@@ -1,8 +1,8 @@
 package constructor.client
 
 import org.example.mockConstructor.config.constructor.client.MQClient
+import org.example.mockConstructor.config.constructor.client.MQContext
 import org.example.mockConstructor.config.constructor.config.MQConfig
-import org.example.mockConstructor.config.constructor.service.MQContext
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
