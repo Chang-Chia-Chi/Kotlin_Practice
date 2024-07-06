@@ -1,6 +1,6 @@
 package org.example.mockConstructor.config.constructor.config
 
-interface Config {
+interface MQConfig {
     var url: String
     var pwd: String
 }

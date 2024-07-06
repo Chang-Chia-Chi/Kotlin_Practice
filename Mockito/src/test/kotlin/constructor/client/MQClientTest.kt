@@ -1,7 +1,7 @@
 package constructor.client
 
 import org.example.mockConstructor.config.constructor.client.MQClient
-import org.example.mockConstructor.config.constructor.config.Config
+import org.example.mockConstructor.config.constructor.config.MQConfig
 import org.example.mockConstructor.config.constructor.service.MQContext
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
@@ -16,7 +16,7 @@ import org.mockito.kotlin.verify
 
 class MQClientTest {
     @Mock
-    lateinit var config: Config
+    lateinit var MQConfig: MQConfig
     lateinit var client: MQClient
     lateinit var context: MQContext
     lateinit var mockConstructor: MockedConstruction<MQContext>
@@ -28,7 +28,7 @@ class MQClientTest {
             Mockito.mockConstruction(MQContext::class.java) { mocked, ctx ->
                 context = mocked
             }
-        client = MQClient(config)
+        client = MQClient(MQConfig)
     }
 
     @AfterEach
