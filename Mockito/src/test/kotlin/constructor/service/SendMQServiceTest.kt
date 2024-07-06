@@ -1,8 +1,8 @@
-package constructor
+package constructor.service
 
-import org.example.mockConstructor.config.constructor.TestClient
-import org.example.mockConstructor.config.constructor.TestService
+import org.example.mockConstructor.config.constructor.client.MQClient
 import org.example.mockConstructor.config.constructor.config.MyConfig
+import org.example.mockConstructor.config.constructor.service.SendMQService
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
 import org.mockito.Mock
@@ -14,10 +14,10 @@ import org.mockito.kotlin.eq
 import org.mockito.kotlin.verify
 import kotlin.test.Test
 
-class TestServiceTest {
-    lateinit var svc: TestService
-    lateinit var client: TestClient
-    lateinit var mockConstructor: MockedConstruction<TestClient>
+class SendMQServiceTest {
+    lateinit var svc: SendMQService
+    lateinit var client: MQClient
+    lateinit var mockConstructor: MockedConstruction<MQClient>
 
     @Mock
     lateinit var config: MyConfig
@@ -27,10 +27,10 @@ class TestServiceTest {
         MockitoAnnotations.openMocks(this)
         mockConstructor =
             Mockito
-                .mockConstruction(TestClient::class.java) { mocked, ctx ->
+                .mockConstruction(MQClient::class.java) { mocked, ctx ->
                     client = mocked
                 }
-        svc = TestService(config)
+        svc = SendMQService(config)
     }
 
     @AfterEach

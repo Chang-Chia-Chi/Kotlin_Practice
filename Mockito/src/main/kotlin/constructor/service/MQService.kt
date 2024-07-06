@@ -1,7 +1,7 @@
-package org.example.mockConstructor.config.constructor
+package org.example.mockConstructor.config.constructor.service
 
 import org.example.mockConstructor.config.constructor.config.Config
 
-open class Service(
+open class MQService(
     open val config: Config,
 )

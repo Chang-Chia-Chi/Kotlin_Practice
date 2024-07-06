@@ -1,7 +1,7 @@
-package constructor
+package constructor.usecase
 
-import org.example.mockConstructor.config.constructor.TestService
-import org.example.mockConstructor.config.constructor.TestUseCase
+import org.example.mockConstructor.config.constructor.service.SendMQService
+import org.example.mockConstructor.config.constructor.usecase.CronUseCase
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.mockito.Mock
@@ -9,15 +9,15 @@ import org.mockito.Mockito.*
 import org.mockito.MockitoAnnotations
 import org.mockito.kotlin.eq
 
-class TestUseCaseTest {
+class CronUseCaseTest {
     @Mock
-    lateinit var svc: TestService
-    lateinit var uc: TestUseCase
+    lateinit var svc: SendMQService
+    lateinit var uc: CronUseCase
 
     @BeforeEach
     fun setUp() {
         MockitoAnnotations.openMocks(this)
-        uc = TestUseCase(svc)
+        uc = CronUseCase(svc)
     }
 
     @Test
