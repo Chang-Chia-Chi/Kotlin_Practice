@@ -1,4 +1,62 @@
 package org.example.mockConstructor.config
 
-fun main() {
+import io.quarkus.runtime.Quarkus
+import io.quarkus.runtime.QuarkusApplication
+import io.quarkus.runtime.annotations.QuarkusMain
+import jakarta.enterprise.context.ApplicationScoped
+import org.example.mockConstructor.config.constructor.client.MQClient
+import org.example.mockConstructor.config.constructor.config.ReceiveMQConfig
+import org.example.mockConstructor.config.constructor.config.SendMQConfig
+import org.example.mockConstructor.config.constructor.service.MQService
+import org.example.mockConstructor.config.constructor.usecase.ReceiveUseCase
+import org.example.mockConstructor.config.constructor.usecase.SchedulerUseCase
+import org.example.mockConstructor.config.constructor.usecase.SendUseCase
+
+@QuarkusMain
+@ApplicationScoped
+class Main(
+    val schedulerUC: SchedulerUseCase,
+) : QuarkusApplication {
+    override fun run(vararg args: String?): Int {
+        println("Start cronjobs...")
+        val sendUC =
+            SendUseCase(
+                MQService(
+                    MQClient(
+                        SendMQConfig(),
+                    ),
+                ),
+            )
+
+        schedulerUC
+            .register(
+                "Send message",
+                crontab = "0/10 * * * * ?",
+                runnable =
+                    {
+                        val msg = "Message at time ${System.currentTimeMillis()}"
+                        sendUC.run(msg)
+                    },
+            ).run()
+        println("Start cronjobs success...")
+
+        println("Start receive infinite loop...")
+        val recvUC =
+            ReceiveUseCase(
+                MQService(
+                    MQClient(
+                        ReceiveMQConfig(),
+                    ),
+                ),
+            )
+        Thread {
+            recvUC.run()
+        }.start()
+        println("Start receive infinite loop success...")
+        return 0
+    }
+}
+
+fun main(args: Array<String>) {
+    Quarkus.run(Main::class.java, *args)
 }

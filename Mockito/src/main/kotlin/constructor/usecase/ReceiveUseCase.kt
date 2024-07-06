@@ -1,9 +1,9 @@
 package org.example.mockConstructor.config.constructor.usecase
 
-import org.example.mockConstructor.config.constructor.service.ReceiveMQService
+import org.example.mockConstructor.config.constructor.service.MQService
 
 class ReceiveUseCase(
-    val svc: ReceiveMQService,
+    val svc: MQService,
 ) {
     val event = "receive"
 
@@ -11,7 +11,7 @@ class ReceiveUseCase(
         while (true) {
             val nxtMessage = svc.getNextMessage(event)
             println("Get message $nxtMessage")
-            Thread.sleep(1000)
+            Thread.sleep(10000)
         }
     }
 }

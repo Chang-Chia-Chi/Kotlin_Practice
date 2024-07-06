@@ -1,7 +1,7 @@
 package constructor.service
 
 import org.example.mockConstructor.config.constructor.client.MQClient
-import org.example.mockConstructor.config.constructor.service.SendMQService
+import org.example.mockConstructor.config.constructor.service.MQService
 import org.junit.jupiter.api.BeforeEach
 import org.mockito.Mock
 import org.mockito.Mockito.times
@@ -13,12 +13,12 @@ import kotlin.test.Test
 class MQServiceTest {
     @Mock
     lateinit var client: MQClient
-    lateinit var svc: SendMQService
+    lateinit var svc: MQService
 
     @BeforeEach
     fun setUp() {
         MockitoAnnotations.openMocks(this)
-        svc = SendMQService(client)
+        svc = MQService(client)
     }
 
     @Test

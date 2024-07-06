@@ -1,9 +1,9 @@
 package org.example.mockConstructor.config.constructor.usecase
 
-import org.example.mockConstructor.config.constructor.service.SendMQService
+import org.example.mockConstructor.config.constructor.service.MQService
 
 class SendUseCase(
-    val svc: SendMQService,
+    val svc: MQService,
 ) {
     var flag: Boolean = true
 

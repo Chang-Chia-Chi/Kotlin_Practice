@@ -1,6 +1,6 @@
 package constructor.usecase
 
-import org.example.mockConstructor.config.constructor.service.SendMQService
+import org.example.mockConstructor.config.constructor.service.MQService
 import org.example.mockConstructor.config.constructor.usecase.SendUseCase
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
@@ -11,7 +11,7 @@ import org.mockito.kotlin.eq
 
 class SendUseCaseTest {
     @Mock
-    lateinit var svc: SendMQService
+    lateinit var svc: MQService
     lateinit var uc: SendUseCase
 
     @BeforeEach
