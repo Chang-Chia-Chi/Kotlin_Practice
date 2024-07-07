@@ -5,6 +5,7 @@ import jakarta.enterprise.context.ApplicationScoped
 import jakarta.enterprise.inject.Produces
 import org.eclipse.microprofile.config.inject.ConfigProperty
 import org.example.mockConstructor.config.client.MQClient
+import org.example.mockConstructor.config.client.MQContext
 import org.example.mockConstructor.config.config.MQConfig
 import org.example.mockConstructor.config.service.MQService
 import org.example.mockConstructor.config.usecase.ReceiveUseCase
@@ -14,6 +15,7 @@ import org.example.mockConstructor.config.usecase.SendUseCase
 @ApplicationScoped
 class UseCaseBeanFactory(
     val scheduler: Scheduler,
+    val mqContext: MQContext,
 ) {
     @Produces
     fun getSchedulerUseCase(): SchedulerUseCase = SchedulerUseCase(scheduler)
@@ -32,6 +34,7 @@ class UseCaseBeanFactory(
                         pwd = pwd,
                         event = event,
                     ),
+                    mqContext,
                 ),
             ),
         )
@@ -50,6 +53,7 @@ class UseCaseBeanFactory(
                         pwd = pwd,
                         event = event,
                     ),
+                    mqContext,
                 ),
             ),
         )

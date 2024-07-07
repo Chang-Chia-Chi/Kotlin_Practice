@@ -27,7 +27,7 @@ class MQClientTest {
                 context = mocked
             }
         mQConfig = MQConfig(event = "test_event")
-        client = MQClient(mQConfig)
+        client = MQClient(mQConfig, context)
     }
 
     @AfterEach

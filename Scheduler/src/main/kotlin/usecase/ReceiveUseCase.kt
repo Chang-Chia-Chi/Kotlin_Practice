@@ -12,7 +12,7 @@ class ReceiveUseCase(
         while (true) {
             val nxtMessage = svc.getNextMessage()
             logger.info("Receive message $nxtMessage")
-            Thread.sleep(10000)
+            Thread.sleep(1000)
         }
     }
 }

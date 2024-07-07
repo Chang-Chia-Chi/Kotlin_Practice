@@ -1,33 +1,23 @@
 package org.example.mockConstructor.config.client
 
-import org.slf4j.LoggerFactory
-import java.util.concurrent.ConcurrentLinkedQueue
+import jakarta.enterprise.context.ApplicationScoped
+import java.util.concurrent.LinkedBlockingQueue
 
+@ApplicationScoped
 class MQContext {
-    val logger = LoggerFactory.getLogger(MQContext::class.java)
-
-    private val queueMap: Map<String, ConcurrentLinkedQueue<String>> =
+    private val queueMap: Map<String, LinkedBlockingQueue<String>> =
         mapOf(
-            "event" to ConcurrentLinkedQueue<String>(),
+            "event" to LinkedBlockingQueue<String>(),
         )
 
     fun sendMessage(
         msg: String,
         event: String,
-    ) = when (fetchQueue(event).add(msg)) {
-        true -> logger.info("MQContext send message $msg to event $event successful")
-        false -> throw Exception("MQContext send msg $msg to event $event failed")
-    }
+    ) = fetchQueue(event).put(msg)
 
-    fun getNextMessage(event: String): String {
-        while (true) {
-            fetchQueue(event)
-                .poll()
-                ?: Thread.sleep(100)
-        }
-    }
+    fun getNextMessage(event: String): String = fetchQueue(event).take()
 
-    private fun fetchQueue(event: String): ConcurrentLinkedQueue<String> =
+    private fun fetchQueue(event: String): LinkedBlockingQueue<String> =
         queueMap[event]
             ?: throw Exception("Event $event is not existed...")
 }
