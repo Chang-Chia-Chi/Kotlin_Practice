@@ -4,10 +4,6 @@ import io.quarkus.runtime.Quarkus
 import io.quarkus.runtime.QuarkusApplication
 import io.quarkus.runtime.annotations.QuarkusMain
 import jakarta.enterprise.context.ApplicationScoped
-import org.example.mockConstructor.config.constructor.client.MQClient
-import org.example.mockConstructor.config.constructor.config.ReceiveMQConfig
-import org.example.mockConstructor.config.constructor.config.SendMQConfig
-import org.example.mockConstructor.config.constructor.service.MQService
 import org.example.mockConstructor.config.constructor.usecase.ReceiveUseCase
 import org.example.mockConstructor.config.constructor.usecase.SchedulerUseCase
 import org.example.mockConstructor.config.constructor.usecase.SendUseCase
@@ -16,18 +12,11 @@ import org.example.mockConstructor.config.constructor.usecase.SendUseCase
 @ApplicationScoped
 class Main(
     val schedulerUC: SchedulerUseCase,
+    val sendUC: SendUseCase,
+    val recvUC: ReceiveUseCase,
 ) : QuarkusApplication {
     override fun run(vararg args: String?): Int {
         println("Start cronjobs...")
-        val sendUC =
-            SendUseCase(
-                MQService(
-                    MQClient(
-                        SendMQConfig(),
-                    ),
-                ),
-            )
-
         schedulerUC
             .register(
                 "Send message",
@@ -41,14 +30,6 @@ class Main(
         println("Start cronjobs success...")
 
         println("Start receive infinite loop...")
-        val recvUC =
-            ReceiveUseCase(
-                MQService(
-                    MQClient(
-                        ReceiveMQConfig(),
-                    ),
-                ),
-            )
         Thread {
             recvUC.run()
         }.start()

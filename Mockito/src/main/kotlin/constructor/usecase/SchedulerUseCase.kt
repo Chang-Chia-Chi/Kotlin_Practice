@@ -1,13 +1,11 @@
 package org.example.mockConstructor.config.constructor.usecase
 
 import io.quarkus.scheduler.Scheduler
-import jakarta.enterprise.context.ApplicationScoped
 import org.example.mockConstructor.config.constructor.model.CronTaskModel
 import org.slf4j.LoggerFactory
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentMap
 
-@ApplicationScoped
 class SchedulerUseCase(
     val scheduler: Scheduler,
 ) {
