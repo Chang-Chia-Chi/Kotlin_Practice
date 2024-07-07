@@ -2,7 +2,6 @@ package org.example.mockConstructor.config.constructor.usecase
 
 import org.example.mockConstructor.config.constructor.service.MQService
 import org.slf4j.LoggerFactory
-import java.util.*
 
 class SendUseCase(
     val svc: MQService,

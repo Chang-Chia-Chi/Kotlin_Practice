@@ -1,6 +1,5 @@
 package org.example.mockConstructor.config
 
-import io.quarkus.runtime.Quarkus
 import io.quarkus.runtime.QuarkusApplication
 import io.quarkus.runtime.annotations.QuarkusMain
 import jakarta.enterprise.context.ApplicationScoped
@@ -20,7 +19,7 @@ class Main(
         schedulerUC
             .register(
                 "Send message",
-                crontab = "0/10 * * * * ?",
+                crontab = "0/1 * * * * ?",
                 runnable =
                     {
                         sendUC.run()
@@ -29,14 +28,8 @@ class Main(
         println("Start cronjobs success...")
 
         println("Start receive infinite loop...")
-        Thread {
-            recvUC.run()
-        }.start()
+        recvUC.run()
         println("Start receive infinite loop success...")
         return 0
     }
-}
-
-fun main(args: Array<String>) {
-    Quarkus.run(Main::class.java, *args)
 }
