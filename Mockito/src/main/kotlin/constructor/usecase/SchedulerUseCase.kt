@@ -3,6 +3,7 @@ package org.example.mockConstructor.config.constructor.usecase
 import io.quarkus.scheduler.Scheduler
 import jakarta.enterprise.context.ApplicationScoped
 import org.example.mockConstructor.config.constructor.model.CronTaskModel
+import org.slf4j.LoggerFactory
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentMap
 
@@ -10,6 +11,8 @@ import java.util.concurrent.ConcurrentMap
 class SchedulerUseCase(
     val scheduler: Scheduler,
 ) {
+    val logger = LoggerFactory.getLogger(SchedulerUseCase::class.java)
+
     val taskMap: ConcurrentMap<String, CronTaskModel> = ConcurrentHashMap()
 
     fun register(
@@ -25,7 +28,7 @@ class SchedulerUseCase(
         return this
     }
 
-    fun run() =
+    fun run() {
         taskMap.forEach { (name, task) ->
             println("Trigger cronjob for event $name")
             scheduler
@@ -35,4 +38,6 @@ class SchedulerUseCase(
                     task.runnable.run()
                 }.schedule()
         }
+        logger.info("Jobs scheduled ${scheduler.getScheduledJobs()}")
+    }
 }
