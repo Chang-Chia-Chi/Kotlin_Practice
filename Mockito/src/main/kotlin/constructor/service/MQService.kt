@@ -7,5 +7,5 @@ open class MQService(
 ) {
     fun sendMessage(msg: String) = client.sendMessage(msg)
 
-    fun getNextMessage(event: String) = client.getNextMessage(event)
+    fun getNextMessage() = client.getNextMessage()
 }

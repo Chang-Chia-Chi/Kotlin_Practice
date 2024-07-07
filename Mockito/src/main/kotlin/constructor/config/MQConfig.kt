@@ -1,6 +1,7 @@
 package org.example.mockConstructor.config.constructor.config
 
-interface MQConfig {
-    var url: String
-    var pwd: String
-}
+data class MQConfig(
+    val url: String = "",
+    val pwd: String = "",
+    val event: String = "",
+)

@@ -8,11 +8,9 @@ class ReceiveUseCase(
 ) {
     val logger = LoggerFactory.getLogger(ReceiveUseCase::class.java)
 
-    val event = "receive"
-
     fun run() {
         while (true) {
-            val nxtMessage = svc.getNextMessage(event)
+            val nxtMessage = svc.getNextMessage()
             logger.info("Receive message $nxtMessage")
             Thread.sleep(10000)
         }

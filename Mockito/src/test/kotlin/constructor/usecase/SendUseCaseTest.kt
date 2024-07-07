@@ -7,7 +7,6 @@ import org.junit.jupiter.api.Test
 import org.mockito.Mock
 import org.mockito.Mockito.*
 import org.mockito.MockitoAnnotations
-import org.mockito.kotlin.eq
 
 class SendUseCaseTest {
     @Mock
@@ -22,17 +21,15 @@ class SendUseCaseTest {
 
     @Test
     fun `should send message when flag is true`() {
-        val msg = "test_message"
-        uc.run(msg)
+        uc.run()
 
-        verify(svc, times(1)).sendMessage(eq(msg))
+        verify(svc, times(1)).sendMessage(anyString())
     }
 
     @Test
     fun `should not send message when flag is false`() {
-        val msg = "test_message"
         uc.flag = false
-        uc.run(msg)
+        uc.run()
 
         verify(svc, never()).sendMessage(anyString())
     }

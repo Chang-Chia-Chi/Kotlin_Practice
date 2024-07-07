@@ -3,9 +3,9 @@ package org.example.mockConstructor.config.constructor.beanfactory
 import io.quarkus.scheduler.Scheduler
 import jakarta.enterprise.context.ApplicationScoped
 import jakarta.enterprise.inject.Produces
+import org.eclipse.microprofile.config.inject.ConfigProperty
 import org.example.mockConstructor.config.constructor.client.MQClient
-import org.example.mockConstructor.config.constructor.config.ReceiveMQConfig
-import org.example.mockConstructor.config.constructor.config.SendMQConfig
+import org.example.mockConstructor.config.constructor.config.MQConfig
 import org.example.mockConstructor.config.constructor.service.MQService
 import org.example.mockConstructor.config.constructor.usecase.ReceiveUseCase
 import org.example.mockConstructor.config.constructor.usecase.SchedulerUseCase
@@ -19,21 +19,37 @@ class UseCaseBeanFactory(
     fun getSchedulerUseCase(): SchedulerUseCase = SchedulerUseCase(scheduler)
 
     @Produces
-    fun getSendUseCase(): SendUseCase =
+    fun getSendUseCase(
+        @ConfigProperty(name = "config.url") url: String,
+        @ConfigProperty(name = "config.pwd") pwd: String,
+        @ConfigProperty(name = "config.event") event: String,
+    ): SendUseCase =
         SendUseCase(
             MQService(
                 MQClient(
-                    SendMQConfig(),
+                    MQConfig(
+                        url = url,
+                        pwd = pwd,
+                        event = event,
+                    ),
                 ),
             ),
         )
 
     @Produces
-    fun getReceiveUseCase(): ReceiveUseCase =
+    fun getReceiveUseCase(
+        @ConfigProperty(name = "config.url") url: String,
+        @ConfigProperty(name = "config.pwd") pwd: String,
+        @ConfigProperty(name = "config.event") event: String,
+    ): ReceiveUseCase =
         ReceiveUseCase(
             MQService(
                 MQClient(
-                    ReceiveMQConfig(),
+                    MQConfig(
+                        url = url,
+                        pwd = pwd,
+                        event = event,
+                    ),
                 ),
             ),
         )

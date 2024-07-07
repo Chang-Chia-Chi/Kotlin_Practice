@@ -23,8 +23,7 @@ class Main(
                 crontab = "0/10 * * * * ?",
                 runnable =
                     {
-                        val msg = "Message at time ${System.currentTimeMillis()}"
-                        sendUC.run(msg)
+                        sendUC.run()
                     },
             ).run()
         println("Start cronjobs success...")

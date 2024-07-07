@@ -6,7 +6,6 @@ import org.example.mockConstructor.config.constructor.config.MQConfig
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
-import org.mockito.Mock
 import org.mockito.MockedConstruction
 import org.mockito.Mockito
 import org.mockito.Mockito.times
@@ -15,8 +14,7 @@ import org.mockito.kotlin.eq
 import org.mockito.kotlin.verify
 
 class MQClientTest {
-    @Mock
-    lateinit var MQConfig: MQConfig
+    lateinit var mQConfig: MQConfig
     lateinit var client: MQClient
     lateinit var context: MQContext
     lateinit var mockConstructor: MockedConstruction<MQContext>
@@ -28,7 +26,8 @@ class MQClientTest {
             Mockito.mockConstruction(MQContext::class.java) { mocked, ctx ->
                 context = mocked
             }
-        client = MQClient(MQConfig)
+        mQConfig = MQConfig(event = "test_event")
+        client = MQClient(mQConfig)
     }
 
     @AfterEach
@@ -40,6 +39,6 @@ class MQClientTest {
     fun `mock context`() {
         val msg = "test message"
         client.sendMessage(msg)
-        verify(context, times(1)).sendMessage(eq(msg))
+        verify(context, times(1)).sendMessage(eq(msg), eq("test_event"))
     }
 }
