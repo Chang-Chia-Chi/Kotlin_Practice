@@ -1,6 +1,6 @@
-package org.example.mockConstructor.config.constructor.usecase
+package org.example.mockConstructor.config.usecase
 
-import org.example.mockConstructor.config.constructor.service.MQService
+import org.example.mockConstructor.config.service.MQService
 import org.slf4j.LoggerFactory
 
 class SendUseCase(

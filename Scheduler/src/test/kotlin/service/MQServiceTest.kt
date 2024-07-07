@@ -1,7 +1,7 @@
-package constructor.service
+package service
 
-import org.example.mockConstructor.config.constructor.client.MQClient
-import org.example.mockConstructor.config.constructor.service.MQService
+import org.example.mockConstructor.config.client.MQClient
+import org.example.mockConstructor.config.service.MQService
 import org.junit.jupiter.api.BeforeEach
 import org.mockito.Mock
 import org.mockito.Mockito.times

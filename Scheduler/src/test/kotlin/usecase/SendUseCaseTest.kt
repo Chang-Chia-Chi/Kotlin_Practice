@@ -1,7 +1,7 @@
-package constructor.usecase
+package usecase
 
-import org.example.mockConstructor.config.constructor.service.MQService
-import org.example.mockConstructor.config.constructor.usecase.SendUseCase
+import org.example.mockConstructor.config.service.MQService
+import org.example.mockConstructor.config.usecase.SendUseCase
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.mockito.Mock

@@ -1,4 +1,4 @@
-package org.example.mockConstructor.config.constructor.config
+package org.example.mockConstructor.config.config
 
 data class MQConfig(
     val url: String = "",

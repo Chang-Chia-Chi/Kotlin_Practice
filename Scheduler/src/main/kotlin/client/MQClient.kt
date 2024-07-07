@@ -1,6 +1,6 @@
-package org.example.mockConstructor.config.constructor.client
+package org.example.mockConstructor.config.client
 
-import org.example.mockConstructor.config.constructor.config.MQConfig
+import org.example.mockConstructor.config.config.MQConfig
 
 class MQClient(
     val mqConfig: MQConfig,

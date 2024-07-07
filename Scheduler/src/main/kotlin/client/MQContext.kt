@@ -1,4 +1,4 @@
-package org.example.mockConstructor.config.constructor.client
+package org.example.mockConstructor.config.client
 
 import org.slf4j.LoggerFactory
 import java.util.concurrent.ConcurrentLinkedQueue

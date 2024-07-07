@@ -1,4 +1,4 @@
-package org.example.mockConstructor.config.constructor.model
+package org.example.mockConstructor.config.model
 
 data class CronTaskModel(
     val runnable: Runnable,

@@ -3,9 +3,9 @@ package org.example.mockConstructor.config
 import io.quarkus.runtime.QuarkusApplication
 import io.quarkus.runtime.annotations.QuarkusMain
 import jakarta.enterprise.context.ApplicationScoped
-import org.example.mockConstructor.config.constructor.usecase.ReceiveUseCase
-import org.example.mockConstructor.config.constructor.usecase.SchedulerUseCase
-import org.example.mockConstructor.config.constructor.usecase.SendUseCase
+import org.example.mockConstructor.config.usecase.ReceiveUseCase
+import org.example.mockConstructor.config.usecase.SchedulerUseCase
+import org.example.mockConstructor.config.usecase.SendUseCase
 
 @QuarkusMain
 @ApplicationScoped
@@ -19,17 +19,15 @@ class Main(
         schedulerUC
             .register(
                 "Send message",
-                crontab = "0/1 * * * * ?",
+                crontab = "0/5 * * * * ?",
                 runnable =
                     {
                         sendUC.run()
                     },
             ).run()
-        println("Start cronjobs success...")
 
         println("Start receive infinite loop...")
         recvUC.run()
-        println("Start receive infinite loop success...")
         return 0
     }
 }

@@ -1,7 +1,7 @@
-package org.example.mockConstructor.config.constructor.usecase
+package org.example.mockConstructor.config.usecase
 
 import io.quarkus.scheduler.Scheduler
-import org.example.mockConstructor.config.constructor.model.CronTaskModel
+import org.example.mockConstructor.config.model.CronTaskModel
 import org.slf4j.LoggerFactory
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentMap
