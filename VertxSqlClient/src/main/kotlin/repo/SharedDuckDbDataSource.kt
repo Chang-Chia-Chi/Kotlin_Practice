@@ -10,12 +10,12 @@ import java.util.logging.Logger
 import javax.sql.DataSource
 
 class SharedDuckDbDataSource(
-    private val url: String = "jdbc:duckdb:",
-    private val properties: Properties = Properties(),
+    private val url: String,
+    private val properties: Properties,
 ) : DataSource {
     companion object {
         fun of(
-            url: String,
+            url: String = "jdbc:duckdb:",
             properties: Properties = Properties(),
         ): SharedDuckDbDataSource = SharedDuckDbDataSource(url, properties)
     }

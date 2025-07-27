@@ -20,7 +20,7 @@ class OracleRepo(
 
         return pool
             .preparedQuery(sql)
-            .execute(Tuple.of(product.productId))
+            .execute(Tuple.of(product.id))
             .coAwait()
             .map(SaleInfo::fromRow)
             .firstOrNull()

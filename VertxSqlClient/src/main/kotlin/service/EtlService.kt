@@ -1,6 +1,7 @@
 package service
 
 import extension.unorderedMapAsync
+import io.quarkus.logging.Log
 import jakarta.enterprise.context.ApplicationScoped
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.buffer
@@ -10,16 +11,18 @@ import model.Product
 import model.ProductSaleInfo
 import repo.DuckDBRepo
 import repo.OracleRepo
+import java.nio.file.Path
+import java.util.concurrent.atomic.AtomicInteger
 
 @ApplicationScoped
 class EtlService(
     private val config: EtlConfig,
     private val duckDBRepo: DuckDBRepo,
     private val oracleRepo: OracleRepo,
-    private val s3Service: S3Service,
 ) {
     @OptIn(ExperimentalCoroutinesApi::class)
-    suspend fun run(parquet: String) {
+    suspend fun run(parquet: String): Path {
+        val counter = AtomicInteger(0)
         duckDBRepo.createTableFromDataClass("product_sale_info", ProductSaleInfo::class)
         duckDBRepo
             .readParquetAsFlow<Product>(parquet)
@@ -27,17 +30,17 @@ class EtlService(
             .unorderedMapAsync(32) { product ->
                 val info = oracleRepo.querySaleInfo(product) ?: return@unorderedMapAsync null
                 ProductSaleInfo(
-                    productId = product.productId,
-                    productName = product.productName,
+                    id = product.id,
+                    name = product.name,
                     total = product.price * info.saleUnit,
                 )
             }.filterNotNull()
             .chunked(2000)
             .collect { chunk ->
                 duckDBRepo.writeTo("product_sale_info", chunk)
+                Log.info("Current Row Processed: ${counter.addAndGet(chunk.size)}")
             }
 
-        val file = duckDBRepo.copyTo("product_sale_info", "parquet")
-        s3Service.upload(file.toUri().path, config.s3BucketName(), config.s3Prefix())
+        return duckDBRepo.copyTo("product_sale_info", "parquet")
     }
 }
