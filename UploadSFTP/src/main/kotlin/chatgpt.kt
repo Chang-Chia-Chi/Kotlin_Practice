@@ -943,3 +943,204 @@ class Coordinator @Inject constructor(
 //         override fun getBaseTimeUnit(): java.util.concurrent.TimeUnit = TimeUnit.SECONDS
 //     }))
 // }
+
+
+package com.example.pipeline
+
+import io.github.resilience4j.circuitbreaker.CircuitBreaker
+import io.github.resilience4j.circuitbreaker.event.CircuitBreakerOnStateTransitionEvent
+import io.nats.client.*
+import io.nats.client.api.*
+import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.flow.*
+import java.time.Duration
+import kotlin.math.min
+
+/* ─────────────────────────────────────────────────────────────────────────── */
+/* 1) Flow-friendly BreakerWatcher → a StateFlow<Boolean> (true = paused)     */
+/* ─────────────────────────────────────────────────────────────────────────── */
+
+class BreakerWatcherFlow(
+    private val breakers: List<CircuitBreaker>,
+    scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+) {
+    private val _paused = MutableStateFlow(false)
+    val paused: StateFlow<Boolean> = _paused
+
+    init {
+        // initial snapshot
+        scope.launch {
+            _paused.value = breakers.any { it.state == CircuitBreaker.State.OPEN }
+        }
+        // react to transitions
+        breakers.forEach { cb ->
+            cb.eventPublisher.onStateTransition { _: CircuitBreakerOnStateTransitionEvent ->
+                scope.launch {
+                    _paused.value = breakers.any { it.state == CircuitBreaker.State.OPEN }
+                }
+            }
+        }
+    }
+}
+
+/* ─────────────────────────────────────────────────────────────────────────── */
+/* 2) Pause operator for any Flow<T>                                          */
+/*    Suspends emission while paused==true (back-pressure; no busy loop)      */
+/* ─────────────────────────────────────────────────────────────────────────── */
+
+fun <T> Flow<T>.pauseWhen(paused: StateFlow<Boolean>): Flow<T> = transform { v ->
+    // If already paused, suspend until it flips to false
+    if (paused.value) paused.filter { !it }.first()
+    emit(v)
+}
+
+/* ─────────────────────────────────────────────────────────────────────────── */
+/* 3) NATS JetStream → Flow<Message> source that respects pause               */
+/*    - Builds/uses a Pull subscription                                       */
+/*    - Waits for resume before each pull/fetch                               */
+/* ─────────────────────────────────────────────────────────────────────────── */
+
+data class NatsPullConfig(
+    val stream: String,
+    val subject: String,
+    val durable: String,
+    val ackWait: Duration = Duration.ofSeconds(60),
+    val fetchBatch: Int = 32,
+    val fetchMaxWait: Duration = Duration.ofMillis(500)
+)
+
+fun Connection.jetStreamPullFlow(
+    cfg: NatsPullConfig,
+    paused: StateFlow<Boolean>,
+    scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+): Flow<Message> = callbackFlow {
+    val js = jetStream()
+    val jsm = jetStreamManagement()
+    // idempotent create
+    runCatching {
+        jsm.addStream(
+            StreamConfiguration.builder()
+                .name(cfg.stream)
+                .subjects(cfg.subject)
+                .storageType(StorageType.Memory)
+                .build()
+        )
+    }
+
+    val cc = ConsumerConfiguration.builder()
+        .durable(cfg.durable)
+        .ackPolicy(AckPolicy.Explicit)
+        .ackWait(cfg.ackWait)
+        .deliverPolicy(DeliverPolicy.All)
+        .build()
+
+    val pso = PullSubscribeOptions.builder()
+        .stream(cfg.stream)
+        .durable(cfg.durable)
+        .configuration(cc)
+        .build()
+
+    val sub = js.pullSubscribe(cfg.subject, pso)
+
+    val job = scope.launch {
+        while (isActive) {
+            // park while paused
+            if (paused.value) paused.filter { !it }.first()
+
+            try {
+                // small waits so we react quickly to a new pause
+                sub.pull(min(1, cfg.fetchBatch), cfg.fetchMaxWait)
+                val msgs = sub.fetch(cfg.fetchBatch, cfg.fetchMaxWait)
+                for (m in msgs) trySend(m)
+            } catch (_: Exception) {
+                delay(200)
+            }
+        }
+    }
+
+    awaitClose { job.cancel() }
+}
+
+/* ─────────────────────────────────────────────────────────────────────────── */
+/* 4) Example wiring with your existing pieces                                 */
+/*    - Breakers → watcher.paused                                              */
+/*    - NATS flow → pauseWhen(paused)                                          */
+/*    - Then heartbeat/admission/rate-limit in your pipeline                   */
+/* ─────────────────────────────────────────────────────────────────────────── */
+
+// Pseudotypes you already have in your project:
+data class Task(val id: String, val natsMsg: Message, val metaKey: String, val destPath: String, val outName: String)
+fun parseTaskFromNats(m: Message): Task? = /* your real parser */
+
+// Example compose:
+    suspend fun runPipelineExample(
+    conn: Connection,
+    cbMinio: CircuitBreaker,
+    cbSftp: CircuitBreaker,
+    makeTask: (Message) -> Task?,                // hook your real parser
+    ackWait: Duration,
+    // your existing helpers:
+    startHeartbeat: (Message) -> HeartbeatingNatsMessage,
+    gate: MultiBreakerGate,                      // ("minio","sftp")
+    minioAwait: suspend () -> Unit,
+    sftpAwait: suspend () -> Unit,
+    fetchMeta: suspend (Task) -> String,         // S3/MinIO metadata
+    selectFileKey: (String) -> String,           // parse fileKey
+    fetchBytes: suspend (String) -> ByteArray,   // S3/MinIO object
+    uploadSftp: suspend (Task, ByteArray) -> Unit
+) {
+    val watcher = BreakerWatcherFlow(listOf(cbMinio, cbSftp))
+    val paused = watcher.paused
+
+    val natsFlow: Flow<Message> = conn.jetStreamPullFlow(
+        cfg = NatsPullConfig(
+            stream = "DATA",
+            subject = "data.request",
+            durable = "pipeline-worker",
+            ackWait = ackWait,
+            fetchBatch = 32,
+            fetchMaxWait = Duration.ofMillis(400)
+        ),
+        paused = paused
+    )
+
+    natsFlow
+        .pauseWhen(paused) // (redundant here because jetStreamPullFlow already waits; safe to keep)
+        .mapNotNull { msg ->
+            val hb = startHeartbeat(msg) // starts hb immediately
+            val t = makeTask(msg)
+            if (t == null) {
+                // bad payload → stop HB then TERM
+                runCatching { hb.term() }
+                null
+            } else t.copy(natsMsg = msg)
+        }
+        // Admit BOTH breakers before the heavy work
+        .withAdmissionAll(
+            gate = gate,
+            names = { arrayOf("minio", "sftp") }
+        ) { t ->
+            // MinIO side
+            minioAwait()
+            val meta = fetchMeta(t)
+            val fileKey = selectFileKey(meta)
+
+            val bytes = fetchBytes(fileKey)
+
+            // SFTP side
+            sftpAwait()
+            uploadSftp(t, bytes)
+
+            // Return the NATS heartbeat wrapper via the Message (or track it elsewhere)
+            t
+        }
+        .collect { t ->
+            // Finish the NATS message (stop HB first inside ack())
+            HeartbeatingNatsMessage(t.natsMsg, ackWait, CoroutineScope(Dispatchers.Default)).apply {
+                // If you kept the instance from earlier, reuse it instead of constructing again
+                // Here, for brevity, we just ACK via the message directly:
+                runCatching { t.natsMsg.ack() }
+            }
+        }
+}
