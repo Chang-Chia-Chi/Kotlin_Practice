@@ -1,9 +1,12 @@
 package infra.coroutine
 
+import io.nats.client.JetStreamSubscription
+import io.nats.client.Message
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.asFlow
 import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.launch
@@ -41,3 +44,14 @@ fun <T, R> Flow<T>.unorderedMapAsync(
         }
     }
 }
+
+fun JetStreamSubscription.pullExpiresInAsFlow(
+    batch: Int,
+    durationMillis: Long,
+): Flow<Message> =
+    channelFlow {
+        pullExpiresIn(batch, durationMillis)
+        generateSequence { nextMessage(1) }
+            .asFlow()
+            .collect { send(it) }
+    }
