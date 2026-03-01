@@ -1,0 +1,63 @@
+quarkus:
+  datasource:
+    # Default datasource (H2 in-memory for demo/testing)
+    db-kind: h2
+    jdbc:
+      url: jdbc:h2:mem:default;DB_CLOSE_DELAY=-1
+      min-size: 2
+      max-size: 10
+
+    # Named datasource example
+    monitoring:
+      db-kind: h2
+      jdbc:
+        url: jdbc:h2:mem:monitoring;DB_CLOSE_DELAY=-1
+        min-size: 1
+        max-size: 5
+
+  # Prometheus endpoint
+  micrometer:
+    export:
+      prometheus:
+        enabled: true
+    binder:
+      jvm: true
+      system: true
+
+  # Scheduler thread pool
+  scheduler:
+    cron-type: quartz
+
+# ─────────────────────────────────────────────────────────
+# Query Exporter Configuration
+# ─────────────────────────────────────────────────────────
+exporter:
+  queries:
+    # Example: active session count as a gauge
+    active_sessions:
+      sql: "SELECT count(*) as value, 'webapp' as app FROM INFORMATION_SCHEMA.SESSIONS"
+      datasource: default
+      schedule:
+        interval: "5s"
+      metrics:
+        - name: db_active_sessions
+          type: GAUGE
+          value-column: value
+          tag-columns:
+            - app
+
+    # Example: table row counts as a gauge
+    table_sizes:
+      sql: >
+        SELECT TABLE_NAME as tbl, ROW_COUNT_ESTIMATE as cnt
+        FROM INFORMATION_SCHEMA.TABLES
+        WHERE TABLE_SCHEMA = 'PUBLIC'
+      datasource: default
+      schedule:
+        interval: "30s"
+      metrics:
+        - name: db_table_row_count
+          type: GAUGE
+          value-column: cnt
+          tag-columns:
+            - tbl

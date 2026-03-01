@@ -43,6 +43,24 @@
             <artifactId>quarkus-arc</artifactId>
         </dependency>
 
+        <dependency>
+            <groupId>com.river-kt</groupId>
+            <artifactId>core-jvm</artifactId>
+            <version>1.0.0-alpha18</version>
+        </dependency>
+
+        <!-- https://mvnrepository.com/artifact/com.river-kt/connector-jms -->
+        <dependency>
+            <groupId>com.river-kt</groupId>
+            <artifactId>connector-jms</artifactId>
+            <version>1.0.0-alpha18</version>
+        </dependency>
+
+        <dependency>
+            <groupId>jakarta.jms</groupId>
+            <artifactId>jakarta.jms-api</artifactId>
+            <version>3.1.0</version>
+        </dependency>
 
         <!-- AWS SDK v2 S3 async client -->
         <dependency>
@@ -117,6 +135,10 @@
             <groupId>org.jetbrains.kotlin</groupId>
             <artifactId>kotlin-stdlib-jdk8</artifactId>
             <version>${kotlin.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.jetbrains.kotlinx</groupId>
+            <artifactId>kotlinx-coroutines-core-jvm</artifactId>
         </dependency>
     </dependencies>
 

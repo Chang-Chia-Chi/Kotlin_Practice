@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(gh api:*)",
+      "Bash(where gh:*)",
+      "WebFetch(domain:riverqueue.com)",
+      "Bash(\"/c/Users/maxch/.gradle/wrapper/dists/gradle-8.11.1-bin/\"*/gradle-8.11.1/bin/gradle:*)",
+      "Bash(where mvn:*)",
+      "Bash(\"/c/Users/maxch/.m2/wrapper/dists/apache-maven-3.9.8-bin/337e6d14/apache-maven-3.9.8/bin/mvn\" wrapper:wrapper:*)",
+      "Bash(./mvnw compile:*)",
+      "Bash(./mvnw test:*)",
+      "Bash(do echo:*)"
+    ]
+  }
+}
