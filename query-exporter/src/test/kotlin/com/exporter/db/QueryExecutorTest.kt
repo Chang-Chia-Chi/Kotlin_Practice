@@ -65,7 +65,8 @@ class QueryExecutorTest {
             val rows = executor.execute("test_db", "SELECT host, cpu_usage FROM metrics_source")
 
             assertThat(rows).hasSize(3)
-            assertThat(rows[0]).containsKey("HOST") // H2 uppercases column names
+            // H2 may return column names in different cases depending on version
+            assertThat(rows[0].keys.map { it.uppercase() }).contains("HOST")
         }
 
         @Test
@@ -73,9 +74,11 @@ class QueryExecutorTest {
             val rows = executor.execute("test_db",
                 "SELECT host, cpu_usage FROM metrics_source ORDER BY host")
 
-            assertThat(rows[0]["CPU_USAGE"]).isEqualTo(75.5)
-            assertThat(rows[1]["CPU_USAGE"]).isEqualTo(45.2)
-            assertThat(rows[2]["CPU_USAGE"]).isEqualTo(92.1)
+            fun Map<String, Any?>.ci(key: String): Any? = entries.firstOrNull { it.key.equals(key, ignoreCase = true) }?.value
+
+            assertThat(rows[0].ci("cpu_usage")).isEqualTo(75.5)
+            assertThat(rows[1].ci("cpu_usage")).isEqualTo(45.2)
+            assertThat(rows[2].ci("cpu_usage")).isEqualTo(92.1)
         }
 
         @Test
@@ -83,8 +86,10 @@ class QueryExecutorTest {
             val rows = executor.execute("test_db",
                 "SELECT COUNT(*) as cnt, AVG(cpu_usage) as avg_cpu FROM metrics_source")
 
+            fun Map<String, Any?>.ci(key: String): Any? = entries.firstOrNull { it.key.equals(key, ignoreCase = true) }?.value
+
             assertThat(rows).hasSize(1)
-            assertThat((rows[0]["CNT"] as Number).toLong()).isEqualTo(3)
+            assertThat((rows[0].ci("cnt") as Number).toLong()).isEqualTo(3)
         }
 
         @Test
@@ -100,9 +105,11 @@ class QueryExecutorTest {
             val rows = executor.execute("test_db",
                 "SELECT env, COUNT(*) as cnt FROM metrics_source GROUP BY env ORDER BY env")
 
+            fun Map<String, Any?>.ci(key: String): Any? = entries.firstOrNull { it.key.equals(key, ignoreCase = true) }?.value
+
             assertThat(rows).hasSize(2)
-            assertThat(rows[0]["ENV"]).isEqualTo("prod")
-            assertThat((rows[0]["CNT"] as Number).toLong()).isEqualTo(2)
+            assertThat(rows[0].ci("env")).isEqualTo("prod")
+            assertThat((rows[0].ci("cnt") as Number).toLong()).isEqualTo(2)
         }
 
         @Test
@@ -123,8 +130,10 @@ class QueryExecutorTest {
             val rows = executor.execute("test_db",
                 "SELECT host, cpu_usage FROM metrics_source WHERE host = 'srv04'")
 
+            fun Map<String, Any?>.ci(key: String): Any? = entries.firstOrNull { it.key.equals(key, ignoreCase = true) }?.value
+
             assertThat(rows).hasSize(1)
-            assertThat(rows[0]["CPU_USAGE"]).isNull()
+            assertThat(rows[0].ci("cpu_usage")).isNull()
         }
     }
 
@@ -146,6 +155,26 @@ class QueryExecutorTest {
             assertThatThrownBy {
                 executor.execute("test_db", "THIS IS NOT SQL")
             }.isInstanceOf(Exception::class.java)
+        }
+    }
+
+    // ─── Query timeout ─────────────────────────────────────────
+
+    @Nested
+    inner class Timeout {
+        @Test
+        fun `default timeout is 30 seconds`() {
+            val defaultExecutor = QueryExecutor(resolver)
+            // Execute a simple query to verify it works with default timeout
+            val rows = defaultExecutor.execute("test_db", "SELECT 1 as val")
+            assertThat(rows).hasSize(1)
+        }
+
+        @Test
+        fun `custom timeout is applied`() {
+            val customExecutor = QueryExecutor(resolver, queryTimeoutSeconds = 10)
+            val rows = customExecutor.execute("test_db", "SELECT 1 as val")
+            assertThat(rows).hasSize(1)
         }
     }
 

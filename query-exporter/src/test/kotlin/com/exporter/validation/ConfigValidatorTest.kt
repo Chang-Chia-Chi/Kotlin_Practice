@@ -374,6 +374,68 @@ class ConfigValidatorTest {
                     assertThat(ex.errors).anyMatch { e -> e.contains("empty name") }
                 })
         }
+
+        @Test
+        fun `invalid Prometheus metric name fails`() {
+            val metric = gaugeMetric(name = "123-invalid!")
+            val config = buildConfig(mapOf(
+                "bad" to buildQuery(metrics = listOf(metric))
+            ))
+
+            assertThatThrownBy { validator.validate(config) }
+                .isInstanceOf(ConfigValidationException::class.java)
+                .satisfies({
+                    val ex = it as ConfigValidationException
+                    assertThat(ex.errors).anyMatch { e -> e.contains("Prometheus format") }
+                })
+        }
+
+        @Test
+        fun `metric name starting with digit fails`() {
+            val metric = gaugeMetric(name = "9cpu_usage")
+            val config = buildConfig(mapOf(
+                "bad" to buildQuery(metrics = listOf(metric))
+            ))
+
+            assertThatThrownBy { validator.validate(config) }
+                .isInstanceOf(ConfigValidationException::class.java)
+                .satisfies({
+                    val ex = it as ConfigValidationException
+                    assertThat(ex.errors).anyMatch { e -> e.contains("Prometheus format") }
+                })
+        }
+
+        @Test
+        fun `metric name with hyphen fails`() {
+            val metric = gaugeMetric(name = "cpu-usage")
+            val config = buildConfig(mapOf(
+                "bad" to buildQuery(metrics = listOf(metric))
+            ))
+
+            assertThatThrownBy { validator.validate(config) }
+                .isInstanceOf(ConfigValidationException::class.java)
+                .satisfies({
+                    val ex = it as ConfigValidationException
+                    assertThat(ex.errors).anyMatch { e -> e.contains("Prometheus format") }
+                })
+        }
+
+        @Test
+        fun `valid Prometheus metric names pass validation`() {
+            // Names with underscores, colons, and mixed case should all pass
+            val metric1 = gaugeMetric(name = "cpu_usage")
+            val metric2 = gaugeMetric(name = "_private_metric")
+            val metric3 = gaugeMetric(name = "namespace:metric_name")
+
+            val config = buildConfig(mapOf(
+                "q1" to buildQuery(metrics = listOf(metric1)),
+                "q2" to buildQuery(metrics = listOf(metric2)),
+                "q3" to buildQuery(metrics = listOf(metric3)),
+            ))
+
+            val result = validator.validate(config)
+            assertThat(result).hasSize(3)
+        }
     }
 
     // ─── Error accumulation ───────────────────────────────────

@@ -11,13 +11,18 @@ import com.exporter.validation.ConfigValidationException
 import com.exporter.validation.ConfigValidator
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import io.mockk.*
+import io.quarkus.runtime.ShutdownEvent
 import io.quarkus.runtime.StartupEvent
+import io.quarkus.scheduler.ScheduledExecution
 import io.quarkus.scheduler.Scheduler
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import java.time.Duration
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.function.Consumer
 
 class ExecutionEngineTest {
 
@@ -29,7 +34,7 @@ class ExecutionEngineTest {
     private lateinit var engine: ExecutionEngine
 
     // Mock builder chain for Scheduler
-    private lateinit var jobDefinition: Scheduler.JobDefinition
+    private lateinit var jobDefinition: Scheduler.JobDefinition<*>
 
     @BeforeEach
     fun setUp() {
@@ -38,9 +43,9 @@ class ExecutionEngineTest {
         queryExecutor = mockk()
         metricRegistry = MetricStateRegistry(SimpleMeterRegistry())
 
-        // Set up Scheduler mock chain
-        jobDefinition = mockk(relaxed = true)
-        every { jobDefinition.setTask(any()) } returns jobDefinition
+        // Set up Scheduler mock chain — use relaxed mock to handle the recursive generic type
+        jobDefinition = mockk<Scheduler.JobDefinition<*>>(relaxed = true)
+        every { jobDefinition.setTask(any<Consumer<ScheduledExecution>>()) } returns jobDefinition
         every { jobDefinition.setInterval(any<String>()) } returns jobDefinition
         every { jobDefinition.setCron(any()) } returns jobDefinition
         every { jobDefinition.schedule() } returns mockk()
@@ -120,5 +125,58 @@ class ExecutionEngineTest {
     @Test
     fun `resolved queries are empty before startup`() {
         assertThat(engine.getResolvedQueries()).isEmpty()
+    }
+
+    @Test
+    fun `overlap protection skips duplicate execution`() {
+        // Capture the task consumer when setTask is called
+        var taskConsumer: Consumer<ScheduledExecution>? = null
+        every { jobDefinition.setTask(any<Consumer<ScheduledExecution>>()) } answers {
+            taskConsumer = firstArg()
+            jobDefinition
+        }
+
+        val latch = CountDownLatch(1)
+        val blockingLatch = CountDownLatch(1)
+
+        // Make the query executor block so the first execution stays "running"
+        every { queryExecutor.execute(any(), any()) } answers {
+            blockingLatch.countDown() // Signal that we're executing
+            latch.await(5, TimeUnit.SECONDS) // Block until released
+            listOf(mapOf("value" to 42 as Any?))
+        }
+
+        val queries = listOf(resolvedQuery("blocking_query"))
+        every { validator.validate(config) } returns queries
+
+        engine.onStart(StartupEvent())
+
+        // Trigger first execution — it will block inside the query
+        val execution = mockk<ScheduledExecution>(relaxed = true)
+        taskConsumer!!.accept(execution)
+
+        // Wait for the first execution to be inside the query
+        blockingLatch.await(5, TimeUnit.SECONDS)
+
+        // Trigger second execution — should be skipped due to overlap
+        taskConsumer!!.accept(execution)
+
+        // Release the blocking execution
+        latch.countDown()
+
+        // Give coroutine time to finish
+        Thread.sleep(100)
+
+        // QueryExecutor should only have been called once (second was skipped)
+        verify(exactly = 1) { queryExecutor.execute(any(), any()) }
+    }
+
+    @Test
+    fun `onStop cancels coroutine scope`() {
+        every { validator.validate(config) } returns emptyList()
+        engine.onStart(StartupEvent())
+
+        // Should not throw
+        engine.onStop(ShutdownEvent())
     }
 }

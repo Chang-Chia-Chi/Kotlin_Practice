@@ -22,6 +22,7 @@ interface ExporterConfig {
         fun sql(): String
 
         /** Logical datasource name referencing a Quarkus-managed Agroal datasource. */
+        @WithDefault("default")
         fun datasource(): String
 
         /** Schedule configuration — exactly one of interval or cron must be set. */

@@ -13,6 +13,8 @@ import jakarta.enterprise.context.ApplicationScoped
 import jakarta.enterprise.event.Observes
 import kotlinx.coroutines.*
 import org.jboss.logging.Logger
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Central orchestrator. On startup:
@@ -36,6 +38,8 @@ class ExecutionEngine(
     private val scope = CoroutineScope(
         SupervisorJob() + Dispatchers.Default + CoroutineName("query-exporter")
     )
+
+    private val runningJobs = ConcurrentHashMap<String, AtomicBoolean>()
 
     private var resolvedQueries: List<ResolvedQuery> = emptyList()
 
@@ -64,21 +68,31 @@ class ExecutionEngine(
     }
 
     private fun registerJob(query: ResolvedQuery) {
+        val running = runningJobs.computeIfAbsent(query.name) { AtomicBoolean(false) }
+
         val jobBuilder = scheduler.newJob("query-exporter-${query.name}")
             .setTask { _ ->
+                if (!running.compareAndSet(false, true)) {
+                    log.warnf("Query '%s' still running from previous cycle, skipping", query.name)
+                    return@setTask
+                }
                 // Fire-and-forget coroutine per execution cycle
                 scope.launch {
-                    val job = QueryJob(query, queryExecutor, metricRegistry)
-                    val startNs = System.nanoTime()
                     try {
-                        val rowCount = job.execute()
-                        val elapsedMs = (System.nanoTime() - startNs) / 1_000_000
-                        log.debugf("Query '%s' completed: %d rows in %d ms",
-                            query.name, rowCount, elapsedMs)
-                    } catch (e: CancellationException) {
-                        throw e // Don't swallow coroutine cancellation
-                    } catch (e: Exception) {
-                        log.errorf(e, "Unhandled error in query '%s'", query.name)
+                        val job = QueryJob(query, queryExecutor, metricRegistry)
+                        val startNs = System.nanoTime()
+                        try {
+                            val rowCount = job.execute()
+                            val elapsedMs = (System.nanoTime() - startNs) / 1_000_000
+                            log.debugf("Query '%s' completed: %d rows in %d ms",
+                                query.name, rowCount, elapsedMs)
+                        } catch (e: CancellationException) {
+                            throw e // Don't swallow coroutine cancellation
+                        } catch (e: Exception) {
+                            log.errorf(e, "Unhandled error in query '%s'", query.name)
+                        }
+                    } finally {
+                        running.set(false)
                     }
                 }
             }

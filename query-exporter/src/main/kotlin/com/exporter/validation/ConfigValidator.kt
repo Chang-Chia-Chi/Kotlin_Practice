@@ -145,6 +145,12 @@ class ConfigValidator(
         if (metricName.isBlank()) {
             errors.add("Query '$queryName' has a metric with empty name.")
             valid = false
+        } else if (!PROMETHEUS_NAME_REGEX.matches(metricName)) {
+            errors.add(
+                "Query '$queryName', metric '$metricName': " +
+                    "name must match Prometheus format [a-zA-Z_:][a-zA-Z0-9_:]*."
+            )
+            valid = false
         }
 
         // Rule: valueColumn must not be blank
@@ -195,6 +201,8 @@ class ConfigValidator(
     }
 
     companion object {
+        /** Prometheus metric name must match this pattern. */
+        private val PROMETHEUS_NAME_REGEX = Regex("^[a-zA-Z_:][a-zA-Z0-9_:]*$")
         /**
          * Parses duration strings like "5s", "1m", "500ms", "2h".
          * Falls back to ISO-8601 Duration parsing.

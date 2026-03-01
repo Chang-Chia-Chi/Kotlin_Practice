@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./mvnw test:*)",
+      "Bash(where mvn:*)",
+      "Bash(mvn test:*)",
+      "Bash(ls gradlew*:*)",
+      "Bash(ls:*)",
+      "Bash(/c/Users/maxch/.m2/wrapper/dists/apache-maven-3.9.8/af622e91/bin/mvn test:*)",
+      "WebSearch",
+      "Bash(jar tf:*)",
+      "Bash(cmd.exe:*)",
+      "Bash(python3:*)",
+      "Bash(python:*)"
+    ]
+  }
+}

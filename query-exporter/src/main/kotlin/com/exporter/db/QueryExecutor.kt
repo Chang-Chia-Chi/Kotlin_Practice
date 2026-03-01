@@ -2,6 +2,7 @@ package com.exporter.db
 
 import jakarta.enterprise.context.ApplicationScoped
 import org.jdbi.v3.core.Jdbi
+import org.jdbi.v3.core.statement.SqlStatements
 import org.jboss.logging.Logger
 import java.util.concurrent.ConcurrentHashMap
 import javax.sql.DataSource
@@ -17,7 +18,12 @@ import javax.sql.DataSource
 @ApplicationScoped
 class QueryExecutor(
     private val dataSourceResolver: DataSourceResolver,
+    private val queryTimeoutSeconds: Int = DEFAULT_QUERY_TIMEOUT_SECONDS,
 ) {
+
+    companion object {
+        const val DEFAULT_QUERY_TIMEOUT_SECONDS = 30
+    }
 
     private val log = Logger.getLogger(QueryExecutor::class.java)
     private val jdbiCache = ConcurrentHashMap<String, Jdbi>()
@@ -34,6 +40,7 @@ class QueryExecutor(
         val jdbi = getOrCreateJdbi(datasourceName)
 
         return jdbi.withHandle<List<Map<String, Any?>>, Exception> { handle ->
+            handle.getConfig(SqlStatements::class.java).queryTimeout = queryTimeoutSeconds
             handle.createQuery(sql)
                 .mapToMap()
                 .list()

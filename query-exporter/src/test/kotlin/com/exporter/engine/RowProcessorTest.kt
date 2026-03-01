@@ -87,6 +87,13 @@ class RowProcessorTest {
             val row = mapOf<String, Any?>("value" to 10, "VALUE" to 20)
             assertThat(RowProcessor.extractValue(row, metric())).isEqualTo(10.0)
         }
+
+        @Test
+        fun `null exact match does not fall through to case-insensitive`() {
+            // "value" exists with null, "VALUE" exists with 99 — should return null, not 99
+            val row = linkedMapOf<String, Any?>("value" to null, "VALUE" to 99)
+            assertThat(RowProcessor.extractValue(row, metric())).isNull()
+        }
     }
 
     // ─── Tag extraction ───────────────────────────────────────

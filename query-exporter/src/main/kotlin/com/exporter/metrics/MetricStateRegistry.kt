@@ -51,7 +51,9 @@ class MetricStateRegistry(
             MetricType.COUNTER -> updateCounter(metric.name, value, tags)
             MetricType.HISTOGRAM -> recordDistribution(metric, value, tags)
             MetricType.SUMMARY -> recordDistribution(metric, value, tags)
-            MetricType.ENUM -> updateEnum(metric, value, tags)
+            MetricType.ENUM -> throw IllegalArgumentException(
+                "ENUM metrics must use updateEnumByState(), not update(). Metric: ${metric.name}"
+            )
         }
     }
 
@@ -122,35 +124,8 @@ class MetricStateRegistry(
     }
 
     /**
-     * ENUM metrics: the value column contains the current state string (cast via toString).
-     * For each known state, emit a gauge of 0 or 1.
-     */
-    private fun updateEnum(metric: ResolvedMetric, value: Double, tags: Map<String, String>) {
-        // For enum, we interpret the value as an index or use a special convention.
-        // More commonly, the SQL returns the state as a string in a separate column.
-        // Here we model it as: the 'value' represents the active state index.
-        val activeIndex = value.toInt()
-
-        for ((idx, state) in metric.states.withIndex()) {
-            val enumTags = tags + ("state" to state)
-            val key = compositeKey(metric.name, enumTags)
-            val meterTags = toTags(enumTags)
-
-            val holder = enumGauges.computeIfAbsent(key) {
-                val ref = AtomicReference(0.0)
-                Gauge.builder(metric.name) { ref.get() }
-                    .tags(meterTags)
-                    .register(meterRegistry)
-                log.debugf("Registered enum gauge: %s state=%s", metric.name, state)
-                ref
-            }
-            holder.set(if (idx == activeIndex) 1.0 else 0.0)
-        }
-    }
-
-    /**
-     * Alternative ENUM update accepting the state name directly.
-     * Use when the SQL returns the state as a string rather than an index.
+     * Updates an ENUM metric by state name.
+     * Sets the active state gauge to 1 and all others to 0.
      */
     fun updateEnumByState(metric: ResolvedMetric, activeState: String, tags: Map<String, String>) {
         for (state in metric.states) {

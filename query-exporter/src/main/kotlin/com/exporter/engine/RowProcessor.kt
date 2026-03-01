@@ -51,8 +51,8 @@ object RowProcessor {
      * in different cases depending on the DB engine.
      */
     private fun findColumn(row: Map<String, Any?>, column: String): Any? {
-        // Fast path: exact match
-        row[column]?.let { return it }
+        // Fast path: exact match (handles null values correctly)
+        if (row.containsKey(column)) return row[column]
         // Slow path: case-insensitive
         return row.entries.firstOrNull { it.key.equals(column, ignoreCase = true) }?.value
     }

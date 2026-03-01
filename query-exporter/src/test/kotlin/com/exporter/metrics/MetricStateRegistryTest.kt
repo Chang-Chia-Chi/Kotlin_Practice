@@ -5,6 +5,7 @@ import com.exporter.config.ResolvedMetric
 import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import org.assertj.core.api.Assertions.assertThat
+import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
@@ -228,6 +229,18 @@ class MetricStateRegistryTest {
                 .isEqualTo(0.0)
             assertThat(meterRegistry.find("service_status").tag("state", "down").gauge()!!.value())
                 .isEqualTo(1.0)
+        }
+
+        @Test
+        fun `update() with ENUM type throws IllegalArgumentException`() {
+            val m = metric(
+                name = "service_status",
+                type = MetricType.ENUM,
+                states = listOf("up", "down"),
+            )
+            assertThatThrownBy { registry.update(m, 0.0, emptyMap()) }
+                .isInstanceOf(IllegalArgumentException::class.java)
+                .hasMessageContaining("updateEnumByState")
         }
 
         @Test
