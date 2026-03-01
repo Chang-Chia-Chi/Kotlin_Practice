@@ -8,6 +8,7 @@ import jakarta.interceptor.Interceptor
 import jakarta.interceptor.InvocationContext
 import org.jboss.logging.Logger
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * CDI interceptor that implements the graceful-shutdown pattern for any method
@@ -30,14 +31,13 @@ class GracefulShutdownInterceptor {
 
     private val inFlightCount = AtomicInteger(0)
 
-    @Volatile
-    private var timeoutSeconds: Long = 25
+    private val maxTimeoutSeconds = AtomicLong(25)
 
     fun onShutdown(@Observes event: ShutdownEvent) {
         log.info("Shutdown signal received — draining in-flight invocations")
         shuttingDown = true
 
-        val deadline = System.currentTimeMillis() + timeoutSeconds * 1000
+        val deadline = System.currentTimeMillis() + maxTimeoutSeconds.get() * 1000
         while (inFlightCount.get() > 0 && System.currentTimeMillis() < deadline) {
             Thread.sleep(250)
         }
@@ -67,9 +67,8 @@ class GracefulShutdownInterceptor {
     private fun cacheTimeout(ctx: InvocationContext) {
         val annotation = ctx.method.getAnnotation(GracefulShutdown::class.java)
             ?: ctx.target?.javaClass?.getAnnotation(GracefulShutdown::class.java)
-        if (annotation != null) {
-            timeoutSeconds = annotation.timeoutSeconds
-        }
+            ?: return
+        maxTimeoutSeconds.accumulateAndGet(annotation.timeoutSeconds) { cur, new -> maxOf(cur, new) }
     }
 
     /** Visible for testing. */
@@ -80,6 +79,6 @@ class GracefulShutdownInterceptor {
 
     /** Visible for testing — allows setting timeout without annotation resolution. */
     internal fun setTimeoutSeconds(seconds: Long) {
-        timeoutSeconds = seconds
+        maxTimeoutSeconds.set(seconds)
     }
 }
