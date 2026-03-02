@@ -26,6 +26,7 @@ class TaskConsumerTest {
             registry = registry,
             batchSize = 10,
             concurrency = 5,
+            heartbeatIntervalSeconds = 3600, // effectively disabled for unit tests
         )
     }
 
@@ -80,12 +81,12 @@ class TaskConsumerTest {
         every { dao.claimBatch(any()) } returns listOf(task)
         every { registry.getHandler("DO_WORK") } returns handler
         every { handler.handle(any(), any()) } returns TaskResult.Success
-        every { dao.markDone(42L) } returns true
+        every { dao.completeWithChildren(42L, any()) } returns true
 
         consumer.poll()
 
         verify { handler.handle(task, any()) }
-        verify { dao.markDone(42L) }
+        verify { dao.completeWithChildren(42L, match { it.isEmpty() }) }
     }
 
     @Test
@@ -100,13 +101,11 @@ class TaskConsumerTest {
             emitter.emit(taskType = "CHILD", payload = "data")
             TaskResult.Success
         }
-        every { dao.insertChildren(10L, any()) } just Runs
-        every { dao.markDone(10L) } returns true
+        every { dao.completeWithChildren(10L, any()) } returns true
 
         consumer.poll()
 
-        verify { dao.insertChildren(10L, match { it.size == 1 && it[0].taskType == "CHILD" }) }
-        verify { dao.markDone(10L) }
+        verify { dao.completeWithChildren(10L, match { it.size == 1 && it[0].taskType == "CHILD" }) }
     }
 
     // ── Snooze path ──
@@ -124,7 +123,7 @@ class TaskConsumerTest {
         consumer.poll()
 
         verify { dao.markSnoozed(20L, 1800L) }
-        verify(exactly = 0) { dao.markDone(any()) }
+        verify(exactly = 0) { dao.completeWithChildren(any(), any()) }
     }
 
     // ── Cancel path ──
@@ -175,7 +174,7 @@ class TaskConsumerTest {
         consumer.poll()
 
         verify { dao.markDiscarded(50L, match { it!!.contains("No handler") }, 0) }
-        verify(exactly = 0) { dao.markDone(any()) }
+        verify(exactly = 0) { dao.completeWithChildren(any(), any()) }
     }
 
     // ── Retry path ──
@@ -224,13 +223,12 @@ class TaskConsumerTest {
             emitter.emit(taskType = "CHILD", payload = "data")
             TaskResult.Success
         }
-        every { dao.insertChildren(any(), any()) } throws RuntimeException("DB write failed")
+        every { dao.completeWithChildren(any(), any()) } throws RuntimeException("DB write failed")
         every { dao.markRetryable(80L, any(), 0) } returns true
 
         consumer.poll()
 
         verify { dao.markRetryable(80L, any(), 0) }
-        verify(exactly = 0) { dao.markDone(any()) }
     }
 
     // ── Concurrent processing ──
@@ -243,12 +241,12 @@ class TaskConsumerTest {
         every { dao.claimBatch(any()) } returns tasks
         every { registry.getHandler("CONCURRENT") } returns handler
         every { handler.handle(any(), any()) } returns TaskResult.Success
-        every { dao.markDone(any()) } returns true
+        every { dao.completeWithChildren(any(), any()) } returns true
 
         consumer.poll()
 
         for (id in 1L..5L) {
-            verify { dao.markDone(id) }
+            verify { dao.completeWithChildren(id, any()) }
         }
     }
 

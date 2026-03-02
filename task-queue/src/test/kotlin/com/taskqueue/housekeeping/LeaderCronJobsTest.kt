@@ -157,9 +157,20 @@ class LeaderCronJobsTest {
     // ── produceTasks ──
 
     @Test
-    fun `produceTasks delegates to TaskProducer`() {
+    fun `produceTasks delegates to TaskProducer when leader`() {
+        isLeader.value = true
+
         cronJobs.produceTasks()
 
         verify(exactly = 1) { taskProducer.produceAll() }
+    }
+
+    @Test
+    fun `produceTasks skips when not leader`() {
+        isLeader.value = false
+
+        cronJobs.produceTasks()
+
+        verify(exactly = 0) { taskProducer.produceAll() }
     }
 }

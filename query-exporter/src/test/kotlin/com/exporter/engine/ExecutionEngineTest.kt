@@ -179,4 +179,10 @@ class ExecutionEngineTest {
         // Should not throw
         engine.onStop(ShutdownEvent())
     }
+
+    @Test
+    fun `onStop before onStart does not throw`() {
+        // Scope is not initialized yet — should handle gracefully
+        engine.onStop(ShutdownEvent())
+    }
 }

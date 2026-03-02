@@ -181,6 +181,92 @@ class TaskQueueDaoH2Test {
         assertThat(count).isEqualTo(0)
     }
 
+    // ── completeWithChildren ──
+
+    @Test
+    fun `completeWithChildren inserts children and marks DONE atomically`() {
+        val parentId = insertTaskInStatus("PROCESSING")
+        val children = listOf(
+            TaskEmitter.PendingTask("CHILD_A", """{"id":1}""", 3, null),
+            TaskEmitter.PendingTask("CHILD_B", """{"id":2}""", 4, null),
+        )
+
+        val result = dao.completeWithChildren(parentId, children)
+        assertThat(result).isTrue()
+        assertThat(selectTask(parentId)["STATUS"]).isEqualTo("DONE")
+        assertThat(selectTask(parentId)["COMPLETED_AT"]).isNotNull()
+
+        val childRows = jdbi.withHandle<List<Map<String, Any?>>, Exception> { handle ->
+            handle.createQuery("SELECT * FROM TASK_QUEUE WHERE PARENT_TASK_ID = :pid")
+                .bind("pid", parentId)
+                .mapToMap()
+                .list()
+                .map { row ->
+                    row.mapKeys { it.key.uppercase() }.mapValues { (_, v) ->
+                        if (v is Clob) v.characterStream.readText() else v
+                    }
+                }
+        }
+        assertThat(childRows).hasSize(2)
+        assertThat(childRows.map { it["TASK_TYPE"] }).containsExactlyInAnyOrder("CHILD_A", "CHILD_B")
+    }
+
+    @Test
+    fun `completeWithChildren rolls back children when status guard fails`() {
+        val parentId = insertTaskInStatus("PENDING") // not PROCESSING
+
+        val children = listOf(
+            TaskEmitter.PendingTask("CHILD_A", null, 5, null),
+        )
+
+        val result = dao.completeWithChildren(parentId, children)
+        assertThat(result).isFalse()
+        assertThat(selectTask(parentId)["STATUS"]).isEqualTo("PENDING")
+
+        val childCount = jdbi.withHandle<Long, Exception> { handle ->
+            handle.createQuery("SELECT COUNT(*) FROM TASK_QUEUE WHERE PARENT_TASK_ID = :pid")
+                .bind("pid", parentId)
+                .mapTo(Long::class.java)
+                .one()
+        }
+        assertThat(childCount).isEqualTo(0) // children rolled back
+    }
+
+    @Test
+    fun `completeWithChildren with no children marks DONE`() {
+        val taskId = insertTaskInStatus("PROCESSING")
+
+        val result = dao.completeWithChildren(taskId, emptyList())
+        assertThat(result).isTrue()
+        assertThat(selectTask(taskId)["STATUS"]).isEqualTo("DONE")
+    }
+
+    // ── touchUpdatedAt ──
+
+    @Test
+    fun `touchUpdatedAt refreshes UPDATED_AT for PROCESSING task`() {
+        val taskId = insertTaskInStatus("PROCESSING")
+        val before = selectTask(taskId)["UPDATED_AT"]
+
+        // Small delay to ensure timestamp differs
+        Thread.sleep(50)
+        dao.touchUpdatedAt(taskId)
+
+        val after = selectTask(taskId)["UPDATED_AT"]
+        assertThat(after).isNotEqualTo(before)
+    }
+
+    @Test
+    fun `touchUpdatedAt is no-op for non-PROCESSING task`() {
+        val taskId = insertTaskInStatus("PENDING")
+        val before = selectTask(taskId)["UPDATED_AT"]
+
+        dao.touchUpdatedAt(taskId)
+
+        val after = selectTask(taskId)["UPDATED_AT"]
+        assertThat(after).isEqualTo(before)
+    }
+
     // ── markDone ──
 
     @Test
@@ -268,6 +354,23 @@ class TaskQueueDaoH2Test {
         assertThat(history).startsWith("[{")
         // Should contain two entries
         assertThat(history!!.split("\"attempt\"")).hasSize(3) // 1 prefix + 2 entries
+    }
+
+    @Test
+    fun `markDiscarded escapes special characters in error history`() {
+        val taskId = insertTaskInStatus("PROCESSING")
+
+        val errorWithSpecialChars = "Error: \"quoted\"\ttabbed\nnewline\\backslash"
+        dao.markDiscarded(taskId, errorWithSpecialChars, 0)
+
+        val row = selectTask(taskId)
+        val history = row["ERROR_HISTORY"] as String?
+        assertThat(history).isNotNull()
+        // Should produce valid JSON — no unescaped quotes, tabs, or newlines
+        assertThat(history).doesNotContain("\t")
+        assertThat(history).doesNotContain("\n")
+        assertThat(history).contains("\\t") // escaped tab
+        assertThat(history).contains("\\n") // escaped newline
     }
 
     // ── markExpired ──

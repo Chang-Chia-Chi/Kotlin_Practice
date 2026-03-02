@@ -31,6 +31,10 @@ class QueryExecutor(
     /**
      * Executes the given SQL against the named datasource.
      *
+     * Security: SQL is sourced from trusted application config (YAML), validated at startup
+     * by [ConfigValidator] which rejects multi-statement SQL. This is NOT safe for
+     * user-supplied input without additional sanitization.
+     *
      * @param datasourceName logical datasource name
      * @param sql raw SQL to execute
      * @return list of rows, each row a column-name → value map

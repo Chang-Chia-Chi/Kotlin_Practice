@@ -24,14 +24,15 @@ class TaskEmitter(private val parentTaskId: Long) {
 
     private val pending = mutableListOf<PendingTask>()
 
-    /** Enqueue a single child task. */
+    /** Enqueue a single child task. Set [uniqueKey] to enable deduplication. */
     fun emit(
         taskType: String,
         payload: String? = null,
         priority: Int = 5,
         deadlineAt: Instant? = null,
+        uniqueKey: String? = null,
     ) {
-        pending += PendingTask(taskType, payload, priority, deadlineAt)
+        pending += PendingTask(taskType, payload, priority, deadlineAt, uniqueKey)
     }
 
     /** Convenience for fan-out: one child per payload, all sharing the same type/priority/deadline. */
@@ -40,8 +41,9 @@ class TaskEmitter(private val parentTaskId: Long) {
         payloads: List<String?>,
         priority: Int = 5,
         deadlineAt: Instant? = null,
+        uniqueKey: String? = null,
     ) {
-        payloads.mapTo(pending) { PendingTask(taskType, it, priority, deadlineAt) }
+        payloads.mapTo(pending) { PendingTask(taskType, it, priority, deadlineAt, uniqueKey) }
     }
 
     /** Returns collected tasks and clears the internal buffer. Called once by the consumer. */

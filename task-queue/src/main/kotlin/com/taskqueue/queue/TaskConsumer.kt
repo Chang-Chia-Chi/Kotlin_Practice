@@ -2,12 +2,15 @@ package com.taskqueue.queue
 
 import io.quarkus.scheduler.Scheduled
 import jakarta.inject.Singleton
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.withContext
 import org.eclipse.microprofile.config.inject.ConfigProperty
 import org.jboss.logging.Logger
 
@@ -54,10 +57,14 @@ class TaskConsumer(
     private val batchSize: Int,
     @ConfigProperty(name = "task.consumer.concurrency", defaultValue = "10")
     private val concurrency: Int,
+    @ConfigProperty(name = "task.consumer.heartbeat-interval-seconds", defaultValue = "60")
+    private val heartbeatIntervalSeconds: Long = 60,
 ) {
 
     private val log = Logger.getLogger(TaskConsumer::class.java)
 
+    // NOTE: Bounded parallelism relies on ConcurrentExecution.SKIP preventing overlapping poll()
+    // calls. If that invariant changes, the semaphore alone does not prevent unbounded queueing.
     private val semaphore by lazy { Semaphore(concurrency) }
 
     @GracefulShutdown(timeoutSeconds = 25)
@@ -74,7 +81,10 @@ class TaskConsumer(
         if (claimed.isEmpty()) return
         log.debugf("Claimed %d task(s)", claimed.size)
 
-        // Phase 2: Process — outside TX, concurrently bounded by semaphore
+        // Phase 2: Process — outside TX, concurrently bounded by semaphore.
+        // NOTE: runBlocking parks the scheduler thread for the batch duration. This is acceptable
+        // with ConcurrentExecution.SKIP, but ensure the Quarkus scheduler pool has enough threads
+        // for other @Scheduled methods that must run concurrently.
         runBlocking {
             processClaimedBatch(claimed)
         }
@@ -97,8 +107,11 @@ class TaskConsumer(
      * (DONE, CANCELLED, DISCARDED, EXPIRED, or RETRYABLE/SCHEDULED for deferral), so no
      * task is left in PROCESSING indefinitely — unless the pod crashes, which the stale
      * reclaimer handles.
+     *
+     * A background heartbeat coroutine keeps UPDATED_AT fresh during handler execution,
+     * preventing the stale reclaimer from resetting legitimately in-flight tasks.
      */
-    private fun processSafely(task: TaskContext) {
+    private suspend fun processSafely(task: TaskContext) {
         // Pre-handler deadline check: the task may have expired between claim and execution
         if (task.isExpired()) {
             dao.markExpired(task.taskId)
@@ -115,24 +128,50 @@ class TaskConsumer(
 
         val emitter = TaskEmitter(task.taskId)
 
-        val result: TaskResult
-        try {
-            result = handler.handle(task, emitter)
-        } catch (e: Exception) {
-            handleFailure(task, e)
-            return
-        }
+        // Heartbeat keeps UPDATED_AT fresh so the stale reclaimer doesn't
+        // reset this task while the handler is still running.
+        coroutineScope {
+            val heartbeatJob = launch(Dispatchers.IO) {
+                while (true) {
+                    delay(heartbeatIntervalSeconds * 1000)
+                    try {
+                        dao.touchUpdatedAt(task.taskId)
+                    } catch (e: Exception) {
+                        log.warnf(e, "Heartbeat failed for task %d", task.taskId)
+                    }
+                }
+            }
 
-        // Dispatch on handler's return signal
+            try {
+                val result = withContext(Dispatchers.IO) {
+                    handler.handle(task, emitter)
+                }
+                handleResult(task, emitter, result)
+            } catch (e: Exception) {
+                handleFailure(task, e)
+            } finally {
+                heartbeatJob.cancel()
+            }
+        }
+    }
+
+    /**
+     * Dispatch on the handler's return signal. Children and DONE status are committed
+     * atomically via [TaskQueueDao.completeWithChildren] — if the task was concurrently
+     * reclaimed, no orphaned children are created.
+     */
+    private fun handleResult(task: TaskContext, emitter: TaskEmitter, result: TaskResult) {
         when (result) {
             is TaskResult.Success -> {
                 try {
                     val children = emitter.drain()
-                    if (children.isNotEmpty()) {
-                        dao.insertChildren(task.taskId, children)
-                        log.debugf("Task %d emitted %d children", task.taskId, children.size)
+                    val completed = dao.completeWithChildren(task.taskId, children)
+                    if (!completed) {
+                        log.warnf(
+                            "Task %d could not be marked DONE (status already changed) — children rolled back",
+                            task.taskId,
+                        )
                     }
-                    dao.markDone(task.taskId)
                 } catch (e: Exception) {
                     log.errorf(e, "Post-handler persistence failed for task %d — scheduling retry", task.taskId)
                     handleFailure(task, e)
@@ -167,7 +206,7 @@ class TaskConsumer(
             dao.markDiscarded(task.taskId, message, task.retryCount)
             log.warnf(
                 "Task %d (type=%s) exhausted retries (%d/%d), discarded: %s",
-                task.taskId, task.taskType, task.retryCount + 1, task.maxRetries, message,
+                task.taskId, task.taskType, task.retryCount, task.maxRetries, message,
             )
         }
     }

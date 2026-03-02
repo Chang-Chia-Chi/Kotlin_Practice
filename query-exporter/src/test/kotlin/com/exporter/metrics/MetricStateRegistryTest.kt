@@ -266,16 +266,18 @@ class MetricStateRegistryTest {
     // ─── Clear ────────────────────────────────────────────────
 
     @Test
-    fun `clear resets internal state`() {
+    fun `clear resets internal state and meter registry`() {
         val m = metric(name = "test", type = MetricType.GAUGE)
         registry.update(m, 42.0, emptyMap())
         registry.clear()
 
-        // After clear, internal maps are empty. New update should re-register.
+        // After clear, both internal maps and meter registry are empty.
+        assertThat(meterRegistry.find("test").gauge()).isNull()
+
+        // New update should re-register cleanly with no phantom meters.
         registry.update(m, 99.0, emptyMap())
-        // The meter registry itself still has the old gauge, but the new one is registered too.
-        // What matters is the holder is fresh.
         val gauges = meterRegistry.find("test").gauges()
-        assertThat(gauges).isNotEmpty
+        assertThat(gauges).hasSize(1)
+        assertThat(gauges.first().value()).isEqualTo(99.0)
     }
 }

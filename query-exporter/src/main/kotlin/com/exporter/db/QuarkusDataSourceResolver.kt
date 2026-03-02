@@ -34,9 +34,4 @@ class QuarkusDataSourceResolver : DataSourceResolver {
         }
     }
 
-    override fun availableNames(): Set<String> {
-        // Quarkus doesn't expose a registry of names directly.
-        // In practice, validation checks each referenced name individually.
-        return emptySet()
-    }
 }

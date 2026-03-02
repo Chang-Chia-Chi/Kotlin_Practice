@@ -27,7 +27,6 @@ class ConfigValidatorTest {
         every { dsResolver.resolve("default") } returns mockDataSource
         every { dsResolver.resolve("monitoring") } returns mockDataSource
         every { dsResolver.resolve(match { it != "default" && it != "monitoring" }) } returns null
-        every { dsResolver.availableNames() } returns setOf("default", "monitoring")
 
         validator = ConfigValidator(dsResolver)
     }
@@ -210,6 +209,20 @@ class ConfigValidatorTest {
                     assertThat(ex.errors).anyMatch { e -> e.contains("empty SQL") }
                 })
         }
+
+        @Test
+        fun `SQL with semicolon fails`() {
+            val config = buildConfig(mapOf(
+                "bad" to buildQuery(sql = "SELECT 1; DROP TABLE users")
+            ))
+
+            assertThatThrownBy { validator.validate(config) }
+                .isInstanceOf(ConfigValidationException::class.java)
+                .satisfies({
+                    val ex = it as ConfigValidationException
+                    assertThat(ex.errors).anyMatch { e -> e.contains("semicolon") }
+                })
+        }
     }
 
     // ─── Failure: Datasource ──────────────────────────────────
@@ -361,6 +374,23 @@ class ConfigValidatorTest {
         }
 
         @Test
+        fun `valueColumn in tagColumns case-insensitive fails`() {
+            val metric = gaugeMetric(valueColumn = "Value", tagColumns = listOf("host", "value"))
+            val config = buildConfig(mapOf(
+                "bad" to buildQuery(metrics = listOf(metric))
+            ))
+
+            assertThatThrownBy { validator.validate(config) }
+                .isInstanceOf(ConfigValidationException::class.java)
+                .satisfies({
+                    val ex = it as ConfigValidationException
+                    assertThat(ex.errors).anyMatch { e ->
+                        e.contains("cannot be both value and tag")
+                    }
+                })
+        }
+
+        @Test
         fun `empty metric name fails`() {
             val metric = gaugeMetric(name = "")
             val config = buildConfig(mapOf(
@@ -481,6 +511,11 @@ class ConfigValidatorTest {
         @Test
         fun `parses milliseconds`() {
             assertThat(ConfigValidator.parseDuration("500ms")).isEqualTo(Duration.ofMillis(500))
+        }
+
+        @Test
+        fun `parses days`() {
+            assertThat(ConfigValidator.parseDuration("1d")).isEqualTo(Duration.ofDays(1))
         }
 
         @Test

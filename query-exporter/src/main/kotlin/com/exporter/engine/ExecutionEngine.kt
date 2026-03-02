@@ -35,9 +35,11 @@ class ExecutionEngine(
 
     private val log = Logger.getLogger(ExecutionEngine::class.java)
 
-    private val scope = CoroutineScope(
-        SupervisorJob() + Dispatchers.Default + CoroutineName("query-exporter")
-    )
+    private val exceptionHandler = CoroutineExceptionHandler { ctx, throwable ->
+        log.errorf(throwable, "Uncaught coroutine exception in %s", ctx[CoroutineName]?.name ?: "unknown")
+    }
+
+    private lateinit var scope: CoroutineScope
 
     private val runningJobs = ConcurrentHashMap<String, AtomicBoolean>()
 
@@ -45,6 +47,10 @@ class ExecutionEngine(
 
     fun onStart(@Observes event: StartupEvent) {
         log.info("Query Exporter starting...")
+
+        scope = CoroutineScope(
+            SupervisorJob() + Dispatchers.Default + exceptionHandler + CoroutineName("query-exporter")
+        )
 
         // Phase 1: Validate
         try {
@@ -64,7 +70,9 @@ class ExecutionEngine(
 
     fun onStop(@Observes event: ShutdownEvent) {
         log.info("Query Exporter shutting down, cancelling coroutine scope...")
-        scope.cancel("Application shutting down")
+        if (::scope.isInitialized) {
+            scope.cancel("Application shutting down")
+        }
     }
 
     private fun registerJob(query: ResolvedQuery) {
@@ -99,7 +107,7 @@ class ExecutionEngine(
 
         val schedule = query.schedule
         if (schedule.interval != null) {
-            jobBuilder.setInterval(schedule.interval.toString())
+            jobBuilder.setInterval("${schedule.interval.toSeconds()}s")
         } else if (schedule.cron != null) {
             jobBuilder.setCron(schedule.cron)
         }

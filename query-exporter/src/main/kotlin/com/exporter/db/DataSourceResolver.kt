@@ -13,7 +13,4 @@ interface DataSourceResolver {
      * The "default" name maps to the unnamed default datasource.
      */
     fun resolve(name: String): DataSource?
-
-    /** Returns all known datasource names. */
-    fun availableNames(): Set<String>
 }

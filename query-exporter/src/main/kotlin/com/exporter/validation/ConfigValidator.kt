@@ -59,6 +59,9 @@ class ConfigValidator(
         if (query.sql().isBlank()) {
             errors.add("Query '$name' has empty SQL.")
             valid = false
+        } else if (query.sql().contains(";")) {
+            errors.add("Query '$name' contains a semicolon — multi-statement SQL is not allowed.")
+            valid = false
         }
 
         // Rule: Datasource must be resolvable
@@ -99,7 +102,7 @@ class ConfigValidator(
         }
     }
 
-    internal fun validateSchedule(
+    private fun validateSchedule(
         queryName: String,
         schedule: ExporterConfig.ScheduleConfig,
         errors: MutableList<String>,
@@ -132,7 +135,7 @@ class ConfigValidator(
         }
     }
 
-    internal fun validateMetric(
+    private fun validateMetric(
         queryName: String,
         metric: ExporterConfig.MetricConfig,
         errors: MutableList<String>,
@@ -159,8 +162,9 @@ class ConfigValidator(
             valid = false
         }
 
-        // Rule: valueColumn must not appear in tagColumns
-        if (tagColumns.contains(metric.valueColumn())) {
+        // Rule: valueColumn must not appear in tagColumns (case-insensitive,
+        // matching RowProcessor.findColumn behavior)
+        if (tagColumns.any { it.equals(metric.valueColumn(), ignoreCase = true) }) {
             errors.add(
                 "Query '$queryName', metric '$metricName': " +
                     "column '${metric.valueColumn()}' cannot be both value and tag."
@@ -215,6 +219,7 @@ class ConfigValidator(
                     trimmed.endsWith("s") -> Duration.ofSeconds(trimmed.dropLast(1).toLong())
                     trimmed.endsWith("m") -> Duration.ofMinutes(trimmed.dropLast(1).toLong())
                     trimmed.endsWith("h") -> Duration.ofHours(trimmed.dropLast(1).toLong())
+                    trimmed.endsWith("d") -> Duration.ofDays(trimmed.dropLast(1).toLong())
                     else -> Duration.parse(trimmed) // ISO-8601 fallback
                 }
             } catch (e: Exception) {

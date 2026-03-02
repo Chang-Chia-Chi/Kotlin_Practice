@@ -43,6 +43,7 @@ class LeaderCronJobs(
      */
     @Scheduled(cron = "{task.produce.cron}", concurrentExecution = Scheduled.ConcurrentExecution.SKIP)
     fun produceTasks() {
+        if (!leaderElection.isLeader.value) return
         taskProducer.produceAll()
     }
 

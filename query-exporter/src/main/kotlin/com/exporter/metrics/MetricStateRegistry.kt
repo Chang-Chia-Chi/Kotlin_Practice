@@ -7,6 +7,8 @@ import jakarta.enterprise.context.ApplicationScoped
 import org.jboss.logging.Logger
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 
 /**
  * Thread-safe metric state registry.
@@ -35,6 +37,7 @@ class MetricStateRegistry(
     private val gaugeHolders = ConcurrentHashMap<String, AtomicReference<Double>>()
     private val counterLastValues = ConcurrentHashMap<String, AtomicReference<Double>>()
     private val counters = ConcurrentHashMap<String, Counter>()
+    private val counterLocks = ConcurrentHashMap<String, ReentrantLock>()
     private val summaries = ConcurrentHashMap<String, DistributionSummary>()
     private val enumGauges = ConcurrentHashMap<String, AtomicReference<Double>>()
 
@@ -87,17 +90,24 @@ class MetricStateRegistry(
             AtomicReference(0.0)
         }
 
-        // Compute delta: source counter is monotonic, we track the increment.
-        val last = lastRef.getAndSet(value)
-        val delta = value - last
-        if (delta > 0) {
-            counter.increment(delta)
-        } else if (delta < 0) {
-            // Counter reset detected (e.g., DB restart). Start fresh from current value.
-            log.debugf("Counter reset detected for %s: %f -> %f", name, last, value)
-            counter.increment(value)
+        // Lock per composite key: the read-modify-write of lastRef + counter.increment
+        // must be atomic. Different queries can share metric names, so overlap guard alone
+        // is not sufficient.
+        val lock = counterLocks.computeIfAbsent(key) { ReentrantLock() }
+        lock.withLock {
+            val last = lastRef.get()
+            lastRef.set(value)
+            val delta = value - last
+            if (delta > 0) {
+                counter.increment(delta)
+            } else if (delta < 0) {
+                // Counter reset detected (e.g., DB restart). Assumes counter restarted from 0,
+                // matching Prometheus reset semantics.
+                log.debugf("Counter reset detected for %s: %f -> %f", name, last, value)
+                counter.increment(value)
+            }
+            // delta == 0 → no change, no increment
         }
-        // delta == 0 → no change, no increment
     }
 
     private fun recordDistribution(metric: ResolvedMetric, value: Double, tags: Map<String, String>) {
@@ -144,13 +154,15 @@ class MetricStateRegistry(
         }
     }
 
-    /** Clears all tracked state. Primarily for testing. */
+    /** Clears all tracked state and removes stale meters from the registry. */
     fun clear() {
         gaugeHolders.clear()
         counterLastValues.clear()
         counters.clear()
+        counterLocks.clear()
         summaries.clear()
         enumGauges.clear()
+        meterRegistry.clear()
     }
 
     private fun compositeKey(name: String, tags: Map<String, String>): String {

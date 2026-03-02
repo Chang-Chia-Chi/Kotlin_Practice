@@ -12,7 +12,10 @@
       "Bash(\"/c/Users/maxch/.m2/wrapper/dists/apache-maven-3.9.8-bin/337e6d14/apache-maven-3.9.8/bin/mvn\" wrapper:wrapper:*)",
       "Bash(./mvnw compile:*)",
       "Bash(./mvnw test:*)",
-      "Bash(do echo:*)"
+      "Bash(do echo:*)",
+      "Bash(./gradlew test:*)",
+      "Bash(mvn test:*)",
+      "Bash(bash mvnw:*)"
     ]
   }
 }

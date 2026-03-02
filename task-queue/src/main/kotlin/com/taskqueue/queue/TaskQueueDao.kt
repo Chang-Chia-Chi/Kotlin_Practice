@@ -29,65 +29,66 @@ class TaskQueueDao(private val jdbi: Jdbi) {
     // ────────────────────────── Consumer: Claim (Atomic MERGE) ──────────────────────────
 
     /**
-     * Atomically claim up to [batchSize] PENDING tasks using Oracle MERGE.
+     * Atomically claim up to [batchSize] PENDING tasks.
      *
-     * 1. MERGE: SELECT FOR UPDATE SKIP LOCKED → lock rows + flip to PROCESSING in one statement
-     * 2. SELECT: fetch full task data for claimed rows
+     * 1. SELECT FOR UPDATE SKIP LOCKED → lock rows + fetch full task data (deterministic)
+     * 2. UPDATE by exact TASK_IDs → flip to PROCESSING
      *
-     * 2 round-trips (down from 3). Lock acquisition and state transition are atomic.
+     * 2 round-trips. The SELECT returns exactly the rows this session locked, so there is
+     * no cross-pod race — unlike a time-window heuristic on STARTED_AT.
      */
     fun claimBatch(batchSize: Int): List<TaskContext> {
         return jdbi.withHandleUnchecked { handle ->
             handle.begin()
             try {
-                // Step 1: Atomic lock + state transition via MERGE
-                handle.createUpdate(
-                    """
-                    MERGE INTO TASK_QUEUE tgt
-                    USING (
-                        SELECT TASK_ID FROM (
-                            SELECT TASK_ID
-                            FROM TASK_QUEUE
-                            WHERE STATUS = 'PENDING'
-                              AND (DEADLINE_AT IS NULL OR DEADLINE_AT > SYSTIMESTAMP)
-                            ORDER BY PRIORITY, CREATED_AT
-                            FOR UPDATE SKIP LOCKED
-                        ) WHERE ROWNUM <= :batchSize
-                    ) src
-                    ON (tgt.TASK_ID = src.TASK_ID)
-                    WHEN MATCHED THEN UPDATE SET
-                        tgt.STATUS = 'PROCESSING',
-                        tgt.STARTED_AT = SYSTIMESTAMP,
-                        tgt.UPDATED_AT = SYSTIMESTAMP
-                    """.trimIndent()
-                )
-                    .bind("batchSize", batchSize)
-                    .execute()
-
-                // Step 2: Fetch the rows we just claimed
+                // Step 1: Lock + fetch full data for up to batchSize PENDING tasks.
+                // FOR UPDATE SKIP LOCKED: rows locked by other sessions are silently skipped.
+                // ROWNUM applied after SKIP LOCKED filtering on the ordered inner query.
                 val tasks = handle.createQuery(
                     """
                     SELECT TASK_ID, PARENT_TASK_ID, TASK_TYPE, PAYLOAD, PRIORITY,
                            RETRY_COUNT, MAX_RETRIES, DEADLINE_AT, SCHEDULED_AT, CREATED_AT
-                    FROM TASK_QUEUE
-                    WHERE STATUS = 'PROCESSING'
-                      AND STARTED_AT >= SYSTIMESTAMP - NUMTODSINTERVAL(5, 'SECOND')
-                    ORDER BY PRIORITY, CREATED_AT
+                    FROM (
+                        SELECT TASK_ID, PARENT_TASK_ID, TASK_TYPE, PAYLOAD, PRIORITY,
+                               RETRY_COUNT, MAX_RETRIES, DEADLINE_AT, SCHEDULED_AT, CREATED_AT
+                        FROM TASK_QUEUE
+                        WHERE STATUS = 'PENDING'
+                          AND (DEADLINE_AT IS NULL OR DEADLINE_AT > SYSTIMESTAMP)
+                        ORDER BY PRIORITY, CREATED_AT
+                        FOR UPDATE SKIP LOCKED
+                    ) WHERE ROWNUM <= :batchSize
                     """.trimIndent()
-                ).map { rs, _ ->
-                    TaskContext(
-                        taskId = rs.getLong("TASK_ID"),
-                        parentTaskId = rs.getLong("PARENT_TASK_ID").takeIf { !rs.wasNull() },
-                        taskType = rs.getString("TASK_TYPE"),
-                        payload = rs.getString("PAYLOAD"),
-                        priority = rs.getInt("PRIORITY"),
-                        retryCount = rs.getInt("RETRY_COUNT"),
-                        maxRetries = rs.getInt("MAX_RETRIES"),
-                        deadlineAt = rs.getTimestamp("DEADLINE_AT")?.toInstant(),
-                        scheduledAt = rs.getTimestamp("SCHEDULED_AT")?.toInstant(),
-                        createdAt = rs.getTimestamp("CREATED_AT").toInstant(),
+                )
+                    .bind("batchSize", batchSize)
+                    .map { rs, _ ->
+                        TaskContext(
+                            taskId = rs.getLong("TASK_ID"),
+                            parentTaskId = rs.getLong("PARENT_TASK_ID").takeIf { !rs.wasNull() },
+                            taskType = rs.getString("TASK_TYPE"),
+                            payload = rs.getString("PAYLOAD"),
+                            priority = rs.getInt("PRIORITY"),
+                            retryCount = rs.getInt("RETRY_COUNT"),
+                            maxRetries = rs.getInt("MAX_RETRIES"),
+                            deadlineAt = rs.getTimestamp("DEADLINE_AT")?.toInstant(),
+                            scheduledAt = rs.getTimestamp("SCHEDULED_AT")?.toInstant(),
+                            createdAt = rs.getTimestamp("CREATED_AT").toInstant(),
+                        )
+                    }.list()
+
+                if (tasks.isNotEmpty()) {
+                    // Step 2: Transition claimed tasks to PROCESSING by exact IDs
+                    handle.createUpdate(
+                        """
+                        UPDATE TASK_QUEUE
+                        SET STATUS = 'PROCESSING',
+                            STARTED_AT = SYSTIMESTAMP,
+                            UPDATED_AT = SYSTIMESTAMP
+                        WHERE TASK_ID IN (<taskIds>)
+                        """.trimIndent()
                     )
-                }.list()
+                        .bindList("taskIds", tasks.map { it.taskId })
+                        .execute()
+                }
 
                 handle.commit()
                 tasks
@@ -95,6 +96,29 @@ class TaskQueueDao(private val jdbi: Jdbi) {
                 handle.rollback()
                 throw e
             }
+        }
+    }
+
+    // ────────────────────── Heartbeat ──────────────────────
+
+    /**
+     * Refresh UPDATED_AT for a task that is still being processed.
+     *
+     * Called periodically by the consumer during long-running handler execution to prevent
+     * the stale reclaimer from resetting the task to PENDING while it is legitimately in-flight.
+     */
+    fun touchUpdatedAt(taskId: Long) {
+        jdbi.withHandleUnchecked { handle ->
+            handle.createUpdate(
+                """
+                UPDATE TASK_QUEUE
+                SET UPDATED_AT = SYSTIMESTAMP
+                WHERE TASK_ID = :taskId
+                  AND STATUS = 'PROCESSING'
+                """.trimIndent()
+            )
+                .bind("taskId", taskId)
+                .execute()
         }
     }
 
@@ -253,6 +277,69 @@ class TaskQueueDao(private val jdbi: Jdbi) {
         }
     }
 
+    // ────────────────────── Atomic Task Completion ──────────────────────
+
+    /**
+     * Atomically insert children and mark the parent DONE in a single transaction.
+     *
+     * If the parent is no longer in PROCESSING (e.g., reclaimed by the stale reclaimer),
+     * the entire transaction is rolled back — no orphaned children are created.
+     *
+     * Returns true if the task was successfully marked DONE, false if the status guard failed.
+     */
+    fun completeWithChildren(taskId: Long, children: List<TaskEmitter.PendingTask>): Boolean {
+        return jdbi.withHandleUnchecked { handle ->
+            handle.begin()
+            try {
+                if (children.isNotEmpty()) {
+                    val batch = handle.prepareBatch(
+                        """
+                        INSERT INTO TASK_QUEUE (PARENT_TASK_ID, TASK_TYPE, PAYLOAD, PRIORITY, DEADLINE_AT, UNIQUE_KEY)
+                        VALUES (:parentTaskId, :taskType, :payload, :priority, :deadlineAt, :uniqueKey)
+                        """.trimIndent()
+                    )
+                    for (child in children) {
+                        batch
+                            .bind("parentTaskId", taskId)
+                            .bind("taskType", child.taskType)
+                            .bind("payload", child.payload)
+                            .bind("priority", child.priority)
+                            .bind("deadlineAt", child.deadlineAt?.let { java.sql.Timestamp.from(it) })
+                            .bind("uniqueKey", child.uniqueKey)
+                            .add()
+                    }
+                    batch.execute()
+                }
+
+                val updated = handle.createUpdate(
+                    """
+                    UPDATE TASK_QUEUE
+                    SET STATUS = 'DONE',
+                        COMPLETED_AT = SYSTIMESTAMP,
+                        UPDATED_AT = SYSTIMESTAMP
+                    WHERE TASK_ID = :taskId
+                      AND STATUS = 'PROCESSING'
+                    """.trimIndent()
+                )
+                    .bind("taskId", taskId)
+                    .execute() > 0
+
+                if (updated) {
+                    handle.commit()
+                    log.debugf("Task %d completed with %d children", taskId, children.size)
+                } else {
+                    handle.rollback()
+                    log.warnf("Task %d could not be marked DONE (status changed) — children rolled back", taskId)
+                }
+
+                updated
+            } catch (e: Exception) {
+                handle.rollback()
+                throw e
+            }
+        }
+    }
+
     // ────────────────────── Root Task Production ──────────────────────
 
     /** Insert a root task (no parent). Used by leader cron jobs. Returns the generated TASK_ID. */
@@ -371,19 +458,35 @@ class TaskQueueDao(private val jdbi: Jdbi) {
         }
     }
 
-    /** Purge terminal tasks older than [retentionDays]. Returns deleted count. */
-    fun purgeOldTasks(retentionDays: Int): Int {
-        return jdbi.withHandleUnchecked { handle ->
-            handle.createUpdate(
-                """
-                DELETE FROM TASK_QUEUE
-                WHERE STATUS IN ('DONE', 'CANCELLED', 'DISCARDED', 'EXPIRED')
-                  AND UPDATED_AT < SYSTIMESTAMP - NUMTODSINTERVAL(:retentionDays, 'DAY')
-                """.trimIndent()
-            )
-                .bind("retentionDays", retentionDays)
-                .execute()
+    /**
+     * Purge terminal tasks older than [retentionDays]. Returns total deleted count.
+     *
+     * Deletes in batches of [batchLimit] to avoid a single massive transaction that holds
+     * excessive row locks and generates large redo logs on tables with millions of rows.
+     */
+    fun purgeOldTasks(retentionDays: Int, batchLimit: Int = 10_000): Int {
+        var totalDeleted = 0
+        while (true) {
+            val deleted = jdbi.withHandleUnchecked { handle ->
+                handle.createUpdate(
+                    """
+                    DELETE FROM TASK_QUEUE
+                    WHERE TASK_ID IN (
+                        SELECT TASK_ID FROM TASK_QUEUE
+                        WHERE STATUS IN ('DONE', 'CANCELLED', 'DISCARDED', 'EXPIRED')
+                          AND UPDATED_AT < SYSTIMESTAMP - NUMTODSINTERVAL(:retentionDays, 'DAY')
+                          AND ROWNUM <= :batchLimit
+                    )
+                    """.trimIndent()
+                )
+                    .bind("retentionDays", retentionDays)
+                    .bind("batchLimit", batchLimit)
+                    .execute()
+            }
+            totalDeleted += deleted
+            if (deleted < batchLimit) break // no more rows to delete
         }
+        return totalDeleted
     }
 
     // ────────────────────── Monitoring ──────────────────────
@@ -456,12 +559,32 @@ class TaskQueueDao(private val jdbi: Jdbi) {
     }
 
     private fun buildErrorHistoryEntry(attempt: Int, errorMessage: String?): String {
-        val escapedError = truncate(errorMessage, 1000)
-            ?.replace("\\", "\\\\")
-            ?.replace("\"", "\\\"")
-            ?.replace("\n", "\\n")
-            ?: ""
+        val escapedError = escapeJsonString(truncate(errorMessage, 1000) ?: "")
         return """{"attempt":$attempt,"at":"${Instant.now()}","error":"$escapedError"}"""
+    }
+
+    /** Escape all JSON special characters including control chars (U+0000–U+001F). */
+    private fun escapeJsonString(value: String): String {
+        val sb = StringBuilder(value.length)
+        for (ch in value) {
+            when (ch) {
+                '"' -> sb.append("\\\"")
+                '\\' -> sb.append("\\\\")
+                '\b' -> sb.append("\\b")
+                '\u000C' -> sb.append("\\f")
+                '\n' -> sb.append("\\n")
+                '\r' -> sb.append("\\r")
+                '\t' -> sb.append("\\t")
+                else -> {
+                    if (ch.code < 0x20) {
+                        sb.append("\\u%04x".format(ch.code))
+                    } else {
+                        sb.append(ch)
+                    }
+                }
+            }
+        }
+        return sb.toString()
     }
 
     private fun isDuplicateKeyException(e: Exception): Boolean {

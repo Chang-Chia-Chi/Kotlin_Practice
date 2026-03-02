@@ -27,11 +27,5 @@ enum class TaskStatus {
     companion object {
         /** Terminal states — no further transitions allowed. */
         val TERMINAL: Set<TaskStatus> = setOf(DONE, CANCELLED, DISCARDED, EXPIRED)
-
-        /** States eligible for claiming by consumers. */
-        val CLAIMABLE: Set<TaskStatus> = setOf(PENDING)
-
-        /** States eligible for promotion to PENDING by the scheduled-task promoter. */
-        val PROMOTABLE: Set<TaskStatus> = setOf(RETRYABLE, SCHEDULED)
     }
 }

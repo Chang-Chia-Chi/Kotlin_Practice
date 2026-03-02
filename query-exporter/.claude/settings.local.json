@@ -11,7 +11,8 @@
       "Bash(jar tf:*)",
       "Bash(cmd.exe:*)",
       "Bash(python3:*)",
-      "Bash(python:*)"
+      "Bash(python:*)",
+      "Bash(/c/Users/maxch/.m2/wrapper/dists/apache-maven-3.9.8-bin/337e6d14/apache-maven-3.9.8/bin/mvn test:*)"
     ]
   }
 }
