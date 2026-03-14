@@ -1,0 +1,40 @@
+package com.mapreduce.queue.registry
+
+import com.mapreduce.queue.spi.TaskHandler
+import jakarta.enterprise.context.ApplicationScoped
+import jakarta.enterprise.inject.Instance
+import io.quarkus.runtime.StartupEvent
+import jakarta.enterprise.event.Observes
+import org.jboss.logging.Logger
+import java.util.concurrent.ConcurrentHashMap
+
+/**
+ * Discovers all [TaskHandler] beans at startup via CDI and supports
+ * programmatic registration (used by Layer 2 patterns like MapReduce
+ * to auto-generate handlers from definitions).
+ */
+@ApplicationScoped
+class HandlerRegistry(private val cdiHandlers: Instance<TaskHandler>) {
+
+    private val log = Logger.getLogger(HandlerRegistry::class.java)
+    private val registry = ConcurrentHashMap<String, TaskHandler>()
+
+    fun onStart(@Observes ev: StartupEvent) {
+        cdiHandlers.forEach { register(it) }
+        log.infof("CDI handler discovery complete: %s", registry.keys)
+    }
+
+    /** Programmatic registration — called by Layer 2 registrars. */
+    fun register(handler: TaskHandler) {
+        val prev = registry.putIfAbsent(handler.handlerName, handler)
+        if (prev != null) {
+            log.warnf("Duplicate handler '%s' — keeping first registration", handler.handlerName)
+        } else {
+            log.debugf("Registered handler: %s", handler.handlerName)
+        }
+    }
+
+    fun resolve(handlerName: String): TaskHandler? = registry[handlerName]
+
+    fun registeredHandlers(): Set<String> = registry.keys.toSet()
+}
