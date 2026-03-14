@@ -230,6 +230,14 @@ class TaskRepository(private val jdbi: Jdbi) {
                 .one()
         }
 
+    fun findById(taskId: String): Task? =
+        jdbi.withHandle<Task?, Exception> { h ->
+            h.createQuery("SELECT * FROM task WHERE task_id = :taskId")
+                .bind("taskId", taskId)
+                .mapTo(Task::class.java)
+                .findOne().orElse(null)
+        }
+
     fun findByGroupAndHandler(groupId: String, handler: String): Task? =
         jdbi.withHandle<Task?, Exception> { h ->
             h.createQuery(
