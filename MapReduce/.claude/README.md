@@ -600,14 +600,3 @@ Completed tasks should be retained for a configurable period for auditability, t
 | **K8s Jobs** | Native retry; pod-per-task | Cold-start overhead; no shared state; orchestration still needed |
 
 The framework is right-sized: a Sidekiq-style task queue implemented on Oracle, with map-reduce orchestration as the first composable pattern on top.
-
----
-
-## 13. Future Considerations
-
-- **Notification-based wakeup** — replace pod polling with a lightweight signal (e.g., NATS pub on task enqueue) to cut poll-interval latency.
-- **Task dependencies within a job** — allow DAG-shaped execution where some tasks depend on others' outputs.
-- **Multi-phase reduce** — support tree-reduce for jobs with very large intermediate volumes.
-- **Job chaining** — allow OnCompleted to submit a follow-up job, enabling pipelines.
-- **Queue-level rate limiting** — cap throughput per queue (e.g., for external API call tasks).
-- **Dead-letter inspection UI** — surface failed tasks with payloads for debugging and manual retry.

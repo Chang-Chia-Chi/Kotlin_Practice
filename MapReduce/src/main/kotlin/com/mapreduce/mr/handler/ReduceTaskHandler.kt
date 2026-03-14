@@ -32,10 +32,10 @@ class ReduceTaskHandler(
 
         val result = definition.reduce(outputFlow)
 
-        definition.onCompleted(result)
-
         val resultMetadata = definition.serializeResult(result)
         jobRepository.completeReduceTask(ctx.taskId, jobId, resultMetadata)
+
+        definition.onCompleted(result)
 
         log.infof("REDUCE %s completed (job=%s)", ctx.taskId, jobId)
         return TaskResult.Success

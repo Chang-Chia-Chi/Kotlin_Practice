@@ -23,7 +23,10 @@
       "Bash(grep -i \"config api\\\\|configuration api\" \"C:\\\\Users\\\\maxch\\\\OneDrive\\\\文件\\\\GitHub\\\\Kotlin_Practice\\\\MapReduce\\\\src\\\\main\\\\kotlin\"/*.kt 2>/dev/null)",
       "Bash(grep -B 2 \"status = 'RUNNING'\" \"C:\\\\Users\\\\maxch\\\\OneDrive\\\\文件\\\\GitHub\\\\Kotlin_Practice\\\\MapReduce\\\\src\\\\main\\\\kotlin/com/mapreduce/mr/repository/JobRepository.kt\")",
       "Bash(find /c/Users/maxch/OneDrive/文件/GitHub/Kotlin_Practice/MapReduce/src/test -type f \\\\\\( -name \"*.kt\" -o -name \"*.xml\" -o -name \"*.properties\" \\\\\\) 2>/dev/null | sort)",
-      "Bash(tree -L 3 \"/c/Users/maxch/OneDrive/文件/GitHub/Kotlin_Practice/MapReduce\" -I target --charset ascii 2>/dev/null || find \"/c/Users/maxch/OneDrive/文件/GitHub/Kotlin_Practice/MapReduce\" -not -path \"*/target/*\" -type d | head -30)"
+      "Bash(tree -L 3 \"/c/Users/maxch/OneDrive/文件/GitHub/Kotlin_Practice/MapReduce\" -I target --charset ascii 2>/dev/null || find \"/c/Users/maxch/OneDrive/文件/GitHub/Kotlin_Practice/MapReduce\" -not -path \"*/target/*\" -type d | head -30)",
+      "Bash(cd \"C:\\\\Users\\\\maxch\\\\OneDrive\\\\文件\\\\GitHub\\\\Kotlin_Practice\\\\MapReduce\" && ./mvnw compile -q 2>&1 | tail -30)",
+      "Bash(cd \"C:\\\\Users\\\\maxch\\\\OneDrive\\\\文件\\\\GitHub\\\\Kotlin_Practice\\\\MapReduce\" && ./mvnw test -q 2>&1 | tail -30)",
+      "Bash(cd \"C:\\\\Users\\\\maxch\\\\OneDrive\\\\文件\\\\GitHub\\\\Kotlin_Practice\\\\MapReduce\" && ./mvnw compile -q 2>&1)"
     ]
   }
 }

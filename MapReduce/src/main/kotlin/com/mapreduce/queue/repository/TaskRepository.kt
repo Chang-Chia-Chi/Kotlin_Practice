@@ -111,16 +111,18 @@ class TaskRepository(private val jdbi: Jdbi) {
      */
     fun fail(taskId: String, errorMessage: String, retryDelay: Duration? = null) {
         jdbi.useTransaction<Exception> { h ->
-            h.createUpdate(
+            val updated = h.createUpdate(
                 """
                 UPDATE task SET retry_count = retry_count + 1,
                     error_message = :error
-                WHERE task_id = :taskId
+                WHERE task_id = :taskId AND status = 'CLAIMED'
                 """
             )
                 .bind("taskId", taskId)
                 .bind("error", errorMessage.take(4000))
                 .execute()
+
+            if (updated == 0) return@useTransaction
 
             val (retryCount, maxRetries) = h.createQuery(
                 "SELECT retry_count, max_retries FROM task WHERE task_id = :taskId"
@@ -169,12 +171,13 @@ class TaskRepository(private val jdbi: Jdbi) {
         }
     }
 
-    fun findStaleTasks(threshold: Instant): List<Task> =
+    fun findStaleTasks(threshold: Instant, limit: Int = 100): List<Task> =
         jdbi.withHandle<List<Task>, Exception> { h ->
             h.createQuery(
-                "SELECT * FROM task WHERE status = 'CLAIMED' AND claimed_at < :threshold"
+                "SELECT * FROM task WHERE status = 'CLAIMED' AND claimed_at < :threshold FETCH FIRST :limit ROWS ONLY"
             )
                 .bind("threshold", threshold)
+                .bind("limit", limit)
                 .mapTo(Task::class.java)
                 .list()
         }
@@ -184,12 +187,14 @@ class TaskRepository(private val jdbi: Jdbi) {
      */
     fun reclaimStaleTask(taskId: String) {
         jdbi.useTransaction<Exception> { h ->
-            h.createUpdate(
+            val updated = h.createUpdate(
                 """
                 UPDATE task SET retry_count = retry_count + 1
                 WHERE task_id = :taskId AND status = 'CLAIMED'
                 """
             ).bind("taskId", taskId).execute()
+
+            if (updated == 0) return@useTransaction
 
             val (retryCount, maxRetries) = h.createQuery(
                 "SELECT retry_count, max_retries FROM task WHERE task_id = :taskId"
@@ -202,12 +207,12 @@ class TaskRepository(private val jdbi: Jdbi) {
                 h.createUpdate(
                     """
                     UPDATE task SET status = 'PENDING', claimed_by = NULL, claimed_at = NULL
-                    WHERE task_id = :taskId
+                    WHERE task_id = :taskId AND status = 'CLAIMED'
                     """
                 ).bind("taskId", taskId).execute()
             } else {
                 h.createUpdate(
-                    "UPDATE task SET status = 'DEAD_LETTER' WHERE task_id = :taskId"
+                    "UPDATE task SET status = 'DEAD_LETTER' WHERE task_id = :taskId AND status = 'CLAIMED'"
                 ).bind("taskId", taskId).execute()
             }
         }

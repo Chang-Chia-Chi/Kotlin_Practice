@@ -7,10 +7,12 @@ import com.mapreduce.mr.spi.MapReduceDefinition
 import com.mapreduce.mr.spi.unsafeCast
 import com.mapreduce.queue.registry.HandlerRegistry
 import io.quarkus.runtime.StartupEvent
+import jakarta.annotation.Priority
 import jakarta.enterprise.context.ApplicationScoped
 import jakarta.enterprise.event.Observes
 import jakarta.enterprise.inject.Instance
 import org.jboss.logging.Logger
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Discovers all [MapReduceDefinition] beans at startup and registers
@@ -26,9 +28,9 @@ class MapReduceRegistrar(
 ) {
 
     private val log = Logger.getLogger(MapReduceRegistrar::class.java)
-    private val definitionMap = mutableMapOf<String, MapReduceDefinition<*, *, *, *>>()
+    private val definitionMap = ConcurrentHashMap<String, MapReduceDefinition<*, *, *, *>>()
 
-    fun onStart(@Observes ev: StartupEvent) {
+    fun onStart(@Observes @Priority(20) ev: StartupEvent) {
         definitions.forEach { def ->
             val unsafe = def.unsafeCast()
             handlerRegistry.register(MapTaskHandler(unsafe, jobRepository))

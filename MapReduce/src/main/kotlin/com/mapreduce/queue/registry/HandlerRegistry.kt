@@ -4,6 +4,7 @@ import com.mapreduce.queue.spi.TaskHandler
 import jakarta.enterprise.context.ApplicationScoped
 import jakarta.enterprise.inject.Instance
 import io.quarkus.runtime.StartupEvent
+import jakarta.annotation.Priority
 import jakarta.enterprise.event.Observes
 import org.jboss.logging.Logger
 import java.util.concurrent.ConcurrentHashMap
@@ -19,7 +20,7 @@ class HandlerRegistry(private val cdiHandlers: Instance<TaskHandler>) {
     private val log = Logger.getLogger(HandlerRegistry::class.java)
     private val registry = ConcurrentHashMap<String, TaskHandler>()
 
-    fun onStart(@Observes ev: StartupEvent) {
+    fun onStart(@Observes @Priority(10) ev: StartupEvent) {
         cdiHandlers.forEach { register(it) }
         log.infof("CDI handler discovery complete: %s", registry.keys)
     }

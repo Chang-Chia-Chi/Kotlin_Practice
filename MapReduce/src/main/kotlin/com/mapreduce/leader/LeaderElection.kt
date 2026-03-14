@@ -86,8 +86,8 @@ class LeaderElection(
                     .build()
                     .run()
             } catch (e: Exception) {
-                log.warnf("Leader election failed (%s) — assuming leader role", e.message)
-                _isLeader.set(true)
+                log.errorf(e, "Leader election failed — relinquishing leader role")
+                _isLeader.set(false)
             }
         }
     }

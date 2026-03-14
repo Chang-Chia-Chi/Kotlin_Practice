@@ -41,19 +41,18 @@ class JobResource(
                 .build()
 
         val def = definition.unsafeCast()
-        val params = def.deserializeParams(request.params)
-        val taskInputs = def.split(params)
-
-        if (taskInputs.isEmpty()) {
-            return Response.status(Response.Status.BAD_REQUEST)
-                .entity(mapOf("error" to "Split produced zero tasks"))
-                .build()
-        }
-
         val jobId = UUID.randomUUID().toString()
-        val serializedInputs = taskInputs.map { def.serializeInput(it) }
 
-        withContext(Dispatchers.IO) {
+        val taskCount = withContext(Dispatchers.IO) {
+            val params = def.deserializeParams(request.params)
+            val taskInputs = def.split(params)
+
+            if (taskInputs.isEmpty()) {
+                return@withContext 0
+            }
+
+            val serializedInputs = taskInputs.map { def.serializeInput(it) }
+
             jobRepository.submitJob(
                 jobId = jobId,
                 jobType = request.jobType,
@@ -64,12 +63,19 @@ class JobResource(
                 failureThreshold = definition.failureThreshold,
                 queue = definition.queue,
             )
+            taskInputs.size
         }
 
-        log.infof("Submitted job %s (type=%s, tasks=%d)", jobId, request.jobType, taskInputs.size)
+        if (taskCount == 0) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                .entity(mapOf("error" to "Split produced zero tasks"))
+                .build()
+        }
+
+        log.infof("Submitted job %s (type=%s, tasks=%d)", jobId, request.jobType, taskCount)
 
         return Response.status(Response.Status.CREATED)
-            .entity(mapOf("jobId" to jobId, "totalTasks" to taskInputs.size))
+            .entity(mapOf("jobId" to jobId, "totalTasks" to taskCount))
             .build()
     }
 
@@ -83,13 +89,19 @@ class JobResource(
 
     @GET
     suspend fun listJobs(@QueryParam("status") status: String?): Response {
-        val jobs = withContext(Dispatchers.IO) {
-            if (status != null) {
-                jobRepository.findJobsByStatus(JobStatus.valueOf(status.uppercase()))
-            } else {
-                jobRepository.findAllJobs()
+        if (status != null) {
+            val jobStatus = try {
+                JobStatus.valueOf(status.uppercase())
+            } catch (_: IllegalArgumentException) {
+                return Response.status(Response.Status.BAD_REQUEST)
+                    .entity(mapOf("error" to "Invalid status: $status"))
+                    .build()
             }
+            val jobs = withContext(Dispatchers.IO) { jobRepository.findJobsByStatus(jobStatus) }
+            return Response.ok(jobs.map { JobResponse.from(it) }).build()
         }
+
+        val jobs = withContext(Dispatchers.IO) { jobRepository.findAllJobs() }
         return Response.ok(jobs.map { JobResponse.from(it) }).build()
     }
 }

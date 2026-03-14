@@ -6,7 +6,6 @@ import com.mapreduce.queue.model.TaskContext
 import com.mapreduce.queue.model.TaskResult
 import com.mapreduce.queue.spi.TaskHandler
 import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.flow.toList
 import org.jboss.logging.Logger
 
 /**
@@ -32,14 +31,13 @@ class MapTaskHandler(
             ?: return TaskResult.Failure("Map task ${ctx.taskId} has no groupId (jobId)")
 
         val input = definition.deserializeInput(ctx.payload)
-        val serialized = definition.map(input)
+        val outputFlow = definition.map(input)
             .map { definition.serializeOutput(it) }
-            .toList()
 
-        // Atomic: persist outputs + mark task COMPLETED + increment completed_tasks
-        jobRepository.completeMapTask(ctx.taskId, jobId, serialized)
+        // Atomic: persist outputs in chunks + mark task COMPLETED + increment completed_tasks
+        jobRepository.completeMapTask(ctx.taskId, jobId, outputFlow)
 
-        log.debugf("MAP %s completed: %d outputs (job=%s)", ctx.taskId, serialized.size, jobId)
+        log.debugf("MAP %s completed (job=%s)", ctx.taskId, jobId)
         return TaskResult.Success
     }
 }
