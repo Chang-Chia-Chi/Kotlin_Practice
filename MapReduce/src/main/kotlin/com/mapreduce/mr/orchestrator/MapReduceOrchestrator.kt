@@ -8,6 +8,7 @@ import com.mapreduce.mr.model.Job
 import com.mapreduce.mr.model.JobStatus
 import com.mapreduce.mr.registry.MapReduceRegistrar
 import com.mapreduce.mr.repository.JobRepository
+import com.mapreduce.observability.AutoscalingMetrics
 import com.mapreduce.queue.model.TaskStatus
 import com.mapreduce.queue.repository.TaskRepository
 import com.mapreduce.shutdown.ShutdownCoordinator
@@ -46,6 +47,7 @@ class MapReduceOrchestrator(
     private val leaderManager: LeaderManager,
     private val speculativeExecutor: SpeculativeExecutor,
     private val shutdownCoordinator: ShutdownCoordinator,
+    private val autoscalingMetrics: AutoscalingMetrics,
 ) {
 
     private val log = Logger.getLogger(MapReduceOrchestrator::class.java)
@@ -126,7 +128,12 @@ class MapReduceOrchestrator(
                     val transitioned = jobRepository.casJobStatus(
                         job.jobId, JobStatus.REDUCING, JobStatus.COMPLETED, job.version,
                     )
-                    if (transitioned) log.infof("Job %s completed (%d reduce partitions)", job.jobId, reduceTasks.size)
+                    if (transitioned) {
+                        log.infof("Job %s completed (%d reduce partitions)", job.jobId, reduceTasks.size)
+                        if (job.createdAt != null) {
+                            autoscalingMetrics.recordOrchestrationDuration("MapReduce", job.jobType, job.createdAt)
+                        }
+                    }
                 }
                 reduceTasks.any { it.status == TaskStatus.DEAD_LETTER } -> {
                     val transitioned = jobRepository.casJobStatus(
@@ -136,6 +143,9 @@ class MapReduceOrchestrator(
                         val failed = reduceTasks.count { it.status == TaskStatus.DEAD_LETTER }
                         log.errorf("Job %s failed: %d/%d reduce partition(s) dead-lettered",
                             job.jobId, failed, reduceTasks.size)
+                        if (job.createdAt != null) {
+                            autoscalingMetrics.recordOrchestrationDuration("MapReduce", job.jobType, job.createdAt)
+                        }
                     }
                 }
             }
@@ -185,6 +195,11 @@ class MapReduceOrchestrator(
         val transitioned = jobRepository.casJobStatus(
             job.jobId, JobStatus.RUNNING, JobStatus.FAILED, job.version,
         )
-        if (transitioned) log.warnf("Job %s failed: %s", job.jobId, reason)
+        if (transitioned) {
+            log.warnf("Job %s failed: %s", job.jobId, reason)
+            if (job.createdAt != null) {
+                autoscalingMetrics.recordOrchestrationDuration("MapReduce", job.jobType, job.createdAt)
+            }
+        }
     }
 }

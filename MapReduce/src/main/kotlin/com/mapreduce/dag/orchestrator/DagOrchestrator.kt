@@ -10,6 +10,7 @@ import com.mapreduce.dag.model.TriggerRule
 import com.mapreduce.dag.repository.DagRepository
 import com.mapreduce.leader.FencingTokenHolder
 import com.mapreduce.leader.LeaderManager
+import com.mapreduce.observability.AutoscalingMetrics
 import com.mapreduce.queue.model.EnqueueRequest
 import com.mapreduce.queue.model.TaskStatus
 import com.mapreduce.queue.repository.TaskRepository
@@ -50,6 +51,7 @@ class DagOrchestrator(
     private val leaderManager: LeaderManager,
     private val objectMapper: ObjectMapper,
     private val shutdownCoordinator: ShutdownCoordinator,
+    private val autoscalingMetrics: AutoscalingMetrics,
 ) {
 
     private val log = Logger.getLogger(DagOrchestrator::class.java)
@@ -324,6 +326,9 @@ class DagOrchestrator(
             val newStatus = if (hasFailed) DagRunStatus.FAILED else DagRunStatus.COMPLETED
             if (dagRepository.updateRunStatus(run.runId, DagRunStatus.RUNNING, newStatus)) {
                 log.infof("DAG run %s → %s (dag=%s)", run.runId, newStatus, run.dagId)
+                if (run.createdAt != null) {
+                    autoscalingMetrics.recordOrchestrationDuration("DAG", run.dagId, run.createdAt)
+                }
             }
         }
     }
