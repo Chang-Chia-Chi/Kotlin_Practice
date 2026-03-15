@@ -50,7 +50,7 @@ class ReduceTaskHandler(
         definition.onCompleted(result)
 
         log.infof("REDUCE %s completed (job=%s, partition=%s)", ctx.taskId, jobId, partitionHash?.toString() ?: "all")
-        return TaskResult.Success
+        return TaskResult.Success()
     }
 
     private fun extractPartitionHash(metadata: String?): Int? {

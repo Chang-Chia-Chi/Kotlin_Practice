@@ -35,7 +35,7 @@ class DagTaskHandler(
         dagRepository.saveInstanceOutput(instanceId, output, ctx.executionGeneration)
 
         log.debugf("DAG node %s completed (task=%s, instance=%s)", nodeHandler.nodeType, ctx.taskId, instanceId)
-        return TaskResult.Success
+        return TaskResult.Success()
     }
 
     private fun extractInstanceId(metadata: String?): String? {

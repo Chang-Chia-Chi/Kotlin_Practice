@@ -46,6 +46,7 @@ class TaskDispatcher(
 
         val ctx = TaskContext(
             task.taskId, task.payload, task.groupId, task.metadata, task.executionGeneration,
+            retryCount = task.retryCount, maxRetries = task.maxRetries,
             shuttingDownSupplier = { shutdownCoordinator.isShuttingDown },
         )
         val gen = task.executionGeneration

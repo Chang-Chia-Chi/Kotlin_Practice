@@ -55,6 +55,6 @@ class MapTaskHandler(
         jobRepository.completeMapTask(ctx.taskId, jobId, blobUri, ctx.executionGeneration, partitionHash)
 
         log.debugf("MAP %s completed (job=%s, blob=%s)", ctx.taskId, jobId, blobUri)
-        return TaskResult.Success
+        return TaskResult.Success()
     }
 }

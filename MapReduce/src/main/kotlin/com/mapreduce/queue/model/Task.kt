@@ -45,6 +45,8 @@ data class TaskContext(
     val groupId: String?,
     val metadata: String?,
     val executionGeneration: String?,
+    val retryCount: Int = 0,
+    val maxRetries: Int = 3,
     private val shuttingDownSupplier: () -> Boolean = { false },
 ) {
     /** Returns true if the pod is shutting down and the handler should wrap up. */
