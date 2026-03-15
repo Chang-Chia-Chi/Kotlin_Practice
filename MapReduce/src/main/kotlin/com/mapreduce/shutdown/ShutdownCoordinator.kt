@@ -61,12 +61,15 @@ class ShutdownCoordinator(
     private var bulkheadSemaphore: Semaphore? = null
 
     @Volatile
-    private var bulkheadSize: Int = 0
+    private var _bulkheadSize: Int = 0
+
+    /** Maximum bulkhead permits (concurrency limit). Exposed for utilization gauge. */
+    val bulkheadSize: Int get() = _bulkheadSize
 
     /** Called by WorkerLoop to register its bulkhead for drain tracking. */
     fun registerBulkhead(semaphore: Semaphore, size: Int) {
         bulkheadSemaphore = semaphore
-        bulkheadSize = size
+        _bulkheadSize = size
     }
 
     /** Number of tasks currently executing (bulkhead slots in use). */

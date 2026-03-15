@@ -92,6 +92,15 @@ interface FrameworkConfig {
         fun logInterval(): Duration
     }
 
+    fun metrics(): MetricsConfig
+
+    /** Autoscaling metrics configuration. */
+    interface MetricsConfig {
+        @WithName("queue-depth-interval")
+        @WithDefault("15S")
+        fun queueDepthInterval(): Duration
+    }
+
     fun speculative(): SpeculativeConfig
 
     interface SpeculativeConfig {

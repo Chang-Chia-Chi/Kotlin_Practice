@@ -240,6 +240,21 @@ class TaskRepository(private val jdbi: Jdbi) {
                 .one()
         }
 
+    /** Count PENDING tasks grouped by queue — used by the leader for the HPA queue depth gauge. */
+    fun countPendingByQueue(): Map<String, Int> =
+        jdbi.withHandle<Map<String, Int>, Exception> { h ->
+            h.createQuery(
+                """
+                SELECT queue, COUNT(*) AS cnt FROM task
+                WHERE status = 'PENDING'
+                GROUP BY queue
+                """
+            )
+                .map { rs, _ -> rs.getString("queue") to rs.getInt("cnt") }
+                .list()
+                .toMap()
+        }
+
     fun findById(taskId: String): Task? =
         jdbi.withHandle<Task?, Exception> { h ->
             h.createQuery("SELECT * FROM task WHERE task_id = :taskId")
