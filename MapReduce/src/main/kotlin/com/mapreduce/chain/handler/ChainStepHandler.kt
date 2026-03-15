@@ -87,6 +87,10 @@ class ChainStepHandler(
                 handleDeadLetterIfLast(ctx, chainId, chainType, stepIndex, result.message)
                 result // Pass through — dispatcher handles retry/dead-letter
             }
+            is TaskResult.DeadLetter -> {
+                handleDeadLetterIfLast(ctx, chainId, chainType, stepIndex, result.reason)
+                result // Pass through — dispatcher handles dead-letter
+            }
         }
     }
 
