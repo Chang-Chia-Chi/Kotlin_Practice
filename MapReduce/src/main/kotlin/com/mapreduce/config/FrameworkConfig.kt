@@ -104,6 +104,15 @@ interface FrameworkConfig {
     @WithName("dead-letter")
     fun deadLetter(): DeadLetterConfig
 
+    fun pipeline(): PipelineConfig
+
+    /** Handler execution pipeline configuration. */
+    interface PipelineConfig {
+        @WithName("default-timeout")
+        @WithDefault("2M")
+        fun defaultTimeout(): Duration
+    }
+
     fun speculative(): SpeculativeConfig
 
     /** Dead letter processor configuration. */

@@ -170,6 +170,35 @@ class TaskRepository(private val jdbi: Jdbi) {
         }
     }
 
+    /**
+     * Re-enqueue a task to PENDING without incrementing retry_count.
+     *
+     * Used when the retry does not consume a retry attempt (e.g., circuit
+     * breaker requeue, shutdown-aware timeout). The task is moved back to
+     * PENDING with an optional delay.
+     */
+    fun requeue(taskId: String, delay: Duration? = null, executionGeneration: String? = null) {
+        jdbi.useHandle<Exception> { h ->
+            val fenceClause = if (executionGeneration != null) " AND execution_generation = :gen" else ""
+            val scheduledClause = if (delay != null && !delay.isZero)
+                ", scheduled_at = CURRENT_TIMESTAMP + NUMTODSINTERVAL(:delay, 'SECOND')"
+            else ""
+
+            val update = h.createUpdate(
+                """
+                UPDATE task SET status = 'PENDING', claimed_by = NULL, claimed_at = NULL$scheduledClause
+                WHERE task_id = :taskId AND status = 'CLAIMED'$fenceClause
+                """
+            )
+                .bind("taskId", taskId)
+
+            if (executionGeneration != null) update.bind("gen", executionGeneration)
+            if (delay != null && !delay.isZero) update.bind("delay", delay.toSeconds())
+
+            update.execute()
+        }
+    }
+
     /** Immediately dead-letter a task (e.g. unrecognized handler). */
     fun deadLetter(taskId: String, reason: String) {
         jdbi.useHandle<Exception> { h ->
