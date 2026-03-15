@@ -1,6 +1,7 @@
 package com.mapreduce.mr.handler
 
 import com.mapreduce.mr.repository.JobRepository
+import com.mapreduce.mr.shuffle.BlobStore
 import com.mapreduce.mr.spi.MapReduceDefinition
 import com.mapreduce.mr.spi.PartitionedMapReduceDefinition
 import com.mapreduce.queue.model.TaskContext
@@ -15,12 +16,14 @@ import org.jboss.logging.Logger
  * Not a CDI bean — instantiated by [com.mapreduce.mr.registry.MapReduceRegistrar]
  * and registered programmatically with the [com.mapreduce.queue.registry.HandlerRegistry].
  *
- * Execution is atomic: outputs + task completion + counter increment happen
- * in one Oracle transaction via [JobRepository.completeMapTask].
+ * Intermediate outputs are streamed to the external [BlobStore] — the database
+ * `mr_output` table stores only the blob URI and partition hash, never the data.
+ * Task completion + counter increment happen atomically in one Oracle transaction.
  */
 class MapTaskHandler(
     private val definition: MapReduceDefinition<Any, Any, Any, Any>,
     private val jobRepository: JobRepository,
+    private val blobStore: BlobStore,
 ) : TaskHandler {
 
     private val log = Logger.getLogger(MapTaskHandler::class.java)
@@ -44,11 +47,14 @@ class MapTaskHandler(
             0
         }
 
-        // Atomic: persist outputs in chunks + mark task COMPLETED + increment completed_tasks
-        // Fenced by execution_generation to prevent zombie commits
-        jobRepository.completeMapTask(ctx.taskId, jobId, outputFlow, ctx.executionGeneration, partitionHash)
+        // Phase 1: Stream intermediate outputs to external blob store
+        val blobUri = blobStore.write(jobId, ctx.taskId, partitionHash, outputFlow)
 
-        log.debugf("MAP %s completed (job=%s)", ctx.taskId, jobId)
+        // Phase 2: Atomic — persist blob URI + mark task COMPLETED + increment completed_tasks
+        // Fenced by execution_generation to prevent zombie commits
+        jobRepository.completeMapTask(ctx.taskId, jobId, blobUri, ctx.executionGeneration, partitionHash)
+
+        log.debugf("MAP %s completed (job=%s, blob=%s)", ctx.taskId, jobId, blobUri)
         return TaskResult.Success
     }
 }

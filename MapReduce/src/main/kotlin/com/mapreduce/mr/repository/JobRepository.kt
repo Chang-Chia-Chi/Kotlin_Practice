@@ -11,8 +11,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
-import kotlinx.coroutines.runBlocking
-import org.jdbi.v3.core.Handle
 import org.jdbi.v3.core.Jdbi
 import java.util.UUID
 
@@ -28,9 +26,6 @@ class JobRepository(
     jdbi: Jdbi,
     private val objectMapper: ObjectMapper,
 ) : FencedRepository(jdbi) {
-    companion object {
-        private const val OUTPUT_BATCH_SIZE = 1000
-    }
 
     /**
      * Atomic fan-out: insert job row + N map tasks in one Oracle transaction.
@@ -194,37 +189,36 @@ class JobRepository(
     }
 
     /**
-     * Atomically: persist map outputs in chunks, mark task COMPLETED, increment completed_tasks.
+     * Atomically: persist blob URI reference, mark task COMPLETED, increment completed_tasks.
      * All in one transaction for correctness.
      *
-     * Outputs are collected from the [Flow] in bounded chunks to avoid OOM
-     * when a single map task produces millions of intermediate records.
+     * The actual intermediate data lives in the external blob store (written by [MapTaskHandler]
+     * before this method is called). The `mr_output` table stores only the routing metadata
+     * (blob URI + partition hash), never the data itself.
+     *
      * The task status UPDATE is guarded with `AND status = 'CLAIMED'` to prevent
      * double-incrementing `completed_tasks` on stale reclaim + re-execution.
      */
     fun completeMapTask(
         taskId: String,
         jobId: String,
-        outputs: Flow<String>,
+        blobUri: String,
         executionGeneration: String? = null,
         partitionHash: Int = 0,
     ) {
         jdbi.useTransaction<Exception> { h ->
-            val buffer = mutableListOf<String>()
-
-            runBlocking {
-                outputs.collect { output ->
-                    buffer.add(output)
-                    if (buffer.size >= OUTPUT_BATCH_SIZE) {
-                        insertOutputBatch(h, jobId, taskId, buffer, partitionHash)
-                        buffer.clear()
-                    }
-                }
-            }
-
-            if (buffer.isNotEmpty()) {
-                insertOutputBatch(h, jobId, taskId, buffer, partitionHash)
-            }
+            // Insert a single mr_output row referencing the external blob
+            h.createUpdate(
+                """
+                INSERT INTO mr_output (output_id, job_id, task_id, blob_uri, partition_hash, created_at)
+                VALUES (:outputId, :jobId, :taskId, :blobUri, :partitionHash, CURRENT_TIMESTAMP)
+                """,
+            ).bind("outputId", UUID.randomUUID().toString())
+                .bind("jobId", jobId)
+                .bind("taskId", taskId)
+                .bind("blobUri", blobUri)
+                .bind("partitionHash", partitionHash)
+                .execute()
 
             // Fenced write: execution_generation prevents zombie workers from committing
             val fenceClause = if (executionGeneration != null) " AND execution_generation = :gen" else ""
@@ -242,39 +236,14 @@ class JobRepository(
                     ).bind("jobId", jobId)
                     .execute()
             } else if (executionGeneration != null) {
-                // Zombie detected — roll back outputs written in this transaction
+                // Zombie detected — roll back the mr_output row (blob itself is orphaned
+                // and cleaned up when the job completes via BlobStore.deleteJob)
                 h.createUpdate("DELETE FROM mr_output WHERE task_id = :taskId AND job_id = :jobId")
                     .bind("taskId", taskId)
                     .bind("jobId", jobId)
                     .execute()
             }
         }
-    }
-
-    private fun insertOutputBatch(
-        h: Handle,
-        jobId: String,
-        taskId: String,
-        outputs: List<String>,
-        partitionHash: Int = 0,
-    ) {
-        val batch =
-            h.prepareBatch(
-                """
-            INSERT INTO mr_output (output_id, job_id, task_id, output_data, partition_hash, created_at)
-            VALUES (:outputId, :jobId, :taskId, :outputData, :partitionHash, CURRENT_TIMESTAMP)
-            """,
-            )
-        outputs.forEach { output ->
-            batch
-                .bind("outputId", UUID.randomUUID().toString())
-                .bind("jobId", jobId)
-                .bind("taskId", taskId)
-                .bind("outputData", output)
-                .bind("partitionHash", partitionHash)
-                .add()
-        }
-        batch.execute()
     }
 
     /** Mark reduce task COMPLETED and store result metadata on the job. */
@@ -377,17 +346,20 @@ class JobRepository(
     }
 
     /**
-     * Returns a [Flow] of output data for a job, backed by a DB cursor.
-     * The JDBI handle stays open while the flow is collected.
+     * Returns a [Flow] of blob URIs for a job's intermediate outputs.
+     *
+     * The reduce phase reads these URIs and streams the actual data from
+     * the external [com.mapreduce.mr.shuffle.BlobStore], bypassing the
+     * database for data movement entirely.
      */
-    fun streamOutputs(jobId: String, partitionHash: Int? = null): Flow<String> =
+    fun streamBlobUris(jobId: String, partitionHash: Int? = null): Flow<String> =
         flow {
             val handle = jdbi.open()
             try {
                 val sql = if (partitionHash != null) {
-                    "SELECT output_data FROM mr_output WHERE job_id = :jobId AND partition_hash = :partitionHash ORDER BY output_id"
+                    "SELECT blob_uri FROM mr_output WHERE job_id = :jobId AND partition_hash = :partitionHash ORDER BY output_id"
                 } else {
-                    "SELECT output_data FROM mr_output WHERE job_id = :jobId ORDER BY output_id"
+                    "SELECT blob_uri FROM mr_output WHERE job_id = :jobId ORDER BY output_id"
                 }
                 val query = handle.createQuery(sql).bind("jobId", jobId)
                 if (partitionHash != null) query.bind("partitionHash", partitionHash)

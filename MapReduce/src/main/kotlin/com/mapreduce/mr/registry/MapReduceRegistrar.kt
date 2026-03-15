@@ -3,6 +3,7 @@ package com.mapreduce.mr.registry
 import com.mapreduce.mr.handler.MapTaskHandler
 import com.mapreduce.mr.handler.ReduceTaskHandler
 import com.mapreduce.mr.repository.JobRepository
+import com.mapreduce.mr.shuffle.BlobStore
 import com.mapreduce.mr.spi.MapReduceDefinition
 import com.mapreduce.mr.spi.unsafeCast
 import com.mapreduce.queue.registry.HandlerRegistry
@@ -25,6 +26,7 @@ class MapReduceRegistrar(
     private val definitions: Instance<MapReduceDefinition<*, *, *, *>>,
     private val handlerRegistry: HandlerRegistry,
     private val jobRepository: JobRepository,
+    private val blobStore: BlobStore,
 ) {
 
     private val log = Logger.getLogger(MapReduceRegistrar::class.java)
@@ -33,8 +35,8 @@ class MapReduceRegistrar(
     fun onStart(@Observes @Priority(20) ev: StartupEvent) {
         definitions.forEach { def ->
             val unsafe = def.unsafeCast()
-            handlerRegistry.register(MapTaskHandler(unsafe, jobRepository))
-            handlerRegistry.register(ReduceTaskHandler(unsafe, jobRepository))
+            handlerRegistry.register(MapTaskHandler(unsafe, jobRepository, blobStore))
+            handlerRegistry.register(ReduceTaskHandler(unsafe, jobRepository, blobStore))
             definitionMap[def.jobType] = def
             log.infof("Registered MR definition: %s → [%s.map, %s.reduce]",
                 def.jobType, def.jobType, def.jobType)
