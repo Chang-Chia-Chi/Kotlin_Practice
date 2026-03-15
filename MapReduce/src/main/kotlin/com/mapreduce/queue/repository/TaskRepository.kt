@@ -292,6 +292,32 @@ class TaskRepository(private val jdbi: Jdbi) {
                 .list()
         }
 
+    /**
+     * Release all tasks claimed by this pod back to PENDING.
+     * Used during graceful shutdown Phase 3 — no retry count increment.
+     *
+     * The WHERE clause guards against racing with handlers that complete
+     * between the decision to release and the UPDATE execution.
+     *
+     * @return number of tasks released
+     */
+    fun releaseTasksByPod(podId: String): Int =
+        jdbi.withHandle<Int, Exception> { h ->
+            h.createUpdate(
+                """
+                UPDATE task
+                   SET status       = 'PENDING',
+                       claimed_by   = NULL,
+                       claimed_at   = NULL,
+                       scheduled_at = NULL
+                 WHERE claimed_by   = :podId
+                   AND status       = 'CLAIMED'
+                """
+            )
+                .bind("podId", podId)
+                .execute()
+        }
+
     fun markSpeculative(taskId: String) {
         jdbi.useHandle<Exception> { h ->
             h.createUpdate("UPDATE task SET speculative = 1 WHERE task_id = :taskId")

@@ -1,7 +1,8 @@
 package com.mapreduce.queue.worker
 
 import com.mapreduce.config.FrameworkConfig
-import io.quarkus.runtime.ShutdownEvent
+import com.mapreduce.shutdown.ShutdownCoordinator
+import com.mapreduce.shutdown.ShutdownState
 import io.quarkus.runtime.StartupEvent
 import jakarta.enterprise.context.ApplicationScoped
 import jakarta.enterprise.event.Observes
@@ -9,21 +10,19 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.jboss.logging.Logger
 import java.util.concurrent.Semaphore
-import java.util.concurrent.TimeUnit
 
 /**
  * Coroutine-based poll loop with bulkhead-controlled parallelism.
  *
  * Uses two separate scopes to enable graceful shutdown:
- * - [pollScope]: drives the claim loop — cancelled first to stop accepting new work.
- * - [taskScope]: runs in-flight task handlers — drained via semaphore, then force-cancelled on timeout.
+ * - [pollScope]: drives the claim loop — exits when [ShutdownCoordinator] enters DRAINING.
+ * - [taskScope]: runs in-flight task handlers — drained by the coordinator, then force-cancelled.
  *
  * Total cluster parallelism = pods × bulkhead.
  */
@@ -32,6 +31,7 @@ class WorkerLoop(
     private val config: FrameworkConfig,
     private val dispatcher: TaskDispatcher,
     private val circuitBreaker: PodCircuitBreaker,
+    private val shutdownCoordinator: ShutdownCoordinator,
 ) {
 
     private val log = Logger.getLogger(WorkerLoop::class.java)
@@ -47,11 +47,21 @@ class WorkerLoop(
         val workerId = config.worker().id()
         val queues = config.worker().queues()
 
+        // Register the bulkhead with the shutdown coordinator for drain tracking
+        shutdownCoordinator.registerBulkhead(semaphore, bulkheadSize)
+        shutdownCoordinator.registerMetrics()
+
         log.infof("Worker starting: id=%s, bulkhead=%d, poll=%dms, queues=%s",
             workerId, bulkheadSize, pollInterval, queues)
 
         pollScope.launch {
             while (isActive) {
+                // Check coordinator state before every claim attempt
+                if (shutdownCoordinator.state != ShutdownState.RUNNING) {
+                    log.info("Shutdown signaled, stopping claim loop")
+                    break
+                }
+
                 if (circuitBreaker.isTripped) {
                     delay(pollInterval)
                     continue
@@ -72,6 +82,10 @@ class WorkerLoop(
                                 dispatcher.execute(task)
                             } finally {
                                 semaphore.release()
+                                // Track completions during drain window
+                                if (shutdownCoordinator.isShuttingDown) {
+                                    shutdownCoordinator.recordDrainCompletion()
+                                }
                             }
                         }
                     } else {
@@ -88,28 +102,5 @@ class WorkerLoop(
                 }
             }
         }
-    }
-
-    fun onStop(@Observes ev: ShutdownEvent) {
-        log.info("Worker stopping — halting claim loop")
-
-        // Phase 1: Stop claiming new tasks
-        pollScope.cancel()
-
-        // Phase 2: Drain in-flight tasks
-        val inFlight = bulkheadSize - semaphore.availablePermits()
-        if (inFlight > 0) {
-            val timeoutSeconds = config.worker().shutdownTimeout().toSeconds()
-            log.infof("Draining %d in-flight task(s) (timeout=%ds)", inFlight, timeoutSeconds)
-            val drained = semaphore.tryAcquire(bulkheadSize, timeoutSeconds, TimeUnit.SECONDS)
-            if (!drained) {
-                val remaining = bulkheadSize - semaphore.availablePermits()
-                log.warnf("Shutdown timeout: %d task(s) still running — force-cancelling", remaining)
-            }
-        }
-
-        // Phase 3: Force-cancel any remaining tasks
-        taskScope.cancel()
-        log.info("Worker stopped")
     }
 }

@@ -33,14 +33,23 @@ data class Task(
     val speculative: Int = 0,
 )
 
-/** Context passed to a [com.mapreduce.queue.spi.TaskHandler]. */
+/**
+ * Context passed to a [com.mapreduce.queue.spi.TaskHandler].
+ *
+ * Handlers performing long-running work can check [isShuttingDown] to
+ * cooperatively exit early during graceful shutdown, avoiding wasted drain time.
+ */
 data class TaskContext(
     val taskId: String,
     val payload: String,
     val groupId: String?,
     val metadata: String?,
     val executionGeneration: String?,
-)
+    private val shuttingDownSupplier: () -> Boolean = { false },
+) {
+    /** Returns true if the pod is shutting down and the handler should wrap up. */
+    val isShuttingDown: Boolean get() = shuttingDownSupplier()
+}
 
 /** Value object for enqueuing a new task. */
 data class EnqueueRequest(

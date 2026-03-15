@@ -6,6 +6,7 @@ import com.mapreduce.queue.model.TaskContext
 import com.mapreduce.queue.model.TaskResult
 import com.mapreduce.queue.registry.HandlerRegistry
 import com.mapreduce.queue.repository.TaskRepository
+import com.mapreduce.shutdown.ShutdownCoordinator
 import io.micrometer.core.instrument.MeterRegistry
 import jakarta.enterprise.context.ApplicationScoped
 import org.jboss.logging.Logger
@@ -22,6 +23,7 @@ class TaskDispatcher(
     private val handlerRegistry: HandlerRegistry,
     private val meterRegistry: MeterRegistry,
     private val circuitBreaker: PodCircuitBreaker,
+    private val shutdownCoordinator: ShutdownCoordinator,
 ) {
 
     private val log = Logger.getLogger(TaskDispatcher::class.java)
@@ -40,7 +42,10 @@ class TaskDispatcher(
             return
         }
 
-        val ctx = TaskContext(task.taskId, task.payload, task.groupId, task.metadata, task.executionGeneration)
+        val ctx = TaskContext(
+            task.taskId, task.payload, task.groupId, task.metadata, task.executionGeneration,
+            shuttingDownSupplier = { shutdownCoordinator.isShuttingDown },
+        )
         val gen = task.executionGeneration
         val start = System.nanoTime()
 
