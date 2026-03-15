@@ -24,16 +24,8 @@ interface FrameworkConfig {
         @WithDefault("4")
         fun bulkheadSize(): Int
 
-        @WithName("stale-threshold")
-        @WithDefault("5M")
-        fun staleThreshold(): Duration
-
         @WithDefault("local-worker")
         fun id(): String
-
-        @WithName("shutdown-timeout")
-        @WithDefault("30S")
-        fun shutdownTimeout(): Duration
 
         @WithDefault("default,mr")
         fun queues(): List<String>
@@ -140,8 +132,6 @@ interface FrameworkConfig {
 
     fun schedule(): ScheduleConfig
 
-    fun speculative(): SpeculativeConfig
-
     /** Worker heartbeat configuration for stale task detection. */
     interface HeartbeatConfig {
         @WithDefault("30S")
@@ -197,17 +187,4 @@ interface FrameworkConfig {
         fun slackWebhookUrl(): String
     }
 
-    interface SpeculativeConfig {
-        @WithName("enabled")
-        @WithDefault("true")
-        fun enabled(): Boolean
-
-        @WithName("median-multiplier")
-        @WithDefault("3.0")
-        fun medianMultiplier(): Double
-
-        @WithName("min-completed")
-        @WithDefault("5")
-        fun minCompleted(): Int
-    }
 }

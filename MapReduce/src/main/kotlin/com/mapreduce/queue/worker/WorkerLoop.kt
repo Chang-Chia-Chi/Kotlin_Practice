@@ -13,6 +13,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -47,8 +48,8 @@ class WorkerLoop(
     private val log = Logger.getLogger(WorkerLoop::class.java)
     private val pollScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val taskScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private lateinit var semaphore: Semaphore
-    private var bulkheadSize = 0
+    private val bulkheadSize = config.worker().bulkheadSize()
+    private val semaphore = Semaphore(bulkheadSize)
 
     /** Updated on every poll loop iteration — used by health probes to detect a hung worker. */
     @Volatile
@@ -56,8 +57,6 @@ class WorkerLoop(
     val lastPollTimestamp: Instant get() = _lastPollTimestamp
 
     fun onStart(@Observes ev: StartupEvent) {
-        bulkheadSize = config.worker().bulkheadSize()
-        semaphore = Semaphore(bulkheadSize)
         val pollInterval = config.worker().pollInterval().toMillis()
         val heartbeatIntervalMs = config.heartbeat().interval().toMillis()
         val workerId = config.worker().id()
@@ -66,6 +65,12 @@ class WorkerLoop(
         // Register the bulkhead with the shutdown coordinator for drain tracking
         shutdownCoordinator.registerBulkhead(semaphore, bulkheadSize)
         shutdownCoordinator.registerMetrics()
+        // Cancel scopes on shutdown — pollScope stops claiming, taskScope is force-cancelled
+        // after the drain phase completes (Phase 3 releases any remaining tasks via SQL)
+        shutdownCoordinator.registerLeaderScopeCallback {
+            pollScope.cancel()
+            taskScope.cancel()
+        }
 
         log.infof("Worker starting: id=%s, bulkhead=%d, poll=%dms, heartbeat=%dms, queues=%s",
             workerId, bulkheadSize, pollInterval, heartbeatIntervalMs, queues)

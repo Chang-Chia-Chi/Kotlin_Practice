@@ -40,8 +40,8 @@ class SlidingWindowCircuitBreaker(
 
     // Sliding window: ring buffer of outcomes (true = success)
     private val window = BooleanArray(slidingWindowSize)
-    private val windowIndex = AtomicInteger(0)
-    private val windowCount = AtomicInteger(0)
+    private var windowIndex = 0
+    private var windowCount = 0
 
     val currentState: State get() = state.get()
 
@@ -105,14 +105,17 @@ class SlidingWindowCircuitBreaker(
         }
     }
 
+    @Synchronized
     private fun recordInWindow(success: Boolean) {
-        val idx = windowIndex.getAndUpdate { (it + 1) % slidingWindowSize }
+        val idx = windowIndex
+        windowIndex = (windowIndex + 1) % slidingWindowSize
         window[idx] = success
-        windowCount.updateAndGet { minOf(it + 1, slidingWindowSize) }
+        windowCount = minOf(windowCount + 1, slidingWindowSize)
     }
 
+    @Synchronized
     private fun checkThreshold() {
-        val count = windowCount.get()
+        val count = windowCount
         if (count < slidingWindowSize) return // not enough data
 
         val failures = window.count { !it }
@@ -125,8 +128,9 @@ class SlidingWindowCircuitBreaker(
         }
     }
 
+    @Synchronized
     private fun resetWindow() {
-        windowCount.set(0)
-        windowIndex.set(0)
+        windowCount = 0
+        windowIndex = 0
     }
 }

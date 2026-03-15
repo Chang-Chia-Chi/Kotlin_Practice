@@ -10,7 +10,7 @@ import com.mapreduce.fanout.spi.FanoutSummary
 import com.mapreduce.fanout.spi.unsafeCast
 import com.mapreduce.leader.FencingTokenHolder
 import com.mapreduce.leader.LeaderManager
-import com.mapreduce.mr.model.FailurePolicy
+import com.mapreduce.mr.model.evaluateFailurePolicy
 import com.mapreduce.observability.AutoscalingMetrics
 import com.mapreduce.queue.model.TaskStatus
 import com.mapreduce.queue.repository.TaskRepository
@@ -110,22 +110,12 @@ class FanoutOrchestrator(
             job.jobId, job.completedTasks, deadLettered, job.totalTasks)
 
         // Apply failure policy (stored on the job row at creation time)
-        when (job.failurePolicy) {
-            FailurePolicy.FAIL_JOB -> {
-                if (deadLettered > 0) {
-                    failJob(job, "FAIL_JOB: $deadLettered task(s) dead-lettered")
-                    return
-                }
-            }
-            FailurePolicy.THRESHOLD -> {
-                val failureRate = deadLettered.toDouble() / job.totalTasks
-                if (failureRate > job.failureThreshold) {
-                    failJob(job, "THRESHOLD: %.1f%% > %.1f%%".format(
-                        failureRate * 100, job.failureThreshold * 100))
-                    return
-                }
-            }
-            FailurePolicy.BEST_EFFORT -> { /* always proceed */ }
+        val failureReason = evaluateFailurePolicy(
+            job.failurePolicy, deadLettered, job.totalTasks, job.failureThreshold,
+        )
+        if (failureReason != null) {
+            failJob(job, failureReason)
+            return
         }
 
         // Invoke OnCompleted inline, then transition to COMPLETED

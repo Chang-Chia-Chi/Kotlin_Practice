@@ -12,6 +12,29 @@ enum class FailurePolicy {
 }
 
 /**
+ * Evaluate whether a failure policy is violated.
+ * Returns a failure reason string if the policy is breached, or `null` if it passes.
+ */
+fun evaluateFailurePolicy(
+    policy: FailurePolicy,
+    deadLettered: Int,
+    totalTasks: Int,
+    failureThreshold: Double,
+): String? = when (policy) {
+    FailurePolicy.FAIL_JOB ->
+        if (deadLettered > 0) "FAIL_JOB: $deadLettered task(s) dead-lettered" else null
+
+    FailurePolicy.THRESHOLD -> {
+        val rate = deadLettered.toDouble() / totalTasks
+        if (rate > failureThreshold)
+            "THRESHOLD: %.1f%% > %.1f%%".format(rate * 100, failureThreshold * 100)
+        else null
+    }
+
+    FailurePolicy.BEST_EFFORT -> null
+}
+
+/**
  * A single map-reduce execution cycle. Tracks overall lifecycle,
  * task counters, failure policy, and output path.
  */

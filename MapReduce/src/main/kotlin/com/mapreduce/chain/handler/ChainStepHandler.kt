@@ -39,12 +39,16 @@ class ChainStepHandler(
     override val handlerName: String = "chain.step"
 
     override suspend fun handle(ctx: TaskContext): TaskResult {
-        // ── Extract chain metadata ──────────────────────────────────
-        val chainId = extractString(ctx.metadata, "chainId")
+        // ── Extract chain metadata (parse JSON once) ─────────────────
+        val metaNode = ctx.metadata?.let {
+            try { objectMapper.readTree(it) } catch (_: Exception) { null }
+        } ?: return TaskResult.Failure("Chain step task ${ctx.taskId} has invalid metadata")
+
+        val chainId = metaNode.get("chainId")?.asText()
             ?: return TaskResult.Failure("Chain step task ${ctx.taskId} missing chainId in metadata")
-        val chainType = extractString(ctx.metadata, "chainType")
+        val chainType = metaNode.get("chainType")?.asText()
             ?: return TaskResult.Failure("Chain step task ${ctx.taskId} missing chainType in metadata")
-        val stepIndex = extractInt(ctx.metadata, "stepIndex")
+        val stepIndex = metaNode.get("stepIndex")?.asInt()
             ?: return TaskResult.Failure("Chain step task ${ctx.taskId} missing stepIndex in metadata")
 
         // ── Look up definition and step ─────────────────────────────
@@ -183,21 +187,4 @@ class ChainStepHandler(
             .record(durationNanos, java.util.concurrent.TimeUnit.NANOSECONDS)
     }
 
-    private fun extractString(metadata: String?, field: String): String? {
-        if (metadata == null) return null
-        return try {
-            objectMapper.readTree(metadata).get(field)?.asText()
-        } catch (_: Exception) {
-            null
-        }
-    }
-
-    private fun extractInt(metadata: String?, field: String): Int? {
-        if (metadata == null) return null
-        return try {
-            objectMapper.readTree(metadata).get(field)?.asInt()
-        } catch (_: Exception) {
-            null
-        }
-    }
 }

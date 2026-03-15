@@ -145,53 +145,35 @@ class TaskRepository(private val jdbi: Jdbi) {
     fun fail(taskId: String, errorMessage: String, retryDelay: Duration? = null, executionGeneration: String? = null): Boolean {
         return jdbi.inTransaction<Boolean, Exception> { h ->
             val fenceClause = if (executionGeneration != null) " AND execution_generation = :gen" else ""
+            val scheduledExpr = if (retryDelay != null)
+                "CURRENT_TIMESTAMP + NUMTODSINTERVAL(:delay, 'SECOND')"
+            else "NULL"
+
             val update = h.createUpdate(
                 """
-                UPDATE task SET retry_count = retry_count + 1,
-                    error_message = :error
+                UPDATE task SET
+                    retry_count    = retry_count + 1,
+                    error_message  = :error,
+                    status         = CASE WHEN retry_count + 1 < max_retries THEN 'PENDING' ELSE 'DEAD_LETTER' END,
+                    claimed_by     = CASE WHEN retry_count + 1 < max_retries THEN NULL ELSE claimed_by END,
+                    claimed_at     = CASE WHEN retry_count + 1 < max_retries THEN NULL ELSE claimed_at END,
+                    last_heartbeat = NULL,
+                    scheduled_at   = CASE WHEN retry_count + 1 < max_retries THEN $scheduledExpr ELSE scheduled_at END
                 WHERE task_id = :taskId AND status = 'CLAIMED'$fenceClause
                 """
             )
                 .bind("taskId", taskId)
                 .bind("error", errorMessage.take(4000))
             if (executionGeneration != null) update.bind("gen", executionGeneration)
+            if (retryDelay != null) update.bind("delay", retryDelay.toSeconds())
             val updated = update.execute()
 
             if (updated == 0) return@inTransaction false
 
-            val (retryCount, maxRetries) = h.createQuery(
-                "SELECT retry_count, max_retries FROM task WHERE task_id = :taskId"
-            )
+            h.createQuery("SELECT status FROM task WHERE task_id = :taskId")
                 .bind("taskId", taskId)
-                .map { rs, _ -> rs.getInt("retry_count") to rs.getInt("max_retries") }
-                .one()
-
-            if (retryCount < maxRetries) {
-                if (retryDelay != null) {
-                    h.createUpdate(
-                        """
-                        UPDATE task SET status = 'PENDING', claimed_by = NULL, claimed_at = NULL,
-                            last_heartbeat = NULL,
-                            scheduled_at = CURRENT_TIMESTAMP + NUMTODSINTERVAL(:delay, 'SECOND')
-                        WHERE task_id = :taskId
-                        """
-                    ).bind("taskId", taskId).bind("delay", retryDelay.toSeconds()).execute()
-                } else {
-                    h.createUpdate(
-                        """
-                        UPDATE task SET status = 'PENDING', claimed_by = NULL, claimed_at = NULL,
-                            last_heartbeat = NULL
-                        WHERE task_id = :taskId
-                        """
-                    ).bind("taskId", taskId).execute()
-                }
-                false
-            } else {
-                h.createUpdate(
-                    "UPDATE task SET status = 'DEAD_LETTER', last_heartbeat = NULL WHERE task_id = :taskId"
-                ).bind("taskId", taskId).execute()
-                true
-            }
+                .mapTo(String::class.java)
+                .one() == "DEAD_LETTER"
         }
     }
 
@@ -279,11 +261,11 @@ class TaskRepository(private val jdbi: Jdbi) {
      *   WHERE last_epoch <= :epoch ... SET last_epoch = :epoch
      *
      * @param errorMessage descriptive message including the dead pod ID
-     * @return `true` if the task was dead-lettered (retries exhausted),
-     *         `false` if reclaimed to PENDING, or if the fence/status check failed (0 rows)
+     * @return `true` if dead-lettered, `false` if reclaimed to PENDING,
+     *         `null` if fence/status check failed (0 rows — already handled)
      */
-    fun reclaimStaleTask(taskId: String, leaderEpoch: Long, errorMessage: String): Boolean {
-        return jdbi.inTransaction<Boolean, Exception> { h ->
+    fun reclaimStaleTask(taskId: String, leaderEpoch: Long, errorMessage: String): Boolean? {
+        return jdbi.inTransaction<Boolean?, Exception> { h ->
             val updated = h.createUpdate(
                 """
                 UPDATE task
@@ -292,7 +274,8 @@ class TaskRepository(private val jdbi: Jdbi) {
                        claimed_at     = NULL,
                        last_heartbeat = NULL,
                        error_message  = :error,
-                       last_epoch     = :epoch
+                       last_epoch     = :epoch,
+                       status         = CASE WHEN retry_count + 1 < max_retries THEN 'PENDING' ELSE 'DEAD_LETTER' END
                  WHERE task_id  = :taskId
                    AND status   = 'CLAIMED'
                    AND last_epoch <= :epoch
@@ -303,24 +286,12 @@ class TaskRepository(private val jdbi: Jdbi) {
                 .bind("epoch", leaderEpoch)
                 .execute()
 
-            if (updated == 0) return@inTransaction false
+            if (updated == 0) return@inTransaction null
 
-            val (retryCount, maxRetries) = h.createQuery(
-                "SELECT retry_count, max_retries FROM task WHERE task_id = :taskId"
-            )
+            h.createQuery("SELECT status FROM task WHERE task_id = :taskId")
                 .bind("taskId", taskId)
-                .map { rs, _ -> rs.getInt("retry_count") to rs.getInt("max_retries") }
-                .one()
-
-            if (retryCount < maxRetries) {
-                h.createUpdate("UPDATE task SET status = 'PENDING' WHERE task_id = :taskId")
-                    .bind("taskId", taskId).execute()
-                false
-            } else {
-                h.createUpdate("UPDATE task SET status = 'DEAD_LETTER' WHERE task_id = :taskId")
-                    .bind("taskId", taskId).execute()
-                true
-            }
+                .mapTo(String::class.java)
+                .one() == "DEAD_LETTER"
         }
     }
 
@@ -431,11 +402,4 @@ class TaskRepository(private val jdbi: Jdbi) {
                 .execute()
         }
 
-    fun markSpeculative(taskId: String) {
-        jdbi.useHandle<Exception> { h ->
-            h.createUpdate("UPDATE task SET speculative = 1 WHERE task_id = :taskId")
-                .bind("taskId", taskId)
-                .execute()
-        }
-    }
 }

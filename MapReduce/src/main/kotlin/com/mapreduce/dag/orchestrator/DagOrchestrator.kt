@@ -325,10 +325,11 @@ class DagOrchestrator(
      */
     private fun evaluate(run: DagRun) {
         var changed = true
+        // Load instances once; re-query only after state changes to reflect DB writes
+        var instances = dagRepository.findInstancesByRunId(run.runId)
+        var instanceMap = instances.associateBy { it.taskKey }
         while (changed) {
             changed = false
-            val instances = dagRepository.findInstancesByRunId(run.runId)
-            val instanceMap = instances.associateBy { it.taskKey }
 
             for (instance in instances) {
                 if (instance.status != TaskInstanceStatus.BLOCKED) continue
@@ -345,7 +346,7 @@ class DagOrchestrator(
                 when (evaluateTriggerRule(instance.triggerRule, allUpstream)) {
                     EvalResult.READY -> {
                         // Evaluate condition expression if present
-                        if (shouldSkipByCondition(run, instance, instanceMap)) {
+                        if (shouldSkipByCondition(run, instance, deps, instanceMap)) {
                             dagRepository.updateInstanceStatus(instance.instanceId, TaskInstanceStatus.SKIPPED)
                             dagEventLog.nodeStateChange(
                                 run.runId, run.dagId, instance.taskKey,
@@ -369,6 +370,11 @@ class DagOrchestrator(
                     EvalResult.WAIT -> { /* not all deps resolved yet */ }
                 }
             }
+            // Re-query only if we made state changes (cascade may unlock more nodes)
+            if (changed) {
+                instances = dagRepository.findInstancesByRunId(run.runId)
+                instanceMap = instances.associateBy { it.taskKey }
+            }
         }
     }
 
@@ -379,6 +385,7 @@ class DagOrchestrator(
     private fun shouldSkipByCondition(
         run: DagRun,
         instance: DagTaskInstance,
+        deps: List<String>,
         instanceMap: Map<String, DagTaskInstance>,
     ): Boolean {
         val blueprint = dagRegistrar.getBlueprint(run.dagId) ?: return false
@@ -386,7 +393,7 @@ class DagOrchestrator(
         val condition = nodeDef.condition ?: return false
 
         return try {
-            val xcom = buildXcomContext(instance, instanceMap)
+            val xcom = buildXcomContext(deps, instanceMap)
             val inputs = run.globalContext?.let { objectMapper.readTree(it) }
             val ctx = TemplateEngine.ResolutionContext(
                 runId = run.runId, dagId = run.dagId, inputs = inputs, xcom = xcom,
@@ -463,9 +470,7 @@ class DagOrchestrator(
         // Enforce max_parallel_nodes concurrency limit
         val blueprint = dagRegistrar.getBlueprint(run.dagId)
         val maxParallel = blueprint?.concurrency()?.maxParallelNodes ?: Int.MAX_VALUE
-        val activeCount = dagRepository.findInstancesByRunId(run.runId).count {
-            it.status == TaskInstanceStatus.QUEUED || it.status == TaskInstanceStatus.RUNNING
-        }
+        val activeCount = dagRepository.countActiveInstances(run.runId)
         val slotsAvailable = (maxParallel - activeCount).coerceAtLeast(0)
 
         val toDispatch = if (slotsAvailable < dispatchable.size) {
@@ -543,7 +548,7 @@ class DagOrchestrator(
         val deps = parseDependencies(instance.dependencies)
         val allInstances = if (deps.isNotEmpty()) dagRepository.findInstancesByRunId(run.runId) else emptyList()
         val instanceMap = allInstances.associateBy { it.taskKey }
-        val xcom = buildXcomContext(instance, instanceMap)
+        val xcom = buildXcomContext(deps, instanceMap)
 
         if (xcom.isNotEmpty()) {
             payloadMap["upstream"] = xcom.mapValues { (_, v) -> v }
@@ -570,10 +575,9 @@ class DagOrchestrator(
 
     /** Build XCom context from upstream completed instances. */
     private fun buildXcomContext(
-        instance: DagTaskInstance,
+        deps: List<String>,
         instanceMap: Map<String, DagTaskInstance>,
     ): Map<String, JsonNode> {
-        val deps = parseDependencies(instance.dependencies)
         val xcom = mutableMapOf<String, JsonNode>()
         for (depKey in deps) {
             val upstream = instanceMap[depKey]

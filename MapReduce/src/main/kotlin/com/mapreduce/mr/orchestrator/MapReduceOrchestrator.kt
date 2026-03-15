@@ -4,9 +4,9 @@ import com.mapreduce.config.FrameworkConfig
 import com.mapreduce.event.JobStateChanged
 import com.mapreduce.leader.FencingTokenHolder
 import com.mapreduce.leader.LeaderManager
-import com.mapreduce.mr.model.FailurePolicy
 import com.mapreduce.mr.model.Job
 import com.mapreduce.mr.model.JobStatus
+import com.mapreduce.mr.model.evaluateFailurePolicy
 import com.mapreduce.mr.registry.MapReduceRegistrar
 import com.mapreduce.mr.repository.JobRepository
 import com.mapreduce.observability.AutoscalingMetrics
@@ -47,7 +47,6 @@ class MapReduceOrchestrator(
     private val taskRepository: TaskRepository,
     private val registrar: MapReduceRegistrar,
     private val leaderManager: LeaderManager,
-    private val speculativeExecutor: SpeculativeExecutor,
     private val shutdownCoordinator: ShutdownCoordinator,
     private val autoscalingMetrics: AutoscalingMetrics,
     private val jobStateEvent: Event<JobStateChanged>,
@@ -82,8 +81,7 @@ class MapReduceOrchestrator(
     }
 
     private fun monitorJobs() {
-        val runningJobs = monitorRunningJobs()
-        speculativeExecutor.evaluateRunningJobs(runningJobs)
+        monitorRunningJobs()
         monitorReducingJobs()
     }
 
@@ -92,7 +90,7 @@ class MapReduceOrchestrator(
      * When barrier is met (completed + dead_lettered >= total), apply failure policy
      * and either fail the job or dispatch the reduce task.
      */
-    private fun monitorRunningJobs(): List<Job> {
+    private fun monitorRunningJobs() {
         val runningJobs = jobRepository.findJobsByStatus(JobStatus.RUNNING)
         for (job in runningJobs) {
             val deadLettered = taskRepository.countByGroupAndStatus(job.jobId, TaskStatus.DEAD_LETTER)
@@ -106,7 +104,6 @@ class MapReduceOrchestrator(
                 handleBarrierMet(job, deadLettered)
             }
         }
-        return runningJobs
     }
 
     /**
@@ -162,22 +159,12 @@ class MapReduceOrchestrator(
             job.jobId, job.completedTasks, deadLettered, job.totalTasks)
 
         // Apply failure policy (stored on the job row at creation time)
-        when (job.failurePolicy) {
-            FailurePolicy.FAIL_JOB -> {
-                if (deadLettered > 0) {
-                    failJob(job, "FAIL_JOB: $deadLettered task(s) dead-lettered")
-                    return
-                }
-            }
-            FailurePolicy.THRESHOLD -> {
-                val failureRate = deadLettered.toDouble() / job.totalTasks
-                if (failureRate > job.failureThreshold) {
-                    failJob(job, "THRESHOLD: %.1f%% > %.1f%%".format(
-                        failureRate * 100, job.failureThreshold * 100))
-                    return
-                }
-            }
-            FailurePolicy.BEST_EFFORT -> { /* always proceed */ }
+        val failureReason = evaluateFailurePolicy(
+            job.failurePolicy, deadLettered, job.totalTasks, job.failureThreshold,
+        )
+        if (failureReason != null) {
+            failJob(job, failureReason)
+            return
         }
 
         val transitioned = jobRepository.casJobStatus(

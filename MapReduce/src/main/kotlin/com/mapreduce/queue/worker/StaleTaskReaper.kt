@@ -118,22 +118,22 @@ class StaleTaskReaper(
 
             val errorMessage = "Reclaimed: heartbeat stale (pod: ${task.claimedBy ?: "unknown"})"
 
-            log.warnf(
-                "Reclaiming stale task %s (handler=%s, claimed_by=%s, stale_age=%ds)",
-                task.taskId, task.handler, task.claimedBy, staleAge.seconds,
-            )
-
-            val wasDeadLettered = taskRepository.reclaimStaleTask(
+            val result = taskRepository.reclaimStaleTask(
                 task.taskId, leaderEpoch, errorMessage,
             )
 
-            // reclaimStaleTask returns false for both "reclaimed to PENDING" and
-            // "fence/status check failed (0 rows)". We check if the task was actually
-            // updated by counting the events we fire. The 0-rows case is harmless —
-            // the task was completed or reclaimed by someone else.
-            reclaimedCount++
+            // null = fence/status check rejected (task already handled by another leader or completed)
+            if (result == null) {
+                log.debugf("Skipped stale task %s — already handled", task.taskId)
+                continue
+            }
 
-            // Record stale age histogram
+            reclaimedCount++
+            log.warnf(
+                "Reclaimed stale task %s (handler=%s, claimed_by=%s, stale_age=%ds)",
+                task.taskId, task.handler, task.claimedBy, staleAge.seconds,
+            )
+
             meterRegistry.timer("taskqueue.reaper.stale_age", "handler", task.handler)
                 .record(staleAge)
 
@@ -151,7 +151,7 @@ class StaleTaskReaper(
                 log.warnf(e, "Failed to fire TaskReclaimed event for task %s", task.taskId)
             }
 
-            if (wasDeadLettered) {
+            if (result) {
                 deadLetteredCount++
                 try {
                     deadLetterEvent.fireAsync(

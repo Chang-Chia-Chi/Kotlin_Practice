@@ -27,7 +27,9 @@
       "Bash(cd \"C:\\\\Users\\\\maxch\\\\OneDrive\\\\文件\\\\GitHub\\\\Kotlin_Practice\\\\MapReduce\" && ./mvnw compile -q 2>&1 | tail -30)",
       "Bash(cd \"C:\\\\Users\\\\maxch\\\\OneDrive\\\\文件\\\\GitHub\\\\Kotlin_Practice\\\\MapReduce\" && ./mvnw test -q 2>&1 | tail -30)",
       "Bash(cd \"C:\\\\Users\\\\maxch\\\\OneDrive\\\\文件\\\\GitHub\\\\Kotlin_Practice\\\\MapReduce\" && ./mvnw compile -q 2>&1)",
-      "Bash(cd:*)"
+      "Bash(cd:*)",
+      "Bash(find:*)",
+      "Bash(ls:*)"
     ]
   }
 }

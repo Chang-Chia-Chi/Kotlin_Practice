@@ -137,6 +137,17 @@ class DagRepository(
                 .list()
         }
 
+    /** Count instances in QUEUED or RUNNING status — used for concurrency limit enforcement. */
+    fun countActiveInstances(runId: String): Int =
+        jdbi.withHandle<Int, Exception> { h ->
+            h.createQuery(
+                "SELECT COUNT(*) FROM dag_task_instance WHERE run_id = :runId AND status IN ('QUEUED', 'RUNNING')",
+            )
+                .bind("runId", runId)
+                .mapTo(Int::class.java)
+                .one()
+        }
+
     fun findInstancesByRunAndStatus(runId: String, status: TaskInstanceStatus): List<DagTaskInstance> =
         jdbi.withHandle<List<DagTaskInstance>, Exception> { h ->
             h.createQuery(

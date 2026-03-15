@@ -25,8 +25,8 @@ import java.util.concurrent.atomic.AtomicReference
  * Kubernetes Lease-based leader election with fencing epoch extraction.
  *
  * Wraps fabric8's `LeaderElector` and adds the fencing token layer:
- * after each leadership transition, reads the Lease's `metadata.resourceVersion`
- * and exposes it as a monotonically increasing [Long] epoch.
+ * after each leadership transition, atomically increments a local monotonic
+ * counter and exposes it as a strictly increasing [Long] epoch.
  *
  * Threading model:
  * - The election loop runs in a single dedicated daemon thread (not the Quarkus worker pool).
@@ -58,7 +58,7 @@ class LeaderManager(
     /** Whether this pod currently holds the leader lease. */
     val isActive: Boolean get() = _isLeader.get()
 
-    /** The current fencing epoch (derived from Lease resourceVersion). */
+    /** The current fencing epoch (monotonically increasing counter). */
     val token: Long get() = _epoch.get()
 
     /** Last time the election loop heartbeated (for liveness probe). */
@@ -73,7 +73,7 @@ class LeaderManager(
     fun onStart(@Observes ev: StartupEvent) {
         if (System.getenv("KUBERNETES_SERVICE_HOST") == null) {
             log.info("Not running in Kubernetes — assuming leader role with synthetic epoch")
-            _epoch.set(System.currentTimeMillis())
+            _epoch.set(1)
             _isLeader.set(true)
             _acquiredAt.set(Instant.now())
             registerMetrics()
@@ -152,9 +152,9 @@ class LeaderManager(
                     .withRetryPeriod(leaderCfg.retryPeriod())
                     .withLeaderCallbacks(
                         LeaderCallbacks(
-                            { onAcquire(identity, namespace, leaseName) },
+                            { onAcquire(identity) },
                             { onLose() },
-                            { newLeader -> onNewLeader(newLeader, identity, namespace, leaseName) },
+                            { newLeader -> onNewLeader(newLeader, identity) },
                         ),
                     )
                     .build()
@@ -188,9 +188,9 @@ class LeaderManager(
         _isLeader.set(false)
     }
 
-    private fun onAcquire(identity: String, namespace: String, leaseName: String) {
+    private fun onAcquire(identity: String) {
         log.infof("Acquired leadership (identity=%s)", identity)
-        refreshEpoch(namespace, leaseName)
+        refreshEpoch()
         _isLeader.set(true)
         _acquiredAt.set(Instant.now())
         try {
@@ -217,37 +217,19 @@ class LeaderManager(
         }
     }
 
-    private fun onNewLeader(newLeader: String, identity: String, namespace: String, leaseName: String) {
+    private fun onNewLeader(newLeader: String, identity: String) {
         _lastHeartbeat.set(Instant.now())
         log.debugf("Leader changed: %s", newLeader)
         // Refresh epoch when we're re-confirmed as leader (covers renewal bumps)
         if (newLeader == identity && _isLeader.get()) {
-            refreshEpoch(namespace, leaseName)
+            refreshEpoch()
         }
     }
 
-    /**
-     * Read the Lease object from the API server and extract resourceVersion
-     * as the fencing epoch. Falls back to timestamp if parsing fails.
-     */
-    private fun refreshEpoch(namespace: String, leaseName: String) {
-        try {
-            val lease = kubernetesClient.leases()
-                .inNamespace(namespace)
-                .withName(leaseName)
-                .get()
-            val rv = lease?.metadata?.resourceVersion
-            val epoch = rv?.toLongOrNull()
-                ?: rv?.hashCode()?.toLong()?.and(0x7FFFFFFFL)  // ensure positive
-                ?: System.currentTimeMillis()
-            _epoch.set(epoch)
-            _renewedAt.set(Instant.now())
-            log.infof("Fencing epoch refreshed: %d (resourceVersion=%s)", epoch, rv)
-        } catch (e: Exception) {
-            log.warnf(e, "Failed to read lease resourceVersion — using timestamp as epoch fallback")
-            _epoch.set(System.currentTimeMillis())
-            _renewedAt.set(Instant.now())
-        }
+    private fun refreshEpoch() {
+        val newEpoch = _epoch.incrementAndGet()
+        _renewedAt.set(Instant.now())
+        log.infof("Fencing epoch incremented: %d", newEpoch)
     }
 
     private fun registerMetrics() {
