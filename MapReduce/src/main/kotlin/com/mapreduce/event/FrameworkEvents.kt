@@ -162,6 +162,35 @@ data class JobStateChanged(
     val changedAt: Instant = Instant.now(),
 )
 
+// ── Schedule Events ──────────────────────────────────────────
+
+/**
+ * Fired when the cron trigger loop enqueues a task for a schedule.
+ *
+ * Producers: [com.mapreduce.schedule.trigger.CronTriggerLoop]
+ * Consumers: Metrics
+ */
+data class ScheduleFired(
+    val scheduleId: String,
+    val scheduleName: String,
+    val taskId: String,
+    val handler: String,
+    val firedAt: Instant = Instant.now(),
+)
+
+/**
+ * Fired when the cron trigger loop skips a schedule due to overlap policy.
+ *
+ * Producers: [com.mapreduce.schedule.trigger.CronTriggerLoop]
+ * Consumers: Metrics
+ */
+data class ScheduleSkipped(
+    val scheduleId: String,
+    val scheduleName: String,
+    val reason: String,
+    val skippedAt: Instant = Instant.now(),
+)
+
 // ── Fan-Out Events ───────────────────────────────────────────
 
 /**

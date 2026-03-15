@@ -134,7 +134,16 @@ interface FrameworkConfig {
         fun defaultTimeout(): Duration
     }
 
+    fun schedule(): ScheduleConfig
+
     fun speculative(): SpeculativeConfig
+
+    /** Cron schedule trigger loop configuration. */
+    interface ScheduleConfig {
+        @WithName("trigger-interval")
+        @WithDefault("10S")
+        fun triggerInterval(): Duration
+    }
 
     /** Dead letter processor configuration. */
     interface DeadLetterConfig {
