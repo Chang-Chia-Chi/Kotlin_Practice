@@ -134,9 +134,34 @@ interface FrameworkConfig {
         fun defaultTimeout(): Duration
     }
 
+    fun heartbeat(): HeartbeatConfig
+
+    fun reaper(): ReaperConfig
+
     fun schedule(): ScheduleConfig
 
     fun speculative(): SpeculativeConfig
+
+    /** Worker heartbeat configuration for stale task detection. */
+    interface HeartbeatConfig {
+        @WithDefault("30S")
+        fun interval(): Duration
+    }
+
+    /** Stale task reaper configuration (leader-only). */
+    interface ReaperConfig {
+        @WithName("scan-interval")
+        @WithDefault("30S")
+        fun scanInterval(): Duration
+
+        @WithName("stale-threshold")
+        @WithDefault("90S")
+        fun staleThreshold(): Duration
+
+        @WithName("batch-size")
+        @WithDefault("50")
+        fun batchSize(): Int
+    }
 
     /** Cron schedule trigger loop configuration. */
     interface ScheduleConfig {
