@@ -2,6 +2,7 @@ package com.mapreduce.mr.handler
 
 import com.mapreduce.mr.repository.JobRepository
 import com.mapreduce.mr.spi.MapReduceDefinition
+import com.mapreduce.mr.spi.PartitionedMapReduceDefinition
 import com.mapreduce.queue.model.TaskContext
 import com.mapreduce.queue.model.TaskResult
 import com.mapreduce.queue.spi.TaskHandler
@@ -34,8 +35,18 @@ class MapTaskHandler(
         val outputFlow = definition.map(input)
             .map { definition.serializeOutput(it) }
 
+        val partitionHash = if (definition is PartitionedMapReduceDefinition<*, *, *, *>) {
+            @Suppress("UNCHECKED_CAST")
+            val partitioned = definition as PartitionedMapReduceDefinition<Any, Any, Any, Any>
+            val rawInput = definition.deserializeInput(ctx.payload)
+            partitioned.partitionFor(rawInput)
+        } else {
+            0
+        }
+
         // Atomic: persist outputs in chunks + mark task COMPLETED + increment completed_tasks
-        jobRepository.completeMapTask(ctx.taskId, jobId, outputFlow)
+        // Fenced by execution_generation to prevent zombie commits
+        jobRepository.completeMapTask(ctx.taskId, jobId, outputFlow, ctx.executionGeneration, partitionHash)
 
         log.debugf("MAP %s completed (job=%s)", ctx.taskId, jobId)
         return TaskResult.Success

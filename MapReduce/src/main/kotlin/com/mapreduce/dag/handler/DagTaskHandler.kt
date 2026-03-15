@@ -32,7 +32,7 @@ class DagTaskHandler(
             ?: return TaskResult.Failure("DAG task ${ctx.taskId} missing instance_id in metadata")
 
         val output = nodeHandler.execute(ctx.payload)
-        dagRepository.saveInstanceOutput(instanceId, output)
+        dagRepository.saveInstanceOutput(instanceId, output, ctx.executionGeneration)
 
         log.debugf("DAG node %s completed (task=%s, instance=%s)", nodeHandler.nodeType, ctx.taskId, instanceId)
         return TaskResult.Success

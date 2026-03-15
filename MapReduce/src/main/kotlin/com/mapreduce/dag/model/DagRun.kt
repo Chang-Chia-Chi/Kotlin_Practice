@@ -16,6 +16,7 @@ data class DagRun(
     @ColumnName("dag_id") val dagId: String,
     val status: DagRunStatus,
     @ColumnName("global_context") val globalContext: String? = null,
+    @ColumnName("last_epoch") val lastEpoch: Long = 0,
     @ColumnName("created_at") val createdAt: Instant? = null,
     @ColumnName("updated_at") val updatedAt: Instant? = null,
 )

@@ -27,17 +27,29 @@ class ReduceTaskHandler(
         val jobId = ctx.groupId
             ?: return TaskResult.Failure("Reduce task ${ctx.taskId} has no groupId (jobId)")
 
-        val outputFlow = jobRepository.streamOutputs(jobId)
+        val partitionHash = extractPartitionHash(ctx.metadata)
+        val outputFlow = jobRepository.streamOutputs(jobId, partitionHash)
             .map { definition.deserializeOutput(it) }
 
         val result = definition.reduce(outputFlow)
 
         val resultMetadata = definition.serializeResult(result)
-        jobRepository.completeReduceTask(ctx.taskId, jobId, resultMetadata)
+        // Fenced by execution_generation to prevent zombie commits
+        jobRepository.completeReduceTask(ctx.taskId, jobId, resultMetadata, ctx.executionGeneration)
 
         definition.onCompleted(result)
 
-        log.infof("REDUCE %s completed (job=%s)", ctx.taskId, jobId)
+        log.infof("REDUCE %s completed (job=%s, partition=%s)", ctx.taskId, jobId, partitionHash?.toString() ?: "all")
         return TaskResult.Success
+    }
+
+    private fun extractPartitionHash(metadata: String?): Int? {
+        if (metadata == null) return null
+        return try {
+            val node = com.fasterxml.jackson.databind.ObjectMapper().readTree(metadata)
+            node.get("partition_hash")?.asInt()
+        } catch (_: Exception) {
+            null
+        }
     }
 }

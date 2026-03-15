@@ -8,7 +8,8 @@ import com.mapreduce.dag.model.DagTaskInstance
 import com.mapreduce.dag.model.TaskInstanceStatus
 import com.mapreduce.dag.model.TriggerRule
 import com.mapreduce.dag.repository.DagRepository
-import com.mapreduce.leader.LeaderElection
+import com.mapreduce.leader.FencingTokenHolder
+import com.mapreduce.leader.LeaderManager
 import com.mapreduce.queue.model.EnqueueRequest
 import com.mapreduce.queue.model.TaskStatus
 import com.mapreduce.queue.repository.TaskRepository
@@ -29,7 +30,7 @@ import org.jboss.logging.Logger
 /**
  * Leader-only orchestration loop for DAG runs.
  *
- * The state machine (spec §3):
+ * The state machine:
  * 1. **Reconcile** — poll Layer 1 tasks tied to a dag_run for terminal states,
  *    update the corresponding dag_task_instance status and output.
  * 2. **Identify Dependents** — find BLOCKED nodes listing the resolved node.
@@ -37,13 +38,16 @@ import org.jboss.logging.Logger
  *    Cascade Protocol: SKIPPED nodes immediately trigger recursive evaluation.
  * 4. **Dispatch** — merge global_context + upstream output_data, transition
  *    READY → RUNNING, enqueue into the Layer 1 task table.
+ *
+ * All leader writes propagate the fencing epoch via [FencingTokenHolder]
+ * so repository SQL includes the `WHERE last_epoch <= :epoch` guard.
  */
 @ApplicationScoped
 class DagOrchestrator(
     private val config: FrameworkConfig,
     private val dagRepository: DagRepository,
     private val taskRepository: TaskRepository,
-    private val leaderElection: LeaderElection,
+    private val leaderManager: LeaderManager,
     private val objectMapper: ObjectMapper,
 ) {
 
@@ -55,9 +59,14 @@ class DagOrchestrator(
         scope.launch {
             delay(interval) // initial delay
             while (isActive) {
-                if (leaderElection.isLeader) {
+                if (leaderManager.isActive) {
+                    val epoch = leaderManager.token
                     try {
-                        withContext(Dispatchers.IO) { monitorRuns() }
+                        withContext(Dispatchers.IO) {
+                            FencingTokenHolder.withToken(epoch) {
+                                monitorRuns()
+                            }
+                        }
                     } catch (e: Exception) {
                         log.errorf(e, "Error in DAG orchestrator loop")
                     }
@@ -129,7 +138,7 @@ class DagOrchestrator(
     }
 
     // ──────────────────────────────────────────────────────────────
-    //  Phase 1b: Dynamic Branch Routing (spec §4)
+    //  Phase 1b: Dynamic Branch Routing
     // ──────────────────────────────────────────────────────────────
 
     /**

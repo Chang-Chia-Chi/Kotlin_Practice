@@ -5,6 +5,7 @@ import com.mapreduce.mr.api.dto.SubmitJobRequest
 import com.mapreduce.mr.model.JobStatus
 import com.mapreduce.mr.registry.MapReduceRegistrar
 import com.mapreduce.mr.repository.JobRepository
+import com.mapreduce.mr.spi.PartitionedMapReduceDefinition
 import com.mapreduce.mr.spi.unsafeCast
 import jakarta.enterprise.context.ApplicationScoped
 import jakarta.ws.rs.Consumes
@@ -53,6 +54,12 @@ class JobResource(
 
             val serializedInputs = taskInputs.map { def.serializeInput(it) }
 
+            val totalPartitions = if (definition is PartitionedMapReduceDefinition<*, *, *, *>) {
+                definition.totalPartitions
+            } else {
+                1
+            }
+
             jobRepository.submitJob(
                 jobId = jobId,
                 jobType = request.jobType,
@@ -62,6 +69,7 @@ class JobResource(
                 failurePolicy = definition.failurePolicy,
                 failureThreshold = definition.failureThreshold,
                 queue = definition.queue,
+                totalPartitions = totalPartitions,
             )
             taskInputs.size
         }

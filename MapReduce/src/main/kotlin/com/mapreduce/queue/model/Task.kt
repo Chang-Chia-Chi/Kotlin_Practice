@@ -29,6 +29,8 @@ data class Task(
     @ColumnName("error_message") val errorMessage: String? = null,
     @ColumnName("created_at") val createdAt: Instant? = null,
     @ColumnName("completed_at") val completedAt: Instant? = null,
+    @ColumnName("execution_generation") val executionGeneration: String? = null,
+    val speculative: Int = 0,
 )
 
 /** Context passed to a [com.mapreduce.queue.spi.TaskHandler]. */
@@ -37,6 +39,7 @@ data class TaskContext(
     val payload: String,
     val groupId: String?,
     val metadata: String?,
+    val executionGeneration: String?,
 )
 
 /** Value object for enqueuing a new task. */

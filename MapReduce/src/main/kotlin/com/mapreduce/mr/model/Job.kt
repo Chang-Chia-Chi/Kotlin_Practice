@@ -27,6 +27,8 @@ data class Job(
     @ColumnName("failure_threshold") val failureThreshold: Double = 0.0,
     @ColumnName("reducing_fence_token") val reducingFenceToken: String? = null,
     @ColumnName("result_metadata") val resultMetadata: String? = null,
+    @ColumnName("total_partitions") val totalPartitions: Int = 1,
+    @ColumnName("last_epoch") val lastEpoch: Long = 0,
     val version: Long = 0,
     @ColumnName("created_at") val createdAt: Instant? = null,
     @ColumnName("updated_at") val updatedAt: Instant? = null,

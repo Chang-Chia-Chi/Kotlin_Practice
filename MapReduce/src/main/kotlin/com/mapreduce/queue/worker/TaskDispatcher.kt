@@ -21,6 +21,7 @@ class TaskDispatcher(
     private val taskRepository: TaskRepository,
     private val handlerRegistry: HandlerRegistry,
     private val meterRegistry: MeterRegistry,
+    private val circuitBreaker: PodCircuitBreaker,
 ) {
 
     private val log = Logger.getLogger(TaskDispatcher::class.java)
@@ -39,28 +40,33 @@ class TaskDispatcher(
             return
         }
 
-        val ctx = TaskContext(task.taskId, task.payload, task.groupId, task.metadata)
+        val ctx = TaskContext(task.taskId, task.payload, task.groupId, task.metadata, task.executionGeneration)
+        val gen = task.executionGeneration
         val start = System.nanoTime()
 
         try {
             when (val result = handler.handle(ctx)) {
                 is TaskResult.Success -> {
-                    taskRepository.complete(task.taskId)
+                    taskRepository.complete(task.taskId, gen)
                     recordMetrics(task.handler, start, "success")
+                    circuitBreaker.recordSuccess()
                 }
                 is TaskResult.Retry -> {
-                    taskRepository.fail(task.taskId, result.reason, result.delay)
+                    taskRepository.fail(task.taskId, result.reason, result.delay, gen)
                     recordMetrics(task.handler, start, "retry")
+                    circuitBreaker.recordFailure()
                 }
                 is TaskResult.Failure -> {
-                    taskRepository.fail(task.taskId, result.message)
+                    taskRepository.fail(task.taskId, result.message, executionGeneration = gen)
                     recordMetrics(task.handler, start, "failure")
+                    circuitBreaker.recordFailure()
                 }
             }
         } catch (e: Exception) {
             log.errorf(e, "Handler '%s' threw for task %s", task.handler, task.taskId)
-            taskRepository.fail(task.taskId, e.message ?: "Unknown error")
+            taskRepository.fail(task.taskId, e.message ?: "Unknown error", executionGeneration = gen)
             recordMetrics(task.handler, start, "error")
+            circuitBreaker.recordFailure()
         }
     }
 

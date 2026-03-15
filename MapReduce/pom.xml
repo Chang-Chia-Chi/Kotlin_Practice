@@ -94,6 +94,18 @@
             <artifactId>quarkus-kubernetes-client</artifactId>
         </dependency>
 
+        <!-- Scheduling (programmatic cron + interval) -->
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-scheduler</artifactId>
+        </dependency>
+
+        <!-- YAML config support (query-exporter uses deeply nested config) -->
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-config-yaml</artifactId>
+        </dependency>
+
         <!-- Observability -->
         <dependency>
             <groupId>io.quarkus</groupId>

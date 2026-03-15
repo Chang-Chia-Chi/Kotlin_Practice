@@ -9,5 +9,7 @@ data class OutputRecord(
     @ColumnName("job_id") val jobId: String,
     @ColumnName("task_id") val taskId: String,
     @ColumnName("output_data") val outputData: String,
+    @ColumnName("blob_uri") val blobUri: String? = null,
+    @ColumnName("partition_hash") val partitionHash: Int = 0,
     @ColumnName("created_at") val createdAt: Instant? = null,
 )

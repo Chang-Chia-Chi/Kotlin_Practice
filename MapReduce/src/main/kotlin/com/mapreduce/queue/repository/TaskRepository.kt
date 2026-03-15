@@ -70,18 +70,20 @@ class TaskRepository(private val jdbi: Jdbi) {
 
             val task = query.mapTo(Task::class.java).findOne().orElse(null) ?: return@inTransaction null
 
+            val generation = UUID.randomUUID().toString()
             h.createUpdate(
                 """
                 UPDATE task SET status = 'CLAIMED', claimed_by = :workerId,
-                    claimed_at = CURRENT_TIMESTAMP
+                    claimed_at = CURRENT_TIMESTAMP, execution_generation = :generation
                 WHERE task_id = :taskId
                 """
             )
                 .bind("workerId", workerId)
                 .bind("taskId", task.taskId)
+                .bind("generation", generation)
                 .execute()
 
-            task.copy(status = TaskStatus.CLAIMED, claimedBy = workerId)
+            task.copy(status = TaskStatus.CLAIMED, claimedBy = workerId, executionGeneration = generation)
         }
     }
 
@@ -90,16 +92,22 @@ class TaskRepository(private val jdbi: Jdbi) {
      * (supports handlers that complete the task themselves in the same transaction
      * as their side-effects, e.g. map-reduce handlers).
      */
-    fun complete(taskId: String) {
+    fun complete(taskId: String, executionGeneration: String? = null) {
         jdbi.useHandle<Exception> { h ->
-            h.createUpdate(
+            val sql = if (executionGeneration != null) {
+                """
+                UPDATE task SET status = 'COMPLETED', completed_at = CURRENT_TIMESTAMP
+                WHERE task_id = :taskId AND status = 'CLAIMED' AND execution_generation = :gen
+                """
+            } else {
                 """
                 UPDATE task SET status = 'COMPLETED', completed_at = CURRENT_TIMESTAMP
                 WHERE task_id = :taskId AND status = 'CLAIMED'
                 """
-            )
-                .bind("taskId", taskId)
-                .execute()
+            }
+            val update = h.createUpdate(sql).bind("taskId", taskId)
+            if (executionGeneration != null) update.bind("gen", executionGeneration)
+            update.execute()
         }
     }
 
@@ -109,18 +117,20 @@ class TaskRepository(private val jdbi: Jdbi) {
      * Increments retry_count. If retries remain, resets to PENDING (with optional
      * delay via [retryDelay]). Otherwise, moves to DEAD_LETTER.
      */
-    fun fail(taskId: String, errorMessage: String, retryDelay: Duration? = null) {
+    fun fail(taskId: String, errorMessage: String, retryDelay: Duration? = null, executionGeneration: String? = null) {
         jdbi.useTransaction<Exception> { h ->
-            val updated = h.createUpdate(
+            val fenceClause = if (executionGeneration != null) " AND execution_generation = :gen" else ""
+            val update = h.createUpdate(
                 """
                 UPDATE task SET retry_count = retry_count + 1,
                     error_message = :error
-                WHERE task_id = :taskId AND status = 'CLAIMED'
+                WHERE task_id = :taskId AND status = 'CLAIMED'$fenceClause
                 """
             )
                 .bind("taskId", taskId)
                 .bind("error", errorMessage.take(4000))
-                .execute()
+            if (executionGeneration != null) update.bind("gen", executionGeneration)
+            val updated = update.execute()
 
             if (updated == 0) return@useTransaction
 
@@ -248,4 +258,45 @@ class TaskRepository(private val jdbi: Jdbi) {
                 .mapTo(Task::class.java)
                 .findOne().orElse(null)
         }
+
+    fun findAllByGroupAndHandler(groupId: String, handler: String): List<Task> =
+        jdbi.withHandle<List<Task>, Exception> { h ->
+            h.createQuery(
+                "SELECT * FROM task WHERE group_id = :groupId AND handler = :handler"
+            )
+                .bind("groupId", groupId)
+                .bind("handler", handler)
+                .mapTo(Task::class.java)
+                .list()
+        }
+
+    fun findCompletedByGroupAndHandler(groupId: String, handler: String): List<Task> =
+        jdbi.withHandle<List<Task>, Exception> { h ->
+            h.createQuery(
+                "SELECT * FROM task WHERE group_id = :groupId AND handler = :handler AND status = 'COMPLETED'"
+            )
+                .bind("groupId", groupId)
+                .bind("handler", handler)
+                .mapTo(Task::class.java)
+                .list()
+        }
+
+    fun findClaimedByGroupAndHandler(groupId: String, handler: String): List<Task> =
+        jdbi.withHandle<List<Task>, Exception> { h ->
+            h.createQuery(
+                "SELECT * FROM task WHERE group_id = :groupId AND handler = :handler AND status = 'CLAIMED'"
+            )
+                .bind("groupId", groupId)
+                .bind("handler", handler)
+                .mapTo(Task::class.java)
+                .list()
+        }
+
+    fun markSpeculative(taskId: String) {
+        jdbi.useHandle<Exception> { h ->
+            h.createUpdate("UPDATE task SET speculative = 1 WHERE task_id = :taskId")
+                .bind("taskId", taskId)
+                .execute()
+        }
+    }
 }

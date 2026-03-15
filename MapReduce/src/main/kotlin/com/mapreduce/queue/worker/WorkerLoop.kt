@@ -31,6 +31,7 @@ import java.util.concurrent.TimeUnit
 class WorkerLoop(
     private val config: FrameworkConfig,
     private val dispatcher: TaskDispatcher,
+    private val circuitBreaker: PodCircuitBreaker,
 ) {
 
     private val log = Logger.getLogger(WorkerLoop::class.java)
@@ -51,6 +52,11 @@ class WorkerLoop(
 
         pollScope.launch {
             while (isActive) {
+                if (circuitBreaker.isTripped) {
+                    delay(pollInterval)
+                    continue
+                }
+
                 if (!semaphore.tryAcquire()) {
                     delay(pollInterval)
                     continue

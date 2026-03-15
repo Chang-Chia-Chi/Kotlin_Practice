@@ -53,6 +53,26 @@ interface MapReduceDefinition<P, I, O, R> {
     fun onCompleted(result: R)
 }
 
+/**
+ * Extension for definitions that support sharded reduce.
+ *
+ * During the split phase, the orchestrator uses [totalPartitions] to define
+ * the number of parallel reduce tasks. Map handlers tag outputs with a
+ * partition hash via [partitionFor]. Each reduce task processes only
+ * its assigned partition slice.
+ *
+ * If a specific partition's reduce fails, only that slice is retried.
+ */
+interface PartitionedMapReduceDefinition<P, I, O, R> : MapReduceDefinition<P, I, O, R> {
+    val totalPartitions: Int get() = 1
+
+    /**
+     * Determine partition assignment for a given map input.
+     * Return value must be in [0, totalPartitions).
+     */
+    fun partitionFor(input: I): Int = 0
+}
+
 @Suppress("UNCHECKED_CAST")
 fun MapReduceDefinition<*, *, *, *>.unsafeCast(): MapReduceDefinition<Any, Any, Any, Any> =
     this as MapReduceDefinition<Any, Any, Any, Any>

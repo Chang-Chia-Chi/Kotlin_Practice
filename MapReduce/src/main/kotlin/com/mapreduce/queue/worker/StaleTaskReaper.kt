@@ -1,7 +1,7 @@
 package com.mapreduce.queue.worker
 
 import com.mapreduce.config.FrameworkConfig
-import com.mapreduce.leader.LeaderElection
+import com.mapreduce.leader.LeaderManager
 import com.mapreduce.queue.repository.TaskRepository
 import io.quarkus.runtime.ShutdownEvent
 import io.quarkus.runtime.StartupEvent
@@ -29,7 +29,7 @@ import java.time.Instant
 class StaleTaskReaper(
     private val config: FrameworkConfig,
     private val taskRepository: TaskRepository,
-    private val leaderElection: LeaderElection,
+    private val leaderManager: LeaderManager,
 ) {
 
     private val log = Logger.getLogger(StaleTaskReaper::class.java)
@@ -40,7 +40,7 @@ class StaleTaskReaper(
         scope.launch {
             delay(interval)
             while (isActive) {
-                if (leaderElection.isLeader) {
+                if (leaderManager.isActive) {
                     try {
                         withContext(Dispatchers.IO) { reap() }
                     } catch (e: Exception) {

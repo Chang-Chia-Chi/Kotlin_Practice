@@ -30,6 +30,7 @@ data class DagTaskInstance(
     @ColumnName("trigger_rule") val triggerRule: TriggerRule = TriggerRule.ALL_SUCCESS,
     @ColumnName("output_data") val outputData: String? = null,
     @ColumnName("task_id") val taskId: String? = null,
+    @ColumnName("last_epoch") val lastEpoch: Long = 0,
     @ColumnName("created_at") val createdAt: Instant? = null,
     @ColumnName("updated_at") val updatedAt: Instant? = null,
 )

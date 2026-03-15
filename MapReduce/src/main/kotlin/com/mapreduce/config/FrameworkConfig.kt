@@ -12,6 +12,9 @@ interface FrameworkConfig {
 
     fun leader(): LeaderConfig
 
+    @WithName("leader-election")
+    fun leaderElection(): LeaderElectionConfig
+
     interface WorkerConfig {
         @WithName("poll-interval")
         @WithDefault("2S")
@@ -34,11 +37,53 @@ interface FrameworkConfig {
 
         @WithDefault("default,mr")
         fun queues(): List<String>
+
+        @WithName("circuit-breaker-threshold")
+        @WithDefault("10")
+        fun circuitBreakerThreshold(): Int
     }
 
     interface LeaderConfig {
         @WithName("monitor-interval")
         @WithDefault("3S")
         fun monitorInterval(): Duration
+    }
+
+    /** Kubernetes Lease-based leader election with fencing epoch. */
+    interface LeaderElectionConfig {
+        @WithName("lease-name")
+        @WithDefault("mapreduce-leader")
+        fun leaseName(): String
+
+        @WithDefault("\${KUBERNETES_NAMESPACE:default}")
+        fun namespace(): String
+
+        @WithName("lease-duration")
+        @WithDefault("15S")
+        fun leaseDuration(): Duration
+
+        @WithName("renew-deadline")
+        @WithDefault("10S")
+        fun renewDeadline(): Duration
+
+        @WithName("retry-period")
+        @WithDefault("2S")
+        fun retryPeriod(): Duration
+    }
+
+    fun speculative(): SpeculativeConfig
+
+    interface SpeculativeConfig {
+        @WithName("enabled")
+        @WithDefault("true")
+        fun enabled(): Boolean
+
+        @WithName("median-multiplier")
+        @WithDefault("3.0")
+        fun medianMultiplier(): Double
+
+        @WithName("min-completed")
+        @WithDefault("5")
+        fun minCompleted(): Int
     }
 }
