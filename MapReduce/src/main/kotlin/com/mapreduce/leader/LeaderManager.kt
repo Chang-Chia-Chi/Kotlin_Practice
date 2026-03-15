@@ -89,6 +89,33 @@ class LeaderManager(
     }
 
     /**
+     * Explicitly release the Kubernetes Lease so another pod can
+     * acquire leadership immediately, without waiting for the lease
+     * duration to expire.
+     */
+    fun releaseLeaseExplicitly() {
+        if (System.getenv("KUBERNETES_SERVICE_HOST") == null) {
+            log.info("Not in Kubernetes — skipping explicit lease release")
+            _isLeader.set(false)
+            return
+        }
+        try {
+            val leaderCfg = config.leaderElection()
+            val leaseApi = kubernetesClient.leases().inNamespace(leaderCfg.namespace())
+            val lease = leaseApi.withName(leaderCfg.leaseName()).get()
+            if (lease != null) {
+                lease.spec.holderIdentity = null
+                lease.spec.acquireTime = null
+                leaseApi.withName(leaderCfg.leaseName()).patch(lease)
+                log.info("Lease released explicitly — new leader can acquire immediately")
+            }
+        } catch (e: Exception) {
+            log.warnf(e, "Failed to release lease explicitly — new leader will acquire after lease expiry")
+        }
+        _isLeader.set(false)
+    }
+
+    /**
      * Blocking election loop that runs in the dedicated daemon thread.
      * After each `run()` return (leadership lost), sleeps for retryPeriod
      * and re-enters the election.

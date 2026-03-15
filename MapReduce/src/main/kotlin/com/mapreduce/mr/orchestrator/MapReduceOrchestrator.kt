@@ -10,7 +10,7 @@ import com.mapreduce.mr.registry.MapReduceRegistrar
 import com.mapreduce.mr.repository.JobRepository
 import com.mapreduce.queue.model.TaskStatus
 import com.mapreduce.queue.repository.TaskRepository
-import io.quarkus.runtime.ShutdownEvent
+import com.mapreduce.shutdown.ShutdownCoordinator
 import io.quarkus.runtime.StartupEvent
 import jakarta.enterprise.context.ApplicationScoped
 import jakarta.enterprise.event.Observes
@@ -45,12 +45,16 @@ class MapReduceOrchestrator(
     private val registrar: MapReduceRegistrar,
     private val leaderManager: LeaderManager,
     private val speculativeExecutor: SpeculativeExecutor,
+    private val shutdownCoordinator: ShutdownCoordinator,
 ) {
 
     private val log = Logger.getLogger(MapReduceOrchestrator::class.java)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     fun onStart(@Observes ev: StartupEvent) {
+        // Register scope cancellation with shutdown coordinator for Phase 1
+        shutdownCoordinator.registerLeaderScopeCallback { scope.cancel() }
+
         val interval = config.leader().monitorInterval().toMillis()
         scope.launch {
             delay(interval) // initial delay
@@ -70,10 +74,6 @@ class MapReduceOrchestrator(
                 delay(interval)
             }
         }
-    }
-
-    fun onStop(@Observes ev: ShutdownEvent) {
-        scope.cancel()
     }
 
     private fun monitorJobs() {

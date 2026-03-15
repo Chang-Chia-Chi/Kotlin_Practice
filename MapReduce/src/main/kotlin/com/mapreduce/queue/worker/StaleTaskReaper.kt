@@ -3,7 +3,7 @@ package com.mapreduce.queue.worker
 import com.mapreduce.config.FrameworkConfig
 import com.mapreduce.leader.LeaderManager
 import com.mapreduce.queue.repository.TaskRepository
-import io.quarkus.runtime.ShutdownEvent
+import com.mapreduce.shutdown.ShutdownCoordinator
 import io.quarkus.runtime.StartupEvent
 import jakarta.enterprise.context.ApplicationScoped
 import jakarta.enterprise.event.Observes
@@ -30,12 +30,16 @@ class StaleTaskReaper(
     private val config: FrameworkConfig,
     private val taskRepository: TaskRepository,
     private val leaderManager: LeaderManager,
+    private val shutdownCoordinator: ShutdownCoordinator,
 ) {
 
     private val log = Logger.getLogger(StaleTaskReaper::class.java)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     fun onStart(@Observes ev: StartupEvent) {
+        // Register scope cancellation with shutdown coordinator for Phase 1
+        shutdownCoordinator.registerLeaderScopeCallback { scope.cancel() }
+
         val interval = config.leader().monitorInterval().toMillis()
         scope.launch {
             delay(interval)
@@ -50,10 +54,6 @@ class StaleTaskReaper(
                 delay(interval)
             }
         }
-    }
-
-    fun onStop(@Observes ev: ShutdownEvent) {
-        scope.cancel()
     }
 
     private fun reap() {

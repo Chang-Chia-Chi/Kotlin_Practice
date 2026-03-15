@@ -13,7 +13,7 @@ import com.mapreduce.leader.LeaderManager
 import com.mapreduce.queue.model.EnqueueRequest
 import com.mapreduce.queue.model.TaskStatus
 import com.mapreduce.queue.repository.TaskRepository
-import io.quarkus.runtime.ShutdownEvent
+import com.mapreduce.shutdown.ShutdownCoordinator
 import io.quarkus.runtime.StartupEvent
 import jakarta.enterprise.context.ApplicationScoped
 import jakarta.enterprise.event.Observes
@@ -49,12 +49,16 @@ class DagOrchestrator(
     private val taskRepository: TaskRepository,
     private val leaderManager: LeaderManager,
     private val objectMapper: ObjectMapper,
+    private val shutdownCoordinator: ShutdownCoordinator,
 ) {
 
     private val log = Logger.getLogger(DagOrchestrator::class.java)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     fun onStart(@Observes ev: StartupEvent) {
+        // Register scope cancellation with shutdown coordinator for Phase 1
+        shutdownCoordinator.registerLeaderScopeCallback { scope.cancel() }
+
         val interval = config.leader().monitorInterval().toMillis()
         scope.launch {
             delay(interval) // initial delay
@@ -74,10 +78,6 @@ class DagOrchestrator(
                 delay(interval)
             }
         }
-    }
-
-    fun onStop(@Observes ev: ShutdownEvent) {
-        scope.cancel()
     }
 
     private fun monitorRuns() {

@@ -3,6 +3,7 @@ package com.mapreduce.observability
 import com.mapreduce.config.FrameworkConfig
 import com.mapreduce.leader.LeaderManager
 import com.mapreduce.queue.worker.PodCircuitBreaker
+import com.mapreduce.shutdown.ShutdownCoordinator
 import jakarta.enterprise.context.ApplicationScoped
 import org.eclipse.microprofile.health.HealthCheck
 import org.eclipse.microprofile.health.HealthCheckResponse
@@ -85,10 +86,21 @@ class ReadinessCheck(
     private val jdbi: Jdbi,
     private val leaderManager: LeaderManager,
     private val circuitBreaker: PodCircuitBreaker,
+    private val shutdownCoordinator: ShutdownCoordinator,
 ) : HealthCheck {
 
     override fun call(): HealthCheckResponse {
         val builder = HealthCheckResponse.named("mapreduce-readiness")
+
+        // During shutdown, return 503 so K8s removes pod from Service endpoints
+        if (shutdownCoordinator.isShuttingDown) {
+            return builder
+                .withData("shutdown_state", shutdownCoordinator.state.name)
+                .withData("in_flight_tasks", shutdownCoordinator.inFlightTasks.toString())
+                .withData("drain_deadline", shutdownCoordinator.drainDeadline?.toString() ?: "N/A")
+                .down()
+                .build()
+        }
 
         if (circuitBreaker.isTripped) {
             return builder
