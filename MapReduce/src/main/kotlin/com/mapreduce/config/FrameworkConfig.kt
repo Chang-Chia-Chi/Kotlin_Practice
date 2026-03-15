@@ -101,7 +101,37 @@ interface FrameworkConfig {
         fun queueDepthInterval(): Duration
     }
 
+    @WithName("dead-letter")
+    fun deadLetter(): DeadLetterConfig
+
     fun speculative(): SpeculativeConfig
+
+    /** Dead letter processor configuration. */
+    interface DeadLetterConfig {
+        @WithName("retention-days")
+        @WithDefault("30")
+        fun retentionDays(): Int
+
+        @WithName("cleanup-schedule-hours")
+        @WithDefault("24")
+        fun cleanupScheduleHours(): Int
+
+        @WithName("archive-before-delete")
+        @WithDefault("false")
+        fun archiveBeforeDelete(): Boolean
+
+        @WithName("alert-default-threshold")
+        @WithDefault("10")
+        fun alertDefaultThreshold(): Int
+
+        @WithName("alert-default-window")
+        @WithDefault("5M")
+        fun alertDefaultWindow(): Duration
+
+        @WithName("slack-webhook-url")
+        @WithDefault("")
+        fun slackWebhookUrl(): String
+    }
 
     interface SpeculativeConfig {
         @WithName("enabled")
