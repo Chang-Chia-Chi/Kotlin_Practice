@@ -71,6 +71,27 @@ interface FrameworkConfig {
         fun retryPeriod(): Duration
     }
 
+    fun shutdown(): ShutdownConfig
+
+    /** Graceful shutdown phase timeouts. */
+    interface ShutdownConfig {
+        @WithName("drain-timeout")
+        @WithDefault("60S")
+        fun drainTimeout(): Duration
+
+        @WithName("leader-teardown-timeout")
+        @WithDefault("5S")
+        fun leaderTeardownTimeout(): Duration
+
+        @WithName("release-timeout")
+        @WithDefault("5S")
+        fun releaseTimeout(): Duration
+
+        @WithName("log-interval")
+        @WithDefault("5S")
+        fun logInterval(): Duration
+    }
+
     fun speculative(): SpeculativeConfig
 
     interface SpeculativeConfig {
