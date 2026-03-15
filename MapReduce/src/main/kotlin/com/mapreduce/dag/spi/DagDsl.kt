@@ -1,6 +1,7 @@
 package com.mapreduce.dag.spi
 
 import com.mapreduce.dag.model.TriggerRule
+import java.time.Duration
 
 /**
  * Kotlin DSL for declarative DAG definitions, inspired by Airflow's task dependencies.
@@ -28,34 +29,30 @@ import com.mapreduce.dag.model.TriggerRule
  * }
  * ```
  *
- * ## Usage — Linear chain
+ * ## Usage — With conditions and config
  *
  * ```kotlin
  * override fun nodes() = buildDag {
- *     val extract   = node("extract",   "etl.extract")
- *     val transform = node("transform", "etl.transform")
- *     val load      = node("load",      "etl.load")
+ *     val router = node("router", "order.route")
+ *     val domestic = node("domestic", "order.domestic") {
+ *         condition = "{{ xcom.router.region }} == 'US'"
+ *     }
+ *     val intl = node("international", "order.intl") {
+ *         condition = "{{ xcom.router.region }} != 'US'"
+ *         timeout = Duration.ofMinutes(15)
+ *         maxAttempts = 5
+ *     }
+ *     val finalize = node("finalize", "order.finalize", triggerRule = TriggerRule.ONE_SUCCESS)
  *
- *     extract then transform then load
+ *     router then listOf(domestic, intl)
+ *     listOf(domestic, intl) then finalize
  * }
  * ```
  *
  * ## Usage — Dynamic routing
  *
  * A node handler can return `{"__dag_route__": ["branch-a"]}` to prune
- * non-routed downstream branches at runtime (see spec §4).
- *
- * ```kotlin
- * override fun nodes() = buildDag {
- *     val router   = node("router",   "order.route")
- *     val branchA  = node("branch-a", "order.domestic")
- *     val branchB  = node("branch-b", "order.international")
- *     val finalize = node("finalize", "order.finalize", triggerRule = TriggerRule.ONE_SUCCESS)
- *
- *     router then listOf(branchA, branchB)
- *     listOf(branchA, branchB) then finalize
- * }
- * ```
+ * non-routed downstream branches at runtime (see spec §6).
  */
 fun buildDag(block: DagBuilder.() -> Unit): List<DagNodeDef> {
     val builder = DagBuilder()
@@ -103,7 +100,43 @@ class DagBuilder {
         nodeType: String,
         triggerRule: TriggerRule = TriggerRule.ALL_SUCCESS,
     ): NodeRef {
-        nodes.add(NodeData(taskKey, nodeType, triggerRule))
+        nodes.add(NodeData(taskKey, nodeType, triggerRule = triggerRule))
+        return NodeRef(taskKey, this)
+    }
+
+    /**
+     * Declare a node with extended configuration via a builder block.
+     *
+     * ```kotlin
+     * val step = node("step", "handler.type") {
+     *     condition = "{{ xcom.prev.status }} == 'OK'"
+     *     timeout = Duration.ofMinutes(15)
+     *     maxAttempts = 5
+     *     config = mapOf("key" to "{{ inputs.value }}")
+     *     taskType = "SQL_QUERY"
+     * }
+     * ```
+     */
+    fun node(
+        taskKey: String,
+        nodeType: String,
+        triggerRule: TriggerRule = TriggerRule.ALL_SUCCESS,
+        configure: NodeConfigBuilder.() -> Unit,
+    ): NodeRef {
+        val builder = NodeConfigBuilder().apply(configure)
+        nodes.add(
+            NodeData(
+                taskKey = taskKey,
+                nodeType = nodeType,
+                triggerRule = triggerRule,
+                taskType = builder.taskType,
+                config = builder.config,
+                condition = builder.condition,
+                timeout = builder.timeout,
+                maxAttempts = builder.maxAttempts,
+                onFailure = builder.onFailure,
+            ),
+        )
         return NodeRef(taskKey, this)
     }
 
@@ -120,8 +153,14 @@ class DagBuilder {
             DagNodeDef(
                 taskKey = nd.taskKey,
                 nodeType = nd.nodeType,
+                taskType = nd.taskType,
                 dependencies = depsMap[nd.taskKey]?.toList() ?: emptyList(),
                 triggerRule = nd.triggerRule,
+                config = nd.config,
+                condition = nd.condition,
+                timeout = nd.timeout,
+                maxAttempts = nd.maxAttempts,
+                onFailure = nd.onFailure,
             )
         }
     }
@@ -130,7 +169,24 @@ class DagBuilder {
         val taskKey: String,
         val nodeType: String,
         val triggerRule: TriggerRule,
+        val taskType: String? = null,
+        val config: Map<String, Any> = emptyMap(),
+        val condition: String? = null,
+        val timeout: Duration? = null,
+        val maxAttempts: Int? = null,
+        val onFailure: OnFailureHandler? = null,
     )
+}
+
+/** Builder for extended node configuration within the DSL. */
+@DagDslMarker
+class NodeConfigBuilder {
+    var taskType: String? = null
+    var config: Map<String, Any> = emptyMap()
+    var condition: String? = null
+    var timeout: Duration? = null
+    var maxAttempts: Int? = null
+    var onFailure: OnFailureHandler? = null
 }
 
 /**
