@@ -1,5 +1,6 @@
 package com.mapreduce.event
 
+import com.mapreduce.fanout.model.FanoutJobStatus
 import com.mapreduce.mr.model.JobStatus
 import com.mapreduce.shutdown.ShutdownState
 import java.time.Instant
@@ -155,6 +156,25 @@ data class JobStateChanged(
     val jobType: String,
     val previousStatus: JobStatus,
     val newStatus: JobStatus,
+    val completedTasks: Int,
+    val failedTasks: Int,
+    val totalTasks: Int,
+    val changedAt: Instant = Instant.now(),
+)
+
+// ── Fan-Out Events ───────────────────────────────────────────
+
+/**
+ * Fired when a fan-out job transitions state.
+ *
+ * Producers: [com.mapreduce.fanout.orchestrator.FanoutOrchestrator]
+ * Consumers: Metrics
+ */
+data class FanoutJobStateChanged(
+    val jobId: String,
+    val jobType: String,
+    val previousStatus: FanoutJobStatus,
+    val newStatus: FanoutJobStatus,
     val completedTasks: Int,
     val failedTasks: Int,
     val totalTasks: Int,

@@ -1,6 +1,7 @@
 package com.mapreduce.observability
 
 import com.mapreduce.event.CircuitBreakerStateChanged
+import com.mapreduce.event.FanoutJobStateChanged
 import com.mapreduce.event.JobStateChanged
 import com.mapreduce.event.LeadershipAcquired
 import com.mapreduce.event.LeadershipLost
@@ -133,6 +134,21 @@ class EventBusMetricsObserver(
             ).increment()
         } catch (e: Exception) {
             log.warnf(e, "Error recording JobStateChanged metric")
+        }
+    }
+
+    // ── Fan-Out Events ───────────────────────────────────────
+
+    fun onFanoutJobStateChanged(@ObservesAsync event: FanoutJobStateChanged) {
+        try {
+            meterRegistry.counter(
+                "framework.fanout.job.transitions",
+                "job_type", event.jobType,
+                "from", event.previousStatus.name,
+                "to", event.newStatus.name,
+            ).increment()
+        } catch (e: Exception) {
+            log.warnf(e, "Error recording FanoutJobStateChanged metric")
         }
     }
 }
