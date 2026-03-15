@@ -2,6 +2,7 @@ package com.mapreduce.queue.worker
 
 import com.mapreduce.config.FrameworkConfig
 import com.mapreduce.event.TaskClaimed
+import com.mapreduce.queue.repository.TaskRepository
 import com.mapreduce.shutdown.ShutdownCoordinator
 import com.mapreduce.shutdown.ShutdownState
 import io.quarkus.runtime.StartupEvent
@@ -27,12 +28,17 @@ import java.util.concurrent.Semaphore
  * - [pollScope]: drives the claim loop — exits when [ShutdownCoordinator] enters DRAINING.
  * - [taskScope]: runs in-flight task handlers — drained by the coordinator, then force-cancelled.
  *
+ * Each in-flight task has a companion heartbeat coroutine that updates [last_heartbeat]
+ * every [HeartbeatConfig.interval] so the stale task reaper can distinguish live tasks
+ * from orphaned ones.
+ *
  * Total cluster parallelism = pods × bulkhead.
  */
 @ApplicationScoped
 class WorkerLoop(
     private val config: FrameworkConfig,
     private val dispatcher: TaskDispatcher,
+    private val taskRepository: TaskRepository,
     private val circuitBreaker: PodCircuitBreaker,
     private val shutdownCoordinator: ShutdownCoordinator,
     private val taskClaimedEvent: Event<TaskClaimed>,
@@ -53,6 +59,7 @@ class WorkerLoop(
         bulkheadSize = config.worker().bulkheadSize()
         semaphore = Semaphore(bulkheadSize)
         val pollInterval = config.worker().pollInterval().toMillis()
+        val heartbeatIntervalMs = config.heartbeat().interval().toMillis()
         val workerId = config.worker().id()
         val queues = config.worker().queues()
 
@@ -60,8 +67,8 @@ class WorkerLoop(
         shutdownCoordinator.registerBulkhead(semaphore, bulkheadSize)
         shutdownCoordinator.registerMetrics()
 
-        log.infof("Worker starting: id=%s, bulkhead=%d, poll=%dms, queues=%s",
-            workerId, bulkheadSize, pollInterval, queues)
+        log.infof("Worker starting: id=%s, bulkhead=%d, poll=%dms, heartbeat=%dms, queues=%s",
+            workerId, bulkheadSize, pollInterval, heartbeatIntervalMs, queues)
 
         pollScope.launch {
             while (isActive) {
@@ -100,7 +107,33 @@ class WorkerLoop(
                         }
                         taskScope.launch {
                             try {
-                                dispatcher.execute(task)
+                                // Launch heartbeat alongside handler execution.
+                                // The heartbeat updates last_heartbeat periodically so the
+                                // stale task reaper can distinguish live tasks from orphaned ones.
+                                val heartbeatJob = launch {
+                                    while (isActive) {
+                                        delay(heartbeatIntervalMs)
+                                        try {
+                                            taskRepository.updateHeartbeat(
+                                                task.taskId, task.executionGeneration,
+                                            )
+                                        } catch (e: CancellationException) {
+                                            throw e
+                                        } catch (e: Exception) {
+                                            // Heartbeat failure is non-fatal (§3.5).
+                                            // Missing one heartbeat is tolerated by the 3× threshold.
+                                            log.debugf(
+                                                "Heartbeat update failed for task %s (non-fatal)",
+                                                task.taskId,
+                                            )
+                                        }
+                                    }
+                                }
+                                try {
+                                    dispatcher.execute(task)
+                                } finally {
+                                    heartbeatJob.cancel()
+                                }
                             } finally {
                                 semaphore.release()
                                 // Track completions during drain window

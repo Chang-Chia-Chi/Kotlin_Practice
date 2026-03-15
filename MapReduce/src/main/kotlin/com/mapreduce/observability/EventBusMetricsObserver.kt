@@ -102,6 +102,10 @@ class EventBusMetricsObserver(
                 "handler", event.handler,
                 "previous_pod", event.previousClaimedBy,
             ).increment()
+            meterRegistry.timer(
+                "framework.task.reclaimed.stale_age",
+                "handler", event.handler,
+            ).record(event.staleAge)
         } catch (e: Exception) {
             log.warnf(e, "Error recording TaskReclaimed metric")
         }

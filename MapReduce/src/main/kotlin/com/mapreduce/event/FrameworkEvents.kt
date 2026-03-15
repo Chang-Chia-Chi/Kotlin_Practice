@@ -3,6 +3,7 @@ package com.mapreduce.event
 import com.mapreduce.fanout.model.FanoutJobStatus
 import com.mapreduce.mr.model.JobStatus
 import com.mapreduce.shutdown.ShutdownState
+import java.time.Duration
 import java.time.Instant
 
 // ── Supporting Enums ──────────────────────────────────────────
@@ -124,6 +125,7 @@ data class TaskReclaimed(
     val handler: String,
     val previousClaimedBy: String,
     val retryCount: Int,
+    val staleAge: Duration,
     val reclaimedAt: Instant = Instant.now(),
 )
 
