@@ -1,6 +1,7 @@
 package com.mapreduce.queue.worker
 
 import com.mapreduce.config.FrameworkConfig
+import com.mapreduce.event.TaskDeadLettered
 import com.mapreduce.observability.AutoscalingMetrics
 import com.mapreduce.queue.model.Task
 import com.mapreduce.queue.model.TaskContext
@@ -10,6 +11,7 @@ import com.mapreduce.queue.repository.TaskRepository
 import com.mapreduce.shutdown.ShutdownCoordinator
 import io.micrometer.core.instrument.MeterRegistry
 import jakarta.enterprise.context.ApplicationScoped
+import jakarta.enterprise.event.Event
 import org.jboss.logging.Logger
 import java.util.concurrent.TimeUnit
 
@@ -26,6 +28,7 @@ class TaskDispatcher(
     private val circuitBreaker: PodCircuitBreaker,
     private val shutdownCoordinator: ShutdownCoordinator,
     private val autoscalingMetrics: AutoscalingMetrics,
+    private val deadLetterEvent: Event<TaskDeadLettered>,
 ) {
 
     private val log = Logger.getLogger(TaskDispatcher::class.java)
@@ -41,6 +44,7 @@ class TaskDispatcher(
             log.errorf("No handler for '%s' — dead-lettering task %s", task.handler, task.taskId)
             taskRepository.deadLetter(task.taskId, "No handler registered for '${task.handler}'")
             meterRegistry.counter("task.dead_letter", "handler", task.handler).increment()
+            fireDeadLetterEvent(task, "No handler registered for '${task.handler}'")
             return
         }
 
@@ -61,27 +65,49 @@ class TaskDispatcher(
                     circuitBreaker.recordSuccess()
                 }
                 is TaskResult.Retry -> {
-                    taskRepository.fail(task.taskId, result.reason, result.delay, gen)
+                    val wasDeadLettered = taskRepository.fail(task.taskId, result.reason, result.delay, gen)
                     recordMetrics(task.handler, start, "retry")
                     autoscalingMetrics.recordTaskDuration(task.handler, "Retry", System.nanoTime() - start)
                     autoscalingMetrics.recordTaskError(task.handler, "retry")
                     circuitBreaker.recordFailure()
+                    if (wasDeadLettered) fireDeadLetterEvent(task, result.reason)
                 }
                 is TaskResult.Failure -> {
-                    taskRepository.fail(task.taskId, result.message, executionGeneration = gen)
+                    val wasDeadLettered = taskRepository.fail(task.taskId, result.message, executionGeneration = gen)
                     recordMetrics(task.handler, start, "failure")
                     autoscalingMetrics.recordTaskDuration(task.handler, "DeadLetter", System.nanoTime() - start)
                     autoscalingMetrics.recordTaskError(task.handler, "failure")
                     circuitBreaker.recordFailure()
+                    if (wasDeadLettered) fireDeadLetterEvent(task, result.message)
                 }
             }
         } catch (e: Exception) {
             log.errorf(e, "Handler '%s' threw for task %s", task.handler, task.taskId)
-            taskRepository.fail(task.taskId, e.message ?: "Unknown error", executionGeneration = gen)
+            val errorMsg = e.message ?: "Unknown error"
+            val wasDeadLettered = taskRepository.fail(task.taskId, errorMsg, executionGeneration = gen)
             recordMetrics(task.handler, start, "error")
             autoscalingMetrics.recordTaskDuration(task.handler, "DeadLetter", System.nanoTime() - start)
             autoscalingMetrics.recordTaskError(task.handler, e.javaClass.simpleName)
             circuitBreaker.recordFailure()
+            if (wasDeadLettered) fireDeadLetterEvent(task, errorMsg)
+        }
+    }
+
+    private fun fireDeadLetterEvent(task: Task, error: String) {
+        try {
+            deadLetterEvent.fireAsync(
+                TaskDeadLettered(
+                    taskId = task.taskId,
+                    handler = task.handler,
+                    queue = task.queue,
+                    groupId = task.groupId,
+                    retryCount = task.retryCount,
+                    lastError = error,
+                    createdAt = task.createdAt,
+                ),
+            )
+        } catch (e: Exception) {
+            log.warnf(e, "Failed to fire TaskDeadLettered event for task %s", task.taskId)
         }
     }
 

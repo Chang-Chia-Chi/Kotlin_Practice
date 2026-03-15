@@ -1,11 +1,13 @@
 package com.mapreduce.queue.worker
 
 import com.mapreduce.config.FrameworkConfig
+import com.mapreduce.event.TaskDeadLettered
 import com.mapreduce.leader.LeaderManager
 import com.mapreduce.queue.repository.TaskRepository
 import com.mapreduce.shutdown.ShutdownCoordinator
 import io.quarkus.runtime.StartupEvent
 import jakarta.enterprise.context.ApplicationScoped
+import jakarta.enterprise.event.Event
 import jakarta.enterprise.event.Observes
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -31,6 +33,7 @@ class StaleTaskReaper(
     private val taskRepository: TaskRepository,
     private val leaderManager: LeaderManager,
     private val shutdownCoordinator: ShutdownCoordinator,
+    private val deadLetterEvent: Event<TaskDeadLettered>,
 ) {
 
     private val log = Logger.getLogger(StaleTaskReaper::class.java)
@@ -62,7 +65,24 @@ class StaleTaskReaper(
         for (task in staleTasks) {
             log.warnf("Reclaiming stale task %s (handler=%s, claimed_by=%s)",
                 task.taskId, task.handler, task.claimedBy)
-            taskRepository.reclaimStaleTask(task.taskId)
+            val wasDeadLettered = taskRepository.reclaimStaleTask(task.taskId)
+            if (wasDeadLettered) {
+                try {
+                    deadLetterEvent.fireAsync(
+                        TaskDeadLettered(
+                            taskId = task.taskId,
+                            handler = task.handler,
+                            queue = task.queue,
+                            groupId = task.groupId,
+                            retryCount = task.retryCount + 1,
+                            lastError = task.errorMessage ?: "Stale reclaim exhausted retries",
+                            createdAt = task.createdAt,
+                        ),
+                    )
+                } catch (e: Exception) {
+                    log.warnf(e, "Failed to fire TaskDeadLettered event for stale task %s", task.taskId)
+                }
+            }
         }
         if (staleTasks.isNotEmpty()) {
             log.infof("Reclaimed %d stale task(s)", staleTasks.size)

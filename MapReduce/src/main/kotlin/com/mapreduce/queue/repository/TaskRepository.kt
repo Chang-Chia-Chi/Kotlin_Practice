@@ -116,9 +116,11 @@ class TaskRepository(private val jdbi: Jdbi) {
      *
      * Increments retry_count. If retries remain, resets to PENDING (with optional
      * delay via [retryDelay]). Otherwise, moves to DEAD_LETTER.
+     *
+     * @return `true` if the task was dead-lettered (retries exhausted)
      */
-    fun fail(taskId: String, errorMessage: String, retryDelay: Duration? = null, executionGeneration: String? = null) {
-        jdbi.useTransaction<Exception> { h ->
+    fun fail(taskId: String, errorMessage: String, retryDelay: Duration? = null, executionGeneration: String? = null): Boolean {
+        return jdbi.inTransaction<Boolean, Exception> { h ->
             val fenceClause = if (executionGeneration != null) " AND execution_generation = :gen" else ""
             val update = h.createUpdate(
                 """
@@ -132,7 +134,7 @@ class TaskRepository(private val jdbi: Jdbi) {
             if (executionGeneration != null) update.bind("gen", executionGeneration)
             val updated = update.execute()
 
-            if (updated == 0) return@useTransaction
+            if (updated == 0) return@inTransaction false
 
             val (retryCount, maxRetries) = h.createQuery(
                 "SELECT retry_count, max_retries FROM task WHERE task_id = :taskId"
@@ -158,10 +160,12 @@ class TaskRepository(private val jdbi: Jdbi) {
                         """
                     ).bind("taskId", taskId).execute()
                 }
+                false
             } else {
                 h.createUpdate(
                     "UPDATE task SET status = 'DEAD_LETTER' WHERE task_id = :taskId"
                 ).bind("taskId", taskId).execute()
+                true
             }
         }
     }
@@ -194,9 +198,11 @@ class TaskRepository(private val jdbi: Jdbi) {
 
     /**
      * Reclaim a stale task: increment retry, then either PENDING or DEAD_LETTER.
+     *
+     * @return `true` if the task was dead-lettered (retries exhausted)
      */
-    fun reclaimStaleTask(taskId: String) {
-        jdbi.useTransaction<Exception> { h ->
+    fun reclaimStaleTask(taskId: String): Boolean {
+        return jdbi.inTransaction<Boolean, Exception> { h ->
             val updated = h.createUpdate(
                 """
                 UPDATE task SET retry_count = retry_count + 1
@@ -204,7 +210,7 @@ class TaskRepository(private val jdbi: Jdbi) {
                 """
             ).bind("taskId", taskId).execute()
 
-            if (updated == 0) return@useTransaction
+            if (updated == 0) return@inTransaction false
 
             val (retryCount, maxRetries) = h.createQuery(
                 "SELECT retry_count, max_retries FROM task WHERE task_id = :taskId"
@@ -220,10 +226,12 @@ class TaskRepository(private val jdbi: Jdbi) {
                     WHERE task_id = :taskId AND status = 'CLAIMED'
                     """
                 ).bind("taskId", taskId).execute()
+                false
             } else {
                 h.createUpdate(
                     "UPDATE task SET status = 'DEAD_LETTER' WHERE task_id = :taskId AND status = 'CLAIMED'"
                 ).bind("taskId", taskId).execute()
+                true
             }
         }
     }
