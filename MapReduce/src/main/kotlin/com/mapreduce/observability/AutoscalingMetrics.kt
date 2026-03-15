@@ -40,7 +40,7 @@ import java.util.concurrent.atomic.AtomicLong
  * Also provides operational health metrics for dashboards and alerts:
  * - `framework.task.duration.seconds` — task processing latency
  * - `framework.task.errors.total` — task failure counter
- * - `framework.orchestration.duration.seconds` — job/DAG completion time
+ * - `framework.orchestration.duration.seconds` — job completion time
  */
 @ApplicationScoped
 class AutoscalingMetrics(
@@ -149,7 +149,7 @@ class AutoscalingMetrics(
 
     /**
      * Record end-to-end orchestration duration from submission to terminal state.
-     * @param orchestrationType "MapReduce" or "DAG"
+     * @param orchestrationType e.g. "MapReduce"
      */
     fun recordOrchestrationDuration(
         orchestrationType: String,

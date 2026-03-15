@@ -130,8 +130,6 @@ interface FrameworkConfig {
 
     fun reaper(): ReaperConfig
 
-    fun schedule(): ScheduleConfig
-
     /** Worker heartbeat configuration for stale task detection. */
     interface HeartbeatConfig {
         @WithDefault("30S")
@@ -151,13 +149,6 @@ interface FrameworkConfig {
         @WithName("batch-size")
         @WithDefault("50")
         fun batchSize(): Int
-    }
-
-    /** Cron schedule trigger loop configuration. */
-    interface ScheduleConfig {
-        @WithName("trigger-interval")
-        @WithDefault("10S")
-        fun triggerInterval(): Duration
     }
 
     /** Dead letter processor configuration. */

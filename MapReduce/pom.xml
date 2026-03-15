@@ -94,13 +94,7 @@
             <artifactId>quarkus-kubernetes-client</artifactId>
         </dependency>
 
-        <!-- Scheduling (programmatic cron + interval) -->
-        <dependency>
-            <groupId>io.quarkus</groupId>
-            <artifactId>quarkus-scheduler</artifactId>
-        </dependency>
-
-        <!-- YAML config support (query-exporter uses deeply nested config) -->
+        <!-- YAML config support -->
         <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-config-yaml</artifactId>
@@ -132,13 +126,6 @@
             <artifactId>jackson-module-kotlin</artifactId>
         </dependency>
 
-        <!-- Cron expression parsing (schedule pattern) -->
-        <dependency>
-            <groupId>com.cronutils</groupId>
-            <artifactId>cron-utils</artifactId>
-            <version>9.2.1</version>
-        </dependency>
-
         <!-- Test -->
         <dependency>
             <groupId>io.quarkus</groupId>
@@ -159,6 +146,22 @@
             <groupId>org.jetbrains.kotlin</groupId>
             <artifactId>kotlin-test-junit5</artifactId>
             <version>${kotlin.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>com.h2database</groupId>
+            <artifactId>h2</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.jetbrains.kotlinx</groupId>
+            <artifactId>kotlinx-coroutines-test</artifactId>
+            <version>${kotlinx-coroutines.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.awaitility</groupId>
+            <artifactId>awaitility-kotlin</artifactId>
             <scope>test</scope>
         </dependency>
     </dependencies>

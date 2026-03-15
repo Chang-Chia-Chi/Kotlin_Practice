@@ -4,13 +4,7 @@ import java.time.Duration
 
 /** Return type for [com.mapreduce.queue.spi.TaskHandler.handle]. */
 sealed interface TaskResult {
-    /**
-     * Handler completed successfully. Framework marks task COMPLETED.
-     *
-     * @param output Optional output payload (serialized JSON). Used by the
-     *   Chained Tasks pattern to pass step output to the next step.
-     *   Handlers that are chain-unaware can omit it.
-     */
+    /** Handler completed successfully. Framework marks task COMPLETED. */
     data class Success(val output: String? = null) : TaskResult
 
     /**

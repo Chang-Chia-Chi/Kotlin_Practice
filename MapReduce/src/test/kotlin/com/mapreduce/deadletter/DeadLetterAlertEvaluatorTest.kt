@@ -37,7 +37,6 @@ class DeadLetterAlertEvaluatorTest {
             override fun pipeline() = throw UnsupportedOperationException()
             override fun heartbeat() = throw UnsupportedOperationException()
             override fun reaper() = throw UnsupportedOperationException()
-            override fun schedule() = throw UnsupportedOperationException()
             override fun deadLetter() = object : FrameworkConfig.DeadLetterConfig {
                 override fun retentionDays() = 30
                 override fun cleanupScheduleHours() = 24
