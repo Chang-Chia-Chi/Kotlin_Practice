@@ -12,6 +12,17 @@ description: |
 
 # Fenced Leader Election
 
+**Version:** 2.0  
+**Date:** 2026-03-15  
+**Status:** Updated — integrates Graceful Shutdown, Event Bus, and Health Probe Registry  
+**Changelog:**
+- v2.0 (2026-03-15): Explicit lease release on planned shutdown. Event Bus integration
+  for lifecycle events. Health probes migrated to HealthContributor interface. Shutdown
+  Coordinator integration for Phase 1 leader teardown.
+- v1.0 (original): Initial design.
+
+---
+
 ## The Problem
 
 Multiple pods compete for leadership to run critical jobs (schedulers, pollers,
@@ -60,6 +71,18 @@ Repository layer (FencedRepository base)
 The interceptor is defense-in-depth. Even if the pre/post checks race with a
 leadership transition, the DB fence is the authoritative gate.
 
+## Integration Points (v2.0)
+
+This component integrates with three other framework components. These
+integrations are called out inline throughout this document, but summarized
+here for orientation:
+
+| Component | Integration | Section |
+|-----------|-------------|---------|
+| **Event Bus** | LeaderManager fires `LeadershipAcquired` and `LeadershipLost` CDI events on every leadership transition. Other subsystems (shutdown coordinator, orchestration loops, health probes, metrics) observe these events instead of polling `isActive()`. | §Leader Lifecycle, §Event Bus Integration |
+| **Shutdown Coordinator** | On planned shutdown (SIGTERM), the shutdown coordinator's Phase 1 calls `LeaderManager.teardown()` which stops orchestration loops, then explicitly releases the K8s Lease for fast handover. | §Graceful Shutdown |
+| **Health Probe Registry** | LeaderManager implements `HealthContributor`, providing liveness (election thread alive?) and optional readiness (is leader?) checks to the unified health aggregator. | §Health Probes |
+
 ## Component Map
 
 Read each reference file for the concepts and design rationale behind that layer.
@@ -86,7 +109,9 @@ Read each reference file for the concepts and design rationale behind that layer
 
 4. **LeaderManager** — `@ApplicationScoped` bean wrapping fabric8's `LeaderElector`.
    Exposes `isActive(): Boolean` and `getToken(): Long`. Runs the election in a
-   dedicated daemon thread with a restart loop.
+   dedicated daemon thread with a restart loop. Fires CDI events on transitions.
+   Implements `HealthContributor` for unified health reporting. Exposes `teardown()`
+   for the shutdown coordinator.
 
 5. **FencingContext / FencingTokenHolder** — Dual-channel token propagation. The
    interceptor sets both; downstream code reads whichever fits (sync vs suspend).
@@ -98,7 +123,9 @@ Read each reference file for the concepts and design rationale behind that layer
    Injects epoch from ThreadLocal, checks affected rows, throws `StaleEpochException`
    on 0 rows.
 
-8. **Health checks** — Liveness: election thread alive? Readiness: is leader?
+8. **Health checks** — Implement `HealthContributor` interface. Liveness: election
+   thread alive? Readiness: is leader? (optional). Registered with the Health Probe
+   Registry automatically via CDI.
 
 9. **Scheduled job** — `@Scheduled` calls a `@FencedLeader` method. Catch
    `NotLeaderException` silently on follower pods.
@@ -121,6 +148,10 @@ Read each reference file for the concepts and design rationale behind that layer
    channel (ThreadLocal/CoroutineContext) inside the fenced method. Never capture it
    in a field.
 
+6. **Calling LeaderManager.teardown() directly** — Only the shutdown coordinator
+   calls `teardown()`. Other subsystems observe `LeadershipLost` events via the
+   event bus. Direct calls bypass the phase ordering that prevents data races.
+
 ## When NOT to Use
 
 - Leader work is fully idempotent and harmless to repeat → simpler K8s Job or
@@ -129,6 +160,8 @@ Read each reference file for the concepts and design rationale behind that layer
 - Write-free leader work (read-only aggregation) → standard leader election without
   fencing is fine.
 
+
+---
 
 # Fencing Token Pattern
 
@@ -232,6 +265,8 @@ notifications), each has its own Lease and its own epoch sequence. The
 they are NOT comparable across leases.
 
 
+---
+
 # Leader Lifecycle
 
 ## Use fabric8's LeaderElector
@@ -276,8 +311,9 @@ Design implications:
    `retryPeriod`, then call `run()` again to re-enter the election. This ensures
    the pod automatically tries to re-acquire after losing.
 
-3. **Shutdown**: On `@ShutdownEvent`, call `executor.shutdownNow()` to interrupt
-   the election thread. The `run()` method respects interruption.
+3. **Shutdown**: On `@ShutdownEvent`, the shutdown coordinator calls
+   `LeaderManager.teardown()`, which shuts down the executor. The `run()`
+   method respects interruption. See §Graceful Shutdown for the full sequence.
 
 ## Timing Parameters
 
@@ -337,15 +373,197 @@ No synchronized blocks needed. The callbacks run on the election thread;
 the readers are on Quarkus worker threads and the health probe thread.
 AtomicBoolean/AtomicLong give visibility guarantees without contention.
 
+## Event Bus Integration (v2.0)
+
+The LeaderManager fires CDI events on every leadership transition. This
+replaces direct method calls and polling as the primary mechanism for other
+subsystems to react to leadership changes.
+
+```kotlin
+@ApplicationScoped
+class LeaderManager(
+    private val leadershipAcquiredEvent: Event<LeadershipAcquired>,
+    private val leadershipLostEvent: Event<LeadershipLost>,
+    private val config: LeaderElectionConfig,
+    private val k8sClient: KubernetesClient
+) : HealthContributor {
+
+    private val isLeader = AtomicBoolean(false)
+    private val epoch = AtomicLong(0)
+    private val lastHeartbeat = AtomicReference(Instant.now())
+    private val acquiredAt = AtomicReference<Instant?>(null)
+
+    private lateinit var executor: ExecutorService
+    private val podId = System.getenv("HOSTNAME") ?: "unknown"
+
+    // ── Public API ──────────────────────────────────────────
+
+    fun isActive(): Boolean = isLeader.get()
+    fun getToken(): Long = epoch.get()
+
+    // ── Callbacks (run on election thread) ──────────────────
+
+    private fun onStartLeading() {
+        val newEpoch = readEpochFromLease()
+        epoch.set(newEpoch)
+        isLeader.set(true)
+        acquiredAt.set(Instant.now())
+        lastHeartbeat.set(Instant.now())
+
+        leadershipAcquiredEvent.fire(
+            LeadershipAcquired(
+                epoch = newEpoch,
+                podId = podId,
+                acquiredAt = Instant.now()
+            )
+        )
+    }
+
+    private fun onStopLeading() {
+        val lastEpoch = epoch.get()
+        isLeader.set(false)
+
+        leadershipLostEvent.fire(
+            LeadershipLost(
+                lastEpoch = lastEpoch,
+                podId = podId,
+                lostAt = Instant.now()
+            )
+        )
+    }
+
+    private fun onNewLeader(identity: String) {
+        lastHeartbeat.set(Instant.now())
+        // If we're the new leader (e.g., lease renewal bumped resourceVersion),
+        // refresh the epoch
+        if (identity == podId && isLeader.get()) {
+            val refreshed = readEpochFromLease()
+            epoch.set(refreshed)
+        }
+    }
+
+    // ── Lifecycle ───────────────────────────────────────────
+
+    fun onStartup(@Observes event: StartupEvent) {
+        executor = Executors.newSingleThreadExecutor { r ->
+            Thread(r, "leader-election").apply { isDaemon = true }
+        }
+        executor.submit { electionLoop() }
+    }
+
+    /**
+     * Called by ShutdownCoordinator Phase 1 — NOT directly by @ShutdownEvent.
+     * The coordinator controls the ordering: stop orchestration loops first,
+     * then call this to release the lease.
+     */
+    fun teardown() {
+        isLeader.set(false)
+        releaseLease()
+        executor.shutdownNow()
+    }
+
+    // ── Internals ───────────────────────────────────────────
+
+    private fun electionLoop() {
+        while (!Thread.currentThread().isInterrupted) {
+            try {
+                val lock = LeaseLock(
+                    config.namespace(), config.leaseName(), podId
+                )
+                val electionConfig = LeaderElectionConfigBuilder()
+                    .withLock(lock)
+                    .withLeaseDuration(config.leaseDuration())
+                    .withRenewDeadline(config.renewDeadline())
+                    .withRetryPeriod(config.retryPeriod())
+                    .withLeaderCallbacks(LeaderCallbacks(
+                        ::onStartLeading,
+                        ::onStopLeading,
+                        ::onNewLeader
+                    ))
+                    .build()
+
+                LeaderElector(k8sClient, electionConfig).run()
+                // run() returned → leadership lost. Sleep and retry.
+                Thread.sleep(config.retryPeriod().toMillis())
+            } catch (e: InterruptedException) {
+                Thread.currentThread().interrupt()
+                break
+            } catch (e: Exception) {
+                // API server unreachable, transient error, etc.
+                // Log and retry after retryPeriod.
+                logger.error("Election loop error: {}", e.message, e)
+                try {
+                    Thread.sleep(config.retryPeriod().toMillis())
+                } catch (ie: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    break
+                }
+            }
+        }
+        logger.info("Election loop exited.")
+    }
+
+    private fun readEpochFromLease(): Long {
+        val lease = k8sClient.leases()
+            .inNamespace(config.namespace())
+            .withName(config.leaseName())
+            .get()
+        return lease?.metadata?.resourceVersion?.toLongOrNull()
+            ?: lease?.metadata?.resourceVersion?.hashCode()?.toLong()
+            ?: 0L
+    }
+
+    private fun releaseLease() {
+        try {
+            val lease = k8sClient.leases()
+                .inNamespace(config.namespace())
+                .withName(config.leaseName())
+                .get()
+            if (lease?.spec?.holderIdentity == podId) {
+                lease.spec.holderIdentity = null
+                lease.spec.acquireTime = null
+                k8sClient.leases()
+                    .inNamespace(config.namespace())
+                    .withName(config.leaseName())
+                    .patch(lease)
+                logger.info("Lease released explicitly. New leader can acquire immediately.")
+            }
+        } catch (e: Exception) {
+            logger.warn("Failed to release lease explicitly: {}. " +
+                "Lease will expire naturally after leaseDuration.", e.message)
+        }
+    }
+}
+```
+
+**Who observes these events:**
+
+| Observer | Event | Reaction |
+|----------|-------|----------|
+| Orchestration loops (barrier monitor, stale reaper, cleanup) | `LeadershipAcquired` | Start loops under a new `SupervisorJob` scope with the new epoch |
+| Orchestration loops | `LeadershipLost` | Cancel the `SupervisorJob` scope, stopping all loops |
+| Shutdown coordinator | `LeadershipLost` | Informational only during normal operation. During shutdown, the coordinator drives teardown via `teardown()`, not via this event. |
+| Health probe registry | Both | Updates the leader election health contributor's state |
+| Metrics (pipeline) | Both | Updates `leader_election_is_leader` gauge and `leader_election_epoch` gauge |
+
+**Ordering guarantee:** `LeadershipAcquired` is fired AFTER `isActive()` returns
+true and `getToken()` returns the new epoch. `LeadershipLost` is fired AFTER
+`isActive()` returns false. Observers can rely on these atomics being consistent
+with the event.
+
 ## Lifecycle in Quarkus
 
 - Start: observe `@StartupEvent` → create LeaseLock, build config, submit
   election loop to executor.
-- Stop: observe `@ShutdownEvent` → set leader=false, shutdownNow() the executor.
+- Stop: **NOT via `@ShutdownEvent` directly.** The shutdown coordinator calls
+  `LeaderManager.teardown()` during Phase 1 (leader teardown). This ensures
+  orchestration loops are stopped before the lease is released.
 
 The `@ApplicationScoped` bean is created eagerly by Quarkus because it
 observes `StartupEvent`.
 
+
+---
 
 # Token Propagation
 
@@ -445,6 +663,9 @@ write — the post-check is a courtesy.
 - **Forgetting to clear the ThreadLocal** — If `ctx.proceed()` throws, the
   ThreadLocal must still be cleared. Always use `withToken()` which has a
   `finally` block, or wrap in try/finally manually.
+
+
+---
 
 # Database Fence
 
@@ -601,6 +822,9 @@ When adding fencing to tables that already have data:
    because `0 <= any_positive_epoch` is always true.
 3. No backfill needed.
 
+
+---
+
 # Failure Modes
 
 ## How to Read This Document
@@ -626,6 +850,7 @@ and another pod acquires it with a higher resourceVersion.
 | fabric8 LeaderElector | When the JVM unfreezes, the next renewal attempt fails → `onStopLeading()` fires → `isActive()` returns false. |
 | Interceptor pre-check | If the scheduler ticks after `onStopLeading()`, the pre-check catches it. But if the method was **already executing** when GC started, the pre-check already passed. |
 | Interceptor post-check | After the method returns, checks `isActive()`. If leadership was lost during execution, throws `NotLeaderException`. |
+| Event bus | `LeadershipLost` fires when JVM unfreezes. Orchestration loops are cancelled. |
 | DB fence | The zombie's epoch (e.g., 100) is lower than the new leader's epoch (e.g., 101). `WHERE last_epoch <= 100` fails because the new leader already stamped the row with 101. **Write rejected.** |
 
 **Net outcome**: Safe. The zombie's writes are rejected at the DB level even
@@ -645,8 +870,8 @@ renew its lease. Followers can't acquire it.
 |-------|----------|
 | K8s Lease | Frozen — no renewals or acquisitions possible. |
 | fabric8 LeaderElector | Leader retries renewal for `renewDeadline` (10s). After exhausting retries, calls `onStopLeading()` and `run()` returns. |
-| LeaderManager | `isActive()` becomes false. The restart loop tries to re-enter the election, but `run()` will throw/fail because the API is down. |
-| Liveness probe | `lastHeartbeat` stops updating. After `renewDeadline + retryPeriod` seconds without a heartbeat, liveness fails → K8s restarts the pod. |
+| LeaderManager | `isActive()` becomes false. Fires `LeadershipLost`. The restart loop tries to re-enter the election, but `run()` will throw/fail because the API is down. |
+| Liveness probe | `lastHeartbeat` stops updating. After `renewDeadline + retryPeriod` seconds without a heartbeat, the `HealthContributor.liveness()` returns DOWN → K8s restarts the pod. |
 | DB fence | If the ex-leader tries to write before stepping down, the fence still works — its epoch is valid as long as no new leader has written. But no new leader CAN write (API is down, so no new epoch). Writes may succeed with a "stale" epoch that happens to still be the highest. |
 
 **Net outcome**: The leader steps down conservatively even though no new leader
@@ -666,8 +891,8 @@ the API server and acquires the lease.
 | Layer | Response |
 |-------|----------|
 | K8s Lease | Pod-A can't renew → lease expires. Pod-B acquires → new resourceVersion. |
-| Pod-A | fabric8 calls `onStopLeading()` after renewDeadline. But there's a window of up to `leaseDuration` where Pod-A still thinks it's leading (it hasn't failed renewal yet). |
-| Pod-B | `onStartLeading()` fires. Starts working with a higher epoch. |
+| Pod-A | fabric8 calls `onStopLeading()` after renewDeadline. `LeadershipLost` fires. But there's a window of up to `leaseDuration` where Pod-A still thinks it's leading (it hasn't failed renewal yet). |
+| Pod-B | `onStartLeading()` fires. `LeadershipAcquired` fires. Starts working with a higher epoch. |
 | DB fence | Both pods may write concurrently during the partition window (<15s). Only the writes with the higher epoch (Pod-B) will "stick". Pod-A's writes to rows that Pod-B has already touched will get 0 rows affected. Pod-A's writes to rows Pod-B hasn't touched yet will succeed (last_epoch is still ≤ Pod-A's epoch). |
 
 **Net outcome**: Safe at the row level, but there may be a brief window where
@@ -691,11 +916,13 @@ typically under 5 seconds.
 |-------|----------|
 | K8s Lease | The lease has a remaining TTL of up to `leaseDuration`. |
 | Followers | Cannot acquire until the lease expires. Election resumes after `leaseDuration`. |
+| Event bus | No events fire — the pod is dead. Other pods detect the new leadership opportunity via the normal election cycle. |
 | DB fence | Not relevant — the crashed pod isn't running. No zombie writes. |
 
 **Net outcome**: Safe, but there's a leadership gap of up to `leaseDuration`
 (15s) while the lease expires. Reduce `leaseDuration` for faster failover at
-the cost of more frequent API calls.
+the cost of more frequent API calls. Note: graceful shutdown (SIGTERM) avoids
+this gap by explicitly releasing the lease — see §Graceful Shutdown.
 
 ---
 
@@ -735,9 +962,44 @@ status changed from PENDING to PROCESSED).
 
 **Net outcome**: The leader stays leader (lease is fine) but can't do work.
 The scheduler will retry on the next tick. If the DB is down for a long time,
-the liveness probe still passes (election loop is healthy). The readiness
-probe may need custom logic if you want to stop routing traffic during DB
-outages.
+the liveness probe still passes (election loop is healthy). The Oracle
+`HealthContributor` will report readiness as DOWN, removing the pod from
+the K8s Service — but the pod remains alive and will resume when the DB
+recovers.
+
+---
+
+## Scenario 7: Planned Shutdown (v2.0)
+
+**What happens**: The pod receives SIGTERM (rolling deployment, scale-down,
+node drain). The shutdown coordinator drives Phase 1 leader teardown.
+
+**Layer responses**:
+
+| Layer | Response |
+|-------|----------|
+| Shutdown coordinator | Sets state to DRAINING. Calls `LeaderManager.teardown()`. |
+| LeaderManager.teardown() | Sets `isActive()=false`. Fires `LeadershipLost`. Explicitly releases the K8s Lease by clearing holderIdentity. Shuts down the election executor. |
+| Orchestration loops | Observe `LeadershipLost` event (or are cancelled by the shutdown coordinator cancelling the leader scope). Stop within the 5s leader teardown timeout. |
+| Other pods | Detect the released Lease within one `retryPeriod` (~2s). A new leader acquires almost immediately. No leadership gap from planned shutdowns. |
+| In-flight fenced methods | If a `@FencedLeader` method is executing when teardown starts, the post-check will detect `isActive()=false` and throw. The DB fence protects individual writes regardless. |
+
+**Net outcome**: Near-zero leadership gap. The new leader acquires within
+seconds of the old leader releasing, compared to up to `leaseDuration` (15s)
+for unplanned crashes.
+
+**Why explicit release is safe here**: The concern with explicit release is
+that the pod might still be processing leader work when the lease drops. The
+shutdown coordinator's phase ordering eliminates this:
+
+1. Phase 0: Claim loop stops → no new tasks claimed.
+2. Phase 1: Orchestration loops cancelled → no new leader-driven work.
+3. Phase 1: `teardown()` releases lease → new leader can acquire.
+4. Phase 2: Worker drain → in-flight tasks (including fenced methods) finish.
+
+By the time the lease is released, all leader-specific orchestration has
+stopped. The only remaining work is worker-side task execution, which is
+fenced by the DB epoch and safe to overlap with a new leader.
 
 ---
 
@@ -751,7 +1013,10 @@ outages.
 | Pod Crash | None | ✅ Crashed pod can't write | Up to leaseDuration |
 | Post-Check Race | None | ✅ Writes already committed | None |
 | DB Down | None | ✅ No writes possible | None (leader is healthy) |
+| **Planned Shutdown** | **None** | **✅ Phase ordering + DB fence** | **~2s (one retryPeriod)** |
 
+
+---
 
 # Operational Reference
 
@@ -761,7 +1026,7 @@ The pod's ServiceAccount needs a Role granting these verbs on Lease resources:
 
 - `get`, `list`, `watch` — observe current lease state.
 - `create` — first pod creates the Lease object.
-- `update`, `patch` — acquire and renew the lease.
+- `update`, `patch` — acquire, renew, and explicitly release the lease.
 
 Scope this to a single namespace with a Role + RoleBinding (not ClusterRole)
 to follow least-privilege. The Lease object lives in the `coordination.k8s.io`
@@ -771,15 +1036,60 @@ Deployment must set `serviceAccountName` on the pod spec.
 
 ## Health Probes
 
+### Integration with Health Probe Registry (v2.0)
+
+The LeaderManager implements the `HealthContributor` interface from the
+Health Probe Registry (see Core Infrastructure Components doc, Component 5).
+This replaces standalone health check beans with a unified pattern.
+
+```kotlin
+// Inside LeaderManager (which implements HealthContributor)
+
+override val name = "leader-election"
+
+override fun liveness(): HealthCheckResult {
+    val heartbeatAge = Duration.between(lastHeartbeat.get(), Instant.now())
+    val threshold = config.renewDeadline() + config.retryPeriod()
+    return if (heartbeatAge < threshold) {
+        HealthCheckResult(
+            status = HealthStatus.UP,
+            details = mapOf(
+                "heartbeatAge" to heartbeatAge.seconds,
+                "isLeader" to isLeader.get(),
+                "epoch" to epoch.get()
+            )
+        )
+    } else {
+        HealthCheckResult(
+            status = HealthStatus.DOWN,
+            details = mapOf(
+                "heartbeatAge" to heartbeatAge.seconds,
+                "reason" to "Election loop heartbeat stale for ${heartbeatAge.seconds}s"
+            )
+        )
+    }
+}
+
+override fun readiness(): HealthCheckResult? {
+    // Leadership is NOT required for readiness by default.
+    // The pod can serve config API traffic and execute worker tasks
+    // without being the leader. Return null = no opinion on readiness.
+    //
+    // Override this in deployments where only the leader should
+    // receive traffic (e.g., leader-only REST endpoints).
+    return null
+}
+```
+
 ### Liveness: Is the Election Loop Alive?
 
 Purpose: detect a hung election thread (deadlock, infinite loop, thread death).
 
-Logic: the LeaderManager updates a `lastHeartbeat` timestamp on every
-`onNewLeader` callback and at the start of each `run()` loop iteration.
-The liveness check compares `now - lastHeartbeat` against a threshold of
-`renewDeadline + retryPeriod` (12s default). If exceeded → unhealthy →
-K8s restarts the pod.
+Logic: the LeaderManager updates `lastHeartbeat` on every `onNewLeader`
+callback and at the start of each `run()` loop iteration. The `liveness()`
+method compares `now - lastHeartbeat` against `renewDeadline + retryPeriod`
+(12s default). If exceeded → DOWN → the Health Probe Registry aggregator
+reports the pod as not-live → K8s restarts it.
 
 K8s probe config:
 - Path: `/q/health/live`
@@ -788,16 +1098,14 @@ K8s probe config:
 - `timeoutSeconds`: 5
 - `failureThreshold`: 3 (restart after 3 consecutive failures = 30s)
 
-### Readiness: Is This Pod the Leader?
+### Readiness: Is This Pod the Leader? (Optional)
 
-Purpose: route traffic only to the leader pod (optional).
+Purpose: route traffic only to the leader pod.
 
-Logic: simply returns `manager.isActive()`. If you expose leader-only REST
-endpoints (e.g., a diagnostic `/leader` status page), a K8s Service selecting
-on readiness ensures only the leader receives requests.
-
-This is optional. Many setups don't need it because the leader work is
-triggered by `@Scheduled`, not by inbound HTTP.
+By default, the LeaderManager returns `null` for readiness (no opinion),
+because most pods need to be ready regardless of leadership status (they
+serve the config API and run the worker loop). Only enable leader-based
+readiness if you have leader-only REST endpoints.
 
 ## Prometheus Metrics
 
@@ -819,6 +1127,11 @@ Four useful metrics for dashboarding and alerting:
 Requires `quarkus-micrometer-registry-prometheus`. Register gauges that
 read from `LeaderManager.isActive()` and `getToken()`. Register counters
 that the `FencedRepository` increments.
+
+**Integration with Handler Execution Pipeline (v2.0):** The metrics middleware
+in the pipeline records per-handler execution metrics. Leader election metrics
+are separate — they measure the election and fencing subsystem, not task
+execution. Both feed into the same Prometheus/Grafana stack.
 
 ## Deployment
 
@@ -888,18 +1201,85 @@ A REST endpoint at `/leader` returning JSON with `isLeader`, `epoch`,
 `holder`, `acquiredAt`, `renewedAt` is useful for debugging. Not for
 production traffic routing (use the readiness probe for that).
 
-## Graceful Shutdown
+This endpoint is supplemented by the Health Probe Registry's
+`/q/health/detail` endpoint, which includes leader election state alongside
+all other subsystem health (see Core Infrastructure Components doc, §5.4).
 
-On `SIGTERM` (K8s pod termination):
+## Graceful Shutdown (v2.0 — REVISED)
 
-1. Quarkus fires `@ShutdownEvent`.
-2. LeaderManager sets `isActive()=false` and shuts down the election executor.
-3. Any in-flight `@FencedLeader` method sees the post-check fail and throws.
-4. The lease is NOT explicitly released — it expires naturally after
-   `leaseDuration`. This is intentional: an explicit release during a
-   network partition could cause the lease to be released on the API server
-   while the pod is still finishing work. Letting it expire is safer.
+**Previous behavior (v1.0):** The lease was NOT explicitly released on
+shutdown. It expired naturally after `leaseDuration`. This was conservative
+but caused a leadership gap of up to 15 seconds on every planned shutdown.
 
-If you want faster handover during rolling deploys, you CAN explicitly
-delete/release the lease in `onStop()`. But understand the trade-off:
-faster handover vs risk of releasing while still processing.
+**Current behavior (v2.0):** On planned shutdown (SIGTERM), the lease IS
+explicitly released. The shutdown coordinator's phase ordering ensures this
+is safe.
+
+### Planned Shutdown Sequence
+
+```
+SIGTERM
+  │
+  ├── Phase 0: ShutdownCoordinator sets state = DRAINING
+  │   └── Worker claim loop stops (no new tasks claimed)
+  │
+  ├── Phase 1: ShutdownCoordinator calls LeaderManager.teardown()
+  │   ├── 1a. Cancel orchestration loops (LeadershipLost event fires)
+  │   │   ├── Barrier monitor loop exits
+  │   │   ├── Stale reaper loop exits
+  │   │   └── Cleanup loop exits
+  │   ├── 1b. Await loop termination (up to 5s)
+  │   ├── 1c. Set isActive() = false
+  │   └── 1d. Release K8s Lease (clear holderIdentity via patch)
+  │       └── Other pods can acquire within ~retryPeriod (2s)
+  │
+  ├── Phase 2: Worker drain (up to 60s)
+  │   └── In-flight tasks (including fenced methods) complete normally.
+  │       DB fence protects any writes against the new leader's epoch.
+  │
+  ├── Phase 3: Release uncompleted tasks back to PENDING
+  └── Phase 4: Close connections, emit metrics, exit
+```
+
+### Why Explicit Release Is Safe
+
+The v1.0 concern was: if the pod releases the lease while still executing
+leader work, a new leader could start conflicting operations.
+
+The Phase 1 ordering eliminates this risk:
+
+1. **Orchestration loops are cancelled BEFORE the lease is released.** No
+   new fan-outs, barrier transitions, or stale reclaims will be initiated
+   by this pod after step 1a.
+
+2. **The claim loop is already stopped (Phase 0).** No new tasks are claimed
+   after shutdown begins.
+
+3. **In-flight tasks that remain (Phase 2) are worker-side execution.**
+   These are fenced by the DB epoch. If the new leader processes the same
+   rows, the fence ensures only the higher epoch's writes succeed. Worker
+   tasks and leader orchestration are independent — a worker completing a
+   map task doesn't conflict with the new leader's barrier detection.
+
+4. **The `teardown()` method is only callable by the ShutdownCoordinator.**
+   It is not exposed via `@ShutdownEvent` directly, preventing accidental
+   out-of-order invocation.
+
+### Unplanned Shutdown (SIGKILL, OOM, Node Failure)
+
+No shutdown hooks run. The lease expires naturally after `leaseDuration`.
+Other pods acquire after the TTL. This is the baseline behavior — graceful
+shutdown improves upon it, not replaces it.
+
+### Trade-Off Summary
+
+| Shutdown Type | Lease Release | Leadership Gap | Safety |
+|---------------|---------------|----------------|--------|
+| Planned (SIGTERM) | Explicit (v2.0) | ~2s (one retryPeriod) | ✅ Phase ordering + DB fence |
+| Unplanned (SIGKILL) | Natural expiry | Up to leaseDuration (15s) | ✅ DB fence (no zombie writes from dead pod) |
+| Network partition during shutdown | Explicit release may fail | Falls back to natural expiry | ✅ `releaseLease()` catches exception, logs warning |
+
+The `releaseLease()` method is wrapped in try-catch. If the K8s API is
+unreachable (network partition during shutdown), the release fails silently
+and the lease expires naturally. This preserves v1.0 safety as a fallback
+while providing v2.0 speed in the common case.
