@@ -50,22 +50,6 @@ class DagEventLog {
         )
     }
 
-    fun dynamicRoute(
-        runId: String,
-        dagId: String,
-        sourceTaskKey: String,
-        routedKeys: Set<String>,
-        skippedKeys: List<String>,
-    ) {
-        log.infof(
-            """{"event":"DYNAMIC_ROUTE","run_id":"%s","dag_id":"%s","source":"%s","routed":%s,"skipped":%s,"timestamp":"%s"}""",
-            runId, dagId, sourceTaskKey,
-            routedKeys.joinToString(",", "[\"", "\"]"),
-            skippedKeys.joinToString(",", "[\"", "\"]"),
-            Instant.now(),
-        )
-    }
-
     fun timeoutReaped(
         runId: String,
         dagId: String,
@@ -103,16 +87,4 @@ class DagEventLog {
         )
     }
 
-    fun conditionEvaluated(
-        runId: String,
-        dagId: String,
-        taskKey: String,
-        condition: String,
-        result: Boolean,
-    ) {
-        log.debugf(
-            """{"event":"CONDITION_EVAL","run_id":"%s","dag_id":"%s","task_key":"%s","condition":"%s","result":%b,"timestamp":"%s"}""",
-            runId, dagId, taskKey, condition.replace("\"", "\\\""), result, Instant.now(),
-        )
-    }
 }

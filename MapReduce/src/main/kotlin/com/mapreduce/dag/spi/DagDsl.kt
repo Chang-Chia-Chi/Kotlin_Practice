@@ -29,30 +29,21 @@ import java.time.Duration
  * }
  * ```
  *
- * ## Usage — With conditions and config
+ * ## Usage — With config
  *
  * ```kotlin
  * override fun nodes() = buildDag {
- *     val router = node("router", "order.route")
- *     val domestic = node("domestic", "order.domestic") {
- *         condition = "{{ xcom.router.region }} == 'US'"
- *     }
- *     val intl = node("international", "order.intl") {
- *         condition = "{{ xcom.router.region }} != 'US'"
+ *     val validate = node("validate", "order.validate")
+ *     val process = node("process", "order.process") {
  *         timeout = Duration.ofMinutes(15)
  *         maxAttempts = 5
+ *         config = mapOf("region" to "US")
  *     }
  *     val finalize = node("finalize", "order.finalize", triggerRule = TriggerRule.ONE_SUCCESS)
  *
- *     router then listOf(domestic, intl)
- *     listOf(domestic, intl) then finalize
+ *     validate then process then finalize
  * }
  * ```
- *
- * ## Usage — Dynamic routing
- *
- * A node handler can return `{"__dag_route__": ["branch-a"]}` to prune
- * non-routed downstream branches at runtime (see spec §6).
  */
 fun buildDag(block: DagBuilder.() -> Unit): List<DagNodeDef> {
     val builder = DagBuilder()
@@ -109,11 +100,9 @@ class DagBuilder {
      *
      * ```kotlin
      * val step = node("step", "handler.type") {
-     *     condition = "{{ xcom.prev.status }} == 'OK'"
      *     timeout = Duration.ofMinutes(15)
      *     maxAttempts = 5
-     *     config = mapOf("key" to "{{ inputs.value }}")
-     *     taskType = "SQL_QUERY"
+     *     config = mapOf("key" to "value")
      * }
      * ```
      */
@@ -129,9 +118,7 @@ class DagBuilder {
                 taskKey = taskKey,
                 nodeType = nodeType,
                 triggerRule = triggerRule,
-                taskType = builder.taskType,
                 config = builder.config,
-                condition = builder.condition,
                 timeout = builder.timeout,
                 maxAttempts = builder.maxAttempts,
                 onFailure = builder.onFailure,
@@ -153,11 +140,9 @@ class DagBuilder {
             DagNodeDef(
                 taskKey = nd.taskKey,
                 nodeType = nd.nodeType,
-                taskType = nd.taskType,
                 dependencies = depsMap[nd.taskKey]?.toList() ?: emptyList(),
                 triggerRule = nd.triggerRule,
                 config = nd.config,
-                condition = nd.condition,
                 timeout = nd.timeout,
                 maxAttempts = nd.maxAttempts,
                 onFailure = nd.onFailure,
@@ -169,9 +154,7 @@ class DagBuilder {
         val taskKey: String,
         val nodeType: String,
         val triggerRule: TriggerRule,
-        val taskType: String? = null,
         val config: Map<String, Any> = emptyMap(),
-        val condition: String? = null,
         val timeout: Duration? = null,
         val maxAttempts: Int? = null,
         val onFailure: OnFailureHandler? = null,
@@ -181,9 +164,7 @@ class DagBuilder {
 /** Builder for extended node configuration within the DSL. */
 @DagDslMarker
 class NodeConfigBuilder {
-    var taskType: String? = null
     var config: Map<String, Any> = emptyMap()
-    var condition: String? = null
     var timeout: Duration? = null
     var maxAttempts: Int? = null
     var onFailure: OnFailureHandler? = null

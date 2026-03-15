@@ -82,7 +82,7 @@ class DagRepository(
                     .bind("runId", runId)
                     .bind("taskKey", node.taskKey)
                     .bind("nodeType", node.nodeType)
-                    .bind("taskType", node.taskType)
+                    .bind("taskType", null as String?)
                     .bind("dependencies", objectMapper.writeValueAsString(node.dependencies))
                     .bind("status", status)
                     .bind("triggerRule", node.triggerRule.name)

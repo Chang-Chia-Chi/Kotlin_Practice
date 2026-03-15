@@ -37,13 +37,11 @@ interface DagBlueprint {
  * @param timeout Default per-node timeout.
  * @param maxAttempts Default retry count.
  * @param retryBackoff Backoff strategy between retries.
- * @param taskType Default task type if a node omits it.
  */
 data class DagDefaults(
     val timeout: Duration = Duration.ofMinutes(30),
     val maxAttempts: Int = 3,
     val retryBackoff: RetryBackoff = RetryBackoff(),
-    val taskType: String = "GENERIC_HANDLER",
 )
 
 /**
@@ -83,11 +81,9 @@ data class OnFailureHandler(
  *
  * @param taskKey Logical identifier for this node within the blueprint.
  * @param nodeType Resolves to a [DagNodeHandler] at runtime (handler = `"dag.{nodeType}"`).
- * @param taskType Pluggable execution type (e.g. GENERIC_HANDLER, SQL_QUERY, NOOP).
  * @param dependencies List of [taskKey]s that must complete before this node is evaluated.
  * @param triggerRule Defines failure tolerance for upstream parents.
- * @param config Static configuration for this node (template expressions resolved at dispatch).
- * @param condition Optional condition expression; if false, node is SKIPPED.
+ * @param config Static configuration for this node.
  * @param timeout Per-node timeout (overrides blueprint default).
  * @param maxAttempts Per-node retry count (overrides blueprint default).
  * @param onFailure Inline error handler dispatched when the node exhausts all retries.
@@ -95,11 +91,9 @@ data class OnFailureHandler(
 data class DagNodeDef(
     val taskKey: String,
     val nodeType: String,
-    val taskType: String? = null,
     val dependencies: List<String> = emptyList(),
     val triggerRule: TriggerRule = TriggerRule.ALL_SUCCESS,
     val config: Map<String, Any> = emptyMap(),
-    val condition: String? = null,
     val timeout: Duration? = null,
     val maxAttempts: Int? = null,
     val onFailure: OnFailureHandler? = null,

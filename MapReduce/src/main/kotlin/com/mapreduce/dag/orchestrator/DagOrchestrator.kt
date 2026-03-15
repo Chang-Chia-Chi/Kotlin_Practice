@@ -13,8 +13,6 @@ import com.mapreduce.dag.observability.DagEventLog
 import com.mapreduce.dag.observability.DagMetrics
 import com.mapreduce.dag.registry.DagRegistrar
 import com.mapreduce.dag.repository.DagRepository
-import com.mapreduce.dag.template.ConditionEvaluator
-import com.mapreduce.dag.template.TemplateEngine
 import com.mapreduce.leader.FencingTokenHolder
 import com.mapreduce.leader.LeaderManager
 import com.mapreduce.observability.AutoscalingMetrics
@@ -40,16 +38,15 @@ import java.time.Instant
 /**
  * Leader-only orchestration loop for DAG runs.
  *
- * Implements the six-phase state machine from the DAG Orchestration spec:
+ * Implements the six-phase state machine:
  *
  * 1. **Reconcile** — sync Layer 1 terminal states to dag_task_instances,
- *    handle error classification and dynamic routing.
+ *    handle error classification.
  * 2. **Timeout Reaping** — detect instances exceeding their timeout_at deadline,
  *    transition to TIMED_OUT, and schedule retries if eligible.
- * 3. **Identify Dependents & Evaluate Trigger Rules** — find BLOCKED nodes whose
- *    dependencies resolved, evaluate trigger rules with cascade protocol.
- * 4. **Dispatch** — resolve templates, enforce concurrency limits, enqueue READY
- *    nodes as Layer 1 tasks.
+ * 3. **Evaluate Trigger Rules** — find BLOCKED nodes whose dependencies resolved,
+ *    evaluate trigger rules with cascade protocol.
+ * 4. **Dispatch** — enforce concurrency limits, enqueue READY nodes as Layer 1 tasks.
  * 5. **Run Completion Check** — determine terminal Run status, dispatch ON_FAILURE
  *    handlers when appropriate.
  * 6. **Promote PENDING Runs** — transition PENDING → RUNNING respecting max_parallel_runs.
@@ -73,8 +70,6 @@ class DagOrchestrator(
 
     private val log = Logger.getLogger(DagOrchestrator::class.java)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-    private val templateEngine = TemplateEngine(objectMapper)
-    private val conditionEvaluator = ConditionEvaluator()
 
     fun onStart(@Observes ev: StartupEvent) {
         shutdownCoordinator.registerLeaderScopeCallback { scope.cancel() }
@@ -158,7 +153,6 @@ class DagOrchestrator(
                         run.dagId, instance.taskKey, instance.taskType ?: instance.nodeType,
                         instance.dispatchedAt?.let { Duration.between(it, Instant.now()).toMillis() } ?: 0,
                     )
-                    handleDynamicRouting(run, instance)
                     changed = true
                     log.debugf("Reconciled %s → COMPLETED (run=%s)", instance.taskKey, run.runId)
                 }
@@ -233,53 +227,6 @@ class DagOrchestrator(
     }
 
     // ──────────────────────────────────────────────────────────────
-    //  Phase 1b: Dynamic Branch Routing
-    // ──────────────────────────────────────────────────────────────
-
-    /**
-     * If a completed task's output contains `__dag_route__`, forcefully
-     * SKIP any immediate downstream nodes not in the routing array.
-     */
-    private fun handleDynamicRouting(run: DagRun, completedInstance: DagTaskInstance) {
-        val output = completedInstance.outputData ?: return
-
-        val routeNode = try {
-            val tree = objectMapper.readTree(output)
-            tree.get("__dag_route__") ?: return
-        } catch (_: Exception) {
-            return
-        }
-
-        if (!routeNode.isArray) return
-        val routedKeys = routeNode.map { it.asText() }.toSet()
-
-        val instances = dagRepository.findInstancesByRunId(run.runId)
-        val skippedKeys = mutableListOf<String>()
-        for (downstream in instances) {
-            if (downstream.status != TaskInstanceStatus.BLOCKED) continue
-            val deps = parseDependencies(downstream.dependencies)
-            if (completedInstance.taskKey !in deps) continue
-
-            if (downstream.taskKey !in routedKeys) {
-                dagRepository.updateInstanceStatus(downstream.instanceId, TaskInstanceStatus.SKIPPED)
-                dagEventLog.nodeStateChange(
-                    run.runId, run.dagId, downstream.taskKey,
-                    TaskInstanceStatus.BLOCKED, TaskInstanceStatus.SKIPPED,
-                )
-                skippedKeys.add(downstream.taskKey)
-            }
-        }
-
-        if (skippedKeys.isNotEmpty()) {
-            dagEventLog.dynamicRoute(run.runId, run.dagId, completedInstance.taskKey, routedKeys, skippedKeys)
-            log.infof(
-                "Dynamic routing from %s: routed=%s, skipped=%s (run=%s)",
-                completedInstance.taskKey, routedKeys, skippedKeys, run.runId,
-            )
-        }
-    }
-
-    // ──────────────────────────────────────────────────────────────
     //  Phase 2: Timeout Reaping
     // ──────────────────────────────────────────────────────────────
 
@@ -315,12 +262,11 @@ class DagOrchestrator(
     }
 
     // ──────────────────────────────────────────────────────────────
-    //  Phase 3/4: Evaluate trigger rules (with cascade + conditions)
+    //  Phase 3/4: Evaluate trigger rules (with cascade)
     // ──────────────────────────────────────────────────────────────
 
     /**
      * Iterate BLOCKED nodes and evaluate trigger rules against upstream parents.
-     * Also evaluates inline condition expressions.
      * Re-loops until no more state changes (handles cascading SKIPs).
      */
     private fun evaluate(run: DagRun) {
@@ -345,18 +291,8 @@ class DagOrchestrator(
 
                 when (evaluateTriggerRule(instance.triggerRule, allUpstream)) {
                     EvalResult.READY -> {
-                        // Evaluate condition expression if present
-                        if (shouldSkipByCondition(run, instance, deps, instanceMap)) {
-                            dagRepository.updateInstanceStatus(instance.instanceId, TaskInstanceStatus.SKIPPED)
-                            dagEventLog.nodeStateChange(
-                                run.runId, run.dagId, instance.taskKey,
-                                TaskInstanceStatus.BLOCKED, TaskInstanceStatus.SKIPPED,
-                            )
-                            changed = true
-                        } else {
-                            dagRepository.updateInstanceStatus(instance.instanceId, TaskInstanceStatus.READY)
-                            changed = true
-                        }
+                        dagRepository.updateInstanceStatus(instance.instanceId, TaskInstanceStatus.READY)
+                        changed = true
                     }
                     EvalResult.SKIP -> {
                         dagRepository.updateInstanceStatus(instance.instanceId, TaskInstanceStatus.SKIPPED)
@@ -375,37 +311,6 @@ class DagOrchestrator(
                 instances = dagRepository.findInstancesByRunId(run.runId)
                 instanceMap = instances.associateBy { it.taskKey }
             }
-        }
-    }
-
-    /**
-     * Evaluate a node's inline condition expression.
-     * Returns true if the condition evaluates to false (node should be SKIPPED).
-     */
-    private fun shouldSkipByCondition(
-        run: DagRun,
-        instance: DagTaskInstance,
-        deps: List<String>,
-        instanceMap: Map<String, DagTaskInstance>,
-    ): Boolean {
-        val blueprint = dagRegistrar.getBlueprint(run.dagId) ?: return false
-        val nodeDef = blueprint.nodes().find { it.taskKey == instance.taskKey } ?: return false
-        val condition = nodeDef.condition ?: return false
-
-        return try {
-            val xcom = buildXcomContext(deps, instanceMap)
-            val inputs = run.globalContext?.let { objectMapper.readTree(it) }
-            val ctx = TemplateEngine.ResolutionContext(
-                runId = run.runId, dagId = run.dagId, inputs = inputs, xcom = xcom,
-            )
-            val resolved = templateEngine.resolve(condition, ctx)
-            val result = conditionEvaluator.evaluate(resolved)
-            dagEventLog.conditionEvaluated(run.runId, run.dagId, instance.taskKey, condition, result)
-            !result // return true if should SKIP (condition is false)
-        } catch (e: Exception) {
-            log.warnf(e, "Condition evaluation failed for %s (run=%s), treating as SKIP",
-                instance.taskKey, run.runId)
-            true
         }
     }
 
@@ -527,47 +432,32 @@ class DagOrchestrator(
 
     /**
      * Merge global_context and upstream output_data into a single JSON payload.
-     * Resolves template expressions in node config if present.
      */
     private fun buildPayload(run: DagRun, instance: DagTaskInstance): String {
         val payloadMap = mutableMapOf<String, Any?>()
 
-        val inputsNode = if (run.globalContext != null) {
+        if (run.globalContext != null) {
             try {
-                objectMapper.readTree(run.globalContext).also {
-                    payloadMap["global_context"] = it
-                }
+                payloadMap["global_context"] = objectMapper.readTree(run.globalContext)
             } catch (_: Exception) {
                 payloadMap["global_context"] = run.globalContext
-                null
             }
-        } else {
-            null
         }
 
         val deps = parseDependencies(instance.dependencies)
-        val allInstances = if (deps.isNotEmpty()) dagRepository.findInstancesByRunId(run.runId) else emptyList()
-        val instanceMap = allInstances.associateBy { it.taskKey }
-        val xcom = buildXcomContext(deps, instanceMap)
-
-        if (xcom.isNotEmpty()) {
-            payloadMap["upstream"] = xcom.mapValues { (_, v) -> v }
+        if (deps.isNotEmpty()) {
+            val allInstances = dagRepository.findInstancesByRunId(run.runId)
+            val instanceMap = allInstances.associateBy { it.taskKey }
+            val xcom = buildXcomContext(deps, instanceMap)
+            if (xcom.isNotEmpty()) {
+                payloadMap["upstream"] = xcom
+            }
         }
 
-        // Resolve template expressions in node config
         val blueprint = dagRegistrar.getBlueprint(run.dagId)
         val nodeDef = blueprint?.nodes()?.find { it.taskKey == instance.taskKey }
         if (nodeDef != null && nodeDef.config.isNotEmpty()) {
-            val ctx = TemplateEngine.ResolutionContext(
-                runId = run.runId, dagId = run.dagId, inputs = inputsNode, xcom = xcom,
-            )
-            try {
-                val resolvedConfig = templateEngine.resolveConfig(nodeDef.config, ctx)
-                payloadMap["config"] = resolvedConfig
-            } catch (e: Exception) {
-                log.warnf(e, "Template resolution failed for %s (run=%s)", instance.taskKey, run.runId)
-                payloadMap["config"] = nodeDef.config
-            }
+            payloadMap["config"] = nodeDef.config
         }
 
         return objectMapper.writeValueAsString(payloadMap)

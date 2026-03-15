@@ -14,7 +14,7 @@ enum class TaskInstanceStatus {
     RUNNING,
     /** Handler returned success. */
     COMPLETED,
-    /** Trigger rule not satisfied and all parents terminal, or dynamic routing pruned. */
+    /** Trigger rule not satisfied and all parents terminal. */
     SKIPPED,
     /** Handler returned failure after exhausting all retries. */
     FAILED,
@@ -58,10 +58,8 @@ enum class ErrorClass {
  * A single node within a [DagRun]. Backed 1:1 by a generic Layer 1 task
  * once dispatched (status transitions from READY → QUEUED → RUNNING).
  *
- * @param taskType Resolved task type (from node config or blueprint defaults).
  * @param attempt Current attempt number (1-indexed). Incremented on DAG-level retry.
  * @param maxAttempts Maximum attempts before the node is marked FAILED.
- * @param resolvedConfig Template-resolved configuration snapshot for the current attempt.
  * @param error Structured error payload (classification, message, stacktrace reference).
  * @param timeoutAt Absolute deadline for the current attempt.
  * @param dispatchedAt When the node was last transitioned to QUEUED.
