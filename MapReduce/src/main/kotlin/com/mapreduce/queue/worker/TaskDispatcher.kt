@@ -1,6 +1,7 @@
 package com.mapreduce.queue.worker
 
 import com.mapreduce.config.FrameworkConfig
+import com.mapreduce.observability.AutoscalingMetrics
 import com.mapreduce.queue.model.Task
 import com.mapreduce.queue.model.TaskContext
 import com.mapreduce.queue.model.TaskResult
@@ -24,6 +25,7 @@ class TaskDispatcher(
     private val meterRegistry: MeterRegistry,
     private val circuitBreaker: PodCircuitBreaker,
     private val shutdownCoordinator: ShutdownCoordinator,
+    private val autoscalingMetrics: AutoscalingMetrics,
 ) {
 
     private val log = Logger.getLogger(TaskDispatcher::class.java)
@@ -54,16 +56,21 @@ class TaskDispatcher(
                 is TaskResult.Success -> {
                     taskRepository.complete(task.taskId, gen)
                     recordMetrics(task.handler, start, "success")
+                    autoscalingMetrics.recordTaskDuration(task.handler, "Success", System.nanoTime() - start)
                     circuitBreaker.recordSuccess()
                 }
                 is TaskResult.Retry -> {
                     taskRepository.fail(task.taskId, result.reason, result.delay, gen)
                     recordMetrics(task.handler, start, "retry")
+                    autoscalingMetrics.recordTaskDuration(task.handler, "Retry", System.nanoTime() - start)
+                    autoscalingMetrics.recordTaskError(task.handler, "retry")
                     circuitBreaker.recordFailure()
                 }
                 is TaskResult.Failure -> {
                     taskRepository.fail(task.taskId, result.message, executionGeneration = gen)
                     recordMetrics(task.handler, start, "failure")
+                    autoscalingMetrics.recordTaskDuration(task.handler, "DeadLetter", System.nanoTime() - start)
+                    autoscalingMetrics.recordTaskError(task.handler, "failure")
                     circuitBreaker.recordFailure()
                 }
             }
@@ -71,6 +78,8 @@ class TaskDispatcher(
             log.errorf(e, "Handler '%s' threw for task %s", task.handler, task.taskId)
             taskRepository.fail(task.taskId, e.message ?: "Unknown error", executionGeneration = gen)
             recordMetrics(task.handler, start, "error")
+            autoscalingMetrics.recordTaskDuration(task.handler, "DeadLetter", System.nanoTime() - start)
+            autoscalingMetrics.recordTaskError(task.handler, e.javaClass.simpleName)
             circuitBreaker.recordFailure()
         }
     }
