@@ -17,6 +17,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.jboss.logging.Logger
+import java.time.Instant
 import java.util.concurrent.Semaphore
 
 /**
@@ -43,6 +44,11 @@ class WorkerLoop(
     private lateinit var semaphore: Semaphore
     private var bulkheadSize = 0
 
+    /** Updated on every poll loop iteration — used by health probes to detect a hung worker. */
+    @Volatile
+    private var _lastPollTimestamp: Instant = Instant.now()
+    val lastPollTimestamp: Instant get() = _lastPollTimestamp
+
     fun onStart(@Observes ev: StartupEvent) {
         bulkheadSize = config.worker().bulkheadSize()
         semaphore = Semaphore(bulkheadSize)
@@ -59,6 +65,8 @@ class WorkerLoop(
 
         pollScope.launch {
             while (isActive) {
+                _lastPollTimestamp = Instant.now()
+
                 // Check coordinator state before every claim attempt
                 if (shutdownCoordinator.state != ShutdownState.RUNNING) {
                     log.info("Shutdown signaled, stopping claim loop")

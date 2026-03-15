@@ -19,6 +19,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.jboss.logging.Logger
+import java.time.Duration
 import java.time.Instant
 
 /**
@@ -41,6 +42,14 @@ class StaleTaskReaper(
     private val log = Logger.getLogger(StaleTaskReaper::class.java)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
+    /** Updated on every reap cycle — used by health probes to detect a hung reaper. */
+    @Volatile
+    private var _lastScanTimestamp: Instant = Instant.now()
+    val lastScanTimestamp: Instant get() = _lastScanTimestamp
+
+    /** The configured scan interval — exposed for health probe threshold calculation. */
+    val scanInterval: Duration get() = config.leader().monitorInterval()
+
     fun onStart(@Observes ev: StartupEvent) {
         // Register scope cancellation with shutdown coordinator for Phase 1
         shutdownCoordinator.registerLeaderScopeCallback { scope.cancel() }
@@ -50,6 +59,7 @@ class StaleTaskReaper(
             delay(interval)
             while (isActive) {
                 if (leaderManager.isActive) {
+                    _lastScanTimestamp = Instant.now()
                     try {
                         withContext(Dispatchers.IO) { reap() }
                     } catch (e: Exception) {

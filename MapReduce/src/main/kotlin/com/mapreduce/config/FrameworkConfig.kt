@@ -104,6 +104,27 @@ interface FrameworkConfig {
     @WithName("dead-letter")
     fun deadLetter(): DeadLetterConfig
 
+    fun health(): HealthConfig
+
+    /** Health probe registry configuration. */
+    interface HealthConfig {
+        @WithName("oracle-check-timeout")
+        @WithDefault("5S")
+        fun oracleCheckTimeout(): Duration
+
+        @WithName("worker-loop-stale-threshold")
+        @WithDefault("6S")
+        fun workerLoopStaleThreshold(): Duration
+
+        @WithName("detail-endpoint-enabled")
+        @WithDefault("true")
+        fun detailEndpointEnabled(): Boolean
+
+        @WithName("leader-readiness-enabled")
+        @WithDefault("false")
+        fun leaderReadinessEnabled(): Boolean
+    }
+
     fun pipeline(): PipelineConfig
 
     /** Handler execution pipeline configuration. */
