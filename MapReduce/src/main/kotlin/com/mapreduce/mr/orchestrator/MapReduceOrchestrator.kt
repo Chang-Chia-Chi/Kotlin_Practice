@@ -1,6 +1,7 @@
 package com.mapreduce.mr.orchestrator
 
 import com.mapreduce.config.FrameworkConfig
+import com.mapreduce.event.JobStateChanged
 import com.mapreduce.leader.FencingTokenHolder
 import com.mapreduce.leader.LeaderManager
 import com.mapreduce.mr.model.FailurePolicy
@@ -14,6 +15,7 @@ import com.mapreduce.queue.repository.TaskRepository
 import com.mapreduce.shutdown.ShutdownCoordinator
 import io.quarkus.runtime.StartupEvent
 import jakarta.enterprise.context.ApplicationScoped
+import jakarta.enterprise.event.Event
 import jakarta.enterprise.event.Observes
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -48,6 +50,7 @@ class MapReduceOrchestrator(
     private val speculativeExecutor: SpeculativeExecutor,
     private val shutdownCoordinator: ShutdownCoordinator,
     private val autoscalingMetrics: AutoscalingMetrics,
+    private val jobStateEvent: Event<JobStateChanged>,
 ) {
 
     private val log = Logger.getLogger(MapReduceOrchestrator::class.java)
@@ -129,6 +132,7 @@ class MapReduceOrchestrator(
                         job.jobId, JobStatus.REDUCING, JobStatus.COMPLETED, job.version,
                     )
                     if (transitioned) {
+                        fireJobStateChanged(job, JobStatus.REDUCING, JobStatus.COMPLETED)
                         log.infof("Job %s completed (%d reduce partitions)", job.jobId, reduceTasks.size)
                         if (job.createdAt != null) {
                             autoscalingMetrics.recordOrchestrationDuration("MapReduce", job.jobType, job.createdAt)
@@ -140,6 +144,7 @@ class MapReduceOrchestrator(
                         job.jobId, JobStatus.REDUCING, JobStatus.FAILED, job.version,
                     )
                     if (transitioned) {
+                        fireJobStateChanged(job, JobStatus.REDUCING, JobStatus.FAILED)
                         val failed = reduceTasks.count { it.status == TaskStatus.DEAD_LETTER }
                         log.errorf("Job %s failed: %d/%d reduce partition(s) dead-lettered",
                             job.jobId, failed, reduceTasks.size)
@@ -179,6 +184,7 @@ class MapReduceOrchestrator(
             job.jobId, JobStatus.RUNNING, JobStatus.REDUCING, job.version,
         )
         if (transitioned) {
+            fireJobStateChanged(job, JobStatus.RUNNING, JobStatus.REDUCING)
             dispatchReduceTask(job)
         }
     }
@@ -191,11 +197,28 @@ class MapReduceOrchestrator(
         log.infof("Dispatched %d reduce task(s) for job %s", job.totalPartitions, job.jobId)
     }
 
+    private fun fireJobStateChanged(job: Job, previousStatus: JobStatus, newStatus: JobStatus) {
+        try {
+            jobStateEvent.fireAsync(JobStateChanged(
+                jobId = job.jobId,
+                jobType = job.jobType,
+                previousStatus = previousStatus,
+                newStatus = newStatus,
+                completedTasks = job.completedTasks,
+                failedTasks = job.failedTasks,
+                totalTasks = job.totalTasks,
+            ))
+        } catch (e: Exception) {
+            log.warnf(e, "Failed to fire JobStateChanged event for job %s", job.jobId)
+        }
+    }
+
     private fun failJob(job: Job, reason: String) {
         val transitioned = jobRepository.casJobStatus(
             job.jobId, JobStatus.RUNNING, JobStatus.FAILED, job.version,
         )
         if (transitioned) {
+            fireJobStateChanged(job, JobStatus.RUNNING, JobStatus.FAILED)
             log.warnf("Job %s failed: %s", job.jobId, reason)
             if (job.createdAt != null) {
                 autoscalingMetrics.recordOrchestrationDuration("MapReduce", job.jobType, job.createdAt)

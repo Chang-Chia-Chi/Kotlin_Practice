@@ -2,6 +2,7 @@ package com.mapreduce.queue.worker
 
 import com.mapreduce.config.FrameworkConfig
 import com.mapreduce.event.TaskDeadLettered
+import com.mapreduce.event.TaskReclaimed
 import com.mapreduce.leader.LeaderManager
 import com.mapreduce.queue.repository.TaskRepository
 import com.mapreduce.shutdown.ShutdownCoordinator
@@ -34,6 +35,7 @@ class StaleTaskReaper(
     private val leaderManager: LeaderManager,
     private val shutdownCoordinator: ShutdownCoordinator,
     private val deadLetterEvent: Event<TaskDeadLettered>,
+    private val taskReclaimedEvent: Event<TaskReclaimed>,
 ) {
 
     private val log = Logger.getLogger(StaleTaskReaper::class.java)
@@ -66,6 +68,16 @@ class StaleTaskReaper(
             log.warnf("Reclaiming stale task %s (handler=%s, claimed_by=%s)",
                 task.taskId, task.handler, task.claimedBy)
             val wasDeadLettered = taskRepository.reclaimStaleTask(task.taskId)
+            try {
+                taskReclaimedEvent.fireAsync(TaskReclaimed(
+                    taskId = task.taskId,
+                    handler = task.handler,
+                    previousClaimedBy = task.claimedBy ?: "unknown",
+                    retryCount = task.retryCount + 1,
+                ))
+            } catch (e: Exception) {
+                log.warnf(e, "Failed to fire TaskReclaimed event for task %s", task.taskId)
+            }
             if (wasDeadLettered) {
                 try {
                     deadLetterEvent.fireAsync(

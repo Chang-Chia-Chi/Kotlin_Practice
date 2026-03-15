@@ -1,6 +1,8 @@
 package com.mapreduce.leader
 
 import com.mapreduce.config.FrameworkConfig
+import com.mapreduce.event.LeadershipAcquired
+import com.mapreduce.event.LeadershipLost
 import io.fabric8.kubernetes.client.KubernetesClient
 import io.fabric8.kubernetes.client.extended.leaderelection.LeaderCallbacks
 import io.fabric8.kubernetes.client.extended.leaderelection.LeaderElectionConfigBuilder
@@ -9,6 +11,7 @@ import io.micrometer.core.instrument.MeterRegistry
 import io.quarkus.runtime.ShutdownEvent
 import io.quarkus.runtime.StartupEvent
 import jakarta.enterprise.context.ApplicationScoped
+import jakarta.enterprise.event.Event
 import jakarta.enterprise.event.Observes
 import org.jboss.logging.Logger
 import java.time.Instant
@@ -39,6 +42,8 @@ class LeaderManager(
     private val config: FrameworkConfig,
     private val kubernetesClient: KubernetesClient,
     private val meterRegistry: MeterRegistry,
+    private val leadershipAcquiredEvent: Event<LeadershipAcquired>,
+    private val leadershipLostEvent: Event<LeadershipLost>,
 ) {
 
     private val log = Logger.getLogger(LeaderManager::class.java)
@@ -72,6 +77,14 @@ class LeaderManager(
             _isLeader.set(true)
             _acquiredAt.set(Instant.now())
             registerMetrics()
+            try {
+                leadershipAcquiredEvent.fireAsync(LeadershipAcquired(
+                    epoch = _epoch.get(),
+                    podId = config.worker().id(),
+                ))
+            } catch (e: Exception) {
+                log.warnf(e, "Failed to fire LeadershipAcquired event")
+            }
             return
         }
 
@@ -180,11 +193,28 @@ class LeaderManager(
         refreshEpoch(namespace, leaseName)
         _isLeader.set(true)
         _acquiredAt.set(Instant.now())
+        try {
+            leadershipAcquiredEvent.fireAsync(LeadershipAcquired(
+                epoch = _epoch.get(),
+                podId = identity,
+            ))
+        } catch (e: Exception) {
+            log.warnf(e, "Failed to fire LeadershipAcquired event")
+        }
     }
 
     private fun onLose() {
+        val lastEpoch = _epoch.get()
         log.info("Lost leadership")
         _isLeader.set(false)
+        try {
+            leadershipLostEvent.fireAsync(LeadershipLost(
+                lastEpoch = lastEpoch,
+                podId = config.worker().id(),
+            ))
+        } catch (e: Exception) {
+            log.warnf(e, "Failed to fire LeadershipLost event")
+        }
     }
 
     private fun onNewLeader(newLeader: String, identity: String, namespace: String, leaseName: String) {

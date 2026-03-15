@@ -1,11 +1,13 @@
 package com.mapreduce.shutdown
 
 import com.mapreduce.config.FrameworkConfig
+import com.mapreduce.event.ShutdownStateChanged
 import com.mapreduce.leader.LeaderManager
 import com.mapreduce.queue.repository.TaskRepository
 import io.micrometer.core.instrument.MeterRegistry
 import io.quarkus.runtime.ShutdownEvent
 import jakarta.enterprise.context.ApplicationScoped
+import jakarta.enterprise.event.Event
 import jakarta.enterprise.event.Observes
 import org.jboss.logging.Logger
 import java.time.Duration
@@ -35,6 +37,7 @@ class ShutdownCoordinator(
     private val leaderManager: LeaderManager,
     private val taskRepository: TaskRepository,
     private val meterRegistry: MeterRegistry,
+    private val shutdownStateEvent: Event<ShutdownStateChanged>,
 ) {
 
     private val log = Logger.getLogger(ShutdownCoordinator::class.java)
@@ -116,6 +119,7 @@ class ShutdownCoordinator(
         val drainTimeout = shutdownConfig.drainTimeout()
         _drainDeadline = Instant.now().plus(drainTimeout)
         _state.set(ShutdownState.DRAINING)
+        fireStateChanged(ShutdownState.RUNNING, ShutdownState.DRAINING)
         log.infof("Shutdown initiated. Drain deadline: %s. In-flight tasks: %d.",
             drainDeadline, inFlightTasks)
 
@@ -129,10 +133,12 @@ class ShutdownCoordinator(
 
         // ── Phase 3: Release ─────────────────────────────────────
         _state.set(ShutdownState.RELEASING)
+        fireStateChanged(ShutdownState.DRAINING, ShutdownState.RELEASING)
         phaseRelease()
 
         // ── Phase 4: Final ───────────────────────────────────────
         _state.set(ShutdownState.TERMINATED)
+        fireStateChanged(ShutdownState.RELEASING, ShutdownState.TERMINATED)
         val totalDuration = Duration.between(shutdownStart, Instant.now())
 
         meterRegistry.counter("taskqueue_shutdown_tasks_completed",
@@ -152,6 +158,19 @@ class ShutdownCoordinator(
             _tasksCompletedDuringDrain.get(),
             _tasksReleased.get(),
         )
+    }
+
+    private fun fireStateChanged(previous: ShutdownState, new: ShutdownState) {
+        try {
+            shutdownStateEvent.fireAsync(ShutdownStateChanged(
+                previousState = previous,
+                newState = new,
+                inFlightTasks = inFlightTasks,
+                drainDeadline = _drainDeadline,
+            ))
+        } catch (e: Exception) {
+            log.warnf(e, "Failed to fire ShutdownStateChanged event")
+        }
     }
 
     // ── Phase 1: Leader Teardown ─────────────────────────────────

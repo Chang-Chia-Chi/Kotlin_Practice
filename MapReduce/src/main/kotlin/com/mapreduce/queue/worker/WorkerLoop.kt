@@ -1,10 +1,12 @@
 package com.mapreduce.queue.worker
 
 import com.mapreduce.config.FrameworkConfig
+import com.mapreduce.event.TaskClaimed
 import com.mapreduce.shutdown.ShutdownCoordinator
 import com.mapreduce.shutdown.ShutdownState
 import io.quarkus.runtime.StartupEvent
 import jakarta.enterprise.context.ApplicationScoped
+import jakarta.enterprise.event.Event
 import jakarta.enterprise.event.Observes
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -32,6 +34,7 @@ class WorkerLoop(
     private val dispatcher: TaskDispatcher,
     private val circuitBreaker: PodCircuitBreaker,
     private val shutdownCoordinator: ShutdownCoordinator,
+    private val taskClaimedEvent: Event<TaskClaimed>,
 ) {
 
     private val log = Logger.getLogger(WorkerLoop::class.java)
@@ -77,6 +80,16 @@ class WorkerLoop(
                     if (task != null) {
                         log.debugf("Claimed task %s [handler=%s, queue=%s]",
                             task.taskId, task.handler, task.queue)
+                        try {
+                            taskClaimedEvent.fireAsync(TaskClaimed(
+                                taskId = task.taskId,
+                                handler = task.handler,
+                                queue = task.queue,
+                                groupId = task.groupId,
+                            ))
+                        } catch (e: Exception) {
+                            log.warnf(e, "Failed to fire TaskClaimed event for task %s", task.taskId)
+                        }
                         taskScope.launch {
                             try {
                                 dispatcher.execute(task)
