@@ -3,36 +3,27 @@ package com.mapreduce.observability.health
 import com.mapreduce.shutdown.ShutdownCoordinator
 import com.mapreduce.shutdown.ShutdownState
 import jakarta.enterprise.context.ApplicationScoped
+import org.eclipse.microprofile.health.HealthCheck
+import org.eclipse.microprofile.health.HealthCheckResponse
+import org.eclipse.microprofile.health.Readiness
 
-/**
- * Health contributor for the shutdown coordinator.
- *
- * - **Liveness:** null (shutdown doesn't mean the pod is dead).
- * - **Readiness:** DOWN when the pod is shutting down (DRAINING, RELEASING, or TERMINATED).
- *   K8s removes the pod from Service endpoints so it stops receiving new traffic.
- */
+@Readiness
 @ApplicationScoped
 class ShutdownHealthContributor(
     private val shutdownCoordinator: ShutdownCoordinator,
-) : HealthContributor {
+) : HealthCheck {
 
-    override val name: String = "shutdown"
-
-    override fun liveness(): ProbeResult? = null
-
-    override fun readiness(): ProbeResult {
+    override fun call(): HealthCheckResponse {
+        val builder = HealthCheckResponse.named("shutdown")
         val state = shutdownCoordinator.state
         return if (state == ShutdownState.RUNNING) {
-            ProbeResult(status = HealthStatus.UP)
+            builder.up().build()
         } else {
-            ProbeResult(
-                status = HealthStatus.DOWN,
-                details = mapOf(
-                    "state" to state.name,
-                    "inFlightTasks" to shutdownCoordinator.inFlightTasks,
-                    "drainDeadline" to (shutdownCoordinator.drainDeadline?.toString() ?: "N/A"),
-                ),
-            )
+            builder.down()
+                .withData("state", state.name)
+                .withData("inFlightTasks", shutdownCoordinator.inFlightTasks.toString())
+                .withData("drainDeadline", shutdownCoordinator.drainDeadline?.toString() ?: "N/A")
+                .build()
         }
     }
 }

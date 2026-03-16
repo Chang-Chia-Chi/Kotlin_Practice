@@ -93,9 +93,6 @@ interface FrameworkConfig {
         fun queueDepthInterval(): Duration
     }
 
-    @WithName("dead-letter")
-    fun deadLetter(): DeadLetterConfig
-
     fun health(): HealthConfig
 
     /** Health probe registry configuration. */
@@ -107,10 +104,6 @@ interface FrameworkConfig {
         @WithName("worker-loop-stale-threshold")
         @WithDefault("6S")
         fun workerLoopStaleThreshold(): Duration
-
-        @WithName("detail-endpoint-enabled")
-        @WithDefault("true")
-        fun detailEndpointEnabled(): Boolean
 
         @WithName("leader-readiness-enabled")
         @WithDefault("false")
@@ -149,33 +142,6 @@ interface FrameworkConfig {
         @WithName("batch-size")
         @WithDefault("50")
         fun batchSize(): Int
-    }
-
-    /** Dead letter processor configuration. */
-    interface DeadLetterConfig {
-        @WithName("retention-days")
-        @WithDefault("30")
-        fun retentionDays(): Int
-
-        @WithName("cleanup-schedule-hours")
-        @WithDefault("24")
-        fun cleanupScheduleHours(): Int
-
-        @WithName("archive-before-delete")
-        @WithDefault("false")
-        fun archiveBeforeDelete(): Boolean
-
-        @WithName("alert-default-threshold")
-        @WithDefault("10")
-        fun alertDefaultThreshold(): Int
-
-        @WithName("alert-default-window")
-        @WithDefault("5M")
-        fun alertDefaultWindow(): Duration
-
-        @WithName("slack-webhook-url")
-        @WithDefault("")
-        fun slackWebhookUrl(): String
     }
 
 }

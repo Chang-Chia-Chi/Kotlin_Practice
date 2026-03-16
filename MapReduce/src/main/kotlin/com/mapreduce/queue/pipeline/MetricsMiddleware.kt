@@ -22,16 +22,14 @@ import java.util.concurrent.atomic.AtomicInteger
 @ApplicationScoped
 class MetricsMiddleware(
     private val meterRegistry: MeterRegistry,
-) : HandlerMiddleware {
-
-    override val order: Int = 10
+) {
 
     private val log = Logger.getLogger(MetricsMiddleware::class.java)
 
     /** Per-handler in-flight gauge backing values. */
     private val inflightGauges = ConcurrentHashMap<String, AtomicInteger>()
 
-    override suspend fun invoke(
+    suspend fun invoke(
         context: TaskExecutionContext,
         next: suspend (TaskExecutionContext) -> TaskResult,
     ): TaskResult {

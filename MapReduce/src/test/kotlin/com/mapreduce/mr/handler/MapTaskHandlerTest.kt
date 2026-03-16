@@ -3,7 +3,6 @@ package com.mapreduce.mr.handler
 import com.mapreduce.mr.repository.JobRepository
 import com.mapreduce.mr.shuffle.BlobStore
 import com.mapreduce.mr.spi.MapReduceDefinition
-import com.mapreduce.mr.spi.PartitionedMapReduceDefinition
 import com.mapreduce.queue.model.TaskContext
 import com.mapreduce.queue.model.TaskResult
 import kotlinx.coroutines.flow.flowOf
@@ -111,32 +110,4 @@ class MapTaskHandlerTest {
         verify(jobRepository).completeMapTask("t-1", "j-1", "blob://u", "gen-abc", 0)
     }
 
-    @Test
-    fun `handles PartitionedMapReduceDefinition correctly`() = runTest {
-        val partitionedDef: PartitionedMapReduceDefinition<Any, Any, Any, Any> = mock()
-        whenever(partitionedDef.jobType).thenReturn("partitioned-job")
-        whenever(partitionedDef.deserializeInput(any())).thenReturn("raw")
-        whenever(partitionedDef.map(any())).thenReturn(flowOf("o"))
-        whenever(partitionedDef.serializeOutput(any())).thenReturn("s")
-        whenever(partitionedDef.partitionFor("raw")).thenReturn(3)
-        whenever(blobStore.write(any(), any(), any(), any())).thenReturn("blob://p")
-
-        @Suppress("UNCHECKED_CAST")
-        val partitionedHandler = MapTaskHandler(
-            partitionedDef as MapReduceDefinition<Any, Any, Any, Any>,
-            jobRepository, blobStore,
-        )
-
-        val ctx = TaskContext(
-            taskId = "t-p", payload = "input", groupId = "j-p",
-            metadata = null, executionGeneration = "gen-p",
-        )
-
-        val result = partitionedHandler.handle(ctx)
-
-        assertInstanceOf(TaskResult.Success::class.java, result)
-        verify(partitionedDef).partitionFor("raw")
-        verify(blobStore).write(eq("j-p"), eq("t-p"), eq(3), any())
-        verify(jobRepository).completeMapTask("t-p", "j-p", "blob://p", "gen-p", 3)
-    }
 }

@@ -1,14 +1,13 @@
 package com.mapreduce.queue.worker
 
 import com.mapreduce.config.FrameworkConfig
-import com.mapreduce.event.TaskClaimed
 import com.mapreduce.queue.model.Task
 import com.mapreduce.queue.model.TaskStatus
 import com.mapreduce.queue.repository.TaskRepository
 import com.mapreduce.shutdown.ShutdownCoordinator
 import com.mapreduce.shutdown.ShutdownState
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import io.quarkus.runtime.StartupEvent
-import jakarta.enterprise.event.Event
 import kotlinx.coroutines.runBlocking
 import org.awaitility.kotlin.await
 import org.awaitility.kotlin.untilAsserted
@@ -37,7 +36,7 @@ class WorkerLoopTest {
     private lateinit var taskRepository: TaskRepository
     private lateinit var circuitBreaker: PodCircuitBreaker
     private lateinit var shutdownCoordinator: ShutdownCoordinator
-    private lateinit var taskClaimedEvent: Event<TaskClaimed>
+    private lateinit var meterRegistry: SimpleMeterRegistry
     private lateinit var workerLoop: WorkerLoop
 
     private fun task(
@@ -64,7 +63,7 @@ class WorkerLoopTest {
         taskRepository = mock()
         circuitBreaker = mock()
         shutdownCoordinator = mock()
-        taskClaimedEvent = mock()
+        meterRegistry = SimpleMeterRegistry()
 
         whenever(config.worker()).thenReturn(workerConfig)
         whenever(config.heartbeat()).thenReturn(heartbeatConfig)
@@ -80,7 +79,7 @@ class WorkerLoopTest {
 
         workerLoop = WorkerLoop(
             config, dispatcher, taskRepository, circuitBreaker,
-            shutdownCoordinator, taskClaimedEvent,
+            shutdownCoordinator, meterRegistry,
         )
     }
 
@@ -88,7 +87,6 @@ class WorkerLoopTest {
         workerLoop.onStart(mock<StartupEvent>())
     }
 
-    /** Verify a suspend function call on the mock dispatcher. */
     private fun verifySuspend(mode: org.mockito.verification.VerificationMode = org.mockito.Mockito.times(1), block: suspend TaskDispatcher.() -> Unit) {
         runBlocking { block(verify(dispatcher, mode)) }
     }
@@ -112,19 +110,6 @@ class WorkerLoopTest {
             }
             await.atMost(2, TimeUnit.SECONDS).untilAsserted {
                 verifySuspend { execute(claimed) }
-            }
-        }
-
-        @Test
-        fun `fires TaskClaimed event on successful claim`() {
-            whenever(dispatcher.claimTask())
-                .thenReturn(task())
-                .thenReturn(null)
-
-            start()
-
-            await.atMost(2, TimeUnit.SECONDS).untilAsserted {
-                verify(taskClaimedEvent).fireAsync(any())
             }
         }
 
@@ -267,7 +252,7 @@ class WorkerLoopTest {
             whenever(workerConfig.bulkheadSize()).thenReturn(2)
             workerLoop = WorkerLoop(
                 config, dispatcher, taskRepository, circuitBreaker,
-                shutdownCoordinator, taskClaimedEvent,
+                shutdownCoordinator, meterRegistry,
             )
 
             val activeCount = AtomicInteger(0)
@@ -331,7 +316,7 @@ class WorkerLoopTest {
                 .thenReturn(null)
             runBlocking {
                 whenever(dispatcher.execute(any())).thenAnswer {
-                    Thread.sleep(150) // Long enough for at least one heartbeat
+                    Thread.sleep(150)
                     latch.countDown()
                     Unit
                 }
@@ -373,22 +358,6 @@ class WorkerLoopTest {
 
     @Nested
     inner class ErrorHandling {
-
-        @Test
-        fun `TaskClaimed event failure does not prevent task execution`() {
-            val claimed = task()
-            whenever(dispatcher.claimTask())
-                .thenReturn(claimed)
-                .thenReturn(null)
-            whenever(taskClaimedEvent.fireAsync(any()))
-                .thenThrow(RuntimeException("event bus down"))
-
-            start()
-
-            await.atMost(2, TimeUnit.SECONDS).untilAsserted {
-                verifySuspend { execute(claimed) }
-            }
-        }
 
         @Test
         fun `claim exception does not kill poll loop`() {

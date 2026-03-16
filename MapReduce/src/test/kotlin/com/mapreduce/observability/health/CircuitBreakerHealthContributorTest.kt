@@ -1,8 +1,9 @@
 package com.mapreduce.observability.health
 
 import com.mapreduce.queue.worker.PodCircuitBreaker
+import org.eclipse.microprofile.health.HealthCheckResponse
 import org.junit.jupiter.api.Assertions.assertEquals
-import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.mockito.Mockito.mock
@@ -20,55 +21,50 @@ class CircuitBreakerHealthContributorTest {
     }
 
     @Test
-    fun `name is circuit-breaker`() {
-        assertEquals("circuit-breaker", contributor.name)
-    }
-
-    @Test
-    fun `liveness returns null - no opinion`() {
-        assertNull(contributor.liveness())
-    }
-
-    @Test
-    fun `readiness returns UP when circuit breaker is not tripped`() {
+    fun `call returns UP when circuit breaker is not tripped`() {
         `when`(circuitBreaker.isTripped).thenReturn(false)
 
-        val result = contributor.readiness()
+        val response = contributor.call()
 
-        assertEquals(HealthStatus.UP, result.status)
-        assertEquals("CLOSED", result.details["podBreaker"])
+        assertEquals("circuit-breaker", response.name)
+        assertEquals(HealthCheckResponse.Status.UP, response.status)
+        assertTrue(response.data.isPresent)
+        assertEquals("CLOSED", response.data.get()["podBreaker"])
     }
 
     @Test
-    fun `readiness returns DOWN when circuit breaker is tripped`() {
+    fun `call returns DOWN when circuit breaker is tripped`() {
         `when`(circuitBreaker.isTripped).thenReturn(true)
 
-        val result = contributor.readiness()
+        val response = contributor.call()
 
-        assertEquals(HealthStatus.DOWN, result.status)
-        assertEquals("TRIPPED", result.details["podBreaker"])
+        assertEquals("circuit-breaker", response.name)
+        assertEquals(HealthCheckResponse.Status.DOWN, response.status)
+        assertTrue(response.data.isPresent)
+        assertEquals("TRIPPED", response.data.get()["podBreaker"])
         assertEquals(
             "Consecutive failure threshold exceeded — pod quarantined",
-            result.details["reason"],
+            response.data.get()["reason"],
         )
     }
 
     @Test
-    fun `readiness UP details do not contain reason key`() {
+    fun `UP response does not contain reason key`() {
         `when`(circuitBreaker.isTripped).thenReturn(false)
 
-        val result = contributor.readiness()
+        val response = contributor.call()
+        val data = response.data.get()
 
-        assertEquals(1, result.details.size)
-        assertEquals("CLOSED", result.details["podBreaker"])
+        assertEquals(1, data.size)
+        assertEquals("CLOSED", data["podBreaker"])
     }
 
     @Test
-    fun `readiness DOWN details contain exactly two entries`() {
+    fun `DOWN response contains exactly two entries`() {
         `when`(circuitBreaker.isTripped).thenReturn(true)
 
-        val result = contributor.readiness()
+        val response = contributor.call()
 
-        assertEquals(2, result.details.size)
+        assertEquals(2, response.data.get().size)
     }
 }

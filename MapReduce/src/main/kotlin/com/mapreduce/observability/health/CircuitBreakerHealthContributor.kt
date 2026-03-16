@@ -2,35 +2,27 @@ package com.mapreduce.observability.health
 
 import com.mapreduce.queue.worker.PodCircuitBreaker
 import jakarta.enterprise.context.ApplicationScoped
+import org.eclipse.microprofile.health.HealthCheck
+import org.eclipse.microprofile.health.HealthCheckResponse
+import org.eclipse.microprofile.health.Readiness
 
-/**
- * Health contributor for the pod-level circuit breaker.
- *
- * - **Liveness:** null (an open breaker doesn't mean the pod should be restarted).
- * - **Readiness:** DOWN when pod-level breaker tripped, UP otherwise.
- */
+@Readiness
 @ApplicationScoped
 class CircuitBreakerHealthContributor(
     private val podCircuitBreaker: PodCircuitBreaker,
-) : HealthContributor {
+) : HealthCheck {
 
-    override val name: String = "circuit-breaker"
-
-    override fun liveness(): ProbeResult? = null
-
-    override fun readiness(): ProbeResult =
-        if (podCircuitBreaker.isTripped) {
-            ProbeResult(
-                status = HealthStatus.DOWN,
-                details = mapOf(
-                    "podBreaker" to "TRIPPED",
-                    "reason" to "Consecutive failure threshold exceeded — pod quarantined",
-                ),
-            )
+    override fun call(): HealthCheckResponse {
+        val builder = HealthCheckResponse.named("circuit-breaker")
+        return if (podCircuitBreaker.isTripped) {
+            builder.down()
+                .withData("podBreaker", "TRIPPED")
+                .withData("reason", "Consecutive failure threshold exceeded — pod quarantined")
+                .build()
         } else {
-            ProbeResult(
-                status = HealthStatus.UP,
-                details = mapOf("podBreaker" to "CLOSED"),
-            )
+            builder.up()
+                .withData("podBreaker", "CLOSED")
+                .build()
         }
+    }
 }

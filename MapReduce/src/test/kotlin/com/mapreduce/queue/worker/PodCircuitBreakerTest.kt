@@ -1,8 +1,6 @@
 package com.mapreduce.queue.worker
 
 import com.mapreduce.config.FrameworkConfig
-import com.mapreduce.event.CircuitBreakerStateChanged
-import jakarta.enterprise.event.Event
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
@@ -16,7 +14,6 @@ class PodCircuitBreakerTest {
 
     private lateinit var config: FrameworkConfig
     private lateinit var workerConfig: FrameworkConfig.WorkerConfig
-    private lateinit var event: Event<CircuitBreakerStateChanged>
     private lateinit var cb: PodCircuitBreaker
 
     private val threshold = 5
@@ -28,9 +25,7 @@ class PodCircuitBreakerTest {
         `when`(config.worker()).thenReturn(workerConfig)
         `when`(workerConfig.circuitBreakerThreshold()).thenReturn(threshold)
 
-        @Suppress("UNCHECKED_CAST")
-        event = mock(Event::class.java) as Event<CircuitBreakerStateChanged>
-        cb = PodCircuitBreaker(config, event)
+        cb = PodCircuitBreaker(config)
     }
 
     @Test
@@ -42,7 +37,6 @@ class PodCircuitBreakerTest {
     fun `recordSuccess resets failure counter`() {
         repeat(threshold - 1) { cb.recordFailure() }
         cb.recordSuccess()
-        // After reset, threshold-1 more failures should not trip
         repeat(threshold - 1) { cb.recordFailure() }
 
         assertFalse(cb.isTripped)
@@ -67,7 +61,6 @@ class PodCircuitBreakerTest {
         repeat(threshold) { cb.recordFailure() }
         assertTrue(cb.isTripped)
 
-        // Additional failures keep it tripped
         repeat(10) { cb.recordFailure() }
         assertTrue(cb.isTripped)
     }
@@ -95,7 +88,7 @@ class PodCircuitBreakerTest {
     @Test
     fun `interleaved success resets counter preventing trip`() {
         repeat(threshold - 1) { cb.recordFailure() }
-        cb.recordSuccess()   // resets counter to 0
+        cb.recordSuccess()
         repeat(threshold - 1) { cb.recordFailure() }
 
         assertFalse(cb.isTripped)
@@ -110,7 +103,7 @@ class PodCircuitBreakerTest {
         repeat(threadCount) {
             executor.submit {
                 latch.countDown()
-                latch.await()  // synchronize start
+                latch.await()
                 cb.recordFailure()
             }
         }

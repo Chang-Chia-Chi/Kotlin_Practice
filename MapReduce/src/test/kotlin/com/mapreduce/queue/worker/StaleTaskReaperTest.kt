@@ -1,15 +1,12 @@
 package com.mapreduce.queue.worker
 
 import com.mapreduce.config.FrameworkConfig
-import com.mapreduce.event.TaskDeadLettered
-import com.mapreduce.event.TaskReclaimed
 import com.mapreduce.leader.LeaderManager
 import com.mapreduce.queue.model.Task
 import com.mapreduce.queue.model.TaskStatus
 import com.mapreduce.queue.repository.TaskRepository
 import com.mapreduce.shutdown.ShutdownCoordinator
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
-import jakarta.enterprise.event.Event
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -25,13 +22,6 @@ import org.mockito.kotlin.whenever
 import java.time.Duration
 import java.time.Instant
 
-/**
- * Tests the stale task reaper's reap logic and config validation.
- *
- * Since [StaleTaskReaper.reap] is private and runs inside an internal
- * coroutine scope, we invoke it via reflection to keep tests fast,
- * deterministic, and free of Thread.sleep().
- */
 class StaleTaskReaperTest {
 
     private lateinit var config: FrameworkConfig
@@ -41,8 +31,6 @@ class StaleTaskReaperTest {
     private lateinit var leaderManager: LeaderManager
     private lateinit var shutdownCoordinator: ShutdownCoordinator
     private lateinit var meterRegistry: SimpleMeterRegistry
-    private lateinit var deadLetterEvent: Event<TaskDeadLettered>
-    private lateinit var taskReclaimedEvent: Event<TaskReclaimed>
     private lateinit var reaper: StaleTaskReaper
 
     @BeforeEach
@@ -64,12 +52,9 @@ class StaleTaskReaperTest {
         shutdownCoordinator = mock<ShutdownCoordinator>()
         meterRegistry = SimpleMeterRegistry()
 
-        deadLetterEvent = mock<Event<TaskDeadLettered>>()
-        taskReclaimedEvent = mock<Event<TaskReclaimed>>()
-
         reaper = StaleTaskReaper(
             config, taskRepository, leaderManager,
-            shutdownCoordinator, meterRegistry, deadLetterEvent, taskReclaimedEvent,
+            shutdownCoordinator, meterRegistry,
         )
     }
 
@@ -80,7 +65,6 @@ class StaleTaskReaperTest {
         whenever(heartbeatConfig.interval()).thenReturn(Duration.ofSeconds(30))
         whenever(reaperConfig.staleThreshold()).thenReturn(Duration.ofSeconds(90))
 
-        // Should not throw
         invokeValidateConfig()
     }
 
@@ -111,7 +95,7 @@ class StaleTaskReaperTest {
         val staleTask = staleTask("task-1", claimedBy = "dead-pod")
         whenever(taskRepository.findStaleTasks(any(), any())).thenReturn(listOf(staleTask))
         whenever(taskRepository.reclaimStaleTask(any(), any(), any()))
-            .thenReturn(false) // reclaimed to PENDING
+            .thenReturn(false)
 
         invokeReap()
 
@@ -120,16 +104,14 @@ class StaleTaskReaperTest {
             eq(5L),
             any(),
         )
-        verify(taskReclaimedEvent).fireAsync(any())
-        verify(deadLetterEvent, never()).fireAsync(any())
     }
 
     @Test
-    fun `reap dead-letters task with exhausted retries and fires event`() {
+    fun `reap dead-letters task with exhausted retries`() {
         val staleTask = staleTask("task-2", retryCount = 2, maxRetries = 3)
         whenever(taskRepository.findStaleTasks(any(), any())).thenReturn(listOf(staleTask))
         whenever(taskRepository.reclaimStaleTask(any(), any(), any()))
-            .thenReturn(true) // dead-lettered
+            .thenReturn(true)
 
         invokeReap()
 
@@ -138,8 +120,6 @@ class StaleTaskReaperTest {
             eq(5L),
             any(),
         )
-        verify(deadLetterEvent).fireAsync(any())
-        verify(taskReclaimedEvent).fireAsync(any())
     }
 
     @Test
@@ -147,12 +127,12 @@ class StaleTaskReaperTest {
         val staleTask = staleTask("task-3")
         whenever(taskRepository.findStaleTasks(any(), any())).thenReturn(listOf(staleTask))
         whenever(taskRepository.reclaimStaleTask(any(), any(), any()))
-            .thenReturn(null) // fence rejected
+            .thenReturn(null)
 
         invokeReap()
 
-        verify(taskReclaimedEvent, never()).fireAsync(any())
-        verify(deadLetterEvent, never()).fireAsync(any())
+        // Only one call to reclaimStaleTask, which returned null
+        verify(taskRepository).reclaimStaleTask(any(), any(), any())
     }
 
     @Test
@@ -165,15 +145,14 @@ class StaleTaskReaperTest {
         whenever(taskRepository.findStaleTasks(any(), any())).thenReturn(tasks)
 
         whenever(taskRepository.reclaimStaleTask(eq("t-pending"), any(), any()))
-            .thenReturn(false) // reclaimed
+            .thenReturn(false)
         whenever(taskRepository.reclaimStaleTask(eq("t-dead"), any(), any()))
-            .thenReturn(true)  // dead-lettered
+            .thenReturn(true)
         whenever(taskRepository.reclaimStaleTask(eq("t-skipped"), any(), any()))
-            .thenReturn(null)  // already handled
+            .thenReturn(null)
 
         invokeReap()
 
-        // reclaimed counter: 2 (pending + dead), dead-lettered counter: 1
         val reclaimed = meterRegistry.counter("taskqueue.reaper.reclaimed").count()
         val deadLettered = meterRegistry.counter("taskqueue.reaper.dead_lettered").count()
         assertEquals(2.0, reclaimed)
@@ -212,14 +191,12 @@ class StaleTaskReaperTest {
         createdAt = Instant.now().minus(Duration.ofMinutes(10)),
     )
 
-    /** Invoke the private `reap()` method via reflection. */
     private fun invokeReap() {
         val method = StaleTaskReaper::class.java.getDeclaredMethod("reap")
         method.isAccessible = true
         method.invoke(reaper)
     }
 
-    /** Invoke the private `validateConfig()` method via reflection. */
     private fun invokeValidateConfig() {
         val method = StaleTaskReaper::class.java.getDeclaredMethod("validateConfig")
         method.isAccessible = true

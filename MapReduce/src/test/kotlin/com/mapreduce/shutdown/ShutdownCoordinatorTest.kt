@@ -1,13 +1,11 @@
 package com.mapreduce.shutdown
 
 import com.mapreduce.config.FrameworkConfig
-import com.mapreduce.event.ShutdownStateChanged
 import com.mapreduce.leader.LeaderManager
 import com.mapreduce.queue.repository.TaskRepository
 import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import io.quarkus.runtime.ShutdownEvent
-import jakarta.enterprise.event.Event
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNotNull
@@ -15,8 +13,6 @@ import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
-import org.mockito.kotlin.atLeast
-import org.mockito.kotlin.argumentCaptor
 import org.mockito.kotlin.mock
 import org.mockito.kotlin.never
 import org.mockito.kotlin.verify
@@ -32,7 +28,6 @@ class ShutdownCoordinatorTest {
     private lateinit var leaderManager: LeaderManager
     private lateinit var taskRepository: TaskRepository
     private lateinit var meterRegistry: MeterRegistry
-    private lateinit var shutdownStateEvent: Event<ShutdownStateChanged>
     private lateinit var coordinator: ShutdownCoordinator
 
     private val podId = "test-pod-1"
@@ -46,8 +41,6 @@ class ShutdownCoordinatorTest {
         taskRepository = mock<TaskRepository>()
         meterRegistry = SimpleMeterRegistry()
 
-        shutdownStateEvent = mock<Event<ShutdownStateChanged>>()
-
         whenever(config.shutdown()).thenReturn(shutdownConfig)
         whenever(config.worker()).thenReturn(workerConfig)
         whenever(workerConfig.id()).thenReturn(podId)
@@ -59,7 +52,7 @@ class ShutdownCoordinatorTest {
         whenever(shutdownConfig.logInterval()).thenReturn(Duration.ofSeconds(60))
 
         coordinator = ShutdownCoordinator(
-            config, leaderManager, taskRepository, meterRegistry, shutdownStateEvent,
+            config, leaderManager, taskRepository, meterRegistry,
         )
     }
 
@@ -230,29 +223,6 @@ class ShutdownCoordinatorTest {
         coordinator.onShutdown(ShutdownEvent())
 
         verify(taskRepository).releaseTasksByPod(podId)
-    }
-
-    @Test
-    fun `onShutdown fires state change events for each transition`() {
-        whenever(leaderManager.isActive).thenReturn(false)
-        whenever(taskRepository.releaseTasksByPod(podId)).thenReturn(0)
-
-        coordinator.onShutdown(ShutdownEvent())
-
-        // Capture all three fireAsync invocations
-        val captor = argumentCaptor<ShutdownStateChanged>()
-        verify(shutdownStateEvent, atLeast(3)).fireAsync(captor.capture())
-
-        val events = captor.allValues
-        assertTrue(events.any {
-            it.previousState == ShutdownState.RUNNING && it.newState == ShutdownState.DRAINING
-        })
-        assertTrue(events.any {
-            it.previousState == ShutdownState.DRAINING && it.newState == ShutdownState.RELEASING
-        })
-        assertTrue(events.any {
-            it.previousState == ShutdownState.RELEASING && it.newState == ShutdownState.TERMINATED
-        })
     }
 
     @Test

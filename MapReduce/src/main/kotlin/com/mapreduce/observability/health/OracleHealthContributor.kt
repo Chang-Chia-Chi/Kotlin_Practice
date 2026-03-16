@@ -2,36 +2,28 @@ package com.mapreduce.observability.health
 
 import com.mapreduce.config.FrameworkConfig
 import jakarta.enterprise.context.ApplicationScoped
+import org.eclipse.microprofile.health.HealthCheck
+import org.eclipse.microprofile.health.HealthCheckResponse
+import org.eclipse.microprofile.health.Liveness
 import org.jdbi.v3.core.Jdbi
 import java.util.concurrent.Callable
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
 
-/**
- * Health contributor for Oracle database connectivity.
- *
- * Executes `SELECT 1 FROM DUAL` with a configurable timeout.
- * Both liveness and readiness return the same result — if the database
- * is unreachable, the pod is neither live nor ready.
- */
+@Liveness
 @ApplicationScoped
 class OracleHealthContributor(
     private val jdbi: Jdbi,
     private val config: FrameworkConfig,
-) : HealthContributor {
-
-    override val name: String = "oracle"
+) : HealthCheck {
 
     private val executor = Executors.newSingleThreadExecutor { r ->
         Thread(r, "health-oracle-check").apply { isDaemon = true }
     }
 
-    override fun liveness(): ProbeResult = checkConnectivity()
-
-    override fun readiness(): ProbeResult = checkConnectivity()
-
-    private fun checkConnectivity(): ProbeResult {
+    override fun call(): HealthCheckResponse {
+        val builder = HealthCheckResponse.named("oracle")
         val timeout = config.health().oracleCheckTimeout()
         return try {
             val future = executor.submit(Callable {
@@ -40,20 +32,16 @@ class OracleHealthContributor(
                 }
             })
             future.get(timeout.toMillis(), TimeUnit.MILLISECONDS)
-            ProbeResult(status = HealthStatus.UP)
+            builder.up().build()
         } catch (e: TimeoutException) {
-            ProbeResult(
-                status = HealthStatus.DOWN,
-                details = mapOf("reason" to "Query timed out after ${timeout.seconds}s"),
-            )
+            builder.down()
+                .withData("reason", "Query timed out after ${timeout.seconds}s")
+                .build()
         } catch (e: Exception) {
-            ProbeResult(
-                status = HealthStatus.DOWN,
-                details = mapOf(
-                    "reason" to "Database unreachable",
-                    "error" to (e.cause?.message ?: e.message ?: "unknown"),
-                ),
-            )
+            builder.down()
+                .withData("reason", "Database unreachable")
+                .withData("error", e.cause?.message ?: e.message ?: "unknown")
+                .build()
         }
     }
 }

@@ -18,11 +18,9 @@ import jakarta.enterprise.context.ApplicationScoped
 @ApplicationScoped
 class TracingMiddleware(
     private val tracer: Tracer,
-) : HandlerMiddleware {
+) {
 
-    override val order: Int = 20
-
-    override suspend fun invoke(
+    suspend fun invoke(
         context: TaskExecutionContext,
         next: suspend (TaskExecutionContext) -> TaskResult,
     ): TaskResult {

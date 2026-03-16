@@ -3,48 +3,39 @@ package com.mapreduce.observability.health
 import com.mapreduce.leader.LeaderManager
 import com.mapreduce.queue.worker.StaleTaskReaper
 import jakarta.enterprise.context.ApplicationScoped
+import org.eclipse.microprofile.health.HealthCheck
+import org.eclipse.microprofile.health.HealthCheckResponse
+import org.eclipse.microprofile.health.Liveness
 import java.time.Duration
 import java.time.Instant
 
-/**
- * Health contributor for the stale task reaper (leader only).
- *
- * - **Liveness:** Is the reaper coroutine alive? Compares [StaleTaskReaper.lastScanTimestamp]
- *   against 3× scan interval. Only checked when this pod is the leader.
- *   Returns null for both dimensions if not the leader.
- * - **Readiness:** null (the reaper is not required for readiness).
- */
+@Liveness
 @ApplicationScoped
 class StaleReaperHealthContributor(
     private val staleTaskReaper: StaleTaskReaper,
     private val leaderManager: LeaderManager,
-) : HealthContributor {
+) : HealthCheck {
 
-    override val name: String = "stale-reaper"
-
-    override fun liveness(): ProbeResult? {
-        if (!leaderManager.isActive) return null
+    override fun call(): HealthCheckResponse {
+        val builder = HealthCheckResponse.named("stale-reaper")
+        if (!leaderManager.isActive) {
+            return builder.up().withData("mode", "not-leader").build()
+        }
 
         val scanInterval = staleTaskReaper.scanInterval
         val threshold = scanInterval.multipliedBy(3)
         val elapsed = Duration.between(staleTaskReaper.lastScanTimestamp, Instant.now())
 
         return if (elapsed <= threshold) {
-            ProbeResult(
-                status = HealthStatus.UP,
-                details = mapOf("lastScanAge" to elapsed.seconds),
-            )
+            builder.up()
+                .withData("lastScanAge", elapsed.seconds.toString())
+                .build()
         } else {
-            ProbeResult(
-                status = HealthStatus.DOWN,
-                details = mapOf(
-                    "lastScanAge" to elapsed.seconds,
-                    "threshold" to threshold.seconds,
-                    "reason" to "Reaper hasn't scanned in ${elapsed.seconds}s (threshold ${threshold.seconds}s)",
-                ),
-            )
+            builder.down()
+                .withData("lastScanAge", elapsed.seconds.toString())
+                .withData("threshold", threshold.seconds.toString())
+                .withData("reason", "Reaper hasn't scanned in ${elapsed.seconds}s (threshold ${threshold.seconds}s)")
+                .build()
         }
     }
-
-    override fun readiness(): ProbeResult? = null
 }
