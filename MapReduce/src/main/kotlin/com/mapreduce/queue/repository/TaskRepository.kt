@@ -145,9 +145,7 @@ class TaskRepository(private val jdbi: Jdbi) {
     fun fail(taskId: String, errorMessage: String, retryDelay: Duration? = null, executionGeneration: String? = null): Boolean {
         return jdbi.inTransaction<Boolean, Exception> { h ->
             val fenceClause = if (executionGeneration != null) " AND execution_generation = :gen" else ""
-            val scheduledExpr = if (retryDelay != null)
-                "CURRENT_TIMESTAMP + NUMTODSINTERVAL(:delay, 'SECOND')"
-            else "NULL"
+            val scheduledAt = retryDelay?.let { Instant.now().plusSeconds(it.toSeconds()) }
 
             val update = h.createUpdate(
                 """
@@ -158,14 +156,14 @@ class TaskRepository(private val jdbi: Jdbi) {
                     claimed_by     = CASE WHEN retry_count + 1 < max_retries THEN NULL ELSE claimed_by END,
                     claimed_at     = CASE WHEN retry_count + 1 < max_retries THEN NULL ELSE claimed_at END,
                     last_heartbeat = NULL,
-                    scheduled_at   = CASE WHEN retry_count + 1 < max_retries THEN $scheduledExpr ELSE scheduled_at END
+                    scheduled_at   = CASE WHEN retry_count + 1 < max_retries THEN :scheduledAt ELSE scheduled_at END
                 WHERE task_id = :taskId AND status = 'CLAIMED'$fenceClause
                 """
             )
                 .bind("taskId", taskId)
                 .bind("error", errorMessage.take(4000))
+                .bind("scheduledAt", scheduledAt)
             if (executionGeneration != null) update.bind("gen", executionGeneration)
-            if (retryDelay != null) update.bind("delay", retryDelay.toSeconds())
             val updated = update.execute()
 
             if (updated == 0) return@inTransaction false
@@ -187,9 +185,9 @@ class TaskRepository(private val jdbi: Jdbi) {
     fun requeue(taskId: String, delay: Duration? = null, executionGeneration: String? = null) {
         jdbi.useHandle<Exception> { h ->
             val fenceClause = if (executionGeneration != null) " AND execution_generation = :gen" else ""
-            val scheduledClause = if (delay != null && !delay.isZero)
-                ", scheduled_at = CURRENT_TIMESTAMP + NUMTODSINTERVAL(:delay, 'SECOND')"
-            else ""
+            val hasDelay = delay != null && !delay.isZero
+            val scheduledClause = if (hasDelay) ", scheduled_at = :scheduledAt" else ""
+            val scheduledAt = if (hasDelay) Instant.now().plusSeconds(delay!!.toSeconds()) else null
 
             val update = h.createUpdate(
                 """
@@ -201,7 +199,7 @@ class TaskRepository(private val jdbi: Jdbi) {
                 .bind("taskId", taskId)
 
             if (executionGeneration != null) update.bind("gen", executionGeneration)
-            if (delay != null && !delay.isZero) update.bind("delay", delay.toSeconds())
+            if (hasDelay) update.bind("scheduledAt", scheduledAt)
 
             update.execute()
         }

@@ -63,7 +63,7 @@ class LocalBlobStore : BlobStore {
             throw e
         }
 
-        val uri = "file://${blobFile.toAbsolutePath()}"
+        val uri = blobFile.toAbsolutePath().toUri().toString()
         log.debugf("Wrote blob: %s", uri)
         uri
     }
