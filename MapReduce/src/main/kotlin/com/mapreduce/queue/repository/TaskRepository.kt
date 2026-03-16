@@ -48,7 +48,6 @@ class TaskRepository(private val jdbi: Jdbi) {
      *
      * Filters by subscribed [queues], PENDING status, and scheduled_at.
      * Orders by priority DESC, created_at ASC.
-     * Sets [last_heartbeat] to current timestamp so the reaper can track liveness.
      */
     fun claim(workerId: String, queues: List<String>): Task? {
         if (queues.isEmpty()) return null
@@ -75,7 +74,7 @@ class TaskRepository(private val jdbi: Jdbi) {
             h.createUpdate(
                 """
                 UPDATE task SET status = 'CLAIMED', claimed_by = :workerId,
-                    claimed_at = CURRENT_TIMESTAMP, last_heartbeat = CURRENT_TIMESTAMP,
+                    claimed_at = CURRENT_TIMESTAMP,
                     execution_generation = :generation
                 WHERE task_id = :taskId
                 """
@@ -90,44 +89,19 @@ class TaskRepository(private val jdbi: Jdbi) {
     }
 
     /**
-     * Update heartbeat timestamp for a claimed task.
-     *
-     * Called periodically by the worker loop while a handler is executing.
-     * Fenced by [executionGeneration] to prevent a stale worker from
-     * heartbeating a task that has been reclaimed and reassigned.
-     */
-    fun updateHeartbeat(taskId: String, executionGeneration: String?) {
-        jdbi.useHandle<Exception> { h ->
-            val fenceClause = if (executionGeneration != null) " AND execution_generation = :gen" else ""
-            val update = h.createUpdate(
-                "UPDATE task SET last_heartbeat = CURRENT_TIMESTAMP WHERE task_id = :taskId AND status = 'CLAIMED'$fenceClause"
-            ).bind("taskId", taskId)
-            if (executionGeneration != null) update.bind("gen", executionGeneration)
-            update.execute()
-        }
-    }
-
-    /**
      * Mark a task as COMPLETED. Idempotent — no-op if already completed
      * (supports handlers that complete the task themselves in the same transaction
      * as their side-effects, e.g. map-reduce handlers).
      */
     fun complete(taskId: String, executionGeneration: String? = null) {
         jdbi.useHandle<Exception> { h ->
-            val sql = if (executionGeneration != null) {
+            val fenceClause = if (executionGeneration != null) " AND execution_generation = :gen" else ""
+            val update = h.createUpdate(
                 """
-                UPDATE task SET status = 'COMPLETED', completed_at = CURRENT_TIMESTAMP,
-                    last_heartbeat = NULL
-                WHERE task_id = :taskId AND status = 'CLAIMED' AND execution_generation = :gen
+                UPDATE task SET status = 'COMPLETED', completed_at = CURRENT_TIMESTAMP
+                WHERE task_id = :taskId AND status = 'CLAIMED'$fenceClause
                 """
-            } else {
-                """
-                UPDATE task SET status = 'COMPLETED', completed_at = CURRENT_TIMESTAMP,
-                    last_heartbeat = NULL
-                WHERE task_id = :taskId AND status = 'CLAIMED'
-                """
-            }
-            val update = h.createUpdate(sql).bind("taskId", taskId)
+            ).bind("taskId", taskId)
             if (executionGeneration != null) update.bind("gen", executionGeneration)
             update.execute()
         }
@@ -138,7 +112,6 @@ class TaskRepository(private val jdbi: Jdbi) {
      *
      * Increments retry_count. If retries remain, resets to PENDING (with optional
      * delay via [retryDelay]). Otherwise, moves to DEAD_LETTER.
-     * Clears [last_heartbeat] in all cases since the task is no longer actively claimed.
      *
      * @return `true` if the task was dead-lettered (retries exhausted)
      */
@@ -155,7 +128,6 @@ class TaskRepository(private val jdbi: Jdbi) {
                     status         = CASE WHEN retry_count + 1 < max_retries THEN 'PENDING' ELSE 'DEAD_LETTER' END,
                     claimed_by     = CASE WHEN retry_count + 1 < max_retries THEN NULL ELSE claimed_by END,
                     claimed_at     = CASE WHEN retry_count + 1 < max_retries THEN NULL ELSE claimed_at END,
-                    last_heartbeat = NULL,
                     scheduled_at   = CASE WHEN retry_count + 1 < max_retries THEN :scheduledAt ELSE scheduled_at END
                 WHERE task_id = :taskId AND status = 'CLAIMED'$fenceClause
                 """
@@ -191,8 +163,7 @@ class TaskRepository(private val jdbi: Jdbi) {
 
             val update = h.createUpdate(
                 """
-                UPDATE task SET status = 'PENDING', claimed_by = NULL, claimed_at = NULL,
-                    last_heartbeat = NULL$scheduledClause
+                UPDATE task SET status = 'PENDING', claimed_by = NULL, claimed_at = NULL$scheduledClause
                 WHERE task_id = :taskId AND status = 'CLAIMED'$fenceClause
                 """
             )
@@ -210,8 +181,7 @@ class TaskRepository(private val jdbi: Jdbi) {
         jdbi.useHandle<Exception> { h ->
             h.createUpdate(
                 """
-                UPDATE task SET status = 'DEAD_LETTER', error_message = :reason,
-                    last_heartbeat = NULL
+                UPDATE task SET status = 'DEAD_LETTER', error_message = :reason
                 WHERE task_id = :taskId
                 """
             )
@@ -222,13 +192,13 @@ class TaskRepository(private val jdbi: Jdbi) {
     }
 
     /**
-     * Find stale CLAIMED tasks by heartbeat age.
+     * Find stale CLAIMED tasks by [claimed_at] age.
      *
-     * A task is stale when its [last_heartbeat] is older than [threshold]
-     * (or NULL, which indicates a claimed task that never heartbeated —
-     * defensive handling for migration edge cases).
+     * A task is stale when its [claimed_at] is older than [threshold],
+     * indicating the worker has been executing it beyond the expected
+     * maximum duration.
      *
-     * Results are ordered by heartbeat age descending (oldest first)
+     * Results are ordered by claimed_at ascending (oldest first)
      * and limited to [batchSize] to avoid locking too many rows.
      */
     fun findStaleTasks(threshold: Instant, batchSize: Int = 50): List<Task> =
@@ -237,8 +207,8 @@ class TaskRepository(private val jdbi: Jdbi) {
                 """
                 SELECT * FROM task
                 WHERE status = 'CLAIMED'
-                  AND (last_heartbeat IS NULL OR last_heartbeat < :threshold)
-                ORDER BY last_heartbeat ASC NULLS FIRST
+                  AND claimed_at < :threshold
+                ORDER BY claimed_at ASC
                 FETCH FIRST :batchSize ROWS ONLY
                 """
             )
@@ -251,7 +221,7 @@ class TaskRepository(private val jdbi: Jdbi) {
     /**
      * Reclaim a stale task with fenced writes.
      *
-     * Increments retry_count, clears claim state and heartbeat, then sets
+     * Increments retry_count, clears claim state, then sets
      * status to PENDING or DEAD_LETTER based on remaining retries.
      *
      * The [leaderEpoch] fence prevents a zombie leader from reclaiming
@@ -270,7 +240,6 @@ class TaskRepository(private val jdbi: Jdbi) {
                    SET retry_count    = retry_count + 1,
                        claimed_by     = NULL,
                        claimed_at     = NULL,
-                       last_heartbeat = NULL,
                        error_message  = :error,
                        last_epoch     = :epoch,
                        status         = CASE WHEN retry_count + 1 < max_retries THEN 'PENDING' ELSE 'DEAD_LETTER' END
@@ -375,7 +344,6 @@ class TaskRepository(private val jdbi: Jdbi) {
     /**
      * Release all tasks claimed by this pod back to PENDING.
      * Used during graceful shutdown Phase 3 — no retry count increment.
-     * Clears [last_heartbeat] since tasks are no longer actively claimed.
      *
      * The WHERE clause guards against racing with handlers that complete
      * between the decision to release and the UPDATE execution.
@@ -390,7 +358,6 @@ class TaskRepository(private val jdbi: Jdbi) {
                    SET status         = 'PENDING',
                        claimed_by     = NULL,
                        claimed_at     = NULL,
-                       last_heartbeat = NULL,
                        scheduled_at   = NULL
                  WHERE claimed_by     = :podId
                    AND status         = 'CLAIMED'

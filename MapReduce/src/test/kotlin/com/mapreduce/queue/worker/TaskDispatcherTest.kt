@@ -3,15 +3,13 @@ package com.mapreduce.queue.worker
 import com.mapreduce.config.FrameworkConfig
 import com.mapreduce.queue.model.Task
 import com.mapreduce.queue.model.TaskResult
-import com.mapreduce.queue.pipeline.ErrorClassifierMiddleware
-import com.mapreduce.queue.pipeline.MetricsMiddleware
+import com.mapreduce.queue.pipeline.Middleware
 import com.mapreduce.queue.pipeline.TaskExecutionContext
-import com.mapreduce.queue.pipeline.TimeoutMiddleware
-import com.mapreduce.queue.pipeline.TracingMiddleware
 import com.mapreduce.queue.registry.HandlerRegistry
 import com.mapreduce.queue.repository.TaskRepository
 import com.mapreduce.shutdown.ShutdownCoordinator
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
+import jakarta.enterprise.inject.Instance
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
@@ -31,14 +29,18 @@ class TaskDispatcherTest {
     private lateinit var workerConfig: FrameworkConfig.WorkerConfig
     private lateinit var taskRepository: TaskRepository
     private lateinit var handlerRegistry: HandlerRegistry
-    private lateinit var metricsMiddleware: MetricsMiddleware
-    private lateinit var tracingMiddleware: TracingMiddleware
-    private lateinit var timeoutMiddleware: TimeoutMiddleware
-    private lateinit var errorClassifierMiddleware: ErrorClassifierMiddleware
     private lateinit var circuitBreaker: PodCircuitBreaker
     private lateinit var shutdownCoordinator: ShutdownCoordinator
     private lateinit var meterRegistry: SimpleMeterRegistry
     private lateinit var dispatcher: TaskDispatcher
+
+    /** A passthrough middleware that just calls next. */
+    private class PassthroughMiddleware(override val order: Int) : Middleware {
+        override suspend fun invoke(
+            context: TaskExecutionContext,
+            next: suspend (TaskExecutionContext) -> TaskResult,
+        ): TaskResult = next(context)
+    }
 
     @BeforeEach
     fun setUp() {
@@ -54,15 +56,18 @@ class TaskDispatcherTest {
         shutdownCoordinator = mock<ShutdownCoordinator>()
         meterRegistry = SimpleMeterRegistry()
 
-        // Middleware mocks that pass through to next
-        metricsMiddleware = mock<MetricsMiddleware>()
-        tracingMiddleware = mock<TracingMiddleware>()
-        timeoutMiddleware = mock<TimeoutMiddleware>()
-        errorClassifierMiddleware = mock<ErrorClassifierMiddleware>()
+        val middlewareInstance = mock<Instance<Middleware>>()
+        val middlewares: MutableList<Middleware> = mutableListOf(
+            PassthroughMiddleware(10),
+            PassthroughMiddleware(20),
+            PassthroughMiddleware(40),
+            PassthroughMiddleware(50),
+        )
+        whenever(middlewareInstance.iterator()).thenReturn(middlewares.iterator())
 
         dispatcher = TaskDispatcher(
             config, taskRepository, handlerRegistry,
-            metricsMiddleware, tracingMiddleware, timeoutMiddleware, errorClassifierMiddleware,
+            middlewareInstance,
             circuitBreaker, shutdownCoordinator, meterRegistry,
         )
     }
@@ -93,7 +98,7 @@ class TaskDispatcherTest {
     @Test
     fun `execute Success completes task and records CB success`() = runTest {
         val task = testTask()
-        stubPassthroughMiddleware(task, TaskResult.Success("done"))
+        stubHandler(task, TaskResult.Success("done"))
 
         dispatcher.execute(task)
 
@@ -107,7 +112,7 @@ class TaskDispatcherTest {
     @Test
     fun `execute Failure fails task and records CB failure`() = runTest {
         val task = testTask()
-        stubPassthroughMiddleware(task, TaskResult.Failure("boom"))
+        stubHandler(task, TaskResult.Failure("boom"))
         whenever(taskRepository.fail(eq("task-1"), eq("boom"), anyOrNull(), eq("gen-1")))
             .thenReturn(false)
 
@@ -123,7 +128,7 @@ class TaskDispatcherTest {
     @Test
     fun `execute DeadLetter dead-letters task and records CB failure`() = runTest {
         val task = testTask()
-        stubPassthroughMiddleware(task, TaskResult.DeadLetter("poison pill"))
+        stubHandler(task, TaskResult.DeadLetter("poison pill"))
 
         dispatcher.execute(task)
 
@@ -137,7 +142,7 @@ class TaskDispatcherTest {
     fun `execute Retry with consumeRetry true fails task and records CB failure`() = runTest {
         val task = testTask()
         val retry = TaskResult.Retry(delay = Duration.ofSeconds(5), reason = "transient", consumeRetry = true)
-        stubPassthroughMiddleware(task, retry)
+        stubHandler(task, retry)
         whenever(taskRepository.fail(eq("task-1"), eq("transient"), eq(Duration.ofSeconds(5)), eq("gen-1")))
             .thenReturn(false)
 
@@ -153,7 +158,7 @@ class TaskDispatcherTest {
     fun `execute Retry with consumeRetry false requeues without CB recording`() = runTest {
         val task = testTask()
         val retry = TaskResult.Retry(delay = Duration.ofSeconds(2), reason = "cb-requeue", consumeRetry = false)
-        stubPassthroughMiddleware(task, retry)
+        stubHandler(task, retry)
 
         dispatcher.execute(task)
 
@@ -182,39 +187,10 @@ class TaskDispatcherTest {
         createdAt = Instant.now(),
     )
 
-    /**
-     * Stubs all 4 middleware mocks to pass through to the innermost handler,
-     * and stubs the handler registry to return a handler that produces [result].
-     */
-    private fun stubPassthroughMiddleware(task: Task, result: TaskResult) {
+    private fun stubHandler(task: Task, result: TaskResult) {
         val handler = mock<com.mapreduce.queue.spi.TaskHandler>()
         whenever(handler.handlerName).thenReturn(task.handler)
         whenever(handlerRegistry.resolve(task.handler)).thenReturn(handler)
-
-        // Each middleware just calls next
-        kotlinx.coroutines.runBlocking {
-            whenever(metricsMiddleware.invoke(any(), any())).thenAnswer { inv ->
-                val ctx = inv.getArgument<TaskExecutionContext>(0)
-                val next = inv.getArgument<suspend (TaskExecutionContext) -> TaskResult>(1)
-                kotlinx.coroutines.runBlocking { next(ctx) }
-            }
-            whenever(tracingMiddleware.invoke(any(), any())).thenAnswer { inv ->
-                val ctx = inv.getArgument<TaskExecutionContext>(0)
-                val next = inv.getArgument<suspend (TaskExecutionContext) -> TaskResult>(1)
-                kotlinx.coroutines.runBlocking { next(ctx) }
-            }
-            whenever(timeoutMiddleware.invoke(any(), any())).thenAnswer { inv ->
-                val ctx = inv.getArgument<TaskExecutionContext>(0)
-                val next = inv.getArgument<suspend (TaskExecutionContext) -> TaskResult>(1)
-                kotlinx.coroutines.runBlocking { next(ctx) }
-            }
-            whenever(errorClassifierMiddleware.invoke(any(), any())).thenAnswer { inv ->
-                val ctx = inv.getArgument<TaskExecutionContext>(0)
-                val next = inv.getArgument<suspend (TaskExecutionContext) -> TaskResult>(1)
-                kotlinx.coroutines.runBlocking { next(ctx) }
-            }
-        }
-
         kotlinx.coroutines.runBlocking {
             whenever(handler.handle(any())).thenReturn(result)
         }

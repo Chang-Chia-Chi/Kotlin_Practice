@@ -31,7 +31,6 @@ data class Task(
     @ColumnName("completed_at") val completedAt: Instant? = null,
     @ColumnName("execution_generation") val executionGeneration: String? = null,
     val speculative: Int = 0,
-    @ColumnName("last_heartbeat") val lastHeartbeat: Instant? = null,
     @ColumnName("last_epoch") val lastEpoch: Long = 0,
 )
 

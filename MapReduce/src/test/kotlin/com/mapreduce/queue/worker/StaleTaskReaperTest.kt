@@ -8,11 +8,8 @@ import com.mapreduce.queue.repository.TaskRepository
 import com.mapreduce.shutdown.ShutdownCoordinator
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import org.junit.jupiter.api.Assertions.assertEquals
-import org.junit.jupiter.api.Assertions.assertThrows
-import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
-import java.lang.reflect.InvocationTargetException
 import org.mockito.kotlin.any
 import org.mockito.kotlin.eq
 import org.mockito.kotlin.mock
@@ -26,7 +23,6 @@ class StaleTaskReaperTest {
 
     private lateinit var config: FrameworkConfig
     private lateinit var reaperConfig: FrameworkConfig.ReaperConfig
-    private lateinit var heartbeatConfig: FrameworkConfig.HeartbeatConfig
     private lateinit var taskRepository: TaskRepository
     private lateinit var leaderManager: LeaderManager
     private lateinit var shutdownCoordinator: ShutdownCoordinator
@@ -37,13 +33,10 @@ class StaleTaskReaperTest {
     fun setUp() {
         config = mock<FrameworkConfig>()
         reaperConfig = mock<FrameworkConfig.ReaperConfig>()
-        heartbeatConfig = mock<FrameworkConfig.HeartbeatConfig>()
         whenever(config.reaper()).thenReturn(reaperConfig)
-        whenever(config.heartbeat()).thenReturn(heartbeatConfig)
         whenever(reaperConfig.scanInterval()).thenReturn(Duration.ofSeconds(30))
-        whenever(reaperConfig.staleThreshold()).thenReturn(Duration.ofSeconds(90))
+        whenever(reaperConfig.staleThreshold()).thenReturn(Duration.ofMinutes(5))
         whenever(reaperConfig.batchSize()).thenReturn(50)
-        whenever(heartbeatConfig.interval()).thenReturn(Duration.ofSeconds(30))
 
         taskRepository = mock<TaskRepository>()
         leaderManager = mock<LeaderManager>()
@@ -58,28 +51,7 @@ class StaleTaskReaperTest {
         )
     }
 
-    // ── Config validation ─────────────────────────────────────────
-
-    @Test
-    fun `validateConfig passes when stale-threshold equals 3x heartbeat`() {
-        whenever(heartbeatConfig.interval()).thenReturn(Duration.ofSeconds(30))
-        whenever(reaperConfig.staleThreshold()).thenReturn(Duration.ofSeconds(90))
-
-        invokeValidateConfig()
-    }
-
-    @Test
-    fun `validateConfig fails when stale-threshold less than 3x heartbeat`() {
-        whenever(heartbeatConfig.interval()).thenReturn(Duration.ofSeconds(30))
-        whenever(reaperConfig.staleThreshold()).thenReturn(Duration.ofSeconds(60))
-
-        val ex = assertThrows(InvocationTargetException::class.java) {
-            invokeValidateConfig()
-        }
-        assertTrue(ex.cause is IllegalArgumentException)
-    }
-
-    // ── Reap logic ────────────────────────────────────────────────
+    // ── Reap logic ────────────────────────────────────────────────────
 
     @Test
     fun `reap with no stale tasks is a no-op`() {
@@ -169,7 +141,7 @@ class StaleTaskReaperTest {
         assertEquals(1, scanTimer.count())
     }
 
-    // ── helpers ───────────────────────────────────────────────────
+    // ── helpers ───────────────────────────────────────────────────────
 
     private fun staleTask(
         taskId: String,
@@ -184,21 +156,14 @@ class StaleTaskReaperTest {
         payload = "{}",
         status = TaskStatus.CLAIMED,
         claimedBy = claimedBy,
-        claimedAt = Instant.now().minus(Duration.ofMinutes(5)),
-        lastHeartbeat = Instant.now().minus(Duration.ofMinutes(3)),
+        claimedAt = Instant.now().minus(Duration.ofMinutes(10)),
         retryCount = retryCount,
         maxRetries = maxRetries,
-        createdAt = Instant.now().minus(Duration.ofMinutes(10)),
+        createdAt = Instant.now().minus(Duration.ofMinutes(15)),
     )
 
     private fun invokeReap() {
         val method = StaleTaskReaper::class.java.getDeclaredMethod("reap")
-        method.isAccessible = true
-        method.invoke(reaper)
-    }
-
-    private fun invokeValidateConfig() {
-        val method = StaleTaskReaper::class.java.getDeclaredMethod("validateConfig")
         method.isAccessible = true
         method.invoke(reaper)
     }

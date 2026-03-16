@@ -1,5 +1,6 @@
 package com.mapreduce.mr.handler
 
+import com.fasterxml.jackson.databind.ObjectMapper
 import com.mapreduce.mr.repository.JobRepository
 import com.mapreduce.mr.shuffle.BlobStore
 import com.mapreduce.mr.spi.MapReduceDefinition
@@ -36,7 +37,7 @@ class ReduceTaskHandlerTest {
         blobStore = mock()
 
         whenever(definition.jobType).thenReturn("word-count")
-        handler = ReduceTaskHandler(definition, jobRepository, blobStore)
+        handler = ReduceTaskHandler(definition, jobRepository, blobStore, ObjectMapper())
     }
 
     @Test

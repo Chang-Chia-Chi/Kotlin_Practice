@@ -31,14 +31,16 @@ import kotlin.random.Random
 @ApplicationScoped
 class ErrorClassifierMiddleware(
     private val handlerRegistry: HandlerRegistry,
-) {
+) : Middleware {
 
     private val log = Logger.getLogger(ErrorClassifierMiddleware::class.java)
+
+    override val order: Int = 50
 
     /** Cached per-handler classification config. */
     private val classificationCache = ConcurrentHashMap<String, ClassificationConfig>()
 
-    suspend fun invoke(
+    override suspend fun invoke(
         context: TaskExecutionContext,
         next: suspend (TaskExecutionContext) -> TaskResult,
     ): TaskResult =

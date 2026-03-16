@@ -21,8 +21,12 @@ import java.time.Duration
 import java.time.Instant
 
 /**
- * Leader-only reaper that reclaims stale CLAIMED tasks using heartbeat-based
- * detection and fenced writes.
+ * Leader-only reaper that reclaims stale CLAIMED tasks using
+ * [claimed_at]-based detection and fenced writes.
+ *
+ * A task is considered stale when it has been CLAIMED longer than
+ * the configured [stale-threshold]. This threshold should exceed
+ * the maximum expected task execution time (pipeline timeout).
  */
 @ApplicationScoped
 class StaleTaskReaper(
@@ -45,8 +49,6 @@ class StaleTaskReaper(
     val scanInterval: Duration get() = config.reaper().scanInterval()
 
     fun onStart(@Observes ev: StartupEvent) {
-        validateConfig()
-
         shutdownCoordinator.registerLeaderScopeCallback { scope.cancel() }
 
         val interval = config.reaper().scanInterval().toMillis()
@@ -66,16 +68,6 @@ class StaleTaskReaper(
         }
     }
 
-    private fun validateConfig() {
-        val heartbeatInterval = config.heartbeat().interval()
-        val staleThreshold = config.reaper().staleThreshold()
-        val minThreshold = heartbeatInterval.multipliedBy(3)
-        require(staleThreshold >= minThreshold) {
-            "mapreduce.reaper.stale-threshold ($staleThreshold) must be >= 3× " +
-                "mapreduce.heartbeat.interval ($heartbeatInterval) = $minThreshold"
-        }
-    }
-
     private fun reap() {
         val scanStart = System.nanoTime()
         val threshold = Instant.now().minus(config.reaper().staleThreshold())
@@ -88,12 +80,8 @@ class StaleTaskReaper(
         var deadLetteredCount = 0
 
         for (task in staleTasks) {
-            val staleAge = if (task.lastHeartbeat != null)
-                Duration.between(task.lastHeartbeat, Instant.now())
-            else
-                Duration.between(task.claimedAt ?: Instant.now(), Instant.now())
-
-            val errorMessage = "Reclaimed: heartbeat stale (pod: ${task.claimedBy ?: "unknown"})"
+            val staleAge = Duration.between(task.claimedAt ?: Instant.now(), Instant.now())
+            val errorMessage = "Reclaimed: task stale (pod: ${task.claimedBy ?: "unknown"})"
 
             val result = taskRepository.reclaimStaleTask(
                 task.taskId, leaderEpoch, errorMessage,

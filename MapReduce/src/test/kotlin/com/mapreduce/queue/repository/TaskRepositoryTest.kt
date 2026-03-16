@@ -39,10 +39,10 @@ class TaskRepositoryTest {
         priority: Int = 0,
         groupId: String? = null,
         claimedBy: String? = null,
+        claimedAt: Instant? = null,
         retryCount: Int = 0,
         maxRetries: Int = 3,
         executionGeneration: String? = null,
-        lastHeartbeat: Instant? = null,
         lastEpoch: Long = 0,
         scheduledAt: Instant? = null,
         errorMessage: String? = null,
@@ -51,11 +51,11 @@ class TaskRepositoryTest {
             h.createUpdate(
                 """
                 INSERT INTO task (task_id, handler, queue, payload, status, priority,
-                    group_id, claimed_by, retry_count, max_retries, execution_generation,
-                    last_heartbeat, last_epoch, scheduled_at, error_message, created_at)
+                    group_id, claimed_by, claimed_at, retry_count, max_retries, execution_generation,
+                    last_epoch, scheduled_at, error_message, created_at)
                 VALUES (:taskId, :handler, :queue, :payload, :status, :priority,
-                    :groupId, :claimedBy, :retryCount, :maxRetries, :gen,
-                    :heartbeat, :epoch, :scheduledAt, :errorMessage, CURRENT_TIMESTAMP)
+                    :groupId, :claimedBy, :claimedAt, :retryCount, :maxRetries, :gen,
+                    :epoch, :scheduledAt, :errorMessage, CURRENT_TIMESTAMP)
                 """
             )
                 .bind("taskId", taskId)
@@ -66,10 +66,10 @@ class TaskRepositoryTest {
                 .bind("priority", priority)
                 .bind("groupId", groupId)
                 .bind("claimedBy", claimedBy)
+                .bind("claimedAt", claimedAt)
                 .bind("retryCount", retryCount)
                 .bind("maxRetries", maxRetries)
                 .bind("gen", executionGeneration)
-                .bind("heartbeat", lastHeartbeat)
                 .bind("epoch", lastEpoch)
                 .bind("scheduledAt", scheduledAt)
                 .bind("errorMessage", errorMessage)
@@ -166,7 +166,6 @@ class TaskRepositoryTest {
             assertEquals(TaskStatus.CLAIMED, persisted.status)
             assertEquals("worker-1", persisted.claimedBy)
             assertNotNull(persisted.claimedAt)
-            assertNotNull(persisted.lastHeartbeat)
         }
 
         @Test
@@ -225,7 +224,6 @@ class TaskRepositoryTest {
             val task = repo.findById("t-1")!!
             assertEquals(TaskStatus.COMPLETED, task.status)
             assertNotNull(task.completedAt)
-            assertNull(task.lastHeartbeat)
         }
 
         @Test
@@ -272,7 +270,6 @@ class TaskRepositoryTest {
             assertEquals("PENDING", readStatus("t-1"))
 
             val task = repo.findById("t-1")!!
-            assertNull(task.lastHeartbeat)
             assertNull(task.claimedBy)
             assertNull(task.claimedAt)
         }
@@ -344,7 +341,6 @@ class TaskRepositoryTest {
             assertEquals(1, task.retryCount) // unchanged
             assertNull(task.claimedBy)
             assertNull(task.claimedAt)
-            assertNull(task.lastHeartbeat)
         }
 
         @Test
@@ -387,7 +383,6 @@ class TaskRepositoryTest {
             val task = repo.findById("t-1")!!
             assertEquals(TaskStatus.DEAD_LETTER, task.status)
             assertEquals("unrecognized handler: bad.handler", task.errorMessage)
-            assertNull(task.lastHeartbeat)
         }
 
         @Test
@@ -406,10 +401,10 @@ class TaskRepositoryTest {
     inner class FindStaleTasks {
 
         @Test
-        fun `returns tasks with old heartbeat`() {
+        fun `returns tasks with old claimed_at`() {
             val staleTime = Instant.now().minus(10, ChronoUnit.MINUTES)
-            insertTask("stale-1", status = TaskStatus.CLAIMED, claimedBy = "w", lastHeartbeat = staleTime)
-            insertTask("stale-2", status = TaskStatus.CLAIMED, claimedBy = "w", lastHeartbeat = staleTime)
+            insertTask("stale-1", status = TaskStatus.CLAIMED, claimedBy = "w", claimedAt = staleTime)
+            insertTask("stale-2", status = TaskStatus.CLAIMED, claimedBy = "w", claimedAt = staleTime)
 
             val threshold = Instant.now().minus(5, ChronoUnit.MINUTES)
             val stale = repo.findStaleTasks(threshold)
@@ -419,18 +414,8 @@ class TaskRepositoryTest {
         }
 
         @Test
-        fun `returns CLAIMED tasks with null heartbeat`() {
-            insertTask("null-hb", status = TaskStatus.CLAIMED, claimedBy = "w", lastHeartbeat = null)
-
-            val stale = repo.findStaleTasks(Instant.now())
-            assertEquals(1, stale.size)
-            assertEquals("null-hb", stale[0].taskId)
-        }
-
-        @Test
-        fun `does not return tasks with recent heartbeat`() {
-            val recentTime = Instant.now()
-            insertTask("fresh", status = TaskStatus.CLAIMED, claimedBy = "w", lastHeartbeat = recentTime)
+        fun `does not return tasks with recent claimed_at`() {
+            insertTask("fresh", status = TaskStatus.CLAIMED, claimedBy = "w", claimedAt = Instant.now())
 
             val threshold = Instant.now().minus(5, ChronoUnit.MINUTES)
             val stale = repo.findStaleTasks(threshold)
@@ -442,7 +427,7 @@ class TaskRepositoryTest {
         fun `respects batchSize limit`() {
             val staleTime = Instant.now().minus(10, ChronoUnit.MINUTES)
             repeat(5) { i ->
-                insertTask("stale-$i", status = TaskStatus.CLAIMED, claimedBy = "w", lastHeartbeat = staleTime)
+                insertTask("stale-$i", status = TaskStatus.CLAIMED, claimedBy = "w", claimedAt = staleTime)
             }
 
             val stale = repo.findStaleTasks(Instant.now(), batchSize = 2)
@@ -456,7 +441,7 @@ class TaskRepositoryTest {
             insertTask("pending", status = TaskStatus.PENDING)
             insertTask("completed", status = TaskStatus.COMPLETED)
             insertTask("dead", status = TaskStatus.DEAD_LETTER)
-            insertTask("claimed", status = TaskStatus.CLAIMED, claimedBy = "w", lastHeartbeat = staleTime)
+            insertTask("claimed", status = TaskStatus.CLAIMED, claimedBy = "w", claimedAt = staleTime)
 
             val threshold = Instant.now()
             val stale = repo.findStaleTasks(threshold)
@@ -488,7 +473,6 @@ class TaskRepositoryTest {
             assertEquals(1, task.retryCount)
             assertNull(task.claimedBy)
             assertNull(task.claimedAt)
-            assertNull(task.lastHeartbeat)
             assertEquals("pod died", task.errorMessage)
             assertEquals(5L, task.lastEpoch)
         }
@@ -622,7 +606,6 @@ class TaskRepositoryTest {
             assertEquals(TaskStatus.PENDING, t1.status)
             assertNull(t1.claimedBy)
             assertNull(t1.claimedAt)
-            assertNull(t1.lastHeartbeat)
             assertNull(t1.scheduledAt)
 
             // pod-B task unaffected
@@ -634,56 +617,6 @@ class TaskRepositoryTest {
             insertTask("t-1", status = TaskStatus.CLAIMED, claimedBy = "pod-B")
 
             assertEquals(0, repo.releaseTasksByPod("pod-A"))
-        }
-    }
-
-    // ── Heartbeat ───────────────────────────────────────────────────────
-
-    @Nested
-    inner class UpdateHeartbeat {
-
-        @Test
-        fun `updates last_heartbeat for claimed task`() {
-            insertTask("t-1", status = TaskStatus.CLAIMED, claimedBy = "w", lastHeartbeat = null)
-
-            repo.updateHeartbeat("t-1", executionGeneration = null)
-
-            val task = repo.findById("t-1")!!
-            assertNotNull(task.lastHeartbeat)
-        }
-
-        @Test
-        fun `with matching execution_generation updates heartbeat`() {
-            insertTask(
-                "t-1", status = TaskStatus.CLAIMED, claimedBy = "w",
-                executionGeneration = "gen-A", lastHeartbeat = null,
-            )
-
-            repo.updateHeartbeat("t-1", executionGeneration = "gen-A")
-
-            assertNotNull(repo.findById("t-1")!!.lastHeartbeat)
-        }
-
-        @Test
-        fun `with mismatched execution_generation -- no-op`() {
-            insertTask(
-                "t-1", status = TaskStatus.CLAIMED, claimedBy = "w",
-                executionGeneration = "gen-A", lastHeartbeat = null,
-            )
-
-            repo.updateHeartbeat("t-1", executionGeneration = "gen-WRONG")
-
-            // Heartbeat should still be null -- update was fenced out
-            assertNull(repo.findById("t-1")!!.lastHeartbeat)
-        }
-
-        @Test
-        fun `does not update non-CLAIMED tasks`() {
-            insertTask("t-1", status = TaskStatus.PENDING, lastHeartbeat = null)
-
-            repo.updateHeartbeat("t-1", executionGeneration = null)
-
-            assertNull(repo.findById("t-1")!!.lastHeartbeat)
         }
     }
 

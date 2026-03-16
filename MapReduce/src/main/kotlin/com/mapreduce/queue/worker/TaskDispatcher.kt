@@ -3,12 +3,9 @@ package com.mapreduce.queue.worker
 import com.mapreduce.config.FrameworkConfig
 import com.mapreduce.queue.model.Task
 import com.mapreduce.queue.model.TaskResult
-import com.mapreduce.queue.pipeline.ErrorClassifierMiddleware
-import com.mapreduce.queue.pipeline.MetricsMiddleware
-import com.mapreduce.queue.pipeline.TaskExecutionContext
-import com.mapreduce.queue.pipeline.TimeoutMiddleware
-import com.mapreduce.queue.pipeline.TracingMiddleware
 import com.mapreduce.queue.model.TaskContext
+import com.mapreduce.queue.pipeline.Middleware
+import com.mapreduce.queue.pipeline.TaskExecutionContext
 import com.mapreduce.queue.registry.HandlerRegistry
 import com.mapreduce.queue.repository.TaskRepository
 import com.mapreduce.queue.spi.TaskHandler
@@ -16,9 +13,8 @@ import com.mapreduce.shutdown.ShutdownCoordinator
 import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.Timer
 import jakarta.enterprise.context.ApplicationScoped
+import jakarta.enterprise.inject.Instance
 import org.jboss.logging.Logger
-import java.time.Duration
-import java.time.Instant
 import java.util.concurrent.TimeUnit
 
 /**
@@ -30,16 +26,14 @@ class TaskDispatcher(
     private val config: FrameworkConfig,
     private val taskRepository: TaskRepository,
     private val handlerRegistry: HandlerRegistry,
-    private val metricsMiddleware: MetricsMiddleware,
-    private val tracingMiddleware: TracingMiddleware,
-    private val timeoutMiddleware: TimeoutMiddleware,
-    private val errorClassifierMiddleware: ErrorClassifierMiddleware,
+    middlewares: Instance<Middleware>,
     private val circuitBreaker: PodCircuitBreaker,
     private val shutdownCoordinator: ShutdownCoordinator,
     private val meterRegistry: MeterRegistry,
 ) {
 
     private val log = Logger.getLogger(TaskDispatcher::class.java)
+    private val pipeline: List<Middleware> = middlewares.toList().sortedBy { it.order }
 
     /** Try to claim a task from subscribed queues. Returns null if no work available. */
     fun claimTask(): Task? =
@@ -86,15 +80,12 @@ class TaskDispatcher(
         processResult(task, result, gen, start)
     }
 
-    private fun buildChain(handler: TaskHandler): suspend (TaskExecutionContext) -> TaskResult = { ctx ->
-        metricsMiddleware.invoke(ctx) { c1 ->
-            tracingMiddleware.invoke(c1) { c2 ->
-                timeoutMiddleware.invoke(c2) { c3 ->
-                    errorClassifierMiddleware.invoke(c3) { c4 ->
-                        handler.handle(c4.taskContext)
-                    }
-                }
-            }
+    private fun buildChain(handler: TaskHandler): suspend (TaskExecutionContext) -> TaskResult {
+        val terminal: suspend (TaskExecutionContext) -> TaskResult = { ctx ->
+            handler.handle(ctx.taskContext)
+        }
+        return pipeline.foldRight(terminal) { middleware, next ->
+            { ctx -> middleware.invoke(ctx, next) }
         }
     }
 

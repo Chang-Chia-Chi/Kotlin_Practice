@@ -12,6 +12,7 @@ import com.mapreduce.queue.model.TaskStatus
 import com.mapreduce.queue.repository.TaskRepository
 import com.mapreduce.shutdown.ShutdownCoordinator
 import io.micrometer.core.instrument.MeterRegistry
+import io.micrometer.core.instrument.Tag
 import io.micrometer.core.instrument.Timer
 import io.quarkus.runtime.StartupEvent
 import jakarta.enterprise.context.ApplicationScoped
@@ -27,7 +28,9 @@ import kotlinx.coroutines.withContext
 import org.jboss.logging.Logger
 import java.time.Duration
 import java.time.Instant
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Leader-only monitoring loop for map-reduce jobs.
@@ -48,7 +51,7 @@ class MapReduceOrchestrator(
 
     private val log = Logger.getLogger(MapReduceOrchestrator::class.java)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-    private val queueDepths = java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicLong>()
+    private val queueDepths = ConcurrentHashMap<String, AtomicLong>()
 
     fun onStart(@Observes ev: StartupEvent) {
         shutdownCoordinator.registerLeaderScopeCallback { scope.cancel() }
@@ -85,10 +88,10 @@ class MapReduceOrchestrator(
             val counts = taskRepository.countPendingByQueue()
             for ((queue, count) in counts) {
                 queueDepths.computeIfAbsent(queue) { q ->
-                    java.util.concurrent.atomic.AtomicLong(0).also { gauge ->
+                    AtomicLong(0).also { gauge ->
                         meterRegistry.gauge(
                             "framework.queue.depth",
-                            listOf(io.micrometer.core.instrument.Tag.of("queue_name", q)),
+                            listOf(Tag.of("queue_name", q)),
                             gauge,
                         ) { it.toDouble() }
                     }

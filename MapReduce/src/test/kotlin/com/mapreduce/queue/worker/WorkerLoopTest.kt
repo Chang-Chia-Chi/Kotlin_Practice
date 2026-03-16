@@ -3,7 +3,6 @@ package com.mapreduce.queue.worker
 import com.mapreduce.config.FrameworkConfig
 import com.mapreduce.queue.model.Task
 import com.mapreduce.queue.model.TaskStatus
-import com.mapreduce.queue.repository.TaskRepository
 import com.mapreduce.shutdown.ShutdownCoordinator
 import com.mapreduce.shutdown.ShutdownState
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
@@ -31,9 +30,7 @@ class WorkerLoopTest {
 
     private lateinit var config: FrameworkConfig
     private lateinit var workerConfig: FrameworkConfig.WorkerConfig
-    private lateinit var heartbeatConfig: FrameworkConfig.HeartbeatConfig
     private lateinit var dispatcher: TaskDispatcher
-    private lateinit var taskRepository: TaskRepository
     private lateinit var circuitBreaker: PodCircuitBreaker
     private lateinit var shutdownCoordinator: ShutdownCoordinator
     private lateinit var meterRegistry: SimpleMeterRegistry
@@ -58,27 +55,23 @@ class WorkerLoopTest {
     fun setUp() {
         config = mock()
         workerConfig = mock()
-        heartbeatConfig = mock()
         dispatcher = mock()
-        taskRepository = mock()
         circuitBreaker = mock()
         shutdownCoordinator = mock()
         meterRegistry = SimpleMeterRegistry()
 
         whenever(config.worker()).thenReturn(workerConfig)
-        whenever(config.heartbeat()).thenReturn(heartbeatConfig)
         whenever(workerConfig.pollInterval()).thenReturn(Duration.ofMillis(20))
         whenever(workerConfig.bulkheadSize()).thenReturn(4)
         whenever(workerConfig.id()).thenReturn("test-pod")
         whenever(workerConfig.queues()).thenReturn(listOf("default"))
-        whenever(heartbeatConfig.interval()).thenReturn(Duration.ofMillis(50))
 
         whenever(shutdownCoordinator.state).thenReturn(ShutdownState.RUNNING)
         whenever(shutdownCoordinator.isShuttingDown).thenReturn(false)
         whenever(circuitBreaker.isTripped).thenReturn(false)
 
         workerLoop = WorkerLoop(
-            config, dispatcher, taskRepository, circuitBreaker,
+            config, dispatcher, circuitBreaker,
             shutdownCoordinator, meterRegistry,
         )
     }
@@ -91,7 +84,7 @@ class WorkerLoopTest {
         runBlocking { block(verify(dispatcher, mode)) }
     }
 
-    // ── Happy path ────────────────────────────────────────────────
+    // ── Happy path ────────────────────────────────────────────────────
 
     @Nested
     inner class HappyPath {
@@ -138,7 +131,7 @@ class WorkerLoopTest {
         }
     }
 
-    // ── Circuit breaker ───────────────────────────────────────────
+    // ── Circuit breaker ───────────────────────────────────────────────
 
     @Nested
     inner class CircuitBreakerBehavior {
@@ -170,7 +163,7 @@ class WorkerLoopTest {
         }
     }
 
-    // ── Shutdown coordination ─────────────────────────────────────
+    // ── Shutdown coordination ─────────────────────────────────────────
 
     @Nested
     inner class ShutdownBehavior {
@@ -242,7 +235,7 @@ class WorkerLoopTest {
         }
     }
 
-    // ── Bulkhead ──────────────────────────────────────────────────
+    // ── Bulkhead ──────────────────────────────────────────────────────
 
     @Nested
     inner class BulkheadBehavior {
@@ -251,7 +244,7 @@ class WorkerLoopTest {
         fun `limits concurrent tasks to bulkhead size`() {
             whenever(workerConfig.bulkheadSize()).thenReturn(2)
             workerLoop = WorkerLoop(
-                config, dispatcher, taskRepository, circuitBreaker,
+                config, dispatcher, circuitBreaker,
                 shutdownCoordinator, meterRegistry,
             )
 
@@ -302,59 +295,7 @@ class WorkerLoopTest {
         }
     }
 
-    // ── Heartbeat ─────────────────────────────────────────────────
-
-    @Nested
-    inner class HeartbeatBehavior {
-
-        @Test
-        fun `sends heartbeats during task execution`() {
-            val latch = CountDownLatch(1)
-            val claimed = task(executionGeneration = "gen-hb")
-            whenever(dispatcher.claimTask())
-                .thenReturn(claimed)
-                .thenReturn(null)
-            runBlocking {
-                whenever(dispatcher.execute(any())).thenAnswer {
-                    Thread.sleep(150)
-                    latch.countDown()
-                    Unit
-                }
-            }
-
-            start()
-
-            assertTrue(latch.await(3, TimeUnit.SECONDS))
-            await.atMost(2, TimeUnit.SECONDS).untilAsserted {
-                verify(taskRepository, atLeast(1)).updateHeartbeat("t-1", "gen-hb")
-            }
-        }
-
-        @Test
-        fun `heartbeat failure is non-fatal`() {
-            val latch = CountDownLatch(1)
-            val claimed = task()
-            whenever(dispatcher.claimTask())
-                .thenReturn(claimed)
-                .thenReturn(null)
-            whenever(taskRepository.updateHeartbeat(any(), any()))
-                .thenThrow(RuntimeException("DB timeout"))
-            runBlocking {
-                whenever(dispatcher.execute(any())).thenAnswer {
-                    Thread.sleep(150)
-                    latch.countDown()
-                    Unit
-                }
-            }
-
-            start()
-
-            assertTrue(latch.await(3, TimeUnit.SECONDS))
-            verifySuspend { execute(claimed) }
-        }
-    }
-
-    // ── Error handling ────────────────────────────────────────────
+    // ── Error handling ────────────────────────────────────────────────
 
     @Nested
     inner class ErrorHandling {

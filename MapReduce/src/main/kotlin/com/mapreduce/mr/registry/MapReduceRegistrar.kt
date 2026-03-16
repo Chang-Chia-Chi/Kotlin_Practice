@@ -1,5 +1,6 @@
 package com.mapreduce.mr.registry
 
+import com.fasterxml.jackson.databind.ObjectMapper
 import com.mapreduce.mr.handler.MapTaskHandler
 import com.mapreduce.mr.handler.ReduceTaskHandler
 import com.mapreduce.mr.repository.JobRepository
@@ -27,6 +28,7 @@ class MapReduceRegistrar(
     private val handlerRegistry: HandlerRegistry,
     private val jobRepository: JobRepository,
     private val blobStore: BlobStore,
+    private val objectMapper: ObjectMapper,
 ) {
 
     private val log = Logger.getLogger(MapReduceRegistrar::class.java)
@@ -36,7 +38,7 @@ class MapReduceRegistrar(
         definitions.forEach { def ->
             val unsafe = def.unsafeCast()
             handlerRegistry.register(MapTaskHandler(unsafe, jobRepository, blobStore))
-            handlerRegistry.register(ReduceTaskHandler(unsafe, jobRepository, blobStore))
+            handlerRegistry.register(ReduceTaskHandler(unsafe, jobRepository, blobStore, objectMapper))
             definitionMap[def.jobType] = def
             log.infof("Registered MR definition: %s → [%s.map, %s.reduce]",
                 def.jobType, def.jobType, def.jobType)

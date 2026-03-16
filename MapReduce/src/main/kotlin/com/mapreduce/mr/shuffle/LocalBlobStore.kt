@@ -7,10 +7,10 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.withContext
 import org.jboss.logging.Logger
-import java.io.BufferedReader
-import java.io.BufferedWriter
+import java.net.URI
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.StandardCopyOption
 import java.nio.file.StandardOpenOption
 
 /**
@@ -45,20 +45,15 @@ class LocalBlobStore : BlobStore {
         val blobFile = jobDir.resolve("${taskId}_p${partitionHash}.ndjson")
         val tempFile = jobDir.resolve("${taskId}_p${partitionHash}.tmp")
 
-        val writer = Files.newBufferedWriter(
-            tempFile,
-            StandardOpenOption.CREATE,
-            StandardOpenOption.TRUNCATE_EXISTING,
-        )
         try {
-            data.collect { record ->
-                writer.write(record)
-                writer.newLine()
+            Files.newBufferedWriter(tempFile, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING).use { writer ->
+                data.collect { record ->
+                    writer.write(record)
+                    writer.newLine()
+                }
             }
-            writer.close()
-            Files.move(tempFile, blobFile, java.nio.file.StandardCopyOption.ATOMIC_MOVE)
+            Files.move(tempFile, blobFile, StandardCopyOption.ATOMIC_MOVE)
         } catch (e: Exception) {
-            writer.close()
             Files.deleteIfExists(tempFile)
             throw e
         }
@@ -69,18 +64,10 @@ class LocalBlobStore : BlobStore {
     }
 
     override suspend fun read(blobUri: String): Flow<String> {
-        val path = Path.of(java.net.URI.create(blobUri))
+        val path = Path.of(URI.create(blobUri))
         return flow {
-            var reader: BufferedReader? = null
-            try {
-                reader = Files.newBufferedReader(path)
-                var line = reader.readLine()
-                while (line != null) {
-                    emit(line)
-                    line = reader.readLine()
-                }
-            } finally {
-                reader?.close()
+            Files.newBufferedReader(path).use { reader ->
+                reader.lineSequence().forEach { emit(it) }
             }
         }.flowOn(Dispatchers.IO)
     }

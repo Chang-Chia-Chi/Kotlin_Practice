@@ -27,14 +27,16 @@ import java.util.concurrent.ConcurrentHashMap
 class TimeoutMiddleware(
     private val config: FrameworkConfig,
     private val handlerRegistry: HandlerRegistry,
-) {
+) : Middleware {
 
     private val log = Logger.getLogger(TimeoutMiddleware::class.java)
+
+    override val order: Int = 40
 
     /** Cached timeout millis per handler name. */
     private val timeouts = ConcurrentHashMap<String, Long>()
 
-    suspend fun invoke(
+    override suspend fun invoke(
         context: TaskExecutionContext,
         next: suspend (TaskExecutionContext) -> TaskResult,
     ): TaskResult {

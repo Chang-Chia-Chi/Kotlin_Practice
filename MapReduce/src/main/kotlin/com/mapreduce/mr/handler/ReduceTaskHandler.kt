@@ -1,5 +1,6 @@
 package com.mapreduce.mr.handler
 
+import com.fasterxml.jackson.databind.ObjectMapper
 import com.mapreduce.mr.repository.JobRepository
 import com.mapreduce.mr.shuffle.BlobStore
 import com.mapreduce.mr.spi.MapReduceDefinition
@@ -23,6 +24,7 @@ class ReduceTaskHandler(
     private val definition: MapReduceDefinition<Any, Any, Any, Any>,
     private val jobRepository: JobRepository,
     private val blobStore: BlobStore,
+    private val objectMapper: ObjectMapper,
 ) : TaskHandler {
 
     private val log = Logger.getLogger(ReduceTaskHandler::class.java)
@@ -56,8 +58,7 @@ class ReduceTaskHandler(
     private fun extractPartitionHash(metadata: String?): Int? {
         if (metadata == null) return null
         return try {
-            val node = com.fasterxml.jackson.databind.ObjectMapper().readTree(metadata)
-            node.get("partition_hash")?.asInt()
+            objectMapper.readTree(metadata).get("partition_hash")?.asInt()
         } catch (_: Exception) {
             null
         }

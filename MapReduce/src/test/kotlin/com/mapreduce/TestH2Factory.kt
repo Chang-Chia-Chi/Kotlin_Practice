@@ -47,7 +47,6 @@ object TestH2Factory {
             completed_at       TIMESTAMP,
             execution_generation VARCHAR(36),
             speculative        INT           DEFAULT 0 NOT NULL,
-            last_heartbeat     TIMESTAMP,
             last_epoch         BIGINT        DEFAULT 0 NOT NULL
         );
 
