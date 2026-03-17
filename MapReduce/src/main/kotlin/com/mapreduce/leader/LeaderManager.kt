@@ -6,7 +6,6 @@ import io.fabric8.kubernetes.client.extended.leaderelection.LeaderCallbacks
 import io.fabric8.kubernetes.client.extended.leaderelection.LeaderElectionConfigBuilder
 import io.fabric8.kubernetes.client.extended.leaderelection.resourcelock.LeaseLock
 import io.micrometer.core.instrument.MeterRegistry
-import io.quarkus.runtime.ShutdownEvent
 import io.quarkus.runtime.StartupEvent
 import jakarta.enterprise.context.ApplicationScoped
 import jakarta.enterprise.event.Observes
@@ -14,9 +13,10 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
 import org.jboss.logging.Logger
@@ -64,13 +64,18 @@ class LeaderManager(
         registerMetrics()
     }
 
-    fun onStop(@Observes ev: ShutdownEvent) {
+    /**
+     * Called by [com.mapreduce.shutdown.ShutdownCoordinator] during leader teardown.
+     * Clears leader flag, awaits election loop completion, and releases the lease.
+     */
+    suspend fun shutdown() {
         log.info("Shutting down leader election")
         _isLeader.value = false
-        scope.cancel()
+        scope.coroutineContext.job.cancelAndJoin()
+        releaseLeaseExplicitly()
     }
 
-    fun releaseLeaseExplicitly() {
+    private fun releaseLeaseExplicitly() {
         if (System.getenv("KUBERNETES_SERVICE_HOST") == null) {
             log.info("Not in Kubernetes — skipping explicit lease release")
             _isLeader.value = false

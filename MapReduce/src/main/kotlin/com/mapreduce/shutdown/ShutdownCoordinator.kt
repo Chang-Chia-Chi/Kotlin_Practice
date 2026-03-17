@@ -9,6 +9,7 @@ import jakarta.enterprise.context.ApplicationScoped
 import jakarta.enterprise.event.Observes
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
 import org.jboss.logging.Logger
 import java.time.Duration
 import java.time.Instant
@@ -20,9 +21,13 @@ import java.util.concurrent.atomic.AtomicReference
 /**
  * Central coordinator for the graceful shutdown protocol.
  *
+ * This is the **single entry point** for shutdown — no other bean should
+ * observe [ShutdownEvent] for lifecycle teardown. This eliminates CDI
+ * observer ordering races.
+ *
  * Phases:
  * - **Signal:** Set state to DRAINING, stop new claims, readiness → 503
- * - **Leader Teardown:** Cancel leader orchestration loops, release Kubernetes Lease
+ * - **Leader Teardown:** Await election loop completion, release Kubernetes Lease
  * - **Worker Drain:** Await in-flight tasks up to drainTimeout
  * - **Release:** Flip uncompleted CLAIMED tasks back to PENDING
  * - **Final:** Emit metrics, log summary, state → TERMINATED
@@ -71,13 +76,6 @@ class ShutdownCoordinator(
         _tasksCompletedDuringDrain.incrementAndGet()
     }
 
-    private val leaderScopeCallbacks = mutableListOf<() -> Unit>()
-
-    /** Called during @Observes StartupEvent — all writes complete before shutdown. */
-    fun registerLeaderScopeCallback(cancel: () -> Unit) {
-        leaderScopeCallbacks.add(cancel)
-    }
-
     fun registerMetrics() {
         meterRegistry.gauge("taskqueue_shutdown_state", this) { state.ordinal.toDouble() }
         meterRegistry.gauge("taskqueue_shutdown_inflight_tasks", this) { inFlightTasks.toDouble() }
@@ -88,17 +86,15 @@ class ShutdownCoordinator(
         val shutdownConfig = config.shutdown()
         val wasLeader = leaderManager.isActive
 
-        // Signal
+        // Signal — poll loops will see DRAINING and stop claiming
         val drainTimeout = shutdownConfig.drainTimeout()
         _drainDeadline = Instant.now().plus(drainTimeout)
         _state.set(ShutdownState.DRAINING)
         log.infof("Shutdown initiated. Drain deadline: %s. In-flight tasks: %d.",
             drainDeadline, inFlightTasks)
 
-        // Leader Teardown
-        if (wasLeader) {
-            phaseLeaderTeardown(shutdownConfig.leaderTeardownTimeout())
-        }
+        // Leader Teardown — always run to clean up election scope
+        phaseLeaderTeardown(shutdownConfig.leaderTeardownTimeout())
 
         // Worker Drain
         phaseWorkerDrain(drainTimeout, shutdownConfig.logInterval())
@@ -130,21 +126,21 @@ class ShutdownCoordinator(
         )
     }
 
+    /**
+     * Await leader election loop completion and release the K8s lease.
+     * [LeaderManager.shutdown] uses `cancelAndJoin` — it returns only after
+     * the election coroutine's finally block has run.
+     */
     private suspend fun phaseLeaderTeardown(timeout: Duration) {
-        log.info("Leader teardown — cancelling orchestration loops")
-
-        for (cancel in leaderScopeCallbacks) {
-            try {
-                cancel()
-            } catch (e: Exception) {
-                log.warnf(e, "Error cancelling leader scope")
-            }
+        log.info("Leader teardown — stopping election loop and releasing lease")
+        try {
+            withTimeoutOrNull(timeout.toMillis()) {
+                leaderManager.shutdown()
+            } ?: log.warn("Leader teardown timed out — proceeding to drain phase")
+        } catch (e: Exception) {
+            log.warnf(e, "Error during leader teardown")
         }
-
-        delay(timeout.toMillis().coerceAtMost(5000))
-
-        leaderManager.releaseLeaseExplicitly()
-        log.info("Leader teardown done, lease released")
+        log.info("Leader teardown done")
     }
 
     private suspend fun phaseWorkerDrain(drainTimeout: Duration, logInterval: Duration) {

@@ -203,17 +203,7 @@ class WorkerLoopTest {
         }
 
         @Test
-        fun `registers leader scope callback on start`() {
-            whenever(shutdownCoordinator.state).thenReturn(ShutdownState.DRAINING)
-
-            start()
-
-            verify(shutdownCoordinator).registerLeaderScopeCallback(any())
-        }
-
-        @Test
         fun `records drain completion when shutting down`() {
-            whenever(shutdownCoordinator.isShuttingDown).thenReturn(true)
             val latch = CountDownLatch(1)
             val claimed = task()
             whenever(dispatcher.claimTask())
@@ -221,6 +211,8 @@ class WorkerLoopTest {
                 .thenReturn(null)
             runBlocking {
                 whenever(dispatcher.execute(any())).thenAnswer {
+                    // Simulate shutdown starting while task is in-flight
+                    whenever(shutdownCoordinator.isShuttingDown).thenReturn(true)
                     latch.countDown()
                     Unit
                 }

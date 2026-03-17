@@ -6,6 +6,7 @@ import com.mapreduce.queue.repository.TaskRepository
 import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import io.quarkus.runtime.ShutdownEvent
+import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNotNull
@@ -14,7 +15,6 @@ import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.mockito.kotlin.mock
-import org.mockito.kotlin.never
 import org.mockito.kotlin.verify
 import org.mockito.kotlin.whenever
 import java.time.Duration
@@ -106,17 +106,6 @@ class ShutdownCoordinatorTest {
         assertEquals(0, coordinator.inFlightTasks)
     }
 
-    // ── Leader scope callbacks ────────────────────────────────────
-
-    @Test
-    fun `registerLeaderScopeCallback stores callback`() {
-        var called = false
-        coordinator.registerLeaderScopeCallback { called = true }
-
-        // Callback is stored but not invoked during registration
-        assertFalse(called)
-    }
-
     // ── recordDrainCompletion ─────────────────────────────────────
 
     @Test
@@ -130,7 +119,6 @@ class ShutdownCoordinatorTest {
 
         coordinator.onShutdown(ShutdownEvent())
 
-        // The counter value is emitted as a metric during Phase 4
         val counter = meterRegistry.find("taskqueue_shutdown_tasks_completed").counter()
         assertNotNull(counter)
         assertEquals(3.0, counter!!.count())
@@ -175,43 +163,25 @@ class ShutdownCoordinatorTest {
     }
 
     @Test
-    fun `onShutdown calls leader teardown when pod was leader`() {
+    fun `onShutdown calls leaderManager shutdown`() {
         whenever(leaderManager.isActive).thenReturn(true)
         whenever(taskRepository.releaseTasksByPod(podId)).thenReturn(0)
 
-        var leaderCallbackInvoked = false
-        coordinator.registerLeaderScopeCallback { leaderCallbackInvoked = true }
-
         coordinator.onShutdown(ShutdownEvent())
 
-        assertTrue(leaderCallbackInvoked)
-        verify(leaderManager).releaseLeaseExplicitly()
+        runBlocking { verify(leaderManager).shutdown() }
         assertEquals(ShutdownState.TERMINATED, coordinator.state)
     }
 
     @Test
-    fun `onShutdown invokes all registered leader scope callbacks`() {
-        whenever(leaderManager.isActive).thenReturn(true)
-        whenever(taskRepository.releaseTasksByPod(podId)).thenReturn(0)
-
-        val invocations = mutableListOf<Int>()
-        coordinator.registerLeaderScopeCallback { invocations.add(1) }
-        coordinator.registerLeaderScopeCallback { invocations.add(2) }
-        coordinator.registerLeaderScopeCallback { invocations.add(3) }
-
-        coordinator.onShutdown(ShutdownEvent())
-
-        assertEquals(listOf(1, 2, 3), invocations)
-    }
-
-    @Test
-    fun `onShutdown skips leader teardown when pod was not leader`() {
+    fun `onShutdown calls leaderManager shutdown even when not leader`() {
         whenever(leaderManager.isActive).thenReturn(false)
         whenever(taskRepository.releaseTasksByPod(podId)).thenReturn(0)
 
         coordinator.onShutdown(ShutdownEvent())
 
-        verify(leaderManager, never()).releaseLeaseExplicitly()
+        // Always called to clean up election scope
+        runBlocking { verify(leaderManager).shutdown() }
         assertEquals(ShutdownState.TERMINATED, coordinator.state)
     }
 
@@ -238,13 +208,13 @@ class ShutdownCoordinatorTest {
     }
 
     @Test
-    fun `onShutdown tolerates leader scope callback exception`() {
+    fun `onShutdown tolerates leaderManager shutdown exception`() {
         whenever(leaderManager.isActive).thenReturn(true)
         whenever(taskRepository.releaseTasksByPod(podId)).thenReturn(0)
+        runBlocking {
+            whenever(leaderManager.shutdown()).thenThrow(RuntimeException("boom"))
+        }
 
-        coordinator.registerLeaderScopeCallback { throw RuntimeException("boom") }
-
-        // Should not propagate — continues to next phases
         coordinator.onShutdown(ShutdownEvent())
 
         assertEquals(ShutdownState.TERMINATED, coordinator.state)
@@ -265,7 +235,6 @@ class ShutdownCoordinatorTest {
         whenever(leaderManager.isActive).thenReturn(false)
         whenever(taskRepository.releaseTasksByPod(podId)).thenReturn(0)
 
-        // No semaphore registered — Phase 2 should be a no-op
         coordinator.onShutdown(ShutdownEvent())
 
         assertEquals(ShutdownState.TERMINATED, coordinator.state)
@@ -278,7 +247,6 @@ class ShutdownCoordinatorTest {
 
         val sem = Semaphore(4)
         coordinator.registerBulkhead(sem, 4)
-        // All permits available → 0 in-flight
 
         coordinator.onShutdown(ShutdownEvent())
 

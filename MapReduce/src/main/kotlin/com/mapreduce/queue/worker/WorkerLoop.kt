@@ -13,7 +13,6 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -64,11 +63,6 @@ class WorkerLoop(
             val size = coordinator.bulkheadSize
             if (size == 0) 0.0 else coordinator.inFlightTasks.toDouble() / size
         }
-        shutdownCoordinator.registerLeaderScopeCallback {
-            pollScope.cancel()
-            taskScope.cancel()
-        }
-
         log.infof("Worker starting: id=%s, bulkhead=%d, poll=%dms, queues=%s",
             workerId, bulkheadSize, pollInterval, queues)
 
@@ -92,6 +86,12 @@ class WorkerLoop(
                 }
 
                 try {
+                    // Re-check after acquiring semaphore — narrows the race window
+                    // between the top-of-loop check and the actual claim call
+                    if (shutdownCoordinator.isShuttingDown) {
+                        semaphore.release()
+                        break
+                    }
                     val task = withContext(Dispatchers.IO) { dispatcher.claimTask() }
                     if (task != null) {
                         log.debugf("Claimed task %s [handler=%s, queue=%s]",
