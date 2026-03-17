@@ -7,6 +7,7 @@ import com.mapreduce.queue.model.TaskResult
 import com.mapreduce.queue.pipeline.Middleware
 import com.mapreduce.queue.pipeline.TaskExecutionContext
 import com.mapreduce.queue.registry.HandlerRegistry
+import com.mapreduce.queue.repository.TaskGroupRepository
 import com.mapreduce.queue.repository.TaskRepository
 import com.mapreduce.queue.spi.TaskHandler
 import com.mapreduce.shutdown.ShutdownCoordinator
@@ -37,6 +38,7 @@ import java.util.concurrent.atomic.AtomicInteger
 class TaskDispatcher(
     private val config: FrameworkConfig,
     private val taskRepository: TaskRepository,
+    private val taskGroupRepository: TaskGroupRepository,
     private val handlerRegistry: HandlerRegistry,
     middlewares: Instance<Middleware>,
     private val circuitBreaker: PodCircuitBreaker,
@@ -154,23 +156,39 @@ class TaskDispatcher(
 
         when (result) {
             is TaskResult.Success -> {
-                taskRepository.complete(task.taskId, gen)
+                if (task.groupId != null) {
+                    taskGroupRepository.completeGroupTask(
+                        task.taskId, task.groupId, gen,
+                        result.outputUri, result.outputMetadata,
+                    )
+                } else {
+                    taskRepository.complete(task.taskId, gen)
+                }
                 circuitBreaker.recordSuccess()
             }
             is TaskResult.Retry -> {
                 if (result.consumeRetry) {
-                    taskRepository.fail(task.taskId, result.reason, result.delay, gen)
+                    val deadLettered = taskRepository.fail(task.taskId, result.reason, result.delay, gen)
+                    if (deadLettered && task.groupId != null) {
+                        taskGroupRepository.recordGroupTaskFailure(task.groupId)
+                    }
                     circuitBreaker.recordFailure()
                 } else {
                     taskRepository.requeue(task.taskId, result.delay, gen)
                 }
             }
             is TaskResult.Failure -> {
-                taskRepository.fail(task.taskId, result.message, executionGeneration = gen)
+                val deadLettered = taskRepository.fail(task.taskId, result.message, executionGeneration = gen)
+                if (deadLettered && task.groupId != null) {
+                    taskGroupRepository.recordGroupTaskFailure(task.groupId)
+                }
                 circuitBreaker.recordFailure()
             }
             is TaskResult.DeadLetter -> {
                 taskRepository.deadLetter(task.taskId, result.reason)
+                if (task.groupId != null) {
+                    taskGroupRepository.recordGroupTaskFailure(task.groupId)
+                }
                 circuitBreaker.recordFailure()
             }
         }

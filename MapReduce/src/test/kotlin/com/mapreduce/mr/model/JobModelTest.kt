@@ -1,5 +1,7 @@
 package com.mapreduce.mr.model
 
+import com.mapreduce.queue.model.FailurePolicy
+import com.mapreduce.queue.model.evaluateFailurePolicy
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
@@ -7,26 +9,26 @@ import kotlin.test.assertNull
 
 class JobModelTest {
 
-    // ── FAIL_JOB ─────────────────────────────────────────────────
+    // ── FAIL_GROUP ────────────────────────────────────────────────
 
     @Test
-    fun `FAIL_JOB returns null when zero dead-lettered`() {
-        val result = evaluateFailurePolicy(FailurePolicy.FAIL_JOB, deadLettered = 0, totalTasks = 10, failureThreshold = 0.0)
+    fun `FAIL_GROUP returns null when zero failed`() {
+        val result = evaluateFailurePolicy(FailurePolicy.FAIL_GROUP, failed = 0, total = 10, failureThreshold = 0.0)
         assertNull(result)
     }
 
     @Test
-    fun `FAIL_JOB returns reason when any task is dead-lettered`() {
-        val result = evaluateFailurePolicy(FailurePolicy.FAIL_JOB, deadLettered = 1, totalTasks = 10, failureThreshold = 0.0)
+    fun `FAIL_GROUP returns reason when any task failed`() {
+        val result = evaluateFailurePolicy(FailurePolicy.FAIL_GROUP, failed = 1, total = 10, failureThreshold = 0.0)
         assertNotNull(result)
-        assertEquals("FAIL_JOB: 1 task(s) dead-lettered", result)
+        assertEquals("FAIL_GROUP: 1 task(s) failed", result)
     }
 
     @Test
-    fun `FAIL_JOB returns reason with multiple dead-lettered`() {
-        val result = evaluateFailurePolicy(FailurePolicy.FAIL_JOB, deadLettered = 5, totalTasks = 10, failureThreshold = 0.0)
+    fun `FAIL_GROUP returns reason with multiple failed`() {
+        val result = evaluateFailurePolicy(FailurePolicy.FAIL_GROUP, failed = 5, total = 10, failureThreshold = 0.0)
         assertNotNull(result)
-        assertEquals("FAIL_JOB: 5 task(s) dead-lettered", result)
+        assertEquals("FAIL_GROUP: 5 task(s) failed", result)
     }
 
     // ── THRESHOLD ────────────────────────────────────────────────
@@ -34,14 +36,14 @@ class JobModelTest {
     @Test
     fun `THRESHOLD returns null when rate is below threshold`() {
         // 1/10 = 10% <= 50%
-        val result = evaluateFailurePolicy(FailurePolicy.THRESHOLD, deadLettered = 1, totalTasks = 10, failureThreshold = 0.5)
+        val result = evaluateFailurePolicy(FailurePolicy.THRESHOLD, failed = 1, total = 10, failureThreshold = 0.5)
         assertNull(result)
     }
 
     @Test
     fun `THRESHOLD returns reason when rate exceeds threshold`() {
         // 6/10 = 60% > 50%
-        val result = evaluateFailurePolicy(FailurePolicy.THRESHOLD, deadLettered = 6, totalTasks = 10, failureThreshold = 0.5)
+        val result = evaluateFailurePolicy(FailurePolicy.THRESHOLD, failed = 6, total = 10, failureThreshold = 0.5)
         assertNotNull(result)
         assert(result.startsWith("THRESHOLD:"))
     }
@@ -49,20 +51,20 @@ class JobModelTest {
     @Test
     fun `THRESHOLD boundary -- exactly at threshold passes`() {
         // 5/10 = 50% is NOT > 50%, so it should pass
-        val result = evaluateFailurePolicy(FailurePolicy.THRESHOLD, deadLettered = 5, totalTasks = 10, failureThreshold = 0.5)
+        val result = evaluateFailurePolicy(FailurePolicy.THRESHOLD, failed = 5, total = 10, failureThreshold = 0.5)
         assertNull(result)
     }
 
     @Test
-    fun `THRESHOLD with zero dead-lettered always passes`() {
-        val result = evaluateFailurePolicy(FailurePolicy.THRESHOLD, deadLettered = 0, totalTasks = 10, failureThreshold = 0.0)
+    fun `THRESHOLD with zero failed always passes`() {
+        val result = evaluateFailurePolicy(FailurePolicy.THRESHOLD, failed = 0, total = 10, failureThreshold = 0.0)
         assertNull(result)
     }
 
     @Test
-    fun `THRESHOLD all tasks dead-lettered exceeds any sub-100 threshold`() {
+    fun `THRESHOLD all tasks failed exceeds any sub-100 threshold`() {
         // 10/10 = 100% > 90%
-        val result = evaluateFailurePolicy(FailurePolicy.THRESHOLD, deadLettered = 10, totalTasks = 10, failureThreshold = 0.9)
+        val result = evaluateFailurePolicy(FailurePolicy.THRESHOLD, failed = 10, total = 10, failureThreshold = 0.9)
         assertNotNull(result)
     }
 
@@ -70,32 +72,32 @@ class JobModelTest {
 
     @Test
     fun `BEST_EFFORT always returns null regardless of failures`() {
-        assertNull(evaluateFailurePolicy(FailurePolicy.BEST_EFFORT, deadLettered = 0, totalTasks = 10, failureThreshold = 0.0))
-        assertNull(evaluateFailurePolicy(FailurePolicy.BEST_EFFORT, deadLettered = 5, totalTasks = 10, failureThreshold = 0.0))
-        assertNull(evaluateFailurePolicy(FailurePolicy.BEST_EFFORT, deadLettered = 10, totalTasks = 10, failureThreshold = 0.0))
+        assertNull(evaluateFailurePolicy(FailurePolicy.BEST_EFFORT, failed = 0, total = 10, failureThreshold = 0.0))
+        assertNull(evaluateFailurePolicy(FailurePolicy.BEST_EFFORT, failed = 5, total = 10, failureThreshold = 0.0))
+        assertNull(evaluateFailurePolicy(FailurePolicy.BEST_EFFORT, failed = 10, total = 10, failureThreshold = 0.0))
     }
 
-    // ── Edge case: totalTasks = 1 ────────────────────────────────
+    // ── Edge case: total = 1 ─────────────────────────────────────
 
     @Test
-    fun `single task with FAIL_JOB -- zero dead-lettered passes`() {
-        assertNull(evaluateFailurePolicy(FailurePolicy.FAIL_JOB, deadLettered = 0, totalTasks = 1, failureThreshold = 0.0))
-    }
-
-    @Test
-    fun `single task with FAIL_JOB -- one dead-lettered fails`() {
-        assertNotNull(evaluateFailurePolicy(FailurePolicy.FAIL_JOB, deadLettered = 1, totalTasks = 1, failureThreshold = 0.0))
+    fun `single task with FAIL_GROUP -- zero failed passes`() {
+        assertNull(evaluateFailurePolicy(FailurePolicy.FAIL_GROUP, failed = 0, total = 1, failureThreshold = 0.0))
     }
 
     @Test
-    fun `single task with THRESHOLD -- one dead-lettered at 100 pct exceeds any sub-100 threshold`() {
+    fun `single task with FAIL_GROUP -- one failed fails`() {
+        assertNotNull(evaluateFailurePolicy(FailurePolicy.FAIL_GROUP, failed = 1, total = 1, failureThreshold = 0.0))
+    }
+
+    @Test
+    fun `single task with THRESHOLD -- one failed at 100 pct exceeds any sub-100 threshold`() {
         // 1/1 = 100% > 50%
-        val result = evaluateFailurePolicy(FailurePolicy.THRESHOLD, deadLettered = 1, totalTasks = 1, failureThreshold = 0.5)
+        val result = evaluateFailurePolicy(FailurePolicy.THRESHOLD, failed = 1, total = 1, failureThreshold = 0.5)
         assertNotNull(result)
     }
 
     @Test
     fun `single task with BEST_EFFORT -- always passes`() {
-        assertNull(evaluateFailurePolicy(FailurePolicy.BEST_EFFORT, deadLettered = 1, totalTasks = 1, failureThreshold = 0.0))
+        assertNull(evaluateFailurePolicy(FailurePolicy.BEST_EFFORT, failed = 1, total = 1, failureThreshold = 0.0))
     }
 }

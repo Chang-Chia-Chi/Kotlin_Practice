@@ -1,33 +1,33 @@
 package com.mapreduce.mr.api.dto
 
-import com.mapreduce.mr.model.Job
+import com.mapreduce.queue.model.TaskGroup
 
 data class JobResponse(
     val jobId: String,
     val jobType: String,
     val status: String,
-    val totalTasks: Int,
-    val completedTasks: Int,
-    val failedTasks: Int,
+    val phase: String,
+    val phaseTotal: Int,
+    val phaseCompleted: Int,
+    val phaseFailed: Int,
     val failurePolicy: String,
-    val totalPartitions: Int,
     val resultMetadata: String?,
     val createdAt: String?,
     val updatedAt: String?,
 ) {
     companion object {
-        fun from(job: Job) = JobResponse(
-            jobId = job.jobId,
-            jobType = job.jobType,
-            status = job.status.name,
-            totalTasks = job.totalTasks,
-            completedTasks = job.completedTasks,
-            failedTasks = job.failedTasks,
-            failurePolicy = job.failurePolicy.name,
-            totalPartitions = job.totalPartitions,
-            resultMetadata = job.resultMetadata,
-            createdAt = job.createdAt?.toString(),
-            updatedAt = job.updatedAt?.toString(),
+        fun from(group: TaskGroup) = JobResponse(
+            jobId = group.groupId,
+            jobType = group.groupType,
+            status = group.status.name,
+            phase = group.phase,
+            phaseTotal = group.phaseTotal,
+            phaseCompleted = group.phaseCompleted,
+            phaseFailed = group.phaseFailed,
+            failurePolicy = group.failurePolicy.name,
+            resultMetadata = group.resultMetadata,
+            createdAt = group.createdAt?.toString(),
+            updatedAt = group.updatedAt?.toString(),
         )
     }
 }

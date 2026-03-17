@@ -1,9 +1,11 @@
 package com.mapreduce.mr.repository
 
-import com.fasterxml.jackson.databind.ObjectMapper
 import com.mapreduce.TestH2Factory
-import com.mapreduce.mr.model.FailurePolicy
-import com.mapreduce.mr.model.JobStatus
+import com.mapreduce.queue.model.EnqueueRequest
+import com.mapreduce.queue.model.FailurePolicy
+import com.mapreduce.queue.model.GroupStatus
+import com.mapreduce.queue.model.TaskGroup
+import com.mapreduce.queue.repository.TaskGroupRepository
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.runTest
 import org.jdbi.v3.core.Jdbi
@@ -18,356 +20,310 @@ import org.junit.jupiter.api.Assertions.assertTrue
 class JobRepositoryTest {
 
     private lateinit var jdbi: Jdbi
-    private lateinit var repo: JobRepository
-    private val objectMapper = ObjectMapper()
+    private lateinit var repo: TaskGroupRepository
 
     @BeforeEach
     fun setUp() {
         jdbi = TestH2Factory.create()
-        repo = JobRepository(jdbi, objectMapper)
+        repo = TaskGroupRepository(jdbi)
     }
 
-    // ── submitJob ────────────────────────────────────────────────
+    // ── submitGroup ───────────────────────────────────────────────
 
     @Test
-    fun `submitJob inserts job and task rows atomically`() {
-        val inputs = listOf("input-0", "input-1", "input-2")
-        repo.submitJob(
-            jobId = "j-1", jobType = "wc", jobParams = "{}",
-            taskInputs = inputs, maxRetries = 3,
-            failurePolicy = FailurePolicy.FAIL_JOB, failureThreshold = 0.0,
-            queue = "mr",
-        )
+    fun `submitGroup inserts group and task rows atomically`() {
+        val group = testGroup("g-1", phaseTotal = 3)
+        val tasks = (0 until 3).map { testTask("g-1", "wc.map", "input-$it") }
 
-        val job = repo.findJobById("j-1")
-        assertNotNull(job)
-        assertEquals("wc", job!!.jobType)
-        assertEquals(JobStatus.RUNNING, job.status)
-        assertEquals(3, job.totalTasks)
-        assertEquals(0, job.completedTasks)
+        repo.submitGroup(group, tasks)
+
+        val found = repo.findGroup("g-1")
+        assertNotNull(found)
+        assertEquals("wc", found!!.groupType)
+        assertEquals(GroupStatus.ACTIVE, found.status)
+        assertEquals(3, found.phaseTotal)
+        assertEquals(0, found.phaseCompleted)
 
         val taskCount = jdbi.withHandle<Int, Exception> { h ->
-            h.createQuery("SELECT COUNT(*) FROM task WHERE group_id = 'j-1'")
+            h.createQuery("SELECT COUNT(*) FROM task WHERE group_id = 'g-1'")
                 .mapTo(Int::class.java).one()
         }
         assertEquals(3, taskCount)
     }
 
     @Test
-    fun `submitJob creates tasks with correct handler name`() {
-        repo.submitJob(
-            jobId = "j-h", jobType = "email", jobParams = "{}",
-            taskInputs = listOf("a"), maxRetries = 2,
-            failurePolicy = FailurePolicy.BEST_EFFORT, failureThreshold = 0.0,
-            queue = "default",
-        )
+    fun `submitGroup creates tasks with correct handler name`() {
+        val group = testGroup("g-h", phaseTotal = 1)
+        val tasks = listOf(testTask("g-h", "email.map", "a"))
+
+        repo.submitGroup(group, tasks)
 
         val handler = jdbi.withHandle<String, Exception> { h ->
-            h.createQuery("SELECT handler FROM task WHERE group_id = 'j-h'")
+            h.createQuery("SELECT handler FROM task WHERE group_id = 'g-h'")
                 .mapTo(String::class.java).one()
         }
         assertEquals("email.map", handler)
     }
 
-    // ── findJobById ──────────────────────────────────────────────
+    // ── findGroup ─────────────────────────────────────────────────
 
     @Test
-    fun `findJobById returns null for nonexistent job`() {
-        assertNull(repo.findJobById("nonexistent"))
+    fun `findGroup returns null for nonexistent group`() {
+        assertNull(repo.findGroup("nonexistent"))
     }
 
     @Test
-    fun `findJobById returns the job`() {
-        repo.submitJob(
-            jobId = "j-f", jobType = "wc", jobParams = """{"k":"v"}""",
-            taskInputs = listOf("i"), maxRetries = 3,
-            failurePolicy = FailurePolicy.THRESHOLD, failureThreshold = 0.5,
-            queue = "mr",
-        )
+    fun `findGroup returns the group with all fields`() {
+        val group = testGroup("g-f", failurePolicy = FailurePolicy.THRESHOLD, failureThreshold = 0.5)
+        repo.submitGroup(group, listOf(testTask("g-f", "wc.map", "i")))
 
-        val job = repo.findJobById("j-f")
-        assertNotNull(job)
-        assertEquals("j-f", job!!.jobId)
-        assertEquals(FailurePolicy.THRESHOLD, job.failurePolicy)
-        assertEquals(0.5, job.failureThreshold)
+        val found = repo.findGroup("g-f")
+        assertNotNull(found)
+        assertEquals("g-f", found!!.groupId)
+        assertEquals(FailurePolicy.THRESHOLD, found.failurePolicy)
+        assertEquals(0.5, found.failureThreshold)
     }
 
-    // ── casJobStatus ─────────────────────────────────────────────
+    // ── casGroupStatus ────────────────────────────────────────────
 
     @Test
-    fun `casJobStatus succeeds with correct version and status`() {
-        repo.submitJob(
-            jobId = "j-cas", jobType = "wc", jobParams = "{}",
-            taskInputs = listOf("a"), maxRetries = 3,
-            failurePolicy = FailurePolicy.FAIL_JOB, failureThreshold = 0.0,
-            queue = "mr",
-        )
+    fun `casGroupStatus succeeds with correct version and status`() {
+        val group = testGroup("g-cas")
+        repo.submitGroup(group, listOf(testTask("g-cas", "wc.map", "a")))
 
-        val result = repo.casJobStatus("j-cas", JobStatus.RUNNING, JobStatus.REDUCING, 0)
+        val result = repo.casGroupStatus("g-cas", GroupStatus.ACTIVE, GroupStatus.COMPLETED, 0)
         assertTrue(result)
 
-        val updated = repo.findJobById("j-cas")!!
-        assertEquals(JobStatus.REDUCING, updated.status)
+        val updated = repo.findGroup("g-cas")!!
+        assertEquals(GroupStatus.COMPLETED, updated.status)
         assertEquals(1, updated.version)
     }
 
     @Test
-    fun `casJobStatus fails with wrong version`() {
-        repo.submitJob(
-            jobId = "j-cv", jobType = "wc", jobParams = "{}",
-            taskInputs = listOf("a"), maxRetries = 3,
-            failurePolicy = FailurePolicy.FAIL_JOB, failureThreshold = 0.0,
-            queue = "mr",
-        )
+    fun `casGroupStatus fails with wrong version`() {
+        val group = testGroup("g-cv")
+        repo.submitGroup(group, listOf(testTask("g-cv", "wc.map", "a")))
 
-        val result = repo.casJobStatus("j-cv", JobStatus.RUNNING, JobStatus.REDUCING, 999)
+        val result = repo.casGroupStatus("g-cv", GroupStatus.ACTIVE, GroupStatus.COMPLETED, 999)
         assertFalse(result)
 
-        // Status should not have changed
-        assertEquals(JobStatus.RUNNING, repo.findJobById("j-cv")!!.status)
+        assertEquals(GroupStatus.ACTIVE, repo.findGroup("g-cv")!!.status)
     }
 
     @Test
-    fun `casJobStatus fails with wrong expected status`() {
-        repo.submitJob(
-            jobId = "j-cs", jobType = "wc", jobParams = "{}",
-            taskInputs = listOf("a"), maxRetries = 3,
-            failurePolicy = FailurePolicy.FAIL_JOB, failureThreshold = 0.0,
-            queue = "mr",
-        )
+    fun `casGroupStatus fails with wrong expected status`() {
+        val group = testGroup("g-cs")
+        repo.submitGroup(group, listOf(testTask("g-cs", "wc.map", "a")))
 
-        // Job is RUNNING, not REDUCING
-        val result = repo.casJobStatus("j-cs", JobStatus.REDUCING, JobStatus.COMPLETED, 0)
+        val result = repo.casGroupStatus("g-cs", GroupStatus.COMPLETED, GroupStatus.FAILED, 0)
         assertFalse(result)
     }
 
-    // ── completeMapTask ──────────────────────────────────────────
+    // ── completeGroupTask ─────────────────────────────────────────
 
     @Test
-    fun `completeMapTask increments completed_tasks when task is CLAIMED`() {
-        repo.submitJob(
-            jobId = "j-cmt", jobType = "wc", jobParams = "{}",
-            taskInputs = listOf("a"), maxRetries = 3,
-            failurePolicy = FailurePolicy.FAIL_JOB, failureThreshold = 0.0,
-            queue = "mr",
-        )
+    fun `completeGroupTask increments phase_completed when task is CLAIMED`() {
+        val group = testGroup("g-cgt", phaseTotal = 1)
+        repo.submitGroup(group, listOf(testTask("g-cgt", "wc.map", "a")))
 
-        val taskId = getFirstTaskId("j-cmt")
+        val taskId = getFirstTaskId("g-cgt")
         claimTask(taskId, "gen-1")
 
-        repo.completeMapTask(taskId, "j-cmt", "blob://test", "gen-1", 0)
+        val result = repo.completeGroupTask(taskId, "g-cgt", "gen-1", "blob://test", null)
 
-        val job = repo.findJobById("j-cmt")!!
-        assertEquals(1, job.completedTasks)
+        assertTrue(result.updated)
+        assertTrue(result.barrierMet)
 
-        val taskStatus = getTaskStatus(taskId)
-        assertEquals("COMPLETED", taskStatus)
+        val updated = repo.findGroup("g-cgt")!!
+        assertEquals(1, updated.phaseCompleted)
+
+        assertEquals("COMPLETED", getTaskStatus(taskId))
     }
 
     @Test
-    fun `completeMapTask zombie detection -- zero rows when execution_generation mismatches`() {
-        repo.submitJob(
-            jobId = "j-zombie", jobType = "wc", jobParams = "{}",
-            taskInputs = listOf("a"), maxRetries = 3,
-            failurePolicy = FailurePolicy.FAIL_JOB, failureThreshold = 0.0,
-            queue = "mr",
-        )
+    fun `completeGroupTask zombie detection -- zero rows when execution_generation mismatches`() {
+        val group = testGroup("g-zombie", phaseTotal = 1)
+        repo.submitGroup(group, listOf(testTask("g-zombie", "wc.map", "a")))
 
-        val taskId = getFirstTaskId("j-zombie")
+        val taskId = getFirstTaskId("g-zombie")
         claimTask(taskId, "gen-correct")
 
-        // Try to complete with wrong generation (zombie worker)
-        repo.completeMapTask(taskId, "j-zombie", "blob://zombie", "gen-wrong", 0)
+        val result = repo.completeGroupTask(taskId, "g-zombie", "gen-wrong", "blob://zombie", null)
 
-        // completed_tasks should NOT have incremented
-        val job = repo.findJobById("j-zombie")!!
-        assertEquals(0, job.completedTasks)
+        assertFalse(result.updated)
+        assertFalse(result.barrierMet)
 
-        // Task should still be CLAIMED (not COMPLETED)
+        val found = repo.findGroup("g-zombie")!!
+        assertEquals(0, found.phaseCompleted)
         assertEquals("CLAIMED", getTaskStatus(taskId))
     }
 
     @Test
-    fun `completeMapTask rolls back mr_output on zombie detection`() {
-        repo.submitJob(
-            jobId = "j-rollback", jobType = "wc", jobParams = "{}",
-            taskInputs = listOf("a"), maxRetries = 3,
-            failurePolicy = FailurePolicy.FAIL_JOB, failureThreshold = 0.0,
-            queue = "mr",
-        )
+    fun `completeGroupTask stores output_uri on task row`() {
+        val group = testGroup("g-out", phaseTotal = 1)
+        repo.submitGroup(group, listOf(testTask("g-out", "wc.map", "a")))
 
-        val taskId = getFirstTaskId("j-rollback")
-        claimTask(taskId, "gen-real")
+        val taskId = getFirstTaskId("g-out")
+        claimTask(taskId, "gen-1")
 
-        // Zombie completes with wrong generation
-        repo.completeMapTask(taskId, "j-rollback", "blob://orphan", "gen-zombie", 0)
+        repo.completeGroupTask(taskId, "g-out", "gen-1", "blob://my-output", """{"key":"val"}""")
 
-        // mr_output should have been cleaned up
-        val outputCount = jdbi.withHandle<Int, Exception> { h ->
-            h.createQuery("SELECT COUNT(*) FROM mr_output WHERE job_id = 'j-rollback'")
-                .mapTo(Int::class.java).one()
+        val outputUri = jdbi.withHandle<String?, Exception> { h ->
+            h.createQuery("SELECT output_uri FROM task WHERE task_id = :taskId")
+                .bind("taskId", taskId)
+                .mapTo(String::class.java).one()
         }
-        assertEquals(0, outputCount)
+        assertEquals("blob://my-output", outputUri)
     }
 
-    // ── completeReduceTask ───────────────────────────────────────
-
     @Test
-    fun `completeReduceTask updates result_metadata`() {
-        repo.submitJob(
-            jobId = "j-red", jobType = "wc", jobParams = "{}",
-            taskInputs = listOf("a"), maxRetries = 3,
-            failurePolicy = FailurePolicy.FAIL_JOB, failureThreshold = 0.0,
-            queue = "mr",
-        )
+    fun `completeGroupTask creates callback task when barrier is met`() {
+        val group = testGroup("g-barrier", phaseTotal = 1, onCompleteHandler = "wc.__phase_complete")
+        repo.submitGroup(group, listOf(testTask("g-barrier", "wc.map", "a")))
 
-        // Insert a reduce task manually
-        val reduceTaskId = insertReduceTask("j-red", "wc.reduce")
-        claimTask(reduceTaskId, "gen-r")
+        val taskId = getFirstTaskId("g-barrier")
+        claimTask(taskId, "gen-1")
 
-        repo.completeReduceTask(reduceTaskId, "j-red", """{"total":42}""", "gen-r")
+        val result = repo.completeGroupTask(taskId, "g-barrier", "gen-1", "blob://x", null)
 
-        val job = repo.findJobById("j-red")!!
-        assertEquals("""{"total":42}""", job.resultMetadata)
+        assertTrue(result.barrierMet)
 
-        assertEquals("COMPLETED", getTaskStatus(reduceTaskId))
+        // Check that callback task was created with NULL group_id
+        val callbackCount = jdbi.withHandle<Int, Exception> { h ->
+            h.createQuery(
+                "SELECT COUNT(*) FROM task WHERE handler = 'wc.__phase_complete' AND group_id IS NULL",
+            ).mapTo(Int::class.java).one()
+        }
+        assertEquals(1, callbackCount)
     }
 
-    // ── transitionToReducing ─────────────────────────────────────
+    // ── transitionPhase ───────────────────────────────────────────
 
     @Test
-    fun `transitionToReducing atomically transitions and creates reduce tasks`() {
-        repo.submitJob(
-            jobId = "j-tr", jobType = "wc", jobParams = "{}",
-            taskInputs = listOf("a", "b"), maxRetries = 3,
-            failurePolicy = FailurePolicy.FAIL_JOB, failureThreshold = 0.0,
-            queue = "mr",
-        )
+    fun `transitionPhase atomically transitions and creates new tasks`() {
+        val group = testGroup("g-tp", phaseTotal = 2)
+        repo.submitGroup(group, (0 until 2).map { testTask("g-tp", "wc.map", "i-$it") })
 
-        val result = repo.transitionToReducing("j-tr", 0, "wc", 3, "mr", 2)
+        val reduceTasks = (0 until 2).map { testTask("g-tp", "wc.reduce", "{}") }
+        val result = repo.transitionPhase("g-tp", 0, "reduce", 2, reduceTasks, "wc.__phase_complete")
         assertTrue(result)
 
-        val job = repo.findJobById("j-tr")!!
-        assertEquals(JobStatus.REDUCING, job.status)
-        assertEquals(1, job.version)
+        val updated = repo.findGroup("g-tp")!!
+        assertEquals("reduce", updated.phase)
+        assertEquals(2, updated.phaseTotal)
+        assertEquals(0, updated.phaseCompleted)
+        assertEquals(1, updated.version)
 
         val reduceCount = jdbi.withHandle<Int, Exception> { h ->
-            h.createQuery("SELECT COUNT(*) FROM task WHERE group_id = 'j-tr' AND handler = 'wc.reduce'")
+            h.createQuery("SELECT COUNT(*) FROM task WHERE group_id = 'g-tp' AND handler = 'wc.reduce'")
                 .mapTo(Int::class.java).one()
         }
         assertEquals(2, reduceCount)
     }
 
     @Test
-    fun `transitionToReducing fails with wrong version and creates no reduce tasks`() {
-        repo.submitJob(
-            jobId = "j-tr-fail", jobType = "wc", jobParams = "{}",
-            taskInputs = listOf("a"), maxRetries = 3,
-            failurePolicy = FailurePolicy.FAIL_JOB, failureThreshold = 0.0,
-            queue = "mr",
-        )
+    fun `transitionPhase fails with wrong version and creates no tasks`() {
+        val group = testGroup("g-tp-fail", phaseTotal = 1)
+        repo.submitGroup(group, listOf(testTask("g-tp-fail", "wc.map", "a")))
 
-        val result = repo.transitionToReducing("j-tr-fail", 999, "wc", 3, "mr", 1)
+        val result = repo.transitionPhase("g-tp-fail", 999, "reduce", 1,
+            listOf(testTask("g-tp-fail", "wc.reduce", "{}")), "wc.__phase_complete")
         assertFalse(result)
 
-        val job = repo.findJobById("j-tr-fail")!!
-        assertEquals(JobStatus.RUNNING, job.status)
-        assertEquals(0, job.version)
+        val found = repo.findGroup("g-tp-fail")!!
+        assertEquals("map", found.phase)
+        assertEquals(0, found.version)
+    }
 
-        val reduceCount = jdbi.withHandle<Int, Exception> { h ->
-            h.createQuery("SELECT COUNT(*) FROM task WHERE group_id = 'j-tr-fail' AND handler = 'wc.reduce'")
-                .mapTo(Int::class.java).one()
+    // ── recordGroupTaskFailure ────────────────────────────────────
+
+    @Test
+    fun `recordGroupTaskFailure increments phase_failed`() {
+        val group = testGroup("g-fail", phaseTotal = 2)
+        repo.submitGroup(group, (0 until 2).map { testTask("g-fail", "wc.map", "i-$it") })
+
+        repo.recordGroupTaskFailure("g-fail")
+
+        val updated = repo.findGroup("g-fail")!!
+        assertEquals(1, updated.phaseFailed)
+    }
+
+    @Test
+    fun `recordGroupTaskFailure creates callback when barrier met`() {
+        val group = testGroup("g-fail-barrier", phaseTotal = 1, onCompleteHandler = "wc.__phase_complete")
+        repo.submitGroup(group, listOf(testTask("g-fail-barrier", "wc.map", "a")))
+
+        repo.recordGroupTaskFailure("g-fail-barrier")
+
+        val callbackCount = jdbi.withHandle<Int, Exception> { h ->
+            h.createQuery(
+                "SELECT COUNT(*) FROM task WHERE handler = 'wc.__phase_complete' AND group_id IS NULL AND payload = 'g-fail-barrier'",
+            ).mapTo(Int::class.java).one()
         }
-        assertEquals(0, reduceCount)
+        assertEquals(1, callbackCount)
     }
 
-    // ── insertReduceTasks ────────────────────────────────────────
+    // ── streamTaskOutputs ─────────────────────────────────────────
 
     @Test
-    fun `insertReduceTasks creates correct number of reduce tasks`() {
-        repo.submitJob(
-            jobId = "j-irt", jobType = "wc", jobParams = "{}",
-            taskInputs = listOf("a"), maxRetries = 3,
-            failurePolicy = FailurePolicy.FAIL_JOB, failureThreshold = 0.0,
-            queue = "mr",
-        )
+    fun `streamTaskOutputs returns output URIs from completed tasks`() = runTest {
+        val group = testGroup("g-stream", phaseTotal = 2)
+        repo.submitGroup(group, (0 until 2).map { testTask("g-stream", "wc.map", "i-$it") })
 
-        repo.insertReduceTasks("j-irt", "wc", maxRetries = 3, queue = "mr", totalPartitions = 4)
-
-        val reduceCount = jdbi.withHandle<Int, Exception> { h ->
-            h.createQuery("SELECT COUNT(*) FROM task WHERE group_id = 'j-irt' AND handler = 'wc.reduce'")
-                .mapTo(Int::class.java).one()
+        // Claim and complete tasks with output URIs
+        val taskIds = getAllTaskIds("g-stream")
+        taskIds.forEachIndexed { i, taskId ->
+            claimTask(taskId, "gen-$i")
+            repo.completeGroupTask(taskId, "g-stream", "gen-$i", "blob://$i", null)
         }
-        assertEquals(4, reduceCount)
-    }
 
-    @Test
-    fun `insertReduceTasks with single partition has REDUCE phase metadata`() {
-        repo.submitJob(
-            jobId = "j-sp", jobType = "wc", jobParams = "{}",
-            taskInputs = listOf("a"), maxRetries = 3,
-            failurePolicy = FailurePolicy.FAIL_JOB, failureThreshold = 0.0,
-            queue = "mr",
-        )
-
-        repo.insertReduceTasks("j-sp", "wc", maxRetries = 3, queue = "mr", totalPartitions = 1)
-
-        val metadata = jdbi.withHandle<String, Exception> { h ->
-            h.createQuery("SELECT metadata FROM task WHERE group_id = 'j-sp' AND handler = 'wc.reduce'")
-                .mapTo(String::class.java).one()
-        }
-        assertTrue(metadata.contains("REDUCE"))
-    }
-
-    // ── streamBlobUris ───────────────────────────────────────────
-
-    @Test
-    fun `streamBlobUris returns blob URIs`() = runTest {
-        repo.submitJob(
-            jobId = "j-blob", jobType = "wc", jobParams = "{}",
-            taskInputs = listOf("a", "b"), maxRetries = 3,
-            failurePolicy = FailurePolicy.FAIL_JOB, failureThreshold = 0.0,
-            queue = "mr",
-        )
-
-        // Insert output rows directly
-        insertMrOutput("j-blob", "t-a", "blob://a", 0)
-        insertMrOutput("j-blob", "t-b", "blob://b", 0)
-
-        val uris = repo.streamBlobUris("j-blob").toList()
-        assertEquals(2, uris.size)
-        assertTrue(uris.containsAll(listOf("blob://a", "blob://b")))
-    }
-
-    @Test
-    fun `streamBlobUris filters by partition hash`() = runTest {
-        repo.submitJob(
-            jobId = "j-part", jobType = "wc", jobParams = "{}",
-            taskInputs = listOf("a"), maxRetries = 3,
-            failurePolicy = FailurePolicy.FAIL_JOB, failureThreshold = 0.0,
-            queue = "mr",
-        )
-
-        insertMrOutput("j-part", "t-1", "blob://p0", 0)
-        insertMrOutput("j-part", "t-2", "blob://p1", 1)
-        insertMrOutput("j-part", "t-3", "blob://p0b", 0)
-
-        val partition0 = repo.streamBlobUris("j-part", 0).toList()
-        assertEquals(2, partition0.size)
-        assertTrue(partition0.all { it.contains("p0") })
-
-        val partition1 = repo.streamBlobUris("j-part", 1).toList()
-        assertEquals(1, partition1.size)
-        assertEquals("blob://p1", partition1.first())
+        val outputs = repo.streamTaskOutputs("g-stream", "wc.map").toList()
+        assertEquals(2, outputs.size)
+        assertTrue(outputs.map { it.uri }.containsAll(listOf("blob://0", "blob://1")))
     }
 
     // ── Helpers ──────────────────────────────────────────────────
 
-    private fun getFirstTaskId(jobId: String): String =
+    private fun testGroup(
+        groupId: String,
+        phaseTotal: Int = 1,
+        failurePolicy: FailurePolicy = FailurePolicy.FAIL_GROUP,
+        failureThreshold: Double = 0.0,
+        onCompleteHandler: String? = null,
+    ) = TaskGroup(
+        groupId = groupId,
+        groupType = "wc",
+        status = GroupStatus.ACTIVE,
+        params = "{}",
+        queue = "mr",
+        phase = "map",
+        phaseTotal = phaseTotal,
+        onCompleteHandler = onCompleteHandler,
+        failurePolicy = failurePolicy,
+        failureThreshold = failureThreshold,
+    )
+
+    private fun testTask(groupId: String, handler: String, payload: String) =
+        EnqueueRequest(
+            handler = handler,
+            payload = payload,
+            queue = "mr",
+            groupId = groupId,
+            maxRetries = 3,
+        )
+
+    private fun getFirstTaskId(groupId: String): String =
         jdbi.withHandle<String, Exception> { h ->
-            h.createQuery("SELECT task_id FROM task WHERE group_id = :jobId")
-                .bind("jobId", jobId)
+            h.createQuery("SELECT task_id FROM task WHERE group_id = :groupId")
+                .bind("groupId", groupId)
                 .mapTo(String::class.java).first()
+        }
+
+    private fun getAllTaskIds(groupId: String): List<String> =
+        jdbi.withHandle<List<String>, Exception> { h ->
+            h.createQuery("SELECT task_id FROM task WHERE group_id = :groupId ORDER BY created_at")
+                .bind("groupId", groupId)
+                .mapTo(String::class.java).list()
         }
 
     private fun getTaskStatus(taskId: String): String =
@@ -380,43 +336,8 @@ class JobRepositoryTest {
     private fun claimTask(taskId: String, generation: String) {
         jdbi.useHandle<Exception> { h ->
             h.createUpdate(
-                "UPDATE task SET status = 'CLAIMED', execution_generation = :gen WHERE task_id = :taskId"
+                "UPDATE task SET status = 'CLAIMED', execution_generation = :gen WHERE task_id = :taskId",
             ).bind("taskId", taskId).bind("gen", generation).execute()
-        }
-    }
-
-    private fun insertReduceTask(jobId: String, handler: String): String {
-        val taskId = java.util.UUID.randomUUID().toString()
-        jdbi.useHandle<Exception> { h ->
-            h.createUpdate(
-                """
-                INSERT INTO task (task_id, handler, queue, payload, status, priority,
-                    group_id, metadata, retry_count, max_retries, created_at)
-                VALUES (:taskId, :handler, 'mr', '{}', 'PENDING', 0,
-                    :groupId, '{"phase":"REDUCE"}', 0, 3, CURRENT_TIMESTAMP)
-                """
-            ).bind("taskId", taskId)
-                .bind("handler", handler)
-                .bind("groupId", jobId)
-                .execute()
-        }
-        return taskId
-    }
-
-    private fun insertMrOutput(jobId: String, taskId: String, blobUri: String, partitionHash: Int) {
-        val outputId = java.util.UUID.randomUUID().toString()
-        jdbi.useHandle<Exception> { h ->
-            h.createUpdate(
-                """
-                INSERT INTO mr_output (output_id, job_id, task_id, blob_uri, partition_hash, created_at)
-                VALUES (:outputId, :jobId, :taskId, :blobUri, :partitionHash, CURRENT_TIMESTAMP)
-                """
-            ).bind("outputId", outputId)
-                .bind("jobId", jobId)
-                .bind("taskId", taskId)
-                .bind("blobUri", blobUri)
-                .bind("partitionHash", partitionHash)
-                .execute()
         }
     }
 }

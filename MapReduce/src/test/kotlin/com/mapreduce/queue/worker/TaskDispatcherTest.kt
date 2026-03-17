@@ -6,6 +6,8 @@ import com.mapreduce.queue.model.TaskResult
 import com.mapreduce.queue.pipeline.Middleware
 import com.mapreduce.queue.pipeline.TaskExecutionContext
 import com.mapreduce.queue.registry.HandlerRegistry
+import com.mapreduce.queue.repository.GroupTaskCompletionResult
+import com.mapreduce.queue.repository.TaskGroupRepository
 import com.mapreduce.queue.repository.TaskRepository
 import com.mapreduce.shutdown.ShutdownCoordinator
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
@@ -31,6 +33,7 @@ class TaskDispatcherTest {
     private lateinit var config: FrameworkConfig
     private lateinit var workerConfig: FrameworkConfig.WorkerConfig
     private lateinit var taskRepository: TaskRepository
+    private lateinit var taskGroupRepository: TaskGroupRepository
     private lateinit var handlerRegistry: HandlerRegistry
     private lateinit var circuitBreaker: PodCircuitBreaker
     private lateinit var shutdownCoordinator: ShutdownCoordinator
@@ -55,6 +58,7 @@ class TaskDispatcherTest {
         whenever(workerConfig.queues()).thenReturn(listOf("default", "mr"))
 
         taskRepository = mock<TaskRepository>()
+        taskGroupRepository = mock<TaskGroupRepository>()
         handlerRegistry = mock<HandlerRegistry>()
         circuitBreaker = mock<PodCircuitBreaker>()
         shutdownCoordinator = mock<ShutdownCoordinator>()
@@ -77,7 +81,7 @@ class TaskDispatcherTest {
         whenever(middlewareInstance.iterator()).thenReturn(middlewares.iterator())
 
         dispatcher = TaskDispatcher(
-            config, taskRepository, handlerRegistry,
+            config, taskRepository, taskGroupRepository, handlerRegistry,
             middlewareInstance,
             circuitBreaker, shutdownCoordinator, meterRegistry, tracer,
         )
@@ -107,15 +111,28 @@ class TaskDispatcherTest {
     // ── execute: Success ──────────────────────────────────────────
 
     @Test
-    fun `execute Success completes task and records CB success`() = runTest {
+    fun `execute Success completes task via group path and records CB success`() = runTest {
         val task = testTask()
+        stubHandler(task, TaskResult.Success("done"))
+        whenever(taskGroupRepository.completeGroupTask(any(), any(), any(), anyOrNull(), anyOrNull()))
+            .thenReturn(GroupTaskCompletionResult(updated = true, barrierMet = false))
+
+        dispatcher.execute(task)
+
+        verify(taskGroupRepository).completeGroupTask(eq("task-1"), eq("group-1"), eq("gen-1"), anyOrNull(), anyOrNull())
+        verify(circuitBreaker).recordSuccess()
+        verify(circuitBreaker, never()).recordFailure()
+    }
+
+    @Test
+    fun `execute Success without groupId completes via taskRepository`() = runTest {
+        val task = testTask(groupId = null)
         stubHandler(task, TaskResult.Success("done"))
 
         dispatcher.execute(task)
 
         verify(taskRepository).complete("task-1", "gen-1")
         verify(circuitBreaker).recordSuccess()
-        verify(circuitBreaker, never()).recordFailure()
     }
 
     // ── execute: Failure ──────────────────────────────────────────
@@ -184,12 +201,13 @@ class TaskDispatcherTest {
         taskId: String = "task-1",
         handler: String = "test.handler",
         queue: String = "default",
+        groupId: String? = "group-1",
     ) = Task(
         taskId = taskId,
         handler = handler,
         queue = queue,
         payload = "{}",
-        groupId = "group-1",
+        groupId = groupId,
         metadata = null,
         retryCount = 0,
         maxRetries = 3,

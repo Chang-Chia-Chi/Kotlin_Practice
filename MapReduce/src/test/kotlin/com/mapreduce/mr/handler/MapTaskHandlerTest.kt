@@ -1,6 +1,5 @@
 package com.mapreduce.mr.handler
 
-import com.mapreduce.mr.repository.JobRepository
 import com.mapreduce.mr.shuffle.BlobStore
 import com.mapreduce.mr.spi.MapReduceDefinition
 import com.mapreduce.queue.model.TaskContext
@@ -21,18 +20,16 @@ import org.junit.jupiter.api.Assertions.assertInstanceOf
 class MapTaskHandlerTest {
 
     private lateinit var definition: MapReduceDefinition<Any, Any, Any, Any>
-    private lateinit var jobRepository: JobRepository
     private lateinit var blobStore: BlobStore
     private lateinit var handler: MapTaskHandler
 
     @BeforeEach
     fun setUp() {
         definition = mock()
-        jobRepository = mock()
         blobStore = mock()
 
         whenever(definition.jobType).thenReturn("word-count")
-        handler = MapTaskHandler(definition, jobRepository, blobStore)
+        handler = MapTaskHandler(definition, blobStore)
     }
 
     @Test
@@ -51,11 +48,10 @@ class MapTaskHandlerTest {
 
         assertInstanceOf(TaskResult.Failure::class.java, result)
         verify(blobStore, never()).write(any(), any(), any(), any())
-        verify(jobRepository, never()).completeMapTask(any(), any(), any(), any(), any())
     }
 
     @Test
-    fun `happy path -- deserializes, maps, serializes, writes blob, completes task`() = runTest {
+    fun `happy path -- deserializes, maps, serializes, writes blob, returns output in TaskResult`() = runTest {
         val ctx = TaskContext(
             taskId = "task-1", payload = "input-json", groupId = "job-1",
             metadata = null, executionGeneration = "gen-1",
@@ -69,11 +65,11 @@ class MapTaskHandlerTest {
 
         val result = handler.handle(ctx)
 
-        assertInstanceOf(TaskResult.Success::class.java, result)
+        val success = assertInstanceOf(TaskResult.Success::class.java, result)
+        assertEquals("blob://job-1/task-1", success.outputUri)
         verify(definition).deserializeInput("input-json")
         verify(definition).map("raw-input")
         verify(blobStore).write(eq("job-1"), eq("task-1"), eq(0), any())
-        verify(jobRepository).completeMapTask("task-1", "job-1", "blob://job-1/task-1", "gen-1", 0)
     }
 
     @Test
@@ -94,7 +90,7 @@ class MapTaskHandlerTest {
     }
 
     @Test
-    fun `calls completeMapTask with execution generation for fencing`() = runTest {
+    fun `returns outputUri and outputMetadata in Success result`() = runTest {
         val ctx = TaskContext(
             taskId = "t-1", payload = "p", groupId = "j-1",
             metadata = null, executionGeneration = "gen-abc",
@@ -105,9 +101,10 @@ class MapTaskHandlerTest {
         whenever(definition.serializeOutput(any())).thenReturn("s-out")
         whenever(blobStore.write(any(), any(), any(), any())).thenReturn("blob://u")
 
-        handler.handle(ctx)
+        val result = handler.handle(ctx)
 
-        verify(jobRepository).completeMapTask("t-1", "j-1", "blob://u", "gen-abc", 0)
+        val success = assertInstanceOf(TaskResult.Success::class.java, result)
+        assertEquals("blob://u", success.outputUri)
+        assertEquals("""{"partition_hash":0}""", success.outputMetadata)
     }
-
 }

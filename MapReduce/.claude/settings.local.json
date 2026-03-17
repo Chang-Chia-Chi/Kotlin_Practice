@@ -31,7 +31,11 @@
       "Bash(find:*)",
       "Bash(ls:*)",
       "Bash(cd*)",
-      "Bash(cd *)"
+      "Bash(cd *)",
+      "WebSearch",
+      "Bash(./mvnw compile:*)",
+      "Bash(./mvnw test:*)",
+      "Bash(./mvnw clean:*)"
     ]
   }
 }

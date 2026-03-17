@@ -2,6 +2,7 @@ package com.mapreduce.queue.worker
 
 import com.mapreduce.config.FrameworkConfig
 import com.mapreduce.leader.LeaderManager
+import com.mapreduce.queue.repository.TaskGroupRepository
 import com.mapreduce.queue.repository.TaskRepository
 import com.mapreduce.shutdown.ShutdownCoordinator
 import io.micrometer.core.instrument.MeterRegistry
@@ -32,6 +33,7 @@ import java.time.Instant
 class StaleTaskReaper(
     private val config: FrameworkConfig,
     private val taskRepository: TaskRepository,
+    private val taskGroupRepository: TaskGroupRepository,
     private val leaderManager: LeaderManager,
     private val shutdownCoordinator: ShutdownCoordinator,
     private val meterRegistry: MeterRegistry,
@@ -103,6 +105,9 @@ class StaleTaskReaper(
 
             if (result) {
                 deadLetteredCount++
+                if (task.groupId != null) {
+                    taskGroupRepository.recordGroupTaskFailure(task.groupId)
+                }
             }
         }
 

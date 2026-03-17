@@ -1,6 +1,6 @@
 package com.mapreduce.mr.spi
 
-import com.mapreduce.mr.model.FailurePolicy
+import com.mapreduce.queue.model.FailurePolicy
 import kotlinx.coroutines.flow.Flow
 
 /**
@@ -19,7 +19,7 @@ interface MapReduceDefinition<P, I, O, R> {
 
     val jobType: String
 
-    val failurePolicy: FailurePolicy get() = FailurePolicy.FAIL_JOB
+    val failurePolicy: FailurePolicy get() = FailurePolicy.FAIL_GROUP
 
     val failureThreshold: Double get() = 0.0
 

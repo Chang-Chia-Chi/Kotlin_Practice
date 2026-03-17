@@ -32,6 +32,8 @@ data class Task(
     @ColumnName("execution_generation") val executionGeneration: String? = null,
     val speculative: Int = 0,
     @ColumnName("last_epoch") val lastEpoch: Long = 0,
+    @ColumnName("output_uri") val outputUri: String? = null,
+    @ColumnName("output_metadata") val outputMetadata: String? = null,
 )
 
 /**

@@ -5,7 +5,11 @@ import java.time.Duration
 /** Return type for [com.mapreduce.queue.spi.TaskHandler.handle]. */
 sealed interface TaskResult {
     /** Handler completed successfully. Framework marks task COMPLETED. */
-    data class Success(val output: String? = null) : TaskResult
+    data class Success(
+        val output: String? = null,
+        val outputUri: String? = null,
+        val outputMetadata: String? = null,
+    ) : TaskResult
 
     /**
      * Handler requests a retry with optional delay.

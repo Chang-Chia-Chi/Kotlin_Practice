@@ -1,6 +1,5 @@
 package com.mapreduce.mr.handler
 
-import com.mapreduce.mr.repository.JobRepository
 import com.mapreduce.mr.shuffle.BlobStore
 import com.mapreduce.mr.spi.MapReduceDefinition
 import com.mapreduce.queue.model.TaskContext
@@ -12,13 +11,12 @@ import org.jboss.logging.Logger
 /**
  * Auto-generated handler for the map phase of a [MapReduceDefinition].
  *
- * Intermediate outputs are streamed to the external [BlobStore] — the database
- * `mr_output` table stores only the blob URI, never the data.
- * Task completion + counter increment happen atomically in one Oracle transaction.
+ * Intermediate outputs are streamed to the external [BlobStore].
+ * Returns the blob URI via [TaskResult.Success] — the framework handles
+ * task completion and group counter increment atomically.
  */
 class MapTaskHandler(
     private val definition: MapReduceDefinition<Any, Any, Any, Any>,
-    private val jobRepository: JobRepository,
     private val blobStore: BlobStore,
 ) : TaskHandler {
 
@@ -36,9 +34,10 @@ class MapTaskHandler(
 
         val blobUri = blobStore.write(jobId, ctx.taskId, 0, outputFlow)
 
-        jobRepository.completeMapTask(ctx.taskId, jobId, blobUri, ctx.executionGeneration, 0)
-
         log.debugf("MAP %s completed (job=%s, blob=%s)", ctx.taskId, jobId, blobUri)
-        return TaskResult.Success()
+        return TaskResult.Success(
+            outputUri = blobUri,
+            outputMetadata = """{"partition_hash":0}""",
+        )
     }
 }

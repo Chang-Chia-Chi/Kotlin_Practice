@@ -4,6 +4,7 @@ import com.mapreduce.config.FrameworkConfig
 import com.mapreduce.leader.LeaderManager
 import com.mapreduce.queue.model.Task
 import com.mapreduce.queue.model.TaskStatus
+import com.mapreduce.queue.repository.TaskGroupRepository
 import com.mapreduce.queue.repository.TaskRepository
 import com.mapreduce.shutdown.ShutdownCoordinator
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
@@ -24,6 +25,7 @@ class StaleTaskReaperTest {
     private lateinit var config: FrameworkConfig
     private lateinit var reaperConfig: FrameworkConfig.ReaperConfig
     private lateinit var taskRepository: TaskRepository
+    private lateinit var taskGroupRepository: TaskGroupRepository
     private lateinit var leaderManager: LeaderManager
     private lateinit var shutdownCoordinator: ShutdownCoordinator
     private lateinit var meterRegistry: SimpleMeterRegistry
@@ -39,6 +41,7 @@ class StaleTaskReaperTest {
         whenever(reaperConfig.batchSize()).thenReturn(50)
 
         taskRepository = mock<TaskRepository>()
+        taskGroupRepository = mock<TaskGroupRepository>()
         leaderManager = mock<LeaderManager>()
         whenever(leaderManager.token).thenReturn(5L)
 
@@ -46,7 +49,7 @@ class StaleTaskReaperTest {
         meterRegistry = SimpleMeterRegistry()
 
         reaper = StaleTaskReaper(
-            config, taskRepository, leaderManager,
+            config, taskRepository, taskGroupRepository, leaderManager,
             shutdownCoordinator, meterRegistry,
         )
     }

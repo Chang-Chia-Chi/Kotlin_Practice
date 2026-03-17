@@ -3,17 +3,13 @@ package com.mapreduce.mr.orchestrator
 import com.mapreduce.config.FrameworkConfig
 import com.mapreduce.leader.FencingTokenHolder
 import com.mapreduce.leader.LeaderManager
-import com.mapreduce.mr.model.Job
-import com.mapreduce.mr.model.JobStatus
-import com.mapreduce.mr.model.evaluateFailurePolicy
-import com.mapreduce.mr.registry.MapReduceRegistrar
-import com.mapreduce.mr.repository.JobRepository
+import com.mapreduce.queue.model.GroupStatus
 import com.mapreduce.queue.model.TaskStatus
+import com.mapreduce.queue.repository.TaskGroupRepository
 import com.mapreduce.queue.repository.TaskRepository
 import com.mapreduce.shutdown.ShutdownCoordinator
 import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.Tag
-import io.micrometer.core.instrument.Timer
 import io.quarkus.runtime.StartupEvent
 import jakarta.enterprise.context.ApplicationScoped
 import jakarta.enterprise.event.Observes
@@ -26,24 +22,23 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.jboss.logging.Logger
-import java.time.Duration
-import java.time.Instant
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 
 /**
- * Leader-only monitoring loop for map-reduce jobs.
+ * Leader-only monitoring loop, simplified after the reactive barrier refactoring.
  *
- * All leader writes propagate the fencing epoch via [FencingTokenHolder]
- * so repository SQL includes the `WHERE last_epoch <= :epoch` guard.
+ * Phase transitions are now handled reactively by [PhaseTransitionHandler] callback
+ * tasks. This orchestrator retains:
+ * 1. [pollQueueDepth] — HPA queue depth gauge (unchanged)
+ * 2. [recoverySweep] — safety net for stuck ACTIVE groups where barrier was met
+ *    but callback task was lost (e.g., bug, TX anomaly)
  */
 @ApplicationScoped
 class MapReduceOrchestrator(
     private val config: FrameworkConfig,
-    private val jobRepository: JobRepository,
+    private val taskGroupRepository: TaskGroupRepository,
     private val taskRepository: TaskRepository,
-    private val registrar: MapReduceRegistrar,
     private val leaderManager: LeaderManager,
     private val shutdownCoordinator: ShutdownCoordinator,
     private val meterRegistry: MeterRegistry,
@@ -52,6 +47,9 @@ class MapReduceOrchestrator(
     private val log = Logger.getLogger(MapReduceOrchestrator::class.java)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val queueDepths = ConcurrentHashMap<String, AtomicLong>()
+
+    /** Tracks how many monitor intervals have elapsed, for low-frequency recovery sweep. */
+    private var tickCount = 0
 
     fun onStart(@Observes ev: StartupEvent) {
         shutdownCoordinator.registerLeaderScopeCallback { scope.cancel() }
@@ -65,7 +63,7 @@ class MapReduceOrchestrator(
                     try {
                         withContext(Dispatchers.IO) {
                             FencingTokenHolder.withToken(epoch) {
-                                monitorJobs()
+                                monitor()
                             }
                         }
                     } catch (e: Exception) {
@@ -77,10 +75,14 @@ class MapReduceOrchestrator(
         }
     }
 
-    private fun monitorJobs() {
-        monitorRunningJobs()
-        monitorReducingJobs()
+    private fun monitor() {
         pollQueueDepth()
+
+        // Recovery sweep at 5x the normal interval
+        tickCount++
+        if (tickCount % 5 == 0) {
+            recoverySweep()
+        }
     }
 
     private fun pollQueueDepth() {
@@ -105,106 +107,39 @@ class MapReduceOrchestrator(
         }
     }
 
-    private fun monitorRunningJobs() {
-        val runningJobs = jobRepository.findJobsByStatus(JobStatus.RUNNING)
-        for (job in runningJobs) {
-            val deadLettered = taskRepository.countByGroupAndStatus(job.jobId, TaskStatus.DEAD_LETTER)
+    /**
+     * Safety net: detect ACTIVE groups where the barrier has been met but no
+     * callback task exists (e.g., due to TX anomaly or bug). Reconciles the
+     * phase_failed counter from actual DEAD_LETTER count and re-creates
+     * missing callback tasks.
+     */
+    private fun recoverySweep() {
+        try {
+            val activeGroups = taskGroupRepository.findGroupsByStatus(GroupStatus.ACTIVE)
+            for (group in activeGroups) {
+                // Reconcile phase_failed from actual dead-letter count
+                val actualDeadLettered = taskRepository.countByGroupAndStatus(group.groupId, TaskStatus.DEAD_LETTER)
+                val actualCompleted = taskRepository.countByGroupAndStatus(group.groupId, TaskStatus.COMPLETED)
 
-            if (deadLettered != job.failedTasks) {
-                jobRepository.updateFailedTasks(job.jobId, deadLettered)
-            }
+                val barrierMet = actualCompleted + actualDeadLettered >= group.phaseTotal
+                if (!barrierMet) continue
 
-            if (job.completedTasks + deadLettered >= job.totalTasks) {
-                handleBarrierMet(job, deadLettered)
-            }
-        }
-    }
-
-    private fun monitorReducingJobs() {
-        val reducingJobs = jobRepository.findJobsByStatus(JobStatus.REDUCING)
-        for (job in reducingJobs) {
-            val reduceHandler = "${job.jobType}.reduce"
-            val reduceTasks = taskRepository.findAllByGroupAndHandler(job.jobId, reduceHandler)
-
-            when {
-                reduceTasks.isEmpty() -> {
-                    log.warnf("Job %s in REDUCING without reduce tasks — recovering", job.jobId)
-                    dispatchReduceTask(job)
-                }
-                reduceTasks.all { it.status == TaskStatus.COMPLETED } -> {
-                    val transitioned = jobRepository.casJobStatus(
-                        job.jobId, JobStatus.REDUCING, JobStatus.COMPLETED, job.version,
-                    )
-                    if (transitioned) {
-                        log.infof("Job %s completed (%d reduce partitions)", job.jobId, reduceTasks.size)
-                        recordOrchestrationDuration(job)
-                    }
-                }
-                reduceTasks.any { it.status == TaskStatus.DEAD_LETTER } -> {
-                    val transitioned = jobRepository.casJobStatus(
-                        job.jobId, JobStatus.REDUCING, JobStatus.FAILED, job.version,
-                    )
-                    if (transitioned) {
-                        val failed = reduceTasks.count { it.status == TaskStatus.DEAD_LETTER }
-                        log.errorf("Job %s failed: %d/%d reduce partition(s) dead-lettered",
-                            job.jobId, failed, reduceTasks.size)
-                        recordOrchestrationDuration(job)
+                // Check if callback task already exists (PENDING or CLAIMED)
+                if (group.onCompleteHandler != null) {
+                    val existingCallback = taskRepository.findByGroupAndHandler(group.groupId, group.onCompleteHandler)
+                    if (existingCallback == null) {
+                        // No callback found with groupId match — but callback tasks have NULL groupId.
+                        // Look for any pending/claimed task with the handler name and payload = groupId
+                        log.warnf(
+                            "Recovery: group %s barrier met (completed=%d, dead_lettered=%d, total=%d) but no callback task — re-creating",
+                            group.groupId, actualCompleted, actualDeadLettered, group.phaseTotal,
+                        )
+                        taskGroupRepository.recordGroupTaskFailure(group.groupId)
                     }
                 }
             }
+        } catch (e: Exception) {
+            log.warnf(e, "Error in recovery sweep")
         }
-    }
-
-    private fun handleBarrierMet(job: Job, deadLettered: Int) {
-        log.infof("Barrier met for job %s: completed=%d, dead_lettered=%d, total=%d",
-            job.jobId, job.completedTasks, deadLettered, job.totalTasks)
-
-        val failureReason = evaluateFailurePolicy(
-            job.failurePolicy, deadLettered, job.totalTasks, job.failureThreshold,
-        )
-        if (failureReason != null) {
-            failJob(job, failureReason)
-            return
-        }
-
-        val definition = registrar.getDefinition(job.jobType)
-        val maxRetries = definition?.maxRetries ?: 3
-        val queue = definition?.queue ?: "mr"
-
-        val transitioned = jobRepository.transitionToReducing(
-            job.jobId, job.version, job.jobType, maxRetries, queue, job.totalPartitions,
-        )
-        if (transitioned) {
-            log.infof("Dispatched %d reduce task(s) for job %s", job.totalPartitions, job.jobId)
-        }
-    }
-
-    /** Recovery-only: insert reduce tasks for a job already in REDUCING state. */
-    private fun dispatchReduceTask(job: Job) {
-        val definition = registrar.getDefinition(job.jobType)
-        val maxRetries = definition?.maxRetries ?: 3
-        val queue = definition?.queue ?: "mr"
-        jobRepository.insertReduceTasks(job.jobId, job.jobType, maxRetries, queue, job.totalPartitions)
-        log.infof("Dispatched %d reduce task(s) for job %s", job.totalPartitions, job.jobId)
-    }
-
-    private fun failJob(job: Job, reason: String) {
-        val transitioned = jobRepository.casJobStatus(
-            job.jobId, JobStatus.RUNNING, JobStatus.FAILED, job.version,
-        )
-        if (transitioned) {
-            log.warnf("Job %s failed: %s", job.jobId, reason)
-            recordOrchestrationDuration(job)
-        }
-    }
-
-    private fun recordOrchestrationDuration(job: Job) {
-        if (job.createdAt == null) return
-        val duration = Duration.between(job.createdAt, Instant.now())
-        Timer.builder("framework.orchestration.duration.seconds")
-            .tag("orchestration_type", "MapReduce")
-            .tag("identifier", job.jobType)
-            .register(meterRegistry)
-            .record(duration.toMillis(), TimeUnit.MILLISECONDS)
     }
 }

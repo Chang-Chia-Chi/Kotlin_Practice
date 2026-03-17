@@ -47,37 +47,29 @@ object TestH2Factory {
             completed_at       TIMESTAMP,
             execution_generation VARCHAR(36),
             speculative        INT           DEFAULT 0 NOT NULL,
-            last_epoch         BIGINT        DEFAULT 0 NOT NULL
+            last_epoch         BIGINT        DEFAULT 0 NOT NULL,
+            output_uri         VARCHAR(1000),
+            output_metadata    CLOB
         );
 
-        CREATE TABLE mr_job (
-            job_id              VARCHAR(36)   NOT NULL PRIMARY KEY,
-            job_type            VARCHAR(255)  NOT NULL,
+        CREATE TABLE task_group (
+            group_id            VARCHAR(36)   NOT NULL PRIMARY KEY,
+            group_type          VARCHAR(255)  NOT NULL,
             status              VARCHAR(20)   NOT NULL,
-            job_params          CLOB,
-            total_tasks         INT           DEFAULT 0 NOT NULL,
-            completed_tasks     INT           DEFAULT 0 NOT NULL,
-            failed_tasks        INT           DEFAULT 0 NOT NULL,
-            failure_policy      VARCHAR(20)   DEFAULT 'FAIL_JOB' NOT NULL,
+            params              CLOB,
+            queue               VARCHAR(100)  DEFAULT 'default' NOT NULL,
+            phase               VARCHAR(50)   NOT NULL,
+            phase_total         INT           DEFAULT 0 NOT NULL,
+            phase_completed     INT           DEFAULT 0 NOT NULL,
+            phase_failed        INT           DEFAULT 0 NOT NULL,
+            on_complete_handler VARCHAR(255),
+            failure_policy      VARCHAR(20)   DEFAULT 'FAIL_GROUP' NOT NULL,
             failure_threshold   DECIMAL(5,4)  DEFAULT 0 NOT NULL,
-            reducing_fence_token VARCHAR(255),
             result_metadata     CLOB,
-            total_partitions    INT           DEFAULT 1 NOT NULL,
-            last_epoch          BIGINT        DEFAULT 0 NOT NULL,
             version             BIGINT        DEFAULT 0 NOT NULL,
+            last_epoch          BIGINT        DEFAULT 0 NOT NULL,
             created_at          TIMESTAMP     DEFAULT CURRENT_TIMESTAMP NOT NULL,
             updated_at          TIMESTAMP     DEFAULT CURRENT_TIMESTAMP NOT NULL
-        );
-
-        CREATE TABLE mr_output (
-            output_id       VARCHAR(36)   NOT NULL PRIMARY KEY,
-            job_id          VARCHAR(36)   NOT NULL,
-            task_id         VARCHAR(36)   NOT NULL,
-            output_data     CLOB,
-            blob_uri        VARCHAR(2000),
-            partition_hash  INT           DEFAULT 0 NOT NULL,
-            created_at      TIMESTAMP     DEFAULT CURRENT_TIMESTAMP NOT NULL,
-            CONSTRAINT fk_mr_output_job FOREIGN KEY (job_id) REFERENCES mr_job (job_id)
         );
     """.trimIndent()
 }
