@@ -106,7 +106,7 @@ class StaleTaskReaper(
             if (result) {
                 deadLetteredCount++
                 if (task.groupId != null) {
-                    taskGroupRepository.recordGroupTaskFailure(task.groupId)
+                    taskGroupRepository.resolveGroupTask(groupId = task.groupId, failed = true)
                 }
             }
         }

@@ -41,7 +41,8 @@ class JobRepositoryTest {
         assertEquals("wc", found!!.groupType)
         assertEquals(GroupStatus.ACTIVE, found.status)
         assertEquals(3, found.phaseTotal)
-        assertEquals(0, found.phaseCompleted)
+        assertEquals(3, found.tasksPending)
+        assertEquals(0, found.tasksFailed)
 
         val taskCount = jdbi.withHandle<Int, Exception> { h ->
             h.createQuery("SELECT COUNT(*) FROM task WHERE group_id = 'g-1'")
@@ -118,54 +119,55 @@ class JobRepositoryTest {
         assertFalse(result)
     }
 
-    // ── completeGroupTask ─────────────────────────────────────────
+    // ── resolveGroupTask (success path) ────────────────────────────
 
     @Test
-    fun `completeGroupTask increments phase_completed when task is CLAIMED`() {
+    fun `resolveGroupTask decrements tasks_pending on success`() {
         val group = testGroup("g-cgt", phaseTotal = 1)
         repo.submitGroup(group, listOf(testTask("g-cgt", "wc.map", "a")))
 
         val taskId = getFirstTaskId("g-cgt")
         claimTask(taskId, "gen-1")
 
-        val result = repo.completeGroupTask(taskId, "g-cgt", "gen-1", "blob://test", null)
+        val result = repo.resolveGroupTask(taskId, "g-cgt", "gen-1", outputUri = "blob://test")
 
         assertTrue(result.updated)
         assertTrue(result.barrierMet)
 
         val updated = repo.findGroup("g-cgt")!!
-        assertEquals(1, updated.phaseCompleted)
+        assertEquals(0, updated.tasksPending)
+        assertEquals(0, updated.tasksFailed)
 
         assertEquals("COMPLETED", getTaskStatus(taskId))
     }
 
     @Test
-    fun `completeGroupTask zombie detection -- zero rows when execution_generation mismatches`() {
+    fun `resolveGroupTask zombie detection -- zero rows when execution_generation mismatches`() {
         val group = testGroup("g-zombie", phaseTotal = 1)
         repo.submitGroup(group, listOf(testTask("g-zombie", "wc.map", "a")))
 
         val taskId = getFirstTaskId("g-zombie")
         claimTask(taskId, "gen-correct")
 
-        val result = repo.completeGroupTask(taskId, "g-zombie", "gen-wrong", "blob://zombie", null)
+        val result = repo.resolveGroupTask(taskId, "g-zombie", "gen-wrong", outputUri = "blob://zombie")
 
         assertFalse(result.updated)
         assertFalse(result.barrierMet)
 
         val found = repo.findGroup("g-zombie")!!
-        assertEquals(0, found.phaseCompleted)
+        assertEquals(1, found.tasksPending)
         assertEquals("CLAIMED", getTaskStatus(taskId))
     }
 
     @Test
-    fun `completeGroupTask stores output_uri on task row`() {
+    fun `resolveGroupTask stores output_uri on task row`() {
         val group = testGroup("g-out", phaseTotal = 1)
         repo.submitGroup(group, listOf(testTask("g-out", "wc.map", "a")))
 
         val taskId = getFirstTaskId("g-out")
         claimTask(taskId, "gen-1")
 
-        repo.completeGroupTask(taskId, "g-out", "gen-1", "blob://my-output", """{"key":"val"}""")
+        repo.resolveGroupTask(taskId, "g-out", "gen-1", outputUri = "blob://my-output", outputMetadata = """{"key":"val"}""")
 
         val outputUri = jdbi.withHandle<String?, Exception> { h ->
             h.createQuery("SELECT output_uri FROM task WHERE task_id = :taskId")
@@ -176,21 +178,49 @@ class JobRepositoryTest {
     }
 
     @Test
-    fun `completeGroupTask creates callback task when barrier is met`() {
+    fun `resolveGroupTask creates callback task when barrier is met`() {
         val group = testGroup("g-barrier", phaseTotal = 1, onCompleteHandler = "wc.__phase_complete")
         repo.submitGroup(group, listOf(testTask("g-barrier", "wc.map", "a")))
 
         val taskId = getFirstTaskId("g-barrier")
         claimTask(taskId, "gen-1")
 
-        val result = repo.completeGroupTask(taskId, "g-barrier", "gen-1", "blob://x", null)
+        val result = repo.resolveGroupTask(taskId, "g-barrier", "gen-1", outputUri = "blob://x")
 
         assertTrue(result.barrierMet)
 
-        // Check that callback task was created with NULL group_id
         val callbackCount = jdbi.withHandle<Int, Exception> { h ->
             h.createQuery(
                 "SELECT COUNT(*) FROM task WHERE handler = 'wc.__phase_complete' AND group_id IS NULL",
+            ).mapTo(Int::class.java).one()
+        }
+        assertEquals(1, callbackCount)
+    }
+
+    // ── resolveGroupTask (failure path) ───────────────────────────
+
+    @Test
+    fun `resolveGroupTask with failed=true decrements pending and increments failed`() {
+        val group = testGroup("g-fail", phaseTotal = 2)
+        repo.submitGroup(group, (0 until 2).map { testTask("g-fail", "wc.map", "i-$it") })
+
+        repo.resolveGroupTask(groupId = "g-fail", failed = true)
+
+        val updated = repo.findGroup("g-fail")!!
+        assertEquals(1, updated.tasksPending)
+        assertEquals(1, updated.tasksFailed)
+    }
+
+    @Test
+    fun `resolveGroupTask with failed=true creates callback when barrier met`() {
+        val group = testGroup("g-fail-barrier", phaseTotal = 1, onCompleteHandler = "wc.__phase_complete")
+        repo.submitGroup(group, listOf(testTask("g-fail-barrier", "wc.map", "a")))
+
+        repo.resolveGroupTask(groupId = "g-fail-barrier", failed = true)
+
+        val callbackCount = jdbi.withHandle<Int, Exception> { h ->
+            h.createQuery(
+                "SELECT COUNT(*) FROM task WHERE handler = 'wc.__phase_complete' AND group_id IS NULL AND payload = 'g-fail-barrier'",
             ).mapTo(Int::class.java).one()
         }
         assertEquals(1, callbackCount)
@@ -210,7 +240,8 @@ class JobRepositoryTest {
         val updated = repo.findGroup("g-tp")!!
         assertEquals("reduce", updated.phase)
         assertEquals(2, updated.phaseTotal)
-        assertEquals(0, updated.phaseCompleted)
+        assertEquals(2, updated.tasksPending)
+        assertEquals(0, updated.tasksFailed)
         assertEquals(1, updated.version)
 
         val reduceCount = jdbi.withHandle<Int, Exception> { h ->
@@ -234,34 +265,6 @@ class JobRepositoryTest {
         assertEquals(0, found.version)
     }
 
-    // ── recordGroupTaskFailure ────────────────────────────────────
-
-    @Test
-    fun `recordGroupTaskFailure increments phase_failed`() {
-        val group = testGroup("g-fail", phaseTotal = 2)
-        repo.submitGroup(group, (0 until 2).map { testTask("g-fail", "wc.map", "i-$it") })
-
-        repo.recordGroupTaskFailure("g-fail")
-
-        val updated = repo.findGroup("g-fail")!!
-        assertEquals(1, updated.phaseFailed)
-    }
-
-    @Test
-    fun `recordGroupTaskFailure creates callback when barrier met`() {
-        val group = testGroup("g-fail-barrier", phaseTotal = 1, onCompleteHandler = "wc.__phase_complete")
-        repo.submitGroup(group, listOf(testTask("g-fail-barrier", "wc.map", "a")))
-
-        repo.recordGroupTaskFailure("g-fail-barrier")
-
-        val callbackCount = jdbi.withHandle<Int, Exception> { h ->
-            h.createQuery(
-                "SELECT COUNT(*) FROM task WHERE handler = 'wc.__phase_complete' AND group_id IS NULL AND payload = 'g-fail-barrier'",
-            ).mapTo(Int::class.java).one()
-        }
-        assertEquals(1, callbackCount)
-    }
-
     // ── streamTaskOutputs ─────────────────────────────────────────
 
     @Test
@@ -269,11 +272,10 @@ class JobRepositoryTest {
         val group = testGroup("g-stream", phaseTotal = 2)
         repo.submitGroup(group, (0 until 2).map { testTask("g-stream", "wc.map", "i-$it") })
 
-        // Claim and complete tasks with output URIs
         val taskIds = getAllTaskIds("g-stream")
         taskIds.forEachIndexed { i, taskId ->
             claimTask(taskId, "gen-$i")
-            repo.completeGroupTask(taskId, "g-stream", "gen-$i", "blob://$i", null)
+            repo.resolveGroupTask(taskId, "g-stream", "gen-$i", outputUri = "blob://$i")
         }
 
         val outputs = repo.streamTaskOutputs("g-stream", "wc.map").toList()

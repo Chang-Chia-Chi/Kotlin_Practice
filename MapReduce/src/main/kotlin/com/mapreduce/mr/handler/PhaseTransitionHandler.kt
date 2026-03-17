@@ -47,7 +47,7 @@ class PhaseTransitionHandler(
 
     private fun handleMapPhaseComplete(group: TaskGroup): TaskResult {
         val failureReason = evaluateFailurePolicy(
-            FailurePolicy.valueOf(group.failurePolicy), group.phaseFailed,
+            FailurePolicy.valueOf(group.failurePolicy), group.tasksFailed,
             group.phaseTotal, group.failureThreshold,
         )
         if (failureReason != null) {

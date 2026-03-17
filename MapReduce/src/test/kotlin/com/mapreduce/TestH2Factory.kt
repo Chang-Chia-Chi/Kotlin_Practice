@@ -60,14 +60,15 @@ object TestH2Factory {
             queue               VARCHAR(100)  DEFAULT 'default' NOT NULL,
             phase               VARCHAR(50)   NOT NULL,
             phase_total         INT           DEFAULT 0 NOT NULL,
-            phase_completed     INT           DEFAULT 0 NOT NULL,
-            phase_failed        INT           DEFAULT 0 NOT NULL,
+            tasks_pending       INT           DEFAULT 0 NOT NULL,
+            tasks_failed        INT           DEFAULT 0 NOT NULL,
             on_complete_handler VARCHAR(255),
             failure_policy      VARCHAR(20)   DEFAULT 'FAIL_GROUP' NOT NULL,
             failure_threshold   DECIMAL(5,4)  DEFAULT 0 NOT NULL,
             result_metadata     CLOB,
             version             BIGINT        DEFAULT 0 NOT NULL,
             last_epoch          BIGINT        DEFAULT 0 NOT NULL,
+            deadline_at         TIMESTAMP,
             created_at          TIMESTAMP     DEFAULT CURRENT_TIMESTAMP NOT NULL,
             updated_at          TIMESTAMP     DEFAULT CURRENT_TIMESTAMP NOT NULL
         );

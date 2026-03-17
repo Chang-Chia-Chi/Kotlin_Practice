@@ -6,7 +6,7 @@ import com.mapreduce.queue.model.TaskResult
 import com.mapreduce.queue.pipeline.Middleware
 import com.mapreduce.queue.pipeline.TaskExecutionContext
 import com.mapreduce.queue.registry.HandlerRegistry
-import com.mapreduce.queue.repository.GroupTaskCompletionResult
+import com.mapreduce.queue.repository.GroupTaskResolution
 import com.mapreduce.queue.repository.TaskGroupRepository
 import com.mapreduce.queue.repository.TaskRepository
 import com.mapreduce.shutdown.ShutdownCoordinator
@@ -114,12 +114,12 @@ class TaskDispatcherTest {
     fun `execute Success completes task via group path and records CB success`() = runTest {
         val task = testTask()
         stubHandler(task, TaskResult.Success("done"))
-        whenever(taskGroupRepository.completeGroupTask(any(), any(), any(), anyOrNull(), anyOrNull()))
-            .thenReturn(GroupTaskCompletionResult(updated = true, barrierMet = false))
+        whenever(taskGroupRepository.resolveGroupTask(any(), any(), anyOrNull(), any(), anyOrNull(), anyOrNull()))
+            .thenReturn(GroupTaskResolution(updated = true, barrierMet = false))
 
         dispatcher.execute(task)
 
-        verify(taskGroupRepository).completeGroupTask(eq("task-1"), eq("group-1"), eq("gen-1"), anyOrNull(), anyOrNull())
+        verify(taskGroupRepository).resolveGroupTask(eq("task-1"), eq("group-1"), eq("gen-1"), eq(false), anyOrNull(), anyOrNull())
         verify(circuitBreaker).recordSuccess()
         verify(circuitBreaker, never()).recordFailure()
     }

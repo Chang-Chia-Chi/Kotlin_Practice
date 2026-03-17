@@ -157,9 +157,10 @@ class TaskDispatcher(
         when (result) {
             is TaskResult.Success -> {
                 if (task.groupId != null) {
-                    taskGroupRepository.completeGroupTask(
-                        task.taskId, task.groupId, gen,
-                        result.outputUri, result.outputMetadata,
+                    taskGroupRepository.resolveGroupTask(
+                        taskId = task.taskId, groupId = task.groupId,
+                        executionGeneration = gen,
+                        outputUri = result.outputUri, outputMetadata = result.outputMetadata,
                     )
                 } else {
                     taskRepository.complete(task.taskId, gen)
@@ -170,7 +171,7 @@ class TaskDispatcher(
                 if (result.consumeRetry) {
                     val deadLettered = taskRepository.fail(task.taskId, result.reason, result.delay, gen)
                     if (deadLettered && task.groupId != null) {
-                        taskGroupRepository.recordGroupTaskFailure(task.groupId)
+                        taskGroupRepository.resolveGroupTask(groupId = task.groupId, failed = true)
                     }
                     circuitBreaker.recordFailure()
                 } else {
@@ -180,14 +181,14 @@ class TaskDispatcher(
             is TaskResult.Failure -> {
                 val deadLettered = taskRepository.fail(task.taskId, result.message, executionGeneration = gen)
                 if (deadLettered && task.groupId != null) {
-                    taskGroupRepository.recordGroupTaskFailure(task.groupId)
+                    taskGroupRepository.resolveGroupTask(groupId = task.groupId, failed = true)
                 }
                 circuitBreaker.recordFailure()
             }
             is TaskResult.DeadLetter -> {
                 taskRepository.deadLetter(task.taskId, result.reason)
                 if (task.groupId != null) {
-                    taskGroupRepository.recordGroupTaskFailure(task.groupId)
+                    taskGroupRepository.resolveGroupTask(groupId = task.groupId, failed = true)
                 }
                 circuitBreaker.recordFailure()
             }

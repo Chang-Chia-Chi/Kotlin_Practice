@@ -14,10 +14,10 @@ import org.jboss.logging.Logger
 import java.util.UUID
 
 /**
- * Result of completing a task within a group.
+ * Result of resolving a task within a group.
  * [barrierMet] is true when this was the final task for the current phase.
  */
-data class GroupTaskCompletionResult(
+data class GroupTaskResolution(
     val updated: Boolean,
     val barrierMet: Boolean,
 )
@@ -31,10 +31,10 @@ data class TaskOutput(
 )
 
 /**
- * Layer 1 persistence for task groups with reactive barrier detection.
+ * Layer 1 persistence for task groups with countdown barrier detection.
  *
- * The core mechanism: when a task completes, the group counter is incremented
- * under a row lock. The worker that sees the counter reach [phaseTotal]
+ * The core mechanism: when a task reaches a terminal state (success or dead-letter),
+ * [tasks_pending] is decremented under a row lock. The worker that drives it to zero
  * atomically inserts a callback task in the same transaction — no polling needed.
  */
 @ApplicationScoped
@@ -46,20 +46,20 @@ class TaskGroupRepository(
 
     /**
      * Atomic fan-out: insert task_group row + N tasks in one transaction.
-     * Not a leader-only write — called from the REST endpoint.
+     * [tasks_pending] is initialized to the number of tasks.
      */
     fun submitGroup(group: TaskGroup, tasks: List<EnqueueRequest>) {
         jdbi.useTransaction<Exception> { h ->
             h.createUpdate(
                 """
                 INSERT INTO task_group (group_id, group_type, status, params, queue,
-                    phase, phase_total, phase_completed, phase_failed,
+                    phase, phase_total, tasks_pending, tasks_failed,
                     on_complete_handler, failure_policy, failure_threshold,
-                    result_metadata, version, last_epoch, created_at, updated_at)
+                    result_metadata, version, last_epoch, deadline_at, created_at, updated_at)
                 VALUES (:groupId, :groupType, :status, :params, :queue,
-                    :phase, :phaseTotal, 0, 0,
+                    :phase, :phaseTotal, :tasksPending, 0,
                     :onCompleteHandler, :failurePolicy, :failureThreshold,
-                    :resultMetadata, 0, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                    :resultMetadata, 0, 0, :deadlineAt, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                 """,
             ).bind("groupId", group.groupId)
                 .bind("groupType", group.groupType)
@@ -68,10 +68,12 @@ class TaskGroupRepository(
                 .bind("queue", group.queue)
                 .bind("phase", group.phase)
                 .bind("phaseTotal", group.phaseTotal)
+                .bind("tasksPending", group.phaseTotal)
                 .bind("onCompleteHandler", group.onCompleteHandler)
                 .bind("failurePolicy", group.failurePolicy)
                 .bind("failureThreshold", group.failureThreshold)
                 .bind("resultMetadata", group.resultMetadata)
+                .bind("deadlineAt", group.deadlineAt)
                 .execute()
 
             val batch = h.prepareBatch(
@@ -99,60 +101,74 @@ class TaskGroupRepository(
     }
 
     /**
-     * Atomically: mark task COMPLETED, increment group counter, check barrier,
-     * and create callback task if barrier is met — all in one Oracle transaction.
+     * Unified task resolution: decrement [tasks_pending], conditionally increment
+     * [tasks_failed], check barrier, and create callback task if barrier is met.
      *
-     * The row lock on task_group serializes concurrent completions, ensuring
+     * For successful tasks ([failed] = false): also marks the task row COMPLETED
+     * with output fields, guarded by execution_generation (zombie detection).
+     *
+     * For failed tasks ([failed] = true): only updates the group counters.
+     * The caller (TaskDispatcher/StaleTaskReaper) has already marked the task
+     * as DEAD_LETTER before calling this.
+     *
+     * The row lock on task_group serializes concurrent resolutions, ensuring
      * exactly one worker observes the barrier condition.
      */
-    fun completeGroupTask(
-        taskId: String,
+    fun resolveGroupTask(
+        taskId: String? = null,
         groupId: String,
-        executionGeneration: String?,
-        outputUri: String?,
-        outputMetadata: String?,
-    ): GroupTaskCompletionResult {
-        return jdbi.inTransaction<GroupTaskCompletionResult, Exception> { h ->
-            // Step 1: Mark task COMPLETED with output fields
-            val fenceClause = if (executionGeneration != null) " AND execution_generation = :gen" else ""
-            val update = h.createUpdate(
-                """
-                UPDATE task SET status = 'COMPLETED', completed_at = CURRENT_TIMESTAMP,
-                    output_uri = :outputUri, output_metadata = :outputMeta
-                WHERE task_id = :taskId AND status = 'CLAIMED'$fenceClause
-                """,
-            ).bind("taskId", taskId)
-                .bind("outputUri", outputUri)
-                .bind("outputMeta", outputMetadata)
-            if (executionGeneration != null) update.bind("gen", executionGeneration)
-            val updated = update.execute()
+        executionGeneration: String? = null,
+        failed: Boolean = false,
+        outputUri: String? = null,
+        outputMetadata: String? = null,
+    ): GroupTaskResolution {
+        return jdbi.inTransaction<GroupTaskResolution, Exception> { h ->
+            // Step 1 (success path only): Mark task COMPLETED with output fields
+            if (!failed && taskId != null) {
+                val fenceClause = if (executionGeneration != null) " AND execution_generation = :gen" else ""
+                val update = h.createUpdate(
+                    """
+                    UPDATE task SET status = 'COMPLETED', completed_at = CURRENT_TIMESTAMP,
+                        output_uri = :outputUri, output_metadata = :outputMeta
+                    WHERE task_id = :taskId AND status = 'CLAIMED'$fenceClause
+                    """,
+                ).bind("taskId", taskId)
+                    .bind("outputUri", outputUri)
+                    .bind("outputMeta", outputMetadata)
+                if (executionGeneration != null) update.bind("gen", executionGeneration)
+                val updated = update.execute()
 
-            if (updated == 0) {
-                log.warnf("Zombie detected for task %s (gen=%s) — skipping group counter", taskId, executionGeneration)
-                return@inTransaction GroupTaskCompletionResult(updated = false, barrierMet = false)
+                if (updated == 0) {
+                    log.warnf("Zombie detected for task %s (gen=%s) — skipping group counter", taskId, executionGeneration)
+                    return@inTransaction GroupTaskResolution(updated = false, barrierMet = false)
+                }
             }
 
-            // Step 2: Increment phase_completed (row lock serializes concurrent completions)
+            // Step 2: Decrement tasks_pending, conditionally increment tasks_failed
+            val failedIncrement = if (failed) 1 else 0
             h.createUpdate(
                 """
-                UPDATE task_group SET phase_completed = phase_completed + 1,
+                UPDATE task_group
+                SET tasks_pending = tasks_pending - 1,
+                    tasks_failed = tasks_failed + :failedIncrement,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE group_id = :groupId AND status = 'ACTIVE'
                 """,
             ).bind("groupId", groupId)
+                .bind("failedIncrement", failedIncrement)
                 .execute()
 
-            // Step 3: Read counters + callback handler
+            // Step 3: Read updated counters + callback handler
             val group = h.createQuery(
                 """
-                SELECT phase_completed, phase_failed, phase_total, on_complete_handler
+                SELECT tasks_pending, tasks_failed, phase_total, on_complete_handler
                 FROM task_group WHERE group_id = :groupId
                 """,
             ).bind("groupId", groupId)
                 .map { rs, _ ->
                     object {
-                        val phaseCompleted = rs.getInt("phase_completed")
-                        val phaseFailed = rs.getInt("phase_failed")
+                        val tasksPending = rs.getInt("tasks_pending")
+                        val tasksFailed = rs.getInt("tasks_failed")
                         val phaseTotal = rs.getInt("phase_total")
                         val onCompleteHandler = rs.getString("on_complete_handler")
                     }
@@ -160,7 +176,7 @@ class TaskGroupRepository(
                 .one()
 
             // Step 4: Check barrier — create callback task if met
-            val barrierMet = group.phaseCompleted + group.phaseFailed >= group.phaseTotal
+            val barrierMet = group.tasksPending == 0
             if (barrierMet && group.onCompleteHandler != null) {
                 h.createUpdate(
                     """
@@ -174,71 +190,19 @@ class TaskGroupRepository(
                     .bind("payload", groupId)
                     .execute()
 
-                log.infof("Barrier met for group %s (completed=%d, failed=%d, total=%d) — callback task created",
-                    groupId, group.phaseCompleted, group.phaseFailed, group.phaseTotal)
+                log.infof(
+                    "Barrier met for group %s (pending=0, failed=%d, total=%d) — callback task created",
+                    groupId, group.tasksFailed, group.phaseTotal,
+                )
             }
 
-            GroupTaskCompletionResult(updated = true, barrierMet = barrierMet)
-        }
-    }
-
-    /**
-     * Increment phase_failed, check barrier + failure policy, create callback task
-     * if barrier is met. Called when a task is dead-lettered.
-     */
-    fun recordGroupTaskFailure(groupId: String) {
-        jdbi.useTransaction<Exception> { h ->
-            // Increment phase_failed
-            h.createUpdate(
-                """
-                UPDATE task_group SET phase_failed = phase_failed + 1,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE group_id = :groupId AND status = 'ACTIVE'
-                """,
-            ).bind("groupId", groupId)
-                .execute()
-
-            // Read counters + callback handler
-            val group = h.createQuery(
-                """
-                SELECT phase_completed, phase_failed, phase_total, on_complete_handler
-                FROM task_group WHERE group_id = :groupId
-                """,
-            ).bind("groupId", groupId)
-                .map { rs, _ ->
-                    object {
-                        val phaseCompleted = rs.getInt("phase_completed")
-                        val phaseFailed = rs.getInt("phase_failed")
-                        val phaseTotal = rs.getInt("phase_total")
-                        val onCompleteHandler = rs.getString("on_complete_handler")
-                    }
-                }
-                .one()
-
-            // Check barrier — create callback task if met
-            val barrierMet = group.phaseCompleted + group.phaseFailed >= group.phaseTotal
-            if (barrierMet && group.onCompleteHandler != null) {
-                h.createUpdate(
-                    """
-                    INSERT INTO task (task_id, handler, queue, payload, status, priority,
-                        group_id, metadata, retry_count, max_retries, created_at)
-                    VALUES (:taskId, :handler, 'default', :payload, 'PENDING', 10,
-                        NULL, NULL, 0, 3, CURRENT_TIMESTAMP)
-                    """,
-                ).bind("taskId", UUID.randomUUID().toString())
-                    .bind("handler", group.onCompleteHandler)
-                    .bind("payload", groupId)
-                    .execute()
-
-                log.infof("Barrier met (via failure) for group %s (completed=%d, failed=%d, total=%d) — callback task created",
-                    groupId, group.phaseCompleted, group.phaseFailed, group.phaseTotal)
-            }
+            GroupTaskResolution(updated = true, barrierMet = barrierMet)
         }
     }
 
     /**
      * Transition to a new phase: CAS version, reset counters, insert new tasks.
-     * All in one transaction for atomicity.
+     * [tasks_pending] is initialized to [newPhaseTotal], [tasks_failed] reset to 0.
      */
     fun transitionPhase(
         groupId: String,
@@ -257,7 +221,7 @@ class TaskGroupRepository(
                 """
                 UPDATE task_group
                 SET phase = :newPhase, phase_total = :newPhaseTotal,
-                    phase_completed = 0, phase_failed = 0,
+                    tasks_pending = :newPhaseTotal, tasks_failed = 0,
                     on_complete_handler = :onCompleteHandler,
                     version = version + 1$epochSet, updated_at = CURRENT_TIMESTAMP
                 WHERE group_id = :groupId AND status = 'ACTIVE'

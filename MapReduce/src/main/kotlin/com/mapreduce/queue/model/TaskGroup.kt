@@ -8,8 +8,10 @@ enum class GroupStatus {
 }
 
 /**
- * A group of related tasks with per-phase tracking and reactive barrier detection.
+ * A group of related tasks with countdown barrier detection.
  *
+ * [tasksPending] counts down to zero as tasks reach terminal states.
+ * [tasksFailed] tracks how many of those were failures (for policy evaluation).
  * The generic queue layer stores [failurePolicy] and [failureThreshold] as opaque
  * values — only the callback handler (Layer 2) interprets them.
  */
@@ -21,14 +23,15 @@ data class TaskGroup(
     val queue: String = "default",
     val phase: String,
     @ColumnName("phase_total") val phaseTotal: Int = 0,
-    @ColumnName("phase_completed") val phaseCompleted: Int = 0,
-    @ColumnName("phase_failed") val phaseFailed: Int = 0,
+    @ColumnName("tasks_pending") val tasksPending: Int = 0,
+    @ColumnName("tasks_failed") val tasksFailed: Int = 0,
     @ColumnName("on_complete_handler") val onCompleteHandler: String? = null,
     @ColumnName("failure_policy") val failurePolicy: String = "FAIL_GROUP",
     @ColumnName("failure_threshold") val failureThreshold: Double = 0.0,
     @ColumnName("result_metadata") val resultMetadata: String? = null,
     val version: Long = 0,
     @ColumnName("last_epoch") val lastEpoch: Long = 0,
+    @ColumnName("deadline_at") val deadlineAt: Instant? = null,
     @ColumnName("created_at") val createdAt: Instant? = null,
     @ColumnName("updated_at") val updatedAt: Instant? = null,
 )
