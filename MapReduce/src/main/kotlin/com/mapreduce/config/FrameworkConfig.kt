@@ -5,7 +5,7 @@ import io.smallrye.config.WithDefault
 import io.smallrye.config.WithName
 import java.time.Duration
 
-@ConfigMapping(prefix = "mapreduce")
+@ConfigMapping(prefix = "taskqueue")
 interface FrameworkConfig {
 
     fun worker(): WorkerConfig
@@ -44,7 +44,7 @@ interface FrameworkConfig {
     /** Kubernetes Lease-based leader election with fencing epoch. */
     interface LeaderElectionConfig {
         @WithName("lease-name")
-        @WithDefault("mapreduce-leader")
+        @WithDefault("taskqueue-leader")
         fun leaseName(): String
 
         @WithDefault("\${KUBERNETES_NAMESPACE:default}")
