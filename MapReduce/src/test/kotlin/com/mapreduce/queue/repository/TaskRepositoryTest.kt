@@ -460,10 +460,10 @@ class TaskRepositoryTest {
         fun `with retries remaining -- reclaims to PENDING and returns false`() {
             insertTask(
                 "t-1", status = TaskStatus.CLAIMED, claimedBy = "dead-pod",
-                retryCount = 0, maxRetries = 3, lastEpoch = 0,
+                retryCount = 0, maxRetries = 3,
             )
 
-            val result = repo.reclaimStaleTask("t-1", leaderEpoch = 5, errorMessage = "pod died")
+            val result = repo.reclaimStaleTask("t-1", errorMessage = "pod died")
 
             assertNotNull(result)
             assertFalse(result!!)
@@ -474,17 +474,16 @@ class TaskRepositoryTest {
             assertNull(task.claimedBy)
             assertNull(task.claimedAt)
             assertEquals("pod died", task.errorMessage)
-            assertEquals(5L, task.lastEpoch)
         }
 
         @Test
         fun `with retries exhausted -- dead-letters and returns true`() {
             insertTask(
                 "t-1", status = TaskStatus.CLAIMED, claimedBy = "dead-pod",
-                retryCount = 2, maxRetries = 3, lastEpoch = 0,
+                retryCount = 2, maxRetries = 3,
             )
 
-            val result = repo.reclaimStaleTask("t-1", leaderEpoch = 5, errorMessage = "pod died")
+            val result = repo.reclaimStaleTask("t-1", errorMessage = "pod died")
 
             assertNotNull(result)
             assertTrue(result!!)
@@ -495,41 +494,26 @@ class TaskRepositoryTest {
         }
 
         @Test
-        fun `epoch fence -- returns null when epoch too low`() {
-            insertTask(
-                "t-1", status = TaskStatus.CLAIMED, claimedBy = "w",
-                retryCount = 0, maxRetries = 3, lastEpoch = 10,
-            )
-
-            val result = repo.reclaimStaleTask("t-1", leaderEpoch = 5, errorMessage = "stale leader")
-
-            assertNull(result) // fence rejected: epoch 5 < stored 10
-            // Task state unchanged
-            assertEquals("CLAIMED", readStatus("t-1"))
-            assertEquals(0, readRetryCount("t-1"))
-        }
-
-        @Test
         fun `returns null when task is not CLAIMED`() {
-            insertTask("t-1", status = TaskStatus.PENDING, lastEpoch = 0)
+            insertTask("t-1", status = TaskStatus.PENDING)
 
-            val result = repo.reclaimStaleTask("t-1", leaderEpoch = 5, errorMessage = "reclaim")
+            val result = repo.reclaimStaleTask("t-1", errorMessage = "reclaim")
 
-            assertNull(result) // 0 rows updated
+            assertNull(result) // 0 rows updated — status CAS failed
         }
 
         @Test
-        fun `epoch fence -- succeeds when epoch equals stored`() {
+        fun `idempotent -- second reclaim returns null`() {
             insertTask(
-                "t-1", status = TaskStatus.CLAIMED, claimedBy = "w",
-                retryCount = 0, maxRetries = 3, lastEpoch = 5,
+                "t-1", status = TaskStatus.CLAIMED, claimedBy = "dead-pod",
+                retryCount = 0, maxRetries = 3,
             )
 
-            val result = repo.reclaimStaleTask("t-1", leaderEpoch = 5, errorMessage = "reclaim")
+            val first = repo.reclaimStaleTask("t-1", errorMessage = "reclaim")
+            val second = repo.reclaimStaleTask("t-1", errorMessage = "reclaim again")
 
-            assertNotNull(result)
-            assertFalse(result!!)
-            assertEquals("PENDING", readStatus("t-1"))
+            assertNotNull(first)
+            assertNull(second) // already PENDING, not CLAIMED
         }
     }
 
@@ -549,28 +533,6 @@ class TaskRepositoryTest {
             assertEquals(1, repo.countByGroupAndStatus("job-1", TaskStatus.COMPLETED))
             assertEquals(0, repo.countByGroupAndStatus("job-1", TaskStatus.DEAD_LETTER))
             assertEquals(1, repo.countByGroupAndStatus("job-2", TaskStatus.PENDING))
-        }
-
-        @Test
-        fun `countPendingByQueue groups correctly`() {
-            insertTask("t-1", queue = "alpha", status = TaskStatus.PENDING)
-            insertTask("t-2", queue = "alpha", status = TaskStatus.PENDING)
-            insertTask("t-3", queue = "beta", status = TaskStatus.PENDING)
-            insertTask("t-4", queue = "alpha", status = TaskStatus.CLAIMED, claimedBy = "w") // not PENDING
-
-            val counts = repo.countPendingByQueue()
-
-            assertEquals(2, counts["alpha"])
-            assertEquals(1, counts["beta"])
-            assertNull(counts["gamma"]) // queue not present
-        }
-
-        @Test
-        fun `countPendingByQueue returns empty map when no PENDING tasks`() {
-            insertTask("t-1", status = TaskStatus.CLAIMED, claimedBy = "w")
-
-            val counts = repo.countPendingByQueue()
-            assertTrue(counts.isEmpty())
         }
 
         @Test

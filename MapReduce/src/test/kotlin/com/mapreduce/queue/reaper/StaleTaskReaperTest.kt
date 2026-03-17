@@ -1,7 +1,6 @@
 package com.mapreduce.queue.reaper
 
 import com.mapreduce.config.FrameworkConfig
-import com.mapreduce.leader.LeaderManager
 import com.mapreduce.queue.model.Task
 import com.mapreduce.queue.model.TaskStatus
 import com.mapreduce.queue.repository.TaskGroupRepository
@@ -25,7 +24,6 @@ class StaleTaskReaperTest {
     private lateinit var reaperConfig: FrameworkConfig.ReaperConfig
     private lateinit var taskRepository: TaskRepository
     private lateinit var taskGroupRepository: TaskGroupRepository
-    private lateinit var leaderManager: LeaderManager
     private lateinit var meterRegistry: SimpleMeterRegistry
     private lateinit var reaper: StaleTaskReaper
 
@@ -40,13 +38,11 @@ class StaleTaskReaperTest {
 
         taskRepository = mock<TaskRepository>()
         taskGroupRepository = mock<TaskGroupRepository>()
-        leaderManager = mock<LeaderManager>()
-        whenever(leaderManager.token).thenReturn(5L)
 
         meterRegistry = SimpleMeterRegistry()
 
         reaper = StaleTaskReaper(
-            config, taskRepository, taskGroupRepository, leaderManager, meterRegistry,
+            config, taskRepository, taskGroupRepository, meterRegistry,
         )
     }
 
@@ -58,52 +54,43 @@ class StaleTaskReaperTest {
 
         reaper.reap()
 
-        verify(taskRepository, never()).reclaimStaleTask(any(), any(), any())
+        verify(taskRepository, never()).reclaimStaleTask(any(), any())
     }
 
     @Test
     fun `reap reclaims stale task to PENDING`() {
         val staleTask = staleTask("task-1", claimedBy = "dead-pod")
         whenever(taskRepository.findStaleTasks(any(), any())).thenReturn(listOf(staleTask))
-        whenever(taskRepository.reclaimStaleTask(any(), any(), any()))
+        whenever(taskRepository.reclaimStaleTask(any(), any()))
             .thenReturn(false)
 
         reaper.reap()
 
-        verify(taskRepository).reclaimStaleTask(
-            eq("task-1"),
-            eq(5L),
-            any(),
-        )
+        verify(taskRepository).reclaimStaleTask(eq("task-1"), any())
     }
 
     @Test
     fun `reap dead-letters task with exhausted retries`() {
         val staleTask = staleTask("task-2", retryCount = 2, maxRetries = 3)
         whenever(taskRepository.findStaleTasks(any(), any())).thenReturn(listOf(staleTask))
-        whenever(taskRepository.reclaimStaleTask(any(), any(), any()))
+        whenever(taskRepository.reclaimStaleTask(any(), any()))
             .thenReturn(true)
 
         reaper.reap()
 
-        verify(taskRepository).reclaimStaleTask(
-            eq("task-2"),
-            eq(5L),
-            any(),
-        )
+        verify(taskRepository).reclaimStaleTask(eq("task-2"), any())
     }
 
     @Test
     fun `reap skips task already handled by another leader`() {
         val staleTask = staleTask("task-3")
         whenever(taskRepository.findStaleTasks(any(), any())).thenReturn(listOf(staleTask))
-        whenever(taskRepository.reclaimStaleTask(any(), any(), any()))
+        whenever(taskRepository.reclaimStaleTask(any(), any()))
             .thenReturn(null)
 
         reaper.reap()
 
-        // Only one call to reclaimStaleTask, which returned null
-        verify(taskRepository).reclaimStaleTask(any(), any(), any())
+        verify(taskRepository).reclaimStaleTask(any(), any())
     }
 
     @Test
@@ -115,11 +102,11 @@ class StaleTaskReaperTest {
         )
         whenever(taskRepository.findStaleTasks(any(), any())).thenReturn(tasks)
 
-        whenever(taskRepository.reclaimStaleTask(eq("t-pending"), any(), any()))
+        whenever(taskRepository.reclaimStaleTask(eq("t-pending"), any()))
             .thenReturn(false)
-        whenever(taskRepository.reclaimStaleTask(eq("t-dead"), any(), any()))
+        whenever(taskRepository.reclaimStaleTask(eq("t-dead"), any()))
             .thenReturn(true)
-        whenever(taskRepository.reclaimStaleTask(eq("t-skipped"), any(), any()))
+        whenever(taskRepository.reclaimStaleTask(eq("t-skipped"), any()))
             .thenReturn(null)
 
         reaper.reap()

@@ -1,7 +1,6 @@
 package com.mapreduce.queue.reaper
 
 import com.mapreduce.config.FrameworkConfig
-import com.mapreduce.leader.LeaderManager
 import com.mapreduce.leader.NotLeader
 import com.mapreduce.queue.repository.TaskGroupRepository
 import com.mapreduce.queue.repository.TaskRepository
@@ -25,7 +24,6 @@ class StaleTaskReaper(
     private val config: FrameworkConfig,
     private val taskRepository: TaskRepository,
     private val taskGroupRepository: TaskGroupRepository,
-    private val leaderManager: LeaderManager,
     private val meterRegistry: MeterRegistry,
 ) {
 
@@ -51,7 +49,6 @@ class StaleTaskReaper(
         val scanStart = System.nanoTime()
         val threshold = Instant.now().minus(config.reaper().staleThreshold())
         val batchSize = config.reaper().batchSize()
-        val leaderEpoch = leaderManager.token
 
         val staleTasks = taskRepository.findStaleTasks(threshold, batchSize)
 
@@ -62,9 +59,7 @@ class StaleTaskReaper(
             val staleAge = Duration.between(task.claimedAt ?: Instant.now(), Instant.now())
             val errorMessage = "Reclaimed: task stale (pod: ${task.claimedBy ?: "unknown"})"
 
-            val result = taskRepository.reclaimStaleTask(
-                task.taskId, leaderEpoch, errorMessage,
-            )
+            val result = taskRepository.reclaimStaleTask(task.taskId, errorMessage)
 
             if (result == null) {
                 log.debugf("Skipped stale task %s — already handled", task.taskId)

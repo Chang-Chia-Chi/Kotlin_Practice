@@ -219,20 +219,19 @@ class TaskRepository(private val jdbi: Jdbi) {
         }
 
     /**
-     * Reclaim a stale task with fenced writes.
+     * Reclaim a stale task.
      *
      * Increments retry_count, clears claim state, then sets
      * status to PENDING or DEAD_LETTER based on remaining retries.
      *
-     * The [leaderEpoch] fence prevents a zombie leader from reclaiming
-     * tasks that the current leader has already handled:
-     *   WHERE last_epoch <= :epoch ... SET last_epoch = :epoch
+     * Idempotent via `WHERE status = 'CLAIMED'` — if two leaders race,
+     * only one sees CLAIMED and updates; the other gets 0 rows.
      *
      * @param errorMessage descriptive message including the dead pod ID
      * @return `true` if dead-lettered, `false` if reclaimed to PENDING,
-     *         `null` if fence/status check failed (0 rows — already handled)
+     *         `null` if already handled (0 rows — status was not CLAIMED)
      */
-    fun reclaimStaleTask(taskId: String, leaderEpoch: Long, errorMessage: String): Boolean? {
+    fun reclaimStaleTask(taskId: String, errorMessage: String): Boolean? {
         return jdbi.inTransaction<Boolean?, Exception> { h ->
             val updated = h.createUpdate(
                 """
@@ -241,16 +240,13 @@ class TaskRepository(private val jdbi: Jdbi) {
                        claimed_by     = NULL,
                        claimed_at     = NULL,
                        error_message  = :error,
-                       last_epoch     = :epoch,
                        status         = CASE WHEN retry_count + 1 < max_retries THEN 'PENDING' ELSE 'DEAD_LETTER' END
                  WHERE task_id  = :taskId
                    AND status   = 'CLAIMED'
-                   AND last_epoch <= :epoch
                 """
             )
                 .bind("taskId", taskId)
                 .bind("error", errorMessage.take(4000))
-                .bind("epoch", leaderEpoch)
                 .execute()
 
             if (updated == 0) return@inTransaction null
@@ -272,21 +268,6 @@ class TaskRepository(private val jdbi: Jdbi) {
                 .bind("status", status.name)
                 .mapTo(Int::class.java)
                 .one()
-        }
-
-    /** Count PENDING tasks grouped by queue — used by the leader for the HPA queue depth gauge. */
-    fun countPendingByQueue(): Map<String, Int> =
-        jdbi.withHandle<Map<String, Int>, Exception> { h ->
-            h.createQuery(
-                """
-                SELECT queue, COUNT(*) AS cnt FROM task
-                WHERE status = 'PENDING'
-                GROUP BY queue
-                """
-            )
-                .map { rs, _ -> rs.getString("queue") to rs.getInt("cnt") }
-                .list()
-                .toMap()
         }
 
     fun findById(taskId: String): Task? =
