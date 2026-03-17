@@ -10,10 +10,16 @@ import io.quarkus.runtime.ShutdownEvent
 import io.quarkus.runtime.StartupEvent
 import jakarta.enterprise.context.ApplicationScoped
 import jakarta.enterprise.event.Observes
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runInterruptible
 import org.jboss.logging.Logger
 import java.time.Instant
-import java.util.concurrent.ExecutorService
-import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
@@ -35,7 +41,7 @@ class LeaderManager(
     private val _lastHeartbeat = AtomicReference(Instant.now())
     private val _acquiredAt = AtomicReference<Instant?>(null)
     private val _renewedAt = AtomicReference<Instant?>(null)
-    private var executor: ExecutorService? = null
+    private val electionScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     val isActive: Boolean get() = _isLeader.get()
     val token: Long get() = _epoch.get()
@@ -53,17 +59,14 @@ class LeaderManager(
             return
         }
 
-        executor = Executors.newSingleThreadExecutor { r ->
-            Thread(r, "leader-election").apply { isDaemon = true }
-        }
-        executor!!.submit { electionLoop() }
+        electionScope.launch { electionLoop() }
         registerMetrics()
     }
 
     fun onStop(@Observes ev: ShutdownEvent) {
         log.info("Shutting down leader election")
         _isLeader.set(false)
-        executor?.shutdownNow()
+        electionScope.cancel()
     }
 
     fun releaseLeaseExplicitly() {
@@ -88,57 +91,55 @@ class LeaderManager(
         _isLeader.set(false)
     }
 
-    private fun electionLoop() {
+    private suspend fun electionLoop() {
         val identity = config.worker().id()
         val leaderCfg = config.leaderElection()
         val namespace = leaderCfg.namespace()
         val leaseName = leaderCfg.leaseName()
         val retryPeriodMs = leaderCfg.retryPeriod().toMillis()
 
-        while (!Thread.currentThread().isInterrupted) {
-            _lastHeartbeat.set(Instant.now())
-            try {
-                val lock = LeaseLock(namespace, leaseName, identity)
-                val electionConfig = LeaderElectionConfigBuilder()
-                    .withName(leaseName)
-                    .withLock(lock)
-                    .withLeaseDuration(leaderCfg.leaseDuration())
-                    .withRenewDeadline(leaderCfg.renewDeadline())
-                    .withRetryPeriod(leaderCfg.retryPeriod())
-                    .withLeaderCallbacks(
-                        LeaderCallbacks(
-                            { onAcquire(identity) },
-                            { onLose() },
-                            { newLeader -> onNewLeader(newLeader, identity) },
-                        ),
-                    )
-                    .build()
+        try {
+            while (true) {
+                _lastHeartbeat.set(Instant.now())
+                try {
+                    val lock = LeaseLock(namespace, leaseName, identity)
+                    val electionConfig = LeaderElectionConfigBuilder()
+                        .withName(leaseName)
+                        .withLock(lock)
+                        .withLeaseDuration(leaderCfg.leaseDuration())
+                        .withRenewDeadline(leaderCfg.renewDeadline())
+                        .withRetryPeriod(leaderCfg.retryPeriod())
+                        .withLeaderCallbacks(
+                            LeaderCallbacks(
+                                { onAcquire(identity) },
+                                { onLose() },
+                                { newLeader -> onNewLeader(newLeader, identity) },
+                            ),
+                        )
+                        .build()
 
-                log.debugf("Entering leader election (identity=%s, lease=%s/%s)", identity, namespace, leaseName)
-                kubernetesClient.leaderElector()
-                    .withConfig(electionConfig)
-                    .build()
-                    .run()
+                    log.debugf("Entering leader election (identity=%s, lease=%s/%s)", identity, namespace, leaseName)
+                    runInterruptible {
+                        kubernetesClient.leaderElector()
+                            .withConfig(electionConfig)
+                            .build()
+                            .run()
+                    }
 
-                log.infof("Leader election run() returned — will retry in %dms", retryPeriodMs)
-            } catch (e: InterruptedException) {
-                Thread.currentThread().interrupt()
-                break
-            } catch (e: Exception) {
-                log.errorf(e, "Leader election error — retrying in %dms", retryPeriodMs)
-                _isLeader.set(false)
+                    log.infof("Leader election run() returned — will retry in %dms", retryPeriodMs)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    log.errorf(e, "Leader election error — retrying in %dms", retryPeriodMs)
+                    _isLeader.set(false)
+                }
+
+                delay(retryPeriodMs)
             }
-
-            try {
-                Thread.sleep(retryPeriodMs)
-            } catch (e: InterruptedException) {
-                Thread.currentThread().interrupt()
-                break
-            }
+        } finally {
+            log.info("Leader election coroutine exiting")
+            _isLeader.set(false)
         }
-
-        log.info("Leader election thread exiting")
-        _isLeader.set(false)
     }
 
     private fun onAcquire(identity: String) {
