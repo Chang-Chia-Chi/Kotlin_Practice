@@ -16,16 +16,22 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
 import org.jboss.logging.Logger
 import java.time.Instant
-import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicLong
-import java.util.concurrent.atomic.AtomicReference
 
 /**
- * Kubernetes Lease-based leader election with fencing epoch extraction.
+ * Kubernetes Lease-based leader election with fencing epoch.
+ *
+ * The fencing epoch is sourced from the K8s lease's `leaseTransitions` counter,
+ * which is globally monotonic and survives pod restarts. This eliminates the
+ * correctness bug where a local counter would reset to 0 on restart, potentially
+ * lower than epochs already written to the database.
+ *
+ * State is exposed via [isActive], [token], and [lastHeartbeat] — all backed
+ * by [MutableStateFlow] for thread-safe, lock-free reads.
  */
 @ApplicationScoped
 class LeaderManager(
@@ -36,43 +42,38 @@ class LeaderManager(
 
     private val log = Logger.getLogger(LeaderManager::class.java)
 
-    private val _isLeader = AtomicBoolean(false)
-    private val _epoch = AtomicLong(0)
-    private val _lastHeartbeat = AtomicReference(Instant.now())
-    private val _acquiredAt = AtomicReference<Instant?>(null)
-    private val _renewedAt = AtomicReference<Instant?>(null)
-    private val electionScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val _isLeader = MutableStateFlow(false)
+    private val _epoch = MutableStateFlow(0L)
+    private val _lastHeartbeat = MutableStateFlow(Instant.now())
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    val isActive: Boolean get() = _isLeader.get()
-    val token: Long get() = _epoch.get()
-    val lastHeartbeat: Instant get() = _lastHeartbeat.get()
-    val acquiredAt: Instant? get() = _acquiredAt.get()
-    val renewedAt: Instant? get() = _renewedAt.get()
+    val isActive: Boolean get() = _isLeader.value
+    val token: Long get() = _epoch.value
+    val lastHeartbeat: Instant get() = _lastHeartbeat.value
 
     fun onStart(@Observes ev: StartupEvent) {
         if (System.getenv("KUBERNETES_SERVICE_HOST") == null) {
             log.info("Not running in Kubernetes — assuming leader role with synthetic epoch")
-            _epoch.set(1)
-            _isLeader.set(true)
-            _acquiredAt.set(Instant.now())
+            _epoch.value = 1
+            _isLeader.value = true
             registerMetrics()
             return
         }
 
-        electionScope.launch { electionLoop() }
+        scope.launch { electionLoop() }
         registerMetrics()
     }
 
     fun onStop(@Observes ev: ShutdownEvent) {
         log.info("Shutting down leader election")
-        _isLeader.set(false)
-        electionScope.cancel()
+        _isLeader.value = false
+        scope.cancel()
     }
 
     fun releaseLeaseExplicitly() {
         if (System.getenv("KUBERNETES_SERVICE_HOST") == null) {
             log.info("Not in Kubernetes — skipping explicit lease release")
-            _isLeader.set(false)
+            _isLeader.value = false
             return
         }
         try {
@@ -88,85 +89,106 @@ class LeaderManager(
         } catch (e: Exception) {
             log.warnf(e, "Failed to release lease explicitly — new leader will acquire after lease expiry")
         }
-        _isLeader.set(false)
+        _isLeader.value = false
     }
+
+    // ── Election loop ──────────────────────────────────────────────────
 
     private suspend fun electionLoop() {
         val identity = config.worker().id()
         val leaderCfg = config.leaderElection()
-        val namespace = leaderCfg.namespace()
-        val leaseName = leaderCfg.leaseName()
         val retryPeriodMs = leaderCfg.retryPeriod().toMillis()
 
         try {
             while (true) {
-                _lastHeartbeat.set(Instant.now())
+                _lastHeartbeat.value = Instant.now()
                 try {
-                    val lock = LeaseLock(namespace, leaseName, identity)
-                    val electionConfig = LeaderElectionConfigBuilder()
-                        .withName(leaseName)
-                        .withLock(lock)
-                        .withLeaseDuration(leaderCfg.leaseDuration())
-                        .withRenewDeadline(leaderCfg.renewDeadline())
-                        .withRetryPeriod(leaderCfg.retryPeriod())
-                        .withLeaderCallbacks(
-                            LeaderCallbacks(
-                                { onAcquire(identity) },
-                                { onLose() },
-                                { newLeader -> onNewLeader(newLeader, identity) },
-                            ),
-                        )
-                        .build()
-
-                    log.debugf("Entering leader election (identity=%s, lease=%s/%s)", identity, namespace, leaseName)
-                    runInterruptible {
-                        kubernetesClient.leaderElector()
-                            .withConfig(electionConfig)
-                            .build()
-                            .run()
-                    }
-
+                    runElection(identity, leaderCfg)
                     log.infof("Leader election run() returned — will retry in %dms", retryPeriodMs)
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
                     log.errorf(e, "Leader election error — retrying in %dms", retryPeriodMs)
-                    _isLeader.set(false)
+                    _isLeader.value = false
                 }
-
                 delay(retryPeriodMs)
             }
         } finally {
             log.info("Leader election coroutine exiting")
-            _isLeader.set(false)
+            _isLeader.value = false
         }
     }
 
-    private fun onAcquire(identity: String) {
-        log.infof("Acquired leadership (identity=%s)", identity)
-        refreshEpoch()
-        _isLeader.set(true)
-        _acquiredAt.set(Instant.now())
+    private suspend fun runElection(identity: String, leaderCfg: FrameworkConfig.LeaderElectionConfig) {
+        val namespace = leaderCfg.namespace()
+        val leaseName = leaderCfg.leaseName()
+        val lock = LeaseLock(namespace, leaseName, identity)
+
+        val electionConfig = LeaderElectionConfigBuilder()
+            .withName(leaseName)
+            .withLock(lock)
+            .withLeaseDuration(leaderCfg.leaseDuration())
+            .withRenewDeadline(leaderCfg.renewDeadline())
+            .withRetryPeriod(leaderCfg.retryPeriod())
+            .withLeaderCallbacks(
+                LeaderCallbacks(
+                    { onAcquire(identity, leaderCfg) },
+                    { onLose() },
+                    { _lastHeartbeat.value = Instant.now() },
+                ),
+            )
+            .build()
+
+        log.debugf("Entering leader election (identity=%s, lease=%s/%s)", identity, namespace, leaseName)
+        runInterruptible {
+            kubernetesClient.leaderElector()
+                .withConfig(electionConfig)
+                .build()
+                .run()
+        }
+    }
+
+    // ── Callbacks ──────────────────────────────────────────────────────
+
+    private fun onAcquire(identity: String, leaderCfg: FrameworkConfig.LeaderElectionConfig) {
+        val epoch = readLeaseTransitions(leaderCfg)
+        _epoch.value = epoch
+        _isLeader.value = true
+        log.infof("Acquired leadership (identity=%s, epoch=%d)", identity, epoch)
     }
 
     private fun onLose() {
+        _isLeader.value = false
         log.info("Lost leadership")
-        _isLeader.set(false)
     }
 
-    private fun onNewLeader(newLeader: String, identity: String) {
-        _lastHeartbeat.set(Instant.now())
-        log.debugf("Leader changed: %s", newLeader)
-        if (newLeader == identity && _isLeader.get()) {
-            refreshEpoch()
+    // ── Fencing epoch from K8s ─────────────────────────────────────────
+
+    /**
+     * Read the lease's `leaseTransitions` counter from Kubernetes.
+     *
+     * `leaseTransitions` is incremented by the leader election client each time
+     * a new holder acquires the lease. It is persisted in etcd, so it survives
+     * pod restarts and provides a globally monotonic fencing epoch.
+     *
+     * Falls back to local increment if the API call fails (should not happen
+     * since we just acquired the lease, but defense in depth).
+     */
+    private fun readLeaseTransitions(leaderCfg: FrameworkConfig.LeaderElectionConfig): Long {
+        return try {
+            val lease = kubernetesClient.leases()
+                .inNamespace(leaderCfg.namespace())
+                .withName(leaderCfg.leaseName())
+                .get()
+            val transitions = lease?.spec?.leaseTransitions ?: 0
+            transitions.toLong()
+        } catch (e: Exception) {
+            log.warnf(e, "Failed to read lease transitions — falling back to local increment")
+            _epoch.value + 1
         }
     }
 
-    private fun refreshEpoch() {
-        val newEpoch = _epoch.incrementAndGet()
-        _renewedAt.set(Instant.now())
-        log.infof("Fencing epoch incremented: %d", newEpoch)
-    }
+    // ── Metrics ────────────────────────────────────────────────────────
 
     private fun registerMetrics() {
         meterRegistry.gauge("leader_election_is_leader", this) { if (isActive) 1.0 else 0.0 }
