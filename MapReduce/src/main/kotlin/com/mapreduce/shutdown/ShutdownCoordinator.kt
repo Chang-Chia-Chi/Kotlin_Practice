@@ -36,6 +36,7 @@ class ShutdownCoordinator(
 ) {
 
     private val log = Logger.getLogger(ShutdownCoordinator::class.java)
+    private val podId = config.worker().id()
 
     private val _state = AtomicReference(ShutdownState.RUNNING)
     private val _tasksCompletedDuringDrain = AtomicInteger(0)
@@ -72,7 +73,7 @@ class ShutdownCoordinator(
 
     private val leaderScopeCallbacks = mutableListOf<() -> Unit>()
 
-    @Synchronized
+    /** Called during @Observes StartupEvent — all writes complete before shutdown. */
     fun registerLeaderScopeCallback(cancel: () -> Unit) {
         leaderScopeCallbacks.add(cancel)
     }
@@ -111,17 +112,17 @@ class ShutdownCoordinator(
         val totalDuration = Duration.between(shutdownStart, Instant.now())
 
         meterRegistry.counter("taskqueue_shutdown_tasks_completed",
-            "pod", config.worker().id()).increment(_tasksCompletedDuringDrain.get().toDouble())
+            "pod", podId).increment(_tasksCompletedDuringDrain.get().toDouble())
         meterRegistry.counter("taskqueue_shutdown_tasks_released",
-            "pod", config.worker().id()).increment(_tasksReleased.get().toDouble())
+            "pod", podId).increment(_tasksReleased.get().toDouble())
         meterRegistry.timer("taskqueue_shutdown_duration_seconds",
-            "pod", config.worker().id(), "was_leader", wasLeader.toString())
+            "pod", podId, "was_leader", wasLeader.toString())
             .record(totalDuration.toMillis(), TimeUnit.MILLISECONDS)
 
         log.infof(
             "Shutdown complete: pod=%s, wasLeader=%s, drainDurationMs=%d, " +
                 "tasksCompletedDuringDrain=%d, tasksReleased=%d",
-            config.worker().id(),
+            podId,
             wasLeader,
             totalDuration.toMillis(),
             _tasksCompletedDuringDrain.get(),
@@ -132,13 +133,11 @@ class ShutdownCoordinator(
     private suspend fun phaseLeaderTeardown(timeout: Duration) {
         log.info("Leader teardown — cancelling orchestration loops")
 
-        synchronized(this) {
-            for (cancel in leaderScopeCallbacks) {
-                try {
-                    cancel()
-                } catch (e: Exception) {
-                    log.warnf(e, "Error cancelling leader scope")
-                }
+        for (cancel in leaderScopeCallbacks) {
+            try {
+                cancel()
+            } catch (e: Exception) {
+                log.warnf(e, "Error cancelling leader scope")
             }
         }
 
@@ -166,7 +165,7 @@ class ShutdownCoordinator(
             if (remaining.isNegative) {
                 log.warnf("Drain timeout expired. %d task(s) still in-flight.", inFlightTasks)
                 meterRegistry.counter("taskqueue_shutdown_drain_timeout_exceeded",
-                    "pod", config.worker().id()).increment()
+                    "pod", podId).increment()
                 break
             }
 
@@ -186,7 +185,6 @@ class ShutdownCoordinator(
     }
 
     private fun phaseRelease() {
-        val podId = config.worker().id()
         log.info("Releasing uncompleted tasks back to PENDING")
 
         try {
