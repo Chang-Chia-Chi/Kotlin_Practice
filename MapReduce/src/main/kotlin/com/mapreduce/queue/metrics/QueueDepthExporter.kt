@@ -1,4 +1,4 @@
-package com.mapreduce.mr.orchestrator
+package com.mapreduce.queue.metrics
 
 import com.mapreduce.config.FrameworkConfig
 import com.mapreduce.leader.LeaderManager
@@ -22,13 +22,13 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 
 /**
- * Leader-only loop that publishes queue depth gauges for HPA autoscaling.
+ * Leader-only loop that publishes per-queue depth gauges for HPA autoscaling.
  *
- * Phase transitions are handled reactively by callback tasks — this class
- * no longer monitors job/group state.
+ * This is a generic queue-layer concern — it knows nothing about MapReduce
+ * or any specific handler type.
  */
 @ApplicationScoped
-class MapReduceOrchestrator(
+class QueueDepthExporter(
     private val config: FrameworkConfig,
     private val taskRepository: TaskRepository,
     private val leaderManager: LeaderManager,
@@ -36,7 +36,7 @@ class MapReduceOrchestrator(
     private val meterRegistry: MeterRegistry,
 ) {
 
-    private val log = Logger.getLogger(MapReduceOrchestrator::class.java)
+    private val log = Logger.getLogger(QueueDepthExporter::class.java)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val queueDepths = ConcurrentHashMap<String, AtomicLong>()
 

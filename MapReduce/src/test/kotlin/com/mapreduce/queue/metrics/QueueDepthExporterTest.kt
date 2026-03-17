@@ -1,4 +1,4 @@
-package com.mapreduce.mr.orchestrator
+package com.mapreduce.queue.metrics
 
 import com.mapreduce.config.FrameworkConfig
 import com.mapreduce.leader.LeaderManager
@@ -19,7 +19,7 @@ import org.mockito.kotlin.whenever
 import java.time.Duration
 import java.util.concurrent.TimeUnit
 
-class MapReduceOrchestratorTest {
+class QueueDepthExporterTest {
 
     private lateinit var config: FrameworkConfig
     private lateinit var metricsConfig: FrameworkConfig.MetricsConfig
@@ -27,7 +27,7 @@ class MapReduceOrchestratorTest {
     private lateinit var leaderManager: LeaderManager
     private lateinit var shutdownCoordinator: ShutdownCoordinator
     private lateinit var meterRegistry: SimpleMeterRegistry
-    private lateinit var orchestrator: MapReduceOrchestrator
+    private lateinit var exporter: QueueDepthExporter
 
     @BeforeEach
     fun setUp() {
@@ -45,7 +45,7 @@ class MapReduceOrchestratorTest {
 
         whenever(leaderManager.isActive).thenReturn(true)
 
-        orchestrator = MapReduceOrchestrator(
+        exporter = QueueDepthExporter(
             config, taskRepository,
             leaderManager, shutdownCoordinator, meterRegistry,
         )
@@ -76,7 +76,7 @@ class MapReduceOrchestratorTest {
 
     private fun startAndAwait(timeout: Long = 3, assertions: () -> Unit) {
         val startupEvent = mock<StartupEvent>()
-        orchestrator.onStart(startupEvent)
+        exporter.onStart(startupEvent)
 
         await.atMost(timeout, TimeUnit.SECONDS).untilAsserted(assertions)
     }
