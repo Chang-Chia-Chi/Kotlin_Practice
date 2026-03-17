@@ -6,7 +6,6 @@ import com.mapreduce.queue.model.Task
 import com.mapreduce.queue.model.TaskStatus
 import com.mapreduce.queue.repository.TaskGroupRepository
 import com.mapreduce.queue.repository.TaskRepository
-import com.mapreduce.shutdown.ShutdownCoordinator
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.BeforeEach
@@ -27,7 +26,6 @@ class StaleTaskReaperTest {
     private lateinit var taskRepository: TaskRepository
     private lateinit var taskGroupRepository: TaskGroupRepository
     private lateinit var leaderManager: LeaderManager
-    private lateinit var shutdownCoordinator: ShutdownCoordinator
     private lateinit var meterRegistry: SimpleMeterRegistry
     private lateinit var reaper: StaleTaskReaper
 
@@ -45,12 +43,10 @@ class StaleTaskReaperTest {
         leaderManager = mock<LeaderManager>()
         whenever(leaderManager.token).thenReturn(5L)
 
-        shutdownCoordinator = mock<ShutdownCoordinator>()
         meterRegistry = SimpleMeterRegistry()
 
         reaper = StaleTaskReaper(
-            config, taskRepository, taskGroupRepository, leaderManager,
-            shutdownCoordinator, meterRegistry,
+            config, taskRepository, taskGroupRepository, leaderManager, meterRegistry,
         )
     }
 
@@ -60,7 +56,7 @@ class StaleTaskReaperTest {
     fun `reap with no stale tasks is a no-op`() {
         whenever(taskRepository.findStaleTasks(any(), any())).thenReturn(emptyList())
 
-        invokeReap()
+        reaper.reap()
 
         verify(taskRepository, never()).reclaimStaleTask(any(), any(), any())
     }
@@ -72,7 +68,7 @@ class StaleTaskReaperTest {
         whenever(taskRepository.reclaimStaleTask(any(), any(), any()))
             .thenReturn(false)
 
-        invokeReap()
+        reaper.reap()
 
         verify(taskRepository).reclaimStaleTask(
             eq("task-1"),
@@ -88,7 +84,7 @@ class StaleTaskReaperTest {
         whenever(taskRepository.reclaimStaleTask(any(), any(), any()))
             .thenReturn(true)
 
-        invokeReap()
+        reaper.reap()
 
         verify(taskRepository).reclaimStaleTask(
             eq("task-2"),
@@ -104,7 +100,7 @@ class StaleTaskReaperTest {
         whenever(taskRepository.reclaimStaleTask(any(), any(), any()))
             .thenReturn(null)
 
-        invokeReap()
+        reaper.reap()
 
         // Only one call to reclaimStaleTask, which returned null
         verify(taskRepository).reclaimStaleTask(any(), any(), any())
@@ -126,7 +122,7 @@ class StaleTaskReaperTest {
         whenever(taskRepository.reclaimStaleTask(eq("t-skipped"), any(), any()))
             .thenReturn(null)
 
-        invokeReap()
+        reaper.reap()
 
         val reclaimed = meterRegistry.counter("taskqueue.reaper.reclaimed").count()
         val deadLettered = meterRegistry.counter("taskqueue.reaper.dead_lettered").count()
@@ -138,7 +134,7 @@ class StaleTaskReaperTest {
     fun `reap records scan duration metric`() {
         whenever(taskRepository.findStaleTasks(any(), any())).thenReturn(emptyList())
 
-        invokeReap()
+        reaper.reap()
 
         val scanTimer = meterRegistry.timer("taskqueue.reaper.scan_duration")
         assertEquals(1, scanTimer.count())
@@ -164,10 +160,4 @@ class StaleTaskReaperTest {
         maxRetries = maxRetries,
         createdAt = Instant.now().minus(Duration.ofMinutes(15)),
     )
-
-    private fun invokeReap() {
-        val method = StaleTaskReaper::class.java.getDeclaredMethod("reap")
-        method.isAccessible = true
-        method.invoke(reaper)
-    }
 }

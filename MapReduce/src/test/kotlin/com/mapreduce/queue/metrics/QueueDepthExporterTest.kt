@@ -1,83 +1,64 @@
 package com.mapreduce.queue.metrics
 
-import com.mapreduce.config.FrameworkConfig
-import com.mapreduce.leader.LeaderManager
 import com.mapreduce.queue.repository.TaskRepository
-import com.mapreduce.shutdown.ShutdownCoordinator
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
-import io.quarkus.runtime.StartupEvent
-import org.awaitility.kotlin.await
-import org.awaitility.kotlin.untilAsserted
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
-import org.mockito.kotlin.any
-import org.mockito.kotlin.atLeast
-import org.mockito.kotlin.doNothing
 import org.mockito.kotlin.mock
 import org.mockito.kotlin.verify
 import org.mockito.kotlin.whenever
-import java.time.Duration
-import java.util.concurrent.TimeUnit
 
 class QueueDepthExporterTest {
 
-    private lateinit var config: FrameworkConfig
-    private lateinit var metricsConfig: FrameworkConfig.MetricsConfig
     private lateinit var taskRepository: TaskRepository
-    private lateinit var leaderManager: LeaderManager
-    private lateinit var shutdownCoordinator: ShutdownCoordinator
     private lateinit var meterRegistry: SimpleMeterRegistry
     private lateinit var exporter: QueueDepthExporter
 
     @BeforeEach
     fun setUp() {
-        config = mock()
-        metricsConfig = mock()
-        whenever(config.metrics()).thenReturn(metricsConfig)
-        whenever(metricsConfig.queueDepthInterval()).thenReturn(Duration.ofMillis(50))
-
         taskRepository = mock()
-        leaderManager = mock()
-        shutdownCoordinator = mock()
         meterRegistry = SimpleMeterRegistry()
 
-        doNothing().whenever(shutdownCoordinator).registerLeaderScopeCallback(any())
-
-        whenever(leaderManager.isActive).thenReturn(true)
-
-        exporter = QueueDepthExporter(
-            config, taskRepository,
-            leaderManager, shutdownCoordinator, meterRegistry,
-        )
+        exporter = QueueDepthExporter(taskRepository, meterRegistry)
     }
 
     @Test
-    fun `polls queue depth on every cycle`() {
+    fun `polls queue depth from repository`() {
         whenever(taskRepository.countPendingByQueue()).thenReturn(mapOf("default" to 5))
 
-        startAndAwait {
-            verify(taskRepository, atLeast(1)).countPendingByQueue()
-        }
+        exporter.pollQueueDepth()
+
+        verify(taskRepository).countPendingByQueue()
     }
 
     @Test
     fun `registers queue depth gauge per queue name`() {
         whenever(taskRepository.countPendingByQueue()).thenReturn(mapOf("mr" to 3, "default" to 7))
 
-        startAndAwait {
-            verify(taskRepository, atLeast(1)).countPendingByQueue()
-        }
+        exporter.pollQueueDepth()
 
         val mrGauge = meterRegistry.find("framework.queue.depth").tag("queue_name", "mr").gauge()
-        assert(mrGauge != null) { "Expected gauge for queue 'mr'" }
+        assertNotNull(mrGauge)
+        assertEquals(3.0, mrGauge!!.value())
+
+        val defaultGauge = meterRegistry.find("framework.queue.depth").tag("queue_name", "default").gauge()
+        assertNotNull(defaultGauge)
+        assertEquals(7.0, defaultGauge!!.value())
     }
 
-    // ── Helpers ──────────────────────────────────────────────────
+    @Test
+    fun `resets gauge to zero when queue disappears`() {
+        whenever(taskRepository.countPendingByQueue()).thenReturn(mapOf("mr" to 5))
+        exporter.pollQueueDepth()
 
-    private fun startAndAwait(timeout: Long = 3, assertions: () -> Unit) {
-        val startupEvent = mock<StartupEvent>()
-        exporter.onStart(startupEvent)
+        // Second poll — "mr" queue no longer has pending tasks
+        whenever(taskRepository.countPendingByQueue()).thenReturn(emptyMap())
+        exporter.pollQueueDepth()
 
-        await.atMost(timeout, TimeUnit.SECONDS).untilAsserted(assertions)
+        val mrGauge = meterRegistry.find("framework.queue.depth").tag("queue_name", "mr").gauge()
+        assertNotNull(mrGauge)
+        assertEquals(0.0, mrGauge!!.value())
     }
 }

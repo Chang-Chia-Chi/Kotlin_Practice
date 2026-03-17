@@ -2,21 +2,12 @@ package com.mapreduce.queue.reaper
 
 import com.mapreduce.config.FrameworkConfig
 import com.mapreduce.leader.LeaderManager
+import com.mapreduce.leader.NotLeader
 import com.mapreduce.queue.repository.TaskGroupRepository
 import com.mapreduce.queue.repository.TaskRepository
-import com.mapreduce.shutdown.ShutdownCoordinator
 import io.micrometer.core.instrument.MeterRegistry
-import io.quarkus.runtime.StartupEvent
+import io.quarkus.scheduler.Scheduled
 import jakarta.enterprise.context.ApplicationScoped
-import jakarta.enterprise.event.Observes
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import org.jboss.logging.Logger
 import java.time.Duration
 import java.time.Instant
@@ -35,12 +26,10 @@ class StaleTaskReaper(
     private val taskRepository: TaskRepository,
     private val taskGroupRepository: TaskGroupRepository,
     private val leaderManager: LeaderManager,
-    private val shutdownCoordinator: ShutdownCoordinator,
     private val meterRegistry: MeterRegistry,
 ) {
 
     private val log = Logger.getLogger(StaleTaskReaper::class.java)
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     /** Updated on every reap cycle — used by health probes to detect a hung reaper. */
     @Volatile
@@ -50,27 +39,15 @@ class StaleTaskReaper(
     /** The configured scan interval — exposed for health probe threshold calculation. */
     val scanInterval: Duration get() = config.reaper().scanInterval()
 
-    fun onStart(@Observes ev: StartupEvent) {
-        shutdownCoordinator.registerLeaderScopeCallback { scope.cancel() }
+    @Scheduled(
+        every = "{taskqueue.reaper.scan-interval}",
+        delayed = "{taskqueue.reaper.scan-interval}",
+        concurrentExecution = Scheduled.ConcurrentExecution.SKIP,
+        skipExecutionIf = NotLeader::class,
+    )
+    fun reap() {
+        _lastScanTimestamp = Instant.now()
 
-        val interval = config.reaper().scanInterval().toMillis()
-        scope.launch {
-            delay(interval)
-            while (isActive) {
-                if (leaderManager.isActive) {
-                    _lastScanTimestamp = Instant.now()
-                    try {
-                        withContext(Dispatchers.IO) { reap() }
-                    } catch (e: Exception) {
-                        log.errorf(e, "Error in stale task reaper")
-                    }
-                }
-                delay(interval)
-            }
-        }
-    }
-
-    private fun reap() {
         val scanStart = System.nanoTime()
         val threshold = Instant.now().minus(config.reaper().staleThreshold())
         val batchSize = config.reaper().batchSize()

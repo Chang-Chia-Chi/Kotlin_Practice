@@ -1,65 +1,37 @@
 package com.mapreduce.queue.metrics
 
-import com.mapreduce.config.FrameworkConfig
-import com.mapreduce.leader.LeaderManager
+import com.mapreduce.leader.NotLeader
 import com.mapreduce.queue.repository.TaskRepository
-import com.mapreduce.shutdown.ShutdownCoordinator
 import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.Tag
-import io.quarkus.runtime.StartupEvent
+import io.quarkus.scheduler.Scheduled
 import jakarta.enterprise.context.ApplicationScoped
-import jakarta.enterprise.event.Observes
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import org.jboss.logging.Logger
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 
 /**
- * Leader-only loop that publishes per-queue depth gauges for HPA autoscaling.
+ * Leader-only scheduled task that publishes per-queue depth gauges for HPA autoscaling.
  *
  * This is a generic queue-layer concern — it knows nothing about MapReduce
  * or any specific handler type.
  */
 @ApplicationScoped
 class QueueDepthExporter(
-    private val config: FrameworkConfig,
     private val taskRepository: TaskRepository,
-    private val leaderManager: LeaderManager,
-    private val shutdownCoordinator: ShutdownCoordinator,
     private val meterRegistry: MeterRegistry,
 ) {
 
     private val log = Logger.getLogger(QueueDepthExporter::class.java)
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val queueDepths = ConcurrentHashMap<String, AtomicLong>()
 
-    fun onStart(@Observes ev: StartupEvent) {
-        shutdownCoordinator.registerLeaderScopeCallback { scope.cancel() }
-
-        val interval = config.metrics().queueDepthInterval().toMillis()
-        scope.launch {
-            delay(interval)
-            while (isActive) {
-                if (leaderManager.isActive) {
-                    try {
-                        withContext(Dispatchers.IO) { pollQueueDepth() }
-                    } catch (e: Exception) {
-                        log.warnf(e, "Failed to poll queue depth")
-                    }
-                }
-                delay(interval)
-            }
-        }
-    }
-
-    private fun pollQueueDepth() {
+    @Scheduled(
+        every = "{taskqueue.metrics.queue-depth-interval}",
+        delayed = "{taskqueue.metrics.queue-depth-interval}",
+        concurrentExecution = Scheduled.ConcurrentExecution.SKIP,
+        skipExecutionIf = NotLeader::class,
+    )
+    fun pollQueueDepth() {
         val counts = taskRepository.countPendingByQueue()
         for ((queue, count) in counts) {
             queueDepths.computeIfAbsent(queue) { q ->
