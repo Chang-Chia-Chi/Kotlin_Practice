@@ -2,9 +2,6 @@ package com.mapreduce.mr.orchestrator
 
 import com.mapreduce.config.FrameworkConfig
 import com.mapreduce.leader.LeaderManager
-import com.mapreduce.queue.model.GroupStatus
-import com.mapreduce.queue.model.TaskGroup
-import com.mapreduce.queue.repository.TaskGroupRepository
 import com.mapreduce.queue.repository.TaskRepository
 import com.mapreduce.shutdown.ShutdownCoordinator
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
@@ -25,8 +22,7 @@ import java.util.concurrent.TimeUnit
 class MapReduceOrchestratorTest {
 
     private lateinit var config: FrameworkConfig
-    private lateinit var leaderConfig: FrameworkConfig.LeaderConfig
-    private lateinit var taskGroupRepository: TaskGroupRepository
+    private lateinit var metricsConfig: FrameworkConfig.MetricsConfig
     private lateinit var taskRepository: TaskRepository
     private lateinit var leaderManager: LeaderManager
     private lateinit var shutdownCoordinator: ShutdownCoordinator
@@ -36,11 +32,10 @@ class MapReduceOrchestratorTest {
     @BeforeEach
     fun setUp() {
         config = mock()
-        leaderConfig = mock()
-        whenever(config.leader()).thenReturn(leaderConfig)
-        whenever(leaderConfig.monitorInterval()).thenReturn(Duration.ofMillis(50))
+        metricsConfig = mock()
+        whenever(config.metrics()).thenReturn(metricsConfig)
+        whenever(metricsConfig.queueDepthInterval()).thenReturn(Duration.ofMillis(50))
 
-        taskGroupRepository = mock()
         taskRepository = mock()
         leaderManager = mock()
         shutdownCoordinator = mock()
@@ -49,12 +44,9 @@ class MapReduceOrchestratorTest {
         doNothing().whenever(shutdownCoordinator).registerLeaderScopeCallback(any())
 
         whenever(leaderManager.isActive).thenReturn(true)
-        whenever(leaderManager.token).thenReturn(1L)
-
-        whenever(taskGroupRepository.findGroupsByStatus(GroupStatus.ACTIVE)).thenReturn(emptyList())
 
         orchestrator = MapReduceOrchestrator(
-            config, taskGroupRepository, taskRepository,
+            config, taskRepository,
             leaderManager, shutdownCoordinator, meterRegistry,
         )
     }
@@ -69,25 +61,15 @@ class MapReduceOrchestratorTest {
     }
 
     @Test
-    fun `recovery sweep detects stuck ACTIVE groups`() {
-        val stuckGroup = TaskGroup(
-            groupId = "g-stuck",
-            groupType = "wc",
-            status = GroupStatus.ACTIVE,
-            phase = "map",
-            phaseTotal = 10,
-            phaseCompleted = 10,
-            phaseFailed = 0,
-            onCompleteHandler = "wc.__phase_complete",
-        )
-        whenever(taskGroupRepository.findGroupsByStatus(GroupStatus.ACTIVE)).thenReturn(listOf(stuckGroup))
-        whenever(taskRepository.countByGroupAndStatus(any(), any())).thenReturn(10)
-        whenever(taskRepository.findByGroupAndHandler(any(), any())).thenReturn(null)
+    fun `registers queue depth gauge per queue name`() {
+        whenever(taskRepository.countPendingByQueue()).thenReturn(mapOf("mr" to 3, "default" to 7))
 
-        // Recovery sweep runs at 5x interval, so wait longer
-        startAndAwait(timeout = 5) {
-            verify(taskGroupRepository, atLeast(1)).findGroupsByStatus(GroupStatus.ACTIVE)
+        startAndAwait {
+            verify(taskRepository, atLeast(1)).countPendingByQueue()
         }
+
+        val mrGauge = meterRegistry.find("framework.queue.depth").tag("queue_name", "mr").gauge()
+        assert(mrGauge != null) { "Expected gauge for queue 'mr'" }
     }
 
     // ── Helpers ──────────────────────────────────────────────────
