@@ -233,6 +233,54 @@ class JobRepositoryTest {
         assertEquals("COMPLETED", getTaskStatus(reduceTaskId))
     }
 
+    // ── transitionToReducing ─────────────────────────────────────
+
+    @Test
+    fun `transitionToReducing atomically transitions and creates reduce tasks`() {
+        repo.submitJob(
+            jobId = "j-tr", jobType = "wc", jobParams = "{}",
+            taskInputs = listOf("a", "b"), maxRetries = 3,
+            failurePolicy = FailurePolicy.FAIL_JOB, failureThreshold = 0.0,
+            queue = "mr",
+        )
+
+        val result = repo.transitionToReducing("j-tr", 0, "wc", 3, "mr", 2)
+        assertTrue(result)
+
+        val job = repo.findJobById("j-tr")!!
+        assertEquals(JobStatus.REDUCING, job.status)
+        assertEquals(1, job.version)
+
+        val reduceCount = jdbi.withHandle<Int, Exception> { h ->
+            h.createQuery("SELECT COUNT(*) FROM task WHERE group_id = 'j-tr' AND handler = 'wc.reduce'")
+                .mapTo(Int::class.java).one()
+        }
+        assertEquals(2, reduceCount)
+    }
+
+    @Test
+    fun `transitionToReducing fails with wrong version and creates no reduce tasks`() {
+        repo.submitJob(
+            jobId = "j-tr-fail", jobType = "wc", jobParams = "{}",
+            taskInputs = listOf("a"), maxRetries = 3,
+            failurePolicy = FailurePolicy.FAIL_JOB, failureThreshold = 0.0,
+            queue = "mr",
+        )
+
+        val result = repo.transitionToReducing("j-tr-fail", 999, "wc", 3, "mr", 1)
+        assertFalse(result)
+
+        val job = repo.findJobById("j-tr-fail")!!
+        assertEquals(JobStatus.RUNNING, job.status)
+        assertEquals(0, job.version)
+
+        val reduceCount = jdbi.withHandle<Int, Exception> { h ->
+            h.createQuery("SELECT COUNT(*) FROM task WHERE group_id = 'j-tr-fail' AND handler = 'wc.reduce'")
+                .mapTo(Int::class.java).one()
+        }
+        assertEquals(0, reduceCount)
+    }
+
     // ── insertReduceTasks ────────────────────────────────────────
 
     @Test

@@ -277,8 +277,90 @@ class JobRepository(
     }
 
     /**
+     * Atomically transition a job from RUNNING → REDUCING and enqueue reduce tasks.
+     *
+     * Combines the CAS status update with the reduce task INSERT in a single
+     * transaction, eliminating the window where the job is REDUCING but has
+     * no reduce tasks (which previously required compensating recovery in the
+     * orchestrator monitoring loop).
+     *
+     * Returns true if the transition succeeded (CAS matched).
+     */
+    fun transitionToReducing(
+        jobId: String,
+        expectedVersion: Long,
+        jobType: String,
+        maxRetries: Int,
+        queue: String,
+        totalPartitions: Int = 1,
+    ): Boolean {
+        val epoch = optionalEpoch()
+        return jdbi.inTransaction<Boolean, Exception> { h ->
+            val updated = if (epoch != null) {
+                h.createUpdate(
+                    """
+                    UPDATE mr_job
+                    SET status = 'REDUCING', last_epoch = :epoch,
+                        version = version + 1, updated_at = CURRENT_TIMESTAMP
+                    WHERE job_id = :jobId AND status = 'RUNNING'
+                      AND version = :expectedVersion AND last_epoch <= :epoch
+                    """,
+                ).bind("jobId", jobId)
+                    .bind("expectedVersion", expectedVersion)
+                    .bind("epoch", epoch)
+                    .execute()
+            } else {
+                h.createUpdate(
+                    """
+                    UPDATE mr_job
+                    SET status = 'REDUCING',
+                        version = version + 1, updated_at = CURRENT_TIMESTAMP
+                    WHERE job_id = :jobId AND status = 'RUNNING'
+                      AND version = :expectedVersion
+                    """,
+                ).bind("jobId", jobId)
+                    .bind("expectedVersion", expectedVersion)
+                    .execute()
+            }
+
+            if (updated == 0) return@inTransaction false
+
+            val batch = h.prepareBatch(
+                """
+                INSERT INTO task (task_id, handler, queue, payload, status, priority,
+                    group_id, metadata, retry_count, max_retries, created_at)
+                VALUES (:taskId, :handler, :queue, '{}', 'PENDING', 0,
+                    :groupId, :metadata, 0, :maxRetries, CURRENT_TIMESTAMP)
+                """,
+            )
+            for (partition in 0 until totalPartitions) {
+                val metadata = if (totalPartitions > 1) {
+                    objectMapper.writeValueAsString(mapOf("phase" to "REDUCE", "partition_hash" to partition))
+                } else {
+                    """{"phase":"REDUCE"}"""
+                }
+                batch
+                    .bind("taskId", UUID.randomUUID().toString())
+                    .bind("handler", "$jobType.reduce")
+                    .bind("queue", queue)
+                    .bind("groupId", jobId)
+                    .bind("metadata", metadata)
+                    .bind("maxRetries", maxRetries)
+                    .add()
+            }
+            batch.execute()
+
+            true
+        }
+    }
+
+    /**
      * Enqueue reduce task(s) into the generic task table.
      * For sharded reduce, enqueues one task per partition.
+     *
+     * Used by the recovery path in [MapReduceOrchestrator.monitorReducingJobs]
+     * when a job is already REDUCING but has no reduce tasks (e.g., after a
+     * crash between the old non-atomic CAS and INSERT).
      */
     fun insertReduceTasks(
         jobId: String,

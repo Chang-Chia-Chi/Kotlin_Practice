@@ -77,16 +77,15 @@ class MapReduceOrchestratorTest {
         )
         whenever(jobRepository.findJobsByStatus(JobStatus.RUNNING)).thenReturn(listOf(job))
         whenever(taskRepository.countByGroupAndStatus("j-1", TaskStatus.DEAD_LETTER)).thenReturn(0)
-        whenever(jobRepository.casJobStatus("j-1", JobStatus.RUNNING, JobStatus.REDUCING, 0)).thenReturn(true)
 
         val definition: MapReduceDefinition<*, *, *, *> = mock()
         whenever(definition.maxRetries).thenReturn(3)
         whenever(definition.queue).thenReturn("mr")
         whenever(registrar.getDefinition("wc")).thenReturn(definition)
+        whenever(jobRepository.transitionToReducing("j-1", 0, "wc", 3, "mr", 1)).thenReturn(true)
 
         startAndAwait {
-            verify(jobRepository).casJobStatus("j-1", JobStatus.RUNNING, JobStatus.REDUCING, 0)
-            verify(jobRepository).insertReduceTasks("j-1", "wc", 3, "mr", 1)
+            verify(jobRepository).transitionToReducing("j-1", 0, "wc", 3, "mr", 1)
         }
     }
 
@@ -114,16 +113,15 @@ class MapReduceOrchestratorTest {
         )
         whenever(jobRepository.findJobsByStatus(JobStatus.RUNNING)).thenReturn(listOf(job))
         whenever(taskRepository.countByGroupAndStatus("j-be", TaskStatus.DEAD_LETTER)).thenReturn(3)
-        whenever(jobRepository.casJobStatus("j-be", JobStatus.RUNNING, JobStatus.REDUCING, 0)).thenReturn(true)
 
         val definition: MapReduceDefinition<*, *, *, *> = mock()
         whenever(definition.maxRetries).thenReturn(3)
         whenever(definition.queue).thenReturn("mr")
         whenever(registrar.getDefinition("wc")).thenReturn(definition)
+        whenever(jobRepository.transitionToReducing("j-be", 0, "wc", 3, "mr", 1)).thenReturn(true)
 
         startAndAwait {
-            verify(jobRepository).casJobStatus("j-be", JobStatus.RUNNING, JobStatus.REDUCING, 0)
-            verify(jobRepository).insertReduceTasks(any(), any(), any(), any(), any())
+            verify(jobRepository).transitionToReducing("j-be", 0, "wc", 3, "mr", 1)
         }
     }
 
@@ -135,15 +133,15 @@ class MapReduceOrchestratorTest {
         )
         whenever(jobRepository.findJobsByStatus(JobStatus.RUNNING)).thenReturn(listOf(job))
         whenever(taskRepository.countByGroupAndStatus("j-th-ok", TaskStatus.DEAD_LETTER)).thenReturn(2)
-        whenever(jobRepository.casJobStatus("j-th-ok", JobStatus.RUNNING, JobStatus.REDUCING, 0)).thenReturn(true)
 
         val definition: MapReduceDefinition<*, *, *, *> = mock()
         whenever(definition.maxRetries).thenReturn(3)
         whenever(definition.queue).thenReturn("mr")
         whenever(registrar.getDefinition("wc")).thenReturn(definition)
+        whenever(jobRepository.transitionToReducing("j-th-ok", 0, "wc", 3, "mr", 1)).thenReturn(true)
 
         startAndAwait {
-            verify(jobRepository).casJobStatus("j-th-ok", JobStatus.RUNNING, JobStatus.REDUCING, 0)
+            verify(jobRepository).transitionToReducing("j-th-ok", 0, "wc", 3, "mr", 1)
         }
     }
 
@@ -229,6 +227,7 @@ class MapReduceOrchestratorTest {
         }
 
         verify(jobRepository, never()).casJobStatus(any(), any(), any(), any())
+        verify(jobRepository, never()).transitionToReducing(any(), any(), any(), any(), any(), any())
         verify(jobRepository, never()).insertReduceTasks(any(), any(), any(), any(), any())
     }
 

@@ -167,14 +167,19 @@ class MapReduceOrchestrator(
             return
         }
 
-        val transitioned = jobRepository.casJobStatus(
-            job.jobId, JobStatus.RUNNING, JobStatus.REDUCING, job.version,
+        val definition = registrar.getDefinition(job.jobType)
+        val maxRetries = definition?.maxRetries ?: 3
+        val queue = definition?.queue ?: "mr"
+
+        val transitioned = jobRepository.transitionToReducing(
+            job.jobId, job.version, job.jobType, maxRetries, queue, job.totalPartitions,
         )
         if (transitioned) {
-            dispatchReduceTask(job)
+            log.infof("Dispatched %d reduce task(s) for job %s", job.totalPartitions, job.jobId)
         }
     }
 
+    /** Recovery-only: insert reduce tasks for a job already in REDUCING state. */
     private fun dispatchReduceTask(job: Job) {
         val definition = registrar.getDefinition(job.jobType)
         val maxRetries = definition?.maxRetries ?: 3
