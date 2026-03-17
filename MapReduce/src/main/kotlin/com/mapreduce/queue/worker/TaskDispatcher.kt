@@ -2,8 +2,8 @@ package com.mapreduce.queue.worker
 
 import com.mapreduce.config.FrameworkConfig
 import com.mapreduce.queue.model.Task
-import com.mapreduce.queue.model.TaskResult
 import com.mapreduce.queue.model.TaskContext
+import com.mapreduce.queue.model.TaskResult
 import com.mapreduce.queue.pipeline.Middleware
 import com.mapreduce.queue.pipeline.TaskExecutionContext
 import com.mapreduce.queue.registry.HandlerRegistry
@@ -11,15 +11,27 @@ import com.mapreduce.queue.repository.TaskRepository
 import com.mapreduce.queue.spi.TaskHandler
 import com.mapreduce.shutdown.ShutdownCoordinator
 import io.micrometer.core.instrument.MeterRegistry
-import io.micrometer.core.instrument.Timer
+import io.micrometer.core.instrument.Tag
+import io.opentelemetry.api.trace.Span
+import io.opentelemetry.api.trace.StatusCode
+import io.opentelemetry.api.trace.Tracer
 import jakarta.enterprise.context.ApplicationScoped
 import jakarta.enterprise.inject.Instance
 import org.jboss.logging.Logger
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Claims a single task from the queue, resolves its handler, executes
  * it through the middleware chain, and records the outcome.
+ *
+ * Tracing and metrics are handled inline here — CDI interceptors cannot
+ * wrap Kotlin suspend functions (ArC does not support the Continuation
+ * parameter that the compiler adds). Timeout and error classification
+ * remain as [Middleware] implementations because they carry domain-specific
+ * logic (shutdown-aware timeout, re-enqueue-based retry) that no existing
+ * library provides.
  */
 @ApplicationScoped
 class TaskDispatcher(
@@ -30,10 +42,12 @@ class TaskDispatcher(
     private val circuitBreaker: PodCircuitBreaker,
     private val shutdownCoordinator: ShutdownCoordinator,
     private val meterRegistry: MeterRegistry,
+    private val tracer: Tracer,
 ) {
 
     private val log = Logger.getLogger(TaskDispatcher::class.java)
     private val pipeline: List<Middleware> = middlewares.toList().sortedBy { it.order }
+    private val inflightGauges = ConcurrentHashMap<String, AtomicInteger>()
 
     /** Try to claim a task from subscribed queues. Returns null if no work available. */
     fun claimTask(): Task? =
@@ -48,36 +62,24 @@ class TaskDispatcher(
             return
         }
 
-        val executionContext = TaskExecutionContext(
-            taskId = task.taskId,
-            handler = task.handler,
-            queue = task.queue,
-            groupId = task.groupId,
-            payload = task.payload,
-            metadata = task.metadata,
-            retryCount = task.retryCount,
-            maxRetries = task.maxRetries,
-            claimedAt = task.claimedAt,
-            executionGeneration = task.executionGeneration,
-            taskContext = TaskContext(
-                task.taskId, task.payload, task.groupId, task.metadata, task.executionGeneration,
-                retryCount = task.retryCount, maxRetries = task.maxRetries,
-                shuttingDownSupplier = { shutdownCoordinator.isShuttingDown },
-            ),
-        )
-
-        val chain = buildChain(handler)
-        val gen = task.executionGeneration
-        val start = System.nanoTime()
+        val ctx = buildExecutionContext(task)
+        val span = startSpan(ctx)
+        val inflight = inflightGauge(ctx.handler)
+        inflight.incrementAndGet()
+        val startNanos = System.nanoTime()
 
         val result = try {
-            chain(executionContext)
+            buildChain(handler)(ctx)
         } catch (e: Exception) {
             log.errorf(e, "Pipeline escaped with exception for handler '%s' task %s", task.handler, task.taskId)
+            span.recordException(e)
             TaskResult.Failure("Pipeline error: ${e.javaClass.simpleName}: ${e.message}")
+        } finally {
+            inflight.decrementAndGet()
         }
 
-        processResult(task, result, gen, start)
+        endSpan(span, result)
+        processResult(task, result, task.executionGeneration, startNanos)
     }
 
     private fun buildChain(handler: TaskHandler): suspend (TaskExecutionContext) -> TaskResult {
@@ -89,54 +91,108 @@ class TaskDispatcher(
         }
     }
 
+    // ── Tracing ────────────────────────────────────────────────────
+
+    private fun startSpan(ctx: TaskExecutionContext): Span =
+        tracer.spanBuilder("task.execute ${ctx.handler}")
+            .setAttribute("task.id", ctx.taskId)
+            .setAttribute("task.handler", ctx.handler)
+            .setAttribute("task.queue", ctx.queue)
+            .setAttribute("task.retryCount", ctx.retryCount.toLong())
+            .apply { ctx.groupId?.let { setAttribute("task.groupId", it) } }
+            .startSpan()
+
+    private fun endSpan(span: Span, result: TaskResult) {
+        when (result) {
+            is TaskResult.Success -> span.setStatus(StatusCode.OK)
+            is TaskResult.Retry -> span.setStatus(StatusCode.OK, "retry: ${result.reason}")
+            is TaskResult.Failure -> span.setStatus(StatusCode.ERROR, result.message)
+            is TaskResult.DeadLetter -> span.setStatus(StatusCode.ERROR, "dead-letter: ${result.reason}")
+        }
+        span.end()
+    }
+
+    // ── Metrics ────────────────────────────────────────────────────
+
+    private fun inflightGauge(handler: String): AtomicInteger =
+        inflightGauges.computeIfAbsent(handler) { name ->
+            AtomicInteger(0).also { gauge ->
+                meterRegistry.gauge(
+                    "taskqueue.handler.inflight",
+                    listOf(Tag.of("handler", name)),
+                    gauge,
+                ) { it.toDouble() }
+            }
+        }
+
+    private fun recordMetrics(task: Task, result: TaskResult, durationNanos: Long) {
+        val resultLabel = when (result) {
+            is TaskResult.Success -> "success"
+            is TaskResult.Retry -> "retry"
+            is TaskResult.Failure -> "failure"
+            is TaskResult.DeadLetter -> "dead_letter"
+        }
+
+        meterRegistry.timer(
+            "taskqueue.handler.duration",
+            "handler", task.handler,
+            "queue", task.queue,
+            "result", resultLabel,
+        ).record(durationNanos, TimeUnit.NANOSECONDS)
+
+        meterRegistry.counter(
+            "taskqueue.handler.executions",
+            "handler", task.handler,
+            "result", resultLabel,
+        ).increment()
+    }
+
+    // ── Result processing ──────────────────────────────────────────
+
     private fun processResult(task: Task, result: TaskResult, gen: String?, startNanos: Long) {
-        val durationNanos = System.nanoTime() - startNanos
+        recordMetrics(task, result, System.nanoTime() - startNanos)
 
         when (result) {
             is TaskResult.Success -> {
                 taskRepository.complete(task.taskId, gen)
-                recordTaskDuration(task.handler, "Success", durationNanos)
                 circuitBreaker.recordSuccess()
             }
             is TaskResult.Retry -> {
                 if (result.consumeRetry) {
                     taskRepository.fail(task.taskId, result.reason, result.delay, gen)
-                    recordTaskDuration(task.handler, "Retry", durationNanos)
-                    recordTaskError(task.handler, "retry")
                     circuitBreaker.recordFailure()
                 } else {
                     taskRepository.requeue(task.taskId, result.delay, gen)
-                    recordTaskDuration(task.handler, "Retry", durationNanos)
                 }
             }
             is TaskResult.Failure -> {
                 taskRepository.fail(task.taskId, result.message, executionGeneration = gen)
-                recordTaskDuration(task.handler, "DeadLetter", durationNanos)
-                recordTaskError(task.handler, "failure")
                 circuitBreaker.recordFailure()
             }
             is TaskResult.DeadLetter -> {
                 taskRepository.deadLetter(task.taskId, result.reason)
-                recordTaskDuration(task.handler, "DeadLetter", durationNanos)
-                recordTaskError(task.handler, "dead_letter")
                 circuitBreaker.recordFailure()
             }
         }
     }
 
-    private fun recordTaskDuration(handler: String, status: String, durationNanos: Long) {
-        Timer.builder("framework.task.duration.seconds")
-            .tag("handler", handler)
-            .tag("status", status)
-            .register(meterRegistry)
-            .record(durationNanos, TimeUnit.NANOSECONDS)
-    }
+    // ── Context building ───────────────────────────────────────────
 
-    private fun recordTaskError(handler: String, errorType: String) {
-        meterRegistry.counter(
-            "framework.task.errors.total",
-            "handler", handler,
-            "error_type", errorType,
-        ).increment()
-    }
+    private fun buildExecutionContext(task: Task) = TaskExecutionContext(
+        taskId = task.taskId,
+        handler = task.handler,
+        queue = task.queue,
+        groupId = task.groupId,
+        payload = task.payload,
+        metadata = task.metadata,
+        retryCount = task.retryCount,
+        maxRetries = task.maxRetries,
+        claimedAt = task.claimedAt,
+        executionGeneration = task.executionGeneration,
+        taskContext = TaskContext(
+            task.taskId, task.payload, task.groupId, task.metadata, task.executionGeneration,
+            retryCount = task.retryCount, maxRetries = task.maxRetries,
+            shuttingDownSupplier = { shutdownCoordinator.isShuttingDown },
+        ),
+    )
 }

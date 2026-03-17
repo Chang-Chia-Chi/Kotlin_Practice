@@ -9,6 +9,9 @@ import com.mapreduce.queue.registry.HandlerRegistry
 import com.mapreduce.queue.repository.TaskRepository
 import com.mapreduce.shutdown.ShutdownCoordinator
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
+import io.opentelemetry.api.trace.Span
+import io.opentelemetry.api.trace.SpanBuilder
+import io.opentelemetry.api.trace.Tracer
 import jakarta.enterprise.inject.Instance
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.BeforeEach
@@ -32,6 +35,7 @@ class TaskDispatcherTest {
     private lateinit var circuitBreaker: PodCircuitBreaker
     private lateinit var shutdownCoordinator: ShutdownCoordinator
     private lateinit var meterRegistry: SimpleMeterRegistry
+    private lateinit var tracer: Tracer
     private lateinit var dispatcher: TaskDispatcher
 
     /** A passthrough middleware that just calls next. */
@@ -56,10 +60,17 @@ class TaskDispatcherTest {
         shutdownCoordinator = mock<ShutdownCoordinator>()
         meterRegistry = SimpleMeterRegistry()
 
+        // Tracer → no-op span chain
+        tracer = mock<Tracer>()
+        val spanBuilder = mock<SpanBuilder>()
+        val span = mock<Span>()
+        whenever(tracer.spanBuilder(any())).thenReturn(spanBuilder)
+        whenever(spanBuilder.setAttribute(any<String>(), any<String>())).thenReturn(spanBuilder)
+        whenever(spanBuilder.setAttribute(any<String>(), any<Long>())).thenReturn(spanBuilder)
+        whenever(spanBuilder.startSpan()).thenReturn(span)
+
         val middlewareInstance = mock<Instance<Middleware>>()
         val middlewares: MutableList<Middleware> = mutableListOf(
-            PassthroughMiddleware(10),
-            PassthroughMiddleware(20),
             PassthroughMiddleware(40),
             PassthroughMiddleware(50),
         )
@@ -68,7 +79,7 @@ class TaskDispatcherTest {
         dispatcher = TaskDispatcher(
             config, taskRepository, handlerRegistry,
             middlewareInstance,
-            circuitBreaker, shutdownCoordinator, meterRegistry,
+            circuitBreaker, shutdownCoordinator, meterRegistry, tracer,
         )
     }
 
