@@ -7,6 +7,8 @@ import io.micrometer.core.instrument.MeterRegistry
 import io.quarkus.runtime.ShutdownEvent
 import jakarta.enterprise.context.ApplicationScoped
 import jakarta.enterprise.event.Observes
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.runBlocking
 import org.jboss.logging.Logger
 import java.time.Duration
 import java.time.Instant
@@ -80,7 +82,7 @@ class ShutdownCoordinator(
         meterRegistry.gauge("taskqueue_shutdown_inflight_tasks", this) { inFlightTasks.toDouble() }
     }
 
-    fun onShutdown(@Observes ev: ShutdownEvent) {
+    fun onShutdown(@Observes ev: ShutdownEvent) = runBlocking {
         val shutdownStart = Instant.now()
         val shutdownConfig = config.shutdown()
         val wasLeader = leaderManager.isActive
@@ -127,7 +129,7 @@ class ShutdownCoordinator(
         )
     }
 
-    private fun phaseLeaderTeardown(timeout: Duration) {
+    private suspend fun phaseLeaderTeardown(timeout: Duration) {
         log.info("Leader teardown — cancelling orchestration loops")
 
         synchronized(this) {
@@ -140,13 +142,13 @@ class ShutdownCoordinator(
             }
         }
 
-        Thread.sleep(timeout.toMillis().coerceAtMost(5000))
+        delay(timeout.toMillis().coerceAtMost(5000))
 
         leaderManager.releaseLeaseExplicitly()
         log.info("Leader teardown done, lease released")
     }
 
-    private fun phaseWorkerDrain(drainTimeout: Duration, logInterval: Duration) {
+    private suspend fun phaseWorkerDrain(drainTimeout: Duration, logInterval: Duration) {
         val sem = bulkheadSemaphore
         if (sem == null || inFlightTasks == 0) {
             log.info("No in-flight tasks — skipping drain")
@@ -175,7 +177,7 @@ class ShutdownCoordinator(
                 lastLog = Instant.now()
             }
 
-            Thread.sleep(1000)
+            delay(1000)
         }
 
         if (inFlightTasks == 0) {
