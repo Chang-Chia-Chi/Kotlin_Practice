@@ -29,10 +29,6 @@ interface FrameworkConfig {
 
         @WithDefault("default,mr")
         fun queues(): List<String>
-
-        @WithName("circuit-breaker-threshold")
-        @WithDefault("10")
-        fun circuitBreakerThreshold(): Int
     }
 
     interface LeaderConfig {

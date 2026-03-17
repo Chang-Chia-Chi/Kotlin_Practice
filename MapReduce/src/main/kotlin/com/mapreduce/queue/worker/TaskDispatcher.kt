@@ -41,7 +41,6 @@ class TaskDispatcher(
     private val taskGroupRepository: TaskGroupRepository,
     private val handlerRegistry: HandlerRegistry,
     middlewares: Instance<Middleware>,
-    private val circuitBreaker: PodCircuitBreaker,
     private val shutdownCoordinator: ShutdownCoordinator,
     private val meterRegistry: MeterRegistry,
     private val tracer: Tracer,
@@ -165,7 +164,6 @@ class TaskDispatcher(
                 } else {
                     taskRepository.complete(task.taskId, gen)
                 }
-                circuitBreaker.recordSuccess()
             }
             is TaskResult.Retry -> {
                 if (result.consumeRetry) {
@@ -173,7 +171,6 @@ class TaskDispatcher(
                     if (deadLettered && task.groupId != null) {
                         taskGroupRepository.resolveGroupTask(groupId = task.groupId, failed = true)
                     }
-                    circuitBreaker.recordFailure()
                 } else {
                     taskRepository.requeue(task.taskId, result.delay, gen)
                 }
@@ -183,14 +180,12 @@ class TaskDispatcher(
                 if (deadLettered && task.groupId != null) {
                     taskGroupRepository.resolveGroupTask(groupId = task.groupId, failed = true)
                 }
-                circuitBreaker.recordFailure()
             }
             is TaskResult.DeadLetter -> {
                 taskRepository.deadLetter(task.taskId, result.reason)
                 if (task.groupId != null) {
                     taskGroupRepository.resolveGroupTask(groupId = task.groupId, failed = true)
                 }
-                circuitBreaker.recordFailure()
             }
         }
     }

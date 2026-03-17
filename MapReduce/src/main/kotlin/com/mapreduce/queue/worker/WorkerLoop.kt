@@ -32,7 +32,6 @@ import java.util.concurrent.Semaphore
 class WorkerLoop(
     private val config: FrameworkConfig,
     private val dispatcher: TaskDispatcher,
-    private val circuitBreaker: PodCircuitBreaker,
     private val shutdownCoordinator: ShutdownCoordinator,
     private val meterRegistry: MeterRegistry,
 ) {
@@ -73,11 +72,6 @@ class WorkerLoop(
                 if (shutdownCoordinator.state != ShutdownState.RUNNING) {
                     log.info("Shutdown signaled, stopping claim loop")
                     break
-                }
-
-                if (circuitBreaker.isTripped) {
-                    delay(pollInterval)
-                    continue
                 }
 
                 if (!semaphore.tryAcquire()) {

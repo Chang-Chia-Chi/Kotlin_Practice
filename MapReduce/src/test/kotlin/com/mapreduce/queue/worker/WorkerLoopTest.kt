@@ -31,7 +31,6 @@ class WorkerLoopTest {
     private lateinit var config: FrameworkConfig
     private lateinit var workerConfig: FrameworkConfig.WorkerConfig
     private lateinit var dispatcher: TaskDispatcher
-    private lateinit var circuitBreaker: PodCircuitBreaker
     private lateinit var shutdownCoordinator: ShutdownCoordinator
     private lateinit var meterRegistry: SimpleMeterRegistry
     private lateinit var workerLoop: WorkerLoop
@@ -56,7 +55,6 @@ class WorkerLoopTest {
         config = mock()
         workerConfig = mock()
         dispatcher = mock()
-        circuitBreaker = mock()
         shutdownCoordinator = mock()
         meterRegistry = SimpleMeterRegistry()
 
@@ -68,10 +66,9 @@ class WorkerLoopTest {
 
         whenever(shutdownCoordinator.state).thenReturn(ShutdownState.RUNNING)
         whenever(shutdownCoordinator.isShuttingDown).thenReturn(false)
-        whenever(circuitBreaker.isTripped).thenReturn(false)
 
         workerLoop = WorkerLoop(
-            config, dispatcher, circuitBreaker,
+            config, dispatcher,
             shutdownCoordinator, meterRegistry,
         )
     }
@@ -128,38 +125,6 @@ class WorkerLoopTest {
                 verify(dispatcher, atLeast(2)).claimTask()
             }
             verifySuspend(never()) { execute(any()) }
-        }
-    }
-
-    // ── Circuit breaker ───────────────────────────────────────────────
-
-    @Nested
-    inner class CircuitBreakerBehavior {
-
-        @Test
-        fun `skips claim when circuit breaker is tripped`() {
-            whenever(circuitBreaker.isTripped).thenReturn(true)
-
-            start()
-
-            await.during(Duration.ofMillis(100)).atMost(2, TimeUnit.SECONDS).untilAsserted {
-                verify(dispatcher, never()).claimTask()
-            }
-        }
-
-        @Test
-        fun `resumes claiming when circuit breaker recovers`() {
-            val callCount = AtomicInteger()
-            whenever(circuitBreaker.isTripped).thenAnswer {
-                callCount.incrementAndGet() <= 3
-            }
-            whenever(dispatcher.claimTask()).thenReturn(null)
-
-            start()
-
-            await.atMost(2, TimeUnit.SECONDS).untilAsserted {
-                verify(dispatcher, atLeast(1)).claimTask()
-            }
         }
     }
 
@@ -236,7 +201,7 @@ class WorkerLoopTest {
         fun `limits concurrent tasks to bulkhead size`() {
             whenever(workerConfig.bulkheadSize()).thenReturn(2)
             workerLoop = WorkerLoop(
-                config, dispatcher, circuitBreaker,
+                config, dispatcher,
                 shutdownCoordinator, meterRegistry,
             )
 

@@ -35,7 +35,6 @@ class TaskDispatcherTest {
     private lateinit var taskRepository: TaskRepository
     private lateinit var taskGroupRepository: TaskGroupRepository
     private lateinit var handlerRegistry: HandlerRegistry
-    private lateinit var circuitBreaker: PodCircuitBreaker
     private lateinit var shutdownCoordinator: ShutdownCoordinator
     private lateinit var meterRegistry: SimpleMeterRegistry
     private lateinit var tracer: Tracer
@@ -60,7 +59,6 @@ class TaskDispatcherTest {
         taskRepository = mock<TaskRepository>()
         taskGroupRepository = mock<TaskGroupRepository>()
         handlerRegistry = mock<HandlerRegistry>()
-        circuitBreaker = mock<PodCircuitBreaker>()
         shutdownCoordinator = mock<ShutdownCoordinator>()
         meterRegistry = SimpleMeterRegistry()
 
@@ -83,7 +81,7 @@ class TaskDispatcherTest {
         dispatcher = TaskDispatcher(
             config, taskRepository, taskGroupRepository, handlerRegistry,
             middlewareInstance,
-            circuitBreaker, shutdownCoordinator, meterRegistry, tracer,
+            shutdownCoordinator, meterRegistry, tracer,
         )
     }
 
@@ -111,7 +109,7 @@ class TaskDispatcherTest {
     // ── execute: Success ──────────────────────────────────────────
 
     @Test
-    fun `execute Success completes task via group path and records CB success`() = runTest {
+    fun `execute Success completes task via group path`() = runTest {
         val task = testTask()
         stubHandler(task, TaskResult.Success("done"))
         whenever(taskGroupRepository.resolveGroupTask(any(), any(), anyOrNull(), any(), anyOrNull(), anyOrNull()))
@@ -120,8 +118,6 @@ class TaskDispatcherTest {
         dispatcher.execute(task)
 
         verify(taskGroupRepository).resolveGroupTask(eq("task-1"), eq("group-1"), eq("gen-1"), eq(false), anyOrNull(), anyOrNull())
-        verify(circuitBreaker).recordSuccess()
-        verify(circuitBreaker, never()).recordFailure()
     }
 
     @Test
@@ -132,13 +128,12 @@ class TaskDispatcherTest {
         dispatcher.execute(task)
 
         verify(taskRepository).complete("task-1", "gen-1")
-        verify(circuitBreaker).recordSuccess()
     }
 
     // ── execute: Failure ──────────────────────────────────────────
 
     @Test
-    fun `execute Failure fails task and records CB failure`() = runTest {
+    fun `execute Failure fails task`() = runTest {
         val task = testTask()
         stubHandler(task, TaskResult.Failure("boom"))
         whenever(taskRepository.fail(eq("task-1"), eq("boom"), anyOrNull(), eq("gen-1")))
@@ -147,27 +142,24 @@ class TaskDispatcherTest {
         dispatcher.execute(task)
 
         verify(taskRepository).fail(eq("task-1"), eq("boom"), anyOrNull(), eq("gen-1"))
-        verify(circuitBreaker).recordFailure()
-        verify(circuitBreaker, never()).recordSuccess()
     }
 
     // ── execute: DeadLetter ───────────────────────────────────────
 
     @Test
-    fun `execute DeadLetter dead-letters task and records CB failure`() = runTest {
+    fun `execute DeadLetter dead-letters task`() = runTest {
         val task = testTask()
         stubHandler(task, TaskResult.DeadLetter("poison pill"))
 
         dispatcher.execute(task)
 
         verify(taskRepository).deadLetter("task-1", "poison pill")
-        verify(circuitBreaker).recordFailure()
     }
 
     // ── execute: Retry(consumeRetry=true) ─────────────────────────
 
     @Test
-    fun `execute Retry with consumeRetry true fails task and records CB failure`() = runTest {
+    fun `execute Retry with consumeRetry true fails task`() = runTest {
         val task = testTask()
         val retry = TaskResult.Retry(delay = Duration.ofSeconds(5), reason = "transient", consumeRetry = true)
         stubHandler(task, retry)
@@ -177,7 +169,6 @@ class TaskDispatcherTest {
         dispatcher.execute(task)
 
         verify(taskRepository).fail("task-1", "transient", Duration.ofSeconds(5), "gen-1")
-        verify(circuitBreaker).recordFailure()
     }
 
     // ── execute: Retry(consumeRetry=false) ────────────────────────
@@ -191,8 +182,6 @@ class TaskDispatcherTest {
         dispatcher.execute(task)
 
         verify(taskRepository).requeue("task-1", Duration.ofSeconds(2), "gen-1")
-        verify(circuitBreaker, never()).recordFailure()
-        verify(circuitBreaker, never()).recordSuccess()
     }
 
     // ── helpers ───────────────────────────────────────────────────
