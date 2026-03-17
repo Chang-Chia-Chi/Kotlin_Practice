@@ -1,5 +1,7 @@
 package com.mapreduce.mr.handler
 
+import com.mapreduce.mr.model.FailurePolicy
+import com.mapreduce.mr.model.evaluateFailurePolicy
 import com.mapreduce.queue.model.EnqueueRequest
 import com.mapreduce.queue.model.GroupStatus.ACTIVE
 import com.mapreduce.queue.model.GroupStatus.COMPLETED
@@ -7,7 +9,6 @@ import com.mapreduce.queue.model.GroupStatus.FAILED
 import com.mapreduce.queue.model.TaskContext
 import com.mapreduce.queue.model.TaskGroup
 import com.mapreduce.queue.model.TaskResult
-import com.mapreduce.queue.model.evaluateFailurePolicy
 import com.mapreduce.queue.repository.TaskGroupRepository
 import com.mapreduce.queue.spi.TaskHandler
 import org.jboss.logging.Logger
@@ -46,7 +47,7 @@ class PhaseTransitionHandler(
 
     private fun handleMapPhaseComplete(group: TaskGroup): TaskResult {
         val failureReason = evaluateFailurePolicy(
-            group.failurePolicy, group.phaseFailed,
+            FailurePolicy.valueOf(group.failurePolicy), group.phaseFailed,
             group.phaseTotal, group.failureThreshold,
         )
         if (failureReason != null) {

@@ -1,6 +1,6 @@
 package com.mapreduce.mr.spi
 
-import com.mapreduce.queue.model.FailurePolicy
+import com.mapreduce.mr.model.FailurePolicy
 import kotlinx.coroutines.flow.Flow
 
 /**

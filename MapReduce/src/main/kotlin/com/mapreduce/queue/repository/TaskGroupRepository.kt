@@ -69,7 +69,7 @@ class TaskGroupRepository(
                 .bind("phase", group.phase)
                 .bind("phaseTotal", group.phaseTotal)
                 .bind("onCompleteHandler", group.onCompleteHandler)
-                .bind("failurePolicy", group.failurePolicy.name)
+                .bind("failurePolicy", group.failurePolicy)
                 .bind("failureThreshold", group.failureThreshold)
                 .bind("resultMetadata", group.resultMetadata)
                 .execute()

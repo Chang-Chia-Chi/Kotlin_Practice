@@ -2,7 +2,6 @@ package com.mapreduce.mr.repository
 
 import com.mapreduce.TestH2Factory
 import com.mapreduce.queue.model.EnqueueRequest
-import com.mapreduce.queue.model.FailurePolicy
 import com.mapreduce.queue.model.GroupStatus
 import com.mapreduce.queue.model.TaskGroup
 import com.mapreduce.queue.repository.TaskGroupRepository
@@ -74,13 +73,13 @@ class JobRepositoryTest {
 
     @Test
     fun `findGroup returns the group with all fields`() {
-        val group = testGroup("g-f", failurePolicy = FailurePolicy.THRESHOLD, failureThreshold = 0.5)
+        val group = testGroup("g-f", failurePolicy = "THRESHOLD", failureThreshold = 0.5)
         repo.submitGroup(group, listOf(testTask("g-f", "wc.map", "i")))
 
         val found = repo.findGroup("g-f")
         assertNotNull(found)
         assertEquals("g-f", found!!.groupId)
-        assertEquals(FailurePolicy.THRESHOLD, found.failurePolicy)
+        assertEquals("THRESHOLD", found.failurePolicy)
         assertEquals(0.5, found.failureThreshold)
     }
 
@@ -287,7 +286,7 @@ class JobRepositoryTest {
     private fun testGroup(
         groupId: String,
         phaseTotal: Int = 1,
-        failurePolicy: FailurePolicy = FailurePolicy.FAIL_GROUP,
+        failurePolicy: String = "FAIL_GROUP",
         failureThreshold: Double = 0.0,
         onCompleteHandler: String? = null,
     ) = TaskGroup(

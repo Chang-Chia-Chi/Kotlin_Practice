@@ -1,7 +1,7 @@
 package com.mapreduce.mr.model
 
-import com.mapreduce.queue.model.FailurePolicy
-import com.mapreduce.queue.model.evaluateFailurePolicy
+import com.mapreduce.mr.model.FailurePolicy
+import com.mapreduce.mr.model.evaluateFailurePolicy
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull

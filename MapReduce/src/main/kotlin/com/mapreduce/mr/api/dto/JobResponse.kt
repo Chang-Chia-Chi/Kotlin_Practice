@@ -24,7 +24,7 @@ data class JobResponse(
             phaseTotal = group.phaseTotal,
             phaseCompleted = group.phaseCompleted,
             phaseFailed = group.phaseFailed,
-            failurePolicy = group.failurePolicy.name,
+            failurePolicy = group.failurePolicy,
             resultMetadata = group.resultMetadata,
             createdAt = group.createdAt?.toString(),
             updatedAt = group.updatedAt?.toString(),
