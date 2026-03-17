@@ -15,7 +15,7 @@ import org.jboss.logging.Logger
 
 /**
  * Callback handler that fires when a phase's barrier is reached.
- * Registered as `"{jobType}.__phase_complete"` by [com.mapreduce.mr.registry.MapReduceRegistrar].
+ * Registered as `"{jobType}.__phase_complete"` by [com.mapreduce.mr.registry.MapReduceRegistry].
  *
  * This replaces the polling-based phase transition logic that was in the old orchestrator.
  * The callback task is created atomically with barrier detection (same TX), so transitions

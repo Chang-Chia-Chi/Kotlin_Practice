@@ -23,7 +23,7 @@ import java.util.concurrent.ConcurrentHashMap
  * generic [HandlerRegistry].
  */
 @ApplicationScoped
-class MapReduceRegistrar(
+class MapReduceRegistry(
     private val definitions: Instance<MapReduceDefinition<*, *, *, *>>,
     private val handlerRegistry: HandlerRegistry,
     private val taskGroupRepository: TaskGroupRepository,
@@ -31,7 +31,7 @@ class MapReduceRegistrar(
     private val objectMapper: ObjectMapper,
 ) {
 
-    private val log = Logger.getLogger(MapReduceRegistrar::class.java)
+    private val log = Logger.getLogger(MapReduceRegistry::class.java)
     private val definitionMap = ConcurrentHashMap<String, MapReduceDefinition<*, *, *, *>>()
 
     fun onStart(@Observes @Priority(20) ev: StartupEvent) {

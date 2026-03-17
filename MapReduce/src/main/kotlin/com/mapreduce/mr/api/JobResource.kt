@@ -2,7 +2,7 @@ package com.mapreduce.mr.api
 
 import com.mapreduce.mr.api.dto.JobResponse
 import com.mapreduce.mr.api.dto.SubmitJobRequest
-import com.mapreduce.mr.registry.MapReduceRegistrar
+import com.mapreduce.mr.registry.MapReduceRegistry
 import com.mapreduce.mr.spi.unsafeCast
 import com.mapreduce.queue.model.EnqueueRequest
 import com.mapreduce.queue.model.GroupStatus
@@ -29,7 +29,7 @@ import java.util.UUID
 @Consumes(MediaType.APPLICATION_JSON)
 class JobResource(
     private val taskGroupRepository: TaskGroupRepository,
-    private val registrar: MapReduceRegistrar,
+    private val registry: MapReduceRegistry,
 ) {
 
     private val log = Logger.getLogger(JobResource::class.java)
@@ -37,7 +37,7 @@ class JobResource(
     @POST
     @Path("/submit")
     suspend fun submitJob(request: SubmitJobRequest): Response {
-        val definition = registrar.getDefinition(request.jobType)
+        val definition = registry.getDefinition(request.jobType)
             ?: return Response.status(Response.Status.BAD_REQUEST)
                 .entity(mapOf("error" to "Unknown job type: ${request.jobType}"))
                 .build()
