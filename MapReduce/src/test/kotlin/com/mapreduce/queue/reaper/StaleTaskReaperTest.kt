@@ -1,4 +1,4 @@
-package com.mapreduce.queue.worker
+package com.mapreduce.queue.reaper
 
 import com.mapreduce.config.FrameworkConfig
 import com.mapreduce.leader.LeaderManager

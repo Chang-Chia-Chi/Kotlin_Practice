@@ -1,7 +1,7 @@
 package com.mapreduce.observability.health
 
 import com.mapreduce.leader.LeaderManager
-import com.mapreduce.queue.worker.StaleTaskReaper
+import com.mapreduce.queue.reaper.StaleTaskReaper
 import jakarta.enterprise.context.ApplicationScoped
 import org.eclipse.microprofile.health.HealthCheck
 import org.eclipse.microprofile.health.HealthCheckResponse
