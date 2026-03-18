@@ -176,18 +176,28 @@ class TaskRepository(private val jdbi: Jdbi) {
         }
     }
 
-    /** Immediately dead-letter a task (e.g. unrecognized handler). */
-    fun deadLetter(taskId: String, reason: String) {
-        jdbi.useHandle<Exception> { h ->
-            h.createUpdate(
+    /**
+     * Immediately dead-letter a task (e.g. unrecognized handler).
+     *
+     * Guarded by `WHERE status = 'CLAIMED'` to prevent a zombie worker from
+     * overwriting a task that has already been completed, retried, or dead-lettered.
+     *
+     * @return `true` if the task was dead-lettered, `false` if the status guard
+     *         or claimToken fence rejected the update (zombie / already-handled).
+     */
+    fun deadLetter(taskId: String, reason: String, claimToken: String? = null): Boolean {
+        return jdbi.withHandle<Boolean, Exception> { h ->
+            val fenceClause = if (claimToken != null) " AND execution_generation = :gen" else ""
+            val update = h.createUpdate(
                 """
                 UPDATE task SET status = 'DEAD_LETTER', error_message = :reason
-                WHERE task_id = :taskId
+                WHERE task_id = :taskId AND status = 'CLAIMED'$fenceClause
                 """
             )
                 .bind("taskId", taskId)
                 .bind("reason", reason.take(4000))
-                .execute()
+            if (claimToken != null) update.bind("gen", claimToken)
+            update.execute() > 0
         }
     }
 

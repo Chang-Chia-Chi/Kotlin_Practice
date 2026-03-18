@@ -375,23 +375,91 @@ class TaskRepositoryTest {
     inner class DeadLetter {
 
         @Test
-        fun `sets status to DEAD_LETTER with reason`() {
+        fun `sets status to DEAD_LETTER with reason and returns true`() {
             insertTask("t-1", status = TaskStatus.CLAIMED, claimedBy = "w")
 
-            repo.deadLetter("t-1", "unrecognized handler: bad.handler")
+            val result = repo.deadLetter("t-1", "unrecognized handler: bad.handler")
 
+            assertTrue(result)
             val task = repo.findById("t-1")!!
             assertEquals(TaskStatus.DEAD_LETTER, task.status)
             assertEquals("unrecognized handler: bad.handler", task.errorMessage)
         }
 
         @Test
-        fun `works on PENDING tasks too`() {
+        fun `with matching claimToken succeeds`() {
+            insertTask("t-1", status = TaskStatus.CLAIMED, claimedBy = "w", claimToken = "gen-A")
+
+            val result = repo.deadLetter("t-1", "bad handler", claimToken = "gen-A")
+
+            assertTrue(result)
+            assertEquals("DEAD_LETTER", readStatus("t-1"))
+        }
+
+        @Test
+        fun `with mismatching claimToken returns false -- zombie rejected`() {
+            insertTask("t-1", status = TaskStatus.CLAIMED, claimedBy = "w", claimToken = "gen-A")
+
+            val result = repo.deadLetter("t-1", "bad handler", claimToken = "gen-WRONG")
+
+            assertFalse(result)
+            assertEquals("CLAIMED", readStatus("t-1"))
+        }
+
+        @Test
+        fun `no-op on PENDING task -- status guard`() {
             insertTask("t-1", status = TaskStatus.PENDING)
 
-            repo.deadLetter("t-1", "poison pill")
+            val result = repo.deadLetter("t-1", "poison pill")
 
+            assertFalse(result)
+            assertEquals("PENDING", readStatus("t-1"))
+        }
+
+        @Test
+        fun `no-op on COMPLETED task -- status guard`() {
+            insertTask("t-1", status = TaskStatus.COMPLETED)
+
+            val result = repo.deadLetter("t-1", "zombie attempt")
+
+            assertFalse(result)
+            assertEquals("COMPLETED", readStatus("t-1"))
+        }
+
+        @Test
+        fun `no-op on already DEAD_LETTER task -- status guard`() {
+            insertTask("t-1", status = TaskStatus.DEAD_LETTER, errorMessage = "original reason")
+
+            val result = repo.deadLetter("t-1", "zombie attempt")
+
+            assertFalse(result)
             assertEquals("DEAD_LETTER", readStatus("t-1"))
+            // Original error message preserved
+            assertEquals("original reason", repo.findById("t-1")!!.errorMessage)
+        }
+
+        @Test
+        fun `zombie lifecycle -- reclaim then re-claim then zombie deadLetter rejected`() {
+            val taskId = repo.enqueue(EnqueueRequest(handler = "h", payload = "{}", maxRetries = 3))
+
+            // Worker A claims
+            val claimA = repo.claim("worker-A", listOf("default"))!!
+            val genA = claimA.claimToken!!
+
+            // Reaper reclaims
+            repo.reclaimStaleTask(taskId, "worker-A presumed dead")
+
+            // Worker B claims
+            val claimB = repo.claim("worker-B", listOf("default"))!!
+
+            // Zombie worker A tries to deadLetter with stale generation
+            val zombieResult = repo.deadLetter(taskId, "zombie deadLetter", claimToken = genA)
+            assertFalse(zombieResult)
+            assertEquals("CLAIMED", readStatus(taskId))
+
+            // Worker B can still operate on the task
+            repo.complete(taskId, claimB.claimToken)
+            assertEquals("COMPLETED", readStatus(taskId))
         }
     }
 
