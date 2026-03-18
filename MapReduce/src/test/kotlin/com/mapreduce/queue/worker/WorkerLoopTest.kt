@@ -3,6 +3,7 @@ package com.mapreduce.queue.worker
 import com.mapreduce.config.FrameworkConfig
 import com.mapreduce.queue.model.Task
 import com.mapreduce.queue.model.TaskStatus
+import com.mapreduce.queue.repository.TaskRepository
 import com.mapreduce.shutdown.ShutdownCoordinator
 import com.mapreduce.shutdown.ShutdownState
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
@@ -30,6 +31,7 @@ class WorkerLoopTest {
 
     private lateinit var config: FrameworkConfig
     private lateinit var workerConfig: FrameworkConfig.WorkerConfig
+    private lateinit var taskRepository: TaskRepository
     private lateinit var dispatcher: TaskDispatcher
     private lateinit var shutdownCoordinator: ShutdownCoordinator
     private lateinit var meterRegistry: SimpleMeterRegistry
@@ -54,6 +56,7 @@ class WorkerLoopTest {
     fun setUp() {
         config = mock()
         workerConfig = mock()
+        taskRepository = mock()
         dispatcher = mock()
         shutdownCoordinator = mock()
         meterRegistry = SimpleMeterRegistry()
@@ -68,7 +71,7 @@ class WorkerLoopTest {
         whenever(shutdownCoordinator.isShuttingDown).thenReturn(false)
 
         workerLoop = WorkerLoop(
-            config, dispatcher,
+            config, taskRepository, dispatcher,
             shutdownCoordinator, meterRegistry,
         )
     }
@@ -89,14 +92,14 @@ class WorkerLoopTest {
         @Test
         fun `claims and dispatches a task`() {
             val claimed = task()
-            whenever(dispatcher.claimTask())
+            whenever(taskRepository.claim("test-pod", listOf("default")))
                 .thenReturn(claimed)
                 .thenReturn(null)
 
             start()
 
             await.atMost(2, TimeUnit.SECONDS).untilAsserted {
-                verify(dispatcher, atLeast(1)).claimTask()
+                verify(taskRepository, atLeast(1)).claim("test-pod", listOf("default"))
             }
             await.atMost(2, TimeUnit.SECONDS).untilAsserted {
                 verifySuspend { execute(claimed) }
@@ -105,7 +108,7 @@ class WorkerLoopTest {
 
         @Test
         fun `updates lastPollTimestamp`() {
-            whenever(dispatcher.claimTask()).thenReturn(null)
+            whenever(taskRepository.claim(any(), any())).thenReturn(null)
 
             val before = workerLoop.lastPollTimestamp
             start()
@@ -117,12 +120,12 @@ class WorkerLoopTest {
 
         @Test
         fun `no task available does not call execute`() {
-            whenever(dispatcher.claimTask()).thenReturn(null)
+            whenever(taskRepository.claim(any(), any())).thenReturn(null)
 
             start()
 
             await.atMost(1, TimeUnit.SECONDS).untilAsserted {
-                verify(dispatcher, atLeast(2)).claimTask()
+                verify(taskRepository, atLeast(2)).claim("test-pod", listOf("default"))
             }
             verifySuspend(never()) { execute(any()) }
         }
@@ -140,7 +143,7 @@ class WorkerLoopTest {
                 if (callCount.incrementAndGet() > 3) ShutdownState.DRAINING
                 else ShutdownState.RUNNING
             }
-            whenever(dispatcher.claimTask()).thenReturn(null)
+            whenever(taskRepository.claim(any(), any())).thenReturn(null)
 
             start()
 
@@ -153,7 +156,7 @@ class WorkerLoopTest {
         fun `records drain completion when shutting down`() {
             val latch = CountDownLatch(1)
             val claimed = task()
-            whenever(dispatcher.claimTask())
+            whenever(taskRepository.claim("test-pod", listOf("default")))
                 .thenReturn(claimed)
                 .thenReturn(null)
             runBlocking {
@@ -183,7 +186,7 @@ class WorkerLoopTest {
         fun `limits concurrent tasks to bulkhead size`() {
             whenever(workerConfig.bulkheadSize()).thenReturn(2)
             workerLoop = WorkerLoop(
-                config, dispatcher,
+                config, taskRepository, dispatcher,
                 shutdownCoordinator, meterRegistry,
             )
 
@@ -191,7 +194,7 @@ class WorkerLoopTest {
             val maxConcurrent = AtomicInteger(0)
             val tasksStarted = CountDownLatch(3)
 
-            whenever(dispatcher.claimTask()).thenReturn(task())
+            whenever(taskRepository.claim(any(), any())).thenReturn(task())
             runBlocking {
                 whenever(dispatcher.execute(any())).thenAnswer {
                     val current = activeCount.incrementAndGet()
@@ -211,25 +214,25 @@ class WorkerLoopTest {
 
         @Test
         fun `releases semaphore when no task claimed`() {
-            whenever(dispatcher.claimTask()).thenReturn(null)
+            whenever(taskRepository.claim(any(), any())).thenReturn(null)
 
             start()
 
             await.atMost(2, TimeUnit.SECONDS).untilAsserted {
-                verify(dispatcher, atLeast(3)).claimTask()
+                verify(taskRepository, atLeast(3)).claim("test-pod", listOf("default"))
             }
         }
 
         @Test
-        fun `releases semaphore when claimTask throws`() {
-            whenever(dispatcher.claimTask())
+        fun `releases semaphore when claim throws`() {
+            whenever(taskRepository.claim(any(), any()))
                 .thenThrow(RuntimeException("DB error"))
                 .thenReturn(null)
 
             start()
 
             await.atMost(2, TimeUnit.SECONDS).untilAsserted {
-                verify(dispatcher, atLeast(2)).claimTask()
+                verify(taskRepository, atLeast(2)).claim(any(), any())
             }
         }
     }
@@ -241,7 +244,7 @@ class WorkerLoopTest {
 
         @Test
         fun `claim exception does not kill poll loop`() {
-            whenever(dispatcher.claimTask())
+            whenever(taskRepository.claim(any(), any()))
                 .thenThrow(RuntimeException("transient"))
                 .thenThrow(RuntimeException("transient"))
                 .thenReturn(null)
@@ -249,7 +252,7 @@ class WorkerLoopTest {
             start()
 
             await.atMost(2, TimeUnit.SECONDS).untilAsserted {
-                verify(dispatcher, atLeast(3)).claimTask()
+                verify(taskRepository, atLeast(3)).claim(any(), any())
             }
         }
     }

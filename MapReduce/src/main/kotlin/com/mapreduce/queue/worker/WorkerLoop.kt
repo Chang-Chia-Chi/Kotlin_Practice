@@ -1,6 +1,7 @@
 package com.mapreduce.queue.worker
 
 import com.mapreduce.config.FrameworkConfig
+import com.mapreduce.queue.repository.TaskRepository
 import com.mapreduce.shutdown.ShutdownCoordinator
 import com.mapreduce.shutdown.ShutdownState
 import com.mapreduce.util.unorderedMapAsync
@@ -42,6 +43,7 @@ import java.time.Instant
 @ApplicationScoped
 class WorkerLoop(
     private val config: FrameworkConfig,
+    private val taskRepository: TaskRepository,
     private val dispatcher: TaskDispatcher,
     private val shutdownCoordinator: ShutdownCoordinator,
     private val meterRegistry: MeterRegistry,
@@ -94,7 +96,9 @@ class WorkerLoop(
             }
 
             try {
-                val task = withContext(Dispatchers.IO) { dispatcher.claimTask() }
+                val task = withContext(Dispatchers.IO) {
+                    taskRepository.claim(config.worker().id(), config.worker().queues())
+                }
                 if (task != null) {
                     log.debugf("Claimed task %s [handler=%s, queue=%s]",
                         task.taskId, task.handler, task.queue)

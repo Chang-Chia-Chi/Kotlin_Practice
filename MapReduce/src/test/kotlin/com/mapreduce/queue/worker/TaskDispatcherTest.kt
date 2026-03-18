@@ -1,20 +1,13 @@
 package com.mapreduce.queue.worker
 
-import com.mapreduce.config.FrameworkConfig
 import com.mapreduce.queue.model.Task
 import com.mapreduce.queue.model.TaskResult
-import com.mapreduce.queue.pipeline.Middleware
-import com.mapreduce.queue.pipeline.TaskExecutionContext
+import com.mapreduce.queue.pipeline.TaskPipeline
 import com.mapreduce.queue.registry.HandlerRegistry
 import com.mapreduce.queue.repository.GroupTaskResolution
 import com.mapreduce.queue.repository.TaskGroupRepository
 import com.mapreduce.queue.repository.TaskRepository
 import com.mapreduce.shutdown.ShutdownCoordinator
-import io.micrometer.core.instrument.simple.SimpleMeterRegistry
-import io.opentelemetry.api.trace.Span
-import io.opentelemetry.api.trace.SpanBuilder
-import io.opentelemetry.api.trace.Tracer
-import jakarta.enterprise.inject.Instance
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
@@ -22,7 +15,6 @@ import org.mockito.kotlin.any
 import org.mockito.kotlin.anyOrNull
 import org.mockito.kotlin.eq
 import org.mockito.kotlin.mock
-import org.mockito.kotlin.never
 import org.mockito.kotlin.verify
 import org.mockito.kotlin.whenever
 import java.time.Duration
@@ -30,68 +22,25 @@ import java.time.Instant
 
 class TaskDispatcherTest {
 
-    private lateinit var config: FrameworkConfig
-    private lateinit var workerConfig: FrameworkConfig.WorkerConfig
     private lateinit var taskRepository: TaskRepository
     private lateinit var taskGroupRepository: TaskGroupRepository
     private lateinit var handlerRegistry: HandlerRegistry
+    private lateinit var pipeline: TaskPipeline
     private lateinit var shutdownCoordinator: ShutdownCoordinator
-    private lateinit var meterRegistry: SimpleMeterRegistry
-    private lateinit var tracer: Tracer
     private lateinit var dispatcher: TaskDispatcher
-
-    /** A passthrough middleware that just calls next. */
-    private class PassthroughMiddleware(override val order: Int) : Middleware {
-        override suspend fun invoke(
-            context: TaskExecutionContext,
-            next: suspend (TaskExecutionContext) -> TaskResult,
-        ): TaskResult = next(context)
-    }
 
     @BeforeEach
     fun setUp() {
-        config = mock<FrameworkConfig>()
-        workerConfig = mock<FrameworkConfig.WorkerConfig>()
-        whenever(config.worker()).thenReturn(workerConfig)
-        whenever(workerConfig.id()).thenReturn("worker-1")
-        whenever(workerConfig.queues()).thenReturn(listOf("default", "mr"))
-
         taskRepository = mock<TaskRepository>()
         taskGroupRepository = mock<TaskGroupRepository>()
         handlerRegistry = mock<HandlerRegistry>()
+        pipeline = mock<TaskPipeline>()
         shutdownCoordinator = mock<ShutdownCoordinator>()
-        meterRegistry = SimpleMeterRegistry()
-
-        // Tracer → no-op span chain
-        tracer = mock<Tracer>()
-        val spanBuilder = mock<SpanBuilder>()
-        val span = mock<Span>()
-        whenever(tracer.spanBuilder(any())).thenReturn(spanBuilder)
-        whenever(spanBuilder.setAttribute(any<String>(), any<String>())).thenReturn(spanBuilder)
-        whenever(spanBuilder.setAttribute(any<String>(), any<Long>())).thenReturn(spanBuilder)
-        whenever(spanBuilder.startSpan()).thenReturn(span)
-
-        val middlewareInstance = mock<Instance<Middleware>>()
-        val middlewares: MutableList<Middleware> = mutableListOf(
-            PassthroughMiddleware(40),
-            PassthroughMiddleware(50),
-        )
-        whenever(middlewareInstance.iterator()).thenReturn(middlewares.iterator())
 
         dispatcher = TaskDispatcher(
-            config, taskRepository, taskGroupRepository, handlerRegistry,
-            middlewareInstance,
-            shutdownCoordinator, meterRegistry, tracer,
+            taskRepository, taskGroupRepository, handlerRegistry,
+            pipeline, shutdownCoordinator,
         )
-    }
-
-    // ── claimTask ─────────────────────────────────────────────────
-
-    @Test
-    fun `claimTask delegates to repository with worker id and queues`() {
-        dispatcher.claimTask()
-
-        verify(taskRepository).claim("worker-1", listOf("default", "mr"))
     }
 
     // ── execute: no handler ───────────────────────────────────────
@@ -111,7 +60,7 @@ class TaskDispatcherTest {
     @Test
     fun `execute Success completes task via group path`() = runTest {
         val task = testTask()
-        stubHandler(task, TaskResult.Success("done"))
+        stubPipeline(task, TaskResult.Success("done"))
         whenever(taskGroupRepository.resolveGroupTask(any(), any(), anyOrNull(), any(), anyOrNull(), anyOrNull()))
             .thenReturn(GroupTaskResolution(updated = true, barrierMet = false))
 
@@ -123,7 +72,7 @@ class TaskDispatcherTest {
     @Test
     fun `execute Success without groupId completes via taskRepository`() = runTest {
         val task = testTask(groupId = null)
-        stubHandler(task, TaskResult.Success("done"))
+        stubPipeline(task, TaskResult.Success("done"))
 
         dispatcher.execute(task)
 
@@ -135,7 +84,7 @@ class TaskDispatcherTest {
     @Test
     fun `execute Failure fails task`() = runTest {
         val task = testTask()
-        stubHandler(task, TaskResult.Failure("boom"))
+        stubPipeline(task, TaskResult.Failure("boom"))
         whenever(taskRepository.fail(eq("task-1"), eq("boom"), anyOrNull(), eq("gen-1")))
             .thenReturn(false)
 
@@ -149,7 +98,7 @@ class TaskDispatcherTest {
     @Test
     fun `execute DeadLetter dead-letters task`() = runTest {
         val task = testTask()
-        stubHandler(task, TaskResult.DeadLetter("poison pill"))
+        stubPipeline(task, TaskResult.DeadLetter("poison pill"))
 
         dispatcher.execute(task)
 
@@ -162,7 +111,7 @@ class TaskDispatcherTest {
     fun `execute Retry with consumeRetry true fails task`() = runTest {
         val task = testTask()
         val retry = TaskResult.Retry(delay = Duration.ofSeconds(5), reason = "transient", consumeRetry = true)
-        stubHandler(task, retry)
+        stubPipeline(task, retry)
         whenever(taskRepository.fail(eq("task-1"), eq("transient"), eq(Duration.ofSeconds(5)), eq("gen-1")))
             .thenReturn(false)
 
@@ -174,10 +123,10 @@ class TaskDispatcherTest {
     // ── execute: Retry(consumeRetry=false) ────────────────────────
 
     @Test
-    fun `execute Retry with consumeRetry false requeues without CB recording`() = runTest {
+    fun `execute Retry with consumeRetry false requeues`() = runTest {
         val task = testTask()
         val retry = TaskResult.Retry(delay = Duration.ofSeconds(2), reason = "cb-requeue", consumeRetry = false)
-        stubHandler(task, retry)
+        stubPipeline(task, retry)
 
         dispatcher.execute(task)
 
@@ -205,12 +154,12 @@ class TaskDispatcherTest {
         createdAt = Instant.now(),
     )
 
-    private fun stubHandler(task: Task, result: TaskResult) {
+    private fun stubPipeline(task: Task, result: TaskResult) {
         val handler = mock<com.mapreduce.queue.spi.TaskHandler>()
         whenever(handler.handlerName).thenReturn(task.handler)
         whenever(handlerRegistry.resolve(task.handler)).thenReturn(handler)
         kotlinx.coroutines.runBlocking {
-            whenever(handler.handle(any())).thenReturn(result)
+            whenever(pipeline.execute(any(), any())).thenReturn(result)
         }
     }
 }
