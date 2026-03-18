@@ -3,18 +3,21 @@ package com.mapreduce.queue.worker
 import com.mapreduce.config.FrameworkConfig
 import com.mapreduce.shutdown.ShutdownCoordinator
 import com.mapreduce.shutdown.ShutdownState
+import com.mapreduce.util.unorderedMapAsync
 import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.Tag
 import io.quarkus.runtime.StartupEvent
 import jakarta.enterprise.context.ApplicationScoped
 import jakarta.enterprise.event.Observes
-import com.mapreduce.queue.model.Task
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.onCompletion
+import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.jboss.logging.Logger
@@ -22,7 +25,16 @@ import java.time.Instant
 import java.util.concurrent.Semaphore
 
 /**
- * Coroutine-based poll loop with bulkhead-controlled parallelism.
+ * Flow-based poll loop with bulkhead-controlled parallelism.
+ *
+ * The pipeline is structured as:
+ * ```
+ * claimFlow()                           // single-threaded: poll DB, backoff on empty/error
+ *   .onEach { update health timestamp }
+ *   .unorderedMapAsync(bulkheadSize)    // fan-out: bounded concurrent execution
+ *   .onCompletion { log }
+ *   .collect {}
+ * ```
  *
  * Stale task detection relies on [claimed_at] age — the leader-only
  * [StaleTaskReaper] reclaims tasks that have been CLAIMED longer than
@@ -37,20 +49,19 @@ class WorkerLoop(
 ) {
 
     private val log = Logger.getLogger(WorkerLoop::class.java)
-    private val pollScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-    private val taskScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val bulkheadSize = config.worker().bulkheadSize()
     private val semaphore = Semaphore(bulkheadSize)
 
-    /** Updated on every poll loop iteration — used by health probes to detect a hung worker. */
+    /** Updated on every poll iteration — used by health probes to detect a hung worker. */
     @Volatile
     private var _lastPollTimestamp: Instant = Instant.now()
     val lastPollTimestamp: Instant get() = _lastPollTimestamp
 
     fun onStart(@Observes ev: StartupEvent) {
-        val pollInterval = config.worker().pollInterval().toMillis()
         val workerId = config.worker().id()
         val queues = config.worker().queues()
+        val pollInterval = config.worker().pollInterval().toMillis()
 
         shutdownCoordinator.registerBulkhead(semaphore, bulkheadSize)
         shutdownCoordinator.registerMetrics()
@@ -65,49 +76,46 @@ class WorkerLoop(
         log.infof("Worker starting: id=%s, bulkhead=%d, poll=%dms, queues=%s",
             workerId, bulkheadSize, pollInterval, queues)
 
-        pollScope.launch {
-            while (isActive) {
-                _lastPollTimestamp = Instant.now()
+        scope.launch {
+            claimFlow(pollInterval)
+                .onEach { _lastPollTimestamp = Instant.now() }
+                .unorderedMapAsync(bulkheadSize) { task -> executeTask(task) }
+                .onCompletion { log.info("Worker loop terminated") }
+                .collect {}
+        }
+    }
 
-                if (shutdownCoordinator.state != ShutdownState.RUNNING) {
-                    log.info("Shutdown signaled, stopping claim loop")
-                    break
-                }
+    /**
+     * Single-threaded claim flow. Emits claimed [Task] items; handles
+     * backoff on empty poll or transient errors. Terminates on shutdown.
+     */
+    private fun claimFlow(pollIntervalMs: Long): Flow<com.mapreduce.queue.model.Task> = flow {
+        while (true) {
+            if (shutdownCoordinator.state != ShutdownState.RUNNING) {
+                log.info("Shutdown signaled, stopping claim loop")
+                return@flow
+            }
 
-                if (!semaphore.tryAcquire()) {
-                    delay(pollInterval)
-                    continue
+            try {
+                val task = withContext(Dispatchers.IO) { dispatcher.claimTask() }
+                if (task != null) {
+                    log.debugf("Claimed task %s [handler=%s, queue=%s]",
+                        task.taskId, task.handler, task.queue)
+                    emit(task)
+                } else {
+                    delay(pollIntervalMs)
                 }
-
-                try {
-                    // Re-check after acquiring semaphore — narrows the race window
-                    // between the top-of-loop check and the actual claim call
-                    if (shutdownCoordinator.isShuttingDown) {
-                        semaphore.release()
-                        break
-                    }
-                    val task = withContext(Dispatchers.IO) { dispatcher.claimTask() }
-                    if (task != null) {
-                        log.debugf("Claimed task %s [handler=%s, queue=%s]",
-                            task.taskId, task.handler, task.queue)
-                        taskScope.launch { executeTask(task) }
-                    } else {
-                        semaphore.release()
-                        delay(pollInterval)
-                    }
-                } catch (e: CancellationException) {
-                    semaphore.release()
-                    throw e
-                } catch (e: Exception) {
-                    semaphore.release()
-                    log.errorf(e, "Error in worker claim loop")
-                    delay(pollInterval)
-                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                log.errorf(e, "Error in worker claim loop")
+                delay(pollIntervalMs)
             }
         }
     }
 
-    private suspend fun executeTask(task: Task) {
+    private suspend fun executeTask(task: com.mapreduce.queue.model.Task) {
+        semaphore.acquire() // track in-flight count for shutdown drain + metrics
         try {
             dispatcher.execute(task)
         } finally {
