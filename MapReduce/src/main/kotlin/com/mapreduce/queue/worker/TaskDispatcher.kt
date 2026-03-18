@@ -32,7 +32,12 @@ class TaskDispatcher(
         val handler = handlerRegistry.resolve(task.handler)
         if (handler == null) {
             log.errorf("No handler for '%s' — dead-lettering task %s", task.handler, task.taskId)
-            taskRepository.deadLetter(task.taskId, "No handler registered for '${task.handler}'")
+            val reason = "No handler registered for '${task.handler}'"
+            if (task.groupId != null) {
+                taskGroupRepository.deadLetterGroupTask(task.taskId, task.groupId, reason, task.claimToken)
+            } else {
+                taskRepository.deadLetter(task.taskId, reason, task.claimToken)
+            }
             return
         }
 
@@ -64,24 +69,33 @@ class TaskDispatcher(
             }
             is TaskResult.Retry -> {
                 if (result.consumeRetry) {
-                    val deadLettered = taskRepository.fail(task.taskId, result.reason, result.delay, gen)
-                    if (deadLettered && task.groupId != null) {
-                        taskGroupRepository.resolveGroupTask(groupId = task.groupId, failed = true)
+                    if (task.groupId != null) {
+                        taskGroupRepository.failGroupTask(
+                            task.taskId, task.groupId, result.reason, result.delay, gen,
+                        )
+                    } else {
+                        taskRepository.fail(task.taskId, result.reason, result.delay, gen)
                     }
                 } else {
                     taskRepository.requeue(task.taskId, result.delay, gen)
                 }
             }
             is TaskResult.Failure -> {
-                val deadLettered = taskRepository.fail(task.taskId, result.message, claimToken = gen)
-                if (deadLettered && task.groupId != null) {
-                    taskGroupRepository.resolveGroupTask(groupId = task.groupId, failed = true)
+                if (task.groupId != null) {
+                    taskGroupRepository.failGroupTask(
+                        task.taskId, task.groupId, result.message, claimToken = gen,
+                    )
+                } else {
+                    taskRepository.fail(task.taskId, result.message, claimToken = gen)
                 }
             }
             is TaskResult.DeadLetter -> {
-                taskRepository.deadLetter(task.taskId, result.reason)
                 if (task.groupId != null) {
-                    taskGroupRepository.resolveGroupTask(groupId = task.groupId, failed = true)
+                    taskGroupRepository.deadLetterGroupTask(
+                        task.taskId, task.groupId, result.reason, gen,
+                    )
+                } else {
+                    taskRepository.deadLetter(task.taskId, result.reason, gen)
                 }
             }
         }

@@ -5,6 +5,7 @@ import com.mapreduce.queue.model.EnqueueRequest
 import com.mapreduce.queue.model.GroupStatus
 import com.mapreduce.queue.model.TaskGroup
 import com.mapreduce.queue.model.TaskStatus
+import com.mapreduce.queue.repository.GroupTaskResolution
 import com.mapreduce.queue.repository.TaskGroupRepository
 import com.mapreduce.queue.repository.TaskRepository
 import kotlinx.coroutines.Dispatchers
@@ -261,11 +262,12 @@ class ConcurrencyStressTest {
             val results = claimedTasks.mapIndexed { idx, task ->
                 async(Dispatchers.IO) {
                     if (idx < failCount) {
-                        // Dead-letter the task first (simulate TaskDispatcher behavior)
-                        taskRepo.deadLetter(task.taskId, "stress-test failure")
-                        groupRepo.resolveGroupTask(
-                            groupId = groupId, failed = true,
+                        // Atomic dead-letter + group counter decrement
+                        val r = groupRepo.deadLetterGroupTask(
+                            taskId = task.taskId, groupId = groupId,
+                            reason = "stress-test failure", claimToken = task.claimToken,
                         )
+                        GroupTaskResolution(updated = r.taskUpdated, barrierMet = r.barrierMet)
                     } else {
                         groupRepo.resolveGroupTask(
                             taskId = task.taskId,
@@ -595,11 +597,14 @@ class ConcurrencyStressTest {
                 taskRepo.claim("worker-$it", listOf("q1"))!!
             }
 
-            // All tasks fail concurrently
+            // All tasks fail concurrently — atomic dead-letter + group decrement
             val results = claimedTasks.map { task ->
                 async(Dispatchers.IO) {
-                    taskRepo.deadLetter(task.taskId, "concurrent failure")
-                    groupRepo.resolveGroupTask(groupId = groupId, failed = true)
+                    val r = groupRepo.deadLetterGroupTask(
+                        taskId = task.taskId, groupId = groupId,
+                        reason = "concurrent failure", claimToken = task.claimToken,
+                    )
+                    GroupTaskResolution(updated = r.taskUpdated, barrierMet = r.barrierMet)
                 }
             }.awaitAll()
 

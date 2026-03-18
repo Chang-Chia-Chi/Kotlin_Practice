@@ -4,6 +4,7 @@ import com.mapreduce.queue.model.Task
 import com.mapreduce.queue.model.TaskResult
 import com.mapreduce.queue.pipeline.TaskPipeline
 import com.mapreduce.queue.registry.HandlerRegistry
+import com.mapreduce.queue.repository.GroupFailResult
 import com.mapreduce.queue.repository.GroupTaskResolution
 import com.mapreduce.queue.repository.TaskGroupRepository
 import com.mapreduce.queue.repository.TaskRepository
@@ -46,13 +47,26 @@ class TaskDispatcherTest {
     // ── execute: no handler ───────────────────────────────────────
 
     @Test
-    fun `execute with no handler dead-letters task`() = runTest {
+    fun `execute with no handler dead-letters grouped task via group path`() = runTest {
         val task = testTask()
         whenever(handlerRegistry.resolve("test.handler")).thenReturn(null)
+        whenever(taskGroupRepository.deadLetterGroupTask(any(), any(), any(), anyOrNull()))
+            .thenReturn(GroupFailResult(taskUpdated = true, deadLettered = true, barrierMet = false))
 
         dispatcher.execute(task)
 
-        verify(taskRepository).deadLetter(eq("task-1"), any())
+        verify(taskGroupRepository).deadLetterGroupTask(eq("task-1"), eq("group-1"), any(), eq("gen-1"))
+    }
+
+    @Test
+    fun `execute with no handler dead-letters non-grouped task via taskRepository`() = runTest {
+        val task = testTask(groupId = null)
+        whenever(handlerRegistry.resolve("test.handler")).thenReturn(null)
+        whenever(taskRepository.deadLetter(any(), any(), anyOrNull())).thenReturn(true)
+
+        dispatcher.execute(task)
+
+        verify(taskRepository).deadLetter(eq("task-1"), any(), eq("gen-1"))
     }
 
     // ── execute: Success ──────────────────────────────────────────
@@ -82,8 +96,20 @@ class TaskDispatcherTest {
     // ── execute: Failure ──────────────────────────────────────────
 
     @Test
-    fun `execute Failure fails task`() = runTest {
+    fun `execute Failure with groupId uses failGroupTask`() = runTest {
         val task = testTask()
+        stubPipeline(task, TaskResult.Failure("boom"))
+        whenever(taskGroupRepository.failGroupTask(any(), any(), any(), anyOrNull(), anyOrNull()))
+            .thenReturn(GroupFailResult(taskUpdated = true, deadLettered = false, barrierMet = false))
+
+        dispatcher.execute(task)
+
+        verify(taskGroupRepository).failGroupTask(eq("task-1"), eq("group-1"), eq("boom"), anyOrNull(), eq("gen-1"))
+    }
+
+    @Test
+    fun `execute Failure without groupId uses taskRepository fail`() = runTest {
+        val task = testTask(groupId = null)
         stubPipeline(task, TaskResult.Failure("boom"))
         whenever(taskRepository.fail(eq("task-1"), eq("boom"), anyOrNull(), eq("gen-1")))
             .thenReturn(false)
@@ -96,20 +122,46 @@ class TaskDispatcherTest {
     // ── execute: DeadLetter ───────────────────────────────────────
 
     @Test
-    fun `execute DeadLetter dead-letters task`() = runTest {
+    fun `execute DeadLetter with groupId uses deadLetterGroupTask`() = runTest {
         val task = testTask()
         stubPipeline(task, TaskResult.DeadLetter("poison pill"))
+        whenever(taskGroupRepository.deadLetterGroupTask(any(), any(), any(), anyOrNull()))
+            .thenReturn(GroupFailResult(taskUpdated = true, deadLettered = true, barrierMet = false))
 
         dispatcher.execute(task)
 
-        verify(taskRepository).deadLetter("task-1", "poison pill")
+        verify(taskGroupRepository).deadLetterGroupTask("task-1", "group-1", "poison pill", "gen-1")
+    }
+
+    @Test
+    fun `execute DeadLetter without groupId uses taskRepository deadLetter`() = runTest {
+        val task = testTask(groupId = null)
+        stubPipeline(task, TaskResult.DeadLetter("poison pill"))
+        whenever(taskRepository.deadLetter(any(), any(), anyOrNull())).thenReturn(true)
+
+        dispatcher.execute(task)
+
+        verify(taskRepository).deadLetter("task-1", "poison pill", "gen-1")
     }
 
     // ── execute: Retry(consumeRetry=true) ─────────────────────────
 
     @Test
-    fun `execute Retry with consumeRetry true fails task`() = runTest {
+    fun `execute Retry consumeRetry with groupId uses failGroupTask`() = runTest {
         val task = testTask()
+        val retry = TaskResult.Retry(delay = Duration.ofSeconds(5), reason = "transient", consumeRetry = true)
+        stubPipeline(task, retry)
+        whenever(taskGroupRepository.failGroupTask(any(), any(), any(), anyOrNull(), anyOrNull()))
+            .thenReturn(GroupFailResult(taskUpdated = true, deadLettered = false, barrierMet = false))
+
+        dispatcher.execute(task)
+
+        verify(taskGroupRepository).failGroupTask("task-1", "group-1", "transient", Duration.ofSeconds(5), "gen-1")
+    }
+
+    @Test
+    fun `execute Retry consumeRetry without groupId uses taskRepository fail`() = runTest {
+        val task = testTask(groupId = null)
         val retry = TaskResult.Retry(delay = Duration.ofSeconds(5), reason = "transient", consumeRetry = true)
         stubPipeline(task, retry)
         whenever(taskRepository.fail(eq("task-1"), eq("transient"), eq(Duration.ofSeconds(5)), eq("gen-1")))

@@ -59,9 +59,13 @@ class StaleTaskReaper(
             val staleAge = Duration.between(task.claimedAt ?: Instant.now(), Instant.now())
             val errorMessage = "Reclaimed: task stale (pod: ${task.claimedBy ?: "unknown"})"
 
-            val result = taskRepository.reclaimStaleTask(task.taskId, errorMessage)
+            val deadLettered: Boolean? = if (task.groupId != null) {
+                taskGroupRepository.reclaimGroupTask(task.taskId, task.groupId, errorMessage)?.deadLettered
+            } else {
+                taskRepository.reclaimStaleTask(task.taskId, errorMessage)
+            }
 
-            if (result == null) {
+            if (deadLettered == null) {
                 log.debugf("Skipped stale task %s — already handled", task.taskId)
                 continue
             }
@@ -75,11 +79,8 @@ class StaleTaskReaper(
             meterRegistry.timer("taskqueue.reaper.stale_age", "handler", task.handler)
                 .record(staleAge)
 
-            if (result) {
+            if (deadLettered) {
                 deadLetteredCount++
-                if (task.groupId != null) {
-                    taskGroupRepository.resolveGroupTask(groupId = task.groupId, failed = true)
-                }
             }
         }
 
