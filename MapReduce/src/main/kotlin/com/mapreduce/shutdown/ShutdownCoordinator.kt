@@ -139,29 +139,20 @@ class ShutdownCoordinator(
         log.infof("Draining %d in-flight task(s) (timeout=%ds)",
             inFlightTasks, drainTimeout.seconds)
 
-        val deadline = Instant.now().plus(drainTimeout)
-        var lastLog = Instant.now()
-
-        while (inFlightTasks > 0) {
-            val remaining = Duration.between(Instant.now(), deadline)
-            if (remaining.isNegative) {
-                log.warnf("Drain timeout expired. %d task(s) still in-flight.", inFlightTasks)
-                meterRegistry.counter("taskqueue_shutdown_drain_timeout_exceeded",
-                    "pod", podId).increment()
-                break
+        val drained = withTimeoutOrNull(drainTimeout.toMillis()) {
+            while (inFlightTasks > 0) {
+                delay(logInterval.toMillis())
+                if (inFlightTasks > 0) {
+                    log.infof("Draining: %d task(s) still in-flight.", inFlightTasks)
+                }
             }
-
-            val sinceLastLog = Duration.between(lastLog, Instant.now())
-            if (sinceLastLog >= logInterval) {
-                log.infof("Draining: %d task(s) in-flight. %ds remaining.",
-                    inFlightTasks, remaining.seconds)
-                lastLog = Instant.now()
-            }
-
-            delay(1000)
         }
 
-        if (inFlightTasks == 0) {
+        if (drained == null) {
+            log.warnf("Drain timeout expired. %d task(s) still in-flight.", inFlightTasks)
+            meterRegistry.counter("taskqueue_shutdown_drain_timeout_exceeded",
+                "pod", podId).increment()
+        } else {
             log.info("All tasks drained successfully")
         }
     }
