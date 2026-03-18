@@ -5,8 +5,6 @@ import com.mapreduce.queue.repository.TaskRepository
 import com.mapreduce.shutdown.ShutdownCoordinator
 import com.mapreduce.shutdown.ShutdownState
 import com.mapreduce.util.unorderedMapAsync
-import io.micrometer.core.instrument.MeterRegistry
-import io.micrometer.core.instrument.Tag
 import io.quarkus.runtime.StartupEvent
 import jakarta.enterprise.context.ApplicationScoped
 import jakarta.enterprise.event.Observes
@@ -46,7 +44,6 @@ class WorkerLoop(
     private val taskRepository: TaskRepository,
     private val dispatcher: TaskDispatcher,
     private val shutdownCoordinator: ShutdownCoordinator,
-    private val meterRegistry: MeterRegistry,
 ) {
 
     private val log = Logger.getLogger(WorkerLoop::class.java)
@@ -63,13 +60,6 @@ class WorkerLoop(
         val queues = config.worker().queues()
         val pollInterval = config.worker().pollInterval().toMillis()
 
-        meterRegistry.gauge(
-            "framework.worker.bulkhead.utilization",
-            listOf(Tag.of("pod_id", workerId)),
-            this,
-        ) { _ ->
-            if (bulkheadSize == 0) 0.0 else shutdownCoordinator.inFlightTasks.toDouble() / bulkheadSize
-        }
         log.infof("Worker starting: id=%s, bulkhead=%d, poll=%dms, queues=%s",
             workerId, bulkheadSize, pollInterval, queues)
 

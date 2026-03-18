@@ -6,7 +6,6 @@ import com.mapreduce.queue.model.TaskStatus
 import com.mapreduce.queue.repository.TaskRepository
 import com.mapreduce.shutdown.ShutdownCoordinator
 import com.mapreduce.shutdown.ShutdownState
-import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import io.quarkus.runtime.StartupEvent
 import kotlinx.coroutines.runBlocking
 import org.awaitility.kotlin.await
@@ -34,7 +33,6 @@ class WorkerLoopTest {
     private lateinit var taskRepository: TaskRepository
     private lateinit var dispatcher: TaskDispatcher
     private lateinit var shutdownCoordinator: ShutdownCoordinator
-    private lateinit var meterRegistry: SimpleMeterRegistry
     private lateinit var workerLoop: WorkerLoop
 
     private fun task(
@@ -59,7 +57,6 @@ class WorkerLoopTest {
         taskRepository = mock()
         dispatcher = mock()
         shutdownCoordinator = mock()
-        meterRegistry = SimpleMeterRegistry()
 
         whenever(config.worker()).thenReturn(workerConfig)
         whenever(workerConfig.pollInterval()).thenReturn(Duration.ofMillis(20))
@@ -72,7 +69,7 @@ class WorkerLoopTest {
 
         workerLoop = WorkerLoop(
             config, taskRepository, dispatcher,
-            shutdownCoordinator, meterRegistry,
+            shutdownCoordinator,
         )
     }
 
@@ -186,7 +183,7 @@ class WorkerLoopTest {
             whenever(workerConfig.bulkheadSize()).thenReturn(2)
             workerLoop = WorkerLoop(
                 config, taskRepository, dispatcher,
-                shutdownCoordinator, meterRegistry,
+                shutdownCoordinator,
             )
 
             val activeCount = AtomicInteger(0)
