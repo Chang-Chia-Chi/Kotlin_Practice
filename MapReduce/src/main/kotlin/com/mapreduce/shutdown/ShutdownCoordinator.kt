@@ -54,15 +54,6 @@ class ShutdownCoordinator(
     val drainDeadline: Instant? get() = _drainDeadline
 
     private val _inFlightTasks = AtomicInteger(0)
-
-    @Volatile
-    private var _bulkheadSize: Int = 0
-    val bulkheadSize: Int get() = _bulkheadSize
-
-    fun registerBulkhead(size: Int) {
-        _bulkheadSize = size
-    }
-
     val inFlightTasks: Int get() = _inFlightTasks.get()
 
     fun trackTaskStart() {
@@ -75,11 +66,6 @@ class ShutdownCoordinator(
 
     fun recordDrainCompletion() {
         _tasksCompletedDuringDrain.incrementAndGet()
-    }
-
-    fun registerMetrics() {
-        meterRegistry.gauge("taskqueue_shutdown_state", this) { state.ordinal.toDouble() }
-        meterRegistry.gauge("taskqueue_shutdown_inflight_tasks", this) { inFlightTasks.toDouble() }
     }
 
     fun onShutdown(@Observes ev: ShutdownEvent) = runBlocking {

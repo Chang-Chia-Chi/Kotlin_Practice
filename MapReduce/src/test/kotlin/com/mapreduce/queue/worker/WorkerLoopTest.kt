@@ -150,24 +150,6 @@ class WorkerLoopTest {
         }
 
         @Test
-        fun `registers bulkhead with coordinator on start`() {
-            whenever(shutdownCoordinator.state).thenReturn(ShutdownState.DRAINING)
-
-            start()
-
-            verify(shutdownCoordinator).registerBulkhead(eq(4))
-        }
-
-        @Test
-        fun `registers metrics on start`() {
-            whenever(shutdownCoordinator.state).thenReturn(ShutdownState.DRAINING)
-
-            start()
-
-            verify(shutdownCoordinator).registerMetrics()
-        }
-
-        @Test
         fun `records drain completion when shutting down`() {
             val latch = CountDownLatch(1)
             val claimed = task()

@@ -72,14 +72,7 @@ class ShutdownCoordinatorTest {
         assertNull(coordinator.drainDeadline)
     }
 
-    // ── Bulkhead integration ──────────────────────────────────────
-
-    @Test
-    fun `registerBulkhead tracks size`() {
-        coordinator.registerBulkhead(8)
-
-        assertEquals(8, coordinator.bulkheadSize)
-    }
+    // ── In-flight task tracking ─────────────────────────────────
 
     @Test
     fun `trackTaskStart and trackTaskEnd update inFlightTasks`() {
@@ -115,21 +108,6 @@ class ShutdownCoordinatorTest {
         val counter = meterRegistry.find("taskqueue_shutdown_tasks_completed").counter()
         assertNotNull(counter)
         assertEquals(3.0, counter!!.count())
-    }
-
-    // ── Metrics registration ──────────────────────────────────────
-
-    @Test
-    fun `registerMetrics creates gauges`() {
-        coordinator.registerMetrics()
-
-        val stateGauge = meterRegistry.find("taskqueue_shutdown_state").gauge()
-        val inflightGauge = meterRegistry.find("taskqueue_shutdown_inflight_tasks").gauge()
-
-        assertNotNull(stateGauge)
-        assertNotNull(inflightGauge)
-        assertEquals(ShutdownState.RUNNING.ordinal.toDouble(), stateGauge!!.value())
-        assertEquals(0.0, inflightGauge!!.value())
     }
 
     // ── onShutdown transitions ────────────────────────────────────
@@ -224,21 +202,9 @@ class ShutdownCoordinatorTest {
     }
 
     @Test
-    fun `onShutdown skips drain when no bulkhead registered`() {
-        whenever(leaderManager.isActive).thenReturn(false)
-        whenever(taskRepository.releaseTasksByPod(podId)).thenReturn(0)
-
-        coordinator.onShutdown(ShutdownEvent())
-
-        assertEquals(ShutdownState.TERMINATED, coordinator.state)
-    }
-
-    @Test
     fun `onShutdown skips drain when no in-flight tasks`() {
         whenever(leaderManager.isActive).thenReturn(false)
         whenever(taskRepository.releaseTasksByPod(podId)).thenReturn(0)
-
-        coordinator.registerBulkhead(4)
 
         coordinator.onShutdown(ShutdownEvent())
 
