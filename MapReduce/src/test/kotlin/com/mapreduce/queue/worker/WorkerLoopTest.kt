@@ -153,7 +153,7 @@ class WorkerLoopTest {
         }
 
         @Test
-        fun `records drain completion when shutting down`() {
+        fun `tracks task end on shutdown`() {
             val latch = CountDownLatch(1)
             val claimed = task()
             whenever(taskRepository.claim("test-pod", listOf("default")))
@@ -161,8 +161,6 @@ class WorkerLoopTest {
                 .thenReturn(null)
             runBlocking {
                 whenever(dispatcher.execute(any())).thenAnswer {
-                    // Simulate shutdown starting while task is in-flight
-                    whenever(shutdownCoordinator.isShuttingDown).thenReturn(true)
                     latch.countDown()
                     Unit
                 }
@@ -172,7 +170,8 @@ class WorkerLoopTest {
 
             assertTrue(latch.await(2, TimeUnit.SECONDS))
             await.atMost(2, TimeUnit.SECONDS).untilAsserted {
-                verify(shutdownCoordinator).recordDrainCompletion()
+                verify(shutdownCoordinator).trackTaskStart()
+                verify(shutdownCoordinator).trackTaskEnd()
             }
         }
     }

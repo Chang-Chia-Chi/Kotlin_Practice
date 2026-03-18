@@ -63,14 +63,12 @@ class WorkerLoop(
         val queues = config.worker().queues()
         val pollInterval = config.worker().pollInterval().toMillis()
 
-        meterRegistry.gauge("taskqueue_shutdown_state", shutdownCoordinator) { it.state.ordinal.toDouble() }
-        meterRegistry.gauge("taskqueue_shutdown_inflight_tasks", shutdownCoordinator) { it.inFlightTasks.toDouble() }
         meterRegistry.gauge(
             "framework.worker.bulkhead.utilization",
             listOf(Tag.of("pod_id", workerId)),
-            shutdownCoordinator,
-        ) { coordinator ->
-            if (bulkheadSize == 0) 0.0 else coordinator.inFlightTasks.toDouble() / bulkheadSize
+            this,
+        ) { _ ->
+            if (bulkheadSize == 0) 0.0 else shutdownCoordinator.inFlightTasks.toDouble() / bulkheadSize
         }
         log.infof("Worker starting: id=%s, bulkhead=%d, poll=%dms, queues=%s",
             workerId, bulkheadSize, pollInterval, queues)
@@ -121,9 +119,6 @@ class WorkerLoop(
             dispatcher.execute(task)
         } finally {
             shutdownCoordinator.trackTaskEnd()
-            if (shutdownCoordinator.isShuttingDown) {
-                shutdownCoordinator.recordDrainCompletion()
-            }
         }
     }
 }

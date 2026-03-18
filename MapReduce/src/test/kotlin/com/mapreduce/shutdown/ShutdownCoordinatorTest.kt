@@ -92,22 +92,52 @@ class ShutdownCoordinatorTest {
         assertEquals(0, coordinator.inFlightTasks)
     }
 
-    // ── recordDrainCompletion ─────────────────────────────────────
+    // ── trackTaskEnd during drain ──────────────────────────────────
 
     @Test
-    fun `recordDrainCompletion increments counter reflected in shutdown metrics`() {
+    fun `trackTaskEnd during drain increments completed counter in shutdown metrics`() {
+        whenever(leaderManager.isActive).thenReturn(false)
+        whenever(taskRepository.releaseTasksByPod(podId)).thenReturn(0)
+        whenever(shutdownConfig.drainTimeout()).thenReturn(Duration.ofSeconds(2))
+
+        // Simulate 3 in-flight tasks
+        coordinator.trackTaskStart()
+        coordinator.trackTaskStart()
+        coordinator.trackTaskStart()
+
+        // Complete tasks on a background thread during drain (mirrors production)
+        val thread = Thread {
+            Thread.sleep(50)
+            coordinator.trackTaskEnd()
+            coordinator.trackTaskEnd()
+            coordinator.trackTaskEnd()
+        }
+        thread.start()
+
+        coordinator.onShutdown(ShutdownEvent()) // blocks until drain completes
+        thread.join()
+
+        val counter = meterRegistry.find("taskqueue_shutdown_tasks_completed").counter()
+        assertNotNull(counter)
+        assertEquals(3.0, counter!!.count())
+    }
+
+    @Test
+    fun `trackTaskEnd before shutdown does not increment drain counter`() {
         whenever(leaderManager.isActive).thenReturn(false)
         whenever(taskRepository.releaseTasksByPod(podId)).thenReturn(0)
 
-        coordinator.recordDrainCompletion()
-        coordinator.recordDrainCompletion()
-        coordinator.recordDrainCompletion()
+        // Tasks complete while still RUNNING — should NOT count
+        coordinator.trackTaskStart()
+        coordinator.trackTaskEnd()
+        coordinator.trackTaskStart()
+        coordinator.trackTaskEnd()
 
         coordinator.onShutdown(ShutdownEvent())
 
         val counter = meterRegistry.find("taskqueue_shutdown_tasks_completed").counter()
         assertNotNull(counter)
-        assertEquals(3.0, counter!!.count())
+        assertEquals(0.0, counter!!.count())
     }
 
     // ── onShutdown transitions ────────────────────────────────────

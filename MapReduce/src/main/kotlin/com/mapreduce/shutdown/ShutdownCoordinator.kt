@@ -56,16 +56,20 @@ class ShutdownCoordinator(
     private val _inFlightTasks = AtomicInteger(0)
     val inFlightTasks: Int get() = _inFlightTasks.get()
 
+    init {
+        meterRegistry.gauge("taskqueue_shutdown_state", this) { it.state.ordinal.toDouble() }
+        meterRegistry.gauge("taskqueue_shutdown_inflight_tasks", this) { it.inFlightTasks.toDouble() }
+    }
+
     fun trackTaskStart() {
         _inFlightTasks.incrementAndGet()
     }
 
     fun trackTaskEnd() {
         _inFlightTasks.decrementAndGet()
-    }
-
-    fun recordDrainCompletion() {
-        _tasksCompletedDuringDrain.incrementAndGet()
+        if (_state.get() != ShutdownState.RUNNING) {
+            _tasksCompletedDuringDrain.incrementAndGet()
+        }
     }
 
     fun onShutdown(@Observes ev: ShutdownEvent) = runBlocking {
