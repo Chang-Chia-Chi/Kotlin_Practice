@@ -44,13 +44,13 @@ class ErrorClassifierMiddlewareTest {
         retryCount = retryCount,
         maxRetries = 3,
         claimedAt = Instant.now(),
-        executionGeneration = "gen-1",
+        claimToken = "gen-1",
         taskContext = TaskContext(
             taskId = "t-1",
             payload = "{}",
             groupId = null,
             metadata = null,
-            executionGeneration = "gen-1",
+            claimToken = "gen-1",
             retryCount = retryCount,
         ),
     )

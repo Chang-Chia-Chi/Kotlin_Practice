@@ -21,7 +21,7 @@ data class TaskExecutionContext(
     val retryCount: Int,
     val maxRetries: Int,
     val claimedAt: Instant?,
-    val executionGeneration: String?,
+    val claimToken: String?,
     /** Runtime context carried into the handler (e.g. isShuttingDown). */
     val taskContext: TaskContext,
 )

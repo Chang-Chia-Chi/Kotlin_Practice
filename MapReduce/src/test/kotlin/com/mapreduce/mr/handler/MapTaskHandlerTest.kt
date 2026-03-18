@@ -41,7 +41,7 @@ class MapTaskHandlerTest {
     fun `returns Failure when groupId is null`() = runTest {
         val ctx = TaskContext(
             taskId = "task-1", payload = "{}", groupId = null,
-            metadata = null, executionGeneration = "gen-1",
+            metadata = null, claimToken = "gen-1",
         )
 
         val result = handler.handle(ctx)
@@ -54,7 +54,7 @@ class MapTaskHandlerTest {
     fun `happy path -- deserializes, maps, serializes, writes blob, returns output in TaskResult`() = runTest {
         val ctx = TaskContext(
             taskId = "task-1", payload = "input-json", groupId = "job-1",
-            metadata = null, executionGeneration = "gen-1",
+            metadata = null, claimToken = "gen-1",
         )
 
         whenever(definition.deserializeInput("input-json")).thenReturn("raw-input")
@@ -76,7 +76,7 @@ class MapTaskHandlerTest {
     fun `writes to blob store with correct parameters`() = runTest {
         val ctx = TaskContext(
             taskId = "t-99", payload = "p", groupId = "j-42",
-            metadata = null, executionGeneration = "gen-x",
+            metadata = null, claimToken = "gen-x",
         )
 
         whenever(definition.deserializeInput(any())).thenReturn("in")
@@ -93,7 +93,7 @@ class MapTaskHandlerTest {
     fun `returns outputUri and outputMetadata in Success result`() = runTest {
         val ctx = TaskContext(
             taskId = "t-1", payload = "p", groupId = "j-1",
-            metadata = null, executionGeneration = "gen-abc",
+            metadata = null, claimToken = "gen-abc",
         )
 
         whenever(definition.deserializeInput(any())).thenReturn("in")

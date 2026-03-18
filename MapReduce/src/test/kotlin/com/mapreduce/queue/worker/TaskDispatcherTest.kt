@@ -150,7 +150,7 @@ class TaskDispatcherTest {
         retryCount = 0,
         maxRetries = 3,
         claimedAt = Instant.now(),
-        executionGeneration = "gen-1",
+        claimToken = "gen-1",
         createdAt = Instant.now(),
     )
 

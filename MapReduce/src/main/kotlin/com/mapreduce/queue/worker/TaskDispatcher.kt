@@ -44,7 +44,7 @@ class TaskDispatcher(
             TaskResult.Failure("Pipeline error: ${e.javaClass.simpleName}: ${e.message}")
         }
 
-        processResult(task, result, task.executionGeneration)
+        processResult(task, result, task.claimToken)
     }
 
     // ── Result processing ──────────────────────────────────────────
@@ -55,7 +55,7 @@ class TaskDispatcher(
                 if (task.groupId != null) {
                     taskGroupRepository.resolveGroupTask(
                         taskId = task.taskId, groupId = task.groupId,
-                        executionGeneration = gen,
+                        claimToken = gen,
                         outputUri = result.outputUri, outputMetadata = result.outputMetadata,
                     )
                 } else {
@@ -73,7 +73,7 @@ class TaskDispatcher(
                 }
             }
             is TaskResult.Failure -> {
-                val deadLettered = taskRepository.fail(task.taskId, result.message, executionGeneration = gen)
+                val deadLettered = taskRepository.fail(task.taskId, result.message, claimToken = gen)
                 if (deadLettered && task.groupId != null) {
                     taskGroupRepository.resolveGroupTask(groupId = task.groupId, failed = true)
                 }
@@ -99,9 +99,9 @@ class TaskDispatcher(
         retryCount = task.retryCount,
         maxRetries = task.maxRetries,
         claimedAt = task.claimedAt,
-        executionGeneration = task.executionGeneration,
+        claimToken = task.claimToken,
         taskContext = TaskContext(
-            task.taskId, task.payload, task.groupId, task.metadata, task.executionGeneration,
+            task.taskId, task.payload, task.groupId, task.metadata, task.claimToken,
             retryCount = task.retryCount, maxRetries = task.maxRetries,
             shuttingDownSupplier = { shutdownCoordinator.isShuttingDown },
         ),

@@ -42,7 +42,7 @@ class TaskRepositoryTest {
         claimedAt: Instant? = null,
         retryCount: Int = 0,
         maxRetries: Int = 3,
-        executionGeneration: String? = null,
+        claimToken: String? = null,
         lastEpoch: Long = 0,
         scheduledAt: Instant? = null,
         errorMessage: String? = null,
@@ -69,7 +69,7 @@ class TaskRepositoryTest {
                 .bind("claimedAt", claimedAt)
                 .bind("retryCount", retryCount)
                 .bind("maxRetries", maxRetries)
-                .bind("gen", executionGeneration)
+                .bind("gen", claimToken)
                 .bind("epoch", lastEpoch)
                 .bind("scheduledAt", scheduledAt)
                 .bind("errorMessage", errorMessage)
@@ -159,7 +159,7 @@ class TaskRepositoryTest {
             assertEquals(taskId, claimed.taskId)
             assertEquals(TaskStatus.CLAIMED, claimed.status)
             assertEquals("worker-1", claimed.claimedBy)
-            assertNotNull(claimed.executionGeneration)
+            assertNotNull(claimed.claimToken)
 
             // Verify persisted state
             val persisted = repo.findById(taskId)!!
@@ -205,8 +205,8 @@ class TaskRepositoryTest {
             repo.enqueue(EnqueueRequest(handler = "h", payload = "{}"))
 
             val claimed = repo.claim("w", listOf("default"))!!
-            assertNotNull(claimed.executionGeneration)
-            assertEquals(36, claimed.executionGeneration!!.length) // UUID format
+            assertNotNull(claimed.claimToken)
+            assertEquals(36, claimed.claimToken!!.length) // UUID format
         }
     }
 
@@ -228,18 +228,18 @@ class TaskRepositoryTest {
 
         @Test
         fun `succeeds when execution_generation matches`() {
-            insertTask("t-1", status = TaskStatus.CLAIMED, claimedBy = "w", executionGeneration = "gen-A")
+            insertTask("t-1", status = TaskStatus.CLAIMED, claimedBy = "w", claimToken = "gen-A")
 
-            repo.complete("t-1", executionGeneration = "gen-A")
+            repo.complete("t-1", claimToken = "gen-A")
 
             assertEquals("COMPLETED", readStatus("t-1"))
         }
 
         @Test
         fun `no-op when execution_generation mismatches -- zombie protection`() {
-            insertTask("t-1", status = TaskStatus.CLAIMED, claimedBy = "w", executionGeneration = "gen-A")
+            insertTask("t-1", status = TaskStatus.CLAIMED, claimedBy = "w", claimToken = "gen-A")
 
-            repo.complete("t-1", executionGeneration = "gen-WRONG")
+            repo.complete("t-1", claimToken = "gen-WRONG")
 
             // Should still be CLAIMED -- the zombie's complete was rejected
             assertEquals("CLAIMED", readStatus("t-1"))
@@ -288,10 +288,10 @@ class TaskRepositoryTest {
         fun `no-op when execution_generation mismatches`() {
             insertTask(
                 "t-1", status = TaskStatus.CLAIMED, claimedBy = "w",
-                executionGeneration = "gen-A", retryCount = 0, maxRetries = 3,
+                claimToken = "gen-A", retryCount = 0, maxRetries = 3,
             )
 
-            val result = repo.fail("t-1", "error", executionGeneration = "gen-WRONG")
+            val result = repo.fail("t-1", "error", claimToken = "gen-WRONG")
 
             // Returns false because 0 rows updated (early return)
             assertFalse(result)
@@ -314,10 +314,10 @@ class TaskRepositoryTest {
         fun `with matching execution_generation succeeds`() {
             insertTask(
                 "t-1", status = TaskStatus.CLAIMED, claimedBy = "w",
-                executionGeneration = "gen-A", retryCount = 0, maxRetries = 3,
+                claimToken = "gen-A", retryCount = 0, maxRetries = 3,
             )
 
-            val deadLettered = repo.fail("t-1", "error", executionGeneration = "gen-A")
+            val deadLettered = repo.fail("t-1", "error", claimToken = "gen-A")
 
             assertFalse(deadLettered)
             assertEquals("PENDING", readStatus("t-1"))
@@ -347,10 +347,10 @@ class TaskRepositoryTest {
         fun `with matching execution_generation succeeds`() {
             insertTask(
                 "t-1", status = TaskStatus.CLAIMED, claimedBy = "w",
-                executionGeneration = "gen-A", retryCount = 2, maxRetries = 3,
+                claimToken = "gen-A", retryCount = 2, maxRetries = 3,
             )
 
-            repo.requeue("t-1", executionGeneration = "gen-A")
+            repo.requeue("t-1", claimToken = "gen-A")
 
             assertEquals("PENDING", readStatus("t-1"))
             assertEquals(2, readRetryCount("t-1")) // unchanged
@@ -360,10 +360,10 @@ class TaskRepositoryTest {
         fun `no-op when execution_generation mismatches`() {
             insertTask(
                 "t-1", status = TaskStatus.CLAIMED, claimedBy = "w",
-                executionGeneration = "gen-A",
+                claimToken = "gen-A",
             )
 
-            repo.requeue("t-1", executionGeneration = "gen-WRONG")
+            repo.requeue("t-1", claimToken = "gen-WRONG")
 
             assertEquals("CLAIMED", readStatus("t-1"))
         }
@@ -595,7 +595,7 @@ class TaskRepositoryTest {
             assertEquals(taskId, claimed.taskId)
             assertEquals(TaskStatus.CLAIMED, claimed.status)
 
-            repo.complete(taskId, claimed.executionGeneration)
+            repo.complete(taskId, claimed.claimToken)
 
             val completed = repo.findById(taskId)!!
             assertEquals(TaskStatus.COMPLETED, completed.status)
@@ -610,14 +610,14 @@ class TaskRepositoryTest {
 
             // First attempt: claim and fail
             val first = repo.claim("w", listOf("default"))!!
-            val dead = repo.fail(taskId, "oops", executionGeneration = first.executionGeneration)
+            val dead = repo.fail(taskId, "oops", claimToken = first.claimToken)
             assertFalse(dead)
             assertEquals(1, readRetryCount(taskId))
 
             // Second attempt: should be claimable again
             val second = repo.claim("w", listOf("default"))!!
             assertEquals(taskId, second.taskId)
-            assertNotEquals(first.executionGeneration, second.executionGeneration)
+            assertNotEquals(first.claimToken, second.claimToken)
         }
     }
 }

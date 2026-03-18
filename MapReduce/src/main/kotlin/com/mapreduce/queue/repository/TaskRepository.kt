@@ -84,7 +84,7 @@ class TaskRepository(private val jdbi: Jdbi) {
                 .bind("generation", generation)
                 .execute()
 
-            task.copy(status = TaskStatus.CLAIMED, claimedBy = workerId, executionGeneration = generation)
+            task.copy(status = TaskStatus.CLAIMED, claimedBy = workerId, claimToken = generation)
         }
     }
 
@@ -93,16 +93,16 @@ class TaskRepository(private val jdbi: Jdbi) {
      * (supports handlers that complete the task themselves in the same transaction
      * as their side-effects, e.g. map-reduce handlers).
      */
-    fun complete(taskId: String, executionGeneration: String? = null) {
+    fun complete(taskId: String, claimToken: String? = null) {
         jdbi.useHandle<Exception> { h ->
-            val fenceClause = if (executionGeneration != null) " AND execution_generation = :gen" else ""
+            val fenceClause = if (claimToken != null) " AND execution_generation = :gen" else ""
             val update = h.createUpdate(
                 """
                 UPDATE task SET status = 'COMPLETED', completed_at = CURRENT_TIMESTAMP
                 WHERE task_id = :taskId AND status = 'CLAIMED'$fenceClause
                 """
             ).bind("taskId", taskId)
-            if (executionGeneration != null) update.bind("gen", executionGeneration)
+            if (claimToken != null) update.bind("gen", claimToken)
             update.execute()
         }
     }
@@ -115,9 +115,9 @@ class TaskRepository(private val jdbi: Jdbi) {
      *
      * @return `true` if the task was dead-lettered (retries exhausted)
      */
-    fun fail(taskId: String, errorMessage: String, retryDelay: Duration? = null, executionGeneration: String? = null): Boolean {
+    fun fail(taskId: String, errorMessage: String, retryDelay: Duration? = null, claimToken: String? = null): Boolean {
         return jdbi.inTransaction<Boolean, Exception> { h ->
-            val fenceClause = if (executionGeneration != null) " AND execution_generation = :gen" else ""
+            val fenceClause = if (claimToken != null) " AND execution_generation = :gen" else ""
             val scheduledAt = retryDelay?.let { Instant.now().plusSeconds(it.toSeconds()) }
 
             val update = h.createUpdate(
@@ -135,7 +135,7 @@ class TaskRepository(private val jdbi: Jdbi) {
                 .bind("taskId", taskId)
                 .bind("error", errorMessage.take(4000))
                 .bind("scheduledAt", scheduledAt)
-            if (executionGeneration != null) update.bind("gen", executionGeneration)
+            if (claimToken != null) update.bind("gen", claimToken)
             val updated = update.execute()
 
             if (updated == 0) return@inTransaction false
@@ -154,9 +154,9 @@ class TaskRepository(private val jdbi: Jdbi) {
      * breaker requeue, shutdown-aware timeout). The task is moved back to
      * PENDING with an optional delay.
      */
-    fun requeue(taskId: String, delay: Duration? = null, executionGeneration: String? = null) {
+    fun requeue(taskId: String, delay: Duration? = null, claimToken: String? = null) {
         jdbi.useHandle<Exception> { h ->
-            val fenceClause = if (executionGeneration != null) " AND execution_generation = :gen" else ""
+            val fenceClause = if (claimToken != null) " AND execution_generation = :gen" else ""
             val hasDelay = delay != null && !delay.isZero
             val scheduledClause = if (hasDelay) ", scheduled_at = :scheduledAt" else ""
             val scheduledAt = if (hasDelay) Instant.now().plusSeconds(delay!!.toSeconds()) else null
@@ -169,7 +169,7 @@ class TaskRepository(private val jdbi: Jdbi) {
             )
                 .bind("taskId", taskId)
 
-            if (executionGeneration != null) update.bind("gen", executionGeneration)
+            if (claimToken != null) update.bind("gen", claimToken)
             if (hasDelay) update.bind("scheduledAt", scheduledAt)
 
             update.execute()

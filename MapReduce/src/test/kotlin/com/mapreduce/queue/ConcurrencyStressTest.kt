@@ -196,7 +196,7 @@ class ConcurrencyStressTest {
                     groupRepo.resolveGroupTask(
                         taskId = task.taskId,
                         groupId = groupId,
-                        executionGeneration = task.executionGeneration,
+                        claimToken = task.claimToken,
                         failed = false,
                         outputUri = "blob://${task.taskId}",
                     )
@@ -270,7 +270,7 @@ class ConcurrencyStressTest {
                         groupRepo.resolveGroupTask(
                             taskId = task.taskId,
                             groupId = groupId,
-                            executionGeneration = task.executionGeneration,
+                            claimToken = task.claimToken,
                             failed = false,
                             outputUri = "blob://${task.taskId}",
                         )
@@ -306,14 +306,14 @@ class ConcurrencyStressTest {
 
             // Worker A claims
             val claimedA = taskRepo.claim("worker-A", listOf("q1"))!!
-            val genA = claimedA.executionGeneration!!
+            val genA = claimedA.claimToken!!
 
             // Reaper reclaims (simulates stale task detection)
             taskRepo.reclaimStaleTask(taskId, "worker-A presumed dead")
 
             // Worker B claims the reclaimed task
             val claimedB = taskRepo.claim("worker-B", listOf("q1"))!!
-            val genB = claimedB.executionGeneration!!
+            val genB = claimedB.claimToken!!
 
             // Worker A tries to complete with stale generation — must fail
             taskRepo.complete(taskId, genA)
@@ -344,18 +344,18 @@ class ConcurrencyStressTest {
             groupRepo.submitGroup(group, tasks)
 
             val task1 = taskRepo.claim("worker-A", listOf("q1"))!!
-            val staleGen = task1.executionGeneration!!
+            val staleGen = task1.claimToken!!
 
             // Reaper reclaims task1
             taskRepo.reclaimStaleTask(task1.taskId, "dead")
             // Worker B re-claims
             val reClaimed = taskRepo.claim("worker-B", listOf("q1"))!!
-            val freshGen = reClaimed.executionGeneration!!
+            val freshGen = reClaimed.claimToken!!
 
             // Stale worker tries to resolve — should be rejected
             val staleResult = groupRepo.resolveGroupTask(
                 taskId = task1.taskId, groupId = groupId,
-                executionGeneration = staleGen, outputUri = "blob://stale",
+                claimToken = staleGen, outputUri = "blob://stale",
             )
             assertEquals(false, staleResult.updated, "Zombie must be rejected")
             assertEquals(false, staleResult.barrierMet)
@@ -367,7 +367,7 @@ class ConcurrencyStressTest {
             // Fresh worker completes — should succeed
             val freshResult = groupRepo.resolveGroupTask(
                 taskId = task1.taskId, groupId = groupId,
-                executionGeneration = freshGen, outputUri = "blob://fresh",
+                claimToken = freshGen, outputUri = "blob://fresh",
             )
             assertEquals(true, freshResult.updated)
             assertEquals(1, groupRepo.findGroup(groupId)!!.tasksPending)
@@ -391,25 +391,25 @@ class ConcurrencyStressTest {
             )
 
             val task = taskRepo.claim("worker-A", listOf("q1"))!!
-            val genA = task.executionGeneration!!
+            val genA = task.claimToken!!
 
             // Reclaim and re-claim
             taskRepo.reclaimStaleTask(task.taskId, "dead")
             val reClaimed = taskRepo.claim("worker-B", listOf("q1"))!!
-            val genB = reClaimed.executionGeneration!!
+            val genB = reClaimed.claimToken!!
 
             // Both try to resolve concurrently
             val (resultA, resultB) = listOf(
                 async(Dispatchers.IO) {
                     groupRepo.resolveGroupTask(
                         taskId = task.taskId, groupId = groupId,
-                        executionGeneration = genA, outputUri = "blob://A",
+                        claimToken = genA, outputUri = "blob://A",
                     )
                 },
                 async(Dispatchers.IO) {
                     groupRepo.resolveGroupTask(
                         taskId = task.taskId, groupId = groupId,
-                        executionGeneration = genB, outputUri = "blob://B",
+                        claimToken = genB, outputUri = "blob://B",
                     )
                 },
             ).awaitAll()
@@ -459,7 +459,7 @@ class ConcurrencyStressTest {
                     val mine = mutableListOf<Pair<String, String>>() // taskId, generation
                     while (true) {
                         val task = taskRepo.claim("worker-$w", listOf("q1")) ?: break
-                        mine.add(task.taskId to task.executionGeneration!!)
+                        mine.add(task.taskId to task.claimToken!!)
                     }
                     mine
                 }
@@ -473,7 +473,7 @@ class ConcurrencyStressTest {
                 async(Dispatchers.IO) {
                     groupRepo.resolveGroupTask(
                         taskId = taskId, groupId = groupId,
-                        executionGeneration = gen, outputUri = "blob://$taskId",
+                        claimToken = gen, outputUri = "blob://$taskId",
                     )
                 }
             }.awaitAll()
@@ -555,13 +555,13 @@ class ConcurrencyStressTest {
 
             // Attempt 1: claim → fail (retry_count becomes 1)
             val claim1 = taskRepo.claim("worker-1", listOf("q1"))!!
-            val dl1 = taskRepo.fail(taskId, "error-1", executionGeneration = claim1.executionGeneration)
+            val dl1 = taskRepo.fail(taskId, "error-1", claimToken = claim1.claimToken)
             assertEquals(false, dl1, "Should retry, not dead-letter")
             assertEquals("PENDING", readStatus(taskId))
 
             // Attempt 2: claim → fail (retry_count becomes 2 >= maxRetries)
             val claim2 = taskRepo.claim("worker-2", listOf("q1"))!!
-            val dl2 = taskRepo.fail(taskId, "error-2", executionGeneration = claim2.executionGeneration)
+            val dl2 = taskRepo.fail(taskId, "error-2", claimToken = claim2.claimToken)
             assertEquals(true, dl2, "Should be dead-lettered now")
             assertEquals("DEAD_LETTER", readStatus(taskId))
 

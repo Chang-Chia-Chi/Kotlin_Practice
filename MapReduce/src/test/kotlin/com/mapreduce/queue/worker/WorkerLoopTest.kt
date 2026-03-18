@@ -39,7 +39,7 @@ class WorkerLoopTest {
         taskId: String = "t-1",
         handler: String = "test.handler",
         queue: String = "default",
-        executionGeneration: String = "gen-1",
+        claimToken: String = "gen-1",
     ) = Task(
         taskId = taskId,
         handler = handler,
@@ -47,7 +47,7 @@ class WorkerLoopTest {
         payload = "{}",
         status = TaskStatus.CLAIMED,
         claimedBy = "test-pod",
-        executionGeneration = executionGeneration,
+        claimToken = claimToken,
     )
 
     @BeforeEach

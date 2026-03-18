@@ -117,7 +117,7 @@ class TaskGroupRepository(
     fun resolveGroupTask(
         taskId: String? = null,
         groupId: String,
-        executionGeneration: String? = null,
+        claimToken: String? = null,
         failed: Boolean = false,
         outputUri: String? = null,
         outputMetadata: String? = null,
@@ -125,7 +125,7 @@ class TaskGroupRepository(
         return jdbi.inTransaction<GroupTaskResolution, Exception> { h ->
             // Step 1 (success path only): Mark task COMPLETED with output fields
             if (!failed && taskId != null) {
-                val fenceClause = if (executionGeneration != null) " AND execution_generation = :gen" else ""
+                val fenceClause = if (claimToken != null) " AND execution_generation = :gen" else ""
                 val update = h.createUpdate(
                     """
                     UPDATE task SET status = 'COMPLETED', completed_at = CURRENT_TIMESTAMP,
@@ -135,11 +135,11 @@ class TaskGroupRepository(
                 ).bind("taskId", taskId)
                     .bind("outputUri", outputUri)
                     .bind("outputMeta", outputMetadata)
-                if (executionGeneration != null) update.bind("gen", executionGeneration)
+                if (claimToken != null) update.bind("gen", claimToken)
                 val updated = update.execute()
 
                 if (updated == 0) {
-                    log.warnf("Zombie detected for task %s (gen=%s) — skipping group counter", taskId, executionGeneration)
+                    log.warnf("Zombie detected for task %s (gen=%s) — skipping group counter", taskId, claimToken)
                     return@inTransaction GroupTaskResolution(updated = false, barrierMet = false)
                 }
             }

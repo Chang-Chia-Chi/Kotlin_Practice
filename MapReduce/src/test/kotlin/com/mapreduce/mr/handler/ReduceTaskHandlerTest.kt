@@ -48,7 +48,7 @@ class ReduceTaskHandlerTest {
     fun `returns Failure when groupId is null`() = runTest {
         val ctx = TaskContext(
             taskId = "t-1", payload = "{}", groupId = null,
-            metadata = null, executionGeneration = "gen-1",
+            metadata = null, claimToken = "gen-1",
         )
 
         val result = handler.handle(ctx)
@@ -61,7 +61,7 @@ class ReduceTaskHandlerTest {
     fun `happy path -- streams task outputs, reads blobs, reduces, calls onCompleted`() = runTest {
         val ctx = TaskContext(
             taskId = "t-r", payload = "{}", groupId = "job-1",
-            metadata = null, executionGeneration = "gen-r",
+            metadata = null, claimToken = "gen-r",
         )
 
         whenever(taskGroupRepository.streamTaskOutputs("job-1", "word-count.map"))
@@ -94,7 +94,7 @@ class ReduceTaskHandlerTest {
     fun `returns result metadata in Success outputMetadata`() = runTest {
         val ctx = TaskContext(
             taskId = "t-ord", payload = "{}", groupId = "job-5",
-            metadata = null, executionGeneration = "gen-o",
+            metadata = null, claimToken = "gen-o",
         )
 
         whenever(taskGroupRepository.streamTaskOutputs(any(), any()))
