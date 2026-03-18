@@ -18,7 +18,6 @@ import java.net.ConnectException
 import java.net.SocketTimeoutException
 import java.sql.SQLTransientException
 import java.time.Duration
-import java.time.Instant
 
 class ErrorClassifierMiddlewareTest {
 
@@ -34,25 +33,14 @@ class ErrorClassifierMiddlewareTest {
     private fun buildContext(
         handler: String = "test-handler",
         retryCount: Int = 0,
-    ) = TaskExecutionContext(
+    ) = TaskContext(
         taskId = "t-1",
         handler = handler,
         queue = "default",
-        groupId = null,
         payload = "{}",
-        metadata = null,
+        claimToken = "gen-1",
         retryCount = retryCount,
         maxRetries = 3,
-        claimedAt = Instant.now(),
-        claimToken = "gen-1",
-        taskContext = TaskContext(
-            taskId = "t-1",
-            payload = "{}",
-            groupId = null,
-            metadata = null,
-            claimToken = "gen-1",
-            retryCount = retryCount,
-        ),
     )
 
     private suspend fun invokeWithException(

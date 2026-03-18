@@ -5,8 +5,10 @@ import com.mapreduce.queue.model.TaskContext
 import com.mapreduce.queue.model.TaskResult
 import com.mapreduce.queue.registry.HandlerRegistry
 import com.mapreduce.queue.spi.TaskHandler
+import com.mapreduce.shutdown.ShutdownSignal
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withContext
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertInstanceOf
@@ -15,7 +17,6 @@ import org.junit.jupiter.api.Test
 import org.mockito.Mockito.`when`
 import org.mockito.kotlin.mock
 import java.time.Duration
-import java.time.Instant
 import java.util.concurrent.TimeUnit
 
 class TimeoutMiddlewareTest {
@@ -39,26 +40,13 @@ class TimeoutMiddlewareTest {
 
     private fun buildContext(
         handler: String = "test-handler",
-        shuttingDown: Boolean = false,
-    ) = TaskExecutionContext(
+    ) = TaskContext(
         taskId = "t-1",
         handler = handler,
         queue = "default",
-        groupId = null,
         payload = "{}",
-        metadata = null,
-        retryCount = 0,
-        maxRetries = 3,
-        claimedAt = Instant.now(),
         claimToken = "gen-1",
-        taskContext = TaskContext(
-            taskId = "t-1",
-            payload = "{}",
-            groupId = null,
-            metadata = null,
-            claimToken = "gen-1",
-            shuttingDownSupplier = { shuttingDown },
-        ),
+        maxRetries = 3,
     )
 
     // -- Normal execution --
@@ -114,9 +102,11 @@ class TimeoutMiddlewareTest {
 
         val mw = TimeoutMiddleware(config, handlerRegistry)
 
-        val result = mw.invoke(buildContext(handler = "shutdown-handler", shuttingDown = true)) {
-            delay(10_000)
-            TaskResult.Success("never")
+        val result = withContext(ShutdownSignal { true }) {
+            mw.invoke(buildContext(handler = "shutdown-handler")) {
+                delay(10_000)
+                TaskResult.Success("never")
+            }
         }
 
         assertInstanceOf(TaskResult.Retry::class.java, result)

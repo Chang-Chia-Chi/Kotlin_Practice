@@ -3,12 +3,10 @@ package com.mapreduce.queue.worker
 import com.mapreduce.queue.model.Task
 import com.mapreduce.queue.model.TaskContext
 import com.mapreduce.queue.model.TaskResult
-import com.mapreduce.queue.pipeline.TaskExecutionContext
 import com.mapreduce.queue.pipeline.TaskPipeline
 import com.mapreduce.queue.registry.HandlerRegistry
 import com.mapreduce.queue.repository.TaskGroupRepository
 import com.mapreduce.queue.repository.TaskRepository
-import com.mapreduce.shutdown.ShutdownCoordinator
 import jakarta.enterprise.context.ApplicationScoped
 import org.jboss.logging.Logger
 
@@ -22,7 +20,6 @@ class TaskDispatcher(
     private val taskGroupRepository: TaskGroupRepository,
     private val handlerRegistry: HandlerRegistry,
     private val pipeline: TaskPipeline,
-    private val shutdownCoordinator: ShutdownCoordinator,
 ) {
 
     private val log = Logger.getLogger(TaskDispatcher::class.java)
@@ -41,7 +38,7 @@ class TaskDispatcher(
             return
         }
 
-        val ctx = buildExecutionContext(task)
+        val ctx = buildContext(task)
         val result = try {
             pipeline.execute(ctx, handler)
         } catch (e: Exception) {
@@ -103,21 +100,15 @@ class TaskDispatcher(
 
     // ── Context building ───────────────────────────────────────────
 
-    private fun buildExecutionContext(task: Task) = TaskExecutionContext(
+    private fun buildContext(task: Task) = TaskContext(
         taskId = task.taskId,
         handler = task.handler,
         queue = task.queue,
-        groupId = task.groupId,
         payload = task.payload,
+        groupId = task.groupId,
         metadata = task.metadata,
+        claimToken = task.claimToken,
         retryCount = task.retryCount,
         maxRetries = task.maxRetries,
-        claimedAt = task.claimedAt,
-        claimToken = task.claimToken,
-        taskContext = TaskContext(
-            task.taskId, task.payload, task.groupId, task.metadata, task.claimToken,
-            retryCount = task.retryCount, maxRetries = task.maxRetries,
-            shuttingDownSupplier = { shutdownCoordinator.isShuttingDown },
-        ),
     )
 }

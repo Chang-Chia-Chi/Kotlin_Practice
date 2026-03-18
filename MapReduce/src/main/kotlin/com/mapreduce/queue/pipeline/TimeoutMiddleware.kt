@@ -1,8 +1,10 @@
 package com.mapreduce.queue.pipeline
 
 import com.mapreduce.config.FrameworkConfig
+import com.mapreduce.queue.model.TaskContext
 import com.mapreduce.queue.model.TaskResult
 import com.mapreduce.queue.registry.HandlerRegistry
+import com.mapreduce.shutdown.isShuttingDown
 import jakarta.enterprise.context.ApplicationScoped
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.withTimeout
@@ -37,8 +39,8 @@ class TimeoutMiddleware(
     private val timeouts = ConcurrentHashMap<String, Long>()
 
     override suspend fun invoke(
-        context: TaskExecutionContext,
-        next: suspend (TaskExecutionContext) -> TaskResult,
+        context: TaskContext,
+        next: suspend (TaskContext) -> TaskResult,
     ): TaskResult {
         val timeoutMs = resolveTimeout(context.handler)
 
@@ -47,7 +49,7 @@ class TimeoutMiddleware(
                 next(context)
             }
         } catch (e: TimeoutCancellationException) {
-            if (context.taskContext.isShuttingDown) {
+            if (isShuttingDown()) {
                 log.infof(
                     "Handler '%s' timed out during shutdown — re-enqueuing task %s",
                     context.handler, context.taskId,

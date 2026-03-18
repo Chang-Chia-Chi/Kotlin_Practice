@@ -1,5 +1,6 @@
 package com.mapreduce.queue.pipeline
 
+import com.mapreduce.queue.model.TaskContext
 import com.mapreduce.queue.model.TaskResult
 import io.micrometer.core.instrument.MeterRegistry
 import jakarta.enterprise.context.ApplicationScoped
@@ -15,8 +16,8 @@ class MetricsMiddleware(private val meterRegistry: MeterRegistry) : Middleware {
     override val order: Int = 20
 
     override suspend fun invoke(
-        context: TaskExecutionContext,
-        next: suspend (TaskExecutionContext) -> TaskResult,
+        context: TaskContext,
+        next: suspend (TaskContext) -> TaskResult,
     ): TaskResult {
         val startNanos = System.nanoTime()
         val result = next(context)

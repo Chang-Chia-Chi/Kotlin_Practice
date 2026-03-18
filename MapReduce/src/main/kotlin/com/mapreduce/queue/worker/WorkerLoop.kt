@@ -3,6 +3,7 @@ package com.mapreduce.queue.worker
 import com.mapreduce.config.FrameworkConfig
 import com.mapreduce.queue.repository.TaskRepository
 import com.mapreduce.shutdown.ShutdownCoordinator
+import com.mapreduce.shutdown.ShutdownSignal
 import com.mapreduce.shutdown.ShutdownState
 import com.mapreduce.util.unorderedMapAsync
 import io.quarkus.runtime.StartupEvent
@@ -47,7 +48,9 @@ class WorkerLoop(
 ) {
 
     private val log = Logger.getLogger(WorkerLoop::class.java)
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val scope = CoroutineScope(
+        SupervisorJob() + Dispatchers.Default + ShutdownSignal { shutdownCoordinator.isShuttingDown },
+    )
     private val bulkheadSize = config.worker().bulkheadSize()
 
     /** Updated on every poll iteration — used by health probes to detect a hung worker. */

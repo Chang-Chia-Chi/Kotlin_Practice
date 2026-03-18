@@ -1,5 +1,6 @@
 package com.mapreduce.queue.pipeline
 
+import com.mapreduce.queue.model.TaskContext
 import com.mapreduce.queue.model.TaskResult
 import io.opentelemetry.api.trace.StatusCode
 import io.opentelemetry.api.trace.Tracer
@@ -15,8 +16,8 @@ class TracingMiddleware(private val tracer: Tracer) : Middleware {
     override val order: Int = 10
 
     override suspend fun invoke(
-        context: TaskExecutionContext,
-        next: suspend (TaskExecutionContext) -> TaskResult,
+        context: TaskContext,
+        next: suspend (TaskContext) -> TaskResult,
     ): TaskResult {
         val span = tracer.spanBuilder("task.execute ${context.handler}")
             .setAttribute("task.id", context.taskId)

@@ -1,5 +1,6 @@
 package com.mapreduce.queue.pipeline
 
+import com.mapreduce.queue.model.TaskContext
 import com.mapreduce.queue.model.TaskResult
 import com.mapreduce.queue.registry.HandlerRegistry
 import jakarta.enterprise.context.ApplicationScoped
@@ -41,8 +42,8 @@ class ErrorClassifierMiddleware(
     private val classificationCache = ConcurrentHashMap<String, ClassificationConfig>()
 
     override suspend fun invoke(
-        context: TaskExecutionContext,
-        next: suspend (TaskExecutionContext) -> TaskResult,
+        context: TaskContext,
+        next: suspend (TaskContext) -> TaskResult,
     ): TaskResult =
         try {
             next(context)
@@ -52,7 +53,7 @@ class ErrorClassifierMiddleware(
             classify(e, context)
         }
 
-    private fun classify(e: Exception, context: TaskExecutionContext): TaskResult {
+    private fun classify(e: Exception, context: TaskContext): TaskResult {
         val config = classificationCache.computeIfAbsent(context.handler) {
             buildClassificationConfig(it)
         }

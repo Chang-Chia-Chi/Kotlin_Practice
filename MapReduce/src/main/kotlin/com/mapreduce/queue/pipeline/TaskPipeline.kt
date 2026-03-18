@@ -1,5 +1,6 @@
 package com.mapreduce.queue.pipeline
 
+import com.mapreduce.queue.model.TaskContext
 import com.mapreduce.queue.model.TaskResult
 import com.mapreduce.queue.spi.TaskHandler
 import jakarta.enterprise.context.ApplicationScoped
@@ -20,9 +21,9 @@ class TaskPipeline(middlewares: Instance<Middleware>) {
     /**
      * Execute [handler] through the middleware chain with the given [context].
      */
-    suspend fun execute(context: TaskExecutionContext, handler: TaskHandler): TaskResult {
-        val terminal: suspend (TaskExecutionContext) -> TaskResult = { ctx ->
-            handler.handle(ctx.taskContext)
+    suspend fun execute(context: TaskContext, handler: TaskHandler): TaskResult {
+        val terminal: suspend (TaskContext) -> TaskResult = { ctx ->
+            handler.handle(ctx)
         }
         val chain = sorted.foldRight(terminal) { middleware, next ->
             { ctx -> middleware.invoke(ctx, next) }

@@ -37,24 +37,22 @@ data class Task(
 )
 
 /**
- * Context passed to a [com.mapreduce.queue.spi.TaskHandler].
+ * Unified context passed through the middleware pipeline and into handlers.
  *
- * Handlers performing long-running work can check [isShuttingDown] to
- * cooperatively exit early during graceful shutdown, avoiding wasted drain time.
+ * Handlers performing long-running work can check shutdown state via the
+ * top-level [com.mapreduce.shutdown.isShuttingDown] suspend function.
  */
 data class TaskContext(
     val taskId: String,
+    val handler: String,
+    val queue: String,
     val payload: String,
-    val groupId: String?,
-    val metadata: String?,
-    val claimToken: String?,
+    val groupId: String? = null,
+    val metadata: String? = null,
+    val claimToken: String? = null,
     val retryCount: Int = 0,
     val maxRetries: Int = 3,
-    private val shuttingDownSupplier: () -> Boolean = { false },
-) {
-    /** Returns true if the pod is shutting down and the handler should wrap up. */
-    val isShuttingDown: Boolean get() = shuttingDownSupplier()
-}
+)
 
 /** Value object for enqueuing a new task. */
 data class EnqueueRequest(

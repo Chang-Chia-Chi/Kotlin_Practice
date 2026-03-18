@@ -8,7 +8,6 @@ import com.mapreduce.queue.repository.GroupFailResult
 import com.mapreduce.queue.repository.GroupTaskResolution
 import com.mapreduce.queue.repository.TaskGroupRepository
 import com.mapreduce.queue.repository.TaskRepository
-import com.mapreduce.shutdown.ShutdownCoordinator
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
@@ -27,7 +26,6 @@ class TaskDispatcherTest {
     private lateinit var taskGroupRepository: TaskGroupRepository
     private lateinit var handlerRegistry: HandlerRegistry
     private lateinit var pipeline: TaskPipeline
-    private lateinit var shutdownCoordinator: ShutdownCoordinator
     private lateinit var dispatcher: TaskDispatcher
 
     @BeforeEach
@@ -36,11 +34,9 @@ class TaskDispatcherTest {
         taskGroupRepository = mock<TaskGroupRepository>()
         handlerRegistry = mock<HandlerRegistry>()
         pipeline = mock<TaskPipeline>()
-        shutdownCoordinator = mock<ShutdownCoordinator>()
 
         dispatcher = TaskDispatcher(
-            taskRepository, taskGroupRepository, handlerRegistry,
-            pipeline, shutdownCoordinator,
+            taskRepository, taskGroupRepository, handlerRegistry, pipeline,
         )
     }
 

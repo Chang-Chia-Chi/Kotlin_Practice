@@ -1,5 +1,6 @@
 package com.mapreduce.queue.pipeline
 
+import com.mapreduce.queue.model.TaskContext
 import com.mapreduce.queue.model.TaskResult
 
 /**
@@ -15,7 +16,7 @@ import com.mapreduce.queue.model.TaskResult
 interface Middleware {
     val order: Int
     suspend fun invoke(
-        context: TaskExecutionContext,
-        next: suspend (TaskExecutionContext) -> TaskResult,
+        context: TaskContext,
+        next: suspend (TaskContext) -> TaskResult,
     ): TaskResult
 }
