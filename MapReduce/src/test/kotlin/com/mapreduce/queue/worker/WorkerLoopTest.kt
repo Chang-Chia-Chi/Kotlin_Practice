@@ -155,7 +155,7 @@ class WorkerLoopTest {
 
             start()
 
-            verify(shutdownCoordinator).registerBulkhead(any(), eq(4))
+            verify(shutdownCoordinator).registerBulkhead(eq(4))
         }
 
         @Test

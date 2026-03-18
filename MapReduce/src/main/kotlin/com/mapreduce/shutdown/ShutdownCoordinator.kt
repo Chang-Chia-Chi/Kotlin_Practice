@@ -13,7 +13,6 @@ import kotlinx.coroutines.withTimeoutOrNull
 import org.jboss.logging.Logger
 import java.time.Duration
 import java.time.Instant
-import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
@@ -54,23 +53,25 @@ class ShutdownCoordinator(
     private var _drainDeadline: Instant? = null
     val drainDeadline: Instant? get() = _drainDeadline
 
-    @Volatile
-    private var bulkheadSemaphore: Semaphore? = null
+    private val _inFlightTasks = AtomicInteger(0)
 
     @Volatile
     private var _bulkheadSize: Int = 0
     val bulkheadSize: Int get() = _bulkheadSize
 
-    fun registerBulkhead(semaphore: Semaphore, size: Int) {
-        bulkheadSemaphore = semaphore
+    fun registerBulkhead(size: Int) {
         _bulkheadSize = size
     }
 
-    val inFlightTasks: Int
-        get() {
-            val sem = bulkheadSemaphore ?: return 0
-            return bulkheadSize - sem.availablePermits()
-        }
+    val inFlightTasks: Int get() = _inFlightTasks.get()
+
+    fun trackTaskStart() {
+        _inFlightTasks.incrementAndGet()
+    }
+
+    fun trackTaskEnd() {
+        _inFlightTasks.decrementAndGet()
+    }
 
     fun recordDrainCompletion() {
         _tasksCompletedDuringDrain.incrementAndGet()
@@ -144,8 +145,7 @@ class ShutdownCoordinator(
     }
 
     private suspend fun phaseWorkerDrain(drainTimeout: Duration, logInterval: Duration) {
-        val sem = bulkheadSemaphore
-        if (sem == null || inFlightTasks == 0) {
+        if (inFlightTasks == 0) {
             log.info("No in-flight tasks — skipping drain")
             return
         }

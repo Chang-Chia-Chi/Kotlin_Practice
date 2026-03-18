@@ -18,7 +18,6 @@ import org.mockito.kotlin.mock
 import org.mockito.kotlin.verify
 import org.mockito.kotlin.whenever
 import java.time.Duration
-import java.util.concurrent.Semaphore
 
 class ShutdownCoordinatorTest {
 
@@ -76,33 +75,27 @@ class ShutdownCoordinatorTest {
     // ── Bulkhead integration ──────────────────────────────────────
 
     @Test
-    fun `registerBulkhead tracks semaphore and size`() {
-        val sem = Semaphore(8)
-        coordinator.registerBulkhead(sem, 8)
+    fun `registerBulkhead tracks size`() {
+        coordinator.registerBulkhead(8)
 
         assertEquals(8, coordinator.bulkheadSize)
     }
 
     @Test
-    fun `inFlightTasks equals size minus availablePermits`() {
-        val sem = Semaphore(4)
-        coordinator.registerBulkhead(sem, 4)
-
-        sem.acquire(3)
+    fun `trackTaskStart and trackTaskEnd update inFlightTasks`() {
+        coordinator.trackTaskStart()
+        coordinator.trackTaskStart()
+        coordinator.trackTaskStart()
 
         assertEquals(3, coordinator.inFlightTasks)
+
+        coordinator.trackTaskEnd()
+
+        assertEquals(2, coordinator.inFlightTasks)
     }
 
     @Test
-    fun `inFlightTasks returns 0 when no semaphore registered`() {
-        assertEquals(0, coordinator.inFlightTasks)
-    }
-
-    @Test
-    fun `inFlightTasks returns 0 when all permits available`() {
-        val sem = Semaphore(4)
-        coordinator.registerBulkhead(sem, 4)
-
+    fun `inFlightTasks returns 0 initially`() {
         assertEquals(0, coordinator.inFlightTasks)
     }
 
@@ -245,8 +238,7 @@ class ShutdownCoordinatorTest {
         whenever(leaderManager.isActive).thenReturn(false)
         whenever(taskRepository.releaseTasksByPod(podId)).thenReturn(0)
 
-        val sem = Semaphore(4)
-        coordinator.registerBulkhead(sem, 4)
+        coordinator.registerBulkhead(4)
 
         coordinator.onShutdown(ShutdownEvent())
 

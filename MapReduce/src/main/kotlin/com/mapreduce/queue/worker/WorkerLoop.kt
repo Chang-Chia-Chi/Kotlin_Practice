@@ -22,7 +22,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.jboss.logging.Logger
 import java.time.Instant
-import java.util.concurrent.Semaphore
 
 /**
  * Flow-based poll loop with bulkhead-controlled parallelism.
@@ -51,7 +50,6 @@ class WorkerLoop(
     private val log = Logger.getLogger(WorkerLoop::class.java)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val bulkheadSize = config.worker().bulkheadSize()
-    private val semaphore = Semaphore(bulkheadSize)
 
     /** Updated on every poll iteration — used by health probes to detect a hung worker. */
     @Volatile
@@ -63,7 +61,7 @@ class WorkerLoop(
         val queues = config.worker().queues()
         val pollInterval = config.worker().pollInterval().toMillis()
 
-        shutdownCoordinator.registerBulkhead(semaphore, bulkheadSize)
+        shutdownCoordinator.registerBulkhead(bulkheadSize)
         shutdownCoordinator.registerMetrics()
         meterRegistry.gauge(
             "framework.worker.bulkhead.utilization",
@@ -115,11 +113,11 @@ class WorkerLoop(
     }
 
     private suspend fun executeTask(task: com.mapreduce.queue.model.Task) {
-        semaphore.acquire() // track in-flight count for shutdown drain + metrics
+        shutdownCoordinator.trackTaskStart()
         try {
             dispatcher.execute(task)
         } finally {
-            semaphore.release()
+            shutdownCoordinator.trackTaskEnd()
             if (shutdownCoordinator.isShuttingDown) {
                 shutdownCoordinator.recordDrainCompletion()
             }
