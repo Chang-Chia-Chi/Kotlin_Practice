@@ -9,8 +9,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
+import org.jdbi.v3.core.Handle
 import org.jdbi.v3.core.Jdbi
 import org.jboss.logging.Logger
+import java.time.Duration
+import java.time.Instant
 import java.util.UUID
 
 /**
@@ -28,6 +31,19 @@ data class GroupTaskResolution(
 data class TaskOutput(
     val uri: String,
     val metadata: String?,
+)
+
+/**
+ * Result of an atomic group failure operation.
+ *
+ * @param taskUpdated false if the status guard / claimToken fence rejected the update (zombie)
+ * @param deadLettered true if the task was terminally dead-lettered (retries exhausted or unconditional)
+ * @param barrierMet true if this was the last pending task in the group
+ */
+data class GroupFailResult(
+    val taskUpdated: Boolean,
+    val deadLettered: Boolean,
+    val barrierMet: Boolean,
 )
 
 /**
@@ -144,60 +160,208 @@ class TaskGroupRepository(
                 }
             }
 
-            // Step 2: Decrement tasks_pending, conditionally increment tasks_failed
-            val failedIncrement = if (failed) 1 else 0
-            h.createUpdate(
-                """
-                UPDATE task_group
-                SET tasks_pending = tasks_pending - 1,
-                    tasks_failed = tasks_failed + :failedIncrement,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE group_id = :groupId AND status = 'ACTIVE'
-                """,
-            ).bind("groupId", groupId)
-                .bind("failedIncrement", failedIncrement)
-                .execute()
-
-            // Step 3: Read updated counters + callback handler
-            val group = h.createQuery(
-                """
-                SELECT tasks_pending, tasks_failed, phase_total, on_complete_handler
-                FROM task_group WHERE group_id = :groupId
-                """,
-            ).bind("groupId", groupId)
-                .map { rs, _ ->
-                    object {
-                        val tasksPending = rs.getInt("tasks_pending")
-                        val tasksFailed = rs.getInt("tasks_failed")
-                        val phaseTotal = rs.getInt("phase_total")
-                        val onCompleteHandler = rs.getString("on_complete_handler")
-                    }
-                }
-                .one()
-
-            // Step 4: Check barrier — create callback task if met
-            val barrierMet = group.tasksPending == 0
-            if (barrierMet && group.onCompleteHandler != null) {
-                h.createUpdate(
-                    """
-                    INSERT INTO task (task_id, handler, queue, payload, status, priority,
-                        group_id, metadata, retry_count, max_retries, created_at)
-                    VALUES (:taskId, :handler, 'default', :payload, 'PENDING', 10,
-                        NULL, NULL, 0, 3, CURRENT_TIMESTAMP)
-                    """,
-                ).bind("taskId", UUID.randomUUID().toString())
-                    .bind("handler", group.onCompleteHandler)
-                    .bind("payload", groupId)
-                    .execute()
-
-                log.infof(
-                    "Barrier met for group %s (pending=0, failed=%d, total=%d) — callback task created",
-                    groupId, group.tasksFailed, group.phaseTotal,
-                )
-            }
-
+            val barrierMet = resolveGroupCounter(h, groupId, failed)
             GroupTaskResolution(updated = true, barrierMet = barrierMet)
         }
+    }
+
+    // ── Atomic group failure methods ───────────────────────────────────
+
+    /**
+     * Atomic fail-with-retry for a grouped task.
+     *
+     * In a single transaction: increments retry_count, conditionally moves to
+     * DEAD_LETTER (retries exhausted) or PENDING (retries remain). Only when
+     * the task is terminally dead-lettered does this decrement the group counter.
+     *
+     * @return [GroupFailResult] — `taskUpdated=false` if fenced out (zombie).
+     */
+    fun failGroupTask(
+        taskId: String,
+        groupId: String,
+        errorMessage: String,
+        retryDelay: Duration? = null,
+        claimToken: String? = null,
+    ): GroupFailResult {
+        return jdbi.inTransaction<GroupFailResult, Exception> { h ->
+            val fenceClause = if (claimToken != null) " AND execution_generation = :gen" else ""
+            val scheduledAt = retryDelay?.let { Instant.now().plusSeconds(it.toSeconds()) }
+
+            val update = h.createUpdate(
+                """
+                UPDATE task SET
+                    retry_count    = retry_count + 1,
+                    error_message  = :error,
+                    status         = CASE WHEN retry_count + 1 < max_retries THEN 'PENDING' ELSE 'DEAD_LETTER' END,
+                    claimed_by     = CASE WHEN retry_count + 1 < max_retries THEN NULL ELSE claimed_by END,
+                    claimed_at     = CASE WHEN retry_count + 1 < max_retries THEN NULL ELSE claimed_at END,
+                    scheduled_at   = CASE WHEN retry_count + 1 < max_retries THEN :scheduledAt ELSE scheduled_at END
+                WHERE task_id = :taskId AND status = 'CLAIMED'$fenceClause
+                """,
+            )
+                .bind("taskId", taskId)
+                .bind("error", errorMessage.take(4000))
+                .bind("scheduledAt", scheduledAt)
+            if (claimToken != null) update.bind("gen", claimToken)
+            val updated = update.execute()
+
+            if (updated == 0) {
+                return@inTransaction GroupFailResult(taskUpdated = false, deadLettered = false, barrierMet = false)
+            }
+
+            val newStatus = h.createQuery("SELECT status FROM task WHERE task_id = :taskId")
+                .bind("taskId", taskId)
+                .mapTo(String::class.java)
+                .one()
+            val deadLettered = newStatus == "DEAD_LETTER"
+
+            val barrierMet = if (deadLettered) resolveGroupCounter(h, groupId, failed = true) else false
+            GroupFailResult(taskUpdated = true, deadLettered = deadLettered, barrierMet = barrierMet)
+        }
+    }
+
+    /**
+     * Atomic unconditional dead-letter for a grouped task.
+     *
+     * In a single transaction: marks task DEAD_LETTER (with status guard)
+     * and decrements the group counter.
+     *
+     * Used for no-handler and explicit [TaskResult.DeadLetter] results.
+     *
+     * @return [GroupFailResult] — `taskUpdated=false` if fenced out (zombie).
+     */
+    fun deadLetterGroupTask(
+        taskId: String,
+        groupId: String,
+        reason: String,
+        claimToken: String? = null,
+    ): GroupFailResult {
+        return jdbi.inTransaction<GroupFailResult, Exception> { h ->
+            val fenceClause = if (claimToken != null) " AND execution_generation = :gen" else ""
+            val update = h.createUpdate(
+                """
+                UPDATE task SET status = 'DEAD_LETTER', error_message = :reason
+                WHERE task_id = :taskId AND status = 'CLAIMED'$fenceClause
+                """,
+            )
+                .bind("taskId", taskId)
+                .bind("reason", reason.take(4000))
+            if (claimToken != null) update.bind("gen", claimToken)
+            val updated = update.execute()
+
+            if (updated == 0) {
+                return@inTransaction GroupFailResult(taskUpdated = false, deadLettered = false, barrierMet = false)
+            }
+
+            val barrierMet = resolveGroupCounter(h, groupId, failed = true)
+            GroupFailResult(taskUpdated = true, deadLettered = true, barrierMet = barrierMet)
+        }
+    }
+
+    /**
+     * Atomic reclaim for a grouped stale task.
+     *
+     * In a single transaction: clears claim fields, increments retry_count,
+     * conditionally DEAD_LETTER, and (if dead-lettered) decrements group counter.
+     *
+     * @return [GroupFailResult], or `null` if already handled (0 rows — not CLAIMED).
+     */
+    fun reclaimGroupTask(
+        taskId: String,
+        groupId: String,
+        errorMessage: String,
+    ): GroupFailResult? {
+        return jdbi.inTransaction<GroupFailResult?, Exception> { h ->
+            val updated = h.createUpdate(
+                """
+                UPDATE task
+                   SET retry_count    = retry_count + 1,
+                       claimed_by     = NULL,
+                       claimed_at     = NULL,
+                       error_message  = :error,
+                       status         = CASE WHEN retry_count + 1 < max_retries THEN 'PENDING' ELSE 'DEAD_LETTER' END
+                 WHERE task_id  = :taskId
+                   AND status   = 'CLAIMED'
+                """,
+            )
+                .bind("taskId", taskId)
+                .bind("error", errorMessage.take(4000))
+                .execute()
+
+            if (updated == 0) return@inTransaction null
+
+            val newStatus = h.createQuery("SELECT status FROM task WHERE task_id = :taskId")
+                .bind("taskId", taskId)
+                .mapTo(String::class.java)
+                .one()
+            val deadLettered = newStatus == "DEAD_LETTER"
+
+            val barrierMet = if (deadLettered) resolveGroupCounter(h, groupId, failed = true) else false
+            GroupFailResult(taskUpdated = true, deadLettered = deadLettered, barrierMet = barrierMet)
+        }
+    }
+
+    // ── Private helpers ────────────────────────────────────────────────
+
+    /**
+     * Decrement [tasks_pending], conditionally increment [tasks_failed],
+     * check barrier, and create callback task if barrier is met.
+     *
+     * Must be called within an existing transaction (caller provides [Handle]).
+     *
+     * @return `true` if the barrier was met (tasks_pending reached 0).
+     */
+    private fun resolveGroupCounter(h: Handle, groupId: String, failed: Boolean): Boolean {
+        val failedIncrement = if (failed) 1 else 0
+        h.createUpdate(
+            """
+            UPDATE task_group
+            SET tasks_pending = tasks_pending - 1,
+                tasks_failed = tasks_failed + :failedIncrement,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE group_id = :groupId AND status = 'ACTIVE'
+            """,
+        ).bind("groupId", groupId)
+            .bind("failedIncrement", failedIncrement)
+            .execute()
+
+        val group = h.createQuery(
+            """
+            SELECT tasks_pending, tasks_failed, phase_total, on_complete_handler
+            FROM task_group WHERE group_id = :groupId
+            """,
+        ).bind("groupId", groupId)
+            .map { rs, _ ->
+                object {
+                    val tasksPending = rs.getInt("tasks_pending")
+                    val tasksFailed = rs.getInt("tasks_failed")
+                    val phaseTotal = rs.getInt("phase_total")
+                    val onCompleteHandler = rs.getString("on_complete_handler")
+                }
+            }
+            .one()
+
+        val barrierMet = group.tasksPending == 0
+        if (barrierMet && group.onCompleteHandler != null) {
+            h.createUpdate(
+                """
+                INSERT INTO task (task_id, handler, queue, payload, status, priority,
+                    group_id, metadata, retry_count, max_retries, created_at)
+                VALUES (:taskId, :handler, 'default', :payload, 'PENDING', 10,
+                    NULL, NULL, 0, 3, CURRENT_TIMESTAMP)
+                """,
+            ).bind("taskId", UUID.randomUUID().toString())
+                .bind("handler", group.onCompleteHandler)
+                .bind("payload", groupId)
+                .execute()
+
+            log.infof(
+                "Barrier met for group %s (pending=0, failed=%d, total=%d) — callback task created",
+                groupId, group.tasksFailed, group.phaseTotal,
+            )
+        }
+
+        return barrierMet
     }
 
     /**
