@@ -476,9 +476,8 @@ class TaskGroupRepository(
      */
     fun streamTaskOutputs(groupId: String, handler: String): Flow<TaskOutput> =
         flow {
-            val handle = jdbi.open()
-            try {
-                val stream = handle.createQuery(
+            jdbi.open().use { handle ->
+                handle.createQuery(
                     """
                     SELECT output_uri, output_metadata FROM task
                     WHERE group_id = :groupId AND handler = :handler
@@ -489,15 +488,12 @@ class TaskGroupRepository(
                     .bind("handler", handler)
                     .map { rs, _ -> TaskOutput(rs.getString("output_uri"), rs.getString("output_metadata")) }
                     .stream()
-
-                stream.use { s ->
-                    val iter = s.iterator()
-                    while (iter.hasNext()) {
-                        emit(iter.next())
+                    .use { s ->
+                        val iter = s.iterator()
+                        while (iter.hasNext()) {
+                            emit(iter.next())
+                        }
                     }
-                }
-            } finally {
-                handle.close()
             }
         }.flowOn(Dispatchers.IO)
 
