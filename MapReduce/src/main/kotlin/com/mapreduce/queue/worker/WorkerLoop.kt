@@ -2,9 +2,8 @@ package com.mapreduce.queue.worker
 
 import com.mapreduce.config.FrameworkConfig
 import com.mapreduce.queue.repository.TaskRepository
-import com.mapreduce.shutdown.ShutdownCoordinator
+import com.mapreduce.shutdown.ShutdownParticipant
 import com.mapreduce.shutdown.ShutdownSignal
-import com.mapreduce.shutdown.ShutdownState
 import com.mapreduce.util.unorderedMapAsync
 import io.quarkus.runtime.StartupEvent
 import jakarta.enterprise.context.ApplicationScoped
@@ -21,7 +20,10 @@ import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.jboss.logging.Logger
+import java.time.Duration
 import java.time.Instant
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Flow-based poll loop with bulkhead-controlled parallelism.
@@ -44,12 +46,18 @@ class WorkerLoop(
     private val config: FrameworkConfig,
     private val taskRepository: TaskRepository,
     private val dispatcher: TaskDispatcher,
-    private val shutdownCoordinator: ShutdownCoordinator,
-) {
+) : ShutdownParticipant {
 
     private val log = Logger.getLogger(WorkerLoop::class.java)
+    private val _accepting = AtomicBoolean(true)
+    private val _inFlightTasks = AtomicInteger(0)
+    val inFlightTasks: Int get() = _inFlightTasks.get()
+
+    override val shutdownOrder: Int = 0
+    override val shutdownTimeout: Duration get() = config.shutdown().drainTimeout()
+
     private val scope = CoroutineScope(
-        SupervisorJob() + Dispatchers.Default + ShutdownSignal { shutdownCoordinator.isShuttingDown },
+        SupervisorJob() + Dispatchers.Default + ShutdownSignal { !_accepting.get() },
     )
     private val bulkheadSize = config.worker().bulkheadSize()
 
@@ -57,6 +65,32 @@ class WorkerLoop(
     @Volatile
     private var _lastPollTimestamp: Instant = Instant.now()
     val lastPollTimestamp: Instant get() = _lastPollTimestamp
+
+    override suspend fun shutdown() {
+        _accepting.set(false)
+        log.infof("Draining %d in-flight task(s)", inFlightTasks)
+        val logInterval = config.shutdown().logInterval().toMillis()
+        while (inFlightTasks > 0) {
+            delay(logInterval)
+            if (inFlightTasks > 0) {
+                log.infof("Draining: %d task(s) still in-flight", inFlightTasks)
+            }
+        }
+        log.info("All tasks drained")
+        releaseTasks()
+    }
+
+    private fun releaseTasks() {
+        val podId = config.worker().id()
+        try {
+            val released = taskRepository.releaseTasksByPod(podId)
+            if (released > 0) {
+                log.infof("Released %d task(s) back to PENDING", released)
+            }
+        } catch (e: Exception) {
+            log.errorf(e, "Failed to release tasks — stale reaper will recover them")
+        }
+    }
 
     fun onStart(@Observes ev: StartupEvent) {
         val workerId = config.worker().id()
@@ -81,7 +115,7 @@ class WorkerLoop(
      */
     private fun claimFlow(pollIntervalMs: Long): Flow<com.mapreduce.queue.model.Task> = flow {
         while (true) {
-            if (shutdownCoordinator.state != ShutdownState.RUNNING) {
+            if (!_accepting.get()) {
                 log.info("Shutdown signaled, stopping claim loop")
                 return@flow
             }
@@ -107,11 +141,11 @@ class WorkerLoop(
     }
 
     private suspend fun executeTask(task: com.mapreduce.queue.model.Task) {
-        shutdownCoordinator.trackTaskStart()
+        _inFlightTasks.incrementAndGet()
         try {
             dispatcher.execute(task)
         } finally {
-            shutdownCoordinator.trackTaskEnd()
+            _inFlightTasks.decrementAndGet()
         }
     }
 }

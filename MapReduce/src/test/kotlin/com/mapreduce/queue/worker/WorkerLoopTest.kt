@@ -4,19 +4,18 @@ import com.mapreduce.config.FrameworkConfig
 import com.mapreduce.queue.model.Task
 import com.mapreduce.queue.model.TaskStatus
 import com.mapreduce.queue.repository.TaskRepository
-import com.mapreduce.shutdown.ShutdownCoordinator
-import com.mapreduce.shutdown.ShutdownState
 import io.quarkus.runtime.StartupEvent
 import kotlinx.coroutines.runBlocking
 import org.awaitility.kotlin.await
 import org.awaitility.kotlin.untilAsserted
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
 import org.mockito.kotlin.any
 import org.mockito.kotlin.atLeast
-import org.mockito.kotlin.eq
 import org.mockito.kotlin.mock
 import org.mockito.kotlin.never
 import org.mockito.kotlin.verify
@@ -30,9 +29,9 @@ class WorkerLoopTest {
 
     private lateinit var config: FrameworkConfig
     private lateinit var workerConfig: FrameworkConfig.WorkerConfig
+    private lateinit var shutdownConfig: FrameworkConfig.ShutdownConfig
     private lateinit var taskRepository: TaskRepository
     private lateinit var dispatcher: TaskDispatcher
-    private lateinit var shutdownCoordinator: ShutdownCoordinator
     private lateinit var workerLoop: WorkerLoop
 
     private fun task(
@@ -54,30 +53,30 @@ class WorkerLoopTest {
     fun setUp() {
         config = mock()
         workerConfig = mock()
+        shutdownConfig = mock()
         taskRepository = mock()
         dispatcher = mock()
-        shutdownCoordinator = mock()
 
         whenever(config.worker()).thenReturn(workerConfig)
+        whenever(config.shutdown()).thenReturn(shutdownConfig)
         whenever(workerConfig.pollInterval()).thenReturn(Duration.ofMillis(20))
         whenever(workerConfig.bulkheadSize()).thenReturn(4)
         whenever(workerConfig.id()).thenReturn("test-pod")
         whenever(workerConfig.queues()).thenReturn(listOf("default"))
+        whenever(shutdownConfig.drainTimeout()).thenReturn(Duration.ofMillis(500))
+        whenever(shutdownConfig.logInterval()).thenReturn(Duration.ofMillis(50))
 
-        whenever(shutdownCoordinator.state).thenReturn(ShutdownState.RUNNING)
-        whenever(shutdownCoordinator.isShuttingDown).thenReturn(false)
-
-        workerLoop = WorkerLoop(
-            config, taskRepository, dispatcher,
-            shutdownCoordinator,
-        )
+        workerLoop = WorkerLoop(config, taskRepository, dispatcher)
     }
 
     private fun start() {
         workerLoop.onStart(mock<StartupEvent>())
     }
 
-    private fun verifySuspend(mode: org.mockito.verification.VerificationMode = org.mockito.Mockito.times(1), block: suspend TaskDispatcher.() -> Unit) {
+    private fun verifySuspend(
+        mode: org.mockito.verification.VerificationMode = org.mockito.Mockito.times(1),
+        block: suspend TaskDispatcher.() -> Unit,
+    ) {
         runBlocking { block(verify(dispatcher, mode)) }
     }
 
@@ -128,48 +127,154 @@ class WorkerLoopTest {
         }
     }
 
-    // ── Shutdown coordination ─────────────────────────────────────────
+    // ── Shutdown behavior ─────────────────────────────────────────────
 
     @Nested
     inner class ShutdownBehavior {
 
         @Test
-        fun `stops claiming when shutdown state is not RUNNING`() {
-            val callCount = AtomicInteger()
-            whenever(shutdownCoordinator.state).thenAnswer {
-                if (callCount.incrementAndGet() > 3) ShutdownState.DRAINING
-                else ShutdownState.RUNNING
-            }
-            whenever(taskRepository.claim(any(), any())).thenReturn(null)
-
-            start()
-
-            await.atMost(2, TimeUnit.SECONDS).untilAsserted {
-                assertTrue(callCount.get() > 3)
-            }
+        fun `shutdownOrder is 0`() {
+            assertEquals(0, workerLoop.shutdownOrder)
         }
 
         @Test
-        fun `tracks task end on shutdown`() {
-            val latch = CountDownLatch(1)
+        fun `shutdownTimeout matches drain timeout config`() {
+            assertEquals(Duration.ofMillis(500), workerLoop.shutdownTimeout)
+        }
+
+        @Test
+        fun `inFlightTasks is 0 initially`() {
+            assertEquals(0, workerLoop.inFlightTasks)
+        }
+
+        @Test
+        fun `inFlightTasks tracks active tasks`() {
+            val taskStarted = CountDownLatch(1)
+            val taskCanFinish = CountDownLatch(1)
             val claimed = task()
+
             whenever(taskRepository.claim("test-pod", listOf("default")))
                 .thenReturn(claimed)
                 .thenReturn(null)
             runBlocking {
                 whenever(dispatcher.execute(any())).thenAnswer {
-                    latch.countDown()
+                    taskStarted.countDown()
+                    taskCanFinish.await(5, TimeUnit.SECONDS)
+                    Unit
+                }
+            }
+
+            assertEquals(0, workerLoop.inFlightTasks)
+            start()
+
+            assertTrue(taskStarted.await(2, TimeUnit.SECONDS))
+            assertEquals(1, workerLoop.inFlightTasks)
+
+            taskCanFinish.countDown()
+            await.atMost(2, TimeUnit.SECONDS).untilAsserted {
+                assertEquals(0, workerLoop.inFlightTasks)
+            }
+        }
+
+        @Test
+        fun `shutdown stops claiming new tasks`() {
+            whenever(taskRepository.claim(any(), any())).thenReturn(null)
+
+            start()
+
+            await.atMost(1, TimeUnit.SECONDS).untilAsserted {
+                verify(taskRepository, atLeast(2)).claim(any(), any())
+            }
+
+            runBlocking { workerLoop.shutdown() }
+
+            val claimsAtShutdown = org.mockito.Mockito.mockingDetails(taskRepository)
+                .invocations.count { it.method.name == "claim" }
+            Thread.sleep(100)
+            val claimsAfter = org.mockito.Mockito.mockingDetails(taskRepository)
+                .invocations.count { it.method.name == "claim" }
+
+            assertEquals(claimsAtShutdown, claimsAfter, "No new claims after shutdown")
+        }
+
+        @Test
+        fun `shutdown waits for in-flight tasks to drain`() {
+            val taskStarted = CountDownLatch(1)
+            val taskCanFinish = CountDownLatch(1)
+            val claimed = task()
+
+            whenever(taskRepository.claim("test-pod", listOf("default")))
+                .thenReturn(claimed)
+                .thenReturn(null)
+            runBlocking {
+                whenever(dispatcher.execute(any())).thenAnswer {
+                    taskStarted.countDown()
+                    taskCanFinish.await(5, TimeUnit.SECONDS)
                     Unit
                 }
             }
 
             start()
+            assertTrue(taskStarted.await(2, TimeUnit.SECONDS))
+            assertEquals(1, workerLoop.inFlightTasks)
 
-            assertTrue(latch.await(2, TimeUnit.SECONDS))
-            await.atMost(2, TimeUnit.SECONDS).untilAsserted {
-                verify(shutdownCoordinator).trackTaskStart()
-                verify(shutdownCoordinator).trackTaskEnd()
+            // Start shutdown in background
+            val shutdownComplete = CountDownLatch(1)
+            Thread {
+                runBlocking { workerLoop.shutdown() }
+                shutdownComplete.countDown()
+            }.start()
+
+            // Shutdown should be waiting for drain
+            assertFalse(shutdownComplete.await(200, TimeUnit.MILLISECONDS))
+            assertEquals(1, workerLoop.inFlightTasks)
+
+            // Let the task finish
+            taskCanFinish.countDown()
+
+            // Now shutdown should complete
+            assertTrue(shutdownComplete.await(2, TimeUnit.SECONDS))
+            assertEquals(0, workerLoop.inFlightTasks)
+        }
+
+        @Test
+        fun `shutdown releases uncompleted tasks`() {
+            whenever(taskRepository.claim(any(), any())).thenReturn(null)
+
+            start()
+            runBlocking { workerLoop.shutdown() }
+
+            verify(taskRepository).releaseTasksByPod("test-pod")
+        }
+
+        @Test
+        fun `shutdown tolerates release exception`() {
+            whenever(taskRepository.claim(any(), any())).thenReturn(null)
+            whenever(taskRepository.releaseTasksByPod(any()))
+                .thenThrow(RuntimeException("DB down"))
+
+            start()
+            runBlocking { workerLoop.shutdown() }
+
+            // Should not throw — stale reaper will recover
+            assertEquals(0, workerLoop.inFlightTasks)
+        }
+
+        @Test
+        fun `shutdown completes immediately when no in-flight tasks`() {
+            whenever(taskRepository.claim(any(), any())).thenReturn(null)
+
+            start()
+
+            await.atMost(1, TimeUnit.SECONDS).untilAsserted {
+                verify(taskRepository, atLeast(1)).claim(any(), any())
             }
+
+            val startTime = System.currentTimeMillis()
+            runBlocking { workerLoop.shutdown() }
+            val elapsed = System.currentTimeMillis() - startTime
+
+            assertTrue(elapsed < 500, "Shutdown with no in-flight tasks should be fast (took ${elapsed}ms)")
         }
     }
 
@@ -181,10 +286,7 @@ class WorkerLoopTest {
         @Test
         fun `limits concurrent tasks to bulkhead size`() {
             whenever(workerConfig.bulkheadSize()).thenReturn(2)
-            workerLoop = WorkerLoop(
-                config, taskRepository, dispatcher,
-                shutdownCoordinator,
-            )
+            workerLoop = WorkerLoop(config, taskRepository, dispatcher)
 
             val activeCount = AtomicInteger(0)
             val maxConcurrent = AtomicInteger(0)

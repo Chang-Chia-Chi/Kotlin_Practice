@@ -1,241 +1,288 @@
 package com.mapreduce.shutdown
 
 import com.mapreduce.config.FrameworkConfig
-import com.mapreduce.leader.LeaderManager
-import com.mapreduce.queue.repository.TaskRepository
 import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import io.quarkus.runtime.ShutdownEvent
-import kotlinx.coroutines.runBlocking
+import jakarta.enterprise.inject.Instance
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.delay
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
+import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
 import org.mockito.kotlin.mock
-import org.mockito.kotlin.verify
 import org.mockito.kotlin.whenever
 import java.time.Duration
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 class ShutdownCoordinatorTest {
 
     private lateinit var config: FrameworkConfig
     private lateinit var shutdownConfig: FrameworkConfig.ShutdownConfig
     private lateinit var workerConfig: FrameworkConfig.WorkerConfig
-    private lateinit var leaderManager: LeaderManager
-    private lateinit var taskRepository: TaskRepository
     private lateinit var meterRegistry: MeterRegistry
     private lateinit var coordinator: ShutdownCoordinator
 
     private val podId = "test-pod-1"
+
+    private fun participantInstance(vararg participants: ShutdownParticipant): Instance<ShutdownParticipant> {
+        val instance = mock<Instance<ShutdownParticipant>>()
+        whenever(instance.iterator()).thenAnswer { participants.toList().iterator() }
+        return instance
+    }
+
+    private fun participant(
+        order: Int = 0,
+        timeout: Duration = Duration.ofMillis(500),
+        action: suspend () -> Unit = {},
+    ): ShutdownParticipant = object : ShutdownParticipant {
+        override val shutdownOrder = order
+        override val shutdownTimeout = timeout
+        override suspend fun shutdown() = action()
+    }
 
     @BeforeEach
     fun setUp() {
         config = mock<FrameworkConfig>()
         shutdownConfig = mock<FrameworkConfig.ShutdownConfig>()
         workerConfig = mock<FrameworkConfig.WorkerConfig>()
-        leaderManager = mock<LeaderManager>()
-        taskRepository = mock<TaskRepository>()
         meterRegistry = SimpleMeterRegistry()
 
         whenever(config.shutdown()).thenReturn(shutdownConfig)
         whenever(config.worker()).thenReturn(workerConfig)
         whenever(workerConfig.id()).thenReturn(podId)
-
-        // Fast timeouts for tests
-        whenever(shutdownConfig.drainTimeout()).thenReturn(Duration.ofMillis(100))
-        whenever(shutdownConfig.leaderTeardownTimeout()).thenReturn(Duration.ofMillis(50))
-        whenever(shutdownConfig.releaseTimeout()).thenReturn(Duration.ofMillis(50))
-        whenever(shutdownConfig.logInterval()).thenReturn(Duration.ofSeconds(60))
+        whenever(shutdownConfig.drainTimeout()).thenReturn(Duration.ofMillis(200))
 
         coordinator = ShutdownCoordinator(
-            config, leaderManager, taskRepository, meterRegistry,
+            config, participantInstance(), meterRegistry,
         )
     }
 
     // ── Initial state ─────────────────────────────────────────────
 
-    @Test
-    fun `initial state is RUNNING`() {
-        assertEquals(ShutdownState.RUNNING, coordinator.state)
-    }
+    @Nested
+    inner class InitialState {
 
-    @Test
-    fun `isShuttingDown is false initially`() {
-        assertFalse(coordinator.isShuttingDown)
-    }
-
-    @Test
-    fun `drainDeadline is null initially`() {
-        assertNull(coordinator.drainDeadline)
-    }
-
-    // ── In-flight task tracking ─────────────────────────────────
-
-    @Test
-    fun `trackTaskStart and trackTaskEnd update inFlightTasks`() {
-        coordinator.trackTaskStart()
-        coordinator.trackTaskStart()
-        coordinator.trackTaskStart()
-
-        assertEquals(3, coordinator.inFlightTasks)
-
-        coordinator.trackTaskEnd()
-
-        assertEquals(2, coordinator.inFlightTasks)
-    }
-
-    @Test
-    fun `inFlightTasks returns 0 initially`() {
-        assertEquals(0, coordinator.inFlightTasks)
-    }
-
-    // ── trackTaskEnd during drain ──────────────────────────────────
-
-    @Test
-    fun `trackTaskEnd during drain increments completed counter in shutdown metrics`() {
-        whenever(leaderManager.isActive).thenReturn(false)
-        whenever(taskRepository.releaseTasksByPod(podId)).thenReturn(0)
-        whenever(shutdownConfig.drainTimeout()).thenReturn(Duration.ofSeconds(2))
-
-        // Simulate 3 in-flight tasks
-        coordinator.trackTaskStart()
-        coordinator.trackTaskStart()
-        coordinator.trackTaskStart()
-
-        // Complete tasks on a background thread during drain (mirrors production)
-        val thread = Thread {
-            Thread.sleep(50)
-            coordinator.trackTaskEnd()
-            coordinator.trackTaskEnd()
-            coordinator.trackTaskEnd()
-        }
-        thread.start()
-
-        coordinator.onShutdown(ShutdownEvent()) // blocks until drain completes
-        thread.join()
-
-        val counter = meterRegistry.find("taskqueue_shutdown_tasks_completed").counter()
-        assertNotNull(counter)
-        assertEquals(3.0, counter!!.count())
-    }
-
-    @Test
-    fun `trackTaskEnd before shutdown does not increment drain counter`() {
-        whenever(leaderManager.isActive).thenReturn(false)
-        whenever(taskRepository.releaseTasksByPod(podId)).thenReturn(0)
-
-        // Tasks complete while still RUNNING — should NOT count
-        coordinator.trackTaskStart()
-        coordinator.trackTaskEnd()
-        coordinator.trackTaskStart()
-        coordinator.trackTaskEnd()
-
-        coordinator.onShutdown(ShutdownEvent())
-
-        val counter = meterRegistry.find("taskqueue_shutdown_tasks_completed").counter()
-        assertNotNull(counter)
-        assertEquals(0.0, counter!!.count())
-    }
-
-    // ── onShutdown transitions ────────────────────────────────────
-
-    @Test
-    fun `onShutdown transitions through all phases to TERMINATED`() {
-        whenever(leaderManager.isActive).thenReturn(false)
-        whenever(taskRepository.releaseTasksByPod(podId)).thenReturn(0)
-
-        coordinator.onShutdown(ShutdownEvent())
-
-        assertEquals(ShutdownState.TERMINATED, coordinator.state)
-        assertTrue(coordinator.isShuttingDown)
-    }
-
-    @Test
-    fun `onShutdown sets drainDeadline`() {
-        whenever(leaderManager.isActive).thenReturn(false)
-        whenever(taskRepository.releaseTasksByPod(podId)).thenReturn(0)
-
-        coordinator.onShutdown(ShutdownEvent())
-
-        assertNotNull(coordinator.drainDeadline)
-    }
-
-    @Test
-    fun `onShutdown calls leaderManager shutdown`() {
-        whenever(leaderManager.isActive).thenReturn(true)
-        whenever(taskRepository.releaseTasksByPod(podId)).thenReturn(0)
-
-        coordinator.onShutdown(ShutdownEvent())
-
-        runBlocking { verify(leaderManager).shutdown() }
-        assertEquals(ShutdownState.TERMINATED, coordinator.state)
-    }
-
-    @Test
-    fun `onShutdown calls leaderManager shutdown even when not leader`() {
-        whenever(leaderManager.isActive).thenReturn(false)
-        whenever(taskRepository.releaseTasksByPod(podId)).thenReturn(0)
-
-        coordinator.onShutdown(ShutdownEvent())
-
-        // Always called to clean up election scope
-        runBlocking { verify(leaderManager).shutdown() }
-        assertEquals(ShutdownState.TERMINATED, coordinator.state)
-    }
-
-    @Test
-    fun `onShutdown releases tasks via taskRepository`() {
-        whenever(leaderManager.isActive).thenReturn(false)
-        whenever(taskRepository.releaseTasksByPod(podId)).thenReturn(5)
-
-        coordinator.onShutdown(ShutdownEvent())
-
-        verify(taskRepository).releaseTasksByPod(podId)
-    }
-
-    @Test
-    fun `onShutdown records shutdown duration metric`() {
-        whenever(leaderManager.isActive).thenReturn(false)
-        whenever(taskRepository.releaseTasksByPod(podId)).thenReturn(0)
-
-        coordinator.onShutdown(ShutdownEvent())
-
-        val timer = meterRegistry.find("taskqueue_shutdown_duration_seconds").timer()
-        assertNotNull(timer)
-        assertTrue(timer!!.count() > 0)
-    }
-
-    @Test
-    fun `onShutdown tolerates leaderManager shutdown exception`() {
-        whenever(leaderManager.isActive).thenReturn(true)
-        whenever(taskRepository.releaseTasksByPod(podId)).thenReturn(0)
-        runBlocking {
-            whenever(leaderManager.shutdown()).thenThrow(RuntimeException("boom"))
+        @Test
+        fun `initial state is RUNNING`() {
+            assertEquals(ShutdownState.RUNNING, coordinator.state)
         }
 
-        coordinator.onShutdown(ShutdownEvent())
+        @Test
+        fun `isShuttingDown is false initially`() {
+            assertFalse(coordinator.isShuttingDown)
+        }
 
-        assertEquals(ShutdownState.TERMINATED, coordinator.state)
+        @Test
+        fun `drainDeadline is null initially`() {
+            assertNull(coordinator.drainDeadline)
+        }
     }
 
-    @Test
-    fun `onShutdown tolerates taskRepository exception during release`() {
-        whenever(leaderManager.isActive).thenReturn(false)
-        whenever(taskRepository.releaseTasksByPod(podId)).thenThrow(RuntimeException("DB down"))
+    // ── State transitions ─────────────────────────────────────────
 
-        coordinator.onShutdown(ShutdownEvent())
+    @Nested
+    inner class StateTransitions {
 
-        assertEquals(ShutdownState.TERMINATED, coordinator.state)
+        @Test
+        fun `onShutdown transitions to TERMINATED`() {
+            coordinator.onShutdown(ShutdownEvent())
+
+            assertEquals(ShutdownState.TERMINATED, coordinator.state)
+            assertTrue(coordinator.isShuttingDown)
+        }
+
+        @Test
+        fun `onShutdown sets drainDeadline`() {
+            coordinator.onShutdown(ShutdownEvent())
+
+            assertNotNull(coordinator.drainDeadline)
+        }
     }
 
-    @Test
-    fun `onShutdown skips drain when no in-flight tasks`() {
-        whenever(leaderManager.isActive).thenReturn(false)
-        whenever(taskRepository.releaseTasksByPod(podId)).thenReturn(0)
+    // ── Participant orchestration ──────────────────────────────────
 
+    @Nested
+    inner class ParticipantOrchestration {
+
+        @Test
+        fun `calls all participants during shutdown`() {
+            val called1 = AtomicBoolean(false)
+            val called2 = AtomicBoolean(false)
+            val p1 = participant { called1.set(true) }
+            val p2 = participant { called2.set(true) }
+
+            coordinator = ShutdownCoordinator(
+                config, participantInstance(p1, p2), meterRegistry,
+            )
+            coordinator.onShutdown(ShutdownEvent())
+
+            assertTrue(called1.get())
+            assertTrue(called2.get())
+        }
+
+        @Test
+        fun `calls participants in ascending order`() {
+            val callOrder = mutableListOf<Int>()
+            val p0 = participant(order = 0) { callOrder.add(0) }
+            val p1 = participant(order = 1) { callOrder.add(1) }
+            val p2 = participant(order = 2) { callOrder.add(2) }
+
+            // Add out of order to verify sorting
+            coordinator = ShutdownCoordinator(
+                config, participantInstance(p2, p0, p1), meterRegistry,
+            )
+            coordinator.onShutdown(ShutdownEvent())
+
+            assertEquals(listOf(0, 1, 2), callOrder)
+        }
+
+        @Test
+        fun `runs same-order participants concurrently`() {
+            // Uses CompletableDeferred (suspending) instead of CountDownLatch (blocking)
+            // to avoid starving the single-threaded runBlocking dispatcher.
+            // Deadlocks if participants are run sequentially to completion.
+            val p1Started = CompletableDeferred<Unit>()
+            val p2Started = CompletableDeferred<Unit>()
+            val p1 = participant(order = 0) {
+                p1Started.complete(Unit)
+                p2Started.await()
+            }
+            val p2 = participant(order = 0) {
+                p2Started.complete(Unit)
+                p1Started.await()
+            }
+
+            coordinator = ShutdownCoordinator(
+                config, participantInstance(p1, p2), meterRegistry,
+            )
+            coordinator.onShutdown(ShutdownEvent())
+        }
+
+        @Test
+        fun `completes group before starting next`() {
+            val order0Done = AtomicBoolean(false)
+            val p0 = participant(order = 0) {
+                delay(50)
+                order0Done.set(true)
+            }
+            val p1 = participant(order = 1) {
+                assertTrue(order0Done.get(), "Order 0 should have completed before order 1 starts")
+            }
+
+            coordinator = ShutdownCoordinator(
+                config, participantInstance(p1, p0), meterRegistry,
+            )
+            coordinator.onShutdown(ShutdownEvent())
+        }
+    }
+
+    // ── Timeout & error handling ───────────────────────────────────
+
+    @Nested
+    inner class TimeoutAndErrorHandling {
+
+        @Test
+        fun `enforces participant timeout without blocking shutdown`() {
+            val p = participant(order = 0, timeout = Duration.ofMillis(50)) {
+                delay(10_000)
+            }
+
+            coordinator = ShutdownCoordinator(
+                config, participantInstance(p), meterRegistry,
+            )
+            val start = System.currentTimeMillis()
+            coordinator.onShutdown(ShutdownEvent())
+            val elapsed = System.currentTimeMillis() - start
+
+            assertTrue(elapsed < 5000, "Shutdown should not wait for slow participant (took ${elapsed}ms)")
+            assertEquals(ShutdownState.TERMINATED, coordinator.state)
+        }
+
+        @Test
+        fun `participant exception does not prevent other participants in same group`() {
+            val completed = AtomicBoolean(false)
+            val p1 = participant(order = 0) { throw RuntimeException("boom") }
+            val p2 = participant(order = 0) { completed.set(true) }
+
+            coordinator = ShutdownCoordinator(
+                config, participantInstance(p1, p2), meterRegistry,
+            )
+            coordinator.onShutdown(ShutdownEvent())
+
+            assertTrue(completed.get())
+            assertEquals(ShutdownState.TERMINATED, coordinator.state)
+        }
+
+        @Test
+        fun `participant exception does not prevent next group`() {
+            val completed = AtomicBoolean(false)
+            val p0 = participant(order = 0) { throw RuntimeException("boom") }
+            val p1 = participant(order = 1) { completed.set(true) }
+
+            coordinator = ShutdownCoordinator(
+                config, participantInstance(p0, p1), meterRegistry,
+            )
+            coordinator.onShutdown(ShutdownEvent())
+
+            assertTrue(completed.get())
+        }
+
+        @Test
+        fun `timed out participant does not prevent next group`() {
+            val completed = AtomicBoolean(false)
+            val p0 = participant(order = 0, timeout = Duration.ofMillis(50)) {
+                delay(10_000)
+            }
+            val p1 = participant(order = 1) { completed.set(true) }
+
+            coordinator = ShutdownCoordinator(
+                config, participantInstance(p0, p1), meterRegistry,
+            )
+            coordinator.onShutdown(ShutdownEvent())
+
+            assertTrue(completed.get())
+            assertEquals(ShutdownState.TERMINATED, coordinator.state)
+        }
+    }
+
+    // ── Metrics ────────────────────────────────────────────────────
+
+    @Nested
+    inner class Metrics {
+
+        @Test
+        fun `records shutdown duration metric`() {
+            coordinator.onShutdown(ShutdownEvent())
+
+            val timer = meterRegistry.find("taskqueue_shutdown_duration_seconds").timer()
+            assertNotNull(timer)
+            assertTrue(timer!!.count() > 0)
+        }
+
+        @Test
+        fun `exposes shutdown state gauge`() {
+            val gauge = meterRegistry.find("taskqueue_shutdown_state").gauge()
+            assertNotNull(gauge)
+            assertEquals(ShutdownState.RUNNING.ordinal.toDouble(), gauge!!.value())
+
+            coordinator.onShutdown(ShutdownEvent())
+
+            assertEquals(ShutdownState.TERMINATED.ordinal.toDouble(), gauge.value())
+        }
+    }
+
+    // ── Edge cases ────────────────────────────────────────────────
+
+    @Test
+    fun `onShutdown succeeds with no participants`() {
         coordinator.onShutdown(ShutdownEvent())
 
         assertEquals(ShutdownState.TERMINATED, coordinator.state)

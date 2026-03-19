@@ -1,6 +1,7 @@
 package com.mapreduce.leader
 
 import com.mapreduce.config.FrameworkConfig
+import com.mapreduce.shutdown.ShutdownParticipant
 import io.fabric8.kubernetes.client.KubernetesClient
 import io.fabric8.kubernetes.client.extended.leaderelection.LeaderCallbacks
 import io.fabric8.kubernetes.client.extended.leaderelection.LeaderElectionConfigBuilder
@@ -13,13 +14,14 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
 import org.jboss.logging.Logger
+import java.time.Duration
 import java.time.Instant
 
 /**
@@ -38,8 +40,7 @@ class LeaderManager(
     private val config: FrameworkConfig,
     private val kubernetesClient: KubernetesClient,
     private val meterRegistry: MeterRegistry,
-) {
-
+) : ShutdownParticipant {
     private val log = Logger.getLogger(LeaderManager::class.java)
 
     private val _isLeader = MutableStateFlow(false)
@@ -51,7 +52,9 @@ class LeaderManager(
     val token: Long get() = _epoch.value
     val lastHeartbeat: Instant get() = _lastHeartbeat.value
 
-    fun onStart(@Observes ev: StartupEvent) {
+    fun onStart(
+        @Observes ev: StartupEvent,
+    ) {
         if (System.getenv("KUBERNETES_SERVICE_HOST") == null) {
             log.info("Not running in Kubernetes — assuming leader role with synthetic epoch")
             _epoch.value = 1
@@ -64,11 +67,10 @@ class LeaderManager(
         registerMetrics()
     }
 
-    /**
-     * Called by [com.mapreduce.shutdown.ShutdownCoordinator] during leader teardown.
-     * Clears leader flag, awaits election loop completion, and releases the lease.
-     */
-    suspend fun shutdown() {
+    override val shutdownOrder: Int = 0
+    override val shutdownTimeout: Duration get() = config.shutdown().leaderTeardownTimeout()
+
+    override suspend fun shutdown() {
         log.info("Shutting down leader election")
         _isLeader.value = false
         scope.coroutineContext.job.cancelAndJoin()
@@ -82,6 +84,7 @@ class LeaderManager(
             return
         }
         try {
+            // TODO: refactor lease as a separate service
             val leaderCfg = config.leaderElection()
             val leaseApi = kubernetesClient.leases().inNamespace(leaderCfg.namespace())
             val lease = leaseApi.withName(leaderCfg.leaseName()).get()
@@ -124,29 +127,33 @@ class LeaderManager(
         }
     }
 
-    private suspend fun runElection(identity: String, leaderCfg: FrameworkConfig.LeaderElectionConfig) {
+    private suspend fun runElection(
+        identity: String,
+        leaderCfg: FrameworkConfig.LeaderElectionConfig,
+    ) {
         val namespace = leaderCfg.namespace()
         val leaseName = leaderCfg.leaseName()
         val lock = LeaseLock(namespace, leaseName, identity)
 
-        val electionConfig = LeaderElectionConfigBuilder()
-            .withName(leaseName)
-            .withLock(lock)
-            .withLeaseDuration(leaderCfg.leaseDuration())
-            .withRenewDeadline(leaderCfg.renewDeadline())
-            .withRetryPeriod(leaderCfg.retryPeriod())
-            .withLeaderCallbacks(
-                LeaderCallbacks(
-                    { onAcquire(identity, leaderCfg) },
-                    { onLose() },
-                    { _lastHeartbeat.value = Instant.now() },
-                ),
-            )
-            .build()
+        val electionConfig =
+            LeaderElectionConfigBuilder()
+                .withName(leaseName)
+                .withLock(lock)
+                .withLeaseDuration(leaderCfg.leaseDuration())
+                .withRenewDeadline(leaderCfg.renewDeadline())
+                .withRetryPeriod(leaderCfg.retryPeriod())
+                .withLeaderCallbacks(
+                    LeaderCallbacks(
+                        { onAcquire(identity, leaderCfg) },
+                        { onLose() },
+                        { _lastHeartbeat.value = Instant.now() },
+                    ),
+                ).build()
 
         log.debugf("Entering leader election (identity=%s, lease=%s/%s)", identity, namespace, leaseName)
         runInterruptible {
-            kubernetesClient.leaderElector()
+            kubernetesClient
+                .leaderElector()
                 .withConfig(electionConfig)
                 .build()
                 .run()
@@ -155,7 +162,10 @@ class LeaderManager(
 
     // ── Callbacks ──────────────────────────────────────────────────────
 
-    private fun onAcquire(identity: String, leaderCfg: FrameworkConfig.LeaderElectionConfig) {
+    private fun onAcquire(
+        identity: String,
+        leaderCfg: FrameworkConfig.LeaderElectionConfig,
+    ) {
         val epoch = readLeaseTransitions(leaderCfg)
         _epoch.value = epoch
         _isLeader.value = true
@@ -179,19 +189,20 @@ class LeaderManager(
      * Falls back to local increment if the API call fails (should not happen
      * since we just acquired the lease, but defense in depth).
      */
-    private fun readLeaseTransitions(leaderCfg: FrameworkConfig.LeaderElectionConfig): Long {
-        return try {
-            val lease = kubernetesClient.leases()
-                .inNamespace(leaderCfg.namespace())
-                .withName(leaderCfg.leaseName())
-                .get()
+    private fun readLeaseTransitions(leaderCfg: FrameworkConfig.LeaderElectionConfig): Long =
+        try {
+            val lease =
+                kubernetesClient
+                    .leases()
+                    .inNamespace(leaderCfg.namespace())
+                    .withName(leaderCfg.leaseName())
+                    .get()
             val transitions = lease?.spec?.leaseTransitions ?: 0
             transitions.toLong()
         } catch (e: Exception) {
             log.warnf(e, "Failed to read lease transitions — falling back to local increment")
             _epoch.value + 1
         }
-    }
 
     // ── Metrics ────────────────────────────────────────────────────────
 
