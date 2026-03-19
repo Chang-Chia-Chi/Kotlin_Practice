@@ -9,8 +9,6 @@ import java.time.Duration
 import java.time.Instant
 import java.util.UUID
 
-// TODO: check indexes of task table to ensure good query performance
-
 /**
  * Layer 1 persistence — generic task CRUD.
  *

@@ -84,7 +84,6 @@ class LeaderManager(
             return
         }
         try {
-            // TODO: refactor lease as a separate service
             val leaderCfg = config.leaderElection()
             val leaseApi = kubernetesClient.leases().inNamespace(leaderCfg.namespace())
             val lease = leaseApi.withName(leaderCfg.leaseName()).get()

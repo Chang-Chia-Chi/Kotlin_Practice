@@ -8,7 +8,6 @@ import org.eclipse.microprofile.health.HealthCheck
 import org.eclipse.microprofile.health.HealthCheckResponse
 import org.eclipse.microprofile.health.Readiness
 
-// TODO: won't health check of shutdown coordinator cause early exit?
 @Readiness
 @ApplicationScoped
 class ShutdownHealthContributor(
