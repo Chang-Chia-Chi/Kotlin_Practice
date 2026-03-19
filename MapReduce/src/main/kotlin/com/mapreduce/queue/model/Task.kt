@@ -30,7 +30,6 @@ data class Task(
     @ColumnName("created_at") val createdAt: Instant? = null,
     @ColumnName("completed_at") val completedAt: Instant? = null,
     @ColumnName("execution_generation") val claimToken: String? = null,
-    val speculative: Int = 0,
     @ColumnName("last_epoch") val lastEpoch: Long = 0,
     @ColumnName("output_uri") val outputUri: String? = null,
     @ColumnName("output_metadata") val outputMetadata: String? = null,

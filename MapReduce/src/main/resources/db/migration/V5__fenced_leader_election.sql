@@ -8,9 +8,3 @@
 
 -- Map-Reduce Job table (leader writes: status transitions, counter updates)
 ALTER TABLE mr_job ADD last_epoch NUMBER(19) DEFAULT 0 NOT NULL;
-
--- DAG Run table (leader writes: status transitions)
-ALTER TABLE dag_run ADD last_epoch NUMBER(19) DEFAULT 0 NOT NULL;
-
--- DAG Task Instance table (leader writes: status transitions, dispatch)
-ALTER TABLE dag_task_instance ADD last_epoch NUMBER(19) DEFAULT 0 NOT NULL;

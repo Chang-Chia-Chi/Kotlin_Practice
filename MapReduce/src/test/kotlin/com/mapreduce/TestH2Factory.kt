@@ -46,7 +46,6 @@ object TestH2Factory {
             created_at         TIMESTAMP     DEFAULT CURRENT_TIMESTAMP NOT NULL,
             completed_at       TIMESTAMP,
             execution_generation VARCHAR(36),
-            speculative        INT           DEFAULT 0 NOT NULL,
             last_epoch         BIGINT        DEFAULT 0 NOT NULL,
             output_uri         VARCHAR(1000),
             output_metadata    CLOB
