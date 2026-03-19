@@ -35,7 +35,25 @@
       "WebSearch",
       "Bash(./mvnw compile:*)",
       "Bash(./mvnw test:*)",
-      "Bash(./mvnw clean:*)"
+      "Bash(./mvnw clean:*)",
+      "Bash(rm src/main/kotlin/com/mapreduce/mr/orchestrator/MapReduceOrchestrator.kt)",
+      "Bash(rm src/test/kotlin/com/mapreduce/mr/orchestrator/MapReduceOrchestratorTest.kt)",
+      "Bash(rm src/main/kotlin/com/mapreduce/queue/worker/StaleTaskReaper.kt)",
+      "Bash(rm src/test/kotlin/com/mapreduce/queue/worker/StaleTaskReaperTest.kt)",
+      "Bash(xargs grep:*)",
+      "Bash(grep -r \"suspend fun shutdown\\\\|fun shutdown\" /c/Users/maxch/OneDrive/文件/GitHub/Kotlin_Practice/MapReduce/src/main/kotlin --include=*.kt)",
+      "Bash(grep -r \"@Scheduled\\\\|@ApplicationScoped\" /c/Users/maxch/OneDrive/文件/GitHub/Kotlin_Practice/MapReduce/src/main/kotlin --include=*.kt)",
+      "Bash(grep -r \"CoroutineScope\\\\|scope.launch\\\\|scope =\" /c/Users/maxch/OneDrive/文件/GitHub/Kotlin_Practice/MapReduce/src/main/kotlin --include=*.kt)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:javadoc.jetty.org)",
+      "WebFetch(domain:grpc.github.io)",
+      "WebFetch(domain:netty.io)",
+      "WebFetch(domain:arrow-kt.io)",
+      "WebFetch(domain:blog.jetbrains.com)",
+      "WebFetch(domain:link.springer.com)",
+      "Bash(gh api:*)",
+      "Bash(git status:*)",
+      "Bash(./mvnw jacoco:prepare-agent test jacoco:report -X)"
     ]
   }
 }

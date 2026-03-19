@@ -9,6 +9,7 @@ import com.mapreduce.queue.repository.GroupTaskResolution
 import com.mapreduce.queue.repository.TaskGroupRepository
 import com.mapreduce.queue.repository.TaskRepository
 import kotlinx.coroutines.test.runTest
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.mockito.kotlin.any
@@ -179,6 +180,118 @@ class TaskDispatcherTest {
         dispatcher.execute(task)
 
         verify(taskRepository).requeue("task-1", Duration.ofSeconds(2), "gen-1")
+    }
+
+    // ── execute: pipeline exception ────────────────────────────────
+
+    @Test
+    fun `execute catches pipeline exception and routes as Failure`() = runTest {
+        val task = testTask()
+        val handler = mock<com.mapreduce.queue.spi.TaskHandler>()
+        whenever(handler.handlerName).thenReturn(task.handler)
+        whenever(handlerRegistry.resolve(task.handler)).thenReturn(handler)
+        kotlinx.coroutines.runBlocking {
+            whenever(pipeline.execute(any(), any()))
+                .thenThrow(RuntimeException("pipeline exploded"))
+        }
+        whenever(taskGroupRepository.failGroupTask(any(), any(), any(), anyOrNull(), anyOrNull()))
+            .thenReturn(GroupFailResult(taskUpdated = true, deadLettered = false, barrierMet = false))
+
+        dispatcher.execute(task)
+
+        // Should route to Failure path with exception class info
+        verify(taskGroupRepository).failGroupTask(
+            eq("task-1"), eq("group-1"),
+            org.mockito.kotlin.argThat { contains("RuntimeException") && contains("pipeline exploded") },
+            anyOrNull(), eq("gen-1"),
+        )
+    }
+
+    @Test
+    fun `execute catches pipeline exception for non-grouped task`() = runTest {
+        val task = testTask(groupId = null)
+        val handler = mock<com.mapreduce.queue.spi.TaskHandler>()
+        whenever(handler.handlerName).thenReturn(task.handler)
+        whenever(handlerRegistry.resolve(task.handler)).thenReturn(handler)
+        kotlinx.coroutines.runBlocking {
+            whenever(pipeline.execute(any(), any()))
+                .thenThrow(IllegalStateException("bad state"))
+        }
+        whenever(taskRepository.fail(any(), any(), anyOrNull(), anyOrNull())).thenReturn(false)
+
+        dispatcher.execute(task)
+
+        verify(taskRepository).fail(
+            eq("task-1"),
+            org.mockito.kotlin.argThat { contains("IllegalStateException") && contains("bad state") },
+            anyOrNull(), eq("gen-1"),
+        )
+    }
+
+    // ── execute: processResult exception propagation ───────────────
+
+    @Test
+    fun `processResult exception propagates to caller`() = runTest {
+        val task = testTask(groupId = null)
+        stubPipeline(task, TaskResult.Success("done"))
+        whenever(taskRepository.complete(any(), anyOrNull()))
+            .thenThrow(RuntimeException("DB connection lost"))
+
+        val ex = org.junit.jupiter.api.assertThrows<RuntimeException> {
+            dispatcher.execute(task)
+        }
+        assertTrue(ex.message!!.contains("DB connection lost"))
+    }
+
+    // ── execute: Retry(consumeRetry=false) with groupId ────────────
+
+    @Test
+    fun `execute Retry with consumeRetry false and groupId uses requeue not group path`() = runTest {
+        val task = testTask(groupId = "group-1")
+        val retry = TaskResult.Retry(delay = Duration.ofSeconds(3), reason = "cb-requeue", consumeRetry = false)
+        stubPipeline(task, retry)
+
+        dispatcher.execute(task)
+
+        // Must go through taskRepository.requeue, NOT taskGroupRepository
+        verify(taskRepository).requeue("task-1", Duration.ofSeconds(3), "gen-1")
+        verify(taskGroupRepository, org.mockito.kotlin.never()).failGroupTask(any(), any(), any(), anyOrNull(), anyOrNull())
+    }
+
+    // ── execute: Success with outputUri/metadata forwarded ─────────
+
+    @Test
+    fun `execute Success forwards outputUri and metadata to group repository`() = runTest {
+        val task = testTask()
+        stubPipeline(task, TaskResult.Success(
+            output = "result-data",
+            outputUri = "gs://bucket/output.json",
+            outputMetadata = """{"rows":42}""",
+        ))
+        whenever(taskGroupRepository.resolveGroupTask(any(), any(), anyOrNull(), any(), anyOrNull(), anyOrNull()))
+            .thenReturn(GroupTaskResolution(updated = true, barrierMet = false))
+
+        dispatcher.execute(task)
+
+        verify(taskGroupRepository).resolveGroupTask(
+            eq("task-1"), eq("group-1"), eq("gen-1"), eq(false),
+            eq("gs://bucket/output.json"), eq("""{"rows":42}"""),
+        )
+    }
+
+    // ── execute: Retry with null delay ─────────────────────────────
+
+    @Test
+    fun `execute Retry consumeRetry with null delay`() = runTest {
+        val task = testTask(groupId = null)
+        val retry = TaskResult.Retry(delay = null, reason = "throttled", consumeRetry = true)
+        stubPipeline(task, retry)
+        whenever(taskRepository.fail(eq("task-1"), eq("throttled"), eq(null), eq("gen-1")))
+            .thenReturn(false)
+
+        dispatcher.execute(task)
+
+        verify(taskRepository).fail("task-1", "throttled", null, "gen-1")
     }
 
     // ── helpers ───────────────────────────────────────────────────

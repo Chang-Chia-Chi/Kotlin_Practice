@@ -245,7 +245,30 @@
                     <systemPropertyVariables>
                         <java.util.logging.manager>org.jboss.logmanager.LogManager</java.util.logging.manager>
                     </systemPropertyVariables>
+                    <!-- Pass JaCoCo agent argLine to the forked JVM -->
+                    <argLine>@{argLine}</argLine>
                 </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.jacoco</groupId>
+                <artifactId>jacoco-maven-plugin</artifactId>
+                <version>0.8.12</version>
+                <configuration>
+                    <!-- Use temp dir to avoid Unicode path encoding issues -->
+                    <destFile>${java.io.tmpdir}/jacoco-mapreduce.exec</destFile>
+                    <dataFile>${java.io.tmpdir}/jacoco-mapreduce.exec</dataFile>
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>prepare-agent</id>
+                        <goals><goal>prepare-agent</goal></goals>
+                    </execution>
+                    <execution>
+                        <id>report</id>
+                        <phase>test</phase>
+                        <goals><goal>report</goal></goals>
+                    </execution>
+                </executions>
             </plugin>
         </plugins>
     </build>

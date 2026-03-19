@@ -144,6 +144,10 @@ class WorkerLoop(
         _inFlightTasks.incrementAndGet()
         try {
             dispatcher.execute(task)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            log.errorf(e, "Unhandled exception executing task %s — stale reaper will recover", task.taskId)
         } finally {
             _inFlightTasks.decrementAndGet()
         }

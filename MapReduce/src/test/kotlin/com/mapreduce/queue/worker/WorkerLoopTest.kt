@@ -353,5 +353,69 @@ class WorkerLoopTest {
                 verify(taskRepository, atLeast(3)).claim(any(), any())
             }
         }
+
+        @Test
+        fun `dispatcher exception decrements inFlightTasks`() {
+            val claimed = task()
+            whenever(taskRepository.claim("test-pod", listOf("default")))
+                .thenReturn(claimed)
+                .thenReturn(null)
+            runBlocking {
+                whenever(dispatcher.execute(any())).thenAnswer {
+                    throw RuntimeException("handler blew up")
+                }
+            }
+
+            start()
+
+            await.atMost(2, TimeUnit.SECONDS).untilAsserted {
+                verifySuspend { execute(claimed) }
+            }
+            // inFlightTasks must return to 0 even after exception (finally block)
+            await.atMost(2, TimeUnit.SECONDS).untilAsserted {
+                assertEquals(0, workerLoop.inFlightTasks,
+                    "inFlightTasks must decrement even when dispatcher throws")
+            }
+        }
+
+        @Test
+        fun `dispatcher exception on one task does not block subsequent claims`() {
+            val callCount = AtomicInteger(0)
+            whenever(taskRepository.claim("test-pod", listOf("default")))
+                .thenReturn(task())
+            runBlocking {
+                whenever(dispatcher.execute(any())).thenAnswer {
+                    val n = callCount.incrementAndGet()
+                    if (n == 1) throw RuntimeException("first task fails")
+                    // Subsequent tasks succeed
+                    Unit
+                }
+            }
+
+            start()
+
+            // The loop should continue claiming even after the first dispatch failure
+            await.atMost(3, TimeUnit.SECONDS).untilAsserted {
+                assertTrue(callCount.get() >= 2,
+                    "Expected at least 2 dispatch attempts, got ${callCount.get()}")
+            }
+        }
+    }
+
+    // ── Shutdown edge cases ──────────────────────────────────────────
+
+    @Nested
+    inner class ShutdownEdgeCases {
+
+        @Test
+        fun `shutdown before onStart completes immediately`() {
+            // Never call start() — worker not running
+            val startTime = System.currentTimeMillis()
+            runBlocking { workerLoop.shutdown() }
+            val elapsed = System.currentTimeMillis() - startTime
+
+            assertTrue(elapsed < 500, "Shutdown with no running loop should be instant (took ${elapsed}ms)")
+            assertEquals(0, workerLoop.inFlightTasks)
+        }
     }
 }
