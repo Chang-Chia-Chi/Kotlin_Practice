@@ -55,21 +55,20 @@ invariants must hold.
 ## Architecture Overview
 
 ```
-Scheduler tick (every N seconds)
-  └─► CDI Interceptor (@FencedLeader)
-        ├── PRE-CHECK:   is this pod the leader?
-        ├── PROPAGATE:   epoch → ThreadLocal + CoroutineContext
-        ├── EXECUTE:     business logic + fenced repository calls
-        └── POST-CHECK:  still leader? epoch unchanged?
+LeaderManager (K8s Lease-based election)
+  └─► Exposes: isActive (Boolean), token (Long/epoch)
+      Backed by MutableStateFlow — thread-safe, lock-free reads
 
-Repository layer (FencedRepository base)
+Repository layer (direct injection)
+  └─► Reads epoch via leaderManager.token
   └─► SQL:  UPDATE ... SET last_epoch = :epoch
             WHERE id = :id AND last_epoch <= :epoch
-            → 0 rows = StaleEpochException (zombie caught)
+            → 0 rows = zombie caught (stale epoch rejected)
 ```
 
-The interceptor is defense-in-depth. Even if the pre/post checks race with a
-leadership transition, the DB fence is the authoritative gate.
+The DB fence is the authoritative safety gate. Repositories inject
+LeaderManager directly and read the epoch — no interceptor, no ThreadLocal,
+no intermediate propagation layer needed.
 
 ## Integration Points (v2.0)
 
@@ -91,7 +90,6 @@ Read each reference file for the concepts and design rationale behind that layer
 |-------|-----------|-------------|
 | Why fencing works | `references/pattern.md` | Fencing token theory, invariants, safety proof |
 | Leader lifecycle | `references/leader-lifecycle.md` | fabric8 LeaderElector behavior, epoch extraction, threading |
-| Token propagation | `references/token-propagation.md` | Dual-channel design: ThreadLocal + CoroutineContext |
 | Database fence | `references/db-fence.md` | SQL invariant, correct vs incorrect fence, edge cases |
 | Failure scenarios | `references/failure-modes.md` | GC pause, API down, network split, pod crash — per-layer response |
 | Operations | `references/operational.md` | RBAC, health probes, metrics, deployment, timing tuning |
@@ -113,22 +111,17 @@ Read each reference file for the concepts and design rationale behind that layer
    Implements `HealthContributor` for unified health reporting. Exposes `teardown()`
    for the shutdown coordinator.
 
-5. **FencingContext / FencingTokenHolder** — Dual-channel token propagation. The
-   interceptor sets both; downstream code reads whichever fits (sync vs suspend).
-
-6. **@FencedLeader interceptor** — CDI `@AroundInvoke`. Pre-check → propagate →
-   proceed → post-check. Throws `NotLeaderException` on failure.
-
-7. **FencedRepository base class** — Provides `fencedUpdate()` / `fencedBatch()`.
-   Injects epoch from ThreadLocal, checks affected rows, throws `StaleEpochException`
-   on 0 rows.
+5. **Direct epoch injection** — Repositories inject `LeaderManager` and read
+   `leaderManager.token` directly. No interceptor, ThreadLocal, or base class
+   needed. Use `optionalEpoch()` pattern for writes that work with or without
+   a leader context.
 
 8. **Health checks** — Implement `HealthContributor` interface. Liveness: election
    thread alive? Readiness: is leader? (optional). Registered with the Health Probe
    Registry automatically via CDI.
 
-9. **Scheduled job** — `@Scheduled` calls a `@FencedLeader` method. Catch
-   `NotLeaderException` silently on follower pods.
+9. **Scheduled job** — `@Scheduled` methods should check `leaderManager.isActive`
+   before doing leader-only work. Skip silently on follower pods.
 
 ## Common Mistakes
 
@@ -138,19 +131,15 @@ Read each reference file for the concepts and design rationale behind that layer
 2. **Using strict less-than** (`< :epoch`) — This prevents same-epoch re-processing.
    Use `<=` unless you specifically want at-most-once per epoch.
 
-3. **Not catching NotLeaderException in scheduler** — Follower pods call `tick()` too.
-   The exception is expected, not an error.
-
-4. **Hand-rolling lease logic** — fabric8's `LeaderElector` handles create, renew,
+3. **Hand-rolling lease logic** — fabric8's `LeaderElector` handles create, renew,
    conflict (409), expiry, and step-down. Don't reimplement it.
 
-5. **Caching the epoch outside the fenced block** — Always read from the propagation
-   channel (ThreadLocal/CoroutineContext) inside the fenced method. Never capture it
-   in a field.
+4. **Caching the epoch in a field** — Always read from `leaderManager.token` at
+   the point of use. The StateFlow gives a fresh, thread-safe read each time.
 
-6. **Calling LeaderManager.teardown() directly** — Only the shutdown coordinator
-   calls `teardown()`. Other subsystems observe `LeadershipLost` events via the
-   event bus. Direct calls bypass the phase ordering that prevents data races.
+5. **Calling LeaderManager.shutdown() directly** — Only the shutdown coordinator
+   calls it via the ShutdownParticipant interface. Direct calls bypass the phase
+   ordering that prevents data races.
 
 ## When NOT to Use
 
@@ -209,7 +198,7 @@ T=0     Holds lease            Standing by            last_epoch=100
 T=5     (frozen)               Writes #42 (101)       last_epoch=101
 T=7     Wakes, writes #42
         WHERE last_epoch<=100  ← 0 rows! (101 > 100)
-        StaleEpochException    ← zombie caught
+        0 rows → zombie caught!
 ```
 
 ## Safety Invariant
@@ -227,20 +216,18 @@ The fence is safe if and only if these two properties hold:
 Together, these ensure that **at most one leader's writes are accepted for
 any given row at any point in time**.
 
-## Why Three Layers
+## Safety Layers
 
-Each layer catches zombies at a different point in the timeline:
+| Layer | When it catches the zombie | Mechanism |
+|-------|---------------------------|-----------|
+| `leaderManager.isActive` check | Before work begins | Fast-fail (optional, in caller code) |
+| Status guards (`WHERE status = 'CLAIMED'`) | At the moment of each write | Idempotency |
+| Version CAS (`WHERE version = :expected`) | At the moment of each write | Optimistic locking |
+| DB fence (`WHERE last_epoch <= :epoch`) | At the moment of each write | Epoch monotonicity |
 
-| Layer | When it catches the zombie | Latency |
-|-------|---------------------------|---------|
-| Pre-check (interceptor) | Before any work begins | Immediate |
-| Post-check (interceptor) | After work completes, before returning | Immediate |
-| DB fence (SQL WHERE) | At the moment of each write | Atomic |
-
-The pre/post checks are optimizations — they avoid wasted work. The DB fence
-is the **only layer that provides actual safety**, because it's the only one
-that's atomic with the data mutation. The interceptor checks can race with
-leadership transitions; the SQL WHERE cannot.
+The DB fence, status guards, and version CAS are all atomic with the data
+mutation. Each is independently sufficient for correctness. Together they
+provide defense-in-depth.
 
 ## Token Source: Why resourceVersion
 
@@ -567,102 +554,52 @@ observes `StartupEvent`.
 
 # Token Propagation
 
-## The Problem
+## Design: Direct Injection
 
-The interceptor knows the fencing epoch. The repository needs it for SQL
-writes. These are separated by multiple layers of business logic. How does
-the token travel from interceptor to repository without polluting every
-method signature with an `epoch: Long` parameter?
+Repositories that need the fencing epoch inject `LeaderManager` directly
+and read `leaderManager.token`. No interceptor, ThreadLocal, or intermediate
+propagation layer is needed.
 
-## Dual-Channel Design
+```kotlin
+@ApplicationScoped
+class TaskGroupRepository(
+    private val jdbi: Jdbi,
+    private val leaderManager: LeaderManager,
+) {
+    private fun optionalEpoch(): Long? =
+        if (leaderManager.isActive) leaderManager.token else null
+}
+```
 
-Two propagation channels cover both calling conventions in a Kotlin/Quarkus app:
+`LeaderManager.token` is backed by a `MutableStateFlow<Long>` — thread-safe,
+lock-free reads from any thread or coroutine, no propagation concerns.
 
-### Channel 1: ThreadLocal (for synchronous JDBI)
+## Why Direct Injection Over ThreadLocal/Interceptor
 
-A `FencingTokenHolder` object wrapping a `ThreadLocal<Long>`.
+The previous design used a CDI interceptor (`@FencedLeader`) to set the epoch
+in a ThreadLocal, which repositories then read. This was removed because:
 
-- **Set by**: the interceptor, before `ctx.proceed()`.
-- **Read by**: `FencingRepository.fencedUpdate()` via `FencingTokenHolder.require()`.
-- **Cleared by**: the interceptor, in a `finally` block after `ctx.proceed()`.
+1. **ThreadLocal breaks coroutines** — suspend functions can resume on a
+   different thread, losing the value.
+2. **Unnecessary indirection** — `LeaderManager` is an `@ApplicationScoped`
+   bean. Any repository can inject it directly.
+3. **The interceptor was never used** — `@FencedLeader` was never applied
+   to any method in production. The safety came from status guards, version
+   CAS, and execution_generation fencing, not the interceptor.
 
-Why ThreadLocal works: JDBI's `withHandle` executes on the calling thread.
-As long as the interceptor sets the token before proceeding and the repository
-reads it within the same call stack, the value is available.
+## Optional Fencing Pattern
 
-Key methods:
-- `set(epoch)` / `clear()` — raw access.
-- `require(): Long` — returns epoch or throws if not set (fail-fast for
-  programming errors).
-- `get(): Long?` — nullable variant for optional fencing.
-- `withToken(epoch) { ... }` — sets, executes block, clears in finally.
-  This is what the interceptor should use.
+Use `optionalEpoch()` for writes that should include the epoch guard when
+available but still work without it (e.g., methods called by both leader
+and non-leader paths):
 
-### Channel 2: CoroutineContext Element (for suspend functions)
-
-A `FencingContext` class extending `AbstractCoroutineContextElement`.
-
-- **Set by**: the interceptor, wrapping `ctx.proceed()` in
-  `runBlocking(FencingContext(epoch)) { ... }`.
-- **Read by**: any suspend function via `FencingContext.current()`.
-- **Lifetime**: scoped to the coroutine — no manual cleanup needed.
-
-Why a CoroutineContext element: if business logic uses `suspend` functions
-or launches child coroutines, ThreadLocal won't propagate across suspension
-points. A CoroutineContext element travels with the coroutine automatically.
-
-Key design:
-- Companion object implements `CoroutineContext.Key<FencingContext>` for
-  type-safe lookup.
-- `current()` is a `suspend` function that reads from `coroutineContext[Key]`
-  and throws if absent.
-
-## Why Both Channels?
-
-| Scenario | ThreadLocal | CoroutineContext |
-|----------|-------------|-----------------|
-| Synchronous JDBI call | ✅ works | ❌ not in a coroutine |
-| Suspend function chain | ❌ lost at suspension | ✅ propagated |
-| `runBlocking` bridge | ✅ same thread | ✅ in scope |
-| `withContext(Dispatchers.IO)` | ❌ different thread | ✅ propagated |
-
-The interceptor sets BOTH, so downstream code picks whichever fits. In
-practice, most Quarkus/JDBI repository code is synchronous and uses the
-ThreadLocal path. The coroutine path is there for reactive or Flow-based
-processing pipelines.
-
-## Interceptor Wiring (Conceptual)
-
-The `@FencedLeader` interceptor's `@AroundInvoke` method does this:
-
-1. Pre-check `manager.isActive()` → throw `NotLeaderException` if false.
-2. Read `epoch = manager.getToken()`.
-3. Execute the method body inside `FencingTokenHolder.withToken(epoch)` AND
-   `runBlocking(FencingContext(epoch))`.
-4. Post-check `manager.isActive()` → throw if leadership was lost during execution.
-5. Post-check `manager.getToken() == epoch` → warn if epoch changed (but don't
-   throw, because the DB fence already protected individual writes).
-
-The post-check detects GC pauses: if the JVM was frozen for 15+ seconds, the
-Lease expired, a new leader was elected, and `isActive()` is now false. The
-interceptor discards the result and throws, preventing the caller from trusting
-stale output. But the real safety comes from the DB fence on each individual
-write — the post-check is a courtesy.
-
-## Anti-Patterns
-
-- **Passing epoch as a method parameter** — Pollutes every interface. The
-  ThreadLocal/CoroutineContext approach keeps it invisible to business logic.
-
-- **Storing epoch in a CDI RequestScoped bean** — Works for JAX-RS requests
-  but not for `@Scheduled` methods, which have no request scope.
-
-- **Using MDC** — Technically works (it's a ThreadLocal), but MDC is for
-  logging context, not application logic. Semantic mismatch.
-
-- **Forgetting to clear the ThreadLocal** — If `ctx.proceed()` throws, the
-  ThreadLocal must still be cleared. Always use `withToken()` which has a
-  `finally` block, or wrap in try/finally manually.
+```kotlin
+val epoch = optionalEpoch()
+val epochClause = if (epoch != null) " AND last_epoch <= :epoch" else ""
+val epochSet = if (epoch != null) ", last_epoch = :epoch" else ""
+// ... build SQL with conditional epoch guards
+if (epoch != null) update.bind("epoch", epoch)
+```
 
 
 ---
@@ -779,16 +716,13 @@ After executing a fenced UPDATE, check the affected row count:
 
 - **1 (or more)**: Write succeeded. The epoch was fresh.
 - **0**: Write rejected. Either the row doesn't exist, or a higher epoch
-  already wrote to it. In the fencing context, treat 0 as
-  `StaleEpochException` — the zombie is caught.
+  already wrote to it. In the fencing context, 0 rows means a zombie
+  was caught.
 
-The repository base class (`FencedRepository`) should encapsulate this
-check. Provide two helpers:
-
-- `fencedUpdate(sql, binder)` — executes one fenced statement, reads epoch
-  from ThreadLocal, throws StaleEpochException on 0 rows.
-- `fencedBatch(items, sql, binder)` — iterates items, fails fast on first
-  0-row result.
+The repository should check affected rows after each fenced write. For
+leader-only writes, 0 rows means a stale epoch was rejected. For writes
+that use `optionalEpoch()`, 0 rows may also indicate a status guard
+rejection (normal idempotent behavior).
 
 ## Reads Don't Need Fencing
 
@@ -805,7 +739,7 @@ loses its lease mid-transaction, some tables may be stamped and others not.
 Options:
 
 1. **Wrap in a DB transaction** — all-or-nothing. If any fenced write
-   throws StaleEpochException, roll back the entire transaction.
+   a fenced write gets 0 rows, roll back the entire transaction.
 
 2. **Idempotent per-row** — design each row's update to be idempotent
    so partial application is harmless on retry by the new leader.
@@ -848,9 +782,7 @@ and another pod acquires it with a higher resourceVersion.
 |-------|----------|
 | K8s Lease | Expires. fabric8's renewal loop can't run during GC. |
 | fabric8 LeaderElector | When the JVM unfreezes, the next renewal attempt fails → `onStopLeading()` fires → `isActive()` returns false. |
-| Interceptor pre-check | If the scheduler ticks after `onStopLeading()`, the pre-check catches it. But if the method was **already executing** when GC started, the pre-check already passed. |
-| Interceptor post-check | After the method returns, checks `isActive()`. If leadership was lost during execution, throws `NotLeaderException`. |
-| Event bus | `LeadershipLost` fires when JVM unfreezes. Orchestration loops are cancelled. |
+| `isActive` check | If the scheduler ticks after `onStopLeading()`, the check catches it. If the method was **already executing** when GC started, the check already passed. |
 | DB fence | The zombie's epoch (e.g., 100) is lower than the new leader's epoch (e.g., 101). `WHERE last_epoch <= 100` fails because the new leader already stamped the row with 101. **Write rejected.** |
 
 **Net outcome**: Safe. The zombie's writes are rejected at the DB level even
@@ -926,25 +858,21 @@ this gap by explicitly releasing the lease — see §Graceful Shutdown.
 
 ---
 
-## Scenario 5: Interceptor Post-Check Race
+## Scenario 5: Leadership Lost During Execution
 
 **What happens**: The leader finishes executing a fenced method. Between the
-last DB write and the interceptor's post-check, leadership transitions to
-a new pod.
+last DB write and returning, leadership transitions to a new pod.
 
 **Layer responses**:
 
 | Layer | Response |
 |-------|----------|
-| Interceptor post-check | Detects `isActive()` is false. Throws `NotLeaderException`. |
 | DB fence | All writes already committed with the (at-the-time valid) epoch. |
+| `isActive` | Returns false — caller may detect leadership loss. |
 
-**Net outcome**: The writes are already committed and valid. The post-check
-throwing just means the caller won't see a successful return. This is a
-**false alarm** — the work was done correctly. The caller (scheduler) should
-treat this as a retryable failure. The new leader may re-process the same
-items, which is fine if the fenced writes made them non-retryable (e.g.,
-status changed from PENDING to PROCESSED).
+**Net outcome**: The writes are already committed and valid. The new leader
+may re-process the same items, which is fine if the fenced writes made them
+non-retryable (e.g., status changed from PENDING to PROCESSED).
 
 ---
 
@@ -982,7 +910,7 @@ node drain). The shutdown coordinator drives Phase 1 leader teardown.
 | LeaderManager.teardown() | Sets `isActive()=false`. Fires `LeadershipLost`. Explicitly releases the K8s Lease by clearing holderIdentity. Shuts down the election executor. |
 | Orchestration loops | Observe `LeadershipLost` event (or are cancelled by the shutdown coordinator cancelling the leader scope). Stop within the 5s leader teardown timeout. |
 | Other pods | Detect the released Lease within one `retryPeriod` (~2s). A new leader acquires almost immediately. No leadership gap from planned shutdowns. |
-| In-flight fenced methods | If a `@FencedLeader` method is executing when teardown starts, the post-check will detect `isActive()=false` and throw. The DB fence protects individual writes regardless. |
+| In-flight fenced writes | Any writes still executing will be protected by the DB fence. The epoch guard ensures stale writes are rejected regardless of shutdown timing. |
 
 **Net outcome**: Near-zero leadership gap. The new leader acquires within
 seconds of the old leader releasing, compared to up to `leaseDuration` (15s)
@@ -1117,16 +1045,8 @@ Four useful metrics for dashboarding and alerting:
 2. **`leader_election_epoch`** (gauge) — current fencing token. Useful for
    correlating with DB audit queries.
 
-3. **`leader_election_fenced_writes_total`** (counter) — total fenced write
-   attempts. Shows throughput.
-
-4. **`leader_election_fenced_writes_rejected`** (counter) — fenced writes
-   rejected (0 rows). A non-zero value means a zombie was caught. Alert on
-   any increment — it indicates a split-brain event occurred.
-
-Requires `quarkus-micrometer-registry-prometheus`. Register gauges that
-read from `LeaderManager.isActive()` and `getToken()`. Register counters
-that the `FencedRepository` increments.
+Requires `quarkus-micrometer-registry-prometheus`. Gauges are registered
+in `LeaderManager.registerMetrics()` reading from `isActive` and `token`.
 
 **Integration with Handler Execution Pipeline (v2.0):** The metrics middleware
 in the pipeline records per-handler execution metrics. Leader election metrics

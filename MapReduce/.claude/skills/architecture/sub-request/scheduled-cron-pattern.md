@@ -12,7 +12,7 @@
 
 The framework's task queue processes tasks that are enqueued explicitly. But many workloads need to run on a schedule: hourly data syncs, daily report generation, nightly cleanup, periodic health checks against external systems.
 
-Quarkus already has `@Scheduled` for cron-like execution. But `@Scheduled` runs on every pod simultaneously. In a 3-pod deployment, a scheduled job fires 3 times. Combined with the fenced leader interceptor (`@FencedLeader`), only the leader's execution proceeds — the other two throw `NotLeaderException` silently. This works but has drawbacks:
+Quarkus already has `@Scheduled` for cron-like execution. But `@Scheduled` runs on every pod simultaneously. In a 3-pod deployment, a scheduled job fires 3 times. With a `leaderManager.isActive` guard, only the leader's execution proceeds — the other two skip silently. This works but has drawbacks:
 
 - **Wasted computation.** Two pods do the pre-check dance every tick.
 - **No retry.** If the leader's execution fails, there's no retry until the next cron tick.

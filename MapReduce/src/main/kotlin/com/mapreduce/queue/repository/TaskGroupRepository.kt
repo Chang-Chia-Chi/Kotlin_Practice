@@ -1,6 +1,6 @@
 package com.mapreduce.queue.repository
 
-import com.mapreduce.leader.FencedRepository
+import com.mapreduce.leader.LeaderManager
 import com.mapreduce.queue.model.EnqueueRequest
 import com.mapreduce.queue.model.GroupStatus
 import com.mapreduce.queue.model.TaskGroup
@@ -55,10 +55,18 @@ data class GroupFailResult(
  */
 @ApplicationScoped
 class TaskGroupRepository(
-    jdbi: Jdbi,
-) : FencedRepository(jdbi) {
+    private val jdbi: Jdbi,
+    private val leaderManager: LeaderManager,
+) {
 
     private val log = Logger.getLogger(TaskGroupRepository::class.java)
+
+    /**
+     * Read the current fencing epoch from [LeaderManager], or null if not leader.
+     * Used for optional defense-in-depth epoch guards in leader-only writes.
+     */
+    private fun optionalEpoch(): Long? =
+        if (leaderManager.isActive) leaderManager.token else null
 
     /**
      * Atomic fan-out: insert task_group row + N tasks in one transaction.
