@@ -25,7 +25,6 @@ class ShutdownHealthContributor(
                 .down()
                 .withData("state", state.name)
                 .withData("inFlightTasks", workerLoop.inFlightTasks.toString())
-                .withData("drainDeadline", shutdownCoordinator.drainDeadline?.toString() ?: "N/A")
                 .build()
         }
     }

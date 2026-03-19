@@ -24,7 +24,7 @@ interface FrameworkConfig {
         @WithDefault("4")
         fun bulkheadSize(): Int
 
-        @WithDefault("local-worker")
+        @WithDefault("\${HOSTNAME:local-worker}")
         fun id(): String
 
         @WithDefault("default,mr")

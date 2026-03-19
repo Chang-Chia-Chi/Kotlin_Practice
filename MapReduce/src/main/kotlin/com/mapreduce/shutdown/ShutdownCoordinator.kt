@@ -1,6 +1,5 @@
 package com.mapreduce.shutdown
 
-import com.mapreduce.config.FrameworkConfig
 import io.micrometer.core.instrument.MeterRegistry
 import io.quarkus.runtime.ShutdownEvent
 import jakarta.enterprise.context.ApplicationScoped
@@ -27,21 +26,16 @@ import java.util.concurrent.atomic.AtomicReference
  */
 @ApplicationScoped
 class ShutdownCoordinator(
-    private val config: FrameworkConfig,
     private val participants: Instance<ShutdownParticipant>,
     private val meterRegistry: MeterRegistry,
 ) {
     private val log = Logger.getLogger(ShutdownCoordinator::class.java)
-    private val podId = config.worker().id()
+    private val podId = System.getenv("HOSTNAME") ?: "local-worker"
 
     private val _state = AtomicReference(ShutdownState.RUNNING)
 
     val state: ShutdownState get() = _state.get()
     val isShuttingDown: Boolean get() = _state.get() != ShutdownState.RUNNING
-
-    @Volatile
-    private var _drainDeadline: Instant? = null
-    val drainDeadline: Instant? get() = _drainDeadline
 
     init {
         meterRegistry.gauge("taskqueue_shutdown_state", this) { it.state.ordinal.toDouble() }
@@ -52,9 +46,8 @@ class ShutdownCoordinator(
     ) = runBlocking {
         val shutdownStart = Instant.now()
 
-        _drainDeadline = Instant.now().plus(config.shutdown().drainTimeout())
         _state.set(ShutdownState.DRAINING)
-        log.infof("Shutdown initiated. Drain deadline: %s", drainDeadline)
+        log.info("Shutdown initiated")
 
         // Run participants grouped by order (lower first, concurrent within group)
         participants

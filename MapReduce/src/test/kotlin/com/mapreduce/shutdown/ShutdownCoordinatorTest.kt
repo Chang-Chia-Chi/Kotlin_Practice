@@ -1,6 +1,5 @@
 package com.mapreduce.shutdown
 
-import com.mapreduce.config.FrameworkConfig
 import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import io.quarkus.runtime.ShutdownEvent
@@ -10,7 +9,6 @@ import kotlinx.coroutines.delay
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNotNull
-import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Nested
@@ -18,19 +16,12 @@ import org.junit.jupiter.api.Test
 import org.mockito.kotlin.mock
 import org.mockito.kotlin.whenever
 import java.time.Duration
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 class ShutdownCoordinatorTest {
 
-    private lateinit var config: FrameworkConfig
-    private lateinit var shutdownConfig: FrameworkConfig.ShutdownConfig
-    private lateinit var workerConfig: FrameworkConfig.WorkerConfig
     private lateinit var meterRegistry: MeterRegistry
     private lateinit var coordinator: ShutdownCoordinator
-
-    private val podId = "test-pod-1"
 
     private fun participantInstance(vararg participants: ShutdownParticipant): Instance<ShutdownParticipant> {
         val instance = mock<Instance<ShutdownParticipant>>()
@@ -50,18 +41,10 @@ class ShutdownCoordinatorTest {
 
     @BeforeEach
     fun setUp() {
-        config = mock<FrameworkConfig>()
-        shutdownConfig = mock<FrameworkConfig.ShutdownConfig>()
-        workerConfig = mock<FrameworkConfig.WorkerConfig>()
         meterRegistry = SimpleMeterRegistry()
 
-        whenever(config.shutdown()).thenReturn(shutdownConfig)
-        whenever(config.worker()).thenReturn(workerConfig)
-        whenever(workerConfig.id()).thenReturn(podId)
-        whenever(shutdownConfig.drainTimeout()).thenReturn(Duration.ofMillis(200))
-
         coordinator = ShutdownCoordinator(
-            config, participantInstance(), meterRegistry,
+            participantInstance(), meterRegistry,
         )
     }
 
@@ -80,10 +63,6 @@ class ShutdownCoordinatorTest {
             assertFalse(coordinator.isShuttingDown)
         }
 
-        @Test
-        fun `drainDeadline is null initially`() {
-            assertNull(coordinator.drainDeadline)
-        }
     }
 
     // ── State transitions ─────────────────────────────────────────
@@ -97,13 +76,6 @@ class ShutdownCoordinatorTest {
 
             assertEquals(ShutdownState.TERMINATED, coordinator.state)
             assertTrue(coordinator.isShuttingDown)
-        }
-
-        @Test
-        fun `onShutdown sets drainDeadline`() {
-            coordinator.onShutdown(ShutdownEvent())
-
-            assertNotNull(coordinator.drainDeadline)
         }
     }
 
@@ -120,7 +92,7 @@ class ShutdownCoordinatorTest {
             val p2 = participant { called2.set(true) }
 
             coordinator = ShutdownCoordinator(
-                config, participantInstance(p1, p2), meterRegistry,
+                participantInstance(p1, p2), meterRegistry,
             )
             coordinator.onShutdown(ShutdownEvent())
 
@@ -137,7 +109,7 @@ class ShutdownCoordinatorTest {
 
             // Add out of order to verify sorting
             coordinator = ShutdownCoordinator(
-                config, participantInstance(p2, p0, p1), meterRegistry,
+                participantInstance(p2, p0, p1), meterRegistry,
             )
             coordinator.onShutdown(ShutdownEvent())
 
@@ -161,7 +133,7 @@ class ShutdownCoordinatorTest {
             }
 
             coordinator = ShutdownCoordinator(
-                config, participantInstance(p1, p2), meterRegistry,
+                participantInstance(p1, p2), meterRegistry,
             )
             coordinator.onShutdown(ShutdownEvent())
         }
@@ -178,7 +150,7 @@ class ShutdownCoordinatorTest {
             }
 
             coordinator = ShutdownCoordinator(
-                config, participantInstance(p1, p0), meterRegistry,
+                participantInstance(p1, p0), meterRegistry,
             )
             coordinator.onShutdown(ShutdownEvent())
         }
@@ -196,7 +168,7 @@ class ShutdownCoordinatorTest {
             }
 
             coordinator = ShutdownCoordinator(
-                config, participantInstance(p), meterRegistry,
+                participantInstance(p), meterRegistry,
             )
             val start = System.currentTimeMillis()
             coordinator.onShutdown(ShutdownEvent())
@@ -213,7 +185,7 @@ class ShutdownCoordinatorTest {
             val p2 = participant(order = 0) { completed.set(true) }
 
             coordinator = ShutdownCoordinator(
-                config, participantInstance(p1, p2), meterRegistry,
+                participantInstance(p1, p2), meterRegistry,
             )
             coordinator.onShutdown(ShutdownEvent())
 
@@ -228,7 +200,7 @@ class ShutdownCoordinatorTest {
             val p1 = participant(order = 1) { completed.set(true) }
 
             coordinator = ShutdownCoordinator(
-                config, participantInstance(p0, p1), meterRegistry,
+                participantInstance(p0, p1), meterRegistry,
             )
             coordinator.onShutdown(ShutdownEvent())
 
@@ -244,7 +216,7 @@ class ShutdownCoordinatorTest {
             val p1 = participant(order = 1) { completed.set(true) }
 
             coordinator = ShutdownCoordinator(
-                config, participantInstance(p0, p1), meterRegistry,
+                participantInstance(p0, p1), meterRegistry,
             )
             coordinator.onShutdown(ShutdownEvent())
 
