@@ -63,6 +63,10 @@ interface FrameworkConfig {
 
     /** Graceful shutdown phase timeouts. */
     interface ShutdownConfig {
+        @WithName("global-timeout")
+        @WithDefault("90S")
+        fun globalTimeout(): Duration
+
         @WithName("drain-timeout")
         @WithDefault("60S")
         fun drainTimeout(): Duration
