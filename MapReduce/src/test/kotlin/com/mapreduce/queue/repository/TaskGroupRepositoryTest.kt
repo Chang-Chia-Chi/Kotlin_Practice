@@ -1,6 +1,7 @@
 package com.mapreduce.queue.repository
 
 import com.mapreduce.TestH2Factory
+import com.mapreduce.leader.LeaderManager
 import com.mapreduce.queue.model.EnqueueRequest
 import com.mapreduce.queue.model.GroupStatus
 import com.mapreduce.queue.model.TaskGroup
@@ -14,6 +15,8 @@ import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
+import org.mockito.kotlin.mock
+import org.mockito.kotlin.whenever
 import java.time.Duration
 import java.time.Instant
 
@@ -27,7 +30,9 @@ class TaskGroupRepositoryTest {
     fun setUp() {
         jdbi = TestH2Factory.create()
         taskRepo = TaskRepository(jdbi)
-        groupRepo = TaskGroupRepository(jdbi)
+        val leaderManager = mock<LeaderManager>()
+        whenever(leaderManager.isActive).thenReturn(false)
+        groupRepo = TaskGroupRepository(jdbi, leaderManager)
     }
 
     // ── helpers ──────────────────────────────────────────────────────────

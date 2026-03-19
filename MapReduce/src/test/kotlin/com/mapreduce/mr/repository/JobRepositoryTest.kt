@@ -1,6 +1,7 @@
 package com.mapreduce.mr.repository
 
 import com.mapreduce.TestH2Factory
+import com.mapreduce.leader.LeaderManager
 import com.mapreduce.queue.model.EnqueueRequest
 import com.mapreduce.queue.model.GroupStatus
 import com.mapreduce.queue.model.TaskGroup
@@ -15,6 +16,8 @@ import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
+import org.mockito.kotlin.mock
+import org.mockito.kotlin.whenever
 
 class JobRepositoryTest {
 
@@ -24,7 +27,9 @@ class JobRepositoryTest {
     @BeforeEach
     fun setUp() {
         jdbi = TestH2Factory.create()
-        repo = TaskGroupRepository(jdbi)
+        val leaderManager = mock<LeaderManager>()
+        whenever(leaderManager.isActive).thenReturn(false)
+        repo = TaskGroupRepository(jdbi, leaderManager)
     }
 
     // ── submitGroup ───────────────────────────────────────────────
