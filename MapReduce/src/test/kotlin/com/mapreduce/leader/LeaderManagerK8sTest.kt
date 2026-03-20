@@ -17,7 +17,10 @@ import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
+import org.mockito.Mockito.RETURNS_DEEP_STUBS
+import org.mockito.kotlin.atLeast
 import org.mockito.kotlin.mock
+import org.mockito.kotlin.verify
 import org.mockito.kotlin.whenever
 import java.time.Duration
 import java.util.concurrent.TimeUnit
@@ -183,6 +186,65 @@ class LeaderManagerK8sTest {
         invokeReleaseLeaseExplicitly(brokenManager)
 
         assertFalse(brokenManager.isActive)
+    }
+
+    // ── electionLoop retry paths ─────────────────────────────────────
+
+    @Test
+    fun `electionLoop retries after runElection throws`() {
+        val failingClient = mock<KubernetesClient>()
+        whenever(failingClient.leaderElector()).thenThrow(RuntimeException("API unavailable"))
+
+        val fastConfig = createFastRetryConfig()
+        val mgr = LeaderManager(fastConfig, failingClient, SimpleMeterRegistry())
+        mgr.onStart(StartupEvent())
+
+        // Wait for at least 2 retry cycles — proves error path + delay + loop-back
+        await.atMost(5, TimeUnit.SECONDS).untilAsserted {
+            verify(failingClient, atLeast(2)).leaderElector()
+        }
+
+        assertFalse(mgr.isActive)
+        runBlocking { mgr.shutdown() }
+    }
+
+    @Test
+    fun `electionLoop retries after runElection returns normally`() {
+        // Deep stubs: leaderElector().withConfig(any()).build().run() all return mocks;
+        // run() is void so it returns immediately, simulating a normal election exit.
+        val stubbedClient = mock<KubernetesClient>(defaultAnswer = RETURNS_DEEP_STUBS)
+
+        val fastConfig = createFastRetryConfig()
+        val mgr = LeaderManager(fastConfig, stubbedClient, SimpleMeterRegistry())
+        mgr.onStart(StartupEvent())
+
+        // Wait for at least 2 cycles — proves normal-return path + "will retry" + delay + loop-back
+        await.atMost(5, TimeUnit.SECONDS).untilAsserted {
+            verify(stubbedClient, atLeast(2)).leaderElector()
+        }
+
+        runBlocking { mgr.shutdown() }
+    }
+
+    private fun createFastRetryConfig(): FrameworkConfig {
+        val cfg = mock<FrameworkConfig>()
+        val workerCfg = mock<FrameworkConfig.WorkerConfig>()
+        whenever(cfg.worker()).thenReturn(workerCfg)
+        whenever(workerCfg.id()).thenReturn("test-pod-1")
+
+        val leaderCfg = mock<FrameworkConfig.LeaderElectionConfig>()
+        whenever(cfg.leaderElection()).thenReturn(leaderCfg)
+        whenever(leaderCfg.namespace()).thenReturn("default")
+        whenever(leaderCfg.leaseName()).thenReturn("test-lease")
+        whenever(leaderCfg.leaseDuration()).thenReturn(Duration.ofSeconds(15))
+        whenever(leaderCfg.renewDeadline()).thenReturn(Duration.ofSeconds(10))
+        whenever(leaderCfg.retryPeriod()).thenReturn(Duration.ofMillis(100))
+
+        val shutdownCfg = mock<FrameworkConfig.ShutdownConfig>()
+        whenever(cfg.shutdown()).thenReturn(shutdownCfg)
+        whenever(shutdownCfg.leaderTeardownTimeout()).thenReturn(Duration.ofSeconds(5))
+
+        return cfg
     }
 
     // ── Reflection helpers ──────────────────────────────────────────
