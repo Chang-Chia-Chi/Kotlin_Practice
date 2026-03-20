@@ -84,6 +84,9 @@ class StaleTaskReaper(
             }
         }
 
+        // Fail ACTIVE groups that have exceeded their deadline
+        val expiredCount = reapExpiredGroups()
+
         val scanDurationNanos = System.nanoTime() - scanStart
         meterRegistry.timer("taskqueue.reaper.scan_duration")
             .record(Duration.ofNanos(scanDurationNanos))
@@ -95,5 +98,21 @@ class StaleTaskReaper(
         if (deadLetteredCount > 0) {
             meterRegistry.counter("taskqueue.reaper.dead_lettered").increment(deadLetteredCount.toDouble())
         }
+        if (expiredCount > 0) {
+            meterRegistry.counter("taskqueue.reaper.groups_expired").increment(expiredCount.toDouble())
+        }
+    }
+
+    /**
+     * Bulk-fail ACTIVE groups whose [deadline_at] has passed.
+     * This prevents groups from stalling indefinitely when tasks are perpetually
+     * requeued without consuming retries (e.g., repeated shutdown-aware timeouts).
+     */
+    private fun reapExpiredGroups(): Int {
+        val count = taskGroupRepository.failExpiredGroups(Instant.now())
+        if (count > 0) {
+            log.warnf("Failed %d group(s) past their deadline", count)
+        }
+        return count
     }
 }

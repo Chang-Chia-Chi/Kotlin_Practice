@@ -11,6 +11,7 @@ import java.nio.file.Path
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
+import org.junit.jupiter.api.assertThrows
 
 class LocalBlobStoreTest {
 
@@ -101,5 +102,26 @@ class LocalBlobStoreTest {
         val uri = store.write("test-job-1", "task-ph", 7, flowOf("x"))
 
         assertTrue(uri.contains("task-ph_p7.ndjson"))
+    }
+
+    @Test
+    fun `write rejects path traversal in jobId`() = runTest {
+        assertThrows<IllegalArgumentException> {
+            store.write("../escape", "task-1", 0, flowOf("x"))
+        }
+    }
+
+    @Test
+    fun `write rejects path traversal in taskId`() = runTest {
+        assertThrows<IllegalArgumentException> {
+            store.write("job-1", "../../etc/passwd", 0, flowOf("x"))
+        }
+    }
+
+    @Test
+    fun `deleteJob rejects path traversal`() = runTest {
+        assertThrows<IllegalArgumentException> {
+            store.deleteJob("../escape")
+        }
     }
 }

@@ -8,6 +8,7 @@ import com.mapreduce.queue.repository.TaskRepository
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.BeforeEach
+import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
 import org.mockito.kotlin.any
 import org.mockito.kotlin.eq
@@ -40,6 +41,9 @@ class StaleTaskReaperTest {
         taskGroupRepository = mock<TaskGroupRepository>()
 
         meterRegistry = SimpleMeterRegistry()
+
+        // Default: no expired groups
+        whenever(taskGroupRepository.failExpiredGroups(any())).thenReturn(0)
 
         reaper = StaleTaskReaper(
             config, taskRepository, taskGroupRepository, meterRegistry,
@@ -125,6 +129,33 @@ class StaleTaskReaperTest {
 
         val scanTimer = meterRegistry.timer("taskqueue.reaper.scan_duration")
         assertEquals(1, scanTimer.count())
+    }
+
+    // ── Expired group reaping (I1) ─────────────────────────────────────
+
+    @Nested
+    inner class ExpiredGroupReaping {
+
+        @Test
+        fun `reap fails ACTIVE groups past their deadline via bulk SQL`() {
+            whenever(taskRepository.findStaleTasks(any(), any())).thenReturn(emptyList())
+            whenever(taskGroupRepository.failExpiredGroups(any())).thenReturn(2)
+
+            reaper.reap()
+
+            verify(taskGroupRepository).failExpiredGroups(any())
+            assertEquals(2.0, meterRegistry.counter("taskqueue.reaper.groups_expired").count())
+        }
+
+        @Test
+        fun `reap with no expired groups does not increment counter`() {
+            whenever(taskRepository.findStaleTasks(any(), any())).thenReturn(emptyList())
+            whenever(taskGroupRepository.failExpiredGroups(any())).thenReturn(0)
+
+            reaper.reap()
+
+            assertEquals(0.0, meterRegistry.counter("taskqueue.reaper.groups_expired").count())
+        }
     }
 
     // ── helpers ───────────────────────────────────────────────────────

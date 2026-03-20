@@ -18,10 +18,13 @@ fun evaluateFailurePolicy(
         if (failed > 0) "FAIL_GROUP: $failed task(s) failed" else null
 
     FailurePolicy.THRESHOLD -> {
-        val rate = failed.toDouble() / total
-        if (rate > failureThreshold)
-            "THRESHOLD: %.1f%% > %.1f%%".format(rate * 100, failureThreshold * 100)
-        else null
+        if (total == 0) null
+        else {
+            val rate = failed.toDouble() / total
+            if (rate > failureThreshold)
+                "THRESHOLD: %.1f%% > %.1f%%".format(rate * 100, failureThreshold * 100)
+            else null
+        }
     }
 
     FailurePolicy.BEST_EFFORT -> null

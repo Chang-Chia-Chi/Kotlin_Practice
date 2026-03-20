@@ -39,6 +39,8 @@ class LocalBlobStore : BlobStore {
         partitionHash: Int,
         data: Flow<String>,
     ): String = withContext(Dispatchers.IO) {
+        requireSafeSegment(jobId, "jobId")
+        requireSafeSegment(taskId, "taskId")
         val jobDir = baseDir.resolve(jobId)
         Files.createDirectories(jobDir)
 
@@ -73,12 +75,19 @@ class LocalBlobStore : BlobStore {
     }
 
     override suspend fun deleteJob(jobId: String) = withContext(Dispatchers.IO) {
+        requireSafeSegment(jobId, "jobId")
         val jobDir = baseDir.resolve(jobId)
         if (Files.exists(jobDir)) {
             Files.walk(jobDir)
                 .sorted(Comparator.reverseOrder())
                 .forEach { Files.deleteIfExists(it) }
             log.debugf("Deleted blobs for job %s", jobId)
+        }
+    }
+
+    private fun requireSafeSegment(value: String, name: String) {
+        require(value.isNotEmpty() && !value.contains('/') && !value.contains('\\') && value != ".." && value != ".") {
+            "$name contains unsafe path characters: $value"
         }
     }
 }
