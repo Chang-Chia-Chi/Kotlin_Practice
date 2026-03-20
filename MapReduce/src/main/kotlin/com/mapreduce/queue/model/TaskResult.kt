@@ -25,7 +25,10 @@ sealed interface TaskResult {
         val consumeRetry: Boolean = true,
     ) : TaskResult
 
-    /** Handler declares permanent failure. */
+    /**
+     * Handler declares permanent failure. Always consumes a retry attempt —
+     * if retries are exhausted, the task is dead-lettered.
+     */
     data class Failure(val message: String) : TaskResult
 
     /**

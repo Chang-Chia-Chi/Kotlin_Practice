@@ -18,7 +18,6 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.onCompletion
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import org.jboss.logging.Logger
 import java.time.Duration
 import java.time.Instant
@@ -121,9 +120,7 @@ class WorkerLoop(
             }
 
             try {
-                val task = withContext(Dispatchers.IO) {
-                    taskRepository.claim(config.worker().id(), config.worker().queues())
-                }
+                val task = taskRepository.claim(config.worker().id(), config.worker().queues())
                 if (task != null) {
                     log.debugf("Claimed task %s [handler=%s, queue=%s]",
                         task.taskId, task.handler, task.queue)

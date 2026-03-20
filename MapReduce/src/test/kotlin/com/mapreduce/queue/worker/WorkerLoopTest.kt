@@ -80,6 +80,13 @@ class WorkerLoopTest {
         runBlocking { block(verify(dispatcher, mode)) }
     }
 
+    private fun verifyClaimSuspend(
+        mode: org.mockito.verification.VerificationMode = org.mockito.Mockito.times(1),
+        block: suspend TaskRepository.() -> Unit,
+    ) {
+        runBlocking { block(verify(taskRepository, mode)) }
+    }
+
     // ── Happy path ────────────────────────────────────────────────────
 
     @Nested
@@ -88,14 +95,16 @@ class WorkerLoopTest {
         @Test
         fun `claims and dispatches a task`() {
             val claimed = task()
-            whenever(taskRepository.claim("test-pod", listOf("default")))
-                .thenReturn(claimed)
-                .thenReturn(null)
+            runBlocking {
+                whenever(taskRepository.claim("test-pod", listOf("default")))
+                    .thenReturn(claimed)
+                    .thenReturn(null)
+            }
 
             start()
 
             await.atMost(2, TimeUnit.SECONDS).untilAsserted {
-                verify(taskRepository, atLeast(1)).claim("test-pod", listOf("default"))
+                verifyClaimSuspend(atLeast(1)) { claim("test-pod", listOf("default")) }
             }
             await.atMost(2, TimeUnit.SECONDS).untilAsserted {
                 verifySuspend { execute(claimed) }
@@ -104,7 +113,7 @@ class WorkerLoopTest {
 
         @Test
         fun `updates lastPollTimestamp`() {
-            whenever(taskRepository.claim(any(), any())).thenReturn(null)
+            runBlocking { whenever(taskRepository.claim(any(), any())).thenReturn(null) }
 
             val before = workerLoop.lastPollTimestamp
             start()
@@ -116,12 +125,12 @@ class WorkerLoopTest {
 
         @Test
         fun `no task available does not call execute`() {
-            whenever(taskRepository.claim(any(), any())).thenReturn(null)
+            runBlocking { whenever(taskRepository.claim(any(), any())).thenReturn(null) }
 
             start()
 
             await.atMost(1, TimeUnit.SECONDS).untilAsserted {
-                verify(taskRepository, atLeast(2)).claim("test-pod", listOf("default"))
+                verifyClaimSuspend(atLeast(2)) { claim("test-pod", listOf("default")) }
             }
             verifySuspend(never()) { execute(any()) }
         }
@@ -153,9 +162,11 @@ class WorkerLoopTest {
             val taskCanFinish = CountDownLatch(1)
             val claimed = task()
 
-            whenever(taskRepository.claim("test-pod", listOf("default")))
-                .thenReturn(claimed)
-                .thenReturn(null)
+            runBlocking {
+                whenever(taskRepository.claim("test-pod", listOf("default")))
+                    .thenReturn(claimed)
+                    .thenReturn(null)
+            }
             runBlocking {
                 whenever(dispatcher.execute(any())).thenAnswer {
                     taskStarted.countDown()
@@ -178,12 +189,12 @@ class WorkerLoopTest {
 
         @Test
         fun `shutdown stops claiming new tasks`() {
-            whenever(taskRepository.claim(any(), any())).thenReturn(null)
+            runBlocking { whenever(taskRepository.claim(any(), any())).thenReturn(null) }
 
             start()
 
             await.atMost(1, TimeUnit.SECONDS).untilAsserted {
-                verify(taskRepository, atLeast(2)).claim(any(), any())
+                verifyClaimSuspend(atLeast(2)) { claim(any(), any()) }
             }
 
             runBlocking { workerLoop.shutdown() }
@@ -203,9 +214,11 @@ class WorkerLoopTest {
             val taskCanFinish = CountDownLatch(1)
             val claimed = task()
 
-            whenever(taskRepository.claim("test-pod", listOf("default")))
-                .thenReturn(claimed)
-                .thenReturn(null)
+            runBlocking {
+                whenever(taskRepository.claim("test-pod", listOf("default")))
+                    .thenReturn(claimed)
+                    .thenReturn(null)
+            }
             runBlocking {
                 whenever(dispatcher.execute(any())).thenAnswer {
                     taskStarted.countDown()
@@ -239,7 +252,7 @@ class WorkerLoopTest {
 
         @Test
         fun `shutdown releases uncompleted tasks`() {
-            whenever(taskRepository.claim(any(), any())).thenReturn(null)
+            runBlocking { whenever(taskRepository.claim(any(), any())).thenReturn(null) }
 
             start()
             runBlocking { workerLoop.shutdown() }
@@ -249,7 +262,7 @@ class WorkerLoopTest {
 
         @Test
         fun `shutdown tolerates release exception`() {
-            whenever(taskRepository.claim(any(), any())).thenReturn(null)
+            runBlocking { whenever(taskRepository.claim(any(), any())).thenReturn(null) }
             whenever(taskRepository.releaseTasksByPod(any()))
                 .thenThrow(RuntimeException("DB down"))
 
@@ -262,12 +275,12 @@ class WorkerLoopTest {
 
         @Test
         fun `shutdown completes immediately when no in-flight tasks`() {
-            whenever(taskRepository.claim(any(), any())).thenReturn(null)
+            runBlocking { whenever(taskRepository.claim(any(), any())).thenReturn(null) }
 
             start()
 
             await.atMost(1, TimeUnit.SECONDS).untilAsserted {
-                verify(taskRepository, atLeast(1)).claim(any(), any())
+                verifyClaimSuspend(atLeast(1)) { claim(any(), any()) }
             }
 
             val startTime = System.currentTimeMillis()
@@ -292,7 +305,7 @@ class WorkerLoopTest {
             val maxConcurrent = AtomicInteger(0)
             val tasksStarted = CountDownLatch(3)
 
-            whenever(taskRepository.claim(any(), any())).thenReturn(task())
+            runBlocking { whenever(taskRepository.claim(any(), any())).thenReturn(task()) }
             runBlocking {
                 whenever(dispatcher.execute(any())).thenAnswer {
                     val current = activeCount.incrementAndGet()
@@ -312,25 +325,27 @@ class WorkerLoopTest {
 
         @Test
         fun `releases semaphore when no task claimed`() {
-            whenever(taskRepository.claim(any(), any())).thenReturn(null)
+            runBlocking { whenever(taskRepository.claim(any(), any())).thenReturn(null) }
 
             start()
 
             await.atMost(2, TimeUnit.SECONDS).untilAsserted {
-                verify(taskRepository, atLeast(3)).claim("test-pod", listOf("default"))
+                verifyClaimSuspend(atLeast(3)) { claim("test-pod", listOf("default")) }
             }
         }
 
         @Test
         fun `releases semaphore when claim throws`() {
-            whenever(taskRepository.claim(any(), any()))
-                .thenThrow(RuntimeException("DB error"))
-                .thenReturn(null)
+            runBlocking {
+                whenever(taskRepository.claim(any(), any()))
+                    .thenThrow(RuntimeException("DB error"))
+                    .thenReturn(null)
+            }
 
             start()
 
             await.atMost(2, TimeUnit.SECONDS).untilAsserted {
-                verify(taskRepository, atLeast(2)).claim(any(), any())
+                verifyClaimSuspend(atLeast(2)) { claim(any(), any()) }
             }
         }
     }
@@ -342,24 +357,28 @@ class WorkerLoopTest {
 
         @Test
         fun `claim exception does not kill poll loop`() {
-            whenever(taskRepository.claim(any(), any()))
-                .thenThrow(RuntimeException("transient"))
-                .thenThrow(RuntimeException("transient"))
-                .thenReturn(null)
+            runBlocking {
+                whenever(taskRepository.claim(any(), any()))
+                    .thenThrow(RuntimeException("transient"))
+                    .thenThrow(RuntimeException("transient"))
+                    .thenReturn(null)
+            }
 
             start()
 
             await.atMost(2, TimeUnit.SECONDS).untilAsserted {
-                verify(taskRepository, atLeast(3)).claim(any(), any())
+                verifyClaimSuspend(atLeast(3)) { claim(any(), any()) }
             }
         }
 
         @Test
         fun `dispatcher exception decrements inFlightTasks`() {
             val claimed = task()
-            whenever(taskRepository.claim("test-pod", listOf("default")))
-                .thenReturn(claimed)
-                .thenReturn(null)
+            runBlocking {
+                whenever(taskRepository.claim("test-pod", listOf("default")))
+                    .thenReturn(claimed)
+                    .thenReturn(null)
+            }
             runBlocking {
                 whenever(dispatcher.execute(any())).thenAnswer {
                     throw RuntimeException("handler blew up")
@@ -381,8 +400,10 @@ class WorkerLoopTest {
         @Test
         fun `dispatcher exception on one task does not block subsequent claims`() {
             val callCount = AtomicInteger(0)
-            whenever(taskRepository.claim("test-pod", listOf("default")))
-                .thenReturn(task())
+            runBlocking {
+                whenever(taskRepository.claim("test-pod", listOf("default")))
+                    .thenReturn(task())
+            }
             runBlocking {
                 whenever(dispatcher.execute(any())).thenAnswer {
                     val n = callCount.incrementAndGet()

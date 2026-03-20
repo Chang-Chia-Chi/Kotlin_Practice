@@ -1,5 +1,8 @@
 package com.mapreduce.queue.repository
 
+import com.mapreduce.config.inTransactionSuspend
+import com.mapreduce.config.useHandleSuspend
+import com.mapreduce.config.withHandleSuspend
 import com.mapreduce.queue.model.EnqueueRequest
 import com.mapreduce.queue.model.Task
 import com.mapreduce.queue.model.TaskStatus
@@ -50,30 +53,27 @@ class TaskRepository(
      * Filters by subscribed [queues], PENDING status, and scheduled_at.
      * Orders by priority DESC, created_at ASC.
      */
-    fun claim(
+    suspend fun claim(
         workerId: String,
         queues: List<String>,
     ): Task? {
         if (queues.isEmpty()) return null
 
-        return jdbi.inTransaction<Task?, Exception> { h ->
-            val inClause = queues.indices.joinToString(", ") { ":queue$it" }
-
+        return jdbi.inTransactionSuspend<Task?, Exception> { h ->
             val query =
                 h.createQuery(
                     """
                 SELECT * FROM task
                 WHERE status = 'PENDING'
-                  AND queue IN ($inClause)
+                  AND queue IN (<queues>)
                   AND (scheduled_at IS NULL OR scheduled_at <= CURRENT_TIMESTAMP)
                 ORDER BY priority DESC, created_at ASC
                 FETCH FIRST 1 ROWS ONLY
                 FOR UPDATE SKIP LOCKED
                 """,
-                )
-            queues.forEachIndexed { i, q -> query.bind("queue$i", q) }
+                ).bindList("queues", queues)
 
-            val task = query.mapTo(Task::class.java).findOne().orElse(null) ?: return@inTransaction null
+            val task = query.mapTo(Task::class.java).findOne().orElse(null) ?: return@inTransactionSuspend null
 
             val generation = UUID.randomUUID().toString()
             h
@@ -98,11 +98,11 @@ class TaskRepository(
      * (supports handlers that complete the task themselves in the same transaction
      * as their side-effects, e.g. map-reduce handlers).
      */
-    fun complete(
+    suspend fun complete(
         taskId: String,
         claimToken: String? = null,
     ) {
-        jdbi.useHandle<Exception> { h ->
+        jdbi.useHandleSuspend<Exception> { h ->
             val fenceClause = if (claimToken != null) " AND execution_generation = :gen" else ""
             val update =
                 h
@@ -125,13 +125,13 @@ class TaskRepository(
      *
      * @return `true` if the task was dead-lettered (retries exhausted)
      */
-    fun fail(
+    suspend fun fail(
         taskId: String,
         errorMessage: String,
         retryDelay: Duration? = null,
         claimToken: String? = null,
     ): Boolean {
-        return jdbi.inTransaction<Boolean, Exception> { h ->
+        return jdbi.inTransactionSuspend<Boolean, Exception> { h ->
             val fenceClause = if (claimToken != null) " AND execution_generation = :gen" else ""
             val scheduledAt = retryDelay?.let { Instant.now().plusSeconds(it.toSeconds()) }
 
@@ -154,7 +154,7 @@ class TaskRepository(
             if (claimToken != null) update.bind("gen", claimToken)
             val updated = update.execute()
 
-            if (updated == 0) return@inTransaction false
+            if (updated == 0) return@inTransactionSuspend false
 
             h
                 .createQuery("SELECT status FROM task WHERE task_id = :taskId")
@@ -171,12 +171,12 @@ class TaskRepository(
      * breaker requeue, shutdown-aware timeout). The task is moved back to
      * PENDING with an optional delay.
      */
-    fun requeue(
+    suspend fun requeue(
         taskId: String,
         delay: Duration? = null,
         claimToken: String? = null,
     ) {
-        jdbi.useHandle<Exception> { h ->
+        jdbi.useHandleSuspend<Exception> { h ->
             val fenceClause = if (claimToken != null) " AND execution_generation = :gen" else ""
             val hasDelay = delay != null && !delay.isZero
             val scheduledClause = if (hasDelay) ", scheduled_at = :scheduledAt" else ""
@@ -207,12 +207,12 @@ class TaskRepository(
      * @return `true` if the task was dead-lettered, `false` if the status guard
      *         or claimToken fence rejected the update (zombie / already-handled).
      */
-    fun deadLetter(
+    suspend fun deadLetter(
         taskId: String,
         reason: String,
         claimToken: String? = null,
     ): Boolean =
-        jdbi.withHandle<Boolean, Exception> { h ->
+        jdbi.withHandleSuspend<Boolean, Exception> { h ->
             val fenceClause = if (claimToken != null) " AND execution_generation = :gen" else ""
             val update =
                 h

@@ -92,7 +92,7 @@ class JobResource(
     @GET
     @Path("/{jobId}")
     suspend fun getJob(@PathParam("jobId") jobId: String): Response {
-        val group = withContext(Dispatchers.IO) { taskGroupRepository.findGroup(jobId) }
+        val group = taskGroupRepository.findGroup(jobId)
             ?: return Response.status(Response.Status.NOT_FOUND).build()
         return Response.ok(JobResponse.from(group)).build()
     }

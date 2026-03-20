@@ -13,6 +13,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.runTest
 import org.jdbi.v3.core.Jdbi
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -306,7 +307,7 @@ class ConcurrencyStressTest {
          * Worker A's completion must be rejected (zombie detected).
          */
         @Test
-        fun `stale generation is rejected after reclaim`() {
+        fun `stale generation is rejected after reclaim`() = runTest {
             val taskId = taskRepo.enqueue(
                 EnqueueRequest(handler = "zombie.handler", payload = "{}", queue = "q1"),
             )
@@ -338,7 +339,7 @@ class ConcurrencyStressTest {
          * should detect the zombie and NOT decrement the group counter.
          */
         @Test
-        fun `stale group task completion does not decrement counter`() {
+        fun `stale group task completion does not decrement counter`() = runTest {
             val groupId = "zombie-group"
             val group = TaskGroup(
                 groupId = groupId, groupType = "stress", status = GroupStatus.ACTIVE,
@@ -555,7 +556,7 @@ class ConcurrencyStressTest {
          * Concurrent fail + claim cycles should not corrupt retry count.
          */
         @Test
-        fun `retry exhaustion dead-letters correctly`() {
+        fun `retry exhaustion dead-letters correctly`() = runTest {
             val taskId = taskRepo.enqueue(
                 EnqueueRequest(handler = "retry.handler", payload = "{}", queue = "q1", maxRetries = 2),
             )

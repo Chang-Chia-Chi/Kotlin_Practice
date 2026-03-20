@@ -35,7 +35,7 @@ class JobRepositoryTest {
     // ── submitGroup ───────────────────────────────────────────────
 
     @Test
-    fun `submitGroup inserts group and task rows atomically`() {
+    fun `submitGroup inserts group and task rows atomically`() = runTest {
         val group = testGroup("g-1", phaseTotal = 3)
         val tasks = (0 until 3).map { testTask("g-1", "wc.map", "input-$it") }
 
@@ -57,7 +57,7 @@ class JobRepositoryTest {
     }
 
     @Test
-    fun `submitGroup creates tasks with correct handler name`() {
+    fun `submitGroup creates tasks with correct handler name`() = runTest {
         val group = testGroup("g-h", phaseTotal = 1)
         val tasks = listOf(testTask("g-h", "email.map", "a"))
 
@@ -73,12 +73,12 @@ class JobRepositoryTest {
     // ── findGroup ─────────────────────────────────────────────────
 
     @Test
-    fun `findGroup returns null for nonexistent group`() {
+    fun `findGroup returns null for nonexistent group`() = runTest {
         assertNull(repo.findGroup("nonexistent"))
     }
 
     @Test
-    fun `findGroup returns the group with all fields`() {
+    fun `findGroup returns the group with all fields`() = runTest {
         val group = testGroup("g-f", failurePolicy = "THRESHOLD", failureThreshold = 0.5)
         repo.submitGroup(group, listOf(testTask("g-f", "wc.map", "i")))
 
@@ -92,7 +92,7 @@ class JobRepositoryTest {
     // ── casGroupStatus ────────────────────────────────────────────
 
     @Test
-    fun `casGroupStatus succeeds with correct version and status`() {
+    fun `casGroupStatus succeeds with correct version and status`() = runTest {
         val group = testGroup("g-cas")
         repo.submitGroup(group, listOf(testTask("g-cas", "wc.map", "a")))
 
@@ -105,7 +105,7 @@ class JobRepositoryTest {
     }
 
     @Test
-    fun `casGroupStatus fails with wrong version`() {
+    fun `casGroupStatus fails with wrong version`() = runTest {
         val group = testGroup("g-cv")
         repo.submitGroup(group, listOf(testTask("g-cv", "wc.map", "a")))
 
@@ -116,7 +116,7 @@ class JobRepositoryTest {
     }
 
     @Test
-    fun `casGroupStatus fails with wrong expected status`() {
+    fun `casGroupStatus fails with wrong expected status`() = runTest {
         val group = testGroup("g-cs")
         repo.submitGroup(group, listOf(testTask("g-cs", "wc.map", "a")))
 
@@ -127,7 +127,7 @@ class JobRepositoryTest {
     // ── resolveGroupTask (success path) ────────────────────────────
 
     @Test
-    fun `resolveGroupTask decrements tasks_pending on success`() {
+    fun `resolveGroupTask decrements tasks_pending on success`() = runTest {
         val group = testGroup("g-cgt", phaseTotal = 1)
         repo.submitGroup(group, listOf(testTask("g-cgt", "wc.map", "a")))
 
@@ -147,7 +147,7 @@ class JobRepositoryTest {
     }
 
     @Test
-    fun `resolveGroupTask zombie detection -- zero rows when execution_generation mismatches`() {
+    fun `resolveGroupTask zombie detection -- zero rows when execution_generation mismatches`() = runTest {
         val group = testGroup("g-zombie", phaseTotal = 1)
         repo.submitGroup(group, listOf(testTask("g-zombie", "wc.map", "a")))
 
@@ -165,7 +165,7 @@ class JobRepositoryTest {
     }
 
     @Test
-    fun `resolveGroupTask stores output_uri on task row`() {
+    fun `resolveGroupTask stores output_uri on task row`() = runTest {
         val group = testGroup("g-out", phaseTotal = 1)
         repo.submitGroup(group, listOf(testTask("g-out", "wc.map", "a")))
 
@@ -183,7 +183,7 @@ class JobRepositoryTest {
     }
 
     @Test
-    fun `resolveGroupTask creates callback task when barrier is met`() {
+    fun `resolveGroupTask creates callback task when barrier is met`() = runTest {
         val group = testGroup("g-barrier", phaseTotal = 1, onCompleteHandler = "wc.__phase_complete")
         repo.submitGroup(group, listOf(testTask("g-barrier", "wc.map", "a")))
 
@@ -205,7 +205,7 @@ class JobRepositoryTest {
     // ── resolveGroupTask (failure path) ───────────────────────────
 
     @Test
-    fun `resolveGroupTask with failed=true decrements pending and increments failed`() {
+    fun `resolveGroupTask with failed=true decrements pending and increments failed`() = runTest {
         val group = testGroup("g-fail", phaseTotal = 2)
         repo.submitGroup(group, (0 until 2).map { testTask("g-fail", "wc.map", "i-$it") })
 
@@ -217,7 +217,7 @@ class JobRepositoryTest {
     }
 
     @Test
-    fun `resolveGroupTask with failed=true creates callback when barrier met`() {
+    fun `resolveGroupTask with failed=true creates callback when barrier met`() = runTest {
         val group = testGroup("g-fail-barrier", phaseTotal = 1, onCompleteHandler = "wc.__phase_complete")
         repo.submitGroup(group, listOf(testTask("g-fail-barrier", "wc.map", "a")))
 
@@ -234,7 +234,7 @@ class JobRepositoryTest {
     // ── transitionPhase ───────────────────────────────────────────
 
     @Test
-    fun `transitionPhase atomically transitions and creates new tasks`() {
+    fun `transitionPhase atomically transitions and creates new tasks`() = runTest {
         val group = testGroup("g-tp", phaseTotal = 2)
         repo.submitGroup(group, (0 until 2).map { testTask("g-tp", "wc.map", "i-$it") })
 
@@ -257,7 +257,7 @@ class JobRepositoryTest {
     }
 
     @Test
-    fun `transitionPhase fails with wrong version and creates no tasks`() {
+    fun `transitionPhase fails with wrong version and creates no tasks`() = runTest {
         val group = testGroup("g-tp-fail", phaseTotal = 1)
         repo.submitGroup(group, listOf(testTask("g-tp-fail", "wc.map", "a")))
 

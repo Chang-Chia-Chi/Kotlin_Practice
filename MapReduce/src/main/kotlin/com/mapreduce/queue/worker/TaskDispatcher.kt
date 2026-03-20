@@ -51,7 +51,7 @@ class TaskDispatcher(
 
     // ── Result processing ──────────────────────────────────────────
 
-    private fun processResult(task: Task, result: TaskResult, gen: String?) {
+    private suspend fun processResult(task: Task, result: TaskResult, gen: String?) {
         when (result) {
             is TaskResult.Success -> {
                 if (task.groupId != null) {

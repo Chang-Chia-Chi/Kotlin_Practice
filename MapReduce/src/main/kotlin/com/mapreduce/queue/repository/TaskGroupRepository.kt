@@ -1,5 +1,7 @@
 package com.mapreduce.queue.repository
 
+import com.mapreduce.config.inTransactionSuspend
+import com.mapreduce.config.withHandleSuspend
 import com.mapreduce.leader.LeaderManager
 import com.mapreduce.queue.model.EnqueueRequest
 import com.mapreduce.queue.model.GroupStatus
@@ -138,7 +140,7 @@ class TaskGroupRepository(
      * The row lock on task_group serializes concurrent resolutions, ensuring
      * exactly one worker observes the barrier condition.
      */
-    fun resolveGroupTask(
+    suspend fun resolveGroupTask(
         taskId: String? = null,
         groupId: String,
         claimToken: String? = null,
@@ -146,7 +148,7 @@ class TaskGroupRepository(
         outputUri: String? = null,
         outputMetadata: String? = null,
     ): GroupTaskResolution {
-        return jdbi.inTransaction<GroupTaskResolution, Exception> { h ->
+        return jdbi.inTransactionSuspend<GroupTaskResolution, Exception> { h ->
             // Step 1 (success path only): Mark task COMPLETED with output fields
             if (!failed && taskId != null) {
                 val fenceClause = if (claimToken != null) " AND execution_generation = :gen" else ""
@@ -164,7 +166,7 @@ class TaskGroupRepository(
 
                 if (updated == 0) {
                     log.warnf("Zombie detected for task %s (gen=%s) — skipping group counter", taskId, claimToken)
-                    return@inTransaction GroupTaskResolution(updated = false, barrierMet = false)
+                    return@inTransactionSuspend GroupTaskResolution(updated = false, barrierMet = false)
                 }
             }
 
@@ -184,14 +186,14 @@ class TaskGroupRepository(
      *
      * @return [GroupFailResult] — `taskUpdated=false` if fenced out (zombie).
      */
-    fun failGroupTask(
+    suspend fun failGroupTask(
         taskId: String,
         groupId: String,
         errorMessage: String,
         retryDelay: Duration? = null,
         claimToken: String? = null,
     ): GroupFailResult {
-        return jdbi.inTransaction<GroupFailResult, Exception> { h ->
+        return jdbi.inTransactionSuspend<GroupFailResult, Exception> { h ->
             val fenceClause = if (claimToken != null) " AND execution_generation = :gen" else ""
             val scheduledAt = retryDelay?.let { Instant.now().plusSeconds(it.toSeconds()) }
 
@@ -214,7 +216,7 @@ class TaskGroupRepository(
             val updated = update.execute()
 
             if (updated == 0) {
-                return@inTransaction GroupFailResult(taskUpdated = false, deadLettered = false, barrierMet = false)
+                return@inTransactionSuspend GroupFailResult(taskUpdated = false, deadLettered = false, barrierMet = false)
             }
 
             val newStatus = h.createQuery("SELECT status FROM task WHERE task_id = :taskId")
@@ -238,13 +240,13 @@ class TaskGroupRepository(
      *
      * @return [GroupFailResult] — `taskUpdated=false` if fenced out (zombie).
      */
-    fun deadLetterGroupTask(
+    suspend fun deadLetterGroupTask(
         taskId: String,
         groupId: String,
         reason: String,
         claimToken: String? = null,
     ): GroupFailResult {
-        return jdbi.inTransaction<GroupFailResult, Exception> { h ->
+        return jdbi.inTransactionSuspend<GroupFailResult, Exception> { h ->
             val fenceClause = if (claimToken != null) " AND execution_generation = :gen" else ""
             val update = h.createUpdate(
                 """
@@ -258,7 +260,7 @@ class TaskGroupRepository(
             val updated = update.execute()
 
             if (updated == 0) {
-                return@inTransaction GroupFailResult(taskUpdated = false, deadLettered = false, barrierMet = false)
+                return@inTransactionSuspend GroupFailResult(taskUpdated = false, deadLettered = false, barrierMet = false)
             }
 
             val barrierMet = resolveGroupCounter(h, groupId, failed = true)
@@ -376,7 +378,7 @@ class TaskGroupRepository(
      * Transition to a new phase: CAS version, reset counters, insert new tasks.
      * [tasks_pending] is initialized to [newPhaseTotal], [tasks_failed] reset to 0.
      */
-    fun transitionPhase(
+    suspend fun transitionPhase(
         groupId: String,
         expectedVersion: Long,
         newPhase: String,
@@ -385,7 +387,7 @@ class TaskGroupRepository(
         onCompleteHandler: String?,
     ): Boolean {
         val epoch = optionalEpoch()
-        return jdbi.inTransaction<Boolean, Exception> { h ->
+        return jdbi.inTransactionSuspend<Boolean, Exception> { h ->
             val epochClause = if (epoch != null) " AND last_epoch <= :epoch" else ""
             val epochSet = if (epoch != null) ", last_epoch = :epoch" else ""
 
@@ -407,7 +409,7 @@ class TaskGroupRepository(
                 .apply { if (epoch != null) bind("epoch", epoch) }
                 .execute()
 
-            if (updated == 0) return@inTransaction false
+            if (updated == 0) return@inTransactionSuspend false
 
             val batch = h.prepareBatch(
                 """
@@ -438,7 +440,7 @@ class TaskGroupRepository(
      * Compare-and-swap for group status transitions.
      * Combines version-based CAS with optional epoch fencing.
      */
-    fun casGroupStatus(
+    suspend fun casGroupStatus(
         groupId: String,
         expectedStatus: GroupStatus,
         newStatus: GroupStatus,
@@ -446,7 +448,7 @@ class TaskGroupRepository(
         resultMetadata: String? = null,
     ): Boolean {
         val epoch = optionalEpoch()
-        val updated = jdbi.withHandle<Int, Exception> { h ->
+        val updated = jdbi.withHandleSuspend<Int, Exception> { h ->
             val epochClause = if (epoch != null) " AND last_epoch <= :epoch" else ""
             val epochSet = if (epoch != null) ", last_epoch = :epoch" else ""
             val metaSet = if (resultMetadata != null) ", result_metadata = :resultMetadata" else ""
@@ -497,8 +499,8 @@ class TaskGroupRepository(
             }
         }.flowOn(Dispatchers.IO)
 
-    fun findGroup(groupId: String): TaskGroup? =
-        jdbi.withHandle<TaskGroup?, Exception> { h ->
+    suspend fun findGroup(groupId: String): TaskGroup? =
+        jdbi.withHandleSuspend<TaskGroup?, Exception> { h ->
             h.createQuery("SELECT * FROM task_group WHERE group_id = :groupId")
                 .bind("groupId", groupId)
                 .mapTo(TaskGroup::class.java)
@@ -520,5 +522,24 @@ class TaskGroupRepository(
                 .bind("limit", limit)
                 .mapTo(TaskGroup::class.java)
                 .list()
+        }
+
+    /**
+     * Bulk-fail ACTIVE groups whose [deadline_at] has passed.
+     * Returns the number of groups transitioned to FAILED.
+     */
+    fun failExpiredGroups(now: Instant): Int =
+        jdbi.withHandle<Int, Exception> { h ->
+            h.createUpdate(
+                """
+                UPDATE task_group
+                SET status = 'FAILED', result_metadata = 'Group deadline exceeded',
+                    version = version + 1, updated_at = CURRENT_TIMESTAMP
+                WHERE status = 'ACTIVE'
+                  AND deadline_at IS NOT NULL
+                  AND deadline_at <= :now
+                """,
+            ).bind("now", now)
+                .execute()
         }
 }

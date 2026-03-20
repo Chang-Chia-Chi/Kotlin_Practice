@@ -3,21 +3,21 @@ package com.mapreduce.queue.repository
 import com.mapreduce.TestH2Factory
 import com.mapreduce.queue.model.EnqueueRequest
 import com.mapreduce.queue.model.TaskStatus
+import kotlinx.coroutines.test.runTest
 import org.jdbi.v3.core.Jdbi
-import org.junit.jupiter.api.BeforeEach
-import org.junit.jupiter.api.Nested
-import org.junit.jupiter.api.Test
-import java.time.Instant
-import java.time.temporal.ChronoUnit
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNotEquals
 import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
+import org.junit.jupiter.api.BeforeEach
+import org.junit.jupiter.api.Nested
+import org.junit.jupiter.api.Test
+import java.time.Instant
+import java.time.temporal.ChronoUnit
 
 class TaskRepositoryTest {
-
     private lateinit var jdbi: Jdbi
     private lateinit var repo: TaskRepository
 
@@ -48,17 +48,17 @@ class TaskRepositoryTest {
         errorMessage: String? = null,
     ) {
         jdbi.useHandle<Exception> { h ->
-            h.createUpdate(
-                """
+            h
+                .createUpdate(
+                    """
                 INSERT INTO task (task_id, handler, queue, payload, status, priority,
                     group_id, claimed_by, claimed_at, retry_count, max_retries, execution_generation,
                     last_epoch, scheduled_at, error_message, created_at)
                 VALUES (:taskId, :handler, :queue, :payload, :status, :priority,
                     :groupId, :claimedBy, :claimedAt, :retryCount, :maxRetries, :gen,
                     :epoch, :scheduledAt, :errorMessage, CURRENT_TIMESTAMP)
-                """
-            )
-                .bind("taskId", taskId)
+                """,
+                ).bind("taskId", taskId)
                 .bind("handler", handler)
                 .bind("queue", queue)
                 .bind("payload", payload)
@@ -79,7 +79,8 @@ class TaskRepositoryTest {
 
     private fun readStatus(taskId: String): String =
         jdbi.withHandle<String, Exception> { h ->
-            h.createQuery("SELECT status FROM task WHERE task_id = :id")
+            h
+                .createQuery("SELECT status FROM task WHERE task_id = :id")
                 .bind("id", taskId)
                 .mapTo(String::class.java)
                 .one()
@@ -87,7 +88,8 @@ class TaskRepositoryTest {
 
     private fun readRetryCount(taskId: String): Int =
         jdbi.withHandle<Int, Exception> { h ->
-            h.createQuery("SELECT retry_count FROM task WHERE task_id = :id")
+            h
+                .createQuery("SELECT retry_count FROM task WHERE task_id = :id")
                 .bind("id", taskId)
                 .mapTo(Int::class.java)
                 .one()
@@ -97,18 +99,18 @@ class TaskRepositoryTest {
 
     @Nested
     inner class Enqueue {
-
         @Test
         fun `creates a PENDING task with correct fields`() {
-            val request = EnqueueRequest(
-                handler = "word.count",
-                payload = """{"text":"hello"}""",
-                queue = "high",
-                maxRetries = 5,
-                priority = 10,
-                groupId = "job-1",
-                metadata = """{"source":"test"}""",
-            )
+            val request =
+                EnqueueRequest(
+                    handler = "word.count",
+                    payload = """{"text":"hello"}""",
+                    queue = "high",
+                    maxRetries = 5,
+                    priority = 10,
+                    groupId = "job-1",
+                    metadata = """{"source":"test"}""",
+                )
             val id = repo.enqueue(request)
 
             val task = repo.findById(id)!!
@@ -139,20 +141,19 @@ class TaskRepositoryTest {
 
     @Nested
     inner class Claim {
-
         @Test
-        fun `returns null when no tasks available`() {
+        fun `returns null when no tasks available`() = runTest {
             assertNull(repo.claim("worker-1", listOf("default")))
         }
 
         @Test
-        fun `returns null when empty queues list`() {
+        fun `returns null when empty queues list`() = runTest {
             repo.enqueue(EnqueueRequest(handler = "h", payload = "{}"))
             assertNull(repo.claim("worker-1", emptyList()))
         }
 
         @Test
-        fun `returns task and sets CLAIMED status`() {
+        fun `returns task and sets CLAIMED status`() = runTest {
             val taskId = repo.enqueue(EnqueueRequest(handler = "h", payload = """{"k":1}"""))
 
             val claimed = repo.claim("worker-1", listOf("default"))!!
@@ -169,7 +170,7 @@ class TaskRepositoryTest {
         }
 
         @Test
-        fun `respects queue filter`() {
+        fun `respects queue filter`() = runTest {
             repo.enqueue(EnqueueRequest(handler = "h", payload = "{}", queue = "alpha"))
             repo.enqueue(EnqueueRequest(handler = "h", payload = "{}", queue = "beta"))
 
@@ -178,7 +179,7 @@ class TaskRepositoryTest {
         }
 
         @Test
-        fun `respects priority ordering -- higher priority first`() {
+        fun `respects priority ordering -- higher priority first`() = runTest {
             repo.enqueue(EnqueueRequest(handler = "low", payload = "{}", priority = 1))
             repo.enqueue(EnqueueRequest(handler = "high", payload = "{}", priority = 10))
             repo.enqueue(EnqueueRequest(handler = "mid", payload = "{}", priority = 5))
@@ -191,17 +192,17 @@ class TaskRepositoryTest {
         }
 
         @Test
-        fun `does not claim future-scheduled tasks`() {
+        fun `does not claim future-scheduled tasks`() = runTest {
             val futureTime = Instant.now().plus(1, ChronoUnit.HOURS)
             repo.enqueue(
-                EnqueueRequest(handler = "future", payload = "{}", scheduledAt = futureTime)
+                EnqueueRequest(handler = "future", payload = "{}", scheduledAt = futureTime),
             )
 
             assertNull(repo.claim("w", listOf("default")))
         }
 
         @Test
-        fun `sets execution_generation on claim`() {
+        fun `sets execution_generation on claim`() = runTest {
             repo.enqueue(EnqueueRequest(handler = "h", payload = "{}"))
 
             val claimed = repo.claim("w", listOf("default"))!!
@@ -214,9 +215,8 @@ class TaskRepositoryTest {
 
     @Nested
     inner class Complete {
-
         @Test
-        fun `sets status to COMPLETED`() {
+        fun `sets status to COMPLETED`() = runTest {
             insertTask("t-1", status = TaskStatus.CLAIMED, claimedBy = "w")
 
             repo.complete("t-1")
@@ -227,7 +227,7 @@ class TaskRepositoryTest {
         }
 
         @Test
-        fun `succeeds when execution_generation matches`() {
+        fun `succeeds when execution_generation matches`() = runTest {
             insertTask("t-1", status = TaskStatus.CLAIMED, claimedBy = "w", claimToken = "gen-A")
 
             repo.complete("t-1", claimToken = "gen-A")
@@ -236,7 +236,7 @@ class TaskRepositoryTest {
         }
 
         @Test
-        fun `no-op when execution_generation mismatches -- zombie protection`() {
+        fun `no-op when execution_generation mismatches -- zombie protection`() = runTest {
             insertTask("t-1", status = TaskStatus.CLAIMED, claimedBy = "w", claimToken = "gen-A")
 
             repo.complete("t-1", claimToken = "gen-WRONG")
@@ -250,9 +250,8 @@ class TaskRepositoryTest {
 
     @Nested
     inner class Fail {
-
         @Test
-        fun `increments retry_count`() {
+        fun `increments retry_count`() = runTest {
             insertTask("t-1", status = TaskStatus.CLAIMED, claimedBy = "w", retryCount = 0, maxRetries = 3)
 
             repo.fail("t-1", "boom")
@@ -261,7 +260,7 @@ class TaskRepositoryTest {
         }
 
         @Test
-        fun `returns false when retries remaining -- task goes to PENDING`() {
+        fun `returns false when retries remaining -- task goes to PENDING`() = runTest {
             insertTask("t-1", status = TaskStatus.CLAIMED, claimedBy = "w", retryCount = 0, maxRetries = 3)
 
             val deadLettered = repo.fail("t-1", "transient error")
@@ -275,7 +274,7 @@ class TaskRepositoryTest {
         }
 
         @Test
-        fun `returns true when retries exhausted -- task goes to DEAD_LETTER`() {
+        fun `returns true when retries exhausted -- task goes to DEAD_LETTER`() = runTest {
             insertTask("t-1", status = TaskStatus.CLAIMED, claimedBy = "w", retryCount = 2, maxRetries = 3)
 
             val deadLettered = repo.fail("t-1", "fatal error")
@@ -285,10 +284,14 @@ class TaskRepositoryTest {
         }
 
         @Test
-        fun `no-op when execution_generation mismatches`() {
+        fun `no-op when execution_generation mismatches`() = runTest {
             insertTask(
-                "t-1", status = TaskStatus.CLAIMED, claimedBy = "w",
-                claimToken = "gen-A", retryCount = 0, maxRetries = 3,
+                "t-1",
+                status = TaskStatus.CLAIMED,
+                claimedBy = "w",
+                claimToken = "gen-A",
+                retryCount = 0,
+                maxRetries = 3,
             )
 
             val result = repo.fail("t-1", "error", claimToken = "gen-WRONG")
@@ -301,7 +304,7 @@ class TaskRepositoryTest {
         }
 
         @Test
-        fun `sets error_message`() {
+        fun `sets error_message`() = runTest {
             insertTask("t-1", status = TaskStatus.CLAIMED, claimedBy = "w", retryCount = 0, maxRetries = 3)
 
             repo.fail("t-1", "NullPointerException at line 42")
@@ -311,10 +314,14 @@ class TaskRepositoryTest {
         }
 
         @Test
-        fun `with matching execution_generation succeeds`() {
+        fun `with matching execution_generation succeeds`() = runTest {
             insertTask(
-                "t-1", status = TaskStatus.CLAIMED, claimedBy = "w",
-                claimToken = "gen-A", retryCount = 0, maxRetries = 3,
+                "t-1",
+                status = TaskStatus.CLAIMED,
+                claimedBy = "w",
+                claimToken = "gen-A",
+                retryCount = 0,
+                maxRetries = 3,
             )
 
             val deadLettered = repo.fail("t-1", "error", claimToken = "gen-A")
@@ -329,9 +336,8 @@ class TaskRepositoryTest {
 
     @Nested
     inner class Requeue {
-
         @Test
-        fun `moves task to PENDING without incrementing retry_count`() {
+        fun `moves task to PENDING without incrementing retry_count`() = runTest {
             insertTask("t-1", status = TaskStatus.CLAIMED, claimedBy = "w", retryCount = 1, maxRetries = 3)
 
             repo.requeue("t-1")
@@ -344,10 +350,14 @@ class TaskRepositoryTest {
         }
 
         @Test
-        fun `with matching execution_generation succeeds`() {
+        fun `with matching execution_generation succeeds`() = runTest {
             insertTask(
-                "t-1", status = TaskStatus.CLAIMED, claimedBy = "w",
-                claimToken = "gen-A", retryCount = 2, maxRetries = 3,
+                "t-1",
+                status = TaskStatus.CLAIMED,
+                claimedBy = "w",
+                claimToken = "gen-A",
+                retryCount = 2,
+                maxRetries = 3,
             )
 
             repo.requeue("t-1", claimToken = "gen-A")
@@ -357,9 +367,11 @@ class TaskRepositoryTest {
         }
 
         @Test
-        fun `no-op when execution_generation mismatches`() {
+        fun `no-op when execution_generation mismatches`() = runTest {
             insertTask(
-                "t-1", status = TaskStatus.CLAIMED, claimedBy = "w",
+                "t-1",
+                status = TaskStatus.CLAIMED,
+                claimedBy = "w",
                 claimToken = "gen-A",
             )
 
@@ -373,9 +385,8 @@ class TaskRepositoryTest {
 
     @Nested
     inner class DeadLetter {
-
         @Test
-        fun `sets status to DEAD_LETTER with reason and returns true`() {
+        fun `sets status to DEAD_LETTER with reason and returns true`() = runTest {
             insertTask("t-1", status = TaskStatus.CLAIMED, claimedBy = "w")
 
             val result = repo.deadLetter("t-1", "unrecognized handler: bad.handler")
@@ -387,7 +398,7 @@ class TaskRepositoryTest {
         }
 
         @Test
-        fun `with matching claimToken succeeds`() {
+        fun `with matching claimToken succeeds`() = runTest {
             insertTask("t-1", status = TaskStatus.CLAIMED, claimedBy = "w", claimToken = "gen-A")
 
             val result = repo.deadLetter("t-1", "bad handler", claimToken = "gen-A")
@@ -397,7 +408,7 @@ class TaskRepositoryTest {
         }
 
         @Test
-        fun `with mismatching claimToken returns false -- zombie rejected`() {
+        fun `with mismatching claimToken returns false -- zombie rejected`() = runTest {
             insertTask("t-1", status = TaskStatus.CLAIMED, claimedBy = "w", claimToken = "gen-A")
 
             val result = repo.deadLetter("t-1", "bad handler", claimToken = "gen-WRONG")
@@ -407,7 +418,7 @@ class TaskRepositoryTest {
         }
 
         @Test
-        fun `no-op on PENDING task -- status guard`() {
+        fun `no-op on PENDING task -- status guard`() = runTest {
             insertTask("t-1", status = TaskStatus.PENDING)
 
             val result = repo.deadLetter("t-1", "poison pill")
@@ -417,7 +428,7 @@ class TaskRepositoryTest {
         }
 
         @Test
-        fun `no-op on COMPLETED task -- status guard`() {
+        fun `no-op on COMPLETED task -- status guard`() = runTest {
             insertTask("t-1", status = TaskStatus.COMPLETED)
 
             val result = repo.deadLetter("t-1", "zombie attempt")
@@ -427,7 +438,7 @@ class TaskRepositoryTest {
         }
 
         @Test
-        fun `no-op on already DEAD_LETTER task -- status guard`() {
+        fun `no-op on already DEAD_LETTER task -- status guard`() = runTest {
             insertTask("t-1", status = TaskStatus.DEAD_LETTER, errorMessage = "original reason")
 
             val result = repo.deadLetter("t-1", "zombie attempt")
@@ -439,7 +450,7 @@ class TaskRepositoryTest {
         }
 
         @Test
-        fun `zombie lifecycle -- reclaim then re-claim then zombie deadLetter rejected`() {
+        fun `zombie lifecycle -- reclaim then re-claim then zombie deadLetter rejected`() = runTest {
             val taskId = repo.enqueue(EnqueueRequest(handler = "h", payload = "{}", maxRetries = 3))
 
             // Worker A claims
@@ -467,7 +478,6 @@ class TaskRepositoryTest {
 
     @Nested
     inner class FindStaleTasks {
-
         @Test
         fun `returns tasks with old claimed_at`() {
             val staleTime = Instant.now().minus(10, ChronoUnit.MINUTES)
@@ -523,12 +533,14 @@ class TaskRepositoryTest {
 
     @Nested
     inner class ReclaimStaleTask {
-
         @Test
         fun `with retries remaining -- reclaims to PENDING and returns false`() {
             insertTask(
-                "t-1", status = TaskStatus.CLAIMED, claimedBy = "dead-pod",
-                retryCount = 0, maxRetries = 3,
+                "t-1",
+                status = TaskStatus.CLAIMED,
+                claimedBy = "dead-pod",
+                retryCount = 0,
+                maxRetries = 3,
             )
 
             val result = repo.reclaimStaleTask("t-1", errorMessage = "pod died")
@@ -547,8 +559,11 @@ class TaskRepositoryTest {
         @Test
         fun `with retries exhausted -- dead-letters and returns true`() {
             insertTask(
-                "t-1", status = TaskStatus.CLAIMED, claimedBy = "dead-pod",
-                retryCount = 2, maxRetries = 3,
+                "t-1",
+                status = TaskStatus.CLAIMED,
+                claimedBy = "dead-pod",
+                retryCount = 2,
+                maxRetries = 3,
             )
 
             val result = repo.reclaimStaleTask("t-1", errorMessage = "pod died")
@@ -573,8 +588,11 @@ class TaskRepositoryTest {
         @Test
         fun `idempotent -- second reclaim returns null`() {
             insertTask(
-                "t-1", status = TaskStatus.CLAIMED, claimedBy = "dead-pod",
-                retryCount = 0, maxRetries = 3,
+                "t-1",
+                status = TaskStatus.CLAIMED,
+                claimedBy = "dead-pod",
+                retryCount = 0,
+                maxRetries = 3,
             )
 
             val first = repo.reclaimStaleTask("t-1", errorMessage = "reclaim")
@@ -589,7 +607,6 @@ class TaskRepositoryTest {
 
     @Nested
     inner class CountAndFind {
-
         @Test
         fun `countByGroupAndStatus returns correct count`() {
             insertTask("t-1", groupId = "job-1", status = TaskStatus.PENDING)
@@ -650,13 +667,110 @@ class TaskRepositoryTest {
         }
     }
 
+    // ── Find by group and handler ────────────────────────────────────────
+
+    @Nested
+    inner class FindByGroupAndHandler {
+        @Test
+        fun `findByGroupAndHandler returns matching task`() {
+            insertTask("t-1", groupId = "job-1", handler = "wc.map", payload = "a")
+            insertTask("t-2", groupId = "job-1", handler = "wc.reduce", payload = "b")
+
+            val found = repo.findByGroupAndHandler("job-1", "wc.map")
+            assertNotNull(found)
+            assertEquals("t-1", found!!.taskId)
+        }
+
+        @Test
+        fun `findByGroupAndHandler returns null when no match`() {
+            insertTask("t-1", groupId = "job-1", handler = "wc.map")
+            assertNull(repo.findByGroupAndHandler("job-1", "wc.reduce"))
+        }
+
+        @Test
+        fun `findAllByGroupAndHandler returns all matching tasks`() {
+            insertTask("t-1", groupId = "job-1", handler = "wc.map")
+            insertTask("t-2", groupId = "job-1", handler = "wc.map")
+            insertTask("t-3", groupId = "job-1", handler = "wc.reduce")
+
+            val found = repo.findAllByGroupAndHandler("job-1", "wc.map")
+            assertEquals(2, found.size)
+            assertTrue(found.all { it.handler == "wc.map" })
+        }
+
+        @Test
+        fun `findCompletedByGroupAndHandler returns only COMPLETED tasks`() {
+            insertTask("t-1", groupId = "job-1", handler = "wc.map", status = TaskStatus.COMPLETED)
+            insertTask("t-2", groupId = "job-1", handler = "wc.map", status = TaskStatus.PENDING)
+            insertTask("t-3", groupId = "job-1", handler = "wc.map", status = TaskStatus.DEAD_LETTER)
+
+            val found = repo.findCompletedByGroupAndHandler("job-1", "wc.map")
+            assertEquals(1, found.size)
+            assertEquals("t-1", found[0].taskId)
+        }
+
+        @Test
+        fun `findClaimedByGroupAndHandler returns only CLAIMED tasks`() {
+            insertTask("t-1", groupId = "job-1", handler = "wc.map", status = TaskStatus.CLAIMED, claimedBy = "w")
+            insertTask("t-2", groupId = "job-1", handler = "wc.map", status = TaskStatus.PENDING)
+
+            val found = repo.findClaimedByGroupAndHandler("job-1", "wc.map")
+            assertEquals(1, found.size)
+            assertEquals("t-1", found[0].taskId)
+        }
+    }
+
+    // ── Fail with retryDelay ─────────────────────────────────────────────
+
+    @Nested
+    inner class FailWithDelay {
+        @Test
+        fun `fail with retryDelay sets scheduled_at`() = runTest {
+            insertTask("t-1", status = TaskStatus.CLAIMED, claimedBy = "w", retryCount = 0, maxRetries = 3)
+
+            repo.fail("t-1", "transient", retryDelay = java.time.Duration.ofSeconds(30))
+
+            val task = repo.findById("t-1")!!
+            assertEquals(TaskStatus.PENDING, task.status)
+            assertNotNull(task.scheduledAt)
+            assertTrue(task.scheduledAt!!.isAfter(Instant.now().plusSeconds(20)))
+        }
+    }
+
+    // ── Requeue with delay ───────────────────────────────────────────────
+
+    @Nested
+    inner class RequeueWithDelay {
+        @Test
+        fun `requeue with delay sets scheduled_at`() = runTest {
+            insertTask("t-1", status = TaskStatus.CLAIMED, claimedBy = "w")
+
+            repo.requeue("t-1", delay = java.time.Duration.ofSeconds(60))
+
+            val task = repo.findById("t-1")!!
+            assertEquals(TaskStatus.PENDING, task.status)
+            assertNotNull(task.scheduledAt)
+            assertTrue(task.scheduledAt!!.isAfter(Instant.now().plusSeconds(50)))
+        }
+
+        @Test
+        fun `requeue with zero delay does not set scheduled_at`() = runTest {
+            insertTask("t-1", status = TaskStatus.CLAIMED, claimedBy = "w")
+
+            repo.requeue("t-1", delay = java.time.Duration.ZERO)
+
+            val task = repo.findById("t-1")!!
+            assertEquals(TaskStatus.PENDING, task.status)
+            assertNull(task.scheduledAt)
+        }
+    }
+
     // ── Integration: enqueue then claim then complete ────────────────────
 
     @Nested
     inner class EndToEnd {
-
         @Test
-        fun `enqueue - claim - complete lifecycle`() {
+        fun `enqueue - claim - complete lifecycle`() = runTest {
             val taskId = repo.enqueue(EnqueueRequest(handler = "h", payload = """{"v":1}"""))
 
             val claimed = repo.claim("worker-1", listOf("default"))!!
@@ -671,10 +785,11 @@ class TaskRepositoryTest {
         }
 
         @Test
-        fun `enqueue - claim - fail - re-claim lifecycle`() {
-            val taskId = repo.enqueue(
-                EnqueueRequest(handler = "h", payload = "{}", maxRetries = 3)
-            )
+        fun `enqueue - claim - fail - re-claim lifecycle`() = runTest {
+            val taskId =
+                repo.enqueue(
+                    EnqueueRequest(handler = "h", payload = "{}", maxRetries = 3),
+                )
 
             // First attempt: claim and fail
             val first = repo.claim("w", listOf("default"))!!

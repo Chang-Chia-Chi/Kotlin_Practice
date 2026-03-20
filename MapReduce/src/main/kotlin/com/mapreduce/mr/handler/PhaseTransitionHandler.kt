@@ -45,7 +45,7 @@ class PhaseTransitionHandler(
         }
     }
 
-    private fun handleMapPhaseComplete(group: TaskGroup): TaskResult {
+    private suspend fun handleMapPhaseComplete(group: TaskGroup): TaskResult {
         val failureReason = evaluateFailurePolicy(
             FailurePolicy.valueOf(group.failurePolicy), group.tasksFailed,
             group.phaseTotal, group.failureThreshold,
@@ -84,7 +84,7 @@ class PhaseTransitionHandler(
         return TaskResult.Success()
     }
 
-    private fun handleReducePhaseComplete(group: TaskGroup): TaskResult {
+    private suspend fun handleReducePhaseComplete(group: TaskGroup): TaskResult {
         val transitioned = taskGroupRepository.casGroupStatus(
             group.groupId, ACTIVE, COMPLETED, group.version,
         )

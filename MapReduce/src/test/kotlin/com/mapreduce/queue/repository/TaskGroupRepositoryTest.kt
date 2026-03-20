@@ -6,6 +6,7 @@ import com.mapreduce.queue.model.EnqueueRequest
 import com.mapreduce.queue.model.GroupStatus
 import com.mapreduce.queue.model.TaskGroup
 import com.mapreduce.queue.model.TaskStatus
+import kotlinx.coroutines.test.runTest
 import org.jdbi.v3.core.Jdbi
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
@@ -63,7 +64,7 @@ class TaskGroupRepositoryTest {
         return tasks
     }
 
-    private fun claimAll(count: Int, queue: String = "default"): List<com.mapreduce.queue.model.Task> =
+    private suspend fun claimAll(count: Int, queue: String = "default"): List<com.mapreduce.queue.model.Task> =
         (0 until count).map { taskRepo.claim("worker-$it", listOf(queue))!! }
 
     private fun readStatus(taskId: String): String =
@@ -95,7 +96,7 @@ class TaskGroupRepositoryTest {
     inner class FailGroupTask {
 
         @Test
-        fun `retry remaining -- task goes PENDING, no group counter change`() {
+        fun `retry remaining -- task goes PENDING, no group counter change`() = runTest {
             val groupId = "fg-retry"
             createGroupWithTasks(groupId, 3, maxRetries = 3)
             val claimed = claimAll(3)
@@ -115,7 +116,7 @@ class TaskGroupRepositoryTest {
         }
 
         @Test
-        fun `retry exhausted -- atomic dead-letter and group decrement`() {
+        fun `retry exhausted -- atomic dead-letter and group decrement`() = runTest {
             val groupId = "fg-exhaust"
             createGroupWithTasks(groupId, 2, maxRetries = 1)
             val claimed = claimAll(2)
@@ -134,7 +135,7 @@ class TaskGroupRepositoryTest {
         }
 
         @Test
-        fun `retry exhausted on last task -- barrier met`() {
+        fun `retry exhausted on last task -- barrier met`() = runTest {
             val groupId = "fg-barrier"
             createGroupWithTasks(groupId, 1, maxRetries = 1)
             val claimed = claimAll(1)
@@ -151,7 +152,7 @@ class TaskGroupRepositoryTest {
         }
 
         @Test
-        fun `fenced out -- returns taskUpdated false`() {
+        fun `fenced out -- returns taskUpdated false`() = runTest {
             val groupId = "fg-fenced"
             createGroupWithTasks(groupId, 2, maxRetries = 1)
             val claimed = claimAll(2)
@@ -169,7 +170,7 @@ class TaskGroupRepositoryTest {
         }
 
         @Test
-        fun `respects retryDelay`() {
+        fun `respects retryDelay`() = runTest {
             val groupId = "fg-delay"
             createGroupWithTasks(groupId, 1, maxRetries = 3)
             val claimed = claimAll(1)
@@ -192,7 +193,7 @@ class TaskGroupRepositoryTest {
     inner class DeadLetterGroupTask {
 
         @Test
-        fun `atomic dead-letter and group decrement`() {
+        fun `atomic dead-letter and group decrement`() = runTest {
             val groupId = "dl-basic"
             createGroupWithTasks(groupId, 3)
             val claimed = claimAll(3)
@@ -211,7 +212,7 @@ class TaskGroupRepositoryTest {
         }
 
         @Test
-        fun `fenced out -- zombie rejected`() {
+        fun `fenced out -- zombie rejected`() = runTest {
             val groupId = "dl-fenced"
             createGroupWithTasks(groupId, 2)
             val claimed = claimAll(2)
@@ -229,7 +230,7 @@ class TaskGroupRepositoryTest {
         }
 
         @Test
-        fun `barrier fires when last task dead-lettered`() {
+        fun `barrier fires when last task dead-lettered`() = runTest {
             val groupId = "dl-barrier"
             createGroupWithTasks(groupId, 2)
             val claimed = claimAll(2)
@@ -261,7 +262,7 @@ class TaskGroupRepositoryTest {
     inner class ReclaimGroupTask {
 
         @Test
-        fun `retry remaining -- task goes PENDING, no group counter change`() {
+        fun `retry remaining -- task goes PENDING, no group counter change`() = runTest {
             val groupId = "rg-retry"
             createGroupWithTasks(groupId, 2, maxRetries = 3)
             val claimed = claimAll(2)
@@ -285,7 +286,7 @@ class TaskGroupRepositoryTest {
         }
 
         @Test
-        fun `retry exhausted -- atomic dead-letter and group decrement`() {
+        fun `retry exhausted -- atomic dead-letter and group decrement`() = runTest {
             val groupId = "rg-exhaust"
             createGroupWithTasks(groupId, 2, maxRetries = 1)
             val claimed = claimAll(2)
@@ -304,7 +305,7 @@ class TaskGroupRepositoryTest {
         }
 
         @Test
-        fun `returns null when task already handled`() {
+        fun `returns null when task already handled`() = runTest {
             val groupId = "rg-null"
             createGroupWithTasks(groupId, 1, maxRetries = 3)
             val claimed = claimAll(1)
@@ -325,7 +326,7 @@ class TaskGroupRepositoryTest {
         }
 
         @Test
-        fun `clears claim fields on reclaim`() {
+        fun `clears claim fields on reclaim`() = runTest {
             val groupId = "rg-clear"
             createGroupWithTasks(groupId, 1, maxRetries = 3)
             val claimed = claimAll(1)
@@ -342,7 +343,7 @@ class TaskGroupRepositoryTest {
         }
 
         @Test
-        fun `reclaim exhausted on last task -- barrier met`() {
+        fun `reclaim exhausted on last task -- barrier met`() = runTest {
             val groupId = "rg-barrier"
             createGroupWithTasks(groupId, 1, maxRetries = 1)
             val claimed = claimAll(1)
