@@ -5,7 +5,7 @@ import com.mapreduce.queue.model.TaskContext
 import com.mapreduce.queue.model.TaskResult
 import com.mapreduce.queue.pipeline.TaskPipeline
 import com.mapreduce.queue.registry.HandlerRegistry
-import com.mapreduce.queue.repository.TaskGroupRepository
+import com.mapreduce.queue.repository.WorkflowStepRepository
 import com.mapreduce.queue.repository.TaskRepository
 import jakarta.enterprise.context.ApplicationScoped
 import org.jboss.logging.Logger
@@ -17,7 +17,7 @@ import org.jboss.logging.Logger
 @ApplicationScoped
 class TaskDispatcher(
     private val taskRepository: TaskRepository,
-    private val taskGroupRepository: TaskGroupRepository,
+    private val workflowStepRepository: WorkflowStepRepository,
     private val handlerRegistry: HandlerRegistry,
     private val pipeline: TaskPipeline,
 ) {
@@ -30,8 +30,8 @@ class TaskDispatcher(
         if (handler == null) {
             log.errorf("No handler for '%s' — dead-lettering task %s", task.handler, task.taskId)
             val reason = "No handler registered for '${task.handler}'"
-            if (task.groupId != null) {
-                taskGroupRepository.deadLetterGroupTask(task.taskId, task.groupId, reason, task.claimToken)
+            if (task.stepId != null) {
+                workflowStepRepository.deadLetterStepTask(task.taskId, task.stepId, reason, task.claimToken)
             } else {
                 taskRepository.deadLetter(task.taskId, reason, task.claimToken)
             }
@@ -54,9 +54,9 @@ class TaskDispatcher(
     private suspend fun processResult(task: Task, result: TaskResult, gen: String?) {
         when (result) {
             is TaskResult.Success -> {
-                if (task.groupId != null) {
-                    taskGroupRepository.resolveGroupTask(
-                        taskId = task.taskId, groupId = task.groupId,
+                if (task.stepId != null) {
+                    workflowStepRepository.resolveStepTask(
+                        taskId = task.taskId, stepId = task.stepId,
                         claimToken = gen,
                         outputUri = result.outputUri, outputMetadata = result.outputMetadata,
                     )
@@ -66,9 +66,9 @@ class TaskDispatcher(
             }
             is TaskResult.Retry -> {
                 if (result.consumeRetry) {
-                    if (task.groupId != null) {
-                        taskGroupRepository.failGroupTask(
-                            task.taskId, task.groupId, result.reason, result.delay, gen,
+                    if (task.stepId != null) {
+                        workflowStepRepository.failStepTask(
+                            task.taskId, task.stepId, result.reason, result.delay, gen,
                         )
                     } else {
                         taskRepository.fail(task.taskId, result.reason, result.delay, gen)
@@ -78,18 +78,18 @@ class TaskDispatcher(
                 }
             }
             is TaskResult.Failure -> {
-                if (task.groupId != null) {
-                    taskGroupRepository.failGroupTask(
-                        task.taskId, task.groupId, result.message, claimToken = gen,
+                if (task.stepId != null) {
+                    workflowStepRepository.failStepTask(
+                        task.taskId, task.stepId, result.message, claimToken = gen,
                     )
                 } else {
                     taskRepository.fail(task.taskId, result.message, claimToken = gen)
                 }
             }
             is TaskResult.DeadLetter -> {
-                if (task.groupId != null) {
-                    taskGroupRepository.deadLetterGroupTask(
-                        task.taskId, task.groupId, result.reason, gen,
+                if (task.stepId != null) {
+                    workflowStepRepository.deadLetterStepTask(
+                        task.taskId, task.stepId, result.reason, gen,
                     )
                 } else {
                     taskRepository.deadLetter(task.taskId, result.reason, gen)
@@ -105,7 +105,7 @@ class TaskDispatcher(
         handler = task.handler,
         queue = task.queue,
         payload = task.payload,
-        groupId = task.groupId,
+        stepId = task.stepId,
         metadata = task.metadata,
         claimToken = task.claimToken,
         retryCount = task.retryCount,

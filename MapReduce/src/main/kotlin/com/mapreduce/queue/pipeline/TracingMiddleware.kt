@@ -24,7 +24,7 @@ class TracingMiddleware(private val tracer: Tracer) : Middleware {
             .setAttribute("task.handler", context.handler)
             .setAttribute("task.queue", context.queue)
             .setAttribute("task.retryCount", context.retryCount.toLong())
-            .apply { context.groupId?.let { setAttribute("task.groupId", it) } }
+            .apply { context.stepId?.let { setAttribute("task.stepId", it) } }
             .startSpan()
 
         return try {

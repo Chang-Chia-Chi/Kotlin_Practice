@@ -1,4 +1,4 @@
-package com.mapreduce.mr.shuffle
+package com.mapreduce.workflow.shuffle
 
 import jakarta.enterprise.context.ApplicationScoped
 import kotlinx.coroutines.Dispatchers

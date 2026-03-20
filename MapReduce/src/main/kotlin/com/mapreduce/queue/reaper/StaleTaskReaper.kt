@@ -2,7 +2,7 @@ package com.mapreduce.queue.reaper
 
 import com.mapreduce.config.FrameworkConfig
 import com.mapreduce.leader.NotLeader
-import com.mapreduce.queue.repository.TaskGroupRepository
+import com.mapreduce.queue.repository.WorkflowStepRepository
 import com.mapreduce.queue.repository.TaskRepository
 import io.micrometer.core.instrument.MeterRegistry
 import io.quarkus.scheduler.Scheduled
@@ -23,7 +23,7 @@ import java.time.Instant
 class StaleTaskReaper(
     private val config: FrameworkConfig,
     private val taskRepository: TaskRepository,
-    private val taskGroupRepository: TaskGroupRepository,
+    private val workflowStepRepository: WorkflowStepRepository,
     private val meterRegistry: MeterRegistry,
 ) {
 
@@ -59,8 +59,8 @@ class StaleTaskReaper(
             val staleAge = Duration.between(task.claimedAt ?: Instant.now(), Instant.now())
             val errorMessage = "Reclaimed: task stale (pod: ${task.claimedBy ?: "unknown"})"
 
-            val deadLettered: Boolean? = if (task.groupId != null) {
-                taskGroupRepository.reclaimGroupTask(task.taskId, task.groupId, errorMessage)?.deadLettered
+            val deadLettered: Boolean? = if (task.stepId != null) {
+                workflowStepRepository.reclaimStepTask(task.taskId, task.stepId, errorMessage)?.deadLettered
             } else {
                 taskRepository.reclaimStaleTask(task.taskId, errorMessage)
             }
@@ -84,8 +84,8 @@ class StaleTaskReaper(
             }
         }
 
-        // Fail ACTIVE groups that have exceeded their deadline
-        val expiredCount = reapExpiredGroups()
+        // Fail ACTIVE steps that have exceeded their deadline
+        val expiredCount = reapExpiredSteps()
 
         val scanDurationNanos = System.nanoTime() - scanStart
         meterRegistry.timer("taskqueue.reaper.scan_duration")
@@ -99,19 +99,19 @@ class StaleTaskReaper(
             meterRegistry.counter("taskqueue.reaper.dead_lettered").increment(deadLetteredCount.toDouble())
         }
         if (expiredCount > 0) {
-            meterRegistry.counter("taskqueue.reaper.groups_expired").increment(expiredCount.toDouble())
+            meterRegistry.counter("taskqueue.reaper.steps_expired").increment(expiredCount.toDouble())
         }
     }
 
     /**
-     * Bulk-fail ACTIVE groups whose [deadline_at] has passed.
-     * This prevents groups from stalling indefinitely when tasks are perpetually
+     * Bulk-fail ACTIVE steps whose [deadline_at] has passed.
+     * This prevents steps from stalling indefinitely when tasks are perpetually
      * requeued without consuming retries (e.g., repeated shutdown-aware timeouts).
      */
-    private fun reapExpiredGroups(): Int {
-        val count = taskGroupRepository.failExpiredGroups(Instant.now())
+    private fun reapExpiredSteps(): Int {
+        val count = workflowStepRepository.failExpiredSteps(Instant.now())
         if (count > 0) {
-            log.warnf("Failed %d group(s) past their deadline", count)
+            log.warnf("Failed %d step(s) past their deadline", count)
         }
         return count
     }

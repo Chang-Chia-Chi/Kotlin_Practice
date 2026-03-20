@@ -11,12 +11,12 @@ import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Discovers all [TaskHandler] beans at startup via CDI and supports
- * programmatic registration (used by Layer 2 patterns like MapReduce
- * to auto-generate handlers from definitions).
+ * programmatic registration (used by Layer 2 patterns like workflow definitions
+ * to register handlers from definitions).
  *
  * **Startup ordering contract:** This bean observes [StartupEvent] at
  * `@Priority(10)` to discover CDI handlers first. Layer 2 registrars
- * (e.g., MapReduceRegistry) must use a higher priority value (e.g., 20)
+ * (e.g., WorkflowRegistry) must use a higher priority value (e.g., 20)
  * so they run after CDI discovery is complete.
  */
 @ApplicationScoped

@@ -1,7 +1,7 @@
-package com.mapreduce.mr.model
+package com.mapreduce.workflow.model
 
 enum class FailurePolicy {
-    FAIL_GROUP, THRESHOLD, BEST_EFFORT
+    FAIL_STEP, THRESHOLD, BEST_EFFORT
 }
 
 /**
@@ -14,8 +14,8 @@ fun evaluateFailurePolicy(
     total: Int,
     failureThreshold: Double,
 ): String? = when (policy) {
-    FailurePolicy.FAIL_GROUP ->
-        if (failed > 0) "FAIL_GROUP: $failed task(s) failed" else null
+    FailurePolicy.FAIL_STEP ->
+        if (failed > 0) "FAIL_STEP: $failed task(s) failed" else null
 
     FailurePolicy.THRESHOLD -> {
         if (total == 0) null

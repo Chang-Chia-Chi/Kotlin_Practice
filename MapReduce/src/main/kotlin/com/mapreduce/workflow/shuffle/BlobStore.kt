@@ -1,15 +1,15 @@
-package com.mapreduce.mr.shuffle
+package com.mapreduce.workflow.shuffle
 
 import kotlinx.coroutines.flow.Flow
 
 /**
  * SPI for external shuffle storage.
  *
- * Map workers stream intermediate outputs to an immutable blob store instead
- * of writing CLOBs to the relational database. The `mr_output` table stores
- * only the routing partition hash and the blob URI.
+ * Step handlers stream intermediate outputs to an immutable blob store instead
+ * of writing CLOBs to the relational database. The task table stores only
+ * the blob URI in the output_uri column.
  *
- * Reduce workers stream inputs directly from the blob store using URIs,
+ * Subsequent steps stream inputs directly from the blob store using URIs,
  * bypassing the database for data movement entirely.
  *
  * Implementations must support concurrent writes from multiple pods and
@@ -23,7 +23,7 @@ interface BlobStore {
      *
      * @param jobId The owning job identifier
      * @param taskId The producing task identifier
-     * @param partitionHash The partition assignment for sharded reduce
+     * @param partitionHash The partition assignment for sharded steps
      * @param data The serialized output records to store
      */
     suspend fun write(
@@ -34,7 +34,7 @@ interface BlobStore {
     ): String
 
     /**
-     * Stream data back from a blob URI for the reduce phase.
+     * Stream data back from a blob URI.
      * Returns a Flow that streams records one at a time.
      */
     suspend fun read(blobUri: String): Flow<String>
