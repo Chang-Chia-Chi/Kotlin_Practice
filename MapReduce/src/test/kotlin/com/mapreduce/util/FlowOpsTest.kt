@@ -37,6 +37,22 @@ class FlowOpsTest {
     }
 
     @Test
+    fun `unorderedMapAsync isolates transform exceptions`() = runTest {
+        val source = flow { for (i in 1..5) emit(i) }
+
+        val results = source
+            .unorderedMapAsync(3) {
+                if (it == 3) throw RuntimeException("boom")
+                it * 2
+            }
+            .toList()
+            .sorted()
+
+        // Element 3 fails and is dropped; the rest complete normally
+        assertEquals(listOf(2, 4, 8, 10), results)
+    }
+
+    @Test
     fun `unorderedMapAsync respects concurrency limit`() = runTest {
         val maxConcurrent = AtomicInteger(0)
         val active = AtomicInteger(0)

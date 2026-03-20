@@ -20,8 +20,12 @@ class MetricsMiddleware(private val meterRegistry: MeterRegistry) : Middleware {
         next: suspend (TaskContext) -> TaskResult,
     ): TaskResult {
         val startNanos = System.nanoTime()
-        val result = next(context)
-        val durationNanos = System.nanoTime() - startNanos
+        val result = try {
+            next(context)
+        } catch (e: Exception) {
+            recordMetrics(context, "exception", startNanos)
+            throw e
+        }
 
         val resultLabel = when (result) {
             is TaskResult.Success -> "success"
@@ -29,6 +33,13 @@ class MetricsMiddleware(private val meterRegistry: MeterRegistry) : Middleware {
             is TaskResult.Failure -> "failure"
             is TaskResult.DeadLetter -> "dead_letter"
         }
+
+        recordMetrics(context, resultLabel, startNanos)
+        return result
+    }
+
+    private fun recordMetrics(context: TaskContext, resultLabel: String, startNanos: Long) {
+        val durationNanos = System.nanoTime() - startNanos
 
         meterRegistry.timer(
             "taskqueue.handler.duration",
@@ -42,7 +53,5 @@ class MetricsMiddleware(private val meterRegistry: MeterRegistry) : Middleware {
             "handler", context.handler,
             "result", resultLabel,
         ).increment()
-
-        return result
     }
 }

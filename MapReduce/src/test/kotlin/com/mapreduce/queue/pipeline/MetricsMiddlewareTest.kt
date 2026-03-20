@@ -5,7 +5,7 @@ import com.mapreduce.queue.model.TaskResult
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Assertions.assertEquals
-import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertSame
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
@@ -175,18 +175,24 @@ class MetricsMiddlewareTest {
     inner class ExceptionPropagation {
 
         @Test
-        fun `exception from next propagates and no metrics are recorded`() = runTest {
+        fun `exception from next propagates and records exception metrics`() = runTest {
             val exception = RuntimeException("handler exploded")
 
             assertThrows<RuntimeException> {
                 middleware.invoke(buildContext()) { throw exception }
             }
 
-            val timer = registry.find("taskqueue.handler.duration").timer()
-            val counter = registry.find("taskqueue.handler.executions").counter()
+            val timer = registry.find("taskqueue.handler.duration")
+                .tag("result", "exception")
+                .timer()
+            val counter = registry.find("taskqueue.handler.executions")
+                .tag("result", "exception")
+                .counter()
 
-            assertNull(timer, "Timer should not be recorded when next throws")
-            assertNull(counter, "Counter should not be recorded when next throws")
+            assertNotNull(timer, "Timer should be recorded with result=exception when next throws")
+            assertEquals(1, timer!!.count())
+            assertNotNull(counter, "Counter should be recorded with result=exception when next throws")
+            assertEquals(1.0, counter!!.count())
         }
     }
 }
