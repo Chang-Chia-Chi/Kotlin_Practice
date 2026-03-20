@@ -497,6 +497,59 @@ class WorkflowStepRepository(
     }
 
     /**
+     * Atomically CAS step to FAILED and enqueue a compensation task.
+     *
+     * Both operations happen in one transaction — if the process crashes
+     * after CAS but before compensation insert, the compensation is not lost.
+     * The compensation handler receives the step_id as payload, enabling it
+     * to query failed task details and perform rollback.
+     *
+     * @return true if the CAS succeeded (step was ACTIVE at expected version).
+     */
+    suspend fun failStepWithCompensation(
+        stepId: String,
+        expectedVersion: Long,
+        compensationHandler: String,
+        queue: String,
+    ): Boolean {
+        val epoch = optionalEpoch()
+        return jdbi.inTransactionSuspend<Boolean, Exception> { h ->
+            val epochClause = if (epoch != null) " AND last_epoch <= :epoch" else ""
+            val epochSet = if (epoch != null) ", last_epoch = :epoch" else ""
+
+            val updated = h.createUpdate(
+                """
+                UPDATE workflow_step
+                SET status = 'FAILED', version = version + 1$epochSet,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE step_id = :stepId AND status = 'ACTIVE'
+                  AND version = :expectedVersion$epochClause
+                """,
+            ).bind("stepId", stepId)
+                .bind("expectedVersion", expectedVersion)
+                .apply { if (epoch != null) bind("epoch", epoch) }
+                .execute()
+
+            if (updated == 0) return@inTransactionSuspend false
+
+            h.createUpdate(
+                """
+                INSERT INTO task (task_id, handler, queue, payload, status, priority,
+                    step_id, metadata, retry_count, max_retries, created_at)
+                VALUES (:taskId, :handler, :queue, :payload, 'PENDING', 10,
+                    NULL, NULL, 0, 3, CURRENT_TIMESTAMP)
+                """,
+            ).bind("taskId", UUID.randomUUID().toString())
+                .bind("handler", compensationHandler)
+                .bind("queue", queue)
+                .bind("payload", stepId)
+                .execute()
+
+            true
+        }
+    }
+
+    /**
      * Stream output URIs and metadata from completed tasks in a step
      * filtered by handler name.
      */

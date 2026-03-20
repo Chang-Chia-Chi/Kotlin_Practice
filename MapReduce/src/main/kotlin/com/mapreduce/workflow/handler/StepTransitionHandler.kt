@@ -69,9 +69,24 @@ class StepTransitionHandler(
             currentSpec.failureThreshold,
         )
         if (failureReason != null) {
-            val transitioned = workflowStepRepository.casStepStatus(step.stepId, ACTIVE, FAILED, step.version)
-            if (transitioned) {
-                log.warnf("Step %s failed during '%s': %s", step.stepId, step.stepLabel, failureReason)
+            val compensation = currentSpec.compensation
+            if (compensation != null) {
+                // Atomic: CAS to FAILED + insert compensation task in one transaction
+                val transitioned = workflowStepRepository.failStepWithCompensation(
+                    stepId = step.stepId,
+                    expectedVersion = step.version,
+                    compensationHandler = compensation,
+                    queue = currentSpec.queue,
+                )
+                if (transitioned) {
+                    log.warnf("Step %s failed during '%s': %s", step.stepId, step.stepLabel, failureReason)
+                    log.infof("Compensation task dispatched for step %s (handler=%s)", step.stepId, compensation)
+                }
+            } else {
+                val transitioned = workflowStepRepository.casStepStatus(step.stepId, ACTIVE, FAILED, step.version)
+                if (transitioned) {
+                    log.warnf("Step %s failed during '%s': %s", step.stepId, step.stepLabel, failureReason)
+                }
             }
             return TaskResult.Success()
         }

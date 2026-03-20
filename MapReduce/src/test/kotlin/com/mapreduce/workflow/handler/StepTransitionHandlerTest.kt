@@ -143,6 +143,42 @@ class StepTransitionHandlerTest {
         }
 
         @Test
+        fun `dispatches compensation task when step fails and compensation handler is set`() = runTest {
+            val pipeline = listOf(
+                WorkflowDefinition.StepSpec(
+                    name = "map", handler = "wc.map", queue = "mr",
+                    compensation = "wc.map-rollback",
+                ),
+                WorkflowDefinition.StepSpec(name = "reduce", handler = "wc.reduce", queue = "mr"),
+            )
+            whenever(stepRepo.findStep("s-1")).thenReturn(step(stepId = "s-1", tasksFailed = 1))
+            whenever(registry.getDefinition("wc")).thenReturn(fakeDefinition(pipeline))
+            whenever(stepRepo.failStepWithCompensation("s-1", 0, "wc.map-rollback", "mr")).thenReturn(true)
+
+            val result = handler.handle(ctx("s-1"))
+
+            assertTrue(result is TaskResult.Success)
+            verify(stepRepo).failStepWithCompensation(
+                stepId = "s-1",
+                expectedVersion = 0,
+                compensationHandler = "wc.map-rollback",
+                queue = "mr",
+            )
+        }
+
+        @Test
+        fun `skips compensation when step fails but no compensation handler`() = runTest {
+            whenever(stepRepo.findStep("s-1")).thenReturn(step(stepId = "s-1", tasksFailed = 1))
+            whenever(registry.getDefinition("wc")).thenReturn(fakeDefinition(twoStepPipeline()))
+            whenever(stepRepo.casStepStatus("s-1", StepStatus.ACTIVE, StepStatus.FAILED, 0)).thenReturn(true)
+
+            val result = handler.handle(ctx("s-1"))
+
+            assertTrue(result is TaskResult.Success)
+            verify(stepRepo, never()).failStepWithCompensation(any(), any(), any(), any())
+        }
+
+        @Test
         fun `BEST_EFFORT does not trigger failure even with failed tasks`() = runTest {
             val pipeline = listOf(
                 WorkflowDefinition.StepSpec(
