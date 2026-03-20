@@ -77,7 +77,7 @@ class ShutdownCoordinatorTest {
     inner class StateTransitions {
 
         @Test
-        fun `onShutdown transitions to TERMINATED`() {
+        fun `onShutdown transitions through DRAINING to TERMINATED`() {
             coordinator.onShutdown(ShutdownEvent())
 
             assertEquals(ShutdownState.TERMINATED, coordinator.state)

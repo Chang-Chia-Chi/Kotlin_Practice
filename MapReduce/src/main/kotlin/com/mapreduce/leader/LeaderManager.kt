@@ -67,7 +67,7 @@ class LeaderManager(
         registerMetrics()
     }
 
-    override val shutdownOrder: Int = 0
+    override val shutdownOrder: Int = 1
     override val shutdownTimeout: Duration get() = config.shutdown().leaderTeardownTimeout()
 
     override suspend fun shutdown() {

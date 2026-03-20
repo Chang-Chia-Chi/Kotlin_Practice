@@ -7,8 +7,8 @@ import org.junit.jupiter.api.Test
 class ShutdownStateTest {
 
     @Test
-    fun `enum contains exactly four values`() {
-        assertEquals(4, ShutdownState.entries.size)
+    fun `enum contains exactly three values`() {
+        assertEquals(3, ShutdownState.entries.size)
     }
 
     @Test
@@ -22,28 +22,21 @@ class ShutdownStateTest {
     }
 
     @Test
-    fun `RELEASING exists`() {
-        assertEquals("RELEASING", ShutdownState.RELEASING.name)
-    }
-
-    @Test
     fun `TERMINATED exists`() {
         assertEquals("TERMINATED", ShutdownState.TERMINATED.name)
     }
 
     @Test
-    fun `ordinal ordering is RUNNING lt DRAINING lt RELEASING lt TERMINATED`() {
+    fun `ordinal ordering is RUNNING lt DRAINING lt TERMINATED`() {
         assertTrue(ShutdownState.RUNNING.ordinal < ShutdownState.DRAINING.ordinal)
-        assertTrue(ShutdownState.DRAINING.ordinal < ShutdownState.RELEASING.ordinal)
-        assertTrue(ShutdownState.RELEASING.ordinal < ShutdownState.TERMINATED.ordinal)
+        assertTrue(ShutdownState.DRAINING.ordinal < ShutdownState.TERMINATED.ordinal)
     }
 
     @Test
     fun `ordinals are sequential starting from 0`() {
         assertEquals(0, ShutdownState.RUNNING.ordinal)
         assertEquals(1, ShutdownState.DRAINING.ordinal)
-        assertEquals(2, ShutdownState.RELEASING.ordinal)
-        assertEquals(3, ShutdownState.TERMINATED.ordinal)
+        assertEquals(2, ShutdownState.TERMINATED.ordinal)
     }
 
     @Test

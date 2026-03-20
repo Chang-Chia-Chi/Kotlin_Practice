@@ -75,10 +75,6 @@ interface FrameworkConfig {
         @WithDefault("5S")
         fun leaderTeardownTimeout(): Duration
 
-        @WithName("release-timeout")
-        @WithDefault("5S")
-        fun releaseTimeout(): Duration
-
         @WithName("log-interval")
         @WithDefault("5S")
         fun logInterval(): Duration

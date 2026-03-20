@@ -146,8 +146,8 @@ class LeaderManagerTest {
         }
 
         @Test
-        fun `shutdownOrder is 0`() {
-            assertEquals(0, leaderManager.shutdownOrder)
+        fun `shutdownOrder is 1 so leader shuts down after workers`() {
+            assertEquals(1, leaderManager.shutdownOrder)
         }
 
         @Test
