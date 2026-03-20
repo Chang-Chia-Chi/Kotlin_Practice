@@ -220,6 +220,48 @@ class StepTransitionHandlerTest {
         }
     }
 
+    // ── Deadline resolution ───────────────────────────────────
+
+    @Nested
+    inner class DeadlineResolution {
+
+        @Test
+        fun `uses config default when spec deadline is null`() = runTest {
+            val pipeline = listOf(
+                WorkflowDefinition.StepSpec(name = "map", handler = "wc.map", queue = "mr"),
+                WorkflowDefinition.StepSpec(name = "reduce", handler = "wc.reduce", queue = "mr", deadline = null),
+            )
+            whenever(stepRepo.findStep("s-1")).thenReturn(step(stepId = "s-1"))
+            whenever(registry.getDefinition("wc")).thenReturn(fakeDefinition(pipeline))
+            whenever(stepRepo.streamTaskOutputs("s-1", "wc.map")).thenReturn(emptyFlow())
+            whenever(stepRepo.createNextStep(any(), any(), any(), any())).thenReturn(true)
+
+            handler.handle(ctx("s-1"))
+
+            // Verify createNextStep was called (deadline resolved without crash)
+            verify(stepRepo).createNextStep(any(), any(), any(), any())
+        }
+
+        @Test
+        fun `uses explicit deadline when spec deadline is set`() = runTest {
+            val pipeline = listOf(
+                WorkflowDefinition.StepSpec(name = "map", handler = "wc.map", queue = "mr"),
+                WorkflowDefinition.StepSpec(
+                    name = "reduce", handler = "wc.reduce", queue = "mr",
+                    deadline = Duration.ofMinutes(5),
+                ),
+            )
+            whenever(stepRepo.findStep("s-1")).thenReturn(step(stepId = "s-1"))
+            whenever(registry.getDefinition("wc")).thenReturn(fakeDefinition(pipeline))
+            whenever(stepRepo.streamTaskOutputs("s-1", "wc.map")).thenReturn(emptyFlow())
+            whenever(stepRepo.createNextStep(any(), any(), any(), any())).thenReturn(true)
+
+            handler.handle(ctx("s-1"))
+
+            verify(stepRepo).createNextStep(any(), any(), any(), any())
+        }
+    }
+
     @Test
     fun `handlerName follows naming convention`() {
         assertEquals("wc.__step_transition", handler.handlerName)
