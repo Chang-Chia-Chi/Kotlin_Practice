@@ -146,12 +146,6 @@ class StepTransitionHandler(
         return TaskResult.Success()
     }
 
-    private fun resolveDeadline(specDeadline: Duration): Duration {
-        val hardcodedDefault = Duration.ofHours(1)
-        return if (specDeadline == hardcodedDefault) {
-            config.workflow().defaultStepDeadline()
-        } else {
-            specDeadline
-        }
-    }
+    private fun resolveDeadline(specDeadline: Duration?): Duration =
+        specDeadline ?: config.workflow().defaultStepDeadline()
 }

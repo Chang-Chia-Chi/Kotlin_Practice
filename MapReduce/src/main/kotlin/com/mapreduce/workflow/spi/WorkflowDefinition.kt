@@ -47,7 +47,10 @@ interface WorkflowDefinition<P> {
         val maxRetries: Int = 3,
         val failurePolicy: FailurePolicy = FailurePolicy.FAIL_STEP,
         val failureThreshold: Double = 0.0,
-        val deadline: Duration = Duration.ofHours(1),
+        /** Null = use config default. Explicit value = use as-is. Fixes magic-value bug. */
+        val deadline: Duration? = null,
+        /** Optional compensation handler name. Dispatched as a task when step fails. */
+        val compensation: String? = null,
     )
 
     data class TaskPayload(

@@ -123,12 +123,6 @@ class JobResource(
         return Response.ok(steps.map { JobResponse.from(it) }).build()
     }
 
-    private fun resolveDeadline(specDeadline: Duration): Duration {
-        val hardcodedDefault = Duration.ofHours(1)
-        return if (specDeadline == hardcodedDefault) {
-            config.workflow().defaultStepDeadline()
-        } else {
-            specDeadline
-        }
-    }
+    private fun resolveDeadline(specDeadline: Duration?): Duration =
+        specDeadline ?: config.workflow().defaultStepDeadline()
 }
