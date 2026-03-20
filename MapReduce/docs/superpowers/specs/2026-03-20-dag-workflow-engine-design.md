@@ -28,6 +28,8 @@ Generalize the MapReduce task queue from a hardcoded two-phase (map/reduce) engi
 
 ## Schema: `workflow_step` + `task`
 
+**Target schema** (reference only — see Migration section below for actual DDL):
+
 ```sql
 -- workflow_step (renamed from task_group, one row per step)
 CREATE TABLE workflow_step (
@@ -42,7 +44,7 @@ CREATE TABLE workflow_step (
     tasks_pending      NUMBER(10)     DEFAULT 0,
     tasks_failed       NUMBER(10)     DEFAULT 0,
     on_complete_handler VARCHAR2(255),
-    failure_policy     VARCHAR2(20)   DEFAULT 'FAIL_GROUP',
+    failure_policy     VARCHAR2(20)   DEFAULT 'FAIL_STEP',
     failure_threshold  NUMBER(5,4)    DEFAULT 0,
     result_metadata    CLOB,
     version            NUMBER(19)     DEFAULT 0,
@@ -53,11 +55,48 @@ CREATE TABLE workflow_step (
     UNIQUE (workflow_name, run_id, step_label)
 );
 
--- task: rename group_id → step_id
-ALTER TABLE task RENAME COLUMN group_id TO step_id;
+-- task.step_id references workflow_step.step_id
+-- (renamed from task.group_id)
 ```
 
-**Migration note**: The Flyway migration (`V14__workflow_step.sql`) should use `ALTER TABLE task_group RENAME TO workflow_step` followed by column renames, not a CREATE+INSERT. This preserves existing data and avoids a maintenance window. Existing ACTIVE steps will continue working since the barrier/counter logic is unchanged.
+### Migration (`V14__workflow_step.sql`)
+
+The Flyway migration uses ALTER/RENAME, not CREATE+INSERT, to preserve existing data:
+
+```sql
+-- Table rename
+ALTER TABLE task_group RENAME TO workflow_step;
+
+-- Column renames on workflow_step
+ALTER TABLE workflow_step RENAME COLUMN group_id TO step_id;
+ALTER TABLE workflow_step RENAME COLUMN group_type TO workflow_name;
+ALTER TABLE workflow_step RENAME COLUMN phase TO step_label;
+ALTER TABLE workflow_step RENAME COLUMN phase_total TO step_total;
+
+-- Add new columns
+ALTER TABLE workflow_step ADD run_id VARCHAR2(36);
+ALTER TABLE workflow_step ADD queue VARCHAR2(100) DEFAULT 'default';
+UPDATE workflow_step SET run_id = step_id WHERE run_id IS NULL;
+ALTER TABLE workflow_step MODIFY run_id NOT NULL;
+ALTER TABLE workflow_step ADD CONSTRAINT uq_wf_step UNIQUE (workflow_name, run_id, step_label);
+
+-- FK rename on task table
+ALTER TABLE task RENAME COLUMN group_id TO step_id;
+
+-- Rebuild indexes referencing old column names
+DROP INDEX idx_task_group;
+CREATE INDEX idx_task_step ON task (step_id, status);
+DROP INDEX idx_task_group_handler;
+CREATE INDEX idx_task_step_handler ON task (step_id, handler);
+
+-- Index for job-level queries
+CREATE INDEX idx_wf_step_run ON workflow_step (run_id);
+
+-- Rename failure_policy enum value
+UPDATE workflow_step SET failure_policy = 'FAIL_STEP' WHERE failure_policy = 'FAIL_GROUP';
+```
+
+Existing ACTIVE steps continue working since the barrier/counter logic is unchanged.
 
 **No `job` table.** Job-level queries use `run_id`:
 - `GET /api/jobs/{runId}` → `SELECT * FROM workflow_step WHERE run_id = :runId ORDER BY created_at`
@@ -101,7 +140,7 @@ interface WorkflowDefinition<P> {
         val handler: String,
         val queue: String = "default",
         val maxRetries: Int = 3,
-        val failurePolicy: FailurePolicy = FailurePolicy.FAIL_GROUP,
+        val failurePolicy: FailurePolicy = FailurePolicy.FAIL_STEP,
         val failureThreshold: Double = 0.0,
         val deadline: Duration = Duration.ofHours(1),
     )
@@ -126,12 +165,12 @@ interface WorkflowDefinition<P> {
 
 **Flow when a step's barrier fires:**
 
-1. Callback task created atomically by `resolveGroupCounter` (unchanged in logic; SQL strings updated for table/column renames — see Rename table). Callback payload = `step_id`.
+1. Callback task created atomically by `resolveStepCounter` (unchanged in logic; SQL strings updated for table/column renames — see Rename table). Callback payload = `step_id`.
 2. `StepTransitionHandler` picks up the callback task (payload = `step_id`).
 3. Fetches the `WorkflowStep` row via `findStep(ctx.payload)` to get `workflowName`, `stepLabel`, `params`.
 4. Looks up `WorkflowDefinition` by `step.workflowName` from `WorkflowRegistry`.
 5. Finds current step index by matching `step.stepLabel` against `pipeline()`.
-6. Evaluates the **current step's** failure policy (from `StepSpec`, not from the step row).
+6. Evaluates the **current step's** failure policy (from `StepSpec`, not from the step row). The `failure_policy` and `failure_threshold` columns on `workflow_step` are written at step creation for observability (admin dashboards, debugging); the `StepTransitionHandler` reads from the in-memory `StepSpec` to avoid stale-row issues.
 7. If policy violated: CAS the step row to FAILED.
 8. If this is the last step: call `onCompleted(step.params, finalOutputs)`, CAS to COMPLETED.
 9. If more steps remain:
@@ -162,13 +201,15 @@ interface WorkflowConfig {
 }
 ```
 
-`StepSpec.deadline` defaults to this config value. Each step row gets `deadline_at = Instant.now() + stepSpec.deadline`. `failExpiredSteps` checks the ACTIVE step row's `deadline_at` — same logic as today.
+`StepSpec.deadline` has a hardcoded default of `Duration.ofHours(1)`. The config value provides a project-wide override: at submission time, if `stepSpec.deadline` equals `Duration.ofHours(1)` (the hardcoded default), the framework uses `config.workflow().defaultStepDeadline()` instead, allowing operators to change the default without code changes. Each step row gets `deadline_at = Instant.now() + resolvedDeadline`. `failExpiredSteps` checks the ACTIVE step row's `deadline_at` — same logic as today.
 
 ## File Impact
 
 All paths relative to `src/main/kotlin/com/mapreduce/` (production) or `src/test/kotlin/com/mapreduce/` (test). **Paths in Delete use current (`mr/`) names. Paths in Modify/Create use post-rename (`workflow/`, `WorkflowStep`, etc.) names.**
 
-**Scope note**: The table rename (`task_group` → `workflow_step`) and FK rename (`group_id` → `step_id`) cascades to every file that references these names in SQL or Kotlin. The class renames (`TaskGroup` → `WorkflowStep`, `TaskGroupRepository` → `WorkflowStepRepository`) cascade to every file that imports them.
+**Scope note**: The table rename (`task_group` → `workflow_step`) and FK rename (`group_id` → `step_id`) cascades to every file that references these names in SQL or Kotlin. The class renames (`TaskGroup` → `WorkflowStep`, `TaskGroupRepository` → `WorkflowStepRepository`) cascade to every file that imports them. All `SELECT * FROM workflow_step` queries that map to the data class are implicitly affected by column renames through `@ColumnName` annotations on `WorkflowStep.kt`.
+
+**File rename convention**: File names on disk follow the class rename — `TaskGroupRepository.kt` becomes `WorkflowStepRepository.kt`, etc. Files listed in the Modify table with `workflow/` paths are also subject to the `mr/` → `workflow/` package move; they appear only in Modify (not also in Move) to avoid duplication.
 
 ### Package rename: `mr/` → `workflow/`
 
@@ -178,12 +219,13 @@ Every file under `mr/` either moves to `workflow/` or is deleted. Files in "Dele
 
 | From (`mr/`) | To (`workflow/`) |
 |--------------|------------------|
-| `mr/model/FailurePolicy.kt` (includes `evaluateFailurePolicy` function) | `workflow/model/FailurePolicy.kt` |
+| `mr/model/FailurePolicy.kt` (includes `evaluateFailurePolicy` function; rename `FAIL_GROUP` → `FAIL_STEP`) | `workflow/model/FailurePolicy.kt` |
 | `mr/shuffle/BlobStore.kt` | `workflow/shuffle/BlobStore.kt` |
 | `mr/shuffle/LocalBlobStore.kt` | `workflow/shuffle/LocalBlobStore.kt` |
 | `mr/api/dto/SubmitJobRequest.kt` | `workflow/api/dto/SubmitJobRequest.kt` |
 | `mr/model/JobModelTest.kt` (test) | `workflow/model/JobModelTest.kt` |
 | `mr/shuffle/LocalBlobStoreTest.kt` (test) | `workflow/shuffle/LocalBlobStoreTest.kt` |
+| `mr/repository/JobRepositoryTest.kt` (test) | `workflow/repository/JobRepositoryTest.kt` |
 
 ### Create
 
@@ -191,7 +233,7 @@ Every file under `mr/` either moves to `workflow/` or is deleted. Files in "Dele
 |----------|---------|
 | `workflow/spi/WorkflowDefinition.kt` | New pipeline definition interface |
 | `workflow/handler/StepTransitionHandler.kt` | Generic step barrier callback handler |
-| `workflow/registry/WorkflowRegistry.kt` | Discovers `WorkflowDefinition` beans, registers `StepTransitionHandler` per type, validates handler/step names at startup |
+| `workflow/registry/WorkflowRegistry.kt` | Discovers `WorkflowDefinition` beans, registers `StepTransitionHandler` per type, validates handler/step names at startup. Exposes `getDefinition(workflowName: String): WorkflowDefinition<*>?` for `StepTransitionHandler` |
 | `resources/db/migration/V14__workflow_step.sql` | Table rename, column renames, FK rename (see Schema section) |
 | `workflow/handler/StepTransitionHandlerTest.kt` (test) | Step transition, per-step failure policy, multi-step pipeline |
 | `workflow/registry/WorkflowRegistryTest.kt` (test) | Bean discovery, handler registration, startup validation |
@@ -221,7 +263,7 @@ These renames affect every file that imports or references the old names:
 | `GroupStatus` | `StepStatus` | Every file using the enum |
 | `GroupTaskResolution` | `StepTaskResolution` | `WorkflowStepRepository`, `TaskDispatcher`, tests |
 | `GroupFailResult` | `StepFailResult` | `WorkflowStepRepository`, `TaskDispatcher`, tests |
-| SQL: `task_group` | `workflow_step` | Every SQL string in `WorkflowStepRepository`, including `resolveGroupCounter` |
+| SQL: `task_group` | `workflow_step` | Every SQL string in `WorkflowStepRepository`, including `resolveStepCounter` |
 | SQL: `group_id` (in task table) | `step_id` | Every SQL string referencing `task.group_id`, including `TaskRepository` |
 | SQL: `group_type` | `workflow_name` | `submitStep` INSERT, queries |
 | SQL: `phase` | `step_label` | `submitStep`, `createNextStep` |
@@ -234,12 +276,20 @@ These renames affect every file that imports or references the old names:
 | Method: `transitionPhase` | `createNextStep` | `WorkflowStepRepository` |
 | Method: `casGroupStatus` | `casStepStatus` | `WorkflowStepRepository` |
 | Method: `failExpiredGroups` | `failExpiredSteps` | `WorkflowStepRepository`, `StaleTaskReaper` |
+| Method: `resolveStepCounter` (private) | `resolveStepCounter` | `WorkflowStepRepository` |
+| Method: `countByGroupAndStatus` | `countByStepAndStatus` | `TaskRepository` |
+| Method: `findByGroupAndHandler` | `findByStepAndHandler` | `TaskRepository` |
+| Method: `findAllByGroupAndHandler` | `findAllByStepAndHandler` | `TaskRepository` |
+| Method: `findCompletedByGroupAndHandler` | `findCompletedByStepAndHandler` | `TaskRepository` |
+| Method: `findClaimedByGroupAndHandler` | `findClaimedByStepAndHandler` | `TaskRepository` |
+| Param: `groupId` in `TaskRepository` methods | `stepId` | All method signatures in `TaskRepository` |
+| Enum: `FailurePolicy.FAIL_GROUP` | `FailurePolicy.FAIL_STEP` | `FailurePolicy.kt`, `StepSpec`, migration |
 
 ### Modify (production — content changes beyond renames)
 
 | File | Changes beyond renames |
 |------|------------------------|
-| `queue/repository/WorkflowStepRepository.kt` | `createNextStep`: INSERT new row instead of CAS-update-in-place. New `run_id`, `workflow_name` columns in all SQL. `submitStep` sets `deadline_at = now + stepSpec.deadline`. `resolveGroupCounter`: logic unchanged but all SQL strings must be updated for table/column renames (`task_group` → `workflow_step`, `group_id` → `step_id`, `phase_total` → `step_total`). |
+| `queue/repository/WorkflowStepRepository.kt` | `createNextStep`: INSERT new row instead of CAS-update-in-place. New `run_id`, `workflow_name` columns in all SQL. `submitStep` sets `deadline_at = now + stepSpec.deadline`. `resolveStepCounter`: logic unchanged but all SQL strings must be updated for table/column renames (`task_group` → `workflow_step`, `group_id` → `step_id`, `phase_total` → `step_total`). |
 | `queue/repository/TaskRepository.kt` | `group_id` → `step_id` in all INSERT and SELECT SQL strings. |
 | `queue/model/WorkflowStep.kt` | Add `runId`, `workflowName` fields. Add `queue` field. Remove `phase` (now `stepLabel`). Rename `phaseTotal` → `stepTotal`. Add `@ColumnName` annotations for new column names. |
 | `queue/model/Task.kt` | `@ColumnName("group_id") val groupId` → `@ColumnName("step_id") val stepId` |
@@ -249,6 +299,8 @@ These renames affect every file that imports or references the old names:
 | `queue/reaper/StaleTaskReaper.kt` | `failExpiredGroups` → `failExpiredSteps` |
 | `workflow/api/JobResource.kt` | Use `WorkflowRegistry`. Call `initialTasks(params)`. Build `EnqueueRequest` with `handler = pipeline()[0].handler`, `queue = pipeline()[0].queue`, `maxRetries = pipeline()[0].maxRetries`. Set step fields from `pipeline()[0]`. Generate `run_id = UUID`, `step_id = UUID`. Set `onCompleteHandler = "${workflowName}.__step_transition"`. `initialTasks` is now `suspend`; remove `withContext(Dispatchers.IO)` wrapper (JDBI suspend extensions handle dispatching). |
 | `workflow/api/dto/JobResponse.kt` | `groupId` → `runId`, `groupType` → `workflowName`, `phase` → `stepLabel`, `phaseTotal` → `stepTotal`; update `from()` mapper for all renamed fields. May return list of step statuses for job-level view. |
+| `queue/pipeline/TracingMiddleware.kt` | `context.groupId` → `context.stepId`, span attribute `task.groupId` → `task.stepId` |
+| `queue/registry/HandlerRegistry.kt` | Update doc comment reference from "MapReduce" to "workflow definitions" |
 | `config/FrameworkConfig.kt` | Add `workflow(): WorkflowConfig` with `defaultStepDeadline` |
 
 ### Modify (tests — content changes beyond renames)
@@ -263,6 +315,7 @@ These renames affect every file that imports or references the old names:
 | `queue/ConcurrencyStressTest.kt` | Construct `WorkflowStep` with new fields. Update callback handler names. |
 | `queue/worker/TaskDispatcherTest.kt` | `groupId` → `stepId` in test task construction |
 | `queue/reaper/StaleTaskReaperTest.kt` | `failExpiredGroups` → `failExpiredSteps` |
+| `queue/pipeline/TracingMiddlewareTest.kt` | `groupId` → `stepId` in test context construction and span attribute assertions |
 
 ### Unchanged
 
@@ -271,11 +324,17 @@ These renames affect every file that imports or references the old names:
 | `leader/LeaderManager.kt` + test | No queue/group references |
 | `leader/NotLeader.kt` + test | Same |
 | `shutdown/ShutdownState.kt` | No queue references |
-| `V11__task_groups.sql`, `V12__countdown_barrier.sql` | Existing migrations never modified |
+| `queue/pipeline/TaskPipeline.kt` + test | No group/step references |
+| `queue/worker/WorkerLoop.kt` + test | Same |
+| `queue/pipeline/MetricsMiddleware.kt` + test | No group/step references |
+| `queue/pipeline/ErrorClassifierMiddleware.kt` + test | Same |
+| `queue/pipeline/TimeoutMiddleware.kt` + test | Same |
+| `queue/registry/HandlerRegistryTest.kt` | No group/step references |
+| All existing Flyway migrations (`V1` through `V13`) | Migrations are append-only; never modified |
 
 ## What Is NOT Changing
 
-- **Countdown barrier** (`resolveGroupCounter`): atomic decrement + callback creation in one transaction. Logic unchanged; SQL strings updated for renames.
+- **Countdown barrier** (`resolveStepCounter`): atomic decrement + callback creation in one transaction. Logic unchanged; SQL strings updated for renames.
 - **Zombie fencing**: `execution_generation` guards on all task updates.
 - **Leader fencing**: `version` CAS + `last_epoch` on writes.
 - **Task claiming**: `SELECT FOR UPDATE SKIP LOCKED` unchanged.
