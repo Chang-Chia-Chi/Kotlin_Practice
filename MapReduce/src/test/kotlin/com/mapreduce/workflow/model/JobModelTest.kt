@@ -1,7 +1,5 @@
-package com.mapreduce.mr.model
+package com.mapreduce.workflow.model
 
-import com.mapreduce.mr.model.FailurePolicy
-import com.mapreduce.mr.model.evaluateFailurePolicy
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
@@ -9,40 +7,38 @@ import kotlin.test.assertNull
 
 class JobModelTest {
 
-    // ── FAIL_GROUP ────────────────────────────────────────────────
+    // ── FAIL_STEP ────────────────────────────────────────────────
 
     @Test
-    fun `FAIL_GROUP returns null when zero failed`() {
-        val result = evaluateFailurePolicy(FailurePolicy.FAIL_GROUP, failed = 0, total = 10, failureThreshold = 0.0)
+    fun `FAIL_STEP returns null when zero failed`() {
+        val result = evaluateFailurePolicy(FailurePolicy.FAIL_STEP, failed = 0, total = 10, failureThreshold = 0.0)
         assertNull(result)
     }
 
     @Test
-    fun `FAIL_GROUP returns reason when any task failed`() {
-        val result = evaluateFailurePolicy(FailurePolicy.FAIL_GROUP, failed = 1, total = 10, failureThreshold = 0.0)
+    fun `FAIL_STEP returns reason when any task failed`() {
+        val result = evaluateFailurePolicy(FailurePolicy.FAIL_STEP, failed = 1, total = 10, failureThreshold = 0.0)
         assertNotNull(result)
-        assertEquals("FAIL_GROUP: 1 task(s) failed", result)
+        assertEquals("FAIL_STEP: 1 task(s) failed", result)
     }
 
     @Test
-    fun `FAIL_GROUP returns reason with multiple failed`() {
-        val result = evaluateFailurePolicy(FailurePolicy.FAIL_GROUP, failed = 5, total = 10, failureThreshold = 0.0)
+    fun `FAIL_STEP returns reason with multiple failed`() {
+        val result = evaluateFailurePolicy(FailurePolicy.FAIL_STEP, failed = 5, total = 10, failureThreshold = 0.0)
         assertNotNull(result)
-        assertEquals("FAIL_GROUP: 5 task(s) failed", result)
+        assertEquals("FAIL_STEP: 5 task(s) failed", result)
     }
 
     // ── THRESHOLD ────────────────────────────────────────────────
 
     @Test
     fun `THRESHOLD returns null when rate is below threshold`() {
-        // 1/10 = 10% <= 50%
         val result = evaluateFailurePolicy(FailurePolicy.THRESHOLD, failed = 1, total = 10, failureThreshold = 0.5)
         assertNull(result)
     }
 
     @Test
     fun `THRESHOLD returns reason when rate exceeds threshold`() {
-        // 6/10 = 60% > 50%
         val result = evaluateFailurePolicy(FailurePolicy.THRESHOLD, failed = 6, total = 10, failureThreshold = 0.5)
         assertNotNull(result)
         assert(result.startsWith("THRESHOLD:"))
@@ -50,7 +46,6 @@ class JobModelTest {
 
     @Test
     fun `THRESHOLD boundary -- exactly at threshold passes`() {
-        // 5/10 = 50% is NOT > 50%, so it should pass
         val result = evaluateFailurePolicy(FailurePolicy.THRESHOLD, failed = 5, total = 10, failureThreshold = 0.5)
         assertNull(result)
     }
@@ -63,7 +58,6 @@ class JobModelTest {
 
     @Test
     fun `THRESHOLD all tasks failed exceeds any sub-100 threshold`() {
-        // 10/10 = 100% > 90%
         val result = evaluateFailurePolicy(FailurePolicy.THRESHOLD, failed = 10, total = 10, failureThreshold = 0.9)
         assertNotNull(result)
     }
@@ -80,18 +74,17 @@ class JobModelTest {
     // ── Edge case: total = 1 ─────────────────────────────────────
 
     @Test
-    fun `single task with FAIL_GROUP -- zero failed passes`() {
-        assertNull(evaluateFailurePolicy(FailurePolicy.FAIL_GROUP, failed = 0, total = 1, failureThreshold = 0.0))
+    fun `single task with FAIL_STEP -- zero failed passes`() {
+        assertNull(evaluateFailurePolicy(FailurePolicy.FAIL_STEP, failed = 0, total = 1, failureThreshold = 0.0))
     }
 
     @Test
-    fun `single task with FAIL_GROUP -- one failed fails`() {
-        assertNotNull(evaluateFailurePolicy(FailurePolicy.FAIL_GROUP, failed = 1, total = 1, failureThreshold = 0.0))
+    fun `single task with FAIL_STEP -- one failed fails`() {
+        assertNotNull(evaluateFailurePolicy(FailurePolicy.FAIL_STEP, failed = 1, total = 1, failureThreshold = 0.0))
     }
 
     @Test
     fun `single task with THRESHOLD -- one failed at 100 pct exceeds any sub-100 threshold`() {
-        // 1/1 = 100% > 50%
         val result = evaluateFailurePolicy(FailurePolicy.THRESHOLD, failed = 1, total = 1, failureThreshold = 0.5)
         assertNotNull(result)
     }

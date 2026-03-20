@@ -1,4 +1,4 @@
-package com.mapreduce.mr.shuffle
+package com.mapreduce.workflow.shuffle
 
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.toList
@@ -26,7 +26,6 @@ class LocalBlobStoreTest {
 
     @AfterEach
     fun tearDown() = runTest {
-        // Clean up test data
         listOf("test-job-1", "test-job-2", "test-job-roundtrip", "test-job-del", "test-job-atomic").forEach {
             try { store.deleteJob(it) } catch (_: Exception) { }
         }
@@ -91,9 +90,7 @@ class LocalBlobStoreTest {
         val tempFile = jobDir.resolve("task-at_p0.tmp")
         val finalFile = jobDir.resolve("task-at_p0.ndjson")
 
-        // Temp file should not exist after successful write
         assertFalse(Files.exists(tempFile))
-        // Final file should exist
         assertTrue(Files.exists(finalFile))
     }
 

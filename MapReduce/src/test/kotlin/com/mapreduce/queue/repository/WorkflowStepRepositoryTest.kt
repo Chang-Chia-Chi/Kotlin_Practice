@@ -3,8 +3,8 @@ package com.mapreduce.queue.repository
 import com.mapreduce.TestH2Factory
 import com.mapreduce.leader.LeaderManager
 import com.mapreduce.queue.model.EnqueueRequest
-import com.mapreduce.queue.model.GroupStatus
-import com.mapreduce.queue.model.TaskGroup
+import com.mapreduce.queue.model.StepStatus
+import com.mapreduce.queue.model.WorkflowStep
 import com.mapreduce.queue.model.TaskStatus
 import kotlinx.coroutines.test.runTest
 import org.jdbi.v3.core.Jdbi
@@ -21,11 +21,11 @@ import org.mockito.kotlin.whenever
 import java.time.Duration
 import java.time.Instant
 
-class TaskGroupRepositoryTest {
+class WorkflowStepRepositoryTest {
 
     private lateinit var jdbi: Jdbi
     private lateinit var taskRepo: TaskRepository
-    private lateinit var groupRepo: TaskGroupRepository
+    private lateinit var stepRepo: WorkflowStepRepository
 
     @BeforeEach
     fun setUp() {
@@ -33,34 +33,35 @@ class TaskGroupRepositoryTest {
         taskRepo = TaskRepository(jdbi)
         val leaderManager = mock<LeaderManager>()
         whenever(leaderManager.isActive).thenReturn(false)
-        groupRepo = TaskGroupRepository(jdbi, leaderManager)
+        stepRepo = WorkflowStepRepository(jdbi, leaderManager)
     }
 
     // ── helpers ──────────────────────────────────────────────────────────
 
-    private fun createGroupWithTasks(
-        groupId: String,
+    private fun createStepWithTasks(
+        stepId: String,
         taskCount: Int,
         maxRetries: Int = 3,
-        onCompleteHandler: String? = "test.__phase_complete",
+        onCompleteHandler: String? = "test.__step_transition",
     ): List<EnqueueRequest> {
-        val group = TaskGroup(
-            groupId = groupId,
-            groupType = "test",
-            status = GroupStatus.ACTIVE,
+        val step = WorkflowStep(
+            stepId = stepId,
+            workflowName = "test",
+            runId = stepId,
+            status = StepStatus.ACTIVE,
             params = "{}",
             queue = "default",
-            phase = "map",
-            phaseTotal = taskCount,
+            stepLabel = "map",
+            stepTotal = taskCount,
             onCompleteHandler = onCompleteHandler,
         )
         val tasks = (0 until taskCount).map {
             EnqueueRequest(
                 handler = "test.map", payload = "{\"i\":$it}",
-                queue = "default", groupId = groupId, maxRetries = maxRetries,
+                queue = "default", stepId = stepId, maxRetries = maxRetries,
             )
         }
-        groupRepo.submitGroup(group, tasks)
+        stepRepo.submitStep(step, tasks)
         return tasks
     }
 
@@ -83,26 +84,26 @@ class TaskGroupRepositoryTest {
                 .one()
         }
 
-    private fun callbackCount(groupId: String): Int =
+    private fun callbackCount(stepId: String): Int =
         jdbi.withHandle<Int, Exception> { h ->
             h.createQuery(
-                "SELECT COUNT(*) FROM task WHERE handler = 'test.__phase_complete' AND payload = :gid",
-            ).bind("gid", groupId).mapTo(Int::class.java).one()
+                "SELECT COUNT(*) FROM task WHERE handler = 'test.__step_transition' AND payload = :gid",
+            ).bind("gid", stepId).mapTo(Int::class.java).one()
         }
 
-    // ── failGroupTask ───────────────────────────────────────────────────
+    // ── failStepTask ───────────────────────────────────────────────────
 
     @Nested
-    inner class FailGroupTask {
+    inner class FailStepTask {
 
         @Test
         fun `retry remaining -- task goes PENDING, no group counter change`() = runTest {
-            val groupId = "fg-retry"
-            createGroupWithTasks(groupId, 3, maxRetries = 3)
+            val stepId = "fg-retry"
+            createStepWithTasks(stepId, 3, maxRetries = 3)
             val claimed = claimAll(3)
 
-            val result = groupRepo.failGroupTask(
-                claimed[0].taskId, groupId, "transient error",
+            val result = stepRepo.failStepTask(
+                claimed[0].taskId, stepId, "transient error",
             )
 
             assertTrue(result.taskUpdated)
@@ -111,18 +112,18 @@ class TaskGroupRepositoryTest {
             assertEquals("PENDING", readStatus(claimed[0].taskId))
             assertEquals(1, readRetryCount(claimed[0].taskId))
             // Group counter unchanged (still 3 pending — task retried, not terminal)
-            assertEquals(3, groupRepo.findGroup(groupId)!!.tasksPending)
-            assertEquals(0, groupRepo.findGroup(groupId)!!.tasksFailed)
+            assertEquals(3, stepRepo.findStep(stepId)!!.tasksPending)
+            assertEquals(0, stepRepo.findStep(stepId)!!.tasksFailed)
         }
 
         @Test
         fun `retry exhausted -- atomic dead-letter and group decrement`() = runTest {
-            val groupId = "fg-exhaust"
-            createGroupWithTasks(groupId, 2, maxRetries = 1)
+            val stepId = "fg-exhaust"
+            createStepWithTasks(stepId, 2, maxRetries = 1)
             val claimed = claimAll(2)
 
-            val result = groupRepo.failGroupTask(
-                claimed[0].taskId, groupId, "fatal error",
+            val result = stepRepo.failStepTask(
+                claimed[0].taskId, stepId, "fatal error",
             )
 
             assertTrue(result.taskUpdated)
@@ -130,35 +131,35 @@ class TaskGroupRepositoryTest {
             assertFalse(result.barrierMet) // still 1 pending
             assertEquals("DEAD_LETTER", readStatus(claimed[0].taskId))
             assertEquals(1, readRetryCount(claimed[0].taskId))
-            assertEquals(1, groupRepo.findGroup(groupId)!!.tasksPending)
-            assertEquals(1, groupRepo.findGroup(groupId)!!.tasksFailed)
+            assertEquals(1, stepRepo.findStep(stepId)!!.tasksPending)
+            assertEquals(1, stepRepo.findStep(stepId)!!.tasksFailed)
         }
 
         @Test
         fun `retry exhausted on last task -- barrier met`() = runTest {
-            val groupId = "fg-barrier"
-            createGroupWithTasks(groupId, 1, maxRetries = 1)
+            val stepId = "fg-barrier"
+            createStepWithTasks(stepId, 1, maxRetries = 1)
             val claimed = claimAll(1)
 
-            val result = groupRepo.failGroupTask(
-                claimed[0].taskId, groupId, "fatal",
+            val result = stepRepo.failStepTask(
+                claimed[0].taskId, stepId, "fatal",
             )
 
             assertTrue(result.taskUpdated)
             assertTrue(result.deadLettered)
             assertTrue(result.barrierMet)
-            assertEquals(0, groupRepo.findGroup(groupId)!!.tasksPending)
-            assertEquals(1, callbackCount(groupId))
+            assertEquals(0, stepRepo.findStep(stepId)!!.tasksPending)
+            assertEquals(1, callbackCount(stepId))
         }
 
         @Test
         fun `fenced out -- returns taskUpdated false`() = runTest {
-            val groupId = "fg-fenced"
-            createGroupWithTasks(groupId, 2, maxRetries = 1)
+            val stepId = "fg-fenced"
+            createStepWithTasks(stepId, 2, maxRetries = 1)
             val claimed = claimAll(2)
 
-            val result = groupRepo.failGroupTask(
-                claimed[0].taskId, groupId, "error",
+            val result = stepRepo.failStepTask(
+                claimed[0].taskId, stepId, "error",
                 claimToken = "wrong-gen",
             )
 
@@ -166,17 +167,17 @@ class TaskGroupRepositoryTest {
             assertFalse(result.deadLettered)
             assertFalse(result.barrierMet)
             assertEquals("CLAIMED", readStatus(claimed[0].taskId))
-            assertEquals(2, groupRepo.findGroup(groupId)!!.tasksPending)
+            assertEquals(2, stepRepo.findStep(stepId)!!.tasksPending)
         }
 
         @Test
         fun `respects retryDelay`() = runTest {
-            val groupId = "fg-delay"
-            createGroupWithTasks(groupId, 1, maxRetries = 3)
+            val stepId = "fg-delay"
+            createStepWithTasks(stepId, 1, maxRetries = 3)
             val claimed = claimAll(1)
 
-            groupRepo.failGroupTask(
-                claimed[0].taskId, groupId, "transient",
+            stepRepo.failStepTask(
+                claimed[0].taskId, stepId, "transient",
                 retryDelay = Duration.ofSeconds(30),
             )
 
@@ -187,19 +188,19 @@ class TaskGroupRepositoryTest {
         }
     }
 
-    // ── deadLetterGroupTask ─────────────────────────────────────────────
+    // ── deadLetterStepTask ─────────────────────────────────────────────
 
     @Nested
-    inner class DeadLetterGroupTask {
+    inner class DeadLetterStepTask {
 
         @Test
         fun `atomic dead-letter and group decrement`() = runTest {
-            val groupId = "dl-basic"
-            createGroupWithTasks(groupId, 3)
+            val stepId = "dl-basic"
+            createStepWithTasks(stepId, 3)
             val claimed = claimAll(3)
 
-            val result = groupRepo.deadLetterGroupTask(
-                claimed[0].taskId, groupId, "no handler",
+            val result = stepRepo.deadLetterStepTask(
+                claimed[0].taskId, stepId, "no handler",
             )
 
             assertTrue(result.taskUpdated)
@@ -207,18 +208,18 @@ class TaskGroupRepositoryTest {
             assertFalse(result.barrierMet)
             assertEquals("DEAD_LETTER", readStatus(claimed[0].taskId))
             assertEquals("no handler", taskRepo.findById(claimed[0].taskId)!!.errorMessage)
-            assertEquals(2, groupRepo.findGroup(groupId)!!.tasksPending)
-            assertEquals(1, groupRepo.findGroup(groupId)!!.tasksFailed)
+            assertEquals(2, stepRepo.findStep(stepId)!!.tasksPending)
+            assertEquals(1, stepRepo.findStep(stepId)!!.tasksFailed)
         }
 
         @Test
         fun `fenced out -- zombie rejected`() = runTest {
-            val groupId = "dl-fenced"
-            createGroupWithTasks(groupId, 2)
+            val stepId = "dl-fenced"
+            createStepWithTasks(stepId, 2)
             val claimed = claimAll(2)
 
-            val result = groupRepo.deadLetterGroupTask(
-                claimed[0].taskId, groupId, "zombie",
+            val result = stepRepo.deadLetterStepTask(
+                claimed[0].taskId, stepId, "zombie",
                 claimToken = "wrong-gen",
             )
 
@@ -226,49 +227,49 @@ class TaskGroupRepositoryTest {
             assertFalse(result.deadLettered)
             assertFalse(result.barrierMet)
             assertEquals("CLAIMED", readStatus(claimed[0].taskId))
-            assertEquals(2, groupRepo.findGroup(groupId)!!.tasksPending)
+            assertEquals(2, stepRepo.findStep(stepId)!!.tasksPending)
         }
 
         @Test
         fun `barrier fires when last task dead-lettered`() = runTest {
-            val groupId = "dl-barrier"
-            createGroupWithTasks(groupId, 2)
+            val stepId = "dl-barrier"
+            createStepWithTasks(stepId, 2)
             val claimed = claimAll(2)
 
             // First task: success
-            groupRepo.resolveGroupTask(
-                taskId = claimed[0].taskId, groupId = groupId,
+            stepRepo.resolveStepTask(
+                taskId = claimed[0].taskId, stepId = stepId,
                 claimToken = claimed[0].claimToken,
             )
-            assertEquals(1, groupRepo.findGroup(groupId)!!.tasksPending)
+            assertEquals(1, stepRepo.findStep(stepId)!!.tasksPending)
 
             // Second task: dead-letter — should trigger barrier
-            val result = groupRepo.deadLetterGroupTask(
-                claimed[1].taskId, groupId, "poison pill",
+            val result = stepRepo.deadLetterStepTask(
+                claimed[1].taskId, stepId, "poison pill",
                 claimToken = claimed[1].claimToken,
             )
 
             assertTrue(result.taskUpdated)
             assertTrue(result.deadLettered)
             assertTrue(result.barrierMet)
-            assertEquals(0, groupRepo.findGroup(groupId)!!.tasksPending)
-            assertEquals(1, callbackCount(groupId))
+            assertEquals(0, stepRepo.findStep(stepId)!!.tasksPending)
+            assertEquals(1, callbackCount(stepId))
         }
     }
 
-    // ── reclaimGroupTask ────────────────────────────────────────────────
+    // ── reclaimStepTask ────────────────────────────────────────────────
 
     @Nested
-    inner class ReclaimGroupTask {
+    inner class ReclaimStepTask {
 
         @Test
         fun `retry remaining -- task goes PENDING, no group counter change`() = runTest {
-            val groupId = "rg-retry"
-            createGroupWithTasks(groupId, 2, maxRetries = 3)
+            val stepId = "rg-retry"
+            createStepWithTasks(stepId, 2, maxRetries = 3)
             val claimed = claimAll(2)
 
-            val result = groupRepo.reclaimGroupTask(
-                claimed[0].taskId, groupId, "pod died",
+            val result = stepRepo.reclaimStepTask(
+                claimed[0].taskId, stepId, "pod died",
             )
 
             assertNotNull(result)
@@ -282,17 +283,17 @@ class TaskGroupRepositoryTest {
             assertNull(task.claimedBy)
             assertNull(task.claimedAt)
             // Group unchanged
-            assertEquals(2, groupRepo.findGroup(groupId)!!.tasksPending)
+            assertEquals(2, stepRepo.findStep(stepId)!!.tasksPending)
         }
 
         @Test
         fun `retry exhausted -- atomic dead-letter and group decrement`() = runTest {
-            val groupId = "rg-exhaust"
-            createGroupWithTasks(groupId, 2, maxRetries = 1)
+            val stepId = "rg-exhaust"
+            createStepWithTasks(stepId, 2, maxRetries = 1)
             val claimed = claimAll(2)
 
-            val result = groupRepo.reclaimGroupTask(
-                claimed[0].taskId, groupId, "pod died",
+            val result = stepRepo.reclaimStepTask(
+                claimed[0].taskId, stepId, "pod died",
             )
 
             assertNotNull(result)
@@ -300,26 +301,26 @@ class TaskGroupRepositoryTest {
             assertTrue(result.deadLettered)
             assertFalse(result.barrierMet)
             assertEquals("DEAD_LETTER", readStatus(claimed[0].taskId))
-            assertEquals(1, groupRepo.findGroup(groupId)!!.tasksPending)
-            assertEquals(1, groupRepo.findGroup(groupId)!!.tasksFailed)
+            assertEquals(1, stepRepo.findStep(stepId)!!.tasksPending)
+            assertEquals(1, stepRepo.findStep(stepId)!!.tasksFailed)
         }
 
         @Test
         fun `returns null when task already handled`() = runTest {
-            val groupId = "rg-null"
-            createGroupWithTasks(groupId, 1, maxRetries = 3)
+            val stepId = "rg-null"
+            createStepWithTasks(stepId, 1, maxRetries = 3)
             val claimed = claimAll(1)
 
             // Complete the task first
-            groupRepo.resolveGroupTask(
-                taskId = claimed[0].taskId, groupId = groupId,
+            stepRepo.resolveStepTask(
+                taskId = claimed[0].taskId, stepId = stepId,
                 claimToken = claimed[0].claimToken,
             )
             assertEquals("COMPLETED", readStatus(claimed[0].taskId))
 
             // Reclaim should return null (not CLAIMED)
-            val result = groupRepo.reclaimGroupTask(
-                claimed[0].taskId, groupId, "pod died",
+            val result = stepRepo.reclaimStepTask(
+                claimed[0].taskId, stepId, "pod died",
             )
 
             assertNull(result)
@@ -327,14 +328,14 @@ class TaskGroupRepositoryTest {
 
         @Test
         fun `clears claim fields on reclaim`() = runTest {
-            val groupId = "rg-clear"
-            createGroupWithTasks(groupId, 1, maxRetries = 3)
+            val stepId = "rg-clear"
+            createStepWithTasks(stepId, 1, maxRetries = 3)
             val claimed = claimAll(1)
 
             // Verify claim fields are set
             assertNotNull(taskRepo.findById(claimed[0].taskId)!!.claimedBy)
 
-            groupRepo.reclaimGroupTask(claimed[0].taskId, groupId, "pod died")
+            stepRepo.reclaimStepTask(claimed[0].taskId, stepId, "pod died")
 
             val task = taskRepo.findById(claimed[0].taskId)!!
             assertNull(task.claimedBy)
@@ -344,19 +345,19 @@ class TaskGroupRepositoryTest {
 
         @Test
         fun `reclaim exhausted on last task -- barrier met`() = runTest {
-            val groupId = "rg-barrier"
-            createGroupWithTasks(groupId, 1, maxRetries = 1)
+            val stepId = "rg-barrier"
+            createStepWithTasks(stepId, 1, maxRetries = 1)
             val claimed = claimAll(1)
 
-            val result = groupRepo.reclaimGroupTask(
-                claimed[0].taskId, groupId, "pod died",
+            val result = stepRepo.reclaimStepTask(
+                claimed[0].taskId, stepId, "pod died",
             )
 
             assertNotNull(result)
             assertTrue(result!!.deadLettered)
             assertTrue(result.barrierMet)
-            assertEquals(0, groupRepo.findGroup(groupId)!!.tasksPending)
-            assertEquals(1, callbackCount(groupId))
+            assertEquals(0, stepRepo.findStep(stepId)!!.tasksPending)
+            assertEquals(1, callbackCount(stepId))
         }
     }
 }

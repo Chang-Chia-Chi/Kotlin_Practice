@@ -4,9 +4,9 @@ import com.mapreduce.queue.model.Task
 import com.mapreduce.queue.model.TaskResult
 import com.mapreduce.queue.pipeline.TaskPipeline
 import com.mapreduce.queue.registry.HandlerRegistry
-import com.mapreduce.queue.repository.GroupFailResult
-import com.mapreduce.queue.repository.GroupTaskResolution
-import com.mapreduce.queue.repository.TaskGroupRepository
+import com.mapreduce.queue.repository.StepFailResult
+import com.mapreduce.queue.repository.StepTaskResolution
+import com.mapreduce.queue.repository.WorkflowStepRepository
 import com.mapreduce.queue.repository.TaskRepository
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -24,7 +24,7 @@ import java.time.Instant
 class TaskDispatcherTest {
 
     private lateinit var taskRepository: TaskRepository
-    private lateinit var taskGroupRepository: TaskGroupRepository
+    private lateinit var workflowStepRepository: WorkflowStepRepository
     private lateinit var handlerRegistry: HandlerRegistry
     private lateinit var pipeline: TaskPipeline
     private lateinit var dispatcher: TaskDispatcher
@@ -32,12 +32,12 @@ class TaskDispatcherTest {
     @BeforeEach
     fun setUp() {
         taskRepository = mock<TaskRepository>()
-        taskGroupRepository = mock<TaskGroupRepository>()
+        workflowStepRepository = mock<WorkflowStepRepository>()
         handlerRegistry = mock<HandlerRegistry>()
         pipeline = mock<TaskPipeline>()
 
         dispatcher = TaskDispatcher(
-            taskRepository, taskGroupRepository, handlerRegistry, pipeline,
+            taskRepository, workflowStepRepository, handlerRegistry, pipeline,
         )
     }
 
@@ -47,17 +47,17 @@ class TaskDispatcherTest {
     fun `execute with no handler dead-letters grouped task via group path`() = runTest {
         val task = testTask()
         whenever(handlerRegistry.resolve("test.handler")).thenReturn(null)
-        whenever(taskGroupRepository.deadLetterGroupTask(any(), any(), any(), anyOrNull()))
-            .thenReturn(GroupFailResult(taskUpdated = true, deadLettered = true, barrierMet = false))
+        whenever(workflowStepRepository.deadLetterStepTask(any(), any(), any(), anyOrNull()))
+            .thenReturn(StepFailResult(taskUpdated = true, deadLettered = true, barrierMet = false))
 
         dispatcher.execute(task)
 
-        verify(taskGroupRepository).deadLetterGroupTask(eq("task-1"), eq("group-1"), any(), eq("gen-1"))
+        verify(workflowStepRepository).deadLetterStepTask(eq("task-1"), eq("group-1"), any(), eq("gen-1"))
     }
 
     @Test
     fun `execute with no handler dead-letters non-grouped task via taskRepository`() = runTest {
-        val task = testTask(groupId = null)
+        val task = testTask(stepId = null)
         whenever(handlerRegistry.resolve("test.handler")).thenReturn(null)
         whenever(taskRepository.deadLetter(any(), any(), anyOrNull())).thenReturn(true)
 
@@ -72,17 +72,17 @@ class TaskDispatcherTest {
     fun `execute Success completes task via group path`() = runTest {
         val task = testTask()
         stubPipeline(task, TaskResult.Success("done"))
-        whenever(taskGroupRepository.resolveGroupTask(any(), any(), anyOrNull(), any(), anyOrNull(), anyOrNull()))
-            .thenReturn(GroupTaskResolution(updated = true, barrierMet = false))
+        whenever(workflowStepRepository.resolveStepTask(any(), any(), anyOrNull(), any(), anyOrNull(), anyOrNull()))
+            .thenReturn(StepTaskResolution(updated = true, barrierMet = false))
 
         dispatcher.execute(task)
 
-        verify(taskGroupRepository).resolveGroupTask(eq("task-1"), eq("group-1"), eq("gen-1"), eq(false), anyOrNull(), anyOrNull())
+        verify(workflowStepRepository).resolveStepTask(eq("task-1"), eq("group-1"), eq("gen-1"), eq(false), anyOrNull(), anyOrNull())
     }
 
     @Test
-    fun `execute Success without groupId completes via taskRepository`() = runTest {
-        val task = testTask(groupId = null)
+    fun `execute Success without stepId completes via taskRepository`() = runTest {
+        val task = testTask(stepId = null)
         stubPipeline(task, TaskResult.Success("done"))
 
         dispatcher.execute(task)
@@ -93,20 +93,20 @@ class TaskDispatcherTest {
     // ── execute: Failure ──────────────────────────────────────────
 
     @Test
-    fun `execute Failure with groupId uses failGroupTask`() = runTest {
+    fun `execute Failure with stepId uses failStepTask`() = runTest {
         val task = testTask()
         stubPipeline(task, TaskResult.Failure("boom"))
-        whenever(taskGroupRepository.failGroupTask(any(), any(), any(), anyOrNull(), anyOrNull()))
-            .thenReturn(GroupFailResult(taskUpdated = true, deadLettered = false, barrierMet = false))
+        whenever(workflowStepRepository.failStepTask(any(), any(), any(), anyOrNull(), anyOrNull()))
+            .thenReturn(StepFailResult(taskUpdated = true, deadLettered = false, barrierMet = false))
 
         dispatcher.execute(task)
 
-        verify(taskGroupRepository).failGroupTask(eq("task-1"), eq("group-1"), eq("boom"), anyOrNull(), eq("gen-1"))
+        verify(workflowStepRepository).failStepTask(eq("task-1"), eq("group-1"), eq("boom"), anyOrNull(), eq("gen-1"))
     }
 
     @Test
-    fun `execute Failure without groupId uses taskRepository fail`() = runTest {
-        val task = testTask(groupId = null)
+    fun `execute Failure without stepId uses taskRepository fail`() = runTest {
+        val task = testTask(stepId = null)
         stubPipeline(task, TaskResult.Failure("boom"))
         whenever(taskRepository.fail(eq("task-1"), eq("boom"), anyOrNull(), eq("gen-1")))
             .thenReturn(false)
@@ -119,20 +119,20 @@ class TaskDispatcherTest {
     // ── execute: DeadLetter ───────────────────────────────────────
 
     @Test
-    fun `execute DeadLetter with groupId uses deadLetterGroupTask`() = runTest {
+    fun `execute DeadLetter with stepId uses deadLetterStepTask`() = runTest {
         val task = testTask()
         stubPipeline(task, TaskResult.DeadLetter("poison pill"))
-        whenever(taskGroupRepository.deadLetterGroupTask(any(), any(), any(), anyOrNull()))
-            .thenReturn(GroupFailResult(taskUpdated = true, deadLettered = true, barrierMet = false))
+        whenever(workflowStepRepository.deadLetterStepTask(any(), any(), any(), anyOrNull()))
+            .thenReturn(StepFailResult(taskUpdated = true, deadLettered = true, barrierMet = false))
 
         dispatcher.execute(task)
 
-        verify(taskGroupRepository).deadLetterGroupTask("task-1", "group-1", "poison pill", "gen-1")
+        verify(workflowStepRepository).deadLetterStepTask("task-1", "group-1", "poison pill", "gen-1")
     }
 
     @Test
-    fun `execute DeadLetter without groupId uses taskRepository deadLetter`() = runTest {
-        val task = testTask(groupId = null)
+    fun `execute DeadLetter without stepId uses taskRepository deadLetter`() = runTest {
+        val task = testTask(stepId = null)
         stubPipeline(task, TaskResult.DeadLetter("poison pill"))
         whenever(taskRepository.deadLetter(any(), any(), anyOrNull())).thenReturn(true)
 
@@ -144,21 +144,21 @@ class TaskDispatcherTest {
     // ── execute: Retry(consumeRetry=true) ─────────────────────────
 
     @Test
-    fun `execute Retry consumeRetry with groupId uses failGroupTask`() = runTest {
+    fun `execute Retry consumeRetry with stepId uses failStepTask`() = runTest {
         val task = testTask()
         val retry = TaskResult.Retry(delay = Duration.ofSeconds(5), reason = "transient", consumeRetry = true)
         stubPipeline(task, retry)
-        whenever(taskGroupRepository.failGroupTask(any(), any(), any(), anyOrNull(), anyOrNull()))
-            .thenReturn(GroupFailResult(taskUpdated = true, deadLettered = false, barrierMet = false))
+        whenever(workflowStepRepository.failStepTask(any(), any(), any(), anyOrNull(), anyOrNull()))
+            .thenReturn(StepFailResult(taskUpdated = true, deadLettered = false, barrierMet = false))
 
         dispatcher.execute(task)
 
-        verify(taskGroupRepository).failGroupTask("task-1", "group-1", "transient", Duration.ofSeconds(5), "gen-1")
+        verify(workflowStepRepository).failStepTask("task-1", "group-1", "transient", Duration.ofSeconds(5), "gen-1")
     }
 
     @Test
-    fun `execute Retry consumeRetry without groupId uses taskRepository fail`() = runTest {
-        val task = testTask(groupId = null)
+    fun `execute Retry consumeRetry without stepId uses taskRepository fail`() = runTest {
+        val task = testTask(stepId = null)
         val retry = TaskResult.Retry(delay = Duration.ofSeconds(5), reason = "transient", consumeRetry = true)
         stubPipeline(task, retry)
         whenever(taskRepository.fail(eq("task-1"), eq("transient"), eq(Duration.ofSeconds(5)), eq("gen-1")))
@@ -194,13 +194,13 @@ class TaskDispatcherTest {
             whenever(pipeline.execute(any(), any()))
                 .thenThrow(RuntimeException("pipeline exploded"))
         }
-        whenever(taskGroupRepository.failGroupTask(any(), any(), any(), anyOrNull(), anyOrNull()))
-            .thenReturn(GroupFailResult(taskUpdated = true, deadLettered = false, barrierMet = false))
+        whenever(workflowStepRepository.failStepTask(any(), any(), any(), anyOrNull(), anyOrNull()))
+            .thenReturn(StepFailResult(taskUpdated = true, deadLettered = false, barrierMet = false))
 
         dispatcher.execute(task)
 
         // Should route to Failure path with exception class info
-        verify(taskGroupRepository).failGroupTask(
+        verify(workflowStepRepository).failStepTask(
             eq("task-1"), eq("group-1"),
             org.mockito.kotlin.argThat { contains("RuntimeException") && contains("pipeline exploded") },
             anyOrNull(), eq("gen-1"),
@@ -209,7 +209,7 @@ class TaskDispatcherTest {
 
     @Test
     fun `execute catches pipeline exception for non-grouped task`() = runTest {
-        val task = testTask(groupId = null)
+        val task = testTask(stepId = null)
         val handler = mock<com.mapreduce.queue.spi.TaskHandler>()
         whenever(handler.handlerName).thenReturn(task.handler)
         whenever(handlerRegistry.resolve(task.handler)).thenReturn(handler)
@@ -232,7 +232,7 @@ class TaskDispatcherTest {
 
     @Test
     fun `processResult exception propagates to caller`() = runTest {
-        val task = testTask(groupId = null)
+        val task = testTask(stepId = null)
         stubPipeline(task, TaskResult.Success("done"))
         whenever(taskRepository.complete(any(), anyOrNull()))
             .thenThrow(RuntimeException("DB connection lost"))
@@ -243,37 +243,37 @@ class TaskDispatcherTest {
         assertTrue(ex.message!!.contains("DB connection lost"))
     }
 
-    // ── execute: Retry(consumeRetry=false) with groupId ────────────
+    // ── execute: Retry(consumeRetry=false) with stepId ────────────
 
     @Test
-    fun `execute Retry with consumeRetry false and groupId uses requeue not group path`() = runTest {
-        val task = testTask(groupId = "group-1")
+    fun `execute Retry with consumeRetry false and stepId uses requeue not step path`() = runTest {
+        val task = testTask(stepId = "group-1")
         val retry = TaskResult.Retry(delay = Duration.ofSeconds(3), reason = "cb-requeue", consumeRetry = false)
         stubPipeline(task, retry)
 
         dispatcher.execute(task)
 
-        // Must go through taskRepository.requeue, NOT taskGroupRepository
+        // Must go through taskRepository.requeue, NOT workflowStepRepository
         verify(taskRepository).requeue("task-1", Duration.ofSeconds(3), "gen-1")
-        verify(taskGroupRepository, org.mockito.kotlin.never()).failGroupTask(any(), any(), any(), anyOrNull(), anyOrNull())
+        verify(workflowStepRepository, org.mockito.kotlin.never()).failStepTask(any(), any(), any(), anyOrNull(), anyOrNull())
     }
 
     // ── execute: Success with outputUri/metadata forwarded ─────────
 
     @Test
-    fun `execute Success forwards outputUri and metadata to group repository`() = runTest {
+    fun `execute Success forwards outputUri and metadata to step repository`() = runTest {
         val task = testTask()
         stubPipeline(task, TaskResult.Success(
             output = "result-data",
             outputUri = "gs://bucket/output.json",
             outputMetadata = """{"rows":42}""",
         ))
-        whenever(taskGroupRepository.resolveGroupTask(any(), any(), anyOrNull(), any(), anyOrNull(), anyOrNull()))
-            .thenReturn(GroupTaskResolution(updated = true, barrierMet = false))
+        whenever(workflowStepRepository.resolveStepTask(any(), any(), anyOrNull(), any(), anyOrNull(), anyOrNull()))
+            .thenReturn(StepTaskResolution(updated = true, barrierMet = false))
 
         dispatcher.execute(task)
 
-        verify(taskGroupRepository).resolveGroupTask(
+        verify(workflowStepRepository).resolveStepTask(
             eq("task-1"), eq("group-1"), eq("gen-1"), eq(false),
             eq("gs://bucket/output.json"), eq("""{"rows":42}"""),
         )
@@ -283,7 +283,7 @@ class TaskDispatcherTest {
 
     @Test
     fun `execute Retry consumeRetry with null delay`() = runTest {
-        val task = testTask(groupId = null)
+        val task = testTask(stepId = null)
         val retry = TaskResult.Retry(delay = null, reason = "throttled", consumeRetry = true)
         stubPipeline(task, retry)
         whenever(taskRepository.fail(eq("task-1"), eq("throttled"), eq(null), eq("gen-1")))
@@ -300,13 +300,13 @@ class TaskDispatcherTest {
         taskId: String = "task-1",
         handler: String = "test.handler",
         queue: String = "default",
-        groupId: String? = "group-1",
+        stepId: String? = "group-1",
     ) = Task(
         taskId = taskId,
         handler = handler,
         queue = queue,
         payload = "{}",
-        groupId = groupId,
+        stepId = stepId,
         metadata = null,
         retryCount = 0,
         maxRetries = 3,

@@ -3,7 +3,7 @@ package com.mapreduce.queue.reaper
 import com.mapreduce.config.FrameworkConfig
 import com.mapreduce.queue.model.Task
 import com.mapreduce.queue.model.TaskStatus
-import com.mapreduce.queue.repository.TaskGroupRepository
+import com.mapreduce.queue.repository.WorkflowStepRepository
 import com.mapreduce.queue.repository.TaskRepository
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -24,7 +24,7 @@ class StaleTaskReaperTest {
     private lateinit var config: FrameworkConfig
     private lateinit var reaperConfig: FrameworkConfig.ReaperConfig
     private lateinit var taskRepository: TaskRepository
-    private lateinit var taskGroupRepository: TaskGroupRepository
+    private lateinit var workflowStepRepository: WorkflowStepRepository
     private lateinit var meterRegistry: SimpleMeterRegistry
     private lateinit var reaper: StaleTaskReaper
 
@@ -38,15 +38,15 @@ class StaleTaskReaperTest {
         whenever(reaperConfig.batchSize()).thenReturn(50)
 
         taskRepository = mock<TaskRepository>()
-        taskGroupRepository = mock<TaskGroupRepository>()
+        workflowStepRepository = mock<WorkflowStepRepository>()
 
         meterRegistry = SimpleMeterRegistry()
 
-        // Default: no expired groups
-        whenever(taskGroupRepository.failExpiredGroups(any())).thenReturn(0)
+        // Default: no expired steps
+        whenever(workflowStepRepository.failExpiredSteps(any())).thenReturn(0)
 
         reaper = StaleTaskReaper(
-            config, taskRepository, taskGroupRepository, meterRegistry,
+            config, taskRepository, workflowStepRepository, meterRegistry,
         )
     }
 
@@ -131,30 +131,30 @@ class StaleTaskReaperTest {
         assertEquals(1, scanTimer.count())
     }
 
-    // ── Expired group reaping (I1) ─────────────────────────────────────
+    // ── Expired step reaping (I1) ─────────────────────────────────────
 
     @Nested
-    inner class ExpiredGroupReaping {
+    inner class ExpiredStepReaping {
 
         @Test
-        fun `reap fails ACTIVE groups past their deadline via bulk SQL`() {
+        fun `reap fails ACTIVE steps past their deadline via bulk SQL`() {
             whenever(taskRepository.findStaleTasks(any(), any())).thenReturn(emptyList())
-            whenever(taskGroupRepository.failExpiredGroups(any())).thenReturn(2)
+            whenever(workflowStepRepository.failExpiredSteps(any())).thenReturn(2)
 
             reaper.reap()
 
-            verify(taskGroupRepository).failExpiredGroups(any())
-            assertEquals(2.0, meterRegistry.counter("taskqueue.reaper.groups_expired").count())
+            verify(workflowStepRepository).failExpiredSteps(any())
+            assertEquals(2.0, meterRegistry.counter("taskqueue.reaper.steps_expired").count())
         }
 
         @Test
-        fun `reap with no expired groups does not increment counter`() {
+        fun `reap with no expired steps does not increment counter`() {
             whenever(taskRepository.findStaleTasks(any(), any())).thenReturn(emptyList())
-            whenever(taskGroupRepository.failExpiredGroups(any())).thenReturn(0)
+            whenever(workflowStepRepository.failExpiredSteps(any())).thenReturn(0)
 
             reaper.reap()
 
-            assertEquals(0.0, meterRegistry.counter("taskqueue.reaper.groups_expired").count())
+            assertEquals(0.0, meterRegistry.counter("taskqueue.reaper.steps_expired").count())
         }
     }
 

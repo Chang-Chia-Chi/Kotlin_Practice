@@ -37,7 +37,7 @@ class TaskRepositoryTest {
         payload: String = "{}",
         status: TaskStatus = TaskStatus.PENDING,
         priority: Int = 0,
-        groupId: String? = null,
+        stepId: String? = null,
         claimedBy: String? = null,
         claimedAt: Instant? = null,
         retryCount: Int = 0,
@@ -52,10 +52,10 @@ class TaskRepositoryTest {
                 .createUpdate(
                     """
                 INSERT INTO task (task_id, handler, queue, payload, status, priority,
-                    group_id, claimed_by, claimed_at, retry_count, max_retries, execution_generation,
+                    step_id, claimed_by, claimed_at, retry_count, max_retries, execution_generation,
                     last_epoch, scheduled_at, error_message, created_at)
                 VALUES (:taskId, :handler, :queue, :payload, :status, :priority,
-                    :groupId, :claimedBy, :claimedAt, :retryCount, :maxRetries, :gen,
+                    :stepId, :claimedBy, :claimedAt, :retryCount, :maxRetries, :gen,
                     :epoch, :scheduledAt, :errorMessage, CURRENT_TIMESTAMP)
                 """,
                 ).bind("taskId", taskId)
@@ -64,7 +64,7 @@ class TaskRepositoryTest {
                 .bind("payload", payload)
                 .bind("status", status.name)
                 .bind("priority", priority)
-                .bind("groupId", groupId)
+                .bind("stepId", stepId)
                 .bind("claimedBy", claimedBy)
                 .bind("claimedAt", claimedAt)
                 .bind("retryCount", retryCount)
@@ -108,7 +108,7 @@ class TaskRepositoryTest {
                     queue = "high",
                     maxRetries = 5,
                     priority = 10,
-                    groupId = "job-1",
+                    stepId = "job-1",
                     metadata = """{"source":"test"}""",
                 )
             val id = repo.enqueue(request)
@@ -120,7 +120,7 @@ class TaskRepositoryTest {
             assertEquals("high", task.queue)
             assertEquals(5, task.maxRetries)
             assertEquals(10, task.priority)
-            assertEquals("job-1", task.groupId)
+            assertEquals("job-1", task.stepId)
             assertEquals("""{"source":"test"}""", task.metadata)
             assertEquals(0, task.retryCount)
             assertNotNull(task.createdAt)
@@ -608,16 +608,16 @@ class TaskRepositoryTest {
     @Nested
     inner class CountAndFind {
         @Test
-        fun `countByGroupAndStatus returns correct count`() {
-            insertTask("t-1", groupId = "job-1", status = TaskStatus.PENDING)
-            insertTask("t-2", groupId = "job-1", status = TaskStatus.PENDING)
-            insertTask("t-3", groupId = "job-1", status = TaskStatus.COMPLETED)
-            insertTask("t-4", groupId = "job-2", status = TaskStatus.PENDING)
+        fun `countByStepAndStatus returns correct count`() {
+            insertTask("t-1", stepId = "job-1", status = TaskStatus.PENDING)
+            insertTask("t-2", stepId = "job-1", status = TaskStatus.PENDING)
+            insertTask("t-3", stepId = "job-1", status = TaskStatus.COMPLETED)
+            insertTask("t-4", stepId = "job-2", status = TaskStatus.PENDING)
 
-            assertEquals(2, repo.countByGroupAndStatus("job-1", TaskStatus.PENDING))
-            assertEquals(1, repo.countByGroupAndStatus("job-1", TaskStatus.COMPLETED))
-            assertEquals(0, repo.countByGroupAndStatus("job-1", TaskStatus.DEAD_LETTER))
-            assertEquals(1, repo.countByGroupAndStatus("job-2", TaskStatus.PENDING))
+            assertEquals(2, repo.countByStepAndStatus("job-1", TaskStatus.PENDING))
+            assertEquals(1, repo.countByStepAndStatus("job-1", TaskStatus.COMPLETED))
+            assertEquals(0, repo.countByStepAndStatus("job-1", TaskStatus.DEAD_LETTER))
+            assertEquals(1, repo.countByStepAndStatus("job-2", TaskStatus.PENDING))
         }
 
         @Test
@@ -667,54 +667,54 @@ class TaskRepositoryTest {
         }
     }
 
-    // ── Find by group and handler ────────────────────────────────────────
+    // ── Find by step and handler ─────────────────────────────────────────
 
     @Nested
-    inner class FindByGroupAndHandler {
+    inner class FindByStepAndHandler {
         @Test
-        fun `findByGroupAndHandler returns matching task`() {
-            insertTask("t-1", groupId = "job-1", handler = "wc.map", payload = "a")
-            insertTask("t-2", groupId = "job-1", handler = "wc.reduce", payload = "b")
+        fun `findByStepAndHandler returns matching task`() {
+            insertTask("t-1", stepId = "job-1", handler = "wc.map", payload = "a")
+            insertTask("t-2", stepId = "job-1", handler = "wc.reduce", payload = "b")
 
-            val found = repo.findByGroupAndHandler("job-1", "wc.map")
+            val found = repo.findByStepAndHandler("job-1", "wc.map")
             assertNotNull(found)
             assertEquals("t-1", found!!.taskId)
         }
 
         @Test
-        fun `findByGroupAndHandler returns null when no match`() {
-            insertTask("t-1", groupId = "job-1", handler = "wc.map")
-            assertNull(repo.findByGroupAndHandler("job-1", "wc.reduce"))
+        fun `findByStepAndHandler returns null when no match`() {
+            insertTask("t-1", stepId = "job-1", handler = "wc.map")
+            assertNull(repo.findByStepAndHandler("job-1", "wc.reduce"))
         }
 
         @Test
-        fun `findAllByGroupAndHandler returns all matching tasks`() {
-            insertTask("t-1", groupId = "job-1", handler = "wc.map")
-            insertTask("t-2", groupId = "job-1", handler = "wc.map")
-            insertTask("t-3", groupId = "job-1", handler = "wc.reduce")
+        fun `findAllByStepAndHandler returns all matching tasks`() {
+            insertTask("t-1", stepId = "job-1", handler = "wc.map")
+            insertTask("t-2", stepId = "job-1", handler = "wc.map")
+            insertTask("t-3", stepId = "job-1", handler = "wc.reduce")
 
-            val found = repo.findAllByGroupAndHandler("job-1", "wc.map")
+            val found = repo.findAllByStepAndHandler("job-1", "wc.map")
             assertEquals(2, found.size)
             assertTrue(found.all { it.handler == "wc.map" })
         }
 
         @Test
-        fun `findCompletedByGroupAndHandler returns only COMPLETED tasks`() {
-            insertTask("t-1", groupId = "job-1", handler = "wc.map", status = TaskStatus.COMPLETED)
-            insertTask("t-2", groupId = "job-1", handler = "wc.map", status = TaskStatus.PENDING)
-            insertTask("t-3", groupId = "job-1", handler = "wc.map", status = TaskStatus.DEAD_LETTER)
+        fun `findCompletedByStepAndHandler returns only COMPLETED tasks`() {
+            insertTask("t-1", stepId = "job-1", handler = "wc.map", status = TaskStatus.COMPLETED)
+            insertTask("t-2", stepId = "job-1", handler = "wc.map", status = TaskStatus.PENDING)
+            insertTask("t-3", stepId = "job-1", handler = "wc.map", status = TaskStatus.DEAD_LETTER)
 
-            val found = repo.findCompletedByGroupAndHandler("job-1", "wc.map")
+            val found = repo.findCompletedByStepAndHandler("job-1", "wc.map")
             assertEquals(1, found.size)
             assertEquals("t-1", found[0].taskId)
         }
 
         @Test
-        fun `findClaimedByGroupAndHandler returns only CLAIMED tasks`() {
-            insertTask("t-1", groupId = "job-1", handler = "wc.map", status = TaskStatus.CLAIMED, claimedBy = "w")
-            insertTask("t-2", groupId = "job-1", handler = "wc.map", status = TaskStatus.PENDING)
+        fun `findClaimedByStepAndHandler returns only CLAIMED tasks`() {
+            insertTask("t-1", stepId = "job-1", handler = "wc.map", status = TaskStatus.CLAIMED, claimedBy = "w")
+            insertTask("t-2", stepId = "job-1", handler = "wc.map", status = TaskStatus.PENDING)
 
-            val found = repo.findClaimedByGroupAndHandler("job-1", "wc.map")
+            val found = repo.findClaimedByStepAndHandler("job-1", "wc.map")
             assertEquals(1, found.size)
             assertEquals("t-1", found[0].taskId)
         }

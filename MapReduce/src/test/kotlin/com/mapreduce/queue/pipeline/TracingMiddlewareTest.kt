@@ -46,14 +46,14 @@ class TracingMiddlewareTest {
         handler: String = "test.handler",
         queue: String = "default",
         retryCount: Int = 2,
-        groupId: String? = null,
+        stepId: String? = null,
     ) = TaskContext(
         taskId = taskId,
         handler = handler,
         queue = queue,
         payload = "{}",
         retryCount = retryCount,
-        groupId = groupId,
+        stepId = stepId,
     )
 
     @Test
@@ -78,21 +78,21 @@ class TracingMiddlewareTest {
         }
 
         @Test
-        fun `groupId attribute set when present`() = runTest {
-            val ctx = buildContext(groupId = "grp-7")
+        fun `stepId attribute set when present`() = runTest {
+            val ctx = buildContext(stepId = "grp-7")
 
             middleware.invoke(ctx) { TaskResult.Success() }
 
-            verify(spanBuilder).setAttribute("task.groupId", "grp-7")
+            verify(spanBuilder).setAttribute("task.stepId", "grp-7")
         }
 
         @Test
-        fun `groupId attribute not set when null`() = runTest {
-            val ctx = buildContext(groupId = null)
+        fun `stepId attribute not set when null`() = runTest {
+            val ctx = buildContext(stepId = null)
 
             middleware.invoke(ctx) { TaskResult.Success() }
 
-            verify(spanBuilder, never()).setAttribute(eq("task.groupId"), any<String>())
+            verify(spanBuilder, never()).setAttribute(eq("task.stepId"), any<String>())
         }
     }
 

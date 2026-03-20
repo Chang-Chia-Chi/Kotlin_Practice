@@ -3,11 +3,11 @@ package com.mapreduce.queue
 import com.mapreduce.TestH2Factory
 import com.mapreduce.leader.LeaderManager
 import com.mapreduce.queue.model.EnqueueRequest
-import com.mapreduce.queue.model.GroupStatus
-import com.mapreduce.queue.model.TaskGroup
+import com.mapreduce.queue.model.StepStatus
+import com.mapreduce.queue.model.WorkflowStep
 import com.mapreduce.queue.model.TaskStatus
-import com.mapreduce.queue.repository.GroupTaskResolution
-import com.mapreduce.queue.repository.TaskGroupRepository
+import com.mapreduce.queue.repository.StepTaskResolution
+import com.mapreduce.queue.repository.WorkflowStepRepository
 import com.mapreduce.queue.repository.TaskRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -32,7 +32,7 @@ import org.mockito.kotlin.whenever
  * 1. **No double-claim** — `SELECT FOR UPDATE SKIP LOCKED` ensures each task
  *    is handed to exactly one worker, even with many concurrent claimers.
  *
- * 2. **Exactly-once barrier** — The row lock on `task_group` serializes
+ * 2. **Exactly-once barrier** — The row lock on `workflow_step` serializes
  *    concurrent completions; exactly one worker observes `tasks_pending = 0`
  *    and creates the callback task.
  *
@@ -46,7 +46,7 @@ class ConcurrencyStressTest {
 
     private lateinit var jdbi: Jdbi
     private lateinit var taskRepo: TaskRepository
-    private lateinit var groupRepo: TaskGroupRepository
+    private lateinit var stepRepo: WorkflowStepRepository
 
     @BeforeEach
     fun setUp() {
@@ -54,7 +54,7 @@ class ConcurrencyStressTest {
         taskRepo = TaskRepository(jdbi)
         val leaderManager = mock<LeaderManager>()
         whenever(leaderManager.isActive).thenReturn(false)
-        groupRepo = TaskGroupRepository(jdbi, leaderManager)
+        stepRepo = WorkflowStepRepository(jdbi, leaderManager)
     }
 
     // ── 1. No Double-Claim ──────────────────────────────────────────
@@ -164,33 +164,34 @@ class ConcurrencyStressTest {
     inner class ExactlyOnceBarrier {
 
         /**
-         * Create a group with N tasks and a callback handler. Complete all N
+         * Create a step with N tasks and a callback handler. Complete all N
          * tasks concurrently. Exactly one callback task must be created.
          */
         @RepeatedTest(10)
         fun `barrier fires exactly once under concurrent completion`() = runBlocking {
-            val groupId = "barrier-${System.nanoTime()}"
+            val stepId = "barrier-${System.nanoTime()}"
             val taskCount = 30
 
-            val group = TaskGroup(
-                groupId = groupId,
-                groupType = "stress",
-                status = GroupStatus.ACTIVE,
+            val step = WorkflowStep(
+                stepId = stepId,
+                workflowName = "stress",
+                runId = stepId,
+                status = StepStatus.ACTIVE,
                 params = "{}",
                 queue = "q1",
-                phase = "map",
-                phaseTotal = taskCount,
-                onCompleteHandler = "stress.__phase_complete",
-                failurePolicy = "FAIL_GROUP",
+                stepLabel = "map",
+                stepTotal = taskCount,
+                onCompleteHandler = "stress.__step_transition",
+                failurePolicy = "FAIL_STEP",
                 failureThreshold = 0.0,
             )
             val tasks = (0 until taskCount).map {
                 EnqueueRequest(
                     handler = "stress.map", payload = "{\"i\":$it}",
-                    queue = "q1", groupId = groupId,
+                    queue = "q1", stepId = stepId,
                 )
             }
-            groupRepo.submitGroup(group, tasks)
+            stepRepo.submitStep(step, tasks)
 
             // Claim all tasks
             val claimedTasks = (0 until taskCount).map {
@@ -200,9 +201,9 @@ class ConcurrencyStressTest {
             // Complete all concurrently
             val results = claimedTasks.map { task ->
                 async(Dispatchers.IO) {
-                    groupRepo.resolveGroupTask(
+                    stepRepo.resolveStepTask(
                         taskId = task.taskId,
-                        groupId = groupId,
+                        stepId = stepId,
                         claimToken = task.claimToken,
                         failed = false,
                         outputUri = "blob://${task.taskId}",
@@ -220,15 +221,15 @@ class ConcurrencyStressTest {
             // Exactly one callback task should exist
             val callbackCount = jdbi.withHandle<Int, Exception> { h ->
                 h.createQuery(
-                    "SELECT COUNT(*) FROM task WHERE handler = 'stress.__phase_complete' AND payload = :groupId",
-                ).bind("groupId", groupId).mapTo(Int::class.java).one()
+                    "SELECT COUNT(*) FROM task WHERE handler = 'stress.__step_transition' AND payload = :stepId",
+                ).bind("stepId", stepId).mapTo(Int::class.java).one()
             }
             assertEquals(1, callbackCount, "Exactly one callback task")
 
-            // Group should have tasks_pending = 0
-            val grp = groupRepo.findGroup(groupId)!!
-            assertEquals(0, grp.tasksPending)
-            assertEquals(0, grp.tasksFailed)
+            // Step should have tasks_pending = 0
+            val step2 = stepRepo.findStep(stepId)!!
+            assertEquals(0, step2.tasksPending)
+            assertEquals(0, step2.tasksFailed)
         }
 
         /**
@@ -237,29 +238,30 @@ class ConcurrencyStressTest {
          */
         @RepeatedTest(5)
         fun `barrier fires once with mixed success and failure`() = runBlocking {
-            val groupId = "mixed-${System.nanoTime()}"
+            val stepId = "mixed-${System.nanoTime()}"
             val taskCount = 20
             val failCount = 7 // tasks at indices 0..6 will fail
 
-            val group = TaskGroup(
-                groupId = groupId,
-                groupType = "stress",
-                status = GroupStatus.ACTIVE,
+            val step = WorkflowStep(
+                stepId = stepId,
+                workflowName = "stress",
+                runId = stepId,
+                status = StepStatus.ACTIVE,
                 params = "{}",
                 queue = "q1",
-                phase = "map",
-                phaseTotal = taskCount,
-                onCompleteHandler = "stress.__phase_complete",
-                failurePolicy = "FAIL_GROUP",
+                stepLabel = "map",
+                stepTotal = taskCount,
+                onCompleteHandler = "stress.__step_transition",
+                failurePolicy = "FAIL_STEP",
                 failureThreshold = 0.0,
             )
             val tasks = (0 until taskCount).map {
                 EnqueueRequest(
                     handler = "stress.map", payload = "{\"i\":$it}",
-                    queue = "q1", groupId = groupId,
+                    queue = "q1", stepId = stepId,
                 )
             }
-            groupRepo.submitGroup(group, tasks)
+            stepRepo.submitStep(step, tasks)
 
             val claimedTasks = (0 until taskCount).map {
                 taskRepo.claim("worker-$it", listOf("q1"))!!
@@ -268,16 +270,16 @@ class ConcurrencyStressTest {
             val results = claimedTasks.mapIndexed { idx, task ->
                 async(Dispatchers.IO) {
                     if (idx < failCount) {
-                        // Atomic dead-letter + group counter decrement
-                        val r = groupRepo.deadLetterGroupTask(
-                            taskId = task.taskId, groupId = groupId,
+                        // Atomic dead-letter + step counter decrement
+                        val r = stepRepo.deadLetterStepTask(
+                            taskId = task.taskId, stepId = stepId,
                             reason = "stress-test failure", claimToken = task.claimToken,
                         )
-                        GroupTaskResolution(updated = r.taskUpdated, barrierMet = r.barrierMet)
+                        StepTaskResolution(updated = r.taskUpdated, barrierMet = r.barrierMet)
                     } else {
-                        groupRepo.resolveGroupTask(
+                        stepRepo.resolveStepTask(
                             taskId = task.taskId,
-                            groupId = groupId,
+                            stepId = stepId,
                             claimToken = task.claimToken,
                             failed = false,
                             outputUri = "blob://${task.taskId}",
@@ -289,9 +291,9 @@ class ConcurrencyStressTest {
             val barrierCount = results.count { it.barrierMet }
             assertEquals(1, barrierCount, "Barrier must be met exactly once")
 
-            val grp = groupRepo.findGroup(groupId)!!
-            assertEquals(0, grp.tasksPending)
-            assertEquals(failCount, grp.tasksFailed)
+            val step2 = stepRepo.findStep(stepId)!!
+            assertEquals(0, step2.tasksPending)
+            assertEquals(failCount, step2.tasksFailed)
         }
     }
 
@@ -335,21 +337,21 @@ class ConcurrencyStressTest {
         }
 
         /**
-         * Group-aware zombie: stale worker completes a group task → resolveGroupTask
-         * should detect the zombie and NOT decrement the group counter.
+         * Group-aware zombie: stale worker completes a step task → resolveStepTask
+         * should detect the zombie and NOT decrement the step counter.
          */
         @Test
-        fun `stale group task completion does not decrement counter`() = runTest {
-            val groupId = "zombie-group"
-            val group = TaskGroup(
-                groupId = groupId, groupType = "stress", status = GroupStatus.ACTIVE,
-                params = "{}", queue = "q1", phase = "map", phaseTotal = 2,
-                onCompleteHandler = "stress.__phase_complete",
+        fun `stale step task completion does not decrement counter`() = runTest {
+            val stepId = "zombie-group"
+            val step = WorkflowStep(
+                stepId = stepId, workflowName = "stress", runId = stepId, status = StepStatus.ACTIVE,
+                params = "{}", queue = "q1", stepLabel = "map", stepTotal = 2,
+                onCompleteHandler = "stress.__step_transition",
             )
             val tasks = (0 until 2).map {
-                EnqueueRequest(handler = "stress.map", payload = "$it", queue = "q1", groupId = groupId)
+                EnqueueRequest(handler = "stress.map", payload = "$it", queue = "q1", stepId = stepId)
             }
-            groupRepo.submitGroup(group, tasks)
+            stepRepo.submitStep(step, tasks)
 
             val task1 = taskRepo.claim("worker-A", listOf("q1"))!!
             val staleGen = task1.claimToken!!
@@ -361,24 +363,24 @@ class ConcurrencyStressTest {
             val freshGen = reClaimed.claimToken!!
 
             // Stale worker tries to resolve — should be rejected
-            val staleResult = groupRepo.resolveGroupTask(
-                taskId = task1.taskId, groupId = groupId,
+            val staleResult = stepRepo.resolveStepTask(
+                taskId = task1.taskId, stepId = stepId,
                 claimToken = staleGen, outputUri = "blob://stale",
             )
             assertEquals(false, staleResult.updated, "Zombie must be rejected")
             assertEquals(false, staleResult.barrierMet)
 
-            // Group counter should still be at 2
-            val grp = groupRepo.findGroup(groupId)!!
-            assertEquals(2, grp.tasksPending, "Counter must not decrement on zombie")
+            // Step counter should still be at 2
+            val step2 = stepRepo.findStep(stepId)!!
+            assertEquals(2, step2.tasksPending, "Counter must not decrement on zombie")
 
             // Fresh worker completes — should succeed
-            val freshResult = groupRepo.resolveGroupTask(
-                taskId = task1.taskId, groupId = groupId,
+            val freshResult = stepRepo.resolveStepTask(
+                taskId = task1.taskId, stepId = stepId,
                 claimToken = freshGen, outputUri = "blob://fresh",
             )
             assertEquals(true, freshResult.updated)
-            assertEquals(1, groupRepo.findGroup(groupId)!!.tasksPending)
+            assertEquals(1, stepRepo.findStep(stepId)!!.tasksPending)
         }
 
         /**
@@ -387,15 +389,15 @@ class ConcurrencyStressTest {
          */
         @RepeatedTest(10)
         fun `concurrent completion with different generations — only one wins`() = runBlocking {
-            val groupId = "race-${System.nanoTime()}"
-            val group = TaskGroup(
-                groupId = groupId, groupType = "stress", status = GroupStatus.ACTIVE,
-                params = "{}", queue = "q1", phase = "map", phaseTotal = 1,
-                onCompleteHandler = "stress.__phase_complete",
+            val stepId = "race-${System.nanoTime()}"
+            val step = WorkflowStep(
+                stepId = stepId, workflowName = "stress", runId = stepId, status = StepStatus.ACTIVE,
+                params = "{}", queue = "q1", stepLabel = "map", stepTotal = 1,
+                onCompleteHandler = "stress.__step_transition",
             )
-            groupRepo.submitGroup(
-                group,
-                listOf(EnqueueRequest(handler = "stress.map", payload = "{}", queue = "q1", groupId = groupId)),
+            stepRepo.submitStep(
+                step,
+                listOf(EnqueueRequest(handler = "stress.map", payload = "{}", queue = "q1", stepId = stepId)),
             )
 
             val task = taskRepo.claim("worker-A", listOf("q1"))!!
@@ -409,14 +411,14 @@ class ConcurrencyStressTest {
             // Both try to resolve concurrently
             val (resultA, resultB) = listOf(
                 async(Dispatchers.IO) {
-                    groupRepo.resolveGroupTask(
-                        taskId = task.taskId, groupId = groupId,
+                    stepRepo.resolveStepTask(
+                        taskId = task.taskId, stepId = stepId,
                         claimToken = genA, outputUri = "blob://A",
                     )
                 },
                 async(Dispatchers.IO) {
-                    groupRepo.resolveGroupTask(
-                        taskId = task.taskId, groupId = groupId,
+                    stepRepo.resolveStepTask(
+                        taskId = task.taskId, stepId = stepId,
                         claimToken = genB, outputUri = "blob://B",
                     )
                 },
@@ -432,34 +434,35 @@ class ConcurrencyStressTest {
         }
     }
 
-    // ── 4. End-to-End Group Lifecycle ───────────────────────────────
+    // ── 4. End-to-End Step Lifecycle ───────────────────────────────
 
     @Nested
-    inner class EndToEndGroupLifecycle {
+    inner class EndToEndStepLifecycle {
 
         /**
-         * Full lifecycle: submit group → concurrent claims → concurrent
+         * Full lifecycle: submit step → concurrent claims → concurrent
          * completions → barrier → callback task exists → verify final state.
          */
         @Test
-        fun `full group lifecycle under concurrency`() = runBlocking {
-            val groupId = "e2e-${System.nanoTime()}"
+        fun `full step lifecycle under concurrency`() = runBlocking {
+            val stepId = "e2e-${System.nanoTime()}"
             val taskCount = 40
 
-            val group = TaskGroup(
-                groupId = groupId,
-                groupType = "e2e",
-                status = GroupStatus.ACTIVE,
+            val step = WorkflowStep(
+                stepId = stepId,
+                workflowName = "e2e",
+                runId = stepId,
+                status = StepStatus.ACTIVE,
                 params = "{}",
                 queue = "q1",
-                phase = "map",
-                phaseTotal = taskCount,
-                onCompleteHandler = "e2e.__phase_complete",
+                stepLabel = "map",
+                stepTotal = taskCount,
+                onCompleteHandler = "e2e.__step_transition",
             )
             val tasks = (0 until taskCount).map {
-                EnqueueRequest(handler = "e2e.map", payload = "$it", queue = "q1", groupId = groupId)
+                EnqueueRequest(handler = "e2e.map", payload = "$it", queue = "q1", stepId = stepId)
             }
-            groupRepo.submitGroup(group, tasks)
+            stepRepo.submitStep(step, tasks)
 
             // Phase 1: concurrent claiming (10 workers, greedy)
             val claimed = (0 until 10).map { w ->
@@ -479,8 +482,8 @@ class ConcurrencyStressTest {
             // Phase 2: concurrent completion
             val results = claimed.map { (taskId, gen) ->
                 async(Dispatchers.IO) {
-                    groupRepo.resolveGroupTask(
-                        taskId = taskId, groupId = groupId,
+                    stepRepo.resolveStepTask(
+                        taskId = taskId, stepId = stepId,
                         claimToken = gen, outputUri = "blob://$taskId",
                     )
                 }
@@ -490,14 +493,14 @@ class ConcurrencyStressTest {
             assertEquals(1, results.count { it.barrierMet }, "Barrier met exactly once")
 
             // Verify final state
-            val grp = groupRepo.findGroup(groupId)!!
-            assertEquals(0, grp.tasksPending)
-            assertEquals(0, grp.tasksFailed)
-            assertEquals(GroupStatus.ACTIVE, grp.status) // still ACTIVE — callback will transition
+            val step2 = stepRepo.findStep(stepId)!!
+            assertEquals(0, step2.tasksPending)
+            assertEquals(0, step2.tasksFailed)
+            assertEquals(StepStatus.ACTIVE, step2.status) // still ACTIVE — callback will transition
 
             // Verify callback task
             val callbackCount = jdbi.withHandle<Int, Exception> { h ->
-                h.createQuery("SELECT COUNT(*) FROM task WHERE handler = 'e2e.__phase_complete'")
+                h.createQuery("SELECT COUNT(*) FROM task WHERE handler = 'e2e.__step_transition'")
                     .mapTo(Int::class.java).one()
             }
             assertEquals(1, callbackCount)
@@ -506,9 +509,9 @@ class ConcurrencyStressTest {
             val completedWithOutput = jdbi.withHandle<Int, Exception> { h ->
                 h.createQuery(
                     """SELECT COUNT(*) FROM task
-                       WHERE group_id = :gid AND handler = 'e2e.map'
+                       WHERE step_id = :gid AND handler = 'e2e.map'
                          AND status = 'COMPLETED' AND output_uri IS NOT NULL""",
-                ).bind("gid", groupId).mapTo(Int::class.java).one()
+                ).bind("gid", stepId).mapTo(Int::class.java).one()
             }
             assertEquals(taskCount, completedWithOutput)
         }
@@ -579,23 +582,23 @@ class ConcurrencyStressTest {
         }
 
         /**
-         * Concurrent failures on different tasks in a group — each task's
-         * retry count is independent, group failure counter is accurate.
+         * Concurrent failures on different tasks in a step — each task's
+         * retry count is independent, step failure counter is accurate.
          */
         @RepeatedTest(5)
-        fun `concurrent group task failures increment correctly`() = runBlocking {
-            val groupId = "fail-group-${System.nanoTime()}"
+        fun `concurrent step task failures increment correctly`() = runBlocking {
+            val stepId = "fail-group-${System.nanoTime()}"
             val taskCount = 15
 
-            val group = TaskGroup(
-                groupId = groupId, groupType = "stress", status = GroupStatus.ACTIVE,
-                params = "{}", queue = "q1", phase = "map", phaseTotal = taskCount,
-                onCompleteHandler = "stress.__phase_complete",
+            val step = WorkflowStep(
+                stepId = stepId, workflowName = "stress", runId = stepId, status = StepStatus.ACTIVE,
+                params = "{}", queue = "q1", stepLabel = "map", stepTotal = taskCount,
+                onCompleteHandler = "stress.__step_transition",
             )
-            groupRepo.submitGroup(
-                group,
+            stepRepo.submitStep(
+                step,
                 (0 until taskCount).map {
-                    EnqueueRequest(handler = "stress.map", payload = "$it", queue = "q1", groupId = groupId)
+                    EnqueueRequest(handler = "stress.map", payload = "$it", queue = "q1", stepId = stepId)
                 },
             )
 
@@ -603,22 +606,22 @@ class ConcurrencyStressTest {
                 taskRepo.claim("worker-$it", listOf("q1"))!!
             }
 
-            // All tasks fail concurrently — atomic dead-letter + group decrement
+            // All tasks fail concurrently — atomic dead-letter + step decrement
             val results = claimedTasks.map { task ->
                 async(Dispatchers.IO) {
-                    val r = groupRepo.deadLetterGroupTask(
-                        taskId = task.taskId, groupId = groupId,
+                    val r = stepRepo.deadLetterStepTask(
+                        taskId = task.taskId, stepId = stepId,
                         reason = "concurrent failure", claimToken = task.claimToken,
                     )
-                    GroupTaskResolution(updated = r.taskUpdated, barrierMet = r.barrierMet)
+                    StepTaskResolution(updated = r.taskUpdated, barrierMet = r.barrierMet)
                 }
             }.awaitAll()
 
             assertEquals(1, results.count { it.barrierMet }, "Barrier met exactly once")
 
-            val grp = groupRepo.findGroup(groupId)!!
-            assertEquals(0, grp.tasksPending)
-            assertEquals(taskCount, grp.tasksFailed)
+            val step2 = stepRepo.findStep(stepId)!!
+            assertEquals(0, step2.tasksPending)
+            assertEquals(taskCount, step2.tasksFailed)
         }
     }
 

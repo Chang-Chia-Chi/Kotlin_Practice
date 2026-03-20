@@ -1,13 +1,15 @@
-package com.mapreduce.mr.api
+package com.mapreduce.workflow.api
 
-import com.mapreduce.mr.api.dto.SubmitJobRequest
-import com.mapreduce.mr.model.FailurePolicy
-import com.mapreduce.mr.registry.MapReduceRegistry
-import com.mapreduce.mr.spi.MapReduceDefinition
-import com.mapreduce.queue.model.GroupStatus
-import com.mapreduce.queue.model.TaskGroup
-import com.mapreduce.queue.repository.TaskGroupRepository
+import com.mapreduce.config.FrameworkConfig
+import com.mapreduce.queue.model.StepStatus
+import com.mapreduce.queue.model.WorkflowStep
+import com.mapreduce.queue.repository.WorkflowStepRepository
+import com.mapreduce.workflow.api.dto.SubmitJobRequest
+import com.mapreduce.workflow.model.FailurePolicy
+import com.mapreduce.workflow.registry.WorkflowRegistry
+import com.mapreduce.workflow.spi.WorkflowDefinition
 import jakarta.ws.rs.core.Response
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNotNull
@@ -18,33 +20,62 @@ import org.junit.jupiter.api.Test
 import org.mockito.kotlin.any
 import org.mockito.kotlin.mock
 import org.mockito.kotlin.whenever
+import java.time.Duration
 import java.time.Instant
 
 class JobResourceTest {
 
-    private lateinit var taskGroupRepository: TaskGroupRepository
-    private lateinit var registry: MapReduceRegistry
+    private lateinit var workflowStepRepository: WorkflowStepRepository
+    private lateinit var registry: WorkflowRegistry
+    private lateinit var config: FrameworkConfig
     private lateinit var resource: JobResource
 
     @BeforeEach
     fun setUp() {
-        taskGroupRepository = mock()
+        workflowStepRepository = mock()
         registry = mock()
-        resource = JobResource(taskGroupRepository, registry)
+        config = mock()
+        val workflowConfig = mock<FrameworkConfig.WorkflowConfig>()
+        whenever(config.workflow()).thenReturn(workflowConfig)
+        whenever(workflowConfig.defaultStepDeadline()).thenReturn(Duration.ofHours(1))
+        resource = JobResource(workflowStepRepository, registry, config)
     }
 
     private fun mockDefinition(
-        taskInputs: List<Any> = listOf("input1", "input2"),
-    ): MapReduceDefinition<Any, Any, Any, Any> {
-        val def = mock<MapReduceDefinition<Any, Any, Any, Any>>()
+        taskPayloads: List<WorkflowDefinition.TaskPayload> = listOf(
+            WorkflowDefinition.TaskPayload("input1"),
+            WorkflowDefinition.TaskPayload("input2"),
+        ),
+    ): WorkflowDefinition<Any> {
+        val def = mock<WorkflowDefinition<Any>>()
+        whenever(def.workflowName).thenReturn("wc")
         whenever(def.deserializeParams(any())).thenReturn("params")
-        whenever(def.split(any())).thenReturn(taskInputs)
-        whenever(def.serializeInput(any())).thenReturn("{}")
-        whenever(def.queue).thenReturn("mr")
-        whenever(def.failurePolicy).thenReturn(FailurePolicy.FAIL_GROUP)
-        whenever(def.failureThreshold).thenReturn(0.0)
-        whenever(def.maxRetries).thenReturn(3)
-        return def
+
+        val stepSpec = WorkflowDefinition.StepSpec(
+            name = "map",
+            handler = "wc.map",
+            queue = "mr",
+            maxRetries = 3,
+            failurePolicy = FailurePolicy.FAIL_STEP,
+            failureThreshold = 0.0,
+        )
+        whenever(def.pipeline()).thenReturn(listOf(stepSpec))
+
+        val obj = object : suspend (Any) -> List<WorkflowDefinition.TaskPayload> {
+            override suspend fun invoke(p1: Any) = taskPayloads
+        }
+        // Use a real implementation for initialTasks
+        return object : WorkflowDefinition<Any> {
+            override val workflowName = "wc"
+            override fun serializeParams(params: Any) = "{}"
+            override fun deserializeParams(json: String) = "params" as Any
+            override fun pipeline() = listOf(stepSpec)
+            override suspend fun initialTasks(params: Any) = taskPayloads
+            override suspend fun transitionTasks(
+                stepIndex: Int, previousStepParams: String, previousOutputs: Flow<WorkflowDefinition.TaskOutput>,
+            ) = WorkflowDefinition.StepTransition(emptyList())
+            override suspend fun onCompleted(lastStepParams: String, finalOutputs: Flow<WorkflowDefinition.TaskOutput>) {}
+        }
     }
 
     // ── submitJob ──────────────────────────────────────────────────
@@ -53,7 +84,7 @@ class JobResourceTest {
     inner class SubmitJob {
 
         @Test
-        fun `returns 400 for unknown job type`() = runTest {
+        fun `returns 400 for unknown workflow type`() = runTest {
             whenever(registry.getDefinition("unknown")).thenReturn(null)
 
             val response = resource.submitJob(SubmitJobRequest("unknown", "{}"))
@@ -61,12 +92,12 @@ class JobResourceTest {
             assertEquals(Response.Status.BAD_REQUEST.statusCode, response.status)
             @Suppress("UNCHECKED_CAST")
             val entity = response.entity as Map<String, Any>
-            assertTrue(entity["error"].toString().contains("Unknown job type"))
+            assertTrue(entity["error"].toString().contains("Unknown workflow"))
         }
 
         @Test
-        fun `returns 400 when split produces zero tasks`() = runTest {
-            val def = mockDefinition(taskInputs = emptyList())
+        fun `returns 400 when initialTasks produces zero tasks`() = runTest {
+            val def = mockDefinition(taskPayloads = emptyList())
             whenever(registry.getDefinition("wc")).thenReturn(def)
 
             val response = resource.submitJob(SubmitJobRequest("wc", """{"text":"hi"}"""))
@@ -78,8 +109,12 @@ class JobResourceTest {
         }
 
         @Test
-        fun `returns 201 with jobId and task count`() = runTest {
-            val def = mockDefinition(taskInputs = listOf("a", "b", "c"))
+        fun `returns 201 with runId and task count`() = runTest {
+            val def = mockDefinition(taskPayloads = listOf(
+                WorkflowDefinition.TaskPayload("a"),
+                WorkflowDefinition.TaskPayload("b"),
+                WorkflowDefinition.TaskPayload("c"),
+            ))
             whenever(registry.getDefinition("wc")).thenReturn(def)
 
             val response = resource.submitJob(SubmitJobRequest("wc", """{"text":"hello"}"""))
@@ -87,13 +122,14 @@ class JobResourceTest {
             assertEquals(Response.Status.CREATED.statusCode, response.status)
             @Suppress("UNCHECKED_CAST")
             val entity = response.entity as Map<String, Any>
-            assertNotNull(entity["jobId"])
+            assertNotNull(entity["runId"])
+            assertNotNull(entity["stepId"])
             assertEquals(3, entity["totalTasks"])
         }
 
         @Test
         fun `returns 201 with single task`() = runTest {
-            val def = mockDefinition(taskInputs = listOf("only-one"))
+            val def = mockDefinition(taskPayloads = listOf(WorkflowDefinition.TaskPayload("only-one")))
             whenever(registry.getDefinition("single")).thenReturn(def)
 
             val response = resource.submitJob(SubmitJobRequest("single", "{}"))
@@ -111,8 +147,8 @@ class JobResourceTest {
     inner class GetJob {
 
         @Test
-        fun `returns 404 when group not found`() = runTest {
-            whenever(taskGroupRepository.findGroup("non-existent")).thenReturn(null)
+        fun `returns 404 when no steps found for runId`() = runTest {
+            whenever(workflowStepRepository.findStepsByRunId("non-existent")).thenReturn(emptyList())
 
             val response = resource.getJob("non-existent")
 
@@ -120,23 +156,24 @@ class JobResourceTest {
         }
 
         @Test
-        fun `returns 200 with JobResponse when group found`() = runTest {
-            val group = TaskGroup(
-                groupId = "job-1",
-                groupType = "wordcount",
-                status = GroupStatus.ACTIVE,
-                phase = "map",
-                phaseTotal = 5,
+        fun `returns 200 with step list when steps found`() = runTest {
+            val step = WorkflowStep(
+                stepId = "step-1",
+                workflowName = "wordcount",
+                runId = "run-1",
+                status = StepStatus.ACTIVE,
+                stepLabel = "map",
+                stepTotal = 5,
                 tasksPending = 3,
                 tasksFailed = 1,
-                failurePolicy = "FAIL_GROUP",
+                failurePolicy = "FAIL_STEP",
                 resultMetadata = null,
                 createdAt = Instant.now(),
                 updatedAt = Instant.now(),
             )
-            whenever(taskGroupRepository.findGroup("job-1")).thenReturn(group)
+            whenever(workflowStepRepository.findStepsByRunId("run-1")).thenReturn(listOf(step))
 
-            val response = resource.getJob("job-1")
+            val response = resource.getJob("run-1")
 
             assertEquals(Response.Status.OK.statusCode, response.status)
         }
@@ -148,12 +185,12 @@ class JobResourceTest {
     inner class ListJobs {
 
         @Test
-        fun `returns 200 with all groups when no status filter`() = runTest {
-            val groups = listOf(
-                TaskGroup("g-1", "wc", GroupStatus.ACTIVE, phase = "map"),
-                TaskGroup("g-2", "wc", GroupStatus.COMPLETED, phase = "reduce"),
+        fun `returns 200 with all steps when no status filter`() = runTest {
+            val steps = listOf(
+                WorkflowStep("s-1", "wc", "r-1", StepStatus.ACTIVE, stepLabel = "map"),
+                WorkflowStep("s-2", "wc", "r-2", StepStatus.COMPLETED, stepLabel = "reduce"),
             )
-            whenever(taskGroupRepository.findAllGroups(any())).thenReturn(groups)
+            whenever(workflowStepRepository.findAllSteps(any())).thenReturn(steps)
 
             val response = resource.listJobs(null)
 
@@ -164,11 +201,11 @@ class JobResourceTest {
         }
 
         @Test
-        fun `returns 200 with filtered groups when valid status provided`() = runTest {
-            val groups = listOf(
-                TaskGroup("g-1", "wc", GroupStatus.ACTIVE, phase = "map"),
+        fun `returns 200 with filtered steps when valid status provided`() = runTest {
+            val steps = listOf(
+                WorkflowStep("s-1", "wc", "r-1", StepStatus.ACTIVE, stepLabel = "map"),
             )
-            whenever(taskGroupRepository.findGroupsByStatus(GroupStatus.ACTIVE)).thenReturn(groups)
+            whenever(workflowStepRepository.findStepsByStatus(StepStatus.ACTIVE)).thenReturn(steps)
 
             val response = resource.listJobs("ACTIVE")
 
@@ -180,7 +217,7 @@ class JobResourceTest {
 
         @Test
         fun `returns 200 with case-insensitive status`() = runTest {
-            whenever(taskGroupRepository.findGroupsByStatus(GroupStatus.COMPLETED)).thenReturn(emptyList())
+            whenever(workflowStepRepository.findStepsByStatus(StepStatus.COMPLETED)).thenReturn(emptyList())
 
             val response = resource.listJobs("completed")
 
@@ -198,8 +235,8 @@ class JobResourceTest {
         }
 
         @Test
-        fun `returns empty list when no groups exist`() = runTest {
-            whenever(taskGroupRepository.findAllGroups(any())).thenReturn(emptyList())
+        fun `returns empty list when no steps exist`() = runTest {
+            whenever(workflowStepRepository.findAllSteps(any())).thenReturn(emptyList())
 
             val response = resource.listJobs(null)
 

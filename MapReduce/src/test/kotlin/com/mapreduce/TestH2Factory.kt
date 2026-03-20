@@ -35,7 +35,7 @@ object TestH2Factory {
             payload            CLOB,
             status             VARCHAR(20)   DEFAULT 'PENDING' NOT NULL,
             priority           INT           DEFAULT 0 NOT NULL,
-            group_id           VARCHAR(36),
+            step_id            VARCHAR(36),
             metadata           CLOB,
             claimed_by         VARCHAR(255),
             claimed_at         TIMESTAMP,
@@ -51,25 +51,29 @@ object TestH2Factory {
             output_metadata    CLOB
         );
 
-        CREATE TABLE task_group (
-            group_id            VARCHAR(36)   NOT NULL PRIMARY KEY,
-            group_type          VARCHAR(255)  NOT NULL,
+        CREATE TABLE workflow_step (
+            step_id             VARCHAR(36)   NOT NULL PRIMARY KEY,
+            workflow_name       VARCHAR(255)  NOT NULL,
+            run_id              VARCHAR(36)   NOT NULL,
             status              VARCHAR(20)   NOT NULL,
             params              CLOB,
             queue               VARCHAR(100)  DEFAULT 'default' NOT NULL,
-            phase               VARCHAR(50)   NOT NULL,
-            phase_total         INT           DEFAULT 0 NOT NULL,
+            step_label          VARCHAR(50)   NOT NULL,
+            step_total          INT           DEFAULT 0 NOT NULL,
             tasks_pending       INT           DEFAULT 0 NOT NULL,
             tasks_failed        INT           DEFAULT 0 NOT NULL,
             on_complete_handler VARCHAR(255),
-            failure_policy      VARCHAR(20)   DEFAULT 'FAIL_GROUP' NOT NULL,
+            failure_policy      VARCHAR(20)   DEFAULT 'FAIL_STEP' NOT NULL,
             failure_threshold   DECIMAL(5,4)  DEFAULT 0 NOT NULL,
             result_metadata     CLOB,
             version             BIGINT        DEFAULT 0 NOT NULL,
             last_epoch          BIGINT        DEFAULT 0 NOT NULL,
             deadline_at         TIMESTAMP,
             created_at          TIMESTAMP     DEFAULT CURRENT_TIMESTAMP NOT NULL,
-            updated_at          TIMESTAMP     DEFAULT CURRENT_TIMESTAMP NOT NULL
+            updated_at          TIMESTAMP     DEFAULT CURRENT_TIMESTAMP NOT NULL,
+            UNIQUE (workflow_name, run_id, step_label)
         );
+
+        CREATE INDEX idx_wf_step_run ON workflow_step (run_id);
     """.trimIndent()
 }
