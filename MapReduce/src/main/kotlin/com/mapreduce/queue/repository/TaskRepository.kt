@@ -29,16 +29,16 @@ class TaskRepository(
                 .createUpdate(
                     """
                 INSERT INTO task (task_id, handler, queue, payload, status, priority,
-                    group_id, metadata, scheduled_at, retry_count, max_retries, created_at)
+                    step_id, metadata, scheduled_at, retry_count, max_retries, created_at)
                 VALUES (:taskId, :handler, :queue, :payload, 'PENDING', :priority,
-                    :groupId, :metadata, :scheduledAt, 0, :maxRetries, CURRENT_TIMESTAMP)
+                    :stepId, :metadata, :scheduledAt, 0, :maxRetries, CURRENT_TIMESTAMP)
                 """,
                 ).bind("taskId", taskId)
                 .bind("handler", request.handler)
                 .bind("queue", request.queue)
                 .bind("payload", request.payload)
                 .bind("priority", request.priority)
-                .bind("groupId", request.groupId)
+                .bind("stepId", request.stepId)
                 .bind("metadata", request.metadata)
                 .bind("scheduledAt", request.scheduledAt)
                 .bind("maxRetries", request.maxRetries)
@@ -302,16 +302,16 @@ class TaskRepository(
         }
     }
 
-    /** Count tasks by group and status — used by MR orchestrator for barrier detection. */
-    fun countByGroupAndStatus(
-        groupId: String,
+    /** Count tasks by step and status. */
+    fun countByStepAndStatus(
+        stepId: String,
         status: TaskStatus,
     ): Int =
         jdbi.withHandle<Int, Exception> { h ->
             h
                 .createQuery(
-                    "SELECT COUNT(*) FROM task WHERE group_id = :groupId AND status = :status",
-                ).bind("groupId", groupId)
+                    "SELECT COUNT(*) FROM task WHERE step_id = :stepId AND status = :status",
+                ).bind("stepId", stepId)
                 .bind("status", status.name)
                 .mapTo(Int::class.java)
                 .one()
@@ -327,58 +327,58 @@ class TaskRepository(
                 .orElse(null)
         }
 
-    fun findByGroupAndHandler(
-        groupId: String,
+    fun findByStepAndHandler(
+        stepId: String,
         handler: String,
     ): Task? =
         jdbi.withHandle<Task?, Exception> { h ->
             h
                 .createQuery(
-                    "SELECT * FROM task WHERE group_id = :groupId AND handler = :handler",
-                ).bind("groupId", groupId)
+                    "SELECT * FROM task WHERE step_id = :stepId AND handler = :handler",
+                ).bind("stepId", stepId)
                 .bind("handler", handler)
                 .mapTo(Task::class.java)
                 .findOne()
                 .orElse(null)
         }
 
-    fun findAllByGroupAndHandler(
-        groupId: String,
+    fun findAllByStepAndHandler(
+        stepId: String,
         handler: String,
     ): List<Task> =
         jdbi.withHandle<List<Task>, Exception> { h ->
             h
                 .createQuery(
-                    "SELECT * FROM task WHERE group_id = :groupId AND handler = :handler",
-                ).bind("groupId", groupId)
+                    "SELECT * FROM task WHERE step_id = :stepId AND handler = :handler",
+                ).bind("stepId", stepId)
                 .bind("handler", handler)
                 .mapTo(Task::class.java)
                 .list()
         }
 
-    fun findCompletedByGroupAndHandler(
-        groupId: String,
+    fun findCompletedByStepAndHandler(
+        stepId: String,
         handler: String,
     ): List<Task> =
         jdbi.withHandle<List<Task>, Exception> { h ->
             h
                 .createQuery(
-                    "SELECT * FROM task WHERE group_id = :groupId AND handler = :handler AND status = 'COMPLETED'",
-                ).bind("groupId", groupId)
+                    "SELECT * FROM task WHERE step_id = :stepId AND handler = :handler AND status = 'COMPLETED'",
+                ).bind("stepId", stepId)
                 .bind("handler", handler)
                 .mapTo(Task::class.java)
                 .list()
         }
 
-    fun findClaimedByGroupAndHandler(
-        groupId: String,
+    fun findClaimedByStepAndHandler(
+        stepId: String,
         handler: String,
     ): List<Task> =
         jdbi.withHandle<List<Task>, Exception> { h ->
             h
                 .createQuery(
-                    "SELECT * FROM task WHERE group_id = :groupId AND handler = :handler AND status = 'CLAIMED'",
-                ).bind("groupId", groupId)
+                    "SELECT * FROM task WHERE step_id = :stepId AND handler = :handler AND status = 'CLAIMED'",
+                ).bind("stepId", stepId)
                 .bind("handler", handler)
                 .mapTo(Task::class.java)
                 .list()

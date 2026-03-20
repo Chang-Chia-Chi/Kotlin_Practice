@@ -4,8 +4,9 @@ import com.mapreduce.config.inTransactionSuspend
 import com.mapreduce.config.withHandleSuspend
 import com.mapreduce.leader.LeaderManager
 import com.mapreduce.queue.model.EnqueueRequest
-import com.mapreduce.queue.model.GroupStatus
-import com.mapreduce.queue.model.TaskGroup
+import com.mapreduce.queue.model.StepStatus
+import com.mapreduce.queue.model.WorkflowStep
+import com.mapreduce.workflow.spi.WorkflowDefinition
 import jakarta.enterprise.context.ApplicationScoped
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
@@ -19,10 +20,10 @@ import java.time.Instant
 import java.util.UUID
 
 /**
- * Result of resolving a task within a group.
- * [barrierMet] is true when this was the final task for the current phase.
+ * Result of resolving a task within a step.
+ * [barrierMet] is true when this was the final task for the current step.
  */
-data class GroupTaskResolution(
+data class StepTaskResolution(
     val updated: Boolean,
     val barrierMet: Boolean,
 )
@@ -36,32 +37,32 @@ data class TaskOutput(
 )
 
 /**
- * Result of an atomic group failure operation.
+ * Result of an atomic step failure operation.
  *
  * @param taskUpdated false if the status guard / claimToken fence rejected the update (zombie)
  * @param deadLettered true if the task was terminally dead-lettered (retries exhausted or unconditional)
- * @param barrierMet true if this was the last pending task in the group
+ * @param barrierMet true if this was the last pending task in the step
  */
-data class GroupFailResult(
+data class StepFailResult(
     val taskUpdated: Boolean,
     val deadLettered: Boolean,
     val barrierMet: Boolean,
 )
 
 /**
- * Layer 1 persistence for task groups with countdown barrier detection.
+ * Layer 1 persistence for workflow steps with countdown barrier detection.
  *
  * The core mechanism: when a task reaches a terminal state (success or dead-letter),
  * [tasks_pending] is decremented under a row lock. The worker that drives it to zero
  * atomically inserts a callback task in the same transaction — no polling needed.
  */
 @ApplicationScoped
-class TaskGroupRepository(
+class WorkflowStepRepository(
     private val jdbi: Jdbi,
     private val leaderManager: LeaderManager,
 ) {
 
-    private val log = Logger.getLogger(TaskGroupRepository::class.java)
+    private val log = Logger.getLogger(WorkflowStepRepository::class.java)
 
     /**
      * Read the current fencing epoch from [LeaderManager], or null if not leader.
@@ -71,43 +72,44 @@ class TaskGroupRepository(
         if (leaderManager.isActive) leaderManager.token else null
 
     /**
-     * Atomic fan-out: insert task_group row + N tasks in one transaction.
+     * Atomic fan-out: insert workflow_step row + N tasks in one transaction.
      * [tasks_pending] is initialized to the number of tasks.
      */
-    fun submitGroup(group: TaskGroup, tasks: List<EnqueueRequest>) {
+    fun submitStep(step: WorkflowStep, tasks: List<EnqueueRequest>) {
         jdbi.useTransaction<Exception> { h ->
             h.createUpdate(
                 """
-                INSERT INTO task_group (group_id, group_type, status, params, queue,
-                    phase, phase_total, tasks_pending, tasks_failed,
+                INSERT INTO workflow_step (step_id, workflow_name, run_id, status, params, queue,
+                    step_label, step_total, tasks_pending, tasks_failed,
                     on_complete_handler, failure_policy, failure_threshold,
                     result_metadata, version, last_epoch, deadline_at, created_at, updated_at)
-                VALUES (:groupId, :groupType, :status, :params, :queue,
-                    :phase, :phaseTotal, :tasksPending, 0,
+                VALUES (:stepId, :workflowName, :runId, :status, :params, :queue,
+                    :stepLabel, :stepTotal, :tasksPending, 0,
                     :onCompleteHandler, :failurePolicy, :failureThreshold,
                     :resultMetadata, 0, 0, :deadlineAt, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                 """,
-            ).bind("groupId", group.groupId)
-                .bind("groupType", group.groupType)
-                .bind("status", group.status.name)
-                .bind("params", group.params)
-                .bind("queue", group.queue)
-                .bind("phase", group.phase)
-                .bind("phaseTotal", group.phaseTotal)
-                .bind("tasksPending", group.phaseTotal)
-                .bind("onCompleteHandler", group.onCompleteHandler)
-                .bind("failurePolicy", group.failurePolicy)
-                .bind("failureThreshold", group.failureThreshold)
-                .bind("resultMetadata", group.resultMetadata)
-                .bind("deadlineAt", group.deadlineAt)
+            ).bind("stepId", step.stepId)
+                .bind("workflowName", step.workflowName)
+                .bind("runId", step.runId)
+                .bind("status", step.status.name)
+                .bind("params", step.params)
+                .bind("queue", step.queue)
+                .bind("stepLabel", step.stepLabel)
+                .bind("stepTotal", step.stepTotal)
+                .bind("tasksPending", step.stepTotal)
+                .bind("onCompleteHandler", step.onCompleteHandler)
+                .bind("failurePolicy", step.failurePolicy)
+                .bind("failureThreshold", step.failureThreshold)
+                .bind("resultMetadata", step.resultMetadata)
+                .bind("deadlineAt", step.deadlineAt)
                 .execute()
 
             val batch = h.prepareBatch(
                 """
                 INSERT INTO task (task_id, handler, queue, payload, status, priority,
-                    group_id, metadata, retry_count, max_retries, created_at)
+                    step_id, metadata, retry_count, max_retries, created_at)
                 VALUES (:taskId, :handler, :queue, :payload, 'PENDING', :priority,
-                    :groupId, :metadata, 0, :maxRetries, CURRENT_TIMESTAMP)
+                    :stepId, :metadata, 0, :maxRetries, CURRENT_TIMESTAMP)
                 """,
             )
             for (task in tasks) {
@@ -117,7 +119,7 @@ class TaskGroupRepository(
                     .bind("queue", task.queue)
                     .bind("payload", task.payload)
                     .bind("priority", task.priority)
-                    .bind("groupId", task.groupId)
+                    .bind("stepId", task.stepId)
                     .bind("metadata", task.metadata)
                     .bind("maxRetries", task.maxRetries)
                     .add()
@@ -133,22 +135,22 @@ class TaskGroupRepository(
      * For successful tasks ([failed] = false): also marks the task row COMPLETED
      * with output fields, guarded by execution_generation (zombie detection).
      *
-     * For failed tasks ([failed] = true): only updates the group counters.
+     * For failed tasks ([failed] = true): only updates the step counters.
      * The caller (TaskDispatcher/StaleTaskReaper) has already marked the task
      * as DEAD_LETTER before calling this.
      *
-     * The row lock on task_group serializes concurrent resolutions, ensuring
+     * The row lock on workflow_step serializes concurrent resolutions, ensuring
      * exactly one worker observes the barrier condition.
      */
-    suspend fun resolveGroupTask(
+    suspend fun resolveStepTask(
         taskId: String? = null,
-        groupId: String,
+        stepId: String,
         claimToken: String? = null,
         failed: Boolean = false,
         outputUri: String? = null,
         outputMetadata: String? = null,
-    ): GroupTaskResolution {
-        return jdbi.inTransactionSuspend<GroupTaskResolution, Exception> { h ->
+    ): StepTaskResolution {
+        return jdbi.inTransactionSuspend<StepTaskResolution, Exception> { h ->
             // Step 1 (success path only): Mark task COMPLETED with output fields
             if (!failed && taskId != null) {
                 val fenceClause = if (claimToken != null) " AND execution_generation = :gen" else ""
@@ -165,35 +167,35 @@ class TaskGroupRepository(
                 val updated = update.execute()
 
                 if (updated == 0) {
-                    log.warnf("Zombie detected for task %s (gen=%s) — skipping group counter", taskId, claimToken)
-                    return@inTransactionSuspend GroupTaskResolution(updated = false, barrierMet = false)
+                    log.warnf("Zombie detected for task %s (gen=%s) — skipping step counter", taskId, claimToken)
+                    return@inTransactionSuspend StepTaskResolution(updated = false, barrierMet = false)
                 }
             }
 
-            val barrierMet = resolveGroupCounter(h, groupId, failed)
-            GroupTaskResolution(updated = true, barrierMet = barrierMet)
+            val barrierMet = resolveStepCounter(h, stepId, failed)
+            StepTaskResolution(updated = true, barrierMet = barrierMet)
         }
     }
 
-    // ── Atomic group failure methods ───────────────────────────────────
+    // ── Atomic step failure methods ───────────────────────────────────
 
     /**
-     * Atomic fail-with-retry for a grouped task.
+     * Atomic fail-with-retry for a step task.
      *
      * In a single transaction: increments retry_count, conditionally moves to
      * DEAD_LETTER (retries exhausted) or PENDING (retries remain). Only when
-     * the task is terminally dead-lettered does this decrement the group counter.
+     * the task is terminally dead-lettered does this decrement the step counter.
      *
-     * @return [GroupFailResult] — `taskUpdated=false` if fenced out (zombie).
+     * @return [StepFailResult] — `taskUpdated=false` if fenced out (zombie).
      */
-    suspend fun failGroupTask(
+    suspend fun failStepTask(
         taskId: String,
-        groupId: String,
+        stepId: String,
         errorMessage: String,
         retryDelay: Duration? = null,
         claimToken: String? = null,
-    ): GroupFailResult {
-        return jdbi.inTransactionSuspend<GroupFailResult, Exception> { h ->
+    ): StepFailResult {
+        return jdbi.inTransactionSuspend<StepFailResult, Exception> { h ->
             val fenceClause = if (claimToken != null) " AND execution_generation = :gen" else ""
             val scheduledAt = retryDelay?.let { Instant.now().plusSeconds(it.toSeconds()) }
 
@@ -216,7 +218,7 @@ class TaskGroupRepository(
             val updated = update.execute()
 
             if (updated == 0) {
-                return@inTransactionSuspend GroupFailResult(taskUpdated = false, deadLettered = false, barrierMet = false)
+                return@inTransactionSuspend StepFailResult(taskUpdated = false, deadLettered = false, barrierMet = false)
             }
 
             val newStatus = h.createQuery("SELECT status FROM task WHERE task_id = :taskId")
@@ -225,28 +227,28 @@ class TaskGroupRepository(
                 .one()
             val deadLettered = newStatus == "DEAD_LETTER"
 
-            val barrierMet = if (deadLettered) resolveGroupCounter(h, groupId, failed = true) else false
-            GroupFailResult(taskUpdated = true, deadLettered = deadLettered, barrierMet = barrierMet)
+            val barrierMet = if (deadLettered) resolveStepCounter(h, stepId, failed = true) else false
+            StepFailResult(taskUpdated = true, deadLettered = deadLettered, barrierMet = barrierMet)
         }
     }
 
     /**
-     * Atomic unconditional dead-letter for a grouped task.
+     * Atomic unconditional dead-letter for a step task.
      *
      * In a single transaction: marks task DEAD_LETTER (with status guard)
-     * and decrements the group counter.
+     * and decrements the step counter.
      *
      * Used for no-handler and explicit [TaskResult.DeadLetter] results.
      *
-     * @return [GroupFailResult] — `taskUpdated=false` if fenced out (zombie).
+     * @return [StepFailResult] — `taskUpdated=false` if fenced out (zombie).
      */
-    suspend fun deadLetterGroupTask(
+    suspend fun deadLetterStepTask(
         taskId: String,
-        groupId: String,
+        stepId: String,
         reason: String,
         claimToken: String? = null,
-    ): GroupFailResult {
-        return jdbi.inTransactionSuspend<GroupFailResult, Exception> { h ->
+    ): StepFailResult {
+        return jdbi.inTransactionSuspend<StepFailResult, Exception> { h ->
             val fenceClause = if (claimToken != null) " AND execution_generation = :gen" else ""
             val update = h.createUpdate(
                 """
@@ -260,28 +262,28 @@ class TaskGroupRepository(
             val updated = update.execute()
 
             if (updated == 0) {
-                return@inTransactionSuspend GroupFailResult(taskUpdated = false, deadLettered = false, barrierMet = false)
+                return@inTransactionSuspend StepFailResult(taskUpdated = false, deadLettered = false, barrierMet = false)
             }
 
-            val barrierMet = resolveGroupCounter(h, groupId, failed = true)
-            GroupFailResult(taskUpdated = true, deadLettered = true, barrierMet = barrierMet)
+            val barrierMet = resolveStepCounter(h, stepId, failed = true)
+            StepFailResult(taskUpdated = true, deadLettered = true, barrierMet = barrierMet)
         }
     }
 
     /**
-     * Atomic reclaim for a grouped stale task.
+     * Atomic reclaim for a step's stale task.
      *
      * In a single transaction: clears claim fields, increments retry_count,
-     * conditionally DEAD_LETTER, and (if dead-lettered) decrements group counter.
+     * conditionally DEAD_LETTER, and (if dead-lettered) decrements step counter.
      *
-     * @return [GroupFailResult], or `null` if already handled (0 rows — not CLAIMED).
+     * @return [StepFailResult], or `null` if already handled (0 rows — not CLAIMED).
      */
-    fun reclaimGroupTask(
+    fun reclaimStepTask(
         taskId: String,
-        groupId: String,
+        stepId: String,
         errorMessage: String,
-    ): GroupFailResult? {
-        return jdbi.inTransaction<GroupFailResult?, Exception> { h ->
+    ): StepFailResult? {
+        return jdbi.inTransaction<StepFailResult?, Exception> { h ->
             val updated = h.createUpdate(
                 """
                 UPDATE task
@@ -306,8 +308,8 @@ class TaskGroupRepository(
                 .one()
             val deadLettered = newStatus == "DEAD_LETTER"
 
-            val barrierMet = if (deadLettered) resolveGroupCounter(h, groupId, failed = true) else false
-            GroupFailResult(taskUpdated = true, deadLettered = deadLettered, barrierMet = barrierMet)
+            val barrierMet = if (deadLettered) resolveStepCounter(h, stepId, failed = true) else false
+            StepFailResult(taskUpdated = true, deadLettered = deadLettered, barrierMet = barrierMet)
         }
     }
 
@@ -321,53 +323,53 @@ class TaskGroupRepository(
      *
      * @return `true` if the barrier was met (tasks_pending reached 0).
      */
-    private fun resolveGroupCounter(h: Handle, groupId: String, failed: Boolean): Boolean {
+    private fun resolveStepCounter(h: Handle, stepId: String, failed: Boolean): Boolean {
         val failedIncrement = if (failed) 1 else 0
         h.createUpdate(
             """
-            UPDATE task_group
+            UPDATE workflow_step
             SET tasks_pending = tasks_pending - 1,
                 tasks_failed = tasks_failed + :failedIncrement,
                 updated_at = CURRENT_TIMESTAMP
-            WHERE group_id = :groupId AND status = 'ACTIVE'
+            WHERE step_id = :stepId AND status = 'ACTIVE'
             """,
-        ).bind("groupId", groupId)
+        ).bind("stepId", stepId)
             .bind("failedIncrement", failedIncrement)
             .execute()
 
-        val group = h.createQuery(
+        val step = h.createQuery(
             """
-            SELECT tasks_pending, tasks_failed, phase_total, on_complete_handler
-            FROM task_group WHERE group_id = :groupId
+            SELECT tasks_pending, tasks_failed, step_total, on_complete_handler
+            FROM workflow_step WHERE step_id = :stepId
             """,
-        ).bind("groupId", groupId)
+        ).bind("stepId", stepId)
             .map { rs, _ ->
                 object {
                     val tasksPending = rs.getInt("tasks_pending")
                     val tasksFailed = rs.getInt("tasks_failed")
-                    val phaseTotal = rs.getInt("phase_total")
+                    val stepTotal = rs.getInt("step_total")
                     val onCompleteHandler = rs.getString("on_complete_handler")
                 }
             }
             .one()
 
-        val barrierMet = group.tasksPending == 0
-        if (barrierMet && group.onCompleteHandler != null) {
+        val barrierMet = step.tasksPending == 0
+        if (barrierMet && step.onCompleteHandler != null) {
             h.createUpdate(
                 """
                 INSERT INTO task (task_id, handler, queue, payload, status, priority,
-                    group_id, metadata, retry_count, max_retries, created_at)
+                    step_id, metadata, retry_count, max_retries, created_at)
                 VALUES (:taskId, :handler, 'default', :payload, 'PENDING', 10,
                     NULL, NULL, 0, 3, CURRENT_TIMESTAMP)
                 """,
             ).bind("taskId", UUID.randomUUID().toString())
-                .bind("handler", group.onCompleteHandler)
-                .bind("payload", groupId)
+                .bind("handler", step.onCompleteHandler)
+                .bind("payload", stepId)
                 .execute()
 
             log.infof(
-                "Barrier met for group %s (pending=0, failed=%d, total=%d) — callback task created",
-                groupId, group.tasksFailed, group.phaseTotal,
+                "Barrier met for step %s (pending=0, failed=%d, total=%d) — callback task created",
+                stepId, step.tasksFailed, step.stepTotal,
             )
         }
 
@@ -375,48 +377,53 @@ class TaskGroupRepository(
     }
 
     /**
-     * Transition to a new phase: CAS version, reset counters, insert new tasks.
-     * [tasks_pending] is initialized to [newPhaseTotal], [tasks_failed] reset to 0.
+     * Create a new step row for the next pipeline stage.
+     *
+     * INSERTs a new workflow_step row (new step_id, same run_id/workflow_name),
+     * inserts tasks for the new step, and CAS the previous step to COMPLETED.
+     * All in one transaction; version/epoch fencing on the CAS prevents duplicate transitions.
      */
-    suspend fun transitionPhase(
-        groupId: String,
+    suspend fun createNextStep(
+        previousStepId: String,
         expectedVersion: Long,
-        newPhase: String,
-        newPhaseTotal: Int,
+        newStep: WorkflowStep,
         tasks: List<EnqueueRequest>,
-        onCompleteHandler: String?,
     ): Boolean {
         val epoch = optionalEpoch()
         return jdbi.inTransactionSuspend<Boolean, Exception> { h ->
-            val epochClause = if (epoch != null) " AND last_epoch <= :epoch" else ""
-            val epochSet = if (epoch != null) ", last_epoch = :epoch" else ""
-
-            val updated = h.createUpdate(
+            // INSERT new workflow_step row
+            h.createUpdate(
                 """
-                UPDATE task_group
-                SET phase = :newPhase, phase_total = :newPhaseTotal,
-                    tasks_pending = :newPhaseTotal, tasks_failed = 0,
-                    on_complete_handler = :onCompleteHandler,
-                    version = version + 1$epochSet, updated_at = CURRENT_TIMESTAMP
-                WHERE group_id = :groupId AND status = 'ACTIVE'
-                  AND version = :expectedVersion$epochClause
+                INSERT INTO workflow_step (step_id, workflow_name, run_id, status, params, queue,
+                    step_label, step_total, tasks_pending, tasks_failed,
+                    on_complete_handler, failure_policy, failure_threshold,
+                    result_metadata, version, last_epoch, deadline_at, created_at, updated_at)
+                VALUES (:stepId, :workflowName, :runId, 'ACTIVE', :params, :queue,
+                    :stepLabel, :stepTotal, :tasksPending, 0,
+                    :onCompleteHandler, :failurePolicy, :failureThreshold,
+                    NULL, 0, 0, :deadlineAt, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                 """,
-            ).bind("groupId", groupId)
-                .bind("newPhase", newPhase)
-                .bind("newPhaseTotal", newPhaseTotal)
-                .bind("onCompleteHandler", onCompleteHandler)
-                .bind("expectedVersion", expectedVersion)
-                .apply { if (epoch != null) bind("epoch", epoch) }
+            ).bind("stepId", newStep.stepId)
+                .bind("workflowName", newStep.workflowName)
+                .bind("runId", newStep.runId)
+                .bind("params", newStep.params)
+                .bind("queue", newStep.queue)
+                .bind("stepLabel", newStep.stepLabel)
+                .bind("stepTotal", newStep.stepTotal)
+                .bind("tasksPending", newStep.stepTotal)
+                .bind("onCompleteHandler", newStep.onCompleteHandler)
+                .bind("failurePolicy", newStep.failurePolicy)
+                .bind("failureThreshold", newStep.failureThreshold)
+                .bind("deadlineAt", newStep.deadlineAt)
                 .execute()
 
-            if (updated == 0) return@inTransactionSuspend false
-
+            // INSERT tasks for the new step
             val batch = h.prepareBatch(
                 """
                 INSERT INTO task (task_id, handler, queue, payload, status, priority,
-                    group_id, metadata, retry_count, max_retries, created_at)
+                    step_id, metadata, retry_count, max_retries, created_at)
                 VALUES (:taskId, :handler, :queue, :payload, 'PENDING', 0,
-                    :groupId, :metadata, 0, :maxRetries, CURRENT_TIMESTAMP)
+                    :stepId, :metadata, 0, :maxRetries, CURRENT_TIMESTAMP)
                 """,
             )
             for (task in tasks) {
@@ -425,25 +432,42 @@ class TaskGroupRepository(
                     .bind("handler", task.handler)
                     .bind("queue", task.queue)
                     .bind("payload", task.payload)
-                    .bind("groupId", task.groupId)
+                    .bind("stepId", task.stepId)
                     .bind("metadata", task.metadata)
                     .bind("maxRetries", task.maxRetries)
                     .add()
             }
             batch.execute()
 
-            true
+            // CAS previous step to COMPLETED
+            val epochClause = if (epoch != null) " AND last_epoch <= :epoch" else ""
+            val epochSet = if (epoch != null) ", last_epoch = :epoch" else ""
+
+            val updated = h.createUpdate(
+                """
+                UPDATE workflow_step
+                SET status = 'COMPLETED', version = version + 1$epochSet,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE step_id = :stepId AND status = 'ACTIVE'
+                  AND version = :expectedVersion$epochClause
+                """,
+            ).bind("stepId", previousStepId)
+                .bind("expectedVersion", expectedVersion)
+                .apply { if (epoch != null) bind("epoch", epoch) }
+                .execute()
+
+            updated > 0
         }
     }
 
     /**
-     * Compare-and-swap for group status transitions.
+     * Compare-and-swap for step status transitions.
      * Combines version-based CAS with optional epoch fencing.
      */
-    suspend fun casGroupStatus(
-        groupId: String,
-        expectedStatus: GroupStatus,
-        newStatus: GroupStatus,
+    suspend fun casStepStatus(
+        stepId: String,
+        expectedStatus: StepStatus,
+        newStatus: StepStatus,
         expectedVersion: Long,
         resultMetadata: String? = null,
     ): Boolean {
@@ -455,13 +479,13 @@ class TaskGroupRepository(
 
             val update = h.createUpdate(
                 """
-                UPDATE task_group
+                UPDATE workflow_step
                 SET status = :newStatus, version = version + 1$epochSet$metaSet,
                     updated_at = CURRENT_TIMESTAMP
-                WHERE group_id = :groupId AND status = :expectedStatus
+                WHERE step_id = :stepId AND status = :expectedStatus
                   AND version = :expectedVersion$epochClause
                 """,
-            ).bind("groupId", groupId)
+            ).bind("stepId", stepId)
                 .bind("expectedStatus", expectedStatus.name)
                 .bind("newStatus", newStatus.name)
                 .bind("expectedVersion", expectedVersion)
@@ -473,20 +497,20 @@ class TaskGroupRepository(
     }
 
     /**
-     * Stream output URIs and metadata from completed tasks in a group
-     * filtered by handler name (e.g., "wordcount.map").
+     * Stream output URIs and metadata from completed tasks in a step
+     * filtered by handler name.
      */
-    fun streamTaskOutputs(groupId: String, handler: String): Flow<TaskOutput> =
+    fun streamTaskOutputs(stepId: String, handler: String): Flow<TaskOutput> =
         flow {
             jdbi.open().use { handle ->
                 handle.createQuery(
                     """
                     SELECT output_uri, output_metadata FROM task
-                    WHERE group_id = :groupId AND handler = :handler
+                    WHERE step_id = :stepId AND handler = :handler
                       AND status = 'COMPLETED' AND output_uri IS NOT NULL
                     ORDER BY created_at ASC
                     """,
-                ).bind("groupId", groupId)
+                ).bind("stepId", stepId)
                     .bind("handler", handler)
                     .map { rs, _ -> TaskOutput(rs.getString("output_uri"), rs.getString("output_metadata")) }
                     .stream()
@@ -499,41 +523,49 @@ class TaskGroupRepository(
             }
         }.flowOn(Dispatchers.IO)
 
-    suspend fun findGroup(groupId: String): TaskGroup? =
-        jdbi.withHandleSuspend<TaskGroup?, Exception> { h ->
-            h.createQuery("SELECT * FROM task_group WHERE group_id = :groupId")
-                .bind("groupId", groupId)
-                .mapTo(TaskGroup::class.java)
+    suspend fun findStep(stepId: String): WorkflowStep? =
+        jdbi.withHandleSuspend<WorkflowStep?, Exception> { h ->
+            h.createQuery("SELECT * FROM workflow_step WHERE step_id = :stepId")
+                .bind("stepId", stepId)
+                .mapTo(WorkflowStep::class.java)
                 .findOne()
                 .orElse(null)
         }
 
-    fun findGroupsByStatus(status: GroupStatus): List<TaskGroup> =
-        jdbi.withHandle<List<TaskGroup>, Exception> { h ->
-            h.createQuery("SELECT * FROM task_group WHERE status = :status")
+    fun findStepsByStatus(status: StepStatus): List<WorkflowStep> =
+        jdbi.withHandle<List<WorkflowStep>, Exception> { h ->
+            h.createQuery("SELECT * FROM workflow_step WHERE status = :status")
                 .bind("status", status.name)
-                .mapTo(TaskGroup::class.java)
+                .mapTo(WorkflowStep::class.java)
                 .list()
         }
 
-    fun findAllGroups(limit: Int = 100): List<TaskGroup> =
-        jdbi.withHandle<List<TaskGroup>, Exception> { h ->
-            h.createQuery("SELECT * FROM task_group ORDER BY created_at DESC FETCH FIRST :limit ROWS ONLY")
+    fun findStepsByRunId(runId: String): List<WorkflowStep> =
+        jdbi.withHandle<List<WorkflowStep>, Exception> { h ->
+            h.createQuery("SELECT * FROM workflow_step WHERE run_id = :runId ORDER BY created_at")
+                .bind("runId", runId)
+                .mapTo(WorkflowStep::class.java)
+                .list()
+        }
+
+    fun findAllSteps(limit: Int = 100): List<WorkflowStep> =
+        jdbi.withHandle<List<WorkflowStep>, Exception> { h ->
+            h.createQuery("SELECT * FROM workflow_step ORDER BY created_at DESC FETCH FIRST :limit ROWS ONLY")
                 .bind("limit", limit)
-                .mapTo(TaskGroup::class.java)
+                .mapTo(WorkflowStep::class.java)
                 .list()
         }
 
     /**
-     * Bulk-fail ACTIVE groups whose [deadline_at] has passed.
-     * Returns the number of groups transitioned to FAILED.
+     * Bulk-fail ACTIVE steps whose [deadline_at] has passed.
+     * Returns the number of steps transitioned to FAILED.
      */
-    fun failExpiredGroups(now: Instant): Int =
+    fun failExpiredSteps(now: Instant): Int =
         jdbi.withHandle<Int, Exception> { h ->
             h.createUpdate(
                 """
-                UPDATE task_group
-                SET status = 'FAILED', result_metadata = 'Group deadline exceeded',
+                UPDATE workflow_step
+                SET status = 'FAILED', result_metadata = 'Step deadline exceeded',
                     version = version + 1, updated_at = CURRENT_TIMESTAMP
                 WHERE status = 'ACTIVE'
                   AND deadline_at IS NOT NULL

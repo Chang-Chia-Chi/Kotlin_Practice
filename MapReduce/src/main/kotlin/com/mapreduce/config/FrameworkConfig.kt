@@ -106,6 +106,15 @@ interface FrameworkConfig {
         fun defaultTimeout(): Duration
     }
 
+    fun workflow(): WorkflowConfig
+
+    /** Workflow engine configuration. */
+    interface WorkflowConfig {
+        @WithName("default-step-deadline")
+        @WithDefault("1H")
+        fun defaultStepDeadline(): Duration
+    }
+
     fun reaper(): ReaperConfig
 
     /** Stale task reaper configuration (leader-only). */
