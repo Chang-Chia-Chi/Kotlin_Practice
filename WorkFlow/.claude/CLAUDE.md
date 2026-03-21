@@ -41,7 +41,8 @@
 * **Constraint 2:** All pure unit tests must use `runTest` from `kotlinx-coroutines-test` for deterministic time control.
 * **Constraint 3:** Mock Kubernetes interactions strictly using `@InjectMock` on the Fabric8 `KubernetesClient`. Do not attempt to spin up a real Kubernetes cluster via Testcontainers.
 * **Constraint 4:** Use `ToxiproxyContainer` for all network fault injection scenarios at the database layer.
-* **Constraint 5:** Ensure test coverage of each component and overall is higher than 80%, reviewer should always look into `Jacoco` report to ensure.
+* **Constraint 5:** Use H2 in-memory database with oracle mode for repository/adapter test.
+* **Constraint 6:** Ensure test coverage of each component and overall is higher than 80%, reviewer should always look into `Jacoco` report to ensure.
 
 ## Local Environment
 * **Maven:** No system `mvn` on PATH. Use `./mvnw` (Maven Wrapper) or the cached distribution at `/c/Users/maxch/.m2/wrapper/dists/apache-maven-3.9.8/af622e91/bin/mvn`.
