@@ -8,23 +8,6 @@
 
 **Tech Stack:** Kotlin 2.2.0 (pom.xml actual; CLAUDE.md says 2.3.x — reconcile before implementation), Quarkus 3.17.5, JDBI 3.45.0 (suspend extensions), Oracle, Flyway, Micrometer, Kubernetes leader election
 
----
-
-## Existing Infrastructure
-
-Already implemented in `src/main/kotlin/`:
-- `extension/JdbiExtension.kt` — `Jdbi.withHandleSuspend()`, `inTransactionSuspend()`, etc.
-- `extension/FlowExtension.kt` — `indefinitelyRepeat()`, `unorderedMapAsync()`, `takeUntilSignal()`
-- `leader/LeaderManager.kt` — K8s Lease-based leader election with fencing epoch
-- `leader/NotLeader.kt` — Scheduler skip predicate
-- `shutdown/` — `ShutdownCoordinator`, `ShutdownParticipant`, `ShutdownSignal`, `ShutdownState`
-
-**Not yet created:** `FrameworkConfig` (referenced by leader/shutdown), `application.properties`, database schema, tests.
-
-Package prefix: `com.workflow`
-
----
-
 ## File Structure
 
 ```
