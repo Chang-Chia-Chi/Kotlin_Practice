@@ -28,7 +28,7 @@
 * Structure:
 * `src/main/kotlin`: Application sources
 * `src/main/resources/application.properties`: Centralized configuration
-* `src/test/kotlin`: JUnit 5 tests
+* `src/test/kotlin`: JUnit 5 tests + mockito
 
 ## Coding Standards
 * File Naming: Use domain-prefixed file names, not generic ones (e.g., `WorkflowDslBuilders.kt` not `Builders.kt`). File names should convey what domain they belong to at a glance.
