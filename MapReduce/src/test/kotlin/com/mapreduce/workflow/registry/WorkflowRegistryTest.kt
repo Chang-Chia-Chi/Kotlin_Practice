@@ -3,10 +3,10 @@ package com.mapreduce.workflow.registry
 import com.mapreduce.config.FrameworkConfig
 import com.mapreduce.queue.registry.HandlerRegistry
 import com.mapreduce.queue.repository.WorkflowStepRepository
+import com.mapreduce.workflow.model.FailurePolicy
 import com.mapreduce.workflow.spi.WorkflowDefinition
 import io.quarkus.runtime.StartupEvent
 import jakarta.enterprise.inject.Instance
-import kotlinx.coroutines.flow.Flow
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertNull
@@ -43,16 +43,12 @@ class WorkflowRegistryTest {
             WorkflowDefinition.StepSpec(name = "map", handler = "wc.map"),
             WorkflowDefinition.StepSpec(name = "reduce", handler = "wc.reduce"),
         ),
-    ): WorkflowDefinition<Any> = object : WorkflowDefinition<Any> {
-        override val workflowName = name
-        override fun serializeParams(params: Any) = "{}"
-        override fun deserializeParams(json: String) = "{}" as Any
+    ): WorkflowDefinition<Any> = object : WorkflowDefinition<Any>(
+        name = name,
+        paramsClass = Any::class,
+    ) {
         override fun pipeline() = pipeline
-        override suspend fun initialTasks(params: Any) = emptyList<WorkflowDefinition.TaskPayload>()
-        override suspend fun transitionTasks(
-            stepIndex: Int, previousStepParams: String, previousOutputs: Flow<WorkflowDefinition.TaskOutput>,
-        ) = WorkflowDefinition.StepTransition(emptyList())
-        override suspend fun onCompleted(lastStepParams: String, finalOutputs: Flow<WorkflowDefinition.TaskOutput>) {}
+        override suspend fun initialTasks(params: Any) = emptyList<TaskPayload>()
     }
 
     private fun registryWith(vararg defs: WorkflowDefinition<*>): WorkflowRegistry {
@@ -116,6 +112,40 @@ class WorkflowRegistryTest {
         assertThrows<IllegalArgumentException> {
             registryWith(fakeDefinition("dup", pipeline = pipeline))
         }
+    }
+
+    @Test
+    fun `DSL-built definition registers and validates correctly`() {
+        val def = object : WorkflowDefinition<String>(
+            name = "dsl-test",
+            paramsClass = String::class,
+        ) {
+            override fun pipeline() = workflow {
+                step("split") {
+                    handler("dsl.split")
+                    retries(3)
+                    failurePolicy(FailurePolicy.BEST_EFFORT)
+                    deadline(Duration.ofMinutes(10))
+                    compensation("dsl.split-rollback")
+                }
+                step("merge") {
+                    handler("dsl.merge")
+                }
+            }
+            override suspend fun initialTasks(params: String) = listOf(TaskPayload(params))
+        }
+
+        val registry = registryWith(def)
+        assertNotNull(registry.getDefinition("dsl-test"))
+        val pipeline = def.pipeline()
+        assertEquals(2, pipeline.size)
+        assertEquals("dsl.split", pipeline[0].handler)
+        assertEquals(3, pipeline[0].maxRetries)
+        assertEquals(FailurePolicy.BEST_EFFORT, pipeline[0].failurePolicy)
+        assertEquals(Duration.ofMinutes(10), pipeline[0].deadline)
+        assertEquals("dsl.split-rollback", pipeline[0].compensation)
+        assertNull(pipeline[1].deadline)
+        assertNull(pipeline[1].compensation)
     }
 
     @Test

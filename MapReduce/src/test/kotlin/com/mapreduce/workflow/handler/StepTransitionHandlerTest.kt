@@ -5,7 +5,6 @@ import com.mapreduce.queue.model.StepStatus
 import com.mapreduce.queue.model.TaskContext
 import com.mapreduce.queue.model.TaskResult
 import com.mapreduce.queue.model.WorkflowStep
-import com.mapreduce.queue.repository.TaskOutput
 import com.mapreduce.queue.repository.WorkflowStepRepository
 import com.mapreduce.workflow.model.FailurePolicy
 import com.mapreduce.workflow.registry.WorkflowRegistry
@@ -74,16 +73,16 @@ class StepTransitionHandlerTest {
     private fun fakeDefinition(
         pipeline: List<WorkflowDefinition.StepSpec>,
         transitionTasks: List<WorkflowDefinition.TaskPayload> = listOf(WorkflowDefinition.TaskPayload("{}")),
-    ): WorkflowDefinition<Any> = object : WorkflowDefinition<Any> {
-        override val workflowName = "wc"
-        override fun serializeParams(params: Any) = "{}"
-        override fun deserializeParams(json: String) = "{}" as Any
+    ): WorkflowDefinition<Any> = object : WorkflowDefinition<Any>(
+        name = "wc",
+        paramsClass = Any::class,
+    ) {
         override fun pipeline() = pipeline
-        override suspend fun initialTasks(params: Any) = emptyList<WorkflowDefinition.TaskPayload>()
+        override suspend fun initialTasks(params: Any) = emptyList<TaskPayload>()
         override suspend fun transitionTasks(
-            stepIndex: Int, previousStepParams: String, previousOutputs: Flow<WorkflowDefinition.TaskOutput>,
-        ) = WorkflowDefinition.StepTransition(transitionTasks)
-        override suspend fun onCompleted(lastStepParams: String, finalOutputs: Flow<WorkflowDefinition.TaskOutput>) {}
+            stepIndex: Int, previousStepParams: String, previousOutputs: Flow<TaskOutput>,
+        ) = StepTransition(transitionTasks)
+        override suspend fun onCompleted(lastStepParams: String, finalOutputs: Flow<TaskOutput>) {}
     }
 
     // ── Error paths ────────────────────────────────────────────
@@ -206,16 +205,13 @@ class StepTransitionHandlerTest {
         @Test
         fun `calls onCompleted and CAS to COMPLETED on final step`() = runTest {
             var onCompletedCalled = false
-            val def = object : WorkflowDefinition<Any> {
-                override val workflowName = "wc"
-                override fun serializeParams(params: Any) = "{}"
-                override fun deserializeParams(json: String) = "{}" as Any
+            val def = object : WorkflowDefinition<Any>(
+                name = "wc",
+                paramsClass = Any::class,
+            ) {
                 override fun pipeline() = singleStepPipeline()
-                override suspend fun initialTasks(params: Any) = emptyList<WorkflowDefinition.TaskPayload>()
-                override suspend fun transitionTasks(
-                    stepIndex: Int, previousStepParams: String, previousOutputs: Flow<WorkflowDefinition.TaskOutput>,
-                ) = WorkflowDefinition.StepTransition(emptyList())
-                override suspend fun onCompleted(lastStepParams: String, finalOutputs: Flow<WorkflowDefinition.TaskOutput>) {
+                override suspend fun initialTasks(params: Any) = emptyList<TaskPayload>()
+                override suspend fun onCompleted(lastStepParams: String, finalOutputs: Flow<TaskOutput>) {
                     onCompletedCalled = true
                 }
             }

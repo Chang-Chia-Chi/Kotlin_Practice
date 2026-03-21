@@ -9,7 +9,6 @@ import com.mapreduce.workflow.model.FailurePolicy
 import com.mapreduce.workflow.registry.WorkflowRegistry
 import com.mapreduce.workflow.spi.WorkflowDefinition
 import jakarta.ws.rs.core.Response
-import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNotNull
@@ -47,10 +46,6 @@ class JobResourceTest {
             WorkflowDefinition.TaskPayload("input2"),
         ),
     ): WorkflowDefinition<Any> {
-        val def = mock<WorkflowDefinition<Any>>()
-        whenever(def.workflowName).thenReturn("wc")
-        whenever(def.deserializeParams(any())).thenReturn("params")
-
         val stepSpec = WorkflowDefinition.StepSpec(
             name = "map",
             handler = "wc.map",
@@ -59,22 +54,12 @@ class JobResourceTest {
             failurePolicy = FailurePolicy.FAIL_STEP,
             failureThreshold = 0.0,
         )
-        whenever(def.pipeline()).thenReturn(listOf(stepSpec))
-
-        val obj = object : suspend (Any) -> List<WorkflowDefinition.TaskPayload> {
-            override suspend fun invoke(p1: Any) = taskPayloads
-        }
-        // Use a real implementation for initialTasks
-        return object : WorkflowDefinition<Any> {
-            override val workflowName = "wc"
-            override fun serializeParams(params: Any) = "{}"
-            override fun deserializeParams(json: String) = "params" as Any
+        return object : WorkflowDefinition<Any>(
+            name = "wc",
+            paramsClass = Any::class,
+        ) {
             override fun pipeline() = listOf(stepSpec)
             override suspend fun initialTasks(params: Any) = taskPayloads
-            override suspend fun transitionTasks(
-                stepIndex: Int, previousStepParams: String, previousOutputs: Flow<WorkflowDefinition.TaskOutput>,
-            ) = WorkflowDefinition.StepTransition(emptyList())
-            override suspend fun onCompleted(lastStepParams: String, finalOutputs: Flow<WorkflowDefinition.TaskOutput>) {}
         }
     }
 
