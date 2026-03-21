@@ -91,6 +91,158 @@ class WorkflowStepRepositoryTest {
             ).bind("gid", stepId).mapTo(Int::class.java).one()
         }
 
+    private fun getAllTaskIds(stepId: String): List<String> =
+        jdbi.withHandle<List<String>, Exception> { h ->
+            h.createQuery("SELECT task_id FROM task WHERE step_id = :stepId ORDER BY created_at")
+                .bind("stepId", stepId)
+                .mapTo(String::class.java).list()
+        }
+
+    // ── OptimisticBarrier ─────────────────────────────────────────────
+
+    @Nested
+    inner class OptimisticBarrier {
+
+        @Test
+        fun `tryDispatchBarrier returns true when all tasks completed`() {
+            val stepId = "opt-all-done"
+            createStepWithTasks(stepId, 2)
+            // Manually mark all tasks COMPLETED (bypassing old barrier)
+            jdbi.useHandle<Exception> { h ->
+                h.createUpdate("UPDATE task SET status = 'COMPLETED' WHERE step_id = :stepId")
+                    .bind("stepId", stepId).execute()
+            }
+
+            val result = stepRepo.tryDispatchBarrier(stepId)
+
+            assertTrue(result)
+            assertEquals(1, callbackCount(stepId))
+        }
+
+        @Test
+        fun `tryDispatchBarrier returns false when tasks still pending`() {
+            val stepId = "opt-pending"
+            createStepWithTasks(stepId, 2)
+
+            val result = stepRepo.tryDispatchBarrier(stepId)
+
+            assertFalse(result)
+            assertEquals(0, callbackCount(stepId))
+        }
+
+        @Test
+        fun `tryDispatchBarrier is idempotent — second call returns false`() {
+            val stepId = "opt-idempotent"
+            createStepWithTasks(stepId, 1)
+            jdbi.useHandle<Exception> { h ->
+                h.createUpdate("UPDATE task SET status = 'COMPLETED' WHERE step_id = :stepId")
+                    .bind("stepId", stepId).execute()
+            }
+
+            assertTrue(stepRepo.tryDispatchBarrier(stepId))
+            assertFalse(stepRepo.tryDispatchBarrier(stepId))
+            assertEquals(1, callbackCount(stepId))
+        }
+
+        @Test
+        fun `tryDispatchBarrier returns false for non-ACTIVE step`() {
+            val stepId = "opt-completed"
+            createStepWithTasks(stepId, 1)
+            jdbi.useHandle<Exception> { h ->
+                h.createUpdate("UPDATE task SET status = 'COMPLETED' WHERE step_id = :stepId")
+                    .bind("stepId", stepId).execute()
+                h.createUpdate("UPDATE workflow_step SET status = 'COMPLETED' WHERE step_id = :stepId")
+                    .bind("stepId", stepId).execute()
+            }
+
+            assertFalse(stepRepo.tryDispatchBarrier(stepId))
+        }
+
+        @Test
+        fun `tryDispatchBarrier returns false when step has no on_complete_handler`() {
+            val stepId = "opt-no-handler"
+            createStepWithTasks(stepId, 1, onCompleteHandler = null)
+            jdbi.useHandle<Exception> { h ->
+                h.createUpdate("UPDATE task SET status = 'COMPLETED' WHERE step_id = :stepId")
+                    .bind("stepId", stepId).execute()
+            }
+
+            assertFalse(stepRepo.tryDispatchBarrier(stepId))
+        }
+
+        @Test
+        fun `tryDispatchBarrier returns true when mix of COMPLETED and DEAD_LETTER`() = runTest {
+            val stepId = "opt-mixed"
+            createStepWithTasks(stepId, 2)
+            val taskIds = claimAll(2).map { it.taskId }
+            jdbi.useHandle<Exception> { h ->
+                h.createUpdate("UPDATE task SET status = 'COMPLETED' WHERE task_id = :id")
+                    .bind("id", taskIds[0]).execute()
+                h.createUpdate("UPDATE task SET status = 'DEAD_LETTER' WHERE task_id = :id")
+                    .bind("id", taskIds[1]).execute()
+            }
+
+            assertTrue(stepRepo.tryDispatchBarrier(stepId))
+        }
+    }
+
+    // ── OnDemandCounts ────────────────────────────────────────────────
+
+    @Nested
+    inner class OnDemandCounts {
+
+        @Test
+        fun `countPendingTasks returns count of PENDING and CLAIMED tasks`() {
+            val stepId = "count-pending"
+            createStepWithTasks(stepId, 3)
+            // 1 PENDING, 1 CLAIMED, 1 COMPLETED
+            val taskIds = getAllTaskIds(stepId)
+            jdbi.useHandle<Exception> { h ->
+                h.createUpdate("UPDATE task SET status = 'CLAIMED' WHERE task_id = :id")
+                    .bind("id", taskIds[0]).execute()
+                h.createUpdate("UPDATE task SET status = 'COMPLETED' WHERE task_id = :id")
+                    .bind("id", taskIds[1]).execute()
+            }
+
+            assertEquals(2, stepRepo.countPendingTasks(stepId)) // 1 PENDING + 1 CLAIMED
+        }
+
+        @Test
+        fun `countFailedTasks returns count of DEAD_LETTER tasks`() {
+            val stepId = "count-failed"
+            createStepWithTasks(stepId, 3)
+            val taskIds = getAllTaskIds(stepId)
+            jdbi.useHandle<Exception> { h ->
+                h.createUpdate("UPDATE task SET status = 'DEAD_LETTER' WHERE task_id = :id")
+                    .bind("id", taskIds[0]).execute()
+                h.createUpdate("UPDATE task SET status = 'DEAD_LETTER' WHERE task_id = :id")
+                    .bind("id", taskIds[1]).execute()
+            }
+
+            assertEquals(2, stepRepo.countFailedTasks(stepId))
+        }
+
+        @Test
+        fun `countPendingTasks returns zero for completed step`() {
+            val stepId = "count-zero"
+            createStepWithTasks(stepId, 2)
+            jdbi.useHandle<Exception> { h ->
+                h.createUpdate("UPDATE task SET status = 'COMPLETED' WHERE step_id = :stepId")
+                    .bind("stepId", stepId).execute()
+            }
+
+            assertEquals(0, stepRepo.countPendingTasks(stepId))
+        }
+
+        @Test
+        fun `countFailedTasks returns zero when no failures`() {
+            val stepId = "count-no-fail"
+            createStepWithTasks(stepId, 2)
+
+            assertEquals(0, stepRepo.countFailedTasks(stepId))
+        }
+    }
+
     // ── failStepTask ───────────────────────────────────────────────────
 
     @Nested

@@ -376,6 +376,119 @@ class WorkflowStepRepository(
         return barrierMet
     }
 
+    // ── Lock-free barrier infrastructure ──────────────────────────────
+
+    /**
+     * Lock-free barrier check with atomic callback dispatch.
+     *
+     * Phase 1 (lock-free): COUNT non-terminal tasks. If > 0, exit.
+     * Phase 2 (short lock): SELECT FOR UPDATE the step row, re-verify COUNT,
+     *   clear on_complete_handler (prevents duplicates), and INSERT callback task.
+     *   At most 1–2 workers reach Phase 2 — no hot-row contention.
+     *
+     * @return true if this call dispatched the callback task.
+     */
+    private fun checkAndDispatchBarrier(stepId: String): Boolean {
+        // Phase 1: Lock-free peek
+        val pendingCount = jdbi.withHandle<Int, Exception> { h ->
+            h.createQuery("""
+                SELECT COUNT(1) FROM task
+                WHERE step_id = :stepId AND status IN ('PENDING', 'CLAIMED')
+            """).bind("stepId", stepId).mapTo(Int::class.java).one()
+        }
+        if (pendingCount > 0) return false
+
+        // Phase 2: Atomic verify-and-dispatch
+        return jdbi.inTransaction<Boolean, Exception> { h ->
+            val handler = h.createQuery("""
+                SELECT on_complete_handler FROM workflow_step
+                WHERE step_id = :stepId AND status = 'ACTIVE'
+                  AND on_complete_handler IS NOT NULL
+                FOR UPDATE
+            """).bind("stepId", stepId)
+                .mapTo(String::class.java)
+                .findOne()
+                .orElse(null) ?: return@inTransaction false
+
+            val recheck = h.createQuery("""
+                SELECT COUNT(1) FROM task
+                WHERE step_id = :stepId AND status IN ('PENDING', 'CLAIMED')
+            """).bind("stepId", stepId).mapTo(Int::class.java).one()
+            if (recheck > 0) return@inTransaction false
+
+            h.createUpdate("""
+                UPDATE workflow_step
+                SET on_complete_handler = NULL, updated_at = CURRENT_TIMESTAMP
+                WHERE step_id = :stepId
+            """).bind("stepId", stepId).execute()
+
+            h.createUpdate("""
+                INSERT INTO task (task_id, handler, queue, payload, status, priority,
+                    step_id, metadata, retry_count, max_retries, created_at)
+                VALUES (:taskId, :handler, 'default', :payload, 'PENDING', 10,
+                    NULL, NULL, 0, 3, CURRENT_TIMESTAMP)
+            """).bind("taskId", UUID.randomUUID().toString())
+                .bind("handler", handler)
+                .bind("payload", stepId)
+                .execute()
+
+            log.infof("Barrier met for step %s — callback dispatched", stepId)
+            true
+        }
+    }
+
+    /**
+     * Public entry point for barrier dispatch. Used by the stuck-step sweeper.
+     */
+    fun tryDispatchBarrier(stepId: String): Boolean = checkAndDispatchBarrier(stepId)
+
+    /**
+     * Count DEAD_LETTER tasks for a step. Used by StepTransitionHandler
+     * to evaluate failure policy on demand (instead of maintaining a counter).
+     */
+    fun countFailedTasks(stepId: String): Int =
+        jdbi.withHandle<Int, Exception> { h ->
+            h.createQuery("""
+                SELECT COUNT(1) FROM task
+                WHERE step_id = :stepId AND status = 'DEAD_LETTER'
+            """).bind("stepId", stepId).mapTo(Int::class.java).one()
+        }
+
+    /**
+     * Count PENDING/CLAIMED tasks for a step. Used by API layer
+     * to report progress on demand.
+     */
+    fun countPendingTasks(stepId: String): Int =
+        jdbi.withHandle<Int, Exception> { h ->
+            h.createQuery("""
+                SELECT COUNT(1) FROM task
+                WHERE step_id = :stepId AND status IN ('PENDING', 'CLAIMED')
+            """).bind("stepId", stepId).mapTo(Int::class.java).one()
+        }
+
+    /**
+     * Find ACTIVE steps with no PENDING/CLAIMED tasks whose last update
+     * is older than [threshold]. These are "stuck" — all tasks reached
+     * terminal state but the callback was never dispatched (crash during
+     * Phase 2, or callback task itself was dead-lettered).
+     */
+    fun findStuckSteps(threshold: Instant): List<String> =
+        jdbi.withHandle<List<String>, Exception> { h ->
+            h.createQuery("""
+                SELECT ws.step_id FROM workflow_step ws
+                WHERE ws.status = 'ACTIVE'
+                  AND ws.on_complete_handler IS NOT NULL
+                  AND ws.updated_at < :threshold
+                  AND NOT EXISTS (
+                      SELECT 1 FROM task t
+                      WHERE t.step_id = ws.step_id
+                        AND t.status IN ('PENDING', 'CLAIMED')
+                  )
+            """).bind("threshold", threshold)
+                .mapTo(String::class.java)
+                .list()
+        }
+
     /**
      * Create a new step row for the next pipeline stage.
      *
