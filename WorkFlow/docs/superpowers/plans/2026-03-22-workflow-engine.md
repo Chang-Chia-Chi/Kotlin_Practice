@@ -21,7 +21,7 @@ Already implemented in `src/main/kotlin/`:
 
 **Not yet created:** `FrameworkConfig` (referenced by leader/shutdown), `application.yaml`, database schema, tests.
 
-Package prefix: `com.mapreduce`
+Package prefix: `com.workflow`
 
 ---
 
@@ -82,7 +82,7 @@ Pure data layer. No dependencies on engine or JDBI. All types are immutable.
 
 - [ ] **Step 1: Create enums and data classes**
 
-`dsl/Models.kt` — package `com.mapreduce.dsl`:
+`dsl/Models.kt` — package `com.workflow.dsl`:
 - `FailurePolicy` enum: `ABORT`, `BEST_EFFORT`
 - `JoinPolicy` sealed interface: `All` object, `Threshold(n: Int)`, `Percentage(pct: Int)` — validate n > 0, pct in 1..100
 - `JoinDefinition` data class: `policy: JoinPolicy`, `transition: String?`
@@ -112,7 +112,7 @@ Kotlin DSL with `@DslMarker` to prevent scope leakage. Build-phase validation.
 
 - [ ] **Step 1: Create DslMarker and builders**
 
-`dsl/Builders.kt` — package `com.mapreduce.dsl`:
+`dsl/Builders.kt` — package `com.workflow.dsl`:
 - `@DslMarker annotation class WorkflowDsl`
 - `JoinBuilder`: `policy()`, `transition()` → builds `JoinDefinition`
 - `FanOutBuilder`: `transition()`, `retries()`, `failurePolicy()`, `deadline()`, `join {}` → builds `FanOutDefinition`. Validate: transition required, join required.
@@ -147,7 +147,7 @@ Quarkus `@ConfigMapping` interface. Unblocks LeaderManager and ShutdownCoordinat
 
 - [ ] **Step 1: Create FrameworkConfig interface**
 
-`config/FrameworkConfig.kt` — package `com.mapreduce.config`:
+`config/FrameworkConfig.kt` — package `com.workflow.config`:
 - `@ConfigMapping(prefix = "framework")` interface with named nested interfaces matching existing usage:
   - `WorkerConfig`: `id(): String` (default: hostname), `pollInterval(): Duration`, `concurrency(): Int`
   - `LeaderElectionConfig`: `namespace(): String`, `leaseName(): String`, `leaseDuration(): Duration`, `renewDeadline(): Duration`, `retryPeriod(): Duration`
@@ -182,7 +182,7 @@ Status enums and entity classes for runtime state. These map to database rows.
 
 - [ ] **Step 1: Create status enums and entity classes**
 
-`engine/Models.kt` — package `com.mapreduce.engine`:
+`engine/Models.kt` — package `com.workflow.engine`:
 - `WorkflowStatus`: `PENDING`, `RUNNING`, `COMPLETED`, `FAILED`
 - `ActivityStatus`: `PENDING`, `DISPATCHED`, `SUCCEEDED`, `FAILED`
 - `TaskStatus`: `PENDING`, `PROCESSING`, `COMPLETED`, `FAILED` — add helper `val isTerminal: Boolean` property (COMPLETED, FAILED)
