@@ -1,4 +1,4 @@
-package com.mapreduce.leader
+package com.workflow.leader
 
 import io.quarkus.scheduler.Scheduled
 import io.quarkus.scheduler.ScheduledExecution

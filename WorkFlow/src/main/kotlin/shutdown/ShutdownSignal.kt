@@ -1,4 +1,4 @@
-package com.mapreduce.shutdown
+package com.workflow.shutdown
 
 import kotlin.coroutines.AbstractCoroutineContextElement
 import kotlin.coroutines.CoroutineContext
@@ -7,7 +7,7 @@ import kotlin.coroutines.coroutineContext
 /**
  * Coroutine context element that propagates shutdown awareness.
  *
- * Installed by [WorkerLoop][com.mapreduce.queue.worker.WorkerLoop] at the
+ * Installed by [WorkerLoop][com.workflow.queue.worker.WorkerLoop] at the
  * scope level so all task execution coroutines inherit it. Middlewares and
  * handlers query shutdown state via the top-level [isShuttingDown] function.
  */

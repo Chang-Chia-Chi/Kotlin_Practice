@@ -1,4 +1,4 @@
-package com.mapreduce.dsl
+package com.workflow.dsl
 
 import java.time.Duration
 import kotlin.test.Test

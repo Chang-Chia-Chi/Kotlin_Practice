@@ -1,7 +1,7 @@
-package com.mapreduce.leader
+package com.workflow.leader
 
-import com.mapreduce.config.FrameworkConfig
-import com.mapreduce.shutdown.ShutdownParticipant
+import com.workflow.config.FrameworkConfig
+import com.workflow.shutdown.ShutdownParticipant
 import io.fabric8.kubernetes.client.KubernetesClient
 import io.fabric8.kubernetes.client.extended.leaderelection.LeaderCallbacks
 import io.fabric8.kubernetes.client.extended.leaderelection.LeaderElectionConfigBuilder

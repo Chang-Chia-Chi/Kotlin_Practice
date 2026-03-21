@@ -1,4 +1,4 @@
-package com.mapreduce.dsl
+package com.workflow.dsl
 
 import com.fasterxml.jackson.annotation.JsonSubTypes
 import com.fasterxml.jackson.annotation.JsonTypeInfo

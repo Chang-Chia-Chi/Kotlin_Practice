@@ -1,4 +1,4 @@
-package com.mapreduce.shutdown
+package com.workflow.shutdown
 
 import java.time.Duration
 

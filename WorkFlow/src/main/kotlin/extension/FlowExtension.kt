@@ -1,4 +1,4 @@
-package com.mapreduce.extension
+package com.workflow.extension
 
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.cancelAndJoin

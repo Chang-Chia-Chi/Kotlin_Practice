@@ -1,4 +1,4 @@
-package com.mapreduce.shutdown
+package com.workflow.shutdown
 
 /**
  * State machine for the graceful shutdown protocol.

@@ -1,6 +1,6 @@
-package com.mapreduce.shutdown
+package com.workflow.shutdown
 
-import com.mapreduce.config.FrameworkConfig
+import com.workflow.config.FrameworkConfig
 import io.micrometer.core.instrument.MeterRegistry
 import io.quarkus.runtime.ShutdownEvent
 import jakarta.enterprise.context.ApplicationScoped
