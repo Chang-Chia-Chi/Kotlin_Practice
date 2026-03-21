@@ -1,6 +1,7 @@
 # Project: Lock-Free Workflow Engine (Kotlin/Quarkus/Maven/JDBI)
 
 * When asked to update memory, you must update `./.claude/CLAUDE.md` if it is not specified that another file should be modified.
+* What should be in CLAUDE.md is always things most important as highest guideline which will not changed overtime.
 
 ## Core Stack
 
