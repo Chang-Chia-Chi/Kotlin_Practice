@@ -149,14 +149,14 @@ class JobResourceTest {
                 status = StepStatus.ACTIVE,
                 stepLabel = "map",
                 stepTotal = 5,
-                tasksPending = 3,
-                tasksFailed = 1,
                 failurePolicy = "FAIL_STEP",
                 resultMetadata = null,
                 createdAt = Instant.now(),
                 updatedAt = Instant.now(),
             )
             whenever(workflowStepRepository.findStepsByRunId("run-1")).thenReturn(listOf(step))
+            whenever(workflowStepRepository.countPendingTasks("step-1")).thenReturn(3)
+            whenever(workflowStepRepository.countFailedTasks("step-1")).thenReturn(1)
 
             val response = resource.getJob("run-1")
 
@@ -176,6 +176,8 @@ class JobResourceTest {
                 WorkflowStep("s-2", "wc", "r-2", StepStatus.COMPLETED, stepLabel = "reduce"),
             )
             whenever(workflowStepRepository.findAllSteps(any())).thenReturn(steps)
+            whenever(workflowStepRepository.countPendingTasks(any())).thenReturn(0)
+            whenever(workflowStepRepository.countFailedTasks(any())).thenReturn(0)
 
             val response = resource.listJobs(null)
 
@@ -191,6 +193,8 @@ class JobResourceTest {
                 WorkflowStep("s-1", "wc", "r-1", StepStatus.ACTIVE, stepLabel = "map"),
             )
             whenever(workflowStepRepository.findStepsByStatus(StepStatus.ACTIVE)).thenReturn(steps)
+            whenever(workflowStepRepository.countPendingTasks(any())).thenReturn(0)
+            whenever(workflowStepRepository.countFailedTasks(any())).thenReturn(0)
 
             val response = resource.listJobs("ACTIVE")
 

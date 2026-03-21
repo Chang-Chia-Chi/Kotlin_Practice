@@ -32,9 +32,9 @@ import org.mockito.kotlin.whenever
  * 1. **No double-claim** — `SELECT FOR UPDATE SKIP LOCKED` ensures each task
  *    is handed to exactly one worker, even with many concurrent claimers.
  *
- * 2. **Exactly-once barrier** — The row lock on `workflow_step` serializes
- *    concurrent completions; exactly one worker observes `tasks_pending = 0`
- *    and creates the callback task.
+ * 2. **Exactly-once barrier** — The lock-free COUNT + CAS mechanism ensures
+ *    exactly one worker observes `COUNT(PENDING/CLAIMED) = 0`
+ *    and dispatches the callback task.
  *
  * 3. **Zombie fencing** — A stale worker holding an old `execution_generation`
  *    cannot mark a task as completed after it has been reclaimed and re-claimed.
@@ -205,7 +205,6 @@ class ConcurrencyStressTest {
                         taskId = task.taskId,
                         stepId = stepId,
                         claimToken = task.claimToken,
-                        failed = false,
                         outputUri = "blob://${task.taskId}",
                     )
                 }
@@ -226,10 +225,8 @@ class ConcurrencyStressTest {
             }
             assertEquals(1, callbackCount, "Exactly one callback task")
 
-            // Step should have tasks_pending = 0
-            val step2 = stepRepo.findStep(stepId)!!
-            assertEquals(0, step2.tasksPending)
-            assertEquals(0, step2.tasksFailed)
+            // Verify all tasks terminal
+            assertEquals(0, stepRepo.countPendingTasks(stepId))
         }
 
         /**
@@ -281,7 +278,6 @@ class ConcurrencyStressTest {
                             taskId = task.taskId,
                             stepId = stepId,
                             claimToken = task.claimToken,
-                            failed = false,
                             outputUri = "blob://${task.taskId}",
                         )
                     }
@@ -291,9 +287,8 @@ class ConcurrencyStressTest {
             val barrierCount = results.count { it.barrierMet }
             assertEquals(1, barrierCount, "Barrier must be met exactly once")
 
-            val step2 = stepRepo.findStep(stepId)!!
-            assertEquals(0, step2.tasksPending)
-            assertEquals(failCount, step2.tasksFailed)
+            assertEquals(0, stepRepo.countPendingTasks(stepId))
+            assertEquals(failCount, stepRepo.countFailedTasks(stepId))
         }
     }
 
@@ -370,9 +365,9 @@ class ConcurrencyStressTest {
             assertEquals(false, staleResult.updated, "Zombie must be rejected")
             assertEquals(false, staleResult.barrierMet)
 
-            // Step counter should still be at 2
+            // Pending must not decrease on zombie
             val step2 = stepRepo.findStep(stepId)!!
-            assertEquals(2, step2.tasksPending, "Counter must not decrement on zombie")
+            assertEquals(2, stepRepo.countPendingTasks(stepId), "Pending must not decrease on zombie")
 
             // Fresh worker completes — should succeed
             val freshResult = stepRepo.resolveStepTask(
@@ -380,7 +375,7 @@ class ConcurrencyStressTest {
                 claimToken = freshGen, outputUri = "blob://fresh",
             )
             assertEquals(true, freshResult.updated)
-            assertEquals(1, stepRepo.findStep(stepId)!!.tasksPending)
+            assertEquals(1, stepRepo.countPendingTasks(stepId))
         }
 
         /**
@@ -493,9 +488,8 @@ class ConcurrencyStressTest {
             assertEquals(1, results.count { it.barrierMet }, "Barrier met exactly once")
 
             // Verify final state
+            assertEquals(0, stepRepo.countPendingTasks(stepId))
             val step2 = stepRepo.findStep(stepId)!!
-            assertEquals(0, step2.tasksPending)
-            assertEquals(0, step2.tasksFailed)
             assertEquals(StepStatus.ACTIVE, step2.status) // still ACTIVE — callback will transition
 
             // Verify callback task
@@ -619,9 +613,8 @@ class ConcurrencyStressTest {
 
             assertEquals(1, results.count { it.barrierMet }, "Barrier met exactly once")
 
-            val step2 = stepRepo.findStep(stepId)!!
-            assertEquals(0, step2.tasksPending)
-            assertEquals(taskCount, step2.tasksFailed)
+            assertEquals(0, stepRepo.countPendingTasks(stepId))
+            assertEquals(taskCount, stepRepo.countFailedTasks(stepId))
         }
     }
 

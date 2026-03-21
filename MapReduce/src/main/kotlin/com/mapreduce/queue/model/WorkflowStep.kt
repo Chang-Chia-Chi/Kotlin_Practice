@@ -8,12 +8,11 @@ enum class StepStatus {
 }
 
 /**
- * A workflow step with countdown barrier detection.
+ * A workflow step with optimistic barrier detection.
  *
- * Each step in a pipeline gets its own row. [tasksPending] counts down to zero
- * as tasks reach terminal states. [tasksFailed] tracks failures (for policy evaluation).
- * The generic queue layer stores [failurePolicy] and [failureThreshold] as opaque
- * values — only the callback handler (Layer 2) interprets them.
+ * Each step in a pipeline gets its own row. Barrier detection uses
+ * lock-free COUNT of remaining PENDING/CLAIMED tasks rather than a
+ * decrementing counter — eliminating row-lock contention.
  */
 data class WorkflowStep(
     @ColumnName("step_id") val stepId: String,
@@ -24,8 +23,6 @@ data class WorkflowStep(
     val queue: String = "default",
     @ColumnName("step_label") val stepLabel: String,
     @ColumnName("step_total") val stepTotal: Int = 0,
-    @ColumnName("tasks_pending") val tasksPending: Int = 0,
-    @ColumnName("tasks_failed") val tasksFailed: Int = 0,
     @ColumnName("on_complete_handler") val onCompleteHandler: String? = null,
     @ColumnName("failure_policy") val failurePolicy: String = "FAIL_STEP",
     @ColumnName("failure_threshold") val failureThreshold: Double = 0.0,

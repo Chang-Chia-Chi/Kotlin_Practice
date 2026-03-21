@@ -102,7 +102,14 @@ class JobResource(
         if (steps.isEmpty()) {
             return Response.status(Response.Status.NOT_FOUND).build()
         }
-        return Response.ok(steps.map { JobResponse.from(it) }).build()
+        val responses = steps.map { step ->
+            JobResponse.from(
+                step,
+                tasksPending = workflowStepRepository.countPendingTasks(step.stepId),
+                tasksFailed = workflowStepRepository.countFailedTasks(step.stepId),
+            )
+        }
+        return Response.ok(responses).build()
     }
 
     @GET
@@ -116,11 +123,23 @@ class JobResource(
                     .build()
             }
             val steps = workflowStepRepository.findStepsByStatus(stepStatus)
-            return Response.ok(steps.map { JobResponse.from(it) }).build()
+            return Response.ok(steps.map { step ->
+                JobResponse.from(
+                    step,
+                    tasksPending = workflowStepRepository.countPendingTasks(step.stepId),
+                    tasksFailed = workflowStepRepository.countFailedTasks(step.stepId),
+                )
+            }).build()
         }
 
         val steps = workflowStepRepository.findAllSteps()
-        return Response.ok(steps.map { JobResponse.from(it) }).build()
+        return Response.ok(steps.map { step ->
+            JobResponse.from(
+                step,
+                tasksPending = workflowStepRepository.countPendingTasks(step.stepId),
+                tasksFailed = workflowStepRepository.countFailedTasks(step.stepId),
+            )
+        }).build()
     }
 
     private fun resolveDeadline(specDeadline: Duration?): Duration =

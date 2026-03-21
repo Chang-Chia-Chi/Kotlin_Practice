@@ -72,12 +72,12 @@ class TaskDispatcherTest {
     fun `execute Success completes task via group path`() = runTest {
         val task = testTask()
         stubPipeline(task, TaskResult.Success("done"))
-        whenever(workflowStepRepository.resolveStepTask(any(), any(), anyOrNull(), any(), anyOrNull(), anyOrNull()))
+        whenever(workflowStepRepository.resolveStepTask(any(), any(), anyOrNull(), anyOrNull(), anyOrNull()))
             .thenReturn(StepTaskResolution(updated = true, barrierMet = false))
 
         dispatcher.execute(task)
 
-        verify(workflowStepRepository).resolveStepTask(eq("task-1"), eq("group-1"), eq("gen-1"), eq(false), anyOrNull(), anyOrNull())
+        verify(workflowStepRepository).resolveStepTask(eq("task-1"), eq("group-1"), eq("gen-1"), anyOrNull(), anyOrNull())
     }
 
     @Test
@@ -268,13 +268,13 @@ class TaskDispatcherTest {
             outputUri = "gs://bucket/output.json",
             outputMetadata = """{"rows":42}""",
         ))
-        whenever(workflowStepRepository.resolveStepTask(any(), any(), anyOrNull(), any(), anyOrNull(), anyOrNull()))
+        whenever(workflowStepRepository.resolveStepTask(any(), any(), anyOrNull(), anyOrNull(), anyOrNull()))
             .thenReturn(StepTaskResolution(updated = true, barrierMet = false))
 
         dispatcher.execute(task)
 
         verify(workflowStepRepository).resolveStepTask(
-            eq("task-1"), eq("group-1"), eq("gen-1"), eq(false),
+            eq("task-1"), eq("group-1"), eq("gen-1"),
             eq("gs://bucket/output.json"), eq("""{"rows":42}"""),
         )
     }

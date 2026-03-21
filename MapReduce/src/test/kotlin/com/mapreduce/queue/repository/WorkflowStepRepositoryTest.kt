@@ -263,9 +263,9 @@ class WorkflowStepRepositoryTest {
             assertFalse(result.barrierMet)
             assertEquals("PENDING", readStatus(claimed[0].taskId))
             assertEquals(1, readRetryCount(claimed[0].taskId))
-            // Group counter unchanged (still 3 pending — task retried, not terminal)
-            assertEquals(3, stepRepo.findStep(stepId)!!.tasksPending)
-            assertEquals(0, stepRepo.findStep(stepId)!!.tasksFailed)
+            // Pending unchanged (task retried, not terminal)
+            assertEquals(3, stepRepo.countPendingTasks(stepId))
+            assertEquals(0, stepRepo.countFailedTasks(stepId))
         }
 
         @Test
@@ -283,8 +283,8 @@ class WorkflowStepRepositoryTest {
             assertFalse(result.barrierMet) // still 1 pending
             assertEquals("DEAD_LETTER", readStatus(claimed[0].taskId))
             assertEquals(1, readRetryCount(claimed[0].taskId))
-            assertEquals(1, stepRepo.findStep(stepId)!!.tasksPending)
-            assertEquals(1, stepRepo.findStep(stepId)!!.tasksFailed)
+            assertEquals(1, stepRepo.countPendingTasks(stepId))
+            assertEquals(1, stepRepo.countFailedTasks(stepId))
         }
 
         @Test
@@ -300,7 +300,7 @@ class WorkflowStepRepositoryTest {
             assertTrue(result.taskUpdated)
             assertTrue(result.deadLettered)
             assertTrue(result.barrierMet)
-            assertEquals(0, stepRepo.findStep(stepId)!!.tasksPending)
+            assertEquals(0, stepRepo.countPendingTasks(stepId))
             assertEquals(1, callbackCount(stepId))
         }
 
@@ -319,7 +319,7 @@ class WorkflowStepRepositoryTest {
             assertFalse(result.deadLettered)
             assertFalse(result.barrierMet)
             assertEquals("CLAIMED", readStatus(claimed[0].taskId))
-            assertEquals(2, stepRepo.findStep(stepId)!!.tasksPending)
+            assertEquals(2, stepRepo.countPendingTasks(stepId))
         }
 
         @Test
@@ -360,8 +360,8 @@ class WorkflowStepRepositoryTest {
             assertFalse(result.barrierMet)
             assertEquals("DEAD_LETTER", readStatus(claimed[0].taskId))
             assertEquals("no handler", taskRepo.findById(claimed[0].taskId)!!.errorMessage)
-            assertEquals(2, stepRepo.findStep(stepId)!!.tasksPending)
-            assertEquals(1, stepRepo.findStep(stepId)!!.tasksFailed)
+            assertEquals(2, stepRepo.countPendingTasks(stepId))
+            assertEquals(1, stepRepo.countFailedTasks(stepId))
         }
 
         @Test
@@ -379,7 +379,7 @@ class WorkflowStepRepositoryTest {
             assertFalse(result.deadLettered)
             assertFalse(result.barrierMet)
             assertEquals("CLAIMED", readStatus(claimed[0].taskId))
-            assertEquals(2, stepRepo.findStep(stepId)!!.tasksPending)
+            assertEquals(2, stepRepo.countPendingTasks(stepId))
         }
 
         @Test
@@ -393,7 +393,7 @@ class WorkflowStepRepositoryTest {
                 taskId = claimed[0].taskId, stepId = stepId,
                 claimToken = claimed[0].claimToken,
             )
-            assertEquals(1, stepRepo.findStep(stepId)!!.tasksPending)
+            assertEquals(1, stepRepo.countPendingTasks(stepId))
 
             // Second task: dead-letter — should trigger barrier
             val result = stepRepo.deadLetterStepTask(
@@ -404,7 +404,7 @@ class WorkflowStepRepositoryTest {
             assertTrue(result.taskUpdated)
             assertTrue(result.deadLettered)
             assertTrue(result.barrierMet)
-            assertEquals(0, stepRepo.findStep(stepId)!!.tasksPending)
+            assertEquals(0, stepRepo.countPendingTasks(stepId))
             assertEquals(1, callbackCount(stepId))
         }
     }
@@ -434,8 +434,8 @@ class WorkflowStepRepositoryTest {
             val task = taskRepo.findById(claimed[0].taskId)!!
             assertNull(task.claimedBy)
             assertNull(task.claimedAt)
-            // Group unchanged
-            assertEquals(2, stepRepo.findStep(stepId)!!.tasksPending)
+            // Pending unchanged
+            assertEquals(2, stepRepo.countPendingTasks(stepId))
         }
 
         @Test
@@ -453,8 +453,8 @@ class WorkflowStepRepositoryTest {
             assertTrue(result.deadLettered)
             assertFalse(result.barrierMet)
             assertEquals("DEAD_LETTER", readStatus(claimed[0].taskId))
-            assertEquals(1, stepRepo.findStep(stepId)!!.tasksPending)
-            assertEquals(1, stepRepo.findStep(stepId)!!.tasksFailed)
+            assertEquals(1, stepRepo.countPendingTasks(stepId))
+            assertEquals(1, stepRepo.countFailedTasks(stepId))
         }
 
         @Test
@@ -508,7 +508,7 @@ class WorkflowStepRepositoryTest {
             assertNotNull(result)
             assertTrue(result!!.deadLettered)
             assertTrue(result.barrierMet)
-            assertEquals(0, stepRepo.findStep(stepId)!!.tasksPending)
+            assertEquals(0, stepRepo.countPendingTasks(stepId))
             assertEquals(1, callbackCount(stepId))
         }
     }

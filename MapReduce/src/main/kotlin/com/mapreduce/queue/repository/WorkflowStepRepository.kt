@@ -6,13 +6,11 @@ import com.mapreduce.leader.LeaderManager
 import com.mapreduce.queue.model.EnqueueRequest
 import com.mapreduce.queue.model.StepStatus
 import com.mapreduce.queue.model.WorkflowStep
-import com.mapreduce.workflow.spi.WorkflowDefinition
 import jakarta.enterprise.context.ApplicationScoped
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
-import org.jdbi.v3.core.Handle
 import org.jdbi.v3.core.Jdbi
 import org.jboss.logging.Logger
 import java.time.Duration
@@ -50,11 +48,12 @@ data class StepFailResult(
 )
 
 /**
- * Layer 1 persistence for workflow steps with countdown barrier detection.
+ * Layer 1 persistence for workflow steps with optimistic barrier detection.
  *
- * The core mechanism: when a task reaches a terminal state (success or dead-letter),
- * [tasks_pending] is decremented under a row lock. The worker that drives it to zero
- * atomically inserts a callback task in the same transaction — no polling needed.
+ * The core mechanism: when a task reaches terminal state, the worker does a
+ * lock-free COUNT of remaining PENDING/CLAIMED tasks. Only the worker that
+ * observes count=0 acquires a short lock on workflow_step to verify and
+ * dispatch the callback — eliminating hot-row contention.
  */
 @ApplicationScoped
 class WorkflowStepRepository(
@@ -73,18 +72,17 @@ class WorkflowStepRepository(
 
     /**
      * Atomic fan-out: insert workflow_step row + N tasks in one transaction.
-     * [tasks_pending] is initialized to the number of tasks.
      */
     fun submitStep(step: WorkflowStep, tasks: List<EnqueueRequest>) {
         jdbi.useTransaction<Exception> { h ->
             h.createUpdate(
                 """
                 INSERT INTO workflow_step (step_id, workflow_name, run_id, status, params, queue,
-                    step_label, step_total, tasks_pending, tasks_failed,
+                    step_label, step_total,
                     on_complete_handler, failure_policy, failure_threshold,
                     result_metadata, version, last_epoch, deadline_at, created_at, updated_at)
                 VALUES (:stepId, :workflowName, :runId, :status, :params, :queue,
-                    :stepLabel, :stepTotal, :tasksPending, 0,
+                    :stepLabel, :stepTotal,
                     :onCompleteHandler, :failurePolicy, :failureThreshold,
                     :resultMetadata, 0, 0, :deadlineAt, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                 """,
@@ -96,7 +94,6 @@ class WorkflowStepRepository(
                 .bind("queue", step.queue)
                 .bind("stepLabel", step.stepLabel)
                 .bind("stepTotal", step.stepTotal)
-                .bind("tasksPending", step.stepTotal)
                 .bind("onCompleteHandler", step.onCompleteHandler)
                 .bind("failurePolicy", step.failurePolicy)
                 .bind("failureThreshold", step.failureThreshold)
@@ -129,52 +126,45 @@ class WorkflowStepRepository(
     }
 
     /**
-     * Unified task resolution: decrement [tasks_pending], conditionally increment
-     * [tasks_failed], check barrier, and create callback task if barrier is met.
+     * Mark a step task as COMPLETED and check whether the barrier is met.
      *
-     * For successful tasks ([failed] = false): also marks the task row COMPLETED
-     * with output fields, guarded by execution_generation (zombie detection).
+     * Phase 1: UPDATE own task row (no contention).
+     * Phase 2: Lock-free barrier check via [checkAndDispatchBarrier].
      *
-     * For failed tasks ([failed] = true): only updates the step counters.
-     * The caller (TaskDispatcher/StaleTaskReaper) has already marked the task
-     * as DEAD_LETTER before calling this.
-     *
-     * The row lock on workflow_step serializes concurrent resolutions, ensuring
-     * exactly one worker observes the barrier condition.
+     * Zombie detection: if execution_generation mismatches, the UPDATE
+     * affects 0 rows and the barrier is not checked.
      */
     suspend fun resolveStepTask(
-        taskId: String? = null,
+        taskId: String,
         stepId: String,
         claimToken: String? = null,
-        failed: Boolean = false,
         outputUri: String? = null,
         outputMetadata: String? = null,
     ): StepTaskResolution {
-        return jdbi.inTransactionSuspend<StepTaskResolution, Exception> { h ->
-            // Step 1 (success path only): Mark task COMPLETED with output fields
-            if (!failed && taskId != null) {
-                val fenceClause = if (claimToken != null) " AND execution_generation = :gen" else ""
-                val update = h.createUpdate(
-                    """
-                    UPDATE task SET status = 'COMPLETED', completed_at = CURRENT_TIMESTAMP,
-                        output_uri = :outputUri, output_metadata = :outputMeta
-                    WHERE task_id = :taskId AND status = 'CLAIMED'$fenceClause
-                    """,
-                ).bind("taskId", taskId)
-                    .bind("outputUri", outputUri)
-                    .bind("outputMeta", outputMetadata)
-                if (claimToken != null) update.bind("gen", claimToken)
-                val updated = update.execute()
-
-                if (updated == 0) {
-                    log.warnf("Zombie detected for task %s (gen=%s) — skipping step counter", taskId, claimToken)
-                    return@inTransactionSuspend StepTaskResolution(updated = false, barrierMet = false)
-                }
-            }
-
-            val barrierMet = resolveStepCounter(h, stepId, failed)
-            StepTaskResolution(updated = true, barrierMet = barrierMet)
+        // Step 1: Mark own task COMPLETED (no workflow_step contention)
+        val fenceClause = if (claimToken != null) " AND execution_generation = :gen" else ""
+        val updated = jdbi.withHandleSuspend<Int, Exception> { h ->
+            val update = h.createUpdate(
+                """
+                UPDATE task SET status = 'COMPLETED', completed_at = CURRENT_TIMESTAMP,
+                    output_uri = :outputUri, output_metadata = :outputMeta
+                WHERE task_id = :taskId AND status = 'CLAIMED'$fenceClause
+                """,
+            ).bind("taskId", taskId)
+                .bind("outputUri", outputUri)
+                .bind("outputMeta", outputMetadata)
+            if (claimToken != null) update.bind("gen", claimToken)
+            update.execute()
         }
+
+        if (updated == 0) {
+            log.warnf("Zombie detected for task %s (gen=%s) — skipping barrier check", taskId, claimToken)
+            return StepTaskResolution(updated = false, barrierMet = false)
+        }
+
+        // Step 2: Lock-free barrier check
+        val barrierMet = checkAndDispatchBarrier(stepId)
+        return StepTaskResolution(updated = true, barrierMet = barrierMet)
     }
 
     // ── Atomic step failure methods ───────────────────────────────────
@@ -182,11 +172,8 @@ class WorkflowStepRepository(
     /**
      * Atomic fail-with-retry for a step task.
      *
-     * In a single transaction: increments retry_count, conditionally moves to
-     * DEAD_LETTER (retries exhausted) or PENDING (retries remain). Only when
-     * the task is terminally dead-lettered does this decrement the step counter.
-     *
-     * @return [StepFailResult] — `taskUpdated=false` if fenced out (zombie).
+     * Updates the task row (retry or dead-letter). Only when the task
+     * reaches terminal state (DEAD_LETTER) does this check the barrier.
      */
     suspend fun failStepTask(
         taskId: String,
@@ -195,10 +182,10 @@ class WorkflowStepRepository(
         retryDelay: Duration? = null,
         claimToken: String? = null,
     ): StepFailResult {
-        return jdbi.inTransactionSuspend<StepFailResult, Exception> { h ->
-            val fenceClause = if (claimToken != null) " AND execution_generation = :gen" else ""
-            val scheduledAt = retryDelay?.let { Instant.now().plusSeconds(it.toSeconds()) }
+        val fenceClause = if (claimToken != null) " AND execution_generation = :gen" else ""
+        val scheduledAt = retryDelay?.let { Instant.now().plusSeconds(it.toSeconds()) }
 
+        val (taskUpdated, deadLettered) = jdbi.inTransactionSuspend<Pair<Boolean, Boolean>, Exception> { h ->
             val update = h.createUpdate(
                 """
                 UPDATE task SET
@@ -210,37 +197,28 @@ class WorkflowStepRepository(
                     scheduled_at   = CASE WHEN retry_count + 1 < max_retries THEN :scheduledAt ELSE scheduled_at END
                 WHERE task_id = :taskId AND status = 'CLAIMED'$fenceClause
                 """,
-            )
-                .bind("taskId", taskId)
+            ).bind("taskId", taskId)
                 .bind("error", errorMessage.take(4000))
                 .bind("scheduledAt", scheduledAt)
             if (claimToken != null) update.bind("gen", claimToken)
             val updated = update.execute()
-
-            if (updated == 0) {
-                return@inTransactionSuspend StepFailResult(taskUpdated = false, deadLettered = false, barrierMet = false)
-            }
+            if (updated == 0) return@inTransactionSuspend Pair(false, false)
 
             val newStatus = h.createQuery("SELECT status FROM task WHERE task_id = :taskId")
                 .bind("taskId", taskId)
-                .mapTo(String::class.java)
-                .one()
-            val deadLettered = newStatus == "DEAD_LETTER"
-
-            val barrierMet = if (deadLettered) resolveStepCounter(h, stepId, failed = true) else false
-            StepFailResult(taskUpdated = true, deadLettered = deadLettered, barrierMet = barrierMet)
+                .mapTo(String::class.java).one()
+            Pair(true, newStatus == "DEAD_LETTER")
         }
+
+        if (!taskUpdated) return StepFailResult(taskUpdated = false, deadLettered = false, barrierMet = false)
+
+        val barrierMet = if (deadLettered) checkAndDispatchBarrier(stepId) else false
+        return StepFailResult(taskUpdated = true, deadLettered = deadLettered, barrierMet = barrierMet)
     }
 
     /**
      * Atomic unconditional dead-letter for a step task.
-     *
-     * In a single transaction: marks task DEAD_LETTER (with status guard)
-     * and decrements the step counter.
-     *
-     * Used for no-handler and explicit [TaskResult.DeadLetter] results.
-     *
-     * @return [StepFailResult] — `taskUpdated=false` if fenced out (zombie).
+     * Always checks the barrier after dead-lettering.
      */
     suspend fun deadLetterStepTask(
         taskId: String,
@@ -248,42 +226,38 @@ class WorkflowStepRepository(
         reason: String,
         claimToken: String? = null,
     ): StepFailResult {
-        return jdbi.inTransactionSuspend<StepFailResult, Exception> { h ->
-            val fenceClause = if (claimToken != null) " AND execution_generation = :gen" else ""
+        val fenceClause = if (claimToken != null) " AND execution_generation = :gen" else ""
+        val updated = jdbi.withHandleSuspend<Int, Exception> { h ->
             val update = h.createUpdate(
                 """
                 UPDATE task SET status = 'DEAD_LETTER', error_message = :reason
                 WHERE task_id = :taskId AND status = 'CLAIMED'$fenceClause
                 """,
-            )
-                .bind("taskId", taskId)
+            ).bind("taskId", taskId)
                 .bind("reason", reason.take(4000))
             if (claimToken != null) update.bind("gen", claimToken)
-            val updated = update.execute()
-
-            if (updated == 0) {
-                return@inTransactionSuspend StepFailResult(taskUpdated = false, deadLettered = false, barrierMet = false)
-            }
-
-            val barrierMet = resolveStepCounter(h, stepId, failed = true)
-            StepFailResult(taskUpdated = true, deadLettered = true, barrierMet = barrierMet)
+            update.execute()
         }
+
+        if (updated == 0) {
+            return StepFailResult(taskUpdated = false, deadLettered = false, barrierMet = false)
+        }
+
+        val barrierMet = checkAndDispatchBarrier(stepId)
+        return StepFailResult(taskUpdated = true, deadLettered = true, barrierMet = barrierMet)
     }
 
     /**
      * Atomic reclaim for a step's stale task.
-     *
-     * In a single transaction: clears claim fields, increments retry_count,
-     * conditionally DEAD_LETTER, and (if dead-lettered) decrements step counter.
-     *
-     * @return [StepFailResult], or `null` if already handled (0 rows — not CLAIMED).
+     * Clears claim fields, increments retry_count, conditionally dead-letters.
+     * If dead-lettered, checks the barrier.
      */
     fun reclaimStepTask(
         taskId: String,
         stepId: String,
         errorMessage: String,
     ): StepFailResult? {
-        return jdbi.inTransaction<StepFailResult?, Exception> { h ->
+        val (taskUpdated, deadLettered) = jdbi.inTransaction<Pair<Boolean, Boolean>, Exception> { h ->
             val updated = h.createUpdate(
                 """
                 UPDATE task
@@ -295,85 +269,22 @@ class WorkflowStepRepository(
                  WHERE task_id  = :taskId
                    AND status   = 'CLAIMED'
                 """,
-            )
-                .bind("taskId", taskId)
+            ).bind("taskId", taskId)
                 .bind("error", errorMessage.take(4000))
                 .execute()
 
-            if (updated == 0) return@inTransaction null
+            if (updated == 0) return@inTransaction Pair(false, false)
 
             val newStatus = h.createQuery("SELECT status FROM task WHERE task_id = :taskId")
                 .bind("taskId", taskId)
-                .mapTo(String::class.java)
-                .one()
-            val deadLettered = newStatus == "DEAD_LETTER"
-
-            val barrierMet = if (deadLettered) resolveStepCounter(h, stepId, failed = true) else false
-            StepFailResult(taskUpdated = true, deadLettered = deadLettered, barrierMet = barrierMet)
-        }
-    }
-
-    // ── Private helpers ────────────────────────────────────────────────
-
-    /**
-     * Decrement [tasks_pending], conditionally increment [tasks_failed],
-     * check barrier, and create callback task if barrier is met.
-     *
-     * Must be called within an existing transaction (caller provides [Handle]).
-     *
-     * @return `true` if the barrier was met (tasks_pending reached 0).
-     */
-    private fun resolveStepCounter(h: Handle, stepId: String, failed: Boolean): Boolean {
-        val failedIncrement = if (failed) 1 else 0
-        h.createUpdate(
-            """
-            UPDATE workflow_step
-            SET tasks_pending = tasks_pending - 1,
-                tasks_failed = tasks_failed + :failedIncrement,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE step_id = :stepId AND status = 'ACTIVE'
-            """,
-        ).bind("stepId", stepId)
-            .bind("failedIncrement", failedIncrement)
-            .execute()
-
-        val step = h.createQuery(
-            """
-            SELECT tasks_pending, tasks_failed, step_total, on_complete_handler
-            FROM workflow_step WHERE step_id = :stepId
-            """,
-        ).bind("stepId", stepId)
-            .map { rs, _ ->
-                object {
-                    val tasksPending = rs.getInt("tasks_pending")
-                    val tasksFailed = rs.getInt("tasks_failed")
-                    val stepTotal = rs.getInt("step_total")
-                    val onCompleteHandler = rs.getString("on_complete_handler")
-                }
-            }
-            .one()
-
-        val barrierMet = step.tasksPending == 0
-        if (barrierMet && step.onCompleteHandler != null) {
-            h.createUpdate(
-                """
-                INSERT INTO task (task_id, handler, queue, payload, status, priority,
-                    step_id, metadata, retry_count, max_retries, created_at)
-                VALUES (:taskId, :handler, 'default', :payload, 'PENDING', 10,
-                    NULL, NULL, 0, 3, CURRENT_TIMESTAMP)
-                """,
-            ).bind("taskId", UUID.randomUUID().toString())
-                .bind("handler", step.onCompleteHandler)
-                .bind("payload", stepId)
-                .execute()
-
-            log.infof(
-                "Barrier met for step %s (pending=0, failed=%d, total=%d) — callback task created",
-                stepId, step.tasksFailed, step.stepTotal,
-            )
+                .mapTo(String::class.java).one()
+            Pair(true, newStatus == "DEAD_LETTER")
         }
 
-        return barrierMet
+        if (!taskUpdated) return null
+
+        val barrierMet = if (deadLettered) checkAndDispatchBarrier(stepId) else false
+        return StepFailResult(taskUpdated = true, deadLettered = deadLettered, barrierMet = barrierMet)
     }
 
     // ── Lock-free barrier infrastructure ──────────────────────────────
@@ -508,11 +419,11 @@ class WorkflowStepRepository(
             h.createUpdate(
                 """
                 INSERT INTO workflow_step (step_id, workflow_name, run_id, status, params, queue,
-                    step_label, step_total, tasks_pending, tasks_failed,
+                    step_label, step_total,
                     on_complete_handler, failure_policy, failure_threshold,
                     result_metadata, version, last_epoch, deadline_at, created_at, updated_at)
                 VALUES (:stepId, :workflowName, :runId, 'ACTIVE', :params, :queue,
-                    :stepLabel, :stepTotal, :tasksPending, 0,
+                    :stepLabel, :stepTotal,
                     :onCompleteHandler, :failurePolicy, :failureThreshold,
                     NULL, 0, 0, :deadlineAt, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                 """,
@@ -523,7 +434,6 @@ class WorkflowStepRepository(
                 .bind("queue", newStep.queue)
                 .bind("stepLabel", newStep.stepLabel)
                 .bind("stepTotal", newStep.stepTotal)
-                .bind("tasksPending", newStep.stepTotal)
                 .bind("onCompleteHandler", newStep.onCompleteHandler)
                 .bind("failurePolicy", newStep.failurePolicy)
                 .bind("failureThreshold", newStep.failureThreshold)

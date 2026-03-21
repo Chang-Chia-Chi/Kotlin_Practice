@@ -62,9 +62,10 @@ class StepTransitionHandler(
         val currentSpec = pipeline[currentIndex]
 
         // Evaluate failure policy from in-memory StepSpec (not from step row)
+        val failedCount = workflowStepRepository.countFailedTasks(step.stepId)
         val failureReason = evaluateFailurePolicy(
             currentSpec.failurePolicy,
-            step.tasksFailed,
+            failedCount,
             step.stepTotal,
             currentSpec.failureThreshold,
         )

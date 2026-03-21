@@ -17,14 +17,14 @@ data class JobResponse(
     val updatedAt: String?,
 ) {
     companion object {
-        fun from(step: WorkflowStep) = JobResponse(
+        fun from(step: WorkflowStep, tasksPending: Int, tasksFailed: Int) = JobResponse(
             runId = step.runId,
             workflowName = step.workflowName,
             status = step.status.name,
             stepLabel = step.stepLabel,
             stepTotal = step.stepTotal,
-            tasksPending = step.tasksPending,
-            tasksFailed = step.tasksFailed,
+            tasksPending = tasksPending,
+            tasksFailed = tasksFailed,
             failurePolicy = step.failurePolicy,
             resultMetadata = step.resultMetadata,
             deadlineAt = step.deadlineAt?.toString(),

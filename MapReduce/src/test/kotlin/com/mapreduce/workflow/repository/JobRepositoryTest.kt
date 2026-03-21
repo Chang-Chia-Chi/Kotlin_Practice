@@ -46,8 +46,6 @@ class JobRepositoryTest {
         assertEquals("wc", found!!.workflowName)
         assertEquals(StepStatus.ACTIVE, found.status)
         assertEquals(3, found.stepTotal)
-        assertEquals(3, found.tasksPending)
-        assertEquals(0, found.tasksFailed)
 
         val taskCount = jdbi.withHandle<Int, Exception> { h ->
             h.createQuery("SELECT COUNT(*) FROM task WHERE step_id = 's-1'")
@@ -127,8 +125,8 @@ class JobRepositoryTest {
     // ── resolveStepTask (success path) ────────────────────────────
 
     @Test
-    fun `resolveStepTask decrements tasks_pending on success`() = runTest {
-        val step = testStep("s-cgt", stepTotal = 1)
+    fun `resolveStepTask marks task completed and detects barrier`() = runTest {
+        val step = testStep("s-cgt", stepTotal = 1, onCompleteHandler = "wc.__step_transition")
         repo.submitStep(step, listOf(testTask("s-cgt", "wc.map", "a")))
 
         val taskId = getFirstTaskId("s-cgt")
@@ -138,10 +136,6 @@ class JobRepositoryTest {
 
         assertTrue(result.updated)
         assertTrue(result.barrierMet)
-
-        val updated = repo.findStep("s-cgt")!!
-        assertEquals(0, updated.tasksPending)
-        assertEquals(0, updated.tasksFailed)
 
         assertEquals("COMPLETED", getTaskStatus(taskId))
     }
@@ -159,8 +153,7 @@ class JobRepositoryTest {
         assertFalse(result.updated)
         assertFalse(result.barrierMet)
 
-        val found = repo.findStep("s-zombie")!!
-        assertEquals(1, found.tasksPending)
+        assertEquals(1, repo.countPendingTasks("s-zombie"))
         assertEquals("CLAIMED", getTaskStatus(taskId))
     }
 
@@ -202,26 +195,28 @@ class JobRepositoryTest {
         assertEquals(1, callbackCount)
     }
 
-    // ── resolveStepTask (failure path) ───────────────────────────
+    // ── deadLetterStepTask (failure path) ───────────────────────
 
     @Test
-    fun `resolveStepTask with failed=true decrements pending and increments failed`() = runTest {
+    fun `deadLetterStepTask increments dead-letter count`() = runTest {
         val step = testStep("s-fail", stepTotal = 2)
         repo.submitStep(step, (0 until 2).map { testTask("s-fail", "wc.map", "i-$it") })
+        val taskId = getFirstTaskId("s-fail")
+        claimTask(taskId, "gen-1")
 
-        repo.resolveStepTask(stepId = "s-fail", failed = true)
+        repo.deadLetterStepTask(taskId = taskId, stepId = "s-fail", reason = "test failure", claimToken = "gen-1")
 
-        val updated = repo.findStep("s-fail")!!
-        assertEquals(1, updated.tasksPending)
-        assertEquals(1, updated.tasksFailed)
+        assertEquals(1, repo.countFailedTasks("s-fail"))
     }
 
     @Test
-    fun `resolveStepTask with failed=true creates callback when barrier met`() = runTest {
+    fun `deadLetterStepTask creates callback when barrier met`() = runTest {
         val step = testStep("s-fail-barrier", stepTotal = 1, onCompleteHandler = "wc.__step_transition")
         repo.submitStep(step, listOf(testTask("s-fail-barrier", "wc.map", "a")))
+        val taskId = getFirstTaskId("s-fail-barrier")
+        claimTask(taskId, "gen-1")
 
-        repo.resolveStepTask(stepId = "s-fail-barrier", failed = true)
+        repo.deadLetterStepTask(taskId = taskId, stepId = "s-fail-barrier", reason = "test", claimToken = "gen-1")
 
         val callbackCount = jdbi.withHandle<Int, Exception> { h ->
             h.createQuery(
@@ -258,12 +253,10 @@ class JobRepositoryTest {
         assertEquals(StepStatus.COMPLETED, prev.status)
         assertEquals(1, prev.version)
 
-        // New step should be ACTIVE with fresh counters
+        // New step should be ACTIVE
         val next = repo.findStep("s-tp-next")!!
         assertEquals("reduce", next.stepLabel)
         assertEquals(2, next.stepTotal)
-        assertEquals(2, next.tasksPending)
-        assertEquals(0, next.tasksFailed)
 
         val reduceCount = jdbi.withHandle<Int, Exception> { h ->
             h.createQuery("SELECT COUNT(*) FROM task WHERE step_id = 's-tp-next' AND handler = 'wc.reduce'")

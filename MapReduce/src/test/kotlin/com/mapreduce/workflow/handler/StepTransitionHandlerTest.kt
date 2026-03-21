@@ -52,12 +52,11 @@ class StepTransitionHandlerTest {
         stepId: String = "step-1",
         stepLabel: String = "map",
         stepTotal: Int = 10,
-        tasksFailed: Int = 0,
         version: Long = 0,
     ) = WorkflowStep(
         stepId = stepId, workflowName = "wc", runId = "run-1",
         status = StepStatus.ACTIVE, params = "{}", queue = "mr",
-        stepLabel = stepLabel, stepTotal = stepTotal, tasksFailed = tasksFailed,
+        stepLabel = stepLabel, stepTotal = stepTotal,
         version = version,
     )
 
@@ -130,8 +129,9 @@ class StepTransitionHandlerTest {
 
         @Test
         fun `FAIL_STEP triggers CAS to FAILED when any tasks failed`() = runTest {
-            whenever(stepRepo.findStep("s-1")).thenReturn(step(stepId = "s-1", tasksFailed = 1))
+            whenever(stepRepo.findStep("s-1")).thenReturn(step(stepId = "s-1"))
             whenever(registry.getDefinition("wc")).thenReturn(fakeDefinition(twoStepPipeline()))
+            whenever(stepRepo.countFailedTasks("s-1")).thenReturn(1)
             whenever(stepRepo.casStepStatus("s-1", StepStatus.ACTIVE, StepStatus.FAILED, 0)).thenReturn(true)
 
             val result = handler.handle(ctx("s-1"))
@@ -150,8 +150,9 @@ class StepTransitionHandlerTest {
                 ),
                 WorkflowDefinition.StepSpec(name = "reduce", handler = "wc.reduce", queue = "mr"),
             )
-            whenever(stepRepo.findStep("s-1")).thenReturn(step(stepId = "s-1", tasksFailed = 1))
+            whenever(stepRepo.findStep("s-1")).thenReturn(step(stepId = "s-1"))
             whenever(registry.getDefinition("wc")).thenReturn(fakeDefinition(pipeline))
+            whenever(stepRepo.countFailedTasks("s-1")).thenReturn(1)
             whenever(stepRepo.failStepWithCompensation("s-1", 0, "wc.map-rollback", "mr")).thenReturn(true)
 
             val result = handler.handle(ctx("s-1"))
@@ -167,8 +168,9 @@ class StepTransitionHandlerTest {
 
         @Test
         fun `skips compensation when step fails but no compensation handler`() = runTest {
-            whenever(stepRepo.findStep("s-1")).thenReturn(step(stepId = "s-1", tasksFailed = 1))
+            whenever(stepRepo.findStep("s-1")).thenReturn(step(stepId = "s-1"))
             whenever(registry.getDefinition("wc")).thenReturn(fakeDefinition(twoStepPipeline()))
+            whenever(stepRepo.countFailedTasks("s-1")).thenReturn(1)
             whenever(stepRepo.casStepStatus("s-1", StepStatus.ACTIVE, StepStatus.FAILED, 0)).thenReturn(true)
 
             val result = handler.handle(ctx("s-1"))
@@ -185,8 +187,9 @@ class StepTransitionHandlerTest {
                     failurePolicy = FailurePolicy.BEST_EFFORT,
                 ),
             )
-            whenever(stepRepo.findStep("s-1")).thenReturn(step(stepId = "s-1", stepLabel = "map", tasksFailed = 5))
+            whenever(stepRepo.findStep("s-1")).thenReturn(step(stepId = "s-1", stepLabel = "map"))
             whenever(registry.getDefinition("wc")).thenReturn(fakeDefinition(pipeline))
+            whenever(stepRepo.countFailedTasks("s-1")).thenReturn(5)
             whenever(stepRepo.streamTaskOutputs("s-1", "wc.map")).thenReturn(emptyFlow())
             whenever(stepRepo.casStepStatus("s-1", StepStatus.ACTIVE, StepStatus.COMPLETED, 0)).thenReturn(true)
 
@@ -194,6 +197,20 @@ class StepTransitionHandlerTest {
 
             assertTrue(result is TaskResult.Success)
             verify(stepRepo).casStepStatus("s-1", StepStatus.ACTIVE, StepStatus.COMPLETED, 0)
+        }
+
+        @Test
+        fun `queries failed count on demand from task table`() = runTest {
+            whenever(stepRepo.findStep("s-1")).thenReturn(step(stepId = "s-1"))
+            whenever(registry.getDefinition("wc")).thenReturn(fakeDefinition(twoStepPipeline()))
+            whenever(stepRepo.countFailedTasks("s-1")).thenReturn(1)
+            whenever(stepRepo.casStepStatus("s-1", StepStatus.ACTIVE, StepStatus.FAILED, 0)).thenReturn(true)
+
+            val result = handler.handle(ctx("s-1"))
+
+            assertTrue(result is TaskResult.Success)
+            verify(stepRepo).countFailedTasks("s-1")
+            verify(stepRepo).casStepStatus("s-1", StepStatus.ACTIVE, StepStatus.FAILED, 0)
         }
     }
 
@@ -218,6 +235,7 @@ class StepTransitionHandlerTest {
 
             whenever(stepRepo.findStep("s-1")).thenReturn(step(stepId = "s-1"))
             whenever(registry.getDefinition("wc")).thenReturn(def)
+            whenever(stepRepo.countFailedTasks(any())).thenReturn(0)
             whenever(stepRepo.streamTaskOutputs("s-1", "wc.map")).thenReturn(emptyFlow())
             whenever(stepRepo.casStepStatus("s-1", StepStatus.ACTIVE, StepStatus.COMPLETED, 0)).thenReturn(true)
 
@@ -242,6 +260,7 @@ class StepTransitionHandlerTest {
             )
             whenever(stepRepo.findStep("s-1")).thenReturn(step(stepId = "s-1"))
             whenever(registry.getDefinition("wc")).thenReturn(fakeDefinition(twoStepPipeline(), transitionPayloads))
+            whenever(stepRepo.countFailedTasks(any())).thenReturn(0)
             whenever(stepRepo.streamTaskOutputs("s-1", "wc.map")).thenReturn(emptyFlow())
             whenever(stepRepo.createNextStep(any(), any(), any(), any())).thenReturn(true)
 
@@ -265,6 +284,7 @@ class StepTransitionHandlerTest {
             )
             whenever(stepRepo.findStep("s-1")).thenReturn(step(stepId = "s-1"))
             whenever(registry.getDefinition("wc")).thenReturn(fakeDefinition(pipeline))
+            whenever(stepRepo.countFailedTasks(any())).thenReturn(0)
             whenever(stepRepo.streamTaskOutputs("s-1", "wc.map")).thenReturn(emptyFlow())
             whenever(stepRepo.createNextStep(any(), any(), any(), any())).thenReturn(true)
 
@@ -285,6 +305,7 @@ class StepTransitionHandlerTest {
             )
             whenever(stepRepo.findStep("s-1")).thenReturn(step(stepId = "s-1"))
             whenever(registry.getDefinition("wc")).thenReturn(fakeDefinition(pipeline))
+            whenever(stepRepo.countFailedTasks(any())).thenReturn(0)
             whenever(stepRepo.streamTaskOutputs("s-1", "wc.map")).thenReturn(emptyFlow())
             whenever(stepRepo.createNextStep(any(), any(), any(), any())).thenReturn(true)
 

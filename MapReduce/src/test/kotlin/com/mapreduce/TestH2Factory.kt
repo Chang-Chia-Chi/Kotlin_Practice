@@ -60,8 +60,6 @@ object TestH2Factory {
             queue               VARCHAR(100)  DEFAULT 'default' NOT NULL,
             step_label          VARCHAR(50)   NOT NULL,
             step_total          INT           DEFAULT 0 NOT NULL,
-            tasks_pending       INT           DEFAULT 0 NOT NULL,
-            tasks_failed        INT           DEFAULT 0 NOT NULL,
             on_complete_handler VARCHAR(255),
             failure_policy      VARCHAR(20)   DEFAULT 'FAIL_STEP' NOT NULL,
             failure_threshold   DECIMAL(5,4)  DEFAULT 0 NOT NULL,
