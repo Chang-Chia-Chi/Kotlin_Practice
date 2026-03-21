@@ -10,10 +10,10 @@
 
 ## Essential Commands
 
-* **Dev mode:** `./mvnw quarkus:dev`
-* **Build & Package:** `./mvnw package` (Add `-Dnative` for GraalVM)
-* **Testing:** `./mvnw test` (Continuous: `mvn quarkus:test`)
-* **Dependency Tree:** `./mvnw quarkus:dependency-tree`
+* **Dev mode:** `mvn quarkus:dev`
+* **Build & Package:** `mvn package` (Add `-Dnative` for GraalVM)
+* **Testing:** `mvn test` (Continuous: `mvn quarkus:test`)
+* **Dependency Tree:** `mvn quarkus:dependency-tree`
 
 ## Critical Guardrails (Tier 1)
 * **Injection:** ALWAYS use primary constructor injection. NEVER use `@Inject` on fields to ensure native-image safety.
@@ -44,7 +44,8 @@
 * **Constraint 4:** Use `ToxiproxyContainer` for all network fault injection scenarios at the database layer.
 * **Constraint 5:** Use H2 in-memory database with oracle mode for repository/adapter test.
 * **Constraint 6:** Ensure test coverage of each component and overall is higher than 80%, reviewer should always look into `Jacoco` report to ensure.
-* **Constraint 6:** Use .properties instead of .yaml for configuration file.
+* **Constraint 7:** Use .properties instead of .yaml for configuration file.
+* **Constraint 8:** Test config lives in `src/test/resources/application.properties`. Do not use `%test.*` profile lines in main `application.properties`.
 
 ## Local Environment
 * **Maven:** No system `mvn` on PATH. Use `./mvnw` (Maven Wrapper) or the cached distribution at `/c/Users/maxch/.m2/wrapper/dists/apache-maven-3.9.8/af622e91/bin/mvn`.
