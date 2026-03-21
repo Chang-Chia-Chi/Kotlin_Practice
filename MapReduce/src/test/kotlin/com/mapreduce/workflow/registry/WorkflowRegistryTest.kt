@@ -159,6 +159,63 @@ class WorkflowRegistryTest {
         }
     }
 
+    @Test
+    fun `rejects workflow with blank compensation handler name`() {
+        val pipeline = listOf(
+            WorkflowDefinition.StepSpec(name = "map", handler = "wc.map", compensation = ""),
+        )
+        assertThrows<IllegalArgumentException> {
+            registryWith(fakeDefinition("bad-comp", pipeline = pipeline))
+        }
+    }
+
+    @Test
+    fun `accepts workflow with null compensation handler`() {
+        val pipeline = listOf(
+            WorkflowDefinition.StepSpec(name = "map", handler = "wc.map", compensation = null),
+        )
+        val registry = registryWith(fakeDefinition("no-comp", pipeline = pipeline))
+        assertNotNull(registry.getDefinition("no-comp"))
+    }
+
+    // ── DSL Builder ─────────────────────────────────────────────
+
+    @Test
+    fun `DSL step builder applies all fields correctly`() {
+        val spec = WorkflowDefinition.StepBuilder("test").apply {
+            handler("my.handler")
+            queue("priority")
+            retries(5)
+            failurePolicy(FailurePolicy.THRESHOLD)
+            failureThreshold(0.3)
+            deadline(Duration.ofMinutes(15))
+            compensation("my.rollback")
+        }.build()
+
+        assertEquals("test", spec.name)
+        assertEquals("my.handler", spec.handler)
+        assertEquals("priority", spec.queue)
+        assertEquals(5, spec.maxRetries)
+        assertEquals(FailurePolicy.THRESHOLD, spec.failurePolicy)
+        assertEquals(0.3, spec.failureThreshold)
+        assertEquals(Duration.ofMinutes(15), spec.deadline)
+        assertEquals("my.rollback", spec.compensation)
+    }
+
+    @Test
+    fun `DSL step builder uses sensible defaults`() {
+        val spec = WorkflowDefinition.StepBuilder("minimal").apply {
+            handler("my.handler")
+        }.build()
+
+        assertEquals("default", spec.queue)
+        assertEquals(3, spec.maxRetries)
+        assertEquals(FailurePolicy.FAIL_STEP, spec.failurePolicy)
+        assertEquals(0.0, spec.failureThreshold)
+        assertNull(spec.deadline)
+        assertNull(spec.compensation)
+    }
+
     private fun assertTrue(condition: Boolean) {
         org.junit.jupiter.api.Assertions.assertTrue(condition)
     }

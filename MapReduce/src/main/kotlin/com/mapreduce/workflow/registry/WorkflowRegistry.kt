@@ -72,6 +72,11 @@ class WorkflowRegistry(
             require(step.handler.isNotBlank()) {
                 "Workflow '${def.workflowName}' step '${step.name}' has a blank handler name"
             }
+            if (step.compensation != null) {
+                require(step.compensation.isNotBlank()) {
+                    "Workflow '${def.workflowName}' step '${step.name}' has a blank compensation handler name"
+                }
+            }
         }
     }
 }
