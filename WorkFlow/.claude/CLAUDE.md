@@ -31,6 +31,7 @@
 * `src/test/kotlin`: JUnit 5 tests
 
 ## Coding Standards
+* File Naming: Use domain-prefixed file names, not generic ones (e.g., `WorkflowDslBuilders.kt` not `Builders.kt`). File names should convey what domain they belong to at a glance.
 * Dependency Injection: Use ArC (CDI). Prefer package-private access for @Inject fields/constructors to avoid reflection fallback in native images.
 * Concurrency: Prefer Kotlin Coroutines (suspend) for REST endpoints.
 * Reactivity: Never block I/O threads; use `withContext(Dispatchers.IO)` if blocking calls are necessary.
