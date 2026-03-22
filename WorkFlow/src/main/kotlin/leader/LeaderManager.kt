@@ -86,6 +86,8 @@ class LeaderManager(
     override suspend fun shutdown() {
         log.info("Shutting down leader election")
         _isLeader.value = false
+        // cancelAndJoin (not cancel) guarantees the election loop's finally block
+        // completes before releaseLeaseExplicitly runs, preventing concurrent K8s API calls.
         scope.coroutineContext.job.cancelAndJoin()
         withTimeoutOrNull(shutdownTimeout.toMillis()) {
             withContext(Dispatchers.IO) {
@@ -105,10 +107,15 @@ class LeaderManager(
             val leaseApi = kubernetesClient.leases().inNamespace(leaderCfg.namespace())
             val lease = leaseApi.withName(leaderCfg.leaseName()).get()
             if (lease != null) {
-                lease.spec.holderIdentity = null
-                lease.spec.acquireTime = null
-                leaseApi.withName(leaderCfg.leaseName()).patch(lease)
-                log.info("Lease released explicitly — new leader can acquire immediately")
+                val identity = config.worker().id()
+                if (lease.spec.holderIdentity == identity) {
+                    lease.spec.holderIdentity = null
+                    lease.spec.acquireTime = null
+                    leaseApi.withName(leaderCfg.leaseName()).patch(lease)
+                    log.info("Lease released explicitly — new leader can acquire immediately")
+                } else {
+                    log.debugf("Lease held by %s, not by this instance — skipping release", lease.spec.holderIdentity)
+                }
             }
         } catch (e: Exception) {
             log.warnf(e, "Failed to release lease explicitly — new leader will acquire after lease expiry")
@@ -188,6 +195,9 @@ class LeaderManager(
     }
 
     private fun onLose() {
+        // Intentionally do NOT reset _epoch: in-flight database writes may still
+        // reference the current epoch as a fencing token. Retaining the "last known"
+        // epoch allows those writes to complete with a valid fence.
         _isLeader.value = false
         log.info("Lost leadership")
     }

@@ -109,12 +109,6 @@
             <artifactId>quarkus-kubernetes-client</artifactId>
         </dependency>
 
-        <!-- YAML config support -->
-        <dependency>
-            <groupId>io.quarkus</groupId>
-            <artifactId>quarkus-config-yaml</artifactId>
-        </dependency>
-
         <!-- Observability -->
         <dependency>
             <groupId>io.quarkus</groupId>
