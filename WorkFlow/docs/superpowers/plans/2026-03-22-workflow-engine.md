@@ -68,8 +68,7 @@ Pure data layer. No dependencies on engine or JDBI. All types are immutable.
 `dsl/WorkflowDsl.kt` — package `com.workflow.dsl` — should contain:
 - `FailurePolicy` enum: `ABORT`, `BEST_EFFORT`
 - `JoinPolicy` sealed interface: `All` object, `Threshold(n: Int)`, `Percentage(pct: Int)` — validate n > 0, pct in 1..100
-- `JoinDefinition` data class: `policy: JoinPolicy`, `transition: String?`
-- `FanOutDefinition` data class: `transition: String`, `retries: Int`, `failurePolicy: FailurePolicy`, `deadline: Duration`, `join: JoinDefinition`
+- `FanOutDefinition` data class: `transition: String`, `retries: Int`, `failurePolicy: FailurePolicy`, `deadline: Duration`, `joinPolicy: JoinPolicy` (default `JoinPolicy.All`)
 - `ActivityDefinition` data class: `name: String`, `transition: String`, `retries: Int`, `failurePolicy: FailurePolicy`, `deadline: Duration`, `fanOut: FanOutDefinition?`
 - `WorkflowDefinition` data class: `activities: List<ActivityDefinition>` — validate non-empty.
 
@@ -273,7 +272,9 @@ Handle methods (for barrier transaction):
 - Create: `src/main/kotlin/worker/HandlerRegistry.kt` ✅ (minimal map-based, implemented as Task 8 prerequisite)
 - Test: `src/test/kotlin/worker/HandlerRegistryTest.kt`
 
-**Design decision (2026-03-22):** Minimal `TransitionHandler` interface + `HandlerInput`/`HandlerOutput` data classes + map-based `HandlerRegistry` implemented as Task 8 prerequisites. CDI qualifier-based discovery (`@TransitionKey`, `Instance.select()`) deferred to when WorkerLoop (Task 10) needs it. Current `HandlerRegistry` uses `ConcurrentHashMap` with `register()`/`resolve()` — sufficient for barrier tests and production bootstrap.
+**Design decision (2026-03-22):** Minimal `TransitionHandler` interface + `HandlerInput`/`HandlerOutput` data classes + map-based `HandlerRegistry` implemented as Task 8 prerequisites. CDI qualifier-based discovery (`@TransitionKey`, `Instance.select()`) deferred to when WorkerLoop (Task 10) needs it. Current `HandlerRegistry` uses `ConcurrentHashMap` with `register()`/`resolve()` — sufficient for worker tests and production bootstrap.
+
+**Update (2026-03-22, barrier refactor):** `HandlerRegistry` is no longer a BarrierService dependency. Barrier no longer executes handlers inline — join/reduce is a separate downstream activity. `HandlerRegistry` is now only used by WorkerLoop (Task 10).
 
 - [x] **Step 1: Create handler interface** (implemented as Task 8 prereq)
 
@@ -321,7 +322,7 @@ Logic (within one `inTransactionSuspend`):
 2. **Lock-free probe:** `taskRepo.countNonTerminalWithHandle(handle, workflowId, sequenceNumber)` — plain SELECT COUNT, no FOR UPDATE
 3. If count > 0: commit and return (other tasks in flight)
 4. **Evaluate outcome:** Load workflow run, deserialize `WorkflowDefinition`, compute sequence metadata inline from `ActivityDefinition` list (map sequence number → activity index + phase type). Count `failed` via `taskRepo.countFailedWithHandle()` and `total` via `taskRepo.countTotalWithHandle()`. Apply policy based on computed phase type:
-    - PARALLEL phase → evaluate `JoinPolicy` from the `JoinDefinition`
+    - PARALLEL phase → evaluate `JoinPolicy` from `FanOutDefinition.joinPolicy`
     - LINEAR / SCATTER phase → evaluate `FailurePolicy` from the `ActivityDefinition`
     - Determine target outcome: success or failure
 5. **CAS:** `workflowRepo.casAdvanceWithHandle(handle, workflowId, expectedSequence, nextSequence, expectedVersion)` — if 0 rows affected, another actor won, commit and return
@@ -332,10 +333,10 @@ Logic (within one `inTransactionSuspend`):
 Within the same transaction handle:
 - **If outcome is failure** and parent activity's FailurePolicy is ABORT → mark workflow FAILED via `workflowRepo.updateStatusWithHandle()`
 - **If outcome is failure** and FailurePolicy is BEST_EFFORT → treat as success, continue to next sequence
-- **If current sequence is PARALLEL with join transition** (outcome is success) → execute join handler inline within this transaction. If join handler fails → treat as failure, apply logic above.
 - **If last sequence in definition** → mark workflow COMPLETED via `workflowRepo.updateStatusWithHandle()`
-- **If next sequence exists** → insert tasks for next sequence:
-    - SCATTER or LINEAR phase: insert 1 task with appropriate handler key and payload
+- **If next sequence exists** → insert tasks for next sequence with payload propagation:
+    - SCATTER or LINEAR phase: insert 1 task with appropriate handler key. Payload = completing task's `resultJson` (pipeline pattern). For PARALLEL→LINEAR, payload = null (multiple parallel results, no single value).
+    - Join/reduce handler is a separate downstream activity (MapReduce model), not inline.
     - PARALLEL phase: read scatter task's `result` column from preceding SCATTER sequence, deserialize payloads, bulk-insert N sub-tasks via `taskRepo.insertBatchWithHandle()`
 
 - [ ] **Step 3: Write barrier unit tests (Oracle Free container)**
@@ -350,8 +351,9 @@ Within the same transaction handle:
 7. JoinPolicy PERCENTAGE(95) with 10/100 failed → outcome = failure
 8. JoinPolicy THRESHOLD(40) with 45/50 succeeded → outcome = success
 9. FailurePolicy BEST_EFFORT on failed phase → workflow advances to next sequence
-10. Pure barrier (join with no transition) → workflow advances immediately
-11. Join with inline transition: CAS wins on parallel phase, join declares transition → join handler executed and workflow advances
+10. PARALLEL→LINEAR payload propagation: parallel phase completes, next linear task has null payload (multiple parallel results, no single value to propagate)
+11. LINEAR→LINEAR payload propagation: completing task's `resultJson` becomes next task's `payloadJson`
+11b. LINEAR→SCATTER payload propagation: completing task's `resultJson` becomes scatter task's `payloadJson`
 12. Scatter → parallel handoff: scatter task completes with payloads in `result` → CAS winner reads result, inserts correct number of sub-tasks at next sequence
 
 - [ ] **Step 4: Commit**
