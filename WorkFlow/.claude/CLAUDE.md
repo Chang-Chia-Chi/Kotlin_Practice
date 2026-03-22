@@ -35,6 +35,7 @@
 * Dependency Injection: Use ArC (CDI). Prefer package-private access for @Inject fields/constructors to avoid reflection fallback in native images.
 * Concurrency: Prefer Kotlin Coroutines (suspend) for REST endpoints.
 * Reactivity: Never block I/O threads; use `withContext(Dispatchers.IO)` if blocking calls are necessary.
+* Domain Driven Develop: Code architecture should follow best practice of DDD & clean architecture with simple, concise & elegant interface for flexibility and future scalability. 
 
 ## Testing Standards
 
