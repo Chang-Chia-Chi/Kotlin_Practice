@@ -44,7 +44,7 @@
 * **Constraint 3:** Mock Kubernetes interactions strictly using `@InjectMock` on the Fabric8 `KubernetesClient`. Do not attempt to spin up a real Kubernetes cluster via Testcontainers.
 * **Constraint 4:** Use `ToxiproxyContainer` for all network fault injection scenarios at the database layer.
 * **Constraint 5:** Use H2 in-memory database with oracle mode for repository/adapter test.
-* **Constraint 6:** Ensure test coverage of each component and overall is higher than 80%, reviewer should always look into `Jacoco` report to ensure.
+* **Constraint 6:** Ensure test coverage of each component and overall is higher than 85%. Please reference @skills/jacoco-coverage.md for how to check.
 * **Constraint 7:** Use .properties instead of .yaml for configuration file.
 * **Constraint 8:** Test config lives in `src/test/resources/application.properties`. Do not use `%test.*` profile lines in main `application.properties`.
 

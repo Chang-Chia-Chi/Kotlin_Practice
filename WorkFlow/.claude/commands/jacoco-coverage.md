@@ -1,0 +1,1 @@
+python check_coverage.py target/site/jacoco/index.html --min-instruction 85 --min-branch 70
