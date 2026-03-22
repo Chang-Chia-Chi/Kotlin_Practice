@@ -22,13 +22,7 @@ class SchemaTest {
 
     @BeforeAll
     fun setup() {
-        jdbi = Jdbi.create("jdbc:h2:mem:schema_test;MODE=Oracle;DB_CLOSE_DELAY=-1", "sa", "")
-        val migrationSql = this::class.java.classLoader
-            .getResource("db/migration/V1__create_workflow_tables.sql")!!
-            .readText()
-        jdbi.useHandle<Exception> { handle ->
-            handle.createScript(migrationSql).execute()
-        }
+        jdbi = OracleTestContainer.jdbi
     }
 
     @AfterEach
@@ -160,7 +154,7 @@ class SchemaTest {
     fun migrationAppliesSuccessfully() {
         jdbi.useHandle<Exception> { handle ->
             val tables = handle.createQuery(
-                "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = 'PUBLIC' AND TABLE_NAME IN ('WORKFLOW', 'TASK')"
+                "SELECT TABLE_NAME FROM USER_TABLES WHERE TABLE_NAME IN ('WORKFLOW', 'TASK')"
             ).mapTo(String::class.java).list()
 
             assertEquals(2, tables.size, "Expected both WORKFLOW and TASK tables to exist")
