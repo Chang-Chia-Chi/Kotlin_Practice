@@ -27,6 +27,11 @@
                 <version>${kotlin.version}</version>
             </dependency>
             <dependency>
+                <groupId>org.jetbrains.kotlin</groupId>
+                <artifactId>kotlin-test</artifactId>
+                <version>${kotlin.version}</version>
+            </dependency>
+            <dependency>
                 <groupId>io.quarkus.platform</groupId>
                 <artifactId>quarkus-bom</artifactId>
                 <version>${quarkus.platform.version}</version>

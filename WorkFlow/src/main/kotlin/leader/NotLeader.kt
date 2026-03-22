@@ -11,6 +11,6 @@ import jakarta.inject.Singleton
  * Usage: `@Scheduled(skipExecutionIf = NotLeader::class)`
  */
 @Singleton
-class NotLeader(private val leaderManager: LeaderManager) : Scheduled.SkipPredicate {
-    override fun test(execution: ScheduledExecution) = !leaderManager.isActive
+class NotLeader(private val leaderElection: LeaderElection) : Scheduled.SkipPredicate {
+    override fun test(execution: ScheduledExecution) = !leaderElection.isActive
 }

@@ -21,6 +21,7 @@ import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
 import org.jboss.logging.Logger
+import java.time.Clock
 import java.time.Duration
 import java.time.Instant
 
@@ -34,28 +35,38 @@ import java.time.Instant
  *
  * State is exposed via [isActive], [token], and [lastHeartbeat] — all backed
  * by [MutableStateFlow] for thread-safe, lock-free reads.
+ *
+ * [clock] and [scope] are `internal` for test injection. Quarkus ArC cannot
+ * inject `Clock` or `CoroutineScope` (ambiguous with framework-provided beans),
+ * so they are kept as internal properties with production defaults rather than
+ * constructor parameters. Tests set them before calling [onStart].
  */
 @ApplicationScoped
 class LeaderManager(
     private val config: FrameworkConfig,
     private val kubernetesClient: KubernetesClient,
     private val meterRegistry: MeterRegistry,
-) : ShutdownParticipant {
+    private val kubernetesDetector: KubernetesDetector,
+) : LeaderElection, ShutdownParticipant {
     private val log = Logger.getLogger(LeaderManager::class.java)
+
+    internal var clock: Clock = Clock.systemUTC()
+    internal var scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private val _isLeader = MutableStateFlow(false)
     private val _epoch = MutableStateFlow(0L)
-    private val _lastHeartbeat = MutableStateFlow(Instant.now())
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    // Lazy so tests can set `clock` before first access captures the initial instant.
+    // NONE mode: always initialized during single-threaded startup (onStart or test setup).
+    private val _lastHeartbeat by lazy(LazyThreadSafetyMode.NONE) { MutableStateFlow(Instant.now(clock)) }
 
-    val isActive: Boolean get() = _isLeader.value
-    val token: Long get() = _epoch.value
-    val lastHeartbeat: Instant get() = _lastHeartbeat.value
+    override val isActive: Boolean get() = _isLeader.value
+    override val token: Long get() = _epoch.value
+    override val lastHeartbeat: Instant get() = _lastHeartbeat.value
 
     fun onStart(
         @Observes ev: StartupEvent,
     ) {
-        if (System.getenv("KUBERNETES_SERVICE_HOST") == null) {
+        if (!kubernetesDetector.isRunningInKubernetes()) {
             log.info("Not running in Kubernetes — assuming leader role with synthetic epoch")
             _epoch.value = 1
             _isLeader.value = true
@@ -78,7 +89,7 @@ class LeaderManager(
     }
 
     private fun releaseLeaseExplicitly() {
-        if (System.getenv("KUBERNETES_SERVICE_HOST") == null) {
+        if (!kubernetesDetector.isRunningInKubernetes()) {
             log.info("Not in Kubernetes — skipping explicit lease release")
             _isLeader.value = false
             return
@@ -108,7 +119,7 @@ class LeaderManager(
 
         try {
             while (true) {
-                _lastHeartbeat.value = Instant.now()
+                _lastHeartbeat.value = Instant.now(clock)
                 try {
                     runElection(identity, leaderCfg)
                     log.infof("Leader election run() returned — will retry in %dms", retryPeriodMs)
@@ -145,7 +156,7 @@ class LeaderManager(
                     LeaderCallbacks(
                         { onAcquire(identity, leaderCfg) },
                         { onLose() },
-                        { _lastHeartbeat.value = Instant.now() },
+                        { _lastHeartbeat.value = Instant.now(clock) },
                     ),
                 ).build()
 
