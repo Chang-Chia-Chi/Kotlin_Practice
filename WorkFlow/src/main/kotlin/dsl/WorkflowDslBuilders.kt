@@ -6,42 +6,27 @@ import java.time.Duration
 annotation class WorkflowDsl
 
 @WorkflowDsl
-class JoinBuilder {
-    private var policy: JoinPolicy = JoinPolicy.All
-    private var transition: String? = null
-
-    fun policy(p: JoinPolicy) { policy = p }
-    fun transition(t: String) { transition = t }
-
-    fun build(): JoinDefinition = JoinDefinition(policy = policy, transition = transition)
-}
-
-@WorkflowDsl
 class FanOutBuilder {
     private var transition: String? = null
     private var retries: Int = 0
     private var failurePolicy: FailurePolicy = FailurePolicy.ABORT
     private var deadline: Duration = Duration.ofMinutes(30)
-    private var joinDef: JoinDefinition? = null
+    private var joinPolicy: JoinPolicy = JoinPolicy.All
 
     fun transition(t: String) { transition = t }
     fun retries(n: Int) { retries = n }
     fun failurePolicy(p: FailurePolicy) { failurePolicy = p }
     fun deadline(d: Duration) { deadline = d }
-
-    fun join(block: JoinBuilder.() -> Unit) {
-        joinDef = JoinBuilder().apply(block).build()
-    }
+    fun joinPolicy(p: JoinPolicy) { joinPolicy = p }
 
     fun build(): FanOutDefinition {
         requireNotNull(transition) { "FanOut transition is required" }
-        requireNotNull(joinDef) { "FanOut join is required" }
         return FanOutDefinition(
             transition = transition!!,
             retries = retries,
             failurePolicy = failurePolicy,
             deadline = deadline,
-            join = joinDef!!,
+            joinPolicy = joinPolicy,
         )
     }
 }

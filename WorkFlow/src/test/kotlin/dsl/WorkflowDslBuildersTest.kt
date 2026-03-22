@@ -45,7 +45,7 @@ class WorkflowDslBuildersTest {
     }
 
     @Test
-    fun `fan-out with Percentage join policy and join transition`() {
+    fun `fan-out with Percentage join policy`() {
         val definition = workflow {
             activity("scatter") {
                 transition("scatter.dispatch")
@@ -54,10 +54,7 @@ class WorkflowDslBuildersTest {
                     retries(3)
                     failurePolicy(FailurePolicy.BEST_EFFORT)
                     deadline(Duration.ofMinutes(15))
-                    join {
-                        policy(JoinPolicy.Percentage(95))
-                        transition("scatter.aggregate")
-                    }
+                    joinPolicy(JoinPolicy.Percentage(95))
                 }
             }
         }
@@ -72,27 +69,22 @@ class WorkflowDslBuildersTest {
         assertEquals(3, fanOut.retries)
         assertEquals(FailurePolicy.BEST_EFFORT, fanOut.failurePolicy)
         assertEquals(Duration.ofMinutes(15), fanOut.deadline)
-        assertEquals(JoinPolicy.Percentage(95), fanOut.join.policy)
-        assertEquals("scatter.aggregate", fanOut.join.transition)
+        assertEquals(JoinPolicy.Percentage(95), fanOut.joinPolicy)
     }
 
     @Test
-    fun `pure barrier join with no transition`() {
+    fun `fan-out with default joinPolicy when omitted`() {
         val definition = workflow {
             activity("barrier-activity") {
                 transition("barrier.dispatch")
                 fanOut {
                     transition("barrier.process")
-                    join {
-                        policy(JoinPolicy.All)
-                    }
                 }
             }
         }
 
         val fanOut = definition.activities[0].fanOut!!
-        assertEquals(JoinPolicy.All, fanOut.join.policy)
-        assertNull(fanOut.join.transition)
+        assertEquals(JoinPolicy.All, fanOut.joinPolicy)
     }
 
     @Test
@@ -101,20 +93,6 @@ class WorkflowDslBuildersTest {
             workflow {
                 activity("no-transition") {
                     retries(1)
-                }
-            }
-        }
-    }
-
-    @Test
-    fun `fanOut without join throws IllegalArgumentException`() {
-        assertFailsWith<IllegalArgumentException> {
-            workflow {
-                activity("missing-join") {
-                    transition("task.run")
-                    fanOut {
-                        transition("fan.process")
-                    }
                 }
             }
         }
@@ -136,7 +114,6 @@ class WorkflowDslBuildersTest {
                     transition("outer.run")
                     fanOut {
                         transition("fan.process")
-                        join { policy(JoinPolicy.All) }
                         // This should not compile normally due to @DslMarker,
                         // but at runtime the builder should not expose activity()
                         (this as? WorkflowBuilder)?.activity("leaked") {

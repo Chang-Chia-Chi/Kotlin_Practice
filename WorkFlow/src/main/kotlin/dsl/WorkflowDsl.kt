@@ -28,17 +28,12 @@ sealed interface JoinPolicy {
     }
 }
 
-data class JoinDefinition(
-    val policy: JoinPolicy = JoinPolicy.All,
-    val transition: String? = null,
-)
-
 data class FanOutDefinition(
     val transition: String,
     val retries: Int = 0,
     val failurePolicy: FailurePolicy = FailurePolicy.ABORT,
     val deadline: Duration = Duration.ofMinutes(30),
-    val join: JoinDefinition,
+    val joinPolicy: JoinPolicy = JoinPolicy.All,
 )
 
 data class ActivityDefinition(
