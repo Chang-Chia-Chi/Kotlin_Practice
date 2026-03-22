@@ -667,6 +667,42 @@ class BarrierServiceTest {
             assertEquals("RUNNING", updatedWf["STATUS"])
             assertEquals(1, countTasksDirect(wfId, 2))
         }
+
+        @Test
+        fun `BEST_EFFORT with non-null resultJson - failed task result propagates as next task payload`() = runTest {
+            val def = WorkflowDefinition(
+                activities = listOf(
+                    ActivityDefinition(
+                        name = "step1", transition = "step1.handler",
+                        failurePolicy = FailurePolicy.BEST_EFFORT,
+                    ),
+                    ActivityDefinition(name = "step2", transition = "step2.handler"),
+                ),
+            )
+            val wfId = randomId()
+            val taskId = randomId()
+            val wf = makeWorkflow(id = wfId, definition = def, currentSequence = 1, version = 0)
+            insertWorkflowDirect(wf)
+            insertTaskDirect(
+                makeTask(
+                    id = taskId, workflowId = wfId, sequenceNumber = 1,
+                    status = TaskStatus.PROCESSING, handlerKey = "step1.handler",
+                ),
+            )
+
+            val errorResult = """{"error":"timeout","partial":{"count":5}}"""
+            barrier.onTaskCompleted(taskId, wfId, 1, TaskStatus.FAILED, errorResult)
+
+            // Workflow advances despite failure
+            val updatedWf = readWorkflowDirect(wfId)
+            assertNotNull(updatedWf)
+            assertEquals(2, (updatedWf["CURRENT_SEQUENCE"] as Number).toInt())
+
+            // Failed task's resultJson propagates as next task's payload
+            val seq2Tasks = readTasksDirect(wfId, 2)
+            assertEquals(1, seq2Tasks.size)
+            assertEquals(errorResult, seq2Tasks[0]["PAYLOAD"])
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -709,8 +745,7 @@ class BarrierServiceTest {
             val seq3Tasks = readTasksDirect(wfId, 3)
             assertEquals(1, seq3Tasks.size)
             assertEquals("final.handler", seq3Tasks[0]["HANDLER_KEY"])
-            val payload = seq3Tasks[0]["PAYLOAD"]
-            assertTrue(payload == null || (payload is Clob && payload.characterStream.readText().isBlank()),
+            assertTrue(seq3Tasks[0]["PAYLOAD"] == null,
                 "PARALLEL→LINEAR: next task payload should be null")
         }
     }
@@ -747,9 +782,7 @@ class BarrierServiceTest {
             // Next task's payload should be the previous task's resultJson
             val seq2Tasks = readTasksDirect(wfId, 2)
             assertEquals(1, seq2Tasks.size)
-            val payload = seq2Tasks[0]["PAYLOAD"]
-            val payloadStr = if (payload is Clob) payload.characterStream.readText() else payload as String
-            assertEquals(resultPayload, payloadStr)
+            assertEquals(resultPayload, seq2Tasks[0]["PAYLOAD"])
         }
     }
 
@@ -799,9 +832,7 @@ class BarrierServiceTest {
             val seq2Tasks = readTasksDirect(wfId, 2)
             assertEquals(1, seq2Tasks.size)
             assertEquals("scatter.handler", seq2Tasks[0]["HANDLER_KEY"])
-            val payload = seq2Tasks[0]["PAYLOAD"]
-            val payloadStr = if (payload is Clob) payload.characterStream.readText() else payload as String
-            assertEquals(resultPayload, payloadStr)
+            assertEquals(resultPayload, seq2Tasks[0]["PAYLOAD"])
         }
     }
 
@@ -853,10 +884,7 @@ class BarrierServiceTest {
             assertTrue(seq2Tasks.all { it["STATUS"] == "PENDING" })
 
             // Each sub-task has the correct payload from the scatter result
-            val payloads = seq2Tasks.map {
-                val raw = it["PAYLOAD"]
-                if (raw is Clob) raw.characterStream.readText() else raw as String
-            }.sorted()
+            val payloads = seq2Tasks.map { it["PAYLOAD"] as String }.sorted()
             assertEquals(scatterPayloads.sorted(), payloads)
         }
     }

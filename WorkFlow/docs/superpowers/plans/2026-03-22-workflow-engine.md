@@ -15,8 +15,8 @@ src/main/kotlin/
   config/
     FrameworkConfig.kt              -- Quarkus @ConfigMapping for all framework settings
   dsl/
-    WorkflowDsl.kt                 -- FailurePolicy, JoinPolicy, WorkflowDefinition, ActivityDefinition, FanOutDefinition, JoinDefinition, SequenceMetadata
-    WorkflowDslBuilders.kt         -- @DslMarker builders: workflow {}, activity {}, fanOut {}, join {}
+    WorkflowDsl.kt                 -- FailurePolicy, JoinPolicy, WorkflowDefinition, ActivityDefinition, FanOutDefinition, SequenceMetadata
+    WorkflowDslBuilders.kt         -- @DslMarker builders: workflow {}, activity {}, fanOut {}
   engine/
     WorkflowModels.kt              -- WorkflowStatus, TaskStatus, WorkflowRun, Task
     WorkflowRepository.kt           -- JDBI suspend DAO for workflow table (CAS target)
@@ -98,8 +98,7 @@ Kotlin DSL with `@DslMarker` to prevent scope leakage. Build-phase validation.
 
 `dsl/WorkflowDslBuilders.kt` — package `com.workflow.dsl`:
 - `@DslMarker annotation class WorkflowDsl`
-- `JoinBuilder`: `policy()`, `transition()` → builds `JoinDefinition`
-- `FanOutBuilder`: `transition()`, `retries()`, `failurePolicy()`, `deadline()`, `join {}` → builds `FanOutDefinition`. Validate: transition required, join required.
+- `FanOutBuilder`: `transition()`, `retries()`, `failurePolicy()`, `deadline()`, `joinPolicy()` → builds `FanOutDefinition`. Validate: transition required.
 - `ActivityBuilder`: `transition()`, `retries()`, `failurePolicy()`, `deadline()`, `fanOut {}` → builds `ActivityDefinition`. Validate: transition required.
 - `WorkflowBuilder`: `activity("name") {}` → builds `WorkflowDefinition`. Validate: at least one activity.
 - Top-level `fun workflow(block: WorkflowBuilder.() -> Unit): WorkflowDefinition`
@@ -108,10 +107,9 @@ Kotlin DSL with `@DslMarker` to prevent scope leakage. Build-phase validation.
 
 `dsl/WorkflowDslBuildersTest.kt`:
 - Happy path: linear workflow with 2 activities
-- Happy path: fan-out with join policy PERCENTAGE(95) and join transition
-- Happy path: pure barrier (join with no transition)
+- Happy path: fan-out with join policy PERCENTAGE(95)
+- Happy path: fan-out with default joinPolicy when omitted
 - Validation: missing activity transition → `IllegalArgumentException`
-- Validation: fanOut without join → `IllegalArgumentException`
 - Validation: empty workflow → `IllegalArgumentException`
 - Scope leakage: verify `@DslMarker` prevents calling `activity {}` inside `fanOut {}`
 
