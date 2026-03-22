@@ -20,6 +20,9 @@
 * **Concurrency:** Prefer Kotlin Coroutines (`suspend`) for REST. Use `awaitSuspending()` for Mutiny integration.
 * **Secrets:** NEVER hardcode credentials. Use `application.properties` with env expansion.
 * **SQL Safety:** Use named parameters (`:param`) to prevent injection.
+* **Oracle SQL:** `FETCH FIRST N ROWS ONLY` is incompatible with `FOR UPDATE` (ORA-02014). Use a subquery: `SELECT * FROM t WHERE id IN (SELECT id FROM t ... FETCH FIRST N ROWS ONLY) FOR UPDATE SKIP LOCKED`.
+* **Oracle JDBC Nulls:** JDBI `.bind("col", null)` fails on Oracle — use `.bindNull("col", Types.TIMESTAMP)` or `.bindNull("col", Types.VARCHAR)` with explicit SQL type.
+* **Oracle Timestamps:** Oracle JDBC returns `oracle.sql.TIMESTAMP`, not `java.sql.Timestamp`. Handle via reflection in row mappers. Truncate `LocalDateTime.now()` to `ChronoUnit.MICROS` (Oracle TIMESTAMP precision).
 
 ## Architecture & Structure
 * Framework: Quarkus (Kubernetes Native Java)
@@ -44,10 +47,12 @@
 * **Constraint 3:** Mock Kubernetes interactions strictly using `@InjectMock` on the Fabric8 `KubernetesClient`. Do not attempt to spin up a real Kubernetes cluster via Testcontainers.
 * **Constraint 4:** Use `ToxiproxyContainer` for all network fault injection scenarios at the database layer.
 * **Constraint 5:** Use Oracle Free container (via Testcontainers) for repository/adapter tests. This ensures full SQL compatibility (SKIP LOCKED, CHECK constraints, CLOB behavior) without H2 dialect gaps.
+* **Constraint 9:** Share one Oracle container across test classes via `OracleTestContainer` singleton object (`src/test/kotlin/engine/OracleTestContainer.kt`). Do not create per-class containers.
 * **Constraint 6:** Ensure test coverage of each component and overall is higher than 85%. Run: `python .claude/scripts/coverage.py target/site/jacoco/index.html --min-instruction 85 --min-branch 70`. Per-package thresholds in `.claude/skills/jacoco-coverage.md`.
 * **Constraint 7:** Use .properties instead of .yaml for configuration file.
 * **Constraint 8:** Test config lives in `src/test/resources/application.properties`. Do not use `%test.*` profile lines in main `application.properties`.
 
 ## Local Environment
+* **Docker:** Docker Desktop must be running for Testcontainers tests. Verify with `docker info | grep "Server Version"`.
 * **Maven:** No system `mvn` on PATH. `./mvnw` does not work in bash-on-Windows — always use the cached distribution at `/c/Users/maxch/.m2/wrapper/dists/apache-maven-3.9.8/af622e91/bin/mvn`.
 * **Running specific tests:** Use class names with surefire: `-Dtest="LeaderManagerTest,NotLeaderTest"`. Package glob patterns (`com.workflow.leader.*`) do not match.
