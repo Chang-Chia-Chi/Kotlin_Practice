@@ -94,6 +94,21 @@ class TaskRepository(private val jdbi: Jdbi) {
                 .map(::mapTaskRow)
         }
 
+    suspend fun resetForRetry(id: String, newRetryCount: Int) {
+        jdbi.inTransactionSuspend<Unit, Exception> { h: Handle ->
+            h.createUpdate(
+                """
+                UPDATE task
+                SET status = 'PENDING', claimed_by = NULL, claimed_at = NULL, retry_count = :newRetryCount
+                WHERE id = :id
+                """,
+            )
+                .bind("id", id)
+                .bind("newRetryCount", newRetryCount)
+                .execute()
+        }
+    }
+
     suspend fun findExpired(now: Instant): List<Task> =
         jdbi.withHandleSuspend<List<Task>, Exception> { h: Handle ->
             h.createQuery(
