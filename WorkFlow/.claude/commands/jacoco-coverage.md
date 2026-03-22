@@ -1,1 +1,1 @@
-python check_coverage.py target/site/jacoco/index.html --min-instruction 85 --min-branch 70
+python C:\Users\maxch\OneDrive\文件\GitHub\Kotlin_Practice\WorkFlow\.claude\scripts\coverage.py target/site/jacoco/index.html --min-instruction 85 --min-branch 70
