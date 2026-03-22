@@ -43,7 +43,7 @@
 * **Constraint 2:** All pure unit tests must use `runTest` from `kotlinx-coroutines-test` for deterministic time control.
 * **Constraint 3:** Mock Kubernetes interactions strictly using `@InjectMock` on the Fabric8 `KubernetesClient`. Do not attempt to spin up a real Kubernetes cluster via Testcontainers.
 * **Constraint 4:** Use `ToxiproxyContainer` for all network fault injection scenarios at the database layer.
-* **Constraint 5:** Use H2 in-memory database with oracle mode for repository/adapter test.
+* **Constraint 5:** Use Oracle Free container (via Testcontainers) for repository/adapter tests. This ensures full SQL compatibility (SKIP LOCKED, CHECK constraints, CLOB behavior) without H2 dialect gaps.
 * **Constraint 6:** Ensure test coverage of each component and overall is higher than 85%. Run: `python .claude/scripts/coverage.py target/site/jacoco/index.html --min-instruction 85 --min-branch 70`. Per-package thresholds in `.claude/skills/jacoco-coverage.md`.
 * **Constraint 7:** Use .properties instead of .yaml for configuration file.
 * **Constraint 8:** Test config lives in `src/test/resources/application.properties`. Do not use `%test.*` profile lines in main `application.properties`.

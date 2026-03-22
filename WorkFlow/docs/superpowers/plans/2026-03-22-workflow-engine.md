@@ -43,8 +43,8 @@ src/test/kotlin/
     WorkflowDslBuildersTest.kt      -- DSL builder + validation tests
   engine/
     WorkflowModelsTest.kt          -- Runtime model tests
-    RepositoryTest.kt               -- Repository CRUD + CAS tests (H2)
-    BarrierServiceTest.kt           -- Lock-free barrier unit tests (H2)
+    RepositoryTest.kt               -- Repository CRUD + CAS tests (Oracle Free container)
+    BarrierServiceTest.kt           -- Lock-free barrier unit tests (Oracle Free container)
     WorkflowEngineTest.kt           -- Workflow start + progression tests
     SweeperTest.kt                  -- Stuck workflow detection + recovery tests
     IntegrationTest.kt              -- End-to-end workflow lifecycle tests
@@ -173,7 +173,7 @@ Status enums and entity classes for runtime state. Two-table model: workflow + t
 
 `engine/WorkflowModels.kt` — package `com.workflow.engine`:
 - `WorkflowStatus`: `RUNNING`, `COMPLETED`, `FAILED` — no PENDING (created directly as RUNNING). Remove old `PENDING`.
-- `TaskStatus`: `PENDING`, `PROCESSING`, `COMPLETED`, `FAILED`, `DEAD_LETTER` — add helper `val isTerminal: Boolean` property (COMPLETED, FAILED, DEAD_LETTER)
+- `TaskStatus`: `PENDING`, `PROCESSING`, `COMPLETED`, `FAILED` — add helper `val isTerminal: Boolean` property (COMPLETED, FAILED)
 - `WorkflowRun` data class: `id: String`, `definitionJson: String`, `currentSequence: Int`, `version: Int`, `status: WorkflowStatus`, `createdAt: Instant`, `updatedAt: Instant`
 - `Task` data class: `id: String`, `workflowId: String`, `sequenceNumber: Int`, `status: TaskStatus`, `handlerKey: String`, `payloadJson: String?`, `resultJson: String?`, `claimedBy: String?`, `claimedAt: Instant?`, `completedAt: Instant?`, `retryCount: Int`, `maxRetries: Int`, `deadlineAt: Instant?`
 - Remove: `ActivityStatus`, `TaskType`, `ActivityInstance` — no longer exist in two-table model. `PhaseType` lives in DSL layer (Task 1).
@@ -190,7 +190,7 @@ Status enums and entity classes for runtime state. Two-table model: workflow + t
 - Create: `src/main/resources/db/migration/V1__create_workflow_tables.sql`
 - Create: `src/test/resources/db/migration/V1__create_workflow_tables.sql`
 
-Oracle-compatible DDL for production, H2-compatible (Oracle mode) for tests. Indexes per Section 9 of the design doc. Two tables only.
+Oracle-compatible DDL for both production and tests (Oracle Free container via Testcontainers). Indexes per Section 9 of the design doc. Two tables only.
 
 - [ ] **Step 1: Create Oracle migration**
 
@@ -207,9 +207,9 @@ Two tables: `workflow`, `task`. No activity table — activity metadata lives in
 - Index: `(status, claimed_at)` — SKIP LOCKED claiming
 - NO trigger or foreign key that propagates writes to the workflow table on task status change
 
-- [ ] **Step 2: Create H2 test migration**
+- [ ] **Step 2: Test migration**
 
-`src/test/resources/db/migration/V1__create_workflow_tables.sql` — same schema adapted for H2 Oracle mode syntax.
+`src/test/resources/db/migration/V1__create_workflow_tables.sql` — same Oracle DDL used for both production and test (Oracle Free container eliminates dialect gaps).
 
 - [ ] **Step 3: Commit**
 
@@ -244,7 +244,7 @@ Suspend methods:
 - `suspend fun claimNext(workerId: String, limit: Int): List<Task>` (SELECT FOR UPDATE SKIP LOCKED)
 - `suspend fun updateStatus(id: String, newStatus: TaskStatus, resultJson: String?)`
 - `suspend fun countNonTerminal(workflowId: String, sequenceNumber: Int): Int` (lock-free probe — plain SELECT COUNT, no FOR UPDATE)
-- `suspend fun countFailed(workflowId: String, sequenceNumber: Int): Int` (count FAILED + DEAD_LETTER)
+- `suspend fun countFailed(workflowId: String, sequenceNumber: Int): Int` (count FAILED tasks)
 - `suspend fun countTotal(workflowId: String, sequenceNumber: Int): Int`
 - `suspend fun findByWorkflowAndSequence(workflowId: String, sequenceNumber: Int): List<Task>`
 - `suspend fun findExpired(now: Instant): List<Task>` (deadline reaper query)
@@ -258,7 +258,7 @@ Handle methods (for barrier transaction):
 
 - [ ] **Step 3: Write repository tests**
 
-`engine/RepositoryTest.kt` — H2-backed JDBI tests (no Quarkus, just raw `Jdbi.create()`):
+`engine/RepositoryTest.kt` — Oracle Free container JDBI tests (Testcontainers, raw `Jdbi.create()`):
 - WorkflowRepository: insert + findById, CAS advance success, CAS version mismatch → false, CAS sequence mismatch → false, findStuck with grace period
 - TaskRepository: insertBatch + countNonTerminal, countFailed, claimNext via SKIP LOCKED, updateStatus
 
@@ -333,9 +333,9 @@ Within the same transaction handle:
     - SCATTER or LINEAR phase: insert 1 task with appropriate handler key and payload
     - PARALLEL phase: read scatter task's `result` column from preceding SCATTER sequence, deserialize payloads, bulk-insert N sub-tasks via `taskRepo.insertBatchWithHandle()`
 
-- [ ] **Step 3: Write barrier unit tests (H2-backed)**
+- [ ] **Step 3: Write barrier unit tests (Oracle Free container)**
 
-`engine/BarrierServiceTest.kt` — raw JDBI + H2, no Quarkus. Tests per Section 11 of design doc:
+`engine/BarrierServiceTest.kt` — raw JDBI + Oracle Free container (Testcontainers). Tests per Section 11 of design doc:
 1. Single task completes (linear): probe=0, CAS wins, next sequence's tasks inserted
 2. Last-of-many completes (parallel phase): Nth task, probe=0, CAS wins, exactly one phase transition
 3. Not-last task: probe > 0, no CAS attempted, only task update committed
@@ -502,7 +502,7 @@ All sub-tasks terminal, simulate worker OOM by rolling back the CAS transaction.
 ## Out of Scope (Deferred)
 
 Per spec Section 11, tests #21-22:
-- **Load test:** 10,000 concurrent task completions — requires Oracle environment, not feasible with H2.
+- **Load test:** 10,000 concurrent task completions — requires production-scale Oracle environment, not feasible with Oracle Free container.
 - **Chaos test:** Random worker kills during workflow — requires Kubernetes cluster.
 
 These are production validation tests, not development-phase tests.
