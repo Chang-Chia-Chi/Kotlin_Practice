@@ -58,6 +58,23 @@ class WorkflowRepository(private val jdbi: Jdbi) {
 
     // ── Handle methods (for barrier transaction) ──
 
+    fun insertWithHandle(handle: Handle, run: WorkflowRun) {
+        handle.createUpdate(
+            """
+            INSERT INTO workflow (id, definition, current_sequence, version, status, created_at, updated_at)
+            VALUES (:id, :definition, :currentSequence, :version, :status, :createdAt, :updatedAt)
+            """,
+        )
+            .bind("id", run.id)
+            .bind("definition", run.definitionJson)
+            .bind("currentSequence", run.currentSequence)
+            .bind("version", run.version)
+            .bind("status", run.status.name)
+            .bind("createdAt", LocalDateTime.ofInstant(run.createdAt, ZoneOffset.UTC))
+            .bind("updatedAt", LocalDateTime.ofInstant(run.updatedAt, ZoneOffset.UTC))
+            .execute()
+    }
+
     fun findByIdWithHandle(handle: Handle, id: String): WorkflowRun? =
         handle.createQuery("SELECT * FROM workflow WHERE id = :id")
             .bind("id", id)
@@ -94,25 +111,6 @@ class WorkflowRepository(private val jdbi: Jdbi) {
             .bind("now", LocalDateTime.now(ZoneOffset.UTC))
             .execute()
         return count == 1
-    }
-
-    // ── Private helpers ──
-
-    fun insertWithHandle(handle: Handle, run: WorkflowRun) {
-        handle.createUpdate(
-            """
-            INSERT INTO workflow (id, definition, current_sequence, version, status, created_at, updated_at)
-            VALUES (:id, :definition, :currentSequence, :version, :status, :createdAt, :updatedAt)
-            """,
-        )
-            .bind("id", run.id)
-            .bind("definition", run.definitionJson)
-            .bind("currentSequence", run.currentSequence)
-            .bind("version", run.version)
-            .bind("status", run.status.name)
-            .bind("createdAt", LocalDateTime.ofInstant(run.createdAt, ZoneOffset.UTC))
-            .bind("updatedAt", LocalDateTime.ofInstant(run.updatedAt, ZoneOffset.UTC))
-            .execute()
     }
 
     private fun mapWorkflowRow(row: Map<String, Any?>): WorkflowRun {

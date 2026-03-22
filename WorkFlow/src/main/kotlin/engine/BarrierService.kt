@@ -115,32 +115,13 @@ class BarrierService(
 
         when (seqInfo.phaseType) {
             PhaseType.LINEAR, PhaseType.SCATTER -> {
-                val handlerKey = when (seqInfo.phaseType) {
-                    PhaseType.SCATTER -> seqInfo.activity.fanOut!!.transition
-                    else -> seqInfo.activity.transition
-                }
-                val retries = when (seqInfo.phaseType) {
-                    PhaseType.SCATTER -> seqInfo.activity.fanOut!!.retries
-                    else -> seqInfo.activity.retries
-                }
-                val deadline = when (seqInfo.phaseType) {
-                    PhaseType.SCATTER -> seqInfo.activity.fanOut!!.deadline
-                    else -> seqInfo.activity.deadline
-                }
-                val task = Task(
-                    id = UUID.randomUUID().toString(),
+                val task = createTaskForActivity(
                     workflowId = workflowId,
                     sequenceNumber = sequenceNumber,
-                    status = TaskStatus.PENDING,
-                    handlerKey = handlerKey,
-                    payloadJson = payload,
-                    resultJson = null,
-                    claimedBy = null,
-                    claimedAt = null,
-                    completedAt = null,
-                    retryCount = 0,
-                    maxRetries = retries,
-                    deadlineAt = now.plus(deadline),
+                    activity = seqInfo.activity,
+                    isScatter = seqInfo.phaseType == PhaseType.SCATTER,
+                    payload = payload,
+                    now = now,
                 )
                 taskRepo.insertBatchWithHandle(handle, listOf(task))
             }
