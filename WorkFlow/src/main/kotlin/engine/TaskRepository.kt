@@ -164,6 +164,16 @@ class TaskRepository(private val jdbi: Jdbi) {
             .mapTo(Int::class.java)
             .one()
 
+    fun findByWorkflowAndSequenceWithHandle(handle: Handle, workflowId: String, sequenceNumber: Int): List<Task> =
+        handle.createQuery(
+            "SELECT * FROM task WHERE workflow_id = :workflowId AND sequence_number = :seq",
+        )
+            .bind("workflowId", workflowId)
+            .bind("seq", sequenceNumber)
+            .mapToMap()
+            .list()
+            .map(::mapTaskRow)
+
     fun insertBatchWithHandle(handle: Handle, tasks: List<Task>) {
         if (tasks.isEmpty()) return
         val batch = handle.prepareBatch(

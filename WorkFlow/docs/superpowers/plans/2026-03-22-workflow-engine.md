@@ -71,9 +71,9 @@ Pure data layer. No dependencies on engine or JDBI. All types are immutable.
 - `JoinDefinition` data class: `policy: JoinPolicy`, `transition: String?`
 - `FanOutDefinition` data class: `transition: String`, `retries: Int`, `failurePolicy: FailurePolicy`, `deadline: Duration`, `join: JoinDefinition`
 - `ActivityDefinition` data class: `name: String`, `transition: String`, `retries: Int`, `failurePolicy: FailurePolicy`, `deadline: Duration`, `fanOut: FanOutDefinition?`
-- `PhaseType` enum: `LINEAR`, `SCATTER`, `PARALLEL` — describes the type of runtime sequence
-- `SequenceMetadata` data class: `phaseType: PhaseType`, `handlerKey: String`, `retries: Int`, `deadline: Duration`, `failurePolicy: FailurePolicy`, `joinDefinition: JoinDefinition?`, `activityIndex: Int` — pre-computed sequence expansion metadata
-- `WorkflowDefinition` data class: `activities: List<ActivityDefinition>` — validate non-empty. Include `fun expandSequences(): List<SequenceMetadata>` that pre-computes the expansion (linear → 1 seq, fan-out → 2 seqs: scatter + parallel)
+- `WorkflowDefinition` data class: `activities: List<ActivityDefinition>` — validate non-empty.
+
+**Design decision (2026-03-22):** `PhaseType`, `SequenceMetadata`, and `expandSequences()` are NOT created as public DSL types. Sequence metadata (phase type, handler key, policies) is computed inline by consumers (BarrierService, WorkflowEngine, Sweeper) from the `ActivityDefinition` list. This avoids a premature abstraction — if multiple consumers duplicate the logic, extract then.
 
 Default values: `retries = 0`, `failurePolicy = ABORT`, `deadline = Duration.ofMinutes(30)`, `fanOut = null`.
 
@@ -269,32 +269,37 @@ Handle methods (for barrier transaction):
 ## Task 7: Handler Interface & Registry
 
 **Files:**
-- Create: `src/main/kotlin/worker/TransitionHandler.kt`
-- Create: `src/main/kotlin/worker/HandlerRegistry.kt`
+- Create: `src/main/kotlin/worker/TransitionHandler.kt` ✅ (implemented as Task 8 prerequisite)
+- Create: `src/main/kotlin/worker/HandlerRegistry.kt` ✅ (minimal map-based, implemented as Task 8 prerequisite)
 - Test: `src/test/kotlin/worker/HandlerRegistryTest.kt`
 
-CDI-based handler resolution by dot-separated transition key.
+**Design decision (2026-03-22):** Minimal `TransitionHandler` interface + `HandlerInput`/`HandlerOutput` data classes + map-based `HandlerRegistry` implemented as Task 8 prerequisites. CDI qualifier-based discovery (`@TransitionKey`, `Instance.select()`) deferred to when WorkerLoop (Task 10) needs it. Current `HandlerRegistry` uses `ConcurrentHashMap` with `register()`/`resolve()` — sufficient for barrier tests and production bootstrap.
 
-- [ ] **Step 1: Create handler interface and qualifier**
+- [x] **Step 1: Create handler interface** (implemented as Task 8 prereq)
 
 `worker/TransitionHandler.kt`:
-- `@Qualifier @Retention(RUNTIME) annotation class TransitionKey(val value: String)`
 - `interface TransitionHandler { suspend fun execute(input: HandlerInput): HandlerOutput }`
 - `data class HandlerInput(val taskId: String, val workflowId: String, val sequenceNumber: Int, val payload: String?)`
-- `data class HandlerOutput(val result: String?)` — scatter handlers serialize their payload list as the result string; the barrier interprets it based on phase type
+- `data class HandlerOutput(val result: String?)`
 
-- [ ] **Step 2: Create HandlerRegistry**
+- [x] **Step 2: Create HandlerRegistry** (implemented as Task 8 prereq)
 
 `worker/HandlerRegistry.kt`:
-- `@ApplicationScoped class HandlerRegistry(private val handlers: Instance<TransitionHandler>)`
-- `fun resolve(transitionKey: String): TransitionHandler` — use CDI `Instance.select()` with `TransitionKey` qualifier. Throw `IllegalStateException` if not found.
+- `@ApplicationScoped class HandlerRegistry` with `ConcurrentHashMap<String, TransitionHandler>`
+- `fun resolve(key: String): TransitionHandler` — throws `IllegalStateException` if not found
+- `fun register(key: String, handler: TransitionHandler)` — for test and manual registration
 
 - [ ] **Step 3: Write tests**
 
-- Register a test handler with `@TransitionKey("test.echo")`, verify resolution
+- Register a test handler, verify resolution
 - Verify unknown key throws
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 4: Add CDI qualifier support** (deferred)
+
+- `@Qualifier @Retention(RUNTIME) annotation class TransitionKey(val value: String)`
+- CDI `Instance.select()` integration for automatic handler discovery
+
+- [ ] **Step 5: Commit**
 
 ---
 
@@ -315,7 +320,7 @@ Logic (within one `inTransactionSuspend`):
 1. **Self-update:** `taskRepo.updateStatusWithHandle(handle, taskId, result, resultJson)`
 2. **Lock-free probe:** `taskRepo.countNonTerminalWithHandle(handle, workflowId, sequenceNumber)` — plain SELECT COUNT, no FOR UPDATE
 3. If count > 0: commit and return (other tasks in flight)
-4. **Evaluate outcome:** Load workflow run, deserialize `WorkflowDefinition`, look up sequence metadata. Count `failed` via `taskRepo.countFailedWithHandle()` and `total` via `taskRepo.countTotalWithHandle()`. Apply policy based on phase type:
+4. **Evaluate outcome:** Load workflow run, deserialize `WorkflowDefinition`, compute sequence metadata inline from `ActivityDefinition` list (map sequence number → activity index + phase type). Count `failed` via `taskRepo.countFailedWithHandle()` and `total` via `taskRepo.countTotalWithHandle()`. Apply policy based on computed phase type:
     - PARALLEL phase → evaluate `JoinPolicy` from the `JoinDefinition`
     - LINEAR / SCATTER phase → evaluate `FailurePolicy` from the `ActivityDefinition`
     - Determine target outcome: success or failure
