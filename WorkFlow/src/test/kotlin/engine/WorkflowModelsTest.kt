@@ -30,9 +30,9 @@ class WorkflowModelsTest {
     // ── TaskStatus enum ─────────────────────────────────────────────────
 
     @Test
-    fun `TaskStatus contains exactly five values`() {
+    fun `TaskStatus contains exactly four values`() {
         assertEquals(
-            setOf("PENDING", "PROCESSING", "COMPLETED", "FAILED", "DEAD_LETTER"),
+            setOf("PENDING", "PROCESSING", "COMPLETED", "FAILED"),
             TaskStatus.entries.map { it.name }.toSet(),
         )
     }
@@ -45,8 +45,8 @@ class WorkflowModelsTest {
     }
 
     @Test
-    fun `isTerminal returns true only for COMPLETED, FAILED, and DEAD_LETTER`() {
-        val expectedTerminal = setOf(TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.DEAD_LETTER)
+    fun `isTerminal returns true only for COMPLETED and FAILED`() {
+        val expectedTerminal = setOf(TaskStatus.COMPLETED, TaskStatus.FAILED)
         TaskStatus.entries.forEach { status ->
             assertEquals(
                 status in expectedTerminal,
@@ -74,11 +74,6 @@ class WorkflowModelsTest {
     @Test
     fun `FAILED is terminal`() {
         assertEquals(true, TaskStatus.FAILED.isTerminal)
-    }
-
-    @Test
-    fun `DEAD_LETTER is terminal`() {
-        assertEquals(true, TaskStatus.DEAD_LETTER.isTerminal)
     }
 
     // ── WorkflowRun data class ──────────────────────────────────────────

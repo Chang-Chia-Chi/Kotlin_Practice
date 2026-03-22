@@ -32,7 +32,7 @@ CREATE TABLE task (
     deadline_at      TIMESTAMP,
     CONSTRAINT pk_task PRIMARY KEY (id),
     CONSTRAINT fk_task_workflow FOREIGN KEY (workflow_id) REFERENCES workflow (id),
-    CONSTRAINT chk_task_status CHECK (status IN ('PENDING', 'PROCESSING', 'COMPLETED', 'FAILED', 'DEAD_LETTER'))
+    CONSTRAINT chk_task_status CHECK (status IN ('PENDING', 'PROCESSING', 'COMPLETED', 'FAILED'))
 );
 
 -- Lock-free probe: count non-terminal tasks per workflow sequence (index-only scan)

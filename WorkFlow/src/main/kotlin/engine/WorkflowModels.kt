@@ -5,9 +5,9 @@ import java.time.Instant
 enum class WorkflowStatus { RUNNING, COMPLETED, FAILED }
 
 enum class TaskStatus {
-    PENDING, PROCESSING, COMPLETED, FAILED, DEAD_LETTER;
+    PENDING, PROCESSING, COMPLETED, FAILED;
 
-    val isTerminal: Boolean get() = this == COMPLETED || this == FAILED || this == DEAD_LETTER
+    val isTerminal: Boolean get() = this == COMPLETED || this == FAILED
 }
 
 data class WorkflowRun(

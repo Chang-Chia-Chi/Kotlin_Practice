@@ -1,5 +1,5 @@
 -- Two-table workflow engine schema: workflow (CAS target) + task (worker-claimed units).
--- H2 Oracle-mode compatible — same DDL as production Oracle migration.
+-- No activity table — activity metadata lives in the serialized WorkflowDefinition CLOB.
 
 CREATE TABLE workflow (
     id               VARCHAR2(36)   NOT NULL,
@@ -31,7 +31,7 @@ CREATE TABLE task (
     deadline_at      TIMESTAMP,
     CONSTRAINT pk_task PRIMARY KEY (id),
     CONSTRAINT fk_task_workflow FOREIGN KEY (workflow_id) REFERENCES workflow (id),
-    CONSTRAINT chk_task_status CHECK (status IN ('PENDING', 'PROCESSING', 'COMPLETED', 'FAILED', 'DEAD_LETTER'))
+    CONSTRAINT chk_task_status CHECK (status IN ('PENDING', 'PROCESSING', 'COMPLETED', 'FAILED'))
 );
 
 CREATE INDEX idx_task_wf_seq_status ON task (workflow_id, sequence_number, status);
