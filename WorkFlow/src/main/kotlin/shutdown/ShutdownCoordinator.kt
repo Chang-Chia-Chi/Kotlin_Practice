@@ -46,9 +46,9 @@ class ShutdownCoordinator(
     fun onShutdown(
         @Observes ev: ShutdownEvent,
     ) = runBlocking {
-        val shutdownStart = Instant.now()
+        if (!_state.compareAndSet(ShutdownState.RUNNING, ShutdownState.DRAINING)) return@runBlocking
 
-        _state.set(ShutdownState.DRAINING)
+        val shutdownStart = Instant.now()
         log.info("Shutdown initiated")
 
         // Run participants grouped by order (lower first, concurrent within group)

@@ -15,6 +15,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.job
@@ -85,7 +87,11 @@ class LeaderManager(
         log.info("Shutting down leader election")
         _isLeader.value = false
         scope.coroutineContext.job.cancelAndJoin()
-        releaseLeaseExplicitly()
+        withTimeoutOrNull(shutdownTimeout.toMillis()) {
+            withContext(Dispatchers.IO) {
+                releaseLeaseExplicitly()
+            }
+        } ?: log.warn("Lease release timed out — new leader will acquire after lease expiry")
     }
 
     private fun releaseLeaseExplicitly() {
@@ -107,7 +113,6 @@ class LeaderManager(
         } catch (e: Exception) {
             log.warnf(e, "Failed to release lease explicitly — new leader will acquire after lease expiry")
         }
-        _isLeader.value = false
     }
 
     // ── Election loop ──────────────────────────────────────────────────
