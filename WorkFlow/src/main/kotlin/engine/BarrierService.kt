@@ -7,10 +7,7 @@ import com.workflow.dsl.FailurePolicy
 import com.workflow.dsl.JoinPolicy
 import com.workflow.dsl.WorkflowDefinition
 import com.workflow.extension.inTransactionSuspend
-import com.workflow.worker.HandlerInput
-import com.workflow.worker.HandlerRegistry
 import jakarta.enterprise.context.ApplicationScoped
-import kotlinx.coroutines.runBlocking
 import org.jdbi.v3.core.Handle
 import org.jdbi.v3.core.Jdbi
 import org.slf4j.LoggerFactory
@@ -23,7 +20,6 @@ class BarrierService(
     private val jdbi: Jdbi,
     private val workflowRepo: WorkflowRepository,
     private val taskRepo: TaskRepository,
-    private val handlerRegistry: HandlerRegistry,
     private val objectMapper: ObjectMapper,
 ) {
 
@@ -68,7 +64,7 @@ class BarrierService(
             }
 
             // 6. Advance workflow (CAS winner only)
-            advanceWorkflow(handle, workflow, sequenceMap, seqInfo, outcomeSuccess)
+            advanceWorkflow(handle, workflow, sequenceMap, seqInfo, outcomeSuccess, resultJson)
         }
     }
 
@@ -78,6 +74,7 @@ class BarrierService(
         sequenceMap: Map<Int, SequenceInfo>,
         currentSeqInfo: SequenceInfo,
         outcomeSuccess: Boolean,
+        payload: String?,
     ) {
         val currentSeq = workflow.currentSequence
         val nextSeq = currentSeq + 1
@@ -95,39 +92,6 @@ class BarrierService(
             }
         }
 
-        // Execute join handler inline for PARALLEL phase with join transition
-        if (effectiveSuccess && currentSeqInfo.phaseType == PhaseType.PARALLEL) {
-            val joinTransition = currentSeqInfo.activity.fanOut!!.join.transition
-            if (joinTransition != null) {
-                try {
-                    val handler = handlerRegistry.resolve(joinTransition)
-                    // runBlocking is required here: JDBI HandleCallback is a plain
-                    // Java SAM (not a suspend lambda), so we cannot call suspend
-                    // functions directly. We are already on Dispatchers.IO via
-                    // inTransactionSuspend, so this does not block an event loop.
-                    runBlocking {
-                        handler.execute(
-                            HandlerInput(
-                                taskId = "",
-                                workflowId = workflow.id,
-                                sequenceNumber = currentSeq,
-                                payload = null,
-                            ),
-                        )
-                    }
-                } catch (e: Exception) {
-                    log.warn("Join handler '{}' failed for workflow {}: {}", joinTransition, workflow.id, e.message)
-                    when (currentSeqInfo.activity.failurePolicy) {
-                        FailurePolicy.ABORT -> {
-                            workflowRepo.updateStatusWithHandle(handle, workflow.id, WorkflowStatus.FAILED)
-                            return
-                        }
-                        FailurePolicy.BEST_EFFORT -> { /* continue to next sequence */ }
-                    }
-                }
-            }
-        }
-
         // Check if this was the last sequence
         if (!sequenceMap.containsKey(nextSeq)) {
             workflowRepo.updateStatusWithHandle(handle, workflow.id, WorkflowStatus.COMPLETED)
@@ -136,7 +100,8 @@ class BarrierService(
 
         // Insert tasks for next sequence
         val nextSeqInfo = sequenceMap[nextSeq]!!
-        insertTasksForSequence(handle, workflow.id, nextSeq, nextSeqInfo, currentSeqInfo)
+        val nextPayload = if (currentSeqInfo.phaseType == PhaseType.PARALLEL) null else payload
+        insertTasksForSequence(handle, workflow.id, nextSeq, nextSeqInfo, nextPayload)
     }
 
     private fun insertTasksForSequence(
@@ -144,7 +109,7 @@ class BarrierService(
         workflowId: String,
         sequenceNumber: Int,
         seqInfo: SequenceInfo,
-        previousSeqInfo: SequenceInfo,
+        payload: String?,
     ) {
         val now = Instant.now().truncatedTo(ChronoUnit.MICROS)
 
@@ -168,7 +133,7 @@ class BarrierService(
                     sequenceNumber = sequenceNumber,
                     status = TaskStatus.PENDING,
                     handlerKey = handlerKey,
-                    payloadJson = null,
+                    payloadJson = payload,
                     resultJson = null,
                     claimedBy = null,
                     claimedAt = null,
@@ -254,7 +219,7 @@ class BarrierService(
     ): Boolean = when (phaseType) {
         PhaseType.LINEAR, PhaseType.SCATTER -> failedCount == 0
         PhaseType.PARALLEL -> {
-            val joinPolicy = activity.fanOut!!.join.policy
+            val joinPolicy = activity.fanOut!!.joinPolicy
             val succeededCount = totalCount - failedCount
             when (joinPolicy) {
                 is JoinPolicy.All -> failedCount == 0

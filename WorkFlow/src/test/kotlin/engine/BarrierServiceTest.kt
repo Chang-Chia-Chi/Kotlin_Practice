@@ -6,13 +6,8 @@ import com.fasterxml.jackson.module.kotlin.KotlinModule
 import com.workflow.dsl.ActivityDefinition
 import com.workflow.dsl.FailurePolicy
 import com.workflow.dsl.FanOutDefinition
-import com.workflow.dsl.JoinDefinition
 import com.workflow.dsl.JoinPolicy
 import com.workflow.dsl.WorkflowDefinition
-import com.workflow.worker.HandlerInput
-import com.workflow.worker.HandlerOutput
-import com.workflow.worker.HandlerRegistry
-import com.workflow.worker.TransitionHandler
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.test.runTest
@@ -28,7 +23,6 @@ import java.time.LocalDateTime
 import java.time.ZoneOffset
 import java.time.temporal.ChronoUnit
 import java.util.UUID
-import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
@@ -39,7 +33,6 @@ class BarrierServiceTest {
     private lateinit var jdbi: Jdbi
     private lateinit var workflowRepo: WorkflowRepository
     private lateinit var taskRepo: TaskRepository
-    private lateinit var handlerRegistry: HandlerRegistry
     private val objectMapper = ObjectMapper()
         .registerModule(KotlinModule.Builder().build())
         .registerModule(JavaTimeModule())
@@ -50,8 +43,7 @@ class BarrierServiceTest {
         jdbi = OracleTestContainer.jdbi
         workflowRepo = WorkflowRepository(jdbi)
         taskRepo = TaskRepository(jdbi)
-        handlerRegistry = HandlerRegistry()
-        barrier = BarrierService(jdbi, workflowRepo, taskRepo, handlerRegistry, objectMapper)
+        barrier = BarrierService(jdbi, workflowRepo, taskRepo, objectMapper)
     }
 
     @AfterEach
@@ -240,15 +232,6 @@ class BarrierServiceTest {
         ),
     )
 
-    /** Three linear activities: seq 1 → seq 2 → seq 3. */
-    private fun threeStepLinearDef() = WorkflowDefinition(
-        activities = listOf(
-            ActivityDefinition(name = "step1", transition = "step1.handler"),
-            ActivityDefinition(name = "step2", transition = "step2.handler"),
-            ActivityDefinition(name = "step3", transition = "step3.handler"),
-        ),
-    )
-
     /**
      * Single fan-out activity: seq 1 (SCATTER) → seq 2 (PARALLEL).
      *
@@ -258,7 +241,6 @@ class BarrierServiceTest {
      */
     private fun fanOutDef(
         joinPolicy: JoinPolicy = JoinPolicy.All,
-        joinTransition: String? = null,
         failurePolicy: FailurePolicy = FailurePolicy.ABORT,
         fanOutFailurePolicy: FailurePolicy = FailurePolicy.ABORT,
     ) = WorkflowDefinition(
@@ -270,7 +252,7 @@ class BarrierServiceTest {
                 fanOut = FanOutDefinition(
                     transition = "scatter.handler",
                     failurePolicy = fanOutFailurePolicy,
-                    join = JoinDefinition(policy = joinPolicy, transition = joinTransition),
+                    joinPolicy = joinPolicy,
                 ),
             ),
         ),
@@ -286,7 +268,6 @@ class BarrierServiceTest {
      */
     private fun fanOutThenLinearDef(
         joinPolicy: JoinPolicy = JoinPolicy.All,
-        joinTransition: String? = null,
         fanOutFailurePolicy: FailurePolicy = FailurePolicy.ABORT,
     ) = WorkflowDefinition(
         activities = listOf(
@@ -296,7 +277,7 @@ class BarrierServiceTest {
                 fanOut = FanOutDefinition(
                     transition = "scatter.handler",
                     failurePolicy = fanOutFailurePolicy,
-                    join = JoinDefinition(policy = joinPolicy, transition = joinTransition),
+                    joinPolicy = joinPolicy,
                 ),
             ),
             ActivityDefinition(name = "final-step", transition = "final.handler"),
@@ -689,23 +670,25 @@ class BarrierServiceTest {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // Test 10: Pure barrier (join with no transition) → advances immediately
+    // Test 10: PARALLEL→LINEAR payload propagation (next task payload is null)
     // ═══════════════════════════════════════════════════════════════════════
 
     @Nested
-    inner class PureBarrier {
+    inner class ParallelToLinearPayload {
 
         @Test
-        fun `pure barrier with no join transition - workflow advances immediately after all parallel tasks complete`() = runTest {
-            // Fan-out with join that has NO transition (pure barrier)
-            val def = fanOutThenLinearDef(joinPolicy = JoinPolicy.All, joinTransition = null)
+        fun `parallel phase completes - next linear task has null payload`() = runTest {
+            val def = fanOutThenLinearDef(joinPolicy = JoinPolicy.All)
             val wfId = randomId()
             val wf = makeWorkflow(id = wfId, definition = def, currentSequence = 2, version = 1)
             insertWorkflowDirect(wf)
 
             val lastTaskId = randomId()
             insertTaskDirect(
-                makeTask(workflowId = wfId, sequenceNumber = 2, status = TaskStatus.COMPLETED, handlerKey = "parallel.handler"),
+                makeTask(
+                    workflowId = wfId, sequenceNumber = 2, status = TaskStatus.COMPLETED,
+                    handlerKey = "parallel.handler", resultJson = """{"r":"one"}""",
+                ),
             )
             insertTaskDirect(
                 makeTask(
@@ -714,61 +697,111 @@ class BarrierServiceTest {
                 ),
             )
 
-            barrier.onTaskCompleted(lastTaskId, wfId, 2, TaskStatus.COMPLETED, null)
+            barrier.onTaskCompleted(lastTaskId, wfId, 2, TaskStatus.COMPLETED, """{"r":"two"}""")
 
-            // No join handler needed — workflow advances directly to seq 3
+            // Workflow advances to seq 3
             val updatedWf = readWorkflowDirect(wfId)
             assertNotNull(updatedWf)
             assertEquals(3, (updatedWf["CURRENT_SEQUENCE"] as Number).toInt())
             assertEquals("RUNNING", updatedWf["STATUS"])
-            assertEquals(1, countTasksDirect(wfId, 3))
+
+            // Next linear task has null payload (multiple parallel results, no single payload to propagate)
+            val seq3Tasks = readTasksDirect(wfId, 3)
+            assertEquals(1, seq3Tasks.size)
+            assertEquals("final.handler", seq3Tasks[0]["HANDLER_KEY"])
+            val payload = seq3Tasks[0]["PAYLOAD"]
+            assertTrue(payload == null || (payload is Clob && payload.characterStream.readText().isBlank()),
+                "PARALLEL→LINEAR: next task payload should be null")
         }
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // Test 11: Join with inline transition — handler executed
+    // Test 11: Payload propagation — LINEAR→LINEAR
     // ═══════════════════════════════════════════════════════════════════════
 
     @Nested
-    inner class JoinWithInlineTransition {
+    inner class LinearToLinearPayload {
 
         @Test
-        fun `join with transition - CAS wins, join handler is executed inline, workflow advances`() = runTest {
-            val joinHandlerCalls = AtomicInteger(0)
-            handlerRegistry.register("join.aggregate", object : TransitionHandler {
-                override suspend fun execute(input: HandlerInput): HandlerOutput {
-                    joinHandlerCalls.incrementAndGet()
-                    return HandlerOutput(result = """{"aggregated":true}""")
-                }
-            })
-
-            val def = fanOutThenLinearDef(joinPolicy = JoinPolicy.All, joinTransition = "join.aggregate")
+        fun `linear task completes with resultJson - next task receives it as payloadJson`() = runTest {
+            val def = twoStepLinearDef()
             val wfId = randomId()
-            val wf = makeWorkflow(id = wfId, definition = def, currentSequence = 2, version = 1)
+            val taskId = randomId()
+            val wf = makeWorkflow(id = wfId, definition = def, currentSequence = 1, version = 0)
             insertWorkflowDirect(wf)
-
-            val lastTaskId = randomId()
-            insertTaskDirect(
-                makeTask(workflowId = wfId, sequenceNumber = 2, status = TaskStatus.COMPLETED, handlerKey = "parallel.handler"),
-            )
             insertTaskDirect(
                 makeTask(
-                    id = lastTaskId, workflowId = wfId, sequenceNumber = 2,
-                    status = TaskStatus.PROCESSING, handlerKey = "parallel.handler",
+                    id = taskId, workflowId = wfId, sequenceNumber = 1,
+                    status = TaskStatus.PROCESSING, handlerKey = "step1.handler",
                 ),
             )
 
-            barrier.onTaskCompleted(lastTaskId, wfId, 2, TaskStatus.COMPLETED, null)
+            val resultPayload = """{"output":"step1-result","count":42}"""
+            barrier.onTaskCompleted(taskId, wfId, 1, TaskStatus.COMPLETED, resultPayload)
 
-            // Join handler was invoked exactly once
-            assertEquals(1, joinHandlerCalls.get())
-
-            // Workflow advanced to seq 3
+            // Workflow advanced to sequence 2
             val updatedWf = readWorkflowDirect(wfId)
             assertNotNull(updatedWf)
-            assertEquals(3, (updatedWf["CURRENT_SEQUENCE"] as Number).toInt())
-            assertEquals("RUNNING", updatedWf["STATUS"])
-            assertEquals(1, countTasksDirect(wfId, 3))
+            assertEquals(2, (updatedWf["CURRENT_SEQUENCE"] as Number).toInt())
+
+            // Next task's payload should be the previous task's resultJson
+            val seq2Tasks = readTasksDirect(wfId, 2)
+            assertEquals(1, seq2Tasks.size)
+            val payload = seq2Tasks[0]["PAYLOAD"]
+            val payloadStr = if (payload is Clob) payload.characterStream.readText() else payload as String
+            assertEquals(resultPayload, payloadStr)
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Test 11b: Payload propagation — LINEAR→SCATTER
+    // ═══════════════════════════════════════════════════════════════════════
+
+    @Nested
+    inner class LinearToScatterPayload {
+
+        @Test
+        fun `linear task completes with resultJson - scatter task receives it as payloadJson`() = runTest {
+            // LINEAR step → fan-out (SCATTER → PARALLEL)
+            val def = WorkflowDefinition(
+                activities = listOf(
+                    ActivityDefinition(name = "step1", transition = "step1.handler"),
+                    ActivityDefinition(
+                        name = "scatter-activity",
+                        transition = "parallel.handler",
+                        fanOut = FanOutDefinition(
+                            transition = "scatter.handler",
+                            joinPolicy = JoinPolicy.All,
+                        ),
+                    ),
+                ),
+            )
+            val wfId = randomId()
+            val taskId = randomId()
+            val wf = makeWorkflow(id = wfId, definition = def, currentSequence = 1, version = 0)
+            insertWorkflowDirect(wf)
+            insertTaskDirect(
+                makeTask(
+                    id = taskId, workflowId = wfId, sequenceNumber = 1,
+                    status = TaskStatus.PROCESSING, handlerKey = "step1.handler",
+                ),
+            )
+
+            val resultPayload = """{"users":["alice","bob"]}"""
+            barrier.onTaskCompleted(taskId, wfId, 1, TaskStatus.COMPLETED, resultPayload)
+
+            // Workflow advanced to sequence 2 (SCATTER phase)
+            val updatedWf = readWorkflowDirect(wfId)
+            assertNotNull(updatedWf)
+            assertEquals(2, (updatedWf["CURRENT_SEQUENCE"] as Number).toInt())
+
+            // Scatter task's payload should be the previous task's resultJson
+            val seq2Tasks = readTasksDirect(wfId, 2)
+            assertEquals(1, seq2Tasks.size)
+            assertEquals("scatter.handler", seq2Tasks[0]["HANDLER_KEY"])
+            val payload = seq2Tasks[0]["PAYLOAD"]
+            val payloadStr = if (payload is Clob) payload.characterStream.readText() else payload as String
+            assertEquals(resultPayload, payloadStr)
         }
     }
 
