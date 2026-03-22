@@ -98,7 +98,7 @@ class WorkflowRepository(private val jdbi: Jdbi) {
 
     // ── Private helpers ──
 
-    private fun insertWithHandle(handle: Handle, run: WorkflowRun) {
+    fun insertWithHandle(handle: Handle, run: WorkflowRun) {
         handle.createUpdate(
             """
             INSERT INTO workflow (id, definition, current_sequence, version, status, created_at, updated_at)
