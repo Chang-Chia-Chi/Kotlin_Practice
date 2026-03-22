@@ -15,6 +15,7 @@ import org.junit.jupiter.api.BeforeAll
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.TestInstance
 import java.time.Duration
+import java.time.Instant
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
@@ -79,12 +80,15 @@ class WorkflowEngineTest {
         assertEquals(1, tasks.size)
 
         val task = tasks.single()
+        assertEquals(runId, task.workflowId)
         assertEquals(TaskStatus.PENDING, task.status)
         assertEquals("order.validate", task.handlerKey)
         assertEquals(payload, task.payloadJson)
         assertEquals(3, task.maxRetries)
         assertEquals(0, task.retryCount)
         assertNotNull(task.deadlineAt)
+        assertTrue(task.deadlineAt!! > Instant.now().plusSeconds(500), "deadline should be ~10 min from now")
+        assertTrue(task.deadlineAt!! < Instant.now().plusSeconds(660), "deadline should not be too far in the future")
         assertNull(task.claimedBy)
         assertNull(task.claimedAt)
         assertNull(task.completedAt)
@@ -127,6 +131,7 @@ class WorkflowEngineTest {
         assertEquals(1, tasks.size)
 
         val scatterTask = tasks.single()
+        assertEquals(runId, scatterTask.workflowId)
         assertEquals(TaskStatus.PENDING, scatterTask.status)
         // Scatter task uses fanOut.transition, fanOut.retries, fanOut.deadline
         assertEquals("batch.scatter", scatterTask.handlerKey)
@@ -134,6 +139,8 @@ class WorkflowEngineTest {
         assertEquals(5, scatterTask.maxRetries)
         assertEquals(0, scatterTask.retryCount)
         assertNotNull(scatterTask.deadlineAt)
+        assertTrue(scatterTask.deadlineAt!! > Instant.now().plusSeconds(3500), "deadline should be ~60 min from now")
+        assertTrue(scatterTask.deadlineAt!! < Instant.now().plusSeconds(3660), "deadline should not be too far in the future")
         assertNull(scatterTask.claimedBy)
         assertNull(scatterTask.claimedAt)
         assertNull(scatterTask.completedAt)
