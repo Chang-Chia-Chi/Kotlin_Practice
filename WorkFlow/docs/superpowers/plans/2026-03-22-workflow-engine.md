@@ -131,10 +131,10 @@ Quarkus `@ConfigMapping` interface. Unblocks LeaderManager and ShutdownCoordinat
 
 `config/FrameworkConfig.kt` — package `com.workflow.config`:
 - `@ConfigMapping(prefix = "framework")` interface with named nested interfaces matching existing usage:
-  - `WorkerConfig`: `id(): String` (default: hostname), `pollInterval(): Duration`, `concurrency(): Int`
-  - `LeaderElectionConfig`: `namespace(): String`, `leaseName(): String`, `leaseDuration(): Duration`, `renewDeadline(): Duration`, `retryPeriod(): Duration`
-  - `ShutdownConfig`: `globalTimeout(): Duration`, `leaderTeardownTimeout(): Duration`
-  - `SweeperConfig`: `interval(): Duration`, `gracePeriod(): Duration`
+    - `WorkerConfig`: `id(): String` (default: hostname), `pollInterval(): Duration`, `concurrency(): Int`
+    - `LeaderElectionConfig`: `namespace(): String`, `leaseName(): String`, `leaseDuration(): Duration`, `renewDeadline(): Duration`, `retryPeriod(): Duration`
+    - `ShutdownConfig`: `globalTimeout(): Duration`, `leaderTeardownTimeout(): Duration`
+    - `SweeperConfig`: `interval(): Duration`, `gracePeriod(): Duration`
 - Methods: `worker(): WorkerConfig`, `leaderElection(): LeaderElectionConfig`, `shutdown(): ShutdownConfig`, `sweeper(): SweeperConfig`
 
 Use `@WithDefault` annotations for sensible defaults.
@@ -351,7 +351,7 @@ Within the same transaction handle:
 9. FailurePolicy BEST_EFFORT on failed phase → workflow advances to next sequence
 10. PARALLEL→LINEAR payload propagation: parallel phase completes, next linear task has null payload (multiple parallel results, no single value to propagate)
 11. LINEAR→LINEAR payload propagation: completing task's `resultJson` becomes next task's `payloadJson`
-11b. LINEAR→SCATTER payload propagation: completing task's `resultJson` becomes scatter task's `payloadJson`
+    11b. LINEAR→SCATTER payload propagation: completing task's `resultJson` becomes scatter task's `payloadJson`
 12. Scatter → parallel handoff: scatter task completes with payloads in `result` → CAS winner reads result, inserts correct number of sub-tasks at next sequence
 
 - [ ] **Step 4: Commit**
@@ -370,12 +370,12 @@ Entry point for starting workflows. No activity instance creation — workflow c
 
 `engine/WorkflowEngine.kt` — `@ApplicationScoped`:
 - `suspend fun startWorkflow(definition: WorkflowDefinition, initialPayload: String? = null): String` — returns workflow run ID
-  - Serialize definition to JSON
-  - Pre-compute sequence expansion from definition (linear → 1 seq, fan-out → 2 seqs: scatter + parallel)
-  - Insert `WorkflowRun` (RUNNING, `current_sequence = 1`)
-  - Insert initial task(s) for sequence 1
-  - Return run ID
-  - All in one transaction
+    - Serialize definition to JSON
+    - Pre-compute sequence expansion from definition (linear → 1 seq, fan-out → 2 seqs: scatter + parallel)
+    - Insert `WorkflowRun` (RUNNING, `current_sequence = 1`)
+    - Insert initial task(s) for sequence 1
+    - Return run ID
+    - All in one transaction
 
 - [ ] **Step 2: Write tests**
 

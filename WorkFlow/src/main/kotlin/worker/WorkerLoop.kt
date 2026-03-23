@@ -5,6 +5,8 @@ import com.workflow.engine.BarrierService
 import com.workflow.engine.Task
 import com.workflow.engine.TaskRepository
 import com.workflow.engine.TaskStatus
+import com.workflow.extension.indefinitelyRepeat
+import com.workflow.extension.takeUntilSignal
 import com.workflow.extension.unorderedMapAsync
 import com.workflow.shutdown.ShutdownParticipant
 import com.workflow.shutdown.ShutdownSignal
@@ -16,16 +18,15 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.flow
-import kotlinx.coroutines.flow.onCompletion
-import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.plus
 import org.slf4j.LoggerFactory
 import java.time.Duration
 import java.time.Instant
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -42,24 +43,26 @@ const val SHUTDOWN_ORDER_WORKER = 10
  *
  * **Pipeline:**
  * ```
- * claimFlow(pollIntervalMs)          // updates _lastPollTimestamp each iteration
- *   .unorderedMapAsync(concurrency) { processTask(it) }
- *   .onCompletion { log }
+ * indefinitelyRepeat(Unit)
+ *   .takeUntilSignal(stopChannel)
+ *   .unorderedMapAsync(concurrency) { pollAndProcess(workerId, pollInterval, 1) }
  *   .collect {}
  * ```
  *
  * **Lifecycle:**
  * - Production: auto-starts via [onStart] observing [StartupEvent].
  * - Tests: call [start] with a test-controlled [CoroutineScope].
- * - Shutdown: [shutdown] sets [_accepting] to false; [claimFlow] checks
- *   this flag each iteration and returns, terminating the pipeline
- *   naturally. [shutdown] then joins the active job, waiting for
- *   in-flight [processTask] calls to complete.
+ * - Shutdown: [shutdown] sets [_accepting] to false, signals [stopChannel],
+ *   and cancels the scope; cancellation wakes any delay(), children exit,
+ *   join returns.
  *
  * **Error contract:** The [processTask] transform catches ALL non-cancellation
  * exceptions from handler execution and reports them to
  * [BarrierService.onTaskCompleted] with [TaskStatus.FAILED] BEFORE returning.
- * No exception escapes the transform.
+ * No exception escapes the transform. If the barrier call itself fails for a
+ * COMPLETED task, the failure is routed through the retry/failure path
+ * ([handleTaskFailure]), which may trigger [TaskRepository.resetForRetry] if
+ * retries remain, or [reportTaskFailed] if exhausted.
  *
  * **Retry semantics:** On handler failure, if `task.retryCount < task.maxRetries`,
  * the task is atomically reset to PENDING via [TaskRepository.resetForRetry]
@@ -81,11 +84,12 @@ class WorkerLoop(
 ) : ShutdownParticipant {
     private val log = LoggerFactory.getLogger(WorkerLoop::class.java)
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-
     private val _accepting = AtomicBoolean(true)
     private val _inFlightTasks = AtomicInteger(0)
+    private val _inFlightIds: MutableSet<String> = ConcurrentHashMap.newKeySet()
     val inFlightTasks: Int get() = _inFlightTasks.get()
+
+    private val stopChannel = Channel<Unit>(Channel.RENDEZVOUS)
 
     @Volatile
     private var _lastPollTimestamp: Instant = Instant.now()
@@ -97,6 +101,7 @@ class WorkerLoop(
     fun onStart(
         @Observes ev: StartupEvent,
     ) {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         start(scope)
     }
 
@@ -106,25 +111,26 @@ class WorkerLoop(
         val concurrency = workerConfig.concurrency()
         val pollInterval = workerConfig.pollInterval()
 
-        val childJob = SupervisorJob(scope.coroutineContext.job)
-        activeJob = childJob
-        val workerScope = scope + childJob + ShutdownSignal { !_accepting.get() }
+        _accepting.set(true)
 
-        // Main poll loop
-        workerScope.launch {
-            claimFlow(pollInterval.toMillis())
-                .unorderedMapAsync(concurrency) { task -> processTask(task) }
-                .onCompletion { log.info("Worker loop terminated") }
-                .collect {}
-        }
-
-        // Deadline reaper
-        workerScope.launch {
-            reapExpiredTasks(pollInterval)
-        }
+        val job =
+            scope.launch(ShutdownSignal { !_accepting.get() }) {
+                coroutineScope {
+                    launch {
+                        indefinitelyRepeat(Unit)
+                            .takeUntilSignal(stopChannel)
+                            .unorderedMapAsync(concurrency) { pollAndProcess(workerId, pollInterval, 1) }
+                            .collect {}
+                    }
+                    launch {
+                        reapExpiredTasks(pollInterval)
+                    }
+                }
+            }
+        activeJob = job
 
         log.info("Worker loop started: workerId={}, concurrency={}, pollInterval={}", workerId, concurrency, pollInterval)
-        return childJob
+        return job
     }
 
     override val shutdownOrder: Int = SHUTDOWN_ORDER_WORKER
@@ -134,68 +140,80 @@ class WorkerLoop(
     override suspend fun shutdown() {
         log.info("Worker loop shutting down")
         _accepting.set(false)
-        activeJob?.join()
-        releaseUnclaimedTasks()
+        stopChannel.trySend(Unit)
+        activeJob?.cancelAndJoin()
         log.info("Worker loop shutdown complete")
     }
 
-    /**
-     * Single-threaded claim flow. Emits claimed [Task] items; handles
-     * backoff on empty poll or transient errors. Terminates when
-     * [_accepting] is set to false.
-     */
-    private fun claimFlow(pollIntervalMs: Long): Flow<Task> = flow {
-        val workerId = config.worker().id()
-        while (_accepting.get()) {
+    private suspend fun pollAndProcess(
+        workerId: String,
+        pollInterval: Duration,
+        batchSize: Int,
+    ) {
+        val tasks =
             try {
-                val tasks = taskRepo.claimNext(workerId, 1)
-                _lastPollTimestamp = Instant.now()
-                if (tasks.isNotEmpty()) {
-                    for (task in tasks) {
-                        emit(task)
-                    }
-                } else {
-                    delay(pollIntervalMs)
-                }
+                taskRepo.claimNext(workerId, batchSize)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                log.error("Error in claim loop", e)
-                delay(pollIntervalMs)
+                log.error("Failed to claim tasks", e)
+                delay(pollInterval.toMillis())
+                return
             }
+        _lastPollTimestamp = Instant.now()
+
+        if (tasks.isEmpty()) {
+            delay(pollInterval.toMillis())
+            return
         }
-        log.info("Shutdown signaled, stopping claim loop")
+
+        for (task in tasks) {
+            processTask(task)
+        }
     }
 
     private suspend fun processTask(task: Task) {
         _inFlightTasks.incrementAndGet()
+        _inFlightIds.add(task.id)
         try {
             val handler = handlerRegistry.resolve(task.handlerKey)
-            val input = HandlerInput(
-                taskId = task.id,
-                workflowId = task.workflowId,
-                sequenceNumber = task.sequenceNumber,
-                payload = task.payloadJson,
-            )
+            val input =
+                HandlerInput(
+                    taskId = task.id,
+                    workflowId = task.workflowId,
+                    sequenceNumber = task.sequenceNumber,
+                    payload = task.payloadJson,
+                )
             val output = handler.execute(input)
 
-            barrierService.onTaskCompleted(
-                taskId = task.id,
-                workflowId = task.workflowId,
-                sequenceNumber = task.sequenceNumber,
-                result = TaskStatus.COMPLETED,
-                resultJson = output.result,
-            )
+            try {
+                barrierService.onTaskCompleted(
+                    taskId = task.id,
+                    workflowId = task.workflowId,
+                    sequenceNumber = task.sequenceNumber,
+                    result = TaskStatus.COMPLETED,
+                    resultJson = output.result,
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                log.error("Barrier failed for COMPLETED task {}, falling through to failure path", task.id, e)
+                handleTaskFailure(task, e)
+            }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             handleTaskFailure(task, e)
         } finally {
+            _inFlightIds.remove(task.id)
             _inFlightTasks.decrementAndGet()
         }
     }
 
-    private suspend fun handleTaskFailure(task: Task, cause: Exception) {
+    private suspend fun handleTaskFailure(
+        task: Task,
+        cause: Exception,
+    ) {
         log.warn(
             "Task {} failed (retry {}/{}): {}",
             task.id,
@@ -239,7 +257,7 @@ class WorkerLoop(
             delay(pollInterval.toMillis())
             try {
                 val expired = taskRepo.findExpired(Instant.now())
-                for (task in expired) {
+                for (task in expired.filter { it.id !in _inFlightIds }) {
                     log.warn("Reaping expired task {} (deadline={})", task.id, task.deadlineAt)
                     reportTaskFailed(task)
                 }
@@ -248,18 +266,6 @@ class WorkerLoop(
             } catch (e: Exception) {
                 log.error("Deadline reaper failed", e)
             }
-        }
-    }
-
-    private suspend fun releaseUnclaimedTasks() {
-        val workerId = config.worker().id()
-        try {
-            val released = taskRepo.releaseByWorker(workerId)
-            if (released > 0) {
-                log.info("Released {} task(s) back to PENDING", released)
-            }
-        } catch (e: Exception) {
-            log.error("Failed to release tasks — deadline reaper will recover them", e)
         }
     }
 }

@@ -6,7 +6,10 @@ import com.workflow.engine.Task
 import com.workflow.engine.TaskRepository
 import com.workflow.engine.TaskStatus
 import com.workflow.shutdown.ShutdownSignal
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runTest
@@ -71,7 +74,6 @@ class WorkerLoopTest {
 
         kotlinx.coroutines.runBlocking {
             whenever(taskRepo.findExpired(any())).thenReturn(emptyList())
-            whenever(taskRepo.releaseByWorker(any())).thenReturn(0)
         }
 
         workerLoop = WorkerLoop(config, taskRepo, handlerRegistry, barrierService)
@@ -473,24 +475,12 @@ class WorkerLoopTest {
         }
 
         @Test
-        fun `releaseByWorker called after shutdown drain`() = runTest {
-            whenever(taskRepo.releaseByWorker(eq(workerId))).thenReturn(0)
-
+        fun `shutdown completes without hanging when never started`() = runTest {
             // activeJob is null (never started), so join() is skipped
             workerLoop.shutdown()
 
-            verify(taskRepo).releaseByWorker(eq(workerId))
-        }
-
-        @Test
-        fun `releaseByWorker throws - shutdown still completes`() = runTest {
-            whenever(taskRepo.releaseByWorker(eq(workerId)))
-                .thenThrow(RuntimeException("DB unavailable during release"))
-
-            // shutdown must not throw even when releaseByWorker fails
-            workerLoop.shutdown()
-
-            verify(taskRepo).releaseByWorker(eq(workerId))
+            // No crash, no hang — shutdown is safe even without start()
+            verify(taskRepo, never()).claimNext(any(), any())
         }
     }
 
@@ -718,6 +708,25 @@ class WorkerLoopTest {
         }
 
         @Test
+        fun `barrier throws on COMPLETED with retries remaining - resetForRetry called`() = runTest {
+            val task = makeTask(retryCount = 0, maxRetries = 3)
+            val handler = mock<TransitionHandler>()
+
+            whenever(taskRepo.claimNext(eq(workerId), eq(1)))
+                .thenReturn(listOf(task))
+                .thenReturn(emptyList())
+            whenever(handlerRegistry.resolve(task.handlerKey)).thenReturn(handler)
+            whenever(handler.execute(any())).thenReturn(HandlerOutput("success"))
+            doThrow(RuntimeException("barrier failed on COMPLETED"))
+                .whenever(barrierService).onTaskCompleted(any(), any(), any(), any(), any())
+
+            startAndAdvance(this)
+
+            verify(handler).execute(any())
+            verify(taskRepo).resetForRetry(eq(task.id), eq(1))
+        }
+
+        @Test
         fun `findExpired throws - reaper continues on next cycle`() = runTest {
             val expiredTask = makeTask(
                 status = TaskStatus.PROCESSING,
@@ -740,6 +749,197 @@ class WorkerLoopTest {
                 eq(TaskStatus.FAILED),
                 eq(null),
             )
+        }
+
+        @Test
+        fun `barrier throws during reportTaskFailed on retries exhausted - loop continues`() = runTest {
+            val task1 = makeTask(id = "t1", handlerKey = "step.one", retryCount = 3, maxRetries = 3)
+            val task2 = makeTask(id = "t2", handlerKey = "step.two")
+            val handler1 = mock<TransitionHandler>()
+            val handler2 = mock<TransitionHandler>()
+
+            whenever(taskRepo.claimNext(eq(workerId), eq(1)))
+                .thenReturn(listOf(task1))
+                .thenReturn(listOf(task2))
+                .thenReturn(emptyList())
+            whenever(handlerRegistry.resolve("step.one")).thenReturn(handler1)
+            whenever(handlerRegistry.resolve("step.two")).thenReturn(handler2)
+            whenever(handler1.execute(any())).thenThrow(RuntimeException("permanent failure"))
+            whenever(handler2.execute(any())).thenReturn(HandlerOutput("r2"))
+
+            // barrier throws on FAILED report for task1, succeeds for task2
+            doAnswer { invocation ->
+                val status = invocation.getArgument<TaskStatus>(3)
+                if (status == TaskStatus.FAILED) throw RuntimeException("barrier blew up on FAILED")
+                Unit
+            }
+                .doAnswer { }
+                .whenever(barrierService).onTaskCompleted(any(), any(), any(), any(), any())
+
+            startAndAdvance(this, ticks = 4)
+
+            verify(handler1).execute(any())
+            verify(handler2).execute(any())
+        }
+    }
+
+    // ── M. Concurrent Polling (Spec #9) ────────────────────────────────
+
+    @Nested
+    inner class ConcurrentPolling {
+
+        @Test
+        fun `concurrency controls parallel polling slots, each claiming one task`() = runTest {
+            val slots = 4
+            val batchWorkerConfig = mock<FrameworkConfig.WorkerConfig>().also {
+                whenever(it.pollInterval()).thenReturn(pollInterval)
+                whenever(it.concurrency()).thenReturn(slots)
+                whenever(it.id()).thenReturn(workerId)
+            }
+            val batchConfig = mock<FrameworkConfig>().also {
+                whenever(it.worker()).thenReturn(batchWorkerConfig)
+                whenever(it.shutdown()).thenReturn(shutdownConfig)
+            }
+            val batchLoop = WorkerLoop(batchConfig, taskRepo, handlerRegistry, barrierService)
+
+            whenever(taskRepo.claimNext(eq(workerId), eq(1)))
+                .thenReturn(emptyList())
+
+            val job = batchLoop.start(this)
+            advanceTimeBy(pollInterval.toMillis() * 2)
+            job.cancel()
+
+            // Each concurrent slot calls claimNext with batchSize=1
+            verify(taskRepo, org.mockito.Mockito.atLeastOnce()).claimNext(eq(workerId), eq(1))
+        }
+    }
+
+    // ── N. Reaper Excludes In-Flight (Spec #8) ──────────────────────────
+
+    @Nested
+    inner class ReaperExcludesInFlight {
+
+        @Test
+        fun `reaper does not fail task that is still in-flight`() = runTest {
+            val task = makeTask(
+                id = "T1",
+                workflowId = "wf-inflight",
+                deadlineAt = Instant.now().minus(5, ChronoUnit.MINUTES),
+            )
+            val handler = object : TransitionHandler {
+                override suspend fun execute(input: HandlerInput): HandlerOutput {
+                    delay(5000)
+                    return HandlerOutput("""{"done":true}""")
+                }
+            }
+
+            whenever(taskRepo.claimNext(eq(workerId), eq(1)))
+                .thenReturn(listOf(task))
+                .thenReturn(emptyList())
+            whenever(handlerRegistry.resolve(task.handlerKey)).thenReturn(handler)
+            // Reaper sees T1 as expired while handler is still running
+            whenever(taskRepo.findExpired(any()))
+                .thenReturn(listOf(task))
+                .thenReturn(emptyList())
+
+            val job = workerLoop.start(this)
+
+            // Advance past first poll (claims T1) and first reaper tick
+            advanceTimeBy(pollInterval.toMillis() * 2)
+
+            // At this point handler is still in delay(5000), reaper has fired.
+            // Reaper should NOT mark T1 as FAILED because it is in-flight.
+            val failedCallsBeforeHandlerDone = org.mockito.Mockito.mockingDetails(barrierService)
+                .invocations
+                .count {
+                    it.method.name == "onTaskCompleted" &&
+                        it.arguments[0] == "T1" &&
+                        it.arguments[3] == TaskStatus.FAILED
+                }
+            assertEquals(0, failedCallsBeforeHandlerDone, "Reaper must not FAIL in-flight task T1")
+
+            // Now advance past handler delay so it completes
+            advanceTimeBy(5000)
+
+            verify(barrierService).onTaskCompleted(
+                eq("T1"), eq("wf-inflight"), eq(task.sequenceNumber),
+                eq(TaskStatus.COMPLETED), eq("""{"done":true}"""),
+            )
+
+            job.cancel()
+        }
+    }
+
+    // ── O. Shutdown Lifecycle (Spec #10) ─────────────────────────────────
+
+    @Nested
+    inner class ShutdownLifecycle {
+
+        @Test
+        fun `start then process then shutdown - full lifecycle`() = runTest {
+            val task = makeTask()
+            val handler = mock<TransitionHandler>()
+
+            whenever(taskRepo.claimNext(eq(workerId), eq(1)))
+                .thenReturn(listOf(task))
+                .thenReturn(emptyList())
+            whenever(handlerRegistry.resolve(task.handlerKey)).thenReturn(handler)
+            whenever(handler.execute(any())).thenReturn(HandlerOutput("done"))
+
+            // 1. Start
+            workerLoop.start(this)
+
+            // 2. Process at least one task
+            advanceTimeBy(pollInterval.toMillis() * 2)
+            verify(handler).execute(any())
+
+            // 3. Shutdown (launch in separate coroutine to avoid blocking)
+            val shutdownJob = launch { workerLoop.shutdown() }
+            advanceTimeBy(pollInterval.toMillis())
+            shutdownJob.join()
+
+            // 4. shutdown() returned (no hang)
+            assertTrue(shutdownJob.isCompleted, "shutdown() should complete without hanging")
+
+            // 5. No further claimNext calls
+            val callsBeforeExtra = org.mockito.Mockito.mockingDetails(taskRepo)
+                .invocations
+                .count { it.method.name == "claimNext" }
+            advanceTimeBy(pollInterval.toMillis() * 3)
+            val callsAfterExtra = org.mockito.Mockito.mockingDetails(taskRepo)
+                .invocations
+                .count { it.method.name == "claimNext" }
+            assertEquals(callsBeforeExtra, callsAfterExtra, "No further claimNext after shutdown")
+
+            // 6. inFlightTasks == 0
+            assertEquals(0, workerLoop.inFlightTasks, "inFlightTasks should be 0 after shutdown")
+        }
+    }
+
+    // ── P. CancellationException Propagation (Spec #18) ─────────────────
+
+    @Nested
+    inner class CancellationExceptionPropagation {
+
+        @Test
+        fun `CancellationException from handler propagates - no retry, no barrier`() = runTest {
+            val task = makeTask(retryCount = 0, maxRetries = 3)
+            val handler = object : TransitionHandler {
+                override suspend fun execute(input: HandlerInput): HandlerOutput {
+                    throw CancellationException("task cancelled")
+                }
+            }
+
+            whenever(taskRepo.claimNext(eq(workerId), eq(1)))
+                .thenReturn(listOf(task))
+                .thenReturn(emptyList())
+            whenever(handlerRegistry.resolve(task.handlerKey)).thenReturn(handler)
+
+            startAndAdvance(this)
+
+            // CancellationException should NOT trigger retry or barrier
+            verify(taskRepo, never()).resetForRetry(any(), any())
+            verifyNoInteractions(barrierService)
         }
     }
 }
