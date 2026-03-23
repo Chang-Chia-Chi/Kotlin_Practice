@@ -11,6 +11,7 @@ import kotlinx.coroutines.test.runTest
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 class FlowExtensionTest {
@@ -88,18 +89,15 @@ class FlowExtensionTest {
     }
 
     @Test
-    fun `unorderedMapAsync exception in transform does not kill the flow`() = runTest {
-        val results = (1..5).asFlow()
-            .unorderedMapAsync(concurrency = 2) { value ->
-                if (value == 3) throw RuntimeException("bad element")
-                value
-            }
-            .toList()
-            .sorted()
-
-        // Element 3 was dropped due to exception; others should be present
-        assertTrue(results.containsAll(listOf(1, 2, 4, 5)))
-        assertTrue(3 !in results)
+    fun `unorderedMapAsync exception in transform propagates to collector`() = runTest {
+        assertFailsWith<RuntimeException>("bad element") {
+            (1..5).asFlow()
+                .unorderedMapAsync(concurrency = 2) { value ->
+                    if (value == 3) throw RuntimeException("bad element")
+                    value
+                }
+                .toList()
+        }
     }
 
     @Test
@@ -113,19 +111,16 @@ class FlowExtensionTest {
 
     @Test
     fun `unorderedMapAsync semaphore is released after exception`() = runTest {
-        // If semaphore isn't released on error, later elements would deadlock
-        val processedCount = AtomicInteger(0)
-
-        (1..5).asFlow()
-            .unorderedMapAsync(concurrency = 1) { value ->
-                if (value == 1) throw RuntimeException("fail early")
-                processedCount.incrementAndGet()
-                value
-            }
-            .toList()
-
-        // Elements 2-5 should still process since semaphore is released in finally
-        assertEquals(4, processedCount.get())
+        // Semaphore must be released in finally even when transform throws,
+        // so the flow can propagate the exception without deadlocking
+        assertFailsWith<RuntimeException>("fail early") {
+            (1..5).asFlow()
+                .unorderedMapAsync(concurrency = 1) { value ->
+                    if (value == 1) throw RuntimeException("fail early")
+                    value
+                }
+                .toList()
+        }
     }
 
     // -- C. takeUntilSignal ---------------------------------------------------
@@ -193,5 +188,25 @@ class FlowExtensionTest {
         assertTrue(collected.contains(1))
         assertTrue(collected.contains(2))
         assertTrue(collected.contains(3))
+    }
+
+    // -- D. Exception propagation (D5) ----------------------------------------
+
+    @Test
+    fun `unorderedMapAsync non-CancellationException propagates and cancels flow`() = runTest {
+        val upstream = flow {
+            emit(1)
+            emit(2)
+            emit(3)
+        }
+
+        assertFailsWith<RuntimeException>("expected boom") {
+            upstream
+                .unorderedMapAsync(concurrency = 1) { value ->
+                    if (value == 2) throw RuntimeException("expected boom")
+                    value
+                }
+                .toList()
+        }
     }
 }
