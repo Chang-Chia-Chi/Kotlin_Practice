@@ -68,6 +68,53 @@ class BarrierService(
         }
     }
 
+    /**
+     * Recover a stuck workflow detected by the [Sweeper].
+     *
+     * Same evaluate → CAS → advance logic as [onTaskCompleted], but without
+     * the self-update step (all tasks are already terminal). Re-reads the
+     * workflow and re-probes inside the transaction for TOCTOU safety.
+     */
+    internal suspend fun recoverStuckWorkflow(workflowId: String) {
+        jdbi.inTransactionSuspend<Unit, Exception> { handle ->
+            val workflow = workflowRepo.findByIdWithHandle(handle, workflowId)
+                ?: return@inTransactionSuspend
+            if (workflow.status != WorkflowStatus.RUNNING) return@inTransactionSuspend
+
+            val seq = workflow.currentSequence
+
+            // Re-probe: all tasks must be terminal (TOCTOU safety vs findStuck)
+            val nonTerminal = taskRepo.countNonTerminalWithHandle(handle, workflowId, seq)
+            if (nonTerminal > 0) return@inTransactionSuspend
+
+            val definition = objectMapper.readValue<WorkflowDefinition>(workflow.definitionJson)
+            val sequenceMap = buildSequenceMap(definition)
+            val seqInfo = sequenceMap[seq] ?: return@inTransactionSuspend
+
+            val failedCount = taskRepo.countFailedWithHandle(handle, workflowId, seq)
+            val totalCount = taskRepo.countTotalWithHandle(handle, workflowId, seq)
+            val outcomeSuccess = evaluateOutcome(seqInfo.phaseType, seqInfo.activity, failedCount, totalCount)
+
+            val nextSeq = seq + 1
+            val casWon = workflowRepo.casAdvanceWithHandle(handle, workflowId, seq, nextSeq, workflow.version)
+            if (!casWon) {
+                log.debug("Sweeper CAS lost for workflow {} at sequence {}", workflowId, seq)
+                return@inTransactionSuspend
+            }
+
+            // Resolve payload: LINEAR/SCATTER → completed task's result; PARALLEL → null
+            val payload = when (seqInfo.phaseType) {
+                PhaseType.LINEAR, PhaseType.SCATTER -> {
+                    taskRepo.findByWorkflowAndSequenceWithHandle(handle, workflowId, seq)
+                        .firstOrNull { it.status == TaskStatus.COMPLETED }?.resultJson
+                }
+                PhaseType.PARALLEL -> null
+            }
+
+            advanceWorkflow(handle, workflow, sequenceMap, seqInfo, outcomeSuccess, payload)
+        }
+    }
+
     private fun advanceWorkflow(
         handle: Handle,
         workflow: WorkflowRun,

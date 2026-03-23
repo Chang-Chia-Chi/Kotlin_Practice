@@ -144,6 +144,30 @@ class TaskRepository(
                 .map(::mapTaskRow)
         }
 
+    suspend fun resetStaleTasks(staleThreshold: Instant): Int =
+        jdbi.inTransactionSuspend<Int, Exception> { h: Handle ->
+            h
+                .createUpdate(
+                    """
+                UPDATE task
+                SET status = 'PENDING', claimed_by = NULL, claimed_at = NULL, retry_count = retry_count + 1
+                WHERE status = 'PROCESSING' AND claimed_at < :threshold AND retry_count < max_retries
+                """,
+                ).bind("threshold", LocalDateTime.ofInstant(staleThreshold, ZoneOffset.UTC))
+                .execute()
+        }
+
+    suspend fun findStale(staleThreshold: Instant): List<Task> =
+        jdbi.withHandleSuspend<List<Task>, Exception> { h: Handle ->
+            h
+                .createQuery(
+                    "SELECT * FROM task WHERE status = 'PROCESSING' AND claimed_at < :threshold",
+                ).bind("threshold", LocalDateTime.ofInstant(staleThreshold, ZoneOffset.UTC))
+                .mapToMap()
+                .list()
+                .map(::mapTaskRow)
+        }
+
     // ── Handle methods (for barrier transaction) ──
 
     fun updateStatusWithHandle(
