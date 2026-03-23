@@ -16,7 +16,7 @@ import io.quarkus.runtime.StartupEvent
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.runBlocking
 import org.awaitility.kotlin.await
 import org.awaitility.kotlin.untilAsserted
 import org.mockito.kotlin.any
@@ -33,12 +33,12 @@ import java.time.Duration
 import java.time.Instant
 import java.time.ZoneOffset
 import java.util.concurrent.TimeUnit
-import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class LeaderManagerTest {
@@ -181,7 +181,7 @@ class LeaderManagerTest {
     }
 
     @Test
-    fun `shutdown sets isActive false regardless of prior state`() = runTest {
+    fun `shutdown sets isActive false regardless of prior state`() = runBlocking<Unit> {
         val managerJob = SupervisorJob()
         val manager = createManager(
             detector = KubernetesDetector { false },
@@ -198,7 +198,7 @@ class LeaderManagerTest {
     // -- C. Shutdown ----------------------------------------------------------
 
     @Test
-    fun `shutdown cancels coroutine scope`() = runTest {
+    fun `shutdown cancels coroutine scope`() = runBlocking<Unit> {
         val managerJob = SupervisorJob()
         val manager = createManager(
             detector = KubernetesDetector { false },
@@ -212,7 +212,7 @@ class LeaderManagerTest {
     }
 
     @Test
-    fun `shutdown in non-k8s mode does not call kubernetesClient for lease release`() = runTest {
+    fun `shutdown in non-k8s mode does not call kubernetesClient for lease release`() = runBlocking<Unit> {
         val managerJob = SupervisorJob()
         val manager = createManager(
             detector = KubernetesDetector { false },
@@ -266,7 +266,7 @@ class LeaderManagerTest {
     }
 
     @Test
-    fun `is_leader gauge returns 1 when active and 0 when not`() = runTest {
+    fun `is_leader gauge returns 1 when active and 0 when not`() = runBlocking<Unit> {
         val managerJob = SupervisorJob()
         val manager = createManager(
             detector = KubernetesDetector { false },
@@ -472,7 +472,7 @@ class LeaderManagerTest {
     // == Section C: releaseLeaseExplicitly =====================================
 
     @Test
-    fun `shutdown in K8s mode releases lease by patching holderIdentity to null`() = runTest {
+    fun `shutdown in K8s mode releases lease by patching holderIdentity to null`() = runBlocking<Unit> {
         val leaseResource = mockLeasesApi()
         val existingLease = leaseWithTransitions(2, holderIdentity = "worker-1")
         whenever(leaseResource.get()).thenReturn(existingLease)
@@ -508,7 +508,7 @@ class LeaderManagerTest {
     }
 
     @Test
-    fun `shutdown in K8s mode with exception during release does not crash`() = runTest {
+    fun `shutdown in K8s mode with exception during release does not crash`() = runBlocking<Unit> {
         val leaseResource = mockLeasesApi()
         whenever(leaseResource.get()).thenReturn(leaseWithTransitions(1))
         whenever(shutdownConfig.leaderTeardownTimeout()).thenReturn(Duration.ofSeconds(10))
@@ -542,7 +542,7 @@ class LeaderManagerTest {
     }
 
     @Test
-    fun `shutdown in K8s mode with null lease does not attempt patch`() = runTest {
+    fun `shutdown in K8s mode with null lease does not attempt patch`() = runBlocking<Unit> {
         val leaseResource = mockLeasesApi()
         // First call for readLeaseTransitions returns a lease, then for release returns null
         whenever(leaseResource.get())
@@ -576,7 +576,7 @@ class LeaderManagerTest {
     }
 
     @Test
-    fun `shutdown in K8s mode skips lease release when holderIdentity does not match`() = runTest {
+    fun `shutdown in K8s mode skips lease release when holderIdentity does not match`() = runBlocking<Unit> {
         val leaseResource = mockLeasesApi()
         // First get() for readLeaseTransitions during onStartLeading
         // Second get() for releaseLeaseExplicitly during shutdown — holder is a different pod
@@ -613,7 +613,7 @@ class LeaderManagerTest {
     }
 
     @Test
-    fun `releaseLeaseExplicitly in non-K8s mode does not call kubernetesClient`() = runTest {
+    fun `releaseLeaseExplicitly in non-K8s mode does not call kubernetesClient`() = runBlocking<Unit> {
         val managerJob = SupervisorJob()
         val manager = createManager(
             detector = KubernetesDetector { false },
@@ -686,7 +686,7 @@ class LeaderManagerTest {
     }
 
     @Test
-    fun `scope cancellation exits election loop and sets isLeader false`() = runTest {
+    fun `scope cancellation exits election loop and sets isLeader false`() = runBlocking<Unit> {
         val leaseResource = mockLeasesApi()
         whenever(leaseResource.get()).thenReturn(leaseWithTransitions(1))
         whenever(shutdownConfig.leaderTeardownTimeout()).thenReturn(Duration.ofSeconds(10))
@@ -722,7 +722,7 @@ class LeaderManagerTest {
     // == Section E: shutdown (K8s mode) ========================================
 
     @Test
-    fun `shutdown in K8s mode sets isLeader false and cancels scope and releases lease`() = runTest {
+    fun `shutdown in K8s mode sets isLeader false and cancels scope and releases lease`() = runBlocking<Unit> {
         val leaseResource = mockLeasesApi()
         whenever(leaseResource.get()).thenReturn(leaseWithTransitions(2, holderIdentity = "worker-1"))
         whenever(leaseResource.patch(any<Lease>())).thenReturn(leaseWithTransitions(2))
@@ -874,7 +874,7 @@ class LeaderManagerTest {
     // == Additional: shutdown with successful (non-timeout) lease release =======
 
     @Test
-    fun `shutdown completes lease release within timeout`() = runTest {
+    fun `shutdown completes lease release within timeout`() = runBlocking<Unit> {
         val leaseResource = mockLeasesApi()
         val existingLease = leaseWithTransitions(3, holderIdentity = "worker-1")
         whenever(leaseResource.get()).thenReturn(existingLease)
