@@ -109,6 +109,19 @@ class TaskRepository(private val jdbi: Jdbi) {
         }
     }
 
+    suspend fun releaseByWorker(workerId: String): Int =
+        jdbi.inTransactionSuspend<Int, Exception> { h: Handle ->
+            h.createUpdate(
+                """
+                UPDATE task
+                SET status = 'PENDING', claimed_by = NULL, claimed_at = NULL
+                WHERE claimed_by = :workerId AND status = 'PROCESSING'
+                """,
+            )
+                .bind("workerId", workerId)
+                .execute()
+        }
+
     suspend fun findExpired(now: Instant): List<Task> =
         jdbi.withHandleSuspend<List<Task>, Exception> { h: Handle ->
             h.createQuery(
