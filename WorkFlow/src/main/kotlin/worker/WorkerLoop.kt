@@ -20,13 +20,11 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.slf4j.LoggerFactory
 import java.time.Duration
 import java.time.Instant
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -69,11 +67,6 @@ const val SHUTDOWN_ORDER_WORKER = 10
  * (clears claim, increments retry count). The barrier is NOT called -- the
  * task re-enters the claimable pool. If retries are exhausted, the task is
  * marked FAILED and the barrier fires.
- *
- * **Deadline reaper:** A separate coroutine runs alongside the main loop.
- * It polls [TaskRepository.findExpired] at [pollInterval] intervals,
- * marking expired PROCESSING tasks as FAILED via the barrier. Uses
- * cooperative shutdown via the same [_accepting] flag.
  */
 @ApplicationScoped
 class WorkerLoop(
@@ -86,7 +79,6 @@ class WorkerLoop(
 
     private val _accepting = AtomicBoolean(true)
     private val _inFlightTasks = AtomicInteger(0)
-    private val _inFlightIds: MutableSet<String> = ConcurrentHashMap.newKeySet()
     val inFlightTasks: Int get() = _inFlightTasks.get()
 
     private val stopChannel = Channel<Unit>(Channel.RENDEZVOUS)
@@ -115,17 +107,10 @@ class WorkerLoop(
 
         val job =
             scope.launch(ShutdownSignal { !_accepting.get() }) {
-                coroutineScope {
-                    launch {
-                        indefinitelyRepeat(Unit)
-                            .takeUntilSignal(stopChannel)
-                            .unorderedMapAsync(concurrency) { pollAndProcess(workerId, pollInterval, 1) }
-                            .collect {}
-                    }
-                    launch {
-                        reapExpiredTasks(pollInterval)
-                    }
-                }
+                indefinitelyRepeat(Unit)
+                    .takeUntilSignal(stopChannel)
+                    .unorderedMapAsync(concurrency) { pollAndProcess(workerId, pollInterval, 1) }
+                    .collect {}
             }
         activeJob = job
 
@@ -174,7 +159,6 @@ class WorkerLoop(
 
     private suspend fun processTask(task: Task) {
         _inFlightTasks.incrementAndGet()
-        _inFlightIds.add(task.id)
         try {
             val handler = handlerRegistry.resolve(task.handlerKey)
             val input =
@@ -205,7 +189,6 @@ class WorkerLoop(
         } catch (e: Exception) {
             handleTaskFailure(task, e)
         } finally {
-            _inFlightIds.remove(task.id)
             _inFlightTasks.decrementAndGet()
         }
     }
@@ -252,20 +235,4 @@ class WorkerLoop(
         }
     }
 
-    private suspend fun reapExpiredTasks(pollInterval: Duration) {
-        while (_accepting.get()) {
-            delay(pollInterval.toMillis())
-            try {
-                val expired = taskRepo.findExpired(Instant.now())
-                for (task in expired.filter { it.id !in _inFlightIds }) {
-                    log.warn("Reaping expired task {} (deadline={})", task.id, task.deadlineAt)
-                    reportTaskFailed(task)
-                }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                log.error("Deadline reaper failed", e)
-            }
-        }
-    }
 }

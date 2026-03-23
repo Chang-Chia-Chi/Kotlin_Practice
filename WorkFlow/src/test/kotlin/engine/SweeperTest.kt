@@ -1,0 +1,1112 @@
+package com.workflow.engine
+
+import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule
+import com.fasterxml.jackson.module.kotlin.KotlinModule
+import com.workflow.config.FrameworkConfig
+import com.workflow.dsl.ActivityDefinition
+import com.workflow.dsl.FailurePolicy
+import com.workflow.dsl.FanOutDefinition
+import com.workflow.dsl.JoinPolicy
+import com.workflow.dsl.WorkflowDefinition
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.test.runTest
+import org.jdbi.v3.core.Jdbi
+import org.junit.jupiter.api.AfterEach
+import org.junit.jupiter.api.BeforeAll
+import org.junit.jupiter.api.Nested
+import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.TestInstance
+import java.sql.Clob
+import java.time.Duration
+import java.time.Instant
+import java.time.LocalDateTime
+import java.time.ZoneOffset
+import java.time.temporal.ChronoUnit
+import java.util.UUID
+import kotlin.test.assertEquals
+import kotlin.test.assertNotNull
+
+@TestInstance(TestInstance.Lifecycle.PER_CLASS)
+class SweeperTest {
+
+    private lateinit var jdbi: Jdbi
+    private lateinit var workflowRepo: WorkflowRepository
+    private lateinit var taskRepo: TaskRepository
+    private val objectMapper = ObjectMapper()
+        .registerModule(KotlinModule.Builder().build())
+        .registerModule(JavaTimeModule())
+    private lateinit var barrier: BarrierService
+    private lateinit var sweeper: Sweeper
+
+    private val gracePeriod = Duration.ofMinutes(2)
+    private val staleTaskThreshold = Duration.ofMinutes(10)
+
+    /** Minimal FrameworkConfig stub returning fixed gracePeriod for sweeper. */
+    private val testConfig = object : FrameworkConfig {
+        override fun worker() = object : FrameworkConfig.WorkerConfig {
+            override fun id() = "test-worker"
+            override fun pollInterval(): Duration = Duration.ofSeconds(1)
+            override fun concurrency() = 4
+        }
+
+        override fun leaderElection() = object : FrameworkConfig.LeaderElectionConfig {
+            override fun namespace() = "default"
+            override fun leaseName() = "test-lease"
+            override fun leaseDuration(): Duration = Duration.ofSeconds(15)
+            override fun renewDeadline(): Duration = Duration.ofSeconds(10)
+            override fun retryPeriod(): Duration = Duration.ofSeconds(2)
+        }
+
+        override fun shutdown() = object : FrameworkConfig.ShutdownConfig {
+            override fun globalTimeout(): Duration = Duration.ofSeconds(30)
+            override fun leaderTeardownTimeout(): Duration = Duration.ofSeconds(10)
+        }
+
+        override fun sweeper() = object : FrameworkConfig.SweeperConfig {
+            override fun interval(): Duration = Duration.ofSeconds(30)
+            override fun gracePeriod(): Duration = gracePeriod
+            override fun staleTaskThreshold(): Duration = staleTaskThreshold
+        }
+    }
+
+    @BeforeAll
+    fun setup() {
+        jdbi = OracleTestContainer.jdbi
+        workflowRepo = WorkflowRepository(jdbi)
+        taskRepo = TaskRepository(jdbi)
+        barrier = BarrierService(jdbi, workflowRepo, taskRepo, objectMapper)
+        sweeper = Sweeper(workflowRepo, taskRepo, barrier, testConfig)
+    }
+
+    @AfterEach
+    fun cleanTables() {
+        jdbi.useHandle<Exception> { handle ->
+            handle.execute("DELETE FROM task")
+            handle.execute("DELETE FROM workflow")
+        }
+    }
+
+    // ── Helpers ──────────────────────────────────────────────────────────
+
+    private fun randomId(): String = UUID.randomUUID().toString()
+
+    private fun now(): Instant = Instant.now().truncatedTo(ChronoUnit.MILLIS)
+
+    private fun makeWorkflow(
+        id: String = randomId(),
+        definition: WorkflowDefinition,
+        currentSequence: Int = 1,
+        version: Int = 0,
+        status: WorkflowStatus = WorkflowStatus.RUNNING,
+        createdAt: Instant = now(),
+        updatedAt: Instant = now(),
+    ): WorkflowRun = WorkflowRun(
+        id = id,
+        definitionJson = objectMapper.writeValueAsString(definition),
+        currentSequence = currentSequence,
+        version = version,
+        status = status,
+        createdAt = createdAt,
+        updatedAt = updatedAt,
+    )
+
+    private fun makeTask(
+        id: String = randomId(),
+        workflowId: String,
+        sequenceNumber: Int = 1,
+        status: TaskStatus = TaskStatus.PENDING,
+        handlerKey: String = "test.handler",
+        payloadJson: String? = null,
+        resultJson: String? = null,
+        claimedBy: String? = null,
+        claimedAt: Instant? = null,
+        completedAt: Instant? = null,
+        retryCount: Int = 0,
+        maxRetries: Int = 0,
+        deadlineAt: Instant? = null,
+    ): Task = Task(
+        id = id,
+        workflowId = workflowId,
+        sequenceNumber = sequenceNumber,
+        status = status,
+        handlerKey = handlerKey,
+        payloadJson = payloadJson,
+        resultJson = resultJson,
+        claimedBy = claimedBy,
+        claimedAt = claimedAt,
+        completedAt = completedAt,
+        retryCount = retryCount,
+        maxRetries = maxRetries,
+        deadlineAt = deadlineAt,
+    )
+
+    /** Insert a workflow directly via SQL (independent of repo under test). */
+    private fun insertWorkflowDirect(run: WorkflowRun) {
+        jdbi.useHandle<Exception> { handle ->
+            handle.createUpdate(
+                """INSERT INTO workflow (id, definition, current_sequence, version, status, created_at, updated_at)
+                   VALUES (:id, :definition, :currentSequence, :version, :status, :createdAt, :updatedAt)""",
+            )
+                .bind("id", run.id)
+                .bind("definition", run.definitionJson)
+                .bind("currentSequence", run.currentSequence)
+                .bind("version", run.version)
+                .bind("status", run.status.name)
+                .bind("createdAt", LocalDateTime.ofInstant(run.createdAt, ZoneOffset.UTC))
+                .bind("updatedAt", LocalDateTime.ofInstant(run.updatedAt, ZoneOffset.UTC))
+                .execute()
+        }
+    }
+
+    /** Insert a task directly via SQL (independent of repo under test). */
+    private fun insertTaskDirect(task: Task) {
+        jdbi.useHandle<Exception> { handle ->
+            val stmt = handle.createUpdate(
+                """INSERT INTO task (id, workflow_id, sequence_number, status, handler_key, payload, result,
+                   claimed_by, claimed_at, completed_at, retry_count, max_retries, deadline_at)
+                   VALUES (:id, :workflowId, :sequenceNumber, :status, :handlerKey, :payload, :result,
+                   :claimedBy, :claimedAt, :completedAt, :retryCount, :maxRetries, :deadlineAt)""",
+            )
+                .bind("id", task.id)
+                .bind("workflowId", task.workflowId)
+                .bind("sequenceNumber", task.sequenceNumber)
+                .bind("status", task.status.name)
+                .bind("handlerKey", task.handlerKey)
+                .bind("retryCount", task.retryCount)
+                .bind("maxRetries", task.maxRetries)
+
+            fun bindStringOrNull(name: String, value: String?) =
+                if (value != null) stmt.bind(name, value) else stmt.bindNull(name, java.sql.Types.VARCHAR)
+
+            fun bindTimestampOrNull(name: String, value: Instant?) =
+                if (value != null) stmt.bind(name, LocalDateTime.ofInstant(value, ZoneOffset.UTC))
+                else stmt.bindNull(name, java.sql.Types.TIMESTAMP)
+
+            bindStringOrNull("payload", task.payloadJson)
+            bindStringOrNull("result", task.resultJson)
+            bindStringOrNull("claimedBy", task.claimedBy)
+            bindTimestampOrNull("claimedAt", task.claimedAt)
+            bindTimestampOrNull("completedAt", task.completedAt)
+            bindTimestampOrNull("deadlineAt", task.deadlineAt)
+
+            stmt.execute()
+        }
+    }
+
+    /** Read a workflow row directly via SQL for assertion. */
+    private fun readWorkflowDirect(id: String): Map<String, Any?>? {
+        return jdbi.withHandle<Map<String, Any?>?, Exception> { handle ->
+            handle.createQuery("SELECT * FROM workflow WHERE id = :id")
+                .bind("id", id)
+                .mapToMap()
+                .findOne()
+                .map { raw ->
+                    val ci = java.util.TreeMap<String, Any?>(String.CASE_INSENSITIVE_ORDER)
+                    raw.forEach { (k, v) -> ci[k] = if (v is Clob) v.characterStream.readText() else v }
+                    ci
+                }
+                .orElse(null)
+        }
+    }
+
+    /** Count tasks at a given workflow + sequence directly via SQL. */
+    private fun countTasksDirect(workflowId: String, sequenceNumber: Int): Int {
+        return jdbi.withHandle<Int, Exception> { handle ->
+            handle.createQuery(
+                "SELECT COUNT(*) FROM task WHERE workflow_id = :wfId AND sequence_number = :seq",
+            )
+                .bind("wfId", workflowId)
+                .bind("seq", sequenceNumber)
+                .mapTo(Int::class.java)
+                .one()
+        }
+    }
+
+    /** Count tasks at a given workflow + sequence + status directly via SQL. */
+    private fun countTasksWithStatusDirect(workflowId: String, sequenceNumber: Int, status: TaskStatus): Int {
+        return jdbi.withHandle<Int, Exception> { handle ->
+            handle.createQuery(
+                "SELECT COUNT(*) FROM task WHERE workflow_id = :wfId AND sequence_number = :seq AND status = :status",
+            )
+                .bind("wfId", workflowId)
+                .bind("seq", sequenceNumber)
+                .bind("status", status.name)
+                .mapTo(Int::class.java)
+                .one()
+        }
+    }
+
+    /** Read a single task by ID directly via SQL for assertion. */
+    private fun readTaskDirect(taskId: String): Map<String, Any?>? {
+        return jdbi.withHandle<Map<String, Any?>?, Exception> { handle ->
+            handle.createQuery("SELECT * FROM task WHERE id = :id")
+                .bind("id", taskId)
+                .mapToMap()
+                .findOne()
+                .map { raw ->
+                    val ci = java.util.TreeMap<String, Any?>(String.CASE_INSENSITIVE_ORDER)
+                    raw.forEach { (k, v) -> ci[k] = if (v is Clob) v.characterStream.readText() else v }
+                    ci
+                }
+                .orElse(null)
+        }
+    }
+
+    /** Read all tasks at a given workflow + sequence directly via SQL. */
+    private fun readTasksDirect(workflowId: String, sequenceNumber: Int): List<Map<String, Any?>> {
+        return jdbi.withHandle<List<Map<String, Any?>>, Exception> { handle ->
+            handle.createQuery(
+                "SELECT * FROM task WHERE workflow_id = :wfId AND sequence_number = :seq",
+            )
+                .bind("wfId", workflowId)
+                .bind("seq", sequenceNumber)
+                .mapToMap()
+                .list()
+                .map { raw ->
+                    val ci = java.util.TreeMap<String, Any?>(String.CASE_INSENSITIVE_ORDER)
+                    raw.forEach { (k, v) -> ci[k] = if (v is Clob) v.characterStream.readText() else v }
+                    ci
+                }
+        }
+    }
+
+    /** Update workflow updated_at directly via SQL. */
+    private fun updateWorkflowUpdatedAtDirect(id: String, updatedAt: Instant) {
+        jdbi.useHandle<Exception> { handle ->
+            handle.createUpdate("UPDATE workflow SET updated_at = :updatedAt WHERE id = :id")
+                .bind("id", id)
+                .bind("updatedAt", LocalDateTime.ofInstant(updatedAt, ZoneOffset.UTC))
+                .execute()
+        }
+    }
+
+    /** Update workflow directly via SQL (for simulating concurrent advance). */
+    private fun advanceWorkflowDirect(id: String, newSequence: Int, newVersion: Int) {
+        jdbi.useHandle<Exception> { handle ->
+            handle.createUpdate(
+                """UPDATE workflow SET current_sequence = :seq, version = :ver, updated_at = :now
+                   WHERE id = :id""",
+            )
+                .bind("id", id)
+                .bind("seq", newSequence)
+                .bind("ver", newVersion)
+                .bind("now", LocalDateTime.now(ZoneOffset.UTC))
+                .execute()
+        }
+    }
+
+    // ── Workflow Definition Builders ─────────────────────────────────────
+
+    /** Two linear activities: seq 1 -> seq 2. */
+    private fun twoStepLinearDef() = WorkflowDefinition(
+        activities = listOf(
+            ActivityDefinition(name = "step1", transition = "step1.handler"),
+            ActivityDefinition(name = "step2", transition = "step2.handler"),
+        ),
+    )
+
+    /** Single activity: seq 1 only. */
+    private fun singleStepDef() = WorkflowDefinition(
+        activities = listOf(
+            ActivityDefinition(name = "only", transition = "only.handler"),
+        ),
+    )
+
+    /** Two linear with BEST_EFFORT on step1. */
+    private fun twoStepBestEffortDef() = WorkflowDefinition(
+        activities = listOf(
+            ActivityDefinition(
+                name = "step1", transition = "step1.handler",
+                failurePolicy = FailurePolicy.BEST_EFFORT,
+            ),
+            ActivityDefinition(name = "step2", transition = "step2.handler"),
+        ),
+    )
+
+    /** Fan-out then linear: seq 1 (SCATTER) -> seq 2 (PARALLEL) -> seq 3 (LINEAR). */
+    private fun fanOutThenLinearDef(joinPolicy: JoinPolicy = JoinPolicy.All) = WorkflowDefinition(
+        activities = listOf(
+            ActivityDefinition(
+                name = "scatter-activity", transition = "parallel.handler",
+                fanOut = FanOutDefinition(transition = "scatter.handler", joinPolicy = joinPolicy),
+            ),
+            ActivityDefinition(name = "final-step", transition = "final.handler"),
+        ),
+    )
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Test 1: Stuck workflow detected after grace period -> sweeper recovers
+    // ═══════════════════════════════════════════════════════════════════════
+
+    @Nested
+    inner class StuckWorkflowRecoveredAfterGracePeriod {
+
+        @Test
+        fun `stuck workflow with all tasks COMPLETED past grace period - patrol advances to next sequence`() = runTest {
+            val def = twoStepLinearDef()
+            val wfId = randomId()
+            val pastGrace = Instant.now().minus(gracePeriod).minusSeconds(60)
+            val wf = makeWorkflow(
+                id = wfId,
+                definition = def,
+                currentSequence = 1,
+                version = 0,
+                updatedAt = pastGrace,
+            )
+            insertWorkflowDirect(wf)
+
+            // Task at seq 1 already COMPLETED (terminal) — the barrier missed the advance
+            insertTaskDirect(
+                makeTask(
+                    workflowId = wfId,
+                    sequenceNumber = 1,
+                    status = TaskStatus.COMPLETED,
+                    handlerKey = "step1.handler",
+                    resultJson = """{"out":"value"}""",
+                ),
+            )
+
+            sweeper.patrol()
+
+            // Workflow should have advanced to sequence 2, version incremented
+            val updatedWf = readWorkflowDirect(wfId)
+            assertNotNull(updatedWf)
+            assertEquals(2, (updatedWf["CURRENT_SEQUENCE"] as Number).toInt())
+            assertEquals(1, (updatedWf["VERSION"] as Number).toInt())
+            assertEquals("RUNNING", updatedWf["STATUS"])
+
+            // One new PENDING task created at sequence 2 with step2's handler key
+            val seq2Tasks = readTasksDirect(wfId, 2)
+            assertEquals(1, seq2Tasks.size)
+            assertEquals("step2.handler", seq2Tasks[0]["HANDLER_KEY"])
+            assertEquals("PENDING", seq2Tasks[0]["STATUS"])
+        }
+
+        @Test
+        fun `last sequence stuck - sweeper marks workflow COMPLETED`() = runTest {
+            val def = singleStepDef()
+            val wfId = randomId()
+            val pastGrace = Instant.now().minus(gracePeriod).minusSeconds(60)
+            val wf = makeWorkflow(id = wfId, definition = def, updatedAt = pastGrace)
+            insertWorkflowDirect(wf)
+            insertTaskDirect(
+                makeTask(
+                    workflowId = wfId, sequenceNumber = 1,
+                    status = TaskStatus.COMPLETED, handlerKey = "only.handler",
+                ),
+            )
+
+            sweeper.patrol()
+
+            val row = readWorkflowDirect(wfId)
+            assertNotNull(row)
+            assertEquals("COMPLETED", row["STATUS"])
+        }
+
+        @Test
+        fun `all tasks FAILED with ABORT policy - sweeper marks workflow FAILED`() = runTest {
+            val def = twoStepLinearDef()
+            val wfId = randomId()
+            val pastGrace = Instant.now().minus(gracePeriod).minusSeconds(60)
+            val wf = makeWorkflow(id = wfId, definition = def, updatedAt = pastGrace)
+            insertWorkflowDirect(wf)
+            insertTaskDirect(
+                makeTask(
+                    workflowId = wfId, sequenceNumber = 1,
+                    status = TaskStatus.FAILED, handlerKey = "step1.handler",
+                ),
+            )
+
+            sweeper.patrol()
+
+            val row = readWorkflowDirect(wfId)
+            assertNotNull(row)
+            assertEquals("FAILED", row["STATUS"])
+            assertEquals(0, countTasksDirect(wfId, 2))
+        }
+
+        @Test
+        fun `all tasks FAILED with BEST_EFFORT - sweeper advances to next sequence`() = runTest {
+            val def = twoStepBestEffortDef()
+            val wfId = randomId()
+            val pastGrace = Instant.now().minus(gracePeriod).minusSeconds(60)
+            val wf = makeWorkflow(id = wfId, definition = def, updatedAt = pastGrace)
+            insertWorkflowDirect(wf)
+            insertTaskDirect(
+                makeTask(
+                    workflowId = wfId, sequenceNumber = 1,
+                    status = TaskStatus.FAILED, handlerKey = "step1.handler",
+                ),
+            )
+
+            sweeper.patrol()
+
+            val row = readWorkflowDirect(wfId)
+            assertNotNull(row)
+            assertEquals(2, (row["CURRENT_SEQUENCE"] as Number).toInt())
+            assertEquals("RUNNING", row["STATUS"])
+            assertEquals(1, countTasksDirect(wfId, 2))
+        }
+
+        @Test
+        fun `scatter phase stuck - sweeper creates parallel sub-tasks`() = runTest {
+            val def = fanOutThenLinearDef()
+            val wfId = randomId()
+            val pastGrace = Instant.now().minus(gracePeriod).minusSeconds(60)
+            val wf = makeWorkflow(id = wfId, definition = def, updatedAt = pastGrace)
+            insertWorkflowDirect(wf)
+
+            val payloads = objectMapper.writeValueAsString(listOf("p1", "p2", "p3"))
+            insertTaskDirect(
+                makeTask(
+                    workflowId = wfId, sequenceNumber = 1,
+                    status = TaskStatus.COMPLETED, handlerKey = "scatter.handler",
+                    resultJson = payloads,
+                ),
+            )
+
+            sweeper.patrol()
+
+            val row = readWorkflowDirect(wfId)
+            assertNotNull(row)
+            assertEquals(2, (row["CURRENT_SEQUENCE"] as Number).toInt())
+            assertEquals(3, countTasksDirect(wfId, 2))
+            assertEquals(3, countTasksWithStatusDirect(wfId, 2, TaskStatus.PENDING))
+        }
+
+        @Test
+        fun `payload propagated from completed task to next sequence`() = runTest {
+            val def = twoStepLinearDef()
+            val wfId = randomId()
+            val pastGrace = Instant.now().minus(gracePeriod).minusSeconds(60)
+            val wf = makeWorkflow(id = wfId, definition = def, updatedAt = pastGrace)
+            insertWorkflowDirect(wf)
+            insertTaskDirect(
+                makeTask(
+                    workflowId = wfId, sequenceNumber = 1,
+                    status = TaskStatus.COMPLETED, handlerKey = "step1.handler",
+                    resultJson = """{"pipeline":"data"}""",
+                ),
+            )
+
+            sweeper.patrol()
+
+            val nextTasks = readTasksDirect(wfId, 2)
+            assertEquals(1, nextTasks.size)
+            assertEquals("""{"pipeline":"data"}""", nextTasks[0]["PAYLOAD"])
+        }
+    }
+
+    @Nested
+    inner class AlreadyTerminalWorkflow {
+
+        @Test
+        fun `COMPLETED workflow is not recovered`() = runTest {
+            val def = singleStepDef()
+            val wfId = randomId()
+            val pastGrace = Instant.now().minus(gracePeriod).minusSeconds(60)
+            val wf = makeWorkflow(
+                id = wfId, definition = def,
+                status = WorkflowStatus.COMPLETED, updatedAt = pastGrace,
+            )
+            insertWorkflowDirect(wf)
+
+            sweeper.patrol()
+
+            val row = readWorkflowDirect(wfId)
+            assertNotNull(row)
+            assertEquals("COMPLETED", row["STATUS"])
+            assertEquals(0, (row["VERSION"] as Number).toInt())
+        }
+
+        @Test
+        fun `FAILED workflow is not recovered`() = runTest {
+            val def = singleStepDef()
+            val wfId = randomId()
+            val pastGrace = Instant.now().minus(gracePeriod).minusSeconds(60)
+            val wf = makeWorkflow(
+                id = wfId, definition = def,
+                status = WorkflowStatus.FAILED, updatedAt = pastGrace,
+            )
+            insertWorkflowDirect(wf)
+
+            sweeper.patrol()
+
+            val row = readWorkflowDirect(wfId)
+            assertNotNull(row)
+            assertEquals("FAILED", row["STATUS"])
+            assertEquals(0, (row["VERSION"] as Number).toInt())
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Test 2: Within grace period -> sweeper skips
+    // ═══════════════════════════════════════════════════════════════════════
+
+    @Nested
+    inner class WithinGracePeriodSkipped {
+
+        @Test
+        fun `workflow within grace period - findStuck returns empty, no recovery`() = runTest {
+            val def = twoStepLinearDef()
+            val wfId = randomId()
+            // updated_at is recent (within grace period)
+            val recentUpdate = Instant.now().minusSeconds(30)
+            val wf = makeWorkflow(
+                id = wfId,
+                definition = def,
+                currentSequence = 1,
+                version = 0,
+                updatedAt = recentUpdate,
+            )
+            insertWorkflowDirect(wf)
+
+            // Task at seq 1 already COMPLETED — same stuck shape, but updated_at is recent
+            insertTaskDirect(
+                makeTask(
+                    workflowId = wfId,
+                    sequenceNumber = 1,
+                    status = TaskStatus.COMPLETED,
+                    handlerKey = "step1.handler",
+                ),
+            )
+
+            sweeper.patrol()
+
+            // Workflow NOT advanced — still at sequence 1, same version
+            val updatedWf = readWorkflowDirect(wfId)
+            assertNotNull(updatedWf)
+            assertEquals(1, (updatedWf["CURRENT_SEQUENCE"] as Number).toInt())
+            assertEquals(0, (updatedWf["VERSION"] as Number).toInt())
+
+            // No tasks created at sequence 2
+            assertEquals(0, countTasksDirect(wfId, 2))
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Test 3: Sweeper CAS loses to worker -> no duplicate downstream tasks
+    // ═══════════════════════════════════════════════════════════════════════
+
+    @Nested
+    inner class SweeperCasLosesToWorker {
+
+        @Test
+        fun `worker advances workflow before sweeper patrol - CAS fails, no duplicate tasks`() = runTest {
+            val def = twoStepLinearDef()
+            val wfId = randomId()
+            val pastGrace = Instant.now().minus(gracePeriod).minusSeconds(60)
+            val wf = makeWorkflow(
+                id = wfId,
+                definition = def,
+                currentSequence = 1,
+                version = 0,
+                updatedAt = pastGrace,
+            )
+            insertWorkflowDirect(wf)
+
+            // Task at seq 1 COMPLETED
+            insertTaskDirect(
+                makeTask(
+                    workflowId = wfId,
+                    sequenceNumber = 1,
+                    status = TaskStatus.COMPLETED,
+                    handlerKey = "step1.handler",
+                ),
+            )
+
+            // Simulate worker advancing the workflow before sweeper runs:
+            // advance to seq 2, version=1, updated_at=NOW
+            advanceWorkflowDirect(wfId, newSequence = 2, newVersion = 1)
+
+            // Insert a PENDING task at seq 2 (as the worker-driven advance would have done)
+            insertTaskDirect(
+                makeTask(
+                    workflowId = wfId,
+                    sequenceNumber = 2,
+                    status = TaskStatus.PENDING,
+                    handlerKey = "step2.handler",
+                ),
+            )
+
+            sweeper.patrol()
+
+            // Workflow still at sequence 2 (not double-advanced)
+            val updatedWf = readWorkflowDirect(wfId)
+            assertNotNull(updatedWf)
+            assertEquals(2, (updatedWf["CURRENT_SEQUENCE"] as Number).toInt())
+            // Version unchanged from the worker advance (sweeper CAS failed)
+            assertEquals(1, (updatedWf["VERSION"] as Number).toInt())
+
+            // Still exactly 1 task at seq 2 — no duplicates
+            assertEquals(1, countTasksDirect(wfId, 2))
+            assertEquals(1, countTasksWithStatusDirect(wfId, 2, TaskStatus.PENDING))
+        }
+
+        @Test
+        fun `two concurrent recoverStuckWorkflow calls - exactly one CAS wins`() = runTest {
+            val def = twoStepLinearDef()
+            val wfId = randomId()
+            val pastGrace = Instant.now().minus(gracePeriod).minusSeconds(60)
+            val wf = makeWorkflow(id = wfId, definition = def, updatedAt = pastGrace)
+            insertWorkflowDirect(wf)
+            insertTaskDirect(
+                makeTask(
+                    workflowId = wfId, sequenceNumber = 1,
+                    status = TaskStatus.COMPLETED, handlerKey = "step1.handler",
+                ),
+            )
+
+            val results = listOf(
+                async { barrier.recoverStuckWorkflow(wfId) },
+                async { barrier.recoverStuckWorkflow(wfId) },
+            ).awaitAll()
+
+            val row = readWorkflowDirect(wfId)
+            assertNotNull(row)
+            assertEquals(2, (row["CURRENT_SEQUENCE"] as Number).toInt())
+            assertEquals(1, (row["VERSION"] as Number).toInt())
+            assertEquals(1, countTasksDirect(wfId, 2))
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Test 4: Sweeper fires twice on same stuck workflow -> second is no-op
+    // ═══════════════════════════════════════════════════════════════════════
+
+    @Nested
+    inner class SweeperIdempotency {
+
+        @Test
+        fun `patrol twice on same stuck workflow - first recovers, second is no-op`() = runTest {
+            val def = twoStepLinearDef()
+            val wfId = randomId()
+            val pastGrace = Instant.now().minus(gracePeriod).minusSeconds(60)
+            val wf = makeWorkflow(
+                id = wfId,
+                definition = def,
+                currentSequence = 1,
+                version = 0,
+                updatedAt = pastGrace,
+            )
+            insertWorkflowDirect(wf)
+
+            // Task at seq 1 COMPLETED
+            insertTaskDirect(
+                makeTask(
+                    workflowId = wfId,
+                    sequenceNumber = 1,
+                    status = TaskStatus.COMPLETED,
+                    handlerKey = "step1.handler",
+                ),
+            )
+
+            // First patrol — recovers the workflow
+            sweeper.patrol()
+
+            // Verify first recovery succeeded
+            val afterFirst = readWorkflowDirect(wfId)
+            assertNotNull(afterFirst)
+            assertEquals(2, (afterFirst["CURRENT_SEQUENCE"] as Number).toInt())
+            assertEquals(1, (afterFirst["VERSION"] as Number).toInt())
+            assertEquals(1, countTasksDirect(wfId, 2))
+            assertEquals(1, countTasksWithStatusDirect(wfId, 2, TaskStatus.PENDING))
+
+            // Re-set updated_at to past grace period (make it eligible again by time)
+            val pastGraceAgain = Instant.now().minus(gracePeriod).minusSeconds(60)
+            updateWorkflowUpdatedAtDirect(wfId, pastGraceAgain)
+
+            // Second patrol — findStuck should NOT return this workflow because
+            // seq 2 has a PENDING (non-terminal) task, so NOT EXISTS condition fails
+            sweeper.patrol()
+
+            // Verify no change: still at seq 2, version 1, exactly 1 task at seq 2
+            val afterSecond = readWorkflowDirect(wfId)
+            assertNotNull(afterSecond)
+            assertEquals(2, (afterSecond["CURRENT_SEQUENCE"] as Number).toInt())
+            assertEquals(1, (afterSecond["VERSION"] as Number).toInt())
+            assertEquals(1, countTasksDirect(wfId, 2))
+
+            // No tasks created at sequence 3
+            assertEquals(0, countTasksDirect(wfId, 3))
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Test 5: failExpiredTasks — expired PROCESSING tasks marked FAILED
+    // ═══════════════════════════════════════════════════════════════════════
+
+    @Nested
+    inner class FailExpiredTasks {
+
+        @Test
+        fun `expired PROCESSING task past deadline - patrol marks FAILED and triggers barrier`() = runTest {
+            val def = twoStepLinearDef()
+            val wfId = randomId()
+            val taskId = randomId()
+            val pastGrace = now().minus(gracePeriod).minusSeconds(60)
+            val wf = makeWorkflow(id = wfId, definition = def, updatedAt = pastGrace)
+            insertWorkflowDirect(wf)
+
+            // Single PROCESSING task at seq 1 with deadline 30 min in the past
+            insertTaskDirect(
+                makeTask(
+                    id = taskId,
+                    workflowId = wfId,
+                    sequenceNumber = 1,
+                    status = TaskStatus.PROCESSING,
+                    handlerKey = "step1.handler",
+                    claimedBy = "dead-worker",
+                    claimedAt = now().minus(Duration.ofMinutes(45)),
+                    deadlineAt = now().minus(Duration.ofMinutes(30)),
+                ),
+            )
+
+            sweeper.patrol()
+
+            // Task should be FAILED
+            val task = readTaskDirect(taskId)
+            assertNotNull(task)
+            assertEquals("FAILED", task["STATUS"])
+
+            // Only task at seq 1 with ABORT policy -> workflow FAILED
+            val wfRow = readWorkflowDirect(wfId)
+            assertNotNull(wfRow)
+            assertEquals("FAILED", wfRow["STATUS"])
+        }
+
+        @Test
+        fun `non-expired PROCESSING task - not touched by patrol`() = runTest {
+            val def = twoStepLinearDef()
+            val wfId = randomId()
+            val taskId = randomId()
+            val wf = makeWorkflow(id = wfId, definition = def, updatedAt = now())
+            insertWorkflowDirect(wf)
+
+            // PROCESSING task with deadline 30 min in the future, claimed just now
+            insertTaskDirect(
+                makeTask(
+                    id = taskId,
+                    workflowId = wfId,
+                    sequenceNumber = 1,
+                    status = TaskStatus.PROCESSING,
+                    handlerKey = "step1.handler",
+                    claimedBy = "active-worker",
+                    claimedAt = now(),
+                    deadlineAt = now().plus(Duration.ofMinutes(30)),
+                ),
+            )
+
+            sweeper.patrol()
+
+            // Task still PROCESSING, workflow still at seq 1 version 0
+            val task = readTaskDirect(taskId)
+            assertNotNull(task)
+            assertEquals("PROCESSING", task["STATUS"])
+
+            val wfRow = readWorkflowDirect(wfId)
+            assertNotNull(wfRow)
+            assertEquals(1, (wfRow["CURRENT_SEQUENCE"] as Number).toInt())
+            assertEquals(0, (wfRow["VERSION"] as Number).toInt())
+        }
+
+        @Test
+        fun `expired task among multiple tasks - only expired ones fail`() = runTest {
+            val def = twoStepLinearDef()
+            val wfId = randomId()
+            val expiredTaskId = randomId()
+            val healthyTaskId = randomId()
+            val pastGrace = now().minus(gracePeriod).minusSeconds(60)
+            val wf = makeWorkflow(id = wfId, definition = def, updatedAt = pastGrace)
+            insertWorkflowDirect(wf)
+
+            // Expired PROCESSING task
+            insertTaskDirect(
+                makeTask(
+                    id = expiredTaskId,
+                    workflowId = wfId,
+                    sequenceNumber = 1,
+                    status = TaskStatus.PROCESSING,
+                    handlerKey = "step1.handler",
+                    claimedBy = "dead-worker",
+                    claimedAt = now().minus(Duration.ofMinutes(45)),
+                    deadlineAt = now().minus(Duration.ofMinutes(30)),
+                ),
+            )
+
+            // Non-expired PROCESSING task
+            insertTaskDirect(
+                makeTask(
+                    id = healthyTaskId,
+                    workflowId = wfId,
+                    sequenceNumber = 1,
+                    status = TaskStatus.PROCESSING,
+                    handlerKey = "step1.handler",
+                    claimedBy = "active-worker",
+                    claimedAt = now(),
+                    deadlineAt = now().plus(Duration.ofMinutes(30)),
+                ),
+            )
+
+            sweeper.patrol()
+
+            // Expired task -> FAILED
+            val expiredTask = readTaskDirect(expiredTaskId)
+            assertNotNull(expiredTask)
+            assertEquals("FAILED", expiredTask["STATUS"])
+
+            // Healthy task -> still PROCESSING (barrier sees non-terminal, doesn't advance)
+            val healthyTask = readTaskDirect(healthyTaskId)
+            assertNotNull(healthyTask)
+            assertEquals("PROCESSING", healthyTask["STATUS"])
+
+            // Workflow unchanged (still has a non-terminal task)
+            val wfRow = readWorkflowDirect(wfId)
+            assertNotNull(wfRow)
+            assertEquals("RUNNING", wfRow["STATUS"])
+            assertEquals(1, (wfRow["CURRENT_SEQUENCE"] as Number).toInt())
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Test 6: reclaimStaleTasks — stale PROCESSING tasks reclaimed or failed
+    // ═══════════════════════════════════════════════════════════════════════
+
+    @Nested
+    inner class ReclaimStaleTasks {
+
+        @Test
+        fun `stale PROCESSING task with retries remaining - reclaimed to PENDING`() = runTest {
+            val def = twoStepLinearDef()
+            val wfId = randomId()
+            val taskId = randomId()
+            val wf = makeWorkflow(id = wfId, definition = def, updatedAt = now())
+            insertWorkflowDirect(wf)
+
+            // PROCESSING task claimed 15 min ago (> 10 min threshold), not expired, retries remaining
+            insertTaskDirect(
+                makeTask(
+                    id = taskId,
+                    workflowId = wfId,
+                    sequenceNumber = 1,
+                    status = TaskStatus.PROCESSING,
+                    handlerKey = "step1.handler",
+                    claimedBy = "stale-worker",
+                    claimedAt = now().minus(Duration.ofMinutes(15)),
+                    retryCount = 0,
+                    maxRetries = 3,
+                    deadlineAt = now().plus(Duration.ofMinutes(30)),
+                ),
+            )
+
+            sweeper.patrol()
+
+            // Task should be reset to PENDING with incremented retry count
+            val task = readTaskDirect(taskId)
+            assertNotNull(task)
+            assertEquals("PENDING", task["STATUS"])
+            assertEquals(1, (task["RETRY_COUNT"] as Number).toInt())
+            // claimed_by and claimed_at should be null after reset
+            assertEquals(null, task["CLAIMED_BY"])
+            assertEquals(null, task["CLAIMED_AT"])
+        }
+
+        @Test
+        fun `stale PROCESSING task with retries exhausted - marked FAILED`() = runTest {
+            val def = twoStepLinearDef()
+            val wfId = randomId()
+            val taskId = randomId()
+            val pastGrace = now().minus(gracePeriod).minusSeconds(60)
+            val wf = makeWorkflow(id = wfId, definition = def, updatedAt = pastGrace)
+            insertWorkflowDirect(wf)
+
+            // PROCESSING task claimed 15 min ago, retries exhausted (3/3)
+            insertTaskDirect(
+                makeTask(
+                    id = taskId,
+                    workflowId = wfId,
+                    sequenceNumber = 1,
+                    status = TaskStatus.PROCESSING,
+                    handlerKey = "step1.handler",
+                    claimedBy = "stale-worker",
+                    claimedAt = now().minus(Duration.ofMinutes(15)),
+                    retryCount = 3,
+                    maxRetries = 3,
+                    deadlineAt = now().plus(Duration.ofMinutes(30)),
+                ),
+            )
+
+            sweeper.patrol()
+
+            // Task should be FAILED (retries exhausted)
+            val task = readTaskDirect(taskId)
+            assertNotNull(task)
+            assertEquals("FAILED", task["STATUS"])
+
+            // Only task at seq 1 with ABORT policy -> workflow FAILED
+            val wfRow = readWorkflowDirect(wfId)
+            assertNotNull(wfRow)
+            assertEquals("FAILED", wfRow["STATUS"])
+        }
+
+        @Test
+        fun `non-stale PROCESSING task - not touched`() = runTest {
+            val def = twoStepLinearDef()
+            val wfId = randomId()
+            val taskId = randomId()
+            val wf = makeWorkflow(id = wfId, definition = def, updatedAt = now())
+            insertWorkflowDirect(wf)
+
+            // PROCESSING task claimed 5 min ago (< 10 min threshold), not expired
+            insertTaskDirect(
+                makeTask(
+                    id = taskId,
+                    workflowId = wfId,
+                    sequenceNumber = 1,
+                    status = TaskStatus.PROCESSING,
+                    handlerKey = "step1.handler",
+                    claimedBy = "active-worker",
+                    claimedAt = now().minus(Duration.ofMinutes(5)),
+                    retryCount = 0,
+                    maxRetries = 3,
+                    deadlineAt = now().plus(Duration.ofMinutes(30)),
+                ),
+            )
+
+            sweeper.patrol()
+
+            // Task still PROCESSING, unchanged
+            val task = readTaskDirect(taskId)
+            assertNotNull(task)
+            assertEquals("PROCESSING", task["STATUS"])
+            assertEquals("active-worker", task["CLAIMED_BY"])
+            assertEquals(0, (task["RETRY_COUNT"] as Number).toInt())
+        }
+
+        @Test
+        fun `expired AND stale task - failExpiredTasks handles it first, reclaimStaleTasks skips`() = runTest {
+            val def = twoStepLinearDef()
+            val wfId = randomId()
+            val taskId = randomId()
+            val pastGrace = now().minus(gracePeriod).minusSeconds(60)
+            val wf = makeWorkflow(id = wfId, definition = def, updatedAt = pastGrace)
+            insertWorkflowDirect(wf)
+
+            // Task is both expired (deadline in the past) AND stale (claimed 15 min ago)
+            // with retries remaining — failExpiredTasks should handle it first
+            insertTaskDirect(
+                makeTask(
+                    id = taskId,
+                    workflowId = wfId,
+                    sequenceNumber = 1,
+                    status = TaskStatus.PROCESSING,
+                    handlerKey = "step1.handler",
+                    claimedBy = "dead-worker",
+                    claimedAt = now().minus(Duration.ofMinutes(15)),
+                    retryCount = 0,
+                    maxRetries = 3,
+                    deadlineAt = now().minus(Duration.ofMinutes(5)),
+                ),
+            )
+
+            sweeper.patrol()
+
+            // Task should be FAILED (not PENDING) — failExpiredTasks ran first
+            val task = readTaskDirect(taskId)
+            assertNotNull(task)
+            assertEquals("FAILED", task["STATUS"])
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Test 7: Patrol ordering — all three phases execute in sequence
+    // ═══════════════════════════════════════════════════════════════════════
+
+    @Nested
+    inner class PatrolOrdering {
+
+        @Test
+        fun `full patrol sequence - expired fails, stale reclaims, stuck workflows recover`() = runTest {
+            // ── Workflow A: expired task -> should be FAILED ──
+            val defA = twoStepLinearDef()
+            val wfIdA = randomId()
+            val expiredTaskId = randomId()
+            val pastGraceA = now().minus(gracePeriod).minusSeconds(60)
+            insertWorkflowDirect(makeWorkflow(id = wfIdA, definition = defA, updatedAt = pastGraceA))
+            insertTaskDirect(
+                makeTask(
+                    id = expiredTaskId,
+                    workflowId = wfIdA,
+                    sequenceNumber = 1,
+                    status = TaskStatus.PROCESSING,
+                    handlerKey = "step1.handler",
+                    claimedBy = "dead-worker",
+                    claimedAt = now().minus(Duration.ofMinutes(45)),
+                    deadlineAt = now().minus(Duration.ofMinutes(30)),
+                ),
+            )
+
+            // ── Workflow B: stale task with retries -> should be reclaimed to PENDING ──
+            val defB = twoStepLinearDef()
+            val wfIdB = randomId()
+            val staleTaskId = randomId()
+            insertWorkflowDirect(makeWorkflow(id = wfIdB, definition = defB, updatedAt = now()))
+            insertTaskDirect(
+                makeTask(
+                    id = staleTaskId,
+                    workflowId = wfIdB,
+                    sequenceNumber = 1,
+                    status = TaskStatus.PROCESSING,
+                    handlerKey = "step1.handler",
+                    claimedBy = "stale-worker",
+                    claimedAt = now().minus(Duration.ofMinutes(15)),
+                    retryCount = 0,
+                    maxRetries = 3,
+                    deadlineAt = now().plus(Duration.ofMinutes(30)),
+                ),
+            )
+
+            // ── Workflow C: all tasks COMPLETED at seq 1, past grace -> should advance to seq 2 ──
+            val defC = twoStepLinearDef()
+            val wfIdC = randomId()
+            val pastGraceC = now().minus(gracePeriod).minusSeconds(60)
+            insertWorkflowDirect(makeWorkflow(id = wfIdC, definition = defC, updatedAt = pastGraceC))
+            insertTaskDirect(
+                makeTask(
+                    workflowId = wfIdC,
+                    sequenceNumber = 1,
+                    status = TaskStatus.COMPLETED,
+                    handlerKey = "step1.handler",
+                    resultJson = """{"out":"value"}""",
+                ),
+            )
+
+            // Single patrol() call triggers all three phases
+            sweeper.patrol()
+
+            // Workflow A: expired task -> FAILED, workflow FAILED (ABORT, single task)
+            val taskA = readTaskDirect(expiredTaskId)
+            assertNotNull(taskA)
+            assertEquals("FAILED", taskA["STATUS"])
+            val wfRowA = readWorkflowDirect(wfIdA)
+            assertNotNull(wfRowA)
+            assertEquals("FAILED", wfRowA["STATUS"])
+
+            // Workflow B: stale task -> PENDING, retry_count incremented
+            val taskB = readTaskDirect(staleTaskId)
+            assertNotNull(taskB)
+            assertEquals("PENDING", taskB["STATUS"])
+            assertEquals(1, (taskB["RETRY_COUNT"] as Number).toInt())
+
+            // Workflow C: stuck -> advanced to seq 2
+            val wfRowC = readWorkflowDirect(wfIdC)
+            assertNotNull(wfRowC)
+            assertEquals(2, (wfRowC["CURRENT_SEQUENCE"] as Number).toInt())
+            assertEquals(1, (wfRowC["VERSION"] as Number).toInt())
+            assertEquals(1, countTasksDirect(wfIdC, 2))
+            assertEquals(1, countTasksWithStatusDirect(wfIdC, 2, TaskStatus.PENDING))
+        }
+    }
+}
