@@ -17,6 +17,7 @@ import org.junit.jupiter.api.TestInstance
 import org.mockito.kotlin.any
 import org.mockito.kotlin.argumentCaptor
 import org.mockito.kotlin.doAnswer
+import org.mockito.kotlin.doThrow
 import org.mockito.kotlin.eq
 import org.mockito.kotlin.mock
 import org.mockito.kotlin.never
@@ -68,6 +69,11 @@ class WorkerLoopTest {
             whenever(it.shutdown()).thenReturn(shutdownConfig)
         }
 
+        kotlinx.coroutines.runBlocking {
+            whenever(taskRepo.findExpired(any())).thenReturn(emptyList())
+            whenever(taskRepo.releaseByWorker(any())).thenReturn(0)
+        }
+
         workerLoop = WorkerLoop(config, taskRepo, handlerRegistry, barrierService)
     }
 
@@ -100,13 +106,13 @@ class WorkerLoopTest {
         deadlineAt = deadlineAt,
     )
 
-    private suspend fun startAndAdvance(testScope: TestScope, ticks: Long = 2) {
-        workerLoop.start(testScope)
+    private fun startAndAdvance(testScope: TestScope, ticks: Long = 2) {
+        val job = workerLoop.start(testScope)
         testScope.advanceTimeBy(pollInterval.toMillis() * ticks)
-        workerLoop.shutdown()
+        job.cancel()
     }
 
-    // ── A. Happy Path ────────────────────────────────────────────────────
+    // ── A. Happy Path (Contract #1) ─────────────────────────────────────
 
     @Nested
     inner class HappyPath {
@@ -125,7 +131,6 @@ class WorkerLoopTest {
 
             startAndAdvance(this)
 
-            // Verify handler was called with correct input
             val inputCaptor = argumentCaptor<HandlerInput>()
             verify(handler).execute(inputCaptor.capture())
             val input = inputCaptor.firstValue
@@ -134,7 +139,6 @@ class WorkerLoopTest {
             assertEquals(task.sequenceNumber, input.sequenceNumber)
             assertEquals(task.payloadJson, input.payload)
 
-            // Verify barrier called with COMPLETED
             verify(barrierService).onTaskCompleted(
                 eq(task.id),
                 eq(task.workflowId),
@@ -195,7 +199,7 @@ class WorkerLoopTest {
         }
     }
 
-    // ── B. Retry Logic ───────────────────────────────────────────────────
+    // ── B. Retry Logic (Contracts #2, #3) ────────────────────────────────
 
     @Nested
     inner class RetryLogic {
@@ -281,7 +285,38 @@ class WorkerLoopTest {
         }
     }
 
-    // ── C. Unknown Handler Key ───────────────────────────────────────────
+    // ── C. ResetForRetry Failure (Contract #4) ──────────────────────────
+
+    @Nested
+    inner class ResetForRetryFailure {
+
+        @Test
+        fun `resetForRetry throws - falls through to barrier FAILED`() = runTest {
+            val task = makeTask(retryCount = 0, maxRetries = 3)
+            val handler = mock<TransitionHandler>()
+
+            whenever(taskRepo.claimNext(eq(workerId), eq(1)))
+                .thenReturn(listOf(task))
+                .thenReturn(emptyList())
+            whenever(handlerRegistry.resolve(task.handlerKey)).thenReturn(handler)
+            whenever(handler.execute(any())).thenThrow(RuntimeException("handler failed"))
+            whenever(taskRepo.resetForRetry(eq(task.id), eq(1)))
+                .thenThrow(RuntimeException("DB connection lost during retry reset"))
+
+            startAndAdvance(this)
+
+            verify(taskRepo).resetForRetry(eq(task.id), eq(1))
+            verify(barrierService).onTaskCompleted(
+                eq(task.id),
+                eq(task.workflowId),
+                eq(task.sequenceNumber),
+                eq(TaskStatus.FAILED),
+                eq(null),
+            )
+        }
+    }
+
+    // ── D. Unknown Handler Key ───────────────────────────────────────────
 
     @Nested
     inner class UnknownHandlerKey {
@@ -324,7 +359,7 @@ class WorkerLoopTest {
         }
     }
 
-    // ── D. Empty Poll ────────────────────────────────────────────────────
+    // ── E. Empty Poll (Contract #6) ──────────────────────────────────────
 
     @Nested
     inner class EmptyPoll {
@@ -362,7 +397,33 @@ class WorkerLoopTest {
         }
     }
 
-    // ── E. Shutdown ──────────────────────────────────────────────────────
+    // ── F. Claim Error (Contract #5) ─────────────────────────────────────
+
+    @Nested
+    inner class ClaimError {
+
+        @Test
+        fun `claimNext throws - loop continues on next tick`() = runTest {
+            val task = makeTask()
+            val handler = mock<TransitionHandler>()
+
+            whenever(taskRepo.claimNext(eq(workerId), eq(1)))
+                .thenThrow(RuntimeException("DB connection lost"))
+                .thenReturn(listOf(task))
+                .thenReturn(emptyList())
+            whenever(handlerRegistry.resolve(task.handlerKey)).thenReturn(handler)
+            whenever(handler.execute(any())).thenReturn(HandlerOutput("recovered"))
+
+            startAndAdvance(this, ticks = 4)
+
+            verify(barrierService).onTaskCompleted(
+                eq(task.id), eq(task.workflowId), eq(task.sequenceNumber),
+                eq(TaskStatus.COMPLETED), eq("recovered"),
+            )
+        }
+    }
+
+    // ── G. Shutdown (Contract #8) ────────────────────────────────────────
 
     @Nested
     inner class Shutdown {
@@ -372,23 +433,21 @@ class WorkerLoopTest {
             whenever(taskRepo.claimNext(eq(workerId), eq(1)))
                 .thenReturn(emptyList())
 
-            workerLoop.start(this)
+            val job = workerLoop.start(this)
             advanceTimeBy(pollInterval.toMillis())
 
             val callCountBefore = org.mockito.Mockito.mockingDetails(taskRepo)
                 .invocations
                 .count { it.method.name == "claimNext" }
 
-            workerLoop.shutdown()
-
-            // Advance more time — no further claims should happen
+            job.cancel()
             advanceTimeBy(pollInterval.toMillis() * 5)
 
             val totalCalls = org.mockito.Mockito.mockingDetails(taskRepo)
                 .invocations
                 .count { it.method.name == "claimNext" }
 
-            assertEquals(callCountBefore, totalCalls, "No further claimNext calls after shutdown")
+            assertEquals(callCountBefore, totalCalls, "No further claimNext calls after cancel")
         }
 
         @Test
@@ -412,9 +471,30 @@ class WorkerLoopTest {
 
             assertTrue(signalObserved, "ShutdownSignal should be present in coroutine context")
         }
+
+        @Test
+        fun `releaseByWorker called after shutdown drain`() = runTest {
+            whenever(taskRepo.releaseByWorker(eq(workerId))).thenReturn(0)
+
+            // activeJob is null (never started), so join() is skipped
+            workerLoop.shutdown()
+
+            verify(taskRepo).releaseByWorker(eq(workerId))
+        }
+
+        @Test
+        fun `releaseByWorker throws - shutdown still completes`() = runTest {
+            whenever(taskRepo.releaseByWorker(eq(workerId)))
+                .thenThrow(RuntimeException("DB unavailable during release"))
+
+            // shutdown must not throw even when releaseByWorker fails
+            workerLoop.shutdown()
+
+            verify(taskRepo).releaseByWorker(eq(workerId))
+        }
     }
 
-    // ── F. ShutdownParticipant Contract ──────────────────────────────────
+    // ── H. ShutdownParticipant Contract ──────────────────────────────────
 
     @Nested
     inner class ShutdownParticipantContract {
@@ -439,7 +519,7 @@ class WorkerLoopTest {
         }
     }
 
-    // ── G. Deadline Reaper ───────────────────────────────────────────────
+    // ── I. Deadline Reaper (Contract #7) ─────────────────────────────────
 
     @Nested
     inner class DeadlineReaper {
@@ -518,7 +598,7 @@ class WorkerLoopTest {
             whenever(taskRepo.findExpired(any()))
                 .thenReturn(emptyList())
 
-            workerLoop.start(this)
+            val job = workerLoop.start(this)
             advanceTimeBy(pollInterval.toMillis() * 3)
 
             val findExpiredCalls = org.mockito.Mockito.mockingDetails(taskRepo)
@@ -526,35 +606,89 @@ class WorkerLoopTest {
                 .count { it.method.name == "findExpired" }
             assertTrue(findExpiredCalls >= 2, "Reaper should poll multiple times, got $findExpiredCalls")
 
-            workerLoop.shutdown()
+            job.cancel()
         }
     }
 
-    // ── H. Error Resilience ──────────────────────────────────────────────
+    // ── J. In-Flight Tracking (Contract #9) ─────────────────────────────
 
     @Nested
-    inner class ErrorResilience {
+    inner class InFlightTracking {
 
         @Test
-        fun `claimNext throws - loop continues on next tick`() = runTest {
+        fun `inFlightTasks is positive during handler execution and zero after`() = runTest {
             val task = makeTask()
-            val handler = mock<TransitionHandler>()
+            var inFlightDuringExecution = -1
+            val handler = object : TransitionHandler {
+                override suspend fun execute(input: HandlerInput): HandlerOutput {
+                    inFlightDuringExecution = workerLoop.inFlightTasks
+                    return HandlerOutput(null)
+                }
+            }
 
             whenever(taskRepo.claimNext(eq(workerId), eq(1)))
-                .thenThrow(RuntimeException("DB connection lost"))
                 .thenReturn(listOf(task))
                 .thenReturn(emptyList())
             whenever(handlerRegistry.resolve(task.handlerKey)).thenReturn(handler)
-            whenever(handler.execute(any())).thenReturn(HandlerOutput("recovered"))
 
-            startAndAdvance(this, ticks = 4)
+            startAndAdvance(this)
 
-            // The loop survived the DB error and processed the next task
-            verify(barrierService).onTaskCompleted(
-                eq(task.id), eq(task.workflowId), eq(task.sequenceNumber),
-                eq(TaskStatus.COMPLETED), eq("recovered"),
-            )
+            assertTrue(inFlightDuringExecution > 0, "inFlightTasks should be > 0 during execution, was $inFlightDuringExecution")
+            assertEquals(0, workerLoop.inFlightTasks, "inFlightTasks should be 0 after completion")
         }
+
+        @Test
+        fun `inFlightTasks returns to zero after handler failure`() = runTest {
+            val task = makeTask(retryCount = 0, maxRetries = 0)
+            var inFlightDuringExecution = -1
+            val handler = object : TransitionHandler {
+                override suspend fun execute(input: HandlerInput): HandlerOutput {
+                    inFlightDuringExecution = workerLoop.inFlightTasks
+                    throw RuntimeException("boom")
+                }
+            }
+
+            whenever(taskRepo.claimNext(eq(workerId), eq(1)))
+                .thenReturn(listOf(task))
+                .thenReturn(emptyList())
+            whenever(handlerRegistry.resolve(task.handlerKey)).thenReturn(handler)
+
+            startAndAdvance(this)
+
+            assertTrue(inFlightDuringExecution > 0, "inFlightTasks should be > 0 during execution, was $inFlightDuringExecution")
+            assertEquals(0, workerLoop.inFlightTasks, "inFlightTasks should be 0 after failure")
+        }
+    }
+
+    // ── K. Health Heartbeat (Contract #10) ───────────────────────────────
+
+    @Nested
+    inner class HealthHeartbeat {
+
+        @Test
+        fun `lastPollTimestamp advances after poll iterations`() = runTest {
+            whenever(taskRepo.claimNext(eq(workerId), eq(1)))
+                .thenReturn(emptyList())
+
+            val before = Instant.now().minusMillis(1)
+
+            val job = workerLoop.start(this)
+            advanceTimeBy(pollInterval.toMillis() * 2)
+
+            val after = workerLoop.lastPollTimestamp
+            assertTrue(
+                after.isAfter(before),
+                "lastPollTimestamp should advance after polling, was $before, now $after",
+            )
+
+            job.cancel()
+        }
+    }
+
+    // ── L. Error Resilience ──────────────────────────────────────────────
+
+    @Nested
+    inner class ErrorResilience {
 
         @Test
         fun `barrier onTaskCompleted throws - loop continues`() = runTest {
@@ -572,17 +706,40 @@ class WorkerLoopTest {
             whenever(handler1.execute(any())).thenReturn(HandlerOutput("r1"))
             whenever(handler2.execute(any())).thenReturn(HandlerOutput("r2"))
 
-            // First barrier call throws, second succeeds
             doAnswer { throw RuntimeException("barrier blew up") }
-                .doAnswer { } // second call succeeds
+                .doAnswer { }
                 .whenever(barrierService).onTaskCompleted(any(), any(), any(), any(), any())
 
             startAndAdvance(this, ticks = 4)
 
-            // Both handlers were executed — loop survived barrier failure
             verify(handler1).execute(any())
             verify(handler2).execute(any())
             verify(barrierService, times(2)).onTaskCompleted(any(), any(), any(), any(), any())
+        }
+
+        @Test
+        fun `findExpired throws - reaper continues on next cycle`() = runTest {
+            val expiredTask = makeTask(
+                status = TaskStatus.PROCESSING,
+                deadlineAt = Instant.now().minus(5, ChronoUnit.MINUTES),
+            )
+
+            whenever(taskRepo.claimNext(eq(workerId), eq(1)))
+                .thenReturn(emptyList())
+            whenever(taskRepo.findExpired(any()))
+                .thenThrow(RuntimeException("reaper DB error"))
+                .thenReturn(listOf(expiredTask))
+                .thenReturn(emptyList())
+
+            startAndAdvance(this, ticks = 4)
+
+            verify(barrierService).onTaskCompleted(
+                eq(expiredTask.id),
+                eq(expiredTask.workflowId),
+                eq(expiredTask.sequenceNumber),
+                eq(TaskStatus.FAILED),
+                eq(null),
+            )
         }
     }
 }
