@@ -72,10 +72,6 @@ class WorkerLoopTest {
             whenever(it.shutdown()).thenReturn(shutdownConfig)
         }
 
-        kotlinx.coroutines.runBlocking {
-            whenever(taskRepo.findExpired(any())).thenReturn(emptyList())
-        }
-
         workerLoop = WorkerLoop(config, taskRepo, handlerRegistry, barrierService)
     }
 
@@ -509,98 +505,7 @@ class WorkerLoopTest {
         }
     }
 
-    // ── I. Deadline Reaper (Contract #7) ─────────────────────────────────
-
-    @Nested
-    inner class DeadlineReaper {
-
-        @Test
-        fun `expired task found by findExpired - marked FAILED via barrier`() = runTest {
-            val expiredTask = makeTask(
-                status = TaskStatus.PROCESSING,
-                deadlineAt = Instant.now().minus(5, ChronoUnit.MINUTES),
-            )
-
-            whenever(taskRepo.claimNext(eq(workerId), eq(1)))
-                .thenReturn(emptyList())
-            whenever(taskRepo.findExpired(any()))
-                .thenReturn(listOf(expiredTask))
-                .thenReturn(emptyList())
-
-            startAndAdvance(this, ticks = 3)
-
-            verify(barrierService).onTaskCompleted(
-                eq(expiredTask.id),
-                eq(expiredTask.workflowId),
-                eq(expiredTask.sequenceNumber),
-                eq(TaskStatus.FAILED),
-                eq(null),
-            )
-        }
-
-        @Test
-        fun `multiple expired tasks each trigger barrier call`() = runTest {
-            val expired1 = makeTask(
-                id = "expired-1",
-                workflowId = "wf-1",
-                deadlineAt = Instant.now().minus(10, ChronoUnit.MINUTES),
-            )
-            val expired2 = makeTask(
-                id = "expired-2",
-                workflowId = "wf-2",
-                deadlineAt = Instant.now().minus(10, ChronoUnit.MINUTES),
-            )
-
-            whenever(taskRepo.claimNext(eq(workerId), eq(1)))
-                .thenReturn(emptyList())
-            whenever(taskRepo.findExpired(any()))
-                .thenReturn(listOf(expired1, expired2))
-                .thenReturn(emptyList())
-
-            startAndAdvance(this, ticks = 3)
-
-            verify(barrierService).onTaskCompleted(
-                eq("expired-1"), eq("wf-1"), eq(expired1.sequenceNumber),
-                eq(TaskStatus.FAILED), eq(null),
-            )
-            verify(barrierService).onTaskCompleted(
-                eq("expired-2"), eq("wf-2"), eq(expired2.sequenceNumber),
-                eq(TaskStatus.FAILED), eq(null),
-            )
-        }
-
-        @Test
-        fun `no expired tasks - barrier not called by reaper`() = runTest {
-            whenever(taskRepo.claimNext(eq(workerId), eq(1)))
-                .thenReturn(emptyList())
-            whenever(taskRepo.findExpired(any()))
-                .thenReturn(emptyList())
-
-            startAndAdvance(this, ticks = 3)
-
-            verifyNoInteractions(barrierService)
-        }
-
-        @Test
-        fun `reaper polls at pollInterval cadence`() = runTest {
-            whenever(taskRepo.claimNext(eq(workerId), eq(1)))
-                .thenReturn(emptyList())
-            whenever(taskRepo.findExpired(any()))
-                .thenReturn(emptyList())
-
-            val job = workerLoop.start(this)
-            advanceTimeBy(pollInterval.toMillis() * 3)
-
-            val findExpiredCalls = org.mockito.Mockito.mockingDetails(taskRepo)
-                .invocations
-                .count { it.method.name == "findExpired" }
-            assertTrue(findExpiredCalls >= 2, "Reaper should poll multiple times, got $findExpiredCalls")
-
-            job.cancel()
-        }
-    }
-
-    // ── J. In-Flight Tracking (Contract #9) ─────────────────────────────
+    // ── I. In-Flight Tracking (Contract #9) ─────────────────────────────
 
     @Nested
     inner class InFlightTracking {
@@ -724,31 +629,6 @@ class WorkerLoopTest {
 
             verify(handler).execute(any())
             verify(taskRepo).resetForRetry(eq(task.id), eq(1))
-        }
-
-        @Test
-        fun `findExpired throws - reaper continues on next cycle`() = runTest {
-            val expiredTask = makeTask(
-                status = TaskStatus.PROCESSING,
-                deadlineAt = Instant.now().minus(5, ChronoUnit.MINUTES),
-            )
-
-            whenever(taskRepo.claimNext(eq(workerId), eq(1)))
-                .thenReturn(emptyList())
-            whenever(taskRepo.findExpired(any()))
-                .thenThrow(RuntimeException("reaper DB error"))
-                .thenReturn(listOf(expiredTask))
-                .thenReturn(emptyList())
-
-            startAndAdvance(this, ticks = 4)
-
-            verify(barrierService).onTaskCompleted(
-                eq(expiredTask.id),
-                eq(expiredTask.workflowId),
-                eq(expiredTask.sequenceNumber),
-                eq(TaskStatus.FAILED),
-                eq(null),
-            )
         }
 
         @Test
