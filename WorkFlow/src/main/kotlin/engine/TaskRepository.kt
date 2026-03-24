@@ -24,6 +24,7 @@ class TaskRepository(
         limit: Int,
     ): List<Task> =
         jdbi.inTransactionSuspend<List<Task>, Exception> { h: Handle ->
+            val now = LocalDateTime.now(ZoneOffset.UTC).truncatedTo(java.time.temporal.ChronoUnit.MICROS)
             val rows =
                 h
                     .createQuery(
@@ -32,18 +33,19 @@ class TaskRepository(
                 WHERE id IN (
                     SELECT id FROM task
                     WHERE status = 'PENDING'
+                      AND (deadline_at IS NULL OR deadline_at > :now)
                     ORDER BY claimed_at NULLS FIRST, id
                     FETCH FIRST :limit ROWS ONLY
                 )
                 FOR UPDATE SKIP LOCKED
                 """,
                     ).bind("limit", limit)
+                    .bind("now", now)
                     .mapToMap()
                     .list()
 
             if (rows.isEmpty()) return@inTransactionSuspend emptyList()
 
-            val now = LocalDateTime.now(ZoneOffset.UTC).truncatedTo(java.time.temporal.ChronoUnit.MICROS)
             val ids = rows.map { caseInsensitive(it)["ID"] as String }
             h
                 .createUpdate(
