@@ -28,12 +28,25 @@ src/main/kotlin/
     TransitionHandler.kt            -- Handler interface + CDI qualifier
     HandlerRegistry.kt              -- CDI-based handler lookup by dot-separated key
     WorkerLoop.kt                   -- Poll loop: claim via SKIP LOCKED, execute, report
+  queryexporter/
+    config/
+      ExporterConfig.kt             -- YAML config data classes
+    core/
+      QueryScheduler.kt             -- Supervisor scope, one coroutine per query
+      QueryExecutor.kt              -- Plain JDBC: execute SQL → List<Row>
+      MetricWriter.kt               -- Map rows → Micrometer meters (GAUGE/COUNTER/HISTOGRAM/SUMMARY/ENUM)
+    spi/
+      LeaderGuard.kt                -- fun interface for optional leader check
+      DataSourceProvider.kt          -- fun interface for datasource resolution
+    QueryExporterBootstrap.kt       -- Wires config, datasources, and scheduler
+    QuarkusDataSourceProvider.kt    -- Quarkus CDI adapter for DataSourceProvider
   extension/                        -- (existing, unchanged)
   leader/                           -- (existing, unchanged)
   shutdown/                         -- (existing, unchanged)
 
 src/main/resources/
   application.properties              -- Quarkus + datasource + framework config
+  query-exporter.yaml                 -- Query exporter metric definitions
   db/migration/
     V1__create_workflow_tables.sql   -- workflow, task tables + indexes
 
@@ -51,6 +64,11 @@ src/test/kotlin/
   worker/
     HandlerRegistryTest.kt          -- CDI handler resolution tests
     WorkerLoopTest.kt               -- Claim + execute + report tests
+  queryexporter/
+    ExporterConfigTest.kt           -- Config parsing + validation tests
+    MetricWriterTest.kt             -- Metric type mapping tests
+    QuerySchedulerTest.kt           -- Scheduler lifecycle tests
+    QueryExporterIntegrationTest.kt -- Real SQL → Prometheus gauge (Oracle Free container)
 ```
 
 ---
@@ -440,44 +458,169 @@ Backup path per Section 7. Runs on leader only. Detects stuck workflows (not orp
 
 ---
 
-## Task 12: Observability
+## Task 12: Query Exporter Core
+
+Reusable, config-driven query exporter component. Core only — GAUGE metric type. Not coupled to the workflow engine. Core dependencies: `kotlinx-coroutines-core`, `micrometer-core`, `java.sql.DataSource`, `jackson-dataformat-yaml`.
 
 **Files:**
-- Create: `src/main/kotlin/engine/WorkflowMetrics.kt`
-- Modify: `src/main/kotlin/engine/BarrierService.kt` — add metric + logging calls
-- Modify: `src/main/kotlin/engine/Sweeper.kt` — add metric + logging calls
-- Modify: `src/main/kotlin/worker/WorkerLoop.kt` — add metric calls
+- Create: `src/main/kotlin/queryexporter/spi/LeaderGuard.kt`
+- Create: `src/main/kotlin/queryexporter/spi/DataSourceProvider.kt`
+- Create: `src/main/kotlin/queryexporter/config/ExporterConfig.kt`
+- Create: `src/main/kotlin/queryexporter/core/QueryExecutor.kt`
+- Create: `src/main/kotlin/queryexporter/core/MetricWriter.kt`
+- Create: `src/main/kotlin/queryexporter/core/QueryScheduler.kt`
+- Create: `src/main/kotlin/queryexporter/QueryExporterBootstrap.kt`
+- Test: `src/test/kotlin/queryexporter/ExporterConfigTest.kt`
+- Test: `src/test/kotlin/queryexporter/MetricWriterTest.kt`
+- Test: `src/test/kotlin/queryexporter/QuerySchedulerTest.kt`
 
-Per Section 10 of the design doc.
+- [ ] **Step 1: Create SPI interfaces**
 
-- [ ] **Step 1: Create WorkflowMetrics**
+`spi/LeaderGuard.kt`:
+- `fun interface LeaderGuard { fun isLeader(): Boolean }`
+- Default companion: `val ALWAYS = LeaderGuard { true }`
 
-Centralized metric names and registration:
-- Counters: `workflow.barrier.cas.attempts{outcome=won|lost}`, `workflow.sweeper.recoveries`, `workflow.phase.transitions{from_seq, to_seq, phase_type}`
-- Gauges: `workflow.running.count`, `workflow.tasks.by_status`
-- Histograms: `workflow.barrier.transaction.duration`, `workflow.phase.completion.duration`
+`spi/DataSourceProvider.kt`:
+- `fun interface DataSourceProvider { fun resolve(name: String): DataSource }`
 
-- [ ] **Step 2: Add structured logging**
+- [ ] **Step 2: Create config data classes**
 
-Per Section 10:
-- On CAS win: log `workflow_id`, `sequence_number`, `phase_type`, `task_count`, `failed_count`, `target_outcome`, `transaction_duration_ms`
-- On CAS loss: log `workflow_id` at DEBUG level
-- On sweeper recovery: log at WARN level with `workflow_id`, `sequence_number`, `time_since_last_update`, `grace_period`
+`config/ExporterConfig.kt` — immutable Kotlin data classes deserialized from YAML via Jackson:
+- `ExporterConfig(queries: Map<String, QueryConfig>)`
+- `QueryConfig(sql: String, datasource: String, schedule: ScheduleConfig, metrics: List<MetricConfig>)`
+- `ScheduleConfig(interval: Duration?, cron: String?)` — validate exactly one is set
+- `MetricConfig(name: String, type: MetricType, valueColumn: String, tagColumns: List<String>, buckets: List<Double>, states: List<String>)`
+- `enum class MetricType { GAUGE, COUNTER, HISTOGRAM, SUMMARY, ENUM }`
+- Fail-fast validation: `buckets` required for HISTOGRAM, `states` required for ENUM
 
-- [ ] **Step 3: Wire metrics into BarrierService, Sweeper, WorkerLoop**
+- [ ] **Step 3: Create QueryExecutor**
 
-Add timing and counter increments at appropriate points.
+`core/QueryExecutor.kt` — stateless, plain JDBC:
+- `fun execute(dataSource: DataSource, sql: String): List<Map<String, Any?>>`
+- Uses `connection.prepareStatement(sql).executeQuery()`, reads columns from `ResultSetMetaData`
+- No JDBI — minimizes dependency footprint
 
-- [ ] **Step 4: Add health checks**
+- [ ] **Step 4: Create MetricWriter (GAUGE only)**
 
-- Sweeper liveness: unhealthy if last patrol > 2x interval ago
-- Stuck workflow gauge: number of workflows currently matching stuck criteria (zero is normal)
+`core/MetricWriter.kt` — maps query result rows to Micrometer meters:
+- Owns a `ConcurrentHashMap<MeterKey, Meter>` cache for meter identity `(name, tag values)`
+- GAUGE: `AtomicDouble`-backed, updated on each poll. Stale tag combinations set to 0.
+- Other metric types (COUNTER, HISTOGRAM, SUMMARY, ENUM) throw `UnsupportedOperationException` with clear message — implemented in Task 13.
+
+- [ ] **Step 5: Create QueryScheduler**
+
+`core/QueryScheduler.kt` — `SupervisorJob` scope, one child coroutine per query:
+- `fun start(config: ExporterConfig, ...)`
+- Each coroutine: `while (isActive) { if (leaderGuard.isLeader()) { execute + write }; delay(interval) }`
+- Cron support via next-fire-time calculation (e.g., `cronutils` library or inline)
+- `fun stop()` — cancels scope, joins with bounded timeout
+- Error per query: log WARN, skip cycle, retry next interval
+
+- [ ] **Step 6: Create QueryExporterBootstrap**
+
+`QueryExporterBootstrap.kt` — plain class, no framework annotations:
+- Constructor: `(config, dataSourceProvider, meterRegistry, leaderGuard)`
+- `fun start(): QueryScheduler` — validates config, resolves datasources, launches scheduler
+
+- [ ] **Step 7: Write unit tests**
+
+`ExporterConfigTest.kt`: YAML parsing, validation (interval XOR cron, required fields, fail-fast)
+`MetricWriterTest.kt`: GAUGE with tags, GAUGE stale tag cleanup → 0, unsupported type throws
+`QuerySchedulerTest.kt`: start/stop lifecycle, leader guard skips when not leader, error isolation between queries
+
+- [ ] **Step 8: Commit**
+
+---
+
+## Task 13: Extended Metric Types
+
+Add COUNTER, HISTOGRAM, SUMMARY, ENUM support to MetricWriter. Incremental additions to one class.
+
+**Files:**
+- Modify: `src/main/kotlin/queryexporter/core/MetricWriter.kt`
+- Modify: `src/test/kotlin/queryexporter/MetricWriterTest.kt`
+
+- [ ] **Step 1: Implement COUNTER**
+
+`FunctionCounter` backed by `AtomicDouble` with absolute value. Prometheus handles `rate()`.
+
+- [ ] **Step 2: Implement HISTOGRAM**
+
+`DistributionSummary` with configured `buckets`. Each row is an observation.
+
+- [ ] **Step 3: Implement SUMMARY**
+
+`DistributionSummary` with percentiles.
+
+- [ ] **Step 4: Implement ENUM**
+
+One gauge per state from `states` list. Current state = 1.0, others = 0.0.
+
+- [ ] **Step 5: Write tests per type**
+
+`MetricWriterTest.kt`: COUNTER absolute value tracking, HISTOGRAM bucketing, SUMMARY percentiles, ENUM state toggling.
+
+- [ ] **Step 6: Commit**
+
+---
+
+## Task 14: Quarkus Integration & Workflow Metrics Config
+
+Connect the query exporter to the workflow engine via Quarkus CDI. Create workflow-specific metric queries.
+
+**Files:**
+- Create: `src/main/kotlin/queryexporter/QuarkusDataSourceProvider.kt`
+- Create: `src/main/resources/query-exporter.yaml`
+- Test: `src/test/kotlin/queryexporter/QueryExporterIntegrationTest.kt`
+
+- [ ] **Step 1: Create QuarkusDataSourceProvider**
+
+`QuarkusDataSourceProvider.kt` — `@ApplicationScoped`, resolves `quarkus.datasource.<name>` via CDI `Instance<AgroalDataSource>`
+
+- [ ] **Step 2: Create Quarkus bootstrap bean**
+
+`@ApplicationScoped` bean that loads `query-exporter.yaml` from classpath, creates `QueryExporterBootstrap`, and starts the scheduler. Wires `LeaderGuard` from existing `LeaderManager.isLeader()`.
+
+- [ ] **Step 3: Create query-exporter.yaml**
+
+`src/main/resources/query-exporter.yaml` — workflow-specific metric queries:
+- `workflow_by_status`: `SELECT status, COUNT(*) as cnt FROM workflow GROUP BY status` (GAUGE, 30s)
+- `task_by_status`: `SELECT status, COUNT(*) as cnt FROM task GROUP BY status` (GAUGE, 30s)
+- `workflow_stuck_count`: stuck workflow query (GAUGE, 60s)
+
+- [ ] **Step 4: Write integration test**
+
+`QueryExporterIntegrationTest.kt` — Oracle Free container:
+- Configure a GAUGE query against real workflow/task tables
+- Execute one scheduler cycle
+- Verify Prometheus gauge output via `MeterRegistry`
 
 - [ ] **Step 5: Commit**
 
 ---
 
-## Task 13: Integration Tests
+## Task 15: Structured Logging
+
+Enhance existing services with structured log fields. No new files. No Micrometer injection.
+
+**Files:**
+- Modify: `src/main/kotlin/engine/BarrierService.kt` — add structured log fields
+- Modify: `src/main/kotlin/engine/Sweeper.kt` — add structured log fields
+
+- [ ] **Step 1: Enhance BarrierService logging**
+
+- CAS win (INFO): `workflow_id`, `sequence_number`, `phase_type`, `task_count`, `failed_count`, `target_outcome`, `transaction_duration_ms`
+- CAS loss (DEBUG): `workflow_id`
+
+- [ ] **Step 2: Enhance Sweeper logging**
+
+- Recovery (WARN): `workflow_id`, `sequence_number`, `time_since_last_update`, `grace_period`
+
+- [ ] **Step 3: Commit**
+
+---
+
+## Task 16: Integration Tests
 
 **Files:**
 - Create: `src/test/kotlin/engine/IntegrationTest.kt`
@@ -533,9 +676,16 @@ Task 4 + Task 3
 
 Task 7 (Handler Interface) ── independent, can run after Task 1
 
-Tasks 8-11
-  └─► Task 12 (Observability)
-        └─► Task 13 (Integration Tests)
+Task 12 (Query Exporter Core) ── independent, no engine dependencies
+  └─► Task 13 (Extended Metric Types)
+  └─► Task 14 (Quarkus Integration) ── needs Task 5 (DB schema for integration test)
+
+Task 15 (Structured Logging) ── needs Tasks 8, 11 (BarrierService, Sweeper)
+
+Tasks 8-11, 14, 15
+  └─► Task 16 (Integration Tests)
 ```
 
-Execution order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11 → 12 → 13
+Execution order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11 → 12 → 13 → 14 → 15 → 16
+
+Note: Task 12 (Query Exporter Core) can run in parallel with Tasks 6-11 since it has no engine dependencies. Task 13 (Extended Metric Types) can also run in parallel with engine work. Task 14 (Quarkus Integration) needs the DB schema. Task 15 (Structured Logging) needs BarrierService and Sweeper.
