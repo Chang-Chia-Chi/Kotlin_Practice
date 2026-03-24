@@ -417,34 +417,53 @@ The task table must have NO trigger or foreign key that propagates writes to the
 
 ## 10. Observability
 
-### Metrics (Micrometer / Prometheus)
+Zero embedded metrics in the engine hot path (BarrierService, WorkerLoop). All aggregate metrics are config-driven via a reusable query exporter component. Event-level data is captured through structured logging.
 
-**Counters:**
+### Query Exporter
 
-- `workflow.barrier.cas.attempts{outcome=won|lost}` — a healthy system shows exactly 1 `won` per phase and 0–few `lost`.
-- `workflow.sweeper.recoveries` — non-zero means workers died mid-transition.
-- `workflow.phase.transitions{from_seq, to_seq, phase_type}` — tracks progression.
+A reusable, config-driven component that periodically executes SQL queries and publishes results as Prometheus metrics via Micrometer. Decoupled from the workflow engine — works with any JDBI/JDBC + Micrometer project.
 
-**Gauges:**
+**Design principles:**
 
-- `workflow.running.count` — number of workflows currently RUNNING. Growing count suggests workflows are getting stuck.
-- `workflow.tasks.by_status` — task count per status across running workflows. Periodic sampling.
+- **Config-driven:** Queries and metric mappings defined in `query-exporter.yaml`. Adding a metric = adding a config entry, zero code changes.
+- **Leader-optional:** Accepts an optional `LeaderGuard` predicate. When provided, only the leader executes queries. When absent, every instance runs them (acceptable for read-only queries).
+- **Framework-agnostic core:** Depends only on `kotlinx-coroutines-core`, `micrometer-core`, `java.sql.DataSource`, and Jackson YAML. Quarkus integration is a thin adapter layer.
+- **Per-query scheduling:** Each query runs on its own coroutine loop with an independent interval or cron schedule.
 
-**Histograms:**
+**Config schema:**
 
-- `workflow.barrier.transaction.duration` — wall time of the full Step 1–4 transaction. P99 directly informs the sweeper's grace period.
-- `workflow.phase.completion.duration` — time from phase start to barrier fire. End-to-end phase latency.
+```yaml
+queries:
+  <query-name>:            # unique key, used in logs and meta-metrics
+    sql: "..."
+    datasource: "<name>"   # must match a quarkus.datasource.<name>
+    schedule:
+      interval: "5s"       # Duration — XOR with cron
+      cron: "0 */5 * * *"  # Quartz cron — XOR with interval
+    metrics:
+      - name: "..."
+        type: GAUGE | COUNTER | HISTOGRAM | SUMMARY | ENUM
+        valueColumn: "..."
+        tagColumns: [...]
+        buckets: [...]     # histogram only
+        states: [...]      # enum only
+```
 
-### Health Checks
+**Workflow engine metrics** (configured in `query-exporter.yaml`):
 
-- **Sweeper liveness:** Unhealthy if the last patrol completed more than 2× the patrol interval ago.
-- **Stuck workflow gauge:** Number of workflows currently matching stuck criteria. Zero is normal.
+| Metric | Query | Purpose |
+|---|---|---|
+| `workflow_by_status` | `SELECT status, COUNT(*) FROM workflow GROUP BY status` | Track RUNNING/COMPLETED/FAILED distribution |
+| `task_by_status` | `SELECT status, COUNT(*) FROM task GROUP BY status` | Track task queue health |
+| `workflow_stuck_count` | Stuck workflow query (RUNNING, zero non-terminal tasks, past grace period) | Alert on stuck workflows |
 
 ### Structured Logging
 
-- On CAS win: `workflow_id`, `sequence_number`, `phase_type`, `task_count`, `failed_count`, `target_outcome`, `transaction_duration_ms`.
-- On CAS loss: `workflow_id` at DEBUG level — expected behaviour.
-- On sweeper recovery: WARN level with `workflow_id`, `sequence_number`, `time_since_last_update`, `grace_period`.
+Event-level data captured by existing services — no Micrometer injection required.
+
+- **CAS win** (BarrierService, INFO): `workflow_id`, `sequence_number`, `phase_type`, `task_count`, `failed_count`, `target_outcome`, `transaction_duration_ms`.
+- **CAS loss** (BarrierService, DEBUG): `workflow_id` — expected behaviour, not an error.
+- **Sweeper recovery** (Sweeper, WARN): `workflow_id`, `sequence_number`, `time_since_last_update`, `grace_period`.
 
 ---
 
@@ -510,6 +529,7 @@ The task table must have NO trigger or foreign key that propagates writes to the
 | Naming aligns with Temporal | activity / workflow / definition semantics match Temporal, reducing communication overhead. |
 | No mutable counters anywhere | Progress is always derived via MVCC read, never stored. |
 | FailurePolicy vs JoinPolicy — two axes | FailurePolicy controls mid-flight behaviour (ABORT/BEST_EFFORT). JoinPolicy controls the post-completion success gate (ALL/THRESHOLD/PERCENTAGE). Orthogonal concerns. |
+| Config-driven query exporter for metrics | Zero Micrometer instrumentation in the engine hot path (BarrierService, WorkerLoop). Aggregate metrics are read-only SQL queries published as Prometheus gauges by a leader-optional, config-driven exporter. Event-level data (CAS outcomes, durations) captured via structured logging. Keeps core logic pure; adding a metric is a YAML config change, not a code change. |
 
 ---
 
