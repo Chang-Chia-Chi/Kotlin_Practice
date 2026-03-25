@@ -8,7 +8,7 @@ import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
-import org.junit.jupiter.api.assertThrows
+
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
@@ -41,6 +41,54 @@ class MetricWriterTest {
         type = MetricType.GAUGE,
         valueColumn = valueColumn,
         tagColumns = tagColumns,
+    )
+
+    private fun counterMetric(
+        name: String = "test_counter",
+        valueColumn: String = "value",
+        tagColumns: List<String> = emptyList(),
+    ) = MetricConfig(
+        name = name,
+        type = MetricType.COUNTER,
+        valueColumn = valueColumn,
+        tagColumns = tagColumns,
+    )
+
+    private fun histogramMetric(
+        name: String = "test_histogram",
+        valueColumn: String = "value",
+        tagColumns: List<String> = emptyList(),
+        buckets: List<Double> = listOf(10.0, 50.0, 100.0),
+    ) = MetricConfig(
+        name = name,
+        type = MetricType.HISTOGRAM,
+        valueColumn = valueColumn,
+        tagColumns = tagColumns,
+        buckets = buckets,
+    )
+
+    private fun summaryMetric(
+        name: String = "test_summary",
+        valueColumn: String = "value",
+        tagColumns: List<String> = emptyList(),
+    ) = MetricConfig(
+        name = name,
+        type = MetricType.SUMMARY,
+        valueColumn = valueColumn,
+        tagColumns = tagColumns,
+    )
+
+    private fun enumMetric(
+        name: String = "test_enum",
+        valueColumn: String = "state",
+        tagColumns: List<String> = emptyList(),
+        states: List<String> = listOf("up", "down", "degraded"),
+    ) = MetricConfig(
+        name = name,
+        type = MetricType.ENUM,
+        valueColumn = valueColumn,
+        tagColumns = tagColumns,
+        states = states,
     )
 
     // ==========================================================================
@@ -249,69 +297,477 @@ class MetricWriterTest {
     }
 
     // ==========================================================================
-    // E. Unsupported metric types
+    // E. COUNTER tests
     // ==========================================================================
 
     @Nested
-    inner class UnsupportedTypes {
+    inner class CounterHappyPath {
 
         @Test
-        fun `write with COUNTER type throws UnsupportedOperationException`() {
-            val metric = MetricConfig(
-                name = "counter_metric",
-                type = MetricType.COUNTER,
-                valueColumn = "cnt",
-            )
+        fun `single row writes absolute value as function counter`() {
+            val metric = counterMetric()
+            val rows = listOf(mapOf<String, Any?>("value" to 42.0))
 
-            assertThrows<UnsupportedOperationException> {
-                writer.write(metric, listOf(mapOf("cnt" to 1.0)))
-            }
+            writer.write(metric, rows)
+
+            val counter = registry.find("test_counter").functionCounter()
+            assertNotNull(counter)
+            assertEquals(42.0, counter.count())
         }
 
         @Test
-        fun `write with HISTOGRAM type throws UnsupportedOperationException`() {
-            val metric = MetricConfig(
-                name = "hist_metric",
-                type = MetricType.HISTOGRAM,
-                valueColumn = "ms",
-                buckets = listOf(10.0, 50.0),
-            )
+        fun `two writes with increasing values reflects latest absolute value`() {
+            val metric = counterMetric()
 
-            assertThrows<UnsupportedOperationException> {
-                writer.write(metric, listOf(mapOf("ms" to 42.0)))
-            }
+            writer.write(metric, listOf(mapOf<String, Any?>("value" to 10.0)))
+            val counter1 = registry.find("test_counter").functionCounter()
+            assertNotNull(counter1)
+            assertEquals(10.0, counter1.count())
+
+            writer.write(metric, listOf(mapOf<String, Any?>("value" to 25.0)))
+            val counter2 = registry.find("test_counter").functionCounter()
+            assertNotNull(counter2)
+            assertEquals(25.0, counter2.count())
         }
 
         @Test
-        fun `write with SUMMARY type throws UnsupportedOperationException`() {
-            val metric = MetricConfig(
-                name = "summary_metric",
-                type = MetricType.SUMMARY,
-                valueColumn = "ms",
+        fun `value with tags creates tagged function counter`() {
+            val metric = counterMetric(tagColumns = listOf("status"))
+            val rows = listOf(
+                mapOf<String, Any?>("value" to 15.0, "status" to "success"),
             )
 
-            assertThrows<UnsupportedOperationException> {
-                writer.write(metric, listOf(mapOf("ms" to 42.0)))
-            }
+            writer.write(metric, rows)
+
+            val counter = registry.find("test_counter").tag("status", "success").functionCounter()
+            assertNotNull(counter)
+            assertEquals(15.0, counter.count())
         }
 
         @Test
-        fun `write with ENUM type throws UnsupportedOperationException`() {
-            val metric = MetricConfig(
-                name = "enum_metric",
-                type = MetricType.ENUM,
-                valueColumn = "state",
-                states = listOf("up", "down"),
+        fun `multiple rows same tags last row wins`() {
+            val metric = counterMetric(tagColumns = listOf("region"))
+            val rows = listOf(
+                mapOf<String, Any?>("value" to 10.0, "region" to "us"),
+                mapOf<String, Any?>("value" to 20.0, "region" to "us"),
+                mapOf<String, Any?>("value" to 30.0, "region" to "us"),
             )
 
-            assertThrows<UnsupportedOperationException> {
-                writer.write(metric, listOf(mapOf("state" to "up")))
-            }
+            writer.write(metric, rows)
+
+            val counter = registry.find("test_counter").tag("region", "us").functionCounter()
+            assertNotNull(counter)
+            assertEquals(30.0, counter.count())
+        }
+
+        @Test
+        fun `null value produces counter at zero`() {
+            val metric = counterMetric()
+            val rows = listOf(mapOf<String, Any?>("value" to null))
+
+            writer.write(metric, rows)
+
+            val counter = registry.find("test_counter").functionCounter()
+            assertNotNull(counter)
+            assertEquals(0.0, counter.count())
+        }
+
+        @Test
+        fun `non-numeric value produces counter at zero`() {
+            val metric = counterMetric()
+            val rows = listOf(mapOf<String, Any?>("value" to "not_a_number"))
+
+            writer.write(metric, rows)
+
+            val counter = registry.find("test_counter").functionCounter()
+            assertNotNull(counter)
+            assertEquals(0.0, counter.count())
+        }
+
+        @Test
+        fun `no stale tag cleanup - absent tag combo retains previous value`() {
+            val metric = counterMetric(tagColumns = listOf("status"))
+
+            // First write: both success and failure present
+            writer.write(metric, listOf(
+                mapOf<String, Any?>("value" to 10.0, "status" to "success"),
+                mapOf<String, Any?>("value" to 5.0, "status" to "failure"),
+            ))
+
+            val successBefore = registry.find("test_counter").tag("status", "success").functionCounter()
+            assertNotNull(successBefore)
+            assertEquals(10.0, successBefore.count())
+
+            // Second write: only success present; failure should NOT be zeroed
+            writer.write(metric, listOf(
+                mapOf<String, Any?>("value" to 20.0, "status" to "success"),
+            ))
+
+            val failureAfter = registry.find("test_counter").tag("status", "failure").functionCounter()
+            assertNotNull(failureAfter, "Counter for absent tag combo should still exist")
+            assertEquals(5.0, failureAfter.count(), "Counter should retain previous value, not zero")
+        }
+
+        @Test
+        fun `close removes function counters from registry`() {
+            val metric = counterMetric(name = "close_counter")
+            writer.write(metric, listOf(mapOf<String, Any?>("value" to 42.0)))
+
+            assertNotNull(registry.find("close_counter").functionCounter())
+
+            writer.close()
+
+            val remaining = registry.meters.filter { it.id.name == "close_counter" }
+            assertTrue(remaining.isEmpty(), "Function counters should be removed after close()")
         }
     }
 
     // ==========================================================================
-    // F. close() behavior
+    // F. HISTOGRAM tests
+    // ==========================================================================
+
+    @Nested
+    inner class HistogramHappyPath {
+
+        @Test
+        fun `single row recorded as observation`() {
+            val metric = histogramMetric()
+            val rows = listOf(mapOf<String, Any?>("value" to 42.0))
+
+            writer.write(metric, rows)
+
+            val summary = registry.find("test_histogram").summary()
+            assertNotNull(summary)
+            assertEquals(1, summary.count())
+            assertEquals(42.0, summary.totalAmount())
+        }
+
+        @Test
+        fun `multiple rows recorded as multiple observations`() {
+            val metric = histogramMetric()
+            val rows = listOf(
+                mapOf<String, Any?>("value" to 10.0),
+                mapOf<String, Any?>("value" to 20.0),
+                mapOf<String, Any?>("value" to 30.0),
+            )
+
+            writer.write(metric, rows)
+
+            val summary = registry.find("test_histogram").summary()
+            assertNotNull(summary)
+            assertEquals(3, summary.count())
+            assertEquals(60.0, summary.totalAmount())
+        }
+
+        @Test
+        fun `buckets from MetricConfig applied to distribution`() {
+            val metric = histogramMetric(buckets = listOf(10.0, 50.0, 100.0))
+            val rows = listOf(
+                mapOf<String, Any?>("value" to 5.0),
+                mapOf<String, Any?>("value" to 25.0),
+                mapOf<String, Any?>("value" to 75.0),
+            )
+
+            writer.write(metric, rows)
+
+            val summary = registry.find("test_histogram").summary()
+            assertNotNull(summary)
+            val snapshot = summary.takeSnapshot()
+            val histogramCounts = snapshot.histogramCounts()
+            assertTrue(histogramCounts.isNotEmpty(), "Histogram should have bucket counts")
+        }
+
+        @Test
+        fun `tags create separate distribution summaries per tag combo`() {
+            val metric = histogramMetric(tagColumns = listOf("endpoint"))
+            val rows = listOf(
+                mapOf<String, Any?>("value" to 10.0, "endpoint" to "/api/a"),
+                mapOf<String, Any?>("value" to 50.0, "endpoint" to "/api/b"),
+            )
+
+            writer.write(metric, rows)
+
+            val summaryA = registry.find("test_histogram").tag("endpoint", "/api/a").summary()
+            val summaryB = registry.find("test_histogram").tag("endpoint", "/api/b").summary()
+            assertNotNull(summaryA)
+            assertNotNull(summaryB)
+            assertEquals(1, summaryA.count())
+            assertEquals(10.0, summaryA.totalAmount())
+            assertEquals(1, summaryB.count())
+            assertEquals(50.0, summaryB.totalAmount())
+        }
+
+        @Test
+        fun `empty rows produce no observations`() {
+            val metric = histogramMetric()
+
+            writer.write(metric, emptyList())
+
+            val summary = registry.find("test_histogram").summary()
+            // Either no meter registered, or count stays at 0
+            assertTrue(summary == null || summary.count() == 0L,
+                "No observations should be recorded for empty rows")
+        }
+
+        @Test
+        fun `two write cycles accumulate observations`() {
+            val metric = histogramMetric()
+
+            writer.write(metric, listOf(mapOf<String, Any?>("value" to 10.0)))
+            writer.write(metric, listOf(
+                mapOf<String, Any?>("value" to 20.0),
+                mapOf<String, Any?>("value" to 30.0),
+            ))
+
+            val summary = registry.find("test_histogram").summary()
+            assertNotNull(summary)
+            assertEquals(3, summary.count(), "Observations should accumulate across write cycles")
+            assertEquals(60.0, summary.totalAmount())
+        }
+
+        @Test
+        fun `close removes distribution summaries from registry`() {
+            val metric = histogramMetric(name = "close_hist")
+            writer.write(metric, listOf(mapOf<String, Any?>("value" to 42.0)))
+
+            assertNotNull(registry.find("close_hist").summary())
+
+            writer.close()
+
+            val remaining = registry.meters.filter { it.id.name == "close_hist" }
+            assertTrue(remaining.isEmpty(), "Distribution summaries should be removed after close()")
+        }
+    }
+
+    // ==========================================================================
+    // G. SUMMARY tests
+    // ==========================================================================
+
+    @Nested
+    inner class SummaryHappyPath {
+
+        @Test
+        fun `single row recorded with count 1 and totalAmount equal to value`() {
+            val metric = summaryMetric()
+            val rows = listOf(mapOf<String, Any?>("value" to 42.0))
+
+            writer.write(metric, rows)
+
+            val summary = registry.find("test_summary").summary()
+            assertNotNull(summary)
+            assertEquals(1, summary.count())
+            assertEquals(42.0, summary.totalAmount())
+        }
+
+        @Test
+        fun `multiple rows produce correct count and total`() {
+            val metric = summaryMetric()
+            val rows = listOf(
+                mapOf<String, Any?>("value" to 10.0),
+                mapOf<String, Any?>("value" to 20.0),
+                mapOf<String, Any?>("value" to 30.0),
+                mapOf<String, Any?>("value" to 40.0),
+            )
+
+            writer.write(metric, rows)
+
+            val summary = registry.find("test_summary").summary()
+            assertNotNull(summary)
+            assertEquals(4, summary.count())
+            assertEquals(100.0, summary.totalAmount())
+        }
+
+        @Test
+        fun `percentiles published in snapshot`() {
+            val metric = summaryMetric()
+            // Record enough observations for percentile computation
+            val rows = (1..100).map { mapOf<String, Any?>("value" to it.toDouble()) }
+
+            writer.write(metric, rows)
+
+            val summary = registry.find("test_summary").summary()
+            assertNotNull(summary)
+            val snapshot = summary.takeSnapshot()
+            val percentiles = snapshot.percentileValues()
+            assertTrue(percentiles.isNotEmpty(), "Summary should publish percentile values")
+
+            val publishedPercentiles = percentiles.map { it.percentile() }.toSet()
+            // Expect at least the standard percentiles (p50, p90, p95, p99)
+            assertTrue(publishedPercentiles.contains(0.5), "Should publish p50")
+            assertTrue(publishedPercentiles.contains(0.9), "Should publish p90")
+            assertTrue(publishedPercentiles.contains(0.95), "Should publish p95")
+            assertTrue(publishedPercentiles.contains(0.99), "Should publish p99")
+        }
+
+        @Test
+        fun `tags create separate distribution summaries per tag combo`() {
+            val metric = summaryMetric(tagColumns = listOf("operation"))
+            val rows = listOf(
+                mapOf<String, Any?>("value" to 5.0, "operation" to "read"),
+                mapOf<String, Any?>("value" to 15.0, "operation" to "write"),
+            )
+
+            writer.write(metric, rows)
+
+            val readSummary = registry.find("test_summary").tag("operation", "read").summary()
+            val writeSummary = registry.find("test_summary").tag("operation", "write").summary()
+            assertNotNull(readSummary)
+            assertNotNull(writeSummary)
+            assertEquals(1, readSummary.count())
+            assertEquals(5.0, readSummary.totalAmount())
+            assertEquals(1, writeSummary.count())
+            assertEquals(15.0, writeSummary.totalAmount())
+        }
+
+        @Test
+        fun `close removes summaries from registry`() {
+            val metric = summaryMetric(name = "close_summary")
+            writer.write(metric, listOf(mapOf<String, Any?>("value" to 42.0)))
+
+            assertNotNull(registry.find("close_summary").summary())
+
+            writer.close()
+
+            val remaining = registry.meters.filter { it.id.name == "close_summary" }
+            assertTrue(remaining.isEmpty(), "Summaries should be removed after close()")
+        }
+    }
+
+    // ==========================================================================
+    // H. ENUM tests
+    // ==========================================================================
+
+    @Nested
+    inner class EnumHappyPath {
+
+        @Test
+        fun `single state write sets current state gauge to 1 and others to 0`() {
+            val metric = enumMetric()
+            val rows = listOf(mapOf<String, Any?>("state" to "up"))
+
+            writer.write(metric, rows)
+
+            val upGauge = registry.find("test_enum").tag("state", "up").gauge()
+            val downGauge = registry.find("test_enum").tag("state", "down").gauge()
+            val degradedGauge = registry.find("test_enum").tag("state", "degraded").gauge()
+            assertNotNull(upGauge, "Active state gauge should exist")
+            assertNotNull(downGauge, "Inactive state gauge should exist")
+            assertNotNull(degradedGauge, "Inactive state gauge should exist")
+            assertEquals(1.0, upGauge.value(), "Active state should be 1.0")
+            assertEquals(0.0, downGauge.value(), "Inactive state should be 0.0")
+            assertEquals(0.0, degradedGauge.value(), "Inactive state should be 0.0")
+        }
+
+        @Test
+        fun `state change updates gauges correctly`() {
+            val metric = enumMetric()
+
+            // Initial state: "up"
+            writer.write(metric, listOf(mapOf<String, Any?>("state" to "up")))
+
+            val upBefore = registry.find("test_enum").tag("state", "up").gauge()
+            assertNotNull(upBefore)
+            assertEquals(1.0, upBefore.value())
+
+            // State change to "down"
+            writer.write(metric, listOf(mapOf<String, Any?>("state" to "down")))
+
+            val upAfter = registry.find("test_enum").tag("state", "up").gauge()
+            val downAfter = registry.find("test_enum").tag("state", "down").gauge()
+            assertNotNull(upAfter)
+            assertNotNull(downAfter)
+            assertEquals(0.0, upAfter.value(), "Previous state should become 0.0")
+            assertEquals(1.0, downAfter.value(), "New state should become 1.0")
+        }
+
+        @Test
+        fun `unknown state not in states list sets all state gauges to 0`() {
+            val metric = enumMetric()
+            val rows = listOf(mapOf<String, Any?>("state" to "unknown_state"))
+
+            writer.write(metric, rows)
+
+            val upGauge = registry.find("test_enum").tag("state", "up").gauge()
+            val downGauge = registry.find("test_enum").tag("state", "down").gauge()
+            val degradedGauge = registry.find("test_enum").tag("state", "degraded").gauge()
+            assertNotNull(upGauge)
+            assertNotNull(downGauge)
+            assertNotNull(degradedGauge)
+            assertEquals(0.0, upGauge.value(), "All states should be 0.0 for unknown state")
+            assertEquals(0.0, downGauge.value(), "All states should be 0.0 for unknown state")
+            assertEquals(0.0, degradedGauge.value(), "All states should be 0.0 for unknown state")
+        }
+
+        @Test
+        fun `tags create separate gauge sets per tag combo`() {
+            val metric = enumMetric(tagColumns = listOf("region"))
+            val rows = listOf(
+                mapOf<String, Any?>("state" to "up", "region" to "us"),
+                mapOf<String, Any?>("state" to "down", "region" to "eu"),
+            )
+
+            writer.write(metric, rows)
+
+            // US region: up=1, down=0
+            val usUp = registry.find("test_enum")
+                .tag("region", "us").tag("state", "up").gauge()
+            val usDown = registry.find("test_enum")
+                .tag("region", "us").tag("state", "down").gauge()
+            assertNotNull(usUp)
+            assertNotNull(usDown)
+            assertEquals(1.0, usUp.value(), "US region should have up=1.0")
+            assertEquals(0.0, usDown.value(), "US region should have down=0.0")
+
+            // EU region: up=0, down=1
+            val euUp = registry.find("test_enum")
+                .tag("region", "eu").tag("state", "up").gauge()
+            val euDown = registry.find("test_enum")
+                .tag("region", "eu").tag("state", "down").gauge()
+            assertNotNull(euUp)
+            assertNotNull(euDown)
+            assertEquals(0.0, euUp.value(), "EU region should have up=0.0")
+            assertEquals(1.0, euDown.value(), "EU region should have down=1.0")
+        }
+
+        @Test
+        fun `empty rows set all states to 0 via stale cleanup`() {
+            val metric = enumMetric()
+
+            // First write to establish gauges
+            writer.write(metric, listOf(mapOf<String, Any?>("state" to "up")))
+            assertEquals(1.0, registry.find("test_enum").tag("state", "up").gauge()!!.value())
+
+            // Empty write should zero all
+            writer.write(metric, emptyList())
+
+            val upGauge = registry.find("test_enum").tag("state", "up").gauge()
+            val downGauge = registry.find("test_enum").tag("state", "down").gauge()
+            val degradedGauge = registry.find("test_enum").tag("state", "degraded").gauge()
+            assertNotNull(upGauge)
+            assertNotNull(downGauge)
+            assertNotNull(degradedGauge)
+            assertEquals(0.0, upGauge.value(), "All states should be 0.0 after empty write")
+            assertEquals(0.0, downGauge.value(), "All states should be 0.0 after empty write")
+            assertEquals(0.0, degradedGauge.value(), "All states should be 0.0 after empty write")
+        }
+
+        @Test
+        fun `close removes all enum gauges from registry`() {
+            val metric = enumMetric(name = "close_enum")
+            writer.write(metric, listOf(mapOf<String, Any?>("state" to "up")))
+
+            // Verify gauges exist before close
+            assertNotNull(registry.find("close_enum").tag("state", "up").gauge())
+
+            writer.close()
+
+            val remaining = registry.meters.filter { it.id.name == "close_enum" }
+            assertTrue(remaining.isEmpty(), "All enum gauges should be removed after close()")
+        }
+    }
+
+    // ==========================================================================
+    // I. close() behavior
     // ==========================================================================
 
     @Nested
@@ -356,7 +812,7 @@ class MetricWriterTest {
     }
 
     // ==========================================================================
-    // G. Edge cases: numeric value extraction
+    // J. Edge cases: numeric value extraction
     // ==========================================================================
 
     @Nested
