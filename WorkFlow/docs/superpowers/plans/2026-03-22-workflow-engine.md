@@ -509,10 +509,11 @@ Reusable, config-driven query exporter component. Core only — GAUGE metric typ
 
 - [ ] **Step 5: Create QueryScheduler**
 
-`core/QueryScheduler.kt` — `SupervisorJob` scope, one child coroutine per query:
+`core/QueryScheduler.kt` — `SupervisorJob` scope, one child coroutine per query, and figure out
+how to let only leader start child coroutine and when switches then stop those loop, and for a follower to leader,
+start the loop:
 - `fun start(config: ExporterConfig, ...)`
-- Each coroutine: `while (isActive) { if (leaderGuard.isLeader()) { execute + write }; delay(interval) }`
-- Cron support via next-fire-time calculation (e.g., `cronutils` library or inline)
+- Cron support via next-fire-time calculation (e.g., `cronutils` library)
 - `fun stop()` — cancels scope, joins with bounded timeout
 - Error per query: log WARN, skip cycle, retry next interval
 
