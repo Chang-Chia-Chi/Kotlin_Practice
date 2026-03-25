@@ -19,6 +19,8 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
@@ -60,6 +62,8 @@ class LeaderManager(
     // Lazy so tests can set `clock` before first access captures the initial instant.
     // NONE mode: always initialized during single-threaded startup (onStart or test setup).
     private val _lastHeartbeat by lazy(LazyThreadSafetyMode.NONE) { MutableStateFlow(Instant.now(clock)) }
+
+    val leaderState: StateFlow<Boolean> get() = _isLeader.asStateFlow()
 
     override val isActive: Boolean get() = _isLeader.value
     override val token: Long get() = _epoch.value
