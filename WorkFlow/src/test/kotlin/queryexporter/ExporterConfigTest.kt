@@ -614,8 +614,9 @@ class ExporterConfigTest {
 
         @Test
         fun `production query-exporter yaml loads and passes validation`() {
-            val input = Thread.currentThread().contextClassLoader
-                .getResourceAsStream("query-exporter.yaml")!!
+            val input = requireNotNull(
+                Thread.currentThread().contextClassLoader.getResourceAsStream("query-exporter.yaml")
+            ) { "query-exporter.yaml not found on classpath" }
             val config = ExporterConfig.load(input)
             assertDoesNotThrow { ExporterConfigValidator.validate(config) }
         }
