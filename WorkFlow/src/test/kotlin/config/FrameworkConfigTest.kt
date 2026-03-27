@@ -38,6 +38,11 @@ class FrameworkConfigDefaultsTest {
     }
 
     @Test
+    fun `worker batchSize defaults to 1`() {
+        assertEquals(1, config.worker().batchSize())
+    }
+
+    @Test
     fun `leaderElection namespace defaults to default`() {
         assertEquals("default", config.leaderElection().namespace())
     }
@@ -120,6 +125,8 @@ class FrameworkConfigOverrideProfile : QuarkusTestProfile {
         "framework.worker.id" to "worker-42",
         "framework.worker.poll-interval" to "PT5S",
         "framework.worker.concurrency" to "16",
+        "framework.worker.batch-size" to "8",
+        "quarkus.datasource.jdbc.max-size" to "32",
         "framework.leader-election.namespace" to "prod",
         "framework.leader-election.lease-name" to "custom-lease",
         "framework.leader-election.lease-duration" to "PT30S",
@@ -152,6 +159,11 @@ class FrameworkConfigOverrideTest {
     @Test
     fun `worker concurrency is overridden`() {
         assertEquals(16, config.worker().concurrency())
+    }
+
+    @Test
+    fun `worker batchSize is overridden`() {
+        assertEquals(8, config.worker().batchSize())
     }
 
     @Test

@@ -18,6 +18,8 @@ interface FrameworkConfig {
         fun pollInterval(): Duration
         @WithDefault("4")
         fun concurrency(): Int
+        @WithDefault("1")
+        fun batchSize(): Int
     }
 
     interface LeaderElectionConfig {

@@ -46,6 +46,7 @@ class WorkflowIntegrationTest {
             override fun id() = "test-worker"
             override fun pollInterval(): Duration = Duration.ofSeconds(1)
             override fun concurrency() = 4
+            override fun batchSize() = 1
         }
 
         override fun leaderElection() = object : FrameworkConfig.LeaderElectionConfig {
