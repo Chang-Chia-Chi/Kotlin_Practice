@@ -1239,6 +1239,227 @@ class RepositoryTest {
             assertNull(row["RESULT"], "result column should be null")
         }
 
+        // ── R1.2 — DEAD_LETTER status ────────────────────────────────────
+
+        @Test
+        fun `deadLetterExhaustedTasks marks exhausted stale tasks as DEAD_LETTER`() = runTest {
+            val wf = makeWorkflow()
+            workflowRepo.insert(wf)
+
+            val threshold = now().minus(Duration.ofMinutes(10))
+            // Exhausted: retryCount >= maxRetries, claimed before threshold
+            val exhausted = makeTask(
+                workflowId = wf.id,
+                status = TaskStatus.PROCESSING,
+                claimedBy = "worker-1",
+                claimedAt = threshold.minus(Duration.ofMinutes(5)),
+                retryCount = 3,
+                maxRetries = 3,
+            )
+            // Not exhausted: has retries remaining
+            val retriable = makeTask(
+                workflowId = wf.id,
+                status = TaskStatus.PROCESSING,
+                claimedBy = "worker-2",
+                claimedAt = threshold.minus(Duration.ofMinutes(5)),
+                retryCount = 1,
+                maxRetries = 3,
+            )
+            // Not stale: claimed recently
+            val fresh = makeTask(
+                workflowId = wf.id,
+                status = TaskStatus.PROCESSING,
+                claimedBy = "worker-3",
+                claimedAt = now(),
+                retryCount = 3,
+                maxRetries = 3,
+            )
+            insertTaskDirect(exhausted)
+            insertTaskDirect(retriable)
+            insertTaskDirect(fresh)
+
+            val count = taskRepo.deadLetterExhaustedTasks(threshold)
+
+            assertEquals(1, count)
+            val row = readTaskDirect(exhausted.id)!!
+            assertEquals("DEAD_LETTER", row["STATUS"])
+            assertNotNull(row["COMPLETED_AT"])
+
+            // Others unchanged
+            assertEquals("PROCESSING", readTaskDirect(retriable.id)!!["STATUS"])
+            assertEquals("PROCESSING", readTaskDirect(fresh.id)!!["STATUS"])
+        }
+
+        @Test
+        fun `DEAD_LETTER is terminal`() {
+            assertTrue(TaskStatus.DEAD_LETTER.isTerminal)
+        }
+
+        @Test
+        fun `countNonTerminal excludes DEAD_LETTER`() = runTest {
+            val wf = makeWorkflow()
+            workflowRepo.insert(wf)
+
+            insertTaskDirect(makeTask(workflowId = wf.id, sequenceNumber = 1, status = TaskStatus.DEAD_LETTER))
+            insertTaskDirect(makeTask(workflowId = wf.id, sequenceNumber = 1, status = TaskStatus.PENDING))
+
+            val count = taskRepo.countNonTerminal(wf.id, 1)
+            assertEquals(1, count, "DEAD_LETTER should be excluded from non-terminal count")
+        }
+
+        @Test
+        fun `countFailed includes DEAD_LETTER`() = runTest {
+            val wf = makeWorkflow()
+            workflowRepo.insert(wf)
+
+            insertTaskDirect(makeTask(workflowId = wf.id, sequenceNumber = 1, status = TaskStatus.FAILED))
+            insertTaskDirect(makeTask(workflowId = wf.id, sequenceNumber = 1, status = TaskStatus.DEAD_LETTER))
+            insertTaskDirect(makeTask(workflowId = wf.id, sequenceNumber = 1, status = TaskStatus.COMPLETED))
+
+            val count = taskRepo.countFailed(wf.id, 1)
+            assertEquals(2, count, "countFailed should include both FAILED and DEAD_LETTER")
+        }
+
+        @Test
+        fun `updateStatusWithHandle rejects update to DEAD_LETTER task`() {
+            val wf = makeWorkflow()
+            insertWorkflowDirect(wf)
+            val task = makeTask(workflowId = wf.id, status = TaskStatus.DEAD_LETTER)
+            insertTaskDirect(task)
+
+            val result = jdbi.inTransaction<Boolean, Exception> { handle ->
+                taskRepo.updateStatusWithHandle(handle, task.id, TaskStatus.COMPLETED, """{"retry":true}""")
+            }
+
+            assertFalse(result, "should return false when task is DEAD_LETTER")
+        }
+
+        // ── R1.5 — Non-terminal status guard ──────────────────────────────
+
+        @Test
+        fun `non-terminal update rejects when task is already COMPLETED`() = runTest {
+            val wf = makeWorkflow()
+            workflowRepo.insert(wf)
+            val task = makeTask(workflowId = wf.id, status = TaskStatus.COMPLETED)
+            insertTaskDirect(task)
+
+            val result = taskRepo.updateStatus(task.id, TaskStatus.PROCESSING)
+
+            assertFalse(result, "non-terminal update should fail on COMPLETED task")
+            assertEquals("COMPLETED", readTaskDirect(task.id)!!["STATUS"])
+        }
+
+        @Test
+        fun `non-terminal update rejects when task is already PENDING`() = runTest {
+            val wf = makeWorkflow()
+            workflowRepo.insert(wf)
+            val task = makeTask(workflowId = wf.id, status = TaskStatus.PENDING)
+            insertTaskDirect(task)
+
+            val result = taskRepo.updateStatus(task.id, TaskStatus.PROCESSING)
+
+            assertFalse(result, "non-terminal update should fail on PENDING task (not PROCESSING)")
+        }
+
+        // ── Zombie guard via (claimed_by, claimed_at) ─────────────────────
+
+        @Test
+        fun `terminal update succeeds with matching claimedBy and claimedAt`() {
+            val wf = makeWorkflow()
+            insertWorkflowDirect(wf)
+            val claimedAt = now()
+            val task = makeTask(
+                workflowId = wf.id,
+                status = TaskStatus.PROCESSING,
+                claimedBy = "pod-A",
+                claimedAt = claimedAt,
+            )
+            insertTaskDirect(task)
+
+            val result = jdbi.inTransaction<Boolean, Exception> { handle ->
+                taskRepo.updateStatusWithHandle(
+                    handle, task.id, TaskStatus.COMPLETED, null,
+                    claimedBy = "pod-A", claimedAt = claimedAt,
+                )
+            }
+
+            assertTrue(result, "should succeed with matching claim identity")
+            assertEquals("COMPLETED", readTaskDirect(task.id)!!["STATUS"])
+        }
+
+        @Test
+        fun `terminal update fails when claimedBy does not match (zombie detection)`() {
+            val wf = makeWorkflow()
+            insertWorkflowDirect(wf)
+            val claimedAt = now()
+            val task = makeTask(
+                workflowId = wf.id,
+                status = TaskStatus.PROCESSING,
+                claimedBy = "pod-B",
+                claimedAt = claimedAt,
+            )
+            insertTaskDirect(task)
+
+            val result = jdbi.inTransaction<Boolean, Exception> { handle ->
+                taskRepo.updateStatusWithHandle(
+                    handle, task.id, TaskStatus.COMPLETED, null,
+                    claimedBy = "pod-A", claimedAt = claimedAt,
+                )
+            }
+
+            assertFalse(result, "zombie handler (different pod) should be rejected")
+            assertEquals("PROCESSING", readTaskDirect(task.id)!!["STATUS"])
+        }
+
+        @Test
+        fun `terminal update fails when claimedAt does not match (zombie after reclaim)`() {
+            val wf = makeWorkflow()
+            insertWorkflowDirect(wf)
+            val originalClaimedAt = now().minus(Duration.ofMinutes(10))
+            val newClaimedAt = now()
+            val task = makeTask(
+                workflowId = wf.id,
+                status = TaskStatus.PROCESSING,
+                claimedBy = "pod-A",
+                claimedAt = newClaimedAt,
+            )
+            insertTaskDirect(task)
+
+            // Zombie from original claim attempts to complete with stale claimedAt
+            val result = jdbi.inTransaction<Boolean, Exception> { handle ->
+                taskRepo.updateStatusWithHandle(
+                    handle, task.id, TaskStatus.COMPLETED, null,
+                    claimedBy = "pod-A", claimedAt = originalClaimedAt,
+                )
+            }
+
+            assertFalse(result, "stale claimedAt should be rejected (same pod, reclaimed)")
+            assertEquals("PROCESSING", readTaskDirect(task.id)!!["STATUS"])
+        }
+
+        @Test
+        fun `terminal update with null claimedBy bypasses fence (sweeper path)`() {
+            val wf = makeWorkflow()
+            insertWorkflowDirect(wf)
+            val task = makeTask(
+                workflowId = wf.id,
+                status = TaskStatus.PROCESSING,
+                claimedBy = "pod-A",
+                claimedAt = now(),
+            )
+            insertTaskDirect(task)
+
+            val result = jdbi.inTransaction<Boolean, Exception> { handle ->
+                taskRepo.updateStatusWithHandle(
+                    handle, task.id, TaskStatus.FAILED, null,
+                    claimedBy = null, claimedAt = null,
+                )
+            }
+
+            assertTrue(result, "null claimedBy should bypass fence (sweeper path)")
+            assertEquals("FAILED", readTaskDirect(task.id)!!["STATUS"])
+        }
+
         // ── SKIP LOCKED concurrency ─────────────────────────────────────
 
         @Test

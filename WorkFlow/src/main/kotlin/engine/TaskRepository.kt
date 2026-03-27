@@ -5,10 +5,10 @@ import com.workflow.extension.withHandleSuspend
 import jakarta.enterprise.context.ApplicationScoped
 import org.jdbi.v3.core.Handle
 import org.jdbi.v3.core.Jdbi
+import java.sql.Types
 import java.time.Instant
 import java.time.LocalDateTime
 import java.time.ZoneOffset
-import java.sql.Types
 
 @ApplicationScoped
 class TaskRepository(
@@ -159,15 +159,17 @@ class TaskRepository(
                 .execute()
         }
 
-    suspend fun findStale(staleThreshold: Instant): List<Task> =
-        jdbi.withHandleSuspend<List<Task>, Exception> { h: Handle ->
+    suspend fun deadLetterExhaustedTasks(staleThreshold: Instant): Int =
+        jdbi.inTransactionSuspend<Int, Exception> { h: Handle ->
             h
-                .createQuery(
-                    "SELECT * FROM task WHERE status = 'PROCESSING' AND claimed_at < :threshold",
-                ).bind("threshold", LocalDateTime.ofInstant(staleThreshold, ZoneOffset.UTC))
-                .mapToMap()
-                .list()
-                .map(::mapTaskRow)
+                .createUpdate(
+                    """
+                UPDATE task SET status = 'DEAD_LETTER', completed_at = :now
+                WHERE status = 'PROCESSING' AND claimed_at < :threshold AND retry_count >= max_retries
+                """,
+                ).bind("now", LocalDateTime.now(ZoneOffset.UTC).truncatedTo(java.time.temporal.ChronoUnit.MICROS))
+                .bind("threshold", LocalDateTime.ofInstant(staleThreshold, ZoneOffset.UTC))
+                .execute()
         }
 
     // ── Handle methods (for barrier transaction) ──
@@ -177,27 +179,43 @@ class TaskRepository(
         id: String,
         newStatus: TaskStatus,
         resultJson: String? = null,
+        claimedBy: String? = null,
+        claimedAt: Instant? = null,
     ): Boolean {
-        val count = if (newStatus.isTerminal) {
-            handle
-                .createUpdate(
-                    """
+        val count =
+            if (newStatus.isTerminal) {
+                handle
+                    .createUpdate(
+                        """
                 UPDATE task SET status = :status, result = :result, completed_at = :now
-                WHERE id = :id AND status NOT IN ('COMPLETED', 'FAILED')
+                WHERE id = :id
+                  AND status NOT IN ('COMPLETED', 'FAILED', 'DEAD_LETTER')
+                  AND (claimed_by = :claimedBy AND claimed_at = :claimedAt OR :claimedBy IS NULL)
                 """,
-                ).bind("id", id)
-                .bind("status", newStatus.name)
-                .let { if (resultJson != null) it.bind("result", resultJson) else it.bindNull("result", Types.CLOB) }
-                .bind("now", LocalDateTime.now(ZoneOffset.UTC))
-                .execute()
-        } else {
-            handle
-                .createUpdate("UPDATE task SET status = :status, result = :result WHERE id = :id")
-                .bind("id", id)
-                .bind("status", newStatus.name)
-                .let { if (resultJson != null) it.bind("result", resultJson) else it.bindNull("result", Types.CLOB) }
-                .execute()
-        }
+                    ).bind("id", id)
+                    .bind("status", newStatus.name)
+                    .let { if (resultJson != null) it.bind("result", resultJson) else it.bindNull("result", Types.CLOB) }
+                    .bind("now", LocalDateTime.now(ZoneOffset.UTC))
+                    .let { if (claimedBy != null) it.bind("claimedBy", claimedBy) else it.bindNull("claimedBy", Types.VARCHAR) }
+                    .let {
+                        if (claimedAt != null) {
+                            it.bind("claimedAt", LocalDateTime.ofInstant(claimedAt, ZoneOffset.UTC))
+                        } else {
+                            it.bindNull("claimedAt", Types.TIMESTAMP)
+                        }
+                    }.execute()
+            } else {
+                handle
+                    .createUpdate(
+                        """
+                UPDATE task SET status = :status, result = :result
+                WHERE id = :id AND status = 'PROCESSING'
+                """,
+                    ).bind("id", id)
+                    .bind("status", newStatus.name)
+                    .let { if (resultJson != null) it.bind("result", resultJson) else it.bindNull("result", Types.CLOB) }
+                    .execute()
+            }
         return count > 0
     }
 
@@ -211,7 +229,7 @@ class TaskRepository(
                 """
             SELECT COUNT(*) FROM task
             WHERE workflow_id = :workflowId AND sequence_number = :seq
-              AND status NOT IN ('COMPLETED', 'FAILED')
+              AND status NOT IN ('COMPLETED', 'FAILED', 'DEAD_LETTER')
             """,
             ).bind("workflowId", workflowId)
             .bind("seq", sequenceNumber)
@@ -228,7 +246,7 @@ class TaskRepository(
                 """
             SELECT COUNT(*) FROM task
             WHERE workflow_id = :workflowId AND sequence_number = :seq
-              AND status = 'FAILED'
+              AND status IN ('FAILED', 'DEAD_LETTER')
             """,
             ).bind("workflowId", workflowId)
             .bind("seq", sequenceNumber)

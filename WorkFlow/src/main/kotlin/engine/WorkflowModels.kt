@@ -7,9 +7,9 @@ import java.util.UUID
 enum class WorkflowStatus { RUNNING, COMPLETED, FAILED }
 
 enum class TaskStatus {
-    PENDING, PROCESSING, COMPLETED, FAILED;
+    PENDING, PROCESSING, COMPLETED, FAILED, DEAD_LETTER;
 
-    val isTerminal: Boolean get() = this == COMPLETED || this == FAILED
+    val isTerminal: Boolean get() = this == COMPLETED || this == FAILED || this == DEAD_LETTER
 }
 
 data class WorkflowRun(

@@ -30,9 +30,9 @@ class WorkflowModelsTest {
     // ── TaskStatus enum ─────────────────────────────────────────────────
 
     @Test
-    fun `TaskStatus contains exactly four values`() {
+    fun `TaskStatus contains exactly five values`() {
         assertEquals(
-            setOf("PENDING", "PROCESSING", "COMPLETED", "FAILED"),
+            setOf("PENDING", "PROCESSING", "COMPLETED", "FAILED", "DEAD_LETTER"),
             TaskStatus.entries.map { it.name }.toSet(),
         )
     }
@@ -45,8 +45,8 @@ class WorkflowModelsTest {
     }
 
     @Test
-    fun `isTerminal returns true only for COMPLETED and FAILED`() {
-        val expectedTerminal = setOf(TaskStatus.COMPLETED, TaskStatus.FAILED)
+    fun `isTerminal returns true only for COMPLETED, FAILED, and DEAD_LETTER`() {
+        val expectedTerminal = setOf(TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.DEAD_LETTER)
         TaskStatus.entries.forEach { status ->
             assertEquals(
                 status in expectedTerminal,

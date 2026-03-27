@@ -147,6 +147,8 @@ class WorkerLoopTest {
                 eq(task.sequenceNumber),
                 eq(TaskStatus.COMPLETED),
                 eq(handlerResult.result),
+                eq(workerId),
+                any(),
             )
         }
 
@@ -169,6 +171,8 @@ class WorkerLoopTest {
                 eq(task.sequenceNumber),
                 eq(TaskStatus.COMPLETED),
                 eq(null),
+                eq(workerId),
+                any(),
             )
         }
 
@@ -192,11 +196,11 @@ class WorkerLoopTest {
 
             verify(barrierService).onTaskCompleted(
                 eq(task1.id), eq(task1.workflowId), eq(task1.sequenceNumber),
-                eq(TaskStatus.COMPLETED), eq("""{"r":1}"""),
+                eq(TaskStatus.COMPLETED), eq("""{"r":1}"""), eq(workerId), any(),
             )
             verify(barrierService).onTaskCompleted(
                 eq(task2.id), eq(task2.workflowId), eq(task2.sequenceNumber),
-                eq(TaskStatus.COMPLETED), eq("""{"r":2}"""),
+                eq(TaskStatus.COMPLETED), eq("""{"r":2}"""), eq(workerId), any(),
             )
         }
     }
@@ -260,6 +264,8 @@ class WorkerLoopTest {
                 eq(task.sequenceNumber),
                 eq(TaskStatus.FAILED),
                 eq(null),
+                eq(workerId),
+                any(),
             )
         }
 
@@ -283,6 +289,8 @@ class WorkerLoopTest {
                 eq(task.sequenceNumber),
                 eq(TaskStatus.FAILED),
                 eq(null),
+                eq(workerId),
+                any(),
             )
         }
     }
@@ -314,6 +322,8 @@ class WorkerLoopTest {
                 eq(task.sequenceNumber),
                 eq(TaskStatus.FAILED),
                 eq(null),
+                eq(workerId),
+                any(),
             )
         }
     }
@@ -357,6 +367,8 @@ class WorkerLoopTest {
                 eq(task.sequenceNumber),
                 eq(TaskStatus.FAILED),
                 eq(null),
+                eq(workerId),
+                any(),
             )
         }
     }
@@ -394,7 +406,7 @@ class WorkerLoopTest {
             verify(handler).execute(any())
             verify(barrierService).onTaskCompleted(
                 eq(task.id), eq(task.workflowId), eq(task.sequenceNumber),
-                eq(TaskStatus.COMPLETED), eq("ok"),
+                eq(TaskStatus.COMPLETED), eq("ok"), eq(workerId), any(),
             )
         }
     }
@@ -420,7 +432,7 @@ class WorkerLoopTest {
 
             verify(barrierService).onTaskCompleted(
                 eq(task.id), eq(task.workflowId), eq(task.sequenceNumber),
-                eq(TaskStatus.COMPLETED), eq("recovered"),
+                eq(TaskStatus.COMPLETED), eq("recovered"), eq(workerId), any(),
             )
         }
     }
@@ -522,7 +534,7 @@ class WorkerLoopTest {
             assertTrue(handlerCompleted.get(), "Handler should complete within drain window (not cancelled)")
             verify(barrierService).onTaskCompleted(
                 eq(task.id), eq(task.workflowId), eq(task.sequenceNumber),
-                eq(TaskStatus.COMPLETED), eq("""{"drained":"ok"}"""),
+                eq(TaskStatus.COMPLETED), eq("""{"drained":"ok"}"""), eq(workerId), any(),
             )
         }
 
@@ -686,13 +698,13 @@ class WorkerLoopTest {
 
             doAnswer { throw RuntimeException("barrier blew up") }
                 .doAnswer { }
-                .whenever(barrierService).onTaskCompleted(any(), any(), any(), any(), any())
+                .whenever(barrierService).onTaskCompleted(any(), any(), any(), any(), any(), any(), any())
 
             startAndAdvance(this, ticks = 4)
 
             verify(handler1).execute(any())
             verify(handler2).execute(any())
-            verify(barrierService, times(2)).onTaskCompleted(any(), any(), any(), any(), any())
+            verify(barrierService, times(2)).onTaskCompleted(any(), any(), any(), any(), any(), any(), any())
         }
 
         @Test
@@ -706,7 +718,7 @@ class WorkerLoopTest {
             whenever(handlerRegistry.resolve(task.handlerKey)).thenReturn(handler)
             whenever(handler.execute(any())).thenReturn(HandlerOutput("success"))
             doThrow(RuntimeException("barrier failed on COMPLETED"))
-                .whenever(barrierService).onTaskCompleted(any(), any(), any(), any(), any())
+                .whenever(barrierService).onTaskCompleted(any(), any(), any(), any(), any(), any(), any())
 
             startAndAdvance(this)
 
@@ -737,7 +749,7 @@ class WorkerLoopTest {
                 Unit
             }
                 .doAnswer { }
-                .whenever(barrierService).onTaskCompleted(any(), any(), any(), any(), any())
+                .whenever(barrierService).onTaskCompleted(any(), any(), any(), any(), any(), any(), any())
 
             startAndAdvance(this, ticks = 4)
 

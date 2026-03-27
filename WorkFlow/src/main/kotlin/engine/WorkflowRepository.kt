@@ -45,7 +45,7 @@ class WorkflowRepository(private val jdbi: Jdbi) {
                     SELECT 1 FROM task t
                     WHERE t.workflow_id = w.id
                       AND t.sequence_number = w.current_sequence
-                      AND t.status NOT IN ('COMPLETED', 'FAILED')
+                      AND t.status NOT IN ('COMPLETED', 'FAILED', 'DEAD_LETTER')
                   )
                 """,
             )

@@ -20,10 +20,11 @@ object OracleTestContainer {
         // isolation can cause DriverManager to lose the driver registration.
         Class.forName("oracle.jdbc.OracleDriver")
         Jdbi.create(oracle.jdbcUrl, oracle.username, oracle.password).also { db ->
-            val sql = OracleTestContainer::class.java.classLoader
-                .getResource("db/migration/V1__create_workflow_tables.sql")!!
-                .readText()
-            db.useHandle<Exception> { it.createScript(sql).execute() }
+            val loader = OracleTestContainer::class.java.classLoader
+            db.useHandle<Exception> { handle ->
+                handle.createScript(loader.getResource("db/migration/V1__create_workflow_tables.sql")!!.readText()).execute()
+                handle.createScript(loader.getResource("db/migration/V2__add_dead_letter.sql")!!.readText()).execute()
+            }
         }
     }
 }

@@ -940,10 +940,10 @@ class SweeperTest {
 
             sweeper.patrol()
 
-            // Task should be FAILED (retries exhausted)
+            // Task should be DEAD_LETTER (retries exhausted)
             val task = readTaskDirect(taskId)
             assertNotNull(task)
-            assertEquals("FAILED", task["STATUS"])
+            assertEquals("DEAD_LETTER", task["STATUS"])
 
             // Only task at seq 1 with ABORT policy -> workflow FAILED
             val wfRow = readWorkflowDirect(wfId)

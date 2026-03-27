@@ -53,23 +53,9 @@ class Sweeper(
             log.info("Reclaimed {} stale task(s) for retry", reclaimed)
         }
 
-        val exhausted = taskRepo.findStale(threshold)
-        for (task in exhausted) {
-            try {
-                barrierService.onTaskCompleted(
-                    taskId = task.id,
-                    workflowId = task.workflowId,
-                    sequenceNumber = task.sequenceNumber,
-                    status = TaskStatus.FAILED,
-                    resultJson = null,
-                )
-                log.warn(
-                    "Stale task {} exhausted retries ({}/{}), marked FAILED",
-                    task.id, task.retryCount, task.maxRetries,
-                )
-            } catch (e: Exception) {
-                log.error("Failed to fail exhausted stale task {}", task.id, e)
-            }
+        val deadLettered = taskRepo.deadLetterExhaustedTasks(threshold)
+        if (deadLettered > 0) {
+            log.warn("Dead-lettered {} exhausted stale task(s)", deadLettered)
         }
     }
 

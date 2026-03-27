@@ -181,6 +181,8 @@ class WorkerLoop(
                     sequenceNumber = task.sequenceNumber,
                     status = TaskStatus.COMPLETED,
                     resultJson = output.result,
+                    claimedBy = task.claimedBy,
+                    claimedAt = task.claimedAt,
                 )
             } catch (e: CancellationException) {
                 throw e
@@ -231,6 +233,8 @@ class WorkerLoop(
                 sequenceNumber = task.sequenceNumber,
                 status = TaskStatus.FAILED,
                 resultJson = null,
+                claimedBy = task.claimedBy,
+                claimedAt = task.claimedAt,
             )
         } catch (e: CancellationException) {
             throw e

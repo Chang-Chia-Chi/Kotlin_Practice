@@ -31,10 +31,12 @@ class BarrierService(
         sequenceNumber: Int,
         status: TaskStatus,
         resultJson: String?,
+        claimedBy: String? = null,
+        claimedAt: Instant? = null,
     ) {
         jdbi.inTransactionSuspend<Unit, Exception> { handle ->
             // 1. Self-update
-            val updated = taskRepo.updateStatusWithHandle(handle, taskId, status, resultJson)
+            val updated = taskRepo.updateStatusWithHandle(handle, taskId, status, resultJson, claimedBy, claimedAt)
             if (!updated) return@inTransactionSuspend  // already finalized by another actor
 
             // 2. Lock-free probe
