@@ -290,10 +290,10 @@ class TaskRepository(
                 """
             INSERT INTO task (id, workflow_id, sequence_number, status, handler_key,
                               payload, result, claimed_by, claimed_at, completed_at,
-                              retry_count, max_retries, deadline_at)
+                              retry_count, max_retries, deadline_at, not_before)
             VALUES (:id, :workflowId, :sequenceNumber, :status, :handlerKey,
                     :payload, :result, :claimedBy, :claimedAt, :completedAt,
-                    :retryCount, :maxRetries, :deadlineAt)
+                    :retryCount, :maxRetries, :deadlineAt, :notBefore)
             """,
             )
         for (task in tasks) {
@@ -313,6 +313,7 @@ class TaskRepository(
                 .bind("retryCount", task.retryCount)
                 .bind("maxRetries", task.maxRetries)
             bindNullableTimestamp(batch, "deadlineAt", task.deadlineAt)
+            bindNullableTimestamp(batch, "notBefore", task.notBefore)
             batch.add()
         }
         batch.execute()
@@ -360,6 +361,7 @@ class TaskRepository(
             retryCount = (ci["RETRY_COUNT"] as Number).toInt(),
             maxRetries = (ci["MAX_RETRIES"] as Number).toInt(),
             deadlineAt = readNullableTimestamp(ci["DEADLINE_AT"]),
+            notBefore = readNullableTimestamp(ci["NOT_BEFORE"]),
         )
     }
 }

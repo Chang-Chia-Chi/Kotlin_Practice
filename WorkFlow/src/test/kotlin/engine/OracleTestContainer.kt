@@ -24,6 +24,7 @@ object OracleTestContainer {
             db.useHandle<Exception> { handle ->
                 handle.createScript(loader.getResource("db/migration/V1__create_workflow_tables.sql")!!.readText()).execute()
                 handle.createScript(loader.getResource("db/migration/V2__add_dead_letter.sql")!!.readText()).execute()
+                handle.createScript(loader.getResource("db/migration/V3__add_not_before.sql")!!.readText()).execute()
             }
         }
     }

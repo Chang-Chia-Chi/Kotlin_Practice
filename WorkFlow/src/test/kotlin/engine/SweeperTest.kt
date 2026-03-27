@@ -49,6 +49,7 @@ class SweeperTest {
             override fun id() = "test-worker"
             override fun pollInterval(): Duration = Duration.ofSeconds(1)
             override fun concurrency() = 4
+            override fun batchSize() = 1
         }
 
         override fun leaderElection() = object : FrameworkConfig.LeaderElectionConfig {
@@ -126,6 +127,7 @@ class SweeperTest {
         retryCount: Int = 0,
         maxRetries: Int = 0,
         deadlineAt: Instant? = null,
+        notBefore: Instant? = null,
     ): Task = Task(
         id = id,
         workflowId = workflowId,
@@ -140,6 +142,7 @@ class SweeperTest {
         retryCount = retryCount,
         maxRetries = maxRetries,
         deadlineAt = deadlineAt,
+        notBefore = notBefore,
     )
 
     /** Insert a workflow directly via SQL (independent of repo under test). */
@@ -165,9 +168,9 @@ class SweeperTest {
         jdbi.useHandle<Exception> { handle ->
             val stmt = handle.createUpdate(
                 """INSERT INTO task (id, workflow_id, sequence_number, status, handler_key, payload, result,
-                   claimed_by, claimed_at, completed_at, retry_count, max_retries, deadline_at)
+                   claimed_by, claimed_at, completed_at, retry_count, max_retries, deadline_at, not_before)
                    VALUES (:id, :workflowId, :sequenceNumber, :status, :handlerKey, :payload, :result,
-                   :claimedBy, :claimedAt, :completedAt, :retryCount, :maxRetries, :deadlineAt)""",
+                   :claimedBy, :claimedAt, :completedAt, :retryCount, :maxRetries, :deadlineAt, :notBefore)""",
             )
                 .bind("id", task.id)
                 .bind("workflowId", task.workflowId)
@@ -190,6 +193,7 @@ class SweeperTest {
             bindTimestampOrNull("claimedAt", task.claimedAt)
             bindTimestampOrNull("completedAt", task.completedAt)
             bindTimestampOrNull("deadlineAt", task.deadlineAt)
+            bindTimestampOrNull("notBefore", task.notBefore)
 
             stmt.execute()
         }

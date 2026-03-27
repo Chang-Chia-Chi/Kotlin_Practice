@@ -36,6 +36,7 @@ data class Task(
     val retryCount: Int,
     val maxRetries: Int,
     val deadlineAt: Instant?,
+    val notBefore: Instant? = null,
 )
 
 internal fun createTaskForActivity(
