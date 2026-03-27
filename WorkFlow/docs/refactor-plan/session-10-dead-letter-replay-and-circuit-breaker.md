@@ -24,7 +24,6 @@
        retry_count = 0,
        claimed_by = NULL,
        claimed_at = NULL,
-       claim_id = NULL,
        completed_at = NULL,
        result = NULL,
        enqueued_at = SYSTIMESTAMP

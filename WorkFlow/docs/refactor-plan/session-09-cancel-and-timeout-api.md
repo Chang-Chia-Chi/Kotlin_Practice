@@ -41,7 +41,7 @@ ALTER TABLE task ADD CONSTRAINT chk_task_status
 3. `src/main/kotlin/engine/BarrierService.kt` — in `advanceWorkflow`, when outcome is ABORT/FAILED:
    ```kotlin
    // After marking workflow FAILED:
-   workflowRepo.updateStatusWithHandle(handle, workflowId, WorkflowStatus.FAILED, epoch)
+   workflowRepo.updateStatusWithHandle(handle, workflowId, WorkflowStatus.FAILED)
    taskRepo.cancelPendingTasks(workflowId)  // bulk cancel orphans
    ```
 
@@ -125,7 +125,7 @@ suspend fun cancelWorkflow(workflowId: UUID): Boolean {
             ?: return@inTransactionSuspend false
         if (workflow.status != WorkflowStatus.RUNNING) return@inTransactionSuspend false
 
-        workflowRepo.updateStatusWithHandle(handle, workflowId, WorkflowStatus.FAILED, 0)
+        workflowRepo.updateStatusWithHandle(handle, workflowId, WorkflowStatus.FAILED)
         taskRepo.cancelPendingTasksWithHandle(handle, workflowId)
         true
     }
