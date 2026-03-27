@@ -8,12 +8,15 @@ import com.fasterxml.jackson.module.kotlin.KotlinModule
 import java.io.InputStream
 import java.time.Duration
 
-data class ExporterConfig(val queries: Map<String, QueryConfig>) {
+data class ExporterConfig(
+    val queries: Map<String, QueryConfig>,
+) {
     companion object {
-        private val mapper: ObjectMapper = ObjectMapper(YAMLFactory())
-            .registerModule(KotlinModule.Builder().build())
-            .registerModule(JavaTimeModule())
-            .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
+        private val mapper: ObjectMapper =
+            ObjectMapper(YAMLFactory())
+                .registerModule(KotlinModule.Builder().build())
+                .registerModule(JavaTimeModule())
+                .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
 
         fun load(input: InputStream): ExporterConfig = mapper.readValue(input, ExporterConfig::class.java)
     }
@@ -41,10 +44,16 @@ data class MetricConfig(
 )
 
 enum class MetricType {
-    GAUGE, COUNTER, HISTOGRAM, SUMMARY, ENUM
+    GAUGE,
+    COUNTER,
+    HISTOGRAM,
+    SUMMARY,
+    ENUM,
 }
 
-class ExporterConfigException(message: String) : IllegalArgumentException(message)
+class ExporterConfigException(
+    message: String,
+) : IllegalArgumentException(message)
 
 object ExporterConfigValidator {
     fun validate(config: ExporterConfig) {
@@ -108,6 +117,4 @@ object ExporterConfigValidator {
             throw ExporterConfigException(violations.joinToString("; "))
         }
     }
-
-    private fun Duration.isPositive(): Boolean = !this.isNegative && !this.isZero
 }
