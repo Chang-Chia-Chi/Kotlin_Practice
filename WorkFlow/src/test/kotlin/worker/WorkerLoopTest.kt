@@ -16,6 +16,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runTest
+import org.slf4j.MDC
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
@@ -67,6 +68,7 @@ class WorkerLoopTest {
             whenever(it.pollInterval()).thenReturn(pollInterval)
             whenever(it.concurrency()).thenReturn(concurrency)
             whenever(it.id()).thenReturn(workerId)
+            whenever(it.batchSize()).thenReturn(1)
         }
         shutdownConfig = mock<FrameworkConfig.ShutdownConfig>().also {
             whenever(it.globalTimeout()).thenReturn(Duration.ofSeconds(30))
@@ -770,6 +772,7 @@ class WorkerLoopTest {
                 whenever(it.pollInterval()).thenReturn(pollInterval)
                 whenever(it.concurrency()).thenReturn(slots)
                 whenever(it.id()).thenReturn(workerId)
+                whenever(it.batchSize()).thenReturn(1)
             }
             val batchConfig = mock<FrameworkConfig>().also {
                 whenever(it.worker()).thenReturn(batchWorkerConfig)
@@ -859,6 +862,118 @@ class WorkerLoopTest {
             // CancellationException should NOT trigger retry or barrier
             verify(taskRepo, never()).resetForRetry(any(), any())
             verifyNoInteractions(barrierService)
+        }
+    }
+
+    // ── Q. MDC Context Propagation (R3.7) ────────────────────────────────
+
+    @Nested
+    inner class MdcContextPropagation {
+
+        @Test
+        fun `MDC contains worker and task fields during handler execution`() = runTest {
+            val task = makeTask(
+                id = "task-42",
+                workflowId = "wf-7",
+                handlerKey = "order.validate",
+                retryCount = 1,
+            )
+            val capturedMdc = mutableMapOf<String, String?>()
+            val handler = object : TransitionHandler {
+                override suspend fun execute(input: HandlerInput): HandlerOutput {
+                    capturedMdc["worker_id"] = MDC.get("worker_id")
+                    capturedMdc["task_id"] = MDC.get("task_id")
+                    capturedMdc["workflow_id"] = MDC.get("workflow_id")
+                    capturedMdc["handler_key"] = MDC.get("handler_key")
+                    capturedMdc["attempt"] = MDC.get("attempt")
+                    return HandlerOutput(null)
+                }
+            }
+
+            whenever(taskRepo.claimNext(eq(workerId), eq(1)))
+                .thenReturn(listOf(task))
+                .thenReturn(emptyList())
+            whenever(handlerRegistry.resolve(task.handlerKey)).thenReturn(handler)
+
+            startAndAdvance(this)
+
+            assertEquals(workerId, capturedMdc["worker_id"])
+            assertEquals("task-42", capturedMdc["task_id"])
+            assertEquals("wf-7", capturedMdc["workflow_id"])
+            assertEquals("order.validate", capturedMdc["handler_key"])
+            assertEquals("1", capturedMdc["attempt"])
+        }
+
+        @Test
+        fun `MDC task fields do not leak between sequential tasks`() = runTest {
+            val task1 = makeTask(id = "t1", workflowId = "wf-1", handlerKey = "step.one")
+            val task2 = makeTask(id = "t2", workflowId = "wf-2", handlerKey = "step.two")
+            val capturedMdcTask2 = mutableMapOf<String, String?>()
+
+            val handler1 = object : TransitionHandler {
+                override suspend fun execute(input: HandlerInput): HandlerOutput {
+                    return HandlerOutput(null)
+                }
+            }
+            val handler2 = object : TransitionHandler {
+                override suspend fun execute(input: HandlerInput): HandlerOutput {
+                    capturedMdcTask2["task_id"] = MDC.get("task_id")
+                    capturedMdcTask2["workflow_id"] = MDC.get("workflow_id")
+                    capturedMdcTask2["handler_key"] = MDC.get("handler_key")
+                    return HandlerOutput(null)
+                }
+            }
+
+            whenever(taskRepo.claimNext(eq(workerId), eq(1)))
+                .thenReturn(listOf(task1))
+                .thenReturn(listOf(task2))
+                .thenReturn(emptyList())
+            whenever(handlerRegistry.resolve("step.one")).thenReturn(handler1)
+            whenever(handlerRegistry.resolve("step.two")).thenReturn(handler2)
+
+            startAndAdvance(this, ticks = 4)
+
+            assertEquals("t2", capturedMdcTask2["task_id"])
+            assertEquals("wf-2", capturedMdcTask2["workflow_id"])
+            assertEquals("step.two", capturedMdcTask2["handler_key"])
+        }
+
+        @Test
+        fun `MDC context persists through failure handling path`() = runTest {
+            val task = makeTask(
+                id = "fail-task",
+                workflowId = "wf-fail",
+                handlerKey = "order.fail",
+                retryCount = 2,
+                maxRetries = 3,
+            )
+            var mdcDuringRetry = emptyMap<String, String?>()
+
+            val handler = mock<TransitionHandler>()
+            whenever(handler.execute(any())).thenThrow(RuntimeException("boom"))
+
+            whenever(taskRepo.claimNext(eq(workerId), eq(1)))
+                .thenReturn(listOf(task))
+                .thenReturn(emptyList())
+            whenever(handlerRegistry.resolve(task.handlerKey)).thenReturn(handler)
+            doAnswer {
+                mdcDuringRetry = mapOf(
+                    "worker_id" to MDC.get("worker_id"),
+                    "task_id" to MDC.get("task_id"),
+                    "workflow_id" to MDC.get("workflow_id"),
+                    "handler_key" to MDC.get("handler_key"),
+                    "attempt" to MDC.get("attempt"),
+                )
+                Unit
+            }.whenever(taskRepo).resetForRetry(eq("fail-task"), eq(3))
+
+            startAndAdvance(this)
+
+            assertEquals(workerId, mdcDuringRetry["worker_id"])
+            assertEquals("fail-task", mdcDuringRetry["task_id"])
+            assertEquals("wf-fail", mdcDuringRetry["workflow_id"])
+            assertEquals("order.fail", mdcDuringRetry["handler_key"])
+            assertEquals("2", mdcDuringRetry["attempt"])
         }
     }
 }
