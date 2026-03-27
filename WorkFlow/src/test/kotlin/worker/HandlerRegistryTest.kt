@@ -1,27 +1,24 @@
 package com.workflow.worker
 
-import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
-import kotlin.test.assertIs
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 class HandlerRegistryTest {
 
-    private lateinit var meterRegistry: SimpleMeterRegistry
     private lateinit var registry: HandlerRegistry
 
     @BeforeEach
     fun setup() {
-        meterRegistry = SimpleMeterRegistry()
-        registry = HandlerRegistry(meterRegistry)
+        registry = HandlerRegistry()
     }
 
     @Test
-    fun `register handler and resolve by key returns metered wrapper`() = runTest {
+    fun `register handler and resolve by key returns same handler`() = runTest {
         val handler = object : TransitionHandler {
             override suspend fun execute(input: HandlerInput): HandlerOutput =
                 HandlerOutput(result = null)
@@ -30,7 +27,7 @@ class HandlerRegistryTest {
         registry.register("order.validate", handler)
 
         val resolved = registry.resolve("order.validate")
-        assertIs<MeteredTransitionHandler>(resolved)
+        assertSame(handler, resolved)
     }
 
     @Test
@@ -59,28 +56,11 @@ class HandlerRegistryTest {
         registry.register("step.one", secondHandler)
 
         val resolved = registry.resolve("step.one")
+        assertSame(secondHandler, resolved)
+
         val output = resolved.execute(
             HandlerInput(taskId = "t1", workflowId = "wf1", sequenceNumber = 1, payload = null),
         )
         assertEquals("second", output.result)
-    }
-
-    @Test
-    fun `resolved handler records timer metric on execute`() = runTest {
-        val handler = object : TransitionHandler {
-            override suspend fun execute(input: HandlerInput): HandlerOutput =
-                HandlerOutput(result = "done")
-        }
-
-        registry.register("order.ship", handler)
-        registry.resolve("order.ship").execute(
-            HandlerInput(taskId = "t1", workflowId = "wf1", sequenceNumber = 1, payload = null),
-        )
-
-        val timer = meterRegistry.find("taskqueue_handler_duration_seconds")
-            .tag("handler", "order.ship")
-            .tag("status", "success")
-            .timer()
-        assertEquals(1, timer?.count())
     }
 }
