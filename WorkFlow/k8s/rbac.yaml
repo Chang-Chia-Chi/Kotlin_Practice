@@ -1,0 +1,23 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: workflow-engine-leader
+  namespace: default  # Match framework.leader-election.namespace
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: workflow-engine-leader-binding
+  namespace: default
+subjects:
+  - kind: ServiceAccount
+    name: workflow-engine
+    namespace: default
+roleRef:
+  kind: Role
+  name: workflow-engine-leader
+  apiGroup: rbac.authorization.k8s.io
