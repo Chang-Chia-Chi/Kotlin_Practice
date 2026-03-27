@@ -1,10 +1,13 @@
 package com.workflow.worker
 
+import io.micrometer.core.instrument.MeterRegistry
 import jakarta.enterprise.context.ApplicationScoped
 import java.util.concurrent.ConcurrentHashMap
 
 @ApplicationScoped
-class HandlerRegistry {
+class HandlerRegistry(
+    private val meterRegistry: MeterRegistry,
+) {
 
     private val handlers = ConcurrentHashMap<String, TransitionHandler>()
 
@@ -12,6 +15,6 @@ class HandlerRegistry {
         handlers[key] ?: throw IllegalStateException("No handler found for key: $key")
 
     fun register(key: String, handler: TransitionHandler) {
-        handlers[key] = handler
+        handlers[key] = MeteredTransitionHandler(handler, key, meterRegistry)
     }
 }
