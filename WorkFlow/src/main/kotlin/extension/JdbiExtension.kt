@@ -1,6 +1,7 @@
 package com.workflow.extension
 
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 import org.jdbi.v3.core.HandleCallback
 import org.jdbi.v3.core.HandleConsumer
@@ -23,12 +24,12 @@ suspend fun <R, X : Exception> Jdbi.withHandleSuspend(callback: HandleCallback<R
     withContext(Dispatchers.IO) { withHandle(callback) }
 
 suspend fun <R, X : Exception> Jdbi.inTransactionSuspend(callback: HandleCallback<R, X>): R =
-    withContext(Dispatchers.IO) { inTransaction(callback) }
+    withContext(Dispatchers.IO + NonCancellable) { inTransaction(callback) }
 
 suspend fun <X : Exception> Jdbi.useHandleSuspend(consumer: HandleConsumer<X>) {
     withContext(Dispatchers.IO) { useHandle(consumer) }
 }
 
 suspend fun <X : Exception> Jdbi.useTransactionSuspend(consumer: HandleConsumer<X>) {
-    withContext(Dispatchers.IO) { useTransaction(consumer) }
+    withContext(Dispatchers.IO + NonCancellable) { useTransaction(consumer) }
 }
