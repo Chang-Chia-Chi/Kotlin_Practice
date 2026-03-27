@@ -1,5 +1,6 @@
 package com.workflow.engine
 
+import kotlinx.coroutines.async
 import kotlinx.coroutines.test.runTest
 import org.jdbi.v3.core.Jdbi
 import org.junit.jupiter.api.AfterEach
@@ -926,6 +927,22 @@ class RepositoryTest {
             assertEquals("COMPLETED", row["STATUS"])
         }
 
+        @Test
+        fun `updateStatusWithHandle returns false for already-terminal task`() {
+            val wf = makeWorkflow()
+            insertWorkflowDirect(wf)
+            val task = makeTask(workflowId = wf.id, status = TaskStatus.COMPLETED)
+            insertTaskDirect(task)
+
+            val result = jdbi.inTransaction<Boolean, Exception> { handle ->
+                taskRepo.updateStatusWithHandle(handle, task.id, TaskStatus.COMPLETED, """{"retry":true}""")
+            }
+
+            assertFalse(result, "should return false when task is already terminal")
+            val row = readTaskDirect(task.id)!!
+            assertNull(row["RESULT"], "result should remain unchanged")
+        }
+
         // ── claimNext ────────────────────────────────────────────────────
 
         @Test
@@ -1161,6 +1178,60 @@ class RepositoryTest {
 
             val expired = taskRepo.findExpired(now())
             assertTrue(expired.isEmpty())
+        }
+
+        // ── SKIP LOCKED concurrency ─────────────────────────────────────
+
+        @Test
+        fun `concurrent claimNext calls produce disjoint task sets via SKIP LOCKED`() = runTest {
+            val wf = makeWorkflow()
+            workflowRepo.insert(wf)
+
+            // Insert 5 PENDING tasks for the same workflow/sequence
+            val taskIds = (1..5).map { i ->
+                val task = makeTask(
+                    workflowId = wf.id,
+                    sequenceNumber = 1,
+                    status = TaskStatus.PENDING,
+                    handlerKey = "skip.locked.$i",
+                )
+                insertTaskDirect(task)
+                task.id
+            }
+
+            // Launch two concurrent claimNext calls
+            val deferred1 = async {
+                taskRepo.claimNext("worker-1", 3)
+            }
+            val deferred2 = async {
+                taskRepo.claimNext("worker-2", 3)
+            }
+
+            val claimed1 = deferred1.await()
+            val claimed2 = deferred2.await()
+
+            // Union of claimed task IDs has no duplicates (disjoint sets)
+            val ids1 = claimed1.map { it.id }.toSet()
+            val ids2 = claimed2.map { it.id }.toSet()
+            val intersection = ids1.intersect(ids2)
+            assertTrue(
+                intersection.isEmpty(),
+                "SKIP LOCKED must prevent overlapping claims, but found shared IDs: $intersection",
+            )
+
+            // Total claimed count <= 5 (no phantom reads)
+            val totalClaimed = ids1.size + ids2.size
+            assertTrue(
+                totalClaimed <= 5,
+                "Total claimed ($totalClaimed) must not exceed available tasks (5)",
+            )
+
+            // All claimed IDs must be from the original set
+            val allClaimed = ids1 + ids2
+            assertTrue(
+                allClaimed.all { it in taskIds },
+                "Claimed IDs must be from the original task set",
+            )
         }
     }
 }

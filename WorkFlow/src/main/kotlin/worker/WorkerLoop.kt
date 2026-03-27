@@ -175,7 +175,7 @@ class WorkerLoop(
                     taskId = task.id,
                     workflowId = task.workflowId,
                     sequenceNumber = task.sequenceNumber,
-                    result = TaskStatus.COMPLETED,
+                    status = TaskStatus.COMPLETED,
                     resultJson = output.result,
                 )
             } catch (e: CancellationException) {
@@ -225,7 +225,7 @@ class WorkerLoop(
                 taskId = task.id,
                 workflowId = task.workflowId,
                 sequenceNumber = task.sequenceNumber,
-                result = TaskStatus.FAILED,
+                status = TaskStatus.FAILED,
                 resultJson = null,
             )
         } catch (e: CancellationException) {

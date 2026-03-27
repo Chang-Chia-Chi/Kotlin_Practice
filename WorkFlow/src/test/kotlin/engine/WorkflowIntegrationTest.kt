@@ -242,7 +242,8 @@ class WorkflowIntegrationTest {
 
             val scatterTasks = taskRepo.findByWorkflowAndSequence(runId, 1)
             assertEquals(1, scatterTasks.size)
-            assertEquals("batch.scatter", scatterTasks[0].handlerKey)
+            // Scatter task uses activity.transition as handler key
+            assertEquals("batch.worker", scatterTasks[0].handlerKey)
             assertEquals(initialPayload, scatterTasks[0].payloadJson)
 
             // Complete scatter task with JSON array of 50 payloads
@@ -258,7 +259,8 @@ class WorkflowIntegrationTest {
 
             val parallelTasks = taskRepo.findByWorkflowAndSequence(runId, 2)
             assertEquals(50, parallelTasks.size)
-            assertTrue(parallelTasks.all { it.handlerKey == "batch.worker" })
+            // Parallel sub-tasks use fanOut.transition as handler key
+            assertTrue(parallelTasks.all { it.handlerKey == "batch.scatter" })
             assertTrue(parallelTasks.all { it.status == TaskStatus.PENDING })
             // Each sub-task payload matches one of the scatter payloads
             val actualPayloads = parallelTasks.map { it.payloadJson }.toSet()

@@ -29,12 +29,13 @@ class BarrierService(
         taskId: String,
         workflowId: String,
         sequenceNumber: Int,
-        result: TaskStatus,
+        status: TaskStatus,
         resultJson: String?,
     ) {
         jdbi.inTransactionSuspend<Unit, Exception> { handle ->
             // 1. Self-update
-            taskRepo.updateStatusWithHandle(handle, taskId, result, resultJson)
+            val updated = taskRepo.updateStatusWithHandle(handle, taskId, status, resultJson)
+            if (!updated) return@inTransactionSuspend  // already finalized by another actor
 
             // 2. Lock-free probe
             val nonTerminal = taskRepo.countNonTerminalWithHandle(handle, workflowId, sequenceNumber)
@@ -78,7 +79,10 @@ class BarrierService(
     internal suspend fun recoverStuckWorkflow(workflowId: String) {
         jdbi.inTransactionSuspend<Unit, Exception> { handle ->
             val workflow = workflowRepo.findByIdWithHandle(handle, workflowId)
-                ?: return@inTransactionSuspend
+                ?: run {
+                    log.warn("Workflow not found during recovery: {}", workflowId)
+                    return@inTransactionSuspend
+                }
             if (workflow.status != WorkflowStatus.RUNNING) return@inTransactionSuspend
 
             val seq = workflow.currentSequence
@@ -166,7 +170,6 @@ class BarrierService(
                     workflowId = workflowId,
                     sequenceNumber = sequenceNumber,
                     activity = seqInfo.activity,
-                    isScatter = seqInfo.phaseType == PhaseType.SCATTER,
                     payload = payload,
                     now = now,
                 )
@@ -189,15 +192,15 @@ class BarrierService(
                         workflowId = workflowId,
                         sequenceNumber = sequenceNumber,
                         status = TaskStatus.PENDING,
-                        handlerKey = seqInfo.activity.transition,
+                        handlerKey = seqInfo.activity.fanOut!!.transition,
                         payloadJson = payload,
                         resultJson = null,
                         claimedBy = null,
                         claimedAt = null,
                         completedAt = null,
                         retryCount = 0,
-                        maxRetries = seqInfo.activity.retries,
-                        deadlineAt = now.plus(seqInfo.activity.deadline),
+                        maxRetries = seqInfo.activity.fanOut!!.retries,
+                        deadlineAt = now.plus(seqInfo.activity.fanOut!!.deadline),
                     )
                 }
                 taskRepo.insertBatchWithHandle(handle, tasks)
@@ -213,27 +216,17 @@ class BarrierService(
         val activityIndex: Int,
         val activity: ActivityDefinition,
         val phaseType: PhaseType,
-        val totalSequences: Int,
     )
 
     private fun buildSequenceMap(definition: WorkflowDefinition): Map<Int, SequenceInfo> {
         val map = mutableMapOf<Int, SequenceInfo>()
         var seq = 1
-        // First pass: count total sequences
-        var total = 0
-        for (activity in definition.activities) {
-            total += if (activity.fanOut != null) 2 else 1
-        }
-        // Second pass: populate map
         for ((i, activity) in definition.activities.withIndex()) {
             if (activity.fanOut == null) {
-                map[seq] = SequenceInfo(i, activity, PhaseType.LINEAR, total)
-                seq++
+                map[seq++] = SequenceInfo(i, activity, PhaseType.LINEAR)
             } else {
-                map[seq] = SequenceInfo(i, activity, PhaseType.SCATTER, total)
-                seq++
-                map[seq] = SequenceInfo(i, activity, PhaseType.PARALLEL, total)
-                seq++
+                map[seq++] = SequenceInfo(i, activity, PhaseType.SCATTER)
+                map[seq++] = SequenceInfo(i, activity, PhaseType.PARALLEL)
             }
         }
         return map

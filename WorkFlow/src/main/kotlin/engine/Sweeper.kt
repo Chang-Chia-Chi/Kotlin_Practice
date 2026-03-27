@@ -36,7 +36,7 @@ class Sweeper(
                     taskId = task.id,
                     workflowId = task.workflowId,
                     sequenceNumber = task.sequenceNumber,
-                    result = TaskStatus.FAILED,
+                    status = TaskStatus.FAILED,
                     resultJson = null,
                 )
             } catch (e: Exception) {
@@ -60,7 +60,7 @@ class Sweeper(
                     taskId = task.id,
                     workflowId = task.workflowId,
                     sequenceNumber = task.sequenceNumber,
-                    result = TaskStatus.FAILED,
+                    status = TaskStatus.FAILED,
                     resultJson = null,
                 )
                 log.warn(

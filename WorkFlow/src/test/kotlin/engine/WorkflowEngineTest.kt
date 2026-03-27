@@ -100,7 +100,7 @@ class WorkflowEngineTest {
     }
 
     @Test
-    fun `start fan-out workflow creates scatter task at sequence 1 with fanOut properties`() = runTest {
+    fun `start fan-out workflow creates scatter task at sequence 1 with activity properties`() = runTest {
         val definition = workflow {
             activity("scatter-gather") {
                 transition("batch.parallel-worker")
@@ -133,14 +133,14 @@ class WorkflowEngineTest {
         val scatterTask = tasks.single()
         assertEquals(runId, scatterTask.workflowId)
         assertEquals(TaskStatus.PENDING, scatterTask.status)
-        // Scatter task uses fanOut.transition, fanOut.retries, fanOut.deadline
-        assertEquals("batch.scatter", scatterTask.handlerKey)
+        // Scatter task uses activity.transition, activity.retries, activity.deadline
+        assertEquals("batch.parallel-worker", scatterTask.handlerKey)
         assertEquals(payload, scatterTask.payloadJson)
-        assertEquals(5, scatterTask.maxRetries)
+        assertEquals(1, scatterTask.maxRetries)
         assertEquals(0, scatterTask.retryCount)
         assertNotNull(scatterTask.deadlineAt)
-        assertTrue(scatterTask.deadlineAt!! > Instant.now().plusSeconds(3500), "deadline should be ~60 min from now")
-        assertTrue(scatterTask.deadlineAt!! < Instant.now().plusSeconds(3660), "deadline should not be too far in the future")
+        assertTrue(scatterTask.deadlineAt!! > Instant.now().plusSeconds(800), "deadline should be ~15 min from now")
+        assertTrue(scatterTask.deadlineAt!! < Instant.now().plusSeconds(960), "deadline should not be too far in the future")
         assertNull(scatterTask.claimedBy)
         assertNull(scatterTask.claimedAt)
         assertNull(scatterTask.completedAt)

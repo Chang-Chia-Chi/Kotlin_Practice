@@ -44,7 +44,6 @@ class WorkflowEngine(
                 workflowId = workflowId,
                 sequenceNumber = 1,
                 activity = firstActivity,
-                isScatter = firstActivity.fanOut != null,
                 payload = initialPayload,
                 now = now,
             )

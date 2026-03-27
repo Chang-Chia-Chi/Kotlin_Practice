@@ -72,11 +72,10 @@ class TaskRepository(
         id: String,
         newStatus: TaskStatus,
         resultJson: String? = null,
-    ) {
-        jdbi.inTransactionSuspend<Unit, Exception> { h: Handle ->
+    ): Boolean =
+        jdbi.inTransactionSuspend<Boolean, Exception> { h: Handle ->
             updateStatusWithHandle(h, id, newStatus, resultJson)
         }
-    }
 
     suspend fun countNonTerminal(
         workflowId: String,
@@ -177,13 +176,13 @@ class TaskRepository(
         id: String,
         newStatus: TaskStatus,
         resultJson: String? = null,
-    ) {
-        if (newStatus.isTerminal) {
+    ): Boolean {
+        val count = if (newStatus.isTerminal) {
             handle
                 .createUpdate(
                     """
                 UPDATE task SET status = :status, result = :result, completed_at = :now
-                WHERE id = :id
+                WHERE id = :id AND status NOT IN ('COMPLETED', 'FAILED')
                 """,
                 ).bind("id", id)
                 .bind("status", newStatus.name)
@@ -198,6 +197,7 @@ class TaskRepository(
                 .bind("result", resultJson)
                 .execute()
         }
+        return count > 0
     }
 
     fun countNonTerminalWithHandle(

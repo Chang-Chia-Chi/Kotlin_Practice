@@ -236,8 +236,8 @@ class BarrierServiceTest {
      * Single fan-out activity: seq 1 (SCATTER) → seq 2 (PARALLEL).
      *
      * Handler key mapping per locked contract:
-     * - SCATTER phase uses `fanOut.transition` → "scatter.handler"
-     * - PARALLEL phase uses `activity.transition` → "parallel.handler"
+     * - SCATTER phase uses `activity.transition` → "parallel.handler"
+     * - PARALLEL phase uses `fanOut.transition` → "scatter.handler"
      */
     private fun fanOutDef(
         joinPolicy: JoinPolicy = JoinPolicy.All,
@@ -263,8 +263,8 @@ class BarrierServiceTest {
      * Used to verify that after parallel phase completes, the next linear task is inserted.
      *
      * Handler key mapping per locked contract:
-     * - SCATTER phase uses `fanOut.transition` → "scatter.handler"
-     * - PARALLEL phase uses `activity.transition` → "parallel.handler"
+     * - SCATTER phase uses `activity.transition` → "parallel.handler"
+     * - PARALLEL phase uses `fanOut.transition` → "scatter.handler"
      */
     private fun fanOutThenLinearDef(
         joinPolicy: JoinPolicy = JoinPolicy.All,
@@ -413,40 +413,39 @@ class BarrierServiceTest {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // Test 4: CAS race — two concurrent completions
+    // Test 4: CAS race — two concurrent recovery attempts
     // ═══════════════════════════════════════════════════════════════════════
 
     @Nested
     inner class CasRace {
 
         @Test
-        fun `two threads complete last tasks concurrently - exactly one CAS wins, one set of downstream tasks`() = runTest {
+        fun `two concurrent recovery attempts on stuck workflow - exactly one CAS wins, one set of downstream tasks`() = runTest {
             val def = twoStepLinearDef()
             val wfId = randomId()
             val wf = makeWorkflow(id = wfId, definition = def, currentSequence = 1, version = 0)
             insertWorkflowDirect(wf)
 
-            // Both tasks pre-committed as COMPLETED so that under READ COMMITTED
-            // both concurrent probes see nonTerminal=0 and both attempt CAS.
-            // The self-update in onTaskCompleted is a harmless re-write.
-            val task1Id = randomId()
-            val task2Id = randomId()
+            // Both tasks pre-committed as COMPLETED (simulates stuck workflow
+            // where all tasks are terminal but workflow wasn't advanced).
+            // recoverStuckWorkflow skips self-update, so both calls see
+            // nonTerminal=0 and both attempt CAS — exactly one wins.
             insertTaskDirect(
                 makeTask(
-                    id = task1Id, workflowId = wfId, sequenceNumber = 1,
+                    workflowId = wfId, sequenceNumber = 1,
                     status = TaskStatus.COMPLETED, handlerKey = "step1.handler",
                 ),
             )
             insertTaskDirect(
                 makeTask(
-                    id = task2Id, workflowId = wfId, sequenceNumber = 1,
+                    workflowId = wfId, sequenceNumber = 1,
                     status = TaskStatus.COMPLETED, handlerKey = "step1.handler",
                 ),
             )
 
-            // Both call onTaskCompleted concurrently — both see nonTerminal=0, both attempt CAS
-            val d1 = async { barrier.onTaskCompleted(task1Id, wfId, 1, TaskStatus.COMPLETED, null) }
-            val d2 = async { barrier.onTaskCompleted(task2Id, wfId, 1, TaskStatus.COMPLETED, null) }
+            // Two concurrent recovery attempts — both see nonTerminal=0, both attempt CAS
+            val d1 = async { barrier.recoverStuckWorkflow(wfId) }
+            val d2 = async { barrier.recoverStuckWorkflow(wfId) }
             awaitAll(d1, d2)
 
             // Workflow advanced exactly once — version must be 1
@@ -829,9 +828,10 @@ class BarrierServiceTest {
             assertEquals(2, (updatedWf["CURRENT_SEQUENCE"] as Number).toInt())
 
             // Scatter task's payload should be the previous task's resultJson
+            // Scatter tasks use activity.transition as handler key
             val seq2Tasks = readTasksDirect(wfId, 2)
             assertEquals(1, seq2Tasks.size)
-            assertEquals("scatter.handler", seq2Tasks[0]["HANDLER_KEY"])
+            assertEquals("parallel.handler", seq2Tasks[0]["HANDLER_KEY"])
             assertEquals(resultPayload, seq2Tasks[0]["PAYLOAD"])
         }
     }
@@ -877,8 +877,8 @@ class BarrierServiceTest {
             val seq2Tasks = readTasksDirect(wfId, 2)
             assertEquals(3, seq2Tasks.size)
 
-            // All sub-tasks use activity.transition as handler key (PARALLEL phase mapping)
-            assertTrue(seq2Tasks.all { it["HANDLER_KEY"] == "parallel.handler" })
+            // All sub-tasks use fanOut.transition as handler key (PARALLEL phase mapping)
+            assertTrue(seq2Tasks.all { it["HANDLER_KEY"] == "scatter.handler" })
 
             // All sub-tasks are PENDING
             assertTrue(seq2Tasks.all { it["STATUS"] == "PENDING" })

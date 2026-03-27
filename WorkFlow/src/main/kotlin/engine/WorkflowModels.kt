@@ -42,26 +42,22 @@ internal fun createTaskForActivity(
     workflowId: String,
     sequenceNumber: Int,
     activity: ActivityDefinition,
-    isScatter: Boolean,
     payload: String?,
     now: Instant,
 ): Task {
-    val handlerKey = if (isScatter) activity.fanOut!!.transition else activity.transition
-    val maxRetries = if (isScatter) activity.fanOut!!.retries else activity.retries
-    val deadline = if (isScatter) activity.fanOut!!.deadline else activity.deadline
     return Task(
         id = UUID.randomUUID().toString(),
         workflowId = workflowId,
         sequenceNumber = sequenceNumber,
         status = TaskStatus.PENDING,
-        handlerKey = handlerKey,
+        handlerKey = activity.transition,
         payloadJson = payload,
         resultJson = null,
         claimedBy = null,
         claimedAt = null,
         completedAt = null,
         retryCount = 0,
-        maxRetries = maxRetries,
-        deadlineAt = now.plus(deadline),
+        maxRetries = activity.retries,
+        deadlineAt = now.plus(activity.deadline),
     )
 }
