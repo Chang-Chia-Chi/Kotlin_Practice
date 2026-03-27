@@ -6,6 +6,7 @@ import com.workflow.engine.Task
 import com.workflow.engine.TaskRepository
 import com.workflow.engine.TaskStatus
 import com.workflow.shutdown.ShutdownSignal
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
@@ -52,6 +53,7 @@ class WorkerLoopTest {
     private lateinit var config: FrameworkConfig
     private lateinit var workerConfig: FrameworkConfig.WorkerConfig
     private lateinit var shutdownConfig: FrameworkConfig.ShutdownConfig
+    private lateinit var meterRegistry: SimpleMeterRegistry
     private lateinit var workerLoop: WorkerLoop
 
     private val pollInterval = Duration.ofSeconds(1)
@@ -78,7 +80,8 @@ class WorkerLoopTest {
             whenever(it.shutdown()).thenReturn(shutdownConfig)
         }
 
-        workerLoop = WorkerLoop(config, taskRepo, handlerRegistry, barrierService)
+        meterRegistry = SimpleMeterRegistry()
+        workerLoop = WorkerLoop(config, taskRepo, handlerRegistry, barrierService, meterRegistry)
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────
@@ -543,7 +546,7 @@ class WorkerLoopTest {
         @Test
         fun `force-cancel after drain timeout - long handler is cancelled`() = runTest {
             whenever(shutdownConfig.globalTimeout()).thenReturn(Duration.ofMillis(100))
-            val shortTimeoutLoop = WorkerLoop(config, taskRepo, handlerRegistry, barrierService)
+            val shortTimeoutLoop = WorkerLoop(config, taskRepo, handlerRegistry, barrierService, meterRegistry)
 
             val handlerStarted = java.util.concurrent.atomic.AtomicBoolean(false)
             val handlerCompleted = java.util.concurrent.atomic.AtomicBoolean(false)
@@ -597,7 +600,7 @@ class WorkerLoopTest {
         fun `shutdownTimeout reflects config value`() {
             whenever(shutdownConfig.globalTimeout()).thenReturn(Duration.ofSeconds(45))
 
-            val freshLoop = WorkerLoop(config, taskRepo, handlerRegistry, barrierService)
+            val freshLoop = WorkerLoop(config, taskRepo, handlerRegistry, barrierService, meterRegistry)
             assertEquals(Duration.ofSeconds(45), freshLoop.shutdownTimeout)
         }
     }
@@ -658,7 +661,7 @@ class WorkerLoopTest {
     inner class HealthHeartbeat {
 
         @Test
-        fun `lastPollTimestamp advances after poll iterations`() = runTest {
+        fun `lastActivityTimestamp advances after poll iterations`() = runTest {
             whenever(taskRepo.claimNext(eq(workerId), eq(1)))
                 .thenReturn(emptyList())
 
@@ -667,10 +670,10 @@ class WorkerLoopTest {
             val job = workerLoop.start(this)
             advanceTimeBy(pollInterval.toMillis() * 2)
 
-            val after = workerLoop.lastPollTimestamp
+            val after = workerLoop.lastActivityTimestamp
             assertTrue(
                 after.isAfter(before),
-                "lastPollTimestamp should advance after polling, was $before, now $after",
+                "lastActivityTimestamp should advance after polling, was $before, now $after",
             )
 
             job.cancel()
@@ -778,7 +781,7 @@ class WorkerLoopTest {
                 whenever(it.worker()).thenReturn(batchWorkerConfig)
                 whenever(it.shutdown()).thenReturn(shutdownConfig)
             }
-            val batchLoop = WorkerLoop(batchConfig, taskRepo, handlerRegistry, barrierService)
+            val batchLoop = WorkerLoop(batchConfig, taskRepo, handlerRegistry, barrierService, meterRegistry)
 
             whenever(taskRepo.claimNext(eq(workerId), eq(1)))
                 .thenReturn(emptyList())
@@ -974,6 +977,136 @@ class WorkerLoopTest {
             assertEquals("wf-fail", mdcDuringRetry["workflow_id"])
             assertEquals("order.fail", mdcDuringRetry["handler_key"])
             assertEquals("2", mdcDuringRetry["attempt"])
+        }
+    }
+
+    // ── R. Metrics (R3.1, R3.2, R3.4 prep) ──────────────────────────────
+
+    @Nested
+    inner class MetricsTest {
+
+        @Test
+        fun `registers in-flight tasks gauge that reflects actual count`() = runTest {
+            val task = makeTask()
+            var gaugeValueDuringExecution = -1.0
+            val handler = object : TransitionHandler {
+                override suspend fun execute(input: HandlerInput): HandlerOutput {
+                    gaugeValueDuringExecution = meterRegistry
+                        .find("taskqueue_worker_in_flight_tasks")
+                        .tag("pod", workerId)
+                        .gauge()
+                        ?.value() ?: -1.0
+                    return HandlerOutput(null)
+                }
+            }
+
+            whenever(taskRepo.claimNext(eq(workerId), eq(1)))
+                .thenReturn(listOf(task))
+                .thenReturn(emptyList())
+            whenever(handlerRegistry.resolve(task.handlerKey)).thenReturn(handler)
+
+            startAndAdvance(this)
+
+            assertEquals(1.0, gaugeValueDuringExecution, "In-flight gauge should be 1.0 during handler execution")
+        }
+
+        @Test
+        fun `registers concurrency limit gauge from config`() = runTest {
+            whenever(taskRepo.claimNext(eq(workerId), eq(1))).thenReturn(emptyList())
+
+            startAndAdvance(this)
+
+            val gaugeValue = meterRegistry
+                .find("taskqueue_worker_concurrency_limit")
+                .tag("pod", workerId)
+                .gauge()
+                ?.value()
+            assertEquals(concurrency.toDouble(), gaugeValue, "Concurrency limit gauge should equal config value")
+        }
+
+        @Test
+        fun `increments claim counter with empty outcome when no tasks`() = runTest {
+            whenever(taskRepo.claimNext(eq(workerId), eq(1))).thenReturn(emptyList())
+
+            startAndAdvance(this)
+
+            val count = meterRegistry
+                .find("taskqueue_claim_total")
+                .tag("pod", workerId)
+                .tag("outcome", "empty")
+                .counter()
+                ?.count() ?: 0.0
+            assertTrue(count > 0.0, "claim counter with outcome=empty should be > 0, was $count")
+        }
+
+        @Test
+        fun `increments claim counter with success outcome and claimed tasks counter`() = runTest {
+            val task = makeTask()
+            val handler = mock<TransitionHandler>()
+
+            whenever(taskRepo.claimNext(eq(workerId), eq(1)))
+                .thenReturn(listOf(task))
+                .thenReturn(emptyList())
+            whenever(handlerRegistry.resolve(task.handlerKey)).thenReturn(handler)
+            whenever(handler.execute(any())).thenReturn(HandlerOutput(null))
+
+            startAndAdvance(this)
+
+            val successCount = meterRegistry
+                .find("taskqueue_claim_total")
+                .tag("pod", workerId)
+                .tag("outcome", "success")
+                .counter()
+                ?.count() ?: 0.0
+            assertEquals(1.0, successCount, "claim counter with outcome=success should be 1.0")
+
+            val claimedCount = meterRegistry
+                .find("taskqueue_claimed_tasks_total")
+                .tag("pod", workerId)
+                .counter()
+                ?.count() ?: 0.0
+            assertEquals(1.0, claimedCount, "claimed_tasks_total counter should be 1.0")
+        }
+
+        @Test
+        fun `increments claim counter with error outcome on claimNext failure`() = runTest {
+            val task = makeTask()
+            val handler = mock<TransitionHandler>()
+
+            whenever(taskRepo.claimNext(eq(workerId), eq(1)))
+                .thenThrow(RuntimeException("DB error"))
+                .thenReturn(listOf(task))
+                .thenReturn(emptyList())
+            whenever(handlerRegistry.resolve(task.handlerKey)).thenReturn(handler)
+            whenever(handler.execute(any())).thenReturn(HandlerOutput(null))
+
+            startAndAdvance(this, ticks = 4)
+
+            val errorCount = meterRegistry
+                .find("taskqueue_claim_total")
+                .tag("pod", workerId)
+                .tag("outcome", "error")
+                .counter()
+                ?.count() ?: 0.0
+            assertEquals(1.0, errorCount, "claim counter with outcome=error should be 1.0")
+        }
+
+        @Test
+        fun `lastActivityTimestamp updates on poll`() = runTest {
+            whenever(taskRepo.claimNext(eq(workerId), eq(1))).thenReturn(emptyList())
+
+            val before = Instant.now().minusMillis(1)
+
+            val job = workerLoop.start(this)
+            advanceTimeBy(pollInterval.toMillis() * 2)
+
+            val after = workerLoop.lastActivityTimestamp
+            assertTrue(
+                after.isAfter(before),
+                "lastActivityTimestamp should advance after polling, was $before, now $after",
+            )
+
+            job.cancel()
         }
     }
 }

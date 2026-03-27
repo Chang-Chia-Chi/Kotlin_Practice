@@ -10,6 +10,9 @@ import com.workflow.extension.takeUntilSignal
 import com.workflow.extension.unorderedMapAsync
 import com.workflow.shutdown.ShutdownParticipant
 import com.workflow.shutdown.ShutdownSignal
+import io.micrometer.core.instrument.Counter
+import io.micrometer.core.instrument.MeterRegistry
+import io.micrometer.core.instrument.Tags
 import io.quarkus.runtime.StartupEvent
 import jakarta.enterprise.context.ApplicationScoped
 import jakarta.enterprise.event.Observes
@@ -78,6 +81,7 @@ class WorkerLoop(
     private val taskRepo: TaskRepository,
     private val handlerRegistry: HandlerRegistry,
     private val barrierService: BarrierService,
+    private val meterRegistry: MeterRegistry,
 ) : ShutdownParticipant {
     private val log = LoggerFactory.getLogger(WorkerLoop::class.java)
 
@@ -88,8 +92,11 @@ class WorkerLoop(
     private val stopChannel = Channel<Unit>(Channel.RENDEZVOUS)
 
     @Volatile
-    private var _lastPollTimestamp: Instant = Instant.now()
-    val lastPollTimestamp: Instant get() = _lastPollTimestamp
+    private var _lastActivityTimestamp: Instant = Instant.now()
+    val lastActivityTimestamp: Instant get() = _lastActivityTimestamp
+
+    private lateinit var claimTotal: (String) -> Counter
+    private lateinit var claimedTasksTotal: Counter
 
     @Volatile
     private var activeJob: Job? = null
@@ -107,6 +114,22 @@ class WorkerLoop(
         val concurrency = workerConfig.concurrency()
         val pollInterval = workerConfig.pollInterval()
         val batchSize = workerConfig.batchSize()
+
+        val podTag = Tags.of("pod", workerId)
+        meterRegistry.gauge(
+            "taskqueue_worker_in_flight_tasks",
+            podTag,
+            _inFlightTasks,
+        ) { it.get().toDouble() }
+        meterRegistry.gauge(
+            "taskqueue_worker_concurrency_limit",
+            podTag,
+            concurrency,
+        ) { it.toDouble() }
+        claimTotal = { outcome: String ->
+            meterRegistry.counter("taskqueue_claim_total", "pod", workerId, "outcome", outcome)
+        }
+        claimedTasksTotal = meterRegistry.counter("taskqueue_claimed_tasks_total", "pod", workerId)
 
         _accepting.set(true)
 
@@ -150,15 +173,20 @@ class WorkerLoop(
                 throw e
             } catch (e: Exception) {
                 log.error("Failed to claim tasks", e)
+                claimTotal("error").increment()
                 delay(pollInterval.toMillis())
                 return@withContext
             }
-        _lastPollTimestamp = Instant.now()
+        _lastActivityTimestamp = Instant.now()
 
         if (tasks.isEmpty()) {
+            claimTotal("empty").increment()
             delay(pollInterval.toMillis())
             return@withContext
         }
+
+        claimTotal("success").increment()
+        claimedTasksTotal.increment(tasks.size.toDouble())
 
         for (task in tasks) {
             processTask(task)
@@ -207,6 +235,7 @@ class WorkerLoop(
                 handleTaskFailure(task, e)
             } finally {
                 _inFlightTasks.decrementAndGet()
+                _lastActivityTimestamp = Instant.now()
             }
         }
     }
