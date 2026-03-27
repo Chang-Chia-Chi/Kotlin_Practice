@@ -604,4 +604,20 @@ class ExporterConfigTest {
             }
         }
     }
+
+    // ==========================================================================
+    // C. Production YAML
+    // ==========================================================================
+
+    @Nested
+    inner class ProductionYaml {
+
+        @Test
+        fun `production query-exporter yaml loads and passes validation`() {
+            val input = Thread.currentThread().contextClassLoader
+                .getResourceAsStream("query-exporter.yaml")!!
+            val config = ExporterConfig.load(input)
+            assertDoesNotThrow { ExporterConfigValidator.validate(config) }
+        }
+    }
 }
