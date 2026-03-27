@@ -33,6 +33,8 @@ interface FrameworkConfig {
         fun renewDeadline(): Duration
         @WithDefault("PT2S")
         fun retryPeriod(): Duration
+        @WithDefault("PT45S")
+        fun healthThreshold(): Duration
     }
 
     interface ShutdownConfig {
