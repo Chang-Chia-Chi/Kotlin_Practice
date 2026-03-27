@@ -8,6 +8,7 @@ import org.jdbi.v3.core.Jdbi
 import java.time.Instant
 import java.time.LocalDateTime
 import java.time.ZoneOffset
+import java.sql.Types
 
 @ApplicationScoped
 class TaskRepository(
@@ -186,7 +187,7 @@ class TaskRepository(
                 """,
                 ).bind("id", id)
                 .bind("status", newStatus.name)
-                .bind("result", resultJson)
+                .let { if (resultJson != null) it.bind("result", resultJson) else it.bindNull("result", Types.CLOB) }
                 .bind("now", LocalDateTime.now(ZoneOffset.UTC))
                 .execute()
         } else {
@@ -194,7 +195,7 @@ class TaskRepository(
                 .createUpdate("UPDATE task SET status = :status, result = :result WHERE id = :id")
                 .bind("id", id)
                 .bind("status", newStatus.name)
-                .bind("result", resultJson)
+                .let { if (resultJson != null) it.bind("result", resultJson) else it.bindNull("result", Types.CLOB) }
                 .execute()
         }
         return count > 0
@@ -284,8 +285,9 @@ class TaskRepository(
                 .bind("sequenceNumber", task.sequenceNumber)
                 .bind("status", task.status.name)
                 .bind("handlerKey", task.handlerKey)
-                .bind("payload", task.payloadJson)
-                .bind("result", task.resultJson)
+            bindNullableClob(batch, "payload", task.payloadJson)
+            bindNullableClob(batch, "result", task.resultJson)
+            batch
                 .bind("claimedBy", task.claimedBy)
             bindNullableTimestamp(batch, "claimedAt", task.claimedAt)
             bindNullableTimestamp(batch, "completedAt", task.completedAt)
@@ -299,6 +301,18 @@ class TaskRepository(
     }
 
     // ── Private helpers ──
+
+    private fun bindNullableClob(
+        stmt: org.jdbi.v3.core.statement.SqlStatement<*>,
+        name: String,
+        value: String?,
+    ) {
+        if (value != null) {
+            stmt.bind(name, value)
+        } else {
+            stmt.bindNull(name, Types.CLOB)
+        }
+    }
 
     private fun bindNullableTimestamp(
         stmt: org.jdbi.v3.core.statement.SqlStatement<*>,

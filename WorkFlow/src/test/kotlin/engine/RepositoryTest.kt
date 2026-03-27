@@ -1180,6 +1180,65 @@ class RepositoryTest {
             assertTrue(expired.isEmpty())
         }
 
+        // ── R0.1 — Oracle null CLOB binding ─────────────────────────────
+
+        @Test
+        fun `updateStatusWithHandle with null resultJson does not throw on Oracle CLOB`() {
+            val wf = makeWorkflow()
+            insertWorkflowDirect(wf)
+            val task = makeTask(workflowId = wf.id, status = TaskStatus.PROCESSING)
+            insertTaskDirect(task)
+
+            val result = jdbi.inTransaction<Boolean, Exception> { handle ->
+                taskRepo.updateStatusWithHandle(handle, task.id, TaskStatus.FAILED, null)
+            }
+
+            assertTrue(result, "updateStatusWithHandle should succeed with null resultJson")
+            val row = readTaskDirect(task.id)!!
+            assertEquals("FAILED", row["STATUS"])
+            assertNull(row["RESULT"], "result column should be null")
+            assertNotNull(row["COMPLETED_AT"], "completed_at should be set for terminal status")
+        }
+
+        @Test
+        fun `updateStatusWithHandle with non-null resultJson still works (regression guard)`() {
+            val wf = makeWorkflow()
+            insertWorkflowDirect(wf)
+            val task = makeTask(workflowId = wf.id, status = TaskStatus.PROCESSING)
+            insertTaskDirect(task)
+
+            val json = """{"output":"success"}"""
+            val result = jdbi.inTransaction<Boolean, Exception> { handle ->
+                taskRepo.updateStatusWithHandle(handle, task.id, TaskStatus.COMPLETED, json)
+            }
+
+            assertTrue(result)
+            val row = readTaskDirect(task.id)!!
+            assertEquals("COMPLETED", row["STATUS"])
+            assertEquals(json, row["RESULT"])
+        }
+
+        @Test
+        fun `insertBatchWithHandle with null payload and null result does not throw on Oracle CLOB`() {
+            val wf = makeWorkflow()
+            insertWorkflowDirect(wf)
+
+            val task = makeTask(
+                workflowId = wf.id,
+                payloadJson = null,
+                resultJson = null,
+            )
+
+            jdbi.useTransaction<Exception> { handle ->
+                taskRepo.insertBatchWithHandle(handle, listOf(task))
+            }
+
+            val row = readTaskDirect(task.id)!!
+            assertEquals(task.id, row["ID"])
+            assertNull(row["PAYLOAD"], "payload column should be null")
+            assertNull(row["RESULT"], "result column should be null")
+        }
+
         // ── SKIP LOCKED concurrency ─────────────────────────────────────
 
         @Test
