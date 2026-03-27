@@ -102,6 +102,11 @@
             <artifactId>kotlinx-coroutines-core</artifactId>
             <version>${kotlinx-coroutines.version}</version>
         </dependency>
+        <dependency>
+            <groupId>org.jetbrains.kotlinx</groupId>
+            <artifactId>kotlinx-coroutines-slf4j</artifactId>
+            <version>${kotlinx-coroutines.version}</version>
+        </dependency>
 
         <!-- Kubernetes Client -->
         <dependency>
@@ -113,6 +118,10 @@
         <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-micrometer-registry-prometheus</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-logging-json</artifactId>
         </dependency>
 
         <!-- OpenTelemetry API for distributed tracing (no-op without SDK) -->
