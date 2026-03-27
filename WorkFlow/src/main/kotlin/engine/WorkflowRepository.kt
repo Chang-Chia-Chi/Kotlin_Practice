@@ -28,9 +28,9 @@ class WorkflowRepository(private val jdbi: Jdbi) {
         casAdvanceWithHandle(h, id, expectedSequence, nextSequence, expectedVersion)
     }
 
-    suspend fun updateStatus(id: String, newStatus: WorkflowStatus): Boolean =
+    suspend fun updateStatus(id: String, newStatus: WorkflowStatus, expectedStatus: WorkflowStatus): Boolean =
         jdbi.inTransactionSuspend<Boolean, Exception> { h: Handle ->
-            updateStatusWithHandle(h, id, newStatus)
+            updateStatusWithHandle(h, id, newStatus, expectedStatus)
         }
 
     suspend fun findStuck(gracePeriod: Duration): List<WorkflowRun> =
@@ -45,11 +45,25 @@ class WorkflowRepository(private val jdbi: Jdbi) {
                     SELECT 1 FROM task t
                     WHERE t.workflow_id = w.id
                       AND t.sequence_number = w.current_sequence
-                      AND t.status NOT IN ('COMPLETED', 'FAILED', 'DEAD_LETTER')
+                      AND t.status NOT IN ('COMPLETED', 'FAILED', 'TIMED_OUT', 'DEAD_LETTER', 'CANCELLED')
                   )
                 """,
             )
                 .bind("cutoff", cutoff)
+                .mapToMap()
+                .list()
+                .map(::mapWorkflowRow)
+        }
+
+    suspend fun findTimedOut(): List<WorkflowRun> =
+        jdbi.withHandleSuspend<List<WorkflowRun>, Exception> { h: Handle ->
+            h.createQuery(
+                """
+                SELECT * FROM workflow
+                WHERE status = 'RUNNING' AND deadline_at < :now
+                """,
+            )
+                .bind("now", LocalDateTime.now(ZoneOffset.UTC))
                 .mapToMap()
                 .list()
                 .map(::mapWorkflowRow)
@@ -60,8 +74,8 @@ class WorkflowRepository(private val jdbi: Jdbi) {
     fun insertWithHandle(handle: Handle, run: WorkflowRun) {
         handle.createUpdate(
             """
-            INSERT INTO workflow (id, definition, current_sequence, version, status, created_at, updated_at)
-            VALUES (:id, :definition, :currentSequence, :version, :status, :createdAt, :updatedAt)
+            INSERT INTO workflow (id, definition, current_sequence, version, status, created_at, updated_at, deadline_at)
+            VALUES (:id, :definition, :currentSequence, :version, :status, :createdAt, :updatedAt, :deadlineAt)
             """,
         )
             .bind("id", run.id)
@@ -71,6 +85,7 @@ class WorkflowRepository(private val jdbi: Jdbi) {
             .bind("status", run.status.name)
             .bind("createdAt", LocalDateTime.ofInstant(run.createdAt, ZoneOffset.UTC))
             .bind("updatedAt", LocalDateTime.ofInstant(run.updatedAt, ZoneOffset.UTC))
+            .bind("deadlineAt", LocalDateTime.ofInstant(run.deadlineAt, ZoneOffset.UTC))
             .execute()
     }
 
@@ -101,12 +116,19 @@ class WorkflowRepository(private val jdbi: Jdbi) {
         return count == 1
     }
 
-    fun updateStatusWithHandle(handle: Handle, id: String, newStatus: WorkflowStatus): Boolean {
+    fun updateStatusWithHandle(
+        handle: Handle,
+        id: String,
+        newStatus: WorkflowStatus,
+        expectedStatus: WorkflowStatus,
+    ): Boolean {
+        WorkflowStatus.requireTransition(expectedStatus, newStatus)
         val count = handle.createUpdate(
-            "UPDATE workflow SET status = :status, updated_at = :now WHERE id = :id",
+            "UPDATE workflow SET status = :status, updated_at = :now WHERE id = :id AND status = :expectedStatus",
         )
             .bind("id", id)
             .bind("status", newStatus.name)
+            .bind("expectedStatus", expectedStatus.name)
             .bind("now", LocalDateTime.now(ZoneOffset.UTC))
             .execute()
         return count == 1

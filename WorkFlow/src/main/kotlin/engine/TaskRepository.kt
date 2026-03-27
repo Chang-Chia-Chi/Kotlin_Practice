@@ -35,6 +35,7 @@ class TaskRepository(
                     SELECT id FROM task
                     WHERE status = 'PENDING'
                       AND (deadline_at IS NULL OR deadline_at > :now)
+                      AND (not_before IS NULL OR not_before < :now)
                     ORDER BY claimed_at NULLS FIRST, id
                     FETCH FIRST :limit ROWS ONLY
                 )
@@ -126,14 +127,38 @@ class TaskRepository(
                 .createUpdate(
                     """
                 UPDATE task
-                SET status = 'PENDING', claimed_by = NULL, claimed_at = NULL, retry_count = :newRetryCount
+                SET status = 'PENDING', claimed_by = NULL, claimed_at = NULL,
+                    retry_count = :newRetryCount,
+                    not_before = :now + NUMTODSINTERVAL(LEAST(backoff_base * POWER(2, :newRetryCount), backoff_cap), 'SECOND')
                 WHERE id = :id
                 """,
                 ).bind("id", id)
                 .bind("newRetryCount", newRetryCount)
+                .bind("now", LocalDateTime.now(ZoneOffset.UTC).truncatedTo(java.time.temporal.ChronoUnit.MICROS))
                 .execute()
         }
     }
+
+    suspend fun replayDeadLetterTask(taskId: String): Boolean =
+        jdbi.inTransactionSuspend<Boolean, Exception> { h: Handle ->
+            val count = h
+                .createUpdate(
+                    """
+                UPDATE task
+                SET status = 'PENDING', retry_count = 0,
+                    claimed_by = NULL, claimed_at = NULL,
+                    completed_at = NULL, result = NULL, not_before = NULL
+                WHERE id = :taskId AND status = 'DEAD_LETTER'
+                """,
+                ).bind("taskId", taskId)
+                .execute()
+            count > 0
+        }
+
+    suspend fun replayDeadLetterBatch(workflowId: String): Int =
+        jdbi.inTransactionSuspend<Int, Exception> { h: Handle ->
+            replayDeadLetterBatchWithHandle(h, workflowId)
+        }
 
     suspend fun findExpired(now: Instant): List<Task> =
         jdbi.withHandleSuspend<List<Task>, Exception> { h: Handle ->
@@ -152,10 +177,13 @@ class TaskRepository(
                 .createUpdate(
                     """
                 UPDATE task
-                SET status = 'PENDING', claimed_by = NULL, claimed_at = NULL, retry_count = retry_count + 1
+                SET status = 'PENDING', claimed_by = NULL, claimed_at = NULL,
+                    retry_count = retry_count + 1,
+                    not_before = :now + NUMTODSINTERVAL(LEAST(backoff_base * POWER(2, retry_count + 1), backoff_cap), 'SECOND')
                 WHERE status = 'PROCESSING' AND claimed_at < :threshold AND retry_count < max_retries
                 """,
                 ).bind("threshold", LocalDateTime.ofInstant(staleThreshold, ZoneOffset.UTC))
+                .bind("now", LocalDateTime.now(ZoneOffset.UTC).truncatedTo(java.time.temporal.ChronoUnit.MICROS))
                 .execute()
         }
 
@@ -189,7 +217,7 @@ class TaskRepository(
                         """
                 UPDATE task SET status = :status, result = :result, completed_at = :now
                 WHERE id = :id
-                  AND status NOT IN ('COMPLETED', 'FAILED', 'DEAD_LETTER')
+                  AND status NOT IN ('COMPLETED', 'FAILED', 'TIMED_OUT', 'DEAD_LETTER', 'CANCELLED')
                   AND (claimed_by = :claimedBy AND claimed_at = :claimedAt OR :claimedBy IS NULL)
                 """,
                     ).bind("id", id)
@@ -229,7 +257,7 @@ class TaskRepository(
                 """
             SELECT COUNT(*) FROM task
             WHERE workflow_id = :workflowId AND sequence_number = :seq
-              AND status NOT IN ('COMPLETED', 'FAILED', 'DEAD_LETTER')
+              AND status NOT IN ('COMPLETED', 'FAILED', 'TIMED_OUT', 'DEAD_LETTER', 'CANCELLED')
             """,
             ).bind("workflowId", workflowId)
             .bind("seq", sequenceNumber)
@@ -246,7 +274,7 @@ class TaskRepository(
                 """
             SELECT COUNT(*) FROM task
             WHERE workflow_id = :workflowId AND sequence_number = :seq
-              AND status IN ('FAILED', 'DEAD_LETTER')
+              AND status IN ('FAILED', 'TIMED_OUT', 'DEAD_LETTER')
             """,
             ).bind("workflowId", workflowId)
             .bind("seq", sequenceNumber)
@@ -280,6 +308,18 @@ class TaskRepository(
             .list()
             .map(::mapTaskRow)
 
+    fun cancelPendingTasksWithHandle(handle: Handle, workflowId: String): Int {
+        return handle.createUpdate(
+            """
+            UPDATE task SET status = 'CANCELLED', completed_at = :now
+            WHERE workflow_id = :workflowId AND status = 'PENDING'
+            """,
+        )
+            .bind("workflowId", workflowId)
+            .bind("now", LocalDateTime.now(ZoneOffset.UTC).truncatedTo(java.time.temporal.ChronoUnit.MICROS))
+            .execute()
+    }
+
     fun insertBatchWithHandle(
         handle: Handle,
         tasks: List<Task>,
@@ -290,10 +330,10 @@ class TaskRepository(
                 """
             INSERT INTO task (id, workflow_id, sequence_number, status, handler_key,
                               payload, result, claimed_by, claimed_at, completed_at,
-                              retry_count, max_retries, deadline_at, not_before)
+                              retry_count, max_retries, deadline_at, not_before, backoff_base, backoff_cap)
             VALUES (:id, :workflowId, :sequenceNumber, :status, :handlerKey,
                     :payload, :result, :claimedBy, :claimedAt, :completedAt,
-                    :retryCount, :maxRetries, :deadlineAt, :notBefore)
+                    :retryCount, :maxRetries, :deadlineAt, :notBefore, :backoffBase, :backoffCap)
             """,
             )
         for (task in tasks) {
@@ -314,10 +354,26 @@ class TaskRepository(
                 .bind("maxRetries", task.maxRetries)
             bindNullableTimestamp(batch, "deadlineAt", task.deadlineAt)
             bindNullableTimestamp(batch, "notBefore", task.notBefore)
+            batch
+                .bind("backoffBase", task.backoffBase)
+                .bind("backoffCap", task.backoffCap)
             batch.add()
         }
         batch.execute()
     }
+
+    fun replayDeadLetterBatchWithHandle(handle: Handle, workflowId: String): Int =
+        handle
+            .createUpdate(
+                """
+            UPDATE task
+            SET status = 'PENDING', retry_count = 0,
+                claimed_by = NULL, claimed_at = NULL,
+                completed_at = NULL, result = NULL, not_before = NULL
+            WHERE workflow_id = :workflowId AND status = 'DEAD_LETTER'
+            """,
+            ).bind("workflowId", workflowId)
+            .execute()
 
     // ── Private helpers ──
 
@@ -362,6 +418,8 @@ class TaskRepository(
             maxRetries = (ci["MAX_RETRIES"] as Number).toInt(),
             deadlineAt = readNullableTimestamp(ci["DEADLINE_AT"]),
             notBefore = readNullableTimestamp(ci["NOT_BEFORE"]),
+            backoffBase = (ci["BACKOFF_BASE"] as Number).toInt(),
+            backoffCap = (ci["BACKOFF_CAP"] as Number).toInt(),
         )
     }
 }
