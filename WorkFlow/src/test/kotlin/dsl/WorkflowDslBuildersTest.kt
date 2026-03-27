@@ -1,6 +1,7 @@
 package com.workflow.dsl
 
 import java.time.Duration
+import org.junit.jupiter.api.assertThrows
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -122,6 +123,43 @@ class WorkflowDslBuildersTest {
                             ?: throw IllegalStateException("DslMarker correctly prevents scope leakage")
                     }
                 }
+            }
+        }
+    }
+
+    @Test
+    fun `workflow deadline defaults to 1 hour`() {
+        val def = workflow {
+            activity("step1") { transition("handler1") }
+        }
+        assertEquals(Duration.ofHours(1), def.deadline)
+    }
+
+    @Test
+    fun `workflow deadline can be customized`() {
+        val def = workflow {
+            deadline(Duration.ofMinutes(30))
+            activity("step1") { transition("handler1") }
+        }
+        assertEquals(Duration.ofMinutes(30), def.deadline)
+    }
+
+    @Test
+    fun `workflow deadline must be positive`() {
+        assertThrows<IllegalArgumentException> {
+            workflow {
+                deadline(Duration.ZERO)
+                activity("step1") { transition("handler1") }
+            }
+        }
+    }
+
+    @Test
+    fun `workflow deadline negative throws`() {
+        assertThrows<IllegalArgumentException> {
+            workflow {
+                deadline(Duration.ofMinutes(-1))
+                activity("step1") { transition("handler1") }
             }
         }
     }

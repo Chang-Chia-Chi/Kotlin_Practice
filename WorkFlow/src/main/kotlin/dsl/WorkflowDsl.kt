@@ -34,6 +34,8 @@ data class FanOutDefinition(
     val failurePolicy: FailurePolicy = FailurePolicy.ABORT,
     val deadline: Duration = Duration.ofMinutes(30),
     val joinPolicy: JoinPolicy = JoinPolicy.All,
+    val backoffBase: Duration = Duration.ofSeconds(1),
+    val backoffCap: Duration = Duration.ofSeconds(300),
 )
 
 data class ActivityDefinition(
@@ -43,12 +45,16 @@ data class ActivityDefinition(
     val failurePolicy: FailurePolicy = FailurePolicy.ABORT,
     val deadline: Duration = Duration.ofMinutes(30),
     val fanOut: FanOutDefinition? = null,
+    val backoffBase: Duration = Duration.ofSeconds(1),
+    val backoffCap: Duration = Duration.ofSeconds(300),
 )
 
 data class WorkflowDefinition(
     val activities: List<ActivityDefinition>,
+    val deadline: Duration = Duration.ofHours(1),
 ) {
     init {
         require(activities.isNotEmpty()) { "Workflow must have at least one activity" }
+        require(deadline > Duration.ZERO) { "Workflow deadline must be positive" }
     }
 }
