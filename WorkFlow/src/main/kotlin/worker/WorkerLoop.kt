@@ -20,10 +20,13 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.slf4j.MDCContext
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.slf4j.LoggerFactory
+import org.slf4j.MDC
 import java.time.Duration
 import java.time.Instant
 import java.util.concurrent.atomic.AtomicBoolean
@@ -44,7 +47,7 @@ const val SHUTDOWN_ORDER_WORKER = 10
  * ```
  * indefinitelyRepeat(Unit)
  *   .takeUntilSignal(stopChannel)
- *   .unorderedMapAsync(concurrency) { pollAndProcess(workerId, pollInterval, 1) }
+ *   .unorderedMapAsync(concurrency) { pollAndProcess(workerId, pollInterval, batchSize) }
  *   .collect {}
  * ```
  *
@@ -103,6 +106,7 @@ class WorkerLoop(
         val workerId = workerConfig.id()
         val concurrency = workerConfig.concurrency()
         val pollInterval = workerConfig.pollInterval()
+        val batchSize = workerConfig.batchSize()
 
         _accepting.set(true)
 
@@ -110,12 +114,12 @@ class WorkerLoop(
             scope.launch(ShutdownSignal { !_accepting.get() }) {
                 indefinitelyRepeat(Unit)
                     .takeUntilSignal(stopChannel)
-                    .unorderedMapAsync(concurrency) { pollAndProcess(workerId, pollInterval, 1) }
+                    .unorderedMapAsync(concurrency) { pollAndProcess(workerId, pollInterval, batchSize) }
                     .collect {}
             }
         activeJob = job
 
-        log.info("Worker loop started: workerId={}, concurrency={}, pollInterval={}", workerId, concurrency, pollInterval)
+        log.info("Worker loop started: workerId={}, concurrency={}, batchSize={}, pollInterval={}", workerId, concurrency, batchSize, pollInterval)
         return job
     }
 
@@ -138,7 +142,7 @@ class WorkerLoop(
         workerId: String,
         pollInterval: Duration,
         batchSize: Int,
-    ) {
+    ) = withContext(MDCContext(mapOf("worker_id" to workerId))) {
         val tasks =
             try {
                 taskRepo.claimNext(workerId, batchSize)
@@ -147,13 +151,13 @@ class WorkerLoop(
             } catch (e: Exception) {
                 log.error("Failed to claim tasks", e)
                 delay(pollInterval.toMillis())
-                return
+                return@withContext
             }
         _lastPollTimestamp = Instant.now()
 
         if (tasks.isEmpty()) {
             delay(pollInterval.toMillis())
-            return
+            return@withContext
         }
 
         for (task in tasks) {
@@ -162,40 +166,48 @@ class WorkerLoop(
     }
 
     private suspend fun processTask(task: Task) {
-        _inFlightTasks.incrementAndGet()
-        try {
-            val handler = handlerRegistry.resolve(task.handlerKey)
-            val input =
-                HandlerInput(
-                    taskId = task.id,
-                    workflowId = task.workflowId,
-                    sequenceNumber = task.sequenceNumber,
-                    payload = task.payloadJson,
-                )
-            val output = handler.execute(input)
-
+        val taskMdc = MDC.getCopyOfContextMap().orEmpty() + mapOf(
+            "task_id" to task.id,
+            "handler_key" to task.handlerKey,
+            "workflow_id" to task.workflowId,
+            "attempt" to task.retryCount.toString(),
+        )
+        withContext(MDCContext(taskMdc)) {
+            _inFlightTasks.incrementAndGet()
             try {
-                barrierService.onTaskCompleted(
-                    taskId = task.id,
-                    workflowId = task.workflowId,
-                    sequenceNumber = task.sequenceNumber,
-                    status = TaskStatus.COMPLETED,
-                    resultJson = output.result,
-                    claimedBy = task.claimedBy,
-                    claimedAt = task.claimedAt,
-                )
+                val handler = handlerRegistry.resolve(task.handlerKey)
+                val input =
+                    HandlerInput(
+                        taskId = task.id,
+                        workflowId = task.workflowId,
+                        sequenceNumber = task.sequenceNumber,
+                        payload = task.payloadJson,
+                    )
+                val output = handler.execute(input)
+
+                try {
+                    barrierService.onTaskCompleted(
+                        taskId = task.id,
+                        workflowId = task.workflowId,
+                        sequenceNumber = task.sequenceNumber,
+                        status = TaskStatus.COMPLETED,
+                        resultJson = output.result,
+                        claimedBy = task.claimedBy,
+                        claimedAt = task.claimedAt,
+                    )
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    log.error("Barrier failed for COMPLETED task {}, falling through to failure path", task.id, e)
+                    handleTaskFailure(task, e)
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                log.error("Barrier failed for COMPLETED task {}, falling through to failure path", task.id, e)
                 handleTaskFailure(task, e)
+            } finally {
+                _inFlightTasks.decrementAndGet()
             }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            handleTaskFailure(task, e)
-        } finally {
-            _inFlightTasks.decrementAndGet()
         }
     }
 
@@ -204,11 +216,13 @@ class WorkerLoop(
         cause: Exception,
     ) {
         log.warn(
-            "Task {} failed (retry {}/{}): {}",
+            "Task {} (handler={}) failed (retry {}/{}): {}",
             task.id,
+            task.handlerKey,
             task.retryCount,
             task.maxRetries,
             cause.message,
+            cause,
         )
 
         if (task.retryCount < task.maxRetries) {
