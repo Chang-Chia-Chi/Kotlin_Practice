@@ -36,6 +36,7 @@ class WorkflowEngine(
                 status = WorkflowStatus.RUNNING,
                 createdAt = now,
                 updatedAt = now,
+                deadlineAt = now.plus(java.time.Duration.ofMinutes(30)),
             )
             workflowRepo.insertWithHandle(handle, run)
 

@@ -122,6 +122,7 @@ class WorkflowRepository(private val jdbi: Jdbi) {
             status = WorkflowStatus.valueOf(ci["STATUS"] as String),
             createdAt = readTimestamp(ci["CREATED_AT"]),
             updatedAt = readTimestamp(ci["UPDATED_AT"]),
+            deadlineAt = readTimestamp(ci["DEADLINE_AT"]),
         )
     }
 }

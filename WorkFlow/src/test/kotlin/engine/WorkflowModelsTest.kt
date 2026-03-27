@@ -4,6 +4,7 @@ import java.time.Instant
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 
 class WorkflowModelsTest {
 
@@ -13,9 +14,9 @@ class WorkflowModelsTest {
     // ── WorkflowStatus enum ─────────────────────────────────────────────
 
     @Test
-    fun `WorkflowStatus contains exactly three values`() {
+    fun `WorkflowStatus contains exactly five values`() {
         assertEquals(
-            setOf("RUNNING", "COMPLETED", "FAILED"),
+            setOf("RUNNING", "COMPLETED", "FAILED", "TIMED_OUT", "CANCELLED"),
             WorkflowStatus.entries.map { it.name }.toSet(),
         )
     }
@@ -27,12 +28,59 @@ class WorkflowModelsTest {
         }
     }
 
+    @Test
+    fun `WorkflowStatus isTerminal returns true for all except RUNNING`() {
+        assertEquals(false, WorkflowStatus.RUNNING.isTerminal)
+        WorkflowStatus.entries.filter { it != WorkflowStatus.RUNNING }.forEach {
+            assertEquals(true, it.isTerminal, "Expected isTerminal=true for $it")
+        }
+    }
+
+    @Test
+    fun `WorkflowStatus allows all legal transitions from RUNNING`() {
+        listOf(
+            WorkflowStatus.COMPLETED,
+            WorkflowStatus.FAILED,
+            WorkflowStatus.TIMED_OUT,
+            WorkflowStatus.CANCELLED,
+        ).forEach { target ->
+            WorkflowStatus.requireTransition(WorkflowStatus.RUNNING, target)
+        }
+    }
+
+    @Test
+    fun `WorkflowStatus allows future reclaim transitions`() {
+        listOf(
+            WorkflowStatus.FAILED,
+            WorkflowStatus.TIMED_OUT,
+            WorkflowStatus.CANCELLED,
+        ).forEach { source ->
+            WorkflowStatus.requireTransition(source, WorkflowStatus.RUNNING)
+        }
+    }
+
+    @Test
+    fun `WorkflowStatus rejects illegal transitions`() {
+        val illegal = listOf(
+            WorkflowStatus.COMPLETED to WorkflowStatus.RUNNING,
+            WorkflowStatus.COMPLETED to WorkflowStatus.FAILED,
+            WorkflowStatus.FAILED to WorkflowStatus.COMPLETED,
+            WorkflowStatus.RUNNING to WorkflowStatus.RUNNING,
+        )
+        illegal.forEach { (from, to) ->
+            val ex = org.junit.jupiter.api.assertThrows<IllegalArgumentException> {
+                WorkflowStatus.requireTransition(from, to)
+            }
+            assertTrue(ex.message!!.contains("Illegal workflow transition"))
+        }
+    }
+
     // ── TaskStatus enum ─────────────────────────────────────────────────
 
     @Test
-    fun `TaskStatus contains exactly five values`() {
+    fun `TaskStatus contains exactly seven values`() {
         assertEquals(
-            setOf("PENDING", "PROCESSING", "COMPLETED", "FAILED", "DEAD_LETTER"),
+            setOf("PENDING", "PROCESSING", "COMPLETED", "FAILED", "TIMED_OUT", "DEAD_LETTER", "CANCELLED"),
             TaskStatus.entries.map { it.name }.toSet(),
         )
     }
@@ -45,8 +93,11 @@ class WorkflowModelsTest {
     }
 
     @Test
-    fun `isTerminal returns true only for COMPLETED, FAILED, and DEAD_LETTER`() {
-        val expectedTerminal = setOf(TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.DEAD_LETTER)
+    fun `isTerminal returns true only for terminal statuses`() {
+        val expectedTerminal = setOf(
+            TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.TIMED_OUT,
+            TaskStatus.DEAD_LETTER, TaskStatus.CANCELLED,
+        )
         TaskStatus.entries.forEach { status ->
             assertEquals(
                 status in expectedTerminal,
@@ -76,6 +127,41 @@ class WorkflowModelsTest {
         assertEquals(true, TaskStatus.FAILED.isTerminal)
     }
 
+    @Test
+    fun `TaskStatus allows all legal transitions`() {
+        val legal = listOf(
+            TaskStatus.PENDING to TaskStatus.PROCESSING,
+            TaskStatus.PENDING to TaskStatus.CANCELLED,
+            TaskStatus.PROCESSING to TaskStatus.COMPLETED,
+            TaskStatus.PROCESSING to TaskStatus.FAILED,
+            TaskStatus.PROCESSING to TaskStatus.TIMED_OUT,
+            TaskStatus.PROCESSING to TaskStatus.PENDING,
+            TaskStatus.PROCESSING to TaskStatus.DEAD_LETTER,
+            TaskStatus.FAILED to TaskStatus.PENDING,
+            TaskStatus.FAILED to TaskStatus.DEAD_LETTER,
+        )
+        legal.forEach { (from, to) ->
+            TaskStatus.requireTransition(from, to)
+        }
+    }
+
+    @Test
+    fun `TaskStatus rejects illegal transitions`() {
+        val illegal = listOf(
+            TaskStatus.PENDING to TaskStatus.COMPLETED,
+            TaskStatus.PENDING to TaskStatus.FAILED,
+            TaskStatus.COMPLETED to TaskStatus.PENDING,
+            TaskStatus.CANCELLED to TaskStatus.PENDING,
+            TaskStatus.DEAD_LETTER to TaskStatus.PROCESSING,
+        )
+        illegal.forEach { (from, to) ->
+            val ex = org.junit.jupiter.api.assertThrows<IllegalArgumentException> {
+                TaskStatus.requireTransition(from, to)
+            }
+            assertTrue(ex.message!!.contains("Illegal task transition"))
+        }
+    }
+
     // ── WorkflowRun data class ──────────────────────────────────────────
 
     private fun workflowRun(
@@ -86,7 +172,8 @@ class WorkflowModelsTest {
         status: WorkflowStatus = WorkflowStatus.RUNNING,
         createdAt: Instant = now,
         updatedAt: Instant = now,
-    ) = WorkflowRun(id, definitionJson, currentSequence, version, status, createdAt, updatedAt)
+        deadlineAt: Instant = later,
+    ) = WorkflowRun(id, definitionJson, currentSequence, version, status, createdAt, updatedAt, deadlineAt)
 
     @Test
     fun `WorkflowRun construction preserves all fields`() {
@@ -98,6 +185,7 @@ class WorkflowModelsTest {
         assertEquals(WorkflowStatus.RUNNING, run.status)
         assertEquals(now, run.createdAt)
         assertEquals(now, run.updatedAt)
+        assertEquals(later, run.deadlineAt)
     }
 
     @Test

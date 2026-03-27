@@ -68,6 +68,7 @@ class BarrierServiceTest {
         status: WorkflowStatus = WorkflowStatus.RUNNING,
         createdAt: Instant = now(),
         updatedAt: Instant = now(),
+        deadlineAt: Instant = now().plus(java.time.Duration.ofMinutes(30)),
     ): WorkflowRun = WorkflowRun(
         id = id,
         definitionJson = objectMapper.writeValueAsString(definition),
@@ -76,6 +77,7 @@ class BarrierServiceTest {
         status = status,
         createdAt = createdAt,
         updatedAt = updatedAt,
+        deadlineAt = deadlineAt,
     )
 
     private fun makeTask(

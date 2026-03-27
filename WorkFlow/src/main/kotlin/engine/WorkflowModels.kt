@@ -4,12 +4,55 @@ import com.workflow.dsl.ActivityDefinition
 import java.time.Instant
 import java.util.UUID
 
-enum class WorkflowStatus { RUNNING, COMPLETED, FAILED }
+enum class WorkflowStatus {
+    RUNNING, COMPLETED, FAILED, TIMED_OUT, CANCELLED;
+
+    val isTerminal: Boolean get() = this != RUNNING
+
+    companion object {
+        private val allowed = setOf(
+            RUNNING to COMPLETED,
+            RUNNING to FAILED,
+            RUNNING to TIMED_OUT,
+            RUNNING to CANCELLED,
+            FAILED to RUNNING,       // future: workflow reclaim
+            TIMED_OUT to RUNNING,    // future: workflow reclaim
+            CANCELLED to RUNNING,    // future: workflow reclaim
+        )
+
+        fun requireTransition(from: WorkflowStatus, to: WorkflowStatus) {
+            require((from to to) in allowed) {
+                "Illegal workflow transition: $from → $to"
+            }
+        }
+    }
+}
 
 enum class TaskStatus {
-    PENDING, PROCESSING, COMPLETED, FAILED, DEAD_LETTER;
+    PENDING, PROCESSING, COMPLETED, FAILED, TIMED_OUT, DEAD_LETTER, CANCELLED;
 
-    val isTerminal: Boolean get() = this == COMPLETED || this == FAILED || this == DEAD_LETTER
+    val isTerminal: Boolean get() = this in terminalStatuses
+
+    companion object {
+        private val terminalStatuses = setOf(COMPLETED, FAILED, TIMED_OUT, DEAD_LETTER, CANCELLED)
+        private val allowed = setOf(
+            PENDING to PROCESSING,
+            PENDING to CANCELLED,
+            PROCESSING to COMPLETED,
+            PROCESSING to FAILED,
+            PROCESSING to TIMED_OUT,
+            PROCESSING to PENDING,       // stale reclaim
+            PROCESSING to DEAD_LETTER,
+            FAILED to PENDING,           // future: retry-on-failure
+            FAILED to DEAD_LETTER,       // future: retry-on-failure exhausted
+        )
+
+        fun requireTransition(from: TaskStatus, to: TaskStatus) {
+            require((from to to) in allowed) {
+                "Illegal task transition: $from → $to"
+            }
+        }
+    }
 }
 
 data class WorkflowRun(
@@ -20,6 +63,7 @@ data class WorkflowRun(
     val status: WorkflowStatus,
     val createdAt: Instant,
     val updatedAt: Instant,
+    val deadlineAt: Instant,
 )
 
 data class Task(
