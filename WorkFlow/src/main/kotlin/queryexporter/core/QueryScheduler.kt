@@ -21,6 +21,7 @@ import org.jboss.logging.Logger
 import java.time.Clock
 import java.time.Duration
 import java.time.ZonedDateTime
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.coroutines.CoroutineContext
 import kotlin.coroutines.EmptyCoroutineContext
 
@@ -35,11 +36,10 @@ class QueryScheduler(
     private val log = Logger.getLogger(QueryScheduler::class.java)
 
     private var queryJobs = listOf<Job>()
-    private var monitorJob: Job? = null
+    private val monitorJobRef = AtomicReference<Job?>(null)
 
     fun start(config: ExporterConfig, scope: CoroutineScope) {
-        if (monitorJob != null) return
-        monitorJob = scope.launch {
+        val job = scope.launch {
             var wasLeader = false
             leaderGuard.leaderState.collect { isLeader ->
                 if (isLeader && !wasLeader) {
@@ -54,6 +54,10 @@ class QueryScheduler(
                 }
                 wasLeader = isLeader
             }
+        }
+        if (!monitorJobRef.compareAndSet(null, job)) {
+            job.cancel()
+            return
         }
     }
 
@@ -94,12 +98,12 @@ class QueryScheduler(
 
     suspend fun stop(timeout: Duration = Duration.ofSeconds(5)) {
         queryJobs.forEach { it.cancel() }
+        val monitorJob = monitorJobRef.getAndSet(null)
         monitorJob?.cancel()
         withTimeoutOrNull(timeout.toMillis()) {
             queryJobs.forEach { it.join() }
             monitorJob?.join()
         }
         queryJobs = emptyList()
-        monitorJob = null
     }
 }

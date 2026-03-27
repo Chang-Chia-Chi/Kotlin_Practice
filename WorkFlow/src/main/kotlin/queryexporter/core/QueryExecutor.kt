@@ -2,8 +2,8 @@ package com.workflow.queryexporter.core
 
 import javax.sql.DataSource
 
-class QueryExecutor {
-    fun execute(dataSource: DataSource, sql: String): List<Map<String, Any?>> {
+open class QueryExecutor {
+    open fun execute(dataSource: DataSource, sql: String): List<Map<String, Any?>> {
         dataSource.connection.use { conn ->
             conn.prepareStatement(sql).use { stmt ->
                 stmt.executeQuery().use { rs ->
@@ -11,7 +11,7 @@ class QueryExecutor {
                     val columns = (1..meta.columnCount).map { meta.getColumnLabel(it).lowercase() }
                     val rows = mutableListOf<Map<String, Any?>>()
                     while (rs.next()) {
-                        rows += columns.associateWith { col -> rs.getObject(columns.indexOf(col) + 1) }
+                        rows += columns.mapIndexed { i, col -> col to rs.getObject(i + 1) }.toMap()
                     }
                     return rows
                 }
