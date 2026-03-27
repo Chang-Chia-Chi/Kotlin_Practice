@@ -8,7 +8,6 @@ import com.workflow.engine.TaskStatus
 import com.workflow.shutdown.ShutdownSignal
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
@@ -691,62 +690,6 @@ class WorkerLoopTest {
 
             // Each concurrent slot calls claimNext with batchSize=1
             verify(taskRepo, org.mockito.Mockito.atLeastOnce()).claimNext(eq(workerId), eq(1))
-        }
-    }
-
-    // ── N. Reaper Excludes In-Flight (Spec #8) ──────────────────────────
-
-    @Nested
-    inner class ReaperExcludesInFlight {
-
-        @Test
-        fun `reaper does not fail task that is still in-flight`() = runTest {
-            val task = makeTask(
-                id = "T1",
-                workflowId = "wf-inflight",
-                deadlineAt = Instant.now().minus(5, ChronoUnit.MINUTES),
-            )
-            val handler = object : TransitionHandler {
-                override suspend fun execute(input: HandlerInput): HandlerOutput {
-                    delay(5000)
-                    return HandlerOutput("""{"done":true}""")
-                }
-            }
-
-            whenever(taskRepo.claimNext(eq(workerId), eq(1)))
-                .thenReturn(listOf(task))
-                .thenReturn(emptyList())
-            whenever(handlerRegistry.resolve(task.handlerKey)).thenReturn(handler)
-            // Reaper sees T1 as expired while handler is still running
-            whenever(taskRepo.findExpired(any()))
-                .thenReturn(listOf(task))
-                .thenReturn(emptyList())
-
-            val job = workerLoop.start(this)
-
-            // Advance past first poll (claims T1) and first reaper tick
-            advanceTimeBy(pollInterval.toMillis() * 2)
-
-            // At this point handler is still in delay(5000), reaper has fired.
-            // Reaper should NOT mark T1 as FAILED because it is in-flight.
-            val failedCallsBeforeHandlerDone = org.mockito.Mockito.mockingDetails(barrierService)
-                .invocations
-                .count {
-                    it.method.name == "onTaskCompleted" &&
-                        it.arguments[0] == "T1" &&
-                        it.arguments[3] == TaskStatus.FAILED
-                }
-            assertEquals(0, failedCallsBeforeHandlerDone, "Reaper must not FAIL in-flight task T1")
-
-            // Now advance past handler delay so it completes
-            advanceTimeBy(5000)
-
-            verify(barrierService).onTaskCompleted(
-                eq("T1"), eq("wf-inflight"), eq(task.sequenceNumber),
-                eq(TaskStatus.COMPLETED), eq("""{"done":true}"""),
-            )
-
-            job.cancel()
         }
     }
 

@@ -7,7 +7,7 @@ import kotlin.coroutines.coroutineContext
 /**
  * Coroutine context element that propagates shutdown awareness.
  *
- * Installed by [WorkerLoop][com.workflow.queue.worker.WorkerLoop] at the
+ * Installed by [WorkerLoop][com.workflow.worker.WorkerLoop] at the
  * scope level so all task execution coroutines inherit it. Middlewares and
  * handlers query shutdown state via the top-level [isShuttingDown] function.
  */

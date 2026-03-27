@@ -1,0 +1,42 @@
+{
+  "env": {
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
+  },
+  "permissions": {
+    "allow": [
+      "Bash(cat:*)",
+      "Bash(grep:*)",
+      "Bash(find:*)",
+      "Bash(head:*)",
+      "Bash(tail:*)",
+      "Bash(sort:*)",
+      "Bash(diff:*)",
+      "Bash(echo:*)",
+      "Bash(printf:*)",
+      "Bash(sed:*)",
+      "Bash(awk:*)",
+      "Bash(wc:*)",
+      "Bash(cp:*)",
+      "Bash(mv:*)",
+      "Bash(touch:*)",
+      "Bash(mkdir:*)",
+      "Bash(ls:*)",
+      "Bash(for:*)",
+      "Bash(xargs:*)",
+      "Bash(timeout:*)",
+      "Bash(python:*)",
+      "Bash(python3:*)",
+      "Bash(jar tf:*)",
+      "Bash(cd:*)",
+      "Bash(git:*)",
+      "Bash(docker info:*)",
+      "Bash(/c/Users/maxch/.m2/wrapper/dists/apache-maven-3.9.8/af622e91/bin/mvn:*)",
+      "Read(//c/Users/maxch/OneDrive/文件/GitHub/Kotlin_Practice/**)",
+      "Skill(claude-md-management:revise-claude-md)",
+      "Bash(do echo:*)",
+      "Read(//c/Users/maxch/OneDrive/文件/GitHub/Kotlin_Practice/WorkFlow/**)",
+      "Bash(done)"
+    ],
+    "defaultMode": "auto"
+  }
+}

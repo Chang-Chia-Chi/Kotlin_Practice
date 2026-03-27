@@ -16,6 +16,9 @@ object OracleTestContainer {
         .apply { start() }
 
     val jdbi: Jdbi by lazy {
+        // Ensure Oracle JDBC driver is registered — Quarkus test classloader
+        // isolation can cause DriverManager to lose the driver registration.
+        Class.forName("oracle.jdbc.OracleDriver")
         Jdbi.create(oracle.jdbcUrl, oracle.username, oracle.password).also { db ->
             val sql = OracleTestContainer::class.java.classLoader
                 .getResource("db/migration/V1__create_workflow_tables.sql")!!
