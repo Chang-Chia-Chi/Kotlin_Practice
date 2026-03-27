@@ -20,6 +20,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.slf4j.LoggerFactory
@@ -126,6 +127,9 @@ class WorkerLoop(
         log.info("Worker loop shutting down")
         _accepting.set(false)
         stopChannel.trySend(Unit)
+        withTimeoutOrNull(shutdownTimeout.toMillis()) {
+            activeJob?.join()
+        }
         activeJob?.cancelAndJoin()
         log.info("Worker loop shutdown complete")
     }

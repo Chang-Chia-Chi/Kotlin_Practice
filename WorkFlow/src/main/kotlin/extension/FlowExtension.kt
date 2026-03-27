@@ -1,6 +1,7 @@
 package com.workflow.extension
 
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.channels.ClosedSendChannelException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.flow.flow
@@ -53,6 +54,10 @@ fun <T> Flow<T>.takeUntilSignal(signal: Channel<Unit>): Flow<T> =
             signal.receive()
             close()
         }
-        collect { send(it) }
+        try {
+            collect { send(it) }
+        } catch (_: ClosedSendChannelException) {
+            // Normal: signalJob closed the channel while upstream was emitting
+        }
         signalJob.cancel()
     }

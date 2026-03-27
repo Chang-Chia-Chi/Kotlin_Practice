@@ -7,7 +7,11 @@ import com.workflow.engine.TaskRepository
 import com.workflow.engine.TaskStatus
 import com.workflow.shutdown.ShutdownSignal
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineExceptionHandler
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
@@ -32,6 +36,7 @@ import java.time.Instant
 import java.time.temporal.ChronoUnit
 import java.util.UUID
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -476,6 +481,85 @@ class WorkerLoopTest {
 
             // No crash, no hang — shutdown is safe even without start()
             verify(taskRepo, never()).claimNext(any(), any())
+        }
+    }
+
+    // ── G2. Shutdown Drain Window (R0.2) ────────────────────────────────
+
+    @Nested
+    inner class ShutdownDrainWindow {
+
+        @Test
+        fun `drain completes within window - handler finishes naturally`() = runTest {
+            val handlerCompleted = java.util.concurrent.atomic.AtomicBoolean(false)
+            val task = makeTask()
+            val handler = object : TransitionHandler {
+                override suspend fun execute(input: HandlerInput): HandlerOutput {
+                    delay(500) // simulated work within drain window (30s default)
+                    handlerCompleted.set(true)
+                    return HandlerOutput("""{"drained":"ok"}""")
+                }
+            }
+
+            whenever(taskRepo.claimNext(eq(workerId), eq(1)))
+                .thenReturn(listOf(task))
+                .thenReturn(emptyList())
+            whenever(handlerRegistry.resolve(task.handlerKey)).thenReturn(handler)
+
+            // SupervisorJob + CoroutineExceptionHandler: the takeUntilSignal
+            // implementation throws ClosedSendChannelException when the signalJob
+            // closes the channelFlow while indefinitelyRepeat is emitting. This is
+            // expected flow-close behavior in production (SupervisorJob in onStart).
+            val ceh = CoroutineExceptionHandler { _, _ -> }
+            val supervisorScope = CoroutineScope(coroutineContext + SupervisorJob() + ceh)
+            workerLoop.start(supervisorScope)
+            advanceTimeBy(pollInterval.toMillis())
+
+            val shutdownJob = launch { workerLoop.shutdown() }
+            advanceTimeBy(pollInterval.toMillis())
+            shutdownJob.join()
+
+            assertTrue(handlerCompleted.get(), "Handler should complete within drain window (not cancelled)")
+            verify(barrierService).onTaskCompleted(
+                eq(task.id), eq(task.workflowId), eq(task.sequenceNumber),
+                eq(TaskStatus.COMPLETED), eq("""{"drained":"ok"}"""),
+            )
+        }
+
+        @Test
+        fun `force-cancel after drain timeout - long handler is cancelled`() = runTest {
+            whenever(shutdownConfig.globalTimeout()).thenReturn(Duration.ofMillis(100))
+            val shortTimeoutLoop = WorkerLoop(config, taskRepo, handlerRegistry, barrierService)
+
+            val handlerStarted = java.util.concurrent.atomic.AtomicBoolean(false)
+            val handlerCompleted = java.util.concurrent.atomic.AtomicBoolean(false)
+            val task = makeTask()
+            val handler = object : TransitionHandler {
+                override suspend fun execute(input: HandlerInput): HandlerOutput {
+                    handlerStarted.set(true)
+                    delay(Long.MAX_VALUE) // block indefinitely — exceeds drain window
+                    handlerCompleted.set(true)
+                    return HandlerOutput(null) // unreachable
+                }
+            }
+
+            whenever(taskRepo.claimNext(eq(workerId), eq(1)))
+                .thenReturn(listOf(task))
+                .thenReturn(emptyList())
+            whenever(handlerRegistry.resolve(task.handlerKey)).thenReturn(handler)
+
+            val ceh = CoroutineExceptionHandler { _, _ -> }
+            val supervisorScope = CoroutineScope(coroutineContext + SupervisorJob() + ceh)
+            shortTimeoutLoop.start(supervisorScope)
+            advanceTimeBy(pollInterval.toMillis())
+
+            val shutdownJob = launch { shortTimeoutLoop.shutdown() }
+            advanceTimeBy(pollInterval.toMillis())
+            shutdownJob.join()
+
+            assertTrue(handlerStarted.get(), "Handler should have started before shutdown")
+            assertFalse(handlerCompleted.get(), "Handler should have been force-cancelled")
+            assertTrue(shutdownJob.isCompleted, "Shutdown should complete after force-cancel")
         }
     }
 
