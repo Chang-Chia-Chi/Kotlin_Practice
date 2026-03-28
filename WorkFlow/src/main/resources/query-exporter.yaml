@@ -110,7 +110,8 @@ queries:
         valueColumn: depth
         tagColumns: [handler_key]
 
-  # -- Anomaly detection: workflow instances with unusually deep pending backlog --
+  # -- Anomaly detection: workflow instances with unusually deep pending backlog.
+  #    Threshold 10 = conservative default; most workflows have ≤ a few pending tasks. --
   workflow_deep_backlog_count:
     sql: >-
       SELECT COUNT(*) AS cnt FROM (
