@@ -56,7 +56,3 @@
 * **Docker:** Docker Desktop must be running for Testcontainers tests. Verify with `docker info | grep "Server Version"`.
 * **Maven:** No system `mvn` on PATH. `./mvnw` does not work in bash-on-Windows — always use the cached distribution at `/c/Users/maxch/.m2/wrapper/dists/apache-maven-3.9.8/af622e91/bin/mvn`.
 * **Running specific tests:** Use class names with surefire: `-Dtest="LeaderManagerTest,NotLeaderTest"`. Package glob patterns (`com.workflow.leader.*`) do not match.
-* **Git Commit:**
-  * Do not use composite commands, which always force a permission request from the user.
-  * Given you're already in the Git repository folder - do not explicitly `cd` first - as it's redundant, and can also cause a composite command.
-  * After a successful commit, ask me with the AskUserQuestion tool if I'd like you to push. Never push without asking.

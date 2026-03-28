@@ -1,5 +1,11 @@
 Let's commit the changes.
 
+* **Git Commit:**
+* Do not use composite commands, which always force a permission request from the user.
+* Given you're already in the Git repository folder - do not explicitly `cd` first - as it's redundant, and can also cause a composite command.
+* After a successful commit, ask me with the AskUserQuestion tool if I'd like you to push. Never push without asking.
+
+
 **Split large changes**: If changes touch multiple concerns, split them into separate commits
 **Write a commit message that matches the content of your change**: Clearly describe what was changed in this commit. A good commit message should:
 - Specify the component or feature affected (e.g., "authentication module").
