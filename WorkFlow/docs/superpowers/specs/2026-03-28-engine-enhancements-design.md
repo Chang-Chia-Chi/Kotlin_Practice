@@ -503,7 +503,7 @@ class ChoicePhaseStrategy(
         val branchSeqs = context.currentSeqInfo.branchSequences!!
 
         val payload = context.tasks.firstOrNull()?.resultJson
-            ?: return AdvancementDecision.Fail("CHOICE has no input payload")
+            ?: return AdvancementDecision.Abort("CHOICE has no input payload")
         val payloadNode = objectMapper.readTree(payload)
 
         // Evaluate branches in order -- first match wins
@@ -513,10 +513,10 @@ class ChoicePhaseStrategy(
 
         val branchName = matchedBranch?.name
             ?: choiceDef.defaultBranch
-            ?: return AdvancementDecision.Fail("No branch matched and no default defined")
+            ?: return AdvancementDecision.Abort("No branch matched and no default defined")
 
         val targetSeq = branchSeqs[branchName]
-            ?: return AdvancementDecision.Fail("Branch '$branchName' not in sequence map")
+            ?: return AdvancementDecision.Abort("Branch '$branchName' not in sequence map")
 
         val targetSeqInfo = context.sequenceMap[targetSeq]!!
         val task = createTaskForActivity(
@@ -613,31 +613,64 @@ data class PhaseContext(
 )
 
 sealed interface AdvancementDecision {
+    /** Advance the workflow to the next sequence, inserting the given tasks. */
     data class Advance(val nextSequence: Int, val tasks: List<Task>) : AdvancementDecision
+    /** All sequences completed — mark the workflow as COMPLETED. */
     data object Complete : AdvancementDecision
-    data class Fail(val reason: String) : AdvancementDecision
+    /**
+     * Abort the workflow — mark it as FAILED and cancel pending tasks.
+     * Only returned when the phase failed AND [FailurePolicy.ABORT] is set.
+     * BEST_EFFORT failures return [Advance] or [Complete] instead.
+     */
+    data class Abort(val reason: String) : AdvancementDecision
 }
 ```
 
 ### Part C: Strategy Implementations
 
-Extracted from existing `when (phaseType)` branches in `evaluateOutcome`, `advanceWorkflow`, and `insertTasksForSequence`:
+Extracted from existing `when (phaseType)` branches in `evaluateOutcome`, `advanceWorkflow`, and `insertTasksForSequence`.
+
+**Failure policy lives in the strategies, not in `executeDecision`.** Each strategy evaluates its own success/failure condition and checks the activity's `failurePolicy`. When the outcome is a failure:
+- `ABORT` → return `Abort(reason)` — `executeDecision` marks the workflow FAILED
+- `BEST_EFFORT` → return `Advance` or `Complete` with null payload (treat as success)
+
+This keeps `executeDecision` simple (no task-creation path for BEST_EFFORT) and avoids a structural gap where `Abort` + BEST_EFFORT would need to build tasks that only the strategy knows how to create.
+
+Shared helper to avoid duplication across strategies:
+
+```kotlin
+fun PhaseContext.failOrAdvance(failedCount: Int, payload: String?): AdvancementDecision? {
+    if (failedCount == 0) return null  // no failure — caller continues to normal advance
+    return when (currentSeqInfo.activity.failurePolicy) {
+        ABORT -> AdvancementDecision.Abort("$failedCount task(s) failed at sequence ${currentSeqInfo.sequenceNumber}")
+        BEST_EFFORT -> advanceOrComplete(payload = null)
+    }
+}
+
+fun PhaseContext.advanceOrComplete(payload: String?): AdvancementDecision {
+    val nextSeq = currentSeqInfo.nextSequence ?: return AdvancementDecision.Complete
+    val nextSeqInfo = sequenceMap[nextSeq]!!
+    val task = createTaskForActivity(workflow.id, nextSeq, nextSeqInfo.activity, payload, Instant.now().truncatedTo(ChronoUnit.MICROS))
+    return AdvancementDecision.Advance(nextSeq, listOf(task))
+}
+```
 
 **`LinearPhaseStrategy`:**
-- Checks `failedCount > 0` for failure detection
-- If `nextSequence == null` -> `Complete`
-- Else -> builds single task for next activity, returns `Advance(nextSequence, tasks)`
+- Calls `context.failOrAdvance(failedCount, payload)` — returns early on failure (ABORT → `Abort`, BEST_EFFORT → `Advance` with null)
+- If `nextSequence == null` → `Complete`
+- Else → builds single task for next activity, returns `Advance(nextSequence, tasks)`
 
 **`ScatterPhaseStrategy`:**
-- Same failure check as LINEAR
-- If succeeded -> builds single task for next activity (which is the SCATTER producer)
-- Returns `Advance(nextSequence, tasks)`
+- Same `failOrAdvance` check as LINEAR
+- If succeeded → reads scatter result from `context.tasks` (the completed scatter task's `resultJson`), deserializes the payload array, looks up the PARALLEL sequence info via `context.sequenceMap[nextSequence]`, and creates fan-out tasks
+- Returns `Advance(parallelSeq, fanOutTasks)`
 
 **`ParallelPhaseStrategy`:**
 - Evaluates `JoinPolicy` (All / Threshold / Percentage) against failed/total counts
-- Collects completed results into JSON array for payload propagation (fix for current `null` payload)
-- If `nextSequence == null` -> `Complete`
-- Else -> builds task for next sequence with aggregated payload, returns `Advance`
+- On failure → calls `failOrAdvance` (ABORT → `Abort`, BEST_EFFORT → `Advance` with null payload)
+- On success → collects completed results into JSON array for payload propagation (fix for current `null` payload)
+- If `nextSequence == null` → `Complete`
+- Else → builds task for next sequence with aggregated payload, returns `Advance`
 
 ### Part D: PhaseStrategyRegistry
 
@@ -661,6 +694,17 @@ New phases register here. BarrierService never changes.
 
 ### Part E: Refactored BarrierService
 
+**Query change:** The current `onTaskCompleted` uses three separate count queries (`countNonTerminal`, `countFailed`, `countTotal`) and never loads task objects. The refactored version must load tasks for `PhaseContext.tasks` because strategies need actual `Task` objects (ScatterPhaseStrategy reads `resultJson`, ParallelPhaseStrategy collects results). Replace the three count queries with a single `findByWorkflowAndSequenceWithHandle` call and compute counts in-memory:
+
+```kotlin
+val tasks = taskRepo.findByWorkflowAndSequenceWithHandle(handle, workflowId, sequenceNumber)
+val nonTerminal = tasks.count { !it.status.isTerminal }
+val failedCount = tasks.count { it.status == TaskStatus.FAILED || it.status == TaskStatus.TIMED_OUT || it.status == TaskStatus.DEAD_LETTER }
+val totalCount = tasks.size
+```
+
+Net effect: fewer DB round-trips (1 query replaces 3), one slightly larger result set. For LINEAR/SCATTER (1 task), trivial. For large PARALLEL fan-outs, unavoidable since ParallelPhaseStrategy needs the results.
+
 ```kotlin
 @ApplicationScoped
 class BarrierService(
@@ -675,11 +719,12 @@ class BarrierService(
             // 1. Self-update (unchanged)
             // 2. Lock-free probe (unchanged)
             // 3. Load workflow + build sequence map (unchanged)
-            // 4. Delegate to strategy
+            // 4. Load tasks for sequence, compute counts in-memory
+            // 5. Delegate to strategy
             val strategy = strategyRegistry.resolve(seqInfo.phaseType)
             val context = PhaseContext(handle, workflow, definition, seqInfo, sequenceMap, failedCount, totalCount, tasks)
             val decision = strategy.resolve(context)
-            // 5. Execute decision
+            // 6. Execute decision
             executeDecision(handle, workflow, seqInfo, decision)
         }
     }
@@ -695,21 +740,9 @@ class BarrierService(
             is Complete -> {
                 workflowRepo.updateStatusWithHandle(handle, workflow.id, COMPLETED, RUNNING)
             }
-            is Fail -> {
-                when (seqInfo.activity.failurePolicy) {
-                    ABORT -> {
-                        workflowRepo.updateStatusWithHandle(handle, workflow.id, FAILED, RUNNING)
-                        taskRepo.cancelPendingTasksWithHandle(handle, workflow.id)
-                    }
-                    BEST_EFFORT -> {
-                        // Treat as success, advance to nextSequence
-                        if (seqInfo.nextSequence == null) {
-                            workflowRepo.updateStatusWithHandle(handle, workflow.id, COMPLETED, RUNNING)
-                        } else {
-                            // Advance with null payload
-                        }
-                    }
-                }
+            is Abort -> {
+                workflowRepo.updateStatusWithHandle(handle, workflow.id, FAILED, RUNNING)
+                taskRepo.cancelPendingTasksWithHandle(handle, workflow.id)
             }
         }
     }
@@ -780,7 +813,7 @@ Structural changes to the current codebase that add no features but make the arc
 
 1. **Dismantle `advanceWorkflow`.** This private method (lines 125–166) contains `nextSeq = currentSeq + 1` arithmetic, failure-policy evaluation, last-sequence detection via `sequenceMap.containsKey(nextSeq)`, and task insertion dispatch. All of this must move into the strategies and the new `executeDecision` coordinator. Specifically:
    - Last-sequence detection → strategy returns `Complete` when `nextSequence == null`
-   - Failure-policy evaluation → stays in `executeDecision` (cross-cutting concern, not phase-specific)
+   - Failure-policy evaluation → **moves into each strategy** via shared `failOrAdvance` helper (ABORT → `Abort`, BEST_EFFORT → `Advance`/`Complete` with null payload). `Abort` always means abort — `executeDecision` stays simple with no task-creation path.
    - `insertTasksForSequence` → each strategy builds its own task list and returns it in `Advance.tasks`
 
 2. **Dismantle `recoverStuckWorkflow`.** This method (lines 82–123) has its own `seq + 1` at line 105 and a `when (phaseType)` payload-resolution switch at lines 113–119. It must delegate to the same strategy `resolve()` call as `onTaskCompleted`. After refactoring, both paths become: load workflow → build context → `strategy.resolve()` → `executeDecision`.
