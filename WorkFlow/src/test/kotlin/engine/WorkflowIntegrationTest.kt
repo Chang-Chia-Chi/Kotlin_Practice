@@ -55,6 +55,7 @@ class WorkflowIntegrationTest {
             override fun leaseDuration(): Duration = Duration.ofSeconds(15)
             override fun renewDeadline(): Duration = Duration.ofSeconds(10)
             override fun retryPeriod(): Duration = Duration.ofSeconds(2)
+            override fun healthThreshold(): Duration = Duration.ofSeconds(45)
         }
 
         override fun shutdown() = object : FrameworkConfig.ShutdownConfig {
@@ -76,7 +77,7 @@ class WorkflowIntegrationTest {
         taskRepo = TaskRepository(jdbi)
         engine = WorkflowEngine(jdbi, workflowRepo, taskRepo, objectMapper)
         barrier = BarrierService(jdbi, workflowRepo, taskRepo, objectMapper)
-        sweeper = Sweeper(workflowRepo, taskRepo, barrier, testConfig)
+        sweeper = Sweeper(jdbi, workflowRepo, taskRepo, barrier, testConfig)
     }
 
     @AfterEach
