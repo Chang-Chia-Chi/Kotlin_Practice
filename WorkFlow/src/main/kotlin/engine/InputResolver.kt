@@ -4,11 +4,13 @@ import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.databind.node.ArrayNode
 import jakarta.enterprise.context.ApplicationScoped
+import org.slf4j.LoggerFactory
 
 @ApplicationScoped
 class InputResolver(
     private val objectMapper: ObjectMapper,
 ) {
+    private val log = LoggerFactory.getLogger(InputResolver::class.java)
 
     suspend fun resolve(
         inputs: Map<String, String>,
@@ -76,8 +78,17 @@ class InputResolver(
         return nextSeq
     }
 
-    private fun traversePath(node: JsonNode, fieldPath: List<String>): JsonNode =
-        fieldPath.fold(node) { current, key -> current.path(key) }
+    private fun traversePath(node: JsonNode, fieldPath: List<String>): JsonNode {
+        var current = node
+        for (key in fieldPath) {
+            current = current.path(key)
+            if (current.isMissingNode) {
+                log.warn("Field path segment '{}' not found in result. Full path: {}", key, fieldPath.joinToString("."))
+                return current
+            }
+        }
+        return current
+    }
 
     private fun aggregateFanOut(
         tasks: List<Task>,

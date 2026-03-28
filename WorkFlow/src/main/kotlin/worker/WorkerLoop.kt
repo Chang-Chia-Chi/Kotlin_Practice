@@ -39,7 +39,7 @@ import org.slf4j.LoggerFactory
 import org.slf4j.MDC
 import java.time.Duration
 import java.time.Instant
-import java.util.concurrent.ConcurrentHashMap
+import java.util.Collections
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -49,6 +49,7 @@ import java.util.concurrent.atomic.AtomicInteger
  * interference.
  */
 const val SHUTDOWN_ORDER_WORKER = 10
+private const val MAX_DEFINITION_CACHE_SIZE = 1024
 
 /**
  * Poll loop that claims PENDING tasks, executes handlers, and feeds results
@@ -114,7 +115,11 @@ class WorkerLoop(
         val sequenceMap: Map<Int, SequenceInfo>,
     )
 
-    private val definitionCache = ConcurrentHashMap<String, CachedDefinition>()
+    private val definitionCache: MutableMap<String, CachedDefinition> =
+        Collections.synchronizedMap(object : LinkedHashMap<String, CachedDefinition>(128, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, CachedDefinition>): Boolean =
+                size > MAX_DEFINITION_CACHE_SIZE
+        })
 
     @Volatile
     private var activeJob: Job? = null
