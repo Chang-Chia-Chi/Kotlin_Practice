@@ -46,6 +46,7 @@ class BarrierService(
             // 3. Load workflow and compute sequence metadata
             val workflow = workflowRepo.findByIdWithHandle(handle, workflowId)
                 ?: throw IllegalStateException("Workflow not found: $workflowId")
+            if (workflow.status != WorkflowStatus.RUNNING) return@inTransactionSuspend
             val definition = objectMapper.readValue<WorkflowDefinition>(workflow.definitionJson)
             val sequenceMap = buildSequenceMap(definition)
             val seqInfo = sequenceMap[sequenceNumber]
@@ -138,7 +139,12 @@ class BarrierService(
             val failurePolicy = currentSeqInfo.activity.failurePolicy
             when (failurePolicy) {
                 FailurePolicy.ABORT -> {
-                    workflowRepo.updateStatusWithHandle(handle, workflow.id, WorkflowStatus.FAILED)
+                    val updated = workflowRepo.updateStatusWithHandle(
+                        handle, workflow.id, WorkflowStatus.FAILED, expectedStatus = WorkflowStatus.RUNNING,
+                    )
+                    if (updated) {
+                        taskRepo.cancelPendingTasksWithHandle(handle, workflow.id)
+                    }
                     return
                 }
                 FailurePolicy.BEST_EFFORT -> effectiveSuccess = true
@@ -147,7 +153,9 @@ class BarrierService(
 
         // Check if this was the last sequence
         if (!sequenceMap.containsKey(nextSeq)) {
-            workflowRepo.updateStatusWithHandle(handle, workflow.id, WorkflowStatus.COMPLETED)
+            workflowRepo.updateStatusWithHandle(
+                handle, workflow.id, WorkflowStatus.COMPLETED, expectedStatus = WorkflowStatus.RUNNING,
+            )
             return
         }
 
@@ -203,6 +211,8 @@ class BarrierService(
                         retryCount = 0,
                         maxRetries = seqInfo.activity.fanOut!!.retries,
                         deadlineAt = now.plus(seqInfo.activity.fanOut!!.deadline),
+                        backoffBase = seqInfo.activity.fanOut!!.backoffBase.seconds.toInt(),
+                        backoffCap = seqInfo.activity.fanOut!!.backoffCap.seconds.toInt(),
                     )
                 }
                 taskRepo.insertBatchWithHandle(handle, tasks)

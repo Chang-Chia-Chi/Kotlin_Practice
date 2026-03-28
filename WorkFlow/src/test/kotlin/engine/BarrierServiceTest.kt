@@ -8,6 +8,7 @@ import com.workflow.dsl.FailurePolicy
 import com.workflow.dsl.FanOutDefinition
 import com.workflow.dsl.JoinPolicy
 import com.workflow.dsl.WorkflowDefinition
+import com.workflow.dsl.workflow
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.test.runTest
@@ -37,6 +38,7 @@ class BarrierServiceTest {
         .registerModule(KotlinModule.Builder().build())
         .registerModule(JavaTimeModule())
     private lateinit var barrier: BarrierService
+    private lateinit var engine: WorkflowEngine
 
     @BeforeAll
     fun setup() {
@@ -44,6 +46,7 @@ class BarrierServiceTest {
         workflowRepo = WorkflowRepository(jdbi)
         taskRepo = TaskRepository(jdbi)
         barrier = BarrierService(jdbi, workflowRepo, taskRepo, objectMapper)
+        engine = WorkflowEngine(jdbi, workflowRepo, taskRepo, objectMapper)
     }
 
     @AfterEach
@@ -114,8 +117,8 @@ class BarrierServiceTest {
     private fun insertWorkflowDirect(run: WorkflowRun) {
         jdbi.useHandle<Exception> { handle ->
             handle.createUpdate(
-                """INSERT INTO workflow (id, definition, current_sequence, version, status, created_at, updated_at)
-                   VALUES (:id, :definition, :currentSequence, :version, :status, :createdAt, :updatedAt)""",
+                """INSERT INTO workflow (id, definition, current_sequence, version, status, created_at, updated_at, deadline_at)
+                   VALUES (:id, :definition, :currentSequence, :version, :status, :createdAt, :updatedAt, :deadlineAt)""",
             )
                 .bind("id", run.id)
                 .bind("definition", run.definitionJson)
@@ -124,6 +127,7 @@ class BarrierServiceTest {
                 .bind("status", run.status.name)
                 .bind("createdAt", LocalDateTime.ofInstant(run.createdAt, ZoneOffset.UTC))
                 .bind("updatedAt", LocalDateTime.ofInstant(run.updatedAt, ZoneOffset.UTC))
+                .bind("deadlineAt", LocalDateTime.ofInstant(run.deadlineAt, ZoneOffset.UTC))
                 .execute()
         }
     }
@@ -888,6 +892,75 @@ class BarrierServiceTest {
             // Each sub-task has the correct payload from the scatter result
             val payloads = seq2Tasks.map { it["PAYLOAD"] as String }.sorted()
             assertEquals(scatterPayloads.sorted(), payloads)
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Test 13: ABORT failure policy cancels sibling PENDING tasks
+    // ═══════════════════════════════════════════════════════════════════════
+
+    @Nested
+    inner class AbortCancelsSiblings {
+
+        @Test
+        fun `ABORT failure policy cancels sibling PENDING tasks`() = runTest {
+            val definition = workflow {
+                activity("scatter") {
+                    transition("scatter.handler")
+                    fanOut {
+                        transition("parallel.handler")
+                        retries(0)
+                        failurePolicy(FailurePolicy.ABORT)
+                        joinPolicy(JoinPolicy.All)
+                    }
+                }
+            }
+            val workflowId = engine.startWorkflow(definition)
+
+            // Complete scatter task with 3 items
+            val scatterTasks = taskRepo.findByWorkflowAndSequence(workflowId, 1)
+            assertEquals(1, scatterTasks.size)
+            barrier.onTaskCompleted(
+                taskId = scatterTasks[0].id,
+                workflowId = workflowId,
+                sequenceNumber = 1,
+                status = TaskStatus.COMPLETED,
+                resultJson = """["a","b","c"]""",
+            )
+
+            // 3 parallel tasks at sequence 2
+            val parallelTasks = taskRepo.findByWorkflowAndSequence(workflowId, 2)
+            assertEquals(3, parallelTasks.size)
+
+            // Complete 2 tasks successfully, then fail the last one
+            barrier.onTaskCompleted(
+                taskId = parallelTasks[1].id,
+                workflowId = workflowId,
+                sequenceNumber = 2,
+                status = TaskStatus.COMPLETED,
+                resultJson = null,
+            )
+            barrier.onTaskCompleted(
+                taskId = parallelTasks[2].id,
+                workflowId = workflowId,
+                sequenceNumber = 2,
+                status = TaskStatus.COMPLETED,
+                resultJson = null,
+            )
+
+            // Fail the last remaining task — ABORT policy triggers
+            barrier.onTaskCompleted(
+                taskId = parallelTasks[0].id,
+                workflowId = workflowId,
+                sequenceNumber = 2,
+                status = TaskStatus.FAILED,
+                resultJson = null,
+            )
+
+            // Workflow should be FAILED via ABORT
+            val workflow = workflowRepo.findById(workflowId)
+            assertNotNull(workflow)
+            assertEquals(WorkflowStatus.FAILED, workflow.status)
         }
     }
 }
