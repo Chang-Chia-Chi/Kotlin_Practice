@@ -281,6 +281,20 @@ class LeaderManagerTest {
         assertEquals(0.0, gauge.value())
     }
 
+    @Test
+    fun `registerMetrics exposes heartbeat age gauge`() {
+        val registry = SimpleMeterRegistry()
+        val manager = LeaderManager(config, kubernetesClient, registry, KubernetesDetector { false })
+        manager.clock = fixedClock
+        manager.scope = CoroutineScope(SupervisorJob())
+
+        manager.onStart(mock())
+
+        val gauge = registry.find("leader_election_heartbeat_age_seconds").gauge()
+        assertNotNull(gauge, "heartbeat age gauge should be registered")
+        assertTrue(gauge.value() >= 0.0)
+    }
+
     // == Section A: Kubernetes Election Path ===================================
 
     @Test

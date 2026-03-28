@@ -238,5 +238,8 @@ class LeaderManager(
     private fun registerMetrics() {
         meterRegistry.gauge("leader_election_is_leader", this) { if (isActive) 1.0 else 0.0 }
         meterRegistry.gauge("leader_election_epoch", this) { token.toDouble() }
+        meterRegistry.gauge("leader_election_heartbeat_age_seconds", this) {
+            Duration.between(lastHeartbeat, Instant.now(clock)).toSeconds().toDouble()
+        }
     }
 }
