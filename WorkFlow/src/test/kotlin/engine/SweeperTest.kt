@@ -26,7 +26,10 @@ import java.time.ZoneOffset
 import java.time.temporal.ChronoUnit
 import java.util.UUID
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
+import kotlin.test.assertTrue
 
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class SweeperTest {
@@ -58,6 +61,7 @@ class SweeperTest {
             override fun leaseDuration(): Duration = Duration.ofSeconds(15)
             override fun renewDeadline(): Duration = Duration.ofSeconds(10)
             override fun retryPeriod(): Duration = Duration.ofSeconds(2)
+            override fun healthThreshold(): Duration = Duration.ofSeconds(45)
         }
 
         override fun shutdown() = object : FrameworkConfig.ShutdownConfig {
@@ -78,7 +82,7 @@ class SweeperTest {
         workflowRepo = WorkflowRepository(jdbi)
         taskRepo = TaskRepository(jdbi)
         barrier = BarrierService(jdbi, workflowRepo, taskRepo, objectMapper)
-        sweeper = Sweeper(workflowRepo, taskRepo, barrier, testConfig)
+        sweeper = Sweeper(jdbi, workflowRepo, taskRepo, barrier, testConfig)
     }
 
     @AfterEach
@@ -103,7 +107,7 @@ class SweeperTest {
         status: WorkflowStatus = WorkflowStatus.RUNNING,
         createdAt: Instant = now(),
         updatedAt: Instant = now(),
-        deadlineAt: Instant = now().plus(java.time.Duration.ofMinutes(30)),
+        deadlineAt: Instant = now().plus(Duration.ofHours(1)),
     ): WorkflowRun = WorkflowRun(
         id = id,
         definitionJson = objectMapper.writeValueAsString(definition),
@@ -130,6 +134,8 @@ class SweeperTest {
         maxRetries: Int = 0,
         deadlineAt: Instant? = null,
         notBefore: Instant? = null,
+        backoffBase: Int = 1,
+        backoffCap: Int = 300,
     ): Task = Task(
         id = id,
         workflowId = workflowId,
@@ -145,14 +151,16 @@ class SweeperTest {
         maxRetries = maxRetries,
         deadlineAt = deadlineAt,
         notBefore = notBefore,
+        backoffBase = backoffBase,
+        backoffCap = backoffCap,
     )
 
     /** Insert a workflow directly via SQL (independent of repo under test). */
     private fun insertWorkflowDirect(run: WorkflowRun) {
         jdbi.useHandle<Exception> { handle ->
             handle.createUpdate(
-                """INSERT INTO workflow (id, definition, current_sequence, version, status, created_at, updated_at)
-                   VALUES (:id, :definition, :currentSequence, :version, :status, :createdAt, :updatedAt)""",
+                """INSERT INTO workflow (id, definition, current_sequence, version, status, created_at, updated_at, deadline_at)
+                   VALUES (:id, :definition, :currentSequence, :version, :status, :createdAt, :updatedAt, :deadlineAt)""",
             )
                 .bind("id", run.id)
                 .bind("definition", run.definitionJson)
@@ -161,6 +169,7 @@ class SweeperTest {
                 .bind("status", run.status.name)
                 .bind("createdAt", LocalDateTime.ofInstant(run.createdAt, ZoneOffset.UTC))
                 .bind("updatedAt", LocalDateTime.ofInstant(run.updatedAt, ZoneOffset.UTC))
+                .bind("deadlineAt", LocalDateTime.ofInstant(run.deadlineAt, ZoneOffset.UTC))
                 .execute()
         }
     }
@@ -170,9 +179,11 @@ class SweeperTest {
         jdbi.useHandle<Exception> { handle ->
             val stmt = handle.createUpdate(
                 """INSERT INTO task (id, workflow_id, sequence_number, status, handler_key, payload, result,
-                   claimed_by, claimed_at, completed_at, retry_count, max_retries, deadline_at, not_before)
+                   claimed_by, claimed_at, completed_at, retry_count, max_retries, deadline_at, not_before,
+                   backoff_base, backoff_cap)
                    VALUES (:id, :workflowId, :sequenceNumber, :status, :handlerKey, :payload, :result,
-                   :claimedBy, :claimedAt, :completedAt, :retryCount, :maxRetries, :deadlineAt, :notBefore)""",
+                   :claimedBy, :claimedAt, :completedAt, :retryCount, :maxRetries, :deadlineAt, :notBefore,
+                   :backoffBase, :backoffCap)""",
             )
                 .bind("id", task.id)
                 .bind("workflowId", task.workflowId)
@@ -196,6 +207,8 @@ class SweeperTest {
             bindTimestampOrNull("completedAt", task.completedAt)
             bindTimestampOrNull("deadlineAt", task.deadlineAt)
             bindTimestampOrNull("notBefore", task.notBefore)
+            stmt.bind("backoffBase", task.backoffBase)
+            stmt.bind("backoffCap", task.backoffCap)
 
             stmt.execute()
         }
@@ -741,14 +754,14 @@ class SweeperTest {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // Test 5: failExpiredTasks — expired PROCESSING tasks marked FAILED
+    // Test 5: expireOverdueTasks — expired PROCESSING tasks marked TIMED_OUT
     // ═══════════════════════════════════════════════════════════════════════
 
     @Nested
     inner class FailExpiredTasks {
 
         @Test
-        fun `expired PROCESSING task past deadline - patrol marks FAILED and triggers barrier`() = runTest {
+        fun `expired PROCESSING task past deadline - patrol marks TIMED_OUT and triggers barrier`() = runTest {
             val def = twoStepLinearDef()
             val wfId = randomId()
             val taskId = randomId()
@@ -772,10 +785,10 @@ class SweeperTest {
 
             sweeper.patrol()
 
-            // Task should be FAILED
+            // Task should be TIMED_OUT
             val task = readTaskDirect(taskId)
             assertNotNull(task)
-            assertEquals("FAILED", task["STATUS"])
+            assertEquals("TIMED_OUT", task["STATUS"])
 
             // Only task at seq 1 with ABORT policy -> workflow FAILED
             val wfRow = readWorkflowDirect(wfId)
@@ -858,10 +871,10 @@ class SweeperTest {
 
             sweeper.patrol()
 
-            // Expired task -> FAILED
+            // Expired task -> TIMED_OUT
             val expiredTask = readTaskDirect(expiredTaskId)
             assertNotNull(expiredTask)
-            assertEquals("FAILED", expiredTask["STATUS"])
+            assertEquals("TIMED_OUT", expiredTask["STATUS"])
 
             // Healthy task -> still PROCESSING (barrier sees non-terminal, doesn't advance)
             val healthyTask = readTaskDirect(healthyTaskId)
@@ -1019,10 +1032,10 @@ class SweeperTest {
 
             sweeper.patrol()
 
-            // Task should be FAILED (not PENDING) — failExpiredTasks ran first
+            // Task should be TIMED_OUT (not PENDING) — expireOverdueTasks ran first
             val task = readTaskDirect(taskId)
             assertNotNull(task)
-            assertEquals("FAILED", task["STATUS"])
+            assertEquals("TIMED_OUT", task["STATUS"])
         }
     }
 
@@ -1092,10 +1105,10 @@ class SweeperTest {
             // Single patrol() call triggers all three phases
             sweeper.patrol()
 
-            // Workflow A: expired task -> FAILED, workflow FAILED (ABORT, single task)
+            // Workflow A: expired task -> TIMED_OUT, workflow FAILED (ABORT, single task)
             val taskA = readTaskDirect(expiredTaskId)
             assertNotNull(taskA)
-            assertEquals("FAILED", taskA["STATUS"])
+            assertEquals("TIMED_OUT", taskA["STATUS"])
             val wfRowA = readWorkflowDirect(wfIdA)
             assertNotNull(wfRowA)
             assertEquals("FAILED", wfRowA["STATUS"])
@@ -1113,6 +1126,263 @@ class SweeperTest {
             assertEquals(1, (wfRowC["VERSION"] as Number).toInt())
             assertEquals(1, countTasksDirect(wfIdC, 2))
             assertEquals(1, countTasksWithStatusDirect(wfIdC, 2, TaskStatus.PENDING))
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Backoff, Barrier Guard, and Replay Tests
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /** Read a nullable Oracle timestamp from raw row data for assertions. */
+    private fun readNullableTimestampDirect(value: Any?): Instant? = when (value) {
+        null -> null
+        is java.sql.Timestamp -> value.toLocalDateTime().toInstant(ZoneOffset.UTC)
+        else -> {
+            val method = value::class.java.getMethod("timestampValue")
+            (method.invoke(value) as java.sql.Timestamp).toLocalDateTime().toInstant(ZoneOffset.UTC)
+        }
+    }
+
+    @Nested
+    inner class SweepBackoffAndReplay {
+
+        @Test
+        fun `reclaimStaleTasks sets not_before with backoff`() = runTest {
+            val wf = makeWorkflow(
+                definition = WorkflowDefinition(
+                    activities = listOf(ActivityDefinition(
+                        name = "step1", transition = "test.handler", retries = 5,
+                        deadline = Duration.ofHours(1), failurePolicy = FailurePolicy.ABORT,
+                    )),
+                ),
+            )
+            insertWorkflowDirect(wf)
+
+            val staleTime = Instant.now().minus(Duration.ofMinutes(15))
+            val task = makeTask(
+                workflowId = wf.id,
+                status = TaskStatus.PROCESSING,
+                claimedBy = "dead-worker",
+                claimedAt = staleTime,
+                retryCount = 2,
+                maxRetries = 5,
+            )
+            insertTaskDirect(task)
+
+            val threshold = Instant.now().minus(Duration.ofMinutes(10))
+            val beforeReclaim = Instant.now()
+            val reclaimed = taskRepo.resetStaleTasks(threshold)
+
+            assertEquals(1, reclaimed)
+            val row = readTaskDirect(task.id)!!
+            assertEquals("PENDING", row["STATUS"])
+            // retry_count incremented from 2 to 3, so backoff = 1*2^3 = 8s
+            val notBefore = readNullableTimestampDirect(row["NOT_BEFORE"])
+            assertNotNull(notBefore, "not_before should be set after stale reclaim")
+            // retry_count incremented from 2 to 3, so backoff = 1*2^3 = 8s
+            assertTrue(
+                notBefore.isAfter(beforeReclaim.plusSeconds(6)),
+                "not_before ($notBefore) should be at least ~8s after reclaim ($beforeReclaim)",
+            )
+            assertTrue(
+                notBefore.isBefore(beforeReclaim.plusSeconds(10)),
+                "not_before ($notBefore) should be at most ~8s+slack after reclaim ($beforeReclaim)",
+            )
+        }
+
+        @Test
+        fun `onTaskCompleted does not advance FAILED workflow`() = runTest {
+            val definition = WorkflowDefinition(
+                activities = listOf(
+                    ActivityDefinition(
+                        name = "step1",
+                        transition = "test.handler",
+                        retries = 0,
+                        deadline = Duration.ofHours(1),
+                        failurePolicy = FailurePolicy.ABORT,
+                    ),
+                ),
+            )
+            val wf = makeWorkflow(
+                definition = definition,
+                currentSequence = 1,
+                version = 0,
+                status = WorkflowStatus.FAILED,
+            )
+            insertWorkflowDirect(wf)
+            val task = makeTask(
+                workflowId = wf.id,
+                sequenceNumber = 1,
+                status = TaskStatus.PROCESSING,
+                claimedBy = "worker-1",
+                claimedAt = Instant.now().truncatedTo(ChronoUnit.MILLIS),
+            )
+            insertTaskDirect(task)
+
+            barrier.onTaskCompleted(
+                taskId = task.id,
+                workflowId = wf.id,
+                sequenceNumber = 1,
+                status = TaskStatus.COMPLETED,
+                resultJson = """{"ok":true}""",
+                claimedBy = task.claimedBy,
+                claimedAt = task.claimedAt,
+            )
+
+            // Task should be updated to COMPLETED
+            val taskRow = readTaskDirect(task.id)!!
+            assertEquals("COMPLETED", taskRow["STATUS"])
+
+            // BUT workflow should still be FAILED — not advanced
+            val wfRow = readWorkflowDirect(wf.id)!!
+            assertEquals("FAILED", wfRow["STATUS"])
+            assertEquals(1, (wfRow["CURRENT_SEQUENCE"] as Number).toInt())
+            assertEquals(0, (wfRow["VERSION"] as Number).toInt())
+        }
+
+        @Test
+        fun `replayWorkflow resets FAILED workflow and replays dead-lettered tasks`() = runTest {
+            val wf = makeWorkflow(
+                definition = WorkflowDefinition(
+                    activities = listOf(ActivityDefinition(
+                        name = "step1", transition = "test.handler", retries = 3,
+                        deadline = Duration.ofHours(1), failurePolicy = FailurePolicy.ABORT,
+                    )),
+                ),
+                status = WorkflowStatus.FAILED,
+            )
+            insertWorkflowDirect(wf)
+
+            val dl1 = makeTask(workflowId = wf.id, status = TaskStatus.DEAD_LETTER, retryCount = 3, maxRetries = 3)
+            val dl2 = makeTask(workflowId = wf.id, status = TaskStatus.DEAD_LETTER, retryCount = 3, maxRetries = 3)
+            val completed = makeTask(workflowId = wf.id, status = TaskStatus.COMPLETED)
+            insertTaskDirect(dl1)
+            insertTaskDirect(dl2)
+            insertTaskDirect(completed)
+
+            val engine = WorkflowEngine(jdbi, workflowRepo, taskRepo, objectMapper)
+            val result = engine.replayWorkflow(wf.id)
+
+            assertTrue(result)
+            val wfRow = readWorkflowDirect(wf.id)!!
+            assertEquals("RUNNING", wfRow["STATUS"])
+            assertEquals("PENDING", readTaskDirect(dl1.id)!!["STATUS"])
+            assertEquals("PENDING", readTaskDirect(dl2.id)!!["STATUS"])
+            assertEquals("COMPLETED", readTaskDirect(completed.id)!!["STATUS"])
+        }
+
+        @Test
+        fun `replayWorkflow returns false for RUNNING workflow`() = runTest {
+            val wf = makeWorkflow(
+                definition = WorkflowDefinition(
+                    activities = listOf(ActivityDefinition(
+                        name = "step1", transition = "test.handler", retries = 0,
+                        deadline = Duration.ofHours(1), failurePolicy = FailurePolicy.ABORT,
+                    )),
+                ),
+                status = WorkflowStatus.RUNNING,
+            )
+            insertWorkflowDirect(wf)
+
+            val engine = WorkflowEngine(jdbi, workflowRepo, taskRepo, objectMapper)
+            val result = engine.replayWorkflow(wf.id)
+
+            assertFalse(result)
+        }
+
+        @Test
+        fun `replayWorkflow returns false for COMPLETED workflow`() = runTest {
+            val wf = makeWorkflow(
+                definition = WorkflowDefinition(
+                    activities = listOf(ActivityDefinition(
+                        name = "step1", transition = "test.handler", retries = 0,
+                        deadline = Duration.ofHours(1), failurePolicy = FailurePolicy.ABORT,
+                    )),
+                ),
+                status = WorkflowStatus.COMPLETED,
+            )
+            insertWorkflowDirect(wf)
+
+            val engine = WorkflowEngine(jdbi, workflowRepo, taskRepo, objectMapper)
+            val result = engine.replayWorkflow(wf.id)
+
+            assertFalse(result)
+        }
+
+        @Test
+        fun `replayWorkflow returns false for non-existent workflow`() = runTest {
+            val engine = WorkflowEngine(jdbi, workflowRepo, taskRepo, objectMapper)
+            val result = engine.replayWorkflow(randomId())
+
+            assertFalse(result)
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Test 8: expireOverdueWorkflows — workflows past deadline
+    // ═══════════════════════════════════════════════════════════════════════
+
+    @Nested
+    inner class ExpireOverdueWorkflows {
+
+        @Test
+        fun `timed-out workflow transitions to TIMED_OUT and cancels pending tasks`() = runTest {
+            val definition = WorkflowDefinition(
+                activities = listOf(
+                    ActivityDefinition(name = "step1", transition = "handler1"),
+                    ActivityDefinition(name = "step2", transition = "handler2"),
+                ),
+            )
+            val wfId = randomId()
+            val pastDeadline = now().minus(Duration.ofMinutes(5))
+            val wf = makeWorkflow(
+                id = wfId,
+                definition = definition,
+                updatedAt = now().minus(Duration.ofHours(1)),
+                deadlineAt = pastDeadline,
+            )
+            workflowRepo.insert(wf)
+
+            val task = Task(
+                id = randomId(), workflowId = wfId, sequenceNumber = 1,
+                status = TaskStatus.PENDING, handlerKey = "handler1",
+                payloadJson = null, resultJson = null,
+                claimedBy = null, claimedAt = null, completedAt = null,
+                retryCount = 0, maxRetries = 3, deadlineAt = null,
+            )
+            taskRepo.insertBatch(listOf(task))
+
+            sweeper.patrol()
+
+            val updatedWf = workflowRepo.findById(wfId)
+            assertNotNull(updatedWf)
+            assertEquals(WorkflowStatus.TIMED_OUT, updatedWf.status)
+
+            val updatedTasks = taskRepo.findByWorkflowAndSequence(wfId, 1)
+            assertTrue(updatedTasks.all { it.status == TaskStatus.CANCELLED })
+        }
+
+        @Test
+        fun `workflow within deadline is not expired`() = runTest {
+            val definition = WorkflowDefinition(
+                activities = listOf(
+                    ActivityDefinition(name = "step1", transition = "handler1"),
+                ),
+            )
+            val wfId = randomId()
+            val futureDeadline = now().plus(Duration.ofHours(1))
+            val wf = makeWorkflow(
+                id = wfId,
+                definition = definition,
+                deadlineAt = futureDeadline,
+            )
+            workflowRepo.insert(wf)
+
+            sweeper.patrol()
+
+            val updatedWf = workflowRepo.findById(wfId)
+            assertNotNull(updatedWf)
+            assertEquals(WorkflowStatus.RUNNING, updatedWf.status)
         }
     }
 }

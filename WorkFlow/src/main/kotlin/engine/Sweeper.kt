@@ -1,15 +1,18 @@
 package com.workflow.engine
 
 import com.workflow.config.FrameworkConfig
+import com.workflow.extension.inTransactionSuspend
 import com.workflow.leader.NotLeader
 import io.quarkus.scheduler.Scheduled
 import jakarta.enterprise.context.ApplicationScoped
 import kotlinx.coroutines.runBlocking
+import org.jdbi.v3.core.Jdbi
 import org.slf4j.LoggerFactory
 import java.time.Instant
 
 @ApplicationScoped
 class Sweeper(
+    private val jdbi: Jdbi,
     private val workflowRepo: WorkflowRepository,
     private val taskRepo: TaskRepository,
     private val barrierService: BarrierService,
@@ -22,21 +25,22 @@ class Sweeper(
     fun sweep() = runBlocking { patrol() }
 
     suspend fun patrol() {
-        failExpiredTasks()
+        expireOverdueTasks()
         reclaimStaleTasks()
         recoverStuckWorkflows()
+        expireOverdueWorkflows()
     }
 
-    private suspend fun failExpiredTasks() {
+    private suspend fun expireOverdueTasks() {
         val expired = taskRepo.findExpired(Instant.now())
         for (task in expired) {
             try {
-                log.warn("Failing expired task {} (deadline={})", task.id, task.deadlineAt)
+                log.warn("Expiring overdue task {} (deadline={})", task.id, task.deadlineAt)
                 barrierService.onTaskCompleted(
                     taskId = task.id,
                     workflowId = task.workflowId,
                     sequenceNumber = task.sequenceNumber,
-                    status = TaskStatus.FAILED,
+                    status = TaskStatus.TIMED_OUT,
                     resultJson = null,
                 )
             } catch (e: Exception) {
@@ -71,6 +75,25 @@ class Sweeper(
                 barrierService.recoverStuckWorkflow(workflow.id)
             } catch (e: Exception) {
                 log.error("Failed to recover stuck workflow {}", workflow.id, e)
+            }
+        }
+    }
+
+    private suspend fun expireOverdueWorkflows() {
+        val timedOut = workflowRepo.findTimedOut()
+        for (workflow in timedOut) {
+            try {
+                jdbi.inTransactionSuspend<Unit, Exception> { handle ->
+                    val updated = workflowRepo.updateStatusWithHandle(
+                        handle, workflow.id, WorkflowStatus.TIMED_OUT, expectedStatus = WorkflowStatus.RUNNING,
+                    )
+                    if (updated) {
+                        taskRepo.cancelPendingTasksWithHandle(handle, workflow.id)
+                        log.warn("Workflow {} timed out (deadline was {})", workflow.id, workflow.deadlineAt)
+                    }
+                }
+            } catch (e: Exception) {
+                log.error("Failed to time out workflow {}", workflow.id, e)
             }
         }
     }
