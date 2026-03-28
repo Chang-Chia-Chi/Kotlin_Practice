@@ -1,0 +1,559 @@
+package com.workflow.stress
+
+import com.workflow.dsl.FailurePolicy
+import com.workflow.dsl.JoinPolicy
+import com.workflow.dsl.workflow
+import com.workflow.engine.TaskStatus
+import com.workflow.worker.HandlerInput
+import com.workflow.worker.HandlerOutput
+import com.workflow.worker.TransitionHandler
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import org.junit.jupiter.api.Tag
+import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.extension.RegisterExtension
+import java.time.Duration
+import java.util.concurrent.atomic.AtomicInteger
+import kotlin.test.assertEquals
+import kotlin.test.assertTrue
+
+@Tag("stress")
+class CorrectnessStressTest : StressTestBase() {
+
+    @JvmField
+    @RegisterExtension
+    val diagnostics = StressTestDiagnostics(this)
+
+    // ---- C1: N workers complete final task of a phase simultaneously (CAS race) ----
+
+    @Test
+    fun `C1 - concurrent CAS race - exactly one set of next-phase tasks created`() = runBlocking {
+        val def = workflow {
+            activity("scatter") {
+                transition("c1.scatter")
+                fanOut {
+                    transition("c1.parallel")
+                    joinPolicy(JoinPolicy.All)
+                }
+            }
+            activity("final") { transition("c1.final") }
+        }
+
+        handlerRegistry.register("c1.scatter", object : TransitionHandler {
+            override suspend fun execute(input: HandlerInput): HandlerOutput {
+                val payloads = (1..scale.fanOutSize).map { """{"item":$it}""" }
+                return HandlerOutput(result = objectMapper.writeValueAsString(payloads))
+            }
+        })
+        handlerRegistry.register("c1.parallel", PassThroughHandler())
+        handlerRegistry.register("c1.final", PassThroughHandler())
+
+        val wfId = engine.startWorkflow(def, """{"test":"C1"}""")
+        diagnostics.trackedWorkflows.add(wfId)
+
+        startWorkerPool()
+
+        val sweepJob = launch {
+            while (true) { delay(sweepInterval.toMillis()); runSweep() }
+        }
+
+        assertWorkflowTerminates(wfId)
+
+        // Assert: exactly 1 task at the final sequence (no duplicates from CAS race)
+        val wf = readWorkflowDirect(wfId)!!
+        // The final activity is the last sequence
+        val allTasks = readTasksDirect(wfId)
+        val maxSeq = allTasks.maxOf { (it["SEQUENCE_NUMBER"] as Number).toInt() }
+        val finalTasks = allTasks.filter { (it["SEQUENCE_NUMBER"] as Number).toInt() == maxSeq }
+        assertEquals(1, finalTasks.size, "Expected exactly 1 final task, got ${finalTasks.size}")
+        assertNoTaskDuplicates(wfId, maxSeq)
+
+        sweepJob.cancel()
+    }
+
+    // ---- C2: Fan-out scatter produces N payloads → N sub-tasks atomically ----
+
+    @Test
+    fun `C2 - scatter produces N payloads - exactly N sub-tasks created`() = runBlocking {
+        val n = scale.fanOutSize
+        val def = workflow {
+            activity("scatter") {
+                transition("c2.scatter")
+                fanOut {
+                    transition("c2.parallel")
+                    joinPolicy(JoinPolicy.All)
+                }
+            }
+        }
+
+        handlerRegistry.register("c2.scatter", object : TransitionHandler {
+            override suspend fun execute(input: HandlerInput): HandlerOutput {
+                val payloads = (1..n).map { """{"item":$it}""" }
+                return HandlerOutput(result = objectMapper.writeValueAsString(payloads))
+            }
+        })
+        handlerRegistry.register("c2.parallel", PassThroughHandler())
+
+        val wfId = engine.startWorkflow(def, """{"test":"C2"}""")
+        diagnostics.trackedWorkflows.add(wfId)
+
+        startWorkerPool()
+
+        val sweepJob = launch {
+            while (true) { delay(sweepInterval.toMillis()); runSweep() }
+        }
+
+        assertWorkflowTerminates(wfId)
+
+        // Parallel tasks are at sequence 2 (scatter=seq1, parallel=seq2)
+        val parallelTasks = readTasksDirect(wfId, sequenceNumber = 2)
+        assertEquals(n, parallelTasks.size, "Expected $n parallel tasks, got ${parallelTasks.size}")
+        assertNoTaskDuplicates(wfId, 2)
+
+        sweepJob.cancel()
+    }
+
+    // ---- C3: JoinPolicy.ALL - 1 of N fails ----
+
+    @Test
+    fun `C3 - JoinPolicy ALL with one failure and ABORT - workflow fails`() = runBlocking {
+        val n = 10
+        val def = workflow {
+            activity("scatter") {
+                transition("c3.scatter")
+                failurePolicy(FailurePolicy.ABORT)
+                fanOut {
+                    transition("c3.parallel")
+                    retries(0)
+                    failurePolicy(FailurePolicy.ABORT)
+                    joinPolicy(JoinPolicy.All)
+                }
+            }
+        }
+
+        handlerRegistry.register("c3.scatter", object : TransitionHandler {
+            override suspend fun execute(input: HandlerInput): HandlerOutput {
+                val payloads = (1..n).map { """{"item":$it}""" }
+                return HandlerOutput(result = objectMapper.writeValueAsString(payloads))
+            }
+        })
+
+        // Fail the first sub-task, succeed the rest
+        val count = AtomicInteger(0)
+        handlerRegistry.register("c3.parallel", object : TransitionHandler {
+            override suspend fun execute(input: HandlerInput): HandlerOutput {
+                if (count.incrementAndGet() == 1) throw RuntimeException("Simulated failure")
+                return HandlerOutput(result = input.payload)
+            }
+        })
+
+        val wfId = engine.startWorkflow(def, """{"test":"C3"}""")
+        diagnostics.trackedWorkflows.add(wfId)
+
+        startWorkerPool()
+
+        val sweepJob = launch {
+            while (true) { delay(sweepInterval.toMillis()); runSweep() }
+        }
+
+        assertWorkflowTerminates(wfId)
+        assertWorkflowStatus(wfId, "FAILED")
+        sweepJob.cancel()
+    }
+
+    // ---- C4: JoinPolicy.Percentage(95) boundary precision ----
+
+    @Test
+    fun `C4 - JoinPolicy Percentage 95 at threshold - passes`() = runBlocking {
+        // 95 of 100 succeed (5 fail) → 95% ≥ 95% → pass
+        val wfId = startPercentageTest(totalTasks = 100, failCount = 5, threshold = 95)
+        val sweepJob = launch {
+            while (true) { delay(sweepInterval.toMillis()); runSweep() }
+        }
+        assertWorkflowTerminates(wfId)
+        assertWorkflowStatus(wfId, "COMPLETED")
+        sweepJob.cancel()
+    }
+
+    @Test
+    fun `C4 - JoinPolicy Percentage 95 below threshold - fails`() = runBlocking {
+        // 94 of 100 succeed (6 fail) → 94% < 95% → fail
+        val wfId = startPercentageTest(totalTasks = 100, failCount = 6, threshold = 95)
+        val sweepJob = launch {
+            while (true) { delay(sweepInterval.toMillis()); runSweep() }
+        }
+        assertWorkflowTerminates(wfId)
+        assertWorkflowStatus(wfId, "FAILED")
+        sweepJob.cancel()
+    }
+
+    private suspend fun startPercentageTest(totalTasks: Int, failCount: Int, threshold: Int): String {
+        val handlerKey = "c4-$totalTasks-$failCount"
+        val def = workflow {
+            activity("scatter") {
+                transition("$handlerKey.scatter")
+                fanOut {
+                    transition("$handlerKey.parallel")
+                    retries(0)
+                    joinPolicy(JoinPolicy.Percentage(threshold))
+                }
+            }
+            activity("final") { transition("$handlerKey.final") }
+        }
+
+        handlerRegistry.register("$handlerKey.scatter", object : TransitionHandler {
+            override suspend fun execute(input: HandlerInput): HandlerOutput {
+                val payloads = (1..totalTasks).map { """{"item":$it}""" }
+                return HandlerOutput(result = objectMapper.writeValueAsString(payloads))
+            }
+        })
+
+        val failCounter = AtomicInteger(0)
+        handlerRegistry.register("$handlerKey.parallel", object : TransitionHandler {
+            override suspend fun execute(input: HandlerInput): HandlerOutput {
+                if (failCounter.incrementAndGet() <= failCount) throw RuntimeException("Simulated failure")
+                return HandlerOutput(result = input.payload)
+            }
+        })
+        handlerRegistry.register("$handlerKey.final", PassThroughHandler())
+
+        val wfId = engine.startWorkflow(def, """{"test":"C4-$failCount"}""")
+        diagnostics.trackedWorkflows.add(wfId)
+        startWorkerPool()
+        return wfId
+    }
+
+    // ---- C5: JoinPolicy.Threshold(N) boundary precision ----
+
+    @Test
+    fun `C5 - JoinPolicy Threshold boundary precision`() = runBlocking {
+        val total = 20
+        val threshold = 15
+
+        // At threshold: 15 succeed → pass
+        verifyJoinPolicyThreshold(total, failCount = total - threshold, threshold = threshold, expectedStatus = "COMPLETED")
+        cleanUpTables()
+
+        // Below threshold: 14 succeed → fail
+        verifyJoinPolicyThreshold(total, failCount = total - threshold + 1, threshold = threshold, expectedStatus = "FAILED")
+    }
+
+    private suspend fun verifyJoinPolicyThreshold(
+        totalTasks: Int,
+        failCount: Int,
+        threshold: Int,
+        expectedStatus: String,
+    ) {
+        val handlerKey = "c5-$totalTasks-$failCount"
+        val def = workflow {
+            activity("scatter") {
+                transition("$handlerKey.scatter")
+                fanOut {
+                    transition("$handlerKey.parallel")
+                    retries(0)
+                    joinPolicy(JoinPolicy.Threshold(threshold))
+                }
+            }
+            activity("final") { transition("$handlerKey.final") }
+        }
+
+        handlerRegistry.register("$handlerKey.scatter", object : TransitionHandler {
+            override suspend fun execute(input: HandlerInput): HandlerOutput {
+                val payloads = (1..totalTasks).map { """{"item":$it}""" }
+                return HandlerOutput(result = objectMapper.writeValueAsString(payloads))
+            }
+        })
+
+        val failCounter = AtomicInteger(0)
+        handlerRegistry.register("$handlerKey.parallel", object : TransitionHandler {
+            override suspend fun execute(input: HandlerInput): HandlerOutput {
+                if (failCounter.incrementAndGet() <= failCount) throw RuntimeException("Simulated failure")
+                return HandlerOutput(result = input.payload)
+            }
+        })
+        handlerRegistry.register("$handlerKey.final", PassThroughHandler())
+
+        val wfId = engine.startWorkflow(def, """{"test":"C5-$failCount"}""")
+        diagnostics.trackedWorkflows.add(wfId)
+
+        startWorkerPool()
+
+        coroutineScope {
+            val sweepJob = launch {
+                while (true) { delay(sweepInterval.toMillis()); runSweep() }
+            }
+
+            assertWorkflowTerminates(wfId)
+            assertWorkflowStatus(wfId, expectedStatus)
+            sweepJob.cancel()
+        }
+    }
+
+    // ---- C6: FailurePolicy.ABORT mid-phase ----
+
+    @Test
+    fun `C6 - ABORT mid-phase - workflow fails and no new phase started`() = runBlocking {
+        val def = workflow {
+            activity("step1") {
+                transition("c6.handler")
+                retries(0)
+                failurePolicy(FailurePolicy.ABORT)
+            }
+            activity("step2") { transition("c6.step2") }
+        }
+
+        handlerRegistry.register("c6.handler", FailingHandler())
+        handlerRegistry.register("c6.step2", PassThroughHandler())
+
+        val wfId = engine.startWorkflow(def, """{"test":"C6"}""")
+        diagnostics.trackedWorkflows.add(wfId)
+
+        startWorkerPool()
+
+        val sweepJob = launch {
+            while (true) { delay(sweepInterval.toMillis()); runSweep() }
+        }
+
+        assertWorkflowTerminates(wfId)
+        assertWorkflowStatus(wfId, "FAILED")
+
+        // No step2 tasks should exist
+        val step2Tasks = readTasksDirect(wfId, sequenceNumber = 2)
+        assertEquals(0, step2Tasks.size, "No tasks should exist at seq 2 after ABORT")
+
+        sweepJob.cancel()
+    }
+
+    // ---- C7: FailurePolicy.BEST_EFFORT - all tasks fail ----
+
+    @Test
+    fun `C7 - BEST_EFFORT with all failures - workflow advances to next phase`() = runBlocking {
+        val def = workflow {
+            activity("step1") {
+                transition("c7.handler")
+                retries(0)
+                failurePolicy(FailurePolicy.BEST_EFFORT)
+            }
+            activity("step2") { transition("c7.step2") }
+        }
+
+        handlerRegistry.register("c7.handler", FailingHandler())
+        handlerRegistry.register("c7.step2", PassThroughHandler())
+
+        val wfId = engine.startWorkflow(def, """{"test":"C7"}""")
+        diagnostics.trackedWorkflows.add(wfId)
+
+        startWorkerPool()
+
+        val sweepJob = launch {
+            while (true) { delay(sweepInterval.toMillis()); runSweep() }
+        }
+
+        assertWorkflowTerminates(wfId)
+        assertWorkflowStatus(wfId, "COMPLETED")
+
+        sweepJob.cancel()
+    }
+
+    // ---- C8: Payload propagation integrity across phases ----
+
+    @Test
+    fun `C8 - payload propagates correctly across phase boundaries`() = runBlocking {
+        val def = workflow {
+            activity("step1") { transition("c8.step1") }
+            activity("step2") { transition("c8.step2") }
+            activity("step3") { transition("c8.step3") }
+        }
+
+        handlerRegistry.register("c8.step1", object : TransitionHandler {
+            override suspend fun execute(input: HandlerInput): HandlerOutput =
+                HandlerOutput(result = """{"phase":1,"data":"${input.payload}"}""")
+        })
+        handlerRegistry.register("c8.step2", object : TransitionHandler {
+            override suspend fun execute(input: HandlerInput): HandlerOutput =
+                HandlerOutput(result = """{"phase":2,"prev":${input.payload}}""")
+        })
+        handlerRegistry.register("c8.step3", object : TransitionHandler {
+            override suspend fun execute(input: HandlerInput): HandlerOutput =
+                HandlerOutput(result = """{"phase":3,"prev":${input.payload}}""")
+        })
+
+        val wfId = engine.startWorkflow(def, """{"origin":"C8"}""")
+        diagnostics.trackedWorkflows.add(wfId)
+
+        startWorkerPool()
+
+        val sweepJob = launch {
+            while (true) { delay(sweepInterval.toMillis()); runSweep() }
+        }
+
+        assertWorkflowTerminates(wfId)
+        assertWorkflowStatus(wfId, "COMPLETED")
+
+        // Verify payload chain: each phase received the previous phase's result
+        val tasks = readTasksDirect(wfId).sortedBy { (it["SEQUENCE_NUMBER"] as Number).toInt() }
+        assertEquals(3, tasks.size)
+
+        // Step1 received initial payload
+        assertTrue(tasks[0]["PAYLOAD"].toString().contains("origin"))
+        // Step2 received step1's result
+        assertTrue(tasks[1]["PAYLOAD"].toString().contains("phase\":1"))
+        // Step3 received step2's result
+        assertTrue(tasks[2]["PAYLOAD"].toString().contains("phase\":2"))
+
+        sweepJob.cancel()
+    }
+
+    // ---- C9: Fan-out sub-task results → join handler receives all ----
+
+    @Test
+    fun `C9 - join handler receives complete result set from all sub-tasks`() = runBlocking {
+        val n = 10
+        val def = workflow {
+            activity("scatter") {
+                transition("c9.scatter")
+                fanOut {
+                    transition("c9.parallel")
+                    joinPolicy(JoinPolicy.All)
+                }
+            }
+        }
+
+        handlerRegistry.register("c9.scatter", object : TransitionHandler {
+            override suspend fun execute(input: HandlerInput): HandlerOutput {
+                val payloads = (1..n).map { """{"item":$it}""" }
+                return HandlerOutput(result = objectMapper.writeValueAsString(payloads))
+            }
+        })
+        handlerRegistry.register("c9.parallel", object : TransitionHandler {
+            override suspend fun execute(input: HandlerInput): HandlerOutput =
+                HandlerOutput(result = """{"processed":${input.payload}}""")
+        })
+
+        val wfId = engine.startWorkflow(def, """{"test":"C9"}""")
+        diagnostics.trackedWorkflows.add(wfId)
+
+        startWorkerPool()
+
+        val sweepJob = launch {
+            while (true) { delay(sweepInterval.toMillis()); runSweep() }
+        }
+
+        assertWorkflowTerminates(wfId)
+
+        // Verify all parallel tasks completed with results
+        val parallelTasks = readTasksDirect(wfId, sequenceNumber = 2)
+        assertEquals(n, parallelTasks.size)
+        for (task in parallelTasks) {
+            assertEquals("COMPLETED", task["STATUS"]?.toString())
+            assertTrue(task["RESULT"]?.toString()?.contains("processed") == true)
+        }
+
+        sweepJob.cancel()
+    }
+
+    // ---- C10: Replay after FAILED ----
+
+    @Test
+    fun `C10 - replay resumes from current sequence without re-executing completed phases`() = runBlocking {
+        val def = workflow {
+            activity("step1") { transition("c10.step1") }
+            activity("step2") {
+                transition("c10.step2")
+                retries(0)
+                failurePolicy(FailurePolicy.ABORT)
+            }
+            activity("step3") { transition("c10.step3") }
+        }
+
+        // Step1 succeeds, step2 fails
+        handlerRegistry.register("c10.step1", PassThroughHandler())
+        val step2Counter = AtomicInteger(0)
+        handlerRegistry.register("c10.step2", object : TransitionHandler {
+            override suspend fun execute(input: HandlerInput): HandlerOutput {
+                if (step2Counter.incrementAndGet() == 1) throw RuntimeException("First attempt fails")
+                return HandlerOutput(result = input.payload)
+            }
+        })
+        handlerRegistry.register("c10.step3", PassThroughHandler())
+
+        val wfId = engine.startWorkflow(def, """{"test":"C10"}""")
+        diagnostics.trackedWorkflows.add(wfId)
+
+        startWorkerPool()
+
+        val sweepJob = launch {
+            while (true) { delay(sweepInterval.toMillis()); runSweep() }
+        }
+
+        // Wait for failure
+        assertWorkflowStatus(wfId, "FAILED")
+
+        // Step1 was completed — verify
+        val step1Tasks = readTasksDirect(wfId, sequenceNumber = 1)
+        assertEquals(1, step1Tasks.size)
+        assertEquals("COMPLETED", step1Tasks[0]["STATUS"]?.toString())
+
+        // Replay
+        val replayed = engine.replayWorkflow(wfId)
+        assertTrue(replayed, "Replay should succeed")
+
+        // After replay, workflow should eventually complete
+        assertWorkflowStatus(wfId, "COMPLETED", timeout = scale.outerTimeout)
+
+        // Step1 should still have only 1 task (not re-executed)
+        val step1After = readTasksDirect(wfId, sequenceNumber = 1)
+        assertEquals(1, step1After.size, "Step1 should not be re-executed on replay")
+
+        sweepJob.cancel()
+    }
+
+    // ---- C11: Concurrent barrier probes see consistent count under high write load ----
+
+    @Test
+    fun `C11 - concurrent barrier probes under high fanout - MVCC consistency`() = runBlocking {
+        val n = scale.fanOutSize
+        val def = workflow {
+            activity("scatter") {
+                transition("c11.scatter")
+                fanOut {
+                    transition("c11.parallel")
+                    joinPolicy(JoinPolicy.All)
+                }
+            }
+            activity("final") { transition("c11.final") }
+        }
+
+        handlerRegistry.register("c11.scatter", object : TransitionHandler {
+            override suspend fun execute(input: HandlerInput): HandlerOutput {
+                val payloads = (1..n).map { """{"item":$it}""" }
+                return HandlerOutput(result = objectMapper.writeValueAsString(payloads))
+            }
+        })
+        handlerRegistry.register("c11.parallel", PassThroughHandler())
+        handlerRegistry.register("c11.final", PassThroughHandler())
+
+        val wfId = engine.startWorkflow(def, """{"test":"C11"}""")
+        diagnostics.trackedWorkflows.add(wfId)
+
+        // Use maximum workers to maximize concurrent barrier probes
+        startWorkerPool()
+
+        val sweepJob = launch {
+            while (true) { delay(sweepInterval.toMillis()); runSweep() }
+        }
+
+        assertWorkflowTerminates(wfId)
+        assertWorkflowStatus(wfId, "COMPLETED")
+
+        // Critical assertion: exactly 1 final task (proves no duplicate CAS wins)
+        val allTasks = readTasksDirect(wfId)
+        val maxSeq = allTasks.maxOf { (it["SEQUENCE_NUMBER"] as Number).toInt() }
+        assertTaskCount(wfId, maxSeq, 1)
+        assertNoTaskDuplicates(wfId, maxSeq)
+
+        sweepJob.cancel()
+    }
+}
