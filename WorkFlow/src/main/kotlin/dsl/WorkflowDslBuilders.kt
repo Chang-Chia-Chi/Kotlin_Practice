@@ -41,6 +41,17 @@ class FanOutBuilder {
 }
 
 @WorkflowDsl
+class InputsBuilder {
+    private val entries = mutableMapOf<String, String>()
+
+    infix fun String.from(ref: String) {
+        entries[this] = ref
+    }
+
+    fun build(): Map<String, String> = entries.toMap()
+}
+
+@WorkflowDsl
 class ActivityBuilder {
     private var transition: String? = null
     private var retries: Int = 0
@@ -50,6 +61,7 @@ class ActivityBuilder {
     private var backoffBase: Duration = Duration.ofSeconds(1)
     private var backoffCap: Duration = Duration.ofSeconds(300)
     private var queue: String = "default"
+    private var inputsDef: Map<String, String> = emptyMap()
 
     fun transition(t: String) { transition = t }
     fun retries(n: Int) { retries = n }
@@ -61,6 +73,10 @@ class ActivityBuilder {
 
     fun fanOut(block: FanOutBuilder.() -> Unit) {
         fanOutDef = FanOutBuilder().apply(block).build()
+    }
+
+    fun inputs(block: InputsBuilder.() -> Unit) {
+        inputsDef = InputsBuilder().apply(block).build()
     }
 
     fun build(name: String): ActivityDefinition {
@@ -75,6 +91,7 @@ class ActivityBuilder {
             backoffBase = backoffBase,
             backoffCap = backoffCap,
             queue = queue,
+            inputs = inputsDef,
         )
     }
 }

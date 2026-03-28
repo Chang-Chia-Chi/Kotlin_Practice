@@ -330,10 +330,10 @@ class TaskRepository(
             handle.prepareBatch(
                 """
             INSERT INTO task (id, workflow_id, sequence_number, status, handler_key,
-                              payload, result, claimed_by, claimed_at, completed_at,
+                              item, result, claimed_by, claimed_at, completed_at,
                               retry_count, max_retries, deadline_at, not_before, backoff_base, backoff_cap, queue_name)
             VALUES (:id, :workflowId, :sequenceNumber, :status, :handlerKey,
-                    :payload, :result, :claimedBy, :claimedAt, :completedAt,
+                    :item, :result, :claimedBy, :claimedAt, :completedAt,
                     :retryCount, :maxRetries, :deadlineAt, :notBefore, :backoffBase, :backoffCap, :queueName)
             """,
             )
@@ -344,7 +344,7 @@ class TaskRepository(
                 .bind("sequenceNumber", task.sequenceNumber)
                 .bind("status", task.status.name)
                 .bind("handlerKey", task.handlerKey)
-            bindNullableClob(batch, "payload", task.payloadJson)
+            bindNullableClob(batch, "item", task.item)
             bindNullableClob(batch, "result", task.resultJson)
             batch
                 .bind("claimedBy", task.claimedBy)
@@ -411,7 +411,7 @@ class TaskRepository(
             sequenceNumber = (ci["SEQUENCE_NUMBER"] as Number).toInt(),
             status = TaskStatus.valueOf(ci["STATUS"] as String),
             handlerKey = ci["HANDLER_KEY"] as String,
-            payloadJson = ci["PAYLOAD"]?.let { readClob(it) },
+            item = ci["ITEM"]?.let { readClob(it) },
             resultJson = ci["RESULT"]?.let { readClob(it) },
             claimedBy = ci["CLAIMED_BY"] as String?,
             claimedAt = readNullableTimestamp(ci["CLAIMED_AT"]),

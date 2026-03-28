@@ -49,6 +49,7 @@ data class ActivityDefinition(
     val backoffBase: Duration = Duration.ofSeconds(1),
     val backoffCap: Duration = Duration.ofSeconds(300),
     val queue: String = "default",
+    val inputs: Map<String, String> = emptyMap(),
 )
 
 data class WorkflowDefinition(
@@ -58,5 +59,9 @@ data class WorkflowDefinition(
     init {
         require(activities.isNotEmpty()) { "Workflow must have at least one activity" }
         require(deadline > Duration.ZERO) { "Workflow deadline must be positive" }
+        val names = activities.map { it.name }
+        require(names.size == names.toSet().size) {
+            "Activity names must be unique, found duplicates: ${names.groupBy { it }.filter { it.value.size > 1 }.keys}"
+        }
     }
 }

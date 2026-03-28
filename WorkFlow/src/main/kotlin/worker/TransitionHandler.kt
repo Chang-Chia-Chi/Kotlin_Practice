@@ -41,13 +41,15 @@ interface TransitionHandler {
  * @property taskId Unique task identifier — use as idempotency key for external calls.
  * @property workflowId Parent workflow identifier.
  * @property sequenceNumber Position in the workflow DAG.
- * @property payload JSON payload from the previous step's output (or initial workflow input).
+ * @property inputs Resolved input map from declared activity inputs. Null if no inputs declared.
+ * @property item Scatter chunk for parallel tasks. Null for non-parallel tasks.
  */
 data class HandlerInput(
     val taskId: String,
     val workflowId: String,
     val sequenceNumber: Int,
-    val payload: String?,
+    val inputs: String?,
+    val item: String?,
 )
 
 /**

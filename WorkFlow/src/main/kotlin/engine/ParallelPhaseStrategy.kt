@@ -1,11 +1,8 @@
 package com.workflow.engine
 
-import com.fasterxml.jackson.databind.ObjectMapper
 import com.workflow.dsl.JoinPolicy
 
-class ParallelPhaseStrategy(
-    private val objectMapper: ObjectMapper,
-) : PhaseStrategy {
+class ParallelPhaseStrategy : PhaseStrategy {
 
     override fun resolve(context: PhaseContext): AdvancementDecision {
         val fanOut = context.currentSeqInfo.activity.fanOut
@@ -14,18 +11,10 @@ class ParallelPhaseStrategy(
         val succeeded = evaluateJoinPolicy(joinPolicy, context.failedCount, context.totalCount)
 
         if (!succeeded) {
-            context.failOrAdvance(payload = null)?.let { return it }
+            context.failOrAdvance()?.let { return it }
         }
 
-        // Aggregate completed task results into JSON array (R3)
-        val arrayNode = objectMapper.createArrayNode()
-        context.tasks
-            .filter { it.status == TaskStatus.COMPLETED }
-            .mapNotNull { it.resultJson }
-            .forEach { arrayNode.add(objectMapper.readTree(it)) }
-        val aggregatedPayload = objectMapper.writeValueAsString(arrayNode)
-
-        return context.advanceOrComplete(payload = aggregatedPayload)
+        return context.advanceOrComplete()
     }
 
     private fun evaluateJoinPolicy(joinPolicy: JoinPolicy, failedCount: Int, totalCount: Int): Boolean {

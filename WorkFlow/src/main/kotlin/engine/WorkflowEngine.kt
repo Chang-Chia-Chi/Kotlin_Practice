@@ -20,7 +20,7 @@ class WorkflowEngine(
 
     private val log = LoggerFactory.getLogger(WorkflowEngine::class.java)
 
-    suspend fun startWorkflow(definition: WorkflowDefinition, initialPayload: String? = null): String {
+    suspend fun startWorkflow(definition: WorkflowDefinition): String {
         require(definition.activities.isNotEmpty()) { "WorkflowDefinition must have at least one activity" }
 
         val workflowId = UUID.randomUUID().toString()
@@ -45,7 +45,6 @@ class WorkflowEngine(
                 workflowId = workflowId,
                 sequenceNumber = 1,
                 activity = firstActivity,
-                payload = initialPayload,
                 now = now,
             )
             taskRepo.insertBatchWithHandle(handle, listOf(task))

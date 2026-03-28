@@ -12,7 +12,7 @@ class PhaseStrategyRegistry(objectMapper: ObjectMapper) {
     init {
         register(PhaseType.LINEAR, LinearPhaseStrategy())
         register(PhaseType.SCATTER, ScatterPhaseStrategy(objectMapper))
-        register(PhaseType.PARALLEL, ParallelPhaseStrategy(objectMapper))
+        register(PhaseType.PARALLEL, ParallelPhaseStrategy())
     }
 
     fun register(type: PhaseType, strategy: PhaseStrategy) {

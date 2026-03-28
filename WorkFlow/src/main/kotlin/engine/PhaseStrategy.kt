@@ -33,13 +33,13 @@ sealed interface AdvancementDecision {
  * Shared failure-policy check. Returns null if no failure (caller continues to normal advance).
  * Returns [AdvancementDecision.Abort] for ABORT, or advance/complete for BEST_EFFORT.
  */
-fun PhaseContext.failOrAdvance(payload: String?): AdvancementDecision? {
+fun PhaseContext.failOrAdvance(): AdvancementDecision? {
     if (failedCount == 0) return null
     return when (currentSeqInfo.activity.failurePolicy) {
         FailurePolicy.ABORT -> AdvancementDecision.Abort(
             "$failedCount task(s) failed at sequence ${currentSeqInfo.sequenceNumber}",
         )
-        FailurePolicy.BEST_EFFORT -> advanceOrComplete(payload)
+        FailurePolicy.BEST_EFFORT -> advanceOrComplete()
     }
 }
 
@@ -47,14 +47,13 @@ fun PhaseContext.failOrAdvance(payload: String?): AdvancementDecision? {
  * Build an [AdvancementDecision.Advance] to the next sequence, or [AdvancementDecision.Complete]
  * if this is the last sequence. Creates a single task for the next sequence's activity.
  */
-fun PhaseContext.advanceOrComplete(payload: String?): AdvancementDecision {
+fun PhaseContext.advanceOrComplete(): AdvancementDecision {
     val nextSeq = currentSeqInfo.nextSequence ?: return AdvancementDecision.Complete
     val nextSeqInfo = sequenceMap[nextSeq]!!
     val task = createTaskForActivity(
         workflowId = workflow.id,
         sequenceNumber = nextSeq,
         activity = nextSeqInfo.activity,
-        payload = payload,
         now = Instant.now().truncatedTo(ChronoUnit.MICROS),
     )
     return AdvancementDecision.Advance(nextSeq, listOf(task))

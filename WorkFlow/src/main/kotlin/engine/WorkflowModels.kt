@@ -77,7 +77,7 @@ data class Task(
     val sequenceNumber: Int,
     val status: TaskStatus,
     val handlerKey: String,
-    val payloadJson: String?,
+    val item: String? = null,
     val resultJson: String?,
     val claimedBy: String?,
     val claimedAt: Instant?,
@@ -96,7 +96,6 @@ internal fun createTaskForActivity(
     workflowId: String,
     sequenceNumber: Int,
     activity: ActivityDefinition,
-    payload: String?,
     now: Instant,
 ): Task {
     return Task(
@@ -105,7 +104,6 @@ internal fun createTaskForActivity(
         sequenceNumber = sequenceNumber,
         status = TaskStatus.PENDING,
         handlerKey = activity.transition,
-        payloadJson = payload,
         resultJson = null,
         claimedBy = null,
         claimedAt = null,

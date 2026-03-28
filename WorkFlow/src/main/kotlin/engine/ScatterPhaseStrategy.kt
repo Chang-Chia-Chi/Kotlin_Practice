@@ -11,28 +11,28 @@ class ScatterPhaseStrategy(
 ) : PhaseStrategy {
 
     override fun resolve(context: PhaseContext): AdvancementDecision {
-        context.failOrAdvance(payload = null)?.let { return it }
+        context.failOrAdvance()?.let { return it }
 
         val scatterTask = context.tasks.firstOrNull { it.status == TaskStatus.COMPLETED }
             ?: return AdvancementDecision.Abort("No completed scatter task at sequence ${context.currentSeqInfo.sequenceNumber}")
         val scatterResult = scatterTask.resultJson
             ?: return AdvancementDecision.Abort("Scatter task ${scatterTask.id} has no result")
 
-        val payloads: List<String> = objectMapper.readValue(scatterResult)
+        val items: List<String> = objectMapper.readValue(scatterResult)
         val parallelSeq = context.currentSeqInfo.nextSequence!!
         val parallelSeqInfo = context.sequenceMap[parallelSeq]!!
         val fanOut = parallelSeqInfo.activity.fanOut
             ?: throw IllegalStateException("SCATTER phase at seq ${context.currentSeqInfo.sequenceNumber} points to PARALLEL seqInfo with no fanOut definition")
         val now = Instant.now().truncatedTo(ChronoUnit.MICROS)
 
-        val tasks = payloads.map { payload ->
+        val tasks = items.map { item ->
             Task(
                 id = UUID.randomUUID().toString(),
                 workflowId = context.workflow.id,
                 sequenceNumber = parallelSeq,
                 status = TaskStatus.PENDING,
                 handlerKey = fanOut.transition,
-                payloadJson = payload,
+                item = item,
                 resultJson = null,
                 claimedBy = null,
                 claimedAt = null,

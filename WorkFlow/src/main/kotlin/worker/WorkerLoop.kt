@@ -1,10 +1,16 @@
 package com.workflow.worker
 
 import com.workflow.config.FrameworkConfig
+import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.module.kotlin.readValue
+import com.workflow.dsl.WorkflowDefinition
 import com.workflow.engine.BarrierService
+import com.workflow.engine.InputResolver
 import com.workflow.engine.Task
 import com.workflow.engine.TaskRepository
 import com.workflow.engine.TaskStatus
+import com.workflow.engine.WorkflowRepository
+import com.workflow.engine.buildSequenceMap
 import com.workflow.extension.indefinitelyRepeat
 import com.workflow.extension.takeUntilSignal
 import com.workflow.extension.unorderedMapAsync
@@ -82,6 +88,9 @@ class WorkerLoop(
     private val handlerRegistry: HandlerRegistry,
     private val barrierService: BarrierService,
     private val meterRegistry: MeterRegistry,
+    private val inputResolver: InputResolver,
+    private val workflowRepo: WorkflowRepository,
+    private val objectMapper: ObjectMapper,
 ) : ShutdownParticipant {
     private val log = LoggerFactory.getLogger(WorkerLoop::class.java)
 
@@ -204,12 +213,16 @@ class WorkerLoop(
             _inFlightTasks.incrementAndGet()
             try {
                 val handler = handlerRegistry.resolve(task.handlerKey)
+
+                val resolvedInputs = resolveInputs(task)
+
                 val input =
                     HandlerInput(
                         taskId = task.id,
                         workflowId = task.workflowId,
                         sequenceNumber = task.sequenceNumber,
-                        payload = task.payloadJson,
+                        inputs = resolvedInputs,
+                        item = task.item,
                     )
                 val output = handler.execute(input)
 
@@ -237,6 +250,19 @@ class WorkerLoop(
                 _inFlightTasks.decrementAndGet()
                 _lastActivityTimestamp = Instant.now()
             }
+        }
+    }
+
+    private suspend fun resolveInputs(task: Task): String? {
+        val workflow = workflowRepo.findById(task.workflowId) ?: return null
+        val definition = objectMapper.readValue<WorkflowDefinition>(workflow.definitionJson)
+        val sequenceMap = buildSequenceMap(definition)
+        val seqInfo = sequenceMap[task.sequenceNumber] ?: return null
+        val activityInputs = seqInfo.activity.inputs
+        if (activityInputs.isEmpty()) return null
+
+        return inputResolver.resolve(activityInputs, sequenceMap) { seq ->
+            taskRepo.findByWorkflowAndSequence(task.workflowId, seq)
         }
     }
 
