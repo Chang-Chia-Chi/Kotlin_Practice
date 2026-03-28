@@ -53,7 +53,8 @@ class IdempotencyStressTest : StressTestBase() {
         )
         updateWorkflowUpdatedAtDirect(wfId, Instant.now().minus(gracePeriod.multipliedBy(2)))
 
-        handlerRegistry.register("i1.handler", PassThroughHandler())
+        val recorder = HistoryRecorder(PassThroughHandler())
+        handlerRegistry.register("i1.handler", recorder)
 
         // Race: sweeper recovery and worker barrier completion fire simultaneously
         val latch = CountDownLatch(1)
@@ -82,6 +83,7 @@ class IdempotencyStressTest : StressTestBase() {
         // Critical: exactly 1 task at seq 2 (no duplicates from race)
         assertTaskCount(wfId, 2, 1)
         assertNoTaskDuplicates(wfId, 2)
+        HistoryChecker.assertNoDuplicateExecution(recorder.snapshot())
         sweepJob.cancel()
     }
 
@@ -295,7 +297,8 @@ class IdempotencyStressTest : StressTestBase() {
         diagnostics.trackedWorkflows.add(wfId)
 
         val counting = CountingHandler()
-        handlerRegistry.register("i7.handler", counting)
+        val recorder = HistoryRecorder(counting)
+        handlerRegistry.register("i7.handler", recorder)
 
         // Start multiple worker pools to maximize claim contention
         repeat(3) { startWorkerPool() }
@@ -308,6 +311,7 @@ class IdempotencyStressTest : StressTestBase() {
 
         // The handler should have been invoked exactly once for the single task
         assertEquals(1, counting.totalInvocations.get(), "Task should be processed exactly once")
+        HistoryChecker.assertNoDuplicateExecution(recorder.snapshot())
         sweepJob.cancel()
     }
 

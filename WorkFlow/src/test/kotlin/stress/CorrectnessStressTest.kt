@@ -49,7 +49,8 @@ class CorrectnessStressTest : StressTestBase() {
                 return HandlerOutput(result = objectMapper.writeValueAsString(payloads))
             }
         })
-        handlerRegistry.register("c1.parallel", PassThroughHandler())
+        val recorder = HistoryRecorder(PassThroughHandler())
+        handlerRegistry.register("c1.parallel", recorder)
         handlerRegistry.register("c1.final", PassThroughHandler())
 
         val wfId = engine.startWorkflow(def)
@@ -71,6 +72,7 @@ class CorrectnessStressTest : StressTestBase() {
         val finalTasks = allTasks.filter { (it["SEQUENCE_NUMBER"] as Number).toInt() == maxSeq }
         assertEquals(1, finalTasks.size, "Expected exactly 1 final task, got ${finalTasks.size}")
         assertNoTaskDuplicates(wfId, maxSeq)
+        HistoryChecker.assertNoDuplicateExecution(recorder.snapshot())
 
         sweepJob.cancel()
     }
