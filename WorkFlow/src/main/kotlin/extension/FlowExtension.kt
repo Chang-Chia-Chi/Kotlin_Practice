@@ -1,6 +1,8 @@
 package com.workflow.extension
 
-import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineExceptionHandler
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.ClosedSendChannelException
 import kotlinx.coroutines.flow.Flow
@@ -34,20 +36,19 @@ fun <T, R> Flow<T>.unorderedMapAsync(
 ): Flow<R> =
     channelFlow {
         val semaphore = Semaphore(concurrency)
+        val supervisor = SupervisorJob(coroutineContext[Job])
+        val handler = CoroutineExceptionHandler { _, e -> close(e) }
         collect { value ->
             semaphore.acquire() // back-pressure: suspends when all slots full
-            launch {
+            launch(supervisor + handler) {
                 try {
                     send(transform(value))
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    close(e)
                 } finally {
                     semaphore.release()
                 }
             }
         }
+        supervisor.complete()
     }
 
 /**
