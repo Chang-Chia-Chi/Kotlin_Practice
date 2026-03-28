@@ -78,9 +78,9 @@ class WorkflowModelsTest {
     // ── TaskStatus enum ─────────────────────────────────────────────────
 
     @Test
-    fun `TaskStatus contains exactly seven values`() {
+    fun `TaskStatus contains exactly eight values`() {
         assertEquals(
-            setOf("PENDING", "PROCESSING", "COMPLETED", "FAILED", "TIMED_OUT", "DEAD_LETTER", "CANCELLED"),
+            setOf("PENDING", "PROCESSING", "WAITING_FOR_SIGNAL", "COMPLETED", "FAILED", "TIMED_OUT", "DEAD_LETTER", "CANCELLED"),
             TaskStatus.entries.map { it.name }.toSet(),
         )
     }
@@ -118,6 +118,11 @@ class WorkflowModelsTest {
     }
 
     @Test
+    fun `WAITING_FOR_SIGNAL is not terminal`() {
+        assertEquals(false, TaskStatus.WAITING_FOR_SIGNAL.isTerminal)
+    }
+
+    @Test
     fun `COMPLETED is terminal`() {
         assertEquals(true, TaskStatus.COMPLETED.isTerminal)
     }
@@ -137,6 +142,11 @@ class WorkflowModelsTest {
             TaskStatus.PROCESSING to TaskStatus.TIMED_OUT,
             TaskStatus.PROCESSING to TaskStatus.PENDING,
             TaskStatus.PROCESSING to TaskStatus.DEAD_LETTER,
+            TaskStatus.PROCESSING to TaskStatus.WAITING_FOR_SIGNAL,
+            TaskStatus.WAITING_FOR_SIGNAL to TaskStatus.COMPLETED,
+            TaskStatus.WAITING_FOR_SIGNAL to TaskStatus.FAILED,
+            TaskStatus.WAITING_FOR_SIGNAL to TaskStatus.TIMED_OUT,
+            TaskStatus.WAITING_FOR_SIGNAL to TaskStatus.CANCELLED,
             TaskStatus.FAILED to TaskStatus.PENDING,
             TaskStatus.FAILED to TaskStatus.DEAD_LETTER,
         )
