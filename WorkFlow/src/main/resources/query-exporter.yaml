@@ -94,21 +94,38 @@ queries:
         type: GAUGE
         valueColumn: cnt
 
-  # -- Repository layer: pending task backlog per workflow sequence --
+  # -- Pending task backlog per handler type (bounded cardinality) --
   task_backlog_depth:
     sql: >-
-      SELECT w.id AS workflow_id, t.sequence_number AS seq, COUNT(*) AS cnt
-      FROM task t JOIN workflow w ON t.workflow_id = w.id
-      WHERE t.status = 'PENDING' AND w.status = 'RUNNING'
-      GROUP BY w.id, t.sequence_number
+      SELECT handler_key, COUNT(*) AS depth
+      FROM task
+      WHERE status = 'PENDING'
+      GROUP BY handler_key
+    datasource: "default"
+    schedule:
+      interval: "PT30S"
+    metrics:
+      - name: task_backlog_depth
+        type: GAUGE
+        valueColumn: depth
+        tagColumns: [handler_key]
+
+  # -- Anomaly detection: workflow instances with unusually deep pending backlog --
+  workflow_deep_backlog_count:
+    sql: >-
+      SELECT COUNT(*) AS cnt FROM (
+        SELECT workflow_id FROM task
+        WHERE status = 'PENDING'
+        GROUP BY workflow_id
+        HAVING COUNT(*) > 10
+      )
     datasource: "default"
     schedule:
       interval: "PT60S"
     metrics:
-      - name: task_backlog_depth
+      - name: workflow_deep_backlog_count
         type: GAUGE
         valueColumn: cnt
-        tagColumns: [workflow_id, seq]
 
   # -- Task success rate: failed vs completed in sliding 1-hour window --
   task_outcome_counts:
