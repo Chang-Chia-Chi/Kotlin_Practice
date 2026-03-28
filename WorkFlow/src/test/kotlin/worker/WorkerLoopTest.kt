@@ -185,6 +185,7 @@ class WorkerLoopTest {
                 .thenReturn(emptyList())
             whenever(handlerRegistry.resolve(task.handlerKey)).thenReturn(handler)
             whenever(handler.execute(any())).thenReturn(HandlerOutput(result = null))
+            whenever(workflowRepo.findById(task.workflowId)).thenReturn(null)
 
             startAndAdvance(this)
 
@@ -214,6 +215,7 @@ class WorkerLoopTest {
             whenever(handlerRegistry.resolve("step.two")).thenReturn(handler2)
             whenever(handler1.execute(any())).thenReturn(HandlerOutput("""{"r":1}"""))
             whenever(handler2.execute(any())).thenReturn(HandlerOutput("""{"r":2}"""))
+            whenever(workflowRepo.findById(any())).thenReturn(null)
 
             startAndAdvance(this, ticks = 4)
 
