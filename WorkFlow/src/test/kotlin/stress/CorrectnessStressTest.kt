@@ -7,6 +7,7 @@ import com.workflow.engine.TaskStatus
 import com.workflow.worker.HandlerInput
 import com.workflow.worker.HandlerOutput
 import com.workflow.worker.TransitionHandler
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -55,7 +56,7 @@ class CorrectnessStressTest : StressTestBase() {
 
         startWorkerPool()
 
-        val sweepJob = launch {
+        val sweepJob = launch(Dispatchers.IO) {
             while (true) { delay(sweepInterval.toMillis()); runSweep() }
         }
 
@@ -101,7 +102,7 @@ class CorrectnessStressTest : StressTestBase() {
 
         startWorkerPool()
 
-        val sweepJob = launch {
+        val sweepJob = launch(Dispatchers.IO) {
             while (true) { delay(sweepInterval.toMillis()); runSweep() }
         }
 
@@ -154,7 +155,7 @@ class CorrectnessStressTest : StressTestBase() {
 
         startWorkerPool()
 
-        val sweepJob = launch {
+        val sweepJob = launch(Dispatchers.IO) {
             while (true) { delay(sweepInterval.toMillis()); runSweep() }
         }
 
@@ -169,7 +170,7 @@ class CorrectnessStressTest : StressTestBase() {
     fun `C4 - JoinPolicy Percentage 95 at threshold - passes`() = runBlocking {
         // 95 of 100 succeed (5 fail) → 95% ≥ 95% → pass
         val wfId = startPercentageTest(totalTasks = 100, failCount = 5, threshold = 95)
-        val sweepJob = launch {
+        val sweepJob = launch(Dispatchers.IO) {
             while (true) { delay(sweepInterval.toMillis()); runSweep() }
         }
         assertWorkflowTerminates(wfId)
@@ -181,7 +182,7 @@ class CorrectnessStressTest : StressTestBase() {
     fun `C4 - JoinPolicy Percentage 95 below threshold - fails`() = runBlocking {
         // 94 of 100 succeed (6 fail) → 94% < 95% → fail
         val wfId = startPercentageTest(totalTasks = 100, failCount = 6, threshold = 95)
-        val sweepJob = launch {
+        val sweepJob = launch(Dispatchers.IO) {
             while (true) { delay(sweepInterval.toMillis()); runSweep() }
         }
         assertWorkflowTerminates(wfId)
@@ -281,7 +282,7 @@ class CorrectnessStressTest : StressTestBase() {
         startWorkerPool()
 
         coroutineScope {
-            val sweepJob = launch {
+            val sweepJob = launch(Dispatchers.IO) {
                 while (true) { delay(sweepInterval.toMillis()); runSweep() }
             }
 
@@ -312,7 +313,7 @@ class CorrectnessStressTest : StressTestBase() {
 
         startWorkerPool()
 
-        val sweepJob = launch {
+        val sweepJob = launch(Dispatchers.IO) {
             while (true) { delay(sweepInterval.toMillis()); runSweep() }
         }
 
@@ -347,7 +348,7 @@ class CorrectnessStressTest : StressTestBase() {
 
         startWorkerPool()
 
-        val sweepJob = launch {
+        val sweepJob = launch(Dispatchers.IO) {
             while (true) { delay(sweepInterval.toMillis()); runSweep() }
         }
 
@@ -385,7 +386,7 @@ class CorrectnessStressTest : StressTestBase() {
 
         startWorkerPool()
 
-        val sweepJob = launch {
+        val sweepJob = launch(Dispatchers.IO) {
             while (true) { delay(sweepInterval.toMillis()); runSweep() }
         }
 
@@ -437,7 +438,7 @@ class CorrectnessStressTest : StressTestBase() {
 
         startWorkerPool()
 
-        val sweepJob = launch {
+        val sweepJob = launch(Dispatchers.IO) {
             while (true) { delay(sweepInterval.toMillis()); runSweep() }
         }
 
@@ -484,7 +485,7 @@ class CorrectnessStressTest : StressTestBase() {
 
         startWorkerPool()
 
-        val sweepJob = launch {
+        val sweepJob = launch(Dispatchers.IO) {
             while (true) { delay(sweepInterval.toMillis()); runSweep() }
         }
 
@@ -541,7 +542,7 @@ class CorrectnessStressTest : StressTestBase() {
         // Use maximum workers to maximize concurrent barrier probes
         startWorkerPool()
 
-        val sweepJob = launch {
+        val sweepJob = launch(Dispatchers.IO) {
             while (true) { delay(sweepInterval.toMillis()); runSweep() }
         }
 

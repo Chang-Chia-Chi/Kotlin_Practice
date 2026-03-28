@@ -7,6 +7,7 @@ import com.workflow.engine.WorkflowStatus
 import com.workflow.worker.HandlerInput
 import com.workflow.worker.HandlerOutput
 import com.workflow.worker.TransitionHandler
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -72,7 +73,7 @@ class IdempotencyStressTest : StressTestBase() {
         // Start workers for step2
         startWorkerPool()
 
-        val sweepJob = launch {
+        val sweepJob = launch(Dispatchers.IO) {
             while (true) { delay(sweepInterval.toMillis()); runSweep() }
         }
 
@@ -119,7 +120,7 @@ class IdempotencyStressTest : StressTestBase() {
 
         startWorkerPool()
 
-        val sweepJob = launch {
+        val sweepJob = launch(Dispatchers.IO) {
             while (true) { delay(sweepInterval.toMillis()); runSweep() }
         }
 
@@ -148,7 +149,7 @@ class IdempotencyStressTest : StressTestBase() {
 
         startWorkerPool()
 
-        val sweepJob = launch {
+        val sweepJob = launch(Dispatchers.IO) {
             while (true) { delay(sweepInterval.toMillis()); runSweep() }
         }
 
@@ -182,7 +183,7 @@ class IdempotencyStressTest : StressTestBase() {
         ))
         startWorkerPool()
 
-        val sweepJob = launch {
+        val sweepJob = launch(Dispatchers.IO) {
             while (true) { delay(sweepInterval.toMillis()); runSweep() }
         }
 
@@ -212,7 +213,7 @@ class IdempotencyStressTest : StressTestBase() {
 
         startWorkerPool()
 
-        val sweepJob = launch {
+        val sweepJob = launch(Dispatchers.IO) {
             while (true) { delay(sweepInterval.toMillis()); runSweep() }
         }
 
@@ -271,7 +272,7 @@ class IdempotencyStressTest : StressTestBase() {
         // Start workers to complete step2
         startWorkerPool()
 
-        val sweepJob = launch {
+        val sweepJob = launch(Dispatchers.IO) {
             while (true) { delay(sweepInterval.toMillis()); runSweep() }
         }
 
@@ -299,7 +300,7 @@ class IdempotencyStressTest : StressTestBase() {
         // Start multiple worker pools to maximize claim contention
         repeat(3) { startWorkerPool() }
 
-        val sweepJob = launch {
+        val sweepJob = launch(Dispatchers.IO) {
             while (true) { delay(sweepInterval.toMillis()); runSweep() }
         }
 

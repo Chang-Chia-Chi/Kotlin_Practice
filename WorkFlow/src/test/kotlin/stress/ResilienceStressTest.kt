@@ -5,6 +5,7 @@ import com.workflow.worker.HandlerInput
 import com.workflow.worker.HandlerOutput
 import com.workflow.worker.TransitionHandler
 import eu.rekawek.toxiproxy.model.ToxicDirection
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -55,7 +56,7 @@ class ResilienceStressTest : StressTestBase() {
         // Restore
         oracleProxy.toxics().get("cut-r1").remove()
 
-        val sweepJob = launch {
+        val sweepJob = launch(Dispatchers.IO) {
             while (true) { delay(sweepInterval.toMillis()); runSweep() }
         }
 
@@ -94,7 +95,7 @@ class ResilienceStressTest : StressTestBase() {
         // Remove latency
         oracleProxy.toxics().get("slow-r2").remove()
 
-        val sweepJob = launch {
+        val sweepJob = launch(Dispatchers.IO) {
             while (true) { delay(sweepInterval.toMillis()); runSweep() }
         }
 
@@ -131,7 +132,7 @@ class ResilienceStressTest : StressTestBase() {
         // Release throttle
         oracleProxy.toxics().get("throttle-r3").remove()
 
-        val sweepJob = launch {
+        val sweepJob = launch(Dispatchers.IO) {
             while (true) { delay(sweepInterval.toMillis()); runSweep() }
         }
 
@@ -178,7 +179,7 @@ class ResilienceStressTest : StressTestBase() {
         // Restart fresh workers
         startWorkerPool()
 
-        val sweepJob = launch {
+        val sweepJob = launch(Dispatchers.IO) {
             while (true) { delay(sweepInterval.toMillis()); runSweep() }
         }
 
@@ -221,7 +222,7 @@ class ResilienceStressTest : StressTestBase() {
         delay(2000)
 
         // "New leader elected" — start sweeping
-        val sweepJob = launch {
+        val sweepJob = launch(Dispatchers.IO) {
             while (true) { delay(sweepInterval.toMillis()); runSweep() }
         }
 
@@ -256,7 +257,7 @@ class ResilienceStressTest : StressTestBase() {
         delay(staleTaskThreshold.toMillis() * 2)
         oracleProxy.toxics().get("cut-r6").remove()
 
-        val sweepJob = launch {
+        val sweepJob = launch(Dispatchers.IO) {
             while (true) { delay(sweepInterval.toMillis()); runSweep() }
         }
 
@@ -297,7 +298,7 @@ class ResilienceStressTest : StressTestBase() {
             delay(200)
         }
 
-        val sweepJob = launch {
+        val sweepJob = launch(Dispatchers.IO) {
             while (true) { delay(sweepInterval.toMillis()); runSweep() }
         }
 
@@ -333,7 +334,7 @@ class ResilienceStressTest : StressTestBase() {
         delay(1000)
         oracleProxy.toxics().get("reset-r8").remove()
 
-        val sweepJob = launch {
+        val sweepJob = launch(Dispatchers.IO) {
             while (true) { delay(sweepInterval.toMillis()); runSweep() }
         }
 
