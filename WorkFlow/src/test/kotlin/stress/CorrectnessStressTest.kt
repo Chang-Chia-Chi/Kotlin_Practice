@@ -31,7 +31,7 @@ class CorrectnessStressTest : StressTestBase() {
     // ---- C1: N workers complete final task of a phase simultaneously (CAS race) ----
 
     @Test
-    fun `C1 - concurrent CAS race - exactly one set of next-phase tasks created`() = runBlocking {
+    fun `C1 - concurrent CAS race - exactly one set of next-phase tasks created`() = runBlocking(Dispatchers.Default) {
         val def = workflow {
             activity("scatter") {
                 transition("c1.scatter")
@@ -78,7 +78,7 @@ class CorrectnessStressTest : StressTestBase() {
     // ---- C2: Fan-out scatter produces N payloads → N sub-tasks atomically ----
 
     @Test
-    fun `C2 - scatter produces N payloads - exactly N sub-tasks created`() = runBlocking {
+    fun `C2 - scatter produces N payloads - exactly N sub-tasks created`() = runBlocking(Dispatchers.Default) {
         val n = scale.fanOutSize
         val def = workflow {
             activity("scatter") {
@@ -120,7 +120,7 @@ class CorrectnessStressTest : StressTestBase() {
     // ---- C3: JoinPolicy.ALL - 1 of N fails ----
 
     @Test
-    fun `C3 - JoinPolicy ALL with one failure and ABORT - workflow fails`() = runBlocking {
+    fun `C3 - JoinPolicy ALL with one failure and ABORT - workflow fails`() = runBlocking(Dispatchers.Default) {
         val n = 10
         val def = workflow {
             activity("scatter") {
@@ -168,7 +168,7 @@ class CorrectnessStressTest : StressTestBase() {
     // ---- C4: JoinPolicy.Percentage(95) boundary precision ----
 
     @Test
-    fun `C4 - JoinPolicy Percentage 95 at threshold - passes`() = runBlocking {
+    fun `C4 - JoinPolicy Percentage 95 at threshold - passes`() = runBlocking(Dispatchers.Default) {
         // 95 of 100 succeed (5 fail) → 95% ≥ 95% → pass
         val wfId = startPercentageTest(totalTasks = 100, failCount = 5, threshold = 95)
         val sweepJob = launch(Dispatchers.IO) {
@@ -180,7 +180,7 @@ class CorrectnessStressTest : StressTestBase() {
     }
 
     @Test
-    fun `C4 - JoinPolicy Percentage 95 below threshold - fails`() = runBlocking {
+    fun `C4 - JoinPolicy Percentage 95 below threshold - fails`() = runBlocking(Dispatchers.Default) {
         // 94 of 100 succeed (6 fail) → 94% < 95% → fail
         val wfId = startPercentageTest(totalTasks = 100, failCount = 6, threshold = 95)
         val sweepJob = launch(Dispatchers.IO) {
@@ -230,7 +230,7 @@ class CorrectnessStressTest : StressTestBase() {
     // ---- C5: JoinPolicy.Threshold(N) boundary precision ----
 
     @Test
-    fun `C5 - JoinPolicy Threshold boundary precision`() = runBlocking {
+    fun `C5 - JoinPolicy Threshold boundary precision`() = runBlocking(Dispatchers.Default) {
         val total = 20
         val threshold = 15
 
@@ -296,7 +296,7 @@ class CorrectnessStressTest : StressTestBase() {
     // ---- C6: FailurePolicy.ABORT mid-phase ----
 
     @Test
-    fun `C6 - ABORT mid-phase - workflow fails and no new phase started`() = runBlocking {
+    fun `C6 - ABORT mid-phase - workflow fails and no new phase started`() = runBlocking(Dispatchers.Default) {
         val def = workflow {
             activity("step1") {
                 transition("c6.handler")
@@ -331,7 +331,7 @@ class CorrectnessStressTest : StressTestBase() {
     // ---- C7: FailurePolicy.BEST_EFFORT - all tasks fail ----
 
     @Test
-    fun `C7 - BEST_EFFORT with all failures - workflow advances to next phase`() = runBlocking {
+    fun `C7 - BEST_EFFORT with all failures - workflow advances to next phase`() = runBlocking(Dispatchers.Default) {
         val def = workflow {
             activity("step1") {
                 transition("c7.handler")
@@ -362,7 +362,7 @@ class CorrectnessStressTest : StressTestBase() {
     // ---- C8: Explicit input resolution across phases ----
 
     @Test
-    fun `C8 - explicit inputs resolve correctly across phase boundaries`() = runBlocking {
+    fun `C8 - explicit inputs resolve correctly across phase boundaries`() = runBlocking(Dispatchers.Default) {
         val def = workflow {
             activity("step1") { transition("c8.step1") }
             activity("step2") {
@@ -427,7 +427,7 @@ class CorrectnessStressTest : StressTestBase() {
     // ---- C9: Fan-out sub-task results → join handler receives all ----
 
     @Test
-    fun `C9 - join handler receives complete result set from all sub-tasks`() = runBlocking {
+    fun `C9 - join handler receives complete result set from all sub-tasks`() = runBlocking(Dispatchers.Default) {
         val n = 10
         val def = workflow {
             activity("scatter") {
@@ -475,7 +475,7 @@ class CorrectnessStressTest : StressTestBase() {
     // ---- C10: Replay after FAILED ----
 
     @Test
-    fun `C10 - replay resumes from current sequence without re-executing completed phases`() = runBlocking {
+    fun `C10 - replay resumes from current sequence without re-executing completed phases`() = runBlocking(Dispatchers.Default) {
         val def = workflow {
             activity("step1") { transition("c10.step1") }
             activity("step2") {
@@ -531,7 +531,7 @@ class CorrectnessStressTest : StressTestBase() {
     // ---- C11: Concurrent barrier probes see consistent count under high write load ----
 
     @Test
-    fun `C11 - concurrent barrier probes under high fanout - MVCC consistency`() = runBlocking {
+    fun `C11 - concurrent barrier probes under high fanout - MVCC consistency`() = runBlocking(Dispatchers.Default) {
         val n = scale.fanOutSize
         val def = workflow {
             activity("scatter") {

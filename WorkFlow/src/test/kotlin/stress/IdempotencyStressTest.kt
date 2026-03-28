@@ -33,7 +33,7 @@ class IdempotencyStressTest : StressTestBase() {
     // ---- I1: Sweeper + worker race on same stuck workflow ----
 
     @Test
-    fun `I1 - sweeper and worker race on stuck workflow - exactly one CAS wins`() = runBlocking {
+    fun `I1 - sweeper and worker race on stuck workflow - exactly one CAS wins`() = runBlocking(Dispatchers.Default) {
         val def = workflow {
             activity("step1") { transition("i1.handler") }
             activity("step2") { transition("i1.handler") }
@@ -88,7 +88,7 @@ class IdempotencyStressTest : StressTestBase() {
     // ---- I2: Two sweeper patrols overlap (dual-leader) ----
 
     @Test
-    fun `I2 - two sweeper patrols overlap - state consistent`() = runBlocking {
+    fun `I2 - two sweeper patrols overlap - state consistent`() = runBlocking(Dispatchers.Default) {
         val def = workflow {
             activity("step1") { transition("i2.handler") }
             activity("step2") { transition("i2.handler") }
@@ -132,7 +132,7 @@ class IdempotencyStressTest : StressTestBase() {
     // ---- I3: Sweeper expires task at same moment worker completes it ----
 
     @Test
-    fun `I3 - timeout and completion race - barrier fires exactly once`() = runBlocking {
+    fun `I3 - timeout and completion race - barrier fires exactly once`() = runBlocking(Dispatchers.Default) {
         val def = workflow {
             activity("step1") {
                 transition("i3.handler")
@@ -169,7 +169,7 @@ class IdempotencyStressTest : StressTestBase() {
     // ---- I4: Sweeper reclaims stale task while worker about to complete ----
 
     @Test
-    fun `I4 - stale reclaim races with task completion - no corruption`() = runBlocking {
+    fun `I4 - stale reclaim races with task completion - no corruption`() = runBlocking(Dispatchers.Default) {
         val def = workflow {
             activity("step1") { transition("i4.handler"); retries(3) }
         }
@@ -195,7 +195,7 @@ class IdempotencyStressTest : StressTestBase() {
     // ---- I5: Replay called while sweeper mid-recovery ----
 
     @Test
-    fun `I5 - replay during sweeper recovery - no conflict`() = runBlocking {
+    fun `I5 - replay during sweeper recovery - no conflict`() = runBlocking(Dispatchers.Default) {
         val def = workflow {
             activity("step1") {
                 transition("i5.handler")
@@ -242,7 +242,7 @@ class IdempotencyStressTest : StressTestBase() {
     // ---- I6: Sweeper detects same stuck workflow on consecutive patrols ----
 
     @Test
-    fun `I6 - consecutive sweeper patrols on same stuck workflow - second is no-op`() = runBlocking {
+    fun `I6 - consecutive sweeper patrols on same stuck workflow - second is no-op`() = runBlocking(Dispatchers.Default) {
         val def = workflow {
             activity("step1") { transition("i6.handler") }
             activity("step2") { transition("i6.handler") }
@@ -287,7 +287,7 @@ class IdempotencyStressTest : StressTestBase() {
     // ---- I7: Double-claim prevention via SKIP LOCKED ----
 
     @Test
-    fun `I7 - concurrent claims on same task - SKIP LOCKED prevents double claim`() = runBlocking {
+    fun `I7 - concurrent claims on same task - SKIP LOCKED prevents double claim`() = runBlocking(Dispatchers.Default) {
         val def = workflow {
             activity("step1") { transition("i7.handler") }
         }
@@ -314,7 +314,7 @@ class IdempotencyStressTest : StressTestBase() {
     // ---- I8: Cancel workflow while barrier in-flight ----
 
     @Test
-    fun `I8 - cancel workflow while barrier in-flight - no post-cancel advancement`() = runBlocking {
+    fun `I8 - cancel workflow while barrier in-flight - no post-cancel advancement`() = runBlocking(Dispatchers.Default) {
         val def = workflow {
             activity("step1") { transition("i8.handler") }
             activity("step2") { transition("i8.step2") }

@@ -165,7 +165,7 @@ abstract class StressTestBase {
 
     @AfterEach
     fun cleanUp() {
-        runBlocking {
+        runBlocking(Dispatchers.Default) {
             // Stop workers
             workerJobs.forEach { it.cancelAndJoin() }
             workerJobs.clear()
@@ -387,7 +387,7 @@ abstract class StressTestBase {
     // --- Table cleanup (for mid-test resets, e.g. C5 boundary tests) ---
 
     protected fun cleanUpTables() {
-        runBlocking {
+        runBlocking(Dispatchers.Default) {
             workerJobs.forEach { it.cancelAndJoin() }
             workerJobs.clear()
         }

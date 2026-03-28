@@ -29,7 +29,7 @@ class LivenessStressTest : StressTestBase() {
 
     @Test
     fun `L1 - worker crash before handler - stale reclaim recovers`() =
-        runBlocking {
+        runBlocking(Dispatchers.Default) {
             val def =
                 workflow {
                     activity("step1") {
@@ -65,7 +65,7 @@ class LivenessStressTest : StressTestBase() {
 
     @Test
     fun `L2 - worker crash mid handler - stale reclaim recovers`() =
-        runBlocking {
+        runBlocking(Dispatchers.Default) {
             val def =
                 workflow {
                     activity("step1") {
@@ -99,7 +99,7 @@ class LivenessStressTest : StressTestBase() {
 
     @Test
     fun `L3 - worker crash after handler before barrier - stale reclaim recovers`() =
-        runBlocking {
+        runBlocking(Dispatchers.Default) {
             val def =
                 workflow {
                     activity("step1") {
@@ -134,7 +134,7 @@ class LivenessStressTest : StressTestBase() {
 
     @Test
     fun `L4 - crash between TX1 and TX2 - sweeper stuck detection recovers`() =
-        runBlocking {
+        runBlocking(Dispatchers.Default) {
             val def =
                 workflow {
                     activity("step1") { transition("l4.handler") }
@@ -179,7 +179,7 @@ class LivenessStressTest : StressTestBase() {
 
     @Test
     fun `L5 - all workers die and restart - stale reclaim batch recovers`() =
-        runBlocking {
+        runBlocking(Dispatchers.Default) {
             val batchSize = scale.workflowBatchSize
             val def =
                 workflow {
@@ -247,7 +247,7 @@ class LivenessStressTest : StressTestBase() {
     @Tag("stress-network")
     @Test
     fun `L6a - network cut during task update TX1 - stale reclaim recovers`() =
-        runBlocking {
+        runBlocking(Dispatchers.Default) {
             val def =
                 workflow {
                     activity("step1") {
@@ -295,7 +295,7 @@ class LivenessStressTest : StressTestBase() {
     @Tag("stress-network")
     @Test
     fun `L6b - network cut during CAS TX2 - sweeper stuck detection recovers`() =
-        runBlocking {
+        runBlocking(Dispatchers.Default) {
             val def =
                 workflow {
                     activity("step1") {
@@ -329,7 +329,7 @@ class LivenessStressTest : StressTestBase() {
     @Tag("stress-network")
     @Test
     fun `L7 - network cut during claim - task stays PENDING and next poll claims it`() =
-        runBlocking {
+        runBlocking(Dispatchers.Default) {
             val def =
                 workflow {
                     activity("step1") { transition("l7.handler") }
@@ -355,7 +355,7 @@ class LivenessStressTest : StressTestBase() {
 
     @Test
     fun `L8 - slow handler exceeds task deadline - sweeper times out task`() =
-        runBlocking {
+        runBlocking(Dispatchers.Default) {
             val def =
                 workflow {
                     activity("step1") {
@@ -388,7 +388,7 @@ class LivenessStressTest : StressTestBase() {
 
     @Test
     fun `L9 - workflow deadline expires - sweeper times out workflow`() =
-        runBlocking {
+        runBlocking(Dispatchers.Default) {
             val def =
                 workflow {
                     activity("step1") { transition("l9.handler") }
@@ -418,7 +418,7 @@ class LivenessStressTest : StressTestBase() {
 
     @Test
     fun `L10 - task exhausts retries to dead letter - barrier fires with failure policy`() =
-        runBlocking {
+        runBlocking(Dispatchers.Default) {
             val def =
                 workflow {
                     activity("step1") {
@@ -451,7 +451,7 @@ class LivenessStressTest : StressTestBase() {
 
     @Test
     fun `L11 - fan-out all sub-tasks fail with BEST_EFFORT - workflow terminates`() =
-        runBlocking {
+        runBlocking(Dispatchers.Default) {
             val def =
                 workflow {
                     activity("scatter") {
@@ -502,7 +502,7 @@ class LivenessStressTest : StressTestBase() {
 
     @Test
     fun `L12 - leader dies mid sweep - new leader recovers stuck workflows`() =
-        runBlocking {
+        runBlocking(Dispatchers.Default) {
             val def =
                 workflow {
                     activity("step1") { transition("l12.handler") }

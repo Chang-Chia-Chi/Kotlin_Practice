@@ -28,7 +28,7 @@ class ResilienceStressTest : StressTestBase() {
     // ---- R1: Oracle unavailable then recovers ----
 
     @Test
-    fun `R1 - Oracle outage then recovery - workflows complete`() = runBlocking {
+    fun `R1 - Oracle outage then recovery - workflows complete`() = runBlocking(Dispatchers.Default) {
         val batchSize = scale.workflowBatchSize
         val def = workflow {
             activity("step1") { transition("r1.handler") }
@@ -69,7 +69,7 @@ class ResilienceStressTest : StressTestBase() {
     // ---- R2: Oracle latency spike ----
 
     @Test
-    fun `R2 - Oracle latency spike - no spurious timeouts and backlog drains`() = runBlocking {
+    fun `R2 - Oracle latency spike - no spurious timeouts and backlog drains`() = runBlocking(Dispatchers.Default) {
         val def = workflow {
             activity("step1") {
                 transition("r2.handler")
@@ -109,7 +109,7 @@ class ResilienceStressTest : StressTestBase() {
     // ---- R3: Connection pool exhaustion ----
 
     @Test
-    fun `R3 - connection pool exhaustion - workers back off and recover`() = runBlocking {
+    fun `R3 - connection pool exhaustion - workers back off and recover`() = runBlocking(Dispatchers.Default) {
         val def = workflow {
             activity("step1") { transition("r3.handler"); retries(5) }
         }
@@ -145,7 +145,7 @@ class ResilienceStressTest : StressTestBase() {
     // ---- R4: Full worker pool dies and restarts ----
 
     @Test
-    fun `R4 - worker pool death and restart - all workflows recover`() = runBlocking {
+    fun `R4 - worker pool death and restart - all workflows recover`() = runBlocking(Dispatchers.Default) {
         val def = workflow {
             activity("step1") { transition("r4.handler"); retries(3) }
         }
@@ -192,7 +192,7 @@ class ResilienceStressTest : StressTestBase() {
     // ---- R5: No leader for extended period, then elected ----
 
     @Test
-    fun `R5 - leaderless period then recovery - stuck workflows batch recovered`() = runBlocking {
+    fun `R5 - leaderless period then recovery - stuck workflows batch recovered`() = runBlocking(Dispatchers.Default) {
         val def = workflow {
             activity("step1") { transition("r5.handler") }
             activity("step2") { transition("r5.handler") }
@@ -236,7 +236,7 @@ class ResilienceStressTest : StressTestBase() {
     // ---- R6: Network partition heals after multiple stale reclaim cycles ----
 
     @Test
-    fun `R6 - extended partition then heal - system converges`() = runBlocking {
+    fun `R6 - extended partition then heal - system converges`() = runBlocking(Dispatchers.Default) {
         val def = workflow {
             activity("step1") { transition("r6.handler"); retries(5) }
         }
@@ -270,7 +270,7 @@ class ResilienceStressTest : StressTestBase() {
     // ---- R7: Rapid leader election flaps ----
 
     @Test
-    fun `R7 - rapid leader flaps - no orphaned state`() = runBlocking {
+    fun `R7 - rapid leader flaps - no orphaned state`() = runBlocking(Dispatchers.Default) {
         val def = workflow {
             activity("step1") { transition("r7.handler") }
             activity("step2") { transition("r7.handler") }
@@ -313,7 +313,7 @@ class ResilienceStressTest : StressTestBase() {
     // ---- R8: Oracle restarts (connections reset) ----
 
     @Test
-    fun `R8 - Oracle connection reset - pool reconnects and workflows resume`() = runBlocking {
+    fun `R8 - Oracle connection reset - pool reconnects and workflows resume`() = runBlocking(Dispatchers.Default) {
         val def = workflow {
             activity("step1") { transition("r8.handler"); retries(3) }
         }
