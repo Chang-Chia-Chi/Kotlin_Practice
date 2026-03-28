@@ -40,7 +40,7 @@ class WorkflowEngineTest {
         workflowRepo = WorkflowRepository(jdbi)
         taskRepo = TaskRepository(jdbi)
         engine = WorkflowEngine(jdbi, workflowRepo, taskRepo, objectMapper)
-        barrierService = BarrierService(jdbi, workflowRepo, taskRepo, objectMapper)
+        barrierService = BarrierService(jdbi, workflowRepo, taskRepo, objectMapper, PhaseStrategyRegistry(objectMapper))
     }
 
     @AfterEach

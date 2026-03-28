@@ -76,7 +76,7 @@ class WorkflowIntegrationTest {
         workflowRepo = WorkflowRepository(jdbi)
         taskRepo = TaskRepository(jdbi)
         engine = WorkflowEngine(jdbi, workflowRepo, taskRepo, objectMapper)
-        barrier = BarrierService(jdbi, workflowRepo, taskRepo, objectMapper)
+        barrier = BarrierService(jdbi, workflowRepo, taskRepo, objectMapper, PhaseStrategyRegistry(objectMapper))
         sweeper = Sweeper(jdbi, workflowRepo, taskRepo, barrier, testConfig)
     }
 

@@ -38,6 +38,7 @@ class BarrierServiceTest {
         .registerModule(KotlinModule.Builder().build())
         .registerModule(JavaTimeModule())
     private lateinit var barrier: BarrierService
+    private lateinit var strategyRegistry: PhaseStrategyRegistry
     private lateinit var engine: WorkflowEngine
 
     @BeforeAll
@@ -45,7 +46,8 @@ class BarrierServiceTest {
         jdbi = OracleTestContainer.jdbi
         workflowRepo = WorkflowRepository(jdbi)
         taskRepo = TaskRepository(jdbi)
-        barrier = BarrierService(jdbi, workflowRepo, taskRepo, objectMapper)
+        strategyRegistry = PhaseStrategyRegistry(objectMapper)
+        barrier = BarrierService(jdbi, workflowRepo, taskRepo, objectMapper, strategyRegistry)
         engine = WorkflowEngine(jdbi, workflowRepo, taskRepo, objectMapper)
     }
 
@@ -61,7 +63,7 @@ class BarrierServiceTest {
 
     private fun randomId(): String = UUID.randomUUID().toString()
 
-    private fun now(): Instant = Instant.now().truncatedTo(ChronoUnit.MILLIS)
+    private fun now(): Instant = Instant.now().truncatedTo(ChronoUnit.MICROS)
 
     private fun makeWorkflow(
         id: String = randomId(),
@@ -137,9 +139,9 @@ class BarrierServiceTest {
         jdbi.useHandle<Exception> { handle ->
             val stmt = handle.createUpdate(
                 """INSERT INTO task (id, workflow_id, sequence_number, status, handler_key, payload, result,
-                   claimed_by, claimed_at, completed_at, retry_count, max_retries, deadline_at)
+                   claimed_by, claimed_at, completed_at, retry_count, max_retries, deadline_at, queue_name)
                    VALUES (:id, :workflowId, :sequenceNumber, :status, :handlerKey, :payload, :result,
-                   :claimedBy, :claimedAt, :completedAt, :retryCount, :maxRetries, :deadlineAt)""",
+                   :claimedBy, :claimedAt, :completedAt, :retryCount, :maxRetries, :deadlineAt, :queueName)""",
             )
                 .bind("id", task.id)
                 .bind("workflowId", task.workflowId)
@@ -148,6 +150,7 @@ class BarrierServiceTest {
                 .bind("handlerKey", task.handlerKey)
                 .bind("retryCount", task.retryCount)
                 .bind("maxRetries", task.maxRetries)
+                .bind("queueName", task.queueName)
 
             fun bindStringOrNull(name: String, value: String?) =
                 if (value != null) stmt.bind(name, value) else stmt.bindNull(name, java.sql.Types.VARCHAR)
@@ -711,14 +714,14 @@ class BarrierServiceTest {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // Test 10: PARALLEL→LINEAR payload propagation (next task payload is null)
+    // Test 10: PARALLEL→LINEAR payload propagation (aggregated results)
     // ═══════════════════════════════════════════════════════════════════════
 
     @Nested
     inner class ParallelToLinearPayload {
 
         @Test
-        fun `parallel phase completes - next linear task has null payload`() = runTest {
+        fun `parallel phase completes - next linear task has aggregated results payload`() = runTest {
             val def = fanOutThenLinearDef(joinPolicy = JoinPolicy.All)
             val wfId = randomId()
             val wf = makeWorkflow(id = wfId, definition = def, currentSequence = 2, version = 1)
@@ -746,12 +749,21 @@ class BarrierServiceTest {
             assertEquals(3, (updatedWf["CURRENT_SEQUENCE"] as Number).toInt())
             assertEquals("RUNNING", updatedWf["STATUS"])
 
-            // Next linear task has null payload (multiple parallel results, no single payload to propagate)
+            // Next linear task has aggregated payload from completed parallel results
             val seq3Tasks = readTasksDirect(wfId, 3)
             assertEquals(1, seq3Tasks.size)
             assertEquals("final.handler", seq3Tasks[0]["HANDLER_KEY"])
-            assertTrue(seq3Tasks[0]["PAYLOAD"] == null,
-                "PARALLEL→LINEAR: next task payload should be null")
+            val payload = seq3Tasks[0]["PAYLOAD"] as? String
+            assertNotNull(payload, "PARALLEL→LINEAR: next task payload should be aggregated results")
+            // ParallelPhaseStrategy aggregates via createArrayNode + readTree (no double-encoding)
+            val resultsNode = objectMapper.readTree(payload)
+            assertTrue(resultsNode.isArray)
+            // Both tasks have non-null resultJson: first was inserted with it,
+            // second received it via onTaskCompleted's self-update in the same transaction
+            assertEquals(2, resultsNode.size())
+            val resultStrings = resultsNode.map { it.toString() }.toSet()
+            assertTrue(resultStrings.contains("""{"r":"one"}"""))
+            assertTrue(resultStrings.contains("""{"r":"two"}"""))
         }
     }
 
