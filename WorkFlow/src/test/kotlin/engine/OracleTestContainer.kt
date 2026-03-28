@@ -25,6 +25,8 @@ object OracleTestContainer {
                 handle.createScript(loader.getResource("db/migration/V1__create_workflow_tables.sql")!!.readText()).execute()
                 handle.createScript(loader.getResource("db/migration/V2__add_dead_letter.sql")!!.readText()).execute()
                 handle.createScript(loader.getResource("db/migration/V3__add_not_before.sql")!!.readText()).execute()
+                handle.createScript(loader.getResource("db/migration/V4__cancelled_and_timeout.sql")!!.readText()).execute()
+                handle.createScript(loader.getResource("db/migration/V5__enqueued_at_and_indexes.sql")!!.readText()).execute()
             }
         }
     }

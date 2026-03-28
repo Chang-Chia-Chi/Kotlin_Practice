@@ -81,6 +81,9 @@ data class Task(
     val maxRetries: Int,
     val deadlineAt: Instant?,
     val notBefore: Instant? = null,
+    val backoffBase: Int = 1,
+    val backoffCap: Int = 300,
+    val enqueuedAt: Instant = Instant.EPOCH,
 )
 
 internal fun createTaskForActivity(
@@ -104,5 +107,7 @@ internal fun createTaskForActivity(
         retryCount = 0,
         maxRetries = activity.retries,
         deadlineAt = now.plus(activity.deadline),
+        backoffBase = activity.backoffBase.seconds.toInt(),
+        backoffCap = activity.backoffCap.seconds.toInt(),
     )
 }

@@ -35,8 +35,8 @@ class TaskRepository(
                     SELECT id FROM task
                     WHERE status = 'PENDING'
                       AND (deadline_at IS NULL OR deadline_at > :now)
-                      AND (not_before IS NULL OR not_before < :now)
-                    ORDER BY claimed_at NULLS FIRST, id
+                      AND (not_before IS NULL OR not_before <= :now)
+                    ORDER BY enqueued_at ASC, id
                     FETCH FIRST :limit ROWS ONLY
                 )
                 FOR UPDATE SKIP LOCKED
@@ -52,22 +52,20 @@ class TaskRepository(
             h
                 .createUpdate(
                     """
-                UPDATE task SET status = 'PROCESSING', claimed_by = :workerId, claimed_at = :now
+                UPDATE task SET status = 'PROCESSING', claimed_by = :workerId, claimed_at = SYSTIMESTAMP
                 WHERE id IN (<ids>)
                 """,
                 ).bind("workerId", workerId)
-                .bind("now", now)
                 .bindList("ids", ids)
                 .execute()
 
-            val nowInstant = now.toInstant(ZoneOffset.UTC)
-            rows.map { row ->
-                mapTaskRow(row).copy(
-                    status = TaskStatus.PROCESSING,
-                    claimedBy = workerId,
-                    claimedAt = nowInstant,
-                )
-            }
+            // Re-read claimed rows to get exact DB-assigned claimed_at for fencing
+            h
+                .createQuery("SELECT * FROM task WHERE id IN (<ids>) ORDER BY enqueued_at ASC, id")
+                .bindList("ids", ids)
+                .mapToMap()
+                .list()
+                .map(::mapTaskRow)
         }
 
     suspend fun updateStatus(
@@ -420,6 +418,7 @@ class TaskRepository(
             notBefore = readNullableTimestamp(ci["NOT_BEFORE"]),
             backoffBase = (ci["BACKOFF_BASE"] as Number).toInt(),
             backoffCap = (ci["BACKOFF_CAP"] as Number).toInt(),
+            enqueuedAt = readTimestamp(ci["ENQUEUED_AT"]),
         )
     }
 }

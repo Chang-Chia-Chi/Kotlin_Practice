@@ -83,6 +83,8 @@ class RepositoryTest {
         maxRetries: Int = 0,
         deadlineAt: Instant? = null,
         notBefore: Instant? = null,
+        backoffBase: Int = 1,
+        backoffCap: Int = 300,
     ) = Task(
         id = id,
         workflowId = workflowId,
@@ -98,14 +100,16 @@ class RepositoryTest {
         maxRetries = maxRetries,
         deadlineAt = deadlineAt,
         notBefore = notBefore,
+        backoffBase = backoffBase,
+        backoffCap = backoffCap,
     )
 
     /** Insert a workflow directly via SQL for test setup (independent of repo under test). */
     private fun insertWorkflowDirect(run: WorkflowRun) {
         jdbi.useHandle<Exception> { handle ->
             handle.createUpdate(
-                """INSERT INTO workflow (id, definition, current_sequence, version, status, created_at, updated_at)
-                   VALUES (:id, :definition, :currentSequence, :version, :status, :createdAt, :updatedAt)"""
+                """INSERT INTO workflow (id, definition, current_sequence, version, status, created_at, updated_at, deadline_at)
+                   VALUES (:id, :definition, :currentSequence, :version, :status, :createdAt, :updatedAt, :deadlineAt)"""
             )
                 .bind("id", run.id)
                 .bind("definition", run.definitionJson)
@@ -114,19 +118,27 @@ class RepositoryTest {
                 .bind("status", run.status.name)
                 .bind("createdAt", LocalDateTime.ofInstant(run.createdAt, ZoneOffset.UTC))
                 .bind("updatedAt", LocalDateTime.ofInstant(run.updatedAt, ZoneOffset.UTC))
+                .bind("deadlineAt", LocalDateTime.ofInstant(run.deadlineAt, ZoneOffset.UTC))
                 .execute()
         }
     }
 
     /** Insert a task directly via SQL for test setup (independent of repo under test). */
-    private fun insertTaskDirect(task: Task) {
+    private fun insertTaskDirect(task: Task, enqueuedAt: Instant? = null) {
         jdbi.useHandle<Exception> { handle ->
-            val stmt = handle.createUpdate(
-                """INSERT INTO task (id, workflow_id, sequence_number, status, handler_key, payload, result,
-                   claimed_by, claimed_at, completed_at, retry_count, max_retries, deadline_at, not_before)
-                   VALUES (:id, :workflowId, :sequenceNumber, :status, :handlerKey, :payload, :result,
-                   :claimedBy, :claimedAt, :completedAt, :retryCount, :maxRetries, :deadlineAt, :notBefore)"""
-            )
+            val columns = buildString {
+                append("id, workflow_id, sequence_number, status, handler_key, payload, result, ")
+                append("claimed_by, claimed_at, completed_at, retry_count, max_retries, deadline_at, not_before, ")
+                append("backoff_base, backoff_cap")
+                if (enqueuedAt != null) append(", enqueued_at")
+            }
+            val values = buildString {
+                append(":id, :workflowId, :sequenceNumber, :status, :handlerKey, :payload, :result, ")
+                append(":claimedBy, :claimedAt, :completedAt, :retryCount, :maxRetries, :deadlineAt, :notBefore, ")
+                append(":backoffBase, :backoffCap")
+                if (enqueuedAt != null) append(", :enqueuedAt")
+            }
+            val stmt = handle.createUpdate("INSERT INTO task ($columns) VALUES ($values)")
                 .bind("id", task.id)
                 .bind("workflowId", task.workflowId)
                 .bind("sequenceNumber", task.sequenceNumber)
@@ -149,6 +161,11 @@ class RepositoryTest {
             bindTimestampOrNull("completedAt", task.completedAt)
             bindTimestampOrNull("deadlineAt", task.deadlineAt)
             bindTimestampOrNull("notBefore", task.notBefore)
+            stmt.bind("backoffBase", task.backoffBase)
+            stmt.bind("backoffCap", task.backoffCap)
+            if (enqueuedAt != null) {
+                stmt.bind("enqueuedAt", LocalDateTime.ofInstant(enqueuedAt, ZoneOffset.UTC))
+            }
 
             stmt.execute()
         }
@@ -436,7 +453,7 @@ class RepositoryTest {
             val wf = makeWorkflow(status = WorkflowStatus.RUNNING)
             workflowRepo.insert(wf)
 
-            val result = workflowRepo.updateStatus(wf.id, WorkflowStatus.COMPLETED)
+            val result = workflowRepo.updateStatus(wf.id, WorkflowStatus.COMPLETED, WorkflowStatus.RUNNING)
 
             assertTrue(result)
             val found = workflowRepo.findById(wf.id)!!
@@ -448,13 +465,13 @@ class RepositoryTest {
             val wf = makeWorkflow(status = WorkflowStatus.RUNNING)
             workflowRepo.insert(wf)
 
-            assertTrue(workflowRepo.updateStatus(wf.id, WorkflowStatus.FAILED))
+            assertTrue(workflowRepo.updateStatus(wf.id, WorkflowStatus.FAILED, WorkflowStatus.RUNNING))
             assertEquals(WorkflowStatus.FAILED, workflowRepo.findById(wf.id)!!.status)
         }
 
         @Test
         fun `updateStatus returns false for non-existent id`() = runTest {
-            val result = workflowRepo.updateStatus(randomId(), WorkflowStatus.COMPLETED)
+            val result = workflowRepo.updateStatus(randomId(), WorkflowStatus.COMPLETED, WorkflowStatus.RUNNING)
             assertFalse(result)
         }
 
@@ -466,7 +483,7 @@ class RepositoryTest {
             insertWorkflowDirect(wf)
 
             val result = jdbi.inTransaction<Boolean, Exception> { handle ->
-                workflowRepo.updateStatusWithHandle(handle, wf.id, WorkflowStatus.COMPLETED)
+                workflowRepo.updateStatusWithHandle(handle, wf.id, WorkflowStatus.COMPLETED, WorkflowStatus.RUNNING)
             }
 
             assertTrue(result)
@@ -1517,6 +1534,571 @@ class RepositoryTest {
                 allClaimed.all { it in taskIds },
                 "Claimed IDs must be from the original task set",
             )
+        }
+
+        // ── not_before claim filtering ────────────────────────────────────
+
+        @Test
+        fun `claimNext skips tasks with future not_before`() = runTest {
+            val wf = makeWorkflow()
+            workflowRepo.insert(wf)
+
+            val futureNotBefore = now().plus(Duration.ofMinutes(5))
+            insertTaskDirect(makeTask(
+                workflowId = wf.id,
+                status = TaskStatus.PENDING,
+                handlerKey = "backed-off",
+                notBefore = futureNotBefore,
+            ))
+            insertTaskDirect(makeTask(
+                workflowId = wf.id,
+                status = TaskStatus.PENDING,
+                handlerKey = "ready",
+            ))
+
+            val claimed = taskRepo.claimNext("worker-1", 10)
+
+            assertEquals(1, claimed.size)
+            assertEquals("ready", claimed[0].handlerKey)
+        }
+
+        @Test
+        fun `claimNext claims task after not_before has passed`() = runTest {
+            val wf = makeWorkflow()
+            workflowRepo.insert(wf)
+
+            val pastNotBefore = now().minus(Duration.ofSeconds(1))
+            insertTaskDirect(makeTask(
+                workflowId = wf.id,
+                status = TaskStatus.PENDING,
+                handlerKey = "backoff-expired",
+                notBefore = pastNotBefore,
+            ))
+
+            val claimed = taskRepo.claimNext("worker-1", 10)
+
+            assertEquals(1, claimed.size)
+            assertEquals("backoff-expired", claimed[0].handlerKey)
+        }
+
+        @Test
+        fun `claimNext claims task with null not_before`() = runTest {
+            val wf = makeWorkflow()
+            workflowRepo.insert(wf)
+
+            insertTaskDirect(makeTask(
+                workflowId = wf.id,
+                status = TaskStatus.PENDING,
+                handlerKey = "no-backoff",
+                notBefore = null,
+            ))
+
+            val claimed = taskRepo.claimNext("worker-1", 10)
+
+            assertEquals(1, claimed.size)
+            assertEquals("no-backoff", claimed[0].handlerKey)
+        }
+
+        @Test
+        fun `claimNext claims task with not_before equal to now`() = runTest {
+            val wf = makeWorkflow()
+            workflowRepo.insert(wf)
+
+            // not_before exactly at claim time — should be claimable with <= check
+            val notBeforeExact = now().minus(Duration.ofMillis(1))
+            insertTaskDirect(makeTask(
+                workflowId = wf.id,
+                status = TaskStatus.PENDING,
+                handlerKey = "boundary-exact",
+                notBefore = notBeforeExact,
+            ))
+
+            val claimed = taskRepo.claimNext("worker-1", 10)
+
+            assertEquals(1, claimed.size)
+            assertEquals("boundary-exact", claimed[0].handlerKey)
+        }
+
+        // ── resetForRetry backoff ─────────────────────────────────────────
+
+        /** Read a nullable Oracle timestamp from raw row data for assertions. */
+        private fun readNullableTimestampDirect(value: Any?): Instant? = when (value) {
+            null -> null
+            is java.sql.Timestamp -> value.toLocalDateTime().toInstant(ZoneOffset.UTC)
+            else -> {
+                // Oracle JDBC returns oracle.sql.TIMESTAMP — use reflection
+                val method = value::class.java.getMethod("timestampValue")
+                (method.invoke(value) as java.sql.Timestamp).toLocalDateTime().toInstant(ZoneOffset.UTC)
+            }
+        }
+
+        @Test
+        fun `resetForRetry sets not_before with exponential backoff`() = runTest {
+            val wf = makeWorkflow()
+            workflowRepo.insert(wf)
+            val task = makeTask(
+                workflowId = wf.id,
+                status = TaskStatus.PROCESSING,
+                claimedBy = "worker-1",
+                claimedAt = now(),
+                maxRetries = 5,
+                retryCount = 0,
+            )
+            insertTaskDirect(task)
+
+            val beforeReset = Instant.now()
+            taskRepo.resetForRetry(task.id, 2) // retryCount=2, default base=1 → backoff = 1*2^2 = 4s
+
+            val row = readTaskDirect(task.id)!!
+            assertEquals("PENDING", row["STATUS"])
+            assertNull(row["CLAIMED_BY"])
+            assertNull(row["CLAIMED_AT"])
+            assertEquals(2, (row["RETRY_COUNT"] as Number).toInt())
+
+            val notBefore = readNullableTimestampDirect(row["NOT_BEFORE"])
+            assertNotNull(notBefore, "not_before should be set after resetForRetry")
+            // 1*2^2 = 4 seconds backoff, allow 2s tolerance for execution time
+            val expectedMin = beforeReset.plusSeconds(2)
+            val expectedMax = beforeReset.plusSeconds(6)
+            assertTrue(
+                notBefore.isAfter(expectedMin) && notBefore.isBefore(expectedMax),
+                "not_before ($notBefore) should be ~4s after reset, " +
+                    "expected between $expectedMin and $expectedMax",
+            )
+        }
+
+        @Test
+        fun `resetForRetry backoff caps at backoff_cap`() = runTest {
+            val wf = makeWorkflow()
+            workflowRepo.insert(wf)
+            val task = makeTask(
+                workflowId = wf.id,
+                status = TaskStatus.PROCESSING,
+                claimedBy = "worker-1",
+                claimedAt = now(),
+                maxRetries = 15,
+                retryCount = 0,
+            )
+            insertTaskDirect(task)
+
+            val beforeReset = Instant.now()
+            taskRepo.resetForRetry(task.id, 10) // 1*2^10 = 1024, capped to 300
+
+            val row = readTaskDirect(task.id)!!
+            val notBefore = readNullableTimestampDirect(row["NOT_BEFORE"])
+            assertNotNull(notBefore)
+            val maxExpected = beforeReset.plusSeconds(305)
+            assertTrue(
+                notBefore.isBefore(maxExpected),
+                "not_before ($notBefore) should be capped at ~300s, not exceed $maxExpected",
+            )
+            val minExpected = beforeReset.plusSeconds(295)
+            assertTrue(
+                notBefore.isAfter(minExpected),
+                "not_before ($notBefore) should be at least ~300s ($minExpected)",
+            )
+        }
+
+        // ── Per-activity backoff config ───────────────────────────────────
+
+        @Test
+        fun `resetForRetry uses per-task backoff_base and backoff_cap`() = runTest {
+            val wf = makeWorkflow()
+            workflowRepo.insert(wf)
+            // Custom backoff: base=5s, cap=60s
+            val task = makeTask(
+                workflowId = wf.id,
+                status = TaskStatus.PROCESSING,
+                claimedBy = "worker-1",
+                claimedAt = now(),
+                maxRetries = 5,
+                retryCount = 0,
+                backoffBase = 5,
+                backoffCap = 60,
+            )
+            insertTaskDirect(task)
+
+            val beforeReset = Instant.now()
+            taskRepo.resetForRetry(task.id, 2) // 5*2^2 = 20s
+
+            val row = readTaskDirect(task.id)!!
+            val notBefore = readNullableTimestampDirect(row["NOT_BEFORE"])
+            assertNotNull(notBefore)
+            val expectedMin = beforeReset.plusSeconds(18)
+            val expectedMax = beforeReset.plusSeconds(22)
+            assertTrue(
+                notBefore.isAfter(expectedMin) && notBefore.isBefore(expectedMax),
+                "not_before ($notBefore) should be ~20s with custom base=5, expected $expectedMin..$expectedMax",
+            )
+        }
+
+        // ── Dead-letter replay — single ───────────────────────────────────
+
+        @Test
+        fun `replayDeadLetterTask resets DEAD_LETTER to PENDING`() = runTest {
+            val wf = makeWorkflow()
+            workflowRepo.insert(wf)
+
+            val task = makeTask(
+                workflowId = wf.id,
+                status = TaskStatus.DEAD_LETTER,
+                claimedBy = "old-worker",
+                claimedAt = now().minus(Duration.ofHours(1)),
+                completedAt = now().minus(Duration.ofMinutes(30)),
+                resultJson = """{"error":"timeout"}""",
+                retryCount = 3,
+                maxRetries = 3,
+                notBefore = now().plus(Duration.ofMinutes(5)),
+            )
+            insertTaskDirect(task)
+
+            val result = taskRepo.replayDeadLetterTask(task.id)
+
+            assertTrue(result)
+            val row = readTaskDirect(task.id)!!
+            assertEquals("PENDING", row["STATUS"])
+            assertEquals(0, (row["RETRY_COUNT"] as Number).toInt())
+            assertNull(row["CLAIMED_BY"])
+            assertNull(row["CLAIMED_AT"])
+            assertNull(row["COMPLETED_AT"])
+            assertNull(row["RESULT"])
+            assertNull(row["NOT_BEFORE"])
+        }
+
+        @Test
+        fun `replayDeadLetterTask returns false for non-DEAD_LETTER task`() = runTest {
+            val wf = makeWorkflow()
+            workflowRepo.insert(wf)
+
+            val task = makeTask(workflowId = wf.id, status = TaskStatus.PENDING)
+            insertTaskDirect(task)
+
+            val result = taskRepo.replayDeadLetterTask(task.id)
+
+            assertFalse(result)
+        }
+
+        @Test
+        fun `replayDeadLetterTask returns false for non-existent task`() = runTest {
+            val result = taskRepo.replayDeadLetterTask(randomId())
+            assertFalse(result)
+        }
+
+        @Test
+        fun `replayed task is claimable by workers`() = runTest {
+            val wf = makeWorkflow()
+            workflowRepo.insert(wf)
+
+            val task = makeTask(
+                workflowId = wf.id,
+                status = TaskStatus.DEAD_LETTER,
+                retryCount = 3,
+                maxRetries = 3,
+            )
+            insertTaskDirect(task)
+
+            taskRepo.replayDeadLetterTask(task.id)
+            val claimed = taskRepo.claimNext("worker-1", 10)
+
+            assertEquals(1, claimed.size)
+            assertEquals(task.id, claimed[0].id)
+            assertEquals(TaskStatus.PROCESSING, claimed[0].status)
+        }
+
+        // ── Dead-letter replay — batch ────────────────────────────────────
+
+        @Test
+        fun `replayDeadLetterBatch replays all DEAD_LETTER tasks for workflow`() = runTest {
+            val wf = makeWorkflow()
+            workflowRepo.insert(wf)
+
+            val dl1 = makeTask(workflowId = wf.id, status = TaskStatus.DEAD_LETTER, retryCount = 3, maxRetries = 3)
+            val dl2 = makeTask(workflowId = wf.id, status = TaskStatus.DEAD_LETTER, retryCount = 3, maxRetries = 3)
+            val completed = makeTask(workflowId = wf.id, status = TaskStatus.COMPLETED)
+            insertTaskDirect(dl1)
+            insertTaskDirect(dl2)
+            insertTaskDirect(completed)
+
+            val count = taskRepo.replayDeadLetterBatch(wf.id)
+
+            assertEquals(2, count)
+            assertEquals("PENDING", readTaskDirect(dl1.id)!!["STATUS"])
+            assertEquals("PENDING", readTaskDirect(dl2.id)!!["STATUS"])
+            assertEquals("COMPLETED", readTaskDirect(completed.id)!!["STATUS"])
+        }
+
+        @Test
+        fun `replayDeadLetterBatch returns 0 when no DEAD_LETTER tasks`() = runTest {
+            val wf = makeWorkflow()
+            workflowRepo.insert(wf)
+
+            insertTaskDirect(makeTask(workflowId = wf.id, status = TaskStatus.COMPLETED))
+
+            val count = taskRepo.replayDeadLetterBatch(wf.id)
+            assertEquals(0, count)
+        }
+
+        @Test
+        fun `replayDeadLetterBatch scoped to workflow`() = runTest {
+            val wf1 = makeWorkflow()
+            val wf2 = makeWorkflow()
+            workflowRepo.insert(wf1)
+            workflowRepo.insert(wf2)
+
+            val task1 = makeTask(workflowId = wf1.id, status = TaskStatus.DEAD_LETTER, retryCount = 3, maxRetries = 3)
+            val task2 = makeTask(workflowId = wf2.id, status = TaskStatus.DEAD_LETTER, retryCount = 3, maxRetries = 3)
+            insertTaskDirect(task1)
+            insertTaskDirect(task2)
+
+            val count = taskRepo.replayDeadLetterBatch(wf1.id)
+
+            assertEquals(1, count)
+            assertEquals("PENDING", readTaskDirect(task1.id)!!["STATUS"])
+            assertEquals("DEAD_LETTER", readTaskDirect(task2.id)!!["STATUS"])
+        }
+
+        @Test
+        fun `replayDeadLetterBatchWithHandle works within transaction`() {
+            val wf = makeWorkflow()
+            insertWorkflowDirect(wf)
+            val task = makeTask(workflowId = wf.id, status = TaskStatus.DEAD_LETTER, retryCount = 3, maxRetries = 3)
+            insertTaskDirect(task)
+
+            val count = jdbi.inTransaction<Int, Exception> { handle ->
+                taskRepo.replayDeadLetterBatchWithHandle(handle, wf.id)
+            }
+
+            assertEquals(1, count)
+            assertEquals("PENDING", readTaskDirect(task.id)!!["STATUS"])
+        }
+
+        // ── R2.1 — FIFO ordering via enqueued_at ─────────────────────────
+
+        /** Read DB server time for SYSTIMESTAMP assertions. */
+        private fun readDbServerTime(): Instant {
+            return jdbi.withHandle<Instant, Exception> { handle ->
+                val raw = handle.createQuery("SELECT CAST(SYSTIMESTAMP AS TIMESTAMP) FROM DUAL")
+                    .mapTo(java.sql.Timestamp::class.java)
+                    .one()
+                raw.toLocalDateTime().toInstant(ZoneOffset.UTC)
+            }
+        }
+
+        @Test
+        fun `claimNext returns tasks in enqueued_at ascending order`() = runTest {
+            val wf = makeWorkflow()
+            workflowRepo.insert(wf)
+
+            val baseTime = Instant.now().truncatedTo(ChronoUnit.SECONDS)
+            val t1 = makeTask(workflowId = wf.id, handlerKey = "oldest")
+            val t2 = makeTask(workflowId = wf.id, handlerKey = "middle")
+            val t3 = makeTask(workflowId = wf.id, handlerKey = "newest")
+
+            // Insert with explicit enqueued_at to control FIFO order
+            insertTaskDirect(t2, enqueuedAt = baseTime.plusSeconds(10))
+            insertTaskDirect(t3, enqueuedAt = baseTime.plusSeconds(20))
+            insertTaskDirect(t1, enqueuedAt = baseTime.plusSeconds(0))
+
+            val claimed = taskRepo.claimNext("worker-1", 10)
+
+            assertEquals(3, claimed.size)
+            assertEquals("oldest", claimed[0].handlerKey)
+            assertEquals("middle", claimed[1].handlerKey)
+            assertEquals("newest", claimed[2].handlerKey)
+        }
+
+        @Test
+        fun `claimNext FIFO ordering breaks ties by id`() = runTest {
+            val wf = makeWorkflow()
+            workflowRepo.insert(wf)
+
+            val sameTime = Instant.now().truncatedTo(ChronoUnit.SECONDS)
+            val t1 = makeTask(workflowId = wf.id, handlerKey = "a")
+            val t2 = makeTask(workflowId = wf.id, handlerKey = "b")
+
+            // Same enqueued_at — tiebreaker is id ASC
+            insertTaskDirect(t1, enqueuedAt = sameTime)
+            insertTaskDirect(t2, enqueuedAt = sameTime)
+
+            val claimed = taskRepo.claimNext("worker-1", 10)
+
+            assertEquals(2, claimed.size)
+            val expectedOrder = listOf(t1.id, t2.id).sorted()
+            assertEquals(expectedOrder, claimed.map { it.id })
+        }
+
+        @Test
+        fun `enqueuedAt is populated after insert and read-back`() = runTest {
+            val wf = makeWorkflow()
+            workflowRepo.insert(wf)
+
+            val beforeInsert = Instant.now().minusSeconds(2)
+            val task = makeTask(workflowId = wf.id)
+            insertTaskDirect(task) // enqueued_at filled by Oracle DEFAULT SYSTIMESTAMP
+
+            val found = taskRepo.findByWorkflowAndSequence(wf.id, 1)
+
+            assertEquals(1, found.size)
+            val enqueuedAt = found[0].enqueuedAt
+            assertTrue(
+                enqueuedAt != Instant.EPOCH,
+                "enqueuedAt should not be EPOCH sentinel after DB round-trip"
+            )
+            assertTrue(
+                enqueuedAt.isAfter(beforeInsert),
+                "enqueuedAt ($enqueuedAt) should be after test start ($beforeInsert)"
+            )
+        }
+
+        @Test
+        fun `insertBatch populates enqueuedAt via DB default`() = runTest {
+            val wf = makeWorkflow()
+            workflowRepo.insert(wf)
+
+            val beforeInsert = Instant.now().minusSeconds(2)
+            val task = makeTask(workflowId = wf.id)
+            taskRepo.insertBatch(listOf(task))
+
+            val found = taskRepo.findByWorkflowAndSequence(wf.id, 1)
+
+            assertEquals(1, found.size)
+            assertTrue(
+                found[0].enqueuedAt != Instant.EPOCH,
+                "enqueuedAt should be DB-assigned, not EPOCH sentinel"
+            )
+            assertTrue(
+                found[0].enqueuedAt.isAfter(beforeInsert),
+                "enqueuedAt should be recent, not stale"
+            )
+        }
+
+        // ── R2.3 — SYSTIMESTAMP for claimed_at ───────────────────────────
+
+        @Test
+        fun `claimNext sets claimed_at from DB SYSTIMESTAMP not JVM clock`() = runTest {
+            val wf = makeWorkflow()
+            workflowRepo.insert(wf)
+
+            val task = makeTask(workflowId = wf.id, status = TaskStatus.PENDING)
+            insertTaskDirect(task)
+
+            val dbTimeBefore = readDbServerTime()
+            val claimed = taskRepo.claimNext("worker-1", 1)
+            val dbTimeAfter = readDbServerTime()
+
+            assertEquals(1, claimed.size)
+            val claimedAt = claimed[0].claimedAt
+            assertNotNull(claimedAt)
+            assertTrue(
+                !claimedAt.isBefore(dbTimeBefore.minusSeconds(1)) && !claimedAt.isAfter(dbTimeAfter.plusSeconds(1)),
+                "claimedAt ($claimedAt) should be within DB server time window [$dbTimeBefore, $dbTimeAfter]"
+            )
+        }
+
+        @Test
+        fun `claimNext re-read returns exact DB-assigned claimedAt for fencing`() = runTest {
+            val wf = makeWorkflow()
+            workflowRepo.insert(wf)
+
+            val task = makeTask(workflowId = wf.id, status = TaskStatus.PENDING)
+            insertTaskDirect(task)
+
+            val claimed = taskRepo.claimNext("worker-1", 1)
+            assertEquals(1, claimed.size)
+
+            // The returned claimedAt should match the DB row exactly
+            val row = readTaskDirect(task.id)!!
+            val dbClaimedAt = readNullableTimestampDirect(row["CLAIMED_AT"])
+            assertNotNull(dbClaimedAt)
+
+            // Compare with millisecond tolerance (Oracle TIMESTAMP precision)
+            val diff = java.time.Duration.between(claimed[0].claimedAt, dbClaimedAt).abs()
+            assertTrue(
+                diff.toMillis() < 1000,
+                "Returned claimedAt (${claimed[0].claimedAt}) must match DB row ($dbClaimedAt), diff=${diff.toMillis()}ms"
+            )
+        }
+
+        @Test
+        fun `fencing works with DB-assigned claimedAt from claimNext`() = runTest {
+            val wf = makeWorkflow()
+            workflowRepo.insert(wf)
+
+            val task = makeTask(workflowId = wf.id, status = TaskStatus.PENDING)
+            insertTaskDirect(task)
+
+            val claimed = taskRepo.claimNext("worker-1", 1)
+            assertEquals(1, claimed.size)
+            val claimedTask = claimed[0]
+
+            // Use the returned claimedBy/claimedAt for fencing — should succeed
+            val result = jdbi.inTransaction<Boolean, Exception> { handle ->
+                taskRepo.updateStatusWithHandle(
+                    handle, claimedTask.id, TaskStatus.COMPLETED, """{"ok":true}""",
+                    claimedBy = claimedTask.claimedBy, claimedAt = claimedTask.claimedAt,
+                )
+            }
+
+            assertTrue(result, "fencing with DB-assigned claimedAt should succeed")
+            assertEquals("COMPLETED", readTaskDirect(task.id)!!["STATUS"])
+        }
+
+        @Test
+        fun `zombie rejected when claimedAt does not match DB-assigned value`() = runTest {
+            val wf = makeWorkflow()
+            workflowRepo.insert(wf)
+
+            val task = makeTask(workflowId = wf.id, status = TaskStatus.PENDING)
+            insertTaskDirect(task)
+
+            val claimed = taskRepo.claimNext("worker-1", 1)
+            assertEquals(1, claimed.size)
+
+            // Simulate zombie with stale claimedAt
+            val staleClaimedAt = Instant.now().minusSeconds(3600)
+            val result = jdbi.inTransaction<Boolean, Exception> { handle ->
+                taskRepo.updateStatusWithHandle(
+                    handle, claimed[0].id, TaskStatus.COMPLETED, null,
+                    claimedBy = "worker-1", claimedAt = staleClaimedAt,
+                )
+            }
+
+            assertFalse(result, "zombie with wrong claimedAt should be rejected")
+            assertEquals("PROCESSING", readTaskDirect(task.id)!!["STATUS"])
+        }
+
+        // ── R2.2 — Index changes (functional regression) ────────────────
+
+        @Test
+        fun `claim and reaper queries work correctly with bulk data`() = runTest {
+            val wf = makeWorkflow()
+            workflowRepo.insert(wf)
+
+            val baseTime = Instant.now().truncatedTo(ChronoUnit.SECONDS)
+
+            // Insert 100 PENDING tasks with spread enqueued_at
+            val taskIds = (1..100).map { i ->
+                val t = makeTask(workflowId = wf.id, status = TaskStatus.PENDING, handlerKey = "bulk.$i")
+                insertTaskDirect(t, enqueuedAt = baseTime.plusSeconds(i.toLong()))
+                t.id
+            }
+
+            // Claim first batch — should be FIFO ordered
+            val batch1 = taskRepo.claimNext("worker-1", 10)
+            assertEquals(10, batch1.size)
+            assertEquals("bulk.1", batch1[0].handlerKey)
+            assertEquals("bulk.10", batch1[9].handlerKey)
+
+            // Claim second batch — continues FIFO
+            val batch2 = taskRepo.claimNext("worker-2", 10)
+            assertEquals(10, batch2.size)
+            assertEquals("bulk.11", batch2[0].handlerKey)
+            assertEquals("bulk.20", batch2[9].handlerKey)
+
+            // No overlap between batches
+            val ids1 = batch1.map { it.id }.toSet()
+            val ids2 = batch2.map { it.id }.toSet()
+            assertTrue(ids1.intersect(ids2).isEmpty(), "No overlap between claim batches")
         }
     }
 }
