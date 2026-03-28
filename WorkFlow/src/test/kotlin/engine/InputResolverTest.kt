@@ -170,10 +170,25 @@ class InputResolverTest {
     }
 
     @Test
-    fun `unknown activity name throws`() = runTest {
+    fun `unknown activity name throws with descriptive message`() = runTest {
         val inputs = mapOf("data" to "nonexistent")
-        assertThrows<NoSuchElementException> {
+        val ex = assertThrows<IllegalArgumentException> {
             resolver.resolve(inputs, linearSequenceMap()) { emptyList() }
         }
+        assertTrue(ex.message!!.contains("nonexistent"))
+        assertTrue(ex.message!!.contains("step1"))
+        assertTrue(ex.message!!.contains("step2"))
+    }
+
+    @Test
+    fun `nested field path traverses multiple levels`() = runTest {
+        val inputs = mapOf("city" to "step1.address.city")
+        val tasksBySeq: (Int) -> List<Task> = { seq ->
+            if (seq == 1) listOf(task(1, resultJson = """{"address":{"city":"NYC","zip":"10001"}}"""))
+            else emptyList()
+        }
+        val result = resolver.resolve(inputs, linearSequenceMap(), tasksBySeq)
+        val parsed = objectMapper.readTree(result)
+        assertEquals("NYC", parsed.get("city").asText())
     }
 }

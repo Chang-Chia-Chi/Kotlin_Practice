@@ -29,6 +29,8 @@ import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.TestInstance
 import org.mockito.kotlin.any
+import org.mockito.kotlin.doReturn
+import org.mockito.kotlin.stub
 import org.mockito.kotlin.argumentCaptor
 import org.mockito.kotlin.doAnswer
 import org.mockito.kotlin.doThrow
@@ -97,6 +99,18 @@ class WorkerLoopTest {
         objectMapper = ObjectMapper()
             .registerModule(com.fasterxml.jackson.module.kotlin.KotlinModule.Builder().build())
             .registerModule(com.fasterxml.jackson.datatype.jsr310.JavaTimeModule())
+
+        // Default stub: return a no-inputs workflow so resolveInputs cache is populated
+        val defaultDef = workflow { activity("default") { transition("order.validate") } }
+        val defaultDefJson = objectMapper.writeValueAsString(defaultDef)
+        val defaultWfRun = WorkflowRun(
+            id = "default", definitionJson = defaultDefJson,
+            currentSequence = 1, version = 0, status = WorkflowStatus.RUNNING,
+            createdAt = Instant.now(), updatedAt = Instant.now(),
+            deadlineAt = Instant.now().plus(1, ChronoUnit.HOURS),
+        )
+        workflowRepo.stub { onBlocking { findById(any()) } doReturn defaultWfRun }
+
         workerLoop = WorkerLoop(config, taskRepo, handlerRegistry, barrierService, meterRegistry, inputResolver, workflowRepo, objectMapper)
     }
 
@@ -151,7 +165,6 @@ class WorkerLoopTest {
                 .thenReturn(emptyList())
             whenever(handlerRegistry.resolve(task.handlerKey)).thenReturn(handler)
             whenever(handler.execute(any())).thenReturn(handlerResult)
-            whenever(workflowRepo.findById(task.workflowId)).thenReturn(null)
 
             startAndAdvance(this)
 
@@ -185,7 +198,6 @@ class WorkerLoopTest {
                 .thenReturn(emptyList())
             whenever(handlerRegistry.resolve(task.handlerKey)).thenReturn(handler)
             whenever(handler.execute(any())).thenReturn(HandlerOutput(result = null))
-            whenever(workflowRepo.findById(task.workflowId)).thenReturn(null)
 
             startAndAdvance(this)
 
@@ -215,7 +227,6 @@ class WorkerLoopTest {
             whenever(handlerRegistry.resolve("step.two")).thenReturn(handler2)
             whenever(handler1.execute(any())).thenReturn(HandlerOutput("""{"r":1}"""))
             whenever(handler2.execute(any())).thenReturn(HandlerOutput("""{"r":2}"""))
-            whenever(workflowRepo.findById(any())).thenReturn(null)
 
             startAndAdvance(this, ticks = 4)
 

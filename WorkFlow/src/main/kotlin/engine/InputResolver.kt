@@ -28,19 +28,22 @@ class InputResolver(
         return objectMapper.writeValueAsString(resultNode)
     }
 
-    private fun parseRef(ref: String): Pair<String, String?> {
-        val dot = ref.indexOf('.')
-        return if (dot < 0) ref to null
-        else ref.substring(0, dot) to ref.substring(dot + 1)
+    private fun parseRef(ref: String): Pair<String, List<String>> {
+        val parts = ref.split('.')
+        return parts.first() to parts.drop(1)
     }
 
     private suspend fun resolveActivity(
         activityName: String,
-        fieldPath: String?,
+        fieldPath: List<String>,
         sequenceMap: Map<Int, SequenceInfo>,
         tasksBySequence: suspend (Int) -> List<Task>,
     ): JsonNode {
-        val seqEntry = sequenceMap.values.first { it.activity.name == activityName }
+        val seqEntry = sequenceMap.values.firstOrNull { it.activity.name == activityName }
+            ?: throw IllegalArgumentException(
+                "Input reference '$activityName' does not match any activity in the workflow. " +
+                    "Available activities: ${sequenceMap.values.map { it.activity.name }}"
+            )
         val isFanOut = seqEntry.activity.fanOut != null
 
         if (isFanOut) {
@@ -57,7 +60,7 @@ class InputResolver(
         if (resultJson == null) return objectMapper.nullNode()
 
         val resultTree = objectMapper.readTree(resultJson)
-        return if (fieldPath != null) resultTree.path(fieldPath) else resultTree
+        return traversePath(resultTree, fieldPath)
     }
 
     private fun findParallelSequence(
@@ -73,19 +76,18 @@ class InputResolver(
         return nextSeq
     }
 
+    private fun traversePath(node: JsonNode, fieldPath: List<String>): JsonNode =
+        fieldPath.fold(node) { current, key -> current.path(key) }
+
     private fun aggregateFanOut(
         tasks: List<Task>,
-        fieldPath: String?,
+        fieldPath: List<String>,
     ): ArrayNode {
         val arrayNode = objectMapper.createArrayNode()
         for (task in tasks) {
             val resultJson = task.resultJson ?: continue
             val resultTree = objectMapper.readTree(resultJson)
-            if (fieldPath != null) {
-                arrayNode.add(resultTree.path(fieldPath))
-            } else {
-                arrayNode.add(resultTree)
-            }
+            arrayNode.add(traversePath(resultTree, fieldPath))
         }
         return arrayNode
     }

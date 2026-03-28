@@ -9,6 +9,7 @@ import com.workflow.engine.InputResolver
 import com.workflow.engine.Task
 import com.workflow.engine.TaskRepository
 import com.workflow.engine.TaskStatus
+import com.workflow.engine.SequenceInfo
 import com.workflow.engine.WorkflowRepository
 import com.workflow.engine.buildSequenceMap
 import com.workflow.extension.indefinitelyRepeat
@@ -38,6 +39,7 @@ import org.slf4j.LoggerFactory
 import org.slf4j.MDC
 import java.time.Duration
 import java.time.Instant
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -106,6 +108,13 @@ class WorkerLoop(
 
     private lateinit var claimTotal: (String) -> Counter
     private lateinit var claimedTasksTotal: Counter
+
+    private data class CachedDefinition(
+        val definition: WorkflowDefinition,
+        val sequenceMap: Map<Int, SequenceInfo>,
+    )
+
+    private val definitionCache = ConcurrentHashMap<String, CachedDefinition>()
 
     @Volatile
     private var activeJob: Job? = null
@@ -254,18 +263,20 @@ class WorkerLoop(
     }
 
     private suspend fun resolveInputs(task: Task): String? {
-        val workflow = workflowRepo.findById(task.workflowId)
-        if (workflow == null) {
-            log.warn("resolveInputs: workflow {} not found for task {}", task.workflowId, task.id)
-            return null
+        val cached = definitionCache.getOrPut(task.workflowId) {
+            val workflow = workflowRepo.findById(task.workflowId)
+                ?: throw IllegalStateException(
+                    "Workflow ${task.workflowId} not found while resolving inputs for task ${task.id}"
+                )
+            val definition = objectMapper.readValue<WorkflowDefinition>(workflow.definitionJson)
+            CachedDefinition(definition, buildSequenceMap(definition))
         }
-        val definition = objectMapper.readValue<WorkflowDefinition>(workflow.definitionJson)
-        val sequenceMap = buildSequenceMap(definition)
-        val seqInfo = sequenceMap[task.sequenceNumber] ?: return null
+
+        val seqInfo = cached.sequenceMap[task.sequenceNumber] ?: return null
         val activityInputs = seqInfo.activity.inputs
         if (activityInputs.isEmpty()) return null
 
-        return inputResolver.resolve(activityInputs, sequenceMap) { seq ->
+        return inputResolver.resolve(activityInputs, cached.sequenceMap) { seq ->
             taskRepo.findByWorkflowAndSequence(task.workflowId, seq)
         }
     }
