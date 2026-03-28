@@ -4,11 +4,34 @@
 
 **Goal:** Add dead-letter replay API and DB-level exponential backoff via `not_before` column to prevent poison-pill handler saturation.
 
-**Architecture:** New `not_before TIMESTAMP` column on the `task` table filters backed-off tasks out of the claim query. `resetForRetry` computes exponential backoff (`2^retryCount`, capped at 300s). Three replay methods (single, batch, workflow-level) reset dead-lettered tasks to PENDING. A status guard in `BarrierService.onTaskCompleted` prevents FAILED workflows from auto-advancing.
+**Architecture:** New `not_before TIMESTAMP` column on the `task` table filters backed-off tasks out of the claim query. `resetForRetry` computes exponential backoff (`backoffBase * 2^retryCount`, capped at `backoffCap`). Three replay methods (single, batch, workflow-level) reset dead-lettered tasks to PENDING. A status guard in `BarrierService.onTaskCompleted` prevents FAILED workflows from auto-advancing.
 
 **Tech Stack:** Kotlin, JDBI 3 (raw SQL), Oracle DB, JUnit 5 + kotlinx-coroutines-test
 
 **Spec:** `docs/superpowers/specs/2026-03-27-dead-letter-replay-and-backoff-design.md`
+
+---
+
+## Design Amendment: Per-Activity Backoff Configuration
+
+**Change:** Backoff base and cap are configurable per activity/fan-out operation in the workflow definition DSL, with defaults (`backoffBase = 1s`, `backoffCap = 300s`) for unconfigured activities.
+
+**DSL changes:**
+- `ActivityDefinition`: add `backoffBase: Duration = Duration.ofSeconds(1)`, `backoffCap: Duration = Duration.ofSeconds(300)`
+- `FanOutDefinition`: add same fields
+
+**Schema changes (V3 amendment):**
+- Add `backoff_base NUMBER DEFAULT 1 NOT NULL` and `backoff_cap NUMBER DEFAULT 300 NOT NULL` to `task` table
+
+**Model changes:**
+- `Task` data class: add `backoffBase: Int = 1`, `backoffCap: Int = 300` (stored in seconds)
+- `createTaskForActivity`: populate from `ActivityDefinition`
+
+**SQL formula change:**
+- Old: `LEAST(POWER(2, retryCount), 300)`
+- New: `LEAST(backoff_base * POWER(2, retryCount), backoff_cap)` — uses row-level values, enabling the sweeper's batch UPDATE without joins
+
+**Impact on tasks:** Task 1 (migration + model) needs backoff columns. Tasks 2-4 SQL uses row-level columns. Tasks 5-8 replay methods clear `not_before` (unchanged). BarrierService `insertTasksForSequence` must set backoff from activity/fanOut definition for fan-out tasks.
 
 ---
 

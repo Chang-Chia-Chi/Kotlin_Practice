@@ -22,7 +22,7 @@ Two additions to the workflow engine:
 | Backoff mechanism | DB-level `not_before` only | Dominant failure mode is downstream (not pod-local). Simpler, global, survives restarts. Sweeper already handles stuck PROCESSING tasks from bad pods. |
 | Pod-level circuit breaker | Not included | Adds complexity for a rare failure case. YAGNI — can add later if monitoring shows need. |
 | Replay advancement control | No flag — workflow status is the gate | FAILED workflows won't auto-advance (barrier CAS checks RUNNING). Operator calls `replayWorkflow` to re-enable. |
-| Backoff formula | Fixed exponential: `2^retryCount` capped at 300s | Simple, no per-handler config needed. Option A from discussion. |
+| Backoff formula | Per-activity exponential: `backoffBase * 2^retryCount` capped at `backoffCap` | Configurable per activity/fan-out in DSL. Defaults: base=1s, cap=300s. Stored on task row for sweeper batch UPDATE compatibility. |
 | `enqueued_at` column | Not in this session | Belongs to Session 5 (schema & query performance). Existing `ORDER BY claimed_at NULLS FIRST, id` suffices. |
 
 ---
