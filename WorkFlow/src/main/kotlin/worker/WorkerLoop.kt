@@ -254,7 +254,11 @@ class WorkerLoop(
     }
 
     private suspend fun resolveInputs(task: Task): String? {
-        val workflow = workflowRepo.findById(task.workflowId) ?: return null
+        val workflow = workflowRepo.findById(task.workflowId)
+        if (workflow == null) {
+            log.warn("resolveInputs: workflow {} not found for task {}", task.workflowId, task.id)
+            return null
+        }
         val definition = objectMapper.readValue<WorkflowDefinition>(workflow.definitionJson)
         val sequenceMap = buildSequenceMap(definition)
         val seqInfo = sequenceMap[task.sequenceNumber] ?: return null

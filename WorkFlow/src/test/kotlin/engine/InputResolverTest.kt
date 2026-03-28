@@ -8,6 +8,7 @@ import kotlinx.coroutines.test.runTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 import org.junit.jupiter.api.assertThrows
 
 class InputResolverTest {
@@ -154,6 +155,18 @@ class InputResolverTest {
         val parsed = objectMapper.readTree(result)
         assertEquals("prod", parsed.get("cfg").asText())
         assertEquals("done", parsed.get("meta").asText())
+    }
+
+    @Test
+    fun `completed task with null resultJson returns json null`() = runTest {
+        val inputs = mapOf("data" to "step1")
+        val tasksBySeq: (Int) -> List<Task> = { seq ->
+            if (seq == 1) listOf(task(1, resultJson = null))
+            else emptyList()
+        }
+        val result = resolver.resolve(inputs, linearSequenceMap(), tasksBySeq)
+        val parsed = objectMapper.readTree(result)
+        assertTrue(parsed.get("data").isNull)
     }
 
     @Test

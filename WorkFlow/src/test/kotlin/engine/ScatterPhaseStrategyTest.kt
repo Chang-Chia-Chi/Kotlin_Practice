@@ -80,7 +80,8 @@ class ScatterPhaseStrategyTest {
             failurePolicy = FailurePolicy.BEST_EFFORT,
         )
         // BEST_EFFORT on SCATTER with no result: advance to next sequence
-        assertIs<AdvancementDecision.Advance>(strategy.resolve(ctx))
+        val advance = assertIs<AdvancementDecision.Advance>(strategy.resolve(ctx))
+        assertEquals(1, advance.tasks.size)
     }
 
     @Test

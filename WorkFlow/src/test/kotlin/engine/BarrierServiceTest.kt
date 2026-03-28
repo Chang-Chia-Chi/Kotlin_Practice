@@ -152,6 +152,9 @@ class BarrierServiceTest {
                 .bind("maxRetries", task.maxRetries)
                 .bind("queueName", task.queueName)
 
+            fun bindClobOrNull(name: String, value: String?) =
+                if (value != null) stmt.bind(name, value) else stmt.bindNull(name, java.sql.Types.CLOB)
+
             fun bindStringOrNull(name: String, value: String?) =
                 if (value != null) stmt.bind(name, value) else stmt.bindNull(name, java.sql.Types.VARCHAR)
 
@@ -159,8 +162,8 @@ class BarrierServiceTest {
                 if (value != null) stmt.bind(name, LocalDateTime.ofInstant(value, ZoneOffset.UTC))
                 else stmt.bindNull(name, java.sql.Types.TIMESTAMP)
 
-            bindStringOrNull("item", task.item)
-            bindStringOrNull("result", task.resultJson)
+            bindClobOrNull("item", task.item)
+            bindClobOrNull("result", task.resultJson)
             bindStringOrNull("claimedBy", task.claimedBy)
             bindTimestampOrNull("claimedAt", task.claimedAt)
             bindTimestampOrNull("completedAt", task.completedAt)

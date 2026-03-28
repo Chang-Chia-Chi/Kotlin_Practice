@@ -8,6 +8,9 @@ import com.workflow.engine.Task
 import com.workflow.engine.TaskRepository
 import com.workflow.engine.TaskStatus
 import com.workflow.engine.WorkflowRepository
+import com.workflow.engine.WorkflowRun
+import com.workflow.engine.WorkflowStatus
+import com.workflow.dsl.workflow
 import com.workflow.shutdown.ShutdownSignal
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import kotlinx.coroutines.CancellationException
@@ -42,6 +45,7 @@ import java.time.temporal.ChronoUnit
 import java.util.UUID
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -90,7 +94,9 @@ class WorkerLoopTest {
         meterRegistry = SimpleMeterRegistry()
         inputResolver = mock()
         workflowRepo = mock()
-        objectMapper = ObjectMapper().registerModule(com.fasterxml.jackson.module.kotlin.KotlinModule.Builder().build())
+        objectMapper = ObjectMapper()
+            .registerModule(com.fasterxml.jackson.module.kotlin.KotlinModule.Builder().build())
+            .registerModule(com.fasterxml.jackson.datatype.jsr310.JavaTimeModule())
         workerLoop = WorkerLoop(config, taskRepo, handlerRegistry, barrierService, meterRegistry, inputResolver, workflowRepo, objectMapper)
     }
 
@@ -145,6 +151,7 @@ class WorkerLoopTest {
                 .thenReturn(emptyList())
             whenever(handlerRegistry.resolve(task.handlerKey)).thenReturn(handler)
             whenever(handler.execute(any())).thenReturn(handlerResult)
+            whenever(workflowRepo.findById(task.workflowId)).thenReturn(null)
 
             startAndAdvance(this)
 
@@ -218,6 +225,52 @@ class WorkerLoopTest {
                 eq(task2.id), eq(task2.workflowId), eq(task2.sequenceNumber),
                 eq(TaskStatus.COMPLETED), eq("""{"r":2}"""), eq(workerId), any(),
             )
+        }
+    }
+
+    // ── A2. Input Resolution ────────────────────────────────────────────
+
+    @Nested
+    inner class InputResolution {
+
+        @Test
+        fun `handler receives resolved inputs when activity declares inputs`() = runTest {
+            val wfId = UUID.randomUUID().toString()
+            val task = makeTask(workflowId = wfId)
+            val handler = mock<TransitionHandler>()
+
+            val def = workflow {
+                activity("step1") { transition("order.validate"); inputs { "data" from "prev.field" } }
+            }
+            val defJson = objectMapper.writeValueAsString(def)
+            val wfRun = WorkflowRun(
+                id = wfId,
+                definitionJson = defJson,
+                currentSequence = 1,
+                version = 0,
+                status = WorkflowStatus.RUNNING,
+                createdAt = Instant.now(),
+                updatedAt = Instant.now(),
+                deadlineAt = Instant.now().plus(1, ChronoUnit.HOURS),
+            )
+
+            whenever(taskRepo.claimNext(eq(workerId), eq(1), eq("default")))
+                .thenReturn(listOf(task))
+                .thenReturn(emptyList())
+            whenever(handlerRegistry.resolve(task.handlerKey)).thenReturn(handler)
+            whenever(handler.execute(any())).thenReturn(HandlerOutput(result = """{"ok":true}"""))
+            whenever(workflowRepo.findById(wfId)).thenReturn(wfRun)
+            whenever(inputResolver.resolve(any(), any(), any())).thenReturn("""{"data":"resolved"}""")
+
+            startAndAdvance(this)
+
+            val inputCaptor = argumentCaptor<HandlerInput>()
+            verify(handler).execute(inputCaptor.capture())
+            val input = inputCaptor.firstValue
+            assertNotNull(input.inputs)
+            assertEquals("""{"data":"resolved"}""", input.inputs)
+
+            verify(inputResolver).resolve(any(), any(), any())
         }
     }
 
