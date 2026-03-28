@@ -14,6 +14,7 @@
 * **Build & Package:** `mvn package` (Add `-Dnative` for GraalVM)
 * **Testing:** `mvn test` (Continuous: `mvn quarkus:test`)
 * **Dependency Tree:** `mvn quarkus:dependency-tree`
+* **Git:** Related to `/commands/commit.md`
 
 ## Critical Guardrails (Tier 1)
 * **Injection:** ALWAYS use primary constructor injection. NEVER use `@Inject` on fields to ensure native-image safety.
