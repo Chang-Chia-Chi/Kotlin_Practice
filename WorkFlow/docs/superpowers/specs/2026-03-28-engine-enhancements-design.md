@@ -592,7 +592,7 @@ data class SequenceInfo(
 fun buildSequenceMap(definition: WorkflowDefinition): Map<Int, SequenceInfo>
 ```
 
-`nextSequence` replaces implicit `seq + 1` arithmetic with explicit data. For current LINEAR workflows, `nextSequence` is `seq + 1` (or `null` for the last). For CHOICE branches, it points to the convergence point.
+`nextSequence` replaces implicit `seq + 1` arithmetic with explicit data. For current LINEAR workflows, `nextSequence` is `seq + 1` (or `null` for the last). For CHOICE branches, it points to the convergence point. For SCATTER, `nextSequence` points to its PARALLEL join sequence — eliminating the `seq - 1` adjacency assumption in fan-out task creation (the scatter result is available in the strategy's `context.tasks`).
 
 ### Part B: PhaseStrategy Interface
 
@@ -775,6 +775,17 @@ Structural changes to the current codebase that add no features but make the arc
 **Why:** Eliminates all `when (phaseType)` switches from BarrierService. Adding CHOICE later = one new strategy class + one `registry.register()` call.
 
 **Behavior change:** None — same logic distributed across strategy classes.
+
+**Critical sub-tasks (highest complexity here):**
+
+1. **Dismantle `advanceWorkflow`.** This private method (lines 125–166) contains `nextSeq = currentSeq + 1` arithmetic, failure-policy evaluation, last-sequence detection via `sequenceMap.containsKey(nextSeq)`, and task insertion dispatch. All of this must move into the strategies and the new `executeDecision` coordinator. Specifically:
+   - Last-sequence detection → strategy returns `Complete` when `nextSequence == null`
+   - Failure-policy evaluation → stays in `executeDecision` (cross-cutting concern, not phase-specific)
+   - `insertTasksForSequence` → each strategy builds its own task list and returns it in `Advance.tasks`
+
+2. **Dismantle `recoverStuckWorkflow`.** This method (lines 82–123) has its own `seq + 1` at line 105 and a `when (phaseType)` payload-resolution switch at lines 113–119. It must delegate to the same strategy `resolve()` call as `onTaskCompleted`. After refactoring, both paths become: load workflow → build context → `strategy.resolve()` → `executeDecision`.
+
+3. **Move fan-out task creation into `ScatterPhaseStrategy`.** Currently `insertTasksForSequence` reads the scatter result from `sequenceNumber - 1` (line 191). After refactoring, `ScatterPhaseStrategy.resolve()` already has the scatter result in `context.tasks` (completed scatter task). It reads `resultJson`, deserializes the payload array, looks up the PARALLEL sequence info via `context.sequenceMap[nextSequence]`, and creates fan-out tasks directly. No `seq - 1` adjacency assumption survives.
 
 ### Refactoring 3: Fix PARALLEL Payload Propagation
 
