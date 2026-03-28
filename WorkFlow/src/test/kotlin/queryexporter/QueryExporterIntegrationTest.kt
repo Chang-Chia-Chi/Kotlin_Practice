@@ -98,9 +98,10 @@ class QueryExporterIntegrationTest {
         status: String = "RUNNING",
         updatedAt: LocalDateTime = LocalDateTime.now().truncatedTo(ChronoUnit.MICROS),
     ) {
+        val deadlineAt = updatedAt.plusHours(1)
         conn.prepareStatement(
-            """INSERT INTO workflow (id, definition, current_sequence, version, status, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)"""
+            """INSERT INTO workflow (id, definition, current_sequence, version, status, created_at, updated_at, deadline_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)"""
         ).use { ps ->
             ps.setString(1, id)
             ps.setString(2, """{"name":"test"}""")
@@ -109,6 +110,7 @@ class QueryExporterIntegrationTest {
             ps.setString(5, status)
             ps.setObject(6, updatedAt)
             ps.setObject(7, updatedAt)
+            ps.setObject(8, deadlineAt)
             ps.executeUpdate()
         }
     }

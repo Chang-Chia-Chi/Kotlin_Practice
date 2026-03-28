@@ -51,31 +51,36 @@ class SchemaTest {
         createdAt: Instant = now(),
         updatedAt: Instant = now(),
     ): String {
+        val createdAtLdt = LocalDateTime.ofInstant(createdAt, ZoneOffset.UTC)
+        val updatedAtLdt = LocalDateTime.ofInstant(updatedAt, ZoneOffset.UTC)
+        val deadlineAtLdt = createdAtLdt.plusHours(1)
         jdbi.useHandle<Exception> { handle ->
             if (version != null) {
                 handle.createUpdate(
-                    """INSERT INTO workflow (id, definition, current_sequence, version, status, created_at, updated_at)
-                       VALUES (:id, :definition, :currentSequence, :version, :status, :createdAt, :updatedAt)"""
+                    """INSERT INTO workflow (id, definition, current_sequence, version, status, created_at, updated_at, deadline_at)
+                       VALUES (:id, :definition, :currentSequence, :version, :status, :createdAt, :updatedAt, :deadlineAt)"""
                 )
                     .bind("id", id)
                     .bind("definition", definition)
                     .bind("currentSequence", currentSequence)
                     .bind("version", version)
                     .bind("status", status)
-                    .bind("createdAt", LocalDateTime.ofInstant(createdAt, ZoneOffset.UTC))
-                    .bind("updatedAt", LocalDateTime.ofInstant(updatedAt, ZoneOffset.UTC))
+                    .bind("createdAt", createdAtLdt)
+                    .bind("updatedAt", updatedAtLdt)
+                    .bind("deadlineAt", deadlineAtLdt)
                     .execute()
             } else {
                 handle.createUpdate(
-                    """INSERT INTO workflow (id, definition, current_sequence, status, created_at, updated_at)
-                       VALUES (:id, :definition, :currentSequence, :status, :createdAt, :updatedAt)"""
+                    """INSERT INTO workflow (id, definition, current_sequence, status, created_at, updated_at, deadline_at)
+                       VALUES (:id, :definition, :currentSequence, :status, :createdAt, :updatedAt, :deadlineAt)"""
                 )
                     .bind("id", id)
                     .bind("definition", definition)
                     .bind("currentSequence", currentSequence)
                     .bind("status", status)
-                    .bind("createdAt", LocalDateTime.ofInstant(createdAt, ZoneOffset.UTC))
-                    .bind("updatedAt", LocalDateTime.ofInstant(updatedAt, ZoneOffset.UTC))
+                    .bind("createdAt", createdAtLdt)
+                    .bind("updatedAt", updatedAtLdt)
+                    .bind("deadlineAt", deadlineAtLdt)
                     .execute()
             }
         }
@@ -320,13 +325,14 @@ class SchemaTest {
     @Test
     fun workflowNotNullConstraints() {
         val ts = LocalDateTime.ofInstant(now(), ZoneOffset.UTC)
+        val dl = ts.plusHours(1)
 
         // null id
         assertThrows<UnableToExecuteStatementException> {
             jdbi.useHandle<Exception> { handle ->
                 handle.createUpdate(
-                    "INSERT INTO workflow (id, definition, current_sequence, status, created_at, updated_at) VALUES (NULL, 'def', 1, 'RUNNING', :ts, :ts)"
-                ).bind("ts", ts).execute()
+                    "INSERT INTO workflow (id, definition, current_sequence, status, created_at, updated_at, deadline_at) VALUES (NULL, 'def', 1, 'RUNNING', :ts, :ts, :dl)"
+                ).bind("ts", ts).bind("dl", dl).execute()
             }
         }
 
@@ -334,8 +340,8 @@ class SchemaTest {
         assertThrows<UnableToExecuteStatementException> {
             jdbi.useHandle<Exception> { handle ->
                 handle.createUpdate(
-                    "INSERT INTO workflow (id, definition, current_sequence, status, created_at, updated_at) VALUES (:id, NULL, 1, 'RUNNING', :ts, :ts)"
-                ).bind("id", randomId()).bind("ts", ts).execute()
+                    "INSERT INTO workflow (id, definition, current_sequence, status, created_at, updated_at, deadline_at) VALUES (:id, NULL, 1, 'RUNNING', :ts, :ts, :dl)"
+                ).bind("id", randomId()).bind("ts", ts).bind("dl", dl).execute()
             }
         }
 
@@ -343,8 +349,8 @@ class SchemaTest {
         assertThrows<UnableToExecuteStatementException> {
             jdbi.useHandle<Exception> { handle ->
                 handle.createUpdate(
-                    "INSERT INTO workflow (id, definition, current_sequence, status, created_at, updated_at) VALUES (:id, 'def', NULL, 'RUNNING', :ts, :ts)"
-                ).bind("id", randomId()).bind("ts", ts).execute()
+                    "INSERT INTO workflow (id, definition, current_sequence, status, created_at, updated_at, deadline_at) VALUES (:id, 'def', NULL, 'RUNNING', :ts, :ts, :dl)"
+                ).bind("id", randomId()).bind("ts", ts).bind("dl", dl).execute()
             }
         }
 
@@ -352,8 +358,8 @@ class SchemaTest {
         assertThrows<UnableToExecuteStatementException> {
             jdbi.useHandle<Exception> { handle ->
                 handle.createUpdate(
-                    "INSERT INTO workflow (id, definition, current_sequence, status, created_at, updated_at) VALUES (:id, 'def', 1, NULL, :ts, :ts)"
-                ).bind("id", randomId()).bind("ts", ts).execute()
+                    "INSERT INTO workflow (id, definition, current_sequence, status, created_at, updated_at, deadline_at) VALUES (:id, 'def', 1, NULL, :ts, :ts, :dl)"
+                ).bind("id", randomId()).bind("ts", ts).bind("dl", dl).execute()
             }
         }
 
@@ -361,8 +367,8 @@ class SchemaTest {
         assertThrows<UnableToExecuteStatementException> {
             jdbi.useHandle<Exception> { handle ->
                 handle.createUpdate(
-                    "INSERT INTO workflow (id, definition, current_sequence, status, created_at, updated_at) VALUES (:id, 'def', 1, 'RUNNING', NULL, :ts)"
-                ).bind("id", randomId()).bind("ts", ts).execute()
+                    "INSERT INTO workflow (id, definition, current_sequence, status, created_at, updated_at, deadline_at) VALUES (:id, 'def', 1, 'RUNNING', NULL, :ts, :dl)"
+                ).bind("id", randomId()).bind("ts", ts).bind("dl", dl).execute()
             }
         }
 
@@ -370,8 +376,8 @@ class SchemaTest {
         assertThrows<UnableToExecuteStatementException> {
             jdbi.useHandle<Exception> { handle ->
                 handle.createUpdate(
-                    "INSERT INTO workflow (id, definition, current_sequence, status, created_at, updated_at) VALUES (:id, 'def', 1, 'RUNNING', :ts, NULL)"
-                ).bind("id", randomId()).bind("ts", ts).execute()
+                    "INSERT INTO workflow (id, definition, current_sequence, status, created_at, updated_at, deadline_at) VALUES (:id, 'def', 1, 'RUNNING', :ts, NULL, :dl)"
+                ).bind("id", randomId()).bind("ts", ts).bind("dl", dl).execute()
             }
         }
 
@@ -379,8 +385,8 @@ class SchemaTest {
         assertThrows<UnableToExecuteStatementException> {
             jdbi.useHandle<Exception> { handle ->
                 handle.createUpdate(
-                    "INSERT INTO workflow (id, definition, current_sequence, version, status, created_at, updated_at) VALUES (:id, 'def', 1, NULL, 'RUNNING', :ts, :ts)"
-                ).bind("id", randomId()).bind("ts", ts).execute()
+                    "INSERT INTO workflow (id, definition, current_sequence, version, status, created_at, updated_at, deadline_at) VALUES (:id, 'def', 1, NULL, 'RUNNING', :ts, :ts, :dl)"
+                ).bind("id", randomId()).bind("ts", ts).bind("dl", dl).execute()
             }
         }
     }
