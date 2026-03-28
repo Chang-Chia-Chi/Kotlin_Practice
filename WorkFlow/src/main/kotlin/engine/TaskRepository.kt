@@ -372,7 +372,7 @@ class TaskRepository(
             SET status = 'PENDING', retry_count = 0,
                 claimed_by = NULL, claimed_at = NULL,
                 completed_at = NULL, result = NULL, not_before = NULL
-            WHERE workflow_id = :workflowId AND status = 'DEAD_LETTER'
+            WHERE workflow_id = :workflowId AND status IN ('DEAD_LETTER', 'FAILED')
             """,
             ).bind("workflowId", workflowId)
             .execute()
