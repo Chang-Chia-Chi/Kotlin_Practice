@@ -60,6 +60,7 @@ abstract class StressTestBase {
     protected lateinit var oracleProxy: ToxiproxyContainer.ContainerProxy
     private lateinit var toxiproxyContainer: ToxiproxyContainer
     private lateinit var proxyDataSource: HikariDataSource
+    protected val faultInjector = FaultInjector()
 
     // --- Components ---
 
@@ -143,7 +144,7 @@ abstract class StressTestBase {
             minimumIdle = 2
             connectionTimeout = 10_000
         })
-        proxyJdbi = Jdbi.create(proxyDataSource)
+        proxyJdbi = Jdbi.create(FaultInjectingDataSource(proxyDataSource, faultInjector))
 
         // Init components
         workflowRepo = WorkflowRepository(proxyJdbi)
@@ -175,6 +176,9 @@ abstract class StressTestBase {
         try {
             oracleProxy.toxics().all.forEach { it.remove() }
         } catch (_: Exception) { }
+
+        // Reset fault injection rules
+        faultInjector.reset()
 
         // Clean tables via direct JDBI (bypasses proxy)
         directJdbi.useHandle<Exception> { handle ->
