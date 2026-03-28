@@ -62,10 +62,10 @@ class CrashableHandler(
     }
 }
 
-/** Returns input payload as output result. */
+/** Returns input as output result. Prefers item (scatter chunk) over inputs. */
 class PassThroughHandler : TransitionHandler {
     override suspend fun execute(input: HandlerInput): HandlerOutput =
-        HandlerOutput(result = input.payload)
+        HandlerOutput(result = input.item ?: input.inputs)
 }
 
 /** Always throws after optional delay. */

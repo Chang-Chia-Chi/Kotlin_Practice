@@ -16,7 +16,8 @@ class MeteredTransitionHandlerTest {
         taskId = "t1",
         workflowId = "wf1",
         sequenceNumber = 1,
-        payload = null,
+        inputs = null,
+        item = null,
     )
 
     @BeforeEach

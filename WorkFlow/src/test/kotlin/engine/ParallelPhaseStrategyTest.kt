@@ -1,7 +1,5 @@
 package com.workflow.engine
 
-import com.fasterxml.jackson.databind.ObjectMapper
-import com.fasterxml.jackson.module.kotlin.KotlinModule
 import com.workflow.dsl.ActivityDefinition
 import com.workflow.dsl.FailurePolicy
 import com.workflow.dsl.FanOutDefinition
@@ -13,17 +11,15 @@ import java.time.temporal.ChronoUnit
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
-import kotlin.test.assertNull
 
 class ParallelPhaseStrategyTest {
 
-    private val objectMapper = ObjectMapper().registerModule(KotlinModule.Builder().build())
-    private val strategy = ParallelPhaseStrategy(objectMapper)
+    private val strategy = ParallelPhaseStrategy()
     private val now = Instant.now().truncatedTo(ChronoUnit.MICROS)
 
     private fun parallelTask(status: TaskStatus = TaskStatus.COMPLETED, resultJson: String? = null) = Task(
         id = "t-${System.nanoTime()}", workflowId = "wf1", sequenceNumber = 2, status = status,
-        handlerKey = "parallel.handler", payloadJson = null, resultJson = resultJson,
+        handlerKey = "parallel.handler", resultJson = resultJson,
         claimedBy = null, claimedAt = null, completedAt = null,
         retryCount = 0, maxRetries = 0, deadlineAt = null,
     )
@@ -109,52 +105,11 @@ class ParallelPhaseStrategyTest {
     }
 
     @Test
-    fun `failure with BEST_EFFORT advances with null payload`() {
+    fun `failure with BEST_EFFORT advances to next sequence`() {
         val tasks = listOf(parallelTask(), parallelTask(status = TaskStatus.FAILED))
         val ctx = context(failedCount = 1, tasks = tasks, failurePolicy = FailurePolicy.BEST_EFFORT)
         val advance = assertIs<AdvancementDecision.Advance>(strategy.resolve(ctx))
-        assertNull(advance.tasks[0].payloadJson)
+        assertEquals(3, advance.nextSequence)
     }
 
-    // ── Task 8: R3 aggregated payload tests ─────────────────────────────
-
-    @Test
-    fun `success aggregates completed task results as JSON array payload`() {
-        val tasks = listOf(
-            parallelTask(resultJson = """{"r":"one"}"""),
-            parallelTask(resultJson = """{"r":"two"}"""),
-        )
-        val ctx = context(tasks = tasks)
-        val advance = assertIs<AdvancementDecision.Advance>(strategy.resolve(ctx))
-        // R3: aggregated results as JSON array of objects (NOT double-encoded strings)
-        val expected = """[{"r":"one"},{"r":"two"}]"""
-        assertEquals(expected, advance.tasks[0].payloadJson)
-    }
-
-    @Test
-    fun `success with mixed null results only includes non-null`() {
-        val tasks = listOf(
-            parallelTask(resultJson = """{"r":"one"}"""),
-            parallelTask(resultJson = null),
-            parallelTask(resultJson = """{"r":"three"}"""),
-        )
-        val ctx = context(tasks = tasks)
-        val advance = assertIs<AdvancementDecision.Advance>(strategy.resolve(ctx))
-        val expected = """[{"r":"one"},{"r":"three"}]"""
-        assertEquals(expected, advance.tasks[0].payloadJson)
-    }
-
-    @Test
-    fun `success with join policy filters only completed results`() {
-        val tasks = listOf(
-            parallelTask(resultJson = """{"r":"ok"}"""),
-            parallelTask(status = TaskStatus.FAILED, resultJson = """{"r":"err"}"""),
-            parallelTask(resultJson = """{"r":"also-ok"}"""),
-        )
-        // Threshold(2): 2 succeeded >= 2 -> success, but only include COMPLETED results
-        val ctx = context(joinPolicy = JoinPolicy.Threshold(2), failedCount = 1, tasks = tasks)
-        val advance = assertIs<AdvancementDecision.Advance>(strategy.resolve(ctx))
-        val expected = """[{"r":"ok"},{"r":"also-ok"}]"""
-        assertEquals(expected, advance.tasks[0].payloadJson)
-    }
 }

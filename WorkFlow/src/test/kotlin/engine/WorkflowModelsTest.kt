@@ -214,7 +214,7 @@ class WorkflowModelsTest {
         sequenceNumber: Int = 1,
         status: TaskStatus = TaskStatus.PENDING,
         handlerKey: String = "process.step1",
-        payloadJson: String? = """{"key":"value"}""",
+        item: String? = null,
         resultJson: String? = null,
         claimedBy: String? = null,
         claimedAt: Instant? = null,
@@ -224,19 +224,19 @@ class WorkflowModelsTest {
         deadlineAt: Instant? = later,
     ) = Task(
         id, workflowId, sequenceNumber, status, handlerKey,
-        payloadJson, resultJson, claimedBy, claimedAt, completedAt,
+        item, resultJson, claimedBy, claimedAt, completedAt,
         retryCount, maxRetries, deadlineAt,
     )
 
     @Test
     fun `Task construction preserves all fields`() {
-        val t = task()
+        val t = task(item = """{"key":"value"}""")
         assertEquals("task-1", t.id)
         assertEquals("wf-1", t.workflowId)
         assertEquals(1, t.sequenceNumber)
         assertEquals(TaskStatus.PENDING, t.status)
         assertEquals("process.step1", t.handlerKey)
-        assertEquals("""{"key":"value"}""", t.payloadJson)
+        assertEquals("""{"key":"value"}""", t.item)
         assertNull(t.resultJson)
         assertNull(t.claimedBy)
         assertNull(t.claimedAt)
@@ -249,14 +249,14 @@ class WorkflowModelsTest {
     @Test
     fun `Task with all nullable fields null`() {
         val t = task(
-            payloadJson = null,
+            item = null,
             resultJson = null,
             claimedBy = null,
             claimedAt = null,
             completedAt = null,
             deadlineAt = null,
         )
-        assertNull(t.payloadJson)
+        assertNull(t.item)
         assertNull(t.resultJson)
         assertNull(t.claimedBy)
         assertNull(t.claimedAt)
@@ -267,14 +267,14 @@ class WorkflowModelsTest {
     @Test
     fun `Task with all nullable fields populated`() {
         val t = task(
-            payloadJson = """{"data":1}""",
+            item = """{"data":1}""",
             resultJson = """{"result":"ok"}""",
             claimedBy = "worker-1",
             claimedAt = now,
             completedAt = later,
             deadlineAt = later,
         )
-        assertEquals("""{"data":1}""", t.payloadJson)
+        assertEquals("""{"data":1}""", t.item)
         assertEquals("""{"result":"ok"}""", t.resultJson)
         assertEquals("worker-1", t.claimedBy)
         assertEquals(now, t.claimedAt)

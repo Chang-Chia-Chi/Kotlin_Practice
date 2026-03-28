@@ -9,7 +9,7 @@ import java.time.temporal.ChronoUnit
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
-import kotlin.test.assertNull
+import kotlin.test.assertTrue
 
 class LinearPhaseStrategyTest {
 
@@ -24,7 +24,7 @@ class LinearPhaseStrategyTest {
         resultJson: String? = null,
     ) = Task(
         id = "t1", workflowId = "wf1", sequenceNumber = 1, status = status,
-        handlerKey = "step1.handler", payloadJson = null, resultJson = resultJson,
+        handlerKey = "step1.handler", resultJson = resultJson,
         claimedBy = null, claimedAt = null, completedAt = null,
         retryCount = 0, maxRetries = 0, deadlineAt = null,
     )
@@ -56,13 +56,6 @@ class LinearPhaseStrategyTest {
     }
 
     @Test
-    fun `success propagates resultJson as next task payload`() {
-        val ctx = context(tasks = listOf(task(resultJson = """{"out":"data"}""")))
-        val advance = assertIs<AdvancementDecision.Advance>(strategy.resolve(ctx))
-        assertEquals("""{"out":"data"}""", advance.tasks[0].payloadJson)
-    }
-
-    @Test
     fun `success at last sequence returns Complete`() {
         val ctx = context(nextSequence = null)
         assertIs<AdvancementDecision.Complete>(strategy.resolve(ctx))
@@ -76,7 +69,7 @@ class LinearPhaseStrategyTest {
     }
 
     @Test
-    fun `failure with BEST_EFFORT returns Advance with null payload`() {
+    fun `failure with BEST_EFFORT advances to next sequence`() {
         val ctx = context(
             activity = activity(failurePolicy = FailurePolicy.BEST_EFFORT),
             failedCount = 1,
@@ -84,7 +77,7 @@ class LinearPhaseStrategyTest {
         )
         val advance = assertIs<AdvancementDecision.Advance>(strategy.resolve(ctx))
         assertEquals(2, advance.nextSequence)
-        assertNull(advance.tasks[0].payloadJson)
+        assertTrue(advance.tasks.isNotEmpty())
     }
 
     @Test

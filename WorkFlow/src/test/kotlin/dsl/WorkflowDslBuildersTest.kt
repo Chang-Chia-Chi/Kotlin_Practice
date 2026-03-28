@@ -6,6 +6,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 
 class WorkflowDslBuildersTest {
 
@@ -160,6 +161,92 @@ class WorkflowDslBuildersTest {
             workflow {
                 deadline(Duration.ofMinutes(-1))
                 activity("step1") { transition("handler1") }
+            }
+        }
+    }
+
+    // ── Inputs DSL ──────────────────────────────────────────────────────
+
+    @Test
+    fun `activity with no inputs has empty inputs map`() {
+        val def = workflow {
+            activity("step1") {
+                transition("step1.handler")
+            }
+        }
+        assertTrue(def.activities[0].inputs.isEmpty())
+    }
+
+    @Test
+    fun `activity with field-level inputs`() {
+        val def = workflow {
+            activity("notify") {
+                transition("notify.handler")
+                inputs {
+                    "chunks" from "split.uri"
+                    "count" from "split.total"
+                }
+            }
+        }
+        val inputs = def.activities[0].inputs
+        assertEquals(2, inputs.size)
+        assertEquals("split.uri", inputs["chunks"])
+        assertEquals("split.total", inputs["count"])
+    }
+
+    @Test
+    fun `activity with whole-result input`() {
+        val def = workflow {
+            activity("aggregate") {
+                transition("agg.handler")
+                inputs {
+                    "data" from "split"
+                }
+            }
+        }
+        assertEquals("split", def.activities[0].inputs["data"])
+    }
+
+    @Test
+    fun `inputs from multiple activities`() {
+        val def = workflow {
+            activity("final") {
+                transition("final.handler")
+                inputs {
+                    "a" from "step1.field"
+                    "b" from "step2"
+                }
+            }
+        }
+        val inputs = def.activities[0].inputs
+        assertEquals("step1.field", inputs["a"])
+        assertEquals("step2", inputs["b"])
+    }
+
+    @Test
+    fun `inputs serializes correctly via Jackson`() {
+        val objectMapper = com.fasterxml.jackson.databind.ObjectMapper()
+            .registerModule(com.fasterxml.jackson.module.kotlin.KotlinModule.Builder().build())
+            .registerModule(com.fasterxml.jackson.datatype.jsr310.JavaTimeModule())
+        val def = workflow {
+            activity("step") {
+                transition("s.handler")
+                inputs {
+                    "x" from "prev.field"
+                }
+            }
+        }
+        val json = objectMapper.writeValueAsString(def)
+        val restored = objectMapper.readValue(json, WorkflowDefinition::class.java)
+        assertEquals("prev.field", restored.activities[0].inputs["x"])
+    }
+
+    @Test
+    fun `duplicate activity names throws`() {
+        assertThrows<IllegalArgumentException> {
+            workflow {
+                activity("step1") { transition("a.handler") }
+                activity("step1") { transition("b.handler") }
             }
         }
     }

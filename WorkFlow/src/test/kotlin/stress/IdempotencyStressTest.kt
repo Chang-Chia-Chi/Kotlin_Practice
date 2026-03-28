@@ -144,7 +144,7 @@ class IdempotencyStressTest : StressTestBase() {
         // Handler that takes just long enough to race with deadline
         handlerRegistry.register("i3.handler", SlowHandler(delayMs = 2500))
 
-        val wfId = engine.startWorkflow(def, """{"test":"I3"}""")
+        val wfId = engine.startWorkflow(def)
         diagnostics.trackedWorkflows.add(wfId)
 
         startWorkerPool()
@@ -173,7 +173,7 @@ class IdempotencyStressTest : StressTestBase() {
         val def = workflow {
             activity("step1") { transition("i4.handler"); retries(3) }
         }
-        val wfId = engine.startWorkflow(def, """{"test":"I4"}""")
+        val wfId = engine.startWorkflow(def)
         diagnostics.trackedWorkflows.add(wfId)
 
         // Slow handler that takes longer than stale threshold
@@ -208,7 +208,7 @@ class IdempotencyStressTest : StressTestBase() {
         // Step1 fails → workflow FAILED
         handlerRegistry.register("i5.handler", FailNThenSucceedHandler(failCount = 1))
 
-        val wfId = engine.startWorkflow(def, """{"test":"I5"}""")
+        val wfId = engine.startWorkflow(def)
         diagnostics.trackedWorkflows.add(wfId)
 
         startWorkerPool()
@@ -291,7 +291,7 @@ class IdempotencyStressTest : StressTestBase() {
         val def = workflow {
             activity("step1") { transition("i7.handler") }
         }
-        val wfId = engine.startWorkflow(def, """{"test":"I7"}""")
+        val wfId = engine.startWorkflow(def)
         diagnostics.trackedWorkflows.add(wfId)
 
         val counting = CountingHandler()
@@ -325,7 +325,7 @@ class IdempotencyStressTest : StressTestBase() {
         handlerRegistry.register("i8.handler", gate)
         handlerRegistry.register("i8.step2", PassThroughHandler())
 
-        val wfId = engine.startWorkflow(def, """{"test":"I8"}""")
+        val wfId = engine.startWorkflow(def)
         diagnostics.trackedWorkflows.add(wfId)
 
         startWorkerPool()

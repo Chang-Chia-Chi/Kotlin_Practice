@@ -125,7 +125,7 @@ class SweeperTest {
         sequenceNumber: Int = 1,
         status: TaskStatus = TaskStatus.PENDING,
         handlerKey: String = "test.handler",
-        payloadJson: String? = null,
+        item: String? = null,
         resultJson: String? = null,
         claimedBy: String? = null,
         claimedAt: Instant? = null,
@@ -142,7 +142,7 @@ class SweeperTest {
         sequenceNumber = sequenceNumber,
         status = status,
         handlerKey = handlerKey,
-        payloadJson = payloadJson,
+        item = item,
         resultJson = resultJson,
         claimedBy = claimedBy,
         claimedAt = claimedAt,
@@ -178,10 +178,10 @@ class SweeperTest {
     private fun insertTaskDirect(task: Task) {
         jdbi.useHandle<Exception> { handle ->
             val stmt = handle.createUpdate(
-                """INSERT INTO task (id, workflow_id, sequence_number, status, handler_key, payload, result,
+                """INSERT INTO task (id, workflow_id, sequence_number, status, handler_key, item, result,
                    claimed_by, claimed_at, completed_at, retry_count, max_retries, deadline_at, not_before,
                    backoff_base, backoff_cap)
-                   VALUES (:id, :workflowId, :sequenceNumber, :status, :handlerKey, :payload, :result,
+                   VALUES (:id, :workflowId, :sequenceNumber, :status, :handlerKey, :item, :result,
                    :claimedBy, :claimedAt, :completedAt, :retryCount, :maxRetries, :deadlineAt, :notBefore,
                    :backoffBase, :backoffCap)""",
             )
@@ -200,7 +200,7 @@ class SweeperTest {
                 if (value != null) stmt.bind(name, LocalDateTime.ofInstant(value, ZoneOffset.UTC))
                 else stmt.bindNull(name, java.sql.Types.TIMESTAMP)
 
-            bindStringOrNull("payload", task.payloadJson)
+            bindStringOrNull("item", task.item)
             bindStringOrNull("result", task.resultJson)
             bindStringOrNull("claimedBy", task.claimedBy)
             bindTimestampOrNull("claimedAt", task.claimedAt)
@@ -496,7 +496,7 @@ class SweeperTest {
         }
 
         @Test
-        fun `payload propagated from completed task to next sequence`() = runTest {
+        fun `completed task triggers next sequence creation`() = runTest {
             val def = twoStepLinearDef()
             val wfId = randomId()
             val pastGrace = Instant.now().minus(gracePeriod).minusSeconds(60)
@@ -514,7 +514,7 @@ class SweeperTest {
 
             val nextTasks = readTasksDirect(wfId, 2)
             assertEquals(1, nextTasks.size)
-            assertEquals("""{"pipeline":"data"}""", nextTasks[0]["PAYLOAD"])
+            assertEquals("step2.handler", nextTasks[0]["HANDLER_KEY"])
         }
     }
 
@@ -1346,7 +1346,7 @@ class SweeperTest {
             val task = Task(
                 id = randomId(), workflowId = wfId, sequenceNumber = 1,
                 status = TaskStatus.PENDING, handlerKey = "handler1",
-                payloadJson = null, resultJson = null,
+                item = null, resultJson = null,
                 claimedBy = null, claimedAt = null, completedAt = null,
                 retryCount = 0, maxRetries = 3, deadlineAt = null,
             )

@@ -59,7 +59,7 @@ class HandlerRegistryTest {
         assertSame(secondHandler, resolved)
 
         val output = resolved.execute(
-            HandlerInput(taskId = "t1", workflowId = "wf1", sequenceNumber = 1, payload = null),
+            HandlerInput(taskId = "t1", workflowId = "wf1", sequenceNumber = 1, inputs = null, item = null),
         )
         assertEquals("second", output.result)
     }

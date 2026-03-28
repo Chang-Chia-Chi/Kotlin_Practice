@@ -18,6 +18,7 @@ import org.junit.jupiter.api.extension.RegisterExtension
 import java.time.Duration
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.assertEquals
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 @Tag("stress")
@@ -51,7 +52,7 @@ class CorrectnessStressTest : StressTestBase() {
         handlerRegistry.register("c1.parallel", PassThroughHandler())
         handlerRegistry.register("c1.final", PassThroughHandler())
 
-        val wfId = engine.startWorkflow(def, """{"test":"C1"}""")
+        val wfId = engine.startWorkflow(def)
         diagnostics.trackedWorkflows.add(wfId)
 
         startWorkerPool()
@@ -97,7 +98,7 @@ class CorrectnessStressTest : StressTestBase() {
         })
         handlerRegistry.register("c2.parallel", PassThroughHandler())
 
-        val wfId = engine.startWorkflow(def, """{"test":"C2"}""")
+        val wfId = engine.startWorkflow(def)
         diagnostics.trackedWorkflows.add(wfId)
 
         startWorkerPool()
@@ -146,11 +147,11 @@ class CorrectnessStressTest : StressTestBase() {
         handlerRegistry.register("c3.parallel", object : TransitionHandler {
             override suspend fun execute(input: HandlerInput): HandlerOutput {
                 if (count.incrementAndGet() == 1) throw RuntimeException("Simulated failure")
-                return HandlerOutput(result = input.payload)
+                return HandlerOutput(result = input.item)
             }
         })
 
-        val wfId = engine.startWorkflow(def, """{"test":"C3"}""")
+        val wfId = engine.startWorkflow(def)
         diagnostics.trackedWorkflows.add(wfId)
 
         startWorkerPool()
@@ -215,12 +216,12 @@ class CorrectnessStressTest : StressTestBase() {
         handlerRegistry.register("$handlerKey.parallel", object : TransitionHandler {
             override suspend fun execute(input: HandlerInput): HandlerOutput {
                 if (failCounter.incrementAndGet() <= failCount) throw RuntimeException("Simulated failure")
-                return HandlerOutput(result = input.payload)
+                return HandlerOutput(result = input.item)
             }
         })
         handlerRegistry.register("$handlerKey.final", PassThroughHandler())
 
-        val wfId = engine.startWorkflow(def, """{"test":"C4-$failCount"}""")
+        val wfId = engine.startWorkflow(def)
         diagnostics.trackedWorkflows.add(wfId)
         startWorkerPool()
         return wfId
@@ -271,12 +272,12 @@ class CorrectnessStressTest : StressTestBase() {
         handlerRegistry.register("$handlerKey.parallel", object : TransitionHandler {
             override suspend fun execute(input: HandlerInput): HandlerOutput {
                 if (failCounter.incrementAndGet() <= failCount) throw RuntimeException("Simulated failure")
-                return HandlerOutput(result = input.payload)
+                return HandlerOutput(result = input.item)
             }
         })
         handlerRegistry.register("$handlerKey.final", PassThroughHandler())
 
-        val wfId = engine.startWorkflow(def, """{"test":"C5-$failCount"}""")
+        val wfId = engine.startWorkflow(def)
         diagnostics.trackedWorkflows.add(wfId)
 
         startWorkerPool()
@@ -308,7 +309,7 @@ class CorrectnessStressTest : StressTestBase() {
         handlerRegistry.register("c6.handler", FailingHandler())
         handlerRegistry.register("c6.step2", PassThroughHandler())
 
-        val wfId = engine.startWorkflow(def, """{"test":"C6"}""")
+        val wfId = engine.startWorkflow(def)
         diagnostics.trackedWorkflows.add(wfId)
 
         startWorkerPool()
@@ -343,7 +344,7 @@ class CorrectnessStressTest : StressTestBase() {
         handlerRegistry.register("c7.handler", FailingHandler())
         handlerRegistry.register("c7.step2", PassThroughHandler())
 
-        val wfId = engine.startWorkflow(def, """{"test":"C7"}""")
+        val wfId = engine.startWorkflow(def)
         diagnostics.trackedWorkflows.add(wfId)
 
         startWorkerPool()
@@ -358,30 +359,36 @@ class CorrectnessStressTest : StressTestBase() {
         sweepJob.cancel()
     }
 
-    // ---- C8: Payload propagation integrity across phases ----
+    // ---- C8: Explicit input resolution across phases ----
 
     @Test
-    fun `C8 - payload propagates correctly across phase boundaries`() = runBlocking {
+    fun `C8 - explicit inputs resolve correctly across phase boundaries`() = runBlocking {
         val def = workflow {
             activity("step1") { transition("c8.step1") }
-            activity("step2") { transition("c8.step2") }
-            activity("step3") { transition("c8.step3") }
+            activity("step2") {
+                transition("c8.step2")
+                inputs { "prev" from "step1" }
+            }
+            activity("step3") {
+                transition("c8.step3")
+                inputs { "prev" from "step2" }
+            }
         }
 
         handlerRegistry.register("c8.step1", object : TransitionHandler {
             override suspend fun execute(input: HandlerInput): HandlerOutput =
-                HandlerOutput(result = """{"phase":1,"data":"${input.payload}"}""")
+                HandlerOutput(result = """{"phase":1,"data":"origin"}""")
         })
         handlerRegistry.register("c8.step2", object : TransitionHandler {
             override suspend fun execute(input: HandlerInput): HandlerOutput =
-                HandlerOutput(result = """{"phase":2,"prev":${input.payload}}""")
+                HandlerOutput(result = """{"phase":2,"prev":${input.inputs}}""")
         })
         handlerRegistry.register("c8.step3", object : TransitionHandler {
             override suspend fun execute(input: HandlerInput): HandlerOutput =
-                HandlerOutput(result = """{"phase":3,"prev":${input.payload}}""")
+                HandlerOutput(result = """{"phase":3,"prev":${input.inputs}}""")
         })
 
-        val wfId = engine.startWorkflow(def, """{"origin":"C8"}""")
+        val wfId = engine.startWorkflow(def)
         diagnostics.trackedWorkflows.add(wfId)
 
         startWorkerPool()
@@ -393,16 +400,26 @@ class CorrectnessStressTest : StressTestBase() {
         assertWorkflowTerminates(wfId)
         assertWorkflowStatus(wfId, "COMPLETED")
 
-        // Verify payload chain: each phase received the previous phase's result
+        // Verify input chain: each phase received the previous phase's result via explicit inputs
         val tasks = readTasksDirect(wfId).sortedBy { (it["SEQUENCE_NUMBER"] as Number).toInt() }
         assertEquals(3, tasks.size)
 
-        // Step1 received initial payload
-        assertTrue(tasks[0]["PAYLOAD"].toString().contains("origin"))
-        // Step2 received step1's result
-        assertTrue(tasks[1]["PAYLOAD"].toString().contains("phase\":1"))
-        // Step3 received step2's result
-        assertTrue(tasks[2]["PAYLOAD"].toString().contains("phase\":2"))
+        // Step1 has no inputs (first activity)
+        val step1Result = tasks[0]["RESULT"]?.toString()
+        assertNotNull(step1Result)
+        assertTrue(step1Result.contains("phase\":1"))
+
+        // Step2 result contains step1's output (resolved via inputs)
+        val step2Result = tasks[1]["RESULT"]?.toString()
+        assertNotNull(step2Result)
+        assertTrue(step2Result.contains("phase\":2"))
+        assertTrue(step2Result.contains("phase\":1"))
+
+        // Step3 result contains step2's output (resolved via inputs)
+        val step3Result = tasks[2]["RESULT"]?.toString()
+        assertNotNull(step3Result)
+        assertTrue(step3Result.contains("phase\":3"))
+        assertTrue(step3Result.contains("phase\":2"))
 
         sweepJob.cancel()
     }
@@ -430,10 +447,10 @@ class CorrectnessStressTest : StressTestBase() {
         })
         handlerRegistry.register("c9.parallel", object : TransitionHandler {
             override suspend fun execute(input: HandlerInput): HandlerOutput =
-                HandlerOutput(result = """{"processed":${input.payload}}""")
+                HandlerOutput(result = """{"processed":${input.item}}""")
         })
 
-        val wfId = engine.startWorkflow(def, """{"test":"C9"}""")
+        val wfId = engine.startWorkflow(def)
         diagnostics.trackedWorkflows.add(wfId)
 
         startWorkerPool()
@@ -475,12 +492,12 @@ class CorrectnessStressTest : StressTestBase() {
         handlerRegistry.register("c10.step2", object : TransitionHandler {
             override suspend fun execute(input: HandlerInput): HandlerOutput {
                 if (step2Counter.incrementAndGet() == 1) throw RuntimeException("First attempt fails")
-                return HandlerOutput(result = input.payload)
+                return HandlerOutput(result = input.inputs)
             }
         })
         handlerRegistry.register("c10.step3", PassThroughHandler())
 
-        val wfId = engine.startWorkflow(def, """{"test":"C10"}""")
+        val wfId = engine.startWorkflow(def)
         diagnostics.trackedWorkflows.add(wfId)
 
         startWorkerPool()
@@ -536,7 +553,7 @@ class CorrectnessStressTest : StressTestBase() {
         handlerRegistry.register("c11.parallel", PassThroughHandler())
         handlerRegistry.register("c11.final", PassThroughHandler())
 
-        val wfId = engine.startWorkflow(def, """{"test":"C11"}""")
+        val wfId = engine.startWorkflow(def)
         diagnostics.trackedWorkflows.add(wfId)
 
         // Use maximum workers to maximize concurrent barrier probes

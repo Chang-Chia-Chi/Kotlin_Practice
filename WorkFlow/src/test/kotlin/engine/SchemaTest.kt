@@ -93,7 +93,7 @@ class SchemaTest {
         sequenceNumber: Int = 1,
         status: String = "PENDING",
         handlerKey: String = "test.handler",
-        payload: String? = null,
+        item: String? = null,
         result: String? = null,
         claimedBy: String? = null,
         claimedAt: Instant? = null,
@@ -117,8 +117,8 @@ class SchemaTest {
                 "handlerKey" to handlerKey,
             )
 
-            if (payload != null) {
-                columns.add("payload"); values.add(":payload"); bindings["payload"] = payload
+            if (item != null) {
+                columns.add("item"); values.add(":item"); bindings["item"] = item
             }
             if (result != null) {
                 columns.add("result"); values.add(":result"); bindings["result"] = result
@@ -223,7 +223,7 @@ class SchemaTest {
             sequenceNumber = 2,
             status = "PROCESSING",
             handlerKey = "order.process",
-            payload = """{"orderId":123}""",
+            item = """{"orderId":123}""",
             result = """{"status":"ok"}""",
             claimedBy = "worker-1",
             claimedAt = ts,
@@ -248,12 +248,12 @@ class SchemaTest {
             assertEquals("PROCESSING", row["STATUS"])
             assertEquals("order.process", row["HANDLER_KEY"])
 
-            val payloadVal = row["PAYLOAD"]
-            val payloadStr = when (payloadVal) {
-                is java.sql.Clob -> payloadVal.characterStream.readText()
-                else -> payloadVal.toString()
+            val itemVal = row["ITEM"]
+            val itemStr = when (itemVal) {
+                is java.sql.Clob -> itemVal.characterStream.readText()
+                else -> itemVal.toString()
             }
-            assertEquals("""{"orderId":123}""", payloadStr)
+            assertEquals("""{"orderId":123}""", itemStr)
 
             val resultVal = row["RESULT"]
             val resultStr = when (resultVal) {
@@ -539,40 +539,40 @@ class SchemaTest {
         }
     }
 
-    // ── Test 15: Task payload and result CLOB ────────────────────────────
+    // ── Test 15: Task item and result CLOB ────────────────────────────
 
     @Test
-    fun taskPayloadAndResultClob() {
+    fun taskItemAndResultClob() {
         val wfId = insertWorkflow()
 
         val largeItems = (1..500).joinToString(",") { i ->
             """{"item_$i":"${"x".repeat(20)}"}"""
         }
-        val largePayload = """{"items":[$largeItems]}"""
+        val largeItem = """{"items":[$largeItems]}"""
         val largeResult = """{"results":[$largeItems]}"""
-        assert(largePayload.length > 10_000) { "Payload should be > 10KB, was ${largePayload.length} bytes" }
+        assert(largeItem.length > 10_000) { "Item should be > 10KB, was ${largeItem.length} bytes" }
         assert(largeResult.length > 10_000) { "Result should be > 10KB, was ${largeResult.length} bytes" }
 
         val taskId = insertTask(
             workflowId = wfId,
-            payload = largePayload,
+            item = largeItem,
             result = largeResult,
         )
 
         jdbi.useHandle<Exception> { handle ->
             val row = caseInsensitiveMap(
-                handle.createQuery("SELECT payload, result FROM task WHERE id = :id")
+                handle.createQuery("SELECT item, result FROM task WHERE id = :id")
                     .bind("id", taskId)
                     .mapToMap()
                     .one()
             )
 
-            val payloadVal = row["PAYLOAD"]
-            val payloadStr = when (payloadVal) {
-                is java.sql.Clob -> payloadVal.characterStream.readText()
-                else -> payloadVal.toString()
+            val itemVal = row["ITEM"]
+            val itemStr = when (itemVal) {
+                is java.sql.Clob -> itemVal.characterStream.readText()
+                else -> itemVal.toString()
             }
-            assertEquals(largePayload, payloadStr)
+            assertEquals(largeItem, itemStr)
 
             val resultVal = row["RESULT"]
             val resultStr = when (resultVal) {

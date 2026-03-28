@@ -74,7 +74,7 @@ class RepositoryTest {
         sequenceNumber: Int = 1,
         status: TaskStatus = TaskStatus.PENDING,
         handlerKey: String = "test.handler",
-        payloadJson: String? = null,
+        item: String? = null,
         resultJson: String? = null,
         claimedBy: String? = null,
         claimedAt: Instant? = null,
@@ -91,7 +91,7 @@ class RepositoryTest {
         sequenceNumber = sequenceNumber,
         status = status,
         handlerKey = handlerKey,
-        payloadJson = payloadJson,
+        item = item,
         resultJson = resultJson,
         claimedBy = claimedBy,
         claimedAt = claimedAt,
@@ -127,13 +127,13 @@ class RepositoryTest {
     private fun insertTaskDirect(task: Task, enqueuedAt: Instant? = null) {
         jdbi.useHandle<Exception> { handle ->
             val columns = buildString {
-                append("id, workflow_id, sequence_number, status, handler_key, payload, result, ")
+                append("id, workflow_id, sequence_number, status, handler_key, item, result, ")
                 append("claimed_by, claimed_at, completed_at, retry_count, max_retries, deadline_at, not_before, ")
                 append("backoff_base, backoff_cap")
                 if (enqueuedAt != null) append(", enqueued_at")
             }
             val values = buildString {
-                append(":id, :workflowId, :sequenceNumber, :status, :handlerKey, :payload, :result, ")
+                append(":id, :workflowId, :sequenceNumber, :status, :handlerKey, :item, :result, ")
                 append(":claimedBy, :claimedAt, :completedAt, :retryCount, :maxRetries, :deadlineAt, :notBefore, ")
                 append(":backoffBase, :backoffCap")
                 if (enqueuedAt != null) append(", :enqueuedAt")
@@ -154,7 +154,7 @@ class RepositoryTest {
                 if (value != null) stmt.bind(name, LocalDateTime.ofInstant(value, ZoneOffset.UTC))
                 else stmt.bindNull(name, java.sql.Types.TIMESTAMP)
 
-            bindStringOrNull("payload", task.payloadJson)
+            bindStringOrNull("item", task.item)
             bindStringOrNull("result", task.resultJson)
             bindStringOrNull("claimedBy", task.claimedBy)
             bindTimestampOrNull("claimedAt", task.claimedAt)
@@ -648,7 +648,7 @@ class RepositoryTest {
                     workflowId = wf.id,
                     sequenceNumber = 1,
                     handlerKey = "test.handler.$i",
-                    payloadJson = """{"index":$i}""",
+                    item = """{"index":$i}""",
                 )
             }
 
@@ -662,7 +662,7 @@ class RepositoryTest {
             val wf = makeWorkflow()
             workflowRepo.insert(wf)
 
-            val task = makeTask(workflowId = wf.id, payloadJson = """{"key":"value"}""")
+            val task = makeTask(workflowId = wf.id, item = """{"key":"value"}""")
             taskRepo.insertBatch(listOf(task))
 
             val row = readTaskDirect(task.id)
@@ -687,7 +687,7 @@ class RepositoryTest {
                 sequenceNumber = 3,
                 status = TaskStatus.PENDING,
                 handlerKey = "order.process",
-                payloadJson = """{"orderId":42}""",
+                item = """{"orderId":42}""",
                 maxRetries = 3,
                 deadlineAt = ts.plus(Duration.ofHours(1)),
             )
@@ -1051,7 +1051,7 @@ class RepositoryTest {
                 sequenceNumber = 2,
                 status = TaskStatus.PENDING,
                 handlerKey = "order.process",
-                payloadJson = """{"orderId":42}""",
+                item = """{"orderId":42}""",
                 maxRetries = 3,
             )
             insertTaskDirect(task)
@@ -1063,7 +1063,7 @@ class RepositoryTest {
             assertEquals(wf.id, c.workflowId)
             assertEquals(2, c.sequenceNumber)
             assertEquals("order.process", c.handlerKey)
-            assertEquals("""{"orderId":42}""", c.payloadJson)
+            assertEquals("""{"orderId":42}""", c.item)
             assertEquals(3, c.maxRetries)
         }
 
@@ -1247,7 +1247,7 @@ class RepositoryTest {
 
             val task = makeTask(
                 workflowId = wf.id,
-                payloadJson = null,
+                item = null,
                 resultJson = null,
             )
 
@@ -1257,7 +1257,7 @@ class RepositoryTest {
 
             val row = readTaskDirect(task.id)!!
             assertEquals(task.id, row["ID"])
-            assertNull(row["PAYLOAD"], "payload column should be null")
+            assertNull(row["ITEM"], "item column should be null")
             assertNull(row["RESULT"], "result column should be null")
         }
 

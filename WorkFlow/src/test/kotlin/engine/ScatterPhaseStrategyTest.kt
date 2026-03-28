@@ -12,7 +12,6 @@ import java.time.temporal.ChronoUnit
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
-import kotlin.test.assertNull
 
 class ScatterPhaseStrategyTest {
 
@@ -31,7 +30,7 @@ class ScatterPhaseStrategyTest {
         resultJson: String? = null,
     ) = Task(
         id = "t1", workflowId = "wf1", sequenceNumber = 1, status = status,
-        handlerKey = "scatter.handler", payloadJson = null, resultJson = resultJson,
+        handlerKey = "scatter.handler", resultJson = resultJson,
         claimedBy = null, claimedAt = null, completedAt = null,
         retryCount = 0, maxRetries = 0, deadlineAt = null,
     )
@@ -62,9 +61,9 @@ class ScatterPhaseStrategyTest {
             assertEquals(TaskStatus.PENDING, task.status)
             assertEquals(2, task.maxRetries)
         }
-        assertEquals("a", advance.tasks[0].payloadJson)
-        assertEquals("b", advance.tasks[1].payloadJson)
-        assertEquals("c", advance.tasks[2].payloadJson)
+        assertEquals("a", advance.tasks[0].item)
+        assertEquals("b", advance.tasks[1].item)
+        assertEquals("c", advance.tasks[2].item)
     }
 
     @Test
@@ -80,9 +79,8 @@ class ScatterPhaseStrategyTest {
             tasks = listOf(scatterTask(status = TaskStatus.FAILED)),
             failurePolicy = FailurePolicy.BEST_EFFORT,
         )
-        // BEST_EFFORT on SCATTER with no result: advance with null payload (single task for next seq)
-        val advance = assertIs<AdvancementDecision.Advance>(strategy.resolve(ctx))
-        assertNull(advance.tasks[0].payloadJson)
+        // BEST_EFFORT on SCATTER with no result: advance to next sequence
+        assertIs<AdvancementDecision.Advance>(strategy.resolve(ctx))
     }
 
     @Test

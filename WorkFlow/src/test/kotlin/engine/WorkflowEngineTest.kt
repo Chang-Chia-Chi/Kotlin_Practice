@@ -63,9 +63,7 @@ class WorkflowEngineTest {
                 transition("order.process")
             }
         }
-        val payload = """{"orderId":"abc-123"}"""
-
-        val runId = engine.startWorkflow(definition, initialPayload = payload)
+        val runId = engine.startWorkflow(definition)
 
         // Verify workflow run
         val run = workflowRepo.findById(runId)
@@ -86,7 +84,7 @@ class WorkflowEngineTest {
         assertEquals(runId, task.workflowId)
         assertEquals(TaskStatus.PENDING, task.status)
         assertEquals("order.validate", task.handlerKey)
-        assertEquals(payload, task.payloadJson)
+        assertNull(task.item)
         assertEquals(3, task.maxRetries)
         assertEquals(0, task.retryCount)
         assertNotNull(task.deadlineAt)
@@ -118,9 +116,7 @@ class WorkflowEngineTest {
                 }
             }
         }
-        val payload = """{"batchId":"batch-001"}"""
-
-        val runId = engine.startWorkflow(definition, initialPayload = payload)
+        val runId = engine.startWorkflow(definition)
 
         // Verify workflow run
         val run = workflowRepo.findById(runId)
@@ -138,7 +134,7 @@ class WorkflowEngineTest {
         assertEquals(TaskStatus.PENDING, scatterTask.status)
         // Scatter task uses activity.transition, activity.retries, activity.deadline
         assertEquals("batch.parallel-worker", scatterTask.handlerKey)
-        assertEquals(payload, scatterTask.payloadJson)
+        assertNull(scatterTask.item)
         assertEquals(1, scatterTask.maxRetries)
         assertEquals(0, scatterTask.retryCount)
         assertNotNull(scatterTask.deadlineAt)
@@ -155,7 +151,7 @@ class WorkflowEngineTest {
     }
 
     @Test
-    fun `start linear workflow with null payload creates task with null payloadJson`() = runTest {
+    fun `start linear workflow with null payload creates task with null item`() = runTest {
         val definition = workflow {
             activity("init") {
                 transition("system.init")
@@ -166,7 +162,7 @@ class WorkflowEngineTest {
 
         val tasks = taskRepo.findByWorkflowAndSequence(runId, 1)
         assertEquals(1, tasks.size)
-        assertNull(tasks.single().payloadJson)
+        assertNull(tasks.single().item)
     }
 
     @Test
@@ -209,7 +205,7 @@ class WorkflowEngineTest {
             activity("step1") { transition("handler1") }
             activity("step2") { transition("handler2") }
         }
-        val runId = engine.startWorkflow(definition, """{"data":"test"}""")
+        val runId = engine.startWorkflow(definition)
 
         val result = engine.cancelWorkflow(runId)
         assertTrue(result)

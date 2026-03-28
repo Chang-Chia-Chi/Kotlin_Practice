@@ -37,7 +37,7 @@ class ResilienceStressTest : StressTestBase() {
         handlerRegistry.register("r1.handler", PassThroughHandler())
 
         val wfIds = (1..batchSize).map {
-            engine.startWorkflow(def, """{"test":"R1-$it"}""").also {
+            engine.startWorkflow(def).also {
                 diagnostics.trackedWorkflows.add(it)
             }
         }
@@ -80,7 +80,7 @@ class ResilienceStressTest : StressTestBase() {
         handlerRegistry.register("r2.handler", PassThroughHandler())
 
         val wfIds = (1..scale.workflowBatchSize).map {
-            engine.startWorkflow(def, """{"test":"R2-$it"}""").also {
+            engine.startWorkflow(def).also {
                 diagnostics.trackedWorkflows.add(it)
             }
         }
@@ -117,7 +117,7 @@ class ResilienceStressTest : StressTestBase() {
         handlerRegistry.register("r3.handler", PassThroughHandler())
 
         val wfIds = (1..scale.workflowBatchSize).map {
-            engine.startWorkflow(def, """{"test":"R3-$it"}""").also {
+            engine.startWorkflow(def).also {
                 diagnostics.trackedWorkflows.add(it)
             }
         }
@@ -153,7 +153,7 @@ class ResilienceStressTest : StressTestBase() {
         handlerRegistry.register("r4.handler", PassThroughHandler())
 
         val wfIds = (1..scale.workflowBatchSize).map {
-            engine.startWorkflow(def, """{"test":"R4-$it"}""").also {
+            engine.startWorkflow(def).also {
                 diagnostics.trackedWorkflows.add(it)
             }
         }
@@ -244,7 +244,7 @@ class ResilienceStressTest : StressTestBase() {
         handlerRegistry.register("r6.handler", PassThroughHandler())
 
         val wfIds = (1..scale.workflowBatchSize).map {
-            engine.startWorkflow(def, """{"test":"R6-$it"}""").also {
+            engine.startWorkflow(def).also {
                 diagnostics.trackedWorkflows.add(it)
             }
         }
@@ -321,7 +321,7 @@ class ResilienceStressTest : StressTestBase() {
         handlerRegistry.register("r8.handler", PassThroughHandler())
 
         val wfIds = (1..scale.workflowBatchSize).map {
-            engine.startWorkflow(def, """{"test":"R8-$it"}""").also {
+            engine.startWorkflow(def).also {
                 diagnostics.trackedWorkflows.add(it)
             }
         }

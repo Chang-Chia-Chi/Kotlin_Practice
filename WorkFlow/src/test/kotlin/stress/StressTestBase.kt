@@ -5,6 +5,7 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule
 import com.fasterxml.jackson.module.kotlin.KotlinModule
 import com.workflow.config.FrameworkConfig
 import com.workflow.engine.BarrierService
+import com.workflow.engine.InputResolver
 import com.workflow.engine.OracleTestContainer
 import com.workflow.engine.PhaseStrategyRegistry
 import com.workflow.engine.Sweeper
@@ -63,6 +64,7 @@ abstract class StressTestBase {
     // --- Components ---
 
     protected lateinit var workflowRepo: WorkflowRepository
+    protected lateinit var inputResolver: InputResolver
     protected lateinit var taskRepo: TaskRepository
     protected lateinit var engine: WorkflowEngine
     protected lateinit var barrier: BarrierService
@@ -150,6 +152,7 @@ abstract class StressTestBase {
         barrier = BarrierService(proxyJdbi, workflowRepo, taskRepo, objectMapper, strategyRegistry)
         engine = WorkflowEngine(proxyJdbi, workflowRepo, taskRepo, objectMapper)
         sweeper = Sweeper(proxyJdbi, workflowRepo, taskRepo, barrier, testConfig)
+        inputResolver = InputResolver(objectMapper)
         handlerRegistry = HandlerRegistry()
         meterRegistry = SimpleMeterRegistry()
     }
@@ -188,7 +191,7 @@ abstract class StressTestBase {
     }
 
     protected fun startWorkerPool(): List<Job> {
-        val loop = WorkerLoop(testConfig, taskRepo, handlerRegistry, barrier, meterRegistry)
+        val loop = WorkerLoop(testConfig, taskRepo, handlerRegistry, barrier, meterRegistry, inputResolver, workflowRepo, objectMapper)
         val job = loop.start(workerScope)
         workerJobs.add(job)
         return listOf(job)
@@ -337,7 +340,7 @@ abstract class StressTestBase {
         sequenceNumber: Int = 1,
         status: String = "PENDING",
         handlerKey: String = "test.handler",
-        payload: String? = null,
+        item: String? = null,
         result: String? = null,
         claimedBy: String? = null,
         claimedAt: Instant? = null,
@@ -348,9 +351,9 @@ abstract class StressTestBase {
         val now = LocalDateTime.ofInstant(Instant.now().truncatedTo(ChronoUnit.MICROS), ZoneOffset.UTC)
         directJdbi.useHandle<Exception> { handle ->
             handle.createUpdate(
-                """INSERT INTO task (id, workflow_id, sequence_number, status, handler_key, payload, result,
+                """INSERT INTO task (id, workflow_id, sequence_number, status, handler_key, item, result,
                    claimed_by, claimed_at, retry_count, max_retries, deadline_at, enqueued_at)
-                   VALUES (:id, :wfId, :seq, :status, :key, :payload, :result,
+                   VALUES (:id, :wfId, :seq, :status, :key, :item, :result,
                    :claimedBy, :claimedAt, :retryCount, :maxRetries, :deadlineAt, :enqueuedAt)""",
             )
                 .bind("id", id)
@@ -358,7 +361,7 @@ abstract class StressTestBase {
                 .bind("seq", sequenceNumber)
                 .bind("status", status)
                 .bind("key", handlerKey)
-                .bind("payload", payload)
+                .bind("item", item)
                 .bind("result", result)
                 .bind("claimedBy", claimedBy)
                 .apply {

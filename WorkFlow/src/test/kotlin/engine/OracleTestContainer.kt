@@ -29,6 +29,7 @@ object OracleTestContainer {
                 handle.createScript(loader.getResource("db/migration/V5__enqueued_at_and_indexes.sql")!!.readText()).execute()
                 handle.createScript(loader.getResource("db/migration/V6__queue_name.sql")!!.readText()).execute()
                 handle.createScript(loader.getResource("db/migration/V7__waiting_for_signal.sql")!!.readText()).execute()
+                handle.createScript(loader.getResource("db/migration/V8__explicit_inputs.sql")!!.readText()).execute()
             }
         }
     }

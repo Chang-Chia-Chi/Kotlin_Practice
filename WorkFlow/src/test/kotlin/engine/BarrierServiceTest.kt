@@ -91,7 +91,7 @@ class BarrierServiceTest {
         sequenceNumber: Int = 1,
         status: TaskStatus = TaskStatus.PENDING,
         handlerKey: String = "test.handler",
-        payloadJson: String? = null,
+        item: String? = null,
         resultJson: String? = null,
         claimedBy: String? = null,
         claimedAt: Instant? = null,
@@ -105,7 +105,7 @@ class BarrierServiceTest {
         sequenceNumber = sequenceNumber,
         status = status,
         handlerKey = handlerKey,
-        payloadJson = payloadJson,
+        item = item,
         resultJson = resultJson,
         claimedBy = claimedBy,
         claimedAt = claimedAt,
@@ -138,9 +138,9 @@ class BarrierServiceTest {
     private fun insertTaskDirect(task: Task) {
         jdbi.useHandle<Exception> { handle ->
             val stmt = handle.createUpdate(
-                """INSERT INTO task (id, workflow_id, sequence_number, status, handler_key, payload, result,
+                """INSERT INTO task (id, workflow_id, sequence_number, status, handler_key, item, result,
                    claimed_by, claimed_at, completed_at, retry_count, max_retries, deadline_at, queue_name)
-                   VALUES (:id, :workflowId, :sequenceNumber, :status, :handlerKey, :payload, :result,
+                   VALUES (:id, :workflowId, :sequenceNumber, :status, :handlerKey, :item, :result,
                    :claimedBy, :claimedAt, :completedAt, :retryCount, :maxRetries, :deadlineAt, :queueName)""",
             )
                 .bind("id", task.id)
@@ -159,7 +159,7 @@ class BarrierServiceTest {
                 if (value != null) stmt.bind(name, LocalDateTime.ofInstant(value, ZoneOffset.UTC))
                 else stmt.bindNull(name, java.sql.Types.TIMESTAMP)
 
-            bindStringOrNull("payload", task.payloadJson)
+            bindStringOrNull("item", task.item)
             bindStringOrNull("result", task.resultJson)
             bindStringOrNull("claimedBy", task.claimedBy)
             bindTimestampOrNull("claimedAt", task.claimedAt)
@@ -706,10 +706,9 @@ class BarrierServiceTest {
             assertNotNull(updatedWf)
             assertEquals(2, (updatedWf["CURRENT_SEQUENCE"] as Number).toInt())
 
-            // Failed task's resultJson propagates as next task's payload
+            // Next task created at sequence 2
             val seq2Tasks = readTasksDirect(wfId, 2)
             assertEquals(1, seq2Tasks.size)
-            assertEquals(errorResult, seq2Tasks[0]["PAYLOAD"])
         }
     }
 
@@ -749,113 +748,15 @@ class BarrierServiceTest {
             assertEquals(3, (updatedWf["CURRENT_SEQUENCE"] as Number).toInt())
             assertEquals("RUNNING", updatedWf["STATUS"])
 
-            // Next linear task has aggregated payload from completed parallel results
+            // Next linear task created at sequence 3
             val seq3Tasks = readTasksDirect(wfId, 3)
             assertEquals(1, seq3Tasks.size)
             assertEquals("final.handler", seq3Tasks[0]["HANDLER_KEY"])
-            val payload = seq3Tasks[0]["PAYLOAD"] as? String
-            assertNotNull(payload, "PARALLEL→LINEAR: next task payload should be aggregated results")
-            // ParallelPhaseStrategy aggregates via createArrayNode + readTree (no double-encoding)
-            val resultsNode = objectMapper.readTree(payload)
-            assertTrue(resultsNode.isArray)
-            // Both tasks have non-null resultJson: first was inserted with it,
-            // second received it via onTaskCompleted's self-update in the same transaction
-            assertEquals(2, resultsNode.size())
-            val resultStrings = resultsNode.map { it.toString() }.toSet()
-            assertTrue(resultStrings.contains("""{"r":"one"}"""))
-            assertTrue(resultStrings.contains("""{"r":"two"}"""))
         }
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // Test 11: Payload propagation — LINEAR→LINEAR
-    // ═══════════════════════════════════════════════════════════════════════
-
-    @Nested
-    inner class LinearToLinearPayload {
-
-        @Test
-        fun `linear task completes with resultJson - next task receives it as payloadJson`() = runTest {
-            val def = twoStepLinearDef()
-            val wfId = randomId()
-            val taskId = randomId()
-            val wf = makeWorkflow(id = wfId, definition = def, currentSequence = 1, version = 0)
-            insertWorkflowDirect(wf)
-            insertTaskDirect(
-                makeTask(
-                    id = taskId, workflowId = wfId, sequenceNumber = 1,
-                    status = TaskStatus.PROCESSING, handlerKey = "step1.handler",
-                ),
-            )
-
-            val resultPayload = """{"output":"step1-result","count":42}"""
-            barrier.onTaskCompleted(taskId, wfId, 1, TaskStatus.COMPLETED, resultPayload)
-
-            // Workflow advanced to sequence 2
-            val updatedWf = readWorkflowDirect(wfId)
-            assertNotNull(updatedWf)
-            assertEquals(2, (updatedWf["CURRENT_SEQUENCE"] as Number).toInt())
-
-            // Next task's payload should be the previous task's resultJson
-            val seq2Tasks = readTasksDirect(wfId, 2)
-            assertEquals(1, seq2Tasks.size)
-            assertEquals(resultPayload, seq2Tasks[0]["PAYLOAD"])
-        }
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // Test 11b: Payload propagation — LINEAR→SCATTER
-    // ═══════════════════════════════════════════════════════════════════════
-
-    @Nested
-    inner class LinearToScatterPayload {
-
-        @Test
-        fun `linear task completes with resultJson - scatter task receives it as payloadJson`() = runTest {
-            // LINEAR step → fan-out (SCATTER → PARALLEL)
-            val def = WorkflowDefinition(
-                activities = listOf(
-                    ActivityDefinition(name = "step1", transition = "step1.handler"),
-                    ActivityDefinition(
-                        name = "scatter-activity",
-                        transition = "parallel.handler",
-                        fanOut = FanOutDefinition(
-                            transition = "scatter.handler",
-                            joinPolicy = JoinPolicy.All,
-                        ),
-                    ),
-                ),
-            )
-            val wfId = randomId()
-            val taskId = randomId()
-            val wf = makeWorkflow(id = wfId, definition = def, currentSequence = 1, version = 0)
-            insertWorkflowDirect(wf)
-            insertTaskDirect(
-                makeTask(
-                    id = taskId, workflowId = wfId, sequenceNumber = 1,
-                    status = TaskStatus.PROCESSING, handlerKey = "step1.handler",
-                ),
-            )
-
-            val resultPayload = """{"users":["alice","bob"]}"""
-            barrier.onTaskCompleted(taskId, wfId, 1, TaskStatus.COMPLETED, resultPayload)
-
-            // Workflow advanced to sequence 2 (SCATTER phase)
-            val updatedWf = readWorkflowDirect(wfId)
-            assertNotNull(updatedWf)
-            assertEquals(2, (updatedWf["CURRENT_SEQUENCE"] as Number).toInt())
-
-            // Scatter task's payload should be the previous task's resultJson
-            // Scatter tasks use activity.transition as handler key
-            val seq2Tasks = readTasksDirect(wfId, 2)
-            assertEquals(1, seq2Tasks.size)
-            assertEquals("parallel.handler", seq2Tasks[0]["HANDLER_KEY"])
-            assertEquals(resultPayload, seq2Tasks[0]["PAYLOAD"])
-        }
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // Test 12: Scatter → parallel handoff
+    // Test 11: Scatter → parallel handoff
     // ═══════════════════════════════════════════════════════════════════════
 
     @Nested
@@ -901,9 +802,9 @@ class BarrierServiceTest {
             // All sub-tasks are PENDING
             assertTrue(seq2Tasks.all { it["STATUS"] == "PENDING" })
 
-            // Each sub-task has the correct payload from the scatter result
-            val payloads = seq2Tasks.map { it["PAYLOAD"] as String }.sorted()
-            assertEquals(scatterPayloads.sorted(), payloads)
+            // Each sub-task has the correct item from the scatter result
+            val items = seq2Tasks.map { it["ITEM"] as String }.sorted()
+            assertEquals(scatterPayloads.sorted(), items)
         }
     }
 

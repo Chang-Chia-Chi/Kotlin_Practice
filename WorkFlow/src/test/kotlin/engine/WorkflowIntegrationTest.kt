@@ -151,16 +151,14 @@ class WorkflowIntegrationTest {
     inner class LinearWorkflowE2E {
 
         @Test
-        fun `3-activity linear workflow completes with payload propagation`() = runTest {
+        fun `3-activity linear workflow completes end-to-end`() = runTest {
             val definition = workflow {
                 activity("validate") { transition("order.validate") }
                 activity("process") { transition("order.process") }
                 activity("notify") { transition("order.notify") }
             }
-            val initialPayload = """{"orderId":"e2e-001"}"""
-
             // Start workflow
-            val runId = engine.startWorkflow(definition, initialPayload = initialPayload)
+            val runId = engine.startWorkflow(definition)
 
             // Verify: workflow RUNNING at seq 1, one PENDING task
             var wf = readWorkflowDirect(runId)!!
@@ -170,7 +168,6 @@ class WorkflowIntegrationTest {
             var tasks = taskRepo.findByWorkflowAndSequence(runId, 1)
             assertEquals(1, tasks.size)
             assertEquals("order.validate", tasks[0].handlerKey)
-            assertEquals(initialPayload, tasks[0].payloadJson)
 
             // Complete task 1 with result
             val task1Result = """{"validated":true}"""
@@ -178,7 +175,7 @@ class WorkflowIntegrationTest {
                 tasks[0].id, runId, 1, TaskStatus.COMPLETED, task1Result,
             )
 
-            // Verify: workflow advanced to seq 2, task 2 auto-created with task 1's result as payload
+            // Verify: workflow advanced to seq 2
             wf = readWorkflowDirect(runId)!!
             assertEquals(2, (wf["CURRENT_SEQUENCE"] as Number).toInt())
             assertEquals(1, (wf["VERSION"] as Number).toInt())
@@ -186,7 +183,6 @@ class WorkflowIntegrationTest {
             tasks = taskRepo.findByWorkflowAndSequence(runId, 2)
             assertEquals(1, tasks.size)
             assertEquals("order.process", tasks[0].handlerKey)
-            assertEquals(task1Result, tasks[0].payloadJson)
 
             // Complete task 2 with result
             val task2Result = """{"processed":true}"""
@@ -194,7 +190,7 @@ class WorkflowIntegrationTest {
                 tasks[0].id, runId, 2, TaskStatus.COMPLETED, task2Result,
             )
 
-            // Verify: workflow advanced to seq 3, task 3 created with task 2's result as payload
+            // Verify: workflow advanced to seq 3
             wf = readWorkflowDirect(runId)!!
             assertEquals(3, (wf["CURRENT_SEQUENCE"] as Number).toInt())
             assertEquals(2, (wf["VERSION"] as Number).toInt())
@@ -202,7 +198,6 @@ class WorkflowIntegrationTest {
             tasks = taskRepo.findByWorkflowAndSequence(runId, 3)
             assertEquals(1, tasks.size)
             assertEquals("order.notify", tasks[0].handlerKey)
-            assertEquals(task2Result, tasks[0].payloadJson)
 
             // Complete task 3
             barrier.onTaskCompleted(
@@ -234,10 +229,8 @@ class WorkflowIntegrationTest {
                 }
                 activity("aggregate") { transition("batch.aggregate") }
             }
-            val initialPayload = """{"batchId":"fan-001"}"""
-
             // Start workflow — creates scatter task at seq 1
-            val runId = engine.startWorkflow(definition, initialPayload = initialPayload)
+            val runId = engine.startWorkflow(definition)
 
             var wf = readWorkflowDirect(runId)!!
             assertEquals(1, (wf["CURRENT_SEQUENCE"] as Number).toInt())
@@ -246,7 +239,6 @@ class WorkflowIntegrationTest {
             assertEquals(1, scatterTasks.size)
             // Scatter task uses activity.transition as handler key
             assertEquals("batch.worker", scatterTasks[0].handlerKey)
-            assertEquals(initialPayload, scatterTasks[0].payloadJson)
 
             // Complete scatter task with JSON array of 50 payloads
             val payloads = (1..50).map { """{"item":$it}""" }
@@ -264,8 +256,8 @@ class WorkflowIntegrationTest {
             // Parallel sub-tasks use fanOut.transition as handler key
             assertTrue(parallelTasks.all { it.handlerKey == "batch.scatter" })
             assertTrue(parallelTasks.all { it.status == TaskStatus.PENDING })
-            // Each sub-task payload matches one of the scatter payloads
-            val actualPayloads = parallelTasks.map { it.payloadJson }.toSet()
+            // Each sub-task item matches one of the scatter payloads
+            val actualPayloads = parallelTasks.map { it.item }.toSet()
             assertEquals(payloads.toSet(), actualPayloads)
 
             // Complete all 50 sub-tasks

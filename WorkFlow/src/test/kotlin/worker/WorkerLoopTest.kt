@@ -1,10 +1,13 @@
 package com.workflow.worker
 
+import com.fasterxml.jackson.databind.ObjectMapper
 import com.workflow.config.FrameworkConfig
 import com.workflow.engine.BarrierService
+import com.workflow.engine.InputResolver
 import com.workflow.engine.Task
 import com.workflow.engine.TaskRepository
 import com.workflow.engine.TaskStatus
+import com.workflow.engine.WorkflowRepository
 import com.workflow.shutdown.ShutdownSignal
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import kotlinx.coroutines.CancellationException
@@ -39,6 +42,7 @@ import java.time.temporal.ChronoUnit
 import java.util.UUID
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -54,6 +58,9 @@ class WorkerLoopTest {
     private lateinit var workerConfig: FrameworkConfig.WorkerConfig
     private lateinit var shutdownConfig: FrameworkConfig.ShutdownConfig
     private lateinit var meterRegistry: SimpleMeterRegistry
+    private lateinit var inputResolver: InputResolver
+    private lateinit var workflowRepo: WorkflowRepository
+    private lateinit var objectMapper: ObjectMapper
     private lateinit var workerLoop: WorkerLoop
 
     private val pollInterval = Duration.ofSeconds(1)
@@ -81,7 +88,10 @@ class WorkerLoopTest {
         }
 
         meterRegistry = SimpleMeterRegistry()
-        workerLoop = WorkerLoop(config, taskRepo, handlerRegistry, barrierService, meterRegistry)
+        inputResolver = mock()
+        workflowRepo = mock()
+        objectMapper = ObjectMapper().registerModule(com.fasterxml.jackson.module.kotlin.KotlinModule.Builder().build())
+        workerLoop = WorkerLoop(config, taskRepo, handlerRegistry, barrierService, meterRegistry, inputResolver, workflowRepo, objectMapper)
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────
@@ -92,7 +102,7 @@ class WorkerLoopTest {
         sequenceNumber: Int = 1,
         status: TaskStatus = TaskStatus.PROCESSING,
         handlerKey: String = "order.validate",
-        payloadJson: String? = """{"orderId":"abc"}""",
+        item: String? = """{"orderId":"abc"}""",
         resultJson: String? = null,
         retryCount: Int = 0,
         maxRetries: Int = 3,
@@ -103,7 +113,7 @@ class WorkerLoopTest {
         sequenceNumber = sequenceNumber,
         status = status,
         handlerKey = handlerKey,
-        payloadJson = payloadJson,
+        item = item,
         resultJson = resultJson,
         claimedBy = workerId,
         claimedAt = Instant.now(),
@@ -144,7 +154,8 @@ class WorkerLoopTest {
             assertEquals(task.id, input.taskId)
             assertEquals(task.workflowId, input.workflowId)
             assertEquals(task.sequenceNumber, input.sequenceNumber)
-            assertEquals(task.payloadJson, input.payload)
+            assertNull(input.inputs)
+            assertEquals(task.item, input.item)
 
             verify(barrierService).onTaskCompleted(
                 eq(task.id),
@@ -546,7 +557,7 @@ class WorkerLoopTest {
         @Test
         fun `force-cancel after drain timeout - long handler is cancelled`() = runTest {
             whenever(shutdownConfig.globalTimeout()).thenReturn(Duration.ofMillis(100))
-            val shortTimeoutLoop = WorkerLoop(config, taskRepo, handlerRegistry, barrierService, meterRegistry)
+            val shortTimeoutLoop = WorkerLoop(config, taskRepo, handlerRegistry, barrierService, meterRegistry, inputResolver, workflowRepo, objectMapper)
 
             val handlerStarted = java.util.concurrent.atomic.AtomicBoolean(false)
             val handlerCompleted = java.util.concurrent.atomic.AtomicBoolean(false)
@@ -600,7 +611,7 @@ class WorkerLoopTest {
         fun `shutdownTimeout reflects config value`() {
             whenever(shutdownConfig.globalTimeout()).thenReturn(Duration.ofSeconds(45))
 
-            val freshLoop = WorkerLoop(config, taskRepo, handlerRegistry, barrierService, meterRegistry)
+            val freshLoop = WorkerLoop(config, taskRepo, handlerRegistry, barrierService, meterRegistry, inputResolver, workflowRepo, objectMapper)
             assertEquals(Duration.ofSeconds(45), freshLoop.shutdownTimeout)
         }
     }
@@ -781,7 +792,7 @@ class WorkerLoopTest {
                 whenever(it.worker()).thenReturn(batchWorkerConfig)
                 whenever(it.shutdown()).thenReturn(shutdownConfig)
             }
-            val batchLoop = WorkerLoop(batchConfig, taskRepo, handlerRegistry, barrierService, meterRegistry)
+            val batchLoop = WorkerLoop(batchConfig, taskRepo, handlerRegistry, barrierService, meterRegistry, inputResolver, workflowRepo, objectMapper)
 
             whenever(taskRepo.claimNext(eq(workerId), eq(1), eq("default")))
                 .thenReturn(emptyList())
