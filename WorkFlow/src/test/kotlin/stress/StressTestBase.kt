@@ -57,12 +57,14 @@ abstract class StressTestBase {
 
     protected lateinit var proxyJdbi: Jdbi
     protected lateinit var directJdbi: Jdbi
+    private lateinit var directPooledJdbi: Jdbi
     protected lateinit var oracleProxy: ToxiproxyContainer.ContainerProxy
     private lateinit var toxiproxyContainer: ToxiproxyContainer
     private lateinit var proxyDataSource: HikariDataSource
+    private lateinit var directDataSource: HikariDataSource
     protected val faultInjector = FaultInjector()
 
-    // --- Components ---
+    // --- Components (proxy path — for fault injection and resilience tests) ---
 
     protected lateinit var workflowRepo: WorkflowRepository
     protected lateinit var inputResolver: InputResolver
@@ -72,6 +74,14 @@ abstract class StressTestBase {
     protected lateinit var sweeper: Sweeper
     protected lateinit var handlerRegistry: HandlerRegistry
     protected lateinit var meterRegistry: SimpleMeterRegistry
+
+    // --- Direct components (bypass proxy — for throughput benchmarks) ---
+
+    protected lateinit var directWorkflowRepo: WorkflowRepository
+    protected lateinit var directTaskRepo: TaskRepository
+    protected lateinit var directEngine: WorkflowEngine
+    protected lateinit var directBarrier: BarrierService
+    protected lateinit var directSweeper: Sweeper
 
     protected val objectMapper: ObjectMapper = ObjectMapper()
         .registerModule(KotlinModule.Builder().build())
@@ -123,6 +133,18 @@ abstract class StressTestBase {
         // Direct JDBI (bypass proxy — for setup/assertions)
         directJdbi = OracleTestContainer.jdbi
 
+        // Pooled direct DataSource (bypass proxy — for throughput benchmarks)
+        val oracle = OracleTestContainer.oracle
+        directDataSource = HikariDataSource(HikariConfig().apply {
+            jdbcUrl = oracle.jdbcUrl
+            username = oracle.username
+            password = oracle.password
+            maximumPoolSize = 20
+            minimumIdle = 2
+            connectionTimeout = 10_000
+        })
+        directPooledJdbi = Jdbi.create(directDataSource)
+
         // Toxiproxy wrapping Oracle
         val oraclePort = OracleTestContainer.oracle.getMappedPort(1521)
         Testcontainers.exposeHostPorts(oraclePort)
@@ -156,11 +178,20 @@ abstract class StressTestBase {
         inputResolver = InputResolver(objectMapper)
         handlerRegistry = HandlerRegistry()
         meterRegistry = SimpleMeterRegistry()
+
+        // Init direct components (bypass proxy — for throughput benchmarks)
+        directWorkflowRepo = WorkflowRepository(directPooledJdbi)
+        directTaskRepo = TaskRepository(directPooledJdbi)
+        val directStrategyRegistry = PhaseStrategyRegistry(objectMapper)
+        directBarrier = BarrierService(directPooledJdbi, directWorkflowRepo, directTaskRepo, objectMapper, directStrategyRegistry)
+        directEngine = WorkflowEngine(directPooledJdbi, directWorkflowRepo, directTaskRepo, objectMapper)
+        directSweeper = Sweeper(directPooledJdbi, directWorkflowRepo, directTaskRepo, directBarrier, testConfig)
     }
 
     @AfterAll
     fun tearDownInfrastructure() {
         proxyDataSource.close()
+        directDataSource.close()
         toxiproxyContainer.stop()
     }
 
@@ -201,10 +232,21 @@ abstract class StressTestBase {
         return listOf(job)
     }
 
+    protected fun startDirectWorkerPool(): List<Job> {
+        val loop = WorkerLoop(testConfig, directTaskRepo, handlerRegistry, directBarrier, meterRegistry, inputResolver, directWorkflowRepo, objectMapper)
+        val job = loop.start(workerScope)
+        workerJobs.add(job)
+        return listOf(job)
+    }
+
     // --- Sweeper ---
 
     protected suspend fun runSweep() {
         sweeper.patrol()
+    }
+
+    protected suspend fun runDirectSweep() {
+        directSweeper.patrol()
     }
 
     // --- Assertions ---

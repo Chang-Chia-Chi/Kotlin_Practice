@@ -38,16 +38,16 @@ class ThroughputBenchmarkTest : StressTestBase() {
         val harness = BenchmarkHarness()
 
         val wfIds = (1..n).map {
-            val wfId = engine.startWorkflow(def)
+            val wfId = directEngine.startWorkflow(def)
             harness.recordSubmission(wfId)
             diagnostics.trackedWorkflows.add(wfId)
             wfId
         }
 
-        startWorkerPool()
+        startDirectWorkerPool()
 
         val sweepJob = launch(Dispatchers.IO) {
-            while (true) { delay(sweepInterval.toMillis()); runSweep() }
+            while (true) { delay(sweepInterval.toMillis()); runDirectSweep() }
         }
 
         for (wfId in wfIds) {
@@ -88,16 +88,16 @@ class ThroughputBenchmarkTest : StressTestBase() {
         val harness = BenchmarkHarness()
 
         val wfIds = (1..n).map {
-            val wfId = engine.startWorkflow(def)
+            val wfId = directEngine.startWorkflow(def)
             harness.recordSubmission(wfId)
             diagnostics.trackedWorkflows.add(wfId)
             wfId
         }
 
-        startWorkerPool()
+        startDirectWorkerPool()
 
         val sweepJob = launch(Dispatchers.IO) {
-            while (true) { delay(sweepInterval.toMillis()); runSweep() }
+            while (true) { delay(sweepInterval.toMillis()); runDirectSweep() }
         }
 
         for (wfId in wfIds) {
@@ -128,16 +128,16 @@ class ThroughputBenchmarkTest : StressTestBase() {
         val harness = BenchmarkHarness()
 
         val wfIds = (1..n).map {
-            val wfId = engine.startWorkflow(def)
+            val wfId = directEngine.startWorkflow(def)
             harness.recordSubmission(wfId)
             diagnostics.trackedWorkflows.add(wfId)
             wfId
         }
 
-        startWorkerPool()
+        startDirectWorkerPool()
 
         val sweepJob = launch(Dispatchers.IO) {
-            while (true) { delay(sweepInterval.toMillis()); runSweep() }
+            while (true) { delay(sweepInterval.toMillis()); runDirectSweep() }
         }
 
         for (wfId in wfIds) {
@@ -221,14 +221,14 @@ class ThroughputBenchmarkTest : StressTestBase() {
         }
 
         // Start workers for step2
-        startWorkerPool()
+        startDirectWorkerPool()
 
         val harness = BenchmarkHarness()
         wfIds.forEach { harness.recordSubmission(it) }
 
         // Measure sweep + recovery time
         val sweepJob = launch(Dispatchers.IO) {
-            while (true) { delay(sweepInterval.toMillis()); runSweep() }
+            while (true) { delay(sweepInterval.toMillis()); runDirectSweep() }
         }
 
         for (wfId in wfIds) {
