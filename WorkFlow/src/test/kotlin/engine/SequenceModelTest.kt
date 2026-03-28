@@ -1,7 +1,6 @@
 package com.workflow.engine
 
 import com.workflow.dsl.ActivityDefinition
-import com.workflow.dsl.FanOutDefinition
 import com.workflow.dsl.WorkflowDefinition
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -22,7 +21,7 @@ class SequenceModelTest {
         assertEquals(0, seq1.activityIndex)
         assertEquals("a", seq1.activity.name)
         assertEquals(1, seq1.sequenceNumber)
-        assertNull(seq1.nextSequence, "Last sequence should have null nextSequence")
+        assertNull(seq1.nextSequence)
         assertNull(seq1.branchSequences)
     }
 
@@ -42,76 +41,66 @@ class SequenceModelTest {
     }
 
     @Test
-    fun `fan-out activity produces SCATTER then PARALLEL`() {
+    fun `fan-out activity is PARALLEL when referenced by another activity`() {
         val def = WorkflowDefinition(
             activities = listOf(
-                ActivityDefinition(
-                    name = "scatter-activity",
-                    transition = "scatter.handler",
-                    fanOut = FanOutDefinition(transition = "parallel.handler"),
-                ),
+                ActivityDefinition(name = "scatter", transition = "scatter.handler", fanOut = "parallel"),
+                ActivityDefinition(name = "parallel", transition = "parallel.handler"),
             ),
         )
         val map = buildSequenceMap(def)
 
         assertEquals(2, map.size)
         val scatter = map[1]!!
-        assertEquals(PhaseType.SCATTER, scatter.phaseType)
-        assertEquals(1, scatter.sequenceNumber)
-        assertEquals(2, scatter.nextSequence, "SCATTER next should point to PARALLEL")
+        assertEquals(PhaseType.LINEAR, scatter.phaseType)
+        assertEquals("scatter", scatter.activity.name)
+        assertEquals(2, scatter.nextSequence)
 
         val parallel = map[2]!!
         assertEquals(PhaseType.PARALLEL, parallel.phaseType)
-        assertEquals(2, parallel.sequenceNumber)
-        assertNull(parallel.nextSequence, "Last PARALLEL should have null nextSequence")
+        assertEquals("parallel", parallel.activity.name)
+        assertNull(parallel.nextSequence)
     }
 
     @Test
-    fun `fan-out then linear produces SCATTER 1 next 2, PARALLEL 2 next 3, LINEAR 3 next null`() {
+    fun `scatter then parallel then join produces LINEAR PARALLEL LINEAR`() {
         val def = WorkflowDefinition(
             activities = listOf(
-                ActivityDefinition(
-                    name = "scatter-activity",
-                    transition = "scatter.handler",
-                    fanOut = FanOutDefinition(transition = "parallel.handler"),
-                ),
-                ActivityDefinition(name = "final", transition = "final.handler"),
+                ActivityDefinition(name = "scatter", transition = "scatter.handler", fanOut = "parallel"),
+                ActivityDefinition(name = "parallel", transition = "parallel.handler"),
+                ActivityDefinition(name = "join", transition = "join.handler"),
             ),
         )
         val map = buildSequenceMap(def)
 
         assertEquals(3, map.size)
-        assertEquals(2, map[1]!!.nextSequence) // SCATTER -> PARALLEL
-        assertEquals(3, map[2]!!.nextSequence) // PARALLEL -> LINEAR
-        assertNull(map[3]!!.nextSequence)       // LINEAR -> end
+        assertEquals(PhaseType.LINEAR, map[1]!!.phaseType)
+        assertEquals(2, map[1]!!.nextSequence)
+        assertEquals(PhaseType.PARALLEL, map[2]!!.phaseType)
+        assertEquals(3, map[2]!!.nextSequence)
+        assertEquals(PhaseType.LINEAR, map[3]!!.phaseType)
+        assertNull(map[3]!!.nextSequence)
     }
 
     @Test
-    fun `linear then fan-out then linear produces correct chain`() {
+    fun `linear then scatter then parallel then join produces correct chain`() {
         val def = WorkflowDefinition(
             activities = listOf(
                 ActivityDefinition(name = "step1", transition = "step1.handler"),
-                ActivityDefinition(
-                    name = "scatter-activity",
-                    transition = "scatter.handler",
-                    fanOut = FanOutDefinition(transition = "parallel.handler"),
-                ),
+                ActivityDefinition(name = "scatter", transition = "scatter.handler", fanOut = "parallel"),
+                ActivityDefinition(name = "parallel", transition = "parallel.handler"),
                 ActivityDefinition(name = "step3", transition = "step3.handler"),
             ),
         )
         val map = buildSequenceMap(def)
 
         assertEquals(4, map.size)
-        // step1: LINEAR seq 1 -> 2
         assertEquals(PhaseType.LINEAR, map[1]!!.phaseType)
         assertEquals(2, map[1]!!.nextSequence)
-        // scatter: SCATTER seq 2 -> 3
-        assertEquals(PhaseType.SCATTER, map[2]!!.phaseType)
+        assertEquals(PhaseType.LINEAR, map[2]!!.phaseType)
         assertEquals(3, map[2]!!.nextSequence)
-        // parallel: PARALLEL seq 3 -> 4
         assertEquals(PhaseType.PARALLEL, map[3]!!.phaseType)
         assertEquals(4, map[3]!!.nextSequence)
-        // step3: LINEAR seq 4 -> null
         assertEquals(PhaseType.LINEAR, map[4]!!.phaseType)
         assertNull(map[4]!!.nextSequence)
     }
@@ -121,11 +110,8 @@ class SequenceModelTest {
         val def = WorkflowDefinition(
             activities = listOf(
                 ActivityDefinition(name = "a", transition = "a.handler"),
-                ActivityDefinition(
-                    name = "b",
-                    transition = "b.handler",
-                    fanOut = FanOutDefinition(transition = "b.fan.handler"),
-                ),
+                ActivityDefinition(name = "b", transition = "b.handler", fanOut = "c"),
+                ActivityDefinition(name = "c", transition = "c.handler"),
             ),
         )
         val map = buildSequenceMap(def)
@@ -139,11 +125,8 @@ class SequenceModelTest {
         val def = WorkflowDefinition(
             activities = listOf(
                 ActivityDefinition(name = "a", transition = "a.handler"),
-                ActivityDefinition(
-                    name = "b",
-                    transition = "b.handler",
-                    fanOut = FanOutDefinition(transition = "b.fan.handler"),
-                ),
+                ActivityDefinition(name = "b", transition = "b.handler", fanOut = "c"),
+                ActivityDefinition(name = "c", transition = "c.handler"),
             ),
         )
         val map = buildSequenceMap(def)

@@ -6,7 +6,6 @@ import com.fasterxml.jackson.module.kotlin.KotlinModule
 import com.workflow.config.FrameworkConfig
 import com.workflow.dsl.ActivityDefinition
 import com.workflow.dsl.FailurePolicy
-import com.workflow.dsl.FanOutDefinition
 import com.workflow.dsl.JoinPolicy
 import com.workflow.dsl.WorkflowDefinition
 import kotlinx.coroutines.async
@@ -81,7 +80,7 @@ class SweeperTest {
         jdbi = OracleTestContainer.jdbi
         workflowRepo = WorkflowRepository(jdbi)
         taskRepo = TaskRepository(jdbi)
-        barrier = BarrierService(jdbi, workflowRepo, taskRepo, objectMapper, PhaseStrategyRegistry(objectMapper))
+        barrier = BarrierService(jdbi, workflowRepo, taskRepo, objectMapper, PhaseStrategyRegistry())
         sweeper = Sweeper(jdbi, workflowRepo, taskRepo, barrier, testConfig)
     }
 
@@ -344,12 +343,16 @@ class SweeperTest {
         ),
     )
 
-    /** Fan-out then linear: seq 1 (SCATTER) -> seq 2 (PARALLEL) -> seq 3 (LINEAR). */
+    /** Fan-out then linear: seq 1 (LINEAR scatter) -> seq 2 (PARALLEL) -> seq 3 (LINEAR). */
     private fun fanOutThenLinearDef(joinPolicy: JoinPolicy = JoinPolicy.All) = WorkflowDefinition(
         activities = listOf(
             ActivityDefinition(
-                name = "scatter-activity", transition = "parallel.handler",
-                fanOut = FanOutDefinition(transition = "scatter.handler", joinPolicy = joinPolicy),
+                name = "scatter-activity", transition = "scatter.handler",
+                fanOut = "parallel-activity",
+            ),
+            ActivityDefinition(
+                name = "parallel-activity", transition = "parallel.handler",
+                joinPolicy = joinPolicy,
             ),
             ActivityDefinition(name = "final-step", transition = "final.handler"),
         ),

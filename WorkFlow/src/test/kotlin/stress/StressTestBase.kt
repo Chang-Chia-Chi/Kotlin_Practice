@@ -171,7 +171,7 @@ abstract class StressTestBase {
         // Init components
         workflowRepo = WorkflowRepository(proxyJdbi)
         taskRepo = TaskRepository(proxyJdbi)
-        val strategyRegistry = PhaseStrategyRegistry(objectMapper)
+        val strategyRegistry = PhaseStrategyRegistry()
         barrier = BarrierService(proxyJdbi, workflowRepo, taskRepo, objectMapper, strategyRegistry)
         engine = WorkflowEngine(proxyJdbi, workflowRepo, taskRepo, objectMapper)
         sweeper = Sweeper(proxyJdbi, workflowRepo, taskRepo, barrier, testConfig)
@@ -182,7 +182,7 @@ abstract class StressTestBase {
         // Init direct components (bypass proxy — for throughput benchmarks)
         directWorkflowRepo = WorkflowRepository(directPooledJdbi)
         directTaskRepo = TaskRepository(directPooledJdbi)
-        val directStrategyRegistry = PhaseStrategyRegistry(objectMapper)
+        val directStrategyRegistry = PhaseStrategyRegistry()
         directBarrier = BarrierService(directPooledJdbi, directWorkflowRepo, directTaskRepo, objectMapper, directStrategyRegistry)
         directEngine = WorkflowEngine(directPooledJdbi, directWorkflowRepo, directTaskRepo, objectMapper)
         directSweeper = Sweeper(directPooledJdbi, directWorkflowRepo, directTaskRepo, directBarrier, testConfig)

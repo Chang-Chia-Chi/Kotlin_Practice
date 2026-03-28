@@ -3,7 +3,6 @@ package com.workflow.engine
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.KotlinModule
 import com.workflow.dsl.ActivityDefinition
-import com.workflow.dsl.FanOutDefinition
 import kotlinx.coroutines.test.runTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -40,15 +39,15 @@ class InputResolverTest {
     }
 
     private fun fanOutSequenceMap(): Map<Int, SequenceInfo> {
-        val act = ActivityDefinition(
-            name = "split", transition = "scatter.handler",
-            fanOut = FanOutDefinition(transition = "parallel.handler"),
+        val scatterAct = ActivityDefinition(
+            name = "scatter", transition = "scatter.handler", fanOut = "split",
         )
-        val act2 = ActivityDefinition(name = "notify", transition = "notify.handler")
+        val splitAct = ActivityDefinition(name = "split", transition = "parallel.handler")
+        val notifyAct = ActivityDefinition(name = "notify", transition = "notify.handler")
         return mapOf(
-            1 to SequenceInfo(1, 0, act, PhaseType.SCATTER, 2),
-            2 to SequenceInfo(2, 0, act, PhaseType.PARALLEL, 3),
-            3 to SequenceInfo(3, 1, act2, PhaseType.LINEAR, null),
+            1 to SequenceInfo(1, 0, scatterAct, PhaseType.LINEAR, 2),
+            2 to SequenceInfo(2, 1, splitAct, PhaseType.PARALLEL, 3),
+            3 to SequenceInfo(3, 2, notifyAct, PhaseType.LINEAR, null),
         )
     }
 
@@ -88,7 +87,7 @@ class InputResolverTest {
     @Test
     fun `whole-result reference from fan-out activity aggregates parallel results`() = runTest {
         val inputs = mapOf("results" to "split")
-        val tasksBySeq: (Int) -> List<Task> = { seq ->
+        val tasksBySeq: suspend (Int) -> List<Task> = { seq ->
             if (seq == 2) listOf(
                 task(2, resultJson = """{"r":"one"}"""),
                 task(2, resultJson = """{"r":"two"}"""),
@@ -131,6 +130,18 @@ class InputResolverTest {
         val result = resolver.resolve(inputs, fanOutSequenceMap(), tasksBySeq)
         val parsed = objectMapper.readTree(result)
         assertEquals(1, parsed.get("results").size())
+    }
+
+    @Test
+    fun `reference to scatter activity returns single result, not aggregation`() = runTest {
+        val inputs = mapOf("token" to "scatter.batchId")
+        val tasksBySeq: suspend (Int) -> List<Task> = { seq ->
+            if (seq == 1) listOf(task(1, resultJson = """{"batchId":"batch-123"}"""))
+            else emptyList()
+        }
+        val result = resolver.resolve(inputs, fanOutSequenceMap(), tasksBySeq)
+        val parsed = objectMapper.readTree(result)
+        assertEquals("batch-123", parsed.get("token").asText())
     }
 
     @Test

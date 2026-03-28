@@ -84,9 +84,10 @@ class FaultInjectionStressTest : StressTestBase() {
             val def = workflow {
                 activity("scatter") {
                     transition("f3.scatter")
-                    fanOut {
-                        transition("f3.parallel")
-                    }
+                    fanOut("parallel")
+                }
+                activity("parallel") {
+                    transition("f3.parallel")
                 }
             }
 

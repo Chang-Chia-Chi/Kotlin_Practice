@@ -6,41 +6,6 @@ import java.time.Duration
 annotation class WorkflowDsl
 
 @WorkflowDsl
-class FanOutBuilder {
-    private var transition: String? = null
-    private var retries: Int = 0
-    private var failurePolicy: FailurePolicy = FailurePolicy.ABORT
-    private var deadline: Duration = Duration.ofMinutes(30)
-    private var joinPolicy: JoinPolicy = JoinPolicy.All
-    private var backoffBase: Duration = Duration.ofSeconds(1)
-    private var backoffCap: Duration = Duration.ofSeconds(300)
-    private var queue: String = "default"
-
-    fun transition(t: String) { transition = t }
-    fun retries(n: Int) { retries = n }
-    fun failurePolicy(p: FailurePolicy) { failurePolicy = p }
-    fun deadline(d: Duration) { deadline = d }
-    fun joinPolicy(p: JoinPolicy) { joinPolicy = p }
-    fun backoffBase(d: Duration) { backoffBase = d }
-    fun backoffCap(d: Duration) { backoffCap = d }
-    fun queue(q: String) { queue = q }
-
-    fun build(): FanOutDefinition {
-        requireNotNull(transition) { "FanOut transition is required" }
-        return FanOutDefinition(
-            transition = transition!!,
-            retries = retries,
-            failurePolicy = failurePolicy,
-            deadline = deadline,
-            joinPolicy = joinPolicy,
-            backoffBase = backoffBase,
-            backoffCap = backoffCap,
-            queue = queue,
-        )
-    }
-}
-
-@WorkflowDsl
 class InputsBuilder {
     private val entries = mutableMapOf<String, String>()
 
@@ -57,7 +22,8 @@ class ActivityBuilder {
     private var retries: Int = 0
     private var failurePolicy: FailurePolicy = FailurePolicy.ABORT
     private var deadline: Duration = Duration.ofMinutes(30)
-    private var fanOutDef: FanOutDefinition? = null
+    private var fanOutTarget: String? = null
+    private var joinPolicy: JoinPolicy = JoinPolicy.All
     private var backoffBase: Duration = Duration.ofSeconds(1)
     private var backoffCap: Duration = Duration.ofSeconds(300)
     private var queue: String = "default"
@@ -71,9 +37,8 @@ class ActivityBuilder {
     fun backoffCap(d: Duration) { backoffCap = d }
     fun queue(q: String) { queue = q }
 
-    fun fanOut(block: FanOutBuilder.() -> Unit) {
-        fanOutDef = FanOutBuilder().apply(block).build()
-    }
+    fun fanOut(target: String) { fanOutTarget = target }
+    fun joinPolicy(p: JoinPolicy) { joinPolicy = p }
 
     fun inputs(block: InputsBuilder.() -> Unit) {
         inputsDef = InputsBuilder().apply(block).build()
@@ -87,7 +52,8 @@ class ActivityBuilder {
             retries = retries,
             failurePolicy = failurePolicy,
             deadline = deadline,
-            fanOut = fanOutDef,
+            fanOut = fanOutTarget,
+            joinPolicy = joinPolicy,
             backoffBase = backoffBase,
             backoffCap = backoffCap,
             queue = queue,

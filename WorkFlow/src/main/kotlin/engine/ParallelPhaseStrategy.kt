@@ -5,9 +5,7 @@ import com.workflow.dsl.JoinPolicy
 class ParallelPhaseStrategy : PhaseStrategy {
 
     override fun resolve(context: PhaseContext): AdvancementDecision {
-        val fanOut = context.currentSeqInfo.activity.fanOut
-            ?: throw IllegalStateException("PARALLEL phase at seq ${context.currentSeqInfo.sequenceNumber} has no fanOut definition")
-        val joinPolicy = fanOut.joinPolicy
+        val joinPolicy = context.currentSeqInfo.activity.joinPolicy
         val succeeded = evaluateJoinPolicy(joinPolicy, context.failedCount, context.totalCount)
 
         if (!succeeded) {

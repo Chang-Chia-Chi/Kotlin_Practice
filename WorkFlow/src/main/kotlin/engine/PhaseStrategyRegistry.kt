@@ -1,17 +1,15 @@
 package com.workflow.engine
 
-import com.fasterxml.jackson.databind.ObjectMapper
 import jakarta.enterprise.context.ApplicationScoped
 import java.util.concurrent.ConcurrentHashMap
 
 @ApplicationScoped
-class PhaseStrategyRegistry(objectMapper: ObjectMapper) {
+class PhaseStrategyRegistry {
 
     private val strategies = ConcurrentHashMap<PhaseType, PhaseStrategy>()
 
     init {
         register(PhaseType.LINEAR, LinearPhaseStrategy())
-        register(PhaseType.SCATTER, ScatterPhaseStrategy(objectMapper))
         register(PhaseType.PARALLEL, ParallelPhaseStrategy())
     }
 

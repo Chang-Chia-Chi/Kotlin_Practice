@@ -28,24 +28,14 @@ sealed interface JoinPolicy {
     }
 }
 
-data class FanOutDefinition(
-    val transition: String,
-    val retries: Int = 0,
-    val failurePolicy: FailurePolicy = FailurePolicy.ABORT,
-    val deadline: Duration = Duration.ofMinutes(30),
-    val joinPolicy: JoinPolicy = JoinPolicy.All,
-    val backoffBase: Duration = Duration.ofSeconds(1),
-    val backoffCap: Duration = Duration.ofSeconds(300),
-    val queue: String = "default",
-)
-
 data class ActivityDefinition(
     val name: String,
     val transition: String,
     val retries: Int = 0,
     val failurePolicy: FailurePolicy = FailurePolicy.ABORT,
     val deadline: Duration = Duration.ofMinutes(30),
-    val fanOut: FanOutDefinition? = null,
+    val fanOut: String? = null,
+    val joinPolicy: JoinPolicy = JoinPolicy.All,
     val backoffBase: Duration = Duration.ofSeconds(1),
     val backoffCap: Duration = Duration.ofSeconds(300),
     val queue: String = "default",
@@ -62,6 +52,25 @@ data class WorkflowDefinition(
         val names = activities.map { it.name }
         require(names.size == names.toSet().size) {
             "Activity names must be unique, found duplicates: ${names.groupBy { it }.filter { it.value.size > 1 }.keys}"
+        }
+        for (activity in activities) {
+            val target = activity.fanOut ?: continue
+            require(activities.any { it.name == target }) {
+                "Activity '${activity.name}' fanOut references unknown activity '$target'"
+            }
+        }
+        for ((i, activity) in activities.withIndex()) {
+            val target = activity.fanOut ?: continue
+            require(i + 1 < activities.size && activities[i + 1].name == target) {
+                "fanOut target '$target' must be the next activity after '${activity.name}'"
+            }
+        }
+        for (activity in activities) {
+            val target = activity.fanOut ?: continue
+            val targetActivity = activities.first { it.name == target }
+            require(targetActivity.fanOut == null) {
+                "fanOut target '$target' cannot itself be a fanOut source"
+            }
         }
     }
 }

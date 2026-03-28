@@ -51,42 +51,44 @@ class WorkflowDslBuildersTest {
         val definition = workflow {
             activity("scatter") {
                 transition("scatter.dispatch")
-                fanOut {
-                    transition("scatter.process")
-                    retries(3)
-                    failurePolicy(FailurePolicy.BEST_EFFORT)
-                    deadline(Duration.ofMinutes(15))
-                    joinPolicy(JoinPolicy.Percentage(95))
-                }
+                fanOut("parallel")
+            }
+            activity("parallel") {
+                transition("scatter.process")
+                retries(3)
+                failurePolicy(FailurePolicy.BEST_EFFORT)
+                deadline(Duration.ofMinutes(15))
+                joinPolicy(JoinPolicy.Percentage(95))
             }
         }
 
-        assertEquals(1, definition.activities.size)
-        val activity = definition.activities[0]
-        assertEquals("scatter", activity.name)
-        assertEquals("scatter.dispatch", activity.transition)
+        assertEquals(2, definition.activities.size)
+        val scatter = definition.activities[0]
+        assertEquals("scatter", scatter.name)
+        assertEquals("scatter.dispatch", scatter.transition)
+        assertEquals("parallel", scatter.fanOut)
 
-        val fanOut = activity.fanOut!!
-        assertEquals("scatter.process", fanOut.transition)
-        assertEquals(3, fanOut.retries)
-        assertEquals(FailurePolicy.BEST_EFFORT, fanOut.failurePolicy)
-        assertEquals(Duration.ofMinutes(15), fanOut.deadline)
-        assertEquals(JoinPolicy.Percentage(95), fanOut.joinPolicy)
+        val parallel = definition.activities[1]
+        assertEquals("scatter.process", parallel.transition)
+        assertEquals(3, parallel.retries)
+        assertEquals(FailurePolicy.BEST_EFFORT, parallel.failurePolicy)
+        assertEquals(Duration.ofMinutes(15), parallel.deadline)
+        assertEquals(JoinPolicy.Percentage(95), parallel.joinPolicy)
     }
 
     @Test
     fun `fan-out with default joinPolicy when omitted`() {
         val definition = workflow {
-            activity("barrier-activity") {
-                transition("barrier.dispatch")
-                fanOut {
-                    transition("barrier.process")
-                }
+            activity("scatter") {
+                transition("scatter.dispatch")
+                fanOut("parallel")
+            }
+            activity("parallel") {
+                transition("parallel.process")
             }
         }
 
-        val fanOut = definition.activities[0].fanOut!!
-        assertEquals(JoinPolicy.All, fanOut.joinPolicy)
+        assertEquals(JoinPolicy.All, definition.activities[1].joinPolicy)
     }
 
     @Test
@@ -108,22 +110,44 @@ class WorkflowDslBuildersTest {
     }
 
     @Test
-    fun `DslMarker prevents calling activity inside fanOut`() {
-        assertFailsWith<Exception> {
-            @Suppress("UNUSED_EXPRESSION")
+    fun `fanOut target must reference existing activity`() {
+        assertThrows<IllegalArgumentException> {
             workflow {
-                activity("outer") {
-                    transition("outer.run")
-                    fanOut {
-                        transition("fan.process")
-                        // This should not compile normally due to @DslMarker,
-                        // but at runtime the builder should not expose activity()
-                        (this as? WorkflowBuilder)?.activity("leaked") {
-                            transition("leaked.run")
-                        }
-                            ?: throw IllegalStateException("DslMarker correctly prevents scope leakage")
-                    }
+                activity("scatter") {
+                    transition("scatter.handler")
+                    fanOut("nonexistent")
                 }
+            }
+        }
+    }
+
+    @Test
+    fun `fanOut target must be next activity`() {
+        assertThrows<IllegalArgumentException> {
+            workflow {
+                activity("scatter") {
+                    transition("scatter.handler")
+                    fanOut("join")
+                }
+                activity("parallel") { transition("parallel.handler") }
+                activity("join") { transition("join.handler") }
+            }
+        }
+    }
+
+    @Test
+    fun `chained fanOut not allowed`() {
+        assertThrows<IllegalArgumentException> {
+            workflow {
+                activity("scatter1") {
+                    transition("s1.handler")
+                    fanOut("scatter2")
+                }
+                activity("scatter2") {
+                    transition("s2.handler")
+                    fanOut("parallel")
+                }
+                activity("parallel") { transition("p.handler") }
             }
         }
     }

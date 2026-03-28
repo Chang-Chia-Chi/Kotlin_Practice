@@ -457,12 +457,13 @@ class LivenessStressTest : StressTestBase() {
                     activity("scatter") {
                         transition("l11.scatter")
                         failurePolicy(FailurePolicy.BEST_EFFORT)
-                        fanOut {
-                            transition("l11.parallel")
-                            retries(0) // No retries — immediate failure
-                            failurePolicy(FailurePolicy.BEST_EFFORT)
-                            joinPolicy(JoinPolicy.All)
-                        }
+                        fanOut("parallel")
+                    }
+                    activity("parallel") {
+                        transition("l11.parallel")
+                        retries(0) // No retries — immediate failure
+                        failurePolicy(FailurePolicy.BEST_EFFORT)
+                        joinPolicy(JoinPolicy.All)
                     }
                     activity("final") { transition("l11.final") }
                 }

@@ -40,7 +40,7 @@ class WorkflowEngineTest {
         workflowRepo = WorkflowRepository(jdbi)
         taskRepo = TaskRepository(jdbi)
         engine = WorkflowEngine(jdbi, workflowRepo, taskRepo, objectMapper)
-        barrierService = BarrierService(jdbi, workflowRepo, taskRepo, objectMapper, PhaseStrategyRegistry(objectMapper))
+        barrierService = BarrierService(jdbi, workflowRepo, taskRepo, objectMapper, PhaseStrategyRegistry())
     }
 
     @AfterEach
@@ -107,13 +107,14 @@ class WorkflowEngineTest {
                 transition("batch.parallel-worker")
                 retries(1)
                 deadline(Duration.ofMinutes(15))
-                fanOut {
-                    transition("batch.scatter")
-                    retries(5)
-                    failurePolicy(FailurePolicy.BEST_EFFORT)
-                    deadline(Duration.ofMinutes(60))
-                    joinPolicy(JoinPolicy.Percentage(95))
-                }
+                fanOut("parallel")
+            }
+            activity("parallel") {
+                transition("batch.scatter")
+                retries(5)
+                failurePolicy(FailurePolicy.BEST_EFFORT)
+                deadline(Duration.ofMinutes(60))
+                joinPolicy(JoinPolicy.Percentage(95))
             }
         }
         val runId = engine.startWorkflow(definition)

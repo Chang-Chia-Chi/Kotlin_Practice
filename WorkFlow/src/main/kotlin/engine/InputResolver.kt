@@ -46,36 +46,22 @@ class InputResolver(
                 "Input reference '$activityName' does not match any activity in the workflow. " +
                     "Available activities: ${sequenceMap.values.map { it.activity.name }}"
             )
-        val isFanOut = seqEntry.activity.fanOut != null
 
-        if (isFanOut) {
-            val parallelSeq = findParallelSequence(seqEntry, sequenceMap)
-            val tasks = tasksBySequence(parallelSeq)
-                .filter { it.status == TaskStatus.COMPLETED }
-            return aggregateFanOut(tasks, fieldPath)
+        return when (seqEntry.phaseType) {
+            PhaseType.PARALLEL -> {
+                val tasks = tasksBySequence(seqEntry.sequenceNumber)
+                    .filter { it.status == TaskStatus.COMPLETED }
+                aggregateFanOut(tasks, fieldPath)
+            }
+            PhaseType.LINEAR -> {
+                val task = tasksBySequence(seqEntry.sequenceNumber)
+                    .firstOrNull { it.status == TaskStatus.COMPLETED }
+                val resultJson = task?.resultJson
+                if (resultJson == null) return objectMapper.nullNode()
+                val resultTree = objectMapper.readTree(resultJson)
+                traversePath(resultTree, fieldPath)
+            }
         }
-
-        val tasks = tasksBySequence(seqEntry.sequenceNumber)
-        val task = tasks.firstOrNull { it.status == TaskStatus.COMPLETED }
-        val resultJson = task?.resultJson
-
-        if (resultJson == null) return objectMapper.nullNode()
-
-        val resultTree = objectMapper.readTree(resultJson)
-        return traversePath(resultTree, fieldPath)
-    }
-
-    private fun findParallelSequence(
-        scatterSeqInfo: SequenceInfo,
-        sequenceMap: Map<Int, SequenceInfo>,
-    ): Int {
-        val nextSeq = scatterSeqInfo.nextSequence
-            ?: throw IllegalStateException("Fan-out activity '${scatterSeqInfo.activity.name}' has no parallel sequence")
-        val nextInfo = sequenceMap[nextSeq]!!
-        require(nextInfo.phaseType == PhaseType.PARALLEL) {
-            "Expected PARALLEL at sequence $nextSeq but found ${nextInfo.phaseType}"
-        }
-        return nextSeq
     }
 
     private fun traversePath(node: JsonNode, fieldPath: List<String>): JsonNode {

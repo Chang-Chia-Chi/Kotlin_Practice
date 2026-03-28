@@ -1,25 +1,15 @@
 package com.workflow.engine
 
-import com.fasterxml.jackson.databind.ObjectMapper
-import com.fasterxml.jackson.module.kotlin.KotlinModule
-import org.junit.jupiter.api.assertThrows
 import kotlin.test.Test
 import kotlin.test.assertIs
-import kotlin.test.assertTrue
 
 class PhaseStrategyRegistryTest {
 
-    private val objectMapper = ObjectMapper().registerModule(KotlinModule.Builder().build())
-    private val registry = PhaseStrategyRegistry(objectMapper)
+    private val registry = PhaseStrategyRegistry()
 
     @Test
     fun `resolve returns LinearPhaseStrategy for LINEAR`() {
         assertIs<LinearPhaseStrategy>(registry.resolve(PhaseType.LINEAR))
-    }
-
-    @Test
-    fun `resolve returns ScatterPhaseStrategy for SCATTER`() {
-        assertIs<ScatterPhaseStrategy>(registry.resolve(PhaseType.SCATTER))
     }
 
     @Test
@@ -54,7 +44,6 @@ class PhaseStrategyRegistryTest {
                 sequenceMap = emptyMap(),
                 failedCount = 0,
                 totalCount = 0,
-                tasks = emptyList(),
             ),
         ))
     }

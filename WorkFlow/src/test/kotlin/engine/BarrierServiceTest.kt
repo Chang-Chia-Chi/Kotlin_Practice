@@ -5,7 +5,6 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule
 import com.fasterxml.jackson.module.kotlin.KotlinModule
 import com.workflow.dsl.ActivityDefinition
 import com.workflow.dsl.FailurePolicy
-import com.workflow.dsl.FanOutDefinition
 import com.workflow.dsl.JoinPolicy
 import com.workflow.dsl.WorkflowDefinition
 import com.workflow.dsl.workflow
@@ -46,7 +45,7 @@ class BarrierServiceTest {
         jdbi = OracleTestContainer.jdbi
         workflowRepo = WorkflowRepository(jdbi)
         taskRepo = TaskRepository(jdbi)
-        strategyRegistry = PhaseStrategyRegistry(objectMapper)
+        strategyRegistry = PhaseStrategyRegistry()
         barrier = BarrierService(jdbi, workflowRepo, taskRepo, objectMapper, strategyRegistry)
         engine = WorkflowEngine(jdbi, workflowRepo, taskRepo, objectMapper)
     }
@@ -245,52 +244,52 @@ class BarrierServiceTest {
     )
 
     /**
-     * Single fan-out activity: seq 1 (SCATTER) → seq 2 (PARALLEL).
+     * Scatter + parallel: seq 1 (LINEAR scatter) → seq 2 (PARALLEL).
      *
      * Handler key mapping per locked contract:
-     * - SCATTER phase uses `activity.transition` → "parallel.handler"
-     * - PARALLEL phase uses `fanOut.transition` → "scatter.handler"
+     * - Scatter activity uses `activity.transition` → "scatter.handler"
+     * - Parallel activity uses its own `transition` → "parallel.handler"
      */
     private fun fanOutDef(
         joinPolicy: JoinPolicy = JoinPolicy.All,
         failurePolicy: FailurePolicy = FailurePolicy.ABORT,
-        fanOutFailurePolicy: FailurePolicy = FailurePolicy.ABORT,
+        parallelFailurePolicy: FailurePolicy = FailurePolicy.ABORT,
     ) = WorkflowDefinition(
         activities = listOf(
             ActivityDefinition(
                 name = "scatter-activity",
-                transition = "parallel.handler",
+                transition = "scatter.handler",
                 failurePolicy = failurePolicy,
-                fanOut = FanOutDefinition(
-                    transition = "scatter.handler",
-                    failurePolicy = fanOutFailurePolicy,
-                    joinPolicy = joinPolicy,
-                ),
+                fanOut = "parallel-activity",
+            ),
+            ActivityDefinition(
+                name = "parallel-activity",
+                transition = "parallel.handler",
+                failurePolicy = parallelFailurePolicy,
+                joinPolicy = joinPolicy,
             ),
         ),
     )
 
     /**
-     * Fan-out followed by a linear step: seq 1 (SCATTER) → seq 2 (PARALLEL) → seq 3 (LINEAR).
+     * Scatter + parallel + linear: seq 1 (LINEAR) → seq 2 (PARALLEL) → seq 3 (LINEAR).
      * Used to verify that after parallel phase completes, the next linear task is inserted.
-     *
-     * Handler key mapping per locked contract:
-     * - SCATTER phase uses `activity.transition` → "parallel.handler"
-     * - PARALLEL phase uses `fanOut.transition` → "scatter.handler"
      */
     private fun fanOutThenLinearDef(
         joinPolicy: JoinPolicy = JoinPolicy.All,
-        fanOutFailurePolicy: FailurePolicy = FailurePolicy.ABORT,
+        parallelFailurePolicy: FailurePolicy = FailurePolicy.ABORT,
     ) = WorkflowDefinition(
         activities = listOf(
             ActivityDefinition(
                 name = "scatter-activity",
+                transition = "scatter.handler",
+                fanOut = "parallel-activity",
+            ),
+            ActivityDefinition(
+                name = "parallel-activity",
                 transition = "parallel.handler",
-                fanOut = FanOutDefinition(
-                    transition = "scatter.handler",
-                    failurePolicy = fanOutFailurePolicy,
-                    joinPolicy = joinPolicy,
-                ),
+                failurePolicy = parallelFailurePolicy,
+                joinPolicy = joinPolicy,
             ),
             ActivityDefinition(name = "final-step", transition = "final.handler"),
         ),
@@ -799,8 +798,8 @@ class BarrierServiceTest {
             val seq2Tasks = readTasksDirect(wfId, 2)
             assertEquals(3, seq2Tasks.size)
 
-            // All sub-tasks use fanOut.transition as handler key (PARALLEL phase mapping)
-            assertTrue(seq2Tasks.all { it["HANDLER_KEY"] == "scatter.handler" })
+            // All sub-tasks use the parallel activity's transition as handler key
+            assertTrue(seq2Tasks.all { it["HANDLER_KEY"] == "parallel.handler" })
 
             // All sub-tasks are PENDING
             assertTrue(seq2Tasks.all { it["STATUS"] == "PENDING" })
@@ -823,12 +822,13 @@ class BarrierServiceTest {
             val definition = workflow {
                 activity("scatter") {
                     transition("scatter.handler")
-                    fanOut {
-                        transition("parallel.handler")
-                        retries(0)
-                        failurePolicy(FailurePolicy.ABORT)
-                        joinPolicy(JoinPolicy.All)
-                    }
+                    fanOut("parallel")
+                }
+                activity("parallel") {
+                    transition("parallel.handler")
+                    retries(0)
+                    failurePolicy(FailurePolicy.ABORT)
+                    joinPolicy(JoinPolicy.All)
                 }
             }
             val workflowId = engine.startWorkflow(definition)

@@ -76,7 +76,7 @@ class WorkflowIntegrationTest {
         workflowRepo = WorkflowRepository(jdbi)
         taskRepo = TaskRepository(jdbi)
         engine = WorkflowEngine(jdbi, workflowRepo, taskRepo, objectMapper)
-        barrier = BarrierService(jdbi, workflowRepo, taskRepo, objectMapper, PhaseStrategyRegistry(objectMapper))
+        barrier = BarrierService(jdbi, workflowRepo, taskRepo, objectMapper, PhaseStrategyRegistry())
         sweeper = Sweeper(jdbi, workflowRepo, taskRepo, barrier, testConfig)
     }
 
@@ -222,10 +222,11 @@ class WorkflowIntegrationTest {
             val definition = workflow {
                 activity("batch") {
                     transition("batch.worker")
-                    fanOut {
-                        transition("batch.scatter")
-                        joinPolicy(JoinPolicy.All)
-                    }
+                    fanOut("parallel")
+                }
+                activity("parallel") {
+                    transition("batch.scatter")
+                    joinPolicy(JoinPolicy.All)
                 }
                 activity("aggregate") { transition("batch.aggregate") }
             }
@@ -237,7 +238,6 @@ class WorkflowIntegrationTest {
 
             val scatterTasks = taskRepo.findByWorkflowAndSequence(runId, 1)
             assertEquals(1, scatterTasks.size)
-            // Scatter task uses activity.transition as handler key
             assertEquals("batch.worker", scatterTasks[0].handlerKey)
 
             // Complete scatter task with JSON array of 50 payloads
@@ -253,7 +253,7 @@ class WorkflowIntegrationTest {
 
             val parallelTasks = taskRepo.findByWorkflowAndSequence(runId, 2)
             assertEquals(50, parallelTasks.size)
-            // Parallel sub-tasks use fanOut.transition as handler key
+            // Parallel sub-tasks use their own activity's transition as handler key
             assertTrue(parallelTasks.all { it.handlerKey == "batch.scatter" })
             assertTrue(parallelTasks.all { it.status == TaskStatus.PENDING })
             // Each sub-task item matches one of the scatter payloads
@@ -271,7 +271,6 @@ class WorkflowIntegrationTest {
             wf = readWorkflowDirect(runId)!!
             assertEquals(3, (wf["CURRENT_SEQUENCE"] as Number).toInt())
 
-            // PARALLEL->LINEAR: payload is null (multiple parallel results, no single value)
             val aggregateTasks = taskRepo.findByWorkflowAndSequence(runId, 3)
             assertEquals(1, aggregateTasks.size)
             assertEquals("batch.aggregate", aggregateTasks[0].handlerKey)
@@ -367,12 +366,13 @@ class WorkflowIntegrationTest {
         fun `concurrent barrier completions produce exactly one phase transition`() = runTest {
             val subTaskCount = 20
             val definition = workflow {
+                activity("scatter-work") {
+                    transition("scatter.handler")
+                    fanOut("parallel-work")
+                }
                 activity("parallel-work") {
                     transition("parallel.handler")
-                    fanOut {
-                        transition("scatter.handler")
-                        joinPolicy(JoinPolicy.All)
-                    }
+                    joinPolicy(JoinPolicy.All)
                 }
                 activity("post-join") { transition("post.handler") }
             }

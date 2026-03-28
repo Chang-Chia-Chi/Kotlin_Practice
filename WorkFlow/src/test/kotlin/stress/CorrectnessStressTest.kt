@@ -35,10 +35,11 @@ class CorrectnessStressTest : StressTestBase() {
         val def = workflow {
             activity("scatter") {
                 transition("c1.scatter")
-                fanOut {
-                    transition("c1.parallel")
-                    joinPolicy(JoinPolicy.All)
-                }
+                fanOut("parallel")
+            }
+            activity("parallel") {
+                transition("c1.parallel")
+                joinPolicy(JoinPolicy.All)
             }
             activity("final") { transition("c1.final") }
         }
@@ -85,10 +86,11 @@ class CorrectnessStressTest : StressTestBase() {
         val def = workflow {
             activity("scatter") {
                 transition("c2.scatter")
-                fanOut {
-                    transition("c2.parallel")
-                    joinPolicy(JoinPolicy.All)
-                }
+                fanOut("parallel")
+            }
+            activity("parallel") {
+                transition("c2.parallel")
+                joinPolicy(JoinPolicy.All)
             }
         }
 
@@ -128,12 +130,13 @@ class CorrectnessStressTest : StressTestBase() {
             activity("scatter") {
                 transition("c3.scatter")
                 failurePolicy(FailurePolicy.ABORT)
-                fanOut {
-                    transition("c3.parallel")
-                    retries(0)
-                    failurePolicy(FailurePolicy.ABORT)
-                    joinPolicy(JoinPolicy.All)
-                }
+                fanOut("parallel")
+            }
+            activity("parallel") {
+                transition("c3.parallel")
+                retries(0)
+                failurePolicy(FailurePolicy.ABORT)
+                joinPolicy(JoinPolicy.All)
             }
         }
 
@@ -198,11 +201,12 @@ class CorrectnessStressTest : StressTestBase() {
         val def = workflow {
             activity("scatter") {
                 transition("$handlerKey.scatter")
-                fanOut {
-                    transition("$handlerKey.parallel")
-                    retries(0)
-                    joinPolicy(JoinPolicy.Percentage(threshold))
-                }
+                fanOut("parallel")
+            }
+            activity("parallel") {
+                transition("$handlerKey.parallel")
+                retries(0)
+                joinPolicy(JoinPolicy.Percentage(threshold))
             }
             activity("final") { transition("$handlerKey.final") }
         }
@@ -254,11 +258,12 @@ class CorrectnessStressTest : StressTestBase() {
         val def = workflow {
             activity("scatter") {
                 transition("$handlerKey.scatter")
-                fanOut {
-                    transition("$handlerKey.parallel")
-                    retries(0)
-                    joinPolicy(JoinPolicy.Threshold(threshold))
-                }
+                fanOut("parallel")
+            }
+            activity("parallel") {
+                transition("$handlerKey.parallel")
+                retries(0)
+                joinPolicy(JoinPolicy.Threshold(threshold))
             }
             activity("final") { transition("$handlerKey.final") }
         }
@@ -434,10 +439,11 @@ class CorrectnessStressTest : StressTestBase() {
         val def = workflow {
             activity("scatter") {
                 transition("c9.scatter")
-                fanOut {
-                    transition("c9.parallel")
-                    joinPolicy(JoinPolicy.All)
-                }
+                fanOut("parallel")
+            }
+            activity("parallel") {
+                transition("c9.parallel")
+                joinPolicy(JoinPolicy.All)
             }
         }
 
@@ -538,10 +544,11 @@ class CorrectnessStressTest : StressTestBase() {
         val def = workflow {
             activity("scatter") {
                 transition("c11.scatter")
-                fanOut {
-                    transition("c11.parallel")
-                    joinPolicy(JoinPolicy.All)
-                }
+                fanOut("parallel")
+            }
+            activity("parallel") {
+                transition("c11.parallel")
+                joinPolicy(JoinPolicy.All)
             }
             activity("final") { transition("c11.final") }
         }
