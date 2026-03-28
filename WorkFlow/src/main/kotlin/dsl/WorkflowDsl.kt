@@ -36,6 +36,7 @@ data class FanOutDefinition(
     val joinPolicy: JoinPolicy = JoinPolicy.All,
     val backoffBase: Duration = Duration.ofSeconds(1),
     val backoffCap: Duration = Duration.ofSeconds(300),
+    val queue: String = "default",
 )
 
 data class ActivityDefinition(
@@ -47,6 +48,7 @@ data class ActivityDefinition(
     val fanOut: FanOutDefinition? = null,
     val backoffBase: Duration = Duration.ofSeconds(1),
     val backoffCap: Duration = Duration.ofSeconds(300),
+    val queue: String = "default",
 )
 
 data class WorkflowDefinition(

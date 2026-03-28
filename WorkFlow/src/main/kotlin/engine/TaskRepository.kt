@@ -23,6 +23,7 @@ class TaskRepository(
     suspend fun claimNext(
         workerId: String,
         limit: Int,
+        queueName: String = "default",
     ): List<Task> =
         jdbi.inTransactionSuspend<List<Task>, Exception> { h: Handle ->
             val now = LocalDateTime.now(ZoneOffset.UTC).truncatedTo(java.time.temporal.ChronoUnit.MICROS)
@@ -34,6 +35,7 @@ class TaskRepository(
                 WHERE id IN (
                     SELECT id FROM task
                     WHERE status = 'PENDING'
+                      AND queue_name = :queueName
                       AND (deadline_at IS NULL OR deadline_at > :now)
                       AND (not_before IS NULL OR not_before <= :now)
                     ORDER BY enqueued_at ASC, id
@@ -43,6 +45,7 @@ class TaskRepository(
                 """,
                     ).bind("limit", limit)
                     .bind("now", now)
+                    .bind("queueName", queueName)
                     .mapToMap()
                     .list()
 
@@ -310,7 +313,7 @@ class TaskRepository(
         return handle.createUpdate(
             """
             UPDATE task SET status = 'CANCELLED', completed_at = :now
-            WHERE workflow_id = :workflowId AND status = 'PENDING'
+            WHERE workflow_id = :workflowId AND status IN ('PENDING', 'WAITING_FOR_SIGNAL')
             """,
         )
             .bind("workflowId", workflowId)
@@ -328,10 +331,10 @@ class TaskRepository(
                 """
             INSERT INTO task (id, workflow_id, sequence_number, status, handler_key,
                               payload, result, claimed_by, claimed_at, completed_at,
-                              retry_count, max_retries, deadline_at, not_before, backoff_base, backoff_cap)
+                              retry_count, max_retries, deadline_at, not_before, backoff_base, backoff_cap, queue_name)
             VALUES (:id, :workflowId, :sequenceNumber, :status, :handlerKey,
                     :payload, :result, :claimedBy, :claimedAt, :completedAt,
-                    :retryCount, :maxRetries, :deadlineAt, :notBefore, :backoffBase, :backoffCap)
+                    :retryCount, :maxRetries, :deadlineAt, :notBefore, :backoffBase, :backoffCap, :queueName)
             """,
             )
         for (task in tasks) {
@@ -355,6 +358,7 @@ class TaskRepository(
             batch
                 .bind("backoffBase", task.backoffBase)
                 .bind("backoffCap", task.backoffCap)
+                .bind("queueName", task.queueName)
             batch.add()
         }
         batch.execute()
@@ -419,6 +423,7 @@ class TaskRepository(
             backoffBase = (ci["BACKOFF_BASE"] as Number).toInt(),
             backoffCap = (ci["BACKOFF_CAP"] as Number).toInt(),
             enqueuedAt = readTimestamp(ci["ENQUEUED_AT"]),
+            queueName = (ci["QUEUE_NAME"] as? String) ?: "default",
         )
     }
 }

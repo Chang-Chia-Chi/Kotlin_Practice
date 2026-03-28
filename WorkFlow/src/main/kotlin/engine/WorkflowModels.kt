@@ -29,7 +29,7 @@ enum class WorkflowStatus {
 }
 
 enum class TaskStatus {
-    PENDING, PROCESSING, COMPLETED, FAILED, TIMED_OUT, DEAD_LETTER, CANCELLED;
+    PENDING, PROCESSING, WAITING_FOR_SIGNAL, COMPLETED, FAILED, TIMED_OUT, DEAD_LETTER, CANCELLED;
 
     val isTerminal: Boolean get() = this in terminalStatuses
 
@@ -41,10 +41,15 @@ enum class TaskStatus {
             PROCESSING to COMPLETED,
             PROCESSING to FAILED,
             PROCESSING to TIMED_OUT,
-            PROCESSING to PENDING,       // stale reclaim
+            PROCESSING to PENDING,              // stale reclaim
             PROCESSING to DEAD_LETTER,
-            FAILED to PENDING,           // future: retry-on-failure
-            FAILED to DEAD_LETTER,       // future: retry-on-failure exhausted
+            PROCESSING to WAITING_FOR_SIGNAL,   // handler suspends task
+            WAITING_FOR_SIGNAL to COMPLETED,    // signal: approved
+            WAITING_FOR_SIGNAL to FAILED,       // signal: rejected
+            WAITING_FOR_SIGNAL to TIMED_OUT,    // sweeper: deadline expired
+            WAITING_FOR_SIGNAL to CANCELLED,    // workflow cancelled
+            FAILED to PENDING,                  // future: retry-on-failure
+            FAILED to DEAD_LETTER,              // future: retry-on-failure exhausted
         )
 
         fun requireTransition(from: TaskStatus, to: TaskStatus) {
@@ -84,6 +89,7 @@ data class Task(
     val backoffBase: Int = 1,
     val backoffCap: Int = 300,
     val enqueuedAt: Instant = Instant.EPOCH,
+    val queueName: String = "default",
 )
 
 internal fun createTaskForActivity(
@@ -109,5 +115,6 @@ internal fun createTaskForActivity(
         deadlineAt = now.plus(activity.deadline),
         backoffBase = activity.backoffBase.seconds.toInt(),
         backoffCap = activity.backoffCap.seconds.toInt(),
+        queueName = activity.queue,
     )
 }

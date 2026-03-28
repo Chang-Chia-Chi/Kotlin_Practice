@@ -27,6 +27,8 @@ object OracleTestContainer {
                 handle.createScript(loader.getResource("db/migration/V3__add_not_before.sql")!!.readText()).execute()
                 handle.createScript(loader.getResource("db/migration/V4__cancelled_and_timeout.sql")!!.readText()).execute()
                 handle.createScript(loader.getResource("db/migration/V5__enqueued_at_and_indexes.sql")!!.readText()).execute()
+                handle.createScript(loader.getResource("db/migration/V6__queue_name.sql")!!.readText()).execute()
+                handle.createScript(loader.getResource("db/migration/V7__waiting_for_signal.sql")!!.readText()).execute()
             }
         }
     }

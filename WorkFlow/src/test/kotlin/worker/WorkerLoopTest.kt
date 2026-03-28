@@ -130,7 +130,7 @@ class WorkerLoopTest {
             val handlerResult = HandlerOutput(result = """{"status":"done"}""")
             val handler = mock<TransitionHandler>()
 
-            whenever(taskRepo.claimNext(eq(workerId), eq(1)))
+            whenever(taskRepo.claimNext(eq(workerId), eq(1), eq("default")))
                 .thenReturn(listOf(task))
                 .thenReturn(emptyList())
             whenever(handlerRegistry.resolve(task.handlerKey)).thenReturn(handler)
@@ -162,7 +162,7 @@ class WorkerLoopTest {
             val task = makeTask()
             val handler = mock<TransitionHandler>()
 
-            whenever(taskRepo.claimNext(eq(workerId), eq(1)))
+            whenever(taskRepo.claimNext(eq(workerId), eq(1), eq("default")))
                 .thenReturn(listOf(task))
                 .thenReturn(emptyList())
             whenever(handlerRegistry.resolve(task.handlerKey)).thenReturn(handler)
@@ -188,7 +188,7 @@ class WorkerLoopTest {
             val handler1 = mock<TransitionHandler>()
             val handler2 = mock<TransitionHandler>()
 
-            whenever(taskRepo.claimNext(eq(workerId), eq(1)))
+            whenever(taskRepo.claimNext(eq(workerId), eq(1), eq("default")))
                 .thenReturn(listOf(task1))
                 .thenReturn(listOf(task2))
                 .thenReturn(emptyList())
@@ -220,7 +220,7 @@ class WorkerLoopTest {
             val task = makeTask(retryCount = 0, maxRetries = 3)
             val handler = mock<TransitionHandler>()
 
-            whenever(taskRepo.claimNext(eq(workerId), eq(1)))
+            whenever(taskRepo.claimNext(eq(workerId), eq(1), eq("default")))
                 .thenReturn(listOf(task))
                 .thenReturn(emptyList())
             whenever(handlerRegistry.resolve(task.handlerKey)).thenReturn(handler)
@@ -237,7 +237,7 @@ class WorkerLoopTest {
             val task = makeTask(retryCount = 1, maxRetries = 3)
             val handler = mock<TransitionHandler>()
 
-            whenever(taskRepo.claimNext(eq(workerId), eq(1)))
+            whenever(taskRepo.claimNext(eq(workerId), eq(1), eq("default")))
                 .thenReturn(listOf(task))
                 .thenReturn(emptyList())
             whenever(handlerRegistry.resolve(task.handlerKey)).thenReturn(handler)
@@ -254,7 +254,7 @@ class WorkerLoopTest {
             val task = makeTask(retryCount = 3, maxRetries = 3)
             val handler = mock<TransitionHandler>()
 
-            whenever(taskRepo.claimNext(eq(workerId), eq(1)))
+            whenever(taskRepo.claimNext(eq(workerId), eq(1), eq("default")))
                 .thenReturn(listOf(task))
                 .thenReturn(emptyList())
             whenever(handlerRegistry.resolve(task.handlerKey)).thenReturn(handler)
@@ -279,7 +279,7 @@ class WorkerLoopTest {
             val task = makeTask(retryCount = 0, maxRetries = 0)
             val handler = mock<TransitionHandler>()
 
-            whenever(taskRepo.claimNext(eq(workerId), eq(1)))
+            whenever(taskRepo.claimNext(eq(workerId), eq(1), eq("default")))
                 .thenReturn(listOf(task))
                 .thenReturn(emptyList())
             whenever(handlerRegistry.resolve(task.handlerKey)).thenReturn(handler)
@@ -310,7 +310,7 @@ class WorkerLoopTest {
             val task = makeTask(retryCount = 0, maxRetries = 3)
             val handler = mock<TransitionHandler>()
 
-            whenever(taskRepo.claimNext(eq(workerId), eq(1)))
+            whenever(taskRepo.claimNext(eq(workerId), eq(1), eq("default")))
                 .thenReturn(listOf(task))
                 .thenReturn(emptyList())
             whenever(handlerRegistry.resolve(task.handlerKey)).thenReturn(handler)
@@ -342,7 +342,7 @@ class WorkerLoopTest {
         fun `resolve throws IllegalStateException with retries remaining - resetForRetry called`() = runTest {
             val task = makeTask(handlerKey = "nonexistent.handler", retryCount = 0, maxRetries = 2)
 
-            whenever(taskRepo.claimNext(eq(workerId), eq(1)))
+            whenever(taskRepo.claimNext(eq(workerId), eq(1), eq("default")))
                 .thenReturn(listOf(task))
                 .thenReturn(emptyList())
             whenever(handlerRegistry.resolve("nonexistent.handler"))
@@ -358,7 +358,7 @@ class WorkerLoopTest {
         fun `resolve throws IllegalStateException with no retries - barrier receives FAILED`() = runTest {
             val task = makeTask(handlerKey = "missing.key", retryCount = 0, maxRetries = 0)
 
-            whenever(taskRepo.claimNext(eq(workerId), eq(1)))
+            whenever(taskRepo.claimNext(eq(workerId), eq(1), eq("default")))
                 .thenReturn(listOf(task))
                 .thenReturn(emptyList())
             whenever(handlerRegistry.resolve("missing.key"))
@@ -385,7 +385,7 @@ class WorkerLoopTest {
 
         @Test
         fun `claimNext returns empty - no handler invocation and no barrier call`() = runTest {
-            whenever(taskRepo.claimNext(eq(workerId), eq(1)))
+            whenever(taskRepo.claimNext(eq(workerId), eq(1), eq("default")))
                 .thenReturn(emptyList())
 
             startAndAdvance(this)
@@ -399,7 +399,7 @@ class WorkerLoopTest {
             val task = makeTask()
             val handler = mock<TransitionHandler>()
 
-            whenever(taskRepo.claimNext(eq(workerId), eq(1)))
+            whenever(taskRepo.claimNext(eq(workerId), eq(1), eq("default")))
                 .thenReturn(emptyList())
                 .thenReturn(listOf(task))
                 .thenReturn(emptyList())
@@ -426,7 +426,7 @@ class WorkerLoopTest {
             val task = makeTask()
             val handler = mock<TransitionHandler>()
 
-            whenever(taskRepo.claimNext(eq(workerId), eq(1)))
+            whenever(taskRepo.claimNext(eq(workerId), eq(1), eq("default")))
                 .thenThrow(RuntimeException("DB connection lost"))
                 .thenReturn(listOf(task))
                 .thenReturn(emptyList())
@@ -449,7 +449,7 @@ class WorkerLoopTest {
 
         @Test
         fun `shutdown signal stops the poll loop`() = runTest {
-            whenever(taskRepo.claimNext(eq(workerId), eq(1)))
+            whenever(taskRepo.claimNext(eq(workerId), eq(1), eq("default")))
                 .thenReturn(emptyList())
 
             val job = workerLoop.start(this)
@@ -481,7 +481,7 @@ class WorkerLoopTest {
                 }
             }
 
-            whenever(taskRepo.claimNext(eq(workerId), eq(1)))
+            whenever(taskRepo.claimNext(eq(workerId), eq(1), eq("default")))
                 .thenReturn(listOf(task))
                 .thenReturn(emptyList())
             whenever(handlerRegistry.resolve(task.handlerKey)).thenReturn(handler)
@@ -497,7 +497,7 @@ class WorkerLoopTest {
             workerLoop.shutdown()
 
             // No crash, no hang — shutdown is safe even without start()
-            verify(taskRepo, never()).claimNext(any(), any())
+            verify(taskRepo, never()).claimNext(any(), any(), any())
         }
     }
 
@@ -518,7 +518,7 @@ class WorkerLoopTest {
                 }
             }
 
-            whenever(taskRepo.claimNext(eq(workerId), eq(1)))
+            whenever(taskRepo.claimNext(eq(workerId), eq(1), eq("default")))
                 .thenReturn(listOf(task))
                 .thenReturn(emptyList())
             whenever(handlerRegistry.resolve(task.handlerKey)).thenReturn(handler)
@@ -560,7 +560,7 @@ class WorkerLoopTest {
                 }
             }
 
-            whenever(taskRepo.claimNext(eq(workerId), eq(1)))
+            whenever(taskRepo.claimNext(eq(workerId), eq(1), eq("default")))
                 .thenReturn(listOf(task))
                 .thenReturn(emptyList())
             whenever(handlerRegistry.resolve(task.handlerKey)).thenReturn(handler)
@@ -621,7 +621,7 @@ class WorkerLoopTest {
                 }
             }
 
-            whenever(taskRepo.claimNext(eq(workerId), eq(1)))
+            whenever(taskRepo.claimNext(eq(workerId), eq(1), eq("default")))
                 .thenReturn(listOf(task))
                 .thenReturn(emptyList())
             whenever(handlerRegistry.resolve(task.handlerKey)).thenReturn(handler)
@@ -643,7 +643,7 @@ class WorkerLoopTest {
                 }
             }
 
-            whenever(taskRepo.claimNext(eq(workerId), eq(1)))
+            whenever(taskRepo.claimNext(eq(workerId), eq(1), eq("default")))
                 .thenReturn(listOf(task))
                 .thenReturn(emptyList())
             whenever(handlerRegistry.resolve(task.handlerKey)).thenReturn(handler)
@@ -662,7 +662,7 @@ class WorkerLoopTest {
 
         @Test
         fun `lastActivityTimestamp advances after poll iterations`() = runTest {
-            whenever(taskRepo.claimNext(eq(workerId), eq(1)))
+            whenever(taskRepo.claimNext(eq(workerId), eq(1), eq("default")))
                 .thenReturn(emptyList())
 
             val before = Instant.now().minusMillis(1)
@@ -692,7 +692,7 @@ class WorkerLoopTest {
             val handler1 = mock<TransitionHandler>()
             val handler2 = mock<TransitionHandler>()
 
-            whenever(taskRepo.claimNext(eq(workerId), eq(1)))
+            whenever(taskRepo.claimNext(eq(workerId), eq(1), eq("default")))
                 .thenReturn(listOf(task1))
                 .thenReturn(listOf(task2))
                 .thenReturn(emptyList())
@@ -717,7 +717,7 @@ class WorkerLoopTest {
             val task = makeTask(retryCount = 0, maxRetries = 3)
             val handler = mock<TransitionHandler>()
 
-            whenever(taskRepo.claimNext(eq(workerId), eq(1)))
+            whenever(taskRepo.claimNext(eq(workerId), eq(1), eq("default")))
                 .thenReturn(listOf(task))
                 .thenReturn(emptyList())
             whenever(handlerRegistry.resolve(task.handlerKey)).thenReturn(handler)
@@ -738,7 +738,7 @@ class WorkerLoopTest {
             val handler1 = mock<TransitionHandler>()
             val handler2 = mock<TransitionHandler>()
 
-            whenever(taskRepo.claimNext(eq(workerId), eq(1)))
+            whenever(taskRepo.claimNext(eq(workerId), eq(1), eq("default")))
                 .thenReturn(listOf(task1))
                 .thenReturn(listOf(task2))
                 .thenReturn(emptyList())
@@ -783,7 +783,7 @@ class WorkerLoopTest {
             }
             val batchLoop = WorkerLoop(batchConfig, taskRepo, handlerRegistry, barrierService, meterRegistry)
 
-            whenever(taskRepo.claimNext(eq(workerId), eq(1)))
+            whenever(taskRepo.claimNext(eq(workerId), eq(1), eq("default")))
                 .thenReturn(emptyList())
 
             val job = batchLoop.start(this)
@@ -791,7 +791,7 @@ class WorkerLoopTest {
             job.cancel()
 
             // Each concurrent slot calls claimNext with batchSize=1
-            verify(taskRepo, org.mockito.Mockito.atLeastOnce()).claimNext(eq(workerId), eq(1))
+            verify(taskRepo, org.mockito.Mockito.atLeastOnce()).claimNext(eq(workerId), eq(1), eq("default"))
         }
     }
 
@@ -805,7 +805,7 @@ class WorkerLoopTest {
             val task = makeTask()
             val handler = mock<TransitionHandler>()
 
-            whenever(taskRepo.claimNext(eq(workerId), eq(1)))
+            whenever(taskRepo.claimNext(eq(workerId), eq(1), eq("default")))
                 .thenReturn(listOf(task))
                 .thenReturn(emptyList())
             whenever(handlerRegistry.resolve(task.handlerKey)).thenReturn(handler)
@@ -855,7 +855,7 @@ class WorkerLoopTest {
                 }
             }
 
-            whenever(taskRepo.claimNext(eq(workerId), eq(1)))
+            whenever(taskRepo.claimNext(eq(workerId), eq(1), eq("default")))
                 .thenReturn(listOf(task))
                 .thenReturn(emptyList())
             whenever(handlerRegistry.resolve(task.handlerKey)).thenReturn(handler)
@@ -893,7 +893,7 @@ class WorkerLoopTest {
                 }
             }
 
-            whenever(taskRepo.claimNext(eq(workerId), eq(1)))
+            whenever(taskRepo.claimNext(eq(workerId), eq(1), eq("default")))
                 .thenReturn(listOf(task))
                 .thenReturn(emptyList())
             whenever(handlerRegistry.resolve(task.handlerKey)).thenReturn(handler)
@@ -927,7 +927,7 @@ class WorkerLoopTest {
                 }
             }
 
-            whenever(taskRepo.claimNext(eq(workerId), eq(1)))
+            whenever(taskRepo.claimNext(eq(workerId), eq(1), eq("default")))
                 .thenReturn(listOf(task1))
                 .thenReturn(listOf(task2))
                 .thenReturn(emptyList())
@@ -955,7 +955,7 @@ class WorkerLoopTest {
             val handler = mock<TransitionHandler>()
             whenever(handler.execute(any())).thenThrow(RuntimeException("boom"))
 
-            whenever(taskRepo.claimNext(eq(workerId), eq(1)))
+            whenever(taskRepo.claimNext(eq(workerId), eq(1), eq("default")))
                 .thenReturn(listOf(task))
                 .thenReturn(emptyList())
             whenever(handlerRegistry.resolve(task.handlerKey)).thenReturn(handler)
@@ -1000,7 +1000,7 @@ class WorkerLoopTest {
                 }
             }
 
-            whenever(taskRepo.claimNext(eq(workerId), eq(1)))
+            whenever(taskRepo.claimNext(eq(workerId), eq(1), eq("default")))
                 .thenReturn(listOf(task))
                 .thenReturn(emptyList())
             whenever(handlerRegistry.resolve(task.handlerKey)).thenReturn(handler)
@@ -1012,7 +1012,7 @@ class WorkerLoopTest {
 
         @Test
         fun `registers concurrency limit gauge from config`() = runTest {
-            whenever(taskRepo.claimNext(eq(workerId), eq(1))).thenReturn(emptyList())
+            whenever(taskRepo.claimNext(eq(workerId), eq(1), eq("default"))).thenReturn(emptyList())
 
             startAndAdvance(this)
 
@@ -1026,7 +1026,7 @@ class WorkerLoopTest {
 
         @Test
         fun `increments claim counter with empty outcome when no tasks`() = runTest {
-            whenever(taskRepo.claimNext(eq(workerId), eq(1))).thenReturn(emptyList())
+            whenever(taskRepo.claimNext(eq(workerId), eq(1), eq("default"))).thenReturn(emptyList())
 
             startAndAdvance(this)
 
@@ -1044,7 +1044,7 @@ class WorkerLoopTest {
             val task = makeTask()
             val handler = mock<TransitionHandler>()
 
-            whenever(taskRepo.claimNext(eq(workerId), eq(1)))
+            whenever(taskRepo.claimNext(eq(workerId), eq(1), eq("default")))
                 .thenReturn(listOf(task))
                 .thenReturn(emptyList())
             whenever(handlerRegistry.resolve(task.handlerKey)).thenReturn(handler)
@@ -1073,7 +1073,7 @@ class WorkerLoopTest {
             val task = makeTask()
             val handler = mock<TransitionHandler>()
 
-            whenever(taskRepo.claimNext(eq(workerId), eq(1)))
+            whenever(taskRepo.claimNext(eq(workerId), eq(1), eq("default")))
                 .thenThrow(RuntimeException("DB error"))
                 .thenReturn(listOf(task))
                 .thenReturn(emptyList())
@@ -1093,7 +1093,7 @@ class WorkerLoopTest {
 
         @Test
         fun `lastActivityTimestamp updates on poll`() = runTest {
-            whenever(taskRepo.claimNext(eq(workerId), eq(1))).thenReturn(emptyList())
+            whenever(taskRepo.claimNext(eq(workerId), eq(1), eq("default"))).thenReturn(emptyList())
 
             val before = Instant.now().minusMillis(1)
 
