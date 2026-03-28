@@ -17,6 +17,7 @@ import org.junit.jupiter.api.TestInstance
 import java.time.Duration
 import java.time.Instant
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -31,6 +32,7 @@ class WorkflowEngineTest {
         .registerModule(KotlinModule.Builder().build())
         .registerModule(JavaTimeModule())
     private lateinit var engine: WorkflowEngine
+    private lateinit var barrierService: BarrierService
 
     @BeforeAll
     fun setup() {
@@ -38,6 +40,7 @@ class WorkflowEngineTest {
         workflowRepo = WorkflowRepository(jdbi)
         taskRepo = TaskRepository(jdbi)
         engine = WorkflowEngine(jdbi, workflowRepo, taskRepo, objectMapper)
+        barrierService = BarrierService(jdbi, workflowRepo, taskRepo, objectMapper)
     }
 
     @AfterEach
@@ -180,5 +183,62 @@ class WorkflowEngineTest {
         assertTrue(id1.isNotBlank())
         assertTrue(id2.isNotBlank())
         assertTrue(id1 != id2)
+    }
+
+    @Test
+    fun `startWorkflow sets deadline_at from definition deadline`() = runTest {
+        val definition = workflow {
+            deadline(Duration.ofMinutes(45))
+            activity("step1") {
+                transition("order.validate")
+            }
+        }
+        val before = Instant.now()
+        val runId = engine.startWorkflow(definition)
+        val after = Instant.now()
+
+        val run = workflowRepo.findById(runId)
+        assertNotNull(run)
+        assertTrue(run.deadlineAt.isAfter(before.plus(Duration.ofMinutes(44))))
+        assertTrue(run.deadlineAt.isBefore(after.plus(Duration.ofMinutes(46))))
+    }
+
+    @Test
+    fun `cancelWorkflow transitions RUNNING to CANCELLED and cancels pending tasks`() = runTest {
+        val definition = workflow {
+            activity("step1") { transition("handler1") }
+            activity("step2") { transition("handler2") }
+        }
+        val runId = engine.startWorkflow(definition, """{"data":"test"}""")
+
+        val result = engine.cancelWorkflow(runId)
+        assertTrue(result)
+
+        val run = workflowRepo.findById(runId)
+        assertNotNull(run)
+        assertEquals(WorkflowStatus.CANCELLED, run.status)
+
+        val tasks = taskRepo.findByWorkflowAndSequence(runId, 1)
+        assertTrue(tasks.all { it.status == TaskStatus.CANCELLED })
+    }
+
+    @Test
+    fun `cancelWorkflow returns false for non-RUNNING workflow`() = runTest {
+        val definition = workflow {
+            activity("step1") { transition("handler1") }
+        }
+        val runId = engine.startWorkflow(definition)
+
+        // Cancel first (moves to CANCELLED)
+        engine.cancelWorkflow(runId)
+        // Try again
+        val result = engine.cancelWorkflow(runId)
+        assertFalse(result)
+    }
+
+    @Test
+    fun `cancelWorkflow returns false for nonexistent workflow`() = runTest {
+        val result = engine.cancelWorkflow("nonexistent-id")
+        assertFalse(result)
     }
 }

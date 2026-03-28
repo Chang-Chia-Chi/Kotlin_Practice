@@ -36,7 +36,7 @@ class WorkflowEngine(
                 status = WorkflowStatus.RUNNING,
                 createdAt = now,
                 updatedAt = now,
-                deadlineAt = now.plus(java.time.Duration.ofMinutes(30)),
+                deadlineAt = now.plus(definition.deadline),
             )
             workflowRepo.insertWithHandle(handle, run)
 
@@ -54,4 +54,31 @@ class WorkflowEngine(
         log.info("Started workflow {} with {} activities", workflowId, definition.activities.size)
         return workflowId
     }
+
+    suspend fun cancelWorkflow(workflowId: String): Boolean =
+        jdbi.inTransactionSuspend<Boolean, Exception> { handle ->
+            val workflow = workflowRepo.findByIdWithHandle(handle, workflowId)
+                ?: return@inTransactionSuspend false
+            if (workflow.status != WorkflowStatus.RUNNING) return@inTransactionSuspend false
+
+            val updated = workflowRepo.updateStatusWithHandle(
+                handle, workflowId, WorkflowStatus.CANCELLED, expectedStatus = WorkflowStatus.RUNNING,
+            )
+            if (updated) {
+                taskRepo.cancelPendingTasksWithHandle(handle, workflowId)
+                log.info("Cancelled workflow {}", workflowId)
+            }
+            updated
+        }
+
+    suspend fun replayWorkflow(workflowId: String): Boolean =
+        jdbi.inTransactionSuspend<Boolean, Exception> { handle ->
+            val workflow = workflowRepo.findByIdWithHandle(handle, workflowId)
+                ?: return@inTransactionSuspend false
+            if (workflow.status != WorkflowStatus.FAILED) return@inTransactionSuspend false
+
+            workflowRepo.updateStatusWithHandle(handle, workflowId, WorkflowStatus.RUNNING, WorkflowStatus.FAILED)
+            taskRepo.replayDeadLetterBatchWithHandle(handle, workflowId)
+            true
+        }
 }
