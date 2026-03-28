@@ -1,5 +1,8 @@
 package com.workflow.extension
 
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.ClosedSendChannelException
 import kotlinx.coroutines.flow.Flow
@@ -34,8 +37,8 @@ fun <T, R> Flow<T>.unorderedMapAsync(
     channelFlow {
         val semaphore = Semaphore(concurrency)
         collect { value ->
-            semaphore.acquire() // back-pressure: suspends when all slots full
-            launch {
+            semaphore.acquire()
+            launch(SupervisorJob(coroutineContext[Job])) {
                 try {
                     send(transform(value))
                 } finally {
@@ -50,10 +53,11 @@ fun <T, R> Flow<T>.unorderedMapAsync(
  */
 fun <T> Flow<T>.takeUntilSignal(signal: Channel<Unit>): Flow<T> =
     channelFlow {
-        val signalJob = launch {
-            signal.receive()
-            close()
-        }
+        val signalJob =
+            launch {
+                signal.receive()
+                close()
+            }
         try {
             collect { send(it) }
         } catch (_: ClosedSendChannelException) {

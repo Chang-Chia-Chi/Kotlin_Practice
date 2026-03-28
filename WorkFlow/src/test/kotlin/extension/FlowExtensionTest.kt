@@ -1,5 +1,6 @@
 package com.workflow.extension
 
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.asFlow
@@ -8,11 +9,15 @@ import kotlinx.coroutines.flow.take
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
+import kotlin.time.Duration.Companion.seconds
 
 class FlowExtensionTest {
 
@@ -208,5 +213,89 @@ class FlowExtensionTest {
                 }
                 .toList()
         }
+    }
+
+    // -- E. SupervisorJob failure isolation (R2.5) ----------------------------
+
+    @Test
+    fun `unorderedMapAsync failure isolation — siblings survive one failure`() = runTest {
+        val completed = AtomicInteger(0)
+        // Gate: the failing element waits until at least one sibling has started
+        val siblingStarted = CountDownLatch(1)
+
+        // withContext(Dispatchers.Default) so channelFlow children run with
+        // real concurrency (channelFlow + SupervisorJob children don't inherit
+        // the TestCoroutineScheduler, so delay() needs a real dispatcher).
+        val exception = withContext(Dispatchers.Default) {
+            assertFailsWith<RuntimeException> {
+                (1..5).asFlow()
+                    .unorderedMapAsync(concurrency = 3) { value ->
+                        if (value == 3) {
+                            // Wait until a sibling is running, then fail
+                            siblingStarted.await()
+                            delay(50) // give siblings time to complete
+                            throw RuntimeException("element 3 failed")
+                        }
+                        siblingStarted.countDown()
+                        delay(10) // simulate work
+                        completed.incrementAndGet()
+                        value
+                    }
+                    .toList()
+            }
+        }
+
+        // (a) The exception from element 3 surfaces to the collector
+        assertEquals("element 3 failed", exception.message)
+
+        // (b) At least some non-failing elements completed before the flow terminated.
+        // With SupervisorJob, the failing child does NOT cancel its siblings,
+        // so in-flight transforms run to completion.
+        assertTrue(
+            completed.get() > 0,
+            "Expected at least one non-failing element to complete, but none did. " +
+                "In-flight siblings should complete before channel close propagates."
+        )
+    }
+
+    @Test
+    fun `unorderedMapAsync cancellation propagation — collector cancel terminates flow`() = runTest {
+        val transformStarted = AtomicInteger(0)
+        val collected = mutableListOf<Int>()
+
+        // Real dispatcher needed: channelFlow + SupervisorJob children use real time.
+        withContext(Dispatchers.Default) {
+            withTimeout(5.seconds) {
+                try {
+                    (1..100).asFlow()
+                        .unorderedMapAsync(concurrency = 3) { value ->
+                            transformStarted.incrementAndGet()
+                            delay(200) // slow transform
+                            value
+                        }
+                        .collect { value ->
+                            collected.add(value)
+                            if (collected.size >= 3) {
+                                throw kotlinx.coroutines.CancellationException("collector done")
+                            }
+                        }
+                } catch (_: kotlinx.coroutines.CancellationException) {
+                    // Expected: collector cancelled
+                }
+            }
+        }
+
+        // We collected at least 3 results before cancelling
+        assertTrue(
+            collected.size >= 3,
+            "Expected at least 3 collected results, got ${collected.size}"
+        )
+
+        // The flow did NOT process all 100 elements — cancellation propagated downward
+        assertTrue(
+            transformStarted.get() < 100,
+            "Expected fewer than 100 transforms to start (got ${transformStarted.get()}). " +
+                "Cancellation should propagate downward to terminate the flow."
+        )
     }
 }

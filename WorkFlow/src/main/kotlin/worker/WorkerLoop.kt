@@ -104,7 +104,7 @@ class WorkerLoop(
     fun onStart(
         @Observes ev: StartupEvent,
     ) {
-        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO.limitedParallelism(config.worker().concurrency()))
         start(scope)
     }
 
