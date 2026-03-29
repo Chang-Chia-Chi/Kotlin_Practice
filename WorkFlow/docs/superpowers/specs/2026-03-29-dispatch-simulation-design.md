@@ -130,9 +130,52 @@ interface StoragePort {
     suspend fun uploadParquet(path: String, content: ByteArray)
 }
 
-// Format decisions to CSV bytes
+// Format decisions to CSV bytes (uses jackson-dataformat-csv)
 interface CsvFormatter {
     fun format(batchToken: String, configId: String, decisions: List<DispatchDecision>): ByteArray
+}
+
+// Default implementation using Jackson CSV
+class DefaultCsvFormatter : CsvFormatter {
+    private val csvMapper = CsvMapper().apply {
+        registerModule(KotlinModule.Builder().build())
+    }
+
+    private val schema = CsvSchema.builder()
+        .addColumn("batch_token")
+        .addColumn("config_id")
+        .addColumn("dispatch_order", CsvSchema.ColumnType.NUMBER)
+        .addColumn("product_id")
+        .addColumn("source_bom_id")
+        .addColumn("qty", CsvSchema.ColumnType.NUMBER)
+        .addColumn("target_site_id")
+        .addColumn("target_bom_id")
+        .addColumn("site_gap", CsvSchema.ColumnType.NUMBER)
+        .addColumn("bom_gap", CsvSchema.ColumnType.NUMBER)
+        .build()
+        .withHeader()
+
+    override fun format(
+        batchToken: String,
+        configId: String,
+        decisions: List<DispatchDecision>,
+    ): ByteArray {
+        val rows = decisions.map { d ->
+            mapOf(
+                "batch_token" to batchToken,
+                "config_id" to configId,
+                "dispatch_order" to d.dispatchOrder,
+                "product_id" to d.productId,
+                "source_bom_id" to d.sourceBomId,
+                "qty" to d.qty,
+                "target_site_id" to d.targetSiteId,
+                "target_bom_id" to (d.targetBomId ?: ""),
+                "site_gap" to d.siteGap,
+                "bom_gap" to (d.bomGap ?: ""),
+            )
+        }
+        return csvMapper.writer(schema).writeValueAsBytes(rows)
+    }
 }
 
 // Format decisions to Parquet bytes
@@ -493,10 +536,12 @@ class DispatchSimulationHandler(
         val batchToken = item["batchToken"].asText()
 
         val config = configRepo.findById(configId)
-        val candidates = candidateQuery.queryCandidates(config)
-        val baseline = baselineProvider.loadBaseline(config)
 
-        val result = simulationEngine.simulate(config, candidates, baseline)
+        val result = simulationEngine.simulate(
+            config = config,
+            candidates = candidateQuery.queryCandidates(config),
+            baseline = baselineProvider.loadBaseline(config),
+        )
 
         resultStore.saveDecisions(batchToken, configId, result.decisions)
 
@@ -637,13 +682,18 @@ class S3ClientProducer {
 }
 ```
 
-Maven dependency:
+Maven dependencies:
 
 ```xml
 <dependency>
     <groupId>software.amazon.awssdk</groupId>
     <artifactId>s3</artifactId>
     <version>2.29.x</version>
+</dependency>
+<dependency>
+    <groupId>com.fasterxml.jackson.dataformat</groupId>
+    <artifactId>jackson-dataformat-csv</artifactId>
+    <!-- version managed by Quarkus BOM -->
 </dependency>
 ```
 
@@ -678,7 +728,8 @@ src/main/kotlin/
                     DispatchAlgorithmFactory, AlgorithmBuilder (DSL)
     simulation/     SimulationEngine, SimulationContext, CandidateIndex
     port/           DispatchConfigRepository, CandidateQueryPort, BaselineProvider,
-                    SimulationResultStore, StoragePort, CsvFormatter, ParquetFormatter
+                    SimulationResultStore, StoragePort,
+                    CsvFormatter, DefaultCsvFormatter, ParquetFormatter
     handler/        DispatchScatterHandler, DispatchSimulationHandler,
                     DispatchJoinHandler, DispatchScheduler
 ```

@@ -1,7 +1,8 @@
-// src/test/kotlin/benchmark/PhaseTimerTest.kt
 package com.workflow.benchmark
 
+import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertThrows
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
@@ -45,5 +46,23 @@ class PhaseTimerTest {
         val timer = PhaseTimer()
         val result = timer.time("phase") { 42 }
         assertEquals(42, result)
+    }
+
+    @Test
+    fun `suspendTime records timing and returns block result`() = runTest {
+        val timer = PhaseTimer()
+        val result = timer.suspendTime("suspend.phase") { 42 }
+        assertEquals(42, result)
+        val summary = timer.summary()
+        assertEquals(1, summary["suspend.phase"]!!.count)
+    }
+
+    @Test
+    fun `time records timing even when block throws`() {
+        val timer = PhaseTimer()
+        assertThrows<RuntimeException> {
+            timer.time("err") { throw RuntimeException("boom") }
+        }
+        assertEquals(1, timer.summary()["err"]!!.count)
     }
 }

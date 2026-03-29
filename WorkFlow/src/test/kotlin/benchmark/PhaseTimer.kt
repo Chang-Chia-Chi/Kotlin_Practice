@@ -25,6 +25,16 @@ class PhaseTimer {
         }
     }
 
+    suspend fun <T> suspendTime(phase: String, block: suspend () -> T): T {
+        val start = System.nanoTime()
+        try {
+            return block()
+        } finally {
+            recordings.getOrPut(phase) { CopyOnWriteArrayList() }
+                .add(System.nanoTime() - start)
+        }
+    }
+
     fun summary(): Map<String, PhaseSummary> =
         recordings.mapValues { (_, nanos) ->
             val ms = nanos.map { it / 1_000_000.0 }.sorted()
