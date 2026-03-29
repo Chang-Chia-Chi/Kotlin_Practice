@@ -12,6 +12,7 @@
         <kotlin.version>2.2.0</kotlin.version>
         <jdbi.version>3.45.0</jdbi.version>
         <kotlinx-coroutines.version>1.10.1</kotlinx-coroutines.version>
+        <ktor.version>3.1.1</ktor.version>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <maven.compiler.release>21</maven.compiler.release>
         <surefire-plugin.version>3.5.2</surefire-plugin.version>
@@ -134,14 +135,17 @@
             <artifactId>quarkus-smallrye-fault-tolerance</artifactId>
         </dependency>
 
-        <!-- Vert.x WebClient for non-blocking peer notification -->
+        <!-- Quarkus Vert.x (core runtime dependency) -->
         <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-vertx</artifactId>
         </dependency>
+
+        <!-- Ktor HTTP client for peer notification -->
         <dependency>
-            <groupId>io.vertx</groupId>
-            <artifactId>vertx-web-client</artifactId>
+            <groupId>io.ktor</groupId>
+            <artifactId>ktor-client-java-jvm</artifactId>
+            <version>${ktor.version}</version>
         </dependency>
         <dependency>
             <groupId>io.quarkus</groupId>
@@ -218,6 +222,12 @@
             <groupId>org.mockito.kotlin</groupId>
             <artifactId>mockito-kotlin</artifactId>
             <version>5.4.0</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.ktor</groupId>
+            <artifactId>ktor-client-mock-jvm</artifactId>
+            <version>${ktor.version}</version>
             <scope>test</scope>
         </dependency>
         <dependency>
@@ -332,4 +342,22 @@
             </plugin>
         </plugins>
     </build>
+    <profiles>
+        <profile>
+            <id>benchmark</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.codehaus.mojo</groupId>
+                        <artifactId>exec-maven-plugin</artifactId>
+                        <version>3.1.0</version>
+                        <configuration>
+                            <mainClass>com.workflow.benchmark.BenchmarkMainKt</mainClass>
+                            <classpathScope>test</classpathScope>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
 </project>

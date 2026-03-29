@@ -35,7 +35,7 @@ class FakeDispatchNotifier : DispatchNotifier {
     private val _awaitTimeouts = mutableListOf<Duration>()
     val awaitTimeouts: List<Duration> get() = synchronized(_awaitTimeouts) { _awaitTimeouts.toList() }
 
-    override fun signal(queueName: String) {
+    override suspend fun signal(queueName: String) {
         _signalCount.incrementAndGet()
         synchronized(_signalledQueues) { _signalledQueues.add(queueName) }
     }

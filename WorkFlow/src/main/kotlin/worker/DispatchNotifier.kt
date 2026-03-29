@@ -1,10 +1,13 @@
 package com.workflow.worker
 
-import io.vertx.ext.web.client.WebClient
+import io.ktor.client.HttpClient
+import io.ktor.client.request.post
 import jakarta.enterprise.context.ApplicationScoped
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.withTimeoutOrNull
 import org.slf4j.LoggerFactory
 import java.net.URLEncoder
@@ -29,9 +32,11 @@ interface DispatchNotifier {
     /**
      * Signal that new work is available on [queueName].
      * Wakes local workers immediately and broadcasts to all peer pods
-     * via fire-and-forget HTTP POST. Called AFTER transaction commit.
+     * concurrently via HTTP POST within a [supervisorScope]. Awaits
+     * all peer notifications; individual failures are logged and do
+     * not cancel siblings. Called AFTER transaction commit.
      */
-    fun signal(queueName: String)
+    suspend fun signal(queueName: String)
 
     /**
      * Handle a remote signal received via the internal HTTP endpoint.
@@ -52,7 +57,7 @@ interface DispatchNotifier {
 @ApplicationScoped
 class DispatchNotifierImpl(
     private val peerRegistry: PeerRegistry,
-    private val webClient: WebClient,
+    private val httpClient: HttpClient,
 ) : DispatchNotifier {
     private val log = LoggerFactory.getLogger(DispatchNotifierImpl::class.java)
 
@@ -67,15 +72,21 @@ class DispatchNotifierImpl(
             )
         }
 
-    override fun signal(queueName: String) {
+    override suspend fun signal(queueName: String) {
         flowFor(queueName).tryEmit(Unit)
         val peers = peerRegistry.peers()
+        if (peers.isEmpty()) return
         val encodedQueue = URLEncoder.encode(queueName, Charsets.UTF_8)
-        for (peer in peers) {
-            webClient
-                .post(8080, peer, "/internal/dispatch-notify?queue=$encodedQueue")
-                .send()
-                .onFailure { log.debug("Peer notify failed for {}: {}", peer, it.message) }
+        supervisorScope {
+            for (peer in peers) {
+                launch {
+                    try {
+                        httpClient.post("http://$peer:8080/internal/dispatch-notify?queue=$encodedQueue")
+                    } catch (e: Exception) {
+                        log.debug("Peer notify failed for {}: {}", peer, e.message)
+                    }
+                }
+            }
         }
     }
 

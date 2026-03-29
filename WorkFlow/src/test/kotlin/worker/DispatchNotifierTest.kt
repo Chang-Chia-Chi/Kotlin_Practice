@@ -1,27 +1,23 @@
 package com.workflow.worker
 
-import io.vertx.core.Future
-import io.vertx.core.buffer.Buffer
-import io.vertx.ext.web.client.HttpRequest
-import io.vertx.ext.web.client.HttpResponse
-import io.vertx.ext.web.client.WebClient
+import io.ktor.client.HttpClient
+import io.ktor.client.engine.mock.MockEngine
+import io.ktor.client.engine.mock.respond
+import io.ktor.http.HttpMethod
+import io.ktor.http.HttpStatusCode
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
-import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.yield
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
-import org.mockito.kotlin.any
-import org.mockito.kotlin.eq
 import org.mockito.kotlin.mock
-import org.mockito.kotlin.never
-import org.mockito.kotlin.verify
 import org.mockito.kotlin.whenever
 import java.time.Duration
+import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
@@ -29,15 +25,13 @@ import kotlin.test.assertTrue
 class DispatchNotifierTest {
 
     private lateinit var peerRegistry: PeerRegistry
-    private lateinit var webClient: WebClient
     private lateinit var notifier: DispatchNotifierImpl
 
     @BeforeEach
     fun setup() {
         peerRegistry = mock()
-        webClient = mock()
         whenever(peerRegistry.peers()).thenReturn(emptyList())
-        notifier = DispatchNotifierImpl(peerRegistry, webClient)
+        notifier = DispatchNotifierImpl(peerRegistry, HttpClient(MockEngine { respond("") }))
     }
 
     // ── A. signal() wakes awaitWork() ────────────────────────────────────
@@ -65,9 +59,6 @@ class DispatchNotifierTest {
             val result2 = async {
                 notifier.awaitWork("default", Duration.ofSeconds(10))
             }
-            // Both coroutines are already suspended at flow.first() due to
-            // UnconfinedTestDispatcher's eager dispatch. Do NOT advanceUntilIdle()
-            // here — that would advance the 10s timeout.
 
             notifier.signal("default")
 
@@ -138,10 +129,13 @@ class DispatchNotifierTest {
 
         @Test
         fun `onRemoteSignal does not broadcast via HTTP`() = runTest {
-            notifier.onRemoteSignal("default")
-            advanceUntilIdle()
+            whenever(peerRegistry.peers()).thenReturn(listOf("10.0.0.2"))
+            val engine = MockEngine { respond("") }
+            val notifier = DispatchNotifierImpl(peerRegistry, HttpClient(engine))
 
-            verify(webClient, never()).post(any<Int>(), any<String>(), any<String>())
+            notifier.onRemoteSignal("default")
+
+            assertTrue(engine.requestHistory.isEmpty(), "onRemoteSignal should not make HTTP calls")
         }
     }
 
@@ -173,68 +167,67 @@ class DispatchNotifierTest {
     @Nested
     inner class SignalWithPeers {
 
-        @Suppress("UNCHECKED_CAST")
-        private fun mockWebClientPost(peer: String, queue: String): HttpRequest<Buffer> {
-            val request = mock<HttpRequest<Buffer>>()
-            val response = mock<HttpResponse<Buffer>>()
-            whenever(request.send()).thenReturn(Future.succeededFuture(response))
-            whenever(webClient.post(eq(8080), eq(peer), eq("/internal/dispatch-notify?queue=$queue")))
-                .thenReturn(request)
-            return request
-        }
-
         @Test
-        fun `signal with peers calls webClient post once per peer`() = runTest {
+        fun `signal with peers calls HTTP post once per peer`() = runTest {
             whenever(peerRegistry.peers()).thenReturn(listOf("10.0.0.2", "10.0.0.3"))
-            val req1 = mockWebClientPost("10.0.0.2", "default")
-            val req2 = mockWebClientPost("10.0.0.3", "default")
+            val engine = MockEngine { respond("") }
+            val notifier = DispatchNotifierImpl(peerRegistry, HttpClient(engine))
 
             notifier.signal("default")
 
-            verify(req1).send()
-            verify(req2).send()
+            assertEquals(2, engine.requestHistory.size)
+            val hosts = engine.requestHistory.map { it.url.host }.toSet()
+            assertEquals(setOf("10.0.0.2", "10.0.0.3"), hosts)
+            engine.requestHistory.forEach { req ->
+                assertEquals(HttpMethod.Post, req.method)
+                assertEquals(8080, req.url.port)
+                assertEquals("/internal/dispatch-notify", req.url.encodedPath)
+                assertEquals("default", req.url.parameters["queue"])
+            }
         }
 
         @Test
-        fun `signal with no peers does not call webClient`() = runTest {
+        fun `signal with no peers does not make HTTP calls`() = runTest {
             whenever(peerRegistry.peers()).thenReturn(emptyList())
+            val engine = MockEngine { respond("") }
+            val notifier = DispatchNotifierImpl(peerRegistry, HttpClient(engine))
 
             notifier.signal("default")
 
-            verify(webClient, never()).post(any<Int>(), any<String>(), any<String>())
+            assertTrue(engine.requestHistory.isEmpty())
         }
 
         @Test
         fun `signal propagates queue name in HTTP path`() = runTest {
             whenever(peerRegistry.peers()).thenReturn(listOf("10.0.0.5"))
-            mockWebClientPost("10.0.0.5", "priority-queue")
+            val engine = MockEngine { respond("") }
+            val notifier = DispatchNotifierImpl(peerRegistry, HttpClient(engine))
 
             notifier.signal("priority-queue")
 
-            verify(webClient).post(eq(8080), eq("10.0.0.5"), eq("/internal/dispatch-notify?queue=priority-queue"))
+            assertEquals(1, engine.requestHistory.size)
+            assertEquals("priority-queue", engine.requestHistory[0].url.parameters["queue"])
         }
 
         @Test
         fun `signal URL-encodes queue name with special characters`() = runTest {
             whenever(peerRegistry.peers()).thenReturn(listOf("10.0.0.7"))
-            mockWebClientPost("10.0.0.7", "queue+with+spaces")
+            val engine = MockEngine { respond("") }
+            val notifier = DispatchNotifierImpl(peerRegistry, HttpClient(engine))
 
             notifier.signal("queue with spaces")
 
-            verify(webClient).post(eq(8080), eq("10.0.0.7"), eq("/internal/dispatch-notify?queue=queue+with+spaces"))
+            assertEquals(1, engine.requestHistory.size)
+            assertEquals("queue with spaces", engine.requestHistory[0].url.parameters["queue"])
         }
 
         @Test
         fun `signal with HTTP failure does not throw`() = runTest {
             whenever(peerRegistry.peers()).thenReturn(listOf("10.0.0.9"))
-            val request = mock<HttpRequest<Buffer>>()
-            whenever(request.send()).thenReturn(Future.failedFuture(RuntimeException("timeout")))
-            whenever(webClient.post(eq(8080), eq("10.0.0.9"), eq("/internal/dispatch-notify?queue=default")))
-                .thenReturn(request)
+            val engine = MockEngine { respond("", HttpStatusCode.InternalServerError) }
+            val notifier = DispatchNotifierImpl(peerRegistry, HttpClient(engine))
 
-            notifier.signal("default")
-
-            verify(request).send()
+            notifier.signal("default") // should not throw
         }
     }
 }

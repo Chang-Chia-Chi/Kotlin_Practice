@@ -6,6 +6,8 @@ import com.workflow.extension.inTransactionSuspend
 import com.workflow.extension.withHandleSuspend
 import com.workflow.worker.DispatchNotifier
 import jakarta.enterprise.context.ApplicationScoped
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.supervisorScope
 import org.jdbi.v3.core.Jdbi
 import org.slf4j.LoggerFactory
 import java.time.Instant
@@ -89,8 +91,10 @@ class WorkflowEngine(
             val queues = jdbi.withHandleSuspend<List<String>, Exception> { handle ->
                 taskRepo.findDistinctQueuesByWorkflowId(handle, workflowId, listOf("PENDING"))
             }
-            for (queue in queues) {
-                notifier.signal(queue)
+            supervisorScope {
+                for (queue in queues) {
+                    launch { notifier.signal(queue) }
+                }
             }
         }
         return replayed

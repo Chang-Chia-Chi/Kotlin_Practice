@@ -16,6 +16,9 @@ import com.workflow.worker.DispatchNotifier
 import com.workflow.worker.DispatchNotifierImpl
 import com.workflow.worker.HandlerRegistry
 import com.workflow.worker.PeerRegistry
+import io.ktor.client.HttpClient
+import io.ktor.client.engine.mock.MockEngine
+import io.ktor.client.engine.mock.respond
 import org.mockito.kotlin.mock
 import org.mockito.kotlin.whenever
 import com.workflow.worker.WorkerLoop
@@ -108,7 +111,7 @@ abstract class StressTestBase {
     protected val notifier: DispatchNotifier = run {
         val registry = mock<PeerRegistry>()
         whenever(registry.peers()).thenReturn(emptyList())
-        DispatchNotifierImpl(registry, mock())
+        DispatchNotifierImpl(registry, HttpClient(MockEngine { respond("") }))
     }
 
     protected val testConfig: FrameworkConfig by lazy {
