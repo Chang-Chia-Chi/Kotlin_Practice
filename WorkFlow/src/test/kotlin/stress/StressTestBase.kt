@@ -12,8 +12,12 @@ import com.workflow.engine.Sweeper
 import com.workflow.engine.TaskRepository
 import com.workflow.engine.WorkflowEngine
 import com.workflow.engine.WorkflowRepository
-import com.workflow.worker.FakeDispatchNotifier
+import com.workflow.worker.DispatchNotifier
+import com.workflow.worker.DispatchNotifierImpl
 import com.workflow.worker.HandlerRegistry
+import com.workflow.worker.PeerRegistry
+import org.mockito.kotlin.mock
+import org.mockito.kotlin.whenever
 import com.workflow.worker.WorkerLoop
 import com.zaxxer.hikari.HikariConfig
 import com.zaxxer.hikari.HikariDataSource
@@ -101,7 +105,11 @@ abstract class StressTestBase {
     protected open val pollInterval: Duration = Duration.ofMillis(200)
     protected open val workerConcurrency: Int = scale.workers
 
-    protected val notifier = FakeDispatchNotifier()
+    protected val notifier: DispatchNotifier = run {
+        val registry = mock<PeerRegistry>()
+        whenever(registry.peers()).thenReturn(emptyList())
+        DispatchNotifierImpl(registry, mock())
+    }
 
     protected val testConfig: FrameworkConfig by lazy {
         object : FrameworkConfig {
