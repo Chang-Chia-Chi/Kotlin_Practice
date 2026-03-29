@@ -95,10 +95,15 @@ class DispatchNotifierTest {
     inner class MultiQueueIsolation {
 
         @Test
-        fun `signal on queue a does not wake waiter on queue b`() = runTest {
-            val result = notifier.awaitWork("b", Duration.ofSeconds(1))
+        fun `signal on queue a does not wake waiter on queue b`() = runTest(UnconfinedTestDispatcher()) {
+            val result = async {
+                notifier.awaitWork("b", Duration.ofSeconds(1))
+            }
+            yield()
 
-            assertFalse(result, "Signal on 'a' should not wake waiter on 'b'")
+            notifier.signal("a")
+
+            assertFalse(result.await(), "Signal on 'a' should not wake waiter on 'b'")
         }
 
         @Test
@@ -207,6 +212,16 @@ class DispatchNotifierTest {
             notifier.signal("priority-queue")
 
             verify(webClient).post(eq(8080), eq("10.0.0.5"), eq("/internal/dispatch-notify?queue=priority-queue"))
+        }
+
+        @Test
+        fun `signal URL-encodes queue name with special characters`() = runTest {
+            whenever(peerRegistry.peers()).thenReturn(listOf("10.0.0.7"))
+            mockWebClientPost("10.0.0.7", "queue+with+spaces")
+
+            notifier.signal("queue with spaces")
+
+            verify(webClient).post(eq(8080), eq("10.0.0.7"), eq("/internal/dispatch-notify?queue=queue+with+spaces"))
         }
 
         @Test

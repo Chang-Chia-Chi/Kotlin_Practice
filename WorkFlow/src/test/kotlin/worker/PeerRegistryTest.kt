@@ -1,6 +1,7 @@
 package com.workflow.worker
 
 import com.workflow.config.FrameworkConfig
+import com.workflow.leader.KubernetesDetector
 import io.fabric8.kubernetes.api.model.EndpointAddress
 import io.fabric8.kubernetes.api.model.EndpointSubset
 import io.fabric8.kubernetes.api.model.Endpoints
@@ -28,6 +29,7 @@ class PeerRegistryTest {
 
     private lateinit var client: KubernetesClient
     private lateinit var config: FrameworkConfig
+    private lateinit var detector: KubernetesDetector
     private lateinit var workerConfig: FrameworkConfig.WorkerConfig
     private lateinit var leaderElectionConfig: FrameworkConfig.LeaderElectionConfig
     private lateinit var registry: PeerRegistry
@@ -39,6 +41,7 @@ class PeerRegistryTest {
     fun setup() {
         client = mock()
         config = mock()
+        detector = mock()
         workerConfig = mock()
         leaderElectionConfig = mock()
 
@@ -56,8 +59,9 @@ class PeerRegistryTest {
         whenever(endpointsOp.inNamespace("default")).thenReturn(endpointsOp)
         whenever(endpointsOp.withName("workflow-engine")).thenReturn(namedResource)
         whenever(namedResource.watch(watchCaptor.capture())).thenReturn(watch)
+        whenever(detector.isRunningInKubernetes()).thenReturn(true)
 
-        registry = PeerRegistry(client, config)
+        registry = PeerRegistry(client, config, detector)
     }
 
     private fun startupEvent(): StartupEvent = mock()
@@ -203,7 +207,7 @@ class PeerRegistryTest {
     fun `peers returns empty when client endpoints throws during start`() {
         whenever(client.endpoints()).thenThrow(RuntimeException("K8s API unavailable"))
 
-        val failRegistry = PeerRegistry(client, config)
+        val failRegistry = PeerRegistry(client, config, detector)
         try {
             failRegistry.start(startupEvent())
         } catch (_: RuntimeException) {
