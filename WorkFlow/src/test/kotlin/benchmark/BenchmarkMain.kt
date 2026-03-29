@@ -80,6 +80,12 @@ fun main() {
     println("Matrix: ${allPoints.size} points across ${config.scenarios.size} scenario(s)\n")
 
     val results = mutableListOf<ScenarioResult>()
+    val oracleVersion = directJdbi.withHandle<String, Exception> { h ->
+        h.createQuery("SELECT banner FROM v\$version WHERE ROWNUM = 1")
+            .mapTo(String::class.java)
+            .findOne()
+            .orElse(oracle.dockerImageName)
+    }
     val gitCommit = BenchmarkReporter.captureGitCommit()
     val timeout = BenchmarkConfig.timeoutForScale(config.scale)
 
@@ -88,7 +94,7 @@ fun main() {
     Runtime.getRuntime().addShutdownHook(Thread {
         shutdownRequested.set(true)
         if (results.isNotEmpty()) {
-            val report = buildReport(config, gitCommit, results, objectMapper)
+            val report = buildReport(config, gitCommit, oracleVersion, results, objectMapper)
             BenchmarkReporter.saveReport(report, Path.of("benchmarks/results"), objectMapper)
             println("Partial results saved (${results.size} scenarios)")
         }
@@ -133,7 +139,7 @@ fun main() {
 
     // 8. Report
     if (results.isNotEmpty()) {
-        val report = buildReport(config, gitCommit, results, objectMapper)
+        val report = buildReport(config, gitCommit, oracleVersion, results, objectMapper)
         BenchmarkReporter.saveReport(report, Path.of("benchmarks/results"), objectMapper)
         println("\n${BenchmarkReporter.formatComparisonTable(results)}")
     }
@@ -224,7 +230,8 @@ private suspend fun runBatch(
         label = point.scenarioName,
         tasksPerWorkflow = point.tasksPerWorkflow,
         phaseBreakdown = timer.summary(),
-    ).copy(parameters = point.toParameterMap())
+        parameters = point.toParameterMap(),
+    )
 }
 
 private suspend fun CoroutineScope.runSustained(
@@ -280,8 +287,9 @@ private suspend fun CoroutineScope.runSustained(
         label = point.scenarioName,
         tasksPerWorkflow = point.tasksPerWorkflow,
         phaseBreakdown = timer.summary(),
+        parameters = point.toParameterMap(),
         inflightSamples = inflightSamples,
-    ).copy(parameters = point.toParameterMap())
+    )
 }
 
 private suspend fun awaitCompletions(
@@ -411,12 +419,13 @@ private fun dumpDiagnostics(directJdbi: Jdbi) {
 private fun buildReport(
     config: BenchmarkRunConfig,
     gitCommit: String,
+    oracleVersion: String,
     results: List<ScenarioResult>,
     objectMapper: ObjectMapper,
 ): BenchmarkReport = BenchmarkReport(
     timestamp = java.time.LocalDateTime.now().toString(),
     scale = config.scale.name.lowercase(),
     gitCommit = gitCommit,
-    environment = BenchmarkReporter.captureEnvironment(),
+    environment = BenchmarkReporter.captureEnvironment(oracleVersion),
     scenarios = results,
 )

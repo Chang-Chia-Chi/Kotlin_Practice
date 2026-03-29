@@ -19,7 +19,7 @@ class BenchmarkReporterTest {
             timestamp = "2026-03-29T14:30:00",
             scale = "quick",
             gitCommit = "abc1234",
-            environment = EnvironmentInfo("Windows 11", 8, 4096, "21.0.2"),
+            environment = EnvironmentInfo("Windows 11", 8, 4096, "21.0.2", "Oracle Database 23ai Free"),
             scenarios = listOf(
                 ScenarioResult(
                     name = "single",

@@ -8,6 +8,7 @@ import com.workflow.worker.HandlerInput
 import com.workflow.worker.HandlerOutput
 import com.workflow.worker.HandlerRegistry
 import com.workflow.worker.TransitionHandler
+import kotlinx.coroutines.delay
 
 object BenchmarkScenarios {
 
@@ -81,7 +82,7 @@ object BenchmarkScenarios {
     private fun latencyHandler(delayMs: Long, delegate: TransitionHandler): TransitionHandler =
         object : TransitionHandler {
             override suspend fun execute(input: HandlerInput): HandlerOutput {
-                Thread.sleep(delayMs)
+                delay(delayMs)
                 return delegate.execute(input)
             }
         }

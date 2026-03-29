@@ -2,6 +2,7 @@ package com.workflow.benchmark
 
 import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.Timer
+import io.micrometer.core.instrument.composite.CompositeMeterRegistry
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 
 class MetricsSupport private constructor(
@@ -9,7 +10,8 @@ class MetricsSupport private constructor(
 ) {
     companion object {
         fun create(enabled: Boolean): MetricsSupport {
-            return MetricsSupport(SimpleMeterRegistry())
+            val registry = if (enabled) SimpleMeterRegistry() else CompositeMeterRegistry()
+            return MetricsSupport(registry)
         }
     }
 

@@ -12,6 +12,7 @@ data class EnvironmentInfo(
     val cpuCores: Int,
     val jvmMaxMemoryMb: Long,
     val javaVersion: String,
+    val oracleVersion: String,
 )
 
 data class BenchmarkReport(
@@ -78,11 +79,12 @@ object BenchmarkReporter {
         }
     }
 
-    fun captureEnvironment(): EnvironmentInfo = EnvironmentInfo(
+    fun captureEnvironment(oracleVersion: String = "unknown"): EnvironmentInfo = EnvironmentInfo(
         os = "${System.getProperty("os.name")} ${System.getProperty("os.version")}",
         cpuCores = Runtime.getRuntime().availableProcessors(),
         jvmMaxMemoryMb = Runtime.getRuntime().maxMemory() / (1024 * 1024),
         javaVersion = System.getProperty("java.version"),
+        oracleVersion = oracleVersion,
     )
 
     fun captureGitCommit(): String = try {

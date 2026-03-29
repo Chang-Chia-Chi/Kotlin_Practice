@@ -58,13 +58,14 @@ class EnhancedBenchmarkHarness {
         label: String,
         tasksPerWorkflow: Int,
         phaseBreakdown: Map<String, PhaseSummary>,
+        parameters: Map<String, Any> = emptyMap(),
     ): ScenarioResult {
         val latencies = perWorkflowLatencies()
         val wallClock = wallClockMs()
         val total = submissions.size
         return ScenarioResult(
             name = label,
-            parameters = emptyMap(),
+            parameters = parameters,
             totalWorkflows = total,
             totalTasks = total * tasksPerWorkflow,
             wallClockMs = wallClock,
@@ -79,6 +80,7 @@ class EnhancedBenchmarkHarness {
         label: String,
         tasksPerWorkflow: Int,
         phaseBreakdown: Map<String, PhaseSummary>,
+        parameters: Map<String, Any> = emptyMap(),
         windowDurationMs: Long = 10_000,
         inflightSamples: List<WindowSample>,
     ): ScenarioResult {
@@ -116,7 +118,7 @@ class EnhancedBenchmarkHarness {
         val allLatencies = perWorkflowLatencies()
         return ScenarioResult(
             name = label,
-            parameters = emptyMap(),
+            parameters = parameters,
             totalWorkflows = total,
             totalTasks = total * tasksPerWorkflow,
             wallClockMs = totalDurationMs,
