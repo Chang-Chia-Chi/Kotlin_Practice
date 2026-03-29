@@ -8,6 +8,7 @@ import com.workflow.dsl.ActivityDefinition
 import com.workflow.dsl.FailurePolicy
 import com.workflow.dsl.JoinPolicy
 import com.workflow.dsl.WorkflowDefinition
+import com.workflow.worker.FakeDispatchNotifier
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.test.runTest
@@ -46,12 +47,18 @@ class SweeperTest {
     private val staleTaskThreshold = Duration.ofMinutes(10)
 
     /** Minimal FrameworkConfig stub returning fixed gracePeriod for sweeper. */
+    private val notifier = FakeDispatchNotifier()
+
     private val testConfig = object : FrameworkConfig {
+        override fun serviceName() = "workflow-engine"
         override fun worker() = object : FrameworkConfig.WorkerConfig {
             override fun id() = "test-worker"
             override fun pollInterval(): Duration = Duration.ofSeconds(1)
             override fun concurrency() = 4
             override fun batchSize() = 1
+            override fun fallbackPollInterval(): Duration = Duration.ofSeconds(5)
+            override fun maxBatchSize() = 16
+            override fun podIp() = "localhost"
         }
 
         override fun leaderElection() = object : FrameworkConfig.LeaderElectionConfig {
@@ -80,7 +87,7 @@ class SweeperTest {
         jdbi = OracleTestContainer.jdbi
         workflowRepo = WorkflowRepository(jdbi)
         taskRepo = TaskRepository(jdbi)
-        barrier = BarrierService(jdbi, workflowRepo, taskRepo, objectMapper, PhaseStrategyRegistry())
+        barrier = BarrierService(jdbi, workflowRepo, taskRepo, objectMapper, PhaseStrategyRegistry(), notifier)
         sweeper = Sweeper(jdbi, workflowRepo, taskRepo, barrier, testConfig)
     }
 
@@ -1263,7 +1270,7 @@ class SweeperTest {
             insertTaskDirect(dl2)
             insertTaskDirect(completed)
 
-            val engine = WorkflowEngine(jdbi, workflowRepo, taskRepo, objectMapper)
+            val engine = WorkflowEngine(jdbi, workflowRepo, taskRepo, objectMapper, notifier)
             val result = engine.replayWorkflow(wf.id)
 
             assertTrue(result)
@@ -1287,7 +1294,7 @@ class SweeperTest {
             )
             insertWorkflowDirect(wf)
 
-            val engine = WorkflowEngine(jdbi, workflowRepo, taskRepo, objectMapper)
+            val engine = WorkflowEngine(jdbi, workflowRepo, taskRepo, objectMapper, notifier)
             val result = engine.replayWorkflow(wf.id)
 
             assertFalse(result)
@@ -1306,7 +1313,7 @@ class SweeperTest {
             )
             insertWorkflowDirect(wf)
 
-            val engine = WorkflowEngine(jdbi, workflowRepo, taskRepo, objectMapper)
+            val engine = WorkflowEngine(jdbi, workflowRepo, taskRepo, objectMapper, notifier)
             val result = engine.replayWorkflow(wf.id)
 
             assertFalse(result)
@@ -1314,7 +1321,7 @@ class SweeperTest {
 
         @Test
         fun `replayWorkflow returns false for non-existent workflow`() = runTest {
-            val engine = WorkflowEngine(jdbi, workflowRepo, taskRepo, objectMapper)
+            val engine = WorkflowEngine(jdbi, workflowRepo, taskRepo, objectMapper, notifier)
             val result = engine.replayWorkflow(randomId())
 
             assertFalse(result)

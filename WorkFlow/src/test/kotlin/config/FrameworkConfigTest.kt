@@ -87,6 +87,28 @@ class FrameworkConfigDefaultsTest {
         assertEquals(Duration.ofMinutes(2), config.sweeper().gracePeriod())
     }
 
+    // -- 1b. New event-driven dispatch defaults -----------------------------
+
+    @Test
+    fun `worker fallbackPollInterval defaults to 5 seconds`() {
+        assertEquals(Duration.ofSeconds(5), config.worker().fallbackPollInterval())
+    }
+
+    @Test
+    fun `worker maxBatchSize defaults to 16`() {
+        assertEquals(16, config.worker().maxBatchSize())
+    }
+
+    @Test
+    fun `worker podIp defaults to localhost`() {
+        assertEquals("localhost", config.worker().podIp())
+    }
+
+    @Test
+    fun `serviceName defaults to workflow-engine`() {
+        assertEquals("workflow-engine", config.serviceName())
+    }
+
     // -- 3. Nested config resolution ----------------------------------------
 
     @Test
@@ -126,6 +148,10 @@ class FrameworkConfigOverrideProfile : QuarkusTestProfile {
         "framework.worker.poll-interval" to "PT5S",
         "framework.worker.concurrency" to "16",
         "framework.worker.batch-size" to "8",
+        "framework.worker.fallback-poll-interval" to "PT10S",
+        "framework.worker.max-batch-size" to "32",
+        "framework.worker.pod-ip" to "10.0.0.42",
+        "framework.service-name" to "custom-engine",
         "quarkus.datasource.jdbc.max-size" to "32",
         "framework.leader-election.namespace" to "prod",
         "framework.leader-election.lease-name" to "custom-lease",
@@ -209,6 +235,26 @@ class FrameworkConfigOverrideTest {
     @Test
     fun `sweeper gracePeriod is overridden`() {
         assertEquals(Duration.ofMinutes(5), config.sweeper().gracePeriod())
+    }
+
+    @Test
+    fun `worker fallbackPollInterval is overridden`() {
+        assertEquals(Duration.ofSeconds(10), config.worker().fallbackPollInterval())
+    }
+
+    @Test
+    fun `worker maxBatchSize is overridden`() {
+        assertEquals(32, config.worker().maxBatchSize())
+    }
+
+    @Test
+    fun `worker podIp is overridden`() {
+        assertEquals("10.0.0.42", config.worker().podIp())
+    }
+
+    @Test
+    fun `serviceName is overridden`() {
+        assertEquals("custom-engine", config.serviceName())
     }
 
     @Test

@@ -8,6 +8,7 @@ import com.workflow.dsl.FailurePolicy
 import com.workflow.dsl.JoinPolicy
 import com.workflow.dsl.WorkflowDefinition
 import com.workflow.dsl.workflow
+import com.workflow.worker.FakeDispatchNotifier
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.test.runTest
@@ -36,6 +37,7 @@ class BarrierServiceTest {
     private val objectMapper = ObjectMapper()
         .registerModule(KotlinModule.Builder().build())
         .registerModule(JavaTimeModule())
+    private lateinit var notifier: FakeDispatchNotifier
     private lateinit var barrier: BarrierService
     private lateinit var strategyRegistry: PhaseStrategyRegistry
     private lateinit var engine: WorkflowEngine
@@ -45,9 +47,10 @@ class BarrierServiceTest {
         jdbi = OracleTestContainer.jdbi
         workflowRepo = WorkflowRepository(jdbi)
         taskRepo = TaskRepository(jdbi)
+        notifier = FakeDispatchNotifier()
         strategyRegistry = PhaseStrategyRegistry()
-        barrier = BarrierService(jdbi, workflowRepo, taskRepo, objectMapper, strategyRegistry)
-        engine = WorkflowEngine(jdbi, workflowRepo, taskRepo, objectMapper)
+        barrier = BarrierService(jdbi, workflowRepo, taskRepo, objectMapper, strategyRegistry, notifier)
+        engine = WorkflowEngine(jdbi, workflowRepo, taskRepo, objectMapper, notifier)
     }
 
     @AfterEach
@@ -913,6 +916,93 @@ class BarrierServiceTest {
             val workflow = workflowRepo.findById(workflowId)
             assertNotNull(workflow)
             assertEquals(WorkflowStatus.FAILED, workflow.status)
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // DispatchNotifier Signal Tests
+    // ═══════════════════════════════════════════════════════════════════════
+
+    @Nested
+    inner class DispatchNotifierSignaling {
+
+        @Test
+        fun `onTaskCompleted last task in phase signals notifier`() = runTest {
+            val def = twoStepLinearDef()
+            val wfId = randomId()
+            val taskId = randomId()
+            val wf = makeWorkflow(id = wfId, definition = def, currentSequence = 1, version = 0)
+            insertWorkflowDirect(wf)
+            insertTaskDirect(
+                makeTask(
+                    id = taskId, workflowId = wfId, sequenceNumber = 1,
+                    status = TaskStatus.PROCESSING, handlerKey = "step1.handler",
+                ),
+            )
+
+            val signalCountBefore = notifier.signalCount
+            barrier.onTaskCompleted(taskId, wfId, 1, TaskStatus.COMPLETED, null)
+
+            assertEquals(
+                signalCountBefore + 1,
+                notifier.signalCount,
+                "signal() should be called exactly once when phase advances",
+            )
+        }
+
+        @Test
+        fun `onTaskCompleted non-last task does not signal notifier`() = runTest {
+            val def = fanOutThenLinearDef()
+            val wfId = randomId()
+            val wf = makeWorkflow(id = wfId, definition = def, currentSequence = 2, version = 1)
+            insertWorkflowDirect(wf)
+
+            val completingTaskId = randomId()
+            insertTaskDirect(
+                makeTask(
+                    id = completingTaskId, workflowId = wfId, sequenceNumber = 2,
+                    status = TaskStatus.PROCESSING, handlerKey = "parallel.handler",
+                ),
+            )
+            insertTaskDirect(
+                makeTask(
+                    workflowId = wfId, sequenceNumber = 2,
+                    status = TaskStatus.PENDING, handlerKey = "parallel.handler",
+                ),
+            )
+
+            val signalCountBefore = notifier.signalCount
+            barrier.onTaskCompleted(completingTaskId, wfId, 2, TaskStatus.COMPLETED, null)
+
+            assertEquals(
+                signalCountBefore,
+                notifier.signalCount,
+                "signal() should NOT be called when non-terminal tasks remain",
+            )
+        }
+
+        @Test
+        fun `recoverStuckWorkflow signals notifier when phase advances`() = runTest {
+            val def = twoStepLinearDef()
+            val wfId = randomId()
+            val taskId = randomId()
+            val wf = makeWorkflow(id = wfId, definition = def, currentSequence = 1, version = 0)
+            insertWorkflowDirect(wf)
+            insertTaskDirect(
+                makeTask(
+                    id = taskId, workflowId = wfId, sequenceNumber = 1,
+                    status = TaskStatus.COMPLETED, handlerKey = "step1.handler",
+                ),
+            )
+
+            val signalCountBefore = notifier.signalCount
+            barrier.recoverStuckWorkflow(wfId)
+
+            assertEquals(
+                signalCountBefore + 1,
+                notifier.signalCount,
+                "signal() should be called exactly once when recoverStuckWorkflow advances phase",
+            )
         }
     }
 }

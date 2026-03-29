@@ -12,6 +12,7 @@ import com.workflow.engine.Sweeper
 import com.workflow.engine.TaskRepository
 import com.workflow.engine.WorkflowEngine
 import com.workflow.engine.WorkflowRepository
+import com.workflow.worker.FakeDispatchNotifier
 import com.workflow.worker.HandlerRegistry
 import com.workflow.worker.WorkerLoop
 import com.zaxxer.hikari.HikariConfig
@@ -100,13 +101,19 @@ abstract class StressTestBase {
     protected open val pollInterval: Duration = Duration.ofMillis(200)
     protected open val workerConcurrency: Int = scale.workers
 
+    protected val notifier = FakeDispatchNotifier()
+
     protected val testConfig: FrameworkConfig by lazy {
         object : FrameworkConfig {
+            override fun serviceName() = "workflow-engine"
             override fun worker() = object : FrameworkConfig.WorkerConfig {
                 override fun id() = "stress-worker"
                 override fun pollInterval() = this@StressTestBase.pollInterval
                 override fun concurrency() = workerConcurrency
                 override fun batchSize() = 1
+                override fun fallbackPollInterval() = this@StressTestBase.pollInterval
+                override fun maxBatchSize() = 16
+                override fun podIp() = "localhost"
             }
             override fun leaderElection() = object : FrameworkConfig.LeaderElectionConfig {
                 override fun namespace() = "default"
@@ -172,8 +179,8 @@ abstract class StressTestBase {
         workflowRepo = WorkflowRepository(proxyJdbi)
         taskRepo = TaskRepository(proxyJdbi)
         val strategyRegistry = PhaseStrategyRegistry()
-        barrier = BarrierService(proxyJdbi, workflowRepo, taskRepo, objectMapper, strategyRegistry)
-        engine = WorkflowEngine(proxyJdbi, workflowRepo, taskRepo, objectMapper)
+        barrier = BarrierService(proxyJdbi, workflowRepo, taskRepo, objectMapper, strategyRegistry, notifier)
+        engine = WorkflowEngine(proxyJdbi, workflowRepo, taskRepo, objectMapper, notifier)
         sweeper = Sweeper(proxyJdbi, workflowRepo, taskRepo, barrier, testConfig)
         inputResolver = InputResolver(objectMapper)
         handlerRegistry = HandlerRegistry()
@@ -183,8 +190,8 @@ abstract class StressTestBase {
         directWorkflowRepo = WorkflowRepository(directPooledJdbi)
         directTaskRepo = TaskRepository(directPooledJdbi)
         val directStrategyRegistry = PhaseStrategyRegistry()
-        directBarrier = BarrierService(directPooledJdbi, directWorkflowRepo, directTaskRepo, objectMapper, directStrategyRegistry)
-        directEngine = WorkflowEngine(directPooledJdbi, directWorkflowRepo, directTaskRepo, objectMapper)
+        directBarrier = BarrierService(directPooledJdbi, directWorkflowRepo, directTaskRepo, objectMapper, directStrategyRegistry, notifier)
+        directEngine = WorkflowEngine(directPooledJdbi, directWorkflowRepo, directTaskRepo, objectMapper, notifier)
         directSweeper = Sweeper(directPooledJdbi, directWorkflowRepo, directTaskRepo, directBarrier, testConfig)
     }
 
@@ -226,14 +233,14 @@ abstract class StressTestBase {
     }
 
     protected fun startWorkerPool(): List<Job> {
-        val loop = WorkerLoop(testConfig, taskRepo, handlerRegistry, barrier, meterRegistry, inputResolver, workflowRepo, objectMapper)
+        val loop = WorkerLoop(testConfig, taskRepo, handlerRegistry, barrier, meterRegistry, inputResolver, workflowRepo, objectMapper, notifier)
         val job = loop.start(workerScope)
         workerJobs.add(job)
         return listOf(job)
     }
 
     protected fun startDirectWorkerPool(): List<Job> {
-        val loop = WorkerLoop(testConfig, directTaskRepo, handlerRegistry, directBarrier, meterRegistry, inputResolver, directWorkflowRepo, objectMapper)
+        val loop = WorkerLoop(testConfig, directTaskRepo, handlerRegistry, directBarrier, meterRegistry, inputResolver, directWorkflowRepo, objectMapper, notifier)
         val job = loop.start(workerScope)
         workerJobs.add(job)
         return listOf(job)

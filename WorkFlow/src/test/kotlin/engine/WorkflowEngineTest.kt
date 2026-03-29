@@ -8,6 +8,8 @@ import com.workflow.dsl.FailurePolicy
 import com.workflow.dsl.JoinPolicy
 import com.workflow.dsl.WorkflowDefinition
 import com.workflow.dsl.workflow
+import com.workflow.worker.DispatchNotifier
+import com.workflow.worker.FakeDispatchNotifier
 import kotlinx.coroutines.test.runTest
 import org.jdbi.v3.core.Jdbi
 import org.junit.jupiter.api.AfterEach
@@ -31,6 +33,7 @@ class WorkflowEngineTest {
     private val objectMapper = ObjectMapper()
         .registerModule(KotlinModule.Builder().build())
         .registerModule(JavaTimeModule())
+    private lateinit var notifier: FakeDispatchNotifier
     private lateinit var engine: WorkflowEngine
     private lateinit var barrierService: BarrierService
 
@@ -39,8 +42,9 @@ class WorkflowEngineTest {
         jdbi = OracleTestContainer.jdbi
         workflowRepo = WorkflowRepository(jdbi)
         taskRepo = TaskRepository(jdbi)
-        engine = WorkflowEngine(jdbi, workflowRepo, taskRepo, objectMapper)
-        barrierService = BarrierService(jdbi, workflowRepo, taskRepo, objectMapper, PhaseStrategyRegistry())
+        notifier = FakeDispatchNotifier()
+        engine = WorkflowEngine(jdbi, workflowRepo, taskRepo, objectMapper, notifier)
+        barrierService = BarrierService(jdbi, workflowRepo, taskRepo, objectMapper, PhaseStrategyRegistry(), notifier)
     }
 
     @AfterEach
@@ -237,5 +241,77 @@ class WorkflowEngineTest {
     fun `cancelWorkflow returns false for nonexistent workflow`() = runTest {
         val result = engine.cancelWorkflow("nonexistent-id")
         assertFalse(result)
+    }
+
+    // ── DispatchNotifier signal tests ────────────────────────────────────
+
+    @Test
+    fun `startWorkflow signals notifier with first activity queue`() = runTest {
+        val signalCountBefore = notifier.signalCount
+        val definition = workflow {
+            activity("step1") {
+                transition("order.validate")
+            }
+        }
+
+        engine.startWorkflow(definition)
+
+        assertEquals(signalCountBefore + 1, notifier.signalCount, "signal() should be called once after startWorkflow")
+        assertTrue(notifier.signalledQueues.last() == "default", "Signal should use the first activity's queue name (default)")
+    }
+
+    @Test
+    fun `startWorkflow signals notifier with custom queue`() = runTest {
+        val signalCountBefore = notifier.signalCount
+        val definition = workflow {
+            activity("step1") {
+                transition("order.validate")
+                queue("priority")
+            }
+        }
+
+        engine.startWorkflow(definition)
+
+        assertEquals(signalCountBefore + 1, notifier.signalCount)
+        assertTrue(notifier.signalledQueues.last() == "priority", "Signal should use custom queue name 'priority'")
+    }
+
+    @Test
+    fun `replayWorkflow signals notifier on success`() = runTest {
+        val definition = workflow {
+            activity("step1") { transition("handler1") }
+        }
+        val runId = engine.startWorkflow(definition)
+
+        // Move to FAILED so we can replay
+        jdbi.useHandle<Exception> { handle ->
+            handle.createUpdate("UPDATE workflow SET status = 'FAILED' WHERE id = :id")
+                .bind("id", runId)
+                .execute()
+            handle.createUpdate("UPDATE task SET status = 'DEAD_LETTER' WHERE workflow_id = :wfId")
+                .bind("wfId", runId)
+                .execute()
+        }
+
+        val signalCountBefore = notifier.signalCount
+        val result = engine.replayWorkflow(runId)
+
+        assertTrue(result)
+        assertTrue(notifier.signalCount > signalCountBefore, "signal() should be called after successful replayWorkflow")
+    }
+
+    @Test
+    fun `replayWorkflow does not signal on non-FAILED workflow`() = runTest {
+        val definition = workflow {
+            activity("step1") { transition("handler1") }
+        }
+        val runId = engine.startWorkflow(definition)
+
+        // Workflow is RUNNING, not FAILED — replay should return false
+        val signalCountBefore = notifier.signalCount
+        val result = engine.replayWorkflow(runId)
+
+        assertFalse(result)
+        assertEquals(signalCountBefore, notifier.signalCount, "signal() should NOT be called on failed replay")
     }
 }

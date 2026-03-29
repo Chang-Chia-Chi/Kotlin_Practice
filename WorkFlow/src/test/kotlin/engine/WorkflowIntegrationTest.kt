@@ -6,6 +6,7 @@ import com.fasterxml.jackson.module.kotlin.KotlinModule
 import com.workflow.config.FrameworkConfig
 import com.workflow.dsl.JoinPolicy
 import com.workflow.dsl.workflow
+import com.workflow.worker.FakeDispatchNotifier
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.sync.Semaphore
@@ -41,12 +42,18 @@ class WorkflowIntegrationTest {
     private val gracePeriod = Duration.ofMinutes(2)
     private val staleTaskThreshold = Duration.ofMinutes(10)
 
+    private val notifier = FakeDispatchNotifier()
+
     private val testConfig = object : FrameworkConfig {
+        override fun serviceName() = "workflow-engine"
         override fun worker() = object : FrameworkConfig.WorkerConfig {
             override fun id() = "test-worker"
             override fun pollInterval(): Duration = Duration.ofSeconds(1)
             override fun concurrency() = 4
             override fun batchSize() = 1
+            override fun fallbackPollInterval(): Duration = Duration.ofSeconds(5)
+            override fun maxBatchSize() = 16
+            override fun podIp() = "localhost"
         }
 
         override fun leaderElection() = object : FrameworkConfig.LeaderElectionConfig {
@@ -75,8 +82,8 @@ class WorkflowIntegrationTest {
         jdbi = OracleTestContainer.jdbi
         workflowRepo = WorkflowRepository(jdbi)
         taskRepo = TaskRepository(jdbi)
-        engine = WorkflowEngine(jdbi, workflowRepo, taskRepo, objectMapper)
-        barrier = BarrierService(jdbi, workflowRepo, taskRepo, objectMapper, PhaseStrategyRegistry())
+        engine = WorkflowEngine(jdbi, workflowRepo, taskRepo, objectMapper, notifier)
+        barrier = BarrierService(jdbi, workflowRepo, taskRepo, objectMapper, PhaseStrategyRegistry(), notifier)
         sweeper = Sweeper(jdbi, workflowRepo, taskRepo, barrier, testConfig)
     }
 
