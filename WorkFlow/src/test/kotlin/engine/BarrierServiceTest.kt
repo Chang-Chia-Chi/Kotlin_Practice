@@ -811,6 +811,42 @@ class BarrierServiceTest {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
+    // Test 12: Empty scatter result fails fast
+    // ═══════════════════════════════════════════════════════════════════════
+
+    @Nested
+    inner class EmptyScatterResult {
+
+        @Test
+        fun `scatter task with empty array result fails fast instead of silently skipping parallel phase`() = runTest {
+            val def = fanOutDef(joinPolicy = JoinPolicy.All)
+            val wfId = randomId()
+            val wf = makeWorkflow(id = wfId, definition = def, currentSequence = 1, version = 0)
+            insertWorkflowDirect(wf)
+
+            val scatterTaskId = randomId()
+            val emptyArrayJson = "[]"
+
+            insertTaskDirect(
+                makeTask(
+                    id = scatterTaskId, workflowId = wfId, sequenceNumber = 1,
+                    status = TaskStatus.PROCESSING, handlerKey = "scatter.handler",
+                ),
+            )
+
+            val ex = org.junit.jupiter.api.assertThrows<IllegalArgumentException> {
+                barrier.onTaskCompleted(scatterTaskId, wfId, 1, TaskStatus.COMPLETED, emptyArrayJson)
+            }
+            assertTrue(ex.message!!.contains("Fan-out produced 0 tasks"))
+
+            // Workflow should NOT have advanced
+            val updatedWf = readWorkflowDirect(wfId)
+            assertNotNull(updatedWf)
+            assertEquals(1, (updatedWf["CURRENT_SEQUENCE"] as Number).toInt())
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
     // Test 13: ABORT failure policy cancels sibling PENDING tasks
     // ═══════════════════════════════════════════════════════════════════════
 

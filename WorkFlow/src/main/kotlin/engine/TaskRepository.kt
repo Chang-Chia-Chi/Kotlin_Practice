@@ -213,7 +213,7 @@ class TaskRepository(
         val activity = targetSeqInfo.activity
         val deadlineAt = LocalDateTime.ofInstant(now.plus(activity.deadline), ZoneOffset.UTC)
             .truncatedTo(java.time.temporal.ChronoUnit.MICROS)
-        handle.createUpdate(
+        val inserted = handle.createUpdate(
             """
             INSERT INTO task (id, workflow_id, sequence_number, status, handler_key, item,
                               result, claimed_by, claimed_at, completed_at,
@@ -241,6 +241,10 @@ class TaskRepository(
             .bind("backoffCap", activity.backoffCap.seconds.toInt())
             .bind("queueName", activity.queue)
             .execute()
+        require(inserted > 0) {
+            "Fan-out produced 0 tasks for workflow $workflowId at scatter sequence $scatterSequence. " +
+                "Scatter handler must return a non-empty JSON array."
+        }
     }
 
     fun updateStatusWithHandle(
