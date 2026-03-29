@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.readValue
 import com.workflow.dsl.WorkflowDefinition
 import com.workflow.extension.inTransactionSuspend
+import com.workflow.worker.DispatchNotifier
 import jakarta.enterprise.context.ApplicationScoped
 import org.jdbi.v3.core.Handle
 import org.jdbi.v3.core.Jdbi
@@ -18,7 +19,7 @@ class BarrierService(
     private val taskRepo: TaskRepository,
     private val objectMapper: ObjectMapper,
     private val strategyRegistry: PhaseStrategyRegistry,
-    private val notifier: com.workflow.worker.DispatchNotifier,
+    private val notifier: DispatchNotifier,
 ) {
     private val log = LoggerFactory.getLogger(BarrierService::class.java)
 

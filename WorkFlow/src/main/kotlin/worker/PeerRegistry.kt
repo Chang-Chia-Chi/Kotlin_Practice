@@ -1,11 +1,14 @@
 package com.workflow.worker
 
 import com.workflow.config.FrameworkConfig
+import com.workflow.leader.KubernetesDetector
 import io.fabric8.kubernetes.api.model.Endpoints
 import io.fabric8.kubernetes.client.KubernetesClient
+import io.fabric8.kubernetes.client.Watch
 import io.fabric8.kubernetes.client.Watcher
 import io.fabric8.kubernetes.client.WatcherException
 import io.quarkus.runtime.StartupEvent
+import jakarta.annotation.PreDestroy
 import jakarta.enterprise.context.ApplicationScoped
 import jakarta.enterprise.event.Observes
 import org.slf4j.LoggerFactory
@@ -25,20 +28,25 @@ import org.slf4j.LoggerFactory
 class PeerRegistry(
     private val client: KubernetesClient,
     private val config: FrameworkConfig,
+    private val detector: KubernetesDetector,
 ) {
     private val log = LoggerFactory.getLogger(PeerRegistry::class.java)
 
     @Volatile
     private var _peers: List<String> = emptyList()
 
+    private var watch: Watch? = null
+
     /** Current peer pod IPs, excluding this pod. */
     fun peers(): List<String> = _peers
 
     fun start(@Observes ev: StartupEvent) {
+        if (!detector.isRunningInKubernetes()) return
+
         val myIp = config.worker().podIp()
 
         try {
-            client.endpoints()
+            watch = client.endpoints()
                 .inNamespace(config.leaderElection().namespace())
                 .withName(config.serviceName())
                 .watch(object : Watcher<Endpoints> {
@@ -56,7 +64,12 @@ class PeerRegistry(
                     }
                 })
         } catch (e: Exception) {
-            log.warn("Failed to start Endpoints watch (running outside K8s?): {}", e.message)
+            log.warn("Failed to start Endpoints watch: {}", e.message)
         }
+    }
+
+    @PreDestroy
+    fun stop() {
+        watch?.close()
     }
 }

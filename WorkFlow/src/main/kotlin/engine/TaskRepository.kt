@@ -421,6 +421,18 @@ class TaskRepository(
             ).bind("workflowId", workflowId)
             .execute()
 
+    fun findDistinctQueuesByWorkflowId(handle: Handle, workflowId: String, statuses: List<String>): List<String> =
+        handle
+            .createQuery(
+                """
+            SELECT DISTINCT queue_name FROM task
+            WHERE workflow_id = :workflowId AND status IN (<statuses>)
+            """,
+            ).bind("workflowId", workflowId)
+            .bindList("statuses", statuses)
+            .mapTo(String::class.java)
+            .list()
+
     // ── Private helpers ──
 
     private fun bindNullableClob(

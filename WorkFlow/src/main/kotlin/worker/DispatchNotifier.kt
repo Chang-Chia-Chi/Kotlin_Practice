@@ -2,12 +2,12 @@ package com.workflow.worker
 
 import io.vertx.ext.web.client.WebClient
 import jakarta.enterprise.context.ApplicationScoped
-import jakarta.enterprise.inject.Produces
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeoutOrNull
 import org.slf4j.LoggerFactory
+import java.net.URLEncoder
 import java.time.Duration
 import java.util.concurrent.ConcurrentHashMap
 
@@ -43,7 +43,10 @@ interface DispatchNotifier {
      * Suspend until work is signaled on [queueName] or [timeout] expires.
      * Returns true if woken by a signal, false on timeout.
      */
-    suspend fun awaitWork(queueName: String, timeout: Duration): Boolean
+    suspend fun awaitWork(
+        queueName: String,
+        timeout: Duration,
+    ): Boolean
 }
 
 @ApplicationScoped
@@ -51,24 +54,26 @@ class DispatchNotifierImpl(
     private val peerRegistry: PeerRegistry,
     private val webClient: WebClient,
 ) : DispatchNotifier {
-
     private val log = LoggerFactory.getLogger(DispatchNotifierImpl::class.java)
 
     private val flows = ConcurrentHashMap<String, MutableSharedFlow<Unit>>()
 
-    private fun flowFor(queue: String) = flows.getOrPut(queue) {
-        MutableSharedFlow(
-            replay = 0,
-            extraBufferCapacity = 1,
-            onBufferOverflow = BufferOverflow.DROP_OLDEST,
-        )
-    }
+    private fun flowFor(queue: String) =
+        flows.getOrPut(queue) {
+            MutableSharedFlow(
+                replay = 0,
+                extraBufferCapacity = 1,
+                onBufferOverflow = BufferOverflow.DROP_OLDEST,
+            )
+        }
 
     override fun signal(queueName: String) {
         flowFor(queueName).tryEmit(Unit)
         val peers = peerRegistry.peers()
+        val encodedQueue = URLEncoder.encode(queueName, Charsets.UTF_8)
         for (peer in peers) {
-            webClient.post(8080, peer, "/internal/dispatch-notify?queue=$queueName")
+            webClient
+                .post(8080, peer, "/internal/dispatch-notify?queue=$encodedQueue")
                 .send()
                 .onFailure { log.debug("Peer notify failed for {}: {}", peer, it.message) }
         }
@@ -78,21 +83,11 @@ class DispatchNotifierImpl(
         flowFor(queueName).tryEmit(Unit)
     }
 
-    override suspend fun awaitWork(queueName: String, timeout: Duration): Boolean {
-        return withTimeoutOrNull(timeout.toMillis()) {
+    override suspend fun awaitWork(
+        queueName: String,
+        timeout: Duration,
+    ): Boolean =
+        withTimeoutOrNull(timeout.toMillis()) {
             flowFor(queueName).first()
         } != null
-    }
-
-    /**
-     * CDI producer for Vert.x [WebClient].
-     * Quarkus does not auto-produce this bean; we create it from the
-     * managed Vert.x instance.
-     */
-    companion object {
-        @Produces
-        @ApplicationScoped
-        @JvmStatic
-        fun webClient(vertx: io.vertx.core.Vertx): WebClient = WebClient.create(vertx)
-    }
 }

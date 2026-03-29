@@ -3,6 +3,8 @@ package com.workflow.engine
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.workflow.dsl.WorkflowDefinition
 import com.workflow.extension.inTransactionSuspend
+import com.workflow.extension.withHandleSuspend
+import com.workflow.worker.DispatchNotifier
 import jakarta.enterprise.context.ApplicationScoped
 import org.jdbi.v3.core.Jdbi
 import org.slf4j.LoggerFactory
@@ -16,7 +18,7 @@ class WorkflowEngine(
     private val workflowRepo: WorkflowRepository,
     private val taskRepo: TaskRepository,
     private val objectMapper: ObjectMapper,
-    private val notifier: com.workflow.worker.DispatchNotifier,
+    private val notifier: DispatchNotifier,
 ) {
 
     private val log = LoggerFactory.getLogger(WorkflowEngine::class.java)
@@ -83,7 +85,14 @@ class WorkflowEngine(
             taskRepo.replayDeadLetterBatchWithHandle(handle, workflowId)
             true
         }
-        if (replayed) notifier.signal("default")
+        if (replayed) {
+            val queues = jdbi.withHandleSuspend<List<String>, Exception> { handle ->
+                taskRepo.findDistinctQueuesByWorkflowId(handle, workflowId, listOf("PENDING"))
+            }
+            for (queue in queues) {
+                notifier.signal(queue)
+            }
+        }
         return replayed
     }
 }
