@@ -6,6 +6,8 @@ import java.time.Duration
 
 @ConfigMapping(prefix = "framework")
 interface FrameworkConfig {
+    @WithDefault("workflow-engine")
+    fun serviceName(): String
     fun worker(): WorkerConfig
     fun leaderElection(): LeaderElectionConfig
     fun shutdown(): ShutdownConfig
@@ -16,10 +18,16 @@ interface FrameworkConfig {
         fun id(): String
         @WithDefault("PT1S")
         fun pollInterval(): Duration
+        @WithDefault("PT5S")
+        fun fallbackPollInterval(): Duration
         @WithDefault("4")
         fun concurrency(): Int
         @WithDefault("1")
         fun batchSize(): Int
+        @WithDefault("16")
+        fun maxBatchSize(): Int
+        @WithDefault("localhost")
+        fun podIp(): String
     }
 
     interface LeaderElectionConfig {

@@ -16,6 +16,7 @@ class WorkflowEngine(
     private val workflowRepo: WorkflowRepository,
     private val taskRepo: TaskRepository,
     private val objectMapper: ObjectMapper,
+    private val notifier: com.workflow.worker.DispatchNotifier,
 ) {
 
     private val log = LoggerFactory.getLogger(WorkflowEngine::class.java)
@@ -27,7 +28,7 @@ class WorkflowEngine(
         val now = Instant.now().truncatedTo(ChronoUnit.MICROS)
         val definitionJson = objectMapper.writeValueAsString(definition)
 
-        jdbi.inTransactionSuspend<Unit, Exception> { handle ->
+        val queueName = jdbi.inTransactionSuspend<String, Exception> { handle ->
             val run = WorkflowRun(
                 id = workflowId,
                 definitionJson = definitionJson,
@@ -48,8 +49,10 @@ class WorkflowEngine(
                 now = now,
             )
             taskRepo.insertBatchWithHandle(handle, listOf(task))
+            firstActivity.queue
         }
 
+        notifier.signal(queueName)
         log.info("Started workflow {} with {} activities", workflowId, definition.activities.size)
         return workflowId
     }
@@ -70,8 +73,8 @@ class WorkflowEngine(
             updated
         }
 
-    suspend fun replayWorkflow(workflowId: String): Boolean =
-        jdbi.inTransactionSuspend<Boolean, Exception> { handle ->
+    suspend fun replayWorkflow(workflowId: String): Boolean {
+        val replayed = jdbi.inTransactionSuspend<Boolean, Exception> { handle ->
             val workflow = workflowRepo.findByIdWithHandle(handle, workflowId)
                 ?: return@inTransactionSuspend false
             if (workflow.status != WorkflowStatus.FAILED) return@inTransactionSuspend false
@@ -80,4 +83,7 @@ class WorkflowEngine(
             taskRepo.replayDeadLetterBatchWithHandle(handle, workflowId)
             true
         }
+        if (replayed) notifier.signal("default")
+        return replayed
+    }
 }

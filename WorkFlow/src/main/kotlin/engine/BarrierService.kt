@@ -18,6 +18,7 @@ class BarrierService(
     private val taskRepo: TaskRepository,
     private val objectMapper: ObjectMapper,
     private val strategyRegistry: PhaseStrategyRegistry,
+    private val notifier: com.workflow.worker.DispatchNotifier,
 ) {
     private val log = LoggerFactory.getLogger(BarrierService::class.java)
 
@@ -35,15 +36,21 @@ class BarrierService(
             if (!updated) return@inTransactionSuspend
         }
 
+        var signalQueue: String? = null
+
         jdbi.inTransactionSuspend<Unit, Exception> { handle ->
             val nonTerminal = taskRepo.countNonTerminalWithHandle(handle, workflowId, sequenceNumber)
             if (nonTerminal > 0) return@inTransactionSuspend
 
-            evaluateAndAdvance(handle, workflowId, sequenceNumber)
+            signalQueue = evaluateAndAdvance(handle, workflowId, sequenceNumber)
         }
+
+        if (signalQueue != null) notifier.signal(signalQueue!!)
     }
 
     internal suspend fun recoverStuckWorkflow(workflowId: String) {
+        var signalQueue: String? = null
+
         jdbi.inTransactionSuspend<Unit, Exception> { handle ->
             val workflow =
                 workflowRepo.findByIdWithHandle(handle, workflowId)
@@ -59,34 +66,45 @@ class BarrierService(
 
             val failedCount = taskRepo.countFailedWithHandle(handle, workflowId, seq)
             val totalCount = taskRepo.countTotalWithHandle(handle, workflowId, seq)
-            resolveAndExecute(handle, workflow, seq, failedCount, totalCount)
+            signalQueue = resolveAndExecute(handle, workflow, seq, failedCount, totalCount)
         }
+
+        if (signalQueue != null) notifier.signal(signalQueue!!)
     }
 
+    /**
+     * Evaluates the current phase and advances the workflow.
+     * Returns the queue name of inserted next-phase tasks, or null
+     * if the workflow completed, aborted, or no advancement occurred.
+     */
     private fun evaluateAndAdvance(
         handle: Handle,
         workflowId: String,
         sequenceNumber: Int,
-    ) {
+    ): String? {
         val workflow =
             workflowRepo.findByIdWithHandle(handle, workflowId)
                 ?: throw IllegalStateException("Workflow not found: $workflowId")
-        if (workflow.status != WorkflowStatus.RUNNING) return
-        if (sequenceNumber != workflow.currentSequence) return
+        if (workflow.status != WorkflowStatus.RUNNING) return null
+        if (sequenceNumber != workflow.currentSequence) return null
 
         val failedCount = taskRepo.countFailedWithHandle(handle, workflowId, sequenceNumber)
         val totalCount = taskRepo.countTotalWithHandle(handle, workflowId, sequenceNumber)
 
-        resolveAndExecute(handle, workflow, sequenceNumber, failedCount, totalCount)
+        return resolveAndExecute(handle, workflow, sequenceNumber, failedCount, totalCount)
     }
 
+    /**
+     * Resolves the phase strategy and executes the advancement decision.
+     * Returns the queue name of inserted next-phase tasks, or null.
+     */
     private fun resolveAndExecute(
         handle: Handle,
         workflow: WorkflowRun,
         sequenceNumber: Int,
         failedCount: Int,
         totalCount: Int,
-    ) {
+    ): String? {
         val definition = objectMapper.readValue<WorkflowDefinition>(workflow.definitionJson)
         val sequenceMap = buildSequenceMap(definition)
         val seqInfo =
@@ -97,16 +115,21 @@ class BarrierService(
         val context = PhaseContext(workflow, definition, seqInfo, sequenceMap, failedCount, totalCount)
         val decision = strategy.resolve(context)
 
-        executeDecision(handle, workflow, seqInfo, sequenceMap, decision)
+        return executeDecision(handle, workflow, seqInfo, sequenceMap, decision)
     }
 
+    /**
+     * Executes the advancement decision within the current transaction.
+     * Returns the queue name of the inserted next-phase tasks (for
+     * Advance decisions), or null for Complete/Abort/CAS-lost.
+     */
     private fun executeDecision(
         handle: Handle,
         workflow: WorkflowRun,
         seqInfo: SequenceInfo,
         sequenceMap: Map<Int, SequenceInfo>,
         decision: AdvancementDecision,
-    ) {
+    ): String? {
         when (decision) {
             is AdvancementDecision.Advance -> {
                 val casWon =
@@ -119,7 +142,7 @@ class BarrierService(
                     )
                 if (!casWon) {
                     log.debug("CAS lost for workflow {} at sequence {}", workflow.id, seqInfo.sequenceNumber)
-                    return
+                    return null
                 }
                 val nextSeqInfo = sequenceMap[decision.nextSequence]!!
                 val now = Instant.now().truncatedTo(ChronoUnit.MICROS)
@@ -141,6 +164,7 @@ class BarrierService(
                         )
                     }
                 }
+                return nextSeqInfo.activity.queue
             }
 
             is AdvancementDecision.Complete -> {
@@ -150,6 +174,7 @@ class BarrierService(
                     WorkflowStatus.COMPLETED,
                     expectedStatus = WorkflowStatus.RUNNING,
                 )
+                return null
             }
 
             is AdvancementDecision.Abort -> {
@@ -164,6 +189,7 @@ class BarrierService(
                 if (updated) {
                     taskRepo.cancelPendingTasksWithHandle(handle, workflow.id)
                 }
+                return null
             }
         }
     }

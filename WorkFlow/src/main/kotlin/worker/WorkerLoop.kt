@@ -33,7 +33,6 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.slf4j.MDCContext
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.slf4j.LoggerFactory
 import org.slf4j.MDC
@@ -67,7 +66,7 @@ private const val MAX_DEFINITION_CACHE_SIZE = 1024
  * - Production: auto-starts via [onStart] observing [StartupEvent].
  * - Tests: call [start] with a test-controlled [CoroutineScope].
  * - Shutdown: [shutdown] sets [_accepting] to false, signals [stopChannel],
- *   and cancels the scope; cancellation wakes any delay(), children exit,
+ *   and cancels the scope; cancellation wakes any awaitWork(), children exit,
  *   join returns.
  *
  * **Error contract:** The [processTask] transform catches ALL non-cancellation
@@ -94,6 +93,7 @@ class WorkerLoop(
     private val inputResolver: InputResolver,
     private val workflowRepo: WorkflowRepository,
     private val objectMapper: ObjectMapper,
+    private val notifier: DispatchNotifier,
 ) : ShutdownParticipant {
     private val log = LoggerFactory.getLogger(WorkerLoop::class.java)
 
@@ -135,8 +135,8 @@ class WorkerLoop(
         val workerConfig = config.worker()
         val workerId = workerConfig.id()
         val concurrency = workerConfig.concurrency()
-        val pollInterval = workerConfig.pollInterval()
-        val batchSize = workerConfig.batchSize()
+        val fallbackPollInterval = workerConfig.fallbackPollInterval()
+        val maxBatchSize = workerConfig.maxBatchSize()
 
         val podTag = Tags.of("pod", workerId)
         meterRegistry.gauge(
@@ -160,12 +160,12 @@ class WorkerLoop(
             scope.launch(ShutdownSignal { !_accepting.get() }) {
                 indefinitelyRepeat(Unit)
                     .takeUntilSignal(stopChannel)
-                    .unorderedMapAsync(concurrency) { pollAndProcess(workerId, pollInterval, batchSize) }
+                    .unorderedMapAsync(concurrency) { pollAndProcess(workerId, fallbackPollInterval, maxBatchSize) }
                     .collect {}
             }
         activeJob = job
 
-        log.info("Worker loop started: workerId={}, concurrency={}, batchSize={}, pollInterval={}", workerId, concurrency, batchSize, pollInterval)
+        log.info("Worker loop started: workerId={}, concurrency={}, maxBatchSize={}, fallbackPollInterval={}", workerId, concurrency, maxBatchSize, fallbackPollInterval)
         return job
     }
 
@@ -186,25 +186,26 @@ class WorkerLoop(
 
     private suspend fun pollAndProcess(
         workerId: String,
-        pollInterval: Duration,
-        batchSize: Int,
+        fallbackPollInterval: Duration,
+        maxBatchSize: Int,
     ) = withContext(MDCContext(mapOf("worker_id" to workerId))) {
+        val queueName = "default"
         val tasks =
             try {
-                taskRepo.claimNext(workerId, batchSize)
+                taskRepo.claimNext(workerId, maxBatchSize, queueName)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 log.error("Failed to claim tasks", e)
                 claimTotal("error").increment()
-                delay(pollInterval.toMillis())
+                notifier.awaitWork(queueName, fallbackPollInterval)
                 return@withContext
             }
         _lastActivityTimestamp = Instant.now()
 
         if (tasks.isEmpty()) {
             claimTotal("empty").increment()
-            delay(pollInterval.toMillis())
+            notifier.awaitWork(queueName, fallbackPollInterval)
             return@withContext
         }
 
