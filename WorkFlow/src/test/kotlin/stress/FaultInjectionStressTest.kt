@@ -2,6 +2,7 @@ package com.workflow.stress
 
 import com.workflow.dsl.FailurePolicy
 import com.workflow.dsl.workflow
+import com.workflow.engine.workflowId
 import com.workflow.worker.HandlerInput
 import com.workflow.worker.HandlerOutput
 import com.workflow.worker.TransitionHandler
@@ -31,7 +32,7 @@ class FaultInjectionStressTest : StressTestBase() {
                 activity("step1") { transition("f1.handler") }
                 activity("step2") { transition("f1.handler") }
             }
-            val wfId = engine.startWorkflow(def)
+            val wfId = engine.startWorkflow(def).workflowId
             diagnostics.trackedWorkflows.add(wfId)
 
             handlerRegistry.register("f1.handler", PassThroughHandler())
@@ -57,7 +58,7 @@ class FaultInjectionStressTest : StressTestBase() {
             val def = workflow {
                 activity("step1") { transition("f2.handler") }
             }
-            val wfId = engine.startWorkflow(def)
+            val wfId = engine.startWorkflow(def).workflowId
             diagnostics.trackedWorkflows.add(wfId)
 
             handlerRegistry.register("f2.handler", PassThroughHandler())
@@ -102,7 +103,7 @@ class FaultInjectionStressTest : StressTestBase() {
             // Slow down task INSERT by 3 seconds (simulates slow disk during scatter)
             faultInjector.onSql("INSERT INTO task").delay(Duration.ofSeconds(3))
 
-            val wfId = engine.startWorkflow(def)
+            val wfId = engine.startWorkflow(def).workflowId
             diagnostics.trackedWorkflows.add(wfId)
 
             startWorkerPool()
@@ -128,7 +129,7 @@ class FaultInjectionStressTest : StressTestBase() {
                 activity("step1") { transition("f4.handler") }
                 activity("step2") { transition("f4.handler") }
             }
-            val wfId = engine.startWorkflow(def)
+            val wfId = engine.startWorkflow(def).workflowId
             diagnostics.trackedWorkflows.add(wfId)
 
             val recorder = HistoryRecorder(PassThroughHandler())
@@ -163,7 +164,7 @@ class FaultInjectionStressTest : StressTestBase() {
                     failurePolicy(FailurePolicy.ABORT)
                 }
             }
-            val wfId = engine.startWorkflow(def)
+            val wfId = engine.startWorkflow(def).workflowId
             diagnostics.trackedWorkflows.add(wfId)
 
             handlerRegistry.register("f5.handler", PassThroughHandler())
@@ -196,7 +197,7 @@ class FaultInjectionStressTest : StressTestBase() {
             handlerRegistry.register("f6.handler", recorder)
 
             val wfIds = (1..batchSize).map {
-                engine.startWorkflow(def).also {
+                engine.startWorkflow(def).workflowId.also {
                     diagnostics.trackedWorkflows.add(it)
                 }
             }

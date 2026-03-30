@@ -3,6 +3,7 @@ package com.workflow.stress
 import com.workflow.dsl.FailurePolicy
 import com.workflow.dsl.JoinPolicy
 import com.workflow.dsl.workflow
+import com.workflow.engine.workflowId
 import com.workflow.engine.TaskStatus
 import com.workflow.engine.WorkflowStatus
 import com.workflow.worker.HandlerInput
@@ -37,7 +38,7 @@ class LivenessStressTest : StressTestBase() {
                         retries(3)
                     }
                 }
-            val wfId = engine.startWorkflow(def)
+            val wfId = engine.startWorkflow(def).workflowId
             diagnostics.trackedWorkflows.add(wfId)
 
             // First call crashes before handler, subsequent calls succeed
@@ -73,7 +74,7 @@ class LivenessStressTest : StressTestBase() {
                         retries(3)
                     }
                 }
-            val wfId = engine.startWorkflow(def)
+            val wfId = engine.startWorkflow(def).workflowId
             diagnostics.trackedWorkflows.add(wfId)
 
             handlerRegistry.register(
@@ -107,7 +108,7 @@ class LivenessStressTest : StressTestBase() {
                         retries(3)
                     }
                 }
-            val wfId = engine.startWorkflow(def)
+            val wfId = engine.startWorkflow(def).workflowId
             diagnostics.trackedWorkflows.add(wfId)
 
             handlerRegistry.register(
@@ -192,7 +193,7 @@ class LivenessStressTest : StressTestBase() {
             // Start multiple workflows
             val wfIds =
                 (1..batchSize).map {
-                    engine.startWorkflow(def).also {
+                    engine.startWorkflow(def).workflowId.also {
                         diagnostics.trackedWorkflows.add(it)
                     }
                 }
@@ -255,7 +256,7 @@ class LivenessStressTest : StressTestBase() {
                         retries(3)
                     }
                 }
-            val wfId = engine.startWorkflow(def)
+            val wfId = engine.startWorkflow(def).workflowId
             diagnostics.trackedWorkflows.add(wfId)
 
             // Handler succeeds, but we cut network so barrier TX1 fails
@@ -304,7 +305,7 @@ class LivenessStressTest : StressTestBase() {
                     }
                     activity("step2") { transition("l6b.handler") }
                 }
-            val wfId = engine.startWorkflow(def)
+            val wfId = engine.startWorkflow(def).workflowId
             diagnostics.trackedWorkflows.add(wfId)
 
             handlerRegistry.register("l6b.handler", PassThroughHandler())
@@ -334,7 +335,7 @@ class LivenessStressTest : StressTestBase() {
                 workflow {
                     activity("step1") { transition("l7.handler") }
                 }
-            val wfId = engine.startWorkflow(def)
+            val wfId = engine.startWorkflow(def).workflowId
             diagnostics.trackedWorkflows.add(wfId)
 
             // Cut network briefly — first claim attempt fails, task stays PENDING
@@ -363,7 +364,7 @@ class LivenessStressTest : StressTestBase() {
                         deadline(Duration.ofSeconds(2)) // Short deadline
                     }
                 }
-            val wfId = engine.startWorkflow(def)
+            val wfId = engine.startWorkflow(def).workflowId
             diagnostics.trackedWorkflows.add(wfId)
 
             // Handler takes longer than deadline
@@ -394,7 +395,7 @@ class LivenessStressTest : StressTestBase() {
                     activity("step1") { transition("l9.handler") }
                     deadline(Duration.ofSeconds(2)) // Short workflow deadline
                 }
-            val wfId = engine.startWorkflow(def)
+            val wfId = engine.startWorkflow(def).workflowId
             diagnostics.trackedWorkflows.add(wfId)
 
             // Handler blocks forever — workflow deadline must fire
@@ -427,7 +428,7 @@ class LivenessStressTest : StressTestBase() {
                         failurePolicy(FailurePolicy.ABORT)
                     }
                 }
-            val wfId = engine.startWorkflow(def)
+            val wfId = engine.startWorkflow(def).workflowId
             diagnostics.trackedWorkflows.add(wfId)
 
             // Always fail
@@ -482,7 +483,7 @@ class LivenessStressTest : StressTestBase() {
             handlerRegistry.register("l11.parallel", FailingHandler())
             handlerRegistry.register("l11.final", PassThroughHandler())
 
-            val wfId = engine.startWorkflow(def)
+            val wfId = engine.startWorkflow(def).workflowId
             diagnostics.trackedWorkflows.add(wfId)
 
             startWorkerPool()

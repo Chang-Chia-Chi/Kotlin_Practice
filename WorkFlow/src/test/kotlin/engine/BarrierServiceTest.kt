@@ -870,7 +870,7 @@ class BarrierServiceTest {
                     joinPolicy(JoinPolicy.All)
                 }
             }
-            val workflowId = engine.startWorkflow(definition)
+            val workflowId = engine.startWorkflow(definition).workflowId
 
             // Complete scatter task with 3 items
             val scatterTasks = taskRepo.findByWorkflowAndSequence(workflowId, 1)

@@ -2,6 +2,7 @@ package com.workflow.stress
 
 import com.workflow.dsl.JoinPolicy
 import com.workflow.dsl.workflow
+import com.workflow.engine.workflowId
 import com.workflow.worker.HandlerInput
 import com.workflow.worker.HandlerOutput
 import com.workflow.worker.TransitionHandler
@@ -40,7 +41,7 @@ class ThroughputBenchmarkTest : StressTestBase() {
             startDirectWorkerPool()
             val wfIds =
                 (1..n).map {
-                    val wfId = directEngine.startWorkflow(def)
+                    val wfId = directEngine.startWorkflow(def).workflowId
                     harness.recordSubmission(wfId)
                     diagnostics.trackedWorkflows.add(wfId)
                     wfId
@@ -99,7 +100,7 @@ class ThroughputBenchmarkTest : StressTestBase() {
 
             val wfIds =
                 (1..n).map {
-                    val wfId = directEngine.startWorkflow(def)
+                    val wfId = directEngine.startWorkflow(def).workflowId
                     harness.recordSubmission(wfId)
                     diagnostics.trackedWorkflows.add(wfId)
                     wfId
@@ -146,7 +147,7 @@ class ThroughputBenchmarkTest : StressTestBase() {
 
             val wfIds =
                 (1..n).map {
-                    val wfId = directEngine.startWorkflow(def)
+                    val wfId = directEngine.startWorkflow(def).workflowId
                     harness.recordSubmission(wfId)
                     diagnostics.trackedWorkflows.add(wfId)
                     wfId
@@ -191,7 +192,7 @@ class ThroughputBenchmarkTest : StressTestBase() {
 
             val wfIds =
                 (1..n).map {
-                    val wfId = engine.startWorkflow(def)
+                    val wfId = engine.startWorkflow(def).workflowId
                     harness.recordSubmission(wfId)
                     diagnostics.trackedWorkflows.add(wfId)
                     wfId

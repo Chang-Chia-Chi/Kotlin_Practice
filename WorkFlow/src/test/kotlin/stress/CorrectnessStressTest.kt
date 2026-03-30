@@ -3,6 +3,7 @@ package com.workflow.stress
 import com.workflow.dsl.FailurePolicy
 import com.workflow.dsl.JoinPolicy
 import com.workflow.dsl.workflow
+import com.workflow.engine.workflowId
 import com.workflow.engine.TaskStatus
 import com.workflow.worker.HandlerInput
 import com.workflow.worker.HandlerOutput
@@ -54,7 +55,7 @@ class CorrectnessStressTest : StressTestBase() {
         handlerRegistry.register("c1.parallel", recorder)
         handlerRegistry.register("c1.final", PassThroughHandler())
 
-        val wfId = engine.startWorkflow(def)
+        val wfId = engine.startWorkflow(def).workflowId
         diagnostics.trackedWorkflows.add(wfId)
 
         startWorkerPool()
@@ -102,7 +103,7 @@ class CorrectnessStressTest : StressTestBase() {
         })
         handlerRegistry.register("c2.parallel", PassThroughHandler())
 
-        val wfId = engine.startWorkflow(def)
+        val wfId = engine.startWorkflow(def).workflowId
         diagnostics.trackedWorkflows.add(wfId)
 
         startWorkerPool()
@@ -156,7 +157,7 @@ class CorrectnessStressTest : StressTestBase() {
             }
         })
 
-        val wfId = engine.startWorkflow(def)
+        val wfId = engine.startWorkflow(def).workflowId
         diagnostics.trackedWorkflows.add(wfId)
 
         startWorkerPool()
@@ -227,7 +228,7 @@ class CorrectnessStressTest : StressTestBase() {
         })
         handlerRegistry.register("$handlerKey.final", PassThroughHandler())
 
-        val wfId = engine.startWorkflow(def)
+        val wfId = engine.startWorkflow(def).workflowId
         diagnostics.trackedWorkflows.add(wfId)
         startWorkerPool()
         return wfId
@@ -284,7 +285,7 @@ class CorrectnessStressTest : StressTestBase() {
         })
         handlerRegistry.register("$handlerKey.final", PassThroughHandler())
 
-        val wfId = engine.startWorkflow(def)
+        val wfId = engine.startWorkflow(def).workflowId
         diagnostics.trackedWorkflows.add(wfId)
 
         startWorkerPool()
@@ -316,7 +317,7 @@ class CorrectnessStressTest : StressTestBase() {
         handlerRegistry.register("c6.handler", FailingHandler())
         handlerRegistry.register("c6.step2", PassThroughHandler())
 
-        val wfId = engine.startWorkflow(def)
+        val wfId = engine.startWorkflow(def).workflowId
         diagnostics.trackedWorkflows.add(wfId)
 
         startWorkerPool()
@@ -351,7 +352,7 @@ class CorrectnessStressTest : StressTestBase() {
         handlerRegistry.register("c7.handler", FailingHandler())
         handlerRegistry.register("c7.step2", PassThroughHandler())
 
-        val wfId = engine.startWorkflow(def)
+        val wfId = engine.startWorkflow(def).workflowId
         diagnostics.trackedWorkflows.add(wfId)
 
         startWorkerPool()
@@ -395,7 +396,7 @@ class CorrectnessStressTest : StressTestBase() {
                 HandlerOutput(result = """{"phase":3,"prev":${input.inputs}}""")
         })
 
-        val wfId = engine.startWorkflow(def)
+        val wfId = engine.startWorkflow(def).workflowId
         diagnostics.trackedWorkflows.add(wfId)
 
         startWorkerPool()
@@ -458,7 +459,7 @@ class CorrectnessStressTest : StressTestBase() {
                 HandlerOutput(result = """{"processed":${input.item}}""")
         })
 
-        val wfId = engine.startWorkflow(def)
+        val wfId = engine.startWorkflow(def).workflowId
         diagnostics.trackedWorkflows.add(wfId)
 
         startWorkerPool()
@@ -505,7 +506,7 @@ class CorrectnessStressTest : StressTestBase() {
         })
         handlerRegistry.register("c10.step3", PassThroughHandler())
 
-        val wfId = engine.startWorkflow(def)
+        val wfId = engine.startWorkflow(def).workflowId
         diagnostics.trackedWorkflows.add(wfId)
 
         startWorkerPool()
@@ -562,7 +563,7 @@ class CorrectnessStressTest : StressTestBase() {
         handlerRegistry.register("c11.parallel", PassThroughHandler())
         handlerRegistry.register("c11.final", PassThroughHandler())
 
-        val wfId = engine.startWorkflow(def)
+        val wfId = engine.startWorkflow(def).workflowId
         diagnostics.trackedWorkflows.add(wfId)
 
         // Use maximum workers to maximize concurrent barrier probes

@@ -25,40 +25,60 @@ class WorkflowEngine(
 
     private val log = LoggerFactory.getLogger(WorkflowEngine::class.java)
 
-    suspend fun startWorkflow(definition: WorkflowDefinition): String {
+    suspend fun startWorkflow(
+        definition: WorkflowDefinition,
+        idempotencyKey: String? = null,
+    ): StartResult {
         require(definition.activities.isNotEmpty()) { "WorkflowDefinition must have at least one activity" }
 
         val workflowId = UUID.randomUUID().toString()
         val now = Instant.now().truncatedTo(ChronoUnit.MICROS)
         val definitionJson = objectMapper.writeValueAsString(definition)
 
-        val queueName = jdbi.inTransactionSuspend<String, Exception> { handle ->
-            val run = WorkflowRun(
-                id = workflowId,
-                definitionJson = definitionJson,
-                currentSequence = 1,
-                version = 0,
-                status = WorkflowStatus.RUNNING,
-                createdAt = now,
-                updatedAt = now,
-                deadlineAt = now.plus(definition.deadline),
-            )
-            workflowRepo.insertWithHandle(handle, run)
+        val run = WorkflowRun(
+            id = workflowId,
+            definitionJson = definitionJson,
+            currentSequence = 1,
+            version = 0,
+            status = WorkflowStatus.RUNNING,
+            createdAt = now,
+            updatedAt = now,
+            deadlineAt = now.plus(definition.deadline),
+        )
 
-            val firstActivity = definition.activities.first()
-            val task = createTaskForActivity(
-                workflowId = workflowId,
-                sequenceNumber = 1,
-                activity = firstActivity,
-                now = now,
-            )
-            taskRepo.insertBatchWithHandle(handle, listOf(task))
-            firstActivity.queue
+        if (idempotencyKey == null) {
+            val queueName = jdbi.inTransactionSuspend<String, Exception> { handle ->
+                workflowRepo.insertWithHandle(handle, run)
+                val firstActivity = definition.activities.first()
+                val task = createTaskForActivity(workflowId, 1, firstActivity, now)
+                taskRepo.insertBatchWithHandle(handle, listOf(task))
+                firstActivity.queue
+            }
+            notifier.signal(queueName)
+            log.info("Started workflow {} with {} activities", workflowId, definition.activities.size)
+            return StartResult.Created(workflowId)
         }
 
-        notifier.signal(queueName)
-        log.info("Started workflow {} with {} activities", workflowId, definition.activities.size)
-        return workflowId
+        val (mergeId, created, queueName) = jdbi.inTransactionSuspend<Triple<String, Boolean, String?>, Exception> { handle ->
+            val (mId, isNew) = workflowRepo.mergeIdempotentWithHandle(handle, run, idempotencyKey)
+            if (isNew) {
+                val firstActivity = definition.activities.first()
+                val task = createTaskForActivity(mId, 1, firstActivity, now)
+                taskRepo.insertBatchWithHandle(handle, listOf(task))
+                Triple(mId, true, firstActivity.queue)
+            } else {
+                Triple(mId, false, null)
+            }
+        }
+
+        if (queueName != null) {
+            notifier.signal(queueName)
+            log.info("Started workflow {} (idempotent, key={}) with {} activities", mergeId, idempotencyKey, definition.activities.size)
+        } else {
+            log.info("Workflow already exists for key {}: {}", idempotencyKey, mergeId)
+        }
+
+        return if (created) StartResult.Created(mergeId) else StartResult.AlreadyExists(mergeId)
     }
 
     suspend fun cancelWorkflow(workflowId: String): Boolean =

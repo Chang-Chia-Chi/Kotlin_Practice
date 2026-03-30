@@ -134,6 +134,37 @@ class WorkflowRepository(private val jdbi: Jdbi) {
         return count == 1
     }
 
+    fun mergeIdempotentWithHandle(handle: Handle, run: WorkflowRun, idempotencyKey: String): Pair<String, Boolean> {
+        val count = handle.createUpdate(
+            """
+            MERGE INTO workflow w
+            USING (SELECT :idemKey AS idem_key FROM dual) src
+            ON (w.idempotency_key = src.idem_key)
+            WHEN NOT MATCHED THEN INSERT
+                (id, idempotency_key, definition, current_sequence, version, status, created_at, updated_at, deadline_at)
+            VALUES (:id, :idemKey, :definition, :currentSequence, :version, :status, :createdAt, :updatedAt, :deadlineAt)
+            """,
+        )
+            .bind("idemKey", idempotencyKey)
+            .bind("id", run.id)
+            .bind("definition", run.definitionJson)
+            .bind("currentSequence", run.currentSequence)
+            .bind("version", run.version)
+            .bind("status", run.status.name)
+            .bind("createdAt", LocalDateTime.ofInstant(run.createdAt, ZoneOffset.UTC))
+            .bind("updatedAt", LocalDateTime.ofInstant(run.updatedAt, ZoneOffset.UTC))
+            .bind("deadlineAt", LocalDateTime.ofInstant(run.deadlineAt, ZoneOffset.UTC))
+            .execute()
+
+        if (count == 1) return run.id to true
+
+        val existingId = handle.createQuery("SELECT id FROM workflow WHERE idempotency_key = :key")
+            .bind("key", idempotencyKey)
+            .mapTo(String::class.java)
+            .one()
+        return existingId to false
+    }
+
     private fun mapWorkflowRow(row: Map<String, Any?>): WorkflowRun {
         val ci = caseInsensitive(row)
         return WorkflowRun(

@@ -165,7 +165,7 @@ class WorkflowIntegrationTest {
                 activity("notify") { transition("order.notify") }
             }
             // Start workflow
-            val runId = engine.startWorkflow(definition)
+            val runId = engine.startWorkflow(definition).workflowId
 
             // Verify: workflow RUNNING at seq 1, one PENDING task
             var wf = readWorkflowDirect(runId)!!
@@ -238,7 +238,7 @@ class WorkflowIntegrationTest {
                 activity("aggregate") { transition("batch.aggregate") }
             }
             // Start workflow — creates scatter task at seq 1
-            val runId = engine.startWorkflow(definition)
+            val runId = engine.startWorkflow(definition).workflowId
 
             var wf = readWorkflowDirect(runId)!!
             assertEquals(1, (wf["CURRENT_SEQUENCE"] as Number).toInt())
@@ -309,7 +309,7 @@ class WorkflowIntegrationTest {
             }
 
             // Start workflow normally
-            val runId = engine.startWorkflow(definition)
+            val runId = engine.startWorkflow(definition).workflowId
 
             // Simulate worker completing task but dying before barrier:
             // Set task at seq 1 to COMPLETED directly via SQL (bypassing barrier CAS)
@@ -385,7 +385,7 @@ class WorkflowIntegrationTest {
             }
 
             // Start workflow — creates scatter task at seq 1
-            val runId = engine.startWorkflow(definition)
+            val runId = engine.startWorkflow(definition).workflowId
 
             // Complete scatter with sub-task payloads
             val scatterTasks = taskRepo.findByWorkflowAndSequence(runId, 1)

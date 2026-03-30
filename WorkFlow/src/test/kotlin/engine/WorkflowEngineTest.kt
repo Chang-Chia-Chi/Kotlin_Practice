@@ -67,7 +67,7 @@ class WorkflowEngineTest {
                 transition("order.process")
             }
         }
-        val runId = engine.startWorkflow(definition)
+        val runId = engine.startWorkflow(definition).workflowId
 
         // Verify workflow run
         val run = workflowRepo.findById(runId)
@@ -121,7 +121,7 @@ class WorkflowEngineTest {
                 joinPolicy(JoinPolicy.Percentage(95))
             }
         }
-        val runId = engine.startWorkflow(definition)
+        val runId = engine.startWorkflow(definition).workflowId
 
         // Verify workflow run
         val run = workflowRepo.findById(runId)
@@ -163,7 +163,7 @@ class WorkflowEngineTest {
             }
         }
 
-        val runId = engine.startWorkflow(definition)
+        val runId = engine.startWorkflow(definition).workflowId
 
         val tasks = taskRepo.findByWorkflowAndSequence(runId, 1)
         assertEquals(1, tasks.size)
@@ -178,8 +178,8 @@ class WorkflowEngineTest {
             }
         }
 
-        val id1 = engine.startWorkflow(definition)
-        val id2 = engine.startWorkflow(definition)
+        val id1 = engine.startWorkflow(definition).workflowId
+        val id2 = engine.startWorkflow(definition).workflowId
 
         assertTrue(id1.isNotBlank())
         assertTrue(id2.isNotBlank())
@@ -195,7 +195,7 @@ class WorkflowEngineTest {
             }
         }
         val before = Instant.now()
-        val runId = engine.startWorkflow(definition)
+        val runId = engine.startWorkflow(definition).workflowId
         val after = Instant.now()
 
         val run = workflowRepo.findById(runId)
@@ -210,7 +210,7 @@ class WorkflowEngineTest {
             activity("step1") { transition("handler1") }
             activity("step2") { transition("handler2") }
         }
-        val runId = engine.startWorkflow(definition)
+        val runId = engine.startWorkflow(definition).workflowId
 
         val result = engine.cancelWorkflow(runId)
         assertTrue(result)
@@ -228,7 +228,7 @@ class WorkflowEngineTest {
         val definition = workflow {
             activity("step1") { transition("handler1") }
         }
-        val runId = engine.startWorkflow(definition)
+        val runId = engine.startWorkflow(definition).workflowId
 
         // Cancel first (moves to CANCELLED)
         engine.cancelWorkflow(runId)
@@ -254,7 +254,7 @@ class WorkflowEngineTest {
             }
         }
 
-        engine.startWorkflow(definition)
+        engine.startWorkflow(definition).workflowId
 
         assertEquals(signalCountBefore + 1, notifier.signalCount, "signal() should be called once after startWorkflow")
         assertTrue(notifier.signalledQueues.last() == "default", "Signal should use the first activity's queue name (default)")
@@ -270,7 +270,7 @@ class WorkflowEngineTest {
             }
         }
 
-        engine.startWorkflow(definition)
+        engine.startWorkflow(definition).workflowId
 
         assertEquals(signalCountBefore + 1, notifier.signalCount)
         assertTrue(notifier.signalledQueues.last() == "priority", "Signal should use custom queue name 'priority'")
@@ -281,7 +281,7 @@ class WorkflowEngineTest {
         val definition = workflow {
             activity("step1") { transition("handler1") }
         }
-        val runId = engine.startWorkflow(definition)
+        val runId = engine.startWorkflow(definition).workflowId
 
         // Move to FAILED so we can replay
         jdbi.useHandle<Exception> { handle ->
@@ -305,7 +305,7 @@ class WorkflowEngineTest {
         val definition = workflow {
             activity("step1") { transition("handler1") }
         }
-        val runId = engine.startWorkflow(definition)
+        val runId = engine.startWorkflow(definition).workflowId
 
         // Workflow is RUNNING, not FAILED — replay should return false
         val signalCountBefore = notifier.signalCount

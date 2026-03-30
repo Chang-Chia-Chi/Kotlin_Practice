@@ -1,6 +1,7 @@
 package com.workflow.stress
 
 import com.workflow.dsl.workflow
+import com.workflow.engine.workflowId
 import com.workflow.worker.HandlerInput
 import com.workflow.worker.HandlerOutput
 import com.workflow.worker.TransitionHandler
@@ -37,7 +38,7 @@ class ResilienceStressTest : StressTestBase() {
         handlerRegistry.register("r1.handler", PassThroughHandler())
 
         val wfIds = (1..batchSize).map {
-            engine.startWorkflow(def).also {
+            engine.startWorkflow(def).workflowId.also {
                 diagnostics.trackedWorkflows.add(it)
             }
         }
@@ -80,7 +81,7 @@ class ResilienceStressTest : StressTestBase() {
         handlerRegistry.register("r2.handler", PassThroughHandler())
 
         val wfIds = (1..scale.workflowBatchSize).map {
-            engine.startWorkflow(def).also {
+            engine.startWorkflow(def).workflowId.also {
                 diagnostics.trackedWorkflows.add(it)
             }
         }
@@ -117,7 +118,7 @@ class ResilienceStressTest : StressTestBase() {
         handlerRegistry.register("r3.handler", PassThroughHandler())
 
         val wfIds = (1..scale.workflowBatchSize).map {
-            engine.startWorkflow(def).also {
+            engine.startWorkflow(def).workflowId.also {
                 diagnostics.trackedWorkflows.add(it)
             }
         }
@@ -153,7 +154,7 @@ class ResilienceStressTest : StressTestBase() {
         handlerRegistry.register("r4.handler", PassThroughHandler())
 
         val wfIds = (1..scale.workflowBatchSize).map {
-            engine.startWorkflow(def).also {
+            engine.startWorkflow(def).workflowId.also {
                 diagnostics.trackedWorkflows.add(it)
             }
         }
@@ -244,7 +245,7 @@ class ResilienceStressTest : StressTestBase() {
         handlerRegistry.register("r6.handler", PassThroughHandler())
 
         val wfIds = (1..scale.workflowBatchSize).map {
-            engine.startWorkflow(def).also {
+            engine.startWorkflow(def).workflowId.also {
                 diagnostics.trackedWorkflows.add(it)
             }
         }
@@ -321,7 +322,7 @@ class ResilienceStressTest : StressTestBase() {
         handlerRegistry.register("r8.handler", PassThroughHandler())
 
         val wfIds = (1..scale.workflowBatchSize).map {
-            engine.startWorkflow(def).also {
+            engine.startWorkflow(def).workflowId.also {
                 diagnostics.trackedWorkflows.add(it)
             }
         }

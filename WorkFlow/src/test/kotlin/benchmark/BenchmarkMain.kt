@@ -1,5 +1,6 @@
 package com.workflow.benchmark
 
+import com.workflow.engine.workflowId
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule
 import com.fasterxml.jackson.module.kotlin.KotlinModule
@@ -218,7 +219,7 @@ private suspend fun runBatch(
     directJdbi: Jdbi,
 ): ScenarioResult? {
     val wfIds = (1..point.workflows).map {
-        val wfId = engine.startWorkflow(definition)
+        val wfId = engine.startWorkflow(definition).workflowId
         harness.recordSubmission(wfId)
         wfId
     }
@@ -252,7 +253,7 @@ private suspend fun CoroutineScope.runSustained(
     val submitterJob = launch(Dispatchers.IO) {
         val end = runStart.plusMillis(durationMs)
         while (isActive && Instant.now().isBefore(end)) {
-            val wfId = engine.startWorkflow(definition)
+            val wfId = engine.startWorkflow(definition).workflowId
             harness.recordSubmission(wfId)
             allIds.add(wfId)
             delay(intervalMs)
