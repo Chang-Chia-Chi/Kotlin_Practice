@@ -27,13 +27,6 @@ class InstrumentedTaskRepository(
 
     override fun insertBatchWithHandle(handle: Handle, tasks: List<Task>) =
         timer.time("task.insert") { super.insertBatchWithHandle(handle, tasks) }
-
-    override fun insertFanOutFromScatter(
-        handle: Handle, workflowId: String, scatterSequence: Int,
-        targetSeqInfo: SequenceInfo, now: Instant,
-    ) = timer.time("task.fanout_insert") {
-        super.insertFanOutFromScatter(handle, workflowId, scatterSequence, targetSeqInfo, now)
-    }
 }
 
 class InstrumentedWorkflowRepository(

@@ -203,50 +203,6 @@ class TaskRepository(
 
     // ── Handle methods (for barrier transaction) ──
 
-    fun insertFanOutFromScatter(
-        handle: Handle,
-        workflowId: String,
-        scatterSequence: Int,
-        targetSeqInfo: SequenceInfo,
-        now: Instant,
-    ) {
-        val activity = targetSeqInfo.activity
-        val deadlineAt = LocalDateTime.ofInstant(now.plus(activity.deadline), ZoneOffset.UTC)
-            .truncatedTo(java.time.temporal.ChronoUnit.MICROS)
-        val inserted = handle.createUpdate(
-            """
-            INSERT INTO task (id, workflow_id, sequence_number, status, handler_key, item,
-                              result, claimed_by, claimed_at, completed_at,
-                              retry_count, max_retries, deadline_at, not_before,
-                              backoff_base, backoff_cap, queue_name)
-            SELECT SYS_GUID(), :workflowId, :nextSeq, 'PENDING', :handlerKey,
-                   jt.item,
-                   NULL, NULL, NULL, NULL,
-                   0, :maxRetries, :deadlineAt, NULL,
-                   :backoffBase, :backoffCap, :queueName
-            FROM task t
-            CROSS JOIN JSON_TABLE(t.result, '$[*]' COLUMNS (item CLOB PATH '$')) jt
-            WHERE t.workflow_id = :workflowId
-              AND t.sequence_number = :scatterSeq
-              AND t.status = 'COMPLETED'
-            """,
-        )
-            .bind("workflowId", workflowId)
-            .bind("nextSeq", targetSeqInfo.sequenceNumber)
-            .bind("handlerKey", activity.transition)
-            .bind("maxRetries", activity.retries)
-            .bind("deadlineAt", deadlineAt)
-            .bind("scatterSeq", scatterSequence)
-            .bind("backoffBase", activity.backoffBase.seconds.toInt())
-            .bind("backoffCap", activity.backoffCap.seconds.toInt())
-            .bind("queueName", activity.queue)
-            .execute()
-        require(inserted > 0) {
-            "Fan-out produced 0 tasks for workflow $workflowId at scatter sequence $scatterSequence. " +
-                "Scatter handler must return a non-empty JSON array."
-        }
-    }
-
     fun updateStatusWithHandle(
         handle: Handle,
         id: String,

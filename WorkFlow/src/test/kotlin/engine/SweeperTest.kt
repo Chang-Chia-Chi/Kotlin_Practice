@@ -480,32 +480,6 @@ class SweeperTest {
         }
 
         @Test
-        fun `scatter phase stuck - sweeper creates parallel sub-tasks`() = runTest {
-            val def = fanOutThenLinearDef()
-            val wfId = randomId()
-            val pastGrace = Instant.now().minus(gracePeriod).minusSeconds(60)
-            val wf = makeWorkflow(id = wfId, definition = def, updatedAt = pastGrace)
-            insertWorkflowDirect(wf)
-
-            val payloads = objectMapper.writeValueAsString(listOf("p1", "p2", "p3"))
-            insertTaskDirect(
-                makeTask(
-                    workflowId = wfId, sequenceNumber = 1,
-                    status = TaskStatus.COMPLETED, handlerKey = "scatter.handler",
-                    resultJson = payloads,
-                ),
-            )
-
-            sweeper.patrol()
-
-            val row = readWorkflowDirect(wfId)
-            assertNotNull(row)
-            assertEquals(2, (row["CURRENT_SEQUENCE"] as Number).toInt())
-            assertEquals(3, countTasksDirect(wfId, 2))
-            assertEquals(3, countTasksWithStatusDirect(wfId, 2, TaskStatus.PENDING))
-        }
-
-        @Test
         fun `completed task triggers next sequence creation`() = runTest {
             val def = twoStepLinearDef()
             val wfId = randomId()

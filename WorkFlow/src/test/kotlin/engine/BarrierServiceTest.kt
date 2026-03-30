@@ -840,7 +840,7 @@ class BarrierServiceTest {
             val ex = org.junit.jupiter.api.assertThrows<IllegalArgumentException> {
                 barrier.onTaskCompleted(scatterTaskId, wfId, 1, TaskStatus.COMPLETED, emptyArrayJson)
             }
-            assertTrue(ex.message!!.contains("Fan-out produced 0 tasks"))
+            assertTrue(ex.message!!.contains("Fan-out produced 0 items"))
 
             // Workflow should NOT have advanced
             val updatedWf = readWorkflowDirect(wfId)

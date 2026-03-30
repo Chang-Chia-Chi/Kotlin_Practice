@@ -32,18 +32,21 @@ class BarrierService(
         claimedBy: String? = null,
         claimedAt: Instant? = null,
     ) {
-        jdbi.inTransactionSuspend<Unit, Exception> { handle ->
-            val updated = taskRepo.updateStatusWithHandle(handle, taskId, status, resultJson, claimedBy, claimedAt)
-            if (!updated) return@inTransactionSuspend
-        }
-
         var signalQueue: String? = null
 
         jdbi.inTransactionSuspend<Unit, Exception> { handle ->
+            val updated = taskRepo.updateStatusWithHandle(handle, taskId, status, resultJson, claimedBy, claimedAt)
+            if (!updated) return@inTransactionSuspend
+
             val nonTerminal = taskRepo.countNonTerminalWithHandle(handle, workflowId, sequenceNumber)
             if (nonTerminal > 0) return@inTransactionSuspend
 
-            signalQueue = evaluateAndAdvance(handle, workflowId, sequenceNumber)
+            val workflow = workflowRepo.findByIdWithHandle(handle, workflowId)
+                ?: throw IllegalStateException("Workflow not found: $workflowId")
+            if (workflow.status != WorkflowStatus.RUNNING) return@inTransactionSuspend
+            if (sequenceNumber != workflow.currentSequence) return@inTransactionSuspend
+
+            signalQueue = advanceWorkflow(handle, workflow, sequenceNumber, resultJson)
         }
 
         if (signalQueue != null) notifier.signal(signalQueue!!)
@@ -65,133 +68,109 @@ class BarrierService(
             val nonTerminal = taskRepo.countNonTerminalWithHandle(handle, workflowId, seq)
             if (nonTerminal > 0) return@inTransactionSuspend
 
-            val failedCount = taskRepo.countFailedWithHandle(handle, workflowId, seq)
-            val totalCount = taskRepo.countTotalWithHandle(handle, workflowId, seq)
-            signalQueue = resolveAndExecute(handle, workflow, seq, failedCount, totalCount)
+            signalQueue = advanceWorkflow(handle, workflow, seq)
         }
 
         if (signalQueue != null) notifier.signal(signalQueue!!)
     }
 
     /**
-     * Evaluates the current phase and advances the workflow.
-     * Returns the queue name of inserted next-phase tasks, or null
-     * if the workflow completed, aborted, or no advancement occurred.
+     * Core advancement pipeline shared by [onTaskCompleted] and [recoverStuckWorkflow].
+     * Resolves the phase strategy, produces a decision, and executes it.
+     * Returns the queue name to signal, or null.
      */
-    private fun evaluateAndAdvance(
-        handle: Handle,
-        workflowId: String,
-        sequenceNumber: Int,
-    ): String? {
-        val workflow =
-            workflowRepo.findByIdWithHandle(handle, workflowId)
-                ?: throw IllegalStateException("Workflow not found: $workflowId")
-        if (workflow.status != WorkflowStatus.RUNNING) return null
-        if (sequenceNumber != workflow.currentSequence) return null
-
-        val failedCount = taskRepo.countFailedWithHandle(handle, workflowId, sequenceNumber)
-        val totalCount = taskRepo.countTotalWithHandle(handle, workflowId, sequenceNumber)
-
-        return resolveAndExecute(handle, workflow, sequenceNumber, failedCount, totalCount)
-    }
-
-    /**
-     * Resolves the phase strategy and executes the advancement decision.
-     * Returns the queue name of inserted next-phase tasks, or null.
-     */
-    private fun resolveAndExecute(
+    private fun advanceWorkflow(
         handle: Handle,
         workflow: WorkflowRun,
         sequenceNumber: Int,
-        failedCount: Int,
-        totalCount: Int,
+        resultJson: String? = null,
     ): String? {
         val definition = objectMapper.readValue<WorkflowDefinition>(workflow.definitionJson)
         val sequenceMap = buildSequenceMap(definition)
-        val seqInfo =
-            sequenceMap[sequenceNumber]
-                ?: throw IllegalStateException("Sequence $sequenceNumber not in definition for workflow ${workflow.id}")
+        val seqInfo = sequenceMap[sequenceNumber]
+            ?: throw IllegalStateException("Sequence $sequenceNumber not in definition for workflow ${workflow.id}")
+
+        val failedCount = taskRepo.countFailedWithHandle(handle, workflow.id, sequenceNumber)
+        val totalCount = taskRepo.countTotalWithHandle(handle, workflow.id, sequenceNumber)
 
         val strategy = strategyRegistry.resolve(seqInfo.phaseType)
         val context = PhaseContext(workflow, definition, seqInfo, sequenceMap, failedCount, totalCount)
         val decision = strategy.resolve(context)
 
-        return executeDecision(handle, workflow, seqInfo, sequenceMap, decision)
+        return when (decision) {
+            is AdvancementDecision.Advance -> advanceToNextPhase(handle, workflow, seqInfo, sequenceMap, decision, resultJson)
+            is AdvancementDecision.Complete -> completeWorkflow(handle, workflow)
+            is AdvancementDecision.Abort -> abortWorkflow(handle, workflow, seqInfo, decision)
+        }
     }
 
-    /**
-     * Executes the advancement decision within the current transaction.
-     * Returns the queue name of the inserted next-phase tasks (for
-     * Advance decisions), or null for Complete/Abort/CAS-lost.
-     */
-    private fun executeDecision(
+    private fun advanceToNextPhase(
         handle: Handle,
         workflow: WorkflowRun,
         seqInfo: SequenceInfo,
         sequenceMap: Map<Int, SequenceInfo>,
-        decision: AdvancementDecision,
+        decision: AdvancementDecision.Advance,
+        resultJson: String?,
     ): String? {
-        when (decision) {
-            is AdvancementDecision.Advance -> {
-                val casWon =
-                    workflowRepo.casAdvanceWithHandle(
-                        handle,
-                        workflow.id,
-                        seqInfo.sequenceNumber,
-                        decision.nextSequence,
-                        workflow.version,
-                    )
-                if (!casWon) {
-                    log.debug("CAS lost for workflow {} at sequence {}", workflow.id, seqInfo.sequenceNumber)
-                    return null
-                }
-                val nextSeqInfo = sequenceMap[decision.nextSequence]!!
-                val now = Instant.now().truncatedTo(ChronoUnit.MICROS)
-                when (nextSeqInfo.phaseType) {
-                    PhaseType.PARALLEL -> {
-                        taskRepo.insertFanOutFromScatter(
-                            handle,
-                            workflow.id,
-                            seqInfo.sequenceNumber,
-                            nextSeqInfo,
-                            now,
-                        )
-                    }
+        val casWon = workflowRepo.casAdvanceWithHandle(
+            handle, workflow.id, seqInfo.sequenceNumber, decision.nextSequence, workflow.version,
+        )
+        if (!casWon) {
+            log.debug("CAS lost for workflow {} at sequence {}", workflow.id, seqInfo.sequenceNumber)
+            return null
+        }
+        val nextSeqInfo = sequenceMap[decision.nextSequence]!!
+        val now = Instant.now().truncatedTo(ChronoUnit.MICROS)
+        val tasks = createNextPhaseTasks(workflow.id, nextSeqInfo, now, resultJson)
+        taskRepo.insertBatchWithHandle(handle, tasks)
+        return nextSeqInfo.activity.queue
+    }
 
-                    PhaseType.LINEAR -> {
-                        taskRepo.insertBatchWithHandle(
-                            handle,
-                            listOf(createTaskForActivity(workflow.id, nextSeqInfo.sequenceNumber, nextSeqInfo.activity, now)),
-                        )
-                    }
-                }
-                return nextSeqInfo.activity.queue
-            }
-
-            is AdvancementDecision.Complete -> {
-                workflowRepo.updateStatusWithHandle(
-                    handle,
-                    workflow.id,
-                    WorkflowStatus.COMPLETED,
-                    expectedStatus = WorkflowStatus.RUNNING,
+    private fun createNextPhaseTasks(
+        workflowId: String,
+        nextSeqInfo: SequenceInfo,
+        now: Instant,
+        resultJson: String?,
+    ): List<Task> = when (nextSeqInfo.phaseType) {
+        PhaseType.PARALLEL -> {
+            val items: List<String> = objectMapper.readValue(
+                resultJson ?: throw IllegalStateException(
+                    "PARALLEL phase requires scatter result but none provided for workflow $workflowId"
                 )
-                return null
+            )
+            require(items.isNotEmpty()) {
+                "Fan-out produced 0 items for workflow $workflowId. " +
+                    "Scatter handler must return a non-empty JSON array."
             }
-
-            is AdvancementDecision.Abort -> {
-                log.warn("Workflow {} failed at sequence {}: {}", workflow.id, seqInfo.sequenceNumber, decision.reason)
-                val updated =
-                    workflowRepo.updateStatusWithHandle(
-                        handle,
-                        workflow.id,
-                        WorkflowStatus.FAILED,
-                        expectedStatus = WorkflowStatus.RUNNING,
-                    )
-                if (updated) {
-                    taskRepo.cancelPendingTasksWithHandle(handle, workflow.id)
-                }
-                return null
+            items.map {
+                createTaskForActivity(workflowId, nextSeqInfo.sequenceNumber, nextSeqInfo.activity, now, item = it)
             }
         }
+        PhaseType.LINEAR -> {
+            listOf(createTaskForActivity(workflowId, nextSeqInfo.sequenceNumber, nextSeqInfo.activity, now))
+        }
+    }
+
+    private fun completeWorkflow(handle: Handle, workflow: WorkflowRun): String? {
+        workflowRepo.updateStatusWithHandle(
+            handle, workflow.id, WorkflowStatus.COMPLETED, expectedStatus = WorkflowStatus.RUNNING,
+        )
+        return null
+    }
+
+    private fun abortWorkflow(
+        handle: Handle,
+        workflow: WorkflowRun,
+        seqInfo: SequenceInfo,
+        decision: AdvancementDecision.Abort,
+    ): String? {
+        log.warn("Workflow {} failed at sequence {}: {}", workflow.id, seqInfo.sequenceNumber, decision.reason)
+        val updated = workflowRepo.updateStatusWithHandle(
+            handle, workflow.id, WorkflowStatus.FAILED, expectedStatus = WorkflowStatus.RUNNING,
+        )
+        if (updated) {
+            taskRepo.cancelPendingTasksWithHandle(handle, workflow.id)
+        }
+        return null
     }
 }
