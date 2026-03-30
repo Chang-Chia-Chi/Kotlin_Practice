@@ -97,6 +97,7 @@ internal fun createTaskForActivity(
     sequenceNumber: Int,
     activity: ActivityDefinition,
     now: Instant,
+    item: String? = null,
 ): Task {
     return Task(
         id = UUID.randomUUID().toString(),
@@ -104,6 +105,7 @@ internal fun createTaskForActivity(
         sequenceNumber = sequenceNumber,
         status = TaskStatus.PENDING,
         handlerKey = activity.transition,
+        item = item,
         resultJson = null,
         claimedBy = null,
         claimedAt = null,
