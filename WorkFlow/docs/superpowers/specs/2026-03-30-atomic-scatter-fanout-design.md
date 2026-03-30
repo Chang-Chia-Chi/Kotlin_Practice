@@ -115,9 +115,9 @@ fun insertFanOutTasks(
     val deadlineAt = LocalDateTime.ofInstant(now.plus(activity.deadline), ZoneOffset.UTC)
         .truncatedTo(ChronoUnit.MICROS)
     // Build Task objects from items, then delegate to insertBatchWithHandle
+    // (add item parameter to createTaskForActivity)
     val tasks = items.map { item ->
-        createTaskForActivity(workflowId, targetSeqInfo.sequenceNumber, activity, now)
-            .copy(item = item)
+        createTaskForActivity(workflowId, targetSeqInfo.sequenceNumber, activity, now, item = item)
     }
     insertBatchWithHandle(handle, tasks)
 }
