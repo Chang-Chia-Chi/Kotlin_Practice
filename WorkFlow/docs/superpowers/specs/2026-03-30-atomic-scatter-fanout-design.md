@@ -61,117 +61,84 @@ This is safe because scatter handlers are inherently idempotent: they produce a 
 
 ### Changes
 
-#### BarrierService
+#### BarrierService — `onTaskCompleted`
 
-Introduce `onScatterTaskCompleted` that runs everything in one transaction:
+Merge the two transactions into one. Thread `resultJson` through to `executeDecision` for fan-out:
 
 ```kotlin
-suspend fun onScatterTaskCompleted(
+suspend fun onTaskCompleted(
     taskId: String,
     workflowId: String,
     sequenceNumber: Int,
-    resultJson: String,        // non-null: scatter must produce items
-    claimedBy: String?,
-    claimedAt: Instant?,
+    status: TaskStatus,
+    resultJson: String?,
+    claimedBy: String? = null,
+    claimedAt: Instant? = null,
 ) {
     var signalQueue: String? = null
 
     jdbi.inTransactionSuspend<Unit, Exception> { handle ->
-        // 1. Complete scatter task WITHOUT storing result CLOB
-        val updated = taskRepo.updateStatusWithHandle(
-            handle, taskId, TaskStatus.COMPLETED,
-            resultJson = null, claimedBy, claimedAt,
-        )
+        val updated = taskRepo.updateStatusWithHandle(handle, taskId, status, resultJson, claimedBy, claimedAt)
         if (!updated) return@inTransactionSuspend
 
-        // 2. Check barrier (scatter is a single task, so count should be 0 now)
         val nonTerminal = taskRepo.countNonTerminalWithHandle(handle, workflowId, sequenceNumber)
         if (nonTerminal > 0) return@inTransactionSuspend
 
-        // 3. Evaluate and advance, passing in-memory result for fan-out
-        signalQueue = evaluateAndAdvance(handle, workflowId, sequenceNumber, scatterResult = resultJson)
+        signalQueue = evaluateAndAdvance(handle, workflowId, sequenceNumber, resultJson)
     }
 
     if (signalQueue != null) notifier.signal(signalQueue!!)
 }
 ```
 
-The existing `onTaskCompleted` remains unchanged for all other paths (linear tasks, failed tasks, timed-out tasks).
+Thread `resultJson: String?` through `evaluateAndAdvance` → `resolveAndExecute` → `executeDecision`. The sweeper's `recoverStuckWorkflow` passes `resultJson = null` (it never reaches the PARALLEL branch — see Edge Case 3).
+
+#### BarrierService — `executeDecision`
+
+Collapse the `PARALLEL`/`LINEAR` branch into a single `insertBatchWithHandle` call. Both paths just build a task list differently:
+
+```kotlin
+val nextSeqInfo = sequenceMap[decision.nextSequence]!!
+val now = Instant.now().truncatedTo(ChronoUnit.MICROS)
+val tasks = when (nextSeqInfo.phaseType) {
+    PhaseType.PARALLEL -> {
+        val items: List<String> = objectMapper.readValue(
+            resultJson ?: throw IllegalStateException(
+                "PARALLEL phase requires scatter result but none provided for workflow ${workflow.id}"
+            )
+        )
+        require(items.isNotEmpty()) {
+            "Fan-out produced 0 items for workflow ${workflow.id}. Scatter handler must return a non-empty JSON array."
+        }
+        items.map { createTaskForActivity(workflow.id, nextSeqInfo.sequenceNumber, nextSeqInfo.activity, now, item = it) }
+    }
+    PhaseType.LINEAR -> {
+        listOf(createTaskForActivity(workflow.id, nextSeqInfo.sequenceNumber, nextSeqInfo.activity, now))
+    }
+}
+taskRepo.insertBatchWithHandle(handle, tasks)
+```
 
 #### TaskRepository
 
-Replace `insertFanOutFromScatter` (which uses `JSON_TABLE`) with a new method that takes parsed items:
-
-```kotlin
-fun insertFanOutTasks(
-    handle: Handle,
-    workflowId: String,
-    items: List<String>,       // each item is a JSON string
-    targetSeqInfo: SequenceInfo,
-    now: Instant,
-) {
-    require(items.isNotEmpty()) { "Fan-out items must not be empty" }
-    val activity = targetSeqInfo.activity
-    val deadlineAt = LocalDateTime.ofInstant(now.plus(activity.deadline), ZoneOffset.UTC)
-        .truncatedTo(ChronoUnit.MICROS)
-    // Build Task objects from items, then delegate to insertBatchWithHandle
-    // (add item parameter to createTaskForActivity)
-    val tasks = items.map { item ->
-        createTaskForActivity(workflowId, targetSeqInfo.sequenceNumber, activity, now, item = item)
-    }
-    insertBatchWithHandle(handle, tasks)
-}
-```
-
-Delete the old `insertFanOutFromScatter` method entirely.
+Delete `insertFanOutFromScatter` entirely. No replacement method needed — the task list construction moves into `executeDecision` and feeds into the existing `insertBatchWithHandle`.
 
 #### WorkerLoop
 
-Detect scatter-to-parallel transitions and call the new method:
-
-```kotlin
-// After handler.execute():
-if (isScatterTask(task, definition)) {
-    barrierService.onScatterTaskCompleted(
-        taskId = task.id,
-        workflowId = task.workflowId,
-        sequenceNumber = task.sequenceNumber,
-        resultJson = output.result!!,
-        claimedBy = task.claimedBy,
-        claimedAt = task.claimedAt,
-    )
-} else {
-    barrierService.onTaskCompleted(/* existing path */)
-}
-```
-
-#### evaluateAndAdvance / executeDecision
-
-Thread an optional `scatterResult: String?` parameter through `evaluateAndAdvance` → `resolveAndExecute` → `executeDecision`. In `executeDecision`, for the `PARALLEL` branch:
-- If `scatterResult` is non-null: parse items, call `insertFanOutTasks`
-- If `scatterResult` is null: this is an unreachable state (see Edge Case 3), throw `IllegalStateException`
-
-The sweeper's `recoverStuckWorkflow` passes `scatterResult = null` (it never reaches the PARALLEL branch — see Edge Case 3).
+No changes needed. The routing is handled entirely inside BarrierService.
 
 #### Sweeper
 
 No changes needed. The sweeper cannot encounter a scatter→parallel transition with the atomic design. If the scatter task is stuck in PROCESSING, the deadline sweeper expires it and the worker retries.
 
-### Scatter Detection
-
-The WorkerLoop needs to know whether a completed task is a scatter task whose next phase is parallel. Two options:
-
-**Option A (recommended):** Query the workflow definition (already loaded for input resolution) and check if the current sequence's next phase is `PARALLEL`. This keeps the detection in WorkerLoop which already has the definition context.
-
-**Option B:** Add a flag to the task row or handler output. Rejected: unnecessary schema change.
-
 ### What Stays the Same
 
-- `onTaskCompleted` — unchanged, still used for linear tasks, failures, timeouts, sweeper-driven completions
-- `recoverStuckWorkflow` — unchanged, still handles generic stuck workflows
-- `insertBatchWithHandle` — reused for the new fan-out batch insert
+- `onTaskCompleted` signature — unchanged (same parameters, same callers)
+- `recoverStuckWorkflow` — unchanged
+- `insertBatchWithHandle` — reused for both LINEAR and PARALLEL
 - Handler contract (`TransitionHandler`) — unchanged
 - `HandlerOutput` — unchanged
+- `WorkerLoop` — unchanged
 
 ### Edge Cases
 
