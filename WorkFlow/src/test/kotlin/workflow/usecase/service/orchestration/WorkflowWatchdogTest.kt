@@ -5,7 +5,7 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule
 import com.fasterxml.jackson.module.kotlin.KotlinModule
 import com.workflow.workflow.adapter.persistent.JdbiTaskRepository
 import com.workflow.workflow.adapter.persistent.JdbiWorkflowRepository
-import com.workflow.workflow.config.SweeperConfig
+import com.workflow.workflow.config.WatchdogConfig
 import com.workflow.workflow.model.ActivityDefinition
 import com.workflow.workflow.model.FailurePolicy
 import com.workflow.workflow.model.JoinPolicy
@@ -15,7 +15,7 @@ import com.workflow.workflow.model.WorkflowDefinition
 import com.workflow.workflow.model.WorkflowRun
 import com.workflow.workflow.model.WorkflowStatus
 import com.workflow.workflow.usecase.service.orchestration.DefaultPhaseGate
-import com.workflow.workflow.usecase.service.orchestration.Sweeper
+import com.workflow.workflow.usecase.service.orchestration.WorkflowWatchdog
 import com.workflow.workflow.usecase.service.orchestration.WorkflowEngine
 import com.workflow.workflow.usecase.service.phase.AdvancementStrategyRegistry
 import com.workflow.worker.adapter.http.FakeDispatchNotifier
@@ -43,7 +43,7 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
-class SweeperTest {
+class WorkflowWatchdogTest {
 
     private lateinit var jdbi: Jdbi
     private lateinit var workflowRepo: JdbiWorkflowRepository
@@ -52,14 +52,14 @@ class SweeperTest {
         .registerModule(KotlinModule.Builder().build())
         .registerModule(JavaTimeModule())
     private lateinit var barrier: DefaultPhaseGate
-    private lateinit var sweeper: Sweeper
+    private lateinit var watchdog: WorkflowWatchdog
 
     private val gracePeriod = Duration.ofMinutes(2)
     private val staleTaskThreshold = Duration.ofMinutes(10)
 
     private val notifier = FakeDispatchNotifier()
 
-    private val testSweeperConfig = object : SweeperConfig {
+    private val testWatchdogConfig = object : WatchdogConfig {
         override fun interval(): Duration = Duration.ofSeconds(30)
         override fun gracePeriod(): Duration = gracePeriod
         override fun staleTaskThreshold(): Duration = staleTaskThreshold
@@ -71,7 +71,7 @@ class SweeperTest {
         workflowRepo = JdbiWorkflowRepository(jdbi)
         taskRepo = JdbiTaskRepository(jdbi)
         barrier = DefaultPhaseGate(jdbi, workflowRepo, taskRepo, objectMapper, AdvancementStrategyRegistry(), notifier)
-        sweeper = Sweeper(jdbi, workflowRepo, taskRepo, barrier, testSweeperConfig)
+        watchdog = WorkflowWatchdog(jdbi, workflowRepo, taskRepo, barrier, testWatchdogConfig)
     }
 
     @AfterEach
@@ -349,7 +349,7 @@ class SweeperTest {
     )
 
     // ═══════════════════════════════════════════════════════════════════════
-    // Test 1: Stuck workflow detected after grace period -> sweeper recovers
+    // Test 1: Stuck workflow detected after grace period -> watchdog recovers
     // ═══════════════════════════════════════════════════════════════════════
 
     @Nested
@@ -380,7 +380,7 @@ class SweeperTest {
                 ),
             )
 
-            sweeper.patrol()
+            watchdog.patrol()
 
             // Workflow should have advanced to sequence 2, version incremented
             val updatedWf = readWorkflowDirect(wfId)
@@ -397,7 +397,7 @@ class SweeperTest {
         }
 
         @Test
-        fun `last sequence stuck - sweeper marks workflow COMPLETED`() = runTest {
+        fun `last sequence stuck - watchdog marks workflow COMPLETED`() = runTest {
             val def = singleStepDef()
             val wfId = randomId()
             val pastGrace = Instant.now().minus(gracePeriod).minusSeconds(60)
@@ -410,7 +410,7 @@ class SweeperTest {
                 ),
             )
 
-            sweeper.patrol()
+            watchdog.patrol()
 
             val row = readWorkflowDirect(wfId)
             assertNotNull(row)
@@ -418,7 +418,7 @@ class SweeperTest {
         }
 
         @Test
-        fun `all tasks FAILED with ABORT policy - sweeper marks workflow FAILED`() = runTest {
+        fun `all tasks FAILED with ABORT policy - watchdog marks workflow FAILED`() = runTest {
             val def = twoStepLinearDef()
             val wfId = randomId()
             val pastGrace = Instant.now().minus(gracePeriod).minusSeconds(60)
@@ -431,7 +431,7 @@ class SweeperTest {
                 ),
             )
 
-            sweeper.patrol()
+            watchdog.patrol()
 
             val row = readWorkflowDirect(wfId)
             assertNotNull(row)
@@ -440,7 +440,7 @@ class SweeperTest {
         }
 
         @Test
-        fun `all tasks FAILED with BEST_EFFORT - sweeper advances to next sequence`() = runTest {
+        fun `all tasks FAILED with BEST_EFFORT - watchdog advances to next sequence`() = runTest {
             val def = twoStepBestEffortDef()
             val wfId = randomId()
             val pastGrace = Instant.now().minus(gracePeriod).minusSeconds(60)
@@ -453,7 +453,7 @@ class SweeperTest {
                 ),
             )
 
-            sweeper.patrol()
+            watchdog.patrol()
 
             val row = readWorkflowDirect(wfId)
             assertNotNull(row)
@@ -477,7 +477,7 @@ class SweeperTest {
                 ),
             )
 
-            sweeper.patrol()
+            watchdog.patrol()
 
             val nextTasks = readTasksDirect(wfId, 2)
             assertEquals(1, nextTasks.size)
@@ -499,7 +499,7 @@ class SweeperTest {
             )
             insertWorkflowDirect(wf)
 
-            sweeper.patrol()
+            watchdog.patrol()
 
             val row = readWorkflowDirect(wfId)
             assertNotNull(row)
@@ -518,7 +518,7 @@ class SweeperTest {
             )
             insertWorkflowDirect(wf)
 
-            sweeper.patrol()
+            watchdog.patrol()
 
             val row = readWorkflowDirect(wfId)
             assertNotNull(row)
@@ -528,7 +528,7 @@ class SweeperTest {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // Test 2: Within grace period -> sweeper skips
+    // Test 2: Within grace period -> watchdog skips
     // ═══════════════════════════════════════════════════════════════════════
 
     @Nested
@@ -559,7 +559,7 @@ class SweeperTest {
                 ),
             )
 
-            sweeper.patrol()
+            watchdog.patrol()
 
             // Workflow NOT advanced — still at sequence 1, same version
             val updatedWf = readWorkflowDirect(wfId)
@@ -573,14 +573,14 @@ class SweeperTest {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // Test 3: Sweeper CAS loses to worker -> no duplicate downstream tasks
+    // Test 3: WorkflowWatchdog CAS loses to worker -> no duplicate downstream tasks
     // ═══════════════════════════════════════════════════════════════════════
 
     @Nested
-    inner class SweeperCasLosesToWorker {
+    inner class WorkflowWatchdogCasLosesToWorker {
 
         @Test
-        fun `worker advances workflow before sweeper patrol - CAS fails, no duplicate tasks`() = runTest {
+        fun `worker advances workflow before watchdog patrol - CAS fails, no duplicate tasks`() = runTest {
             val def = twoStepLinearDef()
             val wfId = randomId()
             val pastGrace = Instant.now().minus(gracePeriod).minusSeconds(60)
@@ -603,7 +603,7 @@ class SweeperTest {
                 ),
             )
 
-            // Simulate worker advancing the workflow before sweeper runs:
+            // Simulate worker advancing the workflow before watchdog runs:
             // advance to seq 2, version=1, updated_at=NOW
             advanceWorkflowDirect(wfId, newSequence = 2, newVersion = 1)
 
@@ -617,13 +617,13 @@ class SweeperTest {
                 ),
             )
 
-            sweeper.patrol()
+            watchdog.patrol()
 
             // Workflow still at sequence 2 (not double-advanced)
             val updatedWf = readWorkflowDirect(wfId)
             assertNotNull(updatedWf)
             assertEquals(2, (updatedWf["CURRENT_SEQUENCE"] as Number).toInt())
-            // Version unchanged from the worker advance (sweeper CAS failed)
+            // Version unchanged from the worker advance (watchdog CAS failed)
             assertEquals(1, (updatedWf["VERSION"] as Number).toInt())
 
             // Still exactly 1 task at seq 2 — no duplicates
@@ -659,11 +659,11 @@ class SweeperTest {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // Test 4: Sweeper fires twice on same stuck workflow -> second is no-op
+    // Test 4: WorkflowWatchdog fires twice on same stuck workflow -> second is no-op
     // ═══════════════════════════════════════════════════════════════════════
 
     @Nested
-    inner class SweeperIdempotency {
+    inner class WorkflowWatchdogIdempotency {
 
         @Test
         fun `patrol twice on same stuck workflow - first recovers, second is no-op`() = runTest {
@@ -690,7 +690,7 @@ class SweeperTest {
             )
 
             // First patrol — recovers the workflow
-            sweeper.patrol()
+            watchdog.patrol()
 
             // Verify first recovery succeeded
             val afterFirst = readWorkflowDirect(wfId)
@@ -706,7 +706,7 @@ class SweeperTest {
 
             // Second patrol — findStuck should NOT return this workflow because
             // seq 2 has a PENDING (non-terminal) task, so NOT EXISTS condition fails
-            sweeper.patrol()
+            watchdog.patrol()
 
             // Verify no change: still at seq 2, version 1, exactly 1 task at seq 2
             val afterSecond = readWorkflowDirect(wfId)
@@ -750,7 +750,7 @@ class SweeperTest {
                 ),
             )
 
-            sweeper.patrol()
+            watchdog.patrol()
 
             // Task should be TIMED_OUT
             val task = readTaskDirect(taskId)
@@ -785,7 +785,7 @@ class SweeperTest {
                 ),
             )
 
-            sweeper.patrol()
+            watchdog.patrol()
 
             // Task still PROCESSING, workflow still at seq 1 version 0
             val task = readTaskDirect(taskId)
@@ -836,7 +836,7 @@ class SweeperTest {
                 ),
             )
 
-            sweeper.patrol()
+            watchdog.patrol()
 
             // Expired task -> TIMED_OUT
             val expiredTask = readTaskDirect(expiredTaskId)
@@ -887,7 +887,7 @@ class SweeperTest {
                 ),
             )
 
-            sweeper.patrol()
+            watchdog.patrol()
 
             // Task should be reset to PENDING with incremented retry count
             val task = readTaskDirect(taskId)
@@ -924,7 +924,7 @@ class SweeperTest {
                 ),
             )
 
-            sweeper.patrol()
+            watchdog.patrol()
 
             // Task should be DEAD_LETTER (retries exhausted)
             val task = readTaskDirect(taskId)
@@ -961,7 +961,7 @@ class SweeperTest {
                 ),
             )
 
-            sweeper.patrol()
+            watchdog.patrol()
 
             // Task still PROCESSING, unchanged
             val task = readTaskDirect(taskId)
@@ -997,7 +997,7 @@ class SweeperTest {
                 ),
             )
 
-            sweeper.patrol()
+            watchdog.patrol()
 
             // Task should be TIMED_OUT (not PENDING) — expireOverdueTasks ran first
             val task = readTaskDirect(taskId)
@@ -1070,7 +1070,7 @@ class SweeperTest {
             )
 
             // Single patrol() call triggers all three phases
-            sweeper.patrol()
+            watchdog.patrol()
 
             // Workflow A: expired task -> TIMED_OUT, workflow FAILED (ABORT, single task)
             val taskA = readTaskDirect(expiredTaskId)
@@ -1319,7 +1319,7 @@ class SweeperTest {
             )
             taskRepo.insertBatch(listOf(task))
 
-            sweeper.patrol()
+            watchdog.patrol()
 
             val updatedWf = workflowRepo.findById(wfId)
             assertNotNull(updatedWf)
@@ -1345,7 +1345,7 @@ class SweeperTest {
             )
             workflowRepo.insert(wf)
 
-            sweeper.patrol()
+            watchdog.patrol()
 
             val updatedWf = workflowRepo.findById(wfId)
             assertNotNull(updatedWf)

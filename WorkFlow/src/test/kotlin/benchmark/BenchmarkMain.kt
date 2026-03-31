@@ -6,9 +6,9 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule
 import com.fasterxml.jackson.module.kotlin.KotlinModule
 import com.workflow.infrastructure.shutdown.ShutdownConfig
 import com.workflow.worker.config.WorkerLoopConfig
-import com.workflow.workflow.config.SweeperConfig
+import com.workflow.workflow.config.WatchdogConfig
 import com.workflow.infrastructure.persistence.OracleTestContainer
-import com.workflow.workflow.usecase.service.orchestration.Sweeper
+import com.workflow.workflow.usecase.service.orchestration.WorkflowWatchdog
 import com.workflow.workflow.usecase.service.orchestration.WorkflowEngine
 import com.workflow.workflow.usecase.service.phase.AdvancementStrategyRegistry
 import com.workflow.worker.usecase.port.outbound.notification.DispatchNotifier
@@ -70,7 +70,7 @@ fun main() {
     val strategyRegistry = AdvancementStrategyRegistry()
     val barrier = InstrumentedDefaultPhaseGate(pooledJdbi, workflowRepo, taskRepo, objectMapper, strategyRegistry, notifier, timer)
     val engine = WorkflowEngine(pooledJdbi, workflowRepo, taskRepo, objectMapper, notifier)
-    val inputResolver = InstrumentedInputResolver(objectMapper, timer)
+    val activityInputResolver = InstrumentedActivityInputResolver(objectMapper, timer)
     val handlerRegistry = HandlerRegistry()
 
     // 4. Metrics
@@ -110,7 +110,7 @@ fun main() {
     if (warmupPoint != null) {
         println("Warmup run (discarded)...")
         val smallWarmup = warmupPoint.copy(workflows = 5, submissionRate = 0, durationSeconds = 0)
-        runScenario(smallWarmup, engine, handlerRegistry, barrier, taskRepo, inputResolver,
+        runScenario(smallWarmup, engine, handlerRegistry, barrier, taskRepo, activityInputResolver,
             workflowRepo, objectMapper, timer, metrics, directJdbi, timeout, config, notifier)
         cleanTables(directJdbi)
         timer.reset()
@@ -128,7 +128,7 @@ fun main() {
         timer.reset()
 
         val result = runScenario(applyPoint, engine, handlerRegistry, barrier, taskRepo,
-            inputResolver, workflowRepo, objectMapper, timer, metrics, directJdbi, timeout, config, notifier)
+            activityInputResolver, workflowRepo, objectMapper, timer, metrics, directJdbi, timeout, config, notifier)
 
         if (result != null) {
             results.add(result)
@@ -163,7 +163,7 @@ private fun runScenario(
     handlerRegistry: HandlerRegistry,
     barrier: InstrumentedDefaultPhaseGate,
     taskRepo: InstrumentedTaskRepository,
-    inputResolver: InstrumentedInputResolver,
+    activityInputResolver: InstrumentedActivityInputResolver,
     workflowRepo: InstrumentedWorkflowRepository,
     objectMapper: ObjectMapper,
     timer: PhaseTimer,
@@ -182,17 +182,17 @@ private fun runScenario(
 
     val testWorkerConfig = createTestWorkerConfig(point.workers)
     val testShutdownConfig = createTestShutdownConfig()
-    val testSweeperConfig = createTestSweeperConfig()
+    val testWatchdogConfig = createTestWatchdogConfig()
     val workerScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     val loop = WorkerLoop(testWorkerConfig, testShutdownConfig, taskRepo, handlerRegistry, barrier, metrics.registry,
-        inputResolver, workflowRepo, objectMapper, notifier)
+        activityInputResolver, workflowRepo, objectMapper, notifier)
     val workerJob = loop.start(workerScope)
 
-    val sweeper = Sweeper(directJdbi, workflowRepo, taskRepo, barrier, testSweeperConfig)
+    val watchdog = WorkflowWatchdog(directJdbi, workflowRepo, taskRepo, barrier, testWatchdogConfig)
     val sweepJob = launch(Dispatchers.IO) {
         while (isActive) {
             delay(1000)
-            timer.suspendTime("sweeper.cycle") { sweeper.patrol() }
+            timer.suspendTime("watchdog.cycle") { watchdog.patrol() }
         }
     }
 
@@ -380,7 +380,7 @@ private fun createTestShutdownConfig(): ShutdownConfig = object : ShutdownConfig
     override fun leaderTeardownTimeout() = Duration.ofSeconds(5)
 }
 
-private fun createTestSweeperConfig(): SweeperConfig = object : SweeperConfig {
+private fun createTestWatchdogConfig(): WatchdogConfig = object : WatchdogConfig {
     override fun interval() = Duration.ofSeconds(1)
     override fun gracePeriod() = Duration.ofSeconds(2)
     override fun staleTaskThreshold() = Duration.ofSeconds(3)

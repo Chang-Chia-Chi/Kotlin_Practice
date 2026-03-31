@@ -26,7 +26,7 @@ class FaultInjectionStressTest : StressTestBase() {
     // ---- F1: CAS deadlock during phase advance ----
 
     @Test
-    fun `F1 - CAS deadlock during phase advance - sweeper retries and recovers`() =
+    fun `F1 - CAS deadlock during phase advance - watchdog retries and recovers`() =
         runBlocking(Dispatchers.Default) {
             val def = workflow {
                 activity("step1") { transition("f1.handler") }
@@ -123,7 +123,7 @@ class FaultInjectionStressTest : StressTestBase() {
     // ---- F4: Partial commit — task UPDATE ok, workflow CAS fails ----
 
     @Test
-    fun `F4 - partial commit - task completes but CAS fails - sweeper recovers`() =
+    fun `F4 - partial commit - task completes but CAS fails - watchdog recovers`() =
         runBlocking(Dispatchers.Default) {
             val def = workflow {
                 activity("step1") { transition("f4.handler") }

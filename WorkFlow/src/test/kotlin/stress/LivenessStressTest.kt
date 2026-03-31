@@ -48,7 +48,7 @@ class LivenessStressTest : StressTestBase() {
             )
             startWorkerPool()
 
-            // Run sweeper periodically to reclaim stale tasks
+            // Run watchdog periodically to reclaim stale tasks
             val sweepJob =
                 launch(Dispatchers.IO) {
                     while (true) {
@@ -134,7 +134,7 @@ class LivenessStressTest : StressTestBase() {
     // Simulated via direct state setup: task is COMPLETED, workflow hasn't advanced.
 
     @Test
-    fun `L4 - crash between TX1 and TX2 - sweeper stuck detection recovers`() =
+    fun `L4 - crash between TX1 and TX2 - watchdog stuck detection recovers`() =
         runBlocking(Dispatchers.Default) {
             val def =
                 workflow {
@@ -162,7 +162,7 @@ class LivenessStressTest : StressTestBase() {
             handlerRegistry.register("l4.handler", PassThroughHandler())
             startWorkerPool()
 
-            // Sweeper should detect stuck workflow and advance it
+            // WorkflowWatchdog should detect stuck workflow and advance it
             val sweepJob =
                 launch(Dispatchers.IO) {
                     while (true) {
@@ -210,7 +210,7 @@ class LivenessStressTest : StressTestBase() {
             jobs.forEach { it.cancel() }
             workerJobs.clear()
 
-            // Make stale tasks visible to sweeper
+            // Make stale tasks visible to watchdog
             directJdbi.useHandle<Exception> { handle ->
                 handle
                     .createUpdate(
@@ -228,7 +228,7 @@ class LivenessStressTest : StressTestBase() {
             handlerRegistry.register("l5.handler", PassThroughHandler())
             startWorkerPool()
 
-            // Sweeper reclaims stale tasks
+            // WorkflowWatchdog reclaims stale tasks
             val sweepJob =
                 launch(Dispatchers.IO) {
                     while (true) {
@@ -295,7 +295,7 @@ class LivenessStressTest : StressTestBase() {
 
     @Tag("stress-network")
     @Test
-    fun `L6b - network cut during CAS TX2 - sweeper stuck detection recovers`() =
+    fun `L6b - network cut during CAS TX2 - watchdog stuck detection recovers`() =
         runBlocking(Dispatchers.Default) {
             val def =
                 workflow {
@@ -355,7 +355,7 @@ class LivenessStressTest : StressTestBase() {
     // ---- L8: Task deadline expires while handler runs slowly ----
 
     @Test
-    fun `L8 - slow handler exceeds task deadline - sweeper times out task`() =
+    fun `L8 - slow handler exceeds task deadline - watchdog times out task`() =
         runBlocking(Dispatchers.Default) {
             val def =
                 workflow {
@@ -388,7 +388,7 @@ class LivenessStressTest : StressTestBase() {
     // ---- L9: Workflow deadline expires during execution ----
 
     @Test
-    fun `L9 - workflow deadline expires - sweeper times out workflow`() =
+    fun `L9 - workflow deadline expires - watchdog times out workflow`() =
         runBlocking(Dispatchers.Default) {
             val def =
                 workflow {

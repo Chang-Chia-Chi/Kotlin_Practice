@@ -200,7 +200,7 @@ class ResilienceStressTest : StressTestBase() {
         }
         val defJson = objectMapper.writeValueAsString(def)
 
-        // Create stuck workflows (simulating no sweeper running)
+        // Create stuck workflows (simulating no watchdog running)
         val wfIds = (1..scale.workflowBatchSize).map { i ->
             val wfId = randomId()
             diagnostics.trackedWorkflows.add(wfId)

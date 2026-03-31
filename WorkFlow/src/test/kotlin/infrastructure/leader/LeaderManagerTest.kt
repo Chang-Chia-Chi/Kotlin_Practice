@@ -41,6 +41,8 @@ import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
+import org.junit.jupiter.api.AfterEach
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class LeaderManagerTest {
@@ -64,13 +66,20 @@ class LeaderManagerTest {
     private val meterRegistry = SimpleMeterRegistry()
     private val startupEvent = mock<StartupEvent>()
 
+    private var testScopeJob: Job = SupervisorJob()
+
+    @AfterEach
+    fun tearDown() {
+        testScopeJob.cancel()
+    }
+
     private fun createManager(
         detector: KubernetesDetector = KubernetesDetector { false },
-        scope: CoroutineScope = CoroutineScope(SupervisorJob()),
     ): LeaderManager {
+        testScopeJob = SupervisorJob()
         val manager = LeaderManager(workerConfig, leaderElectionConfig, shutdownConfig, kubernetesClient, meterRegistry, detector)
         manager.clock = fixedClock
-        manager.scope = scope
+        manager.scope = CoroutineScope(testScopeJob)
         return manager
     }
 
@@ -179,10 +188,8 @@ class LeaderManagerTest {
 
     @Test
     fun `shutdown sets isActive false regardless of prior state`() = runBlocking<Unit> {
-        val managerJob = SupervisorJob()
         val manager = createManager(
             detector = KubernetesDetector { false },
-            scope = CoroutineScope(managerJob),
         )
 
         manager.onStart(startupEvent)
@@ -196,24 +203,20 @@ class LeaderManagerTest {
 
     @Test
     fun `shutdown cancels coroutine scope`() = runBlocking<Unit> {
-        val managerJob = SupervisorJob()
         val manager = createManager(
             detector = KubernetesDetector { false },
-            scope = CoroutineScope(managerJob),
         )
 
         manager.onStart(startupEvent)
         manager.shutdown()
 
-        assertTrue(managerJob.isCancelled)
+        assertTrue(testScopeJob.isCancelled)
     }
 
     @Test
     fun `shutdown in non-k8s mode does not call kubernetesClient for lease release`() = runBlocking<Unit> {
-        val managerJob = SupervisorJob()
         val manager = createManager(
             detector = KubernetesDetector { false },
-            scope = CoroutineScope(managerJob),
         )
 
         manager.onStart(startupEvent)
@@ -264,10 +267,8 @@ class LeaderManagerTest {
 
     @Test
     fun `is_leader gauge returns 1 when active and 0 when not`() = runBlocking<Unit> {
-        val managerJob = SupervisorJob()
         val manager = createManager(
             detector = KubernetesDetector { false },
-            scope = CoroutineScope(managerJob),
         )
         manager.onStart(startupEvent)
 
@@ -498,10 +499,8 @@ class LeaderManagerTest {
             Thread.sleep(2000)
         }
 
-        val managerJob = SupervisorJob()
         val manager = createManager(
             detector = KubernetesDetector { true },
-            scope = CoroutineScope(managerJob),
         )
         manager.onStart(startupEvent)
 
@@ -535,10 +534,8 @@ class LeaderManagerTest {
             Thread.sleep(2000)
         }
 
-        val managerJob = SupervisorJob()
         val manager = createManager(
             detector = KubernetesDetector { true },
-            scope = CoroutineScope(managerJob),
         )
         manager.onStart(startupEvent)
 
@@ -569,10 +566,8 @@ class LeaderManagerTest {
             Thread.sleep(2000)
         }
 
-        val managerJob = SupervisorJob()
         val manager = createManager(
             detector = KubernetesDetector { true },
-            scope = CoroutineScope(managerJob),
         )
         manager.onStart(startupEvent)
 
@@ -604,10 +599,8 @@ class LeaderManagerTest {
             Thread.sleep(2000)
         }
 
-        val managerJob = SupervisorJob()
         val manager = createManager(
             detector = KubernetesDetector { true },
-            scope = CoroutineScope(managerJob),
         )
         manager.onStart(startupEvent)
 
@@ -626,10 +619,8 @@ class LeaderManagerTest {
 
     @Test
     fun `releaseLeaseExplicitly in non-K8s mode does not call kubernetesClient`() = runBlocking<Unit> {
-        val managerJob = SupervisorJob()
         val manager = createManager(
             detector = KubernetesDetector { false },
-            scope = CoroutineScope(managerJob),
         )
 
         manager.onStart(startupEvent)
@@ -710,10 +701,8 @@ class LeaderManagerTest {
             Thread.sleep(10_000)
         }
 
-        val managerJob = SupervisorJob()
         val manager = createManager(
             detector = KubernetesDetector { true },
-            scope = CoroutineScope(managerJob),
         )
         manager.onStart(startupEvent)
 
@@ -728,7 +717,7 @@ class LeaderManagerTest {
         manager.shutdown()
 
         assertFalse(manager.isActive)
-        assertTrue(managerJob.isCancelled)
+        assertTrue(testScopeJob.isCancelled)
     }
 
     // == Section E: shutdown (K8s mode) ========================================
@@ -746,10 +735,8 @@ class LeaderManagerTest {
             Thread.sleep(5000)
         }
 
-        val managerJob = SupervisorJob()
         val manager = createManager(
             detector = KubernetesDetector { true },
-            scope = CoroutineScope(managerJob),
         )
         manager.onStart(startupEvent)
 
@@ -764,7 +751,7 @@ class LeaderManagerTest {
         manager.shutdown()
 
         assertFalse(manager.isActive, "isLeader should be false after shutdown")
-        assertTrue(managerJob.isCancelled, "Scope should be cancelled after shutdown")
+        assertTrue(testScopeJob.isCancelled, "Scope should be cancelled after shutdown")
         // Verify lease release was attempted
         verify(leaseResource).patch(any<Lease>())
     }
@@ -899,10 +886,8 @@ class LeaderManagerTest {
             Thread.sleep(5000)
         }
 
-        val managerJob = SupervisorJob()
         val manager = createManager(
             detector = KubernetesDetector { true },
-            scope = CoroutineScope(managerJob),
         )
         manager.onStart(startupEvent)
 

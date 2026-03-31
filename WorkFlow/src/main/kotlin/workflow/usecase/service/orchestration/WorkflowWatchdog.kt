@@ -2,7 +2,7 @@ package com.workflow.workflow.usecase.service.orchestration
 
 import com.workflow.infrastructure.persistence.inTransactionSuspend
 import com.workflow.infrastructure.leader.NotLeader
-import com.workflow.workflow.config.SweeperConfig
+import com.workflow.workflow.config.WatchdogConfig
 import com.workflow.workflow.model.TaskStatus
 import com.workflow.workflow.model.WorkflowStatus
 import com.workflow.workflow.usecase.port.outbound.persistent.TaskRepository
@@ -15,17 +15,17 @@ import org.slf4j.LoggerFactory
 import java.time.Instant
 
 @ApplicationScoped
-class Sweeper(
+class WorkflowWatchdog(
     private val jdbi: Jdbi,
     private val workflowRepo: WorkflowRepository,
     private val taskRepo: TaskRepository,
     private val phaseGate: DefaultPhaseGate,
-    private val sweeperConfig: SweeperConfig,
+    private val watchdogConfig: WatchdogConfig,
 ) {
 
-    private val log = LoggerFactory.getLogger(Sweeper::class.java)
+    private val log = LoggerFactory.getLogger(WorkflowWatchdog::class.java)
 
-    @Scheduled(every = "{framework.sweeper.interval}", skipExecutionIf = NotLeader::class)
+    @Scheduled(every = "{framework.watchdog.interval}", skipExecutionIf = NotLeader::class)
     fun sweep() = runBlocking { patrol() }
 
     suspend fun patrol() {
@@ -54,7 +54,7 @@ class Sweeper(
     }
 
     private suspend fun reclaimStaleTasks() {
-        val threshold = Instant.now().minus(sweeperConfig.staleTaskThreshold())
+        val threshold = Instant.now().minus(watchdogConfig.staleTaskThreshold())
 
         val reclaimed = taskRepo.resetStaleTasks(threshold)
         if (reclaimed > 0) {
@@ -68,7 +68,7 @@ class Sweeper(
     }
 
     private suspend fun recoverStuckWorkflows() {
-        val gracePeriod = sweeperConfig.gracePeriod()
+        val gracePeriod = watchdogConfig.gracePeriod()
         val stuck = workflowRepo.findStuck(gracePeriod)
         for (workflow in stuck) {
             try {

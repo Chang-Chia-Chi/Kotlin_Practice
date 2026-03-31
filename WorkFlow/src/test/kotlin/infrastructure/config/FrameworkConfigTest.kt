@@ -3,7 +3,7 @@ package com.workflow.infrastructure.config
 import com.workflow.infrastructure.leader.LeaderElectionConfig
 import com.workflow.infrastructure.shutdown.ShutdownConfig
 import com.workflow.worker.config.WorkerLoopConfig
-import com.workflow.workflow.config.SweeperConfig
+import com.workflow.workflow.config.WatchdogConfig
 import io.quarkus.test.junit.QuarkusTest
 import io.quarkus.test.junit.QuarkusTestProfile
 import io.quarkus.test.junit.TestProfile
@@ -34,7 +34,7 @@ class FrameworkConfigDefaultsTest {
     lateinit var shutdownConfig: ShutdownConfig
 
     @Inject
-    lateinit var sweeperConfig: SweeperConfig
+    lateinit var watchdogConfig: WatchdogConfig
 
     // -- 1. Default values --------------------------------------------------
 
@@ -94,13 +94,13 @@ class FrameworkConfigDefaultsTest {
     }
 
     @Test
-    fun `sweeper interval defaults to 30 seconds`() {
-        assertEquals(Duration.ofSeconds(30), sweeperConfig.interval())
+    fun `watchdog interval defaults to 30 seconds`() {
+        assertEquals(Duration.ofSeconds(30), watchdogConfig.interval())
     }
 
     @Test
-    fun `sweeper gracePeriod defaults to 2 minutes`() {
-        assertEquals(Duration.ofMinutes(2), sweeperConfig.gracePeriod())
+    fun `watchdog gracePeriod defaults to 2 minutes`() {
+        assertEquals(Duration.ofMinutes(2), watchdogConfig.gracePeriod())
     }
 
     // -- 1b. New event-driven dispatch defaults -----------------------------
@@ -143,8 +143,8 @@ class FrameworkConfigDefaultsTest {
     }
 
     @Test
-    fun `sweeper config is non-null`() {
-        assertNotNull(sweeperConfig)
+    fun `watchdog config is non-null`() {
+        assertNotNull(watchdogConfig)
     }
 
     // -- 4. CDI wiring integration ------------------------------------------
@@ -176,8 +176,8 @@ class FrameworkConfigOverrideProfile : QuarkusTestProfile {
         "framework.leader-election.retry-period" to "PT5S",
         "framework.shutdown.global-timeout" to "PT1M",
         "framework.shutdown.leader-teardown-timeout" to "PT20S",
-        "framework.sweeper.interval" to "PT1M",
-        "framework.sweeper.grace-period" to "PT5M",
+        "framework.watchdog.interval" to "PT1M",
+        "framework.watchdog.grace-period" to "PT5M",
     )
 }
 
@@ -198,7 +198,7 @@ class FrameworkConfigOverrideTest {
     lateinit var shutdownConfig: ShutdownConfig
 
     @Inject
-    lateinit var sweeperConfig: SweeperConfig
+    lateinit var watchdogConfig: WatchdogConfig
 
     @Test
     fun `worker id is overridden`() {
@@ -256,13 +256,13 @@ class FrameworkConfigOverrideTest {
     }
 
     @Test
-    fun `sweeper interval is overridden`() {
-        assertEquals(Duration.ofMinutes(1), sweeperConfig.interval())
+    fun `watchdog interval is overridden`() {
+        assertEquals(Duration.ofMinutes(1), watchdogConfig.interval())
     }
 
     @Test
-    fun `sweeper gracePeriod is overridden`() {
-        assertEquals(Duration.ofMinutes(5), sweeperConfig.gracePeriod())
+    fun `watchdog gracePeriod is overridden`() {
+        assertEquals(Duration.ofMinutes(5), watchdogConfig.gracePeriod())
     }
 
     @Test
@@ -290,6 +290,6 @@ class FrameworkConfigOverrideTest {
         assertNotNull(workerConfig)
         assertNotNull(leaderElectionConfig)
         assertNotNull(shutdownConfig)
-        assertNotNull(sweeperConfig)
+        assertNotNull(watchdogConfig)
     }
 }

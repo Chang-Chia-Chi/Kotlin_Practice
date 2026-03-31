@@ -1468,7 +1468,7 @@ class RepositoryTest {
         }
 
         @Test
-        fun `terminal update with null claimedBy bypasses fence (sweeper path)`() {
+        fun `terminal update with null claimedBy bypasses fence (watchdog path)`() {
             val wf = makeWorkflow()
             insertWorkflowDirect(wf)
             val task = makeTask(
@@ -1486,7 +1486,7 @@ class RepositoryTest {
                 )
             }
 
-            assertTrue(result, "null claimedBy should bypass fence (sweeper path)")
+            assertTrue(result, "null claimedBy should bypass fence (watchdog path)")
             assertEquals("FAILED", readTaskDirect(task.id)!!["STATUS"])
         }
 

@@ -7,7 +7,7 @@ import com.workflow.workflow.model.PhaseType
 import com.workflow.workflow.model.SequenceInfo
 import com.workflow.workflow.model.Task
 import com.workflow.workflow.model.TaskStatus
-import com.workflow.workflow.usecase.service.orchestration.InputResolver
+import com.workflow.workflow.usecase.service.orchestration.ActivityInputResolver
 import kotlinx.coroutines.test.runTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -15,10 +15,10 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import org.junit.jupiter.api.assertThrows
 
-class InputResolverTest {
+class ActivityInputResolverTest {
 
     private val objectMapper = ObjectMapper().registerModule(KotlinModule.Builder().build())
-    private val resolver = InputResolver(objectMapper)
+    private val resolver = ActivityInputResolver(objectMapper)
 
     // ── Helpers ──
 

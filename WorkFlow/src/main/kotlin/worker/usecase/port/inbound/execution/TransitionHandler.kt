@@ -8,7 +8,7 @@ package com.workflow.worker.usecase.port.inbound.execution
  * The engine provides **at-least-once** delivery. A handler may be invoked
  * multiple times for the same logical task due to:
  * - Retry on failure (up to `maxRetries` per task)
- * - Stale task reclaim by the sweeper (visibility timeout expiry)
+ * - Stale task reclaim by the watchdog (visibility timeout expiry)
  *
  * ## Idempotency Requirement
  *
@@ -23,7 +23,7 @@ package com.workflow.worker.usecase.port.inbound.execution
  * `yield()` to cooperate with graceful shutdown. On pod termination,
  * in-flight handlers receive [kotlinx.coroutines.CancellationException]
  * after the drain window expires. Tasks whose handlers are cancelled
- * remain in PROCESSING state and will be reclaimed by the sweeper.
+ * remain in PROCESSING state and will be reclaimed by the watchdog.
  *
  * ## Shutdown Awareness
  *

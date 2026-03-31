@@ -9,7 +9,7 @@ import com.workflow.workflow.model.TaskStatus
 import com.workflow.workflow.usecase.port.outbound.persistent.TaskRepository
 import com.workflow.workflow.usecase.port.outbound.persistent.WorkflowRepository
 import com.workflow.workflow.usecase.service.orchestration.DefaultPhaseGate
-import com.workflow.workflow.usecase.service.orchestration.InputResolver
+import com.workflow.workflow.usecase.service.orchestration.ActivityInputResolver
 import com.workflow.workflow.usecase.service.phase.AdvancementStrategyRegistry
 import com.workflow.worker.usecase.port.outbound.notification.DispatchNotifier
 import com.workflow.worker.usecase.port.inbound.execution.HandlerInput
@@ -63,10 +63,10 @@ class InstrumentedDefaultPhaseGate(
     }
 }
 
-class InstrumentedInputResolver(
+class InstrumentedActivityInputResolver(
     objectMapper: ObjectMapper,
     private val timer: PhaseTimer,
-) : InputResolver(objectMapper) {
+) : ActivityInputResolver(objectMapper) {
 
     override suspend fun resolve(
         inputs: Map<String, String>,

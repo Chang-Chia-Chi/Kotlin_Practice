@@ -5,13 +5,13 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule
 import com.fasterxml.jackson.module.kotlin.KotlinModule
 import com.workflow.infrastructure.shutdown.ShutdownConfig
 import com.workflow.worker.config.WorkerLoopConfig
-import com.workflow.workflow.config.SweeperConfig
+import com.workflow.workflow.config.WatchdogConfig
 import com.workflow.infrastructure.persistence.OracleTestContainer
 import com.workflow.workflow.adapter.persistent.JdbiTaskRepository
 import com.workflow.workflow.adapter.persistent.JdbiWorkflowRepository
 import com.workflow.workflow.usecase.service.orchestration.DefaultPhaseGate
-import com.workflow.workflow.usecase.service.orchestration.InputResolver
-import com.workflow.workflow.usecase.service.orchestration.Sweeper
+import com.workflow.workflow.usecase.service.orchestration.ActivityInputResolver
+import com.workflow.workflow.usecase.service.orchestration.WorkflowWatchdog
 import com.workflow.workflow.usecase.service.orchestration.WorkflowEngine
 import com.workflow.workflow.usecase.service.phase.AdvancementStrategyRegistry
 import com.workflow.worker.usecase.port.outbound.notification.DispatchNotifier
@@ -77,11 +77,11 @@ abstract class StressTestBase {
     // --- Components (proxy path — for fault injection and resilience tests) ---
 
     protected lateinit var workflowRepo: JdbiWorkflowRepository
-    protected lateinit var inputResolver: InputResolver
+    protected lateinit var activityInputResolver: ActivityInputResolver
     protected lateinit var taskRepo: JdbiTaskRepository
     protected lateinit var engine: WorkflowEngine
     protected lateinit var barrier: DefaultPhaseGate
-    protected lateinit var sweeper: Sweeper
+    protected lateinit var watchdog: WorkflowWatchdog
     protected lateinit var handlerRegistry: HandlerRegistry
     protected lateinit var meterRegistry: SimpleMeterRegistry
 
@@ -91,7 +91,7 @@ abstract class StressTestBase {
     protected lateinit var directTaskRepo: JdbiTaskRepository
     protected lateinit var directEngine: WorkflowEngine
     protected lateinit var directBarrier: DefaultPhaseGate
-    protected lateinit var directSweeper: Sweeper
+    protected lateinit var directWorkflowWatchdog: WorkflowWatchdog
 
     protected val objectMapper: ObjectMapper = ObjectMapper()
         .registerModule(KotlinModule.Builder().build())
@@ -135,8 +135,8 @@ abstract class StressTestBase {
         }
     }
 
-    protected val testSweeperConfig: SweeperConfig by lazy {
-        object : SweeperConfig {
+    protected val testWatchdogConfig: WatchdogConfig by lazy {
+        object : WatchdogConfig {
             override fun interval() = this@StressTestBase.sweepInterval
             override fun gracePeriod() = this@StressTestBase.gracePeriod
             override fun staleTaskThreshold() = this@StressTestBase.staleTaskThreshold
@@ -189,8 +189,8 @@ abstract class StressTestBase {
         val strategyRegistry = AdvancementStrategyRegistry()
         barrier = DefaultPhaseGate(proxyJdbi, workflowRepo, taskRepo, objectMapper, strategyRegistry, notifier)
         engine = WorkflowEngine(proxyJdbi, workflowRepo, taskRepo, objectMapper, notifier)
-        sweeper = Sweeper(proxyJdbi, workflowRepo, taskRepo, barrier, testSweeperConfig)
-        inputResolver = InputResolver(objectMapper)
+        watchdog = WorkflowWatchdog(proxyJdbi, workflowRepo, taskRepo, barrier, testWatchdogConfig)
+        activityInputResolver = ActivityInputResolver(objectMapper)
         handlerRegistry = HandlerRegistry()
         meterRegistry = SimpleMeterRegistry()
 
@@ -200,7 +200,7 @@ abstract class StressTestBase {
         val directStrategyRegistry = AdvancementStrategyRegistry()
         directBarrier = DefaultPhaseGate(directPooledJdbi, directWorkflowRepo, directTaskRepo, objectMapper, directStrategyRegistry, notifier)
         directEngine = WorkflowEngine(directPooledJdbi, directWorkflowRepo, directTaskRepo, objectMapper, notifier)
-        directSweeper = Sweeper(directPooledJdbi, directWorkflowRepo, directTaskRepo, directBarrier, testSweeperConfig)
+        directWorkflowWatchdog = WorkflowWatchdog(directPooledJdbi, directWorkflowRepo, directTaskRepo, directBarrier, testWatchdogConfig)
     }
 
     @AfterAll
@@ -241,27 +241,27 @@ abstract class StressTestBase {
     }
 
     protected fun startWorkerPool(): List<Job> {
-        val loop = WorkerLoop(testWorkerConfig, testShutdownConfig, taskRepo, handlerRegistry, barrier, meterRegistry, inputResolver, workflowRepo, objectMapper, notifier)
+        val loop = WorkerLoop(testWorkerConfig, testShutdownConfig, taskRepo, handlerRegistry, barrier, meterRegistry, activityInputResolver, workflowRepo, objectMapper, notifier)
         val job = loop.start(workerScope)
         workerJobs.add(job)
         return listOf(job)
     }
 
     protected fun startDirectWorkerPool(): List<Job> {
-        val loop = WorkerLoop(testWorkerConfig, testShutdownConfig, directTaskRepo, handlerRegistry, directBarrier, meterRegistry, inputResolver, directWorkflowRepo, objectMapper, notifier)
+        val loop = WorkerLoop(testWorkerConfig, testShutdownConfig, directTaskRepo, handlerRegistry, directBarrier, meterRegistry, activityInputResolver, directWorkflowRepo, objectMapper, notifier)
         val job = loop.start(workerScope)
         workerJobs.add(job)
         return listOf(job)
     }
 
-    // --- Sweeper ---
+    // --- WorkflowWatchdog ---
 
     protected suspend fun runSweep() {
-        sweeper.patrol()
+        watchdog.patrol()
     }
 
     protected suspend fun runDirectSweep() {
-        directSweeper.patrol()
+        directWorkflowWatchdog.patrol()
     }
 
     // --- Assertions ---
@@ -287,7 +287,7 @@ abstract class StressTestBase {
         }
     }
 
-    protected fun assertSweeperRecovers(
+    protected fun assertWorkflowWatchdogRecovers(
         workflowId: String,
         previousSequence: Int,
         timeout: Duration = gracePeriod + sweepInterval + scale.innerMargin,

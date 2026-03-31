@@ -11,10 +11,10 @@ import jakarta.enterprise.context.ApplicationScoped
 import org.slf4j.LoggerFactory
 
 @ApplicationScoped
-class InputResolver(
+class ActivityInputResolver(
     private val objectMapper: ObjectMapper,
 ) {
-    private val log = LoggerFactory.getLogger(InputResolver::class.java)
+    private val log = LoggerFactory.getLogger(ActivityInputResolver::class.java)
 
     suspend fun resolve(
         inputs: Map<String, String>,

@@ -16,7 +16,7 @@ import com.workflow.workflow.dsl.workflow
 import com.workflow.workflow.usecase.port.outbound.persistent.TaskRepository
 import com.workflow.workflow.usecase.port.outbound.persistent.WorkflowRepository
 import com.workflow.workflow.usecase.service.orchestration.DefaultPhaseGate
-import com.workflow.workflow.usecase.service.orchestration.InputResolver
+import com.workflow.workflow.usecase.service.orchestration.ActivityInputResolver
 import com.workflow.infrastructure.shutdown.ShutdownSignal
 import com.workflow.worker.adapter.http.FakeDispatchNotifier
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
@@ -70,7 +70,7 @@ class WorkerLoopTest {
     private lateinit var workerConfig: com.workflow.worker.config.WorkerLoopConfig
     private lateinit var shutdownConfig: com.workflow.infrastructure.shutdown.ShutdownConfig
     private lateinit var meterRegistry: SimpleMeterRegistry
-    private lateinit var inputResolver: InputResolver
+    private lateinit var activityInputResolver: ActivityInputResolver
     private lateinit var workflowRepo: WorkflowRepository
     private lateinit var objectMapper: ObjectMapper
     private lateinit var notifier: FakeDispatchNotifier
@@ -101,7 +101,7 @@ class WorkerLoopTest {
         }
 
         meterRegistry = SimpleMeterRegistry()
-        inputResolver = mock()
+        activityInputResolver = mock()
         workflowRepo = mock()
         objectMapper = ObjectMapper()
             .registerModule(com.fasterxml.jackson.module.kotlin.KotlinModule.Builder().build())
@@ -119,7 +119,7 @@ class WorkerLoopTest {
         )
         workflowRepo.stub { onBlocking { findById(any()) } doReturn defaultWfRun }
 
-        workerLoop = WorkerLoop(workerConfig, shutdownConfig, taskRepo, handlerRegistry, phaseGate, meterRegistry, inputResolver, workflowRepo, objectMapper, notifier)
+        workerLoop = WorkerLoop(workerConfig, shutdownConfig, taskRepo, handlerRegistry, phaseGate, meterRegistry, activityInputResolver, workflowRepo, objectMapper, notifier)
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────
@@ -281,7 +281,7 @@ class WorkerLoopTest {
             whenever(handlerRegistry.resolve(task.handlerKey)).thenReturn(handler)
             whenever(handler.execute(any())).thenReturn(HandlerOutput(result = """{"ok":true}"""))
             whenever(workflowRepo.findById(wfId)).thenReturn(wfRun)
-            whenever(inputResolver.resolve(any(), any(), any())).thenReturn("""{"data":"resolved"}""")
+            whenever(activityInputResolver.resolve(any(), any(), any())).thenReturn("""{"data":"resolved"}""")
 
             startAndAdvance(this)
 
@@ -291,7 +291,7 @@ class WorkerLoopTest {
             assertNotNull(input.inputs)
             assertEquals("""{"data":"resolved"}""", input.inputs)
 
-            verify(inputResolver).resolve(any(), any(), any())
+            verify(activityInputResolver).resolve(any(), any(), any())
         }
     }
 
@@ -631,7 +631,7 @@ class WorkerLoopTest {
         @Test
         fun `force-cancel after drain timeout - long handler is cancelled`() = runTest {
             whenever(shutdownConfig.globalTimeout()).thenReturn(Duration.ofMillis(100))
-            val shortTimeoutLoop = WorkerLoop(workerConfig, shutdownConfig, taskRepo, handlerRegistry, phaseGate, meterRegistry, inputResolver, workflowRepo, objectMapper, notifier)
+            val shortTimeoutLoop = WorkerLoop(workerConfig, shutdownConfig, taskRepo, handlerRegistry, phaseGate, meterRegistry, activityInputResolver, workflowRepo, objectMapper, notifier)
 
             val handlerStarted = java.util.concurrent.atomic.AtomicBoolean(false)
             val handlerCompleted = java.util.concurrent.atomic.AtomicBoolean(false)
@@ -685,7 +685,7 @@ class WorkerLoopTest {
         fun `shutdownTimeout reflects config value`() {
             whenever(shutdownConfig.globalTimeout()).thenReturn(Duration.ofSeconds(45))
 
-            val freshLoop = WorkerLoop(workerConfig, shutdownConfig, taskRepo, handlerRegistry, phaseGate, meterRegistry, inputResolver, workflowRepo, objectMapper, notifier)
+            val freshLoop = WorkerLoop(workerConfig, shutdownConfig, taskRepo, handlerRegistry, phaseGate, meterRegistry, activityInputResolver, workflowRepo, objectMapper, notifier)
             assertEquals(Duration.ofSeconds(45), freshLoop.shutdownTimeout)
         }
     }
@@ -865,7 +865,7 @@ class WorkerLoopTest {
                 whenever(it.maxBatchSize()).thenReturn(16)
                 whenever(it.podIp()).thenReturn("localhost")
             }
-            val batchLoop = WorkerLoop(batchWorkerConfig, shutdownConfig, taskRepo, handlerRegistry, phaseGate, meterRegistry, inputResolver, workflowRepo, objectMapper, notifier)
+            val batchLoop = WorkerLoop(batchWorkerConfig, shutdownConfig, taskRepo, handlerRegistry, phaseGate, meterRegistry, activityInputResolver, workflowRepo, objectMapper, notifier)
 
             whenever(taskRepo.claimNext(eq(workerId), eq(16), eq("default")))
                 .thenReturn(emptyList())

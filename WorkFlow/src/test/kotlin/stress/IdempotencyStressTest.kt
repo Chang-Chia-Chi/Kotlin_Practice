@@ -31,10 +31,10 @@ class IdempotencyStressTest : StressTestBase() {
     @RegisterExtension
     val diagnostics = StressTestDiagnostics(this)
 
-    // ---- I1: Sweeper + worker race on same stuck workflow ----
+    // ---- I1: WorkflowWatchdog + worker race on same stuck workflow ----
 
     @Test
-    fun `I1 - sweeper and worker race on stuck workflow - exactly one CAS wins`() = runBlocking(Dispatchers.Default) {
+    fun `I1 - watchdog and worker race on stuck workflow - exactly one CAS wins`() = runBlocking(Dispatchers.Default) {
         val def = workflow {
             activity("step1") { transition("i1.handler") }
             activity("step2") { transition("i1.handler") }
@@ -57,9 +57,9 @@ class IdempotencyStressTest : StressTestBase() {
         val recorder = HistoryRecorder(PassThroughHandler())
         handlerRegistry.register("i1.handler", recorder)
 
-        // Race: sweeper recovery and worker barrier completion fire simultaneously
+        // Race: watchdog recovery and worker barrier completion fire simultaneously
         val latch = CountDownLatch(1)
-        val sweeperResult = async {
+        val watchdogResult = async {
             latch.await(5, TimeUnit.SECONDS)
             runSweep()
         }
@@ -69,7 +69,7 @@ class IdempotencyStressTest : StressTestBase() {
         }
 
         latch.countDown() // Fire both simultaneously
-        sweeperResult.await()
+        watchdogResult.await()
         barrierResult.await()
 
         // Start workers for step2
@@ -88,10 +88,10 @@ class IdempotencyStressTest : StressTestBase() {
         sweepJob.cancel()
     }
 
-    // ---- I2: Two sweeper patrols overlap (dual-leader) ----
+    // ---- I2: Two watchdog patrols overlap (dual-leader) ----
 
     @Test
-    fun `I2 - two sweeper patrols overlap - state consistent`() = runBlocking(Dispatchers.Default) {
+    fun `I2 - two watchdog patrols overlap - state consistent`() = runBlocking(Dispatchers.Default) {
         val def = workflow {
             activity("step1") { transition("i2.handler") }
             activity("step2") { transition("i2.handler") }
@@ -112,7 +112,7 @@ class IdempotencyStressTest : StressTestBase() {
 
         handlerRegistry.register("i2.handler", PassThroughHandler())
 
-        // Two sweepers fire simultaneously
+        // Two watchdogs fire simultaneously
         val latch = CountDownLatch(1)
         val sweep1 = async { latch.await(5, TimeUnit.SECONDS); runSweep() }
         val sweep2 = async { latch.await(5, TimeUnit.SECONDS); runSweep() }
@@ -132,7 +132,7 @@ class IdempotencyStressTest : StressTestBase() {
         sweepJob.cancel()
     }
 
-    // ---- I3: Sweeper expires task at same moment worker completes it ----
+    // ---- I3: WorkflowWatchdog expires task at same moment worker completes it ----
 
     @Test
     fun `I3 - timeout and completion race - barrier fires exactly once`() = runBlocking(Dispatchers.Default) {
@@ -156,7 +156,7 @@ class IdempotencyStressTest : StressTestBase() {
             while (true) { delay(sweepInterval.toMillis()); runSweep() }
         }
 
-        // Either COMPLETED (worker wins) or FAILED (sweeper timeout wins)
+        // Either COMPLETED (worker wins) or FAILED (watchdog timeout wins)
         // But must terminate — not hang
         assertWorkflowTerminates(wfId)
 
@@ -169,7 +169,7 @@ class IdempotencyStressTest : StressTestBase() {
         sweepJob.cancel()
     }
 
-    // ---- I4: Sweeper reclaims stale task while worker about to complete ----
+    // ---- I4: WorkflowWatchdog reclaims stale task while worker about to complete ----
 
     @Test
     fun `I4 - stale reclaim races with task completion - no corruption`() = runBlocking(Dispatchers.Default) {
@@ -195,10 +195,10 @@ class IdempotencyStressTest : StressTestBase() {
         sweepJob.cancel()
     }
 
-    // ---- I5: Replay called while sweeper mid-recovery ----
+    // ---- I5: Replay called while watchdog mid-recovery ----
 
     @Test
-    fun `I5 - replay during sweeper recovery - no conflict`() = runBlocking(Dispatchers.Default) {
+    fun `I5 - replay during watchdog recovery - no conflict`() = runBlocking(Dispatchers.Default) {
         val def = workflow {
             activity("step1") {
                 transition("i5.handler")
@@ -222,30 +222,30 @@ class IdempotencyStressTest : StressTestBase() {
 
         assertWorkflowStatus(wfId, "FAILED")
 
-        // Race: replay and sweeper both act on the workflow
+        // Race: replay and watchdog both act on the workflow
         val latch = CountDownLatch(1)
         val replayResult = async {
             latch.await(5, TimeUnit.SECONDS)
             engine.replayWorkflow(wfId)
         }
-        val sweeperResult = async {
+        val watchdogResult = async {
             latch.await(5, TimeUnit.SECONDS)
             runSweep()
         }
 
         latch.countDown()
         replayResult.await()
-        sweeperResult.await()
+        watchdogResult.await()
 
         // Should eventually complete (replay re-queues the failed task)
         assertWorkflowTerminates(wfId, timeout = scale.outerTimeout)
         sweepJob.cancel()
     }
 
-    // ---- I6: Sweeper detects same stuck workflow on consecutive patrols ----
+    // ---- I6: WorkflowWatchdog detects same stuck workflow on consecutive patrols ----
 
     @Test
-    fun `I6 - consecutive sweeper patrols on same stuck workflow - second is no-op`() = runBlocking(Dispatchers.Default) {
+    fun `I6 - consecutive watchdog patrols on same stuck workflow - second is no-op`() = runBlocking(Dispatchers.Default) {
         val def = workflow {
             activity("step1") { transition("i6.handler") }
             activity("step2") { transition("i6.handler") }

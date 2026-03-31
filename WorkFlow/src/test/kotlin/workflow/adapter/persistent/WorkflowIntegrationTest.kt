@@ -5,14 +5,14 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule
 import com.fasterxml.jackson.module.kotlin.KotlinModule
 import com.workflow.workflow.adapter.persistent.JdbiTaskRepository
 import com.workflow.workflow.adapter.persistent.JdbiWorkflowRepository
-import com.workflow.workflow.config.SweeperConfig
+import com.workflow.workflow.config.WatchdogConfig
 import com.workflow.workflow.model.JoinPolicy
 import com.workflow.workflow.model.TaskStatus
 import com.workflow.workflow.model.WorkflowStatus
 import com.workflow.workflow.model.workflowId
 import com.workflow.workflow.dsl.workflow
 import com.workflow.workflow.usecase.service.orchestration.DefaultPhaseGate
-import com.workflow.workflow.usecase.service.orchestration.Sweeper
+import com.workflow.workflow.usecase.service.orchestration.WorkflowWatchdog
 import com.workflow.workflow.usecase.service.orchestration.WorkflowEngine
 import com.workflow.workflow.usecase.service.phase.AdvancementStrategyRegistry
 import com.workflow.worker.adapter.http.FakeDispatchNotifier
@@ -47,14 +47,14 @@ class WorkflowIntegrationTest {
         .registerModule(JavaTimeModule())
     private lateinit var engine: WorkflowEngine
     private lateinit var barrier: DefaultPhaseGate
-    private lateinit var sweeper: Sweeper
+    private lateinit var watchdog: WorkflowWatchdog
 
     private val gracePeriod = Duration.ofMinutes(2)
     private val staleTaskThreshold = Duration.ofMinutes(10)
 
     private val notifier = FakeDispatchNotifier()
 
-    private val testSweeperConfig = object : SweeperConfig {
+    private val testWatchdogConfig = object : WatchdogConfig {
         override fun interval(): Duration = Duration.ofSeconds(30)
         override fun gracePeriod(): Duration = gracePeriod
         override fun staleTaskThreshold(): Duration = staleTaskThreshold
@@ -67,7 +67,7 @@ class WorkflowIntegrationTest {
         taskRepo = JdbiTaskRepository(jdbi)
         engine = WorkflowEngine(jdbi, workflowRepo, taskRepo, objectMapper, notifier)
         barrier = DefaultPhaseGate(jdbi, workflowRepo, taskRepo, objectMapper, AdvancementStrategyRegistry(), notifier)
-        sweeper = Sweeper(jdbi, workflowRepo, taskRepo, barrier, testSweeperConfig)
+        watchdog = WorkflowWatchdog(jdbi, workflowRepo, taskRepo, barrier, testWatchdogConfig)
     }
 
     @AfterEach
@@ -284,7 +284,7 @@ class WorkflowIntegrationTest {
     inner class WorkerDeathSimulation {
 
         @Test
-        fun `sweeper recovers stuck workflow when worker died after task completion but before CAS`() = runTest {
+        fun `watchdog recovers stuck workflow when worker died after task completion but before CAS`() = runTest {
             // Build a 2-step linear definition
             val definition = workflow {
                 activity("step1") { transition("step1.handler") }
@@ -312,14 +312,14 @@ class WorkflowIntegrationTest {
             assertEquals(1, (wf["CURRENT_SEQUENCE"] as Number).toInt())
             assertEquals(0, (wf["VERSION"] as Number).toInt())
 
-            // Push updated_at into the past so sweeper's findStuck picks it up
+            // Push updated_at into the past so watchdog's findStuck picks it up
             updateWorkflowUpdatedAtDirect(
                 runId,
                 Instant.now().minus(gracePeriod).minusSeconds(120),
             )
 
-            // Sweeper patrol detects and recovers
-            sweeper.patrol()
+            // WorkflowWatchdog patrol detects and recovers
+            watchdog.patrol()
 
             // Verify: workflow advanced to seq 2, downstream task created
             wf = readWorkflowDirect(runId)!!
@@ -332,8 +332,8 @@ class WorkflowIntegrationTest {
             assertEquals("step2.handler", seq2Tasks[0]["HANDLER_KEY"])
             assertEquals("PENDING", seq2Tasks[0]["STATUS"])
 
-            // Sweeper idempotency: second patrol is a no-op (CAS version already advanced)
-            sweeper.patrol()
+            // WorkflowWatchdog idempotency: second patrol is a no-op (CAS version already advanced)
+            watchdog.patrol()
             val wfAfter = readWorkflowDirect(runId)!!
             assertEquals(2, (wfAfter["CURRENT_SEQUENCE"] as Number).toInt())
             assertEquals(1, (wfAfter["VERSION"] as Number).toInt())

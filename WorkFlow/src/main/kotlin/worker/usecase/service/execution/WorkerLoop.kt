@@ -6,7 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.readValue
 import com.workflow.workflow.model.WorkflowDefinition
 import com.workflow.workflow.usecase.service.orchestration.DefaultPhaseGate
-import com.workflow.workflow.usecase.service.orchestration.InputResolver
+import com.workflow.workflow.usecase.service.orchestration.ActivityInputResolver
 import com.workflow.workflow.model.Task
 import com.workflow.workflow.usecase.port.outbound.persistent.TaskRepository
 import com.workflow.workflow.model.TaskStatus
@@ -46,8 +46,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * Workers drain at order 10, after the leader (order 1) stops sweeper
- * patrols. This ensures in-flight work completes without sweeper
+ * Workers drain at order 10, after the leader (order 1) stops watchdog
+ * patrols. This ensures in-flight work completes without watchdog
  * interference.
  */
 const val SHUTDOWN_ORDER_WORKER = 10
@@ -94,7 +94,7 @@ class WorkerLoop(
     private val handlerRegistry: HandlerRegistry,
     private val phaseGate: DefaultPhaseGate,
     private val meterRegistry: MeterRegistry,
-    private val inputResolver: InputResolver,
+    private val activityInputResolver: ActivityInputResolver,
     private val workflowRepo: WorkflowRepository,
     private val objectMapper: ObjectMapper,
     private val notifier: DispatchNotifier,
@@ -285,7 +285,7 @@ class WorkerLoop(
         val activityInputs = seqInfo.activity.inputs
         if (activityInputs.isEmpty()) return null
 
-        return inputResolver.resolve(activityInputs, cached.sequenceMap) { seq ->
+        return activityInputResolver.resolve(activityInputs, cached.sequenceMap) { seq ->
             taskRepo.findByWorkflowAndSequence(task.workflowId, seq)
         }
     }

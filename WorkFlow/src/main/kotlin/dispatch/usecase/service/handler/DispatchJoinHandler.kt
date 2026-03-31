@@ -20,7 +20,7 @@ class DispatchJoinHandler(
     override suspend fun execute(input: HandlerInput): HandlerOutput {
         val inputsNode = objectMapper.readTree(input.inputs!!)
         val batchTokenNode = inputsNode["batchToken"]
-        // InputResolver aggregates parallel task outputs into an array
+        // ActivityInputResolver aggregates parallel task outputs into an array
         val batchToken = if (batchTokenNode.isArray) {
             batchTokenNode[0].asText()
         } else {
