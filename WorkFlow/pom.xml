@@ -17,6 +17,7 @@
         <maven.compiler.release>21</maven.compiler.release>
         <aws.sdk.version>2.29.51</aws.sdk.version>
         <surefire-plugin.version>3.5.2</surefire-plugin.version>
+        <surefire.excludedGroups>stress</surefire.excludedGroups>
     </properties>
 
     <dependencyManagement>
@@ -339,7 +340,7 @@
                     </systemPropertyVariables>
                     <!-- Pass JaCoCo agent argLine to the forked JVM -->
                     <argLine>@{argLine} --add-opens java.base/java.lang=ALL-UNNAMED</argLine>
-                    <excludedGroups>stress</excludedGroups>
+                    <excludedGroups>${surefire.excludedGroups}</excludedGroups>
                 </configuration>
             </plugin>
             <plugin>
@@ -384,13 +385,15 @@
         </profile>
         <profile>
             <id>stress</id>
+            <properties>
+                <surefire.excludedGroups/>
+            </properties>
             <build>
                 <plugins>
                     <plugin>
                         <artifactId>maven-surefire-plugin</artifactId>
                         <configuration>
                             <groups>stress</groups>
-                            <excludedGroups/>
                         </configuration>
                     </plugin>
                 </plugins>
@@ -398,16 +401,9 @@
         </profile>
         <profile>
             <id>all-tests</id>
-            <build>
-                <plugins>
-                    <plugin>
-                        <artifactId>maven-surefire-plugin</artifactId>
-                        <configuration>
-                            <excludedGroups/>
-                        </configuration>
-                    </plugin>
-                </plugins>
-            </build>
+            <properties>
+                <surefire.excludedGroups/>
+            </properties>
         </profile>
     </profiles>
 </project>
