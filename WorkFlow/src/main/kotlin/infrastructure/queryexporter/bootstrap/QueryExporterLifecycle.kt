@@ -12,12 +12,12 @@ import org.jboss.logging.Logger
 import java.time.Duration
 
 @ApplicationScoped
-class QueryExporterBean(
+class QueryExporterLifecycle(
     private val dataSourceProvider: DataSourceProvider,
     private val meterRegistry: MeterRegistry,
     private val leaderGuard: LeaderGuard,
 ) : ShutdownParticipant {
-    private val log = Logger.getLogger(QueryExporterBean::class.java)
+    private val log = Logger.getLogger(QueryExporterLifecycle::class.java)
 
     private var bootstrap: QueryExporterBootstrap? = null
 

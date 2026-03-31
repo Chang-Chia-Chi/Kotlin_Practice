@@ -17,11 +17,11 @@ import java.time.Duration
 import java.util.concurrent.ConcurrentHashMap
 
 @ApplicationScoped
-class DispatchNotifierImpl(
+class HttpDispatchNotifier(
     private val peerDiscovery: PeerDiscovery,
     private val httpClient: HttpClient,
 ) : DispatchNotifier {
-    private val log = LoggerFactory.getLogger(DispatchNotifierImpl::class.java)
+    private val log = LoggerFactory.getLogger(HttpDispatchNotifier::class.java)
 
     private val flows = ConcurrentHashMap<String, MutableSharedFlow<Unit>>()
 
