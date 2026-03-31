@@ -10,7 +10,7 @@ import com.workflow.workflow.usecase.port.outbound.persistent.TaskRepository
 import com.workflow.workflow.usecase.port.outbound.persistent.WorkflowRepository
 import com.workflow.workflow.usecase.service.orchestration.BarrierService
 import com.workflow.workflow.usecase.service.orchestration.InputResolver
-import com.workflow.workflow.usecase.service.phase.PhaseStrategyRegistry
+import com.workflow.workflow.usecase.service.phase.AdvancementStrategyRegistry
 import com.workflow.worker.usecase.port.outbound.notification.DispatchNotifier
 import com.workflow.worker.usecase.port.inbound.execution.HandlerInput
 import com.workflow.worker.usecase.port.inbound.execution.HandlerOutput
@@ -49,7 +49,7 @@ class InstrumentedBarrierService(
     workflowRepo: WorkflowRepository,
     taskRepo: TaskRepository,
     objectMapper: ObjectMapper,
-    strategyRegistry: PhaseStrategyRegistry,
+    strategyRegistry: AdvancementStrategyRegistry,
     notifier: DispatchNotifier,
     private val timer: PhaseTimer,
 ) : BarrierService(jdbi, workflowRepo, taskRepo, objectMapper, strategyRegistry, notifier) {

@@ -9,7 +9,7 @@ import com.workflow.workflow.model.SequenceInfo
 import com.workflow.workflow.model.WorkflowDefinition
 import com.workflow.workflow.model.WorkflowRun
 import com.workflow.workflow.model.WorkflowStatus
-import com.workflow.workflow.usecase.service.phase.LinearPhaseStrategy
+import com.workflow.workflow.usecase.service.phase.LinearAdvancementStrategy
 import java.time.Duration
 import java.time.Instant
 import java.time.temporal.ChronoUnit
@@ -17,9 +17,9 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
 
-class LinearPhaseStrategyTest {
+class LinearAdvancementStrategyTest {
 
-    private val strategy = LinearPhaseStrategy()
+    private val strategy = LinearAdvancementStrategy()
     private val now = Instant.now().truncatedTo(ChronoUnit.MICROS)
 
     private fun activity(name: String = "step1", failurePolicy: FailurePolicy = FailurePolicy.ABORT) =

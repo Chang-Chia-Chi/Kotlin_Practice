@@ -8,25 +8,25 @@ import com.workflow.workflow.model.SequenceInfo
 import com.workflow.workflow.model.WorkflowDefinition
 import com.workflow.workflow.model.WorkflowRun
 import com.workflow.workflow.model.WorkflowStatus
-import com.workflow.workflow.usecase.port.inbound.phase.PhaseStrategy
-import com.workflow.workflow.usecase.service.phase.LinearPhaseStrategy
-import com.workflow.workflow.usecase.service.phase.ParallelPhaseStrategy
-import com.workflow.workflow.usecase.service.phase.PhaseStrategyRegistry
+import com.workflow.workflow.usecase.port.inbound.phase.AdvancementStrategy
+import com.workflow.workflow.usecase.service.phase.LinearAdvancementStrategy
+import com.workflow.workflow.usecase.service.phase.ParallelAdvancementStrategy
+import com.workflow.workflow.usecase.service.phase.AdvancementStrategyRegistry
 import kotlin.test.Test
 import kotlin.test.assertIs
 
-class PhaseStrategyRegistryTest {
+class AdvancementStrategyRegistryTest {
 
-    private val registry = PhaseStrategyRegistry()
+    private val registry = AdvancementStrategyRegistry()
 
     @Test
-    fun `resolve returns LinearPhaseStrategy for LINEAR`() {
-        assertIs<LinearPhaseStrategy>(registry.resolve(PhaseType.LINEAR))
+    fun `resolve returns LinearAdvancementStrategy for LINEAR`() {
+        assertIs<LinearAdvancementStrategy>(registry.resolve(PhaseType.LINEAR))
     }
 
     @Test
-    fun `resolve returns ParallelPhaseStrategy for PARALLEL`() {
-        assertIs<ParallelPhaseStrategy>(registry.resolve(PhaseType.PARALLEL))
+    fun `resolve returns ParallelAdvancementStrategy for PARALLEL`() {
+        assertIs<ParallelAdvancementStrategy>(registry.resolve(PhaseType.PARALLEL))
     }
 
     @Test
@@ -38,7 +38,7 @@ class PhaseStrategyRegistryTest {
 
     @Test
     fun `register overrides existing strategy`() {
-        val custom = object : PhaseStrategy {
+        val custom = object : AdvancementStrategy {
             override fun resolve(context: PhaseContext): AdvancementDecision = AdvancementDecision.Complete
         }
         registry.register(PhaseType.LINEAR, custom)

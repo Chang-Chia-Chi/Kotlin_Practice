@@ -10,7 +10,7 @@ import com.workflow.workflow.config.SweeperConfig
 import com.workflow.infrastructure.persistence.OracleTestContainer
 import com.workflow.workflow.usecase.service.orchestration.Sweeper
 import com.workflow.workflow.usecase.service.orchestration.WorkflowEngine
-import com.workflow.workflow.usecase.service.phase.PhaseStrategyRegistry
+import com.workflow.workflow.usecase.service.phase.AdvancementStrategyRegistry
 import com.workflow.worker.usecase.port.outbound.notification.DispatchNotifier
 import com.workflow.worker.usecase.service.execution.HandlerRegistry
 import com.workflow.worker.usecase.service.execution.WorkerLoop
@@ -67,7 +67,7 @@ fun main() {
     val notifier = NoOpDispatchNotifier()
     val workflowRepo = InstrumentedWorkflowRepository(pooledJdbi, timer)
     val taskRepo = InstrumentedTaskRepository(pooledJdbi, timer)
-    val strategyRegistry = PhaseStrategyRegistry()
+    val strategyRegistry = AdvancementStrategyRegistry()
     val barrier = InstrumentedBarrierService(pooledJdbi, workflowRepo, taskRepo, objectMapper, strategyRegistry, notifier, timer)
     val engine = WorkflowEngine(pooledJdbi, workflowRepo, taskRepo, objectMapper, notifier)
     val inputResolver = InstrumentedInputResolver(objectMapper, timer)

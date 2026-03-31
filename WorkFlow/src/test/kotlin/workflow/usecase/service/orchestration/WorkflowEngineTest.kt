@@ -16,7 +16,7 @@ import com.workflow.workflow.model.workflowId
 import com.workflow.workflow.dsl.workflow
 import com.workflow.workflow.usecase.service.orchestration.BarrierService
 import com.workflow.workflow.usecase.service.orchestration.WorkflowEngine
-import com.workflow.workflow.usecase.service.phase.PhaseStrategyRegistry
+import com.workflow.workflow.usecase.service.phase.AdvancementStrategyRegistry
 import com.workflow.worker.usecase.port.outbound.notification.DispatchNotifier
 import com.workflow.worker.adapter.http.FakeDispatchNotifier
 import com.workflow.infrastructure.persistence.OracleTestContainer
@@ -54,7 +54,7 @@ class WorkflowEngineTest {
         taskRepo = JdbiTaskRepository(jdbi)
         notifier = FakeDispatchNotifier()
         engine = WorkflowEngine(jdbi, workflowRepo, taskRepo, objectMapper, notifier)
-        barrierService = BarrierService(jdbi, workflowRepo, taskRepo, objectMapper, PhaseStrategyRegistry(), notifier)
+        barrierService = BarrierService(jdbi, workflowRepo, taskRepo, objectMapper, AdvancementStrategyRegistry(), notifier)
     }
 
     @AfterEach

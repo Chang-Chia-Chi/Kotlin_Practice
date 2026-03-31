@@ -13,7 +13,7 @@ import com.workflow.workflow.usecase.service.orchestration.BarrierService
 import com.workflow.workflow.usecase.service.orchestration.InputResolver
 import com.workflow.workflow.usecase.service.orchestration.Sweeper
 import com.workflow.workflow.usecase.service.orchestration.WorkflowEngine
-import com.workflow.workflow.usecase.service.phase.PhaseStrategyRegistry
+import com.workflow.workflow.usecase.service.phase.AdvancementStrategyRegistry
 import com.workflow.worker.usecase.port.outbound.notification.DispatchNotifier
 import com.workflow.worker.adapter.http.DispatchNotifierImpl
 import com.workflow.worker.usecase.service.execution.HandlerRegistry
@@ -186,7 +186,7 @@ abstract class StressTestBase {
         // Init components
         workflowRepo = JdbiWorkflowRepository(proxyJdbi)
         taskRepo = JdbiTaskRepository(proxyJdbi)
-        val strategyRegistry = PhaseStrategyRegistry()
+        val strategyRegistry = AdvancementStrategyRegistry()
         barrier = BarrierService(proxyJdbi, workflowRepo, taskRepo, objectMapper, strategyRegistry, notifier)
         engine = WorkflowEngine(proxyJdbi, workflowRepo, taskRepo, objectMapper, notifier)
         sweeper = Sweeper(proxyJdbi, workflowRepo, taskRepo, barrier, testSweeperConfig)
@@ -197,7 +197,7 @@ abstract class StressTestBase {
         // Init direct components (bypass proxy — for throughput benchmarks)
         directWorkflowRepo = JdbiWorkflowRepository(directPooledJdbi)
         directTaskRepo = JdbiTaskRepository(directPooledJdbi)
-        val directStrategyRegistry = PhaseStrategyRegistry()
+        val directStrategyRegistry = AdvancementStrategyRegistry()
         directBarrier = BarrierService(directPooledJdbi, directWorkflowRepo, directTaskRepo, objectMapper, directStrategyRegistry, notifier)
         directEngine = WorkflowEngine(directPooledJdbi, directWorkflowRepo, directTaskRepo, objectMapper, notifier)
         directSweeper = Sweeper(directPooledJdbi, directWorkflowRepo, directTaskRepo, directBarrier, testSweeperConfig)

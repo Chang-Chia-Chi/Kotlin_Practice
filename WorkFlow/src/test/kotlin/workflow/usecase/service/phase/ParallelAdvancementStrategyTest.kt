@@ -10,7 +10,7 @@ import com.workflow.workflow.model.SequenceInfo
 import com.workflow.workflow.model.WorkflowDefinition
 import com.workflow.workflow.model.WorkflowRun
 import com.workflow.workflow.model.WorkflowStatus
-import com.workflow.workflow.usecase.service.phase.ParallelPhaseStrategy
+import com.workflow.workflow.usecase.service.phase.ParallelAdvancementStrategy
 import java.time.Duration
 import java.time.Instant
 import java.time.temporal.ChronoUnit
@@ -18,9 +18,9 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
 
-class ParallelPhaseStrategyTest {
+class ParallelAdvancementStrategyTest {
 
-    private val strategy = ParallelPhaseStrategy()
+    private val strategy = ParallelAdvancementStrategy()
     private val now = Instant.now().truncatedTo(ChronoUnit.MICROS)
 
     private fun context(

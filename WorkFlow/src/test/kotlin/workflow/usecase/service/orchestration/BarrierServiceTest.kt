@@ -17,7 +17,7 @@ import com.workflow.workflow.dsl.workflow
 import com.workflow.workflow.model.Task
 import com.workflow.workflow.usecase.service.orchestration.BarrierService
 import com.workflow.workflow.usecase.service.orchestration.WorkflowEngine
-import com.workflow.workflow.usecase.service.phase.PhaseStrategyRegistry
+import com.workflow.workflow.usecase.service.phase.AdvancementStrategyRegistry
 import com.workflow.worker.adapter.http.FakeDispatchNotifier
 import com.workflow.infrastructure.persistence.OracleTestContainer
 import kotlinx.coroutines.async
@@ -50,7 +50,7 @@ class BarrierServiceTest {
         .registerModule(JavaTimeModule())
     private lateinit var notifier: FakeDispatchNotifier
     private lateinit var barrier: BarrierService
-    private lateinit var strategyRegistry: PhaseStrategyRegistry
+    private lateinit var strategyRegistry: AdvancementStrategyRegistry
     private lateinit var engine: WorkflowEngine
 
     @BeforeAll
@@ -59,7 +59,7 @@ class BarrierServiceTest {
         workflowRepo = JdbiWorkflowRepository(jdbi)
         taskRepo = JdbiTaskRepository(jdbi)
         notifier = FakeDispatchNotifier()
-        strategyRegistry = PhaseStrategyRegistry()
+        strategyRegistry = AdvancementStrategyRegistry()
         barrier = BarrierService(jdbi, workflowRepo, taskRepo, objectMapper, strategyRegistry, notifier)
         engine = WorkflowEngine(jdbi, workflowRepo, taskRepo, objectMapper, notifier)
     }

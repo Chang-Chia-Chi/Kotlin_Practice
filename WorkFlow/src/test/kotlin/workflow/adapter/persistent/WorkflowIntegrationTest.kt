@@ -14,7 +14,7 @@ import com.workflow.workflow.dsl.workflow
 import com.workflow.workflow.usecase.service.orchestration.BarrierService
 import com.workflow.workflow.usecase.service.orchestration.Sweeper
 import com.workflow.workflow.usecase.service.orchestration.WorkflowEngine
-import com.workflow.workflow.usecase.service.phase.PhaseStrategyRegistry
+import com.workflow.workflow.usecase.service.phase.AdvancementStrategyRegistry
 import com.workflow.worker.adapter.http.FakeDispatchNotifier
 import com.workflow.infrastructure.persistence.OracleTestContainer
 import kotlinx.coroutines.async
@@ -66,7 +66,7 @@ class WorkflowIntegrationTest {
         workflowRepo = JdbiWorkflowRepository(jdbi)
         taskRepo = JdbiTaskRepository(jdbi)
         engine = WorkflowEngine(jdbi, workflowRepo, taskRepo, objectMapper, notifier)
-        barrier = BarrierService(jdbi, workflowRepo, taskRepo, objectMapper, PhaseStrategyRegistry(), notifier)
+        barrier = BarrierService(jdbi, workflowRepo, taskRepo, objectMapper, AdvancementStrategyRegistry(), notifier)
         sweeper = Sweeper(jdbi, workflowRepo, taskRepo, barrier, testSweeperConfig)
     }
 

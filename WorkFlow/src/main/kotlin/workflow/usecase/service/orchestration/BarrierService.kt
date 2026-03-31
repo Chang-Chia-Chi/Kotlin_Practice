@@ -18,7 +18,7 @@ import com.workflow.workflow.model.createTaskForActivity
 import com.workflow.workflow.usecase.port.inbound.orchestration.BarrierOperations
 import com.workflow.workflow.usecase.port.outbound.persistent.TaskRepository
 import com.workflow.workflow.usecase.port.outbound.persistent.WorkflowRepository
-import com.workflow.workflow.usecase.service.phase.PhaseStrategyRegistry
+import com.workflow.workflow.usecase.service.phase.AdvancementStrategyRegistry
 import jakarta.enterprise.context.ApplicationScoped
 import org.jdbi.v3.core.Handle
 import org.jdbi.v3.core.Jdbi
@@ -32,7 +32,7 @@ class BarrierService(
     private val workflowRepo: WorkflowRepository,
     private val taskRepo: TaskRepository,
     private val objectMapper: ObjectMapper,
-    private val strategyRegistry: PhaseStrategyRegistry,
+    private val strategyRegistry: AdvancementStrategyRegistry,
     private val notifier: DispatchNotifier,
 ) : BarrierOperations {
     private val log = LoggerFactory.getLogger(BarrierService::class.java)

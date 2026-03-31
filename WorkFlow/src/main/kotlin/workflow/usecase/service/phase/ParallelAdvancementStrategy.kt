@@ -5,9 +5,9 @@ import com.workflow.workflow.model.JoinPolicy
 import com.workflow.workflow.model.PhaseContext
 import com.workflow.workflow.model.advanceOrComplete
 import com.workflow.workflow.model.failOrAdvance
-import com.workflow.workflow.usecase.port.inbound.phase.PhaseStrategy
+import com.workflow.workflow.usecase.port.inbound.phase.AdvancementStrategy
 
-class ParallelPhaseStrategy : PhaseStrategy {
+class ParallelAdvancementStrategy : AdvancementStrategy {
 
     override fun resolve(context: PhaseContext): AdvancementDecision {
         val joinPolicy = context.currentSeqInfo.activity.joinPolicy
