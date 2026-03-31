@@ -159,7 +159,7 @@ abstract class StressTestBase {
         directPooledJdbi = Jdbi.create(directDataSource)
 
         // Toxiproxy wrapping Oracle — shared singleton, one container per JVM
-        oracleProxy = ToxiproxyTestContainer.newOracleProxy()
+        oracleProxy = ToxiproxyTestContainer.sharedOracleProxy()
 
         // Pooled JDBI through Toxiproxy (production components use this)
         Class.forName("oracle.jdbc.OracleDriver")

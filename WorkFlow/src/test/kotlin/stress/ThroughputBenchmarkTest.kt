@@ -19,6 +19,7 @@ import java.time.Instant
 import java.time.temporal.ChronoUnit
 
 @Tag("benchmark")
+@Tag("stress")
 class ThroughputBenchmarkTest : StressTestBase() {
     @JvmField
     @RegisterExtension

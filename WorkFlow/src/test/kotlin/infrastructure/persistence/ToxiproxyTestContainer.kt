@@ -8,8 +8,8 @@ import org.testcontainers.utility.DockerImageName
  * Shared Toxiproxy container for all stress tests.
  * Singleton object — one container per JVM / test run.
  *
- * Mirrors OracleTestContainer. Call [newOracleProxy] once per stress test class
- * in @BeforeAll to get an isolated proxy pointing at the shared Oracle container.
+ * Mirrors OracleTestContainer. Call [sharedOracleProxy] from @BeforeAll to get the shared
+ * proxy handle pointing at the Oracle container. Toxics are cleaned up in @AfterEach.
  * Do NOT stop the container in @AfterAll — it lives for the JVM lifetime.
  */
 object ToxiproxyTestContainer {
@@ -22,6 +22,6 @@ object ToxiproxyTestContainer {
             .apply { start() }
     }
 
-    fun newOracleProxy(): ToxiproxyContainer.ContainerProxy =
+    fun sharedOracleProxy(): ToxiproxyContainer.ContainerProxy =
         container.getProxy("host.testcontainers.internal", oraclePort)
 }
