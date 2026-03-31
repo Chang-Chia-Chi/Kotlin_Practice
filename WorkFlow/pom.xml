@@ -339,6 +339,7 @@
                     </systemPropertyVariables>
                     <!-- Pass JaCoCo agent argLine to the forked JVM -->
                     <argLine>@{argLine} --add-opens java.base/java.lang=ALL-UNNAMED</argLine>
+                    <excludedGroups>stress</excludedGroups>
                 </configuration>
             </plugin>
             <plugin>
@@ -376,6 +377,33 @@
                         <configuration>
                             <mainClass>com.workflow.benchmark.BenchmarkMainKt</mainClass>
                             <classpathScope>test</classpathScope>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+        <profile>
+            <id>stress</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <artifactId>maven-surefire-plugin</artifactId>
+                        <configuration>
+                            <groups>stress</groups>
+                            <excludedGroups/>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+        <profile>
+            <id>all-tests</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <artifactId>maven-surefire-plugin</artifactId>
+                        <configuration>
+                            <excludedGroups/>
                         </configuration>
                     </plugin>
                 </plugins>
