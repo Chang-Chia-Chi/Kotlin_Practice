@@ -88,14 +88,14 @@ val advanced = workflow {
 }
 ```
 
-Fan-out is an independent, named activity — not a nested block. `joinPolicy` and `failurePolicy` live on the fan-out target. `inputs {}` declares cross-activity data passing: the `InputResolver` determines single-value vs aggregate resolution from the workflow definition (linear activity = single task result, parallel activity = array of results).
+Fan-out is an independent, named activity — not a nested block. `joinPolicy` and `failurePolicy` live on the fan-out target. `inputs {}` declares cross-activity data passing: the `ActivityInputResolver` determines single-value vs aggregate resolution from the workflow definition (linear activity = single task result, parallel activity = array of results).
 
 ### Engine Core
 
-The engine is sequence-driven. Each activity maps to a sequence number; fan-out targets are `PARALLEL` phases, everything else is `LINEAR`. The `PhaseStrategyRegistry` dispatches to the appropriate strategy:
+The engine is sequence-driven. Each activity maps to a sequence number; fan-out targets are `PARALLEL` phases, everything else is `LINEAR`. The `AdvancementStrategyRegistry` dispatches to the appropriate strategy:
 
-- **`LinearPhaseStrategy`** — single task per sequence. Advances on completion, aborts on failure (unless `BEST_EFFORT`).
-- **`ParallelPhaseStrategy`** — N tasks per sequence. Evaluates `JoinPolicy` (All, Threshold, or Percentage) against completion counts. Advances only when the policy is satisfied.
+- **`LinearAdvancementStrategy`** — single task per sequence. Advances on completion, aborts on failure (unless `BEST_EFFORT`).
+- **`ParallelAdvancementStrategy`** — N tasks per sequence. Evaluates `JoinPolicy` (All, Threshold, or Percentage) against completion counts. Advances only when the policy is satisfied.
 
 Both strategies resolve to an `AdvancementDecision`: `Advance(nextSequence)`, `Complete`, or `Abort(reason)`. The barrier evaluates this after every task completion via a read-only MVCC aggregate query (zero locks during task execution) and advances the workflow via optimistic CAS on the single workflow row. At most one actor wins the CAS per phase — this is the only serialization point in the entire design.
 
@@ -132,8 +132,8 @@ Peer discovery uses a Kubernetes Endpoints Watch (`PeerRegistry`) for real-time 
 src/main/kotlin/
   config/         FrameworkConfig (SmallRye @ConfigMapping)
   dsl/            WorkflowDefinition data classes + type-safe builders
-  engine/         BarrierService, PhaseStrategyRegistry, InputResolver,
-                    Sweeper, WorkflowEngine, repositories, models
+  engine/         DefaultPhaseGate, AdvancementStrategyRegistry, ActivityInputResolver,
+                    WorkflowWatchdog, WorkflowEngine, repositories, models
   extension/      Coroutine flow utilities (unorderedMapAsync, takeUntilSignal)
   leader/         K8s Lease-based leader election + health check
   queryexporter/  Config-driven SQL → Prometheus metric exporter
