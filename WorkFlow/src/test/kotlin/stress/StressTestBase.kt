@@ -7,6 +7,7 @@ import com.workflow.infrastructure.shutdown.ShutdownConfig
 import com.workflow.worker.config.WorkerLoopConfig
 import com.workflow.workflow.config.WatchdogConfig
 import com.workflow.infrastructure.persistence.OracleTestContainer
+import com.workflow.infrastructure.persistence.ToxiproxyTestContainer
 import com.workflow.workflow.adapter.persistent.JdbiTaskRepository
 import com.workflow.workflow.adapter.persistent.JdbiWorkflowRepository
 import com.workflow.workflow.usecase.service.orchestration.DefaultPhaseGate
@@ -43,9 +44,7 @@ import org.junit.jupiter.api.BeforeAll
 import org.junit.jupiter.api.TestInstance
 import org.junit.jupiter.api.extension.ExtensionContext
 import org.junit.jupiter.api.extension.TestWatcher
-import org.testcontainers.Testcontainers
 import org.testcontainers.containers.ToxiproxyContainer
-import org.testcontainers.utility.DockerImageName
 import java.time.Duration
 import java.time.Instant
 import java.time.LocalDateTime
@@ -69,7 +68,6 @@ abstract class StressTestBase {
     protected lateinit var directJdbi: Jdbi
     private lateinit var directPooledJdbi: Jdbi
     protected lateinit var oracleProxy: ToxiproxyContainer.ContainerProxy
-    private lateinit var toxiproxyContainer: ToxiproxyContainer
     private lateinit var proxyDataSource: HikariDataSource
     private lateinit var directDataSource: HikariDataSource
     protected val faultInjector = FaultInjector()
@@ -160,15 +158,8 @@ abstract class StressTestBase {
         })
         directPooledJdbi = Jdbi.create(directDataSource)
 
-        // Toxiproxy wrapping Oracle
-        val oraclePort = OracleTestContainer.oracle.getMappedPort(1521)
-        Testcontainers.exposeHostPorts(oraclePort)
-
-        toxiproxyContainer = ToxiproxyContainer(
-            DockerImageName.parse("ghcr.io/shopify/toxiproxy:2.9.0"),
-        ).apply { start() }
-
-        oracleProxy = toxiproxyContainer.getProxy("host.testcontainers.internal", oraclePort)
+        // Toxiproxy wrapping Oracle — shared singleton, one container per JVM
+        oracleProxy = ToxiproxyTestContainer.newOracleProxy()
 
         // Pooled JDBI through Toxiproxy (production components use this)
         Class.forName("oracle.jdbc.OracleDriver")
@@ -207,7 +198,6 @@ abstract class StressTestBase {
     fun tearDownInfrastructure() {
         proxyDataSource.close()
         directDataSource.close()
-        toxiproxyContainer.stop()
     }
 
     @AfterEach
