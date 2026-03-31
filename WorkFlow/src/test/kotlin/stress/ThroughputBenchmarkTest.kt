@@ -1,11 +1,11 @@
 package com.workflow.stress
 
-import com.workflow.dsl.JoinPolicy
-import com.workflow.dsl.workflow
-import com.workflow.engine.workflowId
-import com.workflow.worker.HandlerInput
-import com.workflow.worker.HandlerOutput
-import com.workflow.worker.TransitionHandler
+import com.workflow.workflow.model.JoinPolicy
+import com.workflow.workflow.model.workflowId
+import com.workflow.workflow.dsl.workflow
+import com.workflow.worker.usecase.port.inbound.execution.HandlerInput
+import com.workflow.worker.usecase.port.inbound.execution.HandlerOutput
+import com.workflow.worker.usecase.port.inbound.execution.TransitionHandler
 import eu.rekawek.toxiproxy.model.ToxicDirection
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay

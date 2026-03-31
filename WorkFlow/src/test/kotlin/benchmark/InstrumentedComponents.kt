@@ -1,18 +1,20 @@
 package com.workflow.benchmark
 
 import com.fasterxml.jackson.databind.ObjectMapper
-import com.workflow.engine.BarrierService
-import com.workflow.engine.InputResolver
-import com.workflow.engine.PhaseStrategyRegistry
-import com.workflow.engine.SequenceInfo
-import com.workflow.engine.Task
-import com.workflow.engine.TaskRepository
-import com.workflow.engine.TaskStatus
-import com.workflow.engine.WorkflowRepository
-import com.workflow.worker.DispatchNotifier
-import com.workflow.worker.HandlerInput
-import com.workflow.worker.HandlerOutput
-import com.workflow.worker.TransitionHandler
+import com.workflow.workflow.adapter.persistent.JdbiTaskRepository
+import com.workflow.workflow.adapter.persistent.JdbiWorkflowRepository
+import com.workflow.workflow.model.SequenceInfo
+import com.workflow.workflow.model.Task
+import com.workflow.workflow.model.TaskStatus
+import com.workflow.workflow.usecase.port.outbound.persistent.TaskRepository
+import com.workflow.workflow.usecase.port.outbound.persistent.WorkflowRepository
+import com.workflow.workflow.usecase.service.orchestration.BarrierService
+import com.workflow.workflow.usecase.service.orchestration.InputResolver
+import com.workflow.workflow.usecase.service.phase.PhaseStrategyRegistry
+import com.workflow.worker.usecase.port.outbound.notification.DispatchNotifier
+import com.workflow.worker.usecase.port.inbound.execution.HandlerInput
+import com.workflow.worker.usecase.port.inbound.execution.HandlerOutput
+import com.workflow.worker.usecase.port.inbound.execution.TransitionHandler
 import org.jdbi.v3.core.Handle
 import org.jdbi.v3.core.Jdbi
 import java.time.Instant
@@ -20,7 +22,7 @@ import java.time.Instant
 class InstrumentedTaskRepository(
     jdbi: Jdbi,
     private val timer: PhaseTimer,
-) : TaskRepository(jdbi) {
+) : JdbiTaskRepository(jdbi) {
 
     override suspend fun claimNext(workerId: String, limit: Int, queueName: String): List<Task> =
         timer.suspendTime("task.claim") { super.claimNext(workerId, limit, queueName) }
@@ -32,7 +34,7 @@ class InstrumentedTaskRepository(
 class InstrumentedWorkflowRepository(
     jdbi: Jdbi,
     private val timer: PhaseTimer,
-) : WorkflowRepository(jdbi) {
+) : JdbiWorkflowRepository(jdbi) {
 
     override fun casAdvanceWithHandle(
         handle: Handle, id: String, expectedSequence: Int,

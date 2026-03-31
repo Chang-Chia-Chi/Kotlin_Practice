@@ -8,6 +8,6 @@ import io.quarkus.test.junit.QuarkusTestProfile
  */
 class ConfigOnlyTestProfile : QuarkusTestProfile {
     override fun getConfigOverrides(): Map<String, String> = mapOf(
-        "quarkus.arc.exclude-types" to "com.workflow.engine.**,com.workflow.worker.**,com.workflow.infrastructure.queryexporter.**",
+        "quarkus.arc.exclude-types" to "com.workflow.workflow.**,com.workflow.dispatch.**,com.workflow.worker.**,com.workflow.infrastructure.queryexporter.**",
     )
 }

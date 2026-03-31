@@ -1,8 +1,8 @@
 package com.workflow.stress
 
-import com.workflow.worker.HandlerInput
-import com.workflow.worker.HandlerOutput
-import com.workflow.worker.TransitionHandler
+import com.workflow.worker.usecase.port.inbound.execution.HandlerInput
+import com.workflow.worker.usecase.port.inbound.execution.HandlerOutput
+import com.workflow.worker.usecase.port.inbound.execution.TransitionHandler
 import java.time.Instant
 import java.util.concurrent.ConcurrentLinkedQueue
 import kotlin.test.fail

@@ -1,17 +1,19 @@
 package com.workflow.benchmark
 
-import com.workflow.engine.workflowId
+import com.workflow.workflow.model.workflowId
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule
 import com.fasterxml.jackson.module.kotlin.KotlinModule
-import com.workflow.config.FrameworkConfig
-import com.workflow.engine.OracleTestContainer
-import com.workflow.engine.PhaseStrategyRegistry
-import com.workflow.engine.Sweeper
-import com.workflow.engine.WorkflowEngine
-import com.workflow.worker.DispatchNotifier
-import com.workflow.worker.HandlerRegistry
-import com.workflow.worker.WorkerLoop
+import com.workflow.infrastructure.shutdown.ShutdownConfig
+import com.workflow.worker.config.WorkerLoopConfig
+import com.workflow.workflow.config.SweeperConfig
+import com.workflow.infrastructure.persistence.OracleTestContainer
+import com.workflow.workflow.usecase.service.orchestration.Sweeper
+import com.workflow.workflow.usecase.service.orchestration.WorkflowEngine
+import com.workflow.workflow.usecase.service.phase.PhaseStrategyRegistry
+import com.workflow.worker.usecase.port.outbound.notification.DispatchNotifier
+import com.workflow.worker.usecase.service.execution.HandlerRegistry
+import com.workflow.worker.usecase.service.execution.WorkerLoop
 import com.zaxxer.hikari.HikariConfig
 import com.zaxxer.hikari.HikariDataSource
 import kotlinx.coroutines.CoroutineScope
@@ -178,13 +180,15 @@ private fun runScenario(
     BenchmarkScenarios.registerHandlers(timedRegistry, objectMapper, point)
     wrapRegistryWithTiming(handlerRegistry, timedRegistry, timer)
 
-    val testConfig = createTestConfig(point.workers)
+    val testWorkerConfig = createTestWorkerConfig(point.workers)
+    val testShutdownConfig = createTestShutdownConfig()
+    val testSweeperConfig = createTestSweeperConfig()
     val workerScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    val loop = WorkerLoop(testConfig, taskRepo, handlerRegistry, barrier, metrics.registry,
+    val loop = WorkerLoop(testWorkerConfig, testShutdownConfig, taskRepo, handlerRegistry, barrier, metrics.registry,
         inputResolver, workflowRepo, objectMapper, notifier)
     val workerJob = loop.start(workerScope)
 
-    val sweeper = Sweeper(directJdbi, workflowRepo, taskRepo, barrier, testConfig)
+    val sweeper = Sweeper(directJdbi, workflowRepo, taskRepo, barrier, testSweeperConfig)
     val sweepJob = launch(Dispatchers.IO) {
         while (isActive) {
             delay(1000)
@@ -211,7 +215,7 @@ private fun runScenario(
 
 private suspend fun runBatch(
     point: MatrixPoint,
-    definition: com.workflow.dsl.WorkflowDefinition,
+    definition: com.workflow.workflow.model.WorkflowDefinition,
     engine: WorkflowEngine,
     harness: EnhancedBenchmarkHarness,
     timer: PhaseTimer,
@@ -237,7 +241,7 @@ private suspend fun runBatch(
 
 private suspend fun CoroutineScope.runSustained(
     point: MatrixPoint,
-    definition: com.workflow.dsl.WorkflowDefinition,
+    definition: com.workflow.workflow.model.WorkflowDefinition,
     engine: WorkflowEngine,
     harness: EnhancedBenchmarkHarness,
     timer: PhaseTimer,
@@ -361,34 +365,25 @@ private fun applyOverrides(point: MatrixPoint, config: BenchmarkRunConfig): Matr
     return p
 }
 
-private fun createTestConfig(workers: Int): FrameworkConfig = object : FrameworkConfig {
-    override fun serviceName() = "benchmark"
-    override fun worker() = object : FrameworkConfig.WorkerConfig {
-        override fun id() = "bench-worker"
-        override fun pollInterval() = Duration.ofMillis(100)
-        override fun fallbackPollInterval() = Duration.ofSeconds(5)
-        override fun concurrency() = workers
-        override fun batchSize() = 1
-        override fun maxBatchSize() = 16
-        override fun podIp() = "localhost"
-    }
-    override fun leaderElection() = object : FrameworkConfig.LeaderElectionConfig {
-        override fun namespace() = "default"
-        override fun leaseName() = "bench-lease"
-        override fun leaseDuration() = Duration.ofSeconds(15)
-        override fun renewDeadline() = Duration.ofSeconds(10)
-        override fun retryPeriod() = Duration.ofSeconds(2)
-        override fun healthThreshold() = Duration.ofSeconds(45)
-    }
-    override fun shutdown() = object : FrameworkConfig.ShutdownConfig {
-        override fun globalTimeout() = Duration.ofSeconds(30)
-        override fun leaderTeardownTimeout() = Duration.ofSeconds(5)
-    }
-    override fun sweeper() = object : FrameworkConfig.SweeperConfig {
-        override fun interval() = Duration.ofSeconds(1)
-        override fun gracePeriod() = Duration.ofSeconds(2)
-        override fun staleTaskThreshold() = Duration.ofSeconds(3)
-    }
+private fun createTestWorkerConfig(workers: Int): WorkerLoopConfig = object : WorkerLoopConfig {
+    override fun id() = "bench-worker"
+    override fun pollInterval() = Duration.ofMillis(100)
+    override fun fallbackPollInterval() = Duration.ofSeconds(5)
+    override fun concurrency() = workers
+    override fun batchSize() = 1
+    override fun maxBatchSize() = 16
+    override fun podIp() = "localhost"
+}
+
+private fun createTestShutdownConfig(): ShutdownConfig = object : ShutdownConfig {
+    override fun globalTimeout() = Duration.ofSeconds(30)
+    override fun leaderTeardownTimeout() = Duration.ofSeconds(5)
+}
+
+private fun createTestSweeperConfig(): SweeperConfig = object : SweeperConfig {
+    override fun interval() = Duration.ofSeconds(1)
+    override fun gracePeriod() = Duration.ofSeconds(2)
+    override fun staleTaskThreshold() = Duration.ofSeconds(3)
 }
 
 private fun dumpDiagnostics(directJdbi: Jdbi) {

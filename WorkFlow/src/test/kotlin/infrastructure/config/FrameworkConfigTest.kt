@@ -159,7 +159,7 @@ class FrameworkConfigDefaultsTest {
 
 class FrameworkConfigOverrideProfile : QuarkusTestProfile {
     override fun getConfigOverrides(): Map<String, String> = mapOf(
-        "quarkus.arc.exclude-types" to "com.workflow.engine.**,com.workflow.worker.**,com.workflow.infrastructure.queryexporter.**",
+        "quarkus.arc.exclude-types" to "com.workflow.workflow.**,com.workflow.dispatch.**,com.workflow.worker.**,com.workflow.infrastructure.queryexporter.**",
         "framework.worker.id" to "worker-42",
         "framework.worker.poll-interval" to "PT5S",
         "framework.worker.concurrency" to "16",

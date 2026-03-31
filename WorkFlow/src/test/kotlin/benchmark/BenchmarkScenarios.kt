@@ -1,13 +1,13 @@
 package com.workflow.benchmark
 
 import com.fasterxml.jackson.databind.ObjectMapper
-import com.workflow.dsl.JoinPolicy
-import com.workflow.dsl.WorkflowDefinition
-import com.workflow.dsl.workflow
-import com.workflow.worker.HandlerInput
-import com.workflow.worker.HandlerOutput
-import com.workflow.worker.HandlerRegistry
-import com.workflow.worker.TransitionHandler
+import com.workflow.workflow.model.JoinPolicy
+import com.workflow.workflow.model.WorkflowDefinition
+import com.workflow.workflow.dsl.workflow
+import com.workflow.worker.usecase.port.inbound.execution.HandlerInput
+import com.workflow.worker.usecase.port.inbound.execution.HandlerOutput
+import com.workflow.worker.usecase.service.execution.HandlerRegistry
+import com.workflow.worker.usecase.port.inbound.execution.TransitionHandler
 import kotlinx.coroutines.delay
 
 object BenchmarkScenarios {

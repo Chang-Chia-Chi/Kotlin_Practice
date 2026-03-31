@@ -3,25 +3,27 @@ package com.workflow.stress
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule
 import com.fasterxml.jackson.module.kotlin.KotlinModule
-import com.workflow.config.FrameworkConfig
-import com.workflow.engine.BarrierService
-import com.workflow.engine.InputResolver
-import com.workflow.engine.OracleTestContainer
-import com.workflow.engine.PhaseStrategyRegistry
-import com.workflow.engine.Sweeper
-import com.workflow.engine.TaskRepository
-import com.workflow.engine.WorkflowEngine
-import com.workflow.engine.WorkflowRepository
-import com.workflow.worker.DispatchNotifier
-import com.workflow.worker.DispatchNotifierImpl
-import com.workflow.worker.HandlerRegistry
-import com.workflow.worker.PeerRegistry
+import com.workflow.infrastructure.shutdown.ShutdownConfig
+import com.workflow.worker.config.WorkerLoopConfig
+import com.workflow.workflow.config.SweeperConfig
+import com.workflow.infrastructure.persistence.OracleTestContainer
+import com.workflow.workflow.adapter.persistent.JdbiTaskRepository
+import com.workflow.workflow.adapter.persistent.JdbiWorkflowRepository
+import com.workflow.workflow.usecase.service.orchestration.BarrierService
+import com.workflow.workflow.usecase.service.orchestration.InputResolver
+import com.workflow.workflow.usecase.service.orchestration.Sweeper
+import com.workflow.workflow.usecase.service.orchestration.WorkflowEngine
+import com.workflow.workflow.usecase.service.phase.PhaseStrategyRegistry
+import com.workflow.worker.usecase.port.outbound.notification.DispatchNotifier
+import com.workflow.worker.adapter.http.DispatchNotifierImpl
+import com.workflow.worker.usecase.service.execution.HandlerRegistry
+import com.workflow.worker.adapter.http.PeerRegistry
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.mock.MockEngine
 import io.ktor.client.engine.mock.respond
 import org.mockito.kotlin.mock
 import org.mockito.kotlin.whenever
-import com.workflow.worker.WorkerLoop
+import com.workflow.worker.usecase.service.execution.WorkerLoop
 import com.zaxxer.hikari.HikariConfig
 import com.zaxxer.hikari.HikariDataSource
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
@@ -74,9 +76,9 @@ abstract class StressTestBase {
 
     // --- Components (proxy path — for fault injection and resilience tests) ---
 
-    protected lateinit var workflowRepo: WorkflowRepository
+    protected lateinit var workflowRepo: JdbiWorkflowRepository
     protected lateinit var inputResolver: InputResolver
-    protected lateinit var taskRepo: TaskRepository
+    protected lateinit var taskRepo: JdbiTaskRepository
     protected lateinit var engine: WorkflowEngine
     protected lateinit var barrier: BarrierService
     protected lateinit var sweeper: Sweeper
@@ -85,8 +87,8 @@ abstract class StressTestBase {
 
     // --- Direct components (bypass proxy — for throughput benchmarks) ---
 
-    protected lateinit var directWorkflowRepo: WorkflowRepository
-    protected lateinit var directTaskRepo: TaskRepository
+    protected lateinit var directWorkflowRepo: JdbiWorkflowRepository
+    protected lateinit var directTaskRepo: JdbiTaskRepository
     protected lateinit var directEngine: WorkflowEngine
     protected lateinit var directBarrier: BarrierService
     protected lateinit var directSweeper: Sweeper
@@ -114,35 +116,30 @@ abstract class StressTestBase {
         DispatchNotifierImpl(registry, HttpClient(MockEngine { respond("") }))
     }
 
-    protected val testConfig: FrameworkConfig by lazy {
-        object : FrameworkConfig {
-            override fun serviceName() = "workflow-engine"
-            override fun worker() = object : FrameworkConfig.WorkerConfig {
-                override fun id() = "stress-worker"
-                override fun pollInterval() = this@StressTestBase.pollInterval
-                override fun concurrency() = workerConcurrency
-                override fun batchSize() = 1
-                override fun fallbackPollInterval() = this@StressTestBase.pollInterval
-                override fun maxBatchSize() = 16
-                override fun podIp() = "localhost"
-            }
-            override fun leaderElection() = object : FrameworkConfig.LeaderElectionConfig {
-                override fun namespace() = "default"
-                override fun leaseName() = "test-lease"
-                override fun leaseDuration() = Duration.ofSeconds(15)
-                override fun renewDeadline() = Duration.ofSeconds(10)
-                override fun retryPeriod() = Duration.ofSeconds(2)
-                override fun healthThreshold() = Duration.ofSeconds(45)
-            }
-            override fun shutdown() = object : FrameworkConfig.ShutdownConfig {
-                override fun globalTimeout() = Duration.ofSeconds(10)
-                override fun leaderTeardownTimeout() = Duration.ofSeconds(5)
-            }
-            override fun sweeper() = object : FrameworkConfig.SweeperConfig {
-                override fun interval() = this@StressTestBase.sweepInterval
-                override fun gracePeriod() = this@StressTestBase.gracePeriod
-                override fun staleTaskThreshold() = this@StressTestBase.staleTaskThreshold
-            }
+    protected val testWorkerConfig: WorkerLoopConfig by lazy {
+        object : WorkerLoopConfig {
+            override fun id() = "stress-worker"
+            override fun pollInterval() = this@StressTestBase.pollInterval
+            override fun concurrency() = workerConcurrency
+            override fun batchSize() = 1
+            override fun fallbackPollInterval() = this@StressTestBase.pollInterval
+            override fun maxBatchSize() = 16
+            override fun podIp() = "localhost"
+        }
+    }
+
+    protected val testShutdownConfig: ShutdownConfig by lazy {
+        object : ShutdownConfig {
+            override fun globalTimeout() = Duration.ofSeconds(10)
+            override fun leaderTeardownTimeout() = Duration.ofSeconds(5)
+        }
+    }
+
+    protected val testSweeperConfig: SweeperConfig by lazy {
+        object : SweeperConfig {
+            override fun interval() = this@StressTestBase.sweepInterval
+            override fun gracePeriod() = this@StressTestBase.gracePeriod
+            override fun staleTaskThreshold() = this@StressTestBase.staleTaskThreshold
         }
     }
 
@@ -187,23 +184,23 @@ abstract class StressTestBase {
         proxyJdbi = Jdbi.create(FaultInjectingDataSource(proxyDataSource, faultInjector))
 
         // Init components
-        workflowRepo = WorkflowRepository(proxyJdbi)
-        taskRepo = TaskRepository(proxyJdbi)
+        workflowRepo = JdbiWorkflowRepository(proxyJdbi)
+        taskRepo = JdbiTaskRepository(proxyJdbi)
         val strategyRegistry = PhaseStrategyRegistry()
         barrier = BarrierService(proxyJdbi, workflowRepo, taskRepo, objectMapper, strategyRegistry, notifier)
         engine = WorkflowEngine(proxyJdbi, workflowRepo, taskRepo, objectMapper, notifier)
-        sweeper = Sweeper(proxyJdbi, workflowRepo, taskRepo, barrier, testConfig)
+        sweeper = Sweeper(proxyJdbi, workflowRepo, taskRepo, barrier, testSweeperConfig)
         inputResolver = InputResolver(objectMapper)
         handlerRegistry = HandlerRegistry()
         meterRegistry = SimpleMeterRegistry()
 
         // Init direct components (bypass proxy — for throughput benchmarks)
-        directWorkflowRepo = WorkflowRepository(directPooledJdbi)
-        directTaskRepo = TaskRepository(directPooledJdbi)
+        directWorkflowRepo = JdbiWorkflowRepository(directPooledJdbi)
+        directTaskRepo = JdbiTaskRepository(directPooledJdbi)
         val directStrategyRegistry = PhaseStrategyRegistry()
         directBarrier = BarrierService(directPooledJdbi, directWorkflowRepo, directTaskRepo, objectMapper, directStrategyRegistry, notifier)
         directEngine = WorkflowEngine(directPooledJdbi, directWorkflowRepo, directTaskRepo, objectMapper, notifier)
-        directSweeper = Sweeper(directPooledJdbi, directWorkflowRepo, directTaskRepo, directBarrier, testConfig)
+        directSweeper = Sweeper(directPooledJdbi, directWorkflowRepo, directTaskRepo, directBarrier, testSweeperConfig)
     }
 
     @AfterAll
@@ -238,20 +235,20 @@ abstract class StressTestBase {
 
     // --- Worker lifecycle ---
 
-    protected fun startWorkers(handlerKey: String, handler: com.workflow.worker.TransitionHandler): List<Job> {
+    protected fun startWorkers(handlerKey: String, handler: com.workflow.worker.usecase.port.inbound.execution.TransitionHandler): List<Job> {
         handlerRegistry.register(handlerKey, handler)
         return startWorkerPool()
     }
 
     protected fun startWorkerPool(): List<Job> {
-        val loop = WorkerLoop(testConfig, taskRepo, handlerRegistry, barrier, meterRegistry, inputResolver, workflowRepo, objectMapper, notifier)
+        val loop = WorkerLoop(testWorkerConfig, testShutdownConfig, taskRepo, handlerRegistry, barrier, meterRegistry, inputResolver, workflowRepo, objectMapper, notifier)
         val job = loop.start(workerScope)
         workerJobs.add(job)
         return listOf(job)
     }
 
     protected fun startDirectWorkerPool(): List<Job> {
-        val loop = WorkerLoop(testConfig, directTaskRepo, handlerRegistry, directBarrier, meterRegistry, inputResolver, directWorkflowRepo, objectMapper, notifier)
+        val loop = WorkerLoop(testWorkerConfig, testShutdownConfig, directTaskRepo, handlerRegistry, directBarrier, meterRegistry, inputResolver, directWorkflowRepo, objectMapper, notifier)
         val job = loop.start(workerScope)
         workerJobs.add(job)
         return listOf(job)
