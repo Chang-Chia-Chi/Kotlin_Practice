@@ -3,7 +3,7 @@ package com.workflow.workflow.usecase.service.orchestration
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.workflow.infrastructure.persistence.inTransactionSuspend
 import com.workflow.infrastructure.persistence.withHandleSuspend
-import com.workflow.worker.usecase.port.outbound.notification.DispatchNotifier
+import com.workflow.worker.usecase.port.outbound.notification.WorkerNotifier
 import com.workflow.workflow.model.StartResult
 import com.workflow.workflow.model.WorkflowDefinition
 import com.workflow.workflow.model.WorkflowRun
@@ -27,7 +27,7 @@ class WorkflowEngine(
     private val workflowRepo: WorkflowRepository,
     private val taskRepo: TaskRepository,
     private val objectMapper: ObjectMapper,
-    private val notifier: DispatchNotifier,
+    private val notifier: WorkerNotifier,
 ) : WorkflowLifecycle {
 
     private val log = LoggerFactory.getLogger(WorkflowEngine::class.java)

@@ -17,8 +17,7 @@ import com.workflow.workflow.dsl.workflow
 import com.workflow.workflow.usecase.service.orchestration.DefaultPhaseGate
 import com.workflow.workflow.usecase.service.orchestration.WorkflowEngine
 import com.workflow.workflow.usecase.service.phase.AdvancementStrategyRegistry
-import com.workflow.worker.usecase.port.outbound.notification.DispatchNotifier
-import com.workflow.worker.adapter.http.FakeDispatchNotifier
+import com.workflow.worker.adapter.http.FakeWorkerNotifier
 import com.workflow.infrastructure.persistence.OracleTestContainer
 import kotlinx.coroutines.test.runTest
 import org.jdbi.v3.core.Jdbi
@@ -43,7 +42,7 @@ class WorkflowEngineTest {
     private val objectMapper = ObjectMapper()
         .registerModule(KotlinModule.Builder().build())
         .registerModule(JavaTimeModule())
-    private lateinit var notifier: FakeDispatchNotifier
+    private lateinit var notifier: FakeWorkerNotifier
     private lateinit var engine: WorkflowEngine
     private lateinit var phaseGate: DefaultPhaseGate
 
@@ -52,7 +51,7 @@ class WorkflowEngineTest {
         jdbi = OracleTestContainer.jdbi
         workflowRepo = JdbiWorkflowRepository(jdbi)
         taskRepo = JdbiTaskRepository(jdbi)
-        notifier = FakeDispatchNotifier()
+        notifier = FakeWorkerNotifier()
         engine = WorkflowEngine(jdbi, workflowRepo, taskRepo, objectMapper, notifier)
         phaseGate = DefaultPhaseGate(jdbi, workflowRepo, taskRepo, objectMapper, AdvancementStrategyRegistry(), notifier)
     }
@@ -253,7 +252,7 @@ class WorkflowEngineTest {
         assertFalse(result)
     }
 
-    // ── DispatchNotifier signal tests ────────────────────────────────────
+    // ── WorkerNotifier signal tests ──────────────────────────────────────
 
     @Test
     fun `startWorkflow signals notifier with first activity queue`() = runTest {

@@ -1,6 +1,6 @@
 package com.workflow.worker.adapter.http
 
-import com.workflow.worker.adapter.http.DispatchNotifierImpl
+import com.workflow.worker.adapter.http.HttpWorkerNotifier
 import com.workflow.worker.adapter.http.PeerRegistry
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.mock.MockEngine
@@ -24,16 +24,16 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 @OptIn(ExperimentalCoroutinesApi::class)
-class DispatchNotifierTest {
+class WorkerNotifierTest {
 
     private lateinit var peerRegistry: PeerRegistry
-    private lateinit var notifier: DispatchNotifierImpl
+    private lateinit var notifier: HttpWorkerNotifier
 
     @BeforeEach
     fun setup() {
         peerRegistry = mock()
         whenever(peerRegistry.peers()).thenReturn(emptyList())
-        notifier = DispatchNotifierImpl(peerRegistry, HttpClient(MockEngine { respond("") }))
+        notifier = HttpWorkerNotifier(peerRegistry, HttpClient(MockEngine { respond("") }))
     }
 
     // ── A. signal() wakes awaitWork() ────────────────────────────────────
@@ -133,7 +133,7 @@ class DispatchNotifierTest {
         fun `onRemoteSignal does not broadcast via HTTP`() = runTest {
             whenever(peerRegistry.peers()).thenReturn(listOf("10.0.0.2"))
             val engine = MockEngine { respond("") }
-            val notifier = DispatchNotifierImpl(peerRegistry, HttpClient(engine))
+            val notifier = HttpWorkerNotifier(peerRegistry, HttpClient(engine))
 
             notifier.onRemoteSignal("default")
 
@@ -173,7 +173,7 @@ class DispatchNotifierTest {
         fun `signal with peers calls HTTP post once per peer`() = runTest {
             whenever(peerRegistry.peers()).thenReturn(listOf("10.0.0.2", "10.0.0.3"))
             val engine = MockEngine { respond("") }
-            val notifier = DispatchNotifierImpl(peerRegistry, HttpClient(engine))
+            val notifier = HttpWorkerNotifier(peerRegistry, HttpClient(engine))
 
             notifier.signal("default")
 
@@ -192,7 +192,7 @@ class DispatchNotifierTest {
         fun `signal with no peers does not make HTTP calls`() = runTest {
             whenever(peerRegistry.peers()).thenReturn(emptyList())
             val engine = MockEngine { respond("") }
-            val notifier = DispatchNotifierImpl(peerRegistry, HttpClient(engine))
+            val notifier = HttpWorkerNotifier(peerRegistry, HttpClient(engine))
 
             notifier.signal("default")
 
@@ -203,7 +203,7 @@ class DispatchNotifierTest {
         fun `signal propagates queue name in HTTP path`() = runTest {
             whenever(peerRegistry.peers()).thenReturn(listOf("10.0.0.5"))
             val engine = MockEngine { respond("") }
-            val notifier = DispatchNotifierImpl(peerRegistry, HttpClient(engine))
+            val notifier = HttpWorkerNotifier(peerRegistry, HttpClient(engine))
 
             notifier.signal("priority-queue")
 
@@ -215,7 +215,7 @@ class DispatchNotifierTest {
         fun `signal URL-encodes queue name with special characters`() = runTest {
             whenever(peerRegistry.peers()).thenReturn(listOf("10.0.0.7"))
             val engine = MockEngine { respond("") }
-            val notifier = DispatchNotifierImpl(peerRegistry, HttpClient(engine))
+            val notifier = HttpWorkerNotifier(peerRegistry, HttpClient(engine))
 
             notifier.signal("queue with spaces")
 
@@ -227,7 +227,7 @@ class DispatchNotifierTest {
         fun `signal with HTTP failure does not throw`() = runTest {
             whenever(peerRegistry.peers()).thenReturn(listOf("10.0.0.9"))
             val engine = MockEngine { respond("", HttpStatusCode.InternalServerError) }
-            val notifier = DispatchNotifierImpl(peerRegistry, HttpClient(engine))
+            val notifier = HttpWorkerNotifier(peerRegistry, HttpClient(engine))
 
             notifier.signal("default") // should not throw
         }

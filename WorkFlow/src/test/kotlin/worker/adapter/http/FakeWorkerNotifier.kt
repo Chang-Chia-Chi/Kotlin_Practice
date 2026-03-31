@@ -1,19 +1,19 @@
 package com.workflow.worker.adapter.http
 
-import com.workflow.worker.usecase.port.outbound.notification.DispatchNotifier
+import com.workflow.worker.usecase.port.outbound.notification.WorkerNotifier
 import kotlinx.coroutines.delay
 import java.time.Duration
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * Test double for [DispatchNotifier] that provides deterministic control.
+ * Test double for [WorkerNotifier] that provides deterministic control.
  *
  * - [awaitWork] suspends for the requested [timeout] duration (simulating the
  *   real notifier's fallback poll interval), then returns [awaitReturns].
  *   This ensures the poll loop yields to the test scheduler between iterations.
  * - [signal] and [onRemoteSignal] count invocations for assertions.
  */
-class FakeDispatchNotifier : DispatchNotifier {
+class FakeWorkerNotifier : WorkerNotifier {
 
     @Volatile
     var awaitReturns: Boolean = false

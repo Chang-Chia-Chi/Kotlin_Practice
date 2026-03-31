@@ -1,6 +1,6 @@
 package com.workflow.worker.adapter.http
 
-import com.workflow.worker.usecase.port.outbound.notification.DispatchNotifier
+import com.workflow.worker.usecase.port.outbound.notification.WorkerNotifier
 import com.workflow.worker.usecase.port.outbound.peer.PeerDiscovery
 import io.ktor.client.HttpClient
 import io.ktor.client.request.post
@@ -17,11 +17,11 @@ import java.time.Duration
 import java.util.concurrent.ConcurrentHashMap
 
 @ApplicationScoped
-class HttpDispatchNotifier(
+class HttpWorkerNotifier(
     private val peerDiscovery: PeerDiscovery,
     private val httpClient: HttpClient,
-) : DispatchNotifier {
-    private val log = LoggerFactory.getLogger(HttpDispatchNotifier::class.java)
+) : WorkerNotifier {
+    private val log = LoggerFactory.getLogger(HttpWorkerNotifier::class.java)
 
     private val flows = ConcurrentHashMap<String, MutableSharedFlow<Unit>>()
 

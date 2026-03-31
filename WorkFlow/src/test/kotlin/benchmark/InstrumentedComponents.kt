@@ -11,7 +11,7 @@ import com.workflow.workflow.usecase.port.outbound.persistent.WorkflowRepository
 import com.workflow.workflow.usecase.service.orchestration.DefaultPhaseGate
 import com.workflow.workflow.usecase.service.orchestration.ActivityInputResolver
 import com.workflow.workflow.usecase.service.phase.AdvancementStrategyRegistry
-import com.workflow.worker.usecase.port.outbound.notification.DispatchNotifier
+import com.workflow.worker.usecase.port.outbound.notification.WorkerNotifier
 import com.workflow.worker.usecase.port.inbound.execution.HandlerInput
 import com.workflow.worker.usecase.port.inbound.execution.HandlerOutput
 import com.workflow.worker.usecase.port.inbound.execution.TransitionHandler
@@ -50,7 +50,7 @@ class InstrumentedDefaultPhaseGate(
     taskRepo: TaskRepository,
     objectMapper: ObjectMapper,
     strategyRegistry: AdvancementStrategyRegistry,
-    notifier: DispatchNotifier,
+    notifier: WorkerNotifier,
     private val timer: PhaseTimer,
 ) : DefaultPhaseGate(jdbi, workflowRepo, taskRepo, objectMapper, strategyRegistry, notifier) {
 

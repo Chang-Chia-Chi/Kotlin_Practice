@@ -18,7 +18,7 @@ import com.workflow.workflow.model.Task
 import com.workflow.workflow.usecase.service.orchestration.DefaultPhaseGate
 import com.workflow.workflow.usecase.service.orchestration.WorkflowEngine
 import com.workflow.workflow.usecase.service.phase.AdvancementStrategyRegistry
-import com.workflow.worker.adapter.http.FakeDispatchNotifier
+import com.workflow.worker.adapter.http.FakeWorkerNotifier
 import com.workflow.infrastructure.persistence.OracleTestContainer
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -48,7 +48,7 @@ class DefaultPhaseGateTest {
     private val objectMapper = ObjectMapper()
         .registerModule(KotlinModule.Builder().build())
         .registerModule(JavaTimeModule())
-    private lateinit var notifier: FakeDispatchNotifier
+    private lateinit var notifier: FakeWorkerNotifier
     private lateinit var barrier: DefaultPhaseGate
     private lateinit var strategyRegistry: AdvancementStrategyRegistry
     private lateinit var engine: WorkflowEngine
@@ -58,7 +58,7 @@ class DefaultPhaseGateTest {
         jdbi = OracleTestContainer.jdbi
         workflowRepo = JdbiWorkflowRepository(jdbi)
         taskRepo = JdbiTaskRepository(jdbi)
-        notifier = FakeDispatchNotifier()
+        notifier = FakeWorkerNotifier()
         strategyRegistry = AdvancementStrategyRegistry()
         barrier = DefaultPhaseGate(jdbi, workflowRepo, taskRepo, objectMapper, strategyRegistry, notifier)
         engine = WorkflowEngine(jdbi, workflowRepo, taskRepo, objectMapper, notifier)
@@ -931,11 +931,11 @@ class DefaultPhaseGateTest {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // DispatchNotifier Signal Tests
+    // WorkerNotifier Signal Tests
     // ═══════════════════════════════════════════════════════════════════════
 
     @Nested
-    inner class DispatchNotifierSignaling {
+    inner class WorkerNotifierSignaling {
 
         @Test
         fun `onTaskCompleted last task in phase signals notifier`() = runTest {

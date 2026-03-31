@@ -4,7 +4,7 @@ import kotlinx.coroutines.supervisorScope
 import java.time.Duration
 
 /**
- * Notification layer for event-driven task dispatch.
+ * Notification layer for event-driven task wake-up.
  *
  * Workers suspend on a per-queue flow and wake instantly
  * when signaled. Three signal sources:
@@ -17,7 +17,7 @@ import java.time.Duration
  * degrades performance to fallback-poll mode (5s) but never affects
  * task claiming via SELECT FOR UPDATE SKIP LOCKED.
  */
-interface DispatchNotifier {
+interface WorkerNotifier {
     /**
      * Signal that new work is available on [queueName].
      * Wakes local workers immediately and broadcasts to all peer pods

@@ -18,7 +18,7 @@ import com.workflow.workflow.usecase.port.outbound.persistent.WorkflowRepository
 import com.workflow.workflow.usecase.service.orchestration.DefaultPhaseGate
 import com.workflow.workflow.usecase.service.orchestration.ActivityInputResolver
 import com.workflow.infrastructure.shutdown.ShutdownSignal
-import com.workflow.worker.adapter.http.FakeDispatchNotifier
+import com.workflow.worker.adapter.http.FakeWorkerNotifier
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineExceptionHandler
@@ -73,7 +73,7 @@ class WorkerLoopTest {
     private lateinit var activityInputResolver: ActivityInputResolver
     private lateinit var workflowRepo: WorkflowRepository
     private lateinit var objectMapper: ObjectMapper
-    private lateinit var notifier: FakeDispatchNotifier
+    private lateinit var notifier: FakeWorkerNotifier
     private lateinit var workerLoop: WorkerLoop
 
     private val pollInterval = Duration.ofSeconds(1)
@@ -106,7 +106,7 @@ class WorkerLoopTest {
         objectMapper = ObjectMapper()
             .registerModule(com.fasterxml.jackson.module.kotlin.KotlinModule.Builder().build())
             .registerModule(com.fasterxml.jackson.datatype.jsr310.JavaTimeModule())
-        notifier = FakeDispatchNotifier()
+        notifier = FakeWorkerNotifier()
 
         // Default stub: return a no-inputs workflow so resolveInputs cache is populated
         val defaultDef = workflow { activity("default") { transition("order.validate") } }
@@ -1194,10 +1194,10 @@ class WorkerLoopTest {
         }
     }
 
-    // ── S. DispatchNotifier Integration ──────────────────────────────────
+    // ── S. WorkerNotifier Integration ────────────────────────────────────
 
     @Nested
-    inner class DispatchNotifierIntegration {
+    inner class WorkerNotifierIntegration {
 
         @Test
         fun `empty queue calls awaitWork with fallbackPollInterval and correct queue`() = runTest {

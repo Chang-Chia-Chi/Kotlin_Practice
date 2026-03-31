@@ -11,7 +11,7 @@ import com.workflow.infrastructure.persistence.OracleTestContainer
 import com.workflow.workflow.usecase.service.orchestration.WorkflowWatchdog
 import com.workflow.workflow.usecase.service.orchestration.WorkflowEngine
 import com.workflow.workflow.usecase.service.phase.AdvancementStrategyRegistry
-import com.workflow.worker.usecase.port.outbound.notification.DispatchNotifier
+import com.workflow.worker.usecase.port.outbound.notification.WorkerNotifier
 import com.workflow.worker.usecase.service.execution.HandlerRegistry
 import com.workflow.worker.usecase.service.execution.WorkerLoop
 import com.zaxxer.hikari.HikariConfig
@@ -30,7 +30,7 @@ import java.time.Duration
 import java.time.Instant
 import java.util.concurrent.ConcurrentHashMap
 
-private class NoOpDispatchNotifier : DispatchNotifier {
+private class NoOpWorkerNotifier : WorkerNotifier {
     override suspend fun signal(queueName: String) {}
     override fun onRemoteSignal(queueName: String) {}
     override suspend fun awaitWork(queueName: String, timeout: Duration): Boolean = false
@@ -64,7 +64,7 @@ fun main() {
         .registerModule(JavaTimeModule())
 
     val timer = PhaseTimer()
-    val notifier = NoOpDispatchNotifier()
+    val notifier = NoOpWorkerNotifier()
     val workflowRepo = InstrumentedWorkflowRepository(pooledJdbi, timer)
     val taskRepo = InstrumentedTaskRepository(pooledJdbi, timer)
     val strategyRegistry = AdvancementStrategyRegistry()
@@ -171,7 +171,7 @@ private fun runScenario(
     directJdbi: Jdbi,
     timeout: Duration,
     config: BenchmarkRunConfig,
-    notifier: DispatchNotifier,
+    notifier: WorkerNotifier,
 ): ScenarioResult? = runBlocking(Dispatchers.Default) {
     val definition = BenchmarkScenarios.definitionFor(point)
 

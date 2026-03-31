@@ -3,7 +3,7 @@ package com.workflow.workflow.usecase.service.orchestration
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.readValue
 import com.workflow.infrastructure.persistence.inTransactionSuspend
-import com.workflow.worker.usecase.port.outbound.notification.DispatchNotifier
+import com.workflow.worker.usecase.port.outbound.notification.WorkerNotifier
 import com.workflow.workflow.model.AdvancementDecision
 import com.workflow.workflow.model.PhaseContext
 import com.workflow.workflow.model.PhaseType
@@ -33,7 +33,7 @@ class DefaultPhaseGate(
     private val taskRepo: TaskRepository,
     private val objectMapper: ObjectMapper,
     private val strategyRegistry: AdvancementStrategyRegistry,
-    private val notifier: DispatchNotifier,
+    private val notifier: WorkerNotifier,
 ) : PhaseGate {
     private val log = LoggerFactory.getLogger(DefaultPhaseGate::class.java)
 

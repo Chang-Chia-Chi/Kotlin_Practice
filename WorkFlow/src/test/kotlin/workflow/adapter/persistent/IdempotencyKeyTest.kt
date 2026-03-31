@@ -8,7 +8,7 @@ import com.workflow.workflow.adapter.persistent.JdbiWorkflowRepository
 import com.workflow.workflow.model.StartResult
 import com.workflow.workflow.dsl.workflow
 import com.workflow.workflow.usecase.service.orchestration.WorkflowEngine
-import com.workflow.worker.adapter.http.FakeDispatchNotifier
+import com.workflow.worker.adapter.http.FakeWorkerNotifier
 import com.workflow.infrastructure.persistence.OracleTestContainer
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.AfterEach
@@ -25,7 +25,7 @@ class IdempotencyKeyTest {
     private lateinit var engine: WorkflowEngine
     private lateinit var workflowRepo: JdbiWorkflowRepository
     private lateinit var taskRepo: JdbiTaskRepository
-    private lateinit var notifier: FakeDispatchNotifier
+    private lateinit var notifier: FakeWorkerNotifier
     private val objectMapper = ObjectMapper()
         .registerModule(KotlinModule.Builder().build())
         .registerModule(JavaTimeModule())
@@ -35,7 +35,7 @@ class IdempotencyKeyTest {
     fun setup() {
         workflowRepo = JdbiWorkflowRepository(jdbi)
         taskRepo = JdbiTaskRepository(jdbi)
-        notifier = FakeDispatchNotifier()
+        notifier = FakeWorkerNotifier()
         engine = WorkflowEngine(jdbi, workflowRepo, taskRepo, objectMapper, notifier)
     }
 

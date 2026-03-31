@@ -19,7 +19,7 @@ import com.workflow.infrastructure.coroutine.unorderedMapAsync
 import com.workflow.infrastructure.shutdown.ShutdownParticipant
 import com.workflow.infrastructure.shutdown.ShutdownSignal
 import com.workflow.worker.usecase.port.inbound.execution.HandlerInput
-import com.workflow.worker.usecase.port.outbound.notification.DispatchNotifier
+import com.workflow.worker.usecase.port.outbound.notification.WorkerNotifier
 import io.micrometer.core.instrument.Counter
 import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.Tags
@@ -97,7 +97,7 @@ class WorkerLoop(
     private val activityInputResolver: ActivityInputResolver,
     private val workflowRepo: WorkflowRepository,
     private val objectMapper: ObjectMapper,
-    private val notifier: DispatchNotifier,
+    private val notifier: WorkerNotifier,
 ) : ShutdownParticipant {
     private val log = LoggerFactory.getLogger(WorkerLoop::class.java)
 

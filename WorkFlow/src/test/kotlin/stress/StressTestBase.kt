@@ -14,8 +14,8 @@ import com.workflow.workflow.usecase.service.orchestration.ActivityInputResolver
 import com.workflow.workflow.usecase.service.orchestration.WorkflowWatchdog
 import com.workflow.workflow.usecase.service.orchestration.WorkflowEngine
 import com.workflow.workflow.usecase.service.phase.AdvancementStrategyRegistry
-import com.workflow.worker.usecase.port.outbound.notification.DispatchNotifier
-import com.workflow.worker.adapter.http.DispatchNotifierImpl
+import com.workflow.worker.usecase.port.outbound.notification.WorkerNotifier
+import com.workflow.worker.adapter.http.HttpWorkerNotifier
 import com.workflow.worker.usecase.service.execution.HandlerRegistry
 import com.workflow.worker.adapter.http.PeerRegistry
 import io.ktor.client.HttpClient
@@ -110,10 +110,10 @@ abstract class StressTestBase {
     protected open val pollInterval: Duration = Duration.ofMillis(200)
     protected open val workerConcurrency: Int = scale.workers
 
-    protected val notifier: DispatchNotifier = run {
+    protected val notifier: WorkerNotifier = run {
         val registry = mock<PeerRegistry>()
         whenever(registry.peers()).thenReturn(emptyList())
-        DispatchNotifierImpl(registry, HttpClient(MockEngine { respond("") }))
+        HttpWorkerNotifier(registry, HttpClient(MockEngine { respond("") }))
     }
 
     protected val testWorkerConfig: WorkerLoopConfig by lazy {

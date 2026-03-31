@@ -15,7 +15,7 @@ import com.workflow.workflow.usecase.service.orchestration.DefaultPhaseGate
 import com.workflow.workflow.usecase.service.orchestration.WorkflowWatchdog
 import com.workflow.workflow.usecase.service.orchestration.WorkflowEngine
 import com.workflow.workflow.usecase.service.phase.AdvancementStrategyRegistry
-import com.workflow.worker.adapter.http.FakeDispatchNotifier
+import com.workflow.worker.adapter.http.FakeWorkerNotifier
 import com.workflow.infrastructure.persistence.OracleTestContainer
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -52,7 +52,7 @@ class WorkflowIntegrationTest {
     private val gracePeriod = Duration.ofMinutes(2)
     private val staleTaskThreshold = Duration.ofMinutes(10)
 
-    private val notifier = FakeDispatchNotifier()
+    private val notifier = FakeWorkerNotifier()
 
     private val testWatchdogConfig = object : WatchdogConfig {
         override fun interval(): Duration = Duration.ofSeconds(30)
