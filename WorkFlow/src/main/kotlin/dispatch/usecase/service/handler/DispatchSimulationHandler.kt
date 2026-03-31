@@ -2,11 +2,11 @@ package com.workflow.dispatch.usecase.service.handler
 
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.workflow.dispatch.usecase.port.outbound.persistence.BaselineProvider
-import com.workflow.dispatch.usecase.port.outbound.persistence.CandidateQueryPort
+import com.workflow.dispatch.usecase.port.outbound.persistence.CandidateRepository
 import com.workflow.dispatch.usecase.port.outbound.persistence.DispatchConfigRepository
 import com.workflow.dispatch.usecase.port.outbound.persistence.SimulationResultStore
 import com.workflow.dispatch.usecase.port.outbound.storage.CsvFormatter
-import com.workflow.dispatch.usecase.port.outbound.storage.StoragePort
+import com.workflow.dispatch.usecase.port.outbound.storage.StorageGateway
 import com.workflow.dispatch.usecase.service.simulation.SimulationEngine
 import com.workflow.worker.usecase.port.inbound.execution.HandlerInput
 import com.workflow.worker.usecase.port.inbound.execution.HandlerOutput
@@ -16,11 +16,11 @@ import jakarta.enterprise.context.ApplicationScoped
 @ApplicationScoped
 class DispatchSimulationHandler(
     private val configRepo: DispatchConfigRepository,
-    private val candidateQuery: CandidateQueryPort,
+    private val candidateQuery: CandidateRepository,
     private val baselineProvider: BaselineProvider,
     private val simulationEngine: SimulationEngine,
     private val resultStore: SimulationResultStore,
-    private val storage: StoragePort,
+    private val storage: StorageGateway,
     private val csvFormatter: CsvFormatter,
     private val objectMapper: ObjectMapper,
 ) : TransitionHandler {

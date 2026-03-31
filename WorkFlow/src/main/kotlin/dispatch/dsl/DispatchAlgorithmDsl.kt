@@ -5,8 +5,8 @@ import com.workflow.dispatch.usecase.port.inbound.algorithm.CandidateMatcher
 import com.workflow.dispatch.usecase.port.inbound.algorithm.DispatchAlgorithm
 import com.workflow.dispatch.usecase.port.inbound.algorithm.GapComputer
 import com.workflow.dispatch.usecase.port.inbound.algorithm.TerminationStrategy
-import com.workflow.dispatch.usecase.service.algorithm.DefaultCandidateMatcher
-import com.workflow.dispatch.usecase.service.algorithm.DefaultDispatchAlgorithm
+import com.workflow.dispatch.usecase.service.algorithm.FirstFitCandidateMatcher
+import com.workflow.dispatch.usecase.service.algorithm.GapBasedDispatchAlgorithm
 import com.workflow.dispatch.usecase.service.algorithm.FailFastTermination
 import com.workflow.dispatch.usecase.service.algorithm.QtyCandidateMatcher
 import com.workflow.dispatch.usecase.service.algorithm.QtyGapComputer
@@ -19,7 +19,7 @@ class AlgorithmBuilder(mode: DispatchMode) {
     }
     var candidateMatcher: CandidateMatcher = when (mode) {
         DispatchMode.QTY -> QtyCandidateMatcher()
-        DispatchMode.RATIO -> DefaultCandidateMatcher()
+        DispatchMode.RATIO -> FirstFitCandidateMatcher()
     }
     var terminationStrategy: TerminationStrategy = FailFastTermination()
 }
@@ -29,7 +29,7 @@ fun dispatchAlgorithm(
     block: AlgorithmBuilder.() -> Unit = {},
 ): DispatchAlgorithm {
     val builder = AlgorithmBuilder(mode).apply(block)
-    return DefaultDispatchAlgorithm(
+    return GapBasedDispatchAlgorithm(
         gapComputer = builder.gapComputer,
         candidateMatcher = builder.candidateMatcher,
         terminationStrategy = builder.terminationStrategy,

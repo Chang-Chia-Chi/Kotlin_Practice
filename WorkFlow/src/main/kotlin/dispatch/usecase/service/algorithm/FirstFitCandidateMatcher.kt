@@ -6,7 +6,7 @@ import com.workflow.dispatch.model.SiteTarget
 import com.workflow.dispatch.model.TargetBomAllocation
 import com.workflow.dispatch.usecase.port.inbound.algorithm.CandidateMatcher
 
-class DefaultCandidateMatcher : CandidateMatcher {
+class FirstFitCandidateMatcher : CandidateMatcher {
     override fun findCandidate(
         index: CandidateIndex,
         sourceBomConstraint: String?,

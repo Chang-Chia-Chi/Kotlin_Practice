@@ -1,15 +1,15 @@
 package com.workflow.dispatch.adapter.storage
 
-import com.workflow.dispatch.adapter.storage.DefaultCsvFormatter
+import com.workflow.dispatch.adapter.storage.DispatchCsvFormatter
 import com.workflow.dispatch.model.DispatchDecision
 import org.junit.jupiter.api.Test
 import java.math.BigDecimal
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
-class DefaultCsvFormatterTest {
+class DispatchCsvFormatterTest {
 
-    private val formatter = DefaultCsvFormatter()
+    private val formatter = DispatchCsvFormatter()
 
     @Test
     fun `formats decisions to CSV with header row`() {

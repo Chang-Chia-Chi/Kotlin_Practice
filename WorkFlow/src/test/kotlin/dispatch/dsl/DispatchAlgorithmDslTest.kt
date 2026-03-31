@@ -5,8 +5,8 @@ import com.workflow.dispatch.model.DispatchMode
 import com.workflow.dispatch.model.SimulationContext
 import com.workflow.dispatch.model.TerminationDecision
 import com.workflow.dispatch.usecase.port.inbound.algorithm.TerminationStrategy
-import com.workflow.dispatch.usecase.service.algorithm.DefaultCandidateMatcher
-import com.workflow.dispatch.usecase.service.algorithm.DefaultDispatchAlgorithm
+import com.workflow.dispatch.usecase.service.algorithm.FirstFitCandidateMatcher
+import com.workflow.dispatch.usecase.service.algorithm.GapBasedDispatchAlgorithm
 import com.workflow.dispatch.usecase.service.algorithm.FailFastTermination
 import com.workflow.dispatch.usecase.service.algorithm.QtyCandidateMatcher
 import org.junit.jupiter.api.Test
@@ -16,15 +16,15 @@ class DispatchAlgorithmDslTest {
 
     @Test
     fun `QTY mode creates algorithm with QtyGapComputer and QtyCandidateMatcher`() {
-        val algo = dispatchAlgorithm(DispatchMode.QTY) as DefaultDispatchAlgorithm
+        val algo = dispatchAlgorithm(DispatchMode.QTY) as GapBasedDispatchAlgorithm
         assertIs<QtyCandidateMatcher>(algo.candidateMatcher)
         assertIs<FailFastTermination>(algo.terminationStrategy)
     }
 
     @Test
-    fun `RATIO mode creates algorithm with DefaultCandidateMatcher`() {
-        val algo = dispatchAlgorithm(DispatchMode.RATIO) as DefaultDispatchAlgorithm
-        assertIs<DefaultCandidateMatcher>(algo.candidateMatcher)
+    fun `RATIO mode creates algorithm with FirstFitCandidateMatcher`() {
+        val algo = dispatchAlgorithm(DispatchMode.RATIO) as GapBasedDispatchAlgorithm
+        assertIs<FirstFitCandidateMatcher>(algo.candidateMatcher)
     }
 
     @Test
@@ -35,7 +35,7 @@ class DispatchAlgorithmDslTest {
                     context: SimulationContext,
                 ) = TerminationDecision.SKIP_SITE
             }
-        } as DefaultDispatchAlgorithm
+        } as GapBasedDispatchAlgorithm
         assertIs<QtyCandidateMatcher>(algo.candidateMatcher)
         assert(algo.terminationStrategy !is FailFastTermination)
         val decision = algo.terminationStrategy.onNoCandidate(

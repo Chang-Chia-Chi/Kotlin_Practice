@@ -10,7 +10,7 @@ import com.workflow.dispatch.usecase.port.inbound.algorithm.GapComputer
 import com.workflow.dispatch.usecase.port.inbound.algorithm.TerminationStrategy
 import java.math.BigDecimal
 
-class DefaultDispatchAlgorithm(
+class GapBasedDispatchAlgorithm(
     private val gapComputer: GapComputer,
     override val candidateMatcher: CandidateMatcher,
     override val terminationStrategy: TerminationStrategy,
@@ -27,7 +27,7 @@ class DefaultDispatchAlgorithm(
     ): TargetSelection {
         val siteEntries = siteTargets.map { st ->
             val current = siteCurrents[st.siteId] ?: BigDecimal.ZERO
-            SelectionEntry(st.siteId, gapComputer.computeGap(current, st.target, total), st.target)
+            GapEntry(st.siteId, gapComputer.computeGap(current, st.target, total), st.target)
         }
         val siteId = selectByGap(siteEntries, lastSiteId) ?: return TargetSelection.NoTarget
         val siteGap = siteEntries.first { it.id == siteId }.gap
@@ -38,7 +38,7 @@ class DefaultDispatchAlgorithm(
         val bomTotal = siteCurrents[siteId] ?: BigDecimal.ZERO
         val bomEntries = bomMapping.targetAllocations.map { alloc ->
             val bomCurrent = bomCurrents[SiteBomKey(siteId, alloc.targetBomId)] ?: BigDecimal.ZERO
-            SelectionEntry(alloc.targetBomId, gapComputer.computeGap(bomCurrent, alloc.target, bomTotal), alloc.target)
+            GapEntry(alloc.targetBomId, gapComputer.computeGap(bomCurrent, alloc.target, bomTotal), alloc.target)
         }
         val targetBomId = selectByGap(bomEntries, lastBomId) ?: return TargetSelection.NoTarget
         val bomGap = bomEntries.first { it.id == targetBomId }.gap

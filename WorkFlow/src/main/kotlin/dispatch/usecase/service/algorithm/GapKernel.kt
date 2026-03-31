@@ -2,17 +2,17 @@ package com.workflow.dispatch.usecase.service.algorithm
 
 import java.math.BigDecimal
 
-data class SelectionEntry(
+data class GapEntry(
     val id: String,
     val gap: BigDecimal,
     val target: BigDecimal,
 )
 
-fun selectByGap(entries: List<SelectionEntry>, lastSelected: String?): String? {
+fun selectByGap(entries: List<GapEntry>, lastSelected: String?): String? {
     if (entries.isEmpty()) return null
     return entries
         .sortedWith(
-            compareBy<SelectionEntry> { it.gap }
+            compareBy<GapEntry> { it.gap }
                 .thenByDescending { it.target }
                 .thenByDescending { it.id == lastSelected },
         )

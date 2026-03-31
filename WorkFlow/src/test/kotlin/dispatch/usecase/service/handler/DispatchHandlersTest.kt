@@ -4,12 +4,12 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.KotlinModule
 import com.workflow.dispatch.model.*
 import com.workflow.dispatch.usecase.port.outbound.persistence.BaselineProvider
-import com.workflow.dispatch.usecase.port.outbound.persistence.CandidateQueryPort
+import com.workflow.dispatch.usecase.port.outbound.persistence.CandidateRepository
 import com.workflow.dispatch.usecase.port.outbound.persistence.DispatchConfigRepository
 import com.workflow.dispatch.usecase.port.outbound.persistence.SimulationResultStore
 import com.workflow.dispatch.usecase.port.outbound.storage.CsvFormatter
 import com.workflow.dispatch.usecase.port.outbound.storage.ParquetFormatter
-import com.workflow.dispatch.usecase.port.outbound.storage.StoragePort
+import com.workflow.dispatch.usecase.port.outbound.storage.StorageGateway
 import com.workflow.dispatch.usecase.service.handler.DispatchJoinHandler
 import com.workflow.dispatch.usecase.service.handler.DispatchScatterHandler
 import com.workflow.dispatch.usecase.service.handler.DispatchSimulationHandler
@@ -49,11 +49,11 @@ class DispatchHandlersTest {
     @Test
     fun `simulation handler calls engine and uploads CSV`() = runTest {
         val configRepo = mock<DispatchConfigRepository>()
-        val candidateQuery = mock<CandidateQueryPort>()
+        val candidateQuery = mock<CandidateRepository>()
         val baselineProvider = mock<BaselineProvider>()
         val simulationEngine = mock<SimulationEngine>()
         val resultStore = mock<SimulationResultStore>()
-        val storage = mock<StoragePort>()
+        val storage = mock<StorageGateway>()
         val csvFormatter = mock<CsvFormatter>()
 
         val config = DispatchConfig("cfg1", DispatchMode.QTY, "default", "bom",
@@ -84,7 +84,7 @@ class DispatchHandlersTest {
     @Test
     fun `join handler uploads parquet with merged results`() = runTest {
         val resultStore = mock<SimulationResultStore>()
-        val storage = mock<StoragePort>()
+        val storage = mock<StorageGateway>()
         val parquetFormatter = mock<ParquetFormatter>()
 
         whenever(resultStore.findByBatchToken("2026-03-29T06:00:00")).thenReturn(emptyList())

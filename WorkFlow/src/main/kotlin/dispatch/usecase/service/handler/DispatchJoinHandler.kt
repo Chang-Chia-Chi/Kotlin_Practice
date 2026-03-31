@@ -3,7 +3,7 @@ package com.workflow.dispatch.usecase.service.handler
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.workflow.dispatch.usecase.port.outbound.persistence.SimulationResultStore
 import com.workflow.dispatch.usecase.port.outbound.storage.ParquetFormatter
-import com.workflow.dispatch.usecase.port.outbound.storage.StoragePort
+import com.workflow.dispatch.usecase.port.outbound.storage.StorageGateway
 import com.workflow.worker.usecase.port.inbound.execution.HandlerInput
 import com.workflow.worker.usecase.port.inbound.execution.HandlerOutput
 import com.workflow.worker.usecase.port.inbound.execution.TransitionHandler
@@ -12,7 +12,7 @@ import jakarta.enterprise.context.ApplicationScoped
 @ApplicationScoped
 class DispatchJoinHandler(
     private val resultStore: SimulationResultStore,
-    private val storage: StoragePort,
+    private val storage: StorageGateway,
     private val parquetFormatter: ParquetFormatter,
     private val objectMapper: ObjectMapper,
 ) : TransitionHandler {

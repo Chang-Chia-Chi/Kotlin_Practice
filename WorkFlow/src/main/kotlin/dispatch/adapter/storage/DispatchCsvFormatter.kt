@@ -8,7 +8,7 @@ import com.workflow.dispatch.usecase.port.outbound.storage.CsvFormatter
 import jakarta.enterprise.context.ApplicationScoped
 
 @ApplicationScoped
-class DefaultCsvFormatter : CsvFormatter {
+class DispatchCsvFormatter : CsvFormatter {
 
     private val csvMapper = CsvMapper().apply {
         registerModule(KotlinModule.Builder().build())

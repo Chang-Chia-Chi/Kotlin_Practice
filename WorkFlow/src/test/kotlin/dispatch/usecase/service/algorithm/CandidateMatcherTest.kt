@@ -6,7 +6,7 @@ import com.workflow.dispatch.model.SimulationContext
 import com.workflow.dispatch.model.SiteBomKey
 import com.workflow.dispatch.model.SiteTarget
 import com.workflow.dispatch.model.TargetBomAllocation
-import com.workflow.dispatch.usecase.service.algorithm.DefaultCandidateMatcher
+import com.workflow.dispatch.usecase.service.algorithm.FirstFitCandidateMatcher
 import com.workflow.dispatch.usecase.service.algorithm.QtyCandidateMatcher
 import org.junit.jupiter.api.Test
 import java.math.BigDecimal
@@ -25,16 +25,16 @@ class CandidateMatcherTest {
             total = BigDecimal.ZERO,
         )
 
-    // ---- DefaultCandidateMatcher (ratio mode) ----
+    // ---- FirstFitCandidateMatcher (ratio mode) ----
 
     @Test
-    fun `DefaultCandidateMatcher returns first matching sourceBom`() {
+    fun `FirstFitCandidateMatcher returns first matching sourceBom`() {
         val candidates = listOf(
             CandidateProduct("p1", "bom-A", 5),
             CandidateProduct("p2", "bom-B", 3),
         )
         val index = CandidateIndex(candidates)
-        val matcher = DefaultCandidateMatcher()
+        val matcher = FirstFitCandidateMatcher()
         val ctx = makeContext(emptyMap())
         val target = SiteTarget("s1", BigDecimal("100"))
 
@@ -42,10 +42,10 @@ class CandidateMatcherTest {
     }
 
     @Test
-    fun `DefaultCandidateMatcher returns first candidate when no constraint`() {
+    fun `FirstFitCandidateMatcher returns first candidate when no constraint`() {
         val candidates = listOf(CandidateProduct("p1", "bom-A", 5))
         val index = CandidateIndex(candidates)
-        val matcher = DefaultCandidateMatcher()
+        val matcher = FirstFitCandidateMatcher()
         val ctx = makeContext(emptyMap())
         val target = SiteTarget("s1", BigDecimal("100"))
 
@@ -53,10 +53,10 @@ class CandidateMatcherTest {
     }
 
     @Test
-    fun `DefaultCandidateMatcher ignores bomTarget - no capacity check in ratio mode`() {
+    fun `FirstFitCandidateMatcher ignores bomTarget - no capacity check in ratio mode`() {
         val candidates = listOf(CandidateProduct("p1", "src-1", 25))
         val index = CandidateIndex(candidates)
-        val matcher = DefaultCandidateMatcher()
+        val matcher = FirstFitCandidateMatcher()
         // BOM already at 95/100 but ratio mode doesn't enforce capacity
         val ctx = makeContext(
             siteCurrents = mapOf("s1" to BigDecimal("95")),
