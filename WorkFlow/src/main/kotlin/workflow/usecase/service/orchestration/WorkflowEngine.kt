@@ -9,7 +9,7 @@ import com.workflow.workflow.model.WorkflowDefinition
 import com.workflow.workflow.model.WorkflowRun
 import com.workflow.workflow.model.WorkflowStatus
 import com.workflow.workflow.model.createTaskForActivity
-import com.workflow.workflow.usecase.port.inbound.orchestration.WorkflowOperations
+import com.workflow.workflow.usecase.port.inbound.orchestration.WorkflowLifecycle
 import com.workflow.workflow.usecase.port.outbound.persistent.TaskRepository
 import com.workflow.workflow.usecase.port.outbound.persistent.WorkflowRepository
 import jakarta.enterprise.context.ApplicationScoped
@@ -28,7 +28,7 @@ class WorkflowEngine(
     private val taskRepo: TaskRepository,
     private val objectMapper: ObjectMapper,
     private val notifier: DispatchNotifier,
-) : WorkflowOperations {
+) : WorkflowLifecycle {
 
     private val log = LoggerFactory.getLogger(WorkflowEngine::class.java)
 

@@ -14,7 +14,7 @@ import com.workflow.workflow.model.TaskStatus
 import com.workflow.workflow.model.WorkflowDefinition
 import com.workflow.workflow.model.WorkflowRun
 import com.workflow.workflow.model.WorkflowStatus
-import com.workflow.workflow.usecase.service.orchestration.BarrierService
+import com.workflow.workflow.usecase.service.orchestration.DefaultPhaseGate
 import com.workflow.workflow.usecase.service.orchestration.Sweeper
 import com.workflow.workflow.usecase.service.orchestration.WorkflowEngine
 import com.workflow.workflow.usecase.service.phase.AdvancementStrategyRegistry
@@ -51,7 +51,7 @@ class SweeperTest {
     private val objectMapper = ObjectMapper()
         .registerModule(KotlinModule.Builder().build())
         .registerModule(JavaTimeModule())
-    private lateinit var barrier: BarrierService
+    private lateinit var barrier: DefaultPhaseGate
     private lateinit var sweeper: Sweeper
 
     private val gracePeriod = Duration.ofMinutes(2)
@@ -70,7 +70,7 @@ class SweeperTest {
         jdbi = OracleTestContainer.jdbi
         workflowRepo = JdbiWorkflowRepository(jdbi)
         taskRepo = JdbiTaskRepository(jdbi)
-        barrier = BarrierService(jdbi, workflowRepo, taskRepo, objectMapper, AdvancementStrategyRegistry(), notifier)
+        barrier = DefaultPhaseGate(jdbi, workflowRepo, taskRepo, objectMapper, AdvancementStrategyRegistry(), notifier)
         sweeper = Sweeper(jdbi, workflowRepo, taskRepo, barrier, testSweeperConfig)
     }
 

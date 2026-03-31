@@ -15,7 +15,7 @@ import com.workflow.workflow.model.WorkflowStatus
 import com.workflow.workflow.model.workflowId
 import com.workflow.workflow.dsl.workflow
 import com.workflow.workflow.model.Task
-import com.workflow.workflow.usecase.service.orchestration.BarrierService
+import com.workflow.workflow.usecase.service.orchestration.DefaultPhaseGate
 import com.workflow.workflow.usecase.service.orchestration.WorkflowEngine
 import com.workflow.workflow.usecase.service.phase.AdvancementStrategyRegistry
 import com.workflow.worker.adapter.http.FakeDispatchNotifier
@@ -40,7 +40,7 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
-class BarrierServiceTest {
+class DefaultPhaseGateTest {
 
     private lateinit var jdbi: Jdbi
     private lateinit var workflowRepo: JdbiWorkflowRepository
@@ -49,7 +49,7 @@ class BarrierServiceTest {
         .registerModule(KotlinModule.Builder().build())
         .registerModule(JavaTimeModule())
     private lateinit var notifier: FakeDispatchNotifier
-    private lateinit var barrier: BarrierService
+    private lateinit var barrier: DefaultPhaseGate
     private lateinit var strategyRegistry: AdvancementStrategyRegistry
     private lateinit var engine: WorkflowEngine
 
@@ -60,7 +60,7 @@ class BarrierServiceTest {
         taskRepo = JdbiTaskRepository(jdbi)
         notifier = FakeDispatchNotifier()
         strategyRegistry = AdvancementStrategyRegistry()
-        barrier = BarrierService(jdbi, workflowRepo, taskRepo, objectMapper, strategyRegistry, notifier)
+        barrier = DefaultPhaseGate(jdbi, workflowRepo, taskRepo, objectMapper, strategyRegistry, notifier)
         engine = WorkflowEngine(jdbi, workflowRepo, taskRepo, objectMapper, notifier)
     }
 

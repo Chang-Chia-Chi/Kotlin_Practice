@@ -9,7 +9,7 @@ import com.workflow.workflow.config.SweeperConfig
 import com.workflow.infrastructure.persistence.OracleTestContainer
 import com.workflow.workflow.adapter.persistent.JdbiTaskRepository
 import com.workflow.workflow.adapter.persistent.JdbiWorkflowRepository
-import com.workflow.workflow.usecase.service.orchestration.BarrierService
+import com.workflow.workflow.usecase.service.orchestration.DefaultPhaseGate
 import com.workflow.workflow.usecase.service.orchestration.InputResolver
 import com.workflow.workflow.usecase.service.orchestration.Sweeper
 import com.workflow.workflow.usecase.service.orchestration.WorkflowEngine
@@ -80,7 +80,7 @@ abstract class StressTestBase {
     protected lateinit var inputResolver: InputResolver
     protected lateinit var taskRepo: JdbiTaskRepository
     protected lateinit var engine: WorkflowEngine
-    protected lateinit var barrier: BarrierService
+    protected lateinit var barrier: DefaultPhaseGate
     protected lateinit var sweeper: Sweeper
     protected lateinit var handlerRegistry: HandlerRegistry
     protected lateinit var meterRegistry: SimpleMeterRegistry
@@ -90,7 +90,7 @@ abstract class StressTestBase {
     protected lateinit var directWorkflowRepo: JdbiWorkflowRepository
     protected lateinit var directTaskRepo: JdbiTaskRepository
     protected lateinit var directEngine: WorkflowEngine
-    protected lateinit var directBarrier: BarrierService
+    protected lateinit var directBarrier: DefaultPhaseGate
     protected lateinit var directSweeper: Sweeper
 
     protected val objectMapper: ObjectMapper = ObjectMapper()
@@ -187,7 +187,7 @@ abstract class StressTestBase {
         workflowRepo = JdbiWorkflowRepository(proxyJdbi)
         taskRepo = JdbiTaskRepository(proxyJdbi)
         val strategyRegistry = AdvancementStrategyRegistry()
-        barrier = BarrierService(proxyJdbi, workflowRepo, taskRepo, objectMapper, strategyRegistry, notifier)
+        barrier = DefaultPhaseGate(proxyJdbi, workflowRepo, taskRepo, objectMapper, strategyRegistry, notifier)
         engine = WorkflowEngine(proxyJdbi, workflowRepo, taskRepo, objectMapper, notifier)
         sweeper = Sweeper(proxyJdbi, workflowRepo, taskRepo, barrier, testSweeperConfig)
         inputResolver = InputResolver(objectMapper)
@@ -198,7 +198,7 @@ abstract class StressTestBase {
         directWorkflowRepo = JdbiWorkflowRepository(directPooledJdbi)
         directTaskRepo = JdbiTaskRepository(directPooledJdbi)
         val directStrategyRegistry = AdvancementStrategyRegistry()
-        directBarrier = BarrierService(directPooledJdbi, directWorkflowRepo, directTaskRepo, objectMapper, directStrategyRegistry, notifier)
+        directBarrier = DefaultPhaseGate(directPooledJdbi, directWorkflowRepo, directTaskRepo, objectMapper, directStrategyRegistry, notifier)
         directEngine = WorkflowEngine(directPooledJdbi, directWorkflowRepo, directTaskRepo, objectMapper, notifier)
         directSweeper = Sweeper(directPooledJdbi, directWorkflowRepo, directTaskRepo, directBarrier, testSweeperConfig)
     }

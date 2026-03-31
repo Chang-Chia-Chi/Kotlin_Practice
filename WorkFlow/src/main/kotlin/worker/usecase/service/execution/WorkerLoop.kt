@@ -5,7 +5,7 @@ import com.workflow.worker.config.WorkerLoopConfig
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.readValue
 import com.workflow.workflow.model.WorkflowDefinition
-import com.workflow.workflow.usecase.service.orchestration.BarrierService
+import com.workflow.workflow.usecase.service.orchestration.DefaultPhaseGate
 import com.workflow.workflow.usecase.service.orchestration.InputResolver
 import com.workflow.workflow.model.Task
 import com.workflow.workflow.usecase.port.outbound.persistent.TaskRepository
@@ -74,7 +74,7 @@ private const val MAX_DEFINITION_CACHE_SIZE = 1024
  *
  * **Error contract:** The [processTask] transform catches ALL non-cancellation
  * exceptions from handler execution and reports them to
- * [BarrierService.onTaskCompleted] with [TaskStatus.FAILED] BEFORE returning.
+ * [DefaultPhaseGate.onTaskCompleted] with [TaskStatus.FAILED] BEFORE returning.
  * No exception escapes the transform. If the barrier call itself fails for a
  * COMPLETED task, the failure is routed through the retry/failure path
  * ([handleTaskFailure]), which may trigger [TaskRepository.resetForRetry] if
@@ -92,7 +92,7 @@ class WorkerLoop(
     private val shutdownConfig: ShutdownConfig,
     private val taskRepo: TaskRepository,
     private val handlerRegistry: HandlerRegistry,
-    private val barrierService: BarrierService,
+    private val phaseGate: DefaultPhaseGate,
     private val meterRegistry: MeterRegistry,
     private val inputResolver: InputResolver,
     private val workflowRepo: WorkflowRepository,
@@ -245,7 +245,7 @@ class WorkerLoop(
                 val output = handler.execute(input)
 
                 try {
-                    barrierService.onTaskCompleted(
+                    phaseGate.onTaskCompleted(
                         taskId = task.id,
                         workflowId = task.workflowId,
                         sequenceNumber = task.sequenceNumber,
@@ -320,7 +320,7 @@ class WorkerLoop(
 
     private suspend fun reportTaskFailed(task: Task) {
         try {
-            barrierService.onTaskCompleted(
+            phaseGate.onTaskCompleted(
                 taskId = task.id,
                 workflowId = task.workflowId,
                 sequenceNumber = task.sequenceNumber,

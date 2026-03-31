@@ -8,7 +8,7 @@ import com.workflow.workflow.model.Task
 import com.workflow.workflow.model.TaskStatus
 import com.workflow.workflow.usecase.port.outbound.persistent.TaskRepository
 import com.workflow.workflow.usecase.port.outbound.persistent.WorkflowRepository
-import com.workflow.workflow.usecase.service.orchestration.BarrierService
+import com.workflow.workflow.usecase.service.orchestration.DefaultPhaseGate
 import com.workflow.workflow.usecase.service.orchestration.InputResolver
 import com.workflow.workflow.usecase.service.phase.AdvancementStrategyRegistry
 import com.workflow.worker.usecase.port.outbound.notification.DispatchNotifier
@@ -44,7 +44,7 @@ class InstrumentedWorkflowRepository(
     }
 }
 
-class InstrumentedBarrierService(
+class InstrumentedDefaultPhaseGate(
     jdbi: Jdbi,
     workflowRepo: WorkflowRepository,
     taskRepo: TaskRepository,
@@ -52,7 +52,7 @@ class InstrumentedBarrierService(
     strategyRegistry: AdvancementStrategyRegistry,
     notifier: DispatchNotifier,
     private val timer: PhaseTimer,
-) : BarrierService(jdbi, workflowRepo, taskRepo, objectMapper, strategyRegistry, notifier) {
+) : DefaultPhaseGate(jdbi, workflowRepo, taskRepo, objectMapper, strategyRegistry, notifier) {
 
     override suspend fun onTaskCompleted(
         taskId: String, workflowId: String, sequenceNumber: Int,

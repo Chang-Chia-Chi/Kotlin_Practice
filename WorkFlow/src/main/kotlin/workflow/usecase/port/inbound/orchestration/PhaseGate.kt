@@ -3,7 +3,7 @@ package com.workflow.workflow.usecase.port.inbound.orchestration
 import com.workflow.workflow.model.TaskStatus
 import java.time.Instant
 
-interface BarrierOperations {
+interface PhaseGate {
     suspend fun onTaskCompleted(
         taskId: String,
         workflowId: String,

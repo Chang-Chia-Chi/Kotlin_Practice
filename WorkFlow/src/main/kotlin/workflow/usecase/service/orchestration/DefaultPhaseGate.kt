@@ -15,7 +15,7 @@ import com.workflow.workflow.model.WorkflowRun
 import com.workflow.workflow.model.WorkflowStatus
 import com.workflow.workflow.model.buildSequenceMap
 import com.workflow.workflow.model.createTaskForActivity
-import com.workflow.workflow.usecase.port.inbound.orchestration.BarrierOperations
+import com.workflow.workflow.usecase.port.inbound.orchestration.PhaseGate
 import com.workflow.workflow.usecase.port.outbound.persistent.TaskRepository
 import com.workflow.workflow.usecase.port.outbound.persistent.WorkflowRepository
 import com.workflow.workflow.usecase.service.phase.AdvancementStrategyRegistry
@@ -27,15 +27,15 @@ import java.time.Instant
 import java.time.temporal.ChronoUnit
 
 @ApplicationScoped
-class BarrierService(
+class DefaultPhaseGate(
     private val jdbi: Jdbi,
     private val workflowRepo: WorkflowRepository,
     private val taskRepo: TaskRepository,
     private val objectMapper: ObjectMapper,
     private val strategyRegistry: AdvancementStrategyRegistry,
     private val notifier: DispatchNotifier,
-) : BarrierOperations {
-    private val log = LoggerFactory.getLogger(BarrierService::class.java)
+) : PhaseGate {
+    private val log = LoggerFactory.getLogger(DefaultPhaseGate::class.java)
 
     override suspend fun onTaskCompleted(
         taskId: String,

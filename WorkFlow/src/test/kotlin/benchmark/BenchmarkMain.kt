@@ -68,7 +68,7 @@ fun main() {
     val workflowRepo = InstrumentedWorkflowRepository(pooledJdbi, timer)
     val taskRepo = InstrumentedTaskRepository(pooledJdbi, timer)
     val strategyRegistry = AdvancementStrategyRegistry()
-    val barrier = InstrumentedBarrierService(pooledJdbi, workflowRepo, taskRepo, objectMapper, strategyRegistry, notifier, timer)
+    val barrier = InstrumentedDefaultPhaseGate(pooledJdbi, workflowRepo, taskRepo, objectMapper, strategyRegistry, notifier, timer)
     val engine = WorkflowEngine(pooledJdbi, workflowRepo, taskRepo, objectMapper, notifier)
     val inputResolver = InstrumentedInputResolver(objectMapper, timer)
     val handlerRegistry = HandlerRegistry()
@@ -161,7 +161,7 @@ private fun runScenario(
     point: MatrixPoint,
     engine: WorkflowEngine,
     handlerRegistry: HandlerRegistry,
-    barrier: InstrumentedBarrierService,
+    barrier: InstrumentedDefaultPhaseGate,
     taskRepo: InstrumentedTaskRepository,
     inputResolver: InstrumentedInputResolver,
     workflowRepo: InstrumentedWorkflowRepository,

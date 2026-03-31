@@ -3,7 +3,7 @@ package com.workflow.workflow.usecase.port.inbound.orchestration
 import com.workflow.workflow.model.StartResult
 import com.workflow.workflow.model.WorkflowDefinition
 
-interface WorkflowOperations {
+interface WorkflowLifecycle {
     suspend fun startWorkflow(
         definition: WorkflowDefinition,
         idempotencyKey: String? = null,

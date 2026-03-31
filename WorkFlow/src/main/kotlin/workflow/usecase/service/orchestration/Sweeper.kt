@@ -19,7 +19,7 @@ class Sweeper(
     private val jdbi: Jdbi,
     private val workflowRepo: WorkflowRepository,
     private val taskRepo: TaskRepository,
-    private val barrierService: BarrierService,
+    private val phaseGate: DefaultPhaseGate,
     private val sweeperConfig: SweeperConfig,
 ) {
 
@@ -40,7 +40,7 @@ class Sweeper(
         for (task in expired) {
             try {
                 log.warn("Expiring overdue task {} (deadline={})", task.id, task.deadlineAt)
-                barrierService.onTaskCompleted(
+                phaseGate.onTaskCompleted(
                     taskId = task.id,
                     workflowId = task.workflowId,
                     sequenceNumber = task.sequenceNumber,
@@ -76,7 +76,7 @@ class Sweeper(
                     "Recovering stuck workflow {} at sequence {} (last updated {})",
                     workflow.id, workflow.currentSequence, workflow.updatedAt,
                 )
-                barrierService.recoverStuckWorkflow(workflow.id)
+                phaseGate.recoverStuckWorkflow(workflow.id)
             } catch (e: Exception) {
                 log.error("Failed to recover stuck workflow {}", workflow.id, e)
             }

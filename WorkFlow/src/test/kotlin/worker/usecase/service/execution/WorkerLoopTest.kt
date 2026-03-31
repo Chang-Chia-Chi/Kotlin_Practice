@@ -15,7 +15,7 @@ import com.workflow.workflow.model.WorkflowStatus
 import com.workflow.workflow.dsl.workflow
 import com.workflow.workflow.usecase.port.outbound.persistent.TaskRepository
 import com.workflow.workflow.usecase.port.outbound.persistent.WorkflowRepository
-import com.workflow.workflow.usecase.service.orchestration.BarrierService
+import com.workflow.workflow.usecase.service.orchestration.DefaultPhaseGate
 import com.workflow.workflow.usecase.service.orchestration.InputResolver
 import com.workflow.infrastructure.shutdown.ShutdownSignal
 import com.workflow.worker.adapter.http.FakeDispatchNotifier
@@ -66,7 +66,7 @@ class WorkerLoopTest {
 
     private lateinit var taskRepo: TaskRepository
     private lateinit var handlerRegistry: HandlerRegistry
-    private lateinit var barrierService: BarrierService
+    private lateinit var phaseGate: DefaultPhaseGate
     private lateinit var workerConfig: com.workflow.worker.config.WorkerLoopConfig
     private lateinit var shutdownConfig: com.workflow.infrastructure.shutdown.ShutdownConfig
     private lateinit var meterRegistry: SimpleMeterRegistry
@@ -85,7 +85,7 @@ class WorkerLoopTest {
     fun setup() {
         taskRepo = mock()
         handlerRegistry = mock()
-        barrierService = mock()
+        phaseGate = mock()
 
         workerConfig = mock<WorkerLoopConfig>().also {
             whenever(it.pollInterval()).thenReturn(pollInterval)
@@ -119,7 +119,7 @@ class WorkerLoopTest {
         )
         workflowRepo.stub { onBlocking { findById(any()) } doReturn defaultWfRun }
 
-        workerLoop = WorkerLoop(workerConfig, shutdownConfig, taskRepo, handlerRegistry, barrierService, meterRegistry, inputResolver, workflowRepo, objectMapper, notifier)
+        workerLoop = WorkerLoop(workerConfig, shutdownConfig, taskRepo, handlerRegistry, phaseGate, meterRegistry, inputResolver, workflowRepo, objectMapper, notifier)
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────
@@ -185,7 +185,7 @@ class WorkerLoopTest {
             assertNull(input.inputs)
             assertEquals(task.item, input.item)
 
-            verify(barrierService).onTaskCompleted(
+            verify(phaseGate).onTaskCompleted(
                 eq(task.id),
                 eq(task.workflowId),
                 eq(task.sequenceNumber),
@@ -209,7 +209,7 @@ class WorkerLoopTest {
 
             startAndAdvance(this)
 
-            verify(barrierService).onTaskCompleted(
+            verify(phaseGate).onTaskCompleted(
                 eq(task.id),
                 eq(task.workflowId),
                 eq(task.sequenceNumber),
@@ -238,11 +238,11 @@ class WorkerLoopTest {
 
             startAndAdvance(this, ticks = 4)
 
-            verify(barrierService).onTaskCompleted(
+            verify(phaseGate).onTaskCompleted(
                 eq(task1.id), eq(task1.workflowId), eq(task1.sequenceNumber),
                 eq(TaskStatus.COMPLETED), eq("""{"r":1}"""), eq(workerId), any(),
             )
-            verify(barrierService).onTaskCompleted(
+            verify(phaseGate).onTaskCompleted(
                 eq(task2.id), eq(task2.workflowId), eq(task2.sequenceNumber),
                 eq(TaskStatus.COMPLETED), eq("""{"r":2}"""), eq(workerId), any(),
             )
@@ -314,7 +314,7 @@ class WorkerLoopTest {
             startAndAdvance(this)
 
             verify(taskRepo).resetForRetry(eq(task.id), eq(1))
-            verifyNoInteractions(barrierService)
+            verifyNoInteractions(phaseGate)
         }
 
         @Test
@@ -331,7 +331,7 @@ class WorkerLoopTest {
             startAndAdvance(this)
 
             verify(taskRepo).resetForRetry(eq(task.id), eq(2))
-            verifyNoInteractions(barrierService)
+            verifyNoInteractions(phaseGate)
         }
 
         @Test
@@ -348,7 +348,7 @@ class WorkerLoopTest {
             startAndAdvance(this)
 
             verify(taskRepo, never()).resetForRetry(any(), any())
-            verify(barrierService).onTaskCompleted(
+            verify(phaseGate).onTaskCompleted(
                 eq(task.id),
                 eq(task.workflowId),
                 eq(task.sequenceNumber),
@@ -373,7 +373,7 @@ class WorkerLoopTest {
             startAndAdvance(this)
 
             verify(taskRepo, never()).resetForRetry(any(), any())
-            verify(barrierService).onTaskCompleted(
+            verify(phaseGate).onTaskCompleted(
                 eq(task.id),
                 eq(task.workflowId),
                 eq(task.sequenceNumber),
@@ -406,7 +406,7 @@ class WorkerLoopTest {
             startAndAdvance(this)
 
             verify(taskRepo).resetForRetry(eq(task.id), eq(1))
-            verify(barrierService).onTaskCompleted(
+            verify(phaseGate).onTaskCompleted(
                 eq(task.id),
                 eq(task.workflowId),
                 eq(task.sequenceNumber),
@@ -436,7 +436,7 @@ class WorkerLoopTest {
             startAndAdvance(this)
 
             verify(taskRepo).resetForRetry(eq(task.id), eq(1))
-            verifyNoInteractions(barrierService)
+            verifyNoInteractions(phaseGate)
         }
 
         @Test
@@ -451,7 +451,7 @@ class WorkerLoopTest {
 
             startAndAdvance(this)
 
-            verify(barrierService).onTaskCompleted(
+            verify(phaseGate).onTaskCompleted(
                 eq(task.id),
                 eq(task.workflowId),
                 eq(task.sequenceNumber),
@@ -476,7 +476,7 @@ class WorkerLoopTest {
             startAndAdvance(this)
 
             verifyNoInteractions(handlerRegistry)
-            verifyNoInteractions(barrierService)
+            verifyNoInteractions(phaseGate)
         }
 
         @Test
@@ -494,7 +494,7 @@ class WorkerLoopTest {
             startAndAdvance(this, ticks = 4)
 
             verify(handler).execute(any())
-            verify(barrierService).onTaskCompleted(
+            verify(phaseGate).onTaskCompleted(
                 eq(task.id), eq(task.workflowId), eq(task.sequenceNumber),
                 eq(TaskStatus.COMPLETED), eq("ok"), eq(workerId), any(),
             )
@@ -520,7 +520,7 @@ class WorkerLoopTest {
 
             startAndAdvance(this, ticks = 4)
 
-            verify(barrierService).onTaskCompleted(
+            verify(phaseGate).onTaskCompleted(
                 eq(task.id), eq(task.workflowId), eq(task.sequenceNumber),
                 eq(TaskStatus.COMPLETED), eq("recovered"), eq(workerId), any(),
             )
@@ -622,7 +622,7 @@ class WorkerLoopTest {
             shutdownJob.join()
 
             assertTrue(handlerCompleted.get(), "Handler should complete within drain window (not cancelled)")
-            verify(barrierService).onTaskCompleted(
+            verify(phaseGate).onTaskCompleted(
                 eq(task.id), eq(task.workflowId), eq(task.sequenceNumber),
                 eq(TaskStatus.COMPLETED), eq("""{"drained":"ok"}"""), eq(workerId), any(),
             )
@@ -631,7 +631,7 @@ class WorkerLoopTest {
         @Test
         fun `force-cancel after drain timeout - long handler is cancelled`() = runTest {
             whenever(shutdownConfig.globalTimeout()).thenReturn(Duration.ofMillis(100))
-            val shortTimeoutLoop = WorkerLoop(workerConfig, shutdownConfig, taskRepo, handlerRegistry, barrierService, meterRegistry, inputResolver, workflowRepo, objectMapper, notifier)
+            val shortTimeoutLoop = WorkerLoop(workerConfig, shutdownConfig, taskRepo, handlerRegistry, phaseGate, meterRegistry, inputResolver, workflowRepo, objectMapper, notifier)
 
             val handlerStarted = java.util.concurrent.atomic.AtomicBoolean(false)
             val handlerCompleted = java.util.concurrent.atomic.AtomicBoolean(false)
@@ -685,7 +685,7 @@ class WorkerLoopTest {
         fun `shutdownTimeout reflects config value`() {
             whenever(shutdownConfig.globalTimeout()).thenReturn(Duration.ofSeconds(45))
 
-            val freshLoop = WorkerLoop(workerConfig, shutdownConfig, taskRepo, handlerRegistry, barrierService, meterRegistry, inputResolver, workflowRepo, objectMapper, notifier)
+            val freshLoop = WorkerLoop(workerConfig, shutdownConfig, taskRepo, handlerRegistry, phaseGate, meterRegistry, inputResolver, workflowRepo, objectMapper, notifier)
             assertEquals(Duration.ofSeconds(45), freshLoop.shutdownTimeout)
         }
     }
@@ -788,13 +788,13 @@ class WorkerLoopTest {
 
             doAnswer { throw RuntimeException("barrier blew up") }
                 .doAnswer { }
-                .whenever(barrierService).onTaskCompleted(any(), any(), any(), any(), any(), any(), any())
+                .whenever(phaseGate).onTaskCompleted(any(), any(), any(), any(), any(), any(), any())
 
             startAndAdvance(this, ticks = 4)
 
             verify(handler1).execute(any())
             verify(handler2).execute(any())
-            verify(barrierService, times(2)).onTaskCompleted(any(), any(), any(), any(), any(), any(), any())
+            verify(phaseGate, times(2)).onTaskCompleted(any(), any(), any(), any(), any(), any(), any())
         }
 
         @Test
@@ -808,7 +808,7 @@ class WorkerLoopTest {
             whenever(handlerRegistry.resolve(task.handlerKey)).thenReturn(handler)
             whenever(handler.execute(any())).thenReturn(HandlerOutput("success"))
             doThrow(RuntimeException("barrier failed on COMPLETED"))
-                .whenever(barrierService).onTaskCompleted(any(), any(), any(), any(), any(), any(), any())
+                .whenever(phaseGate).onTaskCompleted(any(), any(), any(), any(), any(), any(), any())
 
             startAndAdvance(this)
 
@@ -839,7 +839,7 @@ class WorkerLoopTest {
                 Unit
             }
                 .doAnswer { }
-                .whenever(barrierService).onTaskCompleted(any(), any(), any(), any(), any(), any(), any())
+                .whenever(phaseGate).onTaskCompleted(any(), any(), any(), any(), any(), any(), any())
 
             startAndAdvance(this, ticks = 4)
 
@@ -865,7 +865,7 @@ class WorkerLoopTest {
                 whenever(it.maxBatchSize()).thenReturn(16)
                 whenever(it.podIp()).thenReturn("localhost")
             }
-            val batchLoop = WorkerLoop(batchWorkerConfig, shutdownConfig, taskRepo, handlerRegistry, barrierService, meterRegistry, inputResolver, workflowRepo, objectMapper, notifier)
+            val batchLoop = WorkerLoop(batchWorkerConfig, shutdownConfig, taskRepo, handlerRegistry, phaseGate, meterRegistry, inputResolver, workflowRepo, objectMapper, notifier)
 
             whenever(taskRepo.claimNext(eq(workerId), eq(16), eq("default")))
                 .thenReturn(emptyList())
@@ -948,7 +948,7 @@ class WorkerLoopTest {
 
             // CancellationException should NOT trigger retry or barrier
             verify(taskRepo, never()).resetForRetry(any(), any())
-            verifyNoInteractions(barrierService)
+            verifyNoInteractions(phaseGate)
         }
     }
 
