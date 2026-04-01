@@ -15,7 +15,7 @@
         <ktor.version>3.1.1</ktor.version>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <maven.compiler.release>21</maven.compiler.release>
-        <aws.sdk.version>2.29.51</aws.sdk.version>
+        <aws.kotlin.sdk.version>1.3.31</aws.kotlin.sdk.version>
         <surefire-plugin.version>3.5.2</surefire-plugin.version>
         <surefire.excludedGroups>stress</surefire.excludedGroups>
     </properties>
@@ -35,9 +35,9 @@
                 <version>${kotlin.version}</version>
             </dependency>
             <dependency>
-                <groupId>software.amazon.awssdk</groupId>
+                <groupId>aws.sdk.kotlin</groupId>
                 <artifactId>bom</artifactId>
-                <version>${aws.sdk.version}</version>
+                <version>${aws.kotlin.sdk.version}</version>
                 <type>pom</type>
                 <scope>import</scope>
             </dependency>
@@ -181,12 +181,8 @@
 
         <!-- AWS S3 -->
         <dependency>
-            <groupId>software.amazon.awssdk</groupId>
+            <groupId>aws.sdk.kotlin</groupId>
             <artifactId>s3</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>software.amazon.awssdk</groupId>
-            <artifactId>netty-nio-client</artifactId>
         </dependency>
 
         <!-- Test -->

@@ -12,7 +12,7 @@ import com.workflow.worker.usecase.port.inbound.execution.HandlerInput
 import com.workflow.worker.usecase.port.inbound.execution.HandlerOutput
 import com.workflow.worker.usecase.port.inbound.execution.TransitionHandler
 import jakarta.enterprise.context.ApplicationScoped
-import java.io.ByteArrayOutputStream
+import java.nio.file.Files
 import java.util.zip.GZIPOutputStream
 
 @ApplicationScoped
@@ -43,8 +43,13 @@ class DispatchSimulationHandler(
         resultStore.saveDecisions(batchToken, configId, result.decisions)
 
         val csv = csvFormatter.format(batchToken, configId, result.decisions)
-        val csvGz = ByteArrayOutputStream().also { out -> GZIPOutputStream(out).use { it.write(csv) } }.toByteArray()
-        storage.uploadCsv("dispatch/$batchToken/simulation/$configId.csv.gz", csvGz)
+        val tmpFile = Files.createTempFile("dispatch-$configId-", ".csv.gz").toFile()
+        try {
+            GZIPOutputStream(tmpFile.outputStream()).use { it.write(csv) }
+            storage.uploadCsv("dispatch/$batchToken/simulation/$configId.csv.gz", tmpFile)
+        } finally {
+            tmpFile.delete()
+        }
 
         return HandlerOutput(
             objectMapper.writeValueAsString(
