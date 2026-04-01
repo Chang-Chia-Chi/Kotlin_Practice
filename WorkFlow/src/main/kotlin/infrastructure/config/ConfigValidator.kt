@@ -6,7 +6,8 @@ import io.quarkus.runtime.StartupEvent
 import jakarta.enterprise.event.Observes
 import jakarta.inject.Singleton
 import org.eclipse.microprofile.config.inject.ConfigProperty
-import org.jboss.logging.Logger
+import org.slf4j.Logger
+import org.slf4j.LoggerFactory
 
 @Singleton
 class ConfigValidator(
@@ -40,14 +41,14 @@ class ConfigValidator(
             "leader-election.retry-period ($retryPeriod) must be < renew-deadline ($renewDeadline)"
         }
 
-        log.infof(
-            "Config validated: concurrency=%d, batchSize=%d, poolSize=%d, lease=%s/%s/%s",
+        log.info(
+            "Config validated: concurrency={}, batchSize={}, poolSize={}, lease={}/{}/{}",
             concurrency, batchSize, poolMaxSize,
             leaseDuration, renewDeadline, retryPeriod,
         )
     }
 
     companion object {
-        private val log = Logger.getLogger(ConfigValidator::class.java)
+        private val log = LoggerFactory.getLogger(ConfigValidator::class.java)
     }
 }

@@ -25,7 +25,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
-import org.jboss.logging.Logger
+import org.slf4j.Logger
+import org.slf4j.LoggerFactory
 import java.time.Clock
 import java.time.Duration
 import java.time.Instant
@@ -39,7 +40,7 @@ class LeaderManager(
     private val meterRegistry: MeterRegistry,
     private val kubernetesDetector: KubernetesDetector,
 ) : LeaderElection, ShutdownParticipant {
-    private val log = Logger.getLogger(LeaderManager::class.java)
+    private val log = LoggerFactory.getLogger(LeaderManager::class.java)
 
     internal var clock: Clock = Clock.systemUTC()
     internal var scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -100,11 +101,11 @@ class LeaderManager(
                     leaseApi.withName(leaderElectionConfig.leaseName()).patch(lease)
                     log.info("Lease released explicitly — new leader can acquire immediately")
                 } else {
-                    log.debugf("Lease held by %s, not by this instance — skipping release", lease.spec.holderIdentity)
+                    log.debug("Lease held by {}, not by this instance — skipping release", lease.spec.holderIdentity)
                 }
             }
         } catch (e: Exception) {
-            log.warnf(e, "Failed to release lease explicitly — new leader will acquire after lease expiry")
+            log.warn("Failed to release lease explicitly — new leader will acquire after lease expiry", e)
         }
     }
 
@@ -117,11 +118,11 @@ class LeaderManager(
                 _lastHeartbeat.value = Instant.now(clock)
                 try {
                     runElection(identity)
-                    log.infof("Leader election run() returned — will retry in %dms", retryPeriodMs)
+                    log.info("Leader election run() returned — will retry in {}ms", retryPeriodMs)
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
-                    log.errorf(e, "Leader election error — retrying in %dms", retryPeriodMs)
+                    log.error("Leader election error — retrying in {}ms", retryPeriodMs, e)
                     _isLeader.value = false
                 }
                 delay(retryPeriodMs)
@@ -152,7 +153,7 @@ class LeaderManager(
                     ),
                 ).build()
 
-        log.debugf("Entering leader election (identity=%s, lease=%s/%s)", identity, namespace, leaseName)
+        log.debug("Entering leader election (identity={}, lease={}/{})", identity, namespace, leaseName)
         runInterruptible {
             kubernetesClient
                 .leaderElector()
@@ -166,7 +167,7 @@ class LeaderManager(
         val epoch = readLeaseTransitions()
         _epoch.value = epoch
         _isLeader.value = true
-        log.infof("Acquired leadership (identity=%s, epoch=%d)", identity, epoch)
+        log.info("Acquired leadership (identity={}, epoch={})", identity, epoch)
     }
 
     private fun onLose() {
@@ -185,7 +186,7 @@ class LeaderManager(
             val transitions = lease?.spec?.leaseTransitions ?: 0
             transitions.toLong()
         } catch (e: Exception) {
-            log.warnf(e, "Failed to read lease transitions — falling back to local increment")
+            log.warn("Failed to read lease transitions — falling back to local increment", e)
             _epoch.value + 1
         }
 

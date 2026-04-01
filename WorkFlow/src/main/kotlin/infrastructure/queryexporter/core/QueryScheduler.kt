@@ -17,7 +17,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
-import org.jboss.logging.Logger
+import org.slf4j.Logger
+import org.slf4j.LoggerFactory
 import java.time.Clock
 import java.time.Duration
 import java.time.ZonedDateTime
@@ -33,7 +34,7 @@ class QueryScheduler(
     private val clock: Clock = Clock.systemUTC(),
     private val ioContext: CoroutineContext = EmptyCoroutineContext,
 ) {
-    private val log = Logger.getLogger(QueryScheduler::class.java)
+    private val log = LoggerFactory.getLogger(QueryScheduler::class.java)
 
     private var queryJobs = listOf<Job>()
     private val monitorJobRef = AtomicReference<Job?>(null)
@@ -74,7 +75,7 @@ class QueryScheduler(
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                log.warnf(e, "Query '%s' failed, will retry next cycle", name)
+                log.warn("Query '{}' failed, will retry next cycle", name, e)
             }
 
             delayUntilNextExecution(config.schedule)

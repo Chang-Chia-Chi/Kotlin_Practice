@@ -9,7 +9,8 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
-import org.jboss.logging.Logger
+import org.slf4j.Logger
+import org.slf4j.LoggerFactory
 import java.time.Duration
 import java.time.Instant
 import java.util.concurrent.TimeUnit
@@ -21,7 +22,7 @@ class ShutdownCoordinator(
     private val meterRegistry: MeterRegistry,
     private val shutdownConfig: ShutdownConfig,
 ) {
-    private val log = Logger.getLogger(ShutdownCoordinator::class.java)
+    private val log = LoggerFactory.getLogger(ShutdownCoordinator::class.java)
     private val podId = System.getenv("HOSTNAME") ?: "local-worker"
 
     private val _state = AtomicReference(ShutdownState.RUNNING)
@@ -47,8 +48,8 @@ class ShutdownCoordinator(
                 .sortedBy { it.shutdownOrder }
                 .groupBy { it.shutdownOrder }
                 .forEach { (order, group) ->
-                    log.infof(
-                        "Shutdown group order=%d: %s",
+                    log.info(
+                        "Shutdown group order={}: {}",
                         order,
                         group.joinToString { it::class.simpleName ?: "?" },
                     )
@@ -58,13 +59,13 @@ class ShutdownCoordinator(
                                 try {
                                     withTimeoutOrNull(p.shutdownTimeout.toMillis()) {
                                         p.shutdown()
-                                    } ?: log.warnf(
-                                        "%s timed out after %s",
+                                    } ?: log.warn(
+                                        "{} timed out after {}",
                                         p::class.simpleName,
                                         p.shutdownTimeout,
                                     )
                                 } catch (e: Exception) {
-                                    log.warnf(e, "Error during shutdown of %s", p::class.simpleName)
+                                    log.warn("Error during shutdown of {}", p::class.simpleName, e)
                                 }
                             }
                         }
@@ -72,7 +73,7 @@ class ShutdownCoordinator(
                 }
         }
         if (completed == null) {
-            log.warnf("Global shutdown timeout expired after %s — forcing termination", shutdownConfig.globalTimeout())
+            log.warn("Global shutdown timeout expired after {} — forcing termination", shutdownConfig.globalTimeout())
         }
 
         // Final
@@ -83,8 +84,8 @@ class ShutdownCoordinator(
             .timer("taskqueue_shutdown_duration_seconds", "pod", podId)
             .record(totalDuration.toMillis(), TimeUnit.MILLISECONDS)
 
-        log.infof(
-            "Shutdown complete: pod=%s, durationMs=%d",
+        log.info(
+            "Shutdown complete: pod={}, durationMs={}",
             podId,
             totalDuration.toMillis(),
         )
