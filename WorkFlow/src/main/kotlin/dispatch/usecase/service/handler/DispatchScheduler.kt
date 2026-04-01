@@ -27,7 +27,7 @@ class DispatchScheduler(
             LocalDateTime
                 .now()
                 .truncatedTo(ChronoUnit.HOURS)
-                .format(DateTimeFormatter.ISO_LOCAL_DATE_TIME)
+                .format(DateTimeFormatter.ofPattern("yyyyMMddHHmmss"))
 
         val result =
             workflowEngine.startWorkflow(

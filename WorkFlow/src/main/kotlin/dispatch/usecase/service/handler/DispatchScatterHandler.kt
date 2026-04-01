@@ -19,7 +19,7 @@ class DispatchScatterHandler(
     override suspend fun execute(input: HandlerInput): HandlerOutput {
         val now = LocalDateTime.now()
         val batchToken = now.truncatedTo(ChronoUnit.HOURS)
-            .format(DateTimeFormatter.ISO_LOCAL_DATE_TIME)
+            .format(DateTimeFormatter.ofPattern("yyyyMMddHHmmss"))
 
         val configs = configRepo.findActiveConfigs(now)
         val items = configs.map { mapOf("configId" to it.id, "batchToken" to batchToken) }

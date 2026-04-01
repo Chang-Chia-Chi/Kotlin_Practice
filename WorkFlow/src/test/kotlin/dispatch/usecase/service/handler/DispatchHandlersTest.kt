@@ -71,13 +71,13 @@ class DispatchHandlersTest {
             resultStore, storage, csvFormatter, objectMapper,
         )
 
-        val item = objectMapper.writeValueAsString(mapOf("configId" to "cfg1", "batchToken" to "2026-03-29T06:00:00"))
+        val item = objectMapper.writeValueAsString(mapOf("configId" to "cfg1", "batchToken" to "20260329060000"))
         val output = handler.execute(
             HandlerInput("t1", "w1", 2, null, item),
         )
 
-        verify(resultStore).saveDecisions(eq("2026-03-29T06:00:00"), eq("cfg1"), any())
-        verify(storage).uploadCsv(eq("dispatch/2026-03-29T06:00:00/simulation/cfg1.csv"), any())
+        verify(resultStore).saveDecisions(eq("20260329060000"), eq("cfg1"), any())
+        verify(storage).uploadCsv(eq("dispatch/20260329060000/simulation/cfg1.csv.gz"), any())
         assertNotNull(output.result)
     }
 
@@ -87,19 +87,19 @@ class DispatchHandlersTest {
         val storage = mock<StorageGateway>()
         val parquetFormatter = mock<ParquetFormatter>()
 
-        whenever(resultStore.findByBatchToken("2026-03-29T06:00:00")).thenReturn(emptyList())
+        whenever(resultStore.findByBatchToken("20260329060000")).thenReturn(emptyList())
         whenever(parquetFormatter.format(any())).thenReturn(byteArrayOf())
 
         val handler = DispatchJoinHandler(resultStore, storage, parquetFormatter, objectMapper)
 
         // Simulate aggregated input from parallel simulate tasks
         val inputs = objectMapper.writeValueAsString(
-            mapOf("batchToken" to listOf("2026-03-29T06:00:00", "2026-03-29T06:00:00")),
+            mapOf("batchToken" to listOf("20260329060000", "20260329060000")),
         )
         handler.execute(
             HandlerInput("t1", "w1", 3, inputs, null),
         )
 
-        verify(storage).uploadParquet(eq("dispatch/2026-03-29T06:00:00/result.parquet"), any())
+        verify(storage).uploadParquet(eq("dispatch/20260329060000/result.parquet"), any())
     }
 }
