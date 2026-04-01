@@ -1,6 +1,5 @@
 package com.workflow.worker.adapter.http
 
-import com.workflow.infrastructure.config.FrameworkConfig
 import com.workflow.infrastructure.leader.LeaderElectionConfig
 import com.workflow.infrastructure.leader.KubernetesDetector
 import com.workflow.worker.config.WorkerLoopConfig
@@ -20,7 +19,7 @@ import org.slf4j.LoggerFactory
  * Maintains a live list of peer pod IPs via Kubernetes Endpoints Watch.
  *
  * The watch is registered on [StartupEvent] against the K8s Service
- * named by [FrameworkConfig.serviceName]. The pod's own IP
+ * named by [WorkerLoopConfig.serviceName]. The pod's own IP
  * ([WorkerLoopConfig.podIp]) is excluded so broadcasts
  * are never sent to self.
  *
@@ -30,7 +29,6 @@ import org.slf4j.LoggerFactory
 @ApplicationScoped
 class PeerRegistry(
     private val client: KubernetesClient,
-    private val frameworkConfig: FrameworkConfig,
     private val workerLoopConfig: WorkerLoopConfig,
     private val leaderElectionConfig: LeaderElectionConfig,
     private val detector: KubernetesDetector,
@@ -53,7 +51,7 @@ class PeerRegistry(
         try {
             watch = client.endpoints()
                 .inNamespace(leaderElectionConfig.namespace())
-                .withName(frameworkConfig.serviceName())
+                .withName(workerLoopConfig.serviceName())
                 .watch(object : Watcher<Endpoints> {
                     override fun eventReceived(action: Watcher.Action, endpoints: Endpoints) {
                         _peers = (endpoints.subsets ?: emptyList())

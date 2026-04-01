@@ -20,4 +20,6 @@ interface WorkerLoopConfig {
     fun maxBatchSize(): Int
     @WithDefault("localhost")
     fun podIp(): String
+    @WithDefault("workflow-engine")
+    fun serviceName(): String
 }

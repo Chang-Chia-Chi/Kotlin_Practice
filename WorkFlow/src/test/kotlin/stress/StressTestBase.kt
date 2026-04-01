@@ -123,6 +123,7 @@ abstract class StressTestBase {
             override fun fallbackPollInterval() = this@StressTestBase.pollInterval
             override fun maxBatchSize() = 16
             override fun podIp() = "localhost"
+            override fun serviceName() = "workflow-engine"
         }
     }
 

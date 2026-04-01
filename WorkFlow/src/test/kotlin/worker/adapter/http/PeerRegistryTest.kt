@@ -1,7 +1,6 @@
 package com.workflow.worker.adapter.http
 
 import com.workflow.worker.adapter.http.PeerRegistry
-import com.workflow.infrastructure.config.FrameworkConfig
 import com.workflow.infrastructure.leader.LeaderElectionConfig
 import com.workflow.infrastructure.leader.KubernetesDetector
 import com.workflow.worker.config.WorkerLoopConfig
@@ -31,7 +30,6 @@ import kotlin.test.assertTrue
 class PeerRegistryTest {
 
     private lateinit var client: KubernetesClient
-    private lateinit var frameworkConfig: FrameworkConfig
     private lateinit var detector: KubernetesDetector
     private lateinit var workerConfig: WorkerLoopConfig
     private lateinit var leaderElectionConfig: LeaderElectionConfig
@@ -43,14 +41,13 @@ class PeerRegistryTest {
     @BeforeEach
     fun setup() {
         client = mock()
-        frameworkConfig = mock()
         detector = mock()
         workerConfig = mock()
         leaderElectionConfig = mock()
 
         whenever(workerConfig.podIp()).thenReturn("10.0.0.1")
+        whenever(workerConfig.serviceName()).thenReturn("workflow-engine")
         whenever(leaderElectionConfig.namespace()).thenReturn("default")
-        whenever(frameworkConfig.serviceName()).thenReturn("workflow-engine")
 
         val endpointsOp = mock<MixedOperation<Endpoints, EndpointsList, Resource<Endpoints>>>()
         val namedResource = mock<Resource<Endpoints>>()
@@ -62,7 +59,7 @@ class PeerRegistryTest {
         whenever(namedResource.watch(watchCaptor.capture())).thenReturn(watch)
         whenever(detector.isRunningInKubernetes()).thenReturn(true)
 
-        registry = PeerRegistry(client, frameworkConfig, workerConfig, leaderElectionConfig, detector)
+        registry = PeerRegistry(client, workerConfig, leaderElectionConfig, detector)
     }
 
     private fun startupEvent(): StartupEvent = mock()
@@ -208,7 +205,7 @@ class PeerRegistryTest {
     fun `peers returns empty when client endpoints throws during start`() {
         whenever(client.endpoints()).thenThrow(RuntimeException("K8s API unavailable"))
 
-        val failRegistry = PeerRegistry(client, frameworkConfig, workerConfig, leaderElectionConfig, detector)
+        val failRegistry = PeerRegistry(client, workerConfig, leaderElectionConfig, detector)
         try {
             failRegistry.start(startupEvent())
         } catch (_: RuntimeException) {

@@ -22,9 +22,6 @@ import kotlin.test.assertNotNull
 class FrameworkConfigDefaultsTest {
 
     @Inject
-    lateinit var config: FrameworkConfig
-
-    @Inject
     lateinit var workerConfig: WorkerLoopConfig
 
     @Inject
@@ -122,7 +119,7 @@ class FrameworkConfigDefaultsTest {
 
     @Test
     fun `serviceName defaults to workflow-engine`() {
-        assertEquals("workflow-engine", config.serviceName())
+        assertEquals("workflow-engine", workerConfig.serviceName())
     }
 
     // -- 3. Config resolution ----------------------------------------
@@ -149,10 +146,6 @@ class FrameworkConfigDefaultsTest {
 
     // -- 4. CDI wiring integration ------------------------------------------
 
-    @Test
-    fun `FrameworkConfig is injectable`() {
-        assertNotNull(config)
-    }
 }
 
 // -- 2. Override test via TestProfile ---------------------------------------
@@ -167,7 +160,7 @@ class FrameworkConfigOverrideProfile : QuarkusTestProfile {
         "framework.worker.fallback-poll-interval" to "PT10S",
         "framework.worker.max-batch-size" to "32",
         "framework.worker.pod-ip" to "10.0.0.42",
-        "framework.service-name" to "custom-engine",
+        "framework.worker.service-name" to "custom-engine",
         "quarkus.datasource.jdbc.max-size" to "32",
         "framework.leader-election.namespace" to "prod",
         "framework.leader-election.lease-name" to "custom-lease",
@@ -184,9 +177,6 @@ class FrameworkConfigOverrideProfile : QuarkusTestProfile {
 @QuarkusTest
 @TestProfile(FrameworkConfigOverrideProfile::class)
 class FrameworkConfigOverrideTest {
-
-    @Inject
-    lateinit var config: FrameworkConfig
 
     @Inject
     lateinit var workerConfig: WorkerLoopConfig
@@ -282,7 +272,7 @@ class FrameworkConfigOverrideTest {
 
     @Test
     fun `serviceName is overridden`() {
-        assertEquals("custom-engine", config.serviceName())
+        assertEquals("custom-engine", workerConfig.serviceName())
     }
 
     @Test

@@ -373,6 +373,7 @@ private fun createTestWorkerConfig(workers: Int): WorkerLoopConfig = object : Wo
     override fun batchSize() = 1
     override fun maxBatchSize() = 16
     override fun podIp() = "localhost"
+    override fun serviceName() = "workflow-engine"
 }
 
 private fun createTestShutdownConfig(): ShutdownConfig = object : ShutdownConfig {
