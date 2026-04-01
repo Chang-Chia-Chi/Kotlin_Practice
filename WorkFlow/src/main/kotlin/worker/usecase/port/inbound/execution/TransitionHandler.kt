@@ -32,6 +32,7 @@ package com.workflow.worker.usecase.port.inbound.execution
  * skip optional work or checkpoint progress.
  */
 interface TransitionHandler {
+    fun key(): String = this::class.simpleName!!
     suspend fun execute(input: HandlerInput): HandlerOutput
 }
 

@@ -36,6 +36,7 @@ class CrashableHandler(
     private val delegate: TransitionHandler = PassThroughHandler(),
 ) : TransitionHandler {
 
+
     private val invocationCount = AtomicInteger(0)
 
     override suspend fun execute(input: HandlerInput): HandlerOutput {

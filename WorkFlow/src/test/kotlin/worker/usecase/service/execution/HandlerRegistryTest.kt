@@ -4,9 +4,12 @@ import com.workflow.worker.usecase.port.inbound.execution.HandlerInput
 import com.workflow.worker.usecase.port.inbound.execution.HandlerOutput
 import com.workflow.worker.usecase.port.inbound.execution.TransitionHandler
 import com.workflow.worker.usecase.service.execution.HandlerRegistry
+import jakarta.enterprise.inject.Instance
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
+import org.mockito.kotlin.mock
+import org.mockito.kotlin.whenever
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertSame
@@ -18,7 +21,9 @@ class HandlerRegistryTest {
 
     @BeforeEach
     fun setup() {
-        registry = HandlerRegistry()
+        val emptyBeans = mock<Instance<TransitionHandler>>()
+        whenever(emptyBeans.iterator()).thenReturn(emptyList<TransitionHandler>().iterator())
+        registry = HandlerRegistry(emptyBeans)
     }
 
     @Test
