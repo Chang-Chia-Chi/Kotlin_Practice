@@ -12,6 +12,7 @@ import com.workflow.workflow.usecase.port.inbound.phase.AdvancementStrategy
 import com.workflow.workflow.usecase.service.phase.LinearAdvancementStrategy
 import com.workflow.workflow.usecase.service.phase.ParallelAdvancementStrategy
 import com.workflow.workflow.usecase.service.phase.AdvancementStrategyRegistry
+import org.junit.jupiter.api.assertThrows
 import kotlin.test.Test
 import kotlin.test.assertIs
 
@@ -30,9 +31,15 @@ class AdvancementStrategyRegistryTest {
     }
 
     @Test
-    fun `all known phase types resolve without error`() {
-        PhaseType.entries.forEach { type ->
-            registry.resolve(type) // should not throw
+    fun `LINEAR and PARALLEL resolve without error`() {
+        registry.resolve(PhaseType.LINEAR)
+        registry.resolve(PhaseType.PARALLEL)
+    }
+
+    @Test
+    fun `SCATTER throws because no strategy is registered yet`() {
+        assertThrows<IllegalStateException> {
+            registry.resolve(PhaseType.SCATTER)
         }
     }
 

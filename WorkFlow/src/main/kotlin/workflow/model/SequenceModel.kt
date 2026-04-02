@@ -1,6 +1,6 @@
 package com.workflow.workflow.model
 
-enum class PhaseType { LINEAR, PARALLEL }
+enum class PhaseType { LINEAR, SCATTER, PARALLEL }
 
 data class SequenceInfo(
     val sequenceNumber: Int,

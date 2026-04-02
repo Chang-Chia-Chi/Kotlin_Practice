@@ -163,6 +163,7 @@ class DefaultPhaseGate(
         PhaseType.LINEAR -> {
             listOf(createTaskForActivity(workflowId, nextSeqInfo.sequenceNumber, nextSeqInfo.activity, now))
         }
+        PhaseType.SCATTER -> error("SCATTER phase type is not yet supported")
     }
 
     private fun completeWorkflow(handle: Handle, workflow: WorkflowRun): String? {

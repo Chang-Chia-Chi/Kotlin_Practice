@@ -65,6 +65,7 @@ class ActivityInputResolver(
                 val resultTree = objectMapper.readTree(resultJson)
                 traversePath(resultTree, fieldPath)
             }
+            PhaseType.SCATTER -> error("SCATTER phase type is not yet supported")
         }
     }
 
