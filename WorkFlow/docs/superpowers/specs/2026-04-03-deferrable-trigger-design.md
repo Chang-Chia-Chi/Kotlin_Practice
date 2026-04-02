@@ -145,6 +145,7 @@ object TriggerTypes {
 fun deferK8sJob(jobName: String, namespace: String): HandlerResult.Defer
 
 fun deferSqlExec(
+    objectMapper: ObjectMapper,
     datasource: String,
     sql: String,
     params: Map<String, Any?> = emptyMap(),
