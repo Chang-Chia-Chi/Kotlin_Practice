@@ -1,9 +1,8 @@
--- Consolidated schema (V1–V9)
+-- Consolidated schema (V1–V9, V2-DAG)
 
 CREATE TABLE workflow (
     id               VARCHAR2(36)   NOT NULL,
     definition       CLOB           NOT NULL,
-    current_sequence NUMBER(10)     NOT NULL,
     version          NUMBER(10)     DEFAULT 0 NOT NULL,
     status           VARCHAR2(20)   NOT NULL,
     created_at       TIMESTAMP      NOT NULL,
@@ -31,6 +30,7 @@ CREATE TABLE task (
     completed_at     TIMESTAMP,
     retry_count      NUMBER(10)     DEFAULT 0    NOT NULL,
     max_retries      NUMBER(10)     DEFAULT 0    NOT NULL,
+    activity_name    VARCHAR2(255),
     deadline_at      TIMESTAMP,
     not_before       TIMESTAMP,
     backoff_base     NUMBER         DEFAULT 1    NOT NULL,
@@ -41,7 +41,7 @@ CREATE TABLE task (
     CONSTRAINT fk_task_workflow FOREIGN KEY (workflow_id) REFERENCES workflow (id),
     CONSTRAINT chk_task_status CHECK (status IN (
         'PENDING', 'PROCESSING', 'COMPLETED', 'FAILED',
-        'TIMED_OUT', 'DEAD_LETTER', 'CANCELLED', 'WAITING_FOR_SIGNAL'
+        'TIMED_OUT', 'DEAD_LETTER', 'CANCELLED', 'WAITING_FOR_SIGNAL', 'SKIPPED'
     ))
 );
 
