@@ -4,6 +4,12 @@ import com.workflow.workflow.model.Task
 import com.workflow.workflow.model.TaskStatus
 import com.workflow.workflow.model.WorkflowRun
 import com.workflow.workflow.model.WorkflowStatus
+import com.workflow.workflow.model.DEFAULT_BRANCH
+import com.workflow.workflow.model.Edge
+import com.workflow.workflow.model.FailurePolicy
+import com.workflow.workflow.model.FanOutDefinition
+import com.workflow.workflow.model.JoinPolicy
+import java.time.Duration
 import java.time.Instant
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -82,9 +88,10 @@ class WorkflowModelsTest {
     // ── TaskStatus enum ─────────────────────────────────────────────────
 
     @Test
-    fun `TaskStatus contains exactly eight values`() {
+    fun `TaskStatus contains exactly nine values`() {
         assertEquals(
-            setOf("PENDING", "PROCESSING", "WAITING_FOR_SIGNAL", "COMPLETED", "FAILED", "TIMED_OUT", "DEAD_LETTER", "CANCELLED"),
+            setOf("PENDING", "PROCESSING", "WAITING_FOR_SIGNAL", "COMPLETED", "FAILED",
+                  "TIMED_OUT", "DEAD_LETTER", "CANCELLED", "SKIPPED"),
             TaskStatus.entries.map { it.name }.toSet(),
         )
     }
@@ -100,7 +107,7 @@ class WorkflowModelsTest {
     fun `isTerminal returns true only for terminal statuses`() {
         val expectedTerminal = setOf(
             TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.TIMED_OUT,
-            TaskStatus.DEAD_LETTER, TaskStatus.CANCELLED,
+            TaskStatus.DEAD_LETTER, TaskStatus.CANCELLED, TaskStatus.SKIPPED,
         )
         TaskStatus.entries.forEach { status ->
             assertEquals(
@@ -134,6 +141,11 @@ class WorkflowModelsTest {
     @Test
     fun `FAILED is terminal`() {
         assertEquals(true, TaskStatus.FAILED.isTerminal)
+    }
+
+    @Test
+    fun `SKIPPED is terminal`() {
+        assertEquals(true, TaskStatus.SKIPPED.isTerminal)
     }
 
     @Test
@@ -292,5 +304,78 @@ class WorkflowModelsTest {
             val t = task(status = status)
             assertEquals(status, t.status)
         }
+    }
+
+    // ── Edge ────────────────────────────────────────────────────────────
+
+    @Test
+    fun `Edge defaults to DEFAULT_BRANCH label`() {
+        val edge = Edge("fulfill")
+        assertEquals("fulfill", edge.target)
+        assertEquals(DEFAULT_BRANCH, edge.label)
+    }
+
+    @Test
+    fun `Edge with explicit label preserves label`() {
+        val edge = Edge("reject", "FAILED")
+        assertEquals("reject", edge.target)
+        assertEquals("FAILED", edge.label)
+    }
+
+    @Test
+    fun `DEFAULT_BRANCH constant value is double-underscore default double-underscore`() {
+        assertEquals("__default__", DEFAULT_BRANCH)
+    }
+
+    @Test
+    fun `Edge with blank target throws IllegalArgumentException`() {
+        val ex = org.junit.jupiter.api.assertThrows<IllegalArgumentException> {
+            Edge("")
+        }
+        assertTrue(ex.message!!.contains("Edge target must not be blank"))
+    }
+
+    @Test
+    fun `Edge with whitespace-only target throws IllegalArgumentException`() {
+        val ex = org.junit.jupiter.api.assertThrows<IllegalArgumentException> {
+            Edge("   ")
+        }
+        assertTrue(ex.message!!.contains("Edge target must not be blank"))
+    }
+
+    // ── FanOutDefinition ─────────────────────────────────────────────────
+
+    @Test
+    fun `FanOutDefinition defaults match spec`() {
+        val fanOut = FanOutDefinition(transition = "MyHandler")
+        assertEquals("MyHandler", fanOut.transition)
+        assertEquals(0, fanOut.retries)
+        assertEquals(FailurePolicy.ABORT, fanOut.failurePolicy)
+        assertEquals(Duration.ofMinutes(30), fanOut.deadline)
+        assertEquals(JoinPolicy.All, fanOut.joinPolicy)
+        assertEquals(Duration.ofSeconds(1), fanOut.backoffBase)
+        assertEquals(Duration.ofSeconds(300), fanOut.backoffCap)
+        assertEquals("default", fanOut.queue)
+    }
+
+    @Test
+    fun `FanOutDefinition preserves overridden fields`() {
+        val fanOut = FanOutDefinition(
+            transition = "Handler",
+            retries = 3,
+            failurePolicy = FailurePolicy.BEST_EFFORT,
+            deadline = Duration.ofMinutes(5),
+            joinPolicy = JoinPolicy.Percentage(80),
+            backoffBase = Duration.ofSeconds(2),
+            backoffCap = Duration.ofSeconds(60),
+            queue = "priority",
+        )
+        assertEquals(3, fanOut.retries)
+        assertEquals(FailurePolicy.BEST_EFFORT, fanOut.failurePolicy)
+        assertEquals(Duration.ofMinutes(5), fanOut.deadline)
+        assertEquals(JoinPolicy.Percentage(80), fanOut.joinPolicy)
+        assertEquals(Duration.ofSeconds(2), fanOut.backoffBase)
+        assertEquals(Duration.ofSeconds(60), fanOut.backoffCap)
+        assertEquals("priority", fanOut.queue)
     }
 }

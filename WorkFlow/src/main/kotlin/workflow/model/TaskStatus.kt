@@ -1,12 +1,14 @@
 package com.workflow.workflow.model
 
 enum class TaskStatus {
-    PENDING, PROCESSING, WAITING_FOR_SIGNAL, COMPLETED, FAILED, TIMED_OUT, DEAD_LETTER, CANCELLED;
+    PENDING, PROCESSING, WAITING_FOR_SIGNAL, COMPLETED, FAILED,
+    TIMED_OUT, DEAD_LETTER, CANCELLED,
+    SKIPPED;   // terminal: inserted by phase gate when a conditional edge is not taken
 
     val isTerminal: Boolean get() = this in terminalStatuses
 
     companion object {
-        private val terminalStatuses = setOf(COMPLETED, FAILED, TIMED_OUT, DEAD_LETTER, CANCELLED)
+        private val terminalStatuses = setOf(COMPLETED, FAILED, TIMED_OUT, DEAD_LETTER, CANCELLED, SKIPPED)
         private val allowed = setOf(
             PENDING to PROCESSING,
             PENDING to CANCELLED,
