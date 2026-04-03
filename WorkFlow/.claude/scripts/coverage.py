@@ -22,10 +22,10 @@ class CoverageRow:
     element: str
     instr_missed: int
     instr_total: int
-    instr_cov: float  # percentage
+    instr_cov: float | None  # percentage, None for n/a
     branch_missed: int
     branch_total: int
-    branch_cov: float
+    branch_cov: float | None  # None means n/a (no branches)
     cxty_missed: int
     cxty_total: int
     lines_missed: int
@@ -50,7 +50,7 @@ def parse_bar_cell(td: Tag) -> tuple[int, int]:
     missed = 0
     covered = 0
     for img in imgs:
-        val = int(img.get("title", "0"))
+        val = int(img.get("title", "0").replace(",", ""))
         src = img.get("src", "")
         if "redbar" in src:
             missed = val
@@ -59,9 +59,12 @@ def parse_bar_cell(td: Tag) -> tuple[int, int]:
     return missed, missed + covered
 
 
-def parse_pct(td: Tag) -> float:
-    """Parse a percentage cell like '74%' into 74.0."""
-    text = td.get_text(strip=True).replace("%", "").replace("n/a", "0")
+def parse_pct(td: Tag) -> float | None:
+    """Parse a percentage cell like '74%' into 74.0, or None for 'n/a'."""
+    text = td.get_text(strip=True)
+    if text == "n/a":
+        return None
+    text = text.replace("%", "")
     return float(text) if text else 0.0
 
 
@@ -127,31 +130,35 @@ def check_thresholds(
     violations = []
     all_rows = rows + ([total] if total else [])
     for r in all_rows:
-        if r.instr_cov < min_instr:
+        if r.instr_cov is not None and r.instr_cov < min_instr:
             violations.append(
                 f"[FAIL] {r.element}: instruction coverage {r.instr_cov:.0f}% < {min_instr:.0f}%"
             )
-        if r.branch_total > 0 and r.branch_cov < min_branch:
+        if r.branch_cov is not None and r.branch_cov < min_branch:
             violations.append(
                 f"[FAIL] {r.element}: branch coverage {r.branch_cov:.0f}% < {min_branch:.0f}%"
             )
     return violations
 
 
+def _fmt_pct(val: float | None) -> str:
+    return f"{val:>6.0f}%" if val is not None else "    n/a"
+
+
 def print_report(rows: list[CoverageRow], total: CoverageRow | None) -> None:
     header = f"{'Package':<40} {'Instr':>7} {'Branch':>7} {'Lines':>7} {'Methods':>7}"
     print(header)
-    print("─" * len(header))
+    print("-" * len(header))
     for r in rows:
         print(
-            f"{r.element:<40} {r.instr_cov:>6.0f}% {r.branch_cov:>6.0f}% "
+            f"{r.element:<40} {_fmt_pct(r.instr_cov)} {_fmt_pct(r.branch_cov)} "
             f"{_pct(r.lines_missed, r.lines_total):>6.0f}% "
             f"{_pct(r.methods_missed, r.methods_total):>6.0f}%"
         )
     if total:
-        print("─" * len(header))
+        print("-" * len(header))
         print(
-            f"{'TOTAL':<40} {total.instr_cov:>6.0f}% {total.branch_cov:>6.0f}% "
+            f"{'TOTAL':<40} {_fmt_pct(total.instr_cov)} {_fmt_pct(total.branch_cov)} "
             f"{_pct(total.lines_missed, total.lines_total):>6.0f}% "
             f"{_pct(total.methods_missed, total.methods_total):>6.0f}%"
         )
