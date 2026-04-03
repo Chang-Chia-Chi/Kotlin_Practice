@@ -58,8 +58,7 @@ class RepositoryTest {
 
     private fun makeWorkflow(
         id: String = randomId(),
-        definitionJson: String = """{"activities":[]}""",
-        currentSequence: Int = 1,
+        definitionJson: String = """{"activities":{}}""",
         version: Int = 0,
         status: WorkflowStatus = WorkflowStatus.RUNNING,
         createdAt: Instant = now(),
@@ -68,7 +67,6 @@ class RepositoryTest {
     ) = WorkflowRun(
         id = id,
         definitionJson = definitionJson,
-        currentSequence = currentSequence,
         version = version,
         status = status,
         createdAt = createdAt,
@@ -79,6 +77,7 @@ class RepositoryTest {
     private fun makeTask(
         id: String = randomId(),
         workflowId: String,
+        activityName: String = "test-activity",
         sequenceNumber: Int = 1,
         status: TaskStatus = TaskStatus.PENDING,
         handlerKey: String = "test.handler",
@@ -96,6 +95,7 @@ class RepositoryTest {
     ) = Task(
         id = id,
         workflowId = workflowId,
+        activityName = activityName,
         sequenceNumber = sequenceNumber,
         status = status,
         handlerKey = handlerKey,
@@ -116,12 +116,11 @@ class RepositoryTest {
     private fun insertWorkflowDirect(run: WorkflowRun) {
         jdbi.useHandle<Exception> { handle ->
             handle.createUpdate(
-                """INSERT INTO workflow (id, definition, current_sequence, version, status, created_at, updated_at, deadline_at)
-                   VALUES (:id, :definition, :currentSequence, :version, :status, :createdAt, :updatedAt, :deadlineAt)"""
+                """INSERT INTO workflow (id, definition, version, status, created_at, updated_at, deadline_at)
+                   VALUES (:id, :definition, :version, :status, :createdAt, :updatedAt, :deadlineAt)"""
             )
                 .bind("id", run.id)
                 .bind("definition", run.definitionJson)
-                .bind("currentSequence", run.currentSequence)
                 .bind("version", run.version)
                 .bind("status", run.status.name)
                 .bind("createdAt", LocalDateTime.ofInstant(run.createdAt, ZoneOffset.UTC))
@@ -238,7 +237,7 @@ class RepositoryTest {
             val ts = now()
             val wf = makeWorkflow(
                 definitionJson = """{"activities":[{"name":"step1"}]}""",
-                currentSequence = 1,
+
                 version = 0,
                 status = WorkflowStatus.RUNNING,
                 createdAt = ts,
@@ -251,7 +250,6 @@ class RepositoryTest {
             assertNotNull(found)
             assertEquals(wf.id, found.id)
             assertEquals(wf.definitionJson, found.definitionJson)
-            assertEquals(wf.currentSequence, found.currentSequence)
             assertEquals(wf.version, found.version)
             assertEquals(wf.status, found.status)
             assertEquals(wf.createdAt, found.createdAt)
@@ -277,36 +275,31 @@ class RepositoryTest {
             assertEquals(largeJson, found.definitionJson)
         }
 
-        // ── casAdvance ───────────────────────────────────────────────────
+        // ── casVersion ───────────────────────────────────────────────────
 
         @Test
-        fun `casAdvance succeeds with matching sequence and version`() = runTest {
-            val wf = makeWorkflow(currentSequence = 1, version = 0)
+        fun `casVersion succeeds with matching version`() = runTest {
+            val wf = makeWorkflow(version = 0)
             workflowRepo.insert(wf)
 
-            val result = workflowRepo.casAdvance(
+            val result = workflowRepo.casVersion(
                 id = wf.id,
-                expectedSequence = 1,
-                nextSequence = 2,
                 expectedVersion = 0,
             )
 
             assertTrue(result)
             val found = workflowRepo.findById(wf.id)
             assertNotNull(found)
-            assertEquals(2, found.currentSequence)
             assertEquals(1, found.version)
         }
 
         @Test
-        fun `casAdvance fails on version mismatch`() = runTest {
-            val wf = makeWorkflow(currentSequence = 1, version = 0)
+        fun `casVersion fails on version mismatch`() = runTest {
+            val wf = makeWorkflow(version = 0)
             workflowRepo.insert(wf)
 
-            val result = workflowRepo.casAdvance(
+            val result = workflowRepo.casVersion(
                 id = wf.id,
-                expectedSequence = 1,
-                nextSequence = 2,
                 expectedVersion = 99,
             )
 
@@ -314,109 +307,68 @@ class RepositoryTest {
             // Row unchanged
             val found = workflowRepo.findById(wf.id)
             assertNotNull(found)
-            assertEquals(1, found.currentSequence)
             assertEquals(0, found.version)
         }
 
         @Test
-        fun `casAdvance fails on sequence mismatch`() = runTest {
-            val wf = makeWorkflow(currentSequence = 1, version = 0)
-            workflowRepo.insert(wf)
-
-            val result = workflowRepo.casAdvance(
-                id = wf.id,
-                expectedSequence = 5,
-                nextSequence = 6,
-                expectedVersion = 0,
-            )
-
-            assertFalse(result)
-            // Row unchanged
-            val found = workflowRepo.findById(wf.id)
-            assertNotNull(found)
-            assertEquals(1, found.currentSequence)
-            assertEquals(0, found.version)
-        }
-
-        @Test
-        fun `casAdvance fails on both sequence and version mismatch`() = runTest {
-            val wf = makeWorkflow(currentSequence = 1, version = 0)
-            workflowRepo.insert(wf)
-
-            val result = workflowRepo.casAdvance(
-                id = wf.id,
-                expectedSequence = 5,
-                nextSequence = 6,
-                expectedVersion = 99,
-            )
-
-            assertFalse(result)
-        }
-
-        @Test
-        fun `casAdvance fails for non-existent id`() = runTest {
-            val result = workflowRepo.casAdvance(
+        fun `casVersion fails for non-existent id`() = runTest {
+            val result = workflowRepo.casVersion(
                 id = randomId(),
-                expectedSequence = 1,
-                nextSequence = 2,
                 expectedVersion = 0,
             )
             assertFalse(result)
         }
 
         @Test
-        fun `casAdvance increments version on success`() = runTest {
-            val wf = makeWorkflow(currentSequence = 1, version = 0)
+        fun `casVersion increments version on success`() = runTest {
+            val wf = makeWorkflow(version = 0)
             workflowRepo.insert(wf)
 
             // First CAS
-            assertTrue(workflowRepo.casAdvance(wf.id, 1, 2, 0))
+            assertTrue(workflowRepo.casVersion(wf.id, 0))
             val afterFirst = workflowRepo.findById(wf.id)!!
-            assertEquals(2, afterFirst.currentSequence)
             assertEquals(1, afterFirst.version)
 
             // Second CAS with updated version
-            assertTrue(workflowRepo.casAdvance(wf.id, 2, 3, 1))
+            assertTrue(workflowRepo.casVersion(wf.id, 1))
             val afterSecond = workflowRepo.findById(wf.id)!!
-            assertEquals(3, afterSecond.currentSequence)
             assertEquals(2, afterSecond.version)
         }
 
         @Test
-        fun `casAdvance second attempt fails after first succeeds (stale version)`() = runTest {
-            val wf = makeWorkflow(currentSequence = 1, version = 0)
+        fun `casVersion second attempt fails after first succeeds (stale version)`() = runTest {
+            val wf = makeWorkflow(version = 0)
             workflowRepo.insert(wf)
 
             // First CAS wins
-            assertTrue(workflowRepo.casAdvance(wf.id, 1, 2, 0))
+            assertTrue(workflowRepo.casVersion(wf.id, 0))
             // Second CAS with stale version loses
-            assertFalse(workflowRepo.casAdvance(wf.id, 1, 2, 0))
+            assertFalse(workflowRepo.casVersion(wf.id, 0))
         }
 
-        // ── casAdvanceWithHandle ─────────────────────────────────────────
+        // ── casVersionWithHandle ─────────────────────────────────────────
 
         @Test
-        fun `casAdvanceWithHandle succeeds within transaction`() {
-            val wf = makeWorkflow(currentSequence = 1, version = 0)
+        fun `casVersionWithHandle succeeds within transaction`() {
+            val wf = makeWorkflow(version = 0)
             insertWorkflowDirect(wf)
 
             val result = jdbi.inTransaction<Boolean, Exception> { handle ->
-                workflowRepo.casAdvanceWithHandle(handle, wf.id, 1, 2, 0)
+                workflowRepo.casVersionWithHandle(handle, wf.id, 0)
             }
 
             assertTrue(result)
             val row = readWorkflowDirect(wf.id)!!
-            assertEquals(2, (row["CURRENT_SEQUENCE"] as Number).toInt())
             assertEquals(1, (row["VERSION"] as Number).toInt())
         }
 
         @Test
-        fun `casAdvanceWithHandle fails on version mismatch`() {
-            val wf = makeWorkflow(currentSequence = 1, version = 0)
+        fun `casVersionWithHandle fails on version mismatch`() {
+            val wf = makeWorkflow(version = 0)
             insertWorkflowDirect(wf)
 
             val result = jdbi.inTransaction<Boolean, Exception> { handle ->
-                workflowRepo.casAdvanceWithHandle(handle, wf.id, 1, 2, 99)
+                workflowRepo.casVersionWithHandle(handle, wf.id, 99)
             }
 
             assertFalse(result)
@@ -428,7 +380,7 @@ class RepositoryTest {
         fun `findByIdWithHandle returns workflow within transaction`() {
             val wf = makeWorkflow(
                 definitionJson = """{"activities":[{"name":"txn-test"}]}""",
-                currentSequence = 2,
+
                 version = 3,
                 status = WorkflowStatus.RUNNING,
             )
@@ -441,7 +393,6 @@ class RepositoryTest {
             assertNotNull(found)
             assertEquals(wf.id, found.id)
             assertEquals(wf.definitionJson, found.definitionJson)
-            assertEquals(2, found.currentSequence)
             assertEquals(3, found.version)
             assertEquals(WorkflowStatus.RUNNING, found.status)
         }
@@ -506,7 +457,7 @@ class RepositoryTest {
             val pastTime = now().minus(Duration.ofMinutes(10))
             val wf = makeWorkflow(
                 status = WorkflowStatus.RUNNING,
-                currentSequence = 1,
+
                 updatedAt = pastTime,
                 createdAt = pastTime,
             )
@@ -526,7 +477,7 @@ class RepositoryTest {
             val pastTime = now().minus(Duration.ofMinutes(10))
             val wf = makeWorkflow(
                 status = WorkflowStatus.RUNNING,
-                currentSequence = 1,
+
                 updatedAt = pastTime,
                 createdAt = pastTime,
             )
@@ -544,7 +495,7 @@ class RepositoryTest {
             val recentTime = now().minus(Duration.ofMinutes(1))
             val wf = makeWorkflow(
                 status = WorkflowStatus.RUNNING,
-                currentSequence = 1,
+
                 updatedAt = recentTime,
                 createdAt = recentTime,
             )
@@ -560,7 +511,7 @@ class RepositoryTest {
             val pastTime = now().minus(Duration.ofMinutes(10))
             val wf = makeWorkflow(
                 status = WorkflowStatus.COMPLETED,
-                currentSequence = 1,
+
                 updatedAt = pastTime,
                 createdAt = pastTime,
             )
@@ -575,7 +526,7 @@ class RepositoryTest {
             val pastTime = now().minus(Duration.ofMinutes(10))
             val wf = makeWorkflow(
                 status = WorkflowStatus.FAILED,
-                currentSequence = 1,
+
                 updatedAt = pastTime,
                 createdAt = pastTime,
             )
@@ -590,7 +541,7 @@ class RepositoryTest {
             val pastTime = now().minus(Duration.ofMinutes(10))
             val wf = makeWorkflow(
                 status = WorkflowStatus.RUNNING,
-                currentSequence = 2,
+
                 updatedAt = pastTime,
                 createdAt = pastTime,
             )
@@ -625,7 +576,7 @@ class RepositoryTest {
             val pastTime = now().minus(Duration.ofMinutes(10))
             val wf = makeWorkflow(
                 status = WorkflowStatus.RUNNING,
-                currentSequence = 1,
+
                 updatedAt = pastTime,
                 createdAt = pastTime,
             )

@@ -3,34 +3,64 @@ package com.workflow.workflow.model
 import java.time.Duration
 
 data class WorkflowDefinition(
-    val activities: List<ActivityDefinition>,
+    val activities: Map<String, ActivityDefinition>,
+    val start: String,
     val deadline: Duration = Duration.ofHours(1),
 ) {
     init {
         require(activities.isNotEmpty()) { "Workflow must have at least one activity" }
         require(deadline > Duration.ZERO) { "Workflow deadline must be positive" }
-        val names = activities.map { it.name }
-        require(names.size == names.toSet().size) {
-            "Activity names must be unique, found duplicates: ${names.groupBy { it }.filter { it.value.size > 1 }.keys}"
-        }
-        for (activity in activities) {
-            val target = activity.fanOut ?: continue
-            require(activities.any { it.name == target }) {
-                "Activity '${activity.name}' fanOut references unknown activity '$target'"
+        require(start in activities) { "Start activity '$start' not found in activities" }
+
+        for ((name, activity) in activities) {
+            for (edge in activity.successors) {
+                require(edge.target in activities) {
+                    "Activity '$name' has edge to unknown activity '${edge.target}'"
+                }
             }
         }
-        for ((i, activity) in activities.withIndex()) {
-            val target = activity.fanOut ?: continue
-            require(i + 1 < activities.size && activities[i + 1].name == target) {
-                "fanOut target '$target' must be the next activity after '${activity.name}'"
+
+        for ((name, activity) in activities) {
+            require(!(activity.failurePolicy == FailurePolicy.BEST_EFFORT &&
+                    activity.successors.any { it.label != DEFAULT_BRANCH })) {
+                "Activity '$name': BEST_EFFORT policy is incompatible with conditional (on()) successors"
             }
         }
-        for (activity in activities) {
-            val target = activity.fanOut ?: continue
-            val targetActivity = activities.first { it.name == target }
-            require(targetActivity.fanOut == null) {
-                "fanOut target '$target' cannot itself be a fanOut source"
+
+        for ((name, activity) in activities) {
+            require(!(activity.fanOut != null &&
+                    activity.successors.any { it.label != DEFAULT_BRANCH })) {
+                "Activity '$name': fanOut cannot be combined with conditional successors"
             }
         }
+
+        require(activities.values.any { it.isTerminal }) {
+            "Workflow must have at least one terminal activity (no successors and no fanOut)"
+        }
+
+        // Cycle detection + unreachable check
+        val reachable = topologicalSort(this)
+        val unreachable = activities.keys - reachable.toSet()
+        require(unreachable.isEmpty()) { "Unreachable activities: $unreachable" }
     }
+}
+
+internal fun topologicalSort(definition: WorkflowDefinition): List<String> {
+    val permanent = mutableSetOf<String>()
+    val temporary = mutableSetOf<String>()
+    val result = mutableListOf<String>()
+
+    fun visit(name: String) {
+        if (name in permanent) return
+        require(name !in temporary) { "Cycle detected involving activity '$name'" }
+        temporary += name
+        val activity = definition.activities[name] ?: return
+        for (edge in activity.successors) visit(edge.target)
+        temporary -= name
+        permanent += name
+        result.add(0, name)
+    }
+
+    visit(definition.start)
+    return result
 }

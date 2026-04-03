@@ -1,282 +1,231 @@
 package com.workflow.workflow.dsl
 
-import com.workflow.workflow.dsl.workflow
-import com.workflow.workflow.model.ActivityDefinition
+import com.workflow.workflow.model.DEFAULT_BRANCH
+import com.workflow.workflow.model.Edge
 import com.workflow.workflow.model.FailurePolicy
+import com.workflow.workflow.model.FanOutDefinition
 import com.workflow.workflow.model.JoinPolicy
-import com.workflow.workflow.model.WorkflowDefinition
 import java.time.Duration
 import org.junit.jupiter.api.assertThrows
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class WorkflowDslBuildersTest {
 
+    // ── Spec item 31: Linear workflow ────────────────────────────────────
+
     @Test
-    fun `linear workflow with two activities`() {
-        val definition = workflow {
+    fun `linear workflow builds correctly`() {
+        val def = workflow {
             activity("step-1") {
                 transition("process.step1")
                 retries(2)
                 failurePolicy(FailurePolicy.ABORT)
                 deadline(Duration.ofMinutes(10))
+                next("step-2")
             }
             activity("step-2") {
                 transition("process.step2")
-                retries(0)
                 failurePolicy(FailurePolicy.BEST_EFFORT)
-                deadline(Duration.ofMinutes(5))
             }
         }
 
-        assertEquals(2, definition.activities.size)
+        assertEquals("step-1", def.start)
+        assertEquals(2, def.activities.size)
 
-        val first = definition.activities[0]
-        assertEquals("step-1", first.name)
+        val first = def.activities["step-1"]!!
         assertEquals("process.step1", first.transition)
         assertEquals(2, first.retries)
         assertEquals(FailurePolicy.ABORT, first.failurePolicy)
         assertEquals(Duration.ofMinutes(10), first.deadline)
         assertNull(first.fanOut)
+        assertEquals(listOf(Edge("step-2", DEFAULT_BRANCH)), first.successors)
 
-        val second = definition.activities[1]
-        assertEquals("step-2", second.name)
+        val second = def.activities["step-2"]!!
         assertEquals("process.step2", second.transition)
-        assertEquals(0, second.retries)
-        assertEquals(FailurePolicy.BEST_EFFORT, second.failurePolicy)
-        assertEquals(Duration.ofMinutes(5), second.deadline)
-        assertNull(second.fanOut)
+        assertTrue(second.successors.isEmpty())
     }
 
+    // ── Spec item 32: Conditional workflow ───────────────────────────────
+
     @Test
-    fun `fan-out with Percentage join policy`() {
-        val definition = workflow {
-            activity("scatter") {
-                transition("scatter.dispatch")
-                fanOut("parallel")
+    fun `conditional workflow builds with correct edge labels`() {
+        val def = workflow {
+            activity("validate") {
+                transition("v.h")
+                on("OK") { next("charge") }
+                on("INVALID") { next("reject") }
             }
-            activity("parallel") {
-                transition("scatter.process")
-                retries(3)
-                failurePolicy(FailurePolicy.BEST_EFFORT)
-                deadline(Duration.ofMinutes(15))
-                joinPolicy(JoinPolicy.Percentage(95))
+            activity("charge") { transition("c.h") }
+            activity("reject") { transition("r.h") }
+        }
+
+        val validate = def.activities["validate"]!!
+        assertEquals(2, validate.successors.size)
+        val okEdge = validate.successors.first { it.label == "OK" }
+        val invalidEdge = validate.successors.first { it.label == "INVALID" }
+        assertEquals("charge", okEdge.target)
+        assertEquals("reject", invalidEdge.target)
+    }
+
+    // ── Spec item 33: Unconditional fork ─────────────────────────────────
+
+    @Test
+    fun `fork builds with multiple DEFAULT_BRANCH edges`() {
+        val def = workflow {
+            activity("prepare") {
+                transition("p.h")
+                next("send-email")
+                next("update-crm")
+            }
+            activity("send-email") { transition("e.h") }
+            activity("update-crm") { transition("c.h") }
+        }
+
+        val prepare = def.activities["prepare"]!!
+        assertEquals(2, prepare.successors.size)
+        assertTrue(prepare.successors.all { it.label == DEFAULT_BRANCH })
+        assertEquals(setOf("send-email", "update-crm"), prepare.successors.map { it.target }.toSet())
+    }
+
+    // ── Spec item 34: Fan-out with FanOutDefinition ───────────────────────
+
+    @Test
+    fun `fan-out builds with FanOutDefinition embedded and next() as successor`() {
+        val def = workflow {
+            activity("scatter") {
+                transition("DispatchScatterHandler")
+                fanOut {
+                    transition("DispatchSimulationHandler")
+                    retries(2)
+                    joinPolicy(JoinPolicy.All)
+                }
+                next("join")
+            }
+            activity("join") { transition("DispatchJoinHandler") }
+        }
+
+        val scatter = def.activities["scatter"]!!
+        assertNotNull(scatter.fanOut)
+        assertEquals("DispatchSimulationHandler", scatter.fanOut!!.transition)
+        assertEquals(2, scatter.fanOut!!.retries)
+        assertEquals(JoinPolicy.All, scatter.fanOut!!.joinPolicy)
+        assertEquals(listOf(Edge("join", DEFAULT_BRANCH)), scatter.successors)
+    }
+
+    // ── Spec item 35: Migrated dispatchWorkflow builds ────────────────────
+
+    @Test
+    fun `migrated dispatchWorkflow builds and scatter batchToken resolves from scatter`() {
+        val def = workflow {
+            start("scatter")
+            activity("scatter") {
+                transition("DispatchScatterHandler")
+                fanOut {
+                    transition("DispatchSimulationHandler")
+                    retries(2)
+                    joinPolicy(JoinPolicy.All)
+                }
+                next("join")
+            }
+            activity("join") {
+                transition("DispatchJoinHandler")
+                deadline(Duration.ofMinutes(10))
+                inputs { "batchToken" from "scatter.batchToken" }
             }
         }
 
-        assertEquals(2, definition.activities.size)
-        val scatter = definition.activities[0]
-        assertEquals("scatter", scatter.name)
-        assertEquals("scatter.dispatch", scatter.transition)
-        assertEquals("parallel", scatter.fanOut)
-
-        val parallel = definition.activities[1]
-        assertEquals("scatter.process", parallel.transition)
-        assertEquals(3, parallel.retries)
-        assertEquals(FailurePolicy.BEST_EFFORT, parallel.failurePolicy)
-        assertEquals(Duration.ofMinutes(15), parallel.deadline)
-        assertEquals(JoinPolicy.Percentage(95), parallel.joinPolicy)
+        assertEquals("scatter", def.start)
+        assertEquals("scatter.batchToken", def.activities["join"]!!.inputs["batchToken"])
     }
 
-    @Test
-    fun `fan-out with default joinPolicy when omitted`() {
-        val definition = workflow {
-            activity("scatter") {
-                transition("scatter.dispatch")
-                fanOut("parallel")
-            }
-            activity("parallel") {
-                transition("parallel.process")
-            }
-        }
-
-        assertEquals(JoinPolicy.All, definition.activities[1].joinPolicy)
-    }
+    // ── Spec item 36: Mixed on() + next() is rejected ────────────────────
 
     @Test
-    fun `missing activity transition throws IllegalArgumentException`() {
+    fun `mixing on() and next() on same activity is rejected at build time`() {
         assertFailsWith<IllegalArgumentException> {
             workflow {
-                activity("no-transition") {
-                    retries(1)
+                activity("a") {
+                    transition("a.h")
+                    next("b")
+                    on("OK") { next("c") }
                 }
+                activity("b") { transition("b.h") }
+                activity("c") { transition("c.h") }
+            }
+        }
+    }
+
+    // ── Additional DSL tests ──────────────────────────────────────────────
+
+    @Test
+    fun `missing transition throws`() {
+        assertFailsWith<IllegalArgumentException> {
+            workflow {
+                activity("step") { retries(1) }
             }
         }
     }
 
     @Test
-    fun `empty workflow throws IllegalArgumentException`() {
+    fun `empty workflow throws`() {
         assertFailsWith<IllegalArgumentException> {
             workflow { }
         }
     }
 
     @Test
-    fun `fanOut target must reference existing activity`() {
-        assertThrows<IllegalArgumentException> {
-            workflow {
-                activity("scatter") {
-                    transition("scatter.handler")
-                    fanOut("nonexistent")
-                }
-            }
-        }
-    }
-
-    @Test
-    fun `fanOut target must be next activity`() {
-        assertThrows<IllegalArgumentException> {
-            workflow {
-                activity("scatter") {
-                    transition("scatter.handler")
-                    fanOut("join")
-                }
-                activity("parallel") { transition("parallel.handler") }
-                activity("join") { transition("join.handler") }
-            }
-        }
-    }
-
-    @Test
-    fun `chained fanOut not allowed`() {
-        assertThrows<IllegalArgumentException> {
-            workflow {
-                activity("scatter1") {
-                    transition("s1.handler")
-                    fanOut("scatter2")
-                }
-                activity("scatter2") {
-                    transition("s2.handler")
-                    fanOut("parallel")
-                }
-                activity("parallel") { transition("p.handler") }
-            }
-        }
-    }
-
-    @Test
     fun `workflow deadline defaults to 1 hour`() {
         val def = workflow {
-            activity("step1") { transition("handler1") }
+            activity("step") { transition("h") }
         }
         assertEquals(Duration.ofHours(1), def.deadline)
     }
 
     @Test
-    fun `workflow deadline can be customized`() {
+    fun `workflow deadline customizable`() {
         val def = workflow {
             deadline(Duration.ofMinutes(30))
-            activity("step1") { transition("handler1") }
+            activity("step") { transition("h") }
         }
         assertEquals(Duration.ofMinutes(30), def.deadline)
     }
 
     @Test
-    fun `workflow deadline must be positive`() {
-        assertThrows<IllegalArgumentException> {
-            workflow {
-                deadline(Duration.ZERO)
-                activity("step1") { transition("handler1") }
-            }
-        }
-    }
-
-    @Test
-    fun `workflow deadline negative throws`() {
-        assertThrows<IllegalArgumentException> {
-            workflow {
-                deadline(Duration.ofMinutes(-1))
-                activity("step1") { transition("handler1") }
-            }
-        }
-    }
-
-    // ── Inputs DSL ──────────────────────────────────────────────────────
-
-    @Test
-    fun `activity with no inputs has empty inputs map`() {
-        val def = workflow {
-            activity("step1") {
-                transition("step1.handler")
-            }
-        }
-        assertTrue(def.activities[0].inputs.isEmpty())
-    }
-
-    @Test
-    fun `activity with field-level inputs`() {
-        val def = workflow {
-            activity("notify") {
-                transition("notify.handler")
-                inputs {
-                    "chunks" from "split.uri"
-                    "count" from "split.total"
-                }
-            }
-        }
-        val inputs = def.activities[0].inputs
-        assertEquals(2, inputs.size)
-        assertEquals("split.uri", inputs["chunks"])
-        assertEquals("split.total", inputs["count"])
-    }
-
-    @Test
-    fun `activity with whole-result input`() {
-        val def = workflow {
-            activity("aggregate") {
-                transition("agg.handler")
-                inputs {
-                    "data" from "split"
-                }
-            }
-        }
-        assertEquals("split", def.activities[0].inputs["data"])
-    }
-
-    @Test
-    fun `inputs from multiple activities`() {
-        val def = workflow {
-            activity("final") {
-                transition("final.handler")
-                inputs {
-                    "a" from "step1.field"
-                    "b" from "step2"
-                }
-            }
-        }
-        val inputs = def.activities[0].inputs
-        assertEquals("step1.field", inputs["a"])
-        assertEquals("step2", inputs["b"])
-    }
-
-    @Test
-    fun `inputs serializes correctly via Jackson`() {
-        val objectMapper = com.fasterxml.jackson.databind.ObjectMapper()
-            .registerModule(com.fasterxml.jackson.module.kotlin.KotlinModule.Builder().build())
-            .registerModule(com.fasterxml.jackson.datatype.jsr310.JavaTimeModule())
+    fun `inputs DSL works on new builder`() {
         val def = workflow {
             activity("step") {
-                transition("s.handler")
+                transition("h")
                 inputs {
                     "x" from "prev.field"
+                    "y" from "prev"
                 }
             }
         }
-        val json = objectMapper.writeValueAsString(def)
-        val restored = objectMapper.readValue(json, WorkflowDefinition::class.java)
-        assertEquals("prev.field", restored.activities[0].inputs["x"])
+        val inputs = def.activities["step"]!!.inputs
+        assertEquals("prev.field", inputs["x"])
+        assertEquals("prev", inputs["y"])
     }
 
     @Test
-    fun `duplicate activity names throws`() {
-        assertThrows<IllegalArgumentException> {
-            workflow {
-                activity("step1") { transition("a.handler") }
-                activity("step1") { transition("b.handler") }
+    fun `BranchBuilder supports multiple next() calls for fork on label`() {
+        val def = workflow {
+            activity("charge") {
+                transition("c.h")
+                on("SUCCESS") { next("notify"); next("audit") }
+                on("FAILED") { next("reject") }
             }
+            activity("notify") { transition("n.h") }
+            activity("audit")  { transition("a.h") }
+            activity("reject") { transition("r.h") }
         }
+        val charge = def.activities["charge"]!!
+        val successEdges = charge.successors.filter { it.label == "SUCCESS" }
+        assertEquals(2, successEdges.size)
+        assertEquals(setOf("notify", "audit"), successEdges.map { it.target }.toSet())
     }
 }

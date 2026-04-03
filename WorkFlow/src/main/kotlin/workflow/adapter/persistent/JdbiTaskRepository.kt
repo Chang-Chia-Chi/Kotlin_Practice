@@ -225,7 +225,7 @@ class JdbiTaskRepository(
                         """
                 UPDATE task SET status = :status, result = :result, completed_at = :now
                 WHERE id = :id
-                  AND status NOT IN ('COMPLETED', 'FAILED', 'TIMED_OUT', 'DEAD_LETTER', 'CANCELLED')
+                  AND status NOT IN ('COMPLETED', 'FAILED', 'TIMED_OUT', 'DEAD_LETTER', 'CANCELLED', 'SKIPPED')
                   AND (claimed_by = :claimedBy AND claimed_at = :claimedAt OR :claimedBy IS NULL)
                 """,
                     ).bind("id", id)
@@ -265,7 +265,7 @@ class JdbiTaskRepository(
                 """
             SELECT COUNT(*) FROM task
             WHERE workflow_id = :workflowId AND sequence_number = :seq
-              AND status NOT IN ('COMPLETED', 'FAILED', 'TIMED_OUT', 'DEAD_LETTER', 'CANCELLED')
+              AND status NOT IN ('COMPLETED', 'FAILED', 'TIMED_OUT', 'DEAD_LETTER', 'CANCELLED', 'SKIPPED')
             """,
             ).bind("workflowId", workflowId)
             .bind("seq", sequenceNumber)
@@ -328,33 +328,29 @@ class JdbiTaskRepository(
             .execute()
     }
 
-    override fun insertBatchWithHandle(
-        handle: Handle,
-        tasks: List<Task>,
-    ) {
+    override fun insertBatchWithHandle(handle: Handle, tasks: List<Task>) {
         if (tasks.isEmpty()) return
-        val batch =
-            handle.prepareBatch(
-                """
-            INSERT INTO task (id, workflow_id, sequence_number, status, handler_key,
+        val batch = handle.prepareBatch(
+            """
+            INSERT INTO task (id, workflow_id, activity_name, sequence_number, status, handler_key,
                               item, result, claimed_by, claimed_at, completed_at,
                               retry_count, max_retries, deadline_at, not_before, backoff_base, backoff_cap, queue_name)
-            VALUES (:id, :workflowId, :sequenceNumber, :status, :handlerKey,
+            VALUES (:id, :workflowId, :activityName, :sequenceNumber, :status, :handlerKey,
                     :item, :result, :claimedBy, :claimedAt, :completedAt,
                     :retryCount, :maxRetries, :deadlineAt, :notBefore, :backoffBase, :backoffCap, :queueName)
             """,
-            )
+        )
         for (task in tasks) {
             batch
                 .bind("id", task.id)
                 .bind("workflowId", task.workflowId)
+                .bind("activityName", task.activityName)
                 .bind("sequenceNumber", task.sequenceNumber)
                 .bind("status", task.status.name)
                 .bind("handlerKey", task.handlerKey)
             bindNullableClob(batch, "item", task.item)
             bindNullableClob(batch, "result", task.resultJson)
-            batch
-                .bind("claimedBy", task.claimedBy)
+            batch.bind("claimedBy", task.claimedBy)
             bindNullableTimestamp(batch, "claimedAt", task.claimedAt)
             bindNullableTimestamp(batch, "completedAt", task.completedAt)
             batch
@@ -427,6 +423,7 @@ class JdbiTaskRepository(
         return Task(
             id = ci["ID"] as String,
             workflowId = ci["WORKFLOW_ID"] as String,
+            activityName = (ci["ACTIVITY_NAME"] as? String) ?: "",
             sequenceNumber = (ci["SEQUENCE_NUMBER"] as Number).toInt(),
             status = TaskStatus.valueOf(ci["STATUS"] as String),
             handlerKey = ci["HANDLER_KEY"] as String,

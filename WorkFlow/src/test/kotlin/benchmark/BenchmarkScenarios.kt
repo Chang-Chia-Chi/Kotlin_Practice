@@ -19,23 +19,26 @@ object BenchmarkScenarios {
     fun fanOutDefinition(fanOutFactor: Int): WorkflowDefinition = workflow {
         activity("scatter") {
             transition("bench.fanout.scatter")
-            fanOut("parallel")
-        }
-        activity("parallel") {
-            transition("bench.fanout.parallel")
-            joinPolicy(JoinPolicy.All)
+            fanOut {
+                transition("bench.fanout.parallel")
+                joinPolicy(JoinPolicy.All)
+            }
+            next("join")
         }
         activity("join") {
             transition("bench.fanout.join")
             inputs {
-                "results" from "parallel.result"
+                "results" from "scatter.result"
             }
         }
     }
 
     fun multiStepDefinition(stepCount: Int): WorkflowDefinition = workflow {
         for (i in 1..stepCount) {
-            activity("step-$i") { transition("bench.multistep.step") }
+            activity("step-$i") {
+                transition("bench.multistep.step")
+                if (i < stepCount) next("step-${i + 1}")
+            }
         }
     }
 

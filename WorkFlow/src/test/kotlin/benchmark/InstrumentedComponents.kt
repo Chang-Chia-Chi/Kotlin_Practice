@@ -10,7 +10,6 @@ import com.workflow.workflow.usecase.port.outbound.persistent.TaskRepository
 import com.workflow.workflow.usecase.port.outbound.persistent.WorkflowRepository
 import com.workflow.workflow.usecase.service.orchestration.DefaultPhaseGate
 import com.workflow.workflow.usecase.service.orchestration.ActivityInputResolver
-import com.workflow.workflow.usecase.service.phase.AdvancementStrategyRegistry
 import com.workflow.worker.usecase.port.outbound.notification.WorkerNotifier
 import com.workflow.worker.usecase.port.inbound.execution.HandlerInput
 import com.workflow.worker.usecase.port.inbound.execution.HandlerOutput
@@ -36,11 +35,10 @@ class InstrumentedWorkflowRepository(
     private val timer: PhaseTimer,
 ) : JdbiWorkflowRepository(jdbi) {
 
-    override fun casAdvanceWithHandle(
-        handle: Handle, id: String, expectedSequence: Int,
-        nextSequence: Int, expectedVersion: Int,
+    override fun casVersionWithHandle(
+        handle: Handle, id: String, expectedVersion: Int,
     ): Boolean = timer.time("workflow.cas") {
-        super.casAdvanceWithHandle(handle, id, expectedSequence, nextSequence, expectedVersion)
+        super.casVersionWithHandle(handle, id, expectedVersion)
     }
 }
 
@@ -49,10 +47,9 @@ class InstrumentedDefaultPhaseGate(
     workflowRepo: WorkflowRepository,
     taskRepo: TaskRepository,
     objectMapper: ObjectMapper,
-    strategyRegistry: AdvancementStrategyRegistry,
     notifier: WorkerNotifier,
     private val timer: PhaseTimer,
-) : DefaultPhaseGate(jdbi, workflowRepo, taskRepo, objectMapper, strategyRegistry, notifier) {
+) : DefaultPhaseGate(jdbi, workflowRepo, taskRepo, objectMapper, notifier) {
 
     override suspend fun onTaskCompleted(
         taskId: String, workflowId: String, sequenceNumber: Int,

@@ -113,7 +113,7 @@ class WorkerLoopTest {
         val defaultDefJson = objectMapper.writeValueAsString(defaultDef)
         val defaultWfRun = WorkflowRun(
             id = "default", definitionJson = defaultDefJson,
-            currentSequence = 1, version = 0, status = WorkflowStatus.RUNNING,
+            version = 0, status = WorkflowStatus.RUNNING,
             createdAt = Instant.now(), updatedAt = Instant.now(),
             deadlineAt = Instant.now().plus(1, ChronoUnit.HOURS),
         )
@@ -127,6 +127,7 @@ class WorkerLoopTest {
     private fun makeTask(
         id: String = UUID.randomUUID().toString(),
         workflowId: String = UUID.randomUUID().toString(),
+        activityName: String = "default",
         sequenceNumber: Int = 1,
         status: TaskStatus = TaskStatus.PROCESSING,
         handlerKey: String = "order.validate",
@@ -138,6 +139,7 @@ class WorkerLoopTest {
     ): Task = Task(
         id = id,
         workflowId = workflowId,
+        activityName = activityName,
         sequenceNumber = sequenceNumber,
         status = status,
         handlerKey = handlerKey,
@@ -267,7 +269,6 @@ class WorkerLoopTest {
             val wfRun = WorkflowRun(
                 id = wfId,
                 definitionJson = defJson,
-                currentSequence = 1,
                 version = 0,
                 status = WorkflowStatus.RUNNING,
                 createdAt = Instant.now(),

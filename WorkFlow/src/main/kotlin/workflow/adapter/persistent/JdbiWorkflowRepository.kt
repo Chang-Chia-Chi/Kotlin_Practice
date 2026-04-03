@@ -15,11 +15,10 @@ import java.time.Duration
 import java.time.Instant
 import java.time.LocalDateTime
 import java.time.ZoneOffset
+import java.time.temporal.ChronoUnit
 
 @ApplicationScoped
 class JdbiWorkflowRepository(private val jdbi: Jdbi) : WorkflowRepository {
-
-    // -- Suspend methods (open own connection) --
 
     override suspend fun insert(run: WorkflowRun) {
         jdbi.withHandleSuspend<Unit, Exception> { h: Handle -> insertWithHandle(h, run) }
@@ -28,11 +27,10 @@ class JdbiWorkflowRepository(private val jdbi: Jdbi) : WorkflowRepository {
     override suspend fun findById(id: String): WorkflowRun? =
         jdbi.withHandleSuspend<WorkflowRun?, Exception> { h: Handle -> findByIdWithHandle(h, id) }
 
-    override suspend fun casAdvance(
-        id: String, expectedSequence: Int, nextSequence: Int, expectedVersion: Int,
-    ): Boolean = jdbi.inTransactionSuspend<Boolean, Exception> { h: Handle ->
-        casAdvanceWithHandle(h, id, expectedSequence, nextSequence, expectedVersion)
-    }
+    override suspend fun casVersion(id: String, expectedVersion: Int): Boolean =
+        jdbi.inTransactionSuspend<Boolean, Exception> { h: Handle ->
+            casVersionWithHandle(h, id, expectedVersion)
+        }
 
     override suspend fun updateStatus(id: String, newStatus: WorkflowStatus, expectedStatus: WorkflowStatus): Boolean =
         jdbi.inTransactionSuspend<Boolean, Exception> { h: Handle ->
@@ -41,52 +39,28 @@ class JdbiWorkflowRepository(private val jdbi: Jdbi) : WorkflowRepository {
 
     override suspend fun findStuck(gracePeriod: Duration): List<WorkflowRun> =
         jdbi.withHandleSuspend<List<WorkflowRun>, Exception> { h: Handle ->
-            val cutoff = LocalDateTime.ofInstant(Instant.now().minus(gracePeriod), ZoneOffset.UTC)
-            h.createQuery(
-                """
-                SELECT w.* FROM workflow w
-                WHERE w.status = 'RUNNING'
-                  AND w.updated_at < :cutoff
-                  AND NOT EXISTS (
-                    SELECT 1 FROM task t
-                    WHERE t.workflow_id = w.id
-                      AND t.sequence_number = w.current_sequence
-                      AND t.status NOT IN ('COMPLETED', 'FAILED', 'TIMED_OUT', 'DEAD_LETTER', 'CANCELLED')
-                  )
-                """,
-            )
-                .bind("cutoff", cutoff)
-                .mapToMap()
-                .list()
-                .map(::mapWorkflowRow)
+            // Placeholder: full DAG-aware stuck detection implemented in Plan 5
+            emptyList()
         }
 
     override suspend fun findTimedOut(): List<WorkflowRun> =
         jdbi.withHandleSuspend<List<WorkflowRun>, Exception> { h: Handle ->
-            h.createQuery(
-                """
-                SELECT * FROM workflow
-                WHERE status = 'RUNNING' AND deadline_at < :now
-                """,
-            )
-                .bind("now", LocalDateTime.now(ZoneOffset.UTC))
+            h.createQuery("SELECT * FROM workflow WHERE status = 'RUNNING' AND deadline_at < :now")
+                .bind("now", LocalDateTime.now(ZoneOffset.UTC).truncatedTo(ChronoUnit.MICROS))
                 .mapToMap()
                 .list()
                 .map(::mapWorkflowRow)
         }
 
-    // -- Handle methods (for barrier transaction) --
-
     override fun insertWithHandle(handle: Handle, run: WorkflowRun) {
         handle.createUpdate(
             """
-            INSERT INTO workflow (id, definition, current_sequence, version, status, created_at, updated_at, deadline_at)
-            VALUES (:id, :definition, :currentSequence, :version, :status, :createdAt, :updatedAt, :deadlineAt)
+            INSERT INTO workflow (id, definition, version, status, created_at, updated_at, deadline_at)
+            VALUES (:id, :definition, :version, :status, :createdAt, :updatedAt, :deadlineAt)
             """,
         )
             .bind("id", run.id)
             .bind("definition", run.definitionJson)
-            .bind("currentSequence", run.currentSequence)
             .bind("version", run.version)
             .bind("status", run.status.name)
             .bind("createdAt", LocalDateTime.ofInstant(run.createdAt, ZoneOffset.UTC))
@@ -103,21 +77,17 @@ class JdbiWorkflowRepository(private val jdbi: Jdbi) : WorkflowRepository {
             .map(::mapWorkflowRow)
             .orElse(null)
 
-    override fun casAdvanceWithHandle(
-        handle: Handle, id: String, expectedSequence: Int, nextSequence: Int, expectedVersion: Int,
-    ): Boolean {
+    override fun casVersionWithHandle(handle: Handle, id: String, expectedVersion: Int): Boolean {
         val count = handle.createUpdate(
             """
             UPDATE workflow
-            SET current_sequence = :nextSequence, version = version + 1, updated_at = :now
-            WHERE id = :id AND current_sequence = :expectedSequence AND version = :expectedVersion
+            SET version = version + 1, updated_at = :now
+            WHERE id = :id AND version = :expectedVersion AND status = 'RUNNING'
             """,
         )
             .bind("id", id)
-            .bind("nextSequence", nextSequence)
-            .bind("expectedSequence", expectedSequence)
             .bind("expectedVersion", expectedVersion)
-            .bind("now", LocalDateTime.now(ZoneOffset.UTC))
+            .bind("now", LocalDateTime.now(ZoneOffset.UTC).truncatedTo(ChronoUnit.MICROS))
             .execute()
         return count == 1
     }
@@ -135,7 +105,7 @@ class JdbiWorkflowRepository(private val jdbi: Jdbi) : WorkflowRepository {
             .bind("id", id)
             .bind("status", newStatus.name)
             .bind("expectedStatus", expectedStatus.name)
-            .bind("now", LocalDateTime.now(ZoneOffset.UTC))
+            .bind("now", LocalDateTime.now(ZoneOffset.UTC).truncatedTo(ChronoUnit.MICROS))
             .execute()
         return count == 1
     }
@@ -147,14 +117,13 @@ class JdbiWorkflowRepository(private val jdbi: Jdbi) : WorkflowRepository {
             USING (SELECT :idemKey AS idem_key FROM dual) src
             ON (w.idempotency_key = src.idem_key)
             WHEN NOT MATCHED THEN INSERT
-                (id, idempotency_key, definition, current_sequence, version, status, created_at, updated_at, deadline_at)
-            VALUES (:id, :idemKey, :definition, :currentSequence, :version, :status, :createdAt, :updatedAt, :deadlineAt)
+                (id, idempotency_key, definition, version, status, created_at, updated_at, deadline_at)
+            VALUES (:id, :idemKey, :definition, :version, :status, :createdAt, :updatedAt, :deadlineAt)
             """,
         )
             .bind("idemKey", idempotencyKey)
             .bind("id", run.id)
             .bind("definition", run.definitionJson)
-            .bind("currentSequence", run.currentSequence)
             .bind("version", run.version)
             .bind("status", run.status.name)
             .bind("createdAt", LocalDateTime.ofInstant(run.createdAt, ZoneOffset.UTC))
@@ -176,7 +145,6 @@ class JdbiWorkflowRepository(private val jdbi: Jdbi) : WorkflowRepository {
         return WorkflowRun(
             id = ci["ID"] as String,
             definitionJson = readClob(ci["DEFINITION"]),
-            currentSequence = (ci["CURRENT_SEQUENCE"] as Number).toInt(),
             version = (ci["VERSION"] as Number).toInt(),
             status = WorkflowStatus.valueOf(ci["STATUS"] as String),
             createdAt = readTimestamp(ci["CREATED_AT"]),

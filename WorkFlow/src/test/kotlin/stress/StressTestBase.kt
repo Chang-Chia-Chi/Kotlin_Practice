@@ -14,7 +14,7 @@ import com.workflow.workflow.usecase.service.orchestration.DefaultPhaseGate
 import com.workflow.workflow.usecase.service.orchestration.ActivityInputResolver
 import com.workflow.workflow.usecase.service.orchestration.WorkflowWatchdog
 import com.workflow.workflow.usecase.service.orchestration.WorkflowEngine
-import com.workflow.workflow.usecase.service.phase.AdvancementStrategyRegistry
+
 import com.workflow.worker.usecase.port.outbound.notification.WorkerNotifier
 import com.workflow.worker.adapter.http.HttpWorkerNotifier
 import com.workflow.worker.usecase.service.execution.HandlerRegistry
@@ -22,6 +22,7 @@ import com.workflow.worker.adapter.http.PeerRegistry
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.mock.MockEngine
 import io.ktor.client.engine.mock.respond
+import jakarta.enterprise.inject.Instance
 import org.mockito.kotlin.mock
 import org.mockito.kotlin.whenever
 import com.workflow.worker.usecase.service.execution.WorkerLoop
@@ -178,19 +179,19 @@ abstract class StressTestBase {
         // Init components
         workflowRepo = JdbiWorkflowRepository(proxyJdbi)
         taskRepo = JdbiTaskRepository(proxyJdbi)
-        val strategyRegistry = AdvancementStrategyRegistry()
-        barrier = DefaultPhaseGate(proxyJdbi, workflowRepo, taskRepo, objectMapper, strategyRegistry, notifier)
+        barrier = DefaultPhaseGate(proxyJdbi, workflowRepo, taskRepo, objectMapper, notifier)
         engine = WorkflowEngine(proxyJdbi, workflowRepo, taskRepo, objectMapper, notifier)
         watchdog = WorkflowWatchdog(proxyJdbi, workflowRepo, taskRepo, barrier, testWatchdogConfig)
         activityInputResolver = ActivityInputResolver(objectMapper)
-        handlerRegistry = HandlerRegistry()
+        val emptyBeans = mock<Instance<com.workflow.worker.usecase.port.inbound.execution.TransitionHandler>>()
+        whenever(emptyBeans.iterator()).thenReturn(mutableListOf<com.workflow.worker.usecase.port.inbound.execution.TransitionHandler>().iterator())
+        handlerRegistry = HandlerRegistry(emptyBeans)
         meterRegistry = SimpleMeterRegistry()
 
         // Init direct components (bypass proxy — for throughput benchmarks)
         directWorkflowRepo = JdbiWorkflowRepository(directPooledJdbi)
         directTaskRepo = JdbiTaskRepository(directPooledJdbi)
-        val directStrategyRegistry = AdvancementStrategyRegistry()
-        directBarrier = DefaultPhaseGate(directPooledJdbi, directWorkflowRepo, directTaskRepo, objectMapper, directStrategyRegistry, notifier)
+        directBarrier = DefaultPhaseGate(directPooledJdbi, directWorkflowRepo, directTaskRepo, objectMapper, notifier)
         directEngine = WorkflowEngine(directPooledJdbi, directWorkflowRepo, directTaskRepo, objectMapper, notifier)
         directWorkflowWatchdog = WorkflowWatchdog(directPooledJdbi, directWorkflowRepo, directTaskRepo, directBarrier, testWatchdogConfig)
     }

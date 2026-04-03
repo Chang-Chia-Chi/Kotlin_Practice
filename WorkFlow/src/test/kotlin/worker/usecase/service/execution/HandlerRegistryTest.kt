@@ -22,7 +22,7 @@ class HandlerRegistryTest {
     @BeforeEach
     fun setup() {
         val emptyBeans = mock<Instance<TransitionHandler>>()
-        whenever(emptyBeans.iterator()).thenReturn(emptyList<TransitionHandler>().iterator())
+        whenever(emptyBeans.iterator()).thenReturn(mutableListOf<TransitionHandler>().iterator())
         registry = HandlerRegistry(emptyBeans)
     }
 

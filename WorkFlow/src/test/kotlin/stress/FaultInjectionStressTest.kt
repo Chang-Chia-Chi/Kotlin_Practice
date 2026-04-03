@@ -29,7 +29,7 @@ class FaultInjectionStressTest : StressTestBase() {
     fun `F1 - CAS deadlock during phase advance - watchdog retries and recovers`() =
         runBlocking(Dispatchers.Default) {
             val def = workflow {
-                activity("step1") { transition("f1.handler") }
+                activity("step1") { transition("f1.handler"); next("step2") }
                 activity("step2") { transition("f1.handler") }
             }
             val wfId = engine.startWorkflow(def).workflowId
@@ -85,10 +85,9 @@ class FaultInjectionStressTest : StressTestBase() {
             val def = workflow {
                 activity("scatter") {
                     transition("f3.scatter")
-                    fanOut("parallel")
-                }
-                activity("parallel") {
-                    transition("f3.parallel")
+                    fanOut {
+                        transition("f3.parallel")
+                    }
                 }
             }
 
@@ -126,7 +125,7 @@ class FaultInjectionStressTest : StressTestBase() {
     fun `F4 - partial commit - task completes but CAS fails - watchdog recovers`() =
         runBlocking(Dispatchers.Default) {
             val def = workflow {
-                activity("step1") { transition("f4.handler") }
+                activity("step1") { transition("f4.handler"); next("step2") }
                 activity("step2") { transition("f4.handler") }
             }
             val wfId = engine.startWorkflow(def).workflowId
@@ -189,7 +188,7 @@ class FaultInjectionStressTest : StressTestBase() {
         runBlocking(Dispatchers.Default) {
             val batchSize = scale.workflowBatchSize
             val def = workflow {
-                activity("step1") { transition("f6.handler") }
+                activity("step1") { transition("f6.handler"); next("step2") }
                 activity("step2") { transition("f6.handler") }
             }
 

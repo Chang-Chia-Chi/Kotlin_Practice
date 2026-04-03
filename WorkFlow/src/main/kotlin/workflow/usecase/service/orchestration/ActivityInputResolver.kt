@@ -65,7 +65,14 @@ class ActivityInputResolver(
                 val resultTree = objectMapper.readTree(resultJson)
                 traversePath(resultTree, fieldPath)
             }
-            PhaseType.SCATTER -> error("SCATTER phase type is not yet supported")
+            PhaseType.SCATTER -> {
+                val task = tasksBySequence(seqEntry.sequenceNumber)
+                    .firstOrNull { it.status == TaskStatus.COMPLETED }
+                val resultJson = task?.resultJson
+                if (resultJson == null) return objectMapper.nullNode()
+                val resultTree = objectMapper.readTree(resultJson)
+                traversePath(resultTree, fieldPath)
+            }
         }
     }
 
@@ -87,6 +94,7 @@ class ActivityInputResolver(
     ): ArrayNode {
         val arrayNode = objectMapper.createArrayNode()
         for (task in tasks) {
+            if (task.status != TaskStatus.COMPLETED) continue
             val resultJson = task.resultJson ?: continue
             val resultTree = objectMapper.readTree(resultJson)
             arrayNode.add(traversePath(resultTree, fieldPath))

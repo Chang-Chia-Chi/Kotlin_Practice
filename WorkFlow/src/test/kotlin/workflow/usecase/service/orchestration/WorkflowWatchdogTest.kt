@@ -6,6 +6,7 @@ import com.fasterxml.jackson.module.kotlin.KotlinModule
 import com.workflow.workflow.adapter.persistent.JdbiTaskRepository
 import com.workflow.workflow.adapter.persistent.JdbiWorkflowRepository
 import com.workflow.workflow.config.WatchdogConfig
+import com.workflow.workflow.dsl.workflow
 import com.workflow.workflow.model.ActivityDefinition
 import com.workflow.workflow.model.FailurePolicy
 import com.workflow.workflow.model.JoinPolicy
@@ -17,7 +18,7 @@ import com.workflow.workflow.model.WorkflowStatus
 import com.workflow.workflow.usecase.service.orchestration.DefaultPhaseGate
 import com.workflow.workflow.usecase.service.orchestration.WorkflowWatchdog
 import com.workflow.workflow.usecase.service.orchestration.WorkflowEngine
-import com.workflow.workflow.usecase.service.phase.AdvancementStrategyRegistry
+
 import com.workflow.worker.adapter.http.FakeWorkerNotifier
 import com.workflow.infrastructure.persistence.OracleTestContainer
 import kotlinx.coroutines.async
@@ -70,7 +71,7 @@ class WorkflowWatchdogTest {
         jdbi = OracleTestContainer.jdbi
         workflowRepo = JdbiWorkflowRepository(jdbi)
         taskRepo = JdbiTaskRepository(jdbi)
-        barrier = DefaultPhaseGate(jdbi, workflowRepo, taskRepo, objectMapper, AdvancementStrategyRegistry(), notifier)
+        barrier = DefaultPhaseGate(jdbi, workflowRepo, taskRepo, objectMapper, notifier)
         watchdog = WorkflowWatchdog(jdbi, workflowRepo, taskRepo, barrier, testWatchdogConfig)
     }
 
@@ -91,7 +92,6 @@ class WorkflowWatchdogTest {
     private fun makeWorkflow(
         id: String = randomId(),
         definition: WorkflowDefinition,
-        currentSequence: Int = 1,
         version: Int = 0,
         status: WorkflowStatus = WorkflowStatus.RUNNING,
         createdAt: Instant = now(),
@@ -100,7 +100,6 @@ class WorkflowWatchdogTest {
     ): WorkflowRun = WorkflowRun(
         id = id,
         definitionJson = objectMapper.writeValueAsString(definition),
-        currentSequence = currentSequence,
         version = version,
         status = status,
         createdAt = createdAt,
@@ -111,6 +110,7 @@ class WorkflowWatchdogTest {
     private fun makeTask(
         id: String = randomId(),
         workflowId: String,
+        activityName: String = "test-activity",
         sequenceNumber: Int = 1,
         status: TaskStatus = TaskStatus.PENDING,
         handlerKey: String = "test.handler",
@@ -128,6 +128,7 @@ class WorkflowWatchdogTest {
     ): Task = Task(
         id = id,
         workflowId = workflowId,
+        activityName = activityName,
         sequenceNumber = sequenceNumber,
         status = status,
         handlerKey = handlerKey,
@@ -148,12 +149,11 @@ class WorkflowWatchdogTest {
     private fun insertWorkflowDirect(run: WorkflowRun) {
         jdbi.useHandle<Exception> { handle ->
             handle.createUpdate(
-                """INSERT INTO workflow (id, definition, current_sequence, version, status, created_at, updated_at, deadline_at)
-                   VALUES (:id, :definition, :currentSequence, :version, :status, :createdAt, :updatedAt, :deadlineAt)""",
+                """INSERT INTO workflow (id, definition, version, status, created_at, updated_at, deadline_at)
+                   VALUES (:id, :definition, :version, :status, :createdAt, :updatedAt, :deadlineAt)""",
             )
                 .bind("id", run.id)
                 .bind("definition", run.definitionJson)
-                .bind("currentSequence", run.currentSequence)
                 .bind("version", run.version)
                 .bind("status", run.status.name)
                 .bind("createdAt", LocalDateTime.ofInstant(run.createdAt, ZoneOffset.UTC))
@@ -308,45 +308,38 @@ class WorkflowWatchdogTest {
     // ── Workflow Definition Builders ─────────────────────────────────────
 
     /** Two linear activities: seq 1 -> seq 2. */
-    private fun twoStepLinearDef() = WorkflowDefinition(
-        activities = listOf(
-            ActivityDefinition(name = "step1", transition = "step1.handler"),
-            ActivityDefinition(name = "step2", transition = "step2.handler"),
-        ),
-    )
+    private fun twoStepLinearDef() = workflow {
+        activity("step1") { transition("step1.handler"); next("step2") }
+        activity("step2") { transition("step2.handler") }
+    }
 
     /** Single activity: seq 1 only. */
-    private fun singleStepDef() = WorkflowDefinition(
-        activities = listOf(
-            ActivityDefinition(name = "only", transition = "only.handler"),
-        ),
-    )
+    private fun singleStepDef() = workflow {
+        activity("only") { transition("only.handler") }
+    }
 
     /** Two linear with BEST_EFFORT on step1. */
-    private fun twoStepBestEffortDef() = WorkflowDefinition(
-        activities = listOf(
-            ActivityDefinition(
-                name = "step1", transition = "step1.handler",
-                failurePolicy = FailurePolicy.BEST_EFFORT,
-            ),
-            ActivityDefinition(name = "step2", transition = "step2.handler"),
-        ),
-    )
+    private fun twoStepBestEffortDef() = workflow {
+        activity("step1") {
+            transition("step1.handler")
+            failurePolicy(FailurePolicy.BEST_EFFORT)
+            next("step2")
+        }
+        activity("step2") { transition("step2.handler") }
+    }
 
-    /** Fan-out then linear: seq 1 (LINEAR scatter) -> seq 2 (PARALLEL) -> seq 3 (LINEAR). */
-    private fun fanOutThenLinearDef(joinPolicy: JoinPolicy = JoinPolicy.All) = WorkflowDefinition(
-        activities = listOf(
-            ActivityDefinition(
-                name = "scatter-activity", transition = "scatter.handler",
-                fanOut = "parallel-activity",
-            ),
-            ActivityDefinition(
-                name = "parallel-activity", transition = "parallel.handler",
-                joinPolicy = joinPolicy,
-            ),
-            ActivityDefinition(name = "final-step", transition = "final.handler"),
-        ),
-    )
+    /** Fan-out then linear: seq 1 (SCATTER) -> seq 2 (PARALLEL) -> seq 3 (LINEAR). */
+    private fun fanOutThenLinearDef(joinPolicy: JoinPolicy = JoinPolicy.All) = workflow {
+        activity("scatter-activity") {
+            transition("scatter.handler")
+            fanOut {
+                transition("parallel.handler")
+                joinPolicy(joinPolicy)
+            }
+            next("final-step")
+        }
+        activity("final-step") { transition("final.handler") }
+    }
 
     // ═══════════════════════════════════════════════════════════════════════
     // Test 1: Stuck workflow detected after grace period -> watchdog recovers
@@ -363,7 +356,7 @@ class WorkflowWatchdogTest {
             val wf = makeWorkflow(
                 id = wfId,
                 definition = def,
-                currentSequence = 1,
+                
                 version = 0,
                 updatedAt = pastGrace,
             )
@@ -543,7 +536,7 @@ class WorkflowWatchdogTest {
             val wf = makeWorkflow(
                 id = wfId,
                 definition = def,
-                currentSequence = 1,
+                
                 version = 0,
                 updatedAt = recentUpdate,
             )
@@ -587,7 +580,7 @@ class WorkflowWatchdogTest {
             val wf = makeWorkflow(
                 id = wfId,
                 definition = def,
-                currentSequence = 1,
+                
                 version = 0,
                 updatedAt = pastGrace,
             )
@@ -673,7 +666,7 @@ class WorkflowWatchdogTest {
             val wf = makeWorkflow(
                 id = wfId,
                 definition = def,
-                currentSequence = 1,
+                
                 version = 0,
                 updatedAt = pastGrace,
             )
@@ -1116,12 +1109,12 @@ class WorkflowWatchdogTest {
         @Test
         fun `reclaimStaleTasks sets not_before with backoff`() = runTest {
             val wf = makeWorkflow(
-                definition = WorkflowDefinition(
-                    activities = listOf(ActivityDefinition(
-                        name = "step1", transition = "test.handler", retries = 5,
-                        deadline = Duration.ofHours(1), failurePolicy = FailurePolicy.ABORT,
-                    )),
-                ),
+                definition = workflow {
+                    activity("step1") {
+                        transition("test.handler"); retries(5)
+                        deadline(Duration.ofHours(1)); failurePolicy(FailurePolicy.ABORT)
+                    }
+                },
             )
             insertWorkflowDirect(wf)
 
@@ -1159,20 +1152,15 @@ class WorkflowWatchdogTest {
 
         @Test
         fun `onTaskCompleted does not advance FAILED workflow`() = runTest {
-            val definition = WorkflowDefinition(
-                activities = listOf(
-                    ActivityDefinition(
-                        name = "step1",
-                        transition = "test.handler",
-                        retries = 0,
-                        deadline = Duration.ofHours(1),
-                        failurePolicy = FailurePolicy.ABORT,
-                    ),
-                ),
-            )
+            val definition = workflow {
+                activity("step1") {
+                    transition("test.handler"); retries(0)
+                    deadline(Duration.ofHours(1)); failurePolicy(FailurePolicy.ABORT)
+                }
+            }
             val wf = makeWorkflow(
                 definition = definition,
-                currentSequence = 1,
+                
                 version = 0,
                 status = WorkflowStatus.FAILED,
             )
@@ -1210,12 +1198,12 @@ class WorkflowWatchdogTest {
         @Test
         fun `replayWorkflow resets FAILED workflow and replays dead-lettered tasks`() = runTest {
             val wf = makeWorkflow(
-                definition = WorkflowDefinition(
-                    activities = listOf(ActivityDefinition(
-                        name = "step1", transition = "test.handler", retries = 3,
-                        deadline = Duration.ofHours(1), failurePolicy = FailurePolicy.ABORT,
-                    )),
-                ),
+                definition = workflow {
+                    activity("step1") {
+                        transition("test.handler"); retries(3)
+                        deadline(Duration.ofHours(1)); failurePolicy(FailurePolicy.ABORT)
+                    }
+                },
                 status = WorkflowStatus.FAILED,
             )
             insertWorkflowDirect(wf)
@@ -1241,12 +1229,12 @@ class WorkflowWatchdogTest {
         @Test
         fun `replayWorkflow returns false for RUNNING workflow`() = runTest {
             val wf = makeWorkflow(
-                definition = WorkflowDefinition(
-                    activities = listOf(ActivityDefinition(
-                        name = "step1", transition = "test.handler", retries = 0,
-                        deadline = Duration.ofHours(1), failurePolicy = FailurePolicy.ABORT,
-                    )),
-                ),
+                definition = workflow {
+                    activity("step1") {
+                        transition("test.handler"); retries(0)
+                        deadline(Duration.ofHours(1)); failurePolicy(FailurePolicy.ABORT)
+                    }
+                },
                 status = WorkflowStatus.RUNNING,
             )
             insertWorkflowDirect(wf)
@@ -1260,12 +1248,12 @@ class WorkflowWatchdogTest {
         @Test
         fun `replayWorkflow returns false for COMPLETED workflow`() = runTest {
             val wf = makeWorkflow(
-                definition = WorkflowDefinition(
-                    activities = listOf(ActivityDefinition(
-                        name = "step1", transition = "test.handler", retries = 0,
-                        deadline = Duration.ofHours(1), failurePolicy = FailurePolicy.ABORT,
-                    )),
-                ),
+                definition = workflow {
+                    activity("step1") {
+                        transition("test.handler"); retries(0)
+                        deadline(Duration.ofHours(1)); failurePolicy(FailurePolicy.ABORT)
+                    }
+                },
                 status = WorkflowStatus.COMPLETED,
             )
             insertWorkflowDirect(wf)
@@ -1294,12 +1282,10 @@ class WorkflowWatchdogTest {
 
         @Test
         fun `timed-out workflow transitions to TIMED_OUT and cancels pending tasks`() = runTest {
-            val definition = WorkflowDefinition(
-                activities = listOf(
-                    ActivityDefinition(name = "step1", transition = "handler1"),
-                    ActivityDefinition(name = "step2", transition = "handler2"),
-                ),
-            )
+            val definition = workflow {
+                activity("step1") { transition("handler1"); next("step2") }
+                activity("step2") { transition("handler2") }
+            }
             val wfId = randomId()
             val pastDeadline = now().minus(Duration.ofMinutes(5))
             val wf = makeWorkflow(
@@ -1311,7 +1297,7 @@ class WorkflowWatchdogTest {
             workflowRepo.insert(wf)
 
             val task = Task(
-                id = randomId(), workflowId = wfId, sequenceNumber = 1,
+                id = randomId(), workflowId = wfId, activityName = "step1", sequenceNumber = 1,
                 status = TaskStatus.PENDING, handlerKey = "handler1",
                 item = null, resultJson = null,
                 claimedBy = null, claimedAt = null, completedAt = null,
@@ -1331,11 +1317,9 @@ class WorkflowWatchdogTest {
 
         @Test
         fun `workflow within deadline is not expired`() = runTest {
-            val definition = WorkflowDefinition(
-                activities = listOf(
-                    ActivityDefinition(name = "step1", transition = "handler1"),
-                ),
-            )
+            val definition = workflow {
+                activity("step1") { transition("handler1") }
+            }
             val wfId = randomId()
             val futureDeadline = now().plus(Duration.ofHours(1))
             val wf = makeWorkflow(

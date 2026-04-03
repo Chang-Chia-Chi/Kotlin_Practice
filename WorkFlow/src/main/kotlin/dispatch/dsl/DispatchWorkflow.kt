@@ -10,21 +10,20 @@ val dispatchWorkflow: WorkflowDefinition = workflow {
 
     activity("scatter") {
         transition("DispatchScatterHandler")
-        fanOut("simulate")
-    }
-
-    activity("simulate") {
-        transition("DispatchSimulationHandler")
-        retries(2)
-        deadline(Duration.ofMinutes(30))
-        joinPolicy(JoinPolicy.All)
+        fanOut {
+            transition("DispatchSimulationHandler")
+            retries(2)
+            deadline(Duration.ofMinutes(30))
+            joinPolicy(JoinPolicy.All)
+        }
+        next("join")
     }
 
     activity("join") {
         transition("DispatchJoinHandler")
         deadline(Duration.ofMinutes(10))
         inputs {
-            "batchToken" from "simulate.batchToken"
+            "batchToken" from "scatter.batchToken"
         }
     }
 }

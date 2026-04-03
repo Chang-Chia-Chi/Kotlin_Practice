@@ -1,5 +1,6 @@
 package com.workflow.workflow.model
 
+import com.fasterxml.jackson.annotation.JsonIgnore
 import java.time.Duration
 
 data class ActivityDefinition(
@@ -8,10 +9,13 @@ data class ActivityDefinition(
     val retries: Int = 0,
     val failurePolicy: FailurePolicy = FailurePolicy.ABORT,
     val deadline: Duration = Duration.ofMinutes(30),
-    val fanOut: String? = null,
-    val joinPolicy: JoinPolicy = JoinPolicy.All,
+    val fanOut: FanOutDefinition? = null,
     val backoffBase: Duration = Duration.ofSeconds(1),
     val backoffCap: Duration = Duration.ofSeconds(300),
     val queue: String = "default",
     val inputs: Map<String, String> = emptyMap(),
-)
+    val successors: List<Edge> = emptyList(),
+) {
+    @get:JsonIgnore
+    val isTerminal: Boolean get() = successors.isEmpty() && fanOut == null
+}

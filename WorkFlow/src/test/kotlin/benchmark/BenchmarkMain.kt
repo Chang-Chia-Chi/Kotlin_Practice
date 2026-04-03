@@ -10,8 +10,9 @@ import com.workflow.workflow.config.WatchdogConfig
 import com.workflow.infrastructure.persistence.OracleTestContainer
 import com.workflow.workflow.usecase.service.orchestration.WorkflowWatchdog
 import com.workflow.workflow.usecase.service.orchestration.WorkflowEngine
-import com.workflow.workflow.usecase.service.phase.AdvancementStrategyRegistry
 import com.workflow.worker.usecase.port.outbound.notification.WorkerNotifier
+import org.mockito.kotlin.mock
+import org.mockito.kotlin.whenever
 import com.workflow.worker.usecase.service.execution.HandlerRegistry
 import com.workflow.worker.usecase.service.execution.WorkerLoop
 import com.zaxxer.hikari.HikariConfig
@@ -67,11 +68,12 @@ fun main() {
     val notifier = NoOpWorkerNotifier()
     val workflowRepo = InstrumentedWorkflowRepository(pooledJdbi, timer)
     val taskRepo = InstrumentedTaskRepository(pooledJdbi, timer)
-    val strategyRegistry = AdvancementStrategyRegistry()
-    val barrier = InstrumentedDefaultPhaseGate(pooledJdbi, workflowRepo, taskRepo, objectMapper, strategyRegistry, notifier, timer)
+    val barrier = InstrumentedDefaultPhaseGate(pooledJdbi, workflowRepo, taskRepo, objectMapper, notifier, timer)
     val engine = WorkflowEngine(pooledJdbi, workflowRepo, taskRepo, objectMapper, notifier)
     val activityInputResolver = InstrumentedActivityInputResolver(objectMapper, timer)
-    val handlerRegistry = HandlerRegistry()
+    val emptyBeans = mock<jakarta.enterprise.inject.Instance<com.workflow.worker.usecase.port.inbound.execution.TransitionHandler>>()
+    whenever(emptyBeans.iterator()).thenReturn(mutableListOf<com.workflow.worker.usecase.port.inbound.execution.TransitionHandler>().iterator())
+    val handlerRegistry = HandlerRegistry(emptyBeans)
 
     // 4. Metrics
     val metrics = MetricsSupport.create(config.metricsEnabled)
@@ -176,7 +178,9 @@ private fun runScenario(
     val definition = BenchmarkScenarios.definitionFor(point)
 
     // Wrap handlers with TimedHandler
-    val timedRegistry = HandlerRegistry()
+    val timedBeans = mock<jakarta.enterprise.inject.Instance<com.workflow.worker.usecase.port.inbound.execution.TransitionHandler>>()
+    whenever(timedBeans.iterator()).thenReturn(mutableListOf<com.workflow.worker.usecase.port.inbound.execution.TransitionHandler>().iterator())
+    val timedRegistry = HandlerRegistry(timedBeans)
     BenchmarkScenarios.registerHandlers(timedRegistry, objectMapper, point)
     wrapRegistryWithTiming(handlerRegistry, timedRegistry, timer)
 

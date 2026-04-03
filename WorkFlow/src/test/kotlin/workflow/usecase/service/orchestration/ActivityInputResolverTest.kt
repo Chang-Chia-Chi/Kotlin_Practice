@@ -3,6 +3,7 @@ package com.workflow.workflow.usecase.service.orchestration
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.KotlinModule
 import com.workflow.workflow.model.ActivityDefinition
+import com.workflow.workflow.model.FanOutDefinition
 import com.workflow.workflow.model.PhaseType
 import com.workflow.workflow.model.SequenceInfo
 import com.workflow.workflow.model.Task
@@ -28,7 +29,7 @@ class ActivityInputResolverTest {
         resultJson: String? = null,
     ) = Task(
         id = "t-${sequenceNumber}-${System.nanoTime()}", workflowId = "wf1",
-        sequenceNumber = sequenceNumber, status = status,
+        activityName = "activity-$sequenceNumber", sequenceNumber = sequenceNumber, status = status,
         handlerKey = "h", resultJson = resultJson,
         claimedBy = null, claimedAt = null, completedAt = null,
         retryCount = 0, maxRetries = 0, deadlineAt = null,
@@ -38,21 +39,22 @@ class ActivityInputResolverTest {
         val act1 = ActivityDefinition(name = "step1", transition = "step1.handler")
         val act2 = ActivityDefinition(name = "step2", transition = "step2.handler")
         return mapOf(
-            1 to SequenceInfo(1, 0, act1, PhaseType.LINEAR, 2),
-            2 to SequenceInfo(2, 1, act2, PhaseType.LINEAR, null),
+            1 to SequenceInfo(1, "step1", act1, PhaseType.LINEAR, emptyList()),
+            2 to SequenceInfo(2, "step2", act2, PhaseType.LINEAR, listOf(1)),
         )
     }
 
     private fun fanOutSequenceMap(): Map<Int, SequenceInfo> {
         val scatterAct = ActivityDefinition(
-            name = "scatter", transition = "scatter.handler", fanOut = "split",
+            name = "scatter", transition = "scatter.handler",
+            fanOut = FanOutDefinition(transition = "parallel.handler"),
         )
-        val splitAct = ActivityDefinition(name = "split", transition = "parallel.handler")
+        val parallelAct = ActivityDefinition(name = "parallel", transition = "parallel.handler")
         val notifyAct = ActivityDefinition(name = "notify", transition = "notify.handler")
         return mapOf(
-            1 to SequenceInfo(1, 0, scatterAct, PhaseType.LINEAR, 2),
-            2 to SequenceInfo(2, 1, splitAct, PhaseType.PARALLEL, 3),
-            3 to SequenceInfo(3, 2, notifyAct, PhaseType.LINEAR, null),
+            1 to SequenceInfo(1, "scatter", scatterAct, PhaseType.SCATTER, emptyList()),
+            2 to SequenceInfo(2, "scatter.__parallel__", parallelAct, PhaseType.PARALLEL, listOf(1)),
+            3 to SequenceInfo(3, "notify", notifyAct, PhaseType.LINEAR, listOf(2)),
         )
     }
 
@@ -91,7 +93,7 @@ class ActivityInputResolverTest {
 
     @Test
     fun `whole-result reference from fan-out activity aggregates parallel results`() = runTest {
-        val inputs = mapOf("results" to "split")
+        val inputs = mapOf("results" to "parallel")
         val tasksBySeq: suspend (Int) -> List<Task> = { seq ->
             if (seq == 2) listOf(
                 task(2, resultJson = """{"r":"one"}"""),
@@ -108,7 +110,7 @@ class ActivityInputResolverTest {
 
     @Test
     fun `field-level reference from fan-out activity extracts per-element`() = runTest {
-        val inputs = mapOf("uris" to "split.uri")
+        val inputs = mapOf("uris" to "parallel.uri")
         val tasksBySeq: (Int) -> List<Task> = { seq ->
             if (seq == 2) listOf(
                 task(2, resultJson = """{"uri":"s3://a","count":1}"""),
@@ -125,16 +127,18 @@ class ActivityInputResolverTest {
 
     @Test
     fun `fan-out aggregation skips non-completed tasks`() = runTest {
-        val inputs = mapOf("results" to "split")
+        val inputs = mapOf("results" to "parallel")
         val tasksBySeq: (Int) -> List<Task> = { seq ->
             if (seq == 2) listOf(
                 task(2, resultJson = """{"r":"ok"}"""),
                 task(2, status = TaskStatus.FAILED, resultJson = null),
+                task(2, status = TaskStatus.FAILED, resultJson = """{"r":"bad"}"""),
             ) else emptyList()
         }
         val result = resolver.resolve(inputs, fanOutSequenceMap(), tasksBySeq)
         val parsed = objectMapper.readTree(result)
         assertEquals(1, parsed.get("results").size())
+        assertEquals("ok", parsed.get("results")[0].get("r").asText())
     }
 
     @Test
@@ -155,9 +159,9 @@ class ActivityInputResolverTest {
         val act2 = ActivityDefinition(name = "enrich", transition = "enrich.handler")
         val act3 = ActivityDefinition(name = "final", transition = "final.handler")
         val seqMap = mapOf(
-            1 to SequenceInfo(1, 0, act1, PhaseType.LINEAR, 2),
-            2 to SequenceInfo(2, 1, act2, PhaseType.LINEAR, 3),
-            3 to SequenceInfo(3, 2, act3, PhaseType.LINEAR, null),
+            1 to SequenceInfo(1, "init", act1, PhaseType.LINEAR, emptyList()),
+            2 to SequenceInfo(2, "enrich", act2, PhaseType.LINEAR, listOf(1)),
+            3 to SequenceInfo(3, "final", act3, PhaseType.LINEAR, listOf(2)),
         )
         val inputs = mapOf("cfg" to "init.config", "meta" to "enrich.summary")
         val tasksBySeq: (Int) -> List<Task> = { seq ->

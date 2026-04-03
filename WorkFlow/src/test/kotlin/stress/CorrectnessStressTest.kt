@@ -36,11 +36,11 @@ class CorrectnessStressTest : StressTestBase() {
         val def = workflow {
             activity("scatter") {
                 transition("c1.scatter")
-                fanOut("parallel")
-            }
-            activity("parallel") {
-                transition("c1.parallel")
-                joinPolicy(JoinPolicy.All)
+                fanOut {
+                    transition("c1.parallel")
+                    joinPolicy(JoinPolicy.All)
+                }
+                next("final")
             }
             activity("final") { transition("c1.final") }
         }
@@ -87,11 +87,10 @@ class CorrectnessStressTest : StressTestBase() {
         val def = workflow {
             activity("scatter") {
                 transition("c2.scatter")
-                fanOut("parallel")
-            }
-            activity("parallel") {
-                transition("c2.parallel")
-                joinPolicy(JoinPolicy.All)
+                fanOut {
+                    transition("c2.parallel")
+                    joinPolicy(JoinPolicy.All)
+                }
             }
         }
 
@@ -131,13 +130,12 @@ class CorrectnessStressTest : StressTestBase() {
             activity("scatter") {
                 transition("c3.scatter")
                 failurePolicy(FailurePolicy.ABORT)
-                fanOut("parallel")
-            }
-            activity("parallel") {
-                transition("c3.parallel")
-                retries(0)
-                failurePolicy(FailurePolicy.ABORT)
-                joinPolicy(JoinPolicy.All)
+                fanOut {
+                    transition("c3.parallel")
+                    retries(0)
+                    failurePolicy(FailurePolicy.ABORT)
+                    joinPolicy(JoinPolicy.All)
+                }
             }
         }
 
@@ -202,12 +200,12 @@ class CorrectnessStressTest : StressTestBase() {
         val def = workflow {
             activity("scatter") {
                 transition("$handlerKey.scatter")
-                fanOut("parallel")
-            }
-            activity("parallel") {
-                transition("$handlerKey.parallel")
-                retries(0)
-                joinPolicy(JoinPolicy.Percentage(threshold))
+                fanOut {
+                    transition("$handlerKey.parallel")
+                    retries(0)
+                    joinPolicy(JoinPolicy.Percentage(threshold))
+                }
+                next("final")
             }
             activity("final") { transition("$handlerKey.final") }
         }
@@ -259,12 +257,12 @@ class CorrectnessStressTest : StressTestBase() {
         val def = workflow {
             activity("scatter") {
                 transition("$handlerKey.scatter")
-                fanOut("parallel")
-            }
-            activity("parallel") {
-                transition("$handlerKey.parallel")
-                retries(0)
-                joinPolicy(JoinPolicy.Threshold(threshold))
+                fanOut {
+                    transition("$handlerKey.parallel")
+                    retries(0)
+                    joinPolicy(JoinPolicy.Threshold(threshold))
+                }
+                next("final")
             }
             activity("final") { transition("$handlerKey.final") }
         }
@@ -310,6 +308,7 @@ class CorrectnessStressTest : StressTestBase() {
                 transition("c6.handler")
                 retries(0)
                 failurePolicy(FailurePolicy.ABORT)
+                next("step2")
             }
             activity("step2") { transition("c6.step2") }
         }
@@ -345,6 +344,7 @@ class CorrectnessStressTest : StressTestBase() {
                 transition("c7.handler")
                 retries(0)
                 failurePolicy(FailurePolicy.BEST_EFFORT)
+                next("step2")
             }
             activity("step2") { transition("c7.step2") }
         }
@@ -372,10 +372,11 @@ class CorrectnessStressTest : StressTestBase() {
     @Test
     fun `C8 - explicit inputs resolve correctly across phase boundaries`() = runBlocking(Dispatchers.Default) {
         val def = workflow {
-            activity("step1") { transition("c8.step1") }
+            activity("step1") { transition("c8.step1"); next("step2") }
             activity("step2") {
                 transition("c8.step2")
                 inputs { "prev" from "step1" }
+                next("step3")
             }
             activity("step3") {
                 transition("c8.step3")
@@ -440,11 +441,10 @@ class CorrectnessStressTest : StressTestBase() {
         val def = workflow {
             activity("scatter") {
                 transition("c9.scatter")
-                fanOut("parallel")
-            }
-            activity("parallel") {
-                transition("c9.parallel")
-                joinPolicy(JoinPolicy.All)
+                fanOut {
+                    transition("c9.parallel")
+                    joinPolicy(JoinPolicy.All)
+                }
             }
         }
 
@@ -486,11 +486,12 @@ class CorrectnessStressTest : StressTestBase() {
     @Test
     fun `C10 - replay resumes from current sequence without re-executing completed phases`() = runBlocking(Dispatchers.Default) {
         val def = workflow {
-            activity("step1") { transition("c10.step1") }
+            activity("step1") { transition("c10.step1"); next("step2") }
             activity("step2") {
                 transition("c10.step2")
                 retries(0)
                 failurePolicy(FailurePolicy.ABORT)
+                next("step3")
             }
             activity("step3") { transition("c10.step3") }
         }
@@ -545,11 +546,11 @@ class CorrectnessStressTest : StressTestBase() {
         val def = workflow {
             activity("scatter") {
                 transition("c11.scatter")
-                fanOut("parallel")
-            }
-            activity("parallel") {
-                transition("c11.parallel")
-                joinPolicy(JoinPolicy.All)
+                fanOut {
+                    transition("c11.parallel")
+                    joinPolicy(JoinPolicy.All)
+                }
+                next("final")
             }
             activity("final") { transition("c11.final") }
         }

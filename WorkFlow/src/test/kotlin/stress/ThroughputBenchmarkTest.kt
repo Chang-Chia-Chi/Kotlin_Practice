@@ -76,11 +76,11 @@ class ThroughputBenchmarkTest : StressTestBase() {
                 workflow {
                     activity("scatter") {
                         transition("b2.scatter")
-                        fanOut("parallel")
-                    }
-                    activity("parallel") {
-                        transition("b2.parallel")
-                        joinPolicy(JoinPolicy.All)
+                        fanOut {
+                            transition("b2.parallel")
+                            joinPolicy(JoinPolicy.All)
+                        }
+                        next("final")
                     }
                     activity("final") { transition("b2.final") }
                 }
@@ -135,10 +135,10 @@ class ThroughputBenchmarkTest : StressTestBase() {
             val n = scale.workflowBatchSize
             val def =
                 workflow {
-                    activity("phase1") { transition("b3.handler") }
-                    activity("phase2") { transition("b3.handler") }
-                    activity("phase3") { transition("b3.handler") }
-                    activity("phase4") { transition("b3.handler") }
+                    activity("phase1") { transition("b3.handler"); next("phase2") }
+                    activity("phase2") { transition("b3.handler"); next("phase3") }
+                    activity("phase3") { transition("b3.handler"); next("phase4") }
+                    activity("phase4") { transition("b3.handler"); next("phase5") }
                     activity("phase5") { transition("b3.handler") }
                 }
 
@@ -237,7 +237,7 @@ class ThroughputBenchmarkTest : StressTestBase() {
             val n = 100
             val def =
                 workflow {
-                    activity("step1") { transition("b5.handler") }
+                    activity("step1") { transition("b5.handler"); next("step2") }
                     activity("step2") { transition("b5.handler") }
                 }
             val defJson = objectMapper.writeValueAsString(def)

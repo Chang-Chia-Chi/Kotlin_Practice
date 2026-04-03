@@ -16,7 +16,7 @@ import com.workflow.workflow.model.workflowId
 import com.workflow.workflow.dsl.workflow
 import com.workflow.workflow.usecase.service.orchestration.DefaultPhaseGate
 import com.workflow.workflow.usecase.service.orchestration.WorkflowEngine
-import com.workflow.workflow.usecase.service.phase.AdvancementStrategyRegistry
+
 import com.workflow.worker.adapter.http.FakeWorkerNotifier
 import com.workflow.infrastructure.persistence.OracleTestContainer
 import kotlinx.coroutines.test.runTest
@@ -53,7 +53,7 @@ class WorkflowEngineTest {
         taskRepo = JdbiTaskRepository(jdbi)
         notifier = FakeWorkerNotifier()
         engine = WorkflowEngine(jdbi, workflowRepo, taskRepo, objectMapper, notifier)
-        phaseGate = DefaultPhaseGate(jdbi, workflowRepo, taskRepo, objectMapper, AdvancementStrategyRegistry(), notifier)
+        phaseGate = DefaultPhaseGate(jdbi, workflowRepo, taskRepo, objectMapper, notifier)
     }
 
     @AfterEach
@@ -82,7 +82,6 @@ class WorkflowEngineTest {
         val run = workflowRepo.findById(runId)
         assertNotNull(run)
         assertEquals(WorkflowStatus.RUNNING, run.status)
-        assertEquals(1, run.currentSequence)
         assertEquals(0, run.version)
 
         // Verify serialized definition round-trips
@@ -120,14 +119,13 @@ class WorkflowEngineTest {
                 transition("batch.parallel-worker")
                 retries(1)
                 deadline(Duration.ofMinutes(15))
-                fanOut("parallel")
-            }
-            activity("parallel") {
-                transition("batch.scatter")
-                retries(5)
-                failurePolicy(FailurePolicy.BEST_EFFORT)
-                deadline(Duration.ofMinutes(60))
-                joinPolicy(JoinPolicy.Percentage(95))
+                fanOut {
+                    transition("batch.scatter")
+                    retries(5)
+                    failurePolicy(FailurePolicy.BEST_EFFORT)
+                    deadline(Duration.ofMinutes(60))
+                    joinPolicy(JoinPolicy.Percentage(95))
+                }
             }
         }
         val runId = engine.startWorkflow(definition).workflowId
@@ -136,7 +134,6 @@ class WorkflowEngineTest {
         val run = workflowRepo.findById(runId)
         assertNotNull(run)
         assertEquals(WorkflowStatus.RUNNING, run.status)
-        assertEquals(1, run.currentSequence)
         assertEquals(0, run.version)
 
         // Verify exactly one scatter task at sequence 1

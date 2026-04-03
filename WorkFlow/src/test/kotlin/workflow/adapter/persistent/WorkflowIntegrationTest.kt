@@ -14,7 +14,6 @@ import com.workflow.workflow.dsl.workflow
 import com.workflow.workflow.usecase.service.orchestration.DefaultPhaseGate
 import com.workflow.workflow.usecase.service.orchestration.WorkflowWatchdog
 import com.workflow.workflow.usecase.service.orchestration.WorkflowEngine
-import com.workflow.workflow.usecase.service.phase.AdvancementStrategyRegistry
 import com.workflow.worker.adapter.http.FakeWorkerNotifier
 import com.workflow.infrastructure.persistence.OracleTestContainer
 import kotlinx.coroutines.async
@@ -66,7 +65,7 @@ class WorkflowIntegrationTest {
         workflowRepo = JdbiWorkflowRepository(jdbi)
         taskRepo = JdbiTaskRepository(jdbi)
         engine = WorkflowEngine(jdbi, workflowRepo, taskRepo, objectMapper, notifier)
-        barrier = DefaultPhaseGate(jdbi, workflowRepo, taskRepo, objectMapper, AdvancementStrategyRegistry(), notifier)
+        barrier = DefaultPhaseGate(jdbi, workflowRepo, taskRepo, objectMapper, notifier)
         watchdog = WorkflowWatchdog(jdbi, workflowRepo, taskRepo, barrier, testWatchdogConfig)
     }
 
@@ -143,8 +142,8 @@ class WorkflowIntegrationTest {
         @Test
         fun `3-activity linear workflow completes end-to-end`() = runTest {
             val definition = workflow {
-                activity("validate") { transition("order.validate") }
-                activity("process") { transition("order.process") }
+                activity("validate") { transition("order.validate"); next("process") }
+                activity("process") { transition("order.process"); next("notify") }
                 activity("notify") { transition("order.notify") }
             }
             // Start workflow
@@ -212,11 +211,11 @@ class WorkflowIntegrationTest {
             val definition = workflow {
                 activity("batch") {
                     transition("batch.worker")
-                    fanOut("parallel")
-                }
-                activity("parallel") {
-                    transition("batch.scatter")
-                    joinPolicy(JoinPolicy.All)
+                    fanOut {
+                        transition("batch.scatter")
+                        joinPolicy(JoinPolicy.All)
+                    }
+                    next("aggregate")
                 }
                 activity("aggregate") { transition("batch.aggregate") }
             }
@@ -287,7 +286,7 @@ class WorkflowIntegrationTest {
         fun `watchdog recovers stuck workflow when worker died after task completion but before CAS`() = runTest {
             // Build a 2-step linear definition
             val definition = workflow {
-                activity("step1") { transition("step1.handler") }
+                activity("step1") { transition("step1.handler"); next("step2") }
                 activity("step2") { transition("step2.handler") }
             }
 
@@ -358,11 +357,11 @@ class WorkflowIntegrationTest {
             val definition = workflow {
                 activity("scatter-work") {
                     transition("scatter.handler")
-                    fanOut("parallel-work")
-                }
-                activity("parallel-work") {
-                    transition("parallel.handler")
-                    joinPolicy(JoinPolicy.All)
+                    fanOut {
+                        transition("parallel.handler")
+                        joinPolicy(JoinPolicy.All)
+                    }
+                    next("post-join")
                 }
                 activity("post-join") { transition("post.handler") }
             }

@@ -17,7 +17,7 @@ import com.workflow.workflow.dsl.workflow
 import com.workflow.workflow.model.Task
 import com.workflow.workflow.usecase.service.orchestration.DefaultPhaseGate
 import com.workflow.workflow.usecase.service.orchestration.WorkflowEngine
-import com.workflow.workflow.usecase.service.phase.AdvancementStrategyRegistry
+
 import com.workflow.worker.adapter.http.FakeWorkerNotifier
 import com.workflow.infrastructure.persistence.OracleTestContainer
 import kotlinx.coroutines.async
@@ -50,7 +50,6 @@ class DefaultPhaseGateTest {
         .registerModule(JavaTimeModule())
     private lateinit var notifier: FakeWorkerNotifier
     private lateinit var barrier: DefaultPhaseGate
-    private lateinit var strategyRegistry: AdvancementStrategyRegistry
     private lateinit var engine: WorkflowEngine
 
     @BeforeAll
@@ -59,8 +58,7 @@ class DefaultPhaseGateTest {
         workflowRepo = JdbiWorkflowRepository(jdbi)
         taskRepo = JdbiTaskRepository(jdbi)
         notifier = FakeWorkerNotifier()
-        strategyRegistry = AdvancementStrategyRegistry()
-        barrier = DefaultPhaseGate(jdbi, workflowRepo, taskRepo, objectMapper, strategyRegistry, notifier)
+        barrier = DefaultPhaseGate(jdbi, workflowRepo, taskRepo, objectMapper, notifier)
         engine = WorkflowEngine(jdbi, workflowRepo, taskRepo, objectMapper, notifier)
     }
 
@@ -81,7 +79,6 @@ class DefaultPhaseGateTest {
     private fun makeWorkflow(
         id: String = randomId(),
         definition: WorkflowDefinition,
-        currentSequence: Int = 1,
         version: Int = 0,
         status: WorkflowStatus = WorkflowStatus.RUNNING,
         createdAt: Instant = now(),
@@ -90,7 +87,6 @@ class DefaultPhaseGateTest {
     ): WorkflowRun = WorkflowRun(
         id = id,
         definitionJson = objectMapper.writeValueAsString(definition),
-        currentSequence = currentSequence,
         version = version,
         status = status,
         createdAt = createdAt,
@@ -101,6 +97,7 @@ class DefaultPhaseGateTest {
     private fun makeTask(
         id: String = randomId(),
         workflowId: String,
+        activityName: String = "test-activity",
         sequenceNumber: Int = 1,
         status: TaskStatus = TaskStatus.PENDING,
         handlerKey: String = "test.handler",
@@ -115,6 +112,7 @@ class DefaultPhaseGateTest {
     ): Task = Task(
         id = id,
         workflowId = workflowId,
+        activityName = activityName,
         sequenceNumber = sequenceNumber,
         status = status,
         handlerKey = handlerKey,
@@ -132,12 +130,11 @@ class DefaultPhaseGateTest {
     private fun insertWorkflowDirect(run: WorkflowRun) {
         jdbi.useHandle<Exception> { handle ->
             handle.createUpdate(
-                """INSERT INTO workflow (id, definition, current_sequence, version, status, created_at, updated_at, deadline_at)
-                   VALUES (:id, :definition, :currentSequence, :version, :status, :createdAt, :updatedAt, :deadlineAt)""",
+                """INSERT INTO workflow (id, definition, version, status, created_at, updated_at, deadline_at)
+                   VALUES (:id, :definition, :version, :status, :createdAt, :updatedAt, :deadlineAt)""",
             )
                 .bind("id", run.id)
                 .bind("definition", run.definitionJson)
-                .bind("currentSequence", run.currentSequence)
                 .bind("version", run.version)
                 .bind("status", run.status.name)
                 .bind("createdAt", LocalDateTime.ofInstant(run.createdAt, ZoneOffset.UTC))
@@ -250,64 +247,53 @@ class DefaultPhaseGateTest {
     // ── Workflow Definition Builders ─────────────────────────────────────
 
     /** Two linear activities: seq 1 → seq 2. */
-    private fun twoStepLinearDef() = WorkflowDefinition(
-        activities = listOf(
-            ActivityDefinition(name = "step1", transition = "step1.handler"),
-            ActivityDefinition(name = "step2", transition = "step2.handler"),
-        ),
-    )
+    private fun twoStepLinearDef() = workflow {
+        activity("step1") { transition("step1.handler"); next("step2") }
+        activity("step2") { transition("step2.handler") }
+    }
 
     /**
-     * Scatter + parallel: seq 1 (LINEAR scatter) → seq 2 (PARALLEL).
+     * Scatter + parallel: seq 1 (SCATTER) → seq 2 (PARALLEL).
      *
      * Handler key mapping per locked contract:
      * - Scatter activity uses `activity.transition` → "scatter.handler"
-     * - Parallel activity uses its own `transition` → "parallel.handler"
+     * - Parallel activity uses fanOut.transition → "parallel.handler"
      */
     private fun fanOutDef(
         joinPolicy: JoinPolicy = JoinPolicy.All,
         failurePolicy: FailurePolicy = FailurePolicy.ABORT,
         parallelFailurePolicy: FailurePolicy = FailurePolicy.ABORT,
-    ) = WorkflowDefinition(
-        activities = listOf(
-            ActivityDefinition(
-                name = "scatter-activity",
-                transition = "scatter.handler",
-                failurePolicy = failurePolicy,
-                fanOut = "parallel-activity",
-            ),
-            ActivityDefinition(
-                name = "parallel-activity",
-                transition = "parallel.handler",
-                failurePolicy = parallelFailurePolicy,
-                joinPolicy = joinPolicy,
-            ),
-        ),
-    )
+    ) = workflow {
+        activity("scatter-activity") {
+            transition("scatter.handler")
+            failurePolicy(failurePolicy)
+            fanOut {
+                transition("parallel.handler")
+                failurePolicy(parallelFailurePolicy)
+                joinPolicy(joinPolicy)
+            }
+        }
+    }
 
     /**
-     * Scatter + parallel + linear: seq 1 (LINEAR) → seq 2 (PARALLEL) → seq 3 (LINEAR).
+     * Scatter + parallel + linear: seq 1 (SCATTER) → seq 2 (PARALLEL) → seq 3 (LINEAR).
      * Used to verify that after parallel phase completes, the next linear task is inserted.
      */
     private fun fanOutThenLinearDef(
         joinPolicy: JoinPolicy = JoinPolicy.All,
         parallelFailurePolicy: FailurePolicy = FailurePolicy.ABORT,
-    ) = WorkflowDefinition(
-        activities = listOf(
-            ActivityDefinition(
-                name = "scatter-activity",
-                transition = "scatter.handler",
-                fanOut = "parallel-activity",
-            ),
-            ActivityDefinition(
-                name = "parallel-activity",
-                transition = "parallel.handler",
-                failurePolicy = parallelFailurePolicy,
-                joinPolicy = joinPolicy,
-            ),
-            ActivityDefinition(name = "final-step", transition = "final.handler"),
-        ),
-    )
+    ) = workflow {
+        activity("scatter-activity") {
+            transition("scatter.handler")
+            fanOut {
+                transition("parallel.handler")
+                failurePolicy(parallelFailurePolicy)
+                joinPolicy(joinPolicy)
+            }
+            next("final-step")
+        }
+        activity("final-step") { transition("final.handler") }
+    }
 
     // ═══════════════════════════════════════════════════════════════════════
     // Test 1: Single task completes (linear)
@@ -321,7 +307,7 @@ class DefaultPhaseGateTest {
             val def = twoStepLinearDef()
             val wfId = randomId()
             val taskId = randomId()
-            val wf = makeWorkflow(id = wfId, definition = def, currentSequence = 1, version = 0)
+            val wf = makeWorkflow(id = wfId, definition = def, version = 0)
             insertWorkflowDirect(wf)
             insertTaskDirect(
                 makeTask(
@@ -359,7 +345,7 @@ class DefaultPhaseGateTest {
             val def = fanOutThenLinearDef()
             val wfId = randomId()
             // Workflow already at PARALLEL phase (sequence 2), scatter done
-            val wf = makeWorkflow(id = wfId, definition = def, currentSequence = 2, version = 1)
+            val wf = makeWorkflow(id = wfId, definition = def, version = 1)
             insertWorkflowDirect(wf)
 
             // 3 parallel sub-tasks: 2 already COMPLETED, 1 still PROCESSING (the last one)
@@ -403,7 +389,7 @@ class DefaultPhaseGateTest {
         fun `not-last task completes - probe greater than 0, task updated, no phase transition`() = runTest {
             val def = fanOutThenLinearDef()
             val wfId = randomId()
-            val wf = makeWorkflow(id = wfId, definition = def, currentSequence = 2, version = 1)
+            val wf = makeWorkflow(id = wfId, definition = def, version = 1)
             insertWorkflowDirect(wf)
 
             val completingTaskId = randomId()
@@ -448,7 +434,7 @@ class DefaultPhaseGateTest {
         fun `two concurrent recovery attempts on stuck workflow - exactly one CAS wins, one set of downstream tasks`() = runTest {
             val def = twoStepLinearDef()
             val wfId = randomId()
-            val wf = makeWorkflow(id = wfId, definition = def, currentSequence = 1, version = 0)
+            val wf = makeWorkflow(id = wfId, definition = def, version = 0)
             insertWorkflowDirect(wf)
 
             // Both tasks pre-committed as COMPLETED (simulates stuck workflow
@@ -495,7 +481,7 @@ class DefaultPhaseGateTest {
         fun `JoinPolicy ALL with 1 failed task - workflow marked FAILED`() = runTest {
             val def = fanOutDef(joinPolicy = JoinPolicy.All)
             val wfId = randomId()
-            val wf = makeWorkflow(id = wfId, definition = def, currentSequence = 2, version = 1)
+            val wf = makeWorkflow(id = wfId, definition = def, version = 1)
             insertWorkflowDirect(wf)
 
             // 3 parallel tasks: 1 FAILED, 1 COMPLETED, 1 PROCESSING (completing now as COMPLETED)
@@ -533,7 +519,7 @@ class DefaultPhaseGateTest {
         fun `PERCENTAGE 95 with 3 of 100 failed - outcome is success, workflow advances`() = runTest {
             val def = fanOutThenLinearDef(joinPolicy = JoinPolicy.Percentage(95))
             val wfId = randomId()
-            val wf = makeWorkflow(id = wfId, definition = def, currentSequence = 2, version = 1)
+            val wf = makeWorkflow(id = wfId, definition = def, version = 1)
             insertWorkflowDirect(wf)
 
             // 100 tasks: 96 COMPLETED, 3 FAILED, 1 PROCESSING (completing now)
@@ -577,7 +563,7 @@ class DefaultPhaseGateTest {
         fun `PERCENTAGE 95 with 10 of 100 failed - outcome is failure, workflow FAILED`() = runTest {
             val def = fanOutDef(joinPolicy = JoinPolicy.Percentage(95))
             val wfId = randomId()
-            val wf = makeWorkflow(id = wfId, definition = def, currentSequence = 2, version = 1)
+            val wf = makeWorkflow(id = wfId, definition = def, version = 1)
             insertWorkflowDirect(wf)
 
             // 100 tasks: 89 COMPLETED, 10 FAILED, 1 PROCESSING (completing now)
@@ -619,7 +605,7 @@ class DefaultPhaseGateTest {
         fun `THRESHOLD 40 with 45 of 50 succeeded - outcome is success, workflow advances`() = runTest {
             val def = fanOutThenLinearDef(joinPolicy = JoinPolicy.Threshold(40))
             val wfId = randomId()
-            val wf = makeWorkflow(id = wfId, definition = def, currentSequence = 2, version = 1)
+            val wf = makeWorkflow(id = wfId, definition = def, version = 1)
             insertWorkflowDirect(wf)
 
             // 50 tasks: 44 COMPLETED, 5 FAILED, 1 PROCESSING (completing now)
@@ -661,18 +647,17 @@ class DefaultPhaseGateTest {
 
         @Test
         fun `BEST_EFFORT on linear task failure - workflow advances to next sequence`() = runTest {
-            val def = WorkflowDefinition(
-                activities = listOf(
-                    ActivityDefinition(
-                        name = "step1", transition = "step1.handler",
-                        failurePolicy = FailurePolicy.BEST_EFFORT,
-                    ),
-                    ActivityDefinition(name = "step2", transition = "step2.handler"),
-                ),
-            )
+            val def = workflow {
+                activity("step1") {
+                    transition("step1.handler")
+                    failurePolicy(FailurePolicy.BEST_EFFORT)
+                    next("step2")
+                }
+                activity("step2") { transition("step2.handler") }
+            }
             val wfId = randomId()
             val taskId = randomId()
-            val wf = makeWorkflow(id = wfId, definition = def, currentSequence = 1, version = 0)
+            val wf = makeWorkflow(id = wfId, definition = def, version = 0)
             insertWorkflowDirect(wf)
             insertTaskDirect(
                 makeTask(
@@ -694,18 +679,17 @@ class DefaultPhaseGateTest {
 
         @Test
         fun `BEST_EFFORT with non-null resultJson - failed task result propagates as next task payload`() = runTest {
-            val def = WorkflowDefinition(
-                activities = listOf(
-                    ActivityDefinition(
-                        name = "step1", transition = "step1.handler",
-                        failurePolicy = FailurePolicy.BEST_EFFORT,
-                    ),
-                    ActivityDefinition(name = "step2", transition = "step2.handler"),
-                ),
-            )
+            val def = workflow {
+                activity("step1") {
+                    transition("step1.handler")
+                    failurePolicy(FailurePolicy.BEST_EFFORT)
+                    next("step2")
+                }
+                activity("step2") { transition("step2.handler") }
+            }
             val wfId = randomId()
             val taskId = randomId()
-            val wf = makeWorkflow(id = wfId, definition = def, currentSequence = 1, version = 0)
+            val wf = makeWorkflow(id = wfId, definition = def, version = 0)
             insertWorkflowDirect(wf)
             insertTaskDirect(
                 makeTask(
@@ -739,7 +723,7 @@ class DefaultPhaseGateTest {
         fun `parallel phase completes - next linear task has aggregated results payload`() = runTest {
             val def = fanOutThenLinearDef(joinPolicy = JoinPolicy.All)
             val wfId = randomId()
-            val wf = makeWorkflow(id = wfId, definition = def, currentSequence = 2, version = 1)
+            val wf = makeWorkflow(id = wfId, definition = def, version = 1)
             insertWorkflowDirect(wf)
 
             val lastTaskId = randomId()
@@ -782,7 +766,7 @@ class DefaultPhaseGateTest {
         fun `scatter task completes with payloads - CAS winner reads result, inserts N sub-tasks at next sequence`() = runTest {
             val def = fanOutDef(joinPolicy = JoinPolicy.All)
             val wfId = randomId()
-            val wf = makeWorkflow(id = wfId, definition = def, currentSequence = 1, version = 0)
+            val wf = makeWorkflow(id = wfId, definition = def, version = 0)
             insertWorkflowDirect(wf)
 
             // Scatter task at sequence 1 with payloads in result
@@ -835,7 +819,7 @@ class DefaultPhaseGateTest {
         fun `scatter task with empty array result fails fast instead of silently skipping parallel phase`() = runTest {
             val def = fanOutDef(joinPolicy = JoinPolicy.All)
             val wfId = randomId()
-            val wf = makeWorkflow(id = wfId, definition = def, currentSequence = 1, version = 0)
+            val wf = makeWorkflow(id = wfId, definition = def, version = 0)
             insertWorkflowDirect(wf)
 
             val scatterTaskId = randomId()
@@ -872,13 +856,12 @@ class DefaultPhaseGateTest {
             val definition = workflow {
                 activity("scatter") {
                     transition("scatter.handler")
-                    fanOut("parallel")
-                }
-                activity("parallel") {
-                    transition("parallel.handler")
-                    retries(0)
-                    failurePolicy(FailurePolicy.ABORT)
-                    joinPolicy(JoinPolicy.All)
+                    fanOut {
+                        transition("parallel.handler")
+                        retries(0)
+                        failurePolicy(FailurePolicy.ABORT)
+                        joinPolicy(JoinPolicy.All)
+                    }
                 }
             }
             val workflowId = engine.startWorkflow(definition).workflowId
@@ -942,7 +925,7 @@ class DefaultPhaseGateTest {
             val def = twoStepLinearDef()
             val wfId = randomId()
             val taskId = randomId()
-            val wf = makeWorkflow(id = wfId, definition = def, currentSequence = 1, version = 0)
+            val wf = makeWorkflow(id = wfId, definition = def, version = 0)
             insertWorkflowDirect(wf)
             insertTaskDirect(
                 makeTask(
@@ -965,7 +948,7 @@ class DefaultPhaseGateTest {
         fun `onTaskCompleted non-last task does not signal notifier`() = runTest {
             val def = fanOutThenLinearDef()
             val wfId = randomId()
-            val wf = makeWorkflow(id = wfId, definition = def, currentSequence = 2, version = 1)
+            val wf = makeWorkflow(id = wfId, definition = def, version = 1)
             insertWorkflowDirect(wf)
 
             val completingTaskId = randomId()
@@ -997,7 +980,7 @@ class DefaultPhaseGateTest {
             val def = twoStepLinearDef()
             val wfId = randomId()
             val taskId = randomId()
-            val wf = makeWorkflow(id = wfId, definition = def, currentSequence = 1, version = 0)
+            val wf = makeWorkflow(id = wfId, definition = def, version = 0)
             insertWorkflowDirect(wf)
             insertTaskDirect(
                 makeTask(

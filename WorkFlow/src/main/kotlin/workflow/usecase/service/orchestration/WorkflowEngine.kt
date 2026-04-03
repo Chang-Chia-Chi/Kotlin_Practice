@@ -8,6 +8,7 @@ import com.workflow.workflow.model.StartResult
 import com.workflow.workflow.model.WorkflowDefinition
 import com.workflow.workflow.model.WorkflowRun
 import com.workflow.workflow.model.WorkflowStatus
+import com.workflow.workflow.model.buildSequenceMap
 import com.workflow.workflow.model.createTaskForActivity
 import com.workflow.workflow.usecase.port.inbound.orchestration.WorkflowLifecycle
 import com.workflow.workflow.usecase.port.outbound.persistent.TaskRepository
@@ -42,10 +43,12 @@ class WorkflowEngine(
         val now = Instant.now().truncatedTo(ChronoUnit.MICROS)
         val definitionJson = objectMapper.writeValueAsString(definition)
 
+        val sequenceMap = buildSequenceMap(definition)
+        val startSeqInfo = sequenceMap[1]!! // start activity always gets seq 1 from topo sort
+
         val run = WorkflowRun(
             id = workflowId,
             definitionJson = definitionJson,
-            currentSequence = 1,
             version = 0,
             status = WorkflowStatus.RUNNING,
             createdAt = now,
@@ -56,10 +59,9 @@ class WorkflowEngine(
         if (idempotencyKey == null) {
             val queueName = jdbi.inTransactionSuspend<String, Exception> { handle ->
                 workflowRepo.insertWithHandle(handle, run)
-                val firstActivity = definition.activities.first()
-                val task = createTaskForActivity(workflowId, 1, firstActivity, now)
+                val task = createTaskForActivity(workflowId, startSeqInfo.activityName, 1, startSeqInfo.activity, now)
                 taskRepo.insertBatchWithHandle(handle, listOf(task))
-                firstActivity.queue
+                startSeqInfo.activity.queue
             }
             notifier.signal(queueName)
             log.info("Started workflow {} with {} activities", workflowId, definition.activities.size)
@@ -69,10 +71,9 @@ class WorkflowEngine(
         val (mergeId, created, queueName) = jdbi.inTransactionSuspend<Triple<String, Boolean, String?>, Exception> { handle ->
             val (mId, isNew) = workflowRepo.mergeIdempotentWithHandle(handle, run, idempotencyKey)
             if (isNew) {
-                val firstActivity = definition.activities.first()
-                val task = createTaskForActivity(mId, 1, firstActivity, now)
+                val task = createTaskForActivity(mId, startSeqInfo.activityName, 1, startSeqInfo.activity, now)
                 taskRepo.insertBatchWithHandle(handle, listOf(task))
-                Triple(mId, true, firstActivity.queue)
+                Triple(mId, true, startSeqInfo.activity.queue)
             } else {
                 Triple(mId, false, null)
             }

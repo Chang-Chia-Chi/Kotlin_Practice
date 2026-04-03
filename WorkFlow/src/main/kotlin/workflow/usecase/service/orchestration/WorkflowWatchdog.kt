@@ -73,8 +73,8 @@ class WorkflowWatchdog(
         for (workflow in stuck) {
             try {
                 log.warn(
-                    "Recovering stuck workflow {} at sequence {} (last updated {})",
-                    workflow.id, workflow.currentSequence, workflow.updatedAt,
+                    "Recovering stuck workflow {} (last updated {})",
+                    workflow.id, workflow.updatedAt,
                 )
                 phaseGate.recoverStuckWorkflow(workflow.id)
             } catch (e: Exception) {

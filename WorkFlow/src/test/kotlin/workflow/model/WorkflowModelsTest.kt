@@ -192,21 +192,19 @@ class WorkflowModelsTest {
 
     private fun workflowRun(
         id: String = "wf-1",
-        definitionJson: String = """{"activities":[]}""",
-        currentSequence: Int = 1,
+        definitionJson: String = """{"activities":{}}""",
         version: Int = 0,
         status: WorkflowStatus = WorkflowStatus.RUNNING,
         createdAt: Instant = now,
         updatedAt: Instant = now,
         deadlineAt: Instant = later,
-    ) = WorkflowRun(id, definitionJson, currentSequence, version, status, createdAt, updatedAt, deadlineAt)
+    ) = WorkflowRun(id, definitionJson, version, status, createdAt, updatedAt, deadlineAt)
 
     @Test
     fun `WorkflowRun construction preserves all fields`() {
         val run = workflowRun()
         assertEquals("wf-1", run.id)
-        assertEquals("""{"activities":[]}""", run.definitionJson)
-        assertEquals(1, run.currentSequence)
+        assertEquals("""{"activities":{}}""", run.definitionJson)
         assertEquals(0, run.version)
         assertEquals(WorkflowStatus.RUNNING, run.status)
         assertEquals(now, run.createdAt)
@@ -227,6 +225,7 @@ class WorkflowModelsTest {
     private fun task(
         id: String = "task-1",
         workflowId: String = "wf-1",
+        activityName: String = "step1",
         sequenceNumber: Int = 1,
         status: TaskStatus = TaskStatus.PENDING,
         handlerKey: String = "process.step1",
@@ -239,9 +238,11 @@ class WorkflowModelsTest {
         maxRetries: Int = 3,
         deadlineAt: Instant? = later,
     ) = Task(
-        id, workflowId, sequenceNumber, status, handlerKey,
-        item, resultJson, claimedBy, claimedAt, completedAt,
-        retryCount, maxRetries, deadlineAt,
+        id = id, workflowId = workflowId, activityName = activityName,
+        sequenceNumber = sequenceNumber, status = status, handlerKey = handlerKey,
+        item = item, resultJson = resultJson, claimedBy = claimedBy,
+        claimedAt = claimedAt, completedAt = completedAt,
+        retryCount = retryCount, maxRetries = maxRetries, deadlineAt = deadlineAt,
     )
 
     @Test
@@ -249,6 +250,7 @@ class WorkflowModelsTest {
         val t = task(item = """{"key":"value"}""")
         assertEquals("task-1", t.id)
         assertEquals("wf-1", t.workflowId)
+        assertEquals("step1", t.activityName)
         assertEquals(1, t.sequenceNumber)
         assertEquals(TaskStatus.PENDING, t.status)
         assertEquals("process.step1", t.handlerKey)

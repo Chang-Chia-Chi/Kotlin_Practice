@@ -138,7 +138,7 @@ class LivenessStressTest : StressTestBase() {
         runBlocking(Dispatchers.Default) {
             val def =
                 workflow {
-                    activity("step1") { transition("l4.handler") }
+                    activity("step1") { transition("l4.handler"); next("step2") }
                     activity("step2") { transition("l4.handler") }
                 }
             val defJson = objectMapper.writeValueAsString(def)
@@ -302,6 +302,7 @@ class LivenessStressTest : StressTestBase() {
                     activity("step1") {
                         transition("l6b.handler")
                         retries(3)
+                        next("step2")
                     }
                     activity("step2") { transition("l6b.handler") }
                 }
@@ -458,13 +459,13 @@ class LivenessStressTest : StressTestBase() {
                     activity("scatter") {
                         transition("l11.scatter")
                         failurePolicy(FailurePolicy.BEST_EFFORT)
-                        fanOut("parallel")
-                    }
-                    activity("parallel") {
-                        transition("l11.parallel")
-                        retries(0) // No retries — immediate failure
-                        failurePolicy(FailurePolicy.BEST_EFFORT)
-                        joinPolicy(JoinPolicy.All)
+                        fanOut {
+                            transition("l11.parallel")
+                            retries(0) // No retries — immediate failure
+                            failurePolicy(FailurePolicy.BEST_EFFORT)
+                            joinPolicy(JoinPolicy.All)
+                        }
+                        next("final")
                     }
                     activity("final") { transition("l11.final") }
                 }
@@ -507,7 +508,7 @@ class LivenessStressTest : StressTestBase() {
         runBlocking(Dispatchers.Default) {
             val def =
                 workflow {
-                    activity("step1") { transition("l12.handler") }
+                    activity("step1") { transition("l12.handler"); next("step2") }
                     activity("step2") { transition("l12.handler") }
                 }
             val defJson = objectMapper.writeValueAsString(def)
