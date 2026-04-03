@@ -1,31 +1,25 @@
-# Checkpoint 20260403 — COMPLETE
+# Checkpoint 20260403-P6 — COMPLETE
 
 ## Session
-- Task: docs/superpowers/plans/2026-04-02-dag/2026-04-02-dag-p5-watchdog-sweeper.md
+- Task: docs/superpowers/plans/2026-04-02-dag/2026-04-02-dag-p6-dispatch-migration.md
 - Current Phase: Phase 7 — COMPLETE
-- Completed Phases: 1, 2, 3, 4, 5, 6, 7
+- Completed Phases: 1, 2, 3, 4, 5, 7
 
 ## Summary of Changes
 
 ### Production Code
-- **DefaultPhaseGate.recoverStuckWorkflow()** — Replaced high-water-mark + successor BFS with iterate-all-sequences in ascending order. SCATTER re-dispatch, PARALLEL skip, LINEAR edge eval with PENDING/SKIPPED insertion. ABORT failure detection before completion check (excluding PARALLEL). CAS guard with retry.
-- **JdbiWorkflowRepository.findStuck()** — Replaced max-sequence subquery with simpler global non-terminal check + EXISTS guard.
-- **WorkflowWatchdog** — No change (already matched plan).
+- **DispatchWorkflow.kt** — No changes needed; already migrated to new DSL before session.
+- **ActivityInputResolver.kt** — No changes; plan's Task 2 rewrite identified as regression. Existing `sequenceMap`-based resolution by `activityName` is correct.
 
 ### Test Code
-- **WorkflowWatchdogTest** — Restored ABORT test expectations. Added diamond DAG recovery test. Added findStuck EXISTS guard test. Added direct `recoverStuckWorkflow` tests (non-existent ID, COMPLETED workflow, FAILED workflow). Diamond DAG derives sequence numbers from `buildSequenceMap`.
+- **DispatchWorkflowTest.kt** (new) — 7 structural tests verifying: start=scatter, scatter fanOut shape (DispatchSimulationHandler, retries=2, JoinPolicy.All), scatter successor=join, no simulate named node, join has no fanOut, join batchToken resolves from scatter, buildSequenceMap returns 3 entries.
 
 ## Test Results
-- 32 tests, 0 failures, 0 errors — BUILD SUCCESS
+- 7 tests, 0 failures, 0 errors — BUILD SUCCESS
 
 ## Decisions Log
 | # | Decision | Rationale |
 |---|----------|-----------|
-| 1 | Iterate-all-sequences over high-water-mark | Handles mid-DAG gaps in diamond/branching topologies |
-| 2 | Keep EXISTS guard in findStuck | Prevents false positives on zero-task workflows |
-| 3 | Global non-terminal check in findStuck | Simpler, conservative two-phase approach |
-| 4 | SKIPPED insertion for untaken edges | Enables progress past conditional branches |
-| 5 | Completion check after iterate loop | Marks workflow COMPLETED when all activities terminal |
-| 6 | Skip JoinPolicy evaluation in recovery | Accepted limitation — onTaskCompleted is authoritative |
-| 7 | log.warn for workflow-not-found | Observability improvement |
-| 8 | Exclude PARALLEL from ABORT check | PARALLEL inherits policy; join eval is onTaskCompleted's job |
+| 1 | Skip Task 2 (ActivityInputResolver rewrite) | Reviewer confirmed regression: existing activityName lookup via sequenceMap is correct and efficient; findByWorkflowAndActivityName would add redundant DB query and bypass typed-by-sequence contract |
+| 2 | No production code changes | DispatchWorkflow.kt was already fully migrated prior to session |
+| 3 | SuccessorDefinition → Edge | Contract correction by SDET; actual type in codebase is Edge, not SuccessorDefinition |
