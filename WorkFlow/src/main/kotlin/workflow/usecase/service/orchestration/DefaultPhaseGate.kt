@@ -60,319 +60,294 @@ class DefaultPhaseGate(
         claimedBy: String?,
         claimedAt: Instant?,
     ) {
-        var signalQueues: List<String> = emptyList()
+        val signalQueues = withCasRetry(workflowId) { handle ->
+            // Step 1: Update task to terminal status
+            val updated = taskRepo.updateStatusWithHandle(
+                handle, taskId, status, resultJson, claimedBy, claimedAt,
+            )
+            if (!updated) return@withCasRetry emptyList()
 
+            // Step 2: Barrier probe -- are all tasks at this sequence terminal?
+            val nonTerminal = taskRepo.countNonTerminalWithHandle(handle, workflowId, sequenceNumber)
+            if (nonTerminal > 0) return@withCasRetry emptyList()
+
+            val workflow = workflowRepo.findByIdWithHandle(handle, workflowId)
+                ?: throw IllegalStateException("Workflow not found: $workflowId")
+            if (workflow.status != WorkflowStatus.RUNNING) return@withCasRetry emptyList()
+
+            val definition = objectMapper.readValue<WorkflowDefinition>(workflow.definitionJson)
+            val sequenceMap = buildSequenceMap(definition)
+            val seqInfo = sequenceMap[sequenceNumber]
+                ?: throw IllegalStateException("Seq $sequenceNumber not in definition for $workflowId")
+
+            val now = Instant.now().truncatedTo(ChronoUnit.MICROS)
+            val signalQueueSet = mutableSetOf<String>()
+            val completionCheckSeqs = mutableSetOf<Int>()
+            // When true, successor eval treats DEFAULT_BRANCH edges as unconditionally taken
+            var forceDefaultBranch = false
+
+            // Step 3a: SCATTER failure -- apply scatter's failurePolicy
+            if (seqInfo.phaseType == PhaseType.SCATTER && status != TaskStatus.COMPLETED) {
+                if (seqInfo.activity.failurePolicy == FailurePolicy.ABORT) {
+                    abortWorkflow(handle, workflowId)
+                    return@withCasRetry emptyList()
+                }
+                // BEST_EFFORT: no parallel tasks; fall through to successor eval
+                forceDefaultBranch = true
+            }
+
+            // Step 3b: SCATTER completed -- expand into parallel tasks
+            if (seqInfo.phaseType == PhaseType.SCATTER && status == TaskStatus.COMPLETED) {
+                val items: List<String> = objectMapper.readValue(
+                    resultJson ?: throw IllegalStateException(
+                        "SCATTER phase requires scatter result for workflow $workflowId",
+                    ),
+                )
+                require(items.isNotEmpty()) {
+                    "Fan-out produced 0 items for workflow $workflowId"
+                }
+                val parallelSeq = sequenceNumber + 1
+                val parallelInfo = sequenceMap[parallelSeq]!!
+                val parallelTasks = items.map {
+                    createTaskForActivity(
+                        workflowId, parallelInfo.activityName, parallelSeq,
+                        parallelInfo.activity, now, item = it,
+                    )
+                }
+                taskRepo.insertBatchWithHandle(handle, parallelTasks)
+                signalQueueSet += parallelInfo.activity.queue
+
+                requireCasWin(handle, workflowId, workflow.version)
+                return@withCasRetry signalQueueSet.toList()
+            }
+
+            // Step 3c: PARALLEL phase -- evaluate JoinPolicy before successor dispatch
+            if (seqInfo.phaseType == PhaseType.PARALLEL) {
+                val completedCount = taskRepo.countCompletedWithHandle(handle, workflowId, sequenceNumber)
+                val totalCount = taskRepo.countTotalWithHandle(handle, workflowId, sequenceNumber)
+                val scatterActName = seqInfo.activityName.removeSuffix(".__parallel__")
+                val scatterActivity = definition.activities[scatterActName]
+                val joinPolicy = scatterActivity?.fanOut?.joinPolicy ?: JoinPolicy.All
+                val joinPassed = evaluateJoinPolicy(joinPolicy, completedCount, totalCount)
+                if (!joinPassed) {
+                    if (seqInfo.activity.failurePolicy == FailurePolicy.ABORT) {
+                        abortWorkflow(handle, workflowId)
+                        return@withCasRetry emptyList()
+                    }
+                    // BEST_EFFORT: force-dispatch unconditional successors
+                    forceDefaultBranch = true
+                }
+            }
+
+            // Step 3d: LINEAR failure with ABORT -- workflow FAILED
+            // (skipped when forceDefaultBranch is set, e.g. SCATTER/PARALLEL BEST_EFFORT)
+            if (!forceDefaultBranch
+                && seqInfo.phaseType == PhaseType.LINEAR
+                && status != TaskStatus.COMPLETED
+                && status != TaskStatus.SKIPPED
+                && seqInfo.activity.failurePolicy == FailurePolicy.ABORT
+            ) {
+                abortWorkflow(handle, workflowId)
+                return@withCasRetry emptyList()
+            }
+
+            // Step 4: Successor evaluation
+            val evalQueue = ArrayDeque<SequenceInfo>()
+            evalQueue += successorsOf(seqInfo, sequenceMap, definition)
+
+            while (evalQueue.isNotEmpty()) {
+                val successor = evalQueue.removeFirst()
+                val sSeq = successor.sequenceNumber
+
+                // a. Dispatch guard: task already exists at this sequence
+                if (taskRepo.countTotalWithHandle(handle, workflowId, sSeq) > 0) continue
+
+                // b. Predecessor gate: all predecessor sequences must be terminal
+                val allPredTerminal = successor.predecessorSequences.all { predSeq ->
+                    taskRepo.countNonTerminalWithHandle(handle, workflowId, predSeq) == 0
+                }
+                if (!allPredTerminal) continue
+
+                // c. Fate decision: check if any edge to this successor is "taken"
+                val edgeTaken = if (forceDefaultBranch) {
+                    hasDefaultBranchEdge(successor, definition)
+                } else {
+                    isAnyEdgeTaken(handle, workflowId, successor, sequenceMap, definition)
+                }
+
+                if (edgeTaken) {
+                    val task = createTaskForActivity(
+                        workflowId, successor.activityName, sSeq, successor.activity, now,
+                    )
+                    taskRepo.insertBatchWithHandle(handle, listOf(task))
+                    signalQueueSet += successor.activity.queue
+                } else {
+                    val skipped = createSkippedTaskForActivity(
+                        workflowId, successor.activityName, sSeq, successor.activity, now,
+                    )
+                    taskRepo.insertBatchWithHandle(handle, listOf(skipped))
+
+                    // If skipping a SCATTER activity, also skip its companion PARALLEL sequence
+                    if (successor.phaseType == PhaseType.SCATTER) {
+                        val parallelSeq = sSeq + 1
+                        val parallelInfo = sequenceMap[parallelSeq]
+                        if (parallelInfo != null && parallelInfo.phaseType == PhaseType.PARALLEL) {
+                            val parallelSkipped = createSkippedTaskForActivity(
+                                workflowId, parallelInfo.activityName, parallelSeq,
+                                parallelInfo.activity, now,
+                            )
+                            taskRepo.insertBatchWithHandle(handle, listOf(parallelSkipped))
+                        }
+                    }
+
+                    if (successor.activity.isTerminal) {
+                        completionCheckSeqs += sSeq
+                    } else {
+                        // Cascade skip: add this successor's successors to the eval queue
+                        evalQueue += successorsOf(successor, sequenceMap, definition)
+                    }
+                }
+            }
+
+            // Also add completed terminal activity to completion check
+            if (seqInfo.activity.isTerminal) {
+                completionCheckSeqs += sequenceNumber
+            }
+
+            // Step 5: Completion check
+            if (completionCheckSeqs.isNotEmpty()) {
+                val globalNonTerminal = taskRepo.countAllNonTerminalWithHandle(handle, workflowId)
+                if (globalNonTerminal == 0) {
+                    workflowRepo.updateStatusWithHandle(
+                        handle, workflowId, WorkflowStatus.COMPLETED, WorkflowStatus.RUNNING,
+                    )
+                    return@withCasRetry emptyList()
+                }
+            }
+
+            // Step 6: CAS guard
+            requireCasWin(handle, workflowId, workflow.version)
+            signalQueueSet.toList()
+        }
+
+        signalQueues.forEach { notifier.signal(it) }
+    }
+
+    override suspend fun recoverStuckWorkflow(workflowId: String) {
+        val signalQueues = withCasRetry(workflowId) { handle ->
+            val workflow = workflowRepo.findByIdWithHandle(handle, workflowId)
+                ?: run {
+                    log.warn("Workflow not found during recovery: {}", workflowId)
+                    return@withCasRetry emptyList()
+                }
+            if (workflow.status != WorkflowStatus.RUNNING) return@withCasRetry emptyList()
+
+            val definition = objectMapper.readValue<WorkflowDefinition>(workflow.definitionJson)
+            val sequenceMap = buildSequenceMap(definition)
+            val now = Instant.now().truncatedTo(ChronoUnit.MICROS)
+            val signalQueueSet = mutableSetOf<String>()
+
+            for ((seq, seqInfo) in sequenceMap.entries.sortedBy { it.key }) {
+                if (taskRepo.countTotalWithHandle(handle, workflowId, seq) > 0) continue
+
+                val allPredTerminal = seqInfo.predecessorSequences.isEmpty() ||
+                    seqInfo.predecessorSequences.all { predSeq ->
+                        taskRepo.countTotalWithHandle(handle, workflowId, predSeq) > 0 &&
+                            taskRepo.countNonTerminalWithHandle(handle, workflowId, predSeq) == 0
+                    }
+                if (!allPredTerminal) continue
+
+                when (seqInfo.phaseType) {
+                    PhaseType.SCATTER -> {
+                        val task = createTaskForActivity(
+                            workflowId, seqInfo.activityName, seq, seqInfo.activity, now,
+                        )
+                        taskRepo.insertBatchWithHandle(handle, listOf(task))
+                        signalQueueSet += seqInfo.activity.queue
+                    }
+                    PhaseType.PARALLEL -> continue
+                    PhaseType.LINEAR -> {
+                        val edgeTaken = isAnyEdgeTaken(handle, workflowId, seqInfo, sequenceMap, definition)
+                        if (edgeTaken || seqInfo.predecessorSequences.isEmpty()) {
+                            val task = createTaskForActivity(
+                                workflowId, seqInfo.activityName, seq, seqInfo.activity, now,
+                            )
+                            taskRepo.insertBatchWithHandle(handle, listOf(task))
+                            signalQueueSet += seqInfo.activity.queue
+                        } else {
+                            val skipped = createSkippedTaskForActivity(
+                                workflowId, seqInfo.activityName, seq, seqInfo.activity, now,
+                            )
+                            taskRepo.insertBatchWithHandle(handle, listOf(skipped))
+                        }
+                    }
+                }
+            }
+
+            // Completion / failure check
+            val globalNonTerminal = taskRepo.countAllNonTerminalWithHandle(handle, workflowId)
+            if (globalNonTerminal == 0) {
+                val abortFailure = sequenceMap.entries.any { (seq, seqInfo) ->
+                    seqInfo.phaseType != PhaseType.PARALLEL &&
+                        seqInfo.activity.failurePolicy == FailurePolicy.ABORT &&
+                        taskRepo.countFailedWithHandle(handle, workflowId, seq) > 0
+                }
+                val terminalStatus = if (abortFailure) WorkflowStatus.FAILED else WorkflowStatus.COMPLETED
+                workflowRepo.updateStatusWithHandle(
+                    handle, workflowId, terminalStatus, WorkflowStatus.RUNNING,
+                )
+                return@withCasRetry emptyList()
+            }
+
+            // No new work dispatched -- skip CAS bump
+            if (signalQueueSet.isEmpty()) return@withCasRetry emptyList()
+
+            requireCasWin(handle, workflowId, workflow.version)
+            signalQueueSet.toList()
+        }
+
+        signalQueues.forEach { notifier.signal(it) }
+    }
+
+    // -- Transaction / CAS helpers --------------------------------------------
+
+    /**
+     * Executes [block] inside a transaction with CAS retry logic.
+     * The block returns the list of queue names to signal after commit.
+     * On [RetryableException], retries up to 10 times before failing.
+     */
+    private suspend fun withCasRetry(
+        workflowId: String,
+        block: (Handle) -> List<String>,
+    ): List<String> {
         var attempts = 0
         while (true) {
             try {
-                jdbi.inTransactionSuspend<Unit, Exception> { handle ->
-                    // Step 1: Update task to terminal status
-                    val updated = taskRepo.updateStatusWithHandle(
-                        handle, taskId, status, resultJson, claimedBy, claimedAt,
-                    )
-                    if (!updated) return@inTransactionSuspend
-
-                    // Step 2: Barrier probe -- are all tasks at this sequence terminal?
-                    val nonTerminal = taskRepo.countNonTerminalWithHandle(handle, workflowId, sequenceNumber)
-                    if (nonTerminal > 0) return@inTransactionSuspend
-
-                    val workflow = workflowRepo.findByIdWithHandle(handle, workflowId)
-                        ?: throw IllegalStateException("Workflow not found: $workflowId")
-                    if (workflow.status != WorkflowStatus.RUNNING) return@inTransactionSuspend
-
-                    val definition = objectMapper.readValue<WorkflowDefinition>(workflow.definitionJson)
-                    val sequenceMap = buildSequenceMap(definition)
-                    val seqInfo = sequenceMap[sequenceNumber]
-                        ?: throw IllegalStateException("Seq $sequenceNumber not in definition for $workflowId")
-
-                    val now = Instant.now().truncatedTo(ChronoUnit.MICROS)
-                    val signalQueueSet = mutableSetOf<String>()
-                    val completionCheckSeqs = mutableSetOf<Int>()
-                    // When true, successor eval treats DEFAULT_BRANCH edges as unconditionally taken
-                    var forceDefaultBranch = false
-
-                    // Step 3a: SCATTER failure -- apply scatter's failurePolicy
-                    if (seqInfo.phaseType == PhaseType.SCATTER && status != TaskStatus.COMPLETED) {
-                        if (seqInfo.activity.failurePolicy == FailurePolicy.ABORT) {
-                            val statusUpdated = workflowRepo.updateStatusWithHandle(
-                                handle, workflowId, WorkflowStatus.FAILED, WorkflowStatus.RUNNING,
-                            )
-                            if (statusUpdated) taskRepo.cancelPendingTasksWithHandle(handle, workflowId)
-                            return@inTransactionSuspend
-                        }
-                        // BEST_EFFORT: no parallel tasks; fall through to successor eval
-                        forceDefaultBranch = true
-                    }
-
-                    // Step 3b: SCATTER completed -- expand into parallel tasks
-                    if (seqInfo.phaseType == PhaseType.SCATTER && status == TaskStatus.COMPLETED) {
-                        val items: List<String> = objectMapper.readValue(
-                            resultJson ?: throw IllegalStateException(
-                                "SCATTER phase requires scatter result for workflow $workflowId",
-                            ),
-                        )
-                        require(items.isNotEmpty()) {
-                            "Fan-out produced 0 items for workflow $workflowId"
-                        }
-                        val parallelSeq = sequenceNumber + 1
-                        val parallelInfo = sequenceMap[parallelSeq]!!
-                        val parallelTasks = items.map {
-                            createTaskForActivity(
-                                workflowId, parallelInfo.activityName, parallelSeq,
-                                parallelInfo.activity, now, item = it,
-                            )
-                        }
-                        taskRepo.insertBatchWithHandle(handle, parallelTasks)
-                        signalQueueSet += parallelInfo.activity.queue
-
-                        val casWon = workflowRepo.casVersionWithHandle(handle, workflowId, workflow.version)
-                        if (!casWon) {
-                            log.debug("CAS lost on SCATTER for workflow {}", workflowId)
-                            throw RetryableException("CAS loss")
-                        }
-                        signalQueues = signalQueueSet.toList()
-                        return@inTransactionSuspend
-                    }
-
-                    // Step 3c: PARALLEL phase -- evaluate JoinPolicy before successor dispatch
-                    if (seqInfo.phaseType == PhaseType.PARALLEL) {
-                        val completedCount = taskRepo.countCompletedWithHandle(handle, workflowId, sequenceNumber)
-                        val totalCount = taskRepo.countTotalWithHandle(handle, workflowId, sequenceNumber)
-                        val scatterActName = seqInfo.activityName.removeSuffix(".__parallel__")
-                        val scatterActivity = definition.activities[scatterActName]
-                        val joinPolicy = scatterActivity?.fanOut?.joinPolicy ?: JoinPolicy.All
-                        // seqInfo.activity.failurePolicy carries the scatter activity's policy
-                        // (set by buildSequenceMap), which governs join failure behavior
-                        val joinPassed = evaluateJoinPolicy(joinPolicy, completedCount, totalCount)
-                        if (!joinPassed) {
-                            if (seqInfo.activity.failurePolicy == FailurePolicy.ABORT) {
-                                val statusUpdated = workflowRepo.updateStatusWithHandle(
-                                    handle, workflowId, WorkflowStatus.FAILED, WorkflowStatus.RUNNING,
-                                )
-                                if (statusUpdated) taskRepo.cancelPendingTasksWithHandle(handle, workflowId)
-                                return@inTransactionSuspend
-                            }
-                            // BEST_EFFORT: force-dispatch unconditional successors
-                            forceDefaultBranch = true
-                        }
-                    }
-
-                    // Step 3d: LINEAR failure with ABORT -- workflow FAILED
-                    // (skipped when forceDefaultBranch is set, e.g. SCATTER/PARALLEL BEST_EFFORT)
-                    if (!forceDefaultBranch
-                        && seqInfo.phaseType == PhaseType.LINEAR
-                        && status != TaskStatus.COMPLETED
-                        && status != TaskStatus.SKIPPED
-                        && seqInfo.activity.failurePolicy == FailurePolicy.ABORT
-                    ) {
-                        val statusUpdated = workflowRepo.updateStatusWithHandle(
-                            handle, workflowId, WorkflowStatus.FAILED, WorkflowStatus.RUNNING,
-                        )
-                        if (statusUpdated) taskRepo.cancelPendingTasksWithHandle(handle, workflowId)
-                        return@inTransactionSuspend
-                    }
-
-                    // Step 4: Successor evaluation
-                    val evalQueue = ArrayDeque<SequenceInfo>()
-                    evalQueue += successorsOf(seqInfo, sequenceMap, definition)
-
-                    while (evalQueue.isNotEmpty()) {
-                        val successor = evalQueue.removeFirst()
-                        val sSeq = successor.sequenceNumber
-
-                        // a. Dispatch guard: task already exists at this sequence
-                        if (taskRepo.countTotalWithHandle(handle, workflowId, sSeq) > 0) continue
-
-                        // b. Predecessor gate: all predecessor sequences must be terminal
-                        val allPredTerminal = successor.predecessorSequences.all { predSeq ->
-                            taskRepo.countNonTerminalWithHandle(handle, workflowId, predSeq) == 0
-                        }
-                        if (!allPredTerminal) continue
-
-                        // c. Fate decision: check if any edge to this successor is "taken"
-                        val edgeTaken = if (forceDefaultBranch) {
-                            // When force-dispatching (BEST_EFFORT fallthrough), all DEFAULT_BRANCH
-                            // edges are taken. Check if any predecessor has a DEFAULT_BRANCH edge.
-                            hasDefaultBranchEdge(successor, definition)
-                        } else {
-                            isAnyEdgeTaken(handle, workflowId, successor, sequenceMap, definition)
-                        }
-
-                        if (edgeTaken) {
-                            val task = createTaskForActivity(
-                                workflowId, successor.activityName, sSeq, successor.activity, now,
-                            )
-                            taskRepo.insertBatchWithHandle(handle, listOf(task))
-                            signalQueueSet += successor.activity.queue
-                        } else {
-                            val skipped = createSkippedTaskForActivity(
-                                workflowId, successor.activityName, sSeq, successor.activity, now,
-                            )
-                            taskRepo.insertBatchWithHandle(handle, listOf(skipped))
-
-                            // If skipping a SCATTER activity, also skip its companion PARALLEL sequence
-                            if (successor.phaseType == PhaseType.SCATTER) {
-                                val parallelSeq = sSeq + 1
-                                val parallelInfo = sequenceMap[parallelSeq]
-                                if (parallelInfo != null && parallelInfo.phaseType == PhaseType.PARALLEL) {
-                                    val parallelSkipped = createSkippedTaskForActivity(
-                                        workflowId, parallelInfo.activityName, parallelSeq,
-                                        parallelInfo.activity, now,
-                                    )
-                                    taskRepo.insertBatchWithHandle(handle, listOf(parallelSkipped))
-                                }
-                            }
-
-                            if (successor.activity.isTerminal) {
-                                completionCheckSeqs += sSeq
-                            } else {
-                                // Cascade skip: add this successor's successors to the eval queue
-                                evalQueue += successorsOf(successor, sequenceMap, definition)
-                            }
-                        }
-                    }
-
-                    // Also add completed terminal activity to completion check
-                    if (seqInfo.activity.isTerminal) {
-                        completionCheckSeqs += sequenceNumber
-                    }
-
-                    // Step 5: Completion check
-                    if (completionCheckSeqs.isNotEmpty()) {
-                        val globalNonTerminal = taskRepo.countAllNonTerminalWithHandle(handle, workflowId)
-                        if (globalNonTerminal == 0) {
-                            workflowRepo.updateStatusWithHandle(
-                                handle, workflowId, WorkflowStatus.COMPLETED, WorkflowStatus.RUNNING,
-                            )
-                            signalQueues = emptyList()
-                            return@inTransactionSuspend
-                        }
-                    }
-
-                    // Step 6: CAS guard
-                    val casWon = workflowRepo.casVersionWithHandle(handle, workflowId, workflow.version)
-                    if (!casWon) {
-                        log.debug("CAS lost for workflow {} at seq {}", workflowId, sequenceNumber)
-                        throw RetryableException("CAS loss")
-                    }
-
-                    signalQueues = signalQueueSet.toList()
-                }
-                break
+                return jdbi.inTransactionSuspend<List<String>, Exception> { handle -> block(handle) }
             } catch (e: RetryableException) {
-                if (++attempts >= 10) {
+                if (++attempts >= MAX_CAS_RETRIES) {
                     throw IllegalStateException("CAS retry exhausted for $workflowId", e)
                 }
                 log.debug("CAS retry {} for workflow {}", attempts, workflowId)
             }
         }
-
-        // Step 7: Signal queues after commit
-        signalQueues.forEach { notifier.signal(it) }
     }
 
-    override suspend fun recoverStuckWorkflow(workflowId: String) {
-        var signalQueues: List<String> = emptyList()
-
-        var attempts = 0
-        while (true) {
-            try {
-                jdbi.inTransactionSuspend<Unit, Exception> { handle ->
-                    val workflow = workflowRepo.findByIdWithHandle(handle, workflowId)
-                        ?: run {
-                            log.warn("Workflow not found during recovery: {}", workflowId)
-                            return@inTransactionSuspend
-                        }
-                    if (workflow.status != WorkflowStatus.RUNNING) return@inTransactionSuspend
-
-                    val definition = objectMapper.readValue<WorkflowDefinition>(workflow.definitionJson)
-                    val sequenceMap = buildSequenceMap(definition)
-                    val now = Instant.now().truncatedTo(ChronoUnit.MICROS)
-                    val signalQueueSet = mutableSetOf<String>()
-
-                    for ((seq, seqInfo) in sequenceMap.entries.sortedBy { it.key }) {
-                        // 4a. Skip if task already exists at this sequence
-                        if (taskRepo.countTotalWithHandle(handle, workflowId, seq) > 0) continue
-
-                        // 4b. Skip if any predecessor has no tasks or has non-terminal tasks
-                        val allPredTerminal = seqInfo.predecessorSequences.isEmpty() ||
-                            seqInfo.predecessorSequences.all { predSeq ->
-                                taskRepo.countTotalWithHandle(handle, workflowId, predSeq) > 0 &&
-                                    taskRepo.countNonTerminalWithHandle(handle, workflowId, predSeq) == 0
-                            }
-                        if (!allPredTerminal) continue
-
-                        when (seqInfo.phaseType) {
-                            // 4c. SCATTER: re-dispatch lost scatter task
-                            PhaseType.SCATTER -> {
-                                val task = createTaskForActivity(
-                                    workflowId, seqInfo.activityName, seq, seqInfo.activity, now,
-                                )
-                                taskRepo.insertBatchWithHandle(handle, listOf(task))
-                                signalQueueSet += seqInfo.activity.queue
-                            }
-                            // 4d. PARALLEL: can't recover without scatter result
-                            PhaseType.PARALLEL -> continue
-                            // 4e. LINEAR: evaluate edges
-                            PhaseType.LINEAR -> {
-                                val edgeTaken = isAnyEdgeTaken(handle, workflowId, seqInfo, sequenceMap, definition)
-                                if (edgeTaken || seqInfo.predecessorSequences.isEmpty()) {
-                                    val task = createTaskForActivity(
-                                        workflowId, seqInfo.activityName, seq, seqInfo.activity, now,
-                                    )
-                                    taskRepo.insertBatchWithHandle(handle, listOf(task))
-                                    signalQueueSet += seqInfo.activity.queue
-                                } else {
-                                    val skipped = createSkippedTaskForActivity(
-                                        workflowId, seqInfo.activityName, seq, seqInfo.activity, now,
-                                    )
-                                    taskRepo.insertBatchWithHandle(handle, listOf(skipped))
-                                }
-                            }
-                        }
-                    }
-
-                    // Step 5: Completion / failure check
-                    val globalNonTerminal = taskRepo.countAllNonTerminalWithHandle(handle, workflowId)
-                    if (globalNonTerminal == 0) {
-                        // Check for ABORT failures: any non-PARALLEL ABORT-policy activity with failed tasks → FAILED
-                        // PARALLEL sequences are excluded: join policy evaluation is onTaskCompleted's responsibility
-                        val abortFailure = sequenceMap.entries.any { (seq, seqInfo) ->
-                            seqInfo.phaseType != PhaseType.PARALLEL &&
-                                seqInfo.activity.failurePolicy == FailurePolicy.ABORT &&
-                                taskRepo.countFailedWithHandle(handle, workflowId, seq) > 0
-                        }
-                        val terminalStatus = if (abortFailure) WorkflowStatus.FAILED else WorkflowStatus.COMPLETED
-                        workflowRepo.updateStatusWithHandle(
-                            handle, workflowId, terminalStatus, WorkflowStatus.RUNNING,
-                        )
-                        signalQueues = emptyList()
-                        return@inTransactionSuspend
-                    }
-
-                    // Step 6: No new work dispatched → skip CAS bump
-                    if (signalQueueSet.isEmpty()) return@inTransactionSuspend
-
-                    // Step 7: CAS guard
-                    val casWon = workflowRepo.casVersionWithHandle(handle, workflowId, workflow.version)
-                    if (!casWon) throw RetryableException("CAS loss in recovery")
-
-                    signalQueues = signalQueueSet.toList()
-                }
-                break
-            } catch (e: RetryableException) {
-                if (++attempts >= 10) {
-                    throw IllegalStateException("CAS retry exhausted in recovery for $workflowId", e)
-                }
-                log.debug("CAS retry {} in recoverStuckWorkflow for {}", attempts, workflowId)
-            }
-        }
-
-        // Step 8: Signal queues after commit
-        signalQueues.forEach { notifier.signal(it) }
+    /** Throws [RetryableException] if CAS increment fails. */
+    private fun requireCasWin(handle: Handle, workflowId: String, expectedVersion: Int) {
+        val casWon = workflowRepo.casVersionWithHandle(handle, workflowId, expectedVersion)
+        if (!casWon) throw RetryableException("CAS loss for workflow $workflowId")
     }
 
-    // -- Private helpers -------------------------------------------------------
+    /** Marks workflow FAILED and cancels all pending tasks. */
+    private fun abortWorkflow(handle: Handle, workflowId: String) {
+        val statusUpdated = workflowRepo.updateStatusWithHandle(
+            handle, workflowId, WorkflowStatus.FAILED, WorkflowStatus.RUNNING,
+        )
+        if (statusUpdated) taskRepo.cancelPendingTasksWithHandle(handle, workflowId)
+    }
+
+    // -- DAG navigation helpers -----------------------------------------------
 
     /**
      * Returns the [SequenceInfo] entries for all successor activities of the given sequence.
@@ -484,6 +459,8 @@ class DefaultPhaseGate(
             }
         }
 }
+
+private const val MAX_CAS_RETRIES = 10
 
 /** Thrown inside a transaction to trigger the CAS retry loop. */
 private class RetryableException(msg: String) : RuntimeException(msg)
