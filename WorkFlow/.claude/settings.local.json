@@ -80,7 +80,16 @@
       "Bash(do grep:*)",
       "Bash(do if:*)",
       "Bash(then echo:*)",
-      "Bash(fi)"
+      "Bash(fi)",
+      "Bash(mkdir -p /tmp/s3-backup)",
+      "Bash(cp src/main/kotlin/dispatch/adapter/storage/S3StorageAdapter.kt /tmp/s3-backup/)",
+      "Bash(cp src/main/kotlin/infrastructure/storage/S3ClientProducer.kt /tmp/s3-backup/)",
+      "Bash(mv src/main/kotlin/dispatch/adapter/storage/S3StorageAdapter.kt src/main/kotlin/dispatch/adapter/storage/S3StorageAdapter.kt.bak)",
+      "Bash(mv src/main/kotlin/infrastructure/storage/S3ClientProducer.kt src/main/kotlin/infrastructure/storage/S3ClientProducer.kt.bak)",
+      "Bash(mv src/main/kotlin/dispatch/adapter/storage/S3StorageAdapter.kt.bak src/main/kotlin/dispatch/adapter/storage/S3StorageAdapter.kt)",
+      "Bash(mv src/main/kotlin/infrastructure/storage/S3ClientProducer.kt.bak src/main/kotlin/infrastructure/storage/S3ClientProducer.kt)",
+      "Bash(mv src/test/kotlin/dispatch/adapter/storage/S3StorageAdapterTest.kt src/test/kotlin/dispatch/adapter/storage/S3StorageAdapterTest.kt.bak)",
+      "Bash(mv src/test/kotlin/dispatch/adapter/storage/S3StorageAdapterTest.kt.bak src/test/kotlin/dispatch/adapter/storage/S3StorageAdapterTest.kt)"
     ],
     "defaultMode": "auto"
   }
