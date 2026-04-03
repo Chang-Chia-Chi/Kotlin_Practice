@@ -4,6 +4,7 @@ import com.workflow.workflow.model.JoinPolicy
 import com.workflow.workflow.model.buildSequenceMap
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 
@@ -32,9 +33,10 @@ class DispatchWorkflowTest {
 
     @Test
     fun `dispatchWorkflow no simulate activity exists as named node`() {
-        assert("simulate" !in dispatchWorkflow.activities) {
-            "simulate should be embedded in fanOut, not a named activity"
-        }
+        assertFalse(
+            "simulate" in dispatchWorkflow.activities,
+            "simulate should be embedded in fanOut, not a named activity",
+        )
     }
 
     @Test

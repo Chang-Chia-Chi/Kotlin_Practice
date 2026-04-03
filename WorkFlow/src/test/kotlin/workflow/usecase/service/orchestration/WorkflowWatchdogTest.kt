@@ -7,7 +7,6 @@ import com.workflow.workflow.adapter.persistent.JdbiTaskRepository
 import com.workflow.workflow.adapter.persistent.JdbiWorkflowRepository
 import com.workflow.workflow.config.WatchdogConfig
 import com.workflow.workflow.dsl.workflow
-import com.workflow.workflow.model.ActivityDefinition
 import com.workflow.workflow.model.FailurePolicy
 import com.workflow.workflow.model.JoinPolicy
 import com.workflow.workflow.model.Task
@@ -15,10 +14,6 @@ import com.workflow.workflow.model.TaskStatus
 import com.workflow.workflow.model.WorkflowDefinition
 import com.workflow.workflow.model.WorkflowRun
 import com.workflow.workflow.model.WorkflowStatus
-import com.workflow.workflow.usecase.service.orchestration.DefaultPhaseGate
-import com.workflow.workflow.usecase.service.orchestration.WorkflowWatchdog
-import com.workflow.workflow.usecase.service.orchestration.WorkflowEngine
-
 import com.workflow.workflow.model.buildSequenceMap
 import com.workflow.worker.adapter.http.FakeWorkerNotifier
 import com.workflow.infrastructure.persistence.OracleTestContainer
@@ -41,7 +36,6 @@ import java.util.UUID
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
-import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
@@ -204,6 +198,13 @@ class WorkflowWatchdogTest {
         }
     }
 
+    /** Converts a raw DB row map to case-insensitive keys, reading Clob values as strings. */
+    private fun caseInsensitiveWithClob(raw: Map<String, Any?>): Map<String, Any?> {
+        val ci = java.util.TreeMap<String, Any?>(String.CASE_INSENSITIVE_ORDER)
+        raw.forEach { (k, v) -> ci[k] = if (v is Clob) v.characterStream.readText() else v }
+        return ci
+    }
+
     /** Read a workflow row directly via SQL for assertion. */
     private fun readWorkflowDirect(id: String): Map<String, Any?>? {
         return jdbi.withHandle<Map<String, Any?>?, Exception> { handle ->
@@ -211,11 +212,7 @@ class WorkflowWatchdogTest {
                 .bind("id", id)
                 .mapToMap()
                 .findOne()
-                .map { raw ->
-                    val ci = java.util.TreeMap<String, Any?>(String.CASE_INSENSITIVE_ORDER)
-                    raw.forEach { (k, v) -> ci[k] = if (v is Clob) v.characterStream.readText() else v }
-                    ci
-                }
+                .map(::caseInsensitiveWithClob)
                 .orElse(null)
         }
     }
@@ -254,11 +251,7 @@ class WorkflowWatchdogTest {
                 .bind("id", taskId)
                 .mapToMap()
                 .findOne()
-                .map { raw ->
-                    val ci = java.util.TreeMap<String, Any?>(String.CASE_INSENSITIVE_ORDER)
-                    raw.forEach { (k, v) -> ci[k] = if (v is Clob) v.characterStream.readText() else v }
-                    ci
-                }
+                .map(::caseInsensitiveWithClob)
                 .orElse(null)
         }
     }
@@ -273,11 +266,7 @@ class WorkflowWatchdogTest {
                 .bind("seq", sequenceNumber)
                 .mapToMap()
                 .list()
-                .map { raw ->
-                    val ci = java.util.TreeMap<String, Any?>(String.CASE_INSENSITIVE_ORDER)
-                    raw.forEach { (k, v) -> ci[k] = if (v is Clob) v.characterStream.readText() else v }
-                    ci
-                }
+                .map(::caseInsensitiveWithClob)
         }
     }
 
