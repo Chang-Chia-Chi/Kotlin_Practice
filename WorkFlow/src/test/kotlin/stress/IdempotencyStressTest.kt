@@ -44,7 +44,7 @@ class IdempotencyStressTest : StressTestBase() {
         diagnostics.trackedWorkflows.add(wfId)
 
         // State: task COMPLETED, workflow not advanced (stuck)
-        insertWorkflowDirect(wfId, defJson, currentSequence = 1, version = 0)
+        insertWorkflowDirect(wfId, defJson, version = 0)
         insertTaskDirect(
             workflowId = wfId,
             sequenceNumber = 1,
@@ -100,7 +100,7 @@ class IdempotencyStressTest : StressTestBase() {
         val wfId = randomId()
         diagnostics.trackedWorkflows.add(wfId)
 
-        insertWorkflowDirect(wfId, defJson, currentSequence = 1, version = 0)
+        insertWorkflowDirect(wfId, defJson, version = 0)
         insertTaskDirect(
             workflowId = wfId,
             sequenceNumber = 1,
@@ -254,7 +254,7 @@ class IdempotencyStressTest : StressTestBase() {
         val wfId = randomId()
         diagnostics.trackedWorkflows.add(wfId)
 
-        insertWorkflowDirect(wfId, defJson, currentSequence = 1, version = 0)
+        insertWorkflowDirect(wfId, defJson, version = 0)
         insertTaskDirect(
             workflowId = wfId,
             sequenceNumber = 1,

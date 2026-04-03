@@ -364,7 +364,6 @@ abstract class StressTestBase {
     protected fun insertWorkflowDirect(
         id: String,
         definitionJson: String,
-        currentSequence: Int = 1,
         version: Int = 0,
         status: String = "RUNNING",
         deadlineAt: Instant = Instant.now().plus(1, ChronoUnit.HOURS),
@@ -373,12 +372,11 @@ abstract class StressTestBase {
         val deadline = LocalDateTime.ofInstant(deadlineAt.truncatedTo(ChronoUnit.MICROS), ZoneOffset.UTC)
         directJdbi.useHandle<Exception> { handle ->
             handle.createUpdate(
-                """INSERT INTO workflow (id, definition, current_sequence, version, status, created_at, updated_at, deadline_at)
-                   VALUES (:id, :def, :seq, :ver, :status, :now, :now, :deadline)""",
+                """INSERT INTO workflow (id, definition, version, status, created_at, updated_at, deadline_at)
+                   VALUES (:id, :def, :ver, :status, :now, :now, :deadline)""",
             )
                 .bind("id", id)
                 .bind("def", definitionJson)
-                .bind("seq", currentSequence)
                 .bind("ver", version)
                 .bind("status", status)
                 .bind("now", now)

@@ -146,7 +146,7 @@ class LivenessStressTest : StressTestBase() {
             diagnostics.trackedWorkflows.add(wfId)
 
             // Set up state: workflow at seq 1, task COMPLETED, but workflow not advanced
-            insertWorkflowDirect(wfId, defJson, currentSequence = 1, version = 0)
+            insertWorkflowDirect(wfId, defJson, version = 0)
             insertTaskDirect(
                 workflowId = wfId,
                 sequenceNumber = 1,
@@ -518,7 +518,7 @@ class LivenessStressTest : StressTestBase() {
                 (1..3).map { i ->
                     val wfId = randomId()
                     diagnostics.trackedWorkflows.add(wfId)
-                    insertWorkflowDirect(wfId, defJson, currentSequence = 1, version = 0)
+                    insertWorkflowDirect(wfId, defJson, version = 0)
                     insertTaskDirect(
                         workflowId = wfId,
                         sequenceNumber = 1,

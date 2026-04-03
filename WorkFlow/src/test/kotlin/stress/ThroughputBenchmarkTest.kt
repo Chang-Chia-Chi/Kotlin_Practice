@@ -249,7 +249,7 @@ class ThroughputBenchmarkTest : StressTestBase() {
                 (1..n).map { i ->
                     val wfId = randomId()
                     diagnostics.trackedWorkflows.add(wfId)
-                    insertWorkflowDirect(wfId, defJson, currentSequence = 1, version = 0)
+                    insertWorkflowDirect(wfId, defJson, version = 0)
                     insertTaskDirect(
                         workflowId = wfId,
                         sequenceNumber = 1,
