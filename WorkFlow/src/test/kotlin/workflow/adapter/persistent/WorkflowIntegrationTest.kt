@@ -16,10 +16,16 @@ import com.workflow.workflow.usecase.service.orchestration.WorkflowWatchdog
 import com.workflow.workflow.usecase.service.orchestration.WorkflowEngine
 import com.workflow.worker.adapter.http.FakeWorkerNotifier
 import com.workflow.infrastructure.persistence.OracleTestContainer
+import com.workflow.infrastructure.persistence.inTransactionSuspend
+import com.workflow.workflow.model.WorkflowDefinition
+import com.workflow.workflow.model.buildSequenceMap
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
 import org.jdbi.v3.core.Jdbi
 import org.junit.jupiter.api.AfterEach
@@ -76,6 +82,8 @@ class WorkflowIntegrationTest {
             handle.execute("DELETE FROM workflow")
         }
     }
+
+    private val gate get() = barrier
 
     // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -398,5 +406,385 @@ class WorkflowIntegrationTest {
             assertEquals("post.handler", seq3Tasks[0]["HANDLER_KEY"])
             assertEquals("PENDING", seq3Tasks[0]["STATUS"])
         }
+    }
+
+    // ── DAG helpers ───────────────────────────────────────────────────────
+
+    private fun seqOf(def: WorkflowDefinition, activityName: String): Int =
+        buildSequenceMap(def).values.first { it.activityName == activityName }.sequenceNumber
+
+    private fun taskStatusAt(wfId: String, seq: Int): List<String> =
+        jdbi.withHandle<List<String>, Exception> { h ->
+            h.createQuery("SELECT status FROM task WHERE workflow_id = :wf AND sequence_number = :seq ORDER BY enqueued_at")
+                .bind("wf", wfId).bind("seq", seq).mapTo(String::class.java).list()
+        }
+
+    private suspend fun complete(wfId: String, def: WorkflowDefinition, actName: String, result: String? = null) {
+        val seq = seqOf(def, actName)
+        val tasks = taskRepo.findByWorkflowAndSequence(wfId, seq)
+        for (t in tasks.filter { it.status == TaskStatus.PENDING || it.status == TaskStatus.PROCESSING }) {
+            gate.onTaskCompleted(t.id, wfId, seq, TaskStatus.COMPLETED, result)
+        }
+    }
+
+    // ── Spec item 37 ─────────────────────────────────────────────────────
+
+    @Test
+    fun `linear DAG end-to-end reaches COMPLETED`() = runBlocking {
+        val def = workflow {
+            activity("step1") { transition("s1.h"); next("step2") }
+            activity("step2") { transition("s2.h"); next("step3") }
+            activity("step3") { transition("s3.h") }
+        }
+        val result = engine.startWorkflow(def)
+        val wfId = result.workflowId
+
+        complete(wfId, def, "step1")
+        complete(wfId, def, "step2")
+        complete(wfId, def, "step3")
+
+        assertEquals(WorkflowStatus.COMPLETED, workflowRepo.findById(wfId)!!.status)
+    }
+
+    // ── Spec item 38 ─────────────────────────────────────────────────────
+
+    @Test
+    fun `conditional routing SUCCESS path correct branch runs other SKIPPED in DB`() = runBlocking {
+        val def = workflow {
+            activity("validate") {
+                transition("v.h")
+                on("OK") { next("charge") }
+                on("INVALID") { next("reject") }
+            }
+            activity("charge") { transition("c.h"); next("done") }
+            activity("reject") { transition("r.h"); next("done") }
+            activity("done")   { transition("d.h") }
+        }
+        val result = engine.startWorkflow(def)
+        val wfId = result.workflowId
+
+        val seqV = seqOf(def, "validate")
+        val vTask = taskRepo.findByWorkflowAndSequence(wfId, seqV)[0]
+        gate.onTaskCompleted(vTask.id, wfId, seqV, TaskStatus.COMPLETED, """{"branch":"OK"}""")
+
+        assertEquals(listOf("PENDING"), taskStatusAt(wfId, seqOf(def, "charge")))
+        assertEquals(listOf("SKIPPED"), taskStatusAt(wfId, seqOf(def, "reject")))
+
+        complete(wfId, def, "charge")
+        complete(wfId, def, "done")
+        assertEquals(WorkflowStatus.COMPLETED, workflowRepo.findById(wfId)!!.status)
+    }
+
+    // ── Spec item 39 ─────────────────────────────────────────────────────
+
+    @Test
+    fun `conditional routing FAIL path correct branch runs other SKIPPED in DB`() = runBlocking {
+        val def = workflow {
+            activity("validate") {
+                transition("v.h")
+                on("OK") { next("charge") }
+                on("INVALID") { next("reject") }
+            }
+            activity("charge") { transition("c.h"); next("done") }
+            activity("reject") { transition("r.h"); next("done") }
+            activity("done")   { transition("d.h") }
+        }
+        val result = engine.startWorkflow(def)
+        val wfId = result.workflowId
+
+        val seqV = seqOf(def, "validate")
+        val vTask = taskRepo.findByWorkflowAndSequence(wfId, seqV)[0]
+        gate.onTaskCompleted(vTask.id, wfId, seqV, TaskStatus.COMPLETED, """{"branch":"INVALID"}""")
+
+        assertEquals(listOf("SKIPPED"), taskStatusAt(wfId, seqOf(def, "charge")))
+        assertEquals(listOf("PENDING"), taskStatusAt(wfId, seqOf(def, "reject")))
+    }
+
+    // ── Spec item 40 ─────────────────────────────────────────────────────
+
+    @Test
+    fun `unconditional fork all branch tasks PENDING simultaneously`() = runBlocking {
+        val def = workflow {
+            activity("prepare") { transition("p.h"); next("email"); next("crm"); next("audit") }
+            activity("email")   { transition("e.h") }
+            activity("crm")     { transition("c.h") }
+            activity("audit")   { transition("a.h") }
+        }
+        val result = engine.startWorkflow(def)
+        val wfId = result.workflowId
+
+        complete(wfId, def, "prepare")
+
+        assertEquals(listOf("PENDING"), taskStatusAt(wfId, seqOf(def, "email")))
+        assertEquals(listOf("PENDING"), taskStatusAt(wfId, seqOf(def, "crm")))
+        assertEquals(listOf("PENDING"), taskStatusAt(wfId, seqOf(def, "audit")))
+    }
+
+    // ── Spec item 41 ─────────────────────────────────────────────────────
+
+    @Test
+    fun `fork and join dispatches join only after all branches COMPLETED`() = runBlocking {
+        val def = workflow {
+            activity("prepare") { transition("p.h"); next("b1"); next("b2") }
+            activity("b1")      { transition("b1.h"); next("join") }
+            activity("b2")      { transition("b2.h"); next("join") }
+            activity("join")    { transition("j.h") }
+        }
+        val result = engine.startWorkflow(def)
+        val wfId = result.workflowId
+
+        complete(wfId, def, "prepare")
+        complete(wfId, def, "b1")
+
+        assertTrue(taskStatusAt(wfId, seqOf(def, "join")).isEmpty())
+
+        complete(wfId, def, "b2")
+
+        assertEquals(listOf("PENDING"), taskStatusAt(wfId, seqOf(def, "join")))
+    }
+
+    // ── Spec item 42 ─────────────────────────────────────────────────────
+
+    @Test
+    fun `asymmetric fork timing join waits for slow branch`() = runBlocking {
+        val def = workflow {
+            activity("start")  { transition("s.h"); next("fast"); next("slow") }
+            activity("fast")   { transition("f.h"); next("join") }
+            activity("slow")   { transition("sl.h"); next("join") }
+            activity("join")   { transition("j.h") }
+        }
+        val result = engine.startWorkflow(def)
+        val wfId = result.workflowId
+
+        complete(wfId, def, "start")
+        complete(wfId, def, "fast")
+        assertTrue(taskStatusAt(wfId, seqOf(def, "join")).isEmpty(), "Join must wait for slow branch")
+
+        complete(wfId, def, "slow")
+        assertEquals(listOf("PENDING"), taskStatusAt(wfId, seqOf(def, "join")))
+    }
+
+    // ── Spec item 43 ─────────────────────────────────────────────────────
+
+    @Test
+    fun `fan-out embedded in DAG reaches COMPLETED`() = runBlocking {
+        val def = workflow {
+            activity("scatter") {
+                transition("sc.h")
+                fanOut { transition("par.h"); retries(1) }
+                next("join")
+            }
+            activity("join") { transition("j.h") }
+        }
+        val result = engine.startWorkflow(def)
+        val wfId = result.workflowId
+
+        val seqScatter = seqOf(def, "scatter")
+        val scatterTask = taskRepo.findByWorkflowAndSequence(wfId, seqScatter)[0]
+        gate.onTaskCompleted(scatterTask.id, wfId, seqScatter, TaskStatus.COMPLETED, """["item-a","item-b"]""")
+
+        val seqParallel = seqOf(def, "scatter.__parallel__")
+        val parTasks = taskRepo.findByWorkflowAndSequence(wfId, seqParallel)
+        assertEquals(2, parTasks.size)
+
+        for (t in parTasks) {
+            gate.onTaskCompleted(t.id, wfId, seqParallel, TaskStatus.COMPLETED, null)
+        }
+
+        complete(wfId, def, "join")
+        assertEquals(WorkflowStatus.COMPLETED, workflowRepo.findById(wfId)!!.status)
+    }
+
+    // ── Spec item 44 ─────────────────────────────────────────────────────
+
+    @Test
+    fun `fan-out on skipped branch skips scatter parallel and successors in DB`() = runBlocking {
+        val def = workflow {
+            activity("route") {
+                transition("r.h")
+                on("RUN") { next("scatter") }
+                on("SKIP") { next("done") }
+            }
+            activity("scatter") {
+                transition("sc.h")
+                fanOut { transition("par.h") }
+                next("done")
+            }
+            activity("done") { transition("d.h") }
+        }
+        val result = engine.startWorkflow(def)
+        val wfId = result.workflowId
+
+        val seqRoute = seqOf(def, "route")
+        val routeTask = taskRepo.findByWorkflowAndSequence(wfId, seqRoute)[0]
+        gate.onTaskCompleted(routeTask.id, wfId, seqRoute, TaskStatus.COMPLETED, """{"branch":"SKIP"}""")
+
+        assertEquals(listOf("SKIPPED"), taskStatusAt(wfId, seqOf(def, "scatter")))
+        assertEquals(listOf("SKIPPED"), taskStatusAt(wfId, seqOf(def, "scatter.__parallel__")))
+        assertEquals(listOf("PENDING"), taskStatusAt(wfId, seqOf(def, "done")))
+    }
+
+    // ── Spec item 45 ─────────────────────────────────────────────────────
+
+    @Test
+    fun `multi-level skip cascade persisted correctly`() = runBlocking {
+        val def = workflow {
+            activity("a") {
+                transition("a.h")
+                on("GO") { next("b") }
+                on("NO") { next("x") }
+            }
+            activity("b") { transition("b.h"); next("c") }
+            activity("c") { transition("c.h"); next("d") }
+            activity("d") { transition("d.h") }
+            activity("x") { transition("x.h") }
+        }
+        val result = engine.startWorkflow(def)
+        val wfId = result.workflowId
+
+        val seqA = seqOf(def, "a")
+        val aTask = taskRepo.findByWorkflowAndSequence(wfId, seqA)[0]
+        gate.onTaskCompleted(aTask.id, wfId, seqA, TaskStatus.COMPLETED, """{"branch":"NO"}""")
+
+        assertEquals(listOf("SKIPPED"), taskStatusAt(wfId, seqOf(def, "b")))
+        assertEquals(listOf("SKIPPED"), taskStatusAt(wfId, seqOf(def, "c")))
+        assertEquals(listOf("SKIPPED"), taskStatusAt(wfId, seqOf(def, "d")))
+        assertEquals(listOf("PENDING"), taskStatusAt(wfId, seqOf(def, "x")))
+    }
+
+    // ── Spec item 46 ─────────────────────────────────────────────────────
+
+    @Test
+    fun `CAS race two workers completing fork branches simultaneously no duplicate join dispatch`() = runBlocking {
+        val def = workflow {
+            activity("start") { transition("s.h"); next("b1"); next("b2") }
+            activity("b1")    { transition("b1.h"); next("join") }
+            activity("b2")    { transition("b2.h"); next("join") }
+            activity("join")  { transition("j.h") }
+        }
+        val result = engine.startWorkflow(def)
+        val wfId = result.workflowId
+        complete(wfId, def, "start")
+
+        val seqB1 = seqOf(def, "b1")
+        val seqB2 = seqOf(def, "b2")
+        val b1Task = taskRepo.findByWorkflowAndSequence(wfId, seqB1)[0]
+        val b2Task = taskRepo.findByWorkflowAndSequence(wfId, seqB2)[0]
+
+        awaitAll(
+            async(Dispatchers.Default) { gate.onTaskCompleted(b1Task.id, wfId, seqB1, TaskStatus.COMPLETED, null) },
+            async(Dispatchers.Default) { gate.onTaskCompleted(b2Task.id, wfId, seqB2, TaskStatus.COMPLETED, null) },
+        )
+
+        val seqJoin = seqOf(def, "join")
+        val joinTasks = taskRepo.findByWorkflowAndSequence(wfId, seqJoin)
+        assertEquals(1, joinTasks.size, "Exactly one join task must exist despite concurrent completions")
+    }
+
+    // ── Spec item 47 ─────────────────────────────────────────────────────
+
+    @Test
+    fun `worker death after CAS before task insert sweeper re-dispatches`() = runBlocking {
+        val def = workflow {
+            activity("a") { transition("a.h"); next("b") }
+            activity("b") { transition("b.h") }
+        }
+        val result = engine.startWorkflow(def)
+        val wfId = result.workflowId
+
+        jdbi.useHandle<Exception> { h ->
+            h.createUpdate(
+                """UPDATE task SET status = 'COMPLETED', completed_at = SYSTIMESTAMP
+                   WHERE workflow_id = :wfId AND sequence_number = 1"""
+            ).bind("wfId", wfId).execute()
+            h.createUpdate(
+                "UPDATE workflow SET version = version + 1, updated_at = :cutoff WHERE id = :wfId"
+            ).bind("wfId", wfId)
+                .bind("cutoff", LocalDateTime.now(ZoneOffset.UTC).minusMinutes(10))
+                .execute()
+        }
+
+        gate.recoverStuckWorkflow(wfId)
+
+        val seqB = seqOf(def, "b")
+        val bTasks = taskRepo.findByWorkflowAndSequence(wfId, seqB)
+        assertEquals(1, bTasks.size)
+        assertEquals(TaskStatus.PENDING, bTasks[0].status)
+    }
+
+    // ── Spec item 48 ─────────────────────────────────────────────────────
+
+    @Test
+    fun `replayWorkflow on failed DAG resumes from correct activity`() = runBlocking {
+        val def = workflow {
+            activity("step1") { transition("s1.h"); next("step2") }
+            activity("step2") { transition("s2.h"); next("step3") }
+            activity("step3") { transition("s3.h") }
+        }
+        val result = engine.startWorkflow(def)
+        val wfId = result.workflowId
+
+        complete(wfId, def, "step1")
+        val seqS2 = seqOf(def, "step2")
+        val s2Tasks = taskRepo.findByWorkflowAndSequence(wfId, seqS2)
+        gate.onTaskCompleted(s2Tasks[0].id, wfId, seqS2, TaskStatus.FAILED, null)
+
+        assertEquals(WorkflowStatus.FAILED, workflowRepo.findById(wfId)!!.status)
+
+        engine.replayWorkflow(wfId)
+
+        assertEquals(WorkflowStatus.RUNNING, workflowRepo.findById(wfId)!!.status)
+        val step2After = taskRepo.findByWorkflowAndSequence(wfId, seqS2)
+        assertTrue(step2After.any { it.status == TaskStatus.PENDING }, "step2 must be PENDING after replay")
+    }
+
+    // ── Spec item 49 ─────────────────────────────────────────────────────
+
+    @Test
+    fun `workflow deadline exceeded mid-DAG marks TIMED_OUT and cancels PENDING tasks`() = runBlocking {
+        val def = workflow {
+            deadline(java.time.Duration.ofMillis(1))
+            activity("step1") { transition("s1.h"); next("step2") }
+            activity("step2") { transition("s2.h") }
+        }
+        val result = engine.startWorkflow(def)
+        val wfId = result.workflowId
+
+        delay(50)
+
+        jdbi.inTransactionSuspend<Unit, Exception> { handle ->
+            workflowRepo.updateStatusWithHandle(handle, wfId, WorkflowStatus.TIMED_OUT, WorkflowStatus.RUNNING)
+            taskRepo.cancelPendingTasksWithHandle(handle, wfId)
+        }
+
+        val wf = workflowRepo.findById(wfId)!!
+        assertEquals(WorkflowStatus.TIMED_OUT, wf.status)
+
+        val tasks = taskRepo.findByWorkflowAndSequence(wfId, seqOf(def, "step1"))
+        assertTrue(tasks.all { it.status == TaskStatus.CANCELLED || it.status == TaskStatus.TIMED_OUT })
+    }
+
+    // ── Spec item 50 ─────────────────────────────────────────────────────
+
+    @Test
+    fun `cancel API mid-fork marks CANCELLED and cancels PENDING branch tasks`() = runBlocking {
+        val def = workflow {
+            activity("start") { transition("s.h"); next("b1"); next("b2") }
+            activity("b1")    { transition("b1.h") }
+            activity("b2")    { transition("b2.h") }
+        }
+        val result = engine.startWorkflow(def)
+        val wfId = result.workflowId
+        complete(wfId, def, "start")
+
+        engine.cancelWorkflow(wfId)
+
+        val wf = workflowRepo.findById(wfId)!!
+        assertEquals(WorkflowStatus.CANCELLED, wf.status)
+
+        val b1Tasks = taskRepo.findByWorkflowAndSequence(wfId, seqOf(def, "b1"))
+        val b2Tasks = taskRepo.findByWorkflowAndSequence(wfId, seqOf(def, "b2"))
+        assertTrue(b1Tasks.all { it.status == TaskStatus.CANCELLED })
+        assertTrue(b2Tasks.all { it.status == TaskStatus.CANCELLED })
     }
 }
