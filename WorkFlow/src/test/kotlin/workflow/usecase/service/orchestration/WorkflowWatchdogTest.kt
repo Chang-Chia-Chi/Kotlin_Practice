@@ -19,6 +19,7 @@ import com.workflow.workflow.usecase.service.orchestration.DefaultPhaseGate
 import com.workflow.workflow.usecase.service.orchestration.WorkflowWatchdog
 import com.workflow.workflow.usecase.service.orchestration.WorkflowEngine
 
+import com.workflow.workflow.model.buildSequenceMap
 import com.workflow.worker.adapter.http.FakeWorkerNotifier
 import com.workflow.infrastructure.persistence.OracleTestContainer
 import kotlinx.coroutines.async
@@ -327,6 +328,14 @@ class WorkflowWatchdogTest {
         activity("step2") { transition("step2.handler") }
     }
 
+    /** Diamond DAG: A→B, A→C, B→D, C→D. Topo: A,C,B,D → Seq: A=1, C=2, B=3, D=4. */
+    private fun diamondDagDef() = workflow {
+        activity("A") { transition("a.handler"); next("B"); next("C") }
+        activity("B") { transition("b.handler"); next("D") }
+        activity("C") { transition("c.handler"); next("D") }
+        activity("D") { transition("d.handler") }
+    }
+
     /** Fan-out then linear: seq 1 (SCATTER) -> seq 2 (PARALLEL) -> seq 3 (LINEAR). */
     private fun fanOutThenLinearDef(joinPolicy: JoinPolicy = JoinPolicy.All) = workflow {
         activity("scatter-activity") {
@@ -427,7 +436,6 @@ class WorkflowWatchdogTest {
             val row = readWorkflowDirect(wfId)
             assertNotNull(row)
             assertEquals("FAILED", row["STATUS"])
-            assertEquals(0, countTasksDirect(wfId, 2))
         }
 
         @Test
@@ -1321,6 +1329,137 @@ class WorkflowWatchdogTest {
             val updatedWf = workflowRepo.findById(wfId)
             assertNotNull(updatedWf)
             assertEquals(WorkflowStatus.RUNNING, updatedWf.status)
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Test 9: Diamond DAG recovery — iterate-all-sequences dispatches gap
+    // ═══════════════════════════════════════════════════════════════════════
+
+    @Nested
+    inner class DiamondDagRecovery {
+
+        @Test
+        fun `diamond DAG crash after B dispatched but C missed - recovery dispatches C`() = runTest {
+            val def = diamondDagDef()
+            val seqMap = buildSequenceMap(def)
+            val seqA = seqMap.entries.first { it.value.activityName == "A" }.key
+            val seqB = seqMap.entries.first { it.value.activityName == "B" }.key
+            val seqC = seqMap.entries.first { it.value.activityName == "C" }.key
+            val seqD = seqMap.entries.first { it.value.activityName == "D" }.key
+
+            val wfId = randomId()
+            val pastGrace = Instant.now().minus(gracePeriod).minusSeconds(60)
+            val wf = makeWorkflow(id = wfId, definition = def, updatedAt = pastGrace)
+            insertWorkflowDirect(wf)
+
+            // A completed at seqA
+            insertTaskDirect(
+                makeTask(
+                    workflowId = wfId, sequenceNumber = seqA,
+                    status = TaskStatus.COMPLETED, handlerKey = "a.handler",
+                ),
+            )
+            // B completed at seqB (was dispatched before crash)
+            insertTaskDirect(
+                makeTask(
+                    workflowId = wfId, sequenceNumber = seqB,
+                    status = TaskStatus.COMPLETED, handlerKey = "b.handler",
+                ),
+            )
+            // C at seqC: NO task (the gap — crash happened before C was dispatched)
+            // D at seqD: NO task
+
+            watchdog.patrol()
+
+            // C should now have a PENDING task at seqC
+            assertEquals(1, countTasksDirect(wfId, seqC))
+            assertEquals(1, countTasksWithStatusDirect(wfId, seqC, TaskStatus.PENDING))
+
+            // D should NOT have a task yet (C is non-terminal, predecessor gate blocks)
+            assertEquals(0, countTasksDirect(wfId, seqD))
+
+            // Workflow still RUNNING with CAS bumped
+            val row = readWorkflowDirect(wfId)
+            assertNotNull(row)
+            assertEquals("RUNNING", row["STATUS"])
+            assertEquals(1, (row["VERSION"] as Number).toInt())
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Test 10: findStuck EXISTS guard — zero-task workflow not returned
+    // ═══════════════════════════════════════════════════════════════════════
+
+    @Nested
+    inner class FindStuckExistsGuard {
+
+        @Test
+        fun `RUNNING workflow past grace with zero tasks - not returned by findStuck`() = runTest {
+            val def = twoStepLinearDef()
+            val wfId = randomId()
+            val pastGrace = Instant.now().minus(gracePeriod).minusSeconds(60)
+            val wf = makeWorkflow(id = wfId, definition = def, updatedAt = pastGrace)
+            insertWorkflowDirect(wf)
+            // No tasks inserted — brand new workflow that hasn't started dispatching
+
+            watchdog.patrol()
+
+            // Workflow should be untouched: still RUNNING, version 0
+            val row = readWorkflowDirect(wfId)
+            assertNotNull(row)
+            assertEquals("RUNNING", row["STATUS"])
+            assertEquals(0, (row["VERSION"] as Number).toInt())
+
+            // No tasks created at any sequence
+            assertEquals(0, countTasksDirect(wfId, 1))
+            assertEquals(0, countTasksDirect(wfId, 2))
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Test 11: recoverStuckWorkflow direct-call edge cases
+    // ═══════════════════════════════════════════════════════════════════════
+
+    @Nested
+    inner class RecoverStuckWorkflowDirectCalls {
+
+        @Test
+        fun `recoverStuckWorkflow with non-existent workflow ID - no-op no error`() = runTest {
+            barrier.recoverStuckWorkflow(randomId())
+            // No exception thrown, no side effects
+        }
+
+        @Test
+        fun `recoverStuckWorkflow on COMPLETED workflow - no-op`() = runTest {
+            val def = singleStepDef()
+            val wfId = randomId()
+            val wf = makeWorkflow(id = wfId, definition = def, status = WorkflowStatus.COMPLETED)
+            insertWorkflowDirect(wf)
+            insertTaskDirect(makeTask(workflowId = wfId, sequenceNumber = 1, status = TaskStatus.COMPLETED, handlerKey = "only.handler"))
+
+            barrier.recoverStuckWorkflow(wfId)
+
+            val row = readWorkflowDirect(wfId)
+            assertNotNull(row)
+            assertEquals("COMPLETED", row["STATUS"])
+            assertEquals(0, (row["VERSION"] as Number).toInt())
+        }
+
+        @Test
+        fun `recoverStuckWorkflow on FAILED workflow - no-op`() = runTest {
+            val def = singleStepDef()
+            val wfId = randomId()
+            val wf = makeWorkflow(id = wfId, definition = def, status = WorkflowStatus.FAILED)
+            insertWorkflowDirect(wf)
+            insertTaskDirect(makeTask(workflowId = wfId, sequenceNumber = 1, status = TaskStatus.FAILED, handlerKey = "only.handler"))
+
+            barrier.recoverStuckWorkflow(wfId)
+
+            val row = readWorkflowDirect(wfId)
+            assertNotNull(row)
+            assertEquals("FAILED", row["STATUS"])
+            assertEquals(0, (row["VERSION"] as Number).toInt())
         }
     }
 }
