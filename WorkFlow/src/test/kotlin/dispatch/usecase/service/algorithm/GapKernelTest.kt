@@ -28,13 +28,13 @@ class GapKernelTest {
     }
 
     @Test
-    fun `breaks double tie with sticky routing`() {
+    fun `breaks double tie with round-robin routing`() {
         val entries = listOf(
             GapEntry("A", BigDecimal("-10"), BigDecimal("50")),
             GapEntry("B", BigDecimal("-10"), BigDecimal("50")),
         )
-        assertEquals("A", selectByGap(entries, "A"))
-        assertEquals("B", selectByGap(entries, "B"))
+        assertEquals("B", selectByGap(entries, "A"))
+        assertEquals("A", selectByGap(entries, "B"))
     }
 
     @Test

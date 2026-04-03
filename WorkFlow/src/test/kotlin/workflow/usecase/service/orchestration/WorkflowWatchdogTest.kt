@@ -290,15 +290,14 @@ class WorkflowWatchdogTest {
         }
     }
 
-    /** Update workflow directly via SQL (for simulating concurrent advance). */
-    private fun advanceWorkflowDirect(id: String, newSequence: Int, newVersion: Int) {
+    /** Update workflow version and updated_at directly via SQL (for simulating concurrent advance). */
+    private fun advanceWorkflowDirect(id: String, newVersion: Int) {
         jdbi.useHandle<Exception> { handle ->
             handle.createUpdate(
-                """UPDATE workflow SET current_sequence = :seq, version = :ver, updated_at = :now
+                """UPDATE workflow SET version = :ver, updated_at = :now
                    WHERE id = :id""",
             )
                 .bind("id", id)
-                .bind("seq", newSequence)
                 .bind("ver", newVersion)
                 .bind("now", LocalDateTime.now(ZoneOffset.UTC))
                 .execute()
@@ -375,10 +374,9 @@ class WorkflowWatchdogTest {
 
             watchdog.patrol()
 
-            // Workflow should have advanced to sequence 2, version incremented
+            // Workflow version incremented, still RUNNING
             val updatedWf = readWorkflowDirect(wfId)
             assertNotNull(updatedWf)
-            assertEquals(2, (updatedWf["CURRENT_SEQUENCE"] as Number).toInt())
             assertEquals(1, (updatedWf["VERSION"] as Number).toInt())
             assertEquals("RUNNING", updatedWf["STATUS"])
 
@@ -450,7 +448,6 @@ class WorkflowWatchdogTest {
 
             val row = readWorkflowDirect(wfId)
             assertNotNull(row)
-            assertEquals(2, (row["CURRENT_SEQUENCE"] as Number).toInt())
             assertEquals("RUNNING", row["STATUS"])
             assertEquals(1, countTasksDirect(wfId, 2))
         }
@@ -554,10 +551,9 @@ class WorkflowWatchdogTest {
 
             watchdog.patrol()
 
-            // Workflow NOT advanced — still at sequence 1, same version
+            // Workflow NOT advanced — same version
             val updatedWf = readWorkflowDirect(wfId)
             assertNotNull(updatedWf)
-            assertEquals(1, (updatedWf["CURRENT_SEQUENCE"] as Number).toInt())
             assertEquals(0, (updatedWf["VERSION"] as Number).toInt())
 
             // No tasks created at sequence 2
@@ -597,8 +593,8 @@ class WorkflowWatchdogTest {
             )
 
             // Simulate worker advancing the workflow before watchdog runs:
-            // advance to seq 2, version=1, updated_at=NOW
-            advanceWorkflowDirect(wfId, newSequence = 2, newVersion = 1)
+            // version=1, updated_at=NOW
+            advanceWorkflowDirect(wfId, newVersion = 1)
 
             // Insert a PENDING task at seq 2 (as the worker-driven advance would have done)
             insertTaskDirect(
@@ -612,11 +608,9 @@ class WorkflowWatchdogTest {
 
             watchdog.patrol()
 
-            // Workflow still at sequence 2 (not double-advanced)
+            // Workflow not double-advanced — version unchanged from worker advance (watchdog CAS failed)
             val updatedWf = readWorkflowDirect(wfId)
             assertNotNull(updatedWf)
-            assertEquals(2, (updatedWf["CURRENT_SEQUENCE"] as Number).toInt())
-            // Version unchanged from the worker advance (watchdog CAS failed)
             assertEquals(1, (updatedWf["VERSION"] as Number).toInt())
 
             // Still exactly 1 task at seq 2 — no duplicates
@@ -645,7 +639,6 @@ class WorkflowWatchdogTest {
 
             val row = readWorkflowDirect(wfId)
             assertNotNull(row)
-            assertEquals(2, (row["CURRENT_SEQUENCE"] as Number).toInt())
             assertEquals(1, (row["VERSION"] as Number).toInt())
             assertEquals(1, countTasksDirect(wfId, 2))
         }
@@ -688,7 +681,6 @@ class WorkflowWatchdogTest {
             // Verify first recovery succeeded
             val afterFirst = readWorkflowDirect(wfId)
             assertNotNull(afterFirst)
-            assertEquals(2, (afterFirst["CURRENT_SEQUENCE"] as Number).toInt())
             assertEquals(1, (afterFirst["VERSION"] as Number).toInt())
             assertEquals(1, countTasksDirect(wfId, 2))
             assertEquals(1, countTasksWithStatusDirect(wfId, 2, TaskStatus.PENDING))
@@ -701,10 +693,9 @@ class WorkflowWatchdogTest {
             // seq 2 has a PENDING (non-terminal) task, so NOT EXISTS condition fails
             watchdog.patrol()
 
-            // Verify no change: still at seq 2, version 1, exactly 1 task at seq 2
+            // Verify no change: version still 1, exactly 1 task at seq 2
             val afterSecond = readWorkflowDirect(wfId)
             assertNotNull(afterSecond)
-            assertEquals(2, (afterSecond["CURRENT_SEQUENCE"] as Number).toInt())
             assertEquals(1, (afterSecond["VERSION"] as Number).toInt())
             assertEquals(1, countTasksDirect(wfId, 2))
 
@@ -780,14 +771,13 @@ class WorkflowWatchdogTest {
 
             watchdog.patrol()
 
-            // Task still PROCESSING, workflow still at seq 1 version 0
+            // Task still PROCESSING, workflow version unchanged
             val task = readTaskDirect(taskId)
             assertNotNull(task)
             assertEquals("PROCESSING", task["STATUS"])
 
             val wfRow = readWorkflowDirect(wfId)
             assertNotNull(wfRow)
-            assertEquals(1, (wfRow["CURRENT_SEQUENCE"] as Number).toInt())
             assertEquals(0, (wfRow["VERSION"] as Number).toInt())
         }
 
@@ -845,7 +835,6 @@ class WorkflowWatchdogTest {
             val wfRow = readWorkflowDirect(wfId)
             assertNotNull(wfRow)
             assertEquals("RUNNING", wfRow["STATUS"])
-            assertEquals(1, (wfRow["CURRENT_SEQUENCE"] as Number).toInt())
         }
     }
 
@@ -1082,7 +1071,6 @@ class WorkflowWatchdogTest {
             // Workflow C: stuck -> advanced to seq 2
             val wfRowC = readWorkflowDirect(wfIdC)
             assertNotNull(wfRowC)
-            assertEquals(2, (wfRowC["CURRENT_SEQUENCE"] as Number).toInt())
             assertEquals(1, (wfRowC["VERSION"] as Number).toInt())
             assertEquals(1, countTasksDirect(wfIdC, 2))
             assertEquals(1, countTasksWithStatusDirect(wfIdC, 2, TaskStatus.PENDING))
@@ -1191,7 +1179,6 @@ class WorkflowWatchdogTest {
             // BUT workflow should still be FAILED — not advanced
             val wfRow = readWorkflowDirect(wf.id)!!
             assertEquals("FAILED", wfRow["STATUS"])
-            assertEquals(1, (wfRow["CURRENT_SEQUENCE"] as Number).toInt())
             assertEquals(0, (wfRow["VERSION"] as Number).toInt())
         }
 

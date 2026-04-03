@@ -3,6 +3,7 @@ package com.workflow.workflow.usecase.service.orchestration
 import com.workflow.infrastructure.persistence.inTransactionSuspend
 import com.workflow.infrastructure.leader.NotLeader
 import com.workflow.workflow.config.WatchdogConfig
+import com.workflow.workflow.usecase.port.inbound.orchestration.PhaseGate
 import com.workflow.workflow.model.TaskStatus
 import com.workflow.workflow.model.WorkflowStatus
 import com.workflow.workflow.usecase.port.outbound.persistent.TaskRepository
@@ -19,7 +20,7 @@ class WorkflowWatchdog(
     private val jdbi: Jdbi,
     private val workflowRepo: WorkflowRepository,
     private val taskRepo: TaskRepository,
-    private val phaseGate: DefaultPhaseGate,
+    private val phaseGate: PhaseGate,
     private val watchdogConfig: WatchdogConfig,
 ) {
 

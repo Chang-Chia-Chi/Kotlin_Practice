@@ -33,18 +33,18 @@ class WorkflowEngine(
 
     private val log = LoggerFactory.getLogger(WorkflowEngine::class.java)
 
+    private data class IdempotentResult(val id: String, val created: Boolean, val queueName: String?)
+
     override suspend fun startWorkflow(
         definition: WorkflowDefinition,
         idempotencyKey: String?,
     ): StartResult {
-        require(definition.activities.isNotEmpty()) { "WorkflowDefinition must have at least one activity" }
-
         val workflowId = UUID.randomUUID().toString()
         val now = Instant.now().truncatedTo(ChronoUnit.MICROS)
         val definitionJson = objectMapper.writeValueAsString(definition)
 
         val sequenceMap = buildSequenceMap(definition)
-        val startSeqInfo = sequenceMap[1]!! // start activity always gets seq 1 from topo sort
+        val startSeqInfo = sequenceMap.values.first { it.activityName == definition.start }
 
         val run = WorkflowRun(
             id = workflowId,
@@ -59,7 +59,7 @@ class WorkflowEngine(
         if (idempotencyKey == null) {
             val queueName = jdbi.inTransactionSuspend<String, Exception> { handle ->
                 workflowRepo.insertWithHandle(handle, run)
-                val task = createTaskForActivity(workflowId, startSeqInfo.activityName, 1, startSeqInfo.activity, now)
+                val task = createTaskForActivity(workflowId, startSeqInfo.activityName, startSeqInfo.sequenceNumber, startSeqInfo.activity, now)
                 taskRepo.insertBatchWithHandle(handle, listOf(task))
                 startSeqInfo.activity.queue
             }
@@ -68,14 +68,14 @@ class WorkflowEngine(
             return StartResult.Created(workflowId)
         }
 
-        val (mergeId, created, queueName) = jdbi.inTransactionSuspend<Triple<String, Boolean, String?>, Exception> { handle ->
+        val (mergeId, created, queueName) = jdbi.inTransactionSuspend<IdempotentResult, Exception> { handle ->
             val (mId, isNew) = workflowRepo.mergeIdempotentWithHandle(handle, run, idempotencyKey)
             if (isNew) {
-                val task = createTaskForActivity(mId, startSeqInfo.activityName, 1, startSeqInfo.activity, now)
+                val task = createTaskForActivity(mId, startSeqInfo.activityName, startSeqInfo.sequenceNumber, startSeqInfo.activity, now)
                 taskRepo.insertBatchWithHandle(handle, listOf(task))
-                Triple(mId, true, startSeqInfo.activity.queue)
+                IdempotentResult(mId, true, startSeqInfo.activity.queue)
             } else {
-                Triple(mId, false, null)
+                IdempotentResult(mId, false, null)
             }
         }
 

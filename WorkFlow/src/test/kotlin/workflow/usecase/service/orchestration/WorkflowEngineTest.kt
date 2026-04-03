@@ -71,6 +71,7 @@ class WorkflowEngineTest {
                 transition("order.validate")
                 retries(3)
                 deadline(Duration.ofMinutes(10))
+                next("step2")
             }
             activity("step2") {
                 transition("order.process")
@@ -126,6 +127,10 @@ class WorkflowEngineTest {
                     deadline(Duration.ofMinutes(60))
                     joinPolicy(JoinPolicy.Percentage(95))
                 }
+                next("done")
+            }
+            activity("done") {
+                transition("batch.finalize")
             }
         }
         val runId = engine.startWorkflow(definition).workflowId
@@ -213,7 +218,10 @@ class WorkflowEngineTest {
     @Test
     fun `cancelWorkflow transitions RUNNING to CANCELLED and cancels pending tasks`() = runTest {
         val definition = workflow {
-            activity("step1") { transition("handler1") }
+            activity("step1") {
+                transition("handler1")
+                next("step2")
+            }
             activity("step2") { transition("handler2") }
         }
         val runId = engine.startWorkflow(definition).workflowId

@@ -5,7 +5,7 @@ import com.workflow.worker.config.WorkerLoopConfig
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.readValue
 import com.workflow.workflow.model.WorkflowDefinition
-import com.workflow.workflow.usecase.service.orchestration.DefaultPhaseGate
+import com.workflow.workflow.usecase.port.inbound.orchestration.PhaseGate
 import com.workflow.workflow.usecase.service.orchestration.ActivityInputResolver
 import com.workflow.workflow.model.Task
 import com.workflow.workflow.usecase.port.outbound.persistent.TaskRepository
@@ -92,7 +92,7 @@ class WorkerLoop(
     private val shutdownConfig: ShutdownConfig,
     private val taskRepo: TaskRepository,
     private val handlerRegistry: HandlerRegistry,
-    private val phaseGate: DefaultPhaseGate,
+    private val phaseGate: PhaseGate,
     private val meterRegistry: MeterRegistry,
     private val activityInputResolver: ActivityInputResolver,
     private val workflowRepo: WorkflowRepository,

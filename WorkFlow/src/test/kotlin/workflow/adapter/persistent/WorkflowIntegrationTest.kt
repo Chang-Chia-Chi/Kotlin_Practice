@@ -152,8 +152,6 @@ class WorkflowIntegrationTest {
             // Verify: workflow RUNNING at seq 1, one PENDING task
             var wf = readWorkflowDirect(runId)!!
             assertEquals("RUNNING", wf["STATUS"])
-            assertEquals(1, (wf["CURRENT_SEQUENCE"] as Number).toInt())
-
             var tasks = taskRepo.findByWorkflowAndSequence(runId, 1)
             assertEquals(1, tasks.size)
             assertEquals("order.validate", tasks[0].handlerKey)
@@ -164,9 +162,8 @@ class WorkflowIntegrationTest {
                 tasks[0].id, runId, 1, TaskStatus.COMPLETED, task1Result,
             )
 
-            // Verify: workflow advanced to seq 2
+            // Verify: workflow version incremented
             wf = readWorkflowDirect(runId)!!
-            assertEquals(2, (wf["CURRENT_SEQUENCE"] as Number).toInt())
             assertEquals(1, (wf["VERSION"] as Number).toInt())
 
             tasks = taskRepo.findByWorkflowAndSequence(runId, 2)
@@ -179,9 +176,8 @@ class WorkflowIntegrationTest {
                 tasks[0].id, runId, 2, TaskStatus.COMPLETED, task2Result,
             )
 
-            // Verify: workflow advanced to seq 3
+            // Verify: workflow version incremented again
             wf = readWorkflowDirect(runId)!!
-            assertEquals(3, (wf["CURRENT_SEQUENCE"] as Number).toInt())
             assertEquals(2, (wf["VERSION"] as Number).toInt())
 
             tasks = taskRepo.findByWorkflowAndSequence(runId, 3)
@@ -223,7 +219,6 @@ class WorkflowIntegrationTest {
             val runId = engine.startWorkflow(definition).workflowId
 
             var wf = readWorkflowDirect(runId)!!
-            assertEquals(1, (wf["CURRENT_SEQUENCE"] as Number).toInt())
 
             val scatterTasks = taskRepo.findByWorkflowAndSequence(runId, 1)
             assertEquals(1, scatterTasks.size)
@@ -236,9 +231,7 @@ class WorkflowIntegrationTest {
                 scatterTasks[0].id, runId, 1, TaskStatus.COMPLETED, scatterResult,
             )
 
-            // Verify: workflow at seq 2, 50 PENDING sub-tasks created
-            wf = readWorkflowDirect(runId)!!
-            assertEquals(2, (wf["CURRENT_SEQUENCE"] as Number).toInt())
+            // Verify: 50 PENDING sub-tasks created at seq 2
 
             val parallelTasks = taskRepo.findByWorkflowAndSequence(runId, 2)
             assertEquals(50, parallelTasks.size)
@@ -256,9 +249,7 @@ class WorkflowIntegrationTest {
                 )
             }
 
-            // Verify: workflow at seq 3, JoinPolicy.All evaluated, next linear task created
-            wf = readWorkflowDirect(runId)!!
-            assertEquals(3, (wf["CURRENT_SEQUENCE"] as Number).toInt())
+            // Verify: JoinPolicy.All evaluated, next linear task created at seq 3
 
             val aggregateTasks = taskRepo.findByWorkflowAndSequence(runId, 3)
             assertEquals(1, aggregateTasks.size)
@@ -306,9 +297,8 @@ class WorkflowIntegrationTest {
                     .execute()
             }
 
-            // Workflow is still at seq 1, version 0 — CAS was never executed
+            // Workflow version still 0 — CAS was never executed
             var wf = readWorkflowDirect(runId)!!
-            assertEquals(1, (wf["CURRENT_SEQUENCE"] as Number).toInt())
             assertEquals(0, (wf["VERSION"] as Number).toInt())
 
             // Push updated_at into the past so watchdog's findStuck picks it up
@@ -320,9 +310,8 @@ class WorkflowIntegrationTest {
             // WorkflowWatchdog patrol detects and recovers
             watchdog.patrol()
 
-            // Verify: workflow advanced to seq 2, downstream task created
+            // Verify: workflow version incremented, downstream task created
             wf = readWorkflowDirect(runId)!!
-            assertEquals(2, (wf["CURRENT_SEQUENCE"] as Number).toInt())
             assertEquals(1, (wf["VERSION"] as Number).toInt())
             assertEquals("RUNNING", wf["STATUS"])
 
@@ -334,7 +323,6 @@ class WorkflowIntegrationTest {
             // WorkflowWatchdog idempotency: second patrol is a no-op (CAS version already advanced)
             watchdog.patrol()
             val wfAfter = readWorkflowDirect(runId)!!
-            assertEquals(2, (wfAfter["CURRENT_SEQUENCE"] as Number).toInt())
             assertEquals(1, (wfAfter["VERSION"] as Number).toInt())
             assertEquals(1, countTasksDirect(runId, 2))
         }
@@ -396,9 +384,8 @@ class WorkflowIntegrationTest {
                 }
             }.awaitAll()
 
-            // Verify exactly ONE phase transition: workflow at seq 3
+            // Verify exactly ONE phase transition
             val wf = readWorkflowDirect(runId)!!
-            assertEquals(3, (wf["CURRENT_SEQUENCE"] as Number).toInt())
             // Version should be 2 (scatter->parallel was v0->v1, parallel->linear is v1->v2)
             assertEquals(2, (wf["VERSION"] as Number).toInt())
 

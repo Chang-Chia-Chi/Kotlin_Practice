@@ -136,14 +136,14 @@ class DefaultPhaseGate(
 
                     // Step 3c: PARALLEL phase -- evaluate JoinPolicy before successor dispatch
                     if (seqInfo.phaseType == PhaseType.PARALLEL) {
-                        val failedCount = taskRepo.countFailedWithHandle(handle, workflowId, sequenceNumber)
+                        val completedCount = taskRepo.countCompletedWithHandle(handle, workflowId, sequenceNumber)
                         val totalCount = taskRepo.countTotalWithHandle(handle, workflowId, sequenceNumber)
                         val scatterActName = seqInfo.activityName.removeSuffix(".__parallel__")
                         val scatterActivity = definition.activities[scatterActName]
                         val joinPolicy = scatterActivity?.fanOut?.joinPolicy ?: JoinPolicy.All
                         // seqInfo.activity.failurePolicy carries the scatter activity's policy
                         // (set by buildSequenceMap), which governs join failure behavior
-                        val joinPassed = evaluateJoinPolicy(joinPolicy, failedCount, totalCount)
+                        val joinPassed = evaluateJoinPolicy(joinPolicy, completedCount, totalCount)
                         if (!joinPassed) {
                             if (seqInfo.activity.failurePolicy == FailurePolicy.ABORT) {
                                 val statusUpdated = workflowRepo.updateStatusWithHandle(
@@ -239,7 +239,7 @@ class DefaultPhaseGate(
 
                     // Step 5: Completion check
                     if (completionCheckSeqs.isNotEmpty()) {
-                        val globalNonTerminal = countGlobalNonTerminal(handle, workflowId)
+                        val globalNonTerminal = taskRepo.countAllNonTerminalWithHandle(handle, workflowId)
                         if (globalNonTerminal == 0) {
                             workflowRepo.updateStatusWithHandle(
                                 handle, workflowId, WorkflowStatus.COMPLETED, WorkflowStatus.RUNNING,
@@ -272,8 +272,149 @@ class DefaultPhaseGate(
     }
 
     override suspend fun recoverStuckWorkflow(workflowId: String) {
-        // Implemented in Plan 5 (dag-p5-watchdog-sweeper)
-        throw UnsupportedOperationException("recoverStuckWorkflow implemented in Plan 5")
+        var signalQueues: List<String> = emptyList()
+
+        var attempts = 0
+        while (true) {
+            try {
+                jdbi.inTransactionSuspend<Unit, Exception> { handle ->
+                    val workflow = workflowRepo.findByIdWithHandle(handle, workflowId)
+                        ?: return@inTransactionSuspend
+                    if (workflow.status != WorkflowStatus.RUNNING) return@inTransactionSuspend
+
+                    val definition = objectMapper.readValue<WorkflowDefinition>(workflow.definitionJson)
+                    val sequenceMap = buildSequenceMap(definition)
+                    val now = Instant.now().truncatedTo(ChronoUnit.MICROS)
+                    val signalQueueSet = mutableSetOf<String>()
+
+                    // Find the highest sequence with tasks — that's where progress stalled
+                    val maxSeqWithTasks = sequenceMap.keys.sorted().lastOrNull { seq ->
+                        taskRepo.countTotalWithHandle(handle, workflowId, seq) > 0
+                    } ?: return@inTransactionSuspend
+
+                    val seqInfo = sequenceMap[maxSeqWithTasks] ?: return@inTransactionSuspend
+
+                    // Determine if the stalled sequence failed or completed
+                    val tasks = taskRepo.findByWorkflowAndSequenceWithHandle(handle, workflowId, maxSeqWithTasks)
+                    val lastTask = tasks.firstOrNull { it.status.isTerminal } ?: return@inTransactionSuspend
+                    val status = lastTask.status
+
+                    // Determine forceDefaultBranch for BEST_EFFORT policies
+                    var forceDefaultBranch = false
+
+                    // Handle failure at LINEAR/SCATTER with ABORT → mark workflow FAILED
+                    if (status != TaskStatus.COMPLETED && status != TaskStatus.SKIPPED) {
+                        if (seqInfo.phaseType == PhaseType.PARALLEL) {
+                            val completedCount = taskRepo.countCompletedWithHandle(handle, workflowId, maxSeqWithTasks)
+                            val totalCount = taskRepo.countTotalWithHandle(handle, workflowId, maxSeqWithTasks)
+                            val scatterActName = seqInfo.activityName.removeSuffix(".__parallel__")
+                            val scatterActivity = definition.activities[scatterActName]
+                            val joinPolicy = scatterActivity?.fanOut?.joinPolicy ?: JoinPolicy.All
+                            val joinPassed = evaluateJoinPolicy(joinPolicy, completedCount, totalCount)
+                            if (!joinPassed) {
+                                if (seqInfo.activity.failurePolicy == FailurePolicy.ABORT) {
+                                    workflowRepo.updateStatusWithHandle(handle, workflowId, WorkflowStatus.FAILED, WorkflowStatus.RUNNING)
+                                    taskRepo.cancelPendingTasksWithHandle(handle, workflowId)
+                                    return@inTransactionSuspend
+                                }
+                                forceDefaultBranch = true
+                            }
+                        } else if (seqInfo.activity.failurePolicy == FailurePolicy.ABORT) {
+                            workflowRepo.updateStatusWithHandle(handle, workflowId, WorkflowStatus.FAILED, WorkflowStatus.RUNNING)
+                            taskRepo.cancelPendingTasksWithHandle(handle, workflowId)
+                            return@inTransactionSuspend
+                        } else {
+                            forceDefaultBranch = true
+                        }
+                    }
+
+                    // Successor evaluation (same logic as onTaskCompleted step 4)
+                    val evalQueue = ArrayDeque<SequenceInfo>()
+                    evalQueue += successorsOf(seqInfo, sequenceMap, definition)
+                    val completionCheckSeqs = mutableSetOf<Int>()
+
+                    while (evalQueue.isNotEmpty()) {
+                        val successor = evalQueue.removeFirst()
+                        val sSeq = successor.sequenceNumber
+
+                        if (taskRepo.countTotalWithHandle(handle, workflowId, sSeq) > 0) continue
+
+                        val allPredTerminal = successor.predecessorSequences.all { predSeq ->
+                            taskRepo.countNonTerminalWithHandle(handle, workflowId, predSeq) == 0
+                        }
+                        if (!allPredTerminal) continue
+
+                        val edgeTaken = if (forceDefaultBranch) {
+                            hasDefaultBranchEdge(successor, definition)
+                        } else {
+                            isAnyEdgeTaken(handle, workflowId, successor, sequenceMap, definition)
+                        }
+
+                        if (edgeTaken) {
+                            val task = createTaskForActivity(
+                                workflowId, successor.activityName, sSeq, successor.activity, now,
+                            )
+                            taskRepo.insertBatchWithHandle(handle, listOf(task))
+                            signalQueueSet += successor.activity.queue
+                        } else {
+                            val skipped = createSkippedTaskForActivity(
+                                workflowId, successor.activityName, sSeq, successor.activity, now,
+                            )
+                            taskRepo.insertBatchWithHandle(handle, listOf(skipped))
+
+                            if (successor.phaseType == PhaseType.SCATTER) {
+                                val parallelSeq = sSeq + 1
+                                val parallelInfo = sequenceMap[parallelSeq]
+                                if (parallelInfo != null && parallelInfo.phaseType == PhaseType.PARALLEL) {
+                                    val parallelSkipped = createSkippedTaskForActivity(
+                                        workflowId, parallelInfo.activityName, parallelSeq,
+                                        parallelInfo.activity, now,
+                                    )
+                                    taskRepo.insertBatchWithHandle(handle, listOf(parallelSkipped))
+                                }
+                            }
+
+                            if (successor.activity.isTerminal) {
+                                completionCheckSeqs += sSeq
+                            } else {
+                                evalQueue += successorsOf(successor, sequenceMap, definition)
+                            }
+                        }
+                    }
+
+                    if (seqInfo.activity.isTerminal) {
+                        completionCheckSeqs += maxSeqWithTasks
+                    }
+
+                    // Completion check
+                    if (completionCheckSeqs.isNotEmpty()) {
+                        val globalNonTerminal = taskRepo.countAllNonTerminalWithHandle(handle, workflowId)
+                        if (globalNonTerminal == 0) {
+                            workflowRepo.updateStatusWithHandle(
+                                handle, workflowId, WorkflowStatus.COMPLETED, WorkflowStatus.RUNNING,
+                            )
+                            signalQueues = emptyList()
+                            return@inTransactionSuspend
+                        }
+                    }
+
+                    val casWon = workflowRepo.casVersionWithHandle(handle, workflowId, workflow.version)
+                    if (!casWon) {
+                        throw RetryableException("CAS loss in recoverStuckWorkflow")
+                    }
+
+                    signalQueues = signalQueueSet.toList()
+                }
+                break
+            } catch (e: RetryableException) {
+                if (++attempts >= 10) {
+                    throw IllegalStateException("CAS retry exhausted for recoverStuckWorkflow $workflowId", e)
+                }
+                log.debug("CAS retry {} for recoverStuckWorkflow {}", attempts, workflowId)
+            }
+        }
+
+        signalQueues.forEach { notifier.signal(it) }
     }
 
     // -- Private helpers -------------------------------------------------------
@@ -378,32 +519,15 @@ class DefaultPhaseGate(
     /**
      * Evaluates whether a fan-out join policy is satisfied given the failure count.
      */
-    private fun evaluateJoinPolicy(joinPolicy: JoinPolicy, failedCount: Int, totalCount: Int): Boolean {
-        val succeededCount = totalCount - failedCount
-        return when (joinPolicy) {
-            is JoinPolicy.All -> failedCount == 0
-            is JoinPolicy.Threshold -> succeededCount >= joinPolicy.n
+    private fun evaluateJoinPolicy(joinPolicy: JoinPolicy, completedCount: Int, totalCount: Int): Boolean =
+        when (joinPolicy) {
+            is JoinPolicy.All -> completedCount == totalCount
+            is JoinPolicy.Threshold -> completedCount >= joinPolicy.n
             is JoinPolicy.Percentage -> {
-                val pct = if (totalCount > 0) (succeededCount * 100) / totalCount else 0
+                val pct = if (totalCount > 0) (completedCount * 100) / totalCount else 0
                 pct >= joinPolicy.pct
             }
         }
-    }
-
-    /**
-     * Counts all non-terminal tasks across the entire workflow (not sequence-scoped).
-     */
-    private fun countGlobalNonTerminal(handle: Handle, workflowId: String): Int =
-        handle.createQuery(
-            """
-            SELECT COUNT(*) FROM task
-            WHERE workflow_id = :wfId
-              AND status NOT IN ('COMPLETED', 'FAILED', 'TIMED_OUT', 'DEAD_LETTER', 'CANCELLED', 'SKIPPED')
-            """,
-        )
-            .bind("wfId", workflowId)
-            .mapTo(Int::class.java)
-            .one()
 }
 
 /** Thrown inside a transaction to trigger the CAS retry loop. */

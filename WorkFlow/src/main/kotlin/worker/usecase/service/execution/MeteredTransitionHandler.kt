@@ -12,6 +12,8 @@ class MeteredTransitionHandler(
     private val meterRegistry: MeterRegistry,
 ) : TransitionHandler {
 
+    override fun key(): String = delegate.key()
+
     override suspend fun execute(input: HandlerInput): HandlerOutput {
         val sample = Timer.start(meterRegistry)
         try {

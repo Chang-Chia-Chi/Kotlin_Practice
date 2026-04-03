@@ -47,7 +47,8 @@ fun buildSequenceMap(definition: WorkflowDefinition): Map<Int, SequenceInfo> {
         val activity = definition.activities[actName]!!
         val predSeqs = predecessorNames[actName]!!.map { outputSeq(it) }
 
-        if (activity.fanOut != null) {
+        val fanOut = activity.fanOut
+        if (fanOut != null) {
             val sSeq = scatterSeq[actName]!!
             val pSeq = parallelSeq[actName]!!
 
@@ -61,13 +62,13 @@ fun buildSequenceMap(definition: WorkflowDefinition): Map<Int, SequenceInfo> {
 
             // Synthetic activity for parallel tasks — uses FanOutDefinition settings.
             // The transition (handlerKey) for each parallel worker comes from fanOut.transition.
-            // The scatter activity's own failurePolicy applies at join evaluation time.
-            val fanOut = activity.fanOut!!
+            // fanOut.failurePolicy governs join failure behavior; scatter activity's own
+            // failurePolicy governs what happens when the scatter phase itself fails.
             val parallelActivity = ActivityDefinition(
                 name = "$actName.__parallel__",
                 transition = fanOut.transition,
                 retries = fanOut.retries,
-                failurePolicy = activity.failurePolicy, // scatter activity's policy governs join failure
+                failurePolicy = fanOut.failurePolicy,
                 deadline = fanOut.deadline,
                 backoffBase = fanOut.backoffBase,
                 backoffCap = fanOut.backoffCap,

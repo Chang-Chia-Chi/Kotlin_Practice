@@ -14,7 +14,7 @@ fun selectByGap(entries: List<GapEntry>, lastSelected: String?): String? {
         .sortedWith(
             compareBy<GapEntry> { it.gap }
                 .thenByDescending { it.target }
-                .thenByDescending { it.id == lastSelected },
+                .thenBy { it.id == lastSelected },
         )
         .first()
         .id

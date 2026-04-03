@@ -287,8 +287,8 @@ abstract class StressTestBase {
         await atMost timeout untilAsserted {
             val wf = readWorkflowDirect(workflowId)
             assertNotNull(wf)
-            val seq = (wf["CURRENT_SEQUENCE"] as Number).toInt()
-            assertTrue(seq > previousSequence, "Workflow $workflowId still at sequence $previousSequence")
+            val ver = (wf["VERSION"] as Number).toInt()
+            assertTrue(ver > previousSequence, "Workflow $workflowId version still at $previousSequence")
         }
     }
 
@@ -469,7 +469,7 @@ abstract class StressTestBase {
     internal fun dumpState(workflowId: String): String = buildString {
         val wf = readWorkflowDirect(workflowId)
         appendLine("=== Workflow $workflowId ===")
-        appendLine("  status=${wf?.get("STATUS")}, seq=${wf?.get("CURRENT_SEQUENCE")}, ver=${wf?.get("VERSION")}")
+        appendLine("  status=${wf?.get("STATUS")}, ver=${wf?.get("VERSION")}")
         val tasks = readTasksDirect(workflowId)
         for (t in tasks) {
             appendLine("  task=${t["ID"]} seq=${t["SEQUENCE_NUMBER"]} status=${t["STATUS"]} claimed=${t["CLAIMED_BY"]} retry=${t["RETRY_COUNT"]}")

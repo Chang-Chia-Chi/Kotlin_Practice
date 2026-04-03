@@ -405,12 +405,12 @@ private fun dumpDiagnostics(directJdbi: Jdbi) {
         println("  Tasks: ${taskCounts.joinToString { "${it["STATUS"]}=${it["CNT"]}" }}")
 
         val stuck = h.createQuery(
-            "SELECT id, current_sequence, status FROM workflow WHERE status = 'RUNNING' FETCH FIRST 5 ROWS ONLY",
+            "SELECT id, version, status FROM workflow WHERE status = 'RUNNING' FETCH FIRST 5 ROWS ONLY",
         ).mapToMap().list()
         if (stuck.isNotEmpty()) {
             println("  Stuck workflows (sample):")
             for (wf in stuck) {
-                println("    ${wf["ID"]} seq=${wf["CURRENT_SEQUENCE"]} status=${wf["STATUS"]}")
+                println("    ${wf["ID"]} ver=${wf["VERSION"]} status=${wf["STATUS"]}")
             }
         }
         println("  ---")

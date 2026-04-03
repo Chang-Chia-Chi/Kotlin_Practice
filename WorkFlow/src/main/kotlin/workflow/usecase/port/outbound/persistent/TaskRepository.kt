@@ -28,5 +28,7 @@ interface TaskRepository {
     fun cancelPendingTasksWithHandle(handle: Handle, workflowId: String): Int
     fun insertBatchWithHandle(handle: Handle, tasks: List<Task>)
     fun replayDeadLetterBatchWithHandle(handle: Handle, workflowId: String): Int
+    fun countAllNonTerminalWithHandle(handle: Handle, workflowId: String): Int
+    fun countCompletedWithHandle(handle: Handle, workflowId: String, sequenceNumber: Int): Int
     fun findDistinctQueuesByWorkflowId(handle: Handle, workflowId: String, statuses: List<String>): List<String>
 }

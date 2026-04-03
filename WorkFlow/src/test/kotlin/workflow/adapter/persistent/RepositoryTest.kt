@@ -564,6 +564,10 @@ class RepositoryTest {
             workflowRepo.insert(wf1)
             workflowRepo.insert(wf2)
 
+            // Each workflow needs terminal tasks at max sequence to be detected as stuck
+            insertTaskDirect(makeTask(workflowId = wf1.id, sequenceNumber = 1, status = TaskStatus.COMPLETED))
+            insertTaskDirect(makeTask(workflowId = wf2.id, sequenceNumber = 1, status = TaskStatus.COMPLETED))
+
             val stuck = workflowRepo.findStuck(Duration.ofMinutes(5))
             assertEquals(2, stuck.size)
             val ids = stuck.map { it.id }.toSet()

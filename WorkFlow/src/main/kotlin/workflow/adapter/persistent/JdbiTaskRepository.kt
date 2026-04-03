@@ -380,6 +380,31 @@ class JdbiTaskRepository(
             ).bind("workflowId", workflowId)
             .execute()
 
+    override fun countAllNonTerminalWithHandle(handle: Handle, workflowId: String): Int =
+        handle
+            .createQuery(
+                """
+            SELECT COUNT(*) FROM task
+            WHERE workflow_id = :workflowId
+              AND status NOT IN ('COMPLETED', 'FAILED', 'TIMED_OUT', 'DEAD_LETTER', 'CANCELLED', 'SKIPPED')
+            """,
+            ).bind("workflowId", workflowId)
+            .mapTo(Int::class.java)
+            .one()
+
+    override fun countCompletedWithHandle(handle: Handle, workflowId: String, sequenceNumber: Int): Int =
+        handle
+            .createQuery(
+                """
+            SELECT COUNT(*) FROM task
+            WHERE workflow_id = :workflowId AND sequence_number = :seq
+              AND status = 'COMPLETED'
+            """,
+            ).bind("workflowId", workflowId)
+            .bind("seq", sequenceNumber)
+            .mapTo(Int::class.java)
+            .one()
+
     override fun findDistinctQueuesByWorkflowId(handle: Handle, workflowId: String, statuses: List<String>): List<String> =
         handle
             .createQuery(

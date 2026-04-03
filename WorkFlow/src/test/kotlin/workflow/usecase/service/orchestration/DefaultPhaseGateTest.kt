@@ -447,12 +447,14 @@ class DefaultPhaseGateTest {
 
     @Test
     fun `PARALLEL join failure with BEST_EFFORT dispatches unconditional successors`() = runTest {
-        // scatter activity's failurePolicy governs the parallel join behavior
+        // fanOut.failurePolicy governs the parallel join behavior
         val def = workflow {
             activity("scatter") {
                 transition("sc.h")
-                failurePolicy(FailurePolicy.BEST_EFFORT)
-                fanOut { transition("par.h") }
+                fanOut {
+                    transition("par.h")
+                    failurePolicy(FailurePolicy.BEST_EFFORT)
+                }
                 next("join")
             }
             activity("join") { transition("j.h") }

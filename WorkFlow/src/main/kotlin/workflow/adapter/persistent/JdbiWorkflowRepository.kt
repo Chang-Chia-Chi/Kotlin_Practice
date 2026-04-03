@@ -39,8 +39,28 @@ class JdbiWorkflowRepository(private val jdbi: Jdbi) : WorkflowRepository {
 
     override suspend fun findStuck(gracePeriod: Duration): List<WorkflowRun> =
         jdbi.withHandleSuspend<List<WorkflowRun>, Exception> { h: Handle ->
-            // Placeholder: full DAG-aware stuck detection implemented in Plan 5
-            emptyList()
+            val threshold = LocalDateTime.now(ZoneOffset.UTC).truncatedTo(ChronoUnit.MICROS)
+                .minus(gracePeriod)
+            h.createQuery(
+                """
+                SELECT w.* FROM workflow w
+                WHERE w.status = 'RUNNING'
+                  AND w.updated_at < :threshold
+                  AND EXISTS (SELECT 1 FROM task t WHERE t.workflow_id = w.id)
+                  AND NOT EXISTS (
+                    SELECT 1 FROM task t
+                    WHERE t.workflow_id = w.id
+                      AND t.sequence_number = (
+                        SELECT MAX(t2.sequence_number) FROM task t2 WHERE t2.workflow_id = w.id
+                      )
+                      AND t.status NOT IN ('COMPLETED', 'FAILED', 'TIMED_OUT', 'DEAD_LETTER', 'CANCELLED', 'SKIPPED')
+                  )
+                """,
+            )
+                .bind("threshold", threshold)
+                .mapToMap()
+                .list()
+                .map(::mapWorkflowRow)
         }
 
     override suspend fun findTimedOut(): List<WorkflowRun> =
