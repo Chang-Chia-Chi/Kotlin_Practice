@@ -49,6 +49,7 @@ class JdbiWorkflowRepository(private val jdbi: Jdbi) : WorkflowRepository {
                   AND NOT EXISTS (
                     SELECT 1 FROM task t
                     WHERE t.workflow_id = w.id
+                      AND t.sequence_number = (SELECT MAX(t2.sequence_number) FROM task t2 WHERE t2.workflow_id = w.id)
                       AND t.status NOT IN ('COMPLETED', 'FAILED', 'TIMED_OUT', 'DEAD_LETTER', 'CANCELLED', 'SKIPPED')
                   )
                 """,
