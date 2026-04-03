@@ -3,38 +3,23 @@ package com.workflow.workflow.usecase.service.orchestration
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule
 import com.fasterxml.jackson.module.kotlin.KotlinModule
+import com.workflow.infrastructure.persistence.OracleTestContainer
 import com.workflow.workflow.adapter.persistent.JdbiTaskRepository
 import com.workflow.workflow.adapter.persistent.JdbiWorkflowRepository
-import com.workflow.workflow.model.ActivityDefinition
+import com.workflow.workflow.dsl.workflow
 import com.workflow.workflow.model.FailurePolicy
-import com.workflow.workflow.model.JoinPolicy
 import com.workflow.workflow.model.TaskStatus
 import com.workflow.workflow.model.WorkflowDefinition
-import com.workflow.workflow.model.WorkflowRun
 import com.workflow.workflow.model.WorkflowStatus
+import com.workflow.workflow.model.buildSequenceMap
 import com.workflow.workflow.model.workflowId
-import com.workflow.workflow.dsl.workflow
-import com.workflow.workflow.model.Task
-import com.workflow.workflow.usecase.service.orchestration.DefaultPhaseGate
-import com.workflow.workflow.usecase.service.orchestration.WorkflowEngine
-
 import com.workflow.worker.adapter.http.FakeWorkerNotifier
-import com.workflow.infrastructure.persistence.OracleTestContainer
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.test.runTest
 import org.jdbi.v3.core.Jdbi
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeAll
-import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.TestInstance
-import java.sql.Clob
-import java.time.Instant
-import java.time.LocalDateTime
-import java.time.ZoneOffset
-import java.time.temporal.ChronoUnit
-import java.util.UUID
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
@@ -49,7 +34,7 @@ class DefaultPhaseGateTest {
         .registerModule(KotlinModule.Builder().build())
         .registerModule(JavaTimeModule())
     private lateinit var notifier: FakeWorkerNotifier
-    private lateinit var barrier: DefaultPhaseGate
+    private lateinit var gate: DefaultPhaseGate
     private lateinit var engine: WorkflowEngine
 
     @BeforeAll
@@ -58,945 +43,534 @@ class DefaultPhaseGateTest {
         workflowRepo = JdbiWorkflowRepository(jdbi)
         taskRepo = JdbiTaskRepository(jdbi)
         notifier = FakeWorkerNotifier()
-        barrier = DefaultPhaseGate(jdbi, workflowRepo, taskRepo, objectMapper, notifier)
+        gate = DefaultPhaseGate(jdbi, workflowRepo, taskRepo, objectMapper, notifier)
         engine = WorkflowEngine(jdbi, workflowRepo, taskRepo, objectMapper, notifier)
     }
 
     @AfterEach
     fun cleanTables() {
-        jdbi.useHandle<Exception> { handle ->
-            handle.execute("DELETE FROM task")
-            handle.execute("DELETE FROM workflow")
+        jdbi.useHandle<Exception> { h ->
+            h.execute("DELETE FROM task")
+            h.execute("DELETE FROM workflow")
         }
     }
 
-    // ── Helpers ──────────────────────────────────────────────────────────
+    // -- Helpers ----------------------------------------------------------------
 
-    private fun randomId(): String = UUID.randomUUID().toString()
+    private suspend fun startAndGetSeq(def: WorkflowDefinition): Pair<String, Int> {
+        val result = engine.startWorkflow(def)
+        val wfId = result.workflowId
+        return wfId to 1
+    }
 
-    private fun now(): Instant = Instant.now().truncatedTo(ChronoUnit.MICROS)
+    private suspend fun completeTask(taskId: String, wfId: String, seq: Int, result: String? = null) {
+        gate.onTaskCompleted(taskId, wfId, seq, TaskStatus.COMPLETED, result)
+    }
 
-    private fun makeWorkflow(
-        id: String = randomId(),
-        definition: WorkflowDefinition,
-        version: Int = 0,
-        status: WorkflowStatus = WorkflowStatus.RUNNING,
-        createdAt: Instant = now(),
-        updatedAt: Instant = now(),
-        deadlineAt: Instant = now().plus(java.time.Duration.ofMinutes(30)),
-    ): WorkflowRun = WorkflowRun(
-        id = id,
-        definitionJson = objectMapper.writeValueAsString(definition),
-        version = version,
-        status = status,
-        createdAt = createdAt,
-        updatedAt = updatedAt,
-        deadlineAt = deadlineAt,
-    )
-
-    private fun makeTask(
-        id: String = randomId(),
-        workflowId: String,
-        activityName: String = "test-activity",
-        sequenceNumber: Int = 1,
-        status: TaskStatus = TaskStatus.PENDING,
-        handlerKey: String = "test.handler",
-        item: String? = null,
-        resultJson: String? = null,
-        claimedBy: String? = null,
-        claimedAt: Instant? = null,
-        completedAt: Instant? = null,
-        retryCount: Int = 0,
-        maxRetries: Int = 0,
-        deadlineAt: Instant? = null,
-    ): Task = Task(
-        id = id,
-        workflowId = workflowId,
-        activityName = activityName,
-        sequenceNumber = sequenceNumber,
-        status = status,
-        handlerKey = handlerKey,
-        item = item,
-        resultJson = resultJson,
-        claimedBy = claimedBy,
-        claimedAt = claimedAt,
-        completedAt = completedAt,
-        retryCount = retryCount,
-        maxRetries = maxRetries,
-        deadlineAt = deadlineAt,
-    )
-
-    /** Insert a workflow directly via SQL (independent of repo under test). */
-    private fun insertWorkflowDirect(run: WorkflowRun) {
-        jdbi.useHandle<Exception> { handle ->
-            handle.createUpdate(
-                """INSERT INTO workflow (id, definition, version, status, created_at, updated_at, deadline_at)
-                   VALUES (:id, :definition, :version, :status, :createdAt, :updatedAt, :deadlineAt)""",
-            )
-                .bind("id", run.id)
-                .bind("definition", run.definitionJson)
-                .bind("version", run.version)
-                .bind("status", run.status.name)
-                .bind("createdAt", LocalDateTime.ofInstant(run.createdAt, ZoneOffset.UTC))
-                .bind("updatedAt", LocalDateTime.ofInstant(run.updatedAt, ZoneOffset.UTC))
-                .bind("deadlineAt", LocalDateTime.ofInstant(run.deadlineAt, ZoneOffset.UTC))
-                .execute()
+    private fun taskStatusAt(wfId: String, seq: Int): List<String> =
+        jdbi.withHandle<List<String>, Exception> { h ->
+            h.createQuery("SELECT status FROM task WHERE workflow_id = :wfId AND sequence_number = :seq")
+                .bind("wfId", wfId).bind("seq", seq).mapTo(String::class.java).list()
         }
-    }
 
-    /** Insert a task directly via SQL (independent of repo under test). */
-    private fun insertTaskDirect(task: Task) {
-        jdbi.useHandle<Exception> { handle ->
-            val stmt = handle.createUpdate(
-                """INSERT INTO task (id, workflow_id, sequence_number, status, handler_key, item, result,
-                   claimed_by, claimed_at, completed_at, retry_count, max_retries, deadline_at, queue_name)
-                   VALUES (:id, :workflowId, :sequenceNumber, :status, :handlerKey, :item, :result,
-                   :claimedBy, :claimedAt, :completedAt, :retryCount, :maxRetries, :deadlineAt, :queueName)""",
-            )
-                .bind("id", task.id)
-                .bind("workflowId", task.workflowId)
-                .bind("sequenceNumber", task.sequenceNumber)
-                .bind("status", task.status.name)
-                .bind("handlerKey", task.handlerKey)
-                .bind("retryCount", task.retryCount)
-                .bind("maxRetries", task.maxRetries)
-                .bind("queueName", task.queueName)
+    private fun workflowStatus(wfId: String): WorkflowStatus =
+        kotlinx.coroutines.runBlocking { workflowRepo.findById(wfId) }!!.status
 
-            fun bindClobOrNull(name: String, value: String?) =
-                if (value != null) stmt.bind(name, value) else stmt.bindNull(name, java.sql.Types.CLOB)
+    // -- Spec item 12: Linear completion -> successor dispatched ----------------
 
-            fun bindStringOrNull(name: String, value: String?) =
-                if (value != null) stmt.bind(name, value) else stmt.bindNull(name, java.sql.Types.VARCHAR)
-
-            fun bindTimestampOrNull(name: String, value: Instant?) =
-                if (value != null) stmt.bind(name, LocalDateTime.ofInstant(value, ZoneOffset.UTC))
-                else stmt.bindNull(name, java.sql.Types.TIMESTAMP)
-
-            bindClobOrNull("item", task.item)
-            bindClobOrNull("result", task.resultJson)
-            bindStringOrNull("claimedBy", task.claimedBy)
-            bindTimestampOrNull("claimedAt", task.claimedAt)
-            bindTimestampOrNull("completedAt", task.completedAt)
-            bindTimestampOrNull("deadlineAt", task.deadlineAt)
-
-            stmt.execute()
+    @Test
+    fun `linear completion dispatches successor`() = runTest {
+        val def = workflow {
+            activity("a") { transition("a.h"); next("b") }
+            activity("b") { transition("b.h") }
         }
+        val (wfId, _) = startAndGetSeq(def)
+        val seq1Tasks = taskRepo.findByWorkflowAndSequence(wfId, 1)
+        assertEquals(1, seq1Tasks.size)
+        completeTask(seq1Tasks[0].id, wfId, 1)
+
+        val seq2Tasks = taskRepo.findByWorkflowAndSequence(wfId, 2)
+        assertEquals(1, seq2Tasks.size)
+        assertEquals(TaskStatus.PENDING, seq2Tasks[0].status)
     }
 
-    /** Read a workflow row directly via SQL for assertion. */
-    private fun readWorkflowDirect(id: String): Map<String, Any?>? {
-        return jdbi.withHandle<Map<String, Any?>?, Exception> { handle ->
-            handle.createQuery("SELECT * FROM workflow WHERE id = :id")
-                .bind("id", id)
-                .mapToMap()
-                .findOne()
-                .map { raw ->
-                    val ci = java.util.TreeMap<String, Any?>(String.CASE_INSENSITIVE_ORDER)
-                    raw.forEach { (k, v) -> ci[k] = if (v is Clob) v.characterStream.readText() else v }
-                    ci
-                }
-                .orElse(null)
+    // -- Spec item 13: Terminal activity completes -> workflow COMPLETED --------
+
+    @Test
+    fun `terminal activity completion marks workflow COMPLETED`() = runTest {
+        val def = workflow {
+            activity("only") { transition("o.h") }
         }
+        val result = engine.startWorkflow(def)
+        val wfId = result.workflowId
+        val tasks = taskRepo.findByWorkflowAndSequence(wfId, 1)
+        completeTask(tasks[0].id, wfId, 1)
+
+        val wf = workflowRepo.findById(wfId)
+        assertNotNull(wf)
+        assertEquals(WorkflowStatus.COMPLETED, wf.status)
     }
 
-    /** Count tasks at a given workflow + sequence directly via SQL. */
-    private fun countTasksDirect(workflowId: String, sequenceNumber: Int): Int {
-        return jdbi.withHandle<Int, Exception> { handle ->
-            handle.createQuery(
-                "SELECT COUNT(*) FROM task WHERE workflow_id = :wfId AND sequence_number = :seq",
-            )
-                .bind("wfId", workflowId)
-                .bind("seq", sequenceNumber)
-                .mapTo(Int::class.java)
-                .one()
+    // -- Spec item 14: Parallel join incomplete -> no dispatch ------------------
+
+    @Test
+    fun `parallel join incomplete does not dispatch join`() = runTest {
+        val def = workflow {
+            activity("a") { transition("a.h"); next("b"); next("c") }
+            activity("b") { transition("b.h"); next("join") }
+            activity("c") { transition("c.h"); next("join") }
+            activity("join") { transition("j.h") }
         }
+        val seqMap = buildSequenceMap(def)
+        val (wfId, _) = startAndGetSeq(def)
+
+        // Complete 'a'
+        val seqA = seqMap.values.first { it.activityName == "a" }.sequenceNumber
+        val aTasks = taskRepo.findByWorkflowAndSequence(wfId, seqA)
+        completeTask(aTasks[0].id, wfId, seqA)
+
+        // Complete 'b' only -- join should NOT dispatch yet
+        val seqB = seqMap.values.first { it.activityName == "b" }.sequenceNumber
+        val bTasks = taskRepo.findByWorkflowAndSequence(wfId, seqB)
+        completeTask(bTasks[0].id, wfId, seqB)
+
+        val seqJoin = seqMap.values.first { it.activityName == "join" }.sequenceNumber
+        val joinTasks = taskRepo.findByWorkflowAndSequence(wfId, seqJoin)
+        assertTrue(joinTasks.isEmpty(), "Join must not dispatch until all predecessors are terminal")
     }
 
-    /** Count tasks at a given workflow + sequence + status directly via SQL. */
-    private fun countTasksWithStatusDirect(workflowId: String, sequenceNumber: Int, status: TaskStatus): Int {
-        return jdbi.withHandle<Int, Exception> { handle ->
-            handle.createQuery(
-                "SELECT COUNT(*) FROM task WHERE workflow_id = :wfId AND sequence_number = :seq AND status = :status",
-            )
-                .bind("wfId", workflowId)
-                .bind("seq", sequenceNumber)
-                .bind("status", status.name)
-                .mapTo(Int::class.java)
-                .one()
+    // -- Spec item 15: Parallel join complete -> successor dispatched -----------
+
+    @Test
+    fun `parallel join dispatches after all branches complete`() = runTest {
+        val def = workflow {
+            activity("a") { transition("a.h"); next("b"); next("c") }
+            activity("b") { transition("b.h"); next("join") }
+            activity("c") { transition("c.h"); next("join") }
+            activity("join") { transition("j.h") }
         }
-    }
+        val seqMap = buildSequenceMap(def)
+        val (wfId, _) = startAndGetSeq(def)
 
-    /** Read all tasks at a given workflow + sequence directly via SQL. */
-    private fun readTasksDirect(workflowId: String, sequenceNumber: Int): List<Map<String, Any?>> {
-        return jdbi.withHandle<List<Map<String, Any?>>, Exception> { handle ->
-            handle.createQuery(
-                "SELECT * FROM task WHERE workflow_id = :wfId AND sequence_number = :seq",
-            )
-                .bind("wfId", workflowId)
-                .bind("seq", sequenceNumber)
-                .mapToMap()
-                .list()
-                .map { raw ->
-                    val ci = java.util.TreeMap<String, Any?>(String.CASE_INSENSITIVE_ORDER)
-                    raw.forEach { (k, v) -> ci[k] = if (v is Clob) v.characterStream.readText() else v }
-                    ci
-                }
+        fun completeByName(name: String) {
+            val seq = seqMap.values.first { it.activityName == name }.sequenceNumber
+            val t = kotlinx.coroutines.runBlocking { taskRepo.findByWorkflowAndSequence(wfId, seq) }[0]
+            kotlinx.coroutines.runBlocking { completeTask(t.id, wfId, seq) }
         }
+
+        completeByName("a")
+        completeByName("b")
+        completeByName("c")
+
+        val seqJoin = seqMap.values.first { it.activityName == "join" }.sequenceNumber
+        val joinTasks = taskRepo.findByWorkflowAndSequence(wfId, seqJoin)
+        assertEquals(1, joinTasks.size)
+        assertEquals(TaskStatus.PENDING, joinTasks[0].status)
     }
 
-    // ── Workflow Definition Builders ─────────────────────────────────────
+    // -- Spec item 16: Conditional SUCCESS branch -> correct task + SKIPPED -----
 
-    /** Two linear activities: seq 1 → seq 2. */
-    private fun twoStepLinearDef() = workflow {
-        activity("step1") { transition("step1.handler"); next("step2") }
-        activity("step2") { transition("step2.handler") }
-    }
-
-    /**
-     * Scatter + parallel: seq 1 (SCATTER) → seq 2 (PARALLEL).
-     *
-     * Handler key mapping per locked contract:
-     * - Scatter activity uses `activity.transition` → "scatter.handler"
-     * - Parallel activity uses fanOut.transition → "parallel.handler"
-     */
-    private fun fanOutDef(
-        joinPolicy: JoinPolicy = JoinPolicy.All,
-        failurePolicy: FailurePolicy = FailurePolicy.ABORT,
-        parallelFailurePolicy: FailurePolicy = FailurePolicy.ABORT,
-    ) = workflow {
-        activity("scatter-activity") {
-            transition("scatter.handler")
-            failurePolicy(failurePolicy)
-            fanOut {
-                transition("parallel.handler")
-                failurePolicy(parallelFailurePolicy)
-                joinPolicy(joinPolicy)
+    @Test
+    fun `conditional SUCCESS branch dispatches charge and SKIPs reject`() = runTest {
+        val def = workflow {
+            activity("validate") {
+                transition("v.h")
+                on("OK") { next("charge") }
+                on("INVALID") { next("reject") }
             }
+            activity("charge") { transition("c.h") }
+            activity("reject") { transition("r.h") }
         }
+        val seqMap = buildSequenceMap(def)
+        val (wfId, _) = startAndGetSeq(def)
+
+        val seqV = seqMap.values.first { it.activityName == "validate" }.sequenceNumber
+        val vTasks = taskRepo.findByWorkflowAndSequence(wfId, seqV)
+        gate.onTaskCompleted(vTasks[0].id, wfId, seqV, TaskStatus.COMPLETED, """{"branch":"OK"}""")
+
+        val seqCharge = seqMap.values.first { it.activityName == "charge" }.sequenceNumber
+        val seqReject = seqMap.values.first { it.activityName == "reject" }.sequenceNumber
+
+        val chargeTasks = taskRepo.findByWorkflowAndSequence(wfId, seqCharge)
+        assertEquals(1, chargeTasks.size)
+        assertEquals(TaskStatus.PENDING, chargeTasks[0].status)
+
+        val rejectTasks = taskRepo.findByWorkflowAndSequence(wfId, seqReject)
+        assertEquals(1, rejectTasks.size)
+        assertEquals(TaskStatus.SKIPPED, rejectTasks[0].status)
     }
 
-    /**
-     * Scatter + parallel + linear: seq 1 (SCATTER) → seq 2 (PARALLEL) → seq 3 (LINEAR).
-     * Used to verify that after parallel phase completes, the next linear task is inserted.
-     */
-    private fun fanOutThenLinearDef(
-        joinPolicy: JoinPolicy = JoinPolicy.All,
-        parallelFailurePolicy: FailurePolicy = FailurePolicy.ABORT,
-    ) = workflow {
-        activity("scatter-activity") {
-            transition("scatter.handler")
-            fanOut {
-                transition("parallel.handler")
-                failurePolicy(parallelFailurePolicy)
-                joinPolicy(joinPolicy)
+    // -- Spec item 17: Conditional FAIL branch -> correct task + SKIPPED --------
+
+    @Test
+    fun `conditional INVALID branch dispatches reject and SKIPs charge`() = runTest {
+        val def = workflow {
+            activity("validate") {
+                transition("v.h")
+                on("OK") { next("charge") }
+                on("INVALID") { next("reject") }
             }
-            next("final-step")
+            activity("charge") { transition("c.h") }
+            activity("reject") { transition("r.h") }
         }
-        activity("final-step") { transition("final.handler") }
+        val seqMap = buildSequenceMap(def)
+        val (wfId, _) = startAndGetSeq(def)
+
+        val seqV = seqMap.values.first { it.activityName == "validate" }.sequenceNumber
+        val vTasks = taskRepo.findByWorkflowAndSequence(wfId, seqV)
+        gate.onTaskCompleted(vTasks[0].id, wfId, seqV, TaskStatus.COMPLETED, """{"branch":"INVALID"}""")
+
+        val seqCharge = seqMap.values.first { it.activityName == "charge" }.sequenceNumber
+        val seqReject = seqMap.values.first { it.activityName == "reject" }.sequenceNumber
+
+        assertEquals(listOf("SKIPPED"), taskStatusAt(wfId, seqCharge))
+        assertEquals(listOf("PENDING"), taskStatusAt(wfId, seqReject))
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // Test 1: Single task completes (linear)
-    // ═══════════════════════════════════════════════════════════════════════
+    // -- Spec item 18: Skip cascade ---------------------------------------------
 
-    @Nested
-    inner class SingleLinearTaskCompletes {
-
-        @Test
-        fun `linear task completes - probe is 0, CAS wins, next sequence tasks inserted`() = runTest {
-            val def = twoStepLinearDef()
-            val wfId = randomId()
-            val taskId = randomId()
-            val wf = makeWorkflow(id = wfId, definition = def, version = 0)
-            insertWorkflowDirect(wf)
-            insertTaskDirect(
-                makeTask(
-                    id = taskId, workflowId = wfId, sequenceNumber = 1,
-                    status = TaskStatus.PROCESSING, handlerKey = "step1.handler",
-                ),
-            )
-
-            barrier.onTaskCompleted(taskId, wfId, 1, TaskStatus.COMPLETED, null)
-
-            // Workflow advanced to sequence 2, version incremented
-            val updatedWf = readWorkflowDirect(wfId)
-            assertNotNull(updatedWf)
-            assertEquals(2, (updatedWf["CURRENT_SEQUENCE"] as Number).toInt())
-            assertEquals(1, (updatedWf["VERSION"] as Number).toInt())
-            assertEquals("RUNNING", updatedWf["STATUS"])
-
-            // One task created at sequence 2 with step2's handler key
-            val seq2Tasks = readTasksDirect(wfId, 2)
-            assertEquals(1, seq2Tasks.size)
-            assertEquals("step2.handler", seq2Tasks[0]["HANDLER_KEY"])
-            assertEquals("PENDING", seq2Tasks[0]["STATUS"])
-        }
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // Test 2: Last-of-many completes (parallel phase)
-    // ═══════════════════════════════════════════════════════════════════════
-
-    @Nested
-    inner class LastOfManyParallelCompletes {
-
-        @Test
-        fun `last parallel task completes - probe is 0, CAS wins, exactly one phase transition`() = runTest {
-            val def = fanOutThenLinearDef()
-            val wfId = randomId()
-            // Workflow already at PARALLEL phase (sequence 2), scatter done
-            val wf = makeWorkflow(id = wfId, definition = def, version = 1)
-            insertWorkflowDirect(wf)
-
-            // 3 parallel sub-tasks: 2 already COMPLETED, 1 still PROCESSING (the last one)
-            val lastTaskId = randomId()
-            insertTaskDirect(
-                makeTask(workflowId = wfId, sequenceNumber = 2, status = TaskStatus.COMPLETED, handlerKey = "parallel.handler"),
-            )
-            insertTaskDirect(
-                makeTask(workflowId = wfId, sequenceNumber = 2, status = TaskStatus.COMPLETED, handlerKey = "parallel.handler"),
-            )
-            insertTaskDirect(
-                makeTask(
-                    id = lastTaskId, workflowId = wfId, sequenceNumber = 2,
-                    status = TaskStatus.PROCESSING, handlerKey = "parallel.handler",
-                ),
-            )
-
-            barrier.onTaskCompleted(lastTaskId, wfId, 2, TaskStatus.COMPLETED, null)
-
-            // Workflow advanced to sequence 3
-            val updatedWf = readWorkflowDirect(wfId)
-            assertNotNull(updatedWf)
-            assertEquals(3, (updatedWf["CURRENT_SEQUENCE"] as Number).toInt())
-            assertEquals(2, (updatedWf["VERSION"] as Number).toInt())
-
-            // One task at sequence 3 (the linear final-step)
-            assertEquals(1, countTasksDirect(wfId, 3))
-            val seq3Tasks = readTasksDirect(wfId, 3)
-            assertEquals("final.handler", seq3Tasks[0]["HANDLER_KEY"])
-        }
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // Test 3: Not-last task (probe > 0, no CAS)
-    // ═══════════════════════════════════════════════════════════════════════
-
-    @Nested
-    inner class NotLastTask {
-
-        @Test
-        fun `not-last task completes - probe greater than 0, task updated, no phase transition`() = runTest {
-            val def = fanOutThenLinearDef()
-            val wfId = randomId()
-            val wf = makeWorkflow(id = wfId, definition = def, version = 1)
-            insertWorkflowDirect(wf)
-
-            val completingTaskId = randomId()
-            // 3 parallel sub-tasks: 1 COMPLETED, 1 PROCESSING (completing now), 1 still PENDING
-            insertTaskDirect(
-                makeTask(workflowId = wfId, sequenceNumber = 2, status = TaskStatus.COMPLETED, handlerKey = "parallel.handler"),
-            )
-            insertTaskDirect(
-                makeTask(
-                    id = completingTaskId, workflowId = wfId, sequenceNumber = 2,
-                    status = TaskStatus.PROCESSING, handlerKey = "parallel.handler",
-                ),
-            )
-            insertTaskDirect(
-                makeTask(workflowId = wfId, sequenceNumber = 2, status = TaskStatus.PENDING, handlerKey = "parallel.handler"),
-            )
-
-            barrier.onTaskCompleted(completingTaskId, wfId, 2, TaskStatus.COMPLETED, null)
-
-            // Workflow NOT advanced — still at sequence 2, same version
-            val updatedWf = readWorkflowDirect(wfId)
-            assertNotNull(updatedWf)
-            assertEquals(2, (updatedWf["CURRENT_SEQUENCE"] as Number).toInt())
-            assertEquals(1, (updatedWf["VERSION"] as Number).toInt())
-
-            // No tasks created at sequence 3
-            assertEquals(0, countTasksDirect(wfId, 3))
-
-            // The completing task was updated to COMPLETED
-            assertEquals(2, countTasksWithStatusDirect(wfId, 2, TaskStatus.COMPLETED))
-        }
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // Test 4: CAS race — two concurrent recovery attempts
-    // ═══════════════════════════════════════════════════════════════════════
-
-    @Nested
-    inner class CasRace {
-
-        @Test
-        fun `two concurrent recovery attempts on stuck workflow - exactly one CAS wins, one set of downstream tasks`() = runTest {
-            val def = twoStepLinearDef()
-            val wfId = randomId()
-            val wf = makeWorkflow(id = wfId, definition = def, version = 0)
-            insertWorkflowDirect(wf)
-
-            // Both tasks pre-committed as COMPLETED (simulates stuck workflow
-            // where all tasks are terminal but workflow wasn't advanced).
-            // recoverStuckWorkflow skips self-update, so both calls see
-            // nonTerminal=0 and both attempt CAS — exactly one wins.
-            insertTaskDirect(
-                makeTask(
-                    workflowId = wfId, sequenceNumber = 1,
-                    status = TaskStatus.COMPLETED, handlerKey = "step1.handler",
-                ),
-            )
-            insertTaskDirect(
-                makeTask(
-                    workflowId = wfId, sequenceNumber = 1,
-                    status = TaskStatus.COMPLETED, handlerKey = "step1.handler",
-                ),
-            )
-
-            // Two concurrent recovery attempts — both see nonTerminal=0, both attempt CAS
-            val d1 = async { barrier.recoverStuckWorkflow(wfId) }
-            val d2 = async { barrier.recoverStuckWorkflow(wfId) }
-            awaitAll(d1, d2)
-
-            // Workflow advanced exactly once — version must be 1
-            val updatedWf = readWorkflowDirect(wfId)
-            assertNotNull(updatedWf)
-            assertEquals(2, (updatedWf["CURRENT_SEQUENCE"] as Number).toInt())
-            assertEquals(1, (updatedWf["VERSION"] as Number).toInt())
-
-            // Exactly one set of downstream tasks at sequence 2
-            assertEquals(1, countTasksDirect(wfId, 2))
-        }
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // Test 5: JoinPolicy ALL with 1 failure → failure
-    // ═══════════════════════════════════════════════════════════════════════
-
-    @Nested
-    inner class JoinPolicyAllWithFailure {
-
-        @Test
-        fun `JoinPolicy ALL with 1 failed task - workflow marked FAILED`() = runTest {
-            val def = fanOutDef(joinPolicy = JoinPolicy.All)
-            val wfId = randomId()
-            val wf = makeWorkflow(id = wfId, definition = def, version = 1)
-            insertWorkflowDirect(wf)
-
-            // 3 parallel tasks: 1 FAILED, 1 COMPLETED, 1 PROCESSING (completing now as COMPLETED)
-            val lastTaskId = randomId()
-            insertTaskDirect(
-                makeTask(workflowId = wfId, sequenceNumber = 2, status = TaskStatus.FAILED, handlerKey = "parallel.handler"),
-            )
-            insertTaskDirect(
-                makeTask(workflowId = wfId, sequenceNumber = 2, status = TaskStatus.COMPLETED, handlerKey = "parallel.handler"),
-            )
-            insertTaskDirect(
-                makeTask(
-                    id = lastTaskId, workflowId = wfId, sequenceNumber = 2,
-                    status = TaskStatus.PROCESSING, handlerKey = "parallel.handler",
-                ),
-            )
-
-            barrier.onTaskCompleted(lastTaskId, wfId, 2, TaskStatus.COMPLETED, null)
-
-            // JoinPolicy.All requires zero failures — workflow should be FAILED
-            val updatedWf = readWorkflowDirect(wfId)
-            assertNotNull(updatedWf)
-            assertEquals("FAILED", updatedWf["STATUS"])
-        }
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // Test 6: JoinPolicy PERCENTAGE(95) with 3/100 failed → success
-    // ═══════════════════════════════════════════════════════════════════════
-
-    @Nested
-    inner class JoinPolicyPercentage95Success {
-
-        @Test
-        fun `PERCENTAGE 95 with 3 of 100 failed - outcome is success, workflow advances`() = runTest {
-            val def = fanOutThenLinearDef(joinPolicy = JoinPolicy.Percentage(95))
-            val wfId = randomId()
-            val wf = makeWorkflow(id = wfId, definition = def, version = 1)
-            insertWorkflowDirect(wf)
-
-            // 100 tasks: 96 COMPLETED, 3 FAILED, 1 PROCESSING (completing now)
-            val lastTaskId = randomId()
-            repeat(96) {
-                insertTaskDirect(
-                    makeTask(workflowId = wfId, sequenceNumber = 2, status = TaskStatus.COMPLETED, handlerKey = "parallel.handler"),
-                )
+    @Test
+    fun `skip cascades through chain in one transaction`() = runTest {
+        val def = workflow {
+            activity("a") {
+                transition("a.h")
+                on("X") { next("b") }
+                on("Y") { next("skip-chain") }
             }
-            repeat(3) {
-                insertTaskDirect(
-                    makeTask(workflowId = wfId, sequenceNumber = 2, status = TaskStatus.FAILED, handlerKey = "parallel.handler"),
-                )
-            }
-            insertTaskDirect(
-                makeTask(
-                    id = lastTaskId, workflowId = wfId, sequenceNumber = 2,
-                    status = TaskStatus.PROCESSING, handlerKey = "parallel.handler",
-                ),
-            )
-
-            barrier.onTaskCompleted(lastTaskId, wfId, 2, TaskStatus.COMPLETED, null)
-
-            // 97/100 succeeded = 97% >= 95% → success → workflow advances to seq 3
-            val updatedWf = readWorkflowDirect(wfId)
-            assertNotNull(updatedWf)
-            assertEquals(3, (updatedWf["CURRENT_SEQUENCE"] as Number).toInt())
-            assertEquals("RUNNING", updatedWf["STATUS"])
-            assertEquals(1, countTasksDirect(wfId, 3))
+            activity("b") { transition("b.h") }
+            activity("skip-chain") { transition("s1.h"); next("skip-next") }
+            activity("skip-next") { transition("s2.h") }
         }
+        val seqMap = buildSequenceMap(def)
+        val (wfId, _) = startAndGetSeq(def)
+
+        val seqA = seqMap.values.first { it.activityName == "a" }.sequenceNumber
+        val aTasks = taskRepo.findByWorkflowAndSequence(wfId, seqA)
+        // Take branch X -- skip-chain and skip-next never execute
+        gate.onTaskCompleted(aTasks[0].id, wfId, seqA, TaskStatus.COMPLETED, """{"branch":"X"}""")
+
+        val seqSkipChain = seqMap.values.first { it.activityName == "skip-chain" }.sequenceNumber
+        val seqSkipNext = seqMap.values.first { it.activityName == "skip-next" }.sequenceNumber
+
+        assertEquals(listOf("SKIPPED"), taskStatusAt(wfId, seqSkipChain))
+        assertEquals(listOf("SKIPPED"), taskStatusAt(wfId, seqSkipNext))
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // Test 7: JoinPolicy PERCENTAGE(95) with 10/100 failed → failure
-    // ═══════════════════════════════════════════════════════════════════════
+    // -- Spec item 19: Fork -> both branch tasks inserted in one transaction ----
 
-    @Nested
-    inner class JoinPolicyPercentage95Failure {
-
-        @Test
-        fun `PERCENTAGE 95 with 10 of 100 failed - outcome is failure, workflow FAILED`() = runTest {
-            val def = fanOutDef(joinPolicy = JoinPolicy.Percentage(95))
-            val wfId = randomId()
-            val wf = makeWorkflow(id = wfId, definition = def, version = 1)
-            insertWorkflowDirect(wf)
-
-            // 100 tasks: 89 COMPLETED, 10 FAILED, 1 PROCESSING (completing now)
-            val lastTaskId = randomId()
-            repeat(89) {
-                insertTaskDirect(
-                    makeTask(workflowId = wfId, sequenceNumber = 2, status = TaskStatus.COMPLETED, handlerKey = "parallel.handler"),
-                )
-            }
-            repeat(10) {
-                insertTaskDirect(
-                    makeTask(workflowId = wfId, sequenceNumber = 2, status = TaskStatus.FAILED, handlerKey = "parallel.handler"),
-                )
-            }
-            insertTaskDirect(
-                makeTask(
-                    id = lastTaskId, workflowId = wfId, sequenceNumber = 2,
-                    status = TaskStatus.PROCESSING, handlerKey = "parallel.handler",
-                ),
-            )
-
-            barrier.onTaskCompleted(lastTaskId, wfId, 2, TaskStatus.COMPLETED, null)
-
-            // 90/100 succeeded = 90% < 95% → failure → workflow FAILED
-            val updatedWf = readWorkflowDirect(wfId)
-            assertNotNull(updatedWf)
-            assertEquals("FAILED", updatedWf["STATUS"])
+    @Test
+    fun `fork inserts both branch tasks in one transaction`() = runTest {
+        val def = workflow {
+            activity("prepare") { transition("p.h"); next("email"); next("crm") }
+            activity("email") { transition("e.h") }
+            activity("crm") { transition("c.h") }
         }
+        val seqMap = buildSequenceMap(def)
+        val (wfId, _) = startAndGetSeq(def)
+
+        val seqP = seqMap.values.first { it.activityName == "prepare" }.sequenceNumber
+        val pTasks = taskRepo.findByWorkflowAndSequence(wfId, seqP)
+        completeTask(pTasks[0].id, wfId, seqP)
+
+        val seqEmail = seqMap.values.first { it.activityName == "email" }.sequenceNumber
+        val seqCrm = seqMap.values.first { it.activityName == "crm" }.sequenceNumber
+
+        assertEquals(1, taskRepo.findByWorkflowAndSequence(wfId, seqEmail).size)
+        assertEquals(1, taskRepo.findByWorkflowAndSequence(wfId, seqCrm).size)
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // Test 8: JoinPolicy THRESHOLD(40) with 45/50 succeeded → success
-    // ═══════════════════════════════════════════════════════════════════════
+    // -- Spec item 22: Dispatch guard -- no double insert -----------------------
 
-    @Nested
-    inner class JoinPolicyThreshold40Success {
-
-        @Test
-        fun `THRESHOLD 40 with 45 of 50 succeeded - outcome is success, workflow advances`() = runTest {
-            val def = fanOutThenLinearDef(joinPolicy = JoinPolicy.Threshold(40))
-            val wfId = randomId()
-            val wf = makeWorkflow(id = wfId, definition = def, version = 1)
-            insertWorkflowDirect(wf)
-
-            // 50 tasks: 44 COMPLETED, 5 FAILED, 1 PROCESSING (completing now)
-            val lastTaskId = randomId()
-            repeat(44) {
-                insertTaskDirect(
-                    makeTask(workflowId = wfId, sequenceNumber = 2, status = TaskStatus.COMPLETED, handlerKey = "parallel.handler"),
-                )
-            }
-            repeat(5) {
-                insertTaskDirect(
-                    makeTask(workflowId = wfId, sequenceNumber = 2, status = TaskStatus.FAILED, handlerKey = "parallel.handler"),
-                )
-            }
-            insertTaskDirect(
-                makeTask(
-                    id = lastTaskId, workflowId = wfId, sequenceNumber = 2,
-                    status = TaskStatus.PROCESSING, handlerKey = "parallel.handler",
-                ),
-            )
-
-            barrier.onTaskCompleted(lastTaskId, wfId, 2, TaskStatus.COMPLETED, null)
-
-            // 45 succeeded >= threshold(40) → success → workflow advances to seq 3
-            val updatedWf = readWorkflowDirect(wfId)
-            assertNotNull(updatedWf)
-            assertEquals(3, (updatedWf["CURRENT_SEQUENCE"] as Number).toInt())
-            assertEquals("RUNNING", updatedWf["STATUS"])
-            assertEquals(1, countTasksDirect(wfId, 3))
+    @Test
+    fun `dispatch guard prevents second task insert for same sequence`() = runTest {
+        val def = workflow {
+            activity("a") { transition("a.h"); next("b"); next("c") }
+            activity("b") { transition("b.h"); next("join") }
+            activity("c") { transition("c.h"); next("join") }
+            activity("join") { transition("j.h") }
         }
+        val seqMap = buildSequenceMap(def)
+        val (wfId, _) = startAndGetSeq(def)
+
+        fun completeByName(name: String) {
+            val seq = seqMap.values.first { it.activityName == name }.sequenceNumber
+            val t = kotlinx.coroutines.runBlocking { taskRepo.findByWorkflowAndSequence(wfId, seq) }[0]
+            kotlinx.coroutines.runBlocking { completeTask(t.id, wfId, seq) }
+        }
+
+        completeByName("a")
+        completeByName("b")
+        completeByName("c")
+
+        val seqJoin = seqMap.values.first { it.activityName == "join" }.sequenceNumber
+        // join should have exactly ONE task despite two predecessors completing
+        val joinTasks = taskRepo.findByWorkflowAndSequence(wfId, seqJoin)
+        assertEquals(1, joinTasks.size)
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // Test 9: FailurePolicy BEST_EFFORT on failed phase → workflow advances
-    // ═══════════════════════════════════════════════════════════════════════
+    // -- Spec item 24: BEST_EFFORT failure -> unconditional successors dispatched
 
-    @Nested
-    inner class FailurePolicyBestEffort {
-
-        @Test
-        fun `BEST_EFFORT on linear task failure - workflow advances to next sequence`() = runTest {
-            val def = workflow {
-                activity("step1") {
-                    transition("step1.handler")
-                    failurePolicy(FailurePolicy.BEST_EFFORT)
-                    next("step2")
-                }
-                activity("step2") { transition("step2.handler") }
+    @Test
+    fun `BEST_EFFORT failed activity dispatches unconditional successors`() = runTest {
+        val def = workflow {
+            activity("risky") {
+                transition("r.h")
+                failurePolicy(FailurePolicy.BEST_EFFORT)
+                next("always-runs")
             }
-            val wfId = randomId()
-            val taskId = randomId()
-            val wf = makeWorkflow(id = wfId, definition = def, version = 0)
-            insertWorkflowDirect(wf)
-            insertTaskDirect(
-                makeTask(
-                    id = taskId, workflowId = wfId, sequenceNumber = 1,
-                    status = TaskStatus.PROCESSING, handlerKey = "step1.handler",
-                ),
-            )
-
-            // Task fails, but FailurePolicy is BEST_EFFORT
-            barrier.onTaskCompleted(taskId, wfId, 1, TaskStatus.FAILED, null)
-
-            // Workflow should advance to sequence 2 despite failure
-            val updatedWf = readWorkflowDirect(wfId)
-            assertNotNull(updatedWf)
-            assertEquals(2, (updatedWf["CURRENT_SEQUENCE"] as Number).toInt())
-            assertEquals("RUNNING", updatedWf["STATUS"])
-            assertEquals(1, countTasksDirect(wfId, 2))
+            activity("always-runs") { transition("a.h") }
         }
+        val seqMap = buildSequenceMap(def)
+        val (wfId, _) = startAndGetSeq(def)
 
-        @Test
-        fun `BEST_EFFORT with non-null resultJson - failed task result propagates as next task payload`() = runTest {
-            val def = workflow {
-                activity("step1") {
-                    transition("step1.handler")
-                    failurePolicy(FailurePolicy.BEST_EFFORT)
-                    next("step2")
-                }
-                activity("step2") { transition("step2.handler") }
+        val seqR = seqMap.values.first { it.activityName == "risky" }.sequenceNumber
+        val rTasks = taskRepo.findByWorkflowAndSequence(wfId, seqR)
+        gate.onTaskCompleted(rTasks[0].id, wfId, seqR, TaskStatus.FAILED, null)
+
+        val seqNext = seqMap.values.first { it.activityName == "always-runs" }.sequenceNumber
+        assertEquals(listOf("PENDING"), taskStatusAt(wfId, seqNext))
+    }
+
+    // -- Spec item 25: ABORT failure -> workflow FAILED -------------------------
+
+    @Test
+    fun `ABORT failed activity marks workflow FAILED`() = runTest {
+        val def = workflow {
+            activity("risky") {
+                transition("r.h")
+                failurePolicy(FailurePolicy.ABORT)
+                next("never")
             }
-            val wfId = randomId()
-            val taskId = randomId()
-            val wf = makeWorkflow(id = wfId, definition = def, version = 0)
-            insertWorkflowDirect(wf)
-            insertTaskDirect(
-                makeTask(
-                    id = taskId, workflowId = wfId, sequenceNumber = 1,
-                    status = TaskStatus.PROCESSING, handlerKey = "step1.handler",
-                ),
-            )
-
-            val errorResult = """{"error":"timeout","partial":{"count":5}}"""
-            barrier.onTaskCompleted(taskId, wfId, 1, TaskStatus.FAILED, errorResult)
-
-            // Workflow advances despite failure
-            val updatedWf = readWorkflowDirect(wfId)
-            assertNotNull(updatedWf)
-            assertEquals(2, (updatedWf["CURRENT_SEQUENCE"] as Number).toInt())
-
-            // Next task created at sequence 2
-            val seq2Tasks = readTasksDirect(wfId, 2)
-            assertEquals(1, seq2Tasks.size)
+            activity("never") { transition("n.h") }
         }
+        val seqMap = buildSequenceMap(def)
+        val (wfId, _) = startAndGetSeq(def)
+
+        val seqR = seqMap.values.first { it.activityName == "risky" }.sequenceNumber
+        val rTasks = taskRepo.findByWorkflowAndSequence(wfId, seqR)
+        gate.onTaskCompleted(rTasks[0].id, wfId, seqR, TaskStatus.FAILED, null)
+
+        val wf = workflowRepo.findById(wfId)
+        assertEquals(WorkflowStatus.FAILED, wf!!.status)
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // Test 10: PARALLEL→LINEAR payload propagation (aggregated results)
-    // ═══════════════════════════════════════════════════════════════════════
+    // -- Spec item 26: SCATTER completes -> N parallel tasks created ------------
 
-    @Nested
-    inner class ParallelToLinearPayload {
-
-        @Test
-        fun `parallel phase completes - next linear task has aggregated results payload`() = runTest {
-            val def = fanOutThenLinearDef(joinPolicy = JoinPolicy.All)
-            val wfId = randomId()
-            val wf = makeWorkflow(id = wfId, definition = def, version = 1)
-            insertWorkflowDirect(wf)
-
-            val lastTaskId = randomId()
-            insertTaskDirect(
-                makeTask(
-                    workflowId = wfId, sequenceNumber = 2, status = TaskStatus.COMPLETED,
-                    handlerKey = "parallel.handler", resultJson = """{"r":"one"}""",
-                ),
-            )
-            insertTaskDirect(
-                makeTask(
-                    id = lastTaskId, workflowId = wfId, sequenceNumber = 2,
-                    status = TaskStatus.PROCESSING, handlerKey = "parallel.handler",
-                ),
-            )
-
-            barrier.onTaskCompleted(lastTaskId, wfId, 2, TaskStatus.COMPLETED, """{"r":"two"}""")
-
-            // Workflow advances to seq 3
-            val updatedWf = readWorkflowDirect(wfId)
-            assertNotNull(updatedWf)
-            assertEquals(3, (updatedWf["CURRENT_SEQUENCE"] as Number).toInt())
-            assertEquals("RUNNING", updatedWf["STATUS"])
-
-            // Next linear task created at sequence 3
-            val seq3Tasks = readTasksDirect(wfId, 3)
-            assertEquals(1, seq3Tasks.size)
-            assertEquals("final.handler", seq3Tasks[0]["HANDLER_KEY"])
-        }
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // Test 11: Scatter → parallel handoff
-    // ═══════════════════════════════════════════════════════════════════════
-
-    @Nested
-    inner class ScatterToParallelHandoff {
-
-        @Test
-        fun `scatter task completes with payloads - CAS winner reads result, inserts N sub-tasks at next sequence`() = runTest {
-            val def = fanOutDef(joinPolicy = JoinPolicy.All)
-            val wfId = randomId()
-            val wf = makeWorkflow(id = wfId, definition = def, version = 0)
-            insertWorkflowDirect(wf)
-
-            // Scatter task at sequence 1 with payloads in result
-            val scatterTaskId = randomId()
-            val scatterPayloads = listOf(
-                """{"item":"A"}""",
-                """{"item":"B"}""",
-                """{"item":"C"}""",
-            )
-            val scatterResultJson = objectMapper.writeValueAsString(scatterPayloads)
-
-            insertTaskDirect(
-                makeTask(
-                    id = scatterTaskId, workflowId = wfId, sequenceNumber = 1,
-                    status = TaskStatus.PROCESSING, handlerKey = "scatter.handler",
-                ),
-            )
-
-            barrier.onTaskCompleted(scatterTaskId, wfId, 1, TaskStatus.COMPLETED, scatterResultJson)
-
-            // Workflow advanced to sequence 2 (PARALLEL phase)
-            val updatedWf = readWorkflowDirect(wfId)
-            assertNotNull(updatedWf)
-            assertEquals(2, (updatedWf["CURRENT_SEQUENCE"] as Number).toInt())
-
-            // 3 sub-tasks created at sequence 2, one per scatter payload
-            val seq2Tasks = readTasksDirect(wfId, 2)
-            assertEquals(3, seq2Tasks.size)
-
-            // All sub-tasks use the parallel activity's transition as handler key
-            assertTrue(seq2Tasks.all { it["HANDLER_KEY"] == "parallel.handler" })
-
-            // All sub-tasks are PENDING
-            assertTrue(seq2Tasks.all { it["STATUS"] == "PENDING" })
-
-            // Each sub-task has the correct item from the scatter result
-            val items = seq2Tasks.map { it["ITEM"] as String }.sorted()
-            assertEquals(scatterPayloads.sorted(), items)
-        }
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // Test 12: Empty scatter result fails fast
-    // ═══════════════════════════════════════════════════════════════════════
-
-    @Nested
-    inner class EmptyScatterResult {
-
-        @Test
-        fun `scatter task with empty array result fails fast instead of silently skipping parallel phase`() = runTest {
-            val def = fanOutDef(joinPolicy = JoinPolicy.All)
-            val wfId = randomId()
-            val wf = makeWorkflow(id = wfId, definition = def, version = 0)
-            insertWorkflowDirect(wf)
-
-            val scatterTaskId = randomId()
-            val emptyArrayJson = "[]"
-
-            insertTaskDirect(
-                makeTask(
-                    id = scatterTaskId, workflowId = wfId, sequenceNumber = 1,
-                    status = TaskStatus.PROCESSING, handlerKey = "scatter.handler",
-                ),
-            )
-
-            val ex = org.junit.jupiter.api.assertThrows<IllegalArgumentException> {
-                barrier.onTaskCompleted(scatterTaskId, wfId, 1, TaskStatus.COMPLETED, emptyArrayJson)
+    @Test
+    fun `SCATTER completion expands into N parallel tasks`() = runTest {
+        val def = workflow {
+            activity("scatter") {
+                transition("sc.h")
+                fanOut { transition("par.h") }
+                next("join")
             }
-            assertTrue(ex.message!!.contains("Fan-out produced 0 items"))
-
-            // Workflow should NOT have advanced
-            val updatedWf = readWorkflowDirect(wfId)
-            assertNotNull(updatedWf)
-            assertEquals(1, (updatedWf["CURRENT_SEQUENCE"] as Number).toInt())
+            activity("join") { transition("j.h") }
         }
+        val seqMap = buildSequenceMap(def)
+        val (wfId, _) = startAndGetSeq(def)
+
+        val seqScatter = seqMap.values.first { it.activityName == "scatter" }.sequenceNumber
+        val scatterTasks = taskRepo.findByWorkflowAndSequence(wfId, seqScatter)
+        // Scatter result = JSON array of items
+        gate.onTaskCompleted(
+            scatterTasks[0].id, wfId, seqScatter, TaskStatus.COMPLETED,
+            """["item1","item2","item3"]""",
+        )
+
+        val seqParallel = seqMap.values.first { it.activityName == "scatter.__parallel__" }.sequenceNumber
+        val parallelTasks = taskRepo.findByWorkflowAndSequence(wfId, seqParallel)
+        assertEquals(3, parallelTasks.size)
+        assertTrue(parallelTasks.all { it.status == TaskStatus.PENDING })
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // Test 13: ABORT failure policy cancels sibling PENDING tasks
-    // ═══════════════════════════════════════════════════════════════════════
+    // -- Spec item 27: PARALLEL join passes -> successor dispatched -------------
 
-    @Nested
-    inner class AbortCancelsSiblings {
-
-        @Test
-        fun `ABORT failure policy cancels sibling PENDING tasks`() = runTest {
-            val definition = workflow {
-                activity("scatter") {
-                    transition("scatter.handler")
-                    fanOut {
-                        transition("parallel.handler")
-                        retries(0)
-                        failurePolicy(FailurePolicy.ABORT)
-                        joinPolicy(JoinPolicy.All)
-                    }
-                }
+    @Test
+    fun `PARALLEL join passes dispatches join successor`() = runTest {
+        val def = workflow {
+            activity("scatter") {
+                transition("sc.h")
+                fanOut { transition("par.h") }
+                next("join")
             }
-            val workflowId = engine.startWorkflow(definition).workflowId
-
-            // Complete scatter task with 3 items
-            val scatterTasks = taskRepo.findByWorkflowAndSequence(workflowId, 1)
-            assertEquals(1, scatterTasks.size)
-            barrier.onTaskCompleted(
-                taskId = scatterTasks[0].id,
-                workflowId = workflowId,
-                sequenceNumber = 1,
-                status = TaskStatus.COMPLETED,
-                resultJson = """["a","b","c"]""",
-            )
-
-            // 3 parallel tasks at sequence 2
-            val parallelTasks = taskRepo.findByWorkflowAndSequence(workflowId, 2)
-            assertEquals(3, parallelTasks.size)
-
-            // Complete 2 tasks successfully, then fail the last one
-            barrier.onTaskCompleted(
-                taskId = parallelTasks[1].id,
-                workflowId = workflowId,
-                sequenceNumber = 2,
-                status = TaskStatus.COMPLETED,
-                resultJson = null,
-            )
-            barrier.onTaskCompleted(
-                taskId = parallelTasks[2].id,
-                workflowId = workflowId,
-                sequenceNumber = 2,
-                status = TaskStatus.COMPLETED,
-                resultJson = null,
-            )
-
-            // Fail the last remaining task — ABORT policy triggers
-            barrier.onTaskCompleted(
-                taskId = parallelTasks[0].id,
-                workflowId = workflowId,
-                sequenceNumber = 2,
-                status = TaskStatus.FAILED,
-                resultJson = null,
-            )
-
-            // Workflow should be FAILED via ABORT
-            val workflow = workflowRepo.findById(workflowId)
-            assertNotNull(workflow)
-            assertEquals(WorkflowStatus.FAILED, workflow.status)
+            activity("join") { transition("j.h") }
         }
+        val seqMap = buildSequenceMap(def)
+        val (wfId, _) = startAndGetSeq(def)
+
+        val seqScatter = seqMap.values.first { it.activityName == "scatter" }.sequenceNumber
+        val scatterTasks = taskRepo.findByWorkflowAndSequence(wfId, seqScatter)
+        gate.onTaskCompleted(scatterTasks[0].id, wfId, seqScatter, TaskStatus.COMPLETED, """["i1","i2"]""")
+
+        val seqParallel = seqMap.values.first { it.activityName == "scatter.__parallel__" }.sequenceNumber
+        val parTasks = taskRepo.findByWorkflowAndSequence(wfId, seqParallel)
+        for (t in parTasks) {
+            gate.onTaskCompleted(t.id, wfId, seqParallel, TaskStatus.COMPLETED, null)
+        }
+
+        val seqJoin = seqMap.values.first { it.activityName == "join" }.sequenceNumber
+        assertEquals(listOf("PENDING"), taskStatusAt(wfId, seqJoin))
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // WorkerNotifier Signal Tests
-    // ═══════════════════════════════════════════════════════════════════════
+    // -- Spec item 28: PARALLEL join fails (ABORT) -> workflow FAILED -----------
 
-    @Nested
-    inner class WorkerNotifierSignaling {
+    @Test
+    fun `PARALLEL join failure with ABORT marks workflow FAILED`() = runTest {
+        // scatter activity's failurePolicy governs the parallel join behavior
+        val def = workflow {
+            activity("scatter") {
+                transition("sc.h")
+                failurePolicy(FailurePolicy.ABORT)
+                fanOut { transition("par.h") }
+                next("join")
+            }
+            activity("join") { transition("j.h") }
+        }
+        val seqMap = buildSequenceMap(def)
+        val (wfId, _) = startAndGetSeq(def)
 
-        @Test
-        fun `onTaskCompleted last task in phase signals notifier`() = runTest {
-            val def = twoStepLinearDef()
-            val wfId = randomId()
-            val taskId = randomId()
-            val wf = makeWorkflow(id = wfId, definition = def, version = 0)
-            insertWorkflowDirect(wf)
-            insertTaskDirect(
-                makeTask(
-                    id = taskId, workflowId = wfId, sequenceNumber = 1,
-                    status = TaskStatus.PROCESSING, handlerKey = "step1.handler",
-                ),
-            )
+        val seqScatter = seqMap.values.first { it.activityName == "scatter" }.sequenceNumber
+        val scatterTasks = taskRepo.findByWorkflowAndSequence(wfId, seqScatter)
+        gate.onTaskCompleted(scatterTasks[0].id, wfId, seqScatter, TaskStatus.COMPLETED, """["i1","i2"]""")
 
-            val signalCountBefore = notifier.signalCount
-            barrier.onTaskCompleted(taskId, wfId, 1, TaskStatus.COMPLETED, null)
-
-            assertEquals(
-                signalCountBefore + 1,
-                notifier.signalCount,
-                "signal() should be called exactly once when phase advances",
-            )
+        val seqParallel = seqMap.values.first { it.activityName == "scatter.__parallel__" }.sequenceNumber
+        val parTasks = taskRepo.findByWorkflowAndSequence(wfId, seqParallel)
+        // Fail all parallel tasks
+        for (t in parTasks) {
+            gate.onTaskCompleted(t.id, wfId, seqParallel, TaskStatus.FAILED, null)
         }
 
-        @Test
-        fun `onTaskCompleted non-last task does not signal notifier`() = runTest {
-            val def = fanOutThenLinearDef()
-            val wfId = randomId()
-            val wf = makeWorkflow(id = wfId, definition = def, version = 1)
-            insertWorkflowDirect(wf)
+        assertEquals(WorkflowStatus.FAILED, workflowStatus(wfId))
+    }
 
-            val completingTaskId = randomId()
-            insertTaskDirect(
-                makeTask(
-                    id = completingTaskId, workflowId = wfId, sequenceNumber = 2,
-                    status = TaskStatus.PROCESSING, handlerKey = "parallel.handler",
-                ),
-            )
-            insertTaskDirect(
-                makeTask(
-                    workflowId = wfId, sequenceNumber = 2,
-                    status = TaskStatus.PENDING, handlerKey = "parallel.handler",
-                ),
-            )
+    // -- Spec item 29: PARALLEL join fails (BEST_EFFORT) -> unconditional successors dispatched
 
-            val signalCountBefore = notifier.signalCount
-            barrier.onTaskCompleted(completingTaskId, wfId, 2, TaskStatus.COMPLETED, null)
+    @Test
+    fun `PARALLEL join failure with BEST_EFFORT dispatches unconditional successors`() = runTest {
+        // scatter activity's failurePolicy governs the parallel join behavior
+        val def = workflow {
+            activity("scatter") {
+                transition("sc.h")
+                failurePolicy(FailurePolicy.BEST_EFFORT)
+                fanOut { transition("par.h") }
+                next("join")
+            }
+            activity("join") { transition("j.h") }
+        }
+        val seqMap = buildSequenceMap(def)
+        val (wfId, _) = startAndGetSeq(def)
 
-            assertEquals(
-                signalCountBefore,
-                notifier.signalCount,
-                "signal() should NOT be called when non-terminal tasks remain",
-            )
+        val seqScatter = seqMap.values.first { it.activityName == "scatter" }.sequenceNumber
+        val scatterTasks = taskRepo.findByWorkflowAndSequence(wfId, seqScatter)
+        gate.onTaskCompleted(scatterTasks[0].id, wfId, seqScatter, TaskStatus.COMPLETED, """["i1","i2"]""")
+
+        val seqParallel = seqMap.values.first { it.activityName == "scatter.__parallel__" }.sequenceNumber
+        val parTasks = taskRepo.findByWorkflowAndSequence(wfId, seqParallel)
+        for (t in parTasks) {
+            gate.onTaskCompleted(t.id, wfId, seqParallel, TaskStatus.FAILED, null)
         }
 
-        @Test
-        fun `recoverStuckWorkflow signals notifier when phase advances`() = runTest {
-            val def = twoStepLinearDef()
-            val wfId = randomId()
-            val taskId = randomId()
-            val wf = makeWorkflow(id = wfId, definition = def, version = 0)
-            insertWorkflowDirect(wf)
-            insertTaskDirect(
-                makeTask(
-                    id = taskId, workflowId = wfId, sequenceNumber = 1,
-                    status = TaskStatus.COMPLETED, handlerKey = "step1.handler",
-                ),
-            )
+        val seqJoin = seqMap.values.first { it.activityName == "join" }.sequenceNumber
+        assertEquals(listOf("PENDING"), taskStatusAt(wfId, seqJoin))
+    }
 
-            val signalCountBefore = notifier.signalCount
-            barrier.recoverStuckWorkflow(wfId)
+    // -- Spec item 30: Fan-out activity SKIPPED -> SCATTER + PARALLEL + successors SKIPPED
 
-            assertEquals(
-                signalCountBefore + 1,
-                notifier.signalCount,
-                "signal() should be called exactly once when recoverStuckWorkflow advances phase",
-            )
+    @Test
+    fun `fan-out activity on SKIPPED branch propagates SKIPPED to scatter, parallel, successors`() = runTest {
+        val def = workflow {
+            activity("route") {
+                transition("r.h")
+                on("RUN") { next("scatter") }
+                on("SKIP") { next("done") }
+            }
+            activity("scatter") {
+                transition("sc.h")
+                fanOut { transition("par.h") }
+                next("done")
+            }
+            activity("done") { transition("d.h") }
         }
+        val seqMap = buildSequenceMap(def)
+        val (wfId, _) = startAndGetSeq(def)
+
+        val seqRoute = seqMap.values.first { it.activityName == "route" }.sequenceNumber
+        val routeTasks = taskRepo.findByWorkflowAndSequence(wfId, seqRoute)
+        // Take SKIP branch -- scatter never runs
+        gate.onTaskCompleted(routeTasks[0].id, wfId, seqRoute, TaskStatus.COMPLETED, """{"branch":"SKIP"}""")
+
+        val seqScatter = seqMap.values.first { it.activityName == "scatter" }.sequenceNumber
+        val seqParallel = seqMap.values.first { it.activityName == "scatter.__parallel__" }.sequenceNumber
+
+        assertEquals(listOf("SKIPPED"), taskStatusAt(wfId, seqScatter))
+        assertEquals(listOf("SKIPPED"), taskStatusAt(wfId, seqParallel))
+    }
+
+    // -- Coverage gap 1: SCATTER failure with BEST_EFFORT dispatches successors ---
+
+    @Test
+    fun `SCATTER failure with BEST_EFFORT dispatches unconditional successors`() = runTest {
+        val def = workflow {
+            activity("scatter") {
+                transition("sc.h")
+                failurePolicy(FailurePolicy.BEST_EFFORT)
+                fanOut { transition("par.h") }
+                next("join")
+            }
+            activity("join") { transition("j.h") }
+        }
+        val seqMap = buildSequenceMap(def)
+        val (wfId, _) = startAndGetSeq(def)
+
+        val seqScatter = seqMap.values.first { it.activityName == "scatter" }.sequenceNumber
+        val scatterTasks = taskRepo.findByWorkflowAndSequence(wfId, seqScatter)
+        // Scatter itself fails (no parallel expansion) -- BEST_EFFORT should fall through
+        gate.onTaskCompleted(scatterTasks[0].id, wfId, seqScatter, TaskStatus.FAILED, null)
+
+        val seqJoin = seqMap.values.first { it.activityName == "join" }.sequenceNumber
+        assertEquals(listOf("PENDING"), taskStatusAt(wfId, seqJoin))
+        // Workflow should still be RUNNING (not FAILED), since BEST_EFFORT proceeds
+        assertEquals(WorkflowStatus.RUNNING, workflowStatus(wfId))
+    }
+
+    // -- Coverage gap 2: CAS retry exhaustion ------------------------------------
+    // SKIPPED: The CAS retry loop (max 10 attempts) is triggered by RetryableException,
+    // which is a private class thrown only when casVersionWithHandle returns false.
+    // To exhaust the retry loop we would need another concurrent transaction to
+    // increment the workflow version between each retry attempt — 10 times within
+    // the same test. This requires either (a) mocking internal repository methods
+    // (prohibited by CLAUDE.md: "mock at interface boundaries only") or (b) a
+    // real concurrent writer with precise timing that is inherently flaky.
+    // The positive CAS path is covered by every existing test that dispatches
+    // successors. The retry mechanism is a simple while-loop with a counter;
+    // a unit test would not add meaningful confidence beyond code inspection.
+
+    // -- Coverage gap 3: Idempotent completion (updateStatus returns false) -------
+
+    @Test
+    fun `idempotent completion is a no-op and does not create duplicate successors`() = runTest {
+        val def = workflow {
+            activity("a") { transition("a.h"); next("b") }
+            activity("b") { transition("b.h") }
+        }
+        val (wfId, _) = startAndGetSeq(def)
+
+        val seq1Tasks = taskRepo.findByWorkflowAndSequence(wfId, 1)
+        assertEquals(1, seq1Tasks.size)
+        val taskId = seq1Tasks[0].id
+
+        // First completion: should dispatch successor "b"
+        gate.onTaskCompleted(taskId, wfId, 1, TaskStatus.COMPLETED, null)
+        val seq2Tasks = taskRepo.findByWorkflowAndSequence(wfId, 2)
+        assertEquals(1, seq2Tasks.size)
+        assertEquals(TaskStatus.PENDING, seq2Tasks[0].status)
+
+        // Second completion of the same task: updateStatusWithHandle returns false
+        // because task is already in terminal status. Should be a complete no-op.
+        gate.onTaskCompleted(taskId, wfId, 1, TaskStatus.COMPLETED, null)
+
+        // Assert: still exactly 1 task for "b" (no duplicate successor created)
+        val seq2TasksAfter = taskRepo.findByWorkflowAndSequence(wfId, 2)
+        assertEquals(1, seq2TasksAfter.size)
     }
 }
