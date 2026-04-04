@@ -231,4 +231,67 @@ class DispatchHandlersTest {
 
         verify(storage).uploadParquet(eq("dispatch/20260329060000/result.parquet"), any())
     }
+
+    @Test
+    fun `join handler exports parquet for prod normal batch`() = runTest {
+        val resultStore = mock<SimulationResultStore>()
+        val storage = mock<StorageGateway>()
+        val parquetFormatter = mock<ParquetFormatter>()
+        val pathBuilder = DispatchPathBuilder("prod")
+
+        whenever(resultStore.findByBatchToken("20260329060000")).thenReturn(emptyList())
+        whenever(resultStore.findBatchStatus("20260329060000")).thenReturn(BatchStatus.NORMAL)
+        whenever(parquetFormatter.format(any())).thenReturn(byteArrayOf())
+
+        val handler = DispatchJoinHandler(resultStore, storage, parquetFormatter, pathBuilder, "prod", objectMapper)
+
+        val inputs = objectMapper.writeValueAsString(
+            mapOf("batchToken" to listOf("20260329060000", "20260329060000")),
+        )
+        handler.execute(HandlerInput("t1", "w1", 3, inputs, null))
+
+        verify(storage).uploadParquet(eq("env=prod/dispatch/result.parquet"), any())
+    }
+
+    @Test
+    fun `join handler skips parquet for prod dryrun batch`() = runTest {
+        val resultStore = mock<SimulationResultStore>()
+        val storage = mock<StorageGateway>()
+        val parquetFormatter = mock<ParquetFormatter>()
+        val pathBuilder = DispatchPathBuilder("prod")
+
+        whenever(resultStore.findByBatchToken("dryrun-abc")).thenReturn(emptyList())
+        whenever(resultStore.findBatchStatus("dryrun-abc")).thenReturn(BatchStatus.DRYRUN)
+
+        val handler = DispatchJoinHandler(resultStore, storage, parquetFormatter, pathBuilder, "prod", objectMapper)
+
+        val inputs = objectMapper.writeValueAsString(
+            mapOf("batchToken" to listOf("dryrun-abc", "dryrun-abc")),
+        )
+        handler.execute(HandlerInput("t1", "w1", 3, inputs, null))
+
+        verify(storage, never()).uploadParquet(any(), any())
+        verify(parquetFormatter, never()).format(any())
+    }
+
+    @Test
+    fun `join handler skips parquet for stg env`() = runTest {
+        val resultStore = mock<SimulationResultStore>()
+        val storage = mock<StorageGateway>()
+        val parquetFormatter = mock<ParquetFormatter>()
+        val pathBuilder = DispatchPathBuilder("stg")
+
+        whenever(resultStore.findBatchStatus("20260329060000")).thenReturn(BatchStatus.NORMAL)
+
+        val handler = DispatchJoinHandler(resultStore, storage, parquetFormatter, pathBuilder, "stg", objectMapper)
+
+        val inputs = objectMapper.writeValueAsString(
+            mapOf("batchToken" to listOf("20260329060000", "20260329060000")),
+        )
+        handler.execute(HandlerInput("t1", "w1", 3, inputs, null))
+
+        verify(resultStore).findBatchStatus("20260329060000")
+        verify(storage, never()).uploadParquet(any(), any())
+        verify(parquetFormatter, never()).format(any())
+    }
 }
