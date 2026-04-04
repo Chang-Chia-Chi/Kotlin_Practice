@@ -48,8 +48,10 @@ class SyncRepository(private val jdbi: Jdbi) {
 
             // 2. Delete orphaned stg batches (no remaining events)
             h.createUpdate("""
-                DELETE FROM dispatch_batch_stg
-                WHERE batch_token NOT IN (SELECT DISTINCT batch_token FROM dispatch_event_stg)
+                DELETE FROM dispatch_batch_stg b
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM dispatch_event_stg e WHERE e.batch_token = b.batch_token
+                )
             """).execute()
 
             // 3. Insert NORMAL batch records into stg (skip if already present)
