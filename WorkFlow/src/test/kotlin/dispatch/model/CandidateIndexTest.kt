@@ -90,4 +90,23 @@ class CandidateIndexTest {
         assertFalse(index.hasUnconsumed())
         assertNull(index.findFirst(null))
     }
+
+    @Test
+    fun `findFirst skips consumed entries efficiently with lazy pruning`() {
+        val large = (1..100).map { CandidateProduct("p$it", "bom-A", 1) }
+        val index = CandidateIndex(large)
+
+        // Consume first 90 candidates
+        for (i in 0 until 90) index.consume(i)
+
+        // findFirst should still return the 91st candidate
+        val idx = index.findFirst(null)
+        assertEquals(90, idx)
+        assertTrue(index.hasUnconsumed())
+
+        // After consuming all, findFirst returns null
+        for (i in 90 until 100) index.consume(i)
+        assertNull(index.findFirst(null))
+        assertFalse(index.hasUnconsumed())
+    }
 }

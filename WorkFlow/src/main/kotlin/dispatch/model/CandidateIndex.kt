@@ -1,13 +1,15 @@
 package com.workflow.dispatch.model
 
 import java.util.BitSet
+import java.util.LinkedList
 
 class CandidateIndex(private val candidates: List<CandidateProduct>) {
 
-    private val bySourceBom: Map<String, List<Int>> =
+    private val bySourceBom: Map<String, LinkedList<Int>> =
         candidates.indices.groupBy { candidates[it].sourceBomId }
+            .mapValues { (_, indices) -> LinkedList(indices) }
 
-    private val allIndices: List<Int> = candidates.indices.toList()
+    private val allIndices: LinkedList<Int> = LinkedList(candidates.indices.toList())
 
     private val consumed = BitSet(candidates.size)
 
@@ -20,7 +22,13 @@ class CandidateIndex(private val candidates: List<CandidateProduct>) {
         } else {
             allIndices
         }
-        return pool.firstOrNull { !consumed[it] && predicate(candidates[it]) }
+        val iter = pool.iterator()
+        while (iter.hasNext()) {
+            val idx = iter.next()
+            if (consumed[idx]) { iter.remove(); continue }
+            if (predicate(candidates[idx])) return idx
+        }
+        return null
     }
 
     fun consume(index: Int) {
