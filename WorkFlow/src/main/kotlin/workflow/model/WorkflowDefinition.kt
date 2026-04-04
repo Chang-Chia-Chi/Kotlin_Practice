@@ -58,9 +58,9 @@ internal fun topologicalSort(definition: WorkflowDefinition): List<String> {
         for (edge in activity.successors) visit(edge.target)
         temporary -= name
         permanent += name
-        result.add(0, name)
+        result.add(name)
     }
 
     visit(definition.start)
-    return result
+    return result.asReversed()
 }
