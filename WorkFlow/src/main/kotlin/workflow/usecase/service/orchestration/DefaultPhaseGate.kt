@@ -162,6 +162,8 @@ class DefaultPhaseGate(
             // Step 4: Successor evaluation
             val evalQueue = ArrayDeque<SequenceInfo>()
             evalQueue += successorsOf(seqInfo, seqByName, definition)
+            val pendingInserts = mutableListOf<Task>()
+            val insertedSeqs = mutableSetOf<Int>()
 
             while (evalQueue.isNotEmpty()) {
                 val successor = evalQueue.removeFirst()
@@ -170,6 +172,7 @@ class DefaultPhaseGate(
                 // a. Dispatch guard: task already exists at this sequence
                 //    (safe with pre-fetched data: DAG traversal evaluates each sequence at most once)
                 if ((allCounts[sSeq]?.total ?: 0) > 0) continue
+                if (sSeq in insertedSeqs) continue
 
                 // b. Predecessor gate: all predecessor sequences must be terminal
                 val allPredTerminal = successor.predecessorSequences.all { predSeq ->
@@ -188,13 +191,15 @@ class DefaultPhaseGate(
                     val task = createTaskForActivity(
                         workflowId, successor.activityName, sSeq, successor.activity, now,
                     )
-                    taskRepo.insertBatchWithHandle(handle, listOf(task))
+                    pendingInserts += task
+                    insertedSeqs += sSeq
                     signalQueueSet += successor.activity.queue
                 } else {
                     val skipped = createSkippedTaskForActivity(
                         workflowId, successor.activityName, sSeq, successor.activity, now,
                     )
-                    taskRepo.insertBatchWithHandle(handle, listOf(skipped))
+                    pendingInserts += skipped
+                    insertedSeqs += sSeq
 
                     // If skipping a SCATTER activity, also skip its companion PARALLEL sequence
                     if (successor.phaseType == PhaseType.SCATTER) {
@@ -205,7 +210,8 @@ class DefaultPhaseGate(
                                 workflowId, parallelInfo.activityName, parallelSeq,
                                 parallelInfo.activity, now,
                             )
-                            taskRepo.insertBatchWithHandle(handle, listOf(parallelSkipped))
+                            pendingInserts += parallelSkipped
+                            insertedSeqs += parallelSeq
                         }
                     }
 
@@ -216,6 +222,15 @@ class DefaultPhaseGate(
                         evalQueue += successorsOf(successor, seqByName, definition)
                     }
                 }
+            }
+
+            if (pendingInserts.isNotEmpty()) {
+                // Partition by null-shape: JDBI PreparedBatch requires uniform
+                // null/non-null patterns across rows for TIMESTAMP columns.
+                // PENDING tasks have completedAt=null; SKIPPED tasks have completedAt=non-null.
+                val (skipped, nonSkipped) = pendingInserts.partition { it.completedAt != null }
+                if (nonSkipped.isNotEmpty()) taskRepo.insertBatchWithHandle(handle, nonSkipped)
+                if (skipped.isNotEmpty()) taskRepo.insertBatchWithHandle(handle, skipped)
             }
 
             // Also add completed terminal activity to completion check
