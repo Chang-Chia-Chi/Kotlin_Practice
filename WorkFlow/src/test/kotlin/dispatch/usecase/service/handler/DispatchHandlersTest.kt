@@ -2,6 +2,7 @@ package com.workflow.dispatch.usecase.service.handler
 
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.KotlinModule
+import com.workflow.dispatch.adapter.storage.DispatchPathBuilder
 import com.workflow.dispatch.model.*
 import com.workflow.dispatch.usecase.port.outbound.persistence.BaselineProvider
 import com.workflow.dispatch.usecase.port.outbound.persistence.CandidateRepository
@@ -137,6 +138,72 @@ class DispatchHandlersTest {
         verify(resultStore).saveDecisions(eq("20260329060000"), eq("cfg1"), any())
         verify(storage).uploadCsv(eq("dispatch/20260329060000/simulation/cfg1.csv.gz"), any())
         assertNotNull(output.result)
+    }
+
+    @Test
+    fun `simulation handler uploads CSV to env-aware path`() = runTest {
+        val configRepo = mock<DispatchConfigRepository>()
+        val candidateQuery = mock<CandidateRepository>()
+        val baselineProvider = mock<BaselineProvider>()
+        val simulationEngine = mock<SimulationEngine>()
+        val resultStore = mock<SimulationResultStore>()
+        val storage = mock<StorageGateway>()
+        val csvFormatter = mock<CsvFormatter>()
+        val pathBuilder = DispatchPathBuilder("prod")
+
+        val config = DispatchConfig("cfg1", DispatchMode.QTY, "default", "bom",
+            listOf(SiteTarget("A", BigDecimal("100"))), null)
+        whenever(configRepo.findById("cfg1")).thenReturn(config)
+        whenever(candidateQuery.queryCandidates(config)).thenReturn(emptyList())
+        whenever(baselineProvider.loadBaseline(config)).thenReturn(Baseline(emptyMap(), emptyMap()))
+        whenever(simulationEngine.simulate(eq(config), any(), any())).thenReturn(
+            SimulationResult(emptyList(), emptyMap(), emptyMap()),
+        )
+        whenever(csvFormatter.format(any(), any(), any())).thenReturn(byteArrayOf())
+        whenever(resultStore.findBatchStatus("20260329060000")).thenReturn(BatchStatus.NORMAL)
+
+        val handler = DispatchSimulationHandler(
+            configRepo, candidateQuery, baselineProvider, simulationEngine,
+            resultStore, storage, csvFormatter, pathBuilder, objectMapper,
+        )
+
+        val item = objectMapper.writeValueAsString(mapOf("configId" to "cfg1", "batchToken" to "20260329060000"))
+        handler.execute(HandlerInput("t1", "w1", 2, null, item))
+
+        verify(storage).uploadCsv(eq("env=prod/mode=normal/dispatch/20260329060000/simulation/cfg1.csv.gz"), any())
+    }
+
+    @Test
+    fun `simulation handler uses dryrun mode path for dryrun batch`() = runTest {
+        val configRepo = mock<DispatchConfigRepository>()
+        val candidateQuery = mock<CandidateRepository>()
+        val baselineProvider = mock<BaselineProvider>()
+        val simulationEngine = mock<SimulationEngine>()
+        val resultStore = mock<SimulationResultStore>()
+        val storage = mock<StorageGateway>()
+        val csvFormatter = mock<CsvFormatter>()
+        val pathBuilder = DispatchPathBuilder("prod")
+
+        val config = DispatchConfig("cfg1", DispatchMode.QTY, "default", "bom",
+            listOf(SiteTarget("A", BigDecimal("100"))), null)
+        whenever(configRepo.findById("cfg1")).thenReturn(config)
+        whenever(candidateQuery.queryCandidates(config)).thenReturn(emptyList())
+        whenever(baselineProvider.loadBaseline(config)).thenReturn(Baseline(emptyMap(), emptyMap()))
+        whenever(simulationEngine.simulate(eq(config), any(), any())).thenReturn(
+            SimulationResult(emptyList(), emptyMap(), emptyMap()),
+        )
+        whenever(csvFormatter.format(any(), any(), any())).thenReturn(byteArrayOf())
+        whenever(resultStore.findBatchStatus("dryrun-abc")).thenReturn(BatchStatus.DRYRUN)
+
+        val handler = DispatchSimulationHandler(
+            configRepo, candidateQuery, baselineProvider, simulationEngine,
+            resultStore, storage, csvFormatter, pathBuilder, objectMapper,
+        )
+
+        val item = objectMapper.writeValueAsString(mapOf("configId" to "cfg1", "batchToken" to "dryrun-abc"))
+        handler.execute(HandlerInput("t1", "w1", 2, null, item))
+
+        verify(storage).uploadCsv(eq("env=prod/mode=dryrun/dispatch/dryrun-abc/simulation/cfg1.csv.gz"), any())
     }
 
     @Test
