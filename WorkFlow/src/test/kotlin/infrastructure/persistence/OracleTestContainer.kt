@@ -23,6 +23,7 @@ object OracleTestContainer {
             val loader = OracleTestContainer::class.java.classLoader
             db.useHandle<Exception> { handle ->
                 handle.createScript(loader.getResource("db/migration/V1__create_workflow_tables.sql")!!.readText()).execute()
+                handle.createScript(loader.getResource("db/migration/V2__create_dispatch_tables.sql")!!.readText()).execute()
             }
         }
     }
