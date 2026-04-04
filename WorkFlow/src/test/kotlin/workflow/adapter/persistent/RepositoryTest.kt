@@ -6,6 +6,7 @@ import com.workflow.workflow.adapter.persistent.JdbiTaskRepository
 import com.workflow.workflow.adapter.persistent.JdbiWorkflowRepository
 import com.workflow.workflow.model.Task
 import com.workflow.workflow.model.TaskStatus
+import com.workflow.workflow.model.TaskStatusCounts
 import com.workflow.workflow.model.WorkflowRun
 import com.workflow.workflow.model.WorkflowStatus
 import kotlinx.coroutines.async
@@ -2062,6 +2063,63 @@ class RepositoryTest {
             val ids1 = batch1.map { it.id }.toSet()
             val ids2 = batch2.map { it.id }.toSet()
             assertTrue(ids1.intersect(ids2).isEmpty(), "No overlap between claim batches")
+        }
+
+        // ── countStatusSummariesByWorkflowWithHandle ────────────────────
+
+        @Test
+        fun `countStatusSummariesByWorkflow returns counts grouped by sequence`() = runTest {
+            val wfId = randomId()
+            workflowRepo.insert(makeWorkflow(id = wfId))
+
+            val tasks = listOf(
+                makeTask(workflowId = wfId, sequenceNumber = 1, status = TaskStatus.COMPLETED),
+                makeTask(workflowId = wfId, sequenceNumber = 2, status = TaskStatus.PENDING),
+                makeTask(workflowId = wfId, sequenceNumber = 2, status = TaskStatus.COMPLETED),
+                makeTask(workflowId = wfId, sequenceNumber = 2, status = TaskStatus.FAILED),
+            )
+            taskRepo.insertBatch(tasks)
+
+            val result = jdbi.withHandle<Map<Int, TaskStatusCounts>, Exception> { h ->
+                taskRepo.countStatusSummariesByWorkflowWithHandle(h, wfId)
+            }
+
+            val seq1 = result[1]!!
+            assertEquals(1, seq1.total)
+            assertEquals(1, seq1.completed)
+            assertEquals(0, seq1.nonTerminal)
+            assertEquals(0, seq1.failed)
+
+            val seq2 = result[2]!!
+            assertEquals(3, seq2.total)
+            assertEquals(1, seq2.completed)
+            assertEquals(1, seq2.nonTerminal)
+            assertEquals(1, seq2.failed)
+        }
+
+        // ── findByWorkflowIdWithHandle ──────────────────────────────────
+
+        @Test
+        fun `findByWorkflowIdWithHandle returns all tasks for a workflow`() = runTest {
+            val wfId = randomId()
+            val otherWfId = randomId()
+            workflowRepo.insert(makeWorkflow(id = wfId))
+            workflowRepo.insert(makeWorkflow(id = otherWfId))
+
+            val tasks = listOf(
+                makeTask(workflowId = wfId, sequenceNumber = 1, status = TaskStatus.COMPLETED),
+                makeTask(workflowId = wfId, sequenceNumber = 2, status = TaskStatus.PENDING),
+                makeTask(workflowId = otherWfId, sequenceNumber = 1, status = TaskStatus.PENDING),
+            )
+            taskRepo.insertBatch(tasks)
+
+            val result = jdbi.withHandle<List<Task>, Exception> { h ->
+                taskRepo.findByWorkflowIdWithHandle(h, wfId)
+            }
+
+            assertEquals(2, result.size)
+            assertTrue(result.all { it.workflowId == wfId })
+            assertEquals(setOf(1, 2), result.map { it.sequenceNumber }.toSet())
         }
     }
 }

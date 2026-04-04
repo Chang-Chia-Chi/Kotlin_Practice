@@ -8,6 +8,7 @@ import com.workflow.infrastructure.persistence.readTimestamp
 import com.workflow.infrastructure.persistence.withHandleSuspend
 import com.workflow.workflow.model.Task
 import com.workflow.workflow.model.TaskStatus
+import com.workflow.workflow.model.TaskStatusCounts
 import com.workflow.workflow.usecase.port.outbound.persistent.TaskRepository
 import jakarta.enterprise.context.ApplicationScoped
 import org.jdbi.v3.core.Handle
@@ -416,6 +417,41 @@ class JdbiTaskRepository(
             .bindList("statuses", statuses)
             .mapTo(String::class.java)
             .list()
+
+    override fun countStatusSummariesByWorkflowWithHandle(handle: Handle, workflowId: String): Map<Int, TaskStatusCounts> =
+        handle
+            .createQuery(
+                """
+            SELECT sequence_number,
+                   COUNT(*) AS total,
+                   SUM(CASE WHEN status = 'COMPLETED' THEN 1 ELSE 0 END) AS completed,
+                   SUM(CASE WHEN status NOT IN ('COMPLETED','FAILED','TIMED_OUT','DEAD_LETTER','CANCELLED','SKIPPED') THEN 1 ELSE 0 END) AS non_terminal,
+                   SUM(CASE WHEN status IN ('FAILED','TIMED_OUT','DEAD_LETTER') THEN 1 ELSE 0 END) AS failed
+            FROM task
+            WHERE workflow_id = :workflowId
+            GROUP BY sequence_number
+            """,
+            ).bind("workflowId", workflowId)
+            .mapToMap()
+            .list()
+            .associate { rawRow ->
+                val row = caseInsensitive(rawRow)
+                val seq = (row["SEQUENCE_NUMBER"] as Number).toInt()
+                seq to TaskStatusCounts(
+                    total = (row["TOTAL"] as Number).toInt(),
+                    completed = (row["COMPLETED"] as Number).toInt(),
+                    nonTerminal = (row["NON_TERMINAL"] as Number).toInt(),
+                    failed = (row["FAILED"] as Number).toInt(),
+                )
+            }
+
+    override fun findByWorkflowIdWithHandle(handle: Handle, workflowId: String): List<Task> =
+        handle
+            .createQuery("SELECT * FROM task WHERE workflow_id = :workflowId")
+            .bind("workflowId", workflowId)
+            .mapToMap()
+            .list()
+            .map(::mapTaskRow)
 
     // -- Private helpers --
 

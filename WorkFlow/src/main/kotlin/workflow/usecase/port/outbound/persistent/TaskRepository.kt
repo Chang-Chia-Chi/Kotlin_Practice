@@ -2,6 +2,7 @@ package com.workflow.workflow.usecase.port.outbound.persistent
 
 import com.workflow.workflow.model.Task
 import com.workflow.workflow.model.TaskStatus
+import com.workflow.workflow.model.TaskStatusCounts
 import org.jdbi.v3.core.Handle
 import java.time.Instant
 
@@ -31,4 +32,6 @@ interface TaskRepository {
     fun countAllNonTerminalWithHandle(handle: Handle, workflowId: String): Int
     fun countCompletedWithHandle(handle: Handle, workflowId: String, sequenceNumber: Int): Int
     fun findDistinctQueuesByWorkflowId(handle: Handle, workflowId: String, statuses: List<String>): List<String>
+    fun countStatusSummariesByWorkflowWithHandle(handle: Handle, workflowId: String): Map<Int, TaskStatusCounts>
+    fun findByWorkflowIdWithHandle(handle: Handle, workflowId: String): List<Task>
 }
