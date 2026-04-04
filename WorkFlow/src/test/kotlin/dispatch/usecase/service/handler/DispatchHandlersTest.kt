@@ -17,6 +17,7 @@ import org.junit.jupiter.api.Test
 import org.mockito.kotlin.*
 import java.math.BigDecimal
 import java.time.LocalDateTime
+import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
@@ -27,11 +28,12 @@ class DispatchHandlersTest {
     @Test
     fun `scatter handler returns JSON array of config items`() = runTest {
         val configRepo = mock<DispatchConfigRepository>()
+        val resultStore = mock<SimulationResultStore>()
         val config = DispatchConfig("cfg1", DispatchMode.QTY, "default", "bom",
             listOf(SiteTarget("A", BigDecimal("100"))), null)
         whenever(configRepo.findActiveConfigs(any())).thenReturn(listOf(config))
 
-        val handler = DispatchScatterHandler(configRepo, objectMapper)
+        val handler = DispatchScatterHandler(configRepo, resultStore, objectMapper)
         val output = handler.execute(
             HandlerInput("t1", "w1", 1, null, null),
         )
@@ -41,6 +43,62 @@ class DispatchHandlersTest {
         assertTrue(arr.isArray)
         assertTrue(arr[0].has("configId"))
         assertTrue(arr[0].has("batchToken"))
+    }
+
+    @Test
+    fun `scatter handler uses provided configIds and batchToken without creating batch`() = runTest {
+        val configRepo = mock<DispatchConfigRepository>()
+        val resultStore = mock<SimulationResultStore>()
+        val config1 = DispatchConfig("cfg1", DispatchMode.QTY, "default", "bom",
+            listOf(SiteTarget("A", BigDecimal("100"))), null)
+        val config2 = DispatchConfig("cfg2", DispatchMode.QTY, "default", "bom",
+            listOf(SiteTarget("B", BigDecimal("200"))), null)
+        whenever(configRepo.findById("cfg1")).thenReturn(config1)
+        whenever(configRepo.findById("cfg2")).thenReturn(config2)
+
+        val handler = DispatchScatterHandler(configRepo, resultStore, objectMapper)
+        val item = objectMapper.writeValueAsString(
+            mapOf("batchToken" to "custom-token", "configIds" to listOf("cfg1", "cfg2"))
+        )
+        val output = handler.execute(
+            HandlerInput("t1", "w1", 1, null, item),
+        )
+
+        val arr = objectMapper.readTree(output.result)
+        assertTrue(arr.isArray)
+        assertEquals(2, arr.size())
+        assertEquals("cfg1", arr[0]["configId"].asText())
+        assertEquals("custom-token", arr[0]["batchToken"].asText())
+        assertEquals("cfg2", arr[1]["configId"].asText())
+        assertEquals("custom-token", arr[1]["batchToken"].asText())
+
+        verify(configRepo, never()).findActiveConfigs(any())
+        verify(resultStore, never()).createBatch(any(), any(), any())
+    }
+
+    @Test
+    fun `scatter handler creates NORMAL batch and uses all active configs when no item`() = runTest {
+        val configRepo = mock<DispatchConfigRepository>()
+        val resultStore = mock<SimulationResultStore>()
+        val config = DispatchConfig("cfg1", DispatchMode.QTY, "default", "bom",
+            listOf(SiteTarget("A", BigDecimal("100"))), null)
+        whenever(configRepo.findActiveConfigs(any())).thenReturn(listOf(config))
+
+        val handler = DispatchScatterHandler(configRepo, resultStore, objectMapper,
+            batchTokenProvider = { "20260404140000" })
+        val output = handler.execute(
+            HandlerInput("t1", "w1", 1, null, null),
+        )
+
+        val arr = objectMapper.readTree(output.result)
+        assertTrue(arr.isArray)
+        assertEquals(1, arr.size())
+        assertEquals("cfg1", arr[0]["configId"].asText())
+        assertEquals("20260404140000", arr[0]["batchToken"].asText())
+
+        verify(configRepo).findActiveConfigs(any())
+        verify(configRepo, never()).findById(any())
+        verify(resultStore).createBatch(eq("20260404140000"), eq(BatchStatus.NORMAL), eq(1))
     }
 
     @Test
