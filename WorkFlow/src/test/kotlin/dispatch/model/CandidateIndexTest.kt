@@ -1,7 +1,5 @@
 package com.workflow.dispatch.model
 
-import com.workflow.dispatch.model.CandidateIndex
-import com.workflow.dispatch.model.CandidateProduct
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse

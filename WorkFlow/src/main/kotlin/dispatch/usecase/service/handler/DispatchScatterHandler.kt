@@ -7,8 +7,6 @@ import com.workflow.worker.usecase.port.inbound.execution.HandlerOutput
 import com.workflow.worker.usecase.port.inbound.execution.TransitionHandler
 import jakarta.enterprise.context.ApplicationScoped
 import java.time.LocalDateTime
-import java.time.format.DateTimeFormatter
-import java.time.temporal.ChronoUnit
 
 @ApplicationScoped
 class DispatchScatterHandler(
@@ -18,8 +16,7 @@ class DispatchScatterHandler(
 
     override suspend fun execute(input: HandlerInput): HandlerOutput {
         val now = LocalDateTime.now()
-        val batchToken = now.truncatedTo(ChronoUnit.HOURS)
-            .format(DateTimeFormatter.ofPattern("yyyyMMddHHmmss"))
+        val batchToken = currentBatchToken(now)
 
         val configs = configRepo.findActiveConfigs(now)
         val items = configs.map { mapOf("configId" to it.id, "batchToken" to batchToken) }

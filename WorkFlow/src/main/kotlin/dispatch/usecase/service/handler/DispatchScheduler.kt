@@ -7,9 +7,6 @@ import io.quarkus.scheduler.Scheduled
 import jakarta.enterprise.context.ApplicationScoped
 import kotlinx.coroutines.runBlocking
 import org.slf4j.LoggerFactory
-import java.time.LocalDateTime
-import java.time.format.DateTimeFormatter
-import java.time.temporal.ChronoUnit
 
 @ApplicationScoped
 class DispatchScheduler(
@@ -19,11 +16,7 @@ class DispatchScheduler(
 
     @Scheduled(cron = "{dispatch.cron}", skipExecutionIf = com.workflow.infrastructure.leader.NotLeader::class)
     fun trigger() = runBlocking {
-        val batchToken =
-            LocalDateTime
-                .now()
-                .truncatedTo(ChronoUnit.HOURS)
-                .format(DateTimeFormatter.ofPattern("yyyyMMddHHmmss"))
+        val batchToken = currentBatchToken()
 
         val result =
             workflowEngine.startWorkflow(

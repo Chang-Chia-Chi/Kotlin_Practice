@@ -1,6 +1,5 @@
 package com.workflow.dispatch.adapter.storage
 
-import com.workflow.dispatch.adapter.storage.DispatchCsvFormatter
 import com.workflow.dispatch.model.DispatchDecision
 import org.junit.jupiter.api.Test
 import java.math.BigDecimal

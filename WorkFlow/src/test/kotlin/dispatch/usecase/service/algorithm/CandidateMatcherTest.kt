@@ -6,8 +6,6 @@ import com.workflow.dispatch.model.SimulationContext
 import com.workflow.dispatch.model.SiteBomKey
 import com.workflow.dispatch.model.SiteTarget
 import com.workflow.dispatch.model.TargetBomAllocation
-import com.workflow.dispatch.usecase.service.algorithm.FirstFitCandidateMatcher
-import com.workflow.dispatch.usecase.service.algorithm.QtyCandidateMatcher
 import org.junit.jupiter.api.Test
 import java.math.BigDecimal
 import kotlin.test.assertEquals

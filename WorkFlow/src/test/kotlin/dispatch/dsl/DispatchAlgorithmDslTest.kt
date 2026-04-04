@@ -1,6 +1,5 @@
 package com.workflow.dispatch.dsl
 
-import com.workflow.dispatch.dsl.dispatchAlgorithm
 import com.workflow.dispatch.model.DispatchMode
 import com.workflow.dispatch.model.SimulationContext
 import com.workflow.dispatch.model.TerminationDecision
@@ -10,6 +9,8 @@ import com.workflow.dispatch.usecase.service.algorithm.GapBasedDispatchAlgorithm
 import com.workflow.dispatch.usecase.service.algorithm.FailFastTermination
 import com.workflow.dispatch.usecase.service.algorithm.QtyCandidateMatcher
 import org.junit.jupiter.api.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
 
 class DispatchAlgorithmDslTest {
@@ -37,7 +38,7 @@ class DispatchAlgorithmDslTest {
             }
         } as GapBasedDispatchAlgorithm
         assertIs<QtyCandidateMatcher>(algo.candidateMatcher)
-        assert(algo.terminationStrategy !is FailFastTermination)
+        assertFalse(algo.terminationStrategy is FailFastTermination)
         val decision = algo.terminationStrategy.onNoCandidate(
             "site-1", "bom-1",
             SimulationContext(
@@ -46,6 +47,6 @@ class DispatchAlgorithmDslTest {
                 total = java.math.BigDecimal.ZERO,
             ),
         )
-        kotlin.test.assertEquals(TerminationDecision.SKIP_SITE, decision)
+        assertEquals(TerminationDecision.SKIP_SITE, decision)
     }
 }

@@ -1,7 +1,5 @@
 package com.workflow.dispatch.usecase.service.algorithm
 
-import com.workflow.dispatch.usecase.service.algorithm.GapEntry
-import com.workflow.dispatch.usecase.service.algorithm.selectByGap
 import org.junit.jupiter.api.Test
 import java.math.BigDecimal
 import kotlin.test.assertEquals

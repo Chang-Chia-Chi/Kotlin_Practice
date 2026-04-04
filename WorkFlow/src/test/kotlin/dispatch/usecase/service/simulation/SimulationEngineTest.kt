@@ -2,7 +2,6 @@ package com.workflow.dispatch.usecase.service.simulation
 
 import com.workflow.dispatch.model.*
 import com.workflow.dispatch.usecase.service.algorithm.DefaultDispatchAlgorithmFactory
-import com.workflow.dispatch.usecase.service.simulation.SimulationEngine
 import org.junit.jupiter.api.Test
 import java.math.BigDecimal
 import kotlin.test.assertEquals
