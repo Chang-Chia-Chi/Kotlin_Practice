@@ -1,8 +1,10 @@
 package com.workflow.dispatch.adapter
 
 import com.workflow.dispatch.adapter.persistence.JdbiSimulationResultStore
+import com.workflow.dispatch.adapter.persistence.SyncRepository
 import com.workflow.dispatch.adapter.storage.DispatchPathBuilder
 import com.workflow.dispatch.usecase.port.outbound.persistence.SimulationResultStore
+import io.quarkus.arc.profile.IfBuildProfile
 import jakarta.enterprise.context.ApplicationScoped
 import jakarta.enterprise.inject.Produces
 import org.eclipse.microprofile.config.inject.ConfigProperty
@@ -37,4 +39,9 @@ class DispatchProducers {
     fun dispatchPathBuilder(
         @ConfigProperty(name = "dispatch.env", defaultValue = "prod") env: String,
     ): DispatchPathBuilder = DispatchPathBuilder(env)
+
+    @Produces
+    @ApplicationScoped
+    @IfBuildProfile("stg")
+    fun syncRepository(jdbi: Jdbi): SyncRepository = SyncRepository(jdbi)
 }
