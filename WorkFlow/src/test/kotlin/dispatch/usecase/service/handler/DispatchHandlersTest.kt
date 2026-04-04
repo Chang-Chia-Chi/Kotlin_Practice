@@ -215,13 +215,14 @@ class DispatchHandlersTest {
         val resultStore = mock<SimulationResultStore>()
         val storage = mock<StorageGateway>()
         val parquetFormatter = mock<ParquetFormatter>()
+        val pathBuilder = DispatchPathBuilder("prod")
 
         whenever(resultStore.findByBatchToken("20260329060000")).thenReturn(emptyList())
+        whenever(resultStore.findBatchStatus("20260329060000")).thenReturn(BatchStatus.NORMAL)
         whenever(parquetFormatter.format(any())).thenReturn(byteArrayOf())
 
-        val handler = DispatchJoinHandler(resultStore, storage, parquetFormatter, objectMapper)
+        val handler = DispatchJoinHandler(resultStore, storage, parquetFormatter, pathBuilder, "prod", objectMapper)
 
-        // Simulate aggregated input from parallel simulate tasks
         val inputs = objectMapper.writeValueAsString(
             mapOf("batchToken" to listOf("20260329060000", "20260329060000")),
         )
@@ -229,7 +230,7 @@ class DispatchHandlersTest {
             HandlerInput("t1", "w1", 3, inputs, null),
         )
 
-        verify(storage).uploadParquet(eq("dispatch/20260329060000/result.parquet"), any())
+        verify(storage).uploadParquet(eq("env=prod/dispatch/result.parquet"), any())
     }
 
     @Test

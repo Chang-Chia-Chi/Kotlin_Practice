@@ -1,6 +1,8 @@
 package com.workflow.dispatch.usecase.service.handler
 
 import com.fasterxml.jackson.databind.ObjectMapper
+import com.workflow.dispatch.adapter.storage.DispatchPathBuilder
+import com.workflow.dispatch.model.BatchStatus
 import com.workflow.dispatch.usecase.port.outbound.persistence.SimulationResultStore
 import com.workflow.dispatch.usecase.port.outbound.storage.ParquetFormatter
 import com.workflow.dispatch.usecase.port.outbound.storage.StorageGateway
@@ -8,12 +10,15 @@ import com.workflow.worker.usecase.port.inbound.execution.HandlerInput
 import com.workflow.worker.usecase.port.inbound.execution.HandlerOutput
 import com.workflow.worker.usecase.port.inbound.execution.TransitionHandler
 import jakarta.enterprise.context.ApplicationScoped
+import org.eclipse.microprofile.config.inject.ConfigProperty
 
 @ApplicationScoped
 class DispatchJoinHandler(
     private val resultStore: SimulationResultStore,
     private val storage: StorageGateway,
     private val parquetFormatter: ParquetFormatter,
+    private val pathBuilder: DispatchPathBuilder,
+    @ConfigProperty(name = "dispatch.env", defaultValue = "prod") private val env: String,
     private val objectMapper: ObjectMapper,
 ) : TransitionHandler {
 
@@ -25,9 +30,13 @@ class DispatchJoinHandler(
             else -> batchTokenNode.asText()
         }
 
-        val allDecisions = resultStore.findByBatchToken(batchToken)
-        val parquet = parquetFormatter.format(allDecisions)
-        storage.uploadParquet("dispatch/$batchToken/result.parquet", parquet)
+        val batchStatus = resultStore.findBatchStatus(batchToken)
+
+        if (env == "prod" && batchStatus == BatchStatus.NORMAL) {
+            val allDecisions = resultStore.findByBatchToken(batchToken)
+            val parquet = parquetFormatter.format(allDecisions)
+            storage.uploadParquet(pathBuilder.prodParquetPath(), parquet)
+        }
 
         return HandlerOutput(null)
     }
