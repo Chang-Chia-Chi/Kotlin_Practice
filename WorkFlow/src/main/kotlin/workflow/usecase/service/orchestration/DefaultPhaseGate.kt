@@ -164,6 +164,7 @@ class DefaultPhaseGate(
             evalQueue += successorsOf(seqInfo, seqByName, definition)
             val pendingInserts = mutableListOf<Task>()
             val insertedSeqs = mutableSetOf<Int>()
+            val pendingInsertSeqs = mutableSetOf<Int>()
 
             while (evalQueue.isNotEmpty()) {
                 val successor = evalQueue.removeFirst()
@@ -174,9 +175,12 @@ class DefaultPhaseGate(
                 if ((allCounts[sSeq]?.total ?: 0) > 0) continue
                 if (sSeq in insertedSeqs) continue
 
-                // b. Predecessor gate: all predecessor sequences must be terminal
+                // b. Predecessor gate: all predecessor sequences must be terminal.
+                //    Must also consider PENDING tasks inserted earlier in this loop
+                //    (allCounts is stale w.r.t. this iteration's inserts).
                 val allPredTerminal = successor.predecessorSequences.all { predSeq ->
-                    (allCounts[predSeq]?.nonTerminal ?: 0) == 0
+                    predSeq !in pendingInsertSeqs &&
+                        (allCounts[predSeq]?.nonTerminal ?: 0) == 0
                 }
                 if (!allPredTerminal) continue
 
@@ -193,6 +197,7 @@ class DefaultPhaseGate(
                     )
                     pendingInserts += task
                     insertedSeqs += sSeq
+                    pendingInsertSeqs += sSeq
                     signalQueueSet += successor.activity.queue
                 } else {
                     val skipped = createSkippedTaskForActivity(
