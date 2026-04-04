@@ -38,6 +38,7 @@ class WorkflowEngine(
     override suspend fun startWorkflow(
         definition: WorkflowDefinition,
         idempotencyKey: String?,
+        initialItem: String?,
     ): StartResult {
         val workflowId = UUID.randomUUID().toString()
         val now = Instant.now().truncatedTo(ChronoUnit.MICROS)
@@ -59,7 +60,7 @@ class WorkflowEngine(
         if (idempotencyKey == null) {
             val queueName = jdbi.inTransactionSuspend<String, Exception> { handle ->
                 workflowRepo.insertWithHandle(handle, run)
-                val task = createTaskForActivity(workflowId, startSeqInfo.activityName, startSeqInfo.sequenceNumber, startSeqInfo.activity, now)
+                val task = createTaskForActivity(workflowId, startSeqInfo.activityName, startSeqInfo.sequenceNumber, startSeqInfo.activity, now, initialItem)
                 taskRepo.insertBatchWithHandle(handle, listOf(task))
                 startSeqInfo.activity.queue
             }
@@ -71,7 +72,7 @@ class WorkflowEngine(
         val (mergeId, created, queueName) = jdbi.inTransactionSuspend<IdempotentResult, Exception> { handle ->
             val (mId, isNew) = workflowRepo.mergeIdempotentWithHandle(handle, run, idempotencyKey)
             if (isNew) {
-                val task = createTaskForActivity(mId, startSeqInfo.activityName, startSeqInfo.sequenceNumber, startSeqInfo.activity, now)
+                val task = createTaskForActivity(mId, startSeqInfo.activityName, startSeqInfo.sequenceNumber, startSeqInfo.activity, now, initialItem)
                 taskRepo.insertBatchWithHandle(handle, listOf(task))
                 IdempotentResult(mId, true, startSeqInfo.activity.queue)
             } else {

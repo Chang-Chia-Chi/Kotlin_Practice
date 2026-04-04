@@ -7,6 +7,7 @@ interface WorkflowLifecycle {
     suspend fun startWorkflow(
         definition: WorkflowDefinition,
         idempotencyKey: String? = null,
+        initialItem: String? = null,
     ): StartResult
 
     suspend fun cancelWorkflow(workflowId: String): Boolean

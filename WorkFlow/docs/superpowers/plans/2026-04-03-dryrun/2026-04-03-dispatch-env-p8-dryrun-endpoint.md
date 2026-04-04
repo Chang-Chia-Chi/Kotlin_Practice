@@ -104,27 +104,58 @@ git commit -m "test(dispatch): add dry-run endpoint tests"
 
 ---
 
-### Task 2: Check WorkflowEngine.startWorkflow signature
+### Task 2: Add initialItem to WorkflowLifecycle and WorkflowEngine
 
 **Files:**
-- Read: `src/main/kotlin/workflow/usecase/service/orchestration/WorkflowEngine.kt`
+- Modify: `src/main/kotlin/workflow/usecase/port/inbound/orchestration/WorkflowLifecycle.kt`
+- Modify: `src/main/kotlin/workflow/usecase/service/orchestration/WorkflowEngine.kt`
 
-- [ ] **Step 1: Check if startWorkflow accepts an initialItem parameter**
+- [ ] **Step 1: Update WorkflowLifecycle interface**
 
-Read `WorkflowEngine` to understand its current signature. The dry-run endpoint needs to pass an initial item (JSON with `batchToken` and `configIds`) to the workflow, which the scatter handler reads from `input.item`.
+Add `initialItem: String? = null` as a trailing parameter to `startWorkflow` in `WorkflowLifecycle.kt`:
 
-If `startWorkflow` does NOT accept `initialItem`, we need to add it. If it does, proceed to Task 3.
+```kotlin
+interface WorkflowLifecycle {
+    suspend fun startWorkflow(
+        definition: WorkflowDefinition,
+        idempotencyKey: String? = null,
+        initialItem: String? = null,
+    ): StartResult
+    suspend fun cancelWorkflow(workflowId: String): Boolean
+    suspend fun replayWorkflow(workflowId: String): Boolean
+}
+```
 
-**If it needs an initialItem parameter:** Add an optional `initialItem: String? = null` parameter to `startWorkflow`. This should be stored as the `item` field on the first task (scatter activity). Check the engine implementation to find where the first task is created and pass the item through.
+- [ ] **Step 2: Update WorkflowEngine.startWorkflow**
 
-- [ ] **Step 2: If changes were needed, run existing tests to verify no regressions**
+Add `initialItem: String? = null` to the `startWorkflow` override signature, and thread it through both `createTaskForActivity` call sites:
+
+```kotlin
+override suspend fun startWorkflow(
+    definition: WorkflowDefinition,
+    idempotencyKey: String?,
+    initialItem: String? = null,
+): StartResult {
+    // ...
+    // Non-idempotent path (no idempotencyKey):
+    val task = createTaskForActivity(workflowId, startSeqInfo.activityName, startSeqInfo.sequenceNumber, startSeqInfo.activity, now, initialItem)
+
+    // Idempotent path (with idempotencyKey, inside the transaction lambda):
+    val task = createTaskForActivity(mId, startSeqInfo.activityName, startSeqInfo.sequenceNumber, startSeqInfo.activity, now, initialItem)
+}
+```
+
+`DispatchScheduler` is the only existing caller and passes no `initialItem` — it continues to work with the default `null`.
+
+- [ ] **Step 3: Run existing tests to verify no regressions**
 
 Run: `/c/Users/maxch/.m2/wrapper/dists/apache-maven-3.9.8/af622e91/bin/mvn test -pl WorkFlow`
 Expected: All existing tests PASS.
 
-- [ ] **Step 3: Commit if changes were made**
+- [ ] **Step 4: Commit**
 
 ```bash
+git add src/main/kotlin/workflow/usecase/port/inbound/orchestration/WorkflowLifecycle.kt
 git add src/main/kotlin/workflow/usecase/service/orchestration/WorkflowEngine.kt
 git commit -m "feat(workflow): add optional initialItem parameter to startWorkflow"
 ```
@@ -156,7 +187,6 @@ import jakarta.ws.rs.POST
 import jakarta.ws.rs.Path
 import jakarta.ws.rs.Produces
 import jakarta.ws.rs.core.MediaType
-import kotlinx.coroutines.runBlocking
 import java.time.LocalDateTime
 import java.util.UUID
 
@@ -177,7 +207,7 @@ class DispatchDryRunResource(
     @Path("/dryrun")
     @Consumes(MediaType.APPLICATION_JSON)
     @Produces(MediaType.APPLICATION_JSON)
-    fun dryRun(request: DryRunRequest): DryRunResponse = runBlocking {
+    suspend fun dryRun(request: DryRunRequest): DryRunResponse {
         val batchToken = UUID.randomUUID().toString()
 
         val configIds = request.configIds
@@ -195,7 +225,7 @@ class DispatchDryRunResource(
             initialItem = initialItem,
         )
 
-        DryRunResponse(batchToken = batchToken, status = "DRYRUN")
+        return DryRunResponse(batchToken = batchToken, status = "DRYRUN")
     }
 }
 ```
