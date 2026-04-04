@@ -15,6 +15,11 @@ object OracleTestContainer {
         .withPassword("testpass")
         .apply { start() }
 
+    private val migrations = listOf(
+        "db/migration/V1__create_workflow_tables.sql",
+        "db/migration/V2__create_dispatch_tables.sql",
+    )
+
     val jdbi: Jdbi by lazy {
         // Ensure Oracle JDBC driver is registered — Quarkus test classloader
         // isolation can cause DriverManager to lose the driver registration.
@@ -22,8 +27,9 @@ object OracleTestContainer {
         Jdbi.create(oracle.jdbcUrl, oracle.username, oracle.password).also { db ->
             val loader = OracleTestContainer::class.java.classLoader
             db.useHandle<Exception> { handle ->
-                handle.createScript(loader.getResource("db/migration/V1__create_workflow_tables.sql")!!.readText()).execute()
-                handle.createScript(loader.getResource("db/migration/V2__create_dispatch_tables.sql")!!.readText()).execute()
+                migrations.forEach { path ->
+                    handle.createScript(loader.getResource(path)!!.readText()).execute()
+                }
             }
         }
     }

@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.TestInstance
 import org.junit.jupiter.api.assertDoesNotThrow
 import org.junit.jupiter.api.assertThrows
+import java.sql.Types
 import java.time.LocalDateTime
 import java.time.temporal.ChronoUnit
 import java.util.TreeMap
@@ -53,24 +54,15 @@ class DispatchSchemaTest {
         table: String = "dispatch_batch",
     ): String {
         jdbi.useHandle<Exception> { handle ->
-            if (configCount != null) {
-                handle.createUpdate(
-                    "INSERT INTO $table (batch_token, status, created_at, config_count) VALUES (:token, :status, :createdAt, :configCount)"
-                )
-                    .bind("token", batchToken)
-                    .bind("status", status)
-                    .bind("createdAt", createdAt)
-                    .bind("configCount", configCount)
-                    .execute()
-            } else {
-                handle.createUpdate(
-                    "INSERT INTO $table (batch_token, status, created_at) VALUES (:token, :status, :createdAt)"
-                )
-                    .bind("token", batchToken)
-                    .bind("status", status)
-                    .bind("createdAt", createdAt)
-                    .execute()
-            }
+            val update = handle.createUpdate(
+                "INSERT INTO $table (batch_token, status, created_at, config_count) VALUES (:token, :status, :createdAt, :configCount)"
+            )
+                .bind("token", batchToken)
+                .bind("status", status)
+                .bind("createdAt", createdAt)
+            if (configCount != null) update.bind("configCount", configCount)
+            else update.bindNull("configCount", Types.INTEGER)
+            update.execute()
         }
         return batchToken
     }
@@ -89,35 +81,27 @@ class DispatchSchemaTest {
         table: String = "dispatch_event",
     ) {
         jdbi.useHandle<Exception> { handle ->
-            val columns = mutableListOf(
-                "batch_token", "config_id", "dispatch_order", "product_id",
-                "source_bom_id", "qty", "target_site_id", "site_gap"
+            val update = handle.createUpdate(
+                """INSERT INTO $table
+                   (batch_token, config_id, dispatch_order, product_id,
+                    source_bom_id, qty, target_site_id, target_bom_id, site_gap, bom_gap)
+                   VALUES (:batchToken, :configId, :dispatchOrder, :productId,
+                    :sourceBomId, :qty, :targetSiteId, :targetBomId, :siteGap, :bomGap)"""
             )
-            val placeholders = mutableListOf(
-                ":batchToken", ":configId", ":dispatchOrder", ":productId",
-                ":sourceBomId", ":qty", ":targetSiteId", ":siteGap"
-            )
-            val bindings = mutableMapOf<String, Any?>(
-                "batchToken" to batchToken,
-                "configId" to configId,
-                "dispatchOrder" to dispatchOrder,
-                "productId" to productId,
-                "sourceBomId" to sourceBomId,
-                "qty" to qty,
-                "targetSiteId" to targetSiteId,
-                "siteGap" to siteGap,
-            )
+                .bind("batchToken", batchToken)
+                .bind("configId", configId)
+                .bind("dispatchOrder", dispatchOrder)
+                .bind("productId", productId)
+                .bind("sourceBomId", sourceBomId)
+                .bind("qty", qty)
+                .bind("targetSiteId", targetSiteId)
+                .bind("siteGap", siteGap)
 
-            if (targetBomId != null) {
-                columns.add("target_bom_id"); placeholders.add(":targetBomId"); bindings["targetBomId"] = targetBomId
-            }
-            if (bomGap != null) {
-                columns.add("bom_gap"); placeholders.add(":bomGap"); bindings["bomGap"] = bomGap
-            }
+            if (targetBomId != null) update.bind("targetBomId", targetBomId)
+            else update.bindNull("targetBomId", Types.VARCHAR)
+            if (bomGap != null) update.bind("bomGap", bomGap)
+            else update.bindNull("bomGap", Types.INTEGER)
 
-            val sql = "INSERT INTO $table (${columns.joinToString()}) VALUES (${placeholders.joinToString()})"
-            val update = handle.createUpdate(sql)
-            bindings.forEach { (key, value) -> update.bind(key, value) }
             update.execute()
         }
     }
@@ -141,58 +125,40 @@ class DispatchSchemaTest {
         }
     }
 
+    private fun assertColumnParity(prodTable: String, stgTable: String) {
+        jdbi.useHandle<Exception> { handle ->
+            fun columnsOf(table: String) = handle.createQuery(
+                """SELECT COLUMN_NAME, DATA_TYPE, DATA_LENGTH, NULLABLE
+                   FROM USER_TAB_COLUMNS WHERE TABLE_NAME = :table
+                   ORDER BY COLUMN_NAME"""
+            ).bind("table", table).mapToMap().list()
+
+            val prodCols = columnsOf(prodTable)
+            val stgCols = columnsOf(stgTable)
+
+            assertEquals(prodCols.size, stgCols.size, "Column count mismatch between $prodTable and $stgTable")
+            prodCols.zip(stgCols).forEach { (prod, stg) ->
+                val colName = prod["COLUMN_NAME"]
+                assertEquals(prod["COLUMN_NAME"], stg["COLUMN_NAME"], "Column name mismatch")
+                assertEquals(prod["DATA_TYPE"], stg["DATA_TYPE"], "Data type mismatch for $colName")
+                assertEquals(prod["DATA_LENGTH"], stg["DATA_LENGTH"], "Data length mismatch for $colName")
+                assertEquals(prod["NULLABLE"], stg["NULLABLE"], "Nullable mismatch for $colName")
+            }
+        }
+    }
+
     // ── Test 2: batch column parity (prod == stg) ───────────────────────
 
     @Test
     fun batchColumnParity() {
-        jdbi.useHandle<Exception> { handle ->
-            val prodCols = handle.createQuery(
-                """SELECT COLUMN_NAME, DATA_TYPE, DATA_LENGTH, NULLABLE
-                   FROM USER_TAB_COLUMNS WHERE TABLE_NAME = 'DISPATCH_BATCH'
-                   ORDER BY COLUMN_NAME"""
-            ).mapToMap().list()
-
-            val stgCols = handle.createQuery(
-                """SELECT COLUMN_NAME, DATA_TYPE, DATA_LENGTH, NULLABLE
-                   FROM USER_TAB_COLUMNS WHERE TABLE_NAME = 'DISPATCH_BATCH_STG'
-                   ORDER BY COLUMN_NAME"""
-            ).mapToMap().list()
-
-            assertEquals(prodCols.size, stgCols.size, "Column count mismatch between dispatch_batch and dispatch_batch_stg")
-            prodCols.zip(stgCols).forEach { (prod, stg) ->
-                assertEquals(prod["COLUMN_NAME"], stg["COLUMN_NAME"], "Column name mismatch")
-                assertEquals(prod["DATA_TYPE"], stg["DATA_TYPE"], "Data type mismatch for ${prod["COLUMN_NAME"]}")
-                assertEquals(prod["DATA_LENGTH"], stg["DATA_LENGTH"], "Data length mismatch for ${prod["COLUMN_NAME"]}")
-                assertEquals(prod["NULLABLE"], stg["NULLABLE"], "Nullable mismatch for ${prod["COLUMN_NAME"]}")
-            }
-        }
+        assertColumnParity("DISPATCH_BATCH", "DISPATCH_BATCH_STG")
     }
 
     // ── Test 3: event column parity (prod == stg) ───────────────────────
 
     @Test
     fun eventColumnParity() {
-        jdbi.useHandle<Exception> { handle ->
-            val prodCols = handle.createQuery(
-                """SELECT COLUMN_NAME, DATA_TYPE, DATA_LENGTH, NULLABLE
-                   FROM USER_TAB_COLUMNS WHERE TABLE_NAME = 'DISPATCH_EVENT'
-                   ORDER BY COLUMN_NAME"""
-            ).mapToMap().list()
-
-            val stgCols = handle.createQuery(
-                """SELECT COLUMN_NAME, DATA_TYPE, DATA_LENGTH, NULLABLE
-                   FROM USER_TAB_COLUMNS WHERE TABLE_NAME = 'DISPATCH_EVENT_STG'
-                   ORDER BY COLUMN_NAME"""
-            ).mapToMap().list()
-
-            assertEquals(prodCols.size, stgCols.size, "Column count mismatch between dispatch_event and dispatch_event_stg")
-            prodCols.zip(stgCols).forEach { (prod, stg) ->
-                assertEquals(prod["COLUMN_NAME"], stg["COLUMN_NAME"], "Column name mismatch")
-                assertEquals(prod["DATA_TYPE"], stg["DATA_TYPE"], "Data type mismatch for ${prod["COLUMN_NAME"]}")
-                assertEquals(prod["DATA_LENGTH"], stg["DATA_LENGTH"], "Data length mismatch for ${prod["COLUMN_NAME"]}")
-                assertEquals(prod["NULLABLE"], stg["NULLABLE"], "Nullable mismatch for ${prod["COLUMN_NAME"]}")
-            }
-        }
+        assertColumnParity("DISPATCH_EVENT", "DISPATCH_EVENT_STG")
     }
 
     // ── Test 4: PK constraints exist for all 4 tables ───────────────────
@@ -390,76 +356,24 @@ class DispatchSchemaTest {
             }
         }
 
-        // event required columns: batch_token, config_id, dispatch_order, product_id, source_bom_id, qty, target_site_id, site_gap
+        // Each required event column must reject NULL
         val token = insertBatch()
+        val baseValues = mapOf(
+            "config_id" to "'c'", "dispatch_order" to "1", "product_id" to "'p'",
+            "source_bom_id" to "'b'", "qty" to "1", "target_site_id" to "'s'", "site_gap" to "1",
+        )
 
-        // config_id NULL
-        assertThrows<UnableToExecuteStatementException> {
-            jdbi.useHandle<Exception> { handle ->
-                handle.createUpdate(
-                    """INSERT INTO dispatch_event (batch_token, config_id, dispatch_order, product_id, source_bom_id, qty, target_site_id, site_gap)
-                       VALUES (:token, NULL, 1, 'p', 'b', 1, 's', 1)"""
-                ).bind("token", token).execute()
-            }
-        }
+        for (nullColumn in baseValues.keys) {
+            val values = baseValues.mapValues { (col, v) -> if (col == nullColumn) "NULL" else v }
+            val columnList = "batch_token, ${values.keys.joinToString()}"
+            val valueList = ":token, ${values.values.joinToString()}"
 
-        // dispatch_order NULL
-        assertThrows<UnableToExecuteStatementException> {
-            jdbi.useHandle<Exception> { handle ->
-                handle.createUpdate(
-                    """INSERT INTO dispatch_event (batch_token, config_id, dispatch_order, product_id, source_bom_id, qty, target_site_id, site_gap)
-                       VALUES (:token, 'c', NULL, 'p', 'b', 1, 's', 1)"""
-                ).bind("token", token).execute()
-            }
-        }
-
-        // product_id NULL
-        assertThrows<UnableToExecuteStatementException> {
-            jdbi.useHandle<Exception> { handle ->
-                handle.createUpdate(
-                    """INSERT INTO dispatch_event (batch_token, config_id, dispatch_order, product_id, source_bom_id, qty, target_site_id, site_gap)
-                       VALUES (:token, 'c', 1, NULL, 'b', 1, 's', 1)"""
-                ).bind("token", token).execute()
-            }
-        }
-
-        // source_bom_id NULL
-        assertThrows<UnableToExecuteStatementException> {
-            jdbi.useHandle<Exception> { handle ->
-                handle.createUpdate(
-                    """INSERT INTO dispatch_event (batch_token, config_id, dispatch_order, product_id, source_bom_id, qty, target_site_id, site_gap)
-                       VALUES (:token, 'c', 1, 'p', NULL, 1, 's', 1)"""
-                ).bind("token", token).execute()
-            }
-        }
-
-        // qty NULL
-        assertThrows<UnableToExecuteStatementException> {
-            jdbi.useHandle<Exception> { handle ->
-                handle.createUpdate(
-                    """INSERT INTO dispatch_event (batch_token, config_id, dispatch_order, product_id, source_bom_id, qty, target_site_id, site_gap)
-                       VALUES (:token, 'c', 1, 'p', 'b', NULL, 's', 1)"""
-                ).bind("token", token).execute()
-            }
-        }
-
-        // target_site_id NULL
-        assertThrows<UnableToExecuteStatementException> {
-            jdbi.useHandle<Exception> { handle ->
-                handle.createUpdate(
-                    """INSERT INTO dispatch_event (batch_token, config_id, dispatch_order, product_id, source_bom_id, qty, target_site_id, site_gap)
-                       VALUES (:token, 'c', 1, 'p', 'b', 1, NULL, 1)"""
-                ).bind("token", token).execute()
-            }
-        }
-
-        // site_gap NULL
-        assertThrows<UnableToExecuteStatementException> {
-            jdbi.useHandle<Exception> { handle ->
-                handle.createUpdate(
-                    """INSERT INTO dispatch_event (batch_token, config_id, dispatch_order, product_id, source_bom_id, qty, target_site_id, site_gap)
-                       VALUES (:token, 'c', 1, 'p', 'b', 1, 's', NULL)"""
-                ).bind("token", token).execute()
+            assertThrows<UnableToExecuteStatementException>("$nullColumn should reject NULL") {
+                jdbi.useHandle<Exception> { handle ->
+                    handle.createUpdate(
+                        "INSERT INTO dispatch_event ($columnList) VALUES ($valueList)"
+                    ).bind("token", token).execute()
+                }
             }
         }
     }
@@ -492,30 +406,21 @@ class DispatchSchemaTest {
                 )
             }
 
-            // Also verify the index columns for one representative index
-            val batchConfigCols = handle.createQuery(
-                """SELECT COLUMN_NAME FROM USER_IND_COLUMNS
-                   WHERE INDEX_NAME = 'IDX_DISPATCH_EVENT_BATCH_CONFIG'
-                   ORDER BY COLUMN_POSITION"""
-            ).mapTo(String::class.java).list()
+            // Verify column composition for representative indexes
+            val expectedColumns = mapOf(
+                "IDX_DISPATCH_EVENT_BATCH_CONFIG" to listOf("BATCH_TOKEN", "CONFIG_ID"),
+                "IDX_DISPATCH_EVENT_CONFIG_BATCH" to listOf("CONFIG_ID", "BATCH_TOKEN"),
+                "IDX_DISPATCH_BATCH_STATUS_CREATED" to listOf("STATUS", "CREATED_AT"),
+            )
+            for ((indexName, expectedCols) in expectedColumns) {
+                val actualCols = handle.createQuery(
+                    """SELECT COLUMN_NAME FROM USER_IND_COLUMNS
+                       WHERE INDEX_NAME = :indexName
+                       ORDER BY COLUMN_POSITION"""
+                ).bind("indexName", indexName).mapTo(String::class.java).list()
 
-            assertEquals(listOf("BATCH_TOKEN", "CONFIG_ID"), batchConfigCols, "Index columns for idx_dispatch_event_batch_config")
-
-            val configBatchCols = handle.createQuery(
-                """SELECT COLUMN_NAME FROM USER_IND_COLUMNS
-                   WHERE INDEX_NAME = 'IDX_DISPATCH_EVENT_CONFIG_BATCH'
-                   ORDER BY COLUMN_POSITION"""
-            ).mapTo(String::class.java).list()
-
-            assertEquals(listOf("CONFIG_ID", "BATCH_TOKEN"), configBatchCols, "Index columns for idx_dispatch_event_config_batch")
-
-            val statusCreatedCols = handle.createQuery(
-                """SELECT COLUMN_NAME FROM USER_IND_COLUMNS
-                   WHERE INDEX_NAME = 'IDX_DISPATCH_BATCH_STATUS_CREATED'
-                   ORDER BY COLUMN_POSITION"""
-            ).mapTo(String::class.java).list()
-
-            assertEquals(listOf("STATUS", "CREATED_AT"), statusCreatedCols, "Index columns for idx_dispatch_batch_status_created")
+                assertEquals(expectedCols, actualCols, "Index columns for $indexName")
+            }
         }
     }
 
