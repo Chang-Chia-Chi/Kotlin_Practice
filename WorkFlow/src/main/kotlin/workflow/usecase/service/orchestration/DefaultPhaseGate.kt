@@ -253,7 +253,6 @@ class DefaultPhaseGate(
 
             val definition = objectMapper.readValue<WorkflowDefinition>(workflow.definitionJson)
             val sequenceMap = buildSequenceMap(definition)
-            val seqByName = buildSeqByName(sequenceMap)
             val now = Instant.now().truncatedTo(ChronoUnit.MICROS)
             val signalQueueSet = mutableSetOf<String>()
 
