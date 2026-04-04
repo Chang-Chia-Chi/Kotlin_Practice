@@ -114,6 +114,7 @@ class DispatchHandlersTest {
         val resultStore = mock<SimulationResultStore>()
         val storage = mock<StorageGateway>()
         val csvFormatter = mock<CsvFormatter>()
+        val pathBuilder = DispatchPathBuilder("prod")
 
         val config = DispatchConfig("cfg1", DispatchMode.QTY, "default", "bom",
             listOf(SiteTarget("A", BigDecimal("100"))), null)
@@ -124,10 +125,11 @@ class DispatchHandlersTest {
             SimulationResult(emptyList(), emptyMap(), emptyMap()),
         )
         whenever(csvFormatter.format(any(), any(), any())).thenReturn(byteArrayOf())
+        whenever(resultStore.findBatchStatus("20260329060000")).thenReturn(BatchStatus.NORMAL)
 
         val handler = DispatchSimulationHandler(
             configRepo, candidateQuery, baselineProvider, simulationEngine,
-            resultStore, storage, csvFormatter, objectMapper,
+            resultStore, storage, csvFormatter, pathBuilder, objectMapper,
         )
 
         val item = objectMapper.writeValueAsString(mapOf("configId" to "cfg1", "batchToken" to "20260329060000"))
@@ -136,7 +138,7 @@ class DispatchHandlersTest {
         )
 
         verify(resultStore).saveDecisions(eq("20260329060000"), eq("cfg1"), any())
-        verify(storage).uploadCsv(eq("dispatch/20260329060000/simulation/cfg1.csv.gz"), any())
+        verify(storage).uploadCsv(eq("env=prod/mode=normal/dispatch/20260329060000/simulation/cfg1.csv.gz"), any())
         assertNotNull(output.result)
     }
 

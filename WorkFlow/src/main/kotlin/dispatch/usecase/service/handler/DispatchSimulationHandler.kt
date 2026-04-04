@@ -1,6 +1,7 @@
 package com.workflow.dispatch.usecase.service.handler
 
 import com.fasterxml.jackson.databind.ObjectMapper
+import com.workflow.dispatch.adapter.storage.DispatchPathBuilder
 import com.workflow.dispatch.usecase.port.outbound.persistence.BaselineProvider
 import com.workflow.dispatch.usecase.port.outbound.persistence.CandidateRepository
 import com.workflow.dispatch.usecase.port.outbound.persistence.DispatchConfigRepository
@@ -24,6 +25,7 @@ class DispatchSimulationHandler(
     private val resultStore: SimulationResultStore,
     private val storage: StorageGateway,
     private val csvFormatter: CsvFormatter,
+    private val pathBuilder: DispatchPathBuilder,
     private val objectMapper: ObjectMapper,
 ) : TransitionHandler {
 
@@ -42,11 +44,14 @@ class DispatchSimulationHandler(
 
         resultStore.saveDecisions(batchToken, configId, result.decisions)
 
+        val batchStatus = resultStore.findBatchStatus(batchToken)
+        val csvPath = pathBuilder.csvPath(batchStatus, batchToken, configId)
+
         val csv = csvFormatter.format(batchToken, configId, result.decisions)
         val tmpFile = Files.createTempFile("dispatch-$configId-", ".csv.gz").toFile()
         try {
             GZIPOutputStream(tmpFile.outputStream()).use { it.write(csv) }
-            storage.uploadCsv("dispatch/$batchToken/simulation/$configId.csv.gz", tmpFile)
+            storage.uploadCsv(csvPath, tmpFile)
         } finally {
             tmpFile.delete()
         }
