@@ -8,4 +8,5 @@ interface SimulationResultStore {
     suspend fun findBatchStatus(batchToken: String): BatchStatus
     suspend fun saveDecisions(batchToken: String, configId: String, decisions: List<DispatchDecision>)
     suspend fun findByBatchToken(batchToken: String): List<DispatchDecision>
+    suspend fun findByBatchTokenAndConfigs(batchToken: String, configIds: List<String>): List<DispatchDecision>
 }

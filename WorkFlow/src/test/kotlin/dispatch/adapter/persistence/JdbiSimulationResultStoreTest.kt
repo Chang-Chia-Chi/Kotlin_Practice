@@ -162,4 +162,53 @@ class JdbiSimulationResultStoreTest {
 
         assertTrue(prodResult.isEmpty(), "Stg writes must not appear in prod reads")
     }
+
+    // ── findByBatchTokenAndConfigs ───────────────────────────────────────
+
+    @Test
+    fun `findByBatchTokenAndConfigs filters by config IDs`() = runTest {
+        store.createBatch("batch-filter", BatchStatus.NORMAL, 2)
+        store.saveDecisions("batch-filter", "cfg1", listOf(
+            DispatchDecision(1, "P1", "BOM-A", 10, "SITE-X", null, BigDecimal("5.0"), null),
+        ))
+        store.saveDecisions("batch-filter", "cfg2", listOf(
+            DispatchDecision(1, "P2", "BOM-B", 8, "SITE-Y", null, BigDecimal("3.0"), null),
+        ))
+
+        val found = store.findByBatchTokenAndConfigs("batch-filter", listOf("cfg1"))
+
+        assertEquals(1, found.size)
+        assertEquals("P1", found[0].productId)
+    }
+
+    @Test
+    fun `findByBatchTokenAndConfigs with empty list returns empty`() = runTest {
+        store.createBatch("batch-empty-filter", BatchStatus.NORMAL, 1)
+        store.saveDecisions("batch-empty-filter", "cfg1", listOf(
+            DispatchDecision(1, "P1", "BOM-A", 10, "SITE-X", null, BigDecimal("5.0"), null),
+        ))
+
+        val found = store.findByBatchTokenAndConfigs("batch-empty-filter", emptyList())
+
+        assertEquals(emptyList(), found)
+    }
+
+    @Test
+    fun `findByBatchTokenAndConfigs orders by config then dispatch_order`() = runTest {
+        store.createBatch("batch-order", BatchStatus.NORMAL, 2)
+        store.saveDecisions("batch-order", "cfg-b", listOf(
+            DispatchDecision(2, "P-B2", "BOM-B", 4, "SITE-Y", null, BigDecimal("2.0"), null),
+            DispatchDecision(1, "P-B1", "BOM-B", 8, "SITE-Y", null, BigDecimal("3.0"), null),
+        ))
+        store.saveDecisions("batch-order", "cfg-a", listOf(
+            DispatchDecision(1, "P-A1", "BOM-A", 10, "SITE-X", null, BigDecimal("5.0"), null),
+        ))
+
+        val found = store.findByBatchTokenAndConfigs("batch-order", listOf("cfg-a", "cfg-b"))
+
+        assertEquals(3, found.size)
+        assertEquals("P-A1", found[0].productId)
+        assertEquals("P-B1", found[1].productId)
+        assertEquals("P-B2", found[2].productId)
+    }
 }

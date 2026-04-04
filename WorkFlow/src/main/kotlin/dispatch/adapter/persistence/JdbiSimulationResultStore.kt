@@ -84,6 +84,39 @@ class JdbiSimulationResultStore(
         }
     }
 
+    override suspend fun findByBatchTokenAndConfigs(
+        batchToken: String,
+        configIds: List<String>,
+    ): List<DispatchDecision> {
+        if (configIds.isEmpty()) return emptyList()
+        return jdbi.withHandleSuspend<List<DispatchDecision>, Exception> { h ->
+            h.createQuery(
+                """SELECT dispatch_order, product_id, source_bom_id, qty,
+                          target_site_id, target_bom_id, site_gap, bom_gap
+                   FROM $eventTable
+                   WHERE batch_token = :token AND config_id IN (<configIds>)
+                   ORDER BY config_id, dispatch_order"""
+            )
+                .bind("token", batchToken)
+                .bindList("configIds", configIds)
+                .mapToMap()
+                .list()
+                .map { rawRow ->
+                    val row = caseInsensitive(rawRow)
+                    DispatchDecision(
+                        dispatchOrder = (row["dispatch_order"] as Number).toInt(),
+                        productId = row["product_id"] as String,
+                        sourceBomId = row["source_bom_id"] as String,
+                        qty = (row["qty"] as Number).toInt(),
+                        targetSiteId = row["target_site_id"] as String,
+                        targetBomId = row["target_bom_id"] as String?,
+                        siteGap = row["site_gap"] as BigDecimal,
+                        bomGap = row["bom_gap"] as BigDecimal?,
+                    )
+                }
+        }
+    }
+
     override suspend fun findByBatchToken(batchToken: String): List<DispatchDecision> {
         return jdbi.withHandleSuspend<List<DispatchDecision>, Exception> { h ->
             h.createQuery(
