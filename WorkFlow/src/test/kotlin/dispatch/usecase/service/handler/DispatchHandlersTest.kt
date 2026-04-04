@@ -137,13 +137,15 @@ class DispatchHandlersTest {
             HandlerInput("t1", "w1", 2, null, item),
         )
 
-        verify(resultStore).saveDecisions(eq("20260329060000"), eq("cfg1"), any())
+        val order = inOrder(resultStore)
+        order.verify(resultStore).saveDecisions(eq("20260329060000"), eq("cfg1"), any())
+        order.verify(resultStore).findBatchStatus(eq("20260329060000"))
         verify(storage).uploadCsv(eq("env=prod/mode=normal/dispatch/20260329060000/simulation/cfg1.csv.gz"), any())
         assertNotNull(output.result)
     }
 
     @Test
-    fun `simulation handler uploads CSV to env-aware path`() = runTest {
+    fun `simulation handler uses env from pathBuilder in CSV path`() = runTest {
         val configRepo = mock<DispatchConfigRepository>()
         val candidateQuery = mock<CandidateRepository>()
         val baselineProvider = mock<BaselineProvider>()
@@ -151,7 +153,7 @@ class DispatchHandlersTest {
         val resultStore = mock<SimulationResultStore>()
         val storage = mock<StorageGateway>()
         val csvFormatter = mock<CsvFormatter>()
-        val pathBuilder = DispatchPathBuilder("prod")
+        val pathBuilder = DispatchPathBuilder("staging")
 
         val config = DispatchConfig("cfg1", DispatchMode.QTY, "default", "bom",
             listOf(SiteTarget("A", BigDecimal("100"))), null)
@@ -172,7 +174,7 @@ class DispatchHandlersTest {
         val item = objectMapper.writeValueAsString(mapOf("configId" to "cfg1", "batchToken" to "20260329060000"))
         handler.execute(HandlerInput("t1", "w1", 2, null, item))
 
-        verify(storage).uploadCsv(eq("env=prod/mode=normal/dispatch/20260329060000/simulation/cfg1.csv.gz"), any())
+        verify(storage).uploadCsv(eq("env=staging/mode=normal/dispatch/20260329060000/simulation/cfg1.csv.gz"), any())
     }
 
     @Test
