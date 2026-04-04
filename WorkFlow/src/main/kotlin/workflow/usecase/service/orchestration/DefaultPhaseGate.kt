@@ -82,6 +82,11 @@ class DefaultPhaseGate(
             val seqInfo = sequenceMap[sequenceNumber]
                 ?: throw IllegalStateException("Seq $sequenceNumber not in definition for $workflowId")
 
+            // Pre-fetch all task counts and tasks for this workflow (eliminates N+1)
+            val allCounts = taskRepo.countStatusSummariesByWorkflowWithHandle(handle, workflowId)
+            val tasksBySeq = taskRepo.findByWorkflowIdWithHandle(handle, workflowId)
+                .groupBy { it.sequenceNumber }
+
             val now = Instant.now().truncatedTo(ChronoUnit.MICROS)
             val signalQueueSet = mutableSetOf<String>()
             val completionCheckSeqs = mutableSetOf<Int>()
@@ -125,8 +130,9 @@ class DefaultPhaseGate(
 
             // Step 3c: PARALLEL phase -- evaluate JoinPolicy before successor dispatch
             if (seqInfo.phaseType == PhaseType.PARALLEL) {
-                val completedCount = taskRepo.countCompletedWithHandle(handle, workflowId, sequenceNumber)
-                val totalCount = taskRepo.countTotalWithHandle(handle, workflowId, sequenceNumber)
+                val counts = allCounts[sequenceNumber] ?: TaskStatusCounts(0, 0, 0, 0)
+                val completedCount = counts.completed
+                val totalCount = counts.total
                 val scatterActName = seqInfo.activityName.removeSuffix(".__parallel__")
                 val scatterActivity = definition.activities[scatterActName]
                 val joinPolicy = scatterActivity?.fanOut?.joinPolicy ?: JoinPolicy.All
@@ -162,11 +168,12 @@ class DefaultPhaseGate(
                 val sSeq = successor.sequenceNumber
 
                 // a. Dispatch guard: task already exists at this sequence
-                if (taskRepo.countTotalWithHandle(handle, workflowId, sSeq) > 0) continue
+                //    (safe with pre-fetched data: DAG traversal evaluates each sequence at most once)
+                if ((allCounts[sSeq]?.total ?: 0) > 0) continue
 
                 // b. Predecessor gate: all predecessor sequences must be terminal
                 val allPredTerminal = successor.predecessorSequences.all { predSeq ->
-                    taskRepo.countNonTerminalWithHandle(handle, workflowId, predSeq) == 0
+                    (allCounts[predSeq]?.nonTerminal ?: 0) == 0
                 }
                 if (!allPredTerminal) continue
 
@@ -174,7 +181,7 @@ class DefaultPhaseGate(
                 val edgeTaken = if (forceDefaultBranch) {
                     hasDefaultBranchEdge(successor, definition)
                 } else {
-                    isAnyEdgeTaken(handle, workflowId, successor, sequenceMap, definition)
+                    isAnyEdgeTaken(tasksBySeq, successor, sequenceMap, definition)
                 }
 
                 if (edgeTaken) {
@@ -250,13 +257,18 @@ class DefaultPhaseGate(
             val now = Instant.now().truncatedTo(ChronoUnit.MICROS)
             val signalQueueSet = mutableSetOf<String>()
 
+            // Pre-fetch all task counts and tasks (eliminates N+1)
+            val allCounts = taskRepo.countStatusSummariesByWorkflowWithHandle(handle, workflowId)
+            val tasksBySeq = taskRepo.findByWorkflowIdWithHandle(handle, workflowId)
+                .groupBy { it.sequenceNumber }
+
             for ((seq, seqInfo) in sequenceMap.entries.sortedBy { it.key }) {
-                if (taskRepo.countTotalWithHandle(handle, workflowId, seq) > 0) continue
+                if ((allCounts[seq]?.total ?: 0) > 0) continue
 
                 val allPredTerminal = seqInfo.predecessorSequences.isEmpty() ||
                     seqInfo.predecessorSequences.all { predSeq ->
-                        taskRepo.countTotalWithHandle(handle, workflowId, predSeq) > 0 &&
-                            taskRepo.countNonTerminalWithHandle(handle, workflowId, predSeq) == 0
+                        (allCounts[predSeq]?.total ?: 0) > 0 &&
+                            (allCounts[predSeq]?.nonTerminal ?: 0) == 0
                     }
                 if (!allPredTerminal) continue
 
@@ -270,7 +282,7 @@ class DefaultPhaseGate(
                     }
                     PhaseType.PARALLEL -> continue
                     PhaseType.LINEAR -> {
-                        val edgeTaken = isAnyEdgeTaken(handle, workflowId, seqInfo, sequenceMap, definition)
+                        val edgeTaken = isAnyEdgeTaken(tasksBySeq, seqInfo, sequenceMap, definition)
                         if (edgeTaken || seqInfo.predecessorSequences.isEmpty()) {
                             val task = createTaskForActivity(
                                 workflowId, seqInfo.activityName, seq, seqInfo.activity, now,
@@ -287,13 +299,14 @@ class DefaultPhaseGate(
                 }
             }
 
-            // Completion / failure check
+            // Completion / failure check -- must query DB to see newly inserted tasks
             val globalNonTerminal = taskRepo.countAllNonTerminalWithHandle(handle, workflowId)
             if (globalNonTerminal == 0) {
+                // allCounts is safe: recovery only inserts PENDING/SKIPPED tasks, never FAILED
                 val abortFailure = sequenceMap.entries.any { (seq, seqInfo) ->
                     seqInfo.phaseType != PhaseType.PARALLEL &&
                         seqInfo.activity.failurePolicy == FailurePolicy.ABORT &&
-                        taskRepo.countFailedWithHandle(handle, workflowId, seq) > 0
+                        (allCounts[seq]?.failed ?: 0) > 0
                 }
                 val terminalStatus = if (abortFailure) WorkflowStatus.FAILED else WorkflowStatus.COMPLETED
                 workflowRepo.updateStatusWithHandle(
@@ -402,8 +415,7 @@ class DefaultPhaseGate(
      * - Predecessor FAILED with BEST_EFFORT policy and edge label is DEFAULT_BRANCH
      */
     private fun isAnyEdgeTaken(
-        handle: Handle,
-        workflowId: String,
+        tasksBySeq: Map<Int, List<Task>>,
         successor: SequenceInfo,
         sequenceMap: Map<Int, SequenceInfo>,
         definition: WorkflowDefinition,
@@ -420,7 +432,7 @@ class DefaultPhaseGate(
                     name == predActName && (si.phaseType == PhaseType.PARALLEL || si.phaseType == PhaseType.LINEAR)
                 }?.sequenceNumber ?: continue
 
-            val predTasks = taskRepo.findByWorkflowAndSequenceWithHandle(handle, workflowId, predOutputSeq)
+            val predTasks = tasksBySeq[predOutputSeq] ?: continue
             for (predTask in predTasks) {
                 for (edge in edgesToTarget) {
                     if (isEdgeTaken(predTask, edge.label, predActivity.failurePolicy)) return true
