@@ -34,4 +34,5 @@ interface TaskRepository {
     fun findDistinctQueuesByWorkflowId(handle: Handle, workflowId: String, statuses: List<String>): List<String>
     fun countStatusSummariesByWorkflowWithHandle(handle: Handle, workflowId: String): Map<Int, TaskStatusCounts>
     fun findByWorkflowIdWithHandle(handle: Handle, workflowId: String): List<Task>
+    fun cancelTasksForOverdueWorkflowsWithHandle(handle: Handle, now: java.time.LocalDateTime): Int
 }

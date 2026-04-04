@@ -72,15 +72,6 @@ class JdbiWorkflowRepository(private val jdbi: Jdbi) : WorkflowRepository {
                 .map(::mapWorkflowRow)
         }
 
-    override suspend fun findTimedOut(): List<WorkflowRun> =
-        jdbi.withHandleSuspend<List<WorkflowRun>, Exception> { h: Handle ->
-            h.createQuery("SELECT * FROM workflow WHERE status = 'RUNNING' AND deadline_at < :now")
-                .bind("now", LocalDateTime.now(ZoneOffset.UTC).truncatedTo(ChronoUnit.MICROS))
-                .mapToMap()
-                .list()
-                .map(::mapWorkflowRow)
-        }
-
     override fun insertWithHandle(handle: Handle, run: WorkflowRun) {
         handle.createUpdate(
             """
@@ -168,6 +159,14 @@ class JdbiWorkflowRepository(private val jdbi: Jdbi) : WorkflowRepository {
             .one()
         return existingId to false
     }
+
+    override fun expireOverdueWithHandle(handle: Handle, now: LocalDateTime): Int =
+        handle.createUpdate(
+            """
+            UPDATE workflow SET status = 'TIMED_OUT', updated_at = :now
+            WHERE status = 'RUNNING' AND deadline_at < :now
+            """,
+        ).bind("now", now).execute()
 
     private fun mapWorkflowRow(row: Map<String, Any?>): WorkflowRun {
         val ci = caseInsensitive(row)

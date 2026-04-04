@@ -453,6 +453,19 @@ class JdbiTaskRepository(
             .list()
             .map(::mapTaskRow)
 
+    // Only cancels PENDING/WAITING_FOR_SIGNAL tasks. PROCESSING tasks are left alone —
+    // they will be handled by subsequent expireOverdueTasks/reclaimStaleTasks sweeps.
+    override fun cancelTasksForOverdueWorkflowsWithHandle(handle: Handle, now: LocalDateTime): Int =
+        handle.createUpdate(
+            """
+            UPDATE task SET status = 'CANCELLED', completed_at = :now
+            WHERE status IN ('PENDING', 'WAITING_FOR_SIGNAL')
+              AND workflow_id IN (
+                SELECT id FROM workflow WHERE status = 'RUNNING' AND deadline_at < :now
+              )
+            """,
+        ).bind("now", now).execute()
+
     // -- Private helpers --
 
     private fun bindNullableClob(
