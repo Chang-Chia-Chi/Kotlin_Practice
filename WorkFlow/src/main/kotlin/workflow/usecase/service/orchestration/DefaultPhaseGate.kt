@@ -11,6 +11,7 @@ import com.workflow.workflow.model.PhaseType
 import com.workflow.workflow.model.SequenceInfo
 import com.workflow.workflow.model.Task
 import com.workflow.workflow.model.TaskStatus
+import com.workflow.workflow.model.TaskStatusCounts
 import com.workflow.workflow.model.WorkflowDefinition
 import com.workflow.workflow.model.WorkflowStatus
 import com.workflow.workflow.model.buildSequenceMap
@@ -77,9 +78,7 @@ class DefaultPhaseGate(
 
             val definition = objectMapper.readValue<WorkflowDefinition>(workflow.definitionJson)
             val sequenceMap = buildSequenceMap(definition)
-            val seqByName: Map<String, SequenceInfo> = sequenceMap.values
-                .filter { it.phaseType != PhaseType.PARALLEL }
-                .associateBy { it.activityName }
+            val seqByName = buildSeqByName(sequenceMap)
             val seqInfo = sequenceMap[sequenceNumber]
                 ?: throw IllegalStateException("Seq $sequenceNumber not in definition for $workflowId")
 
@@ -247,9 +246,7 @@ class DefaultPhaseGate(
 
             val definition = objectMapper.readValue<WorkflowDefinition>(workflow.definitionJson)
             val sequenceMap = buildSequenceMap(definition)
-            val seqByName: Map<String, SequenceInfo> = sequenceMap.values
-                .filter { it.phaseType != PhaseType.PARALLEL }
-                .associateBy { it.activityName }
+            val seqByName = buildSeqByName(sequenceMap)
             val now = Instant.now().truncatedTo(ChronoUnit.MICROS)
             val signalQueueSet = mutableSetOf<String>()
 
@@ -354,6 +351,11 @@ class DefaultPhaseGate(
     }
 
     // -- DAG navigation helpers -----------------------------------------------
+
+    private fun buildSeqByName(sequenceMap: Map<Int, SequenceInfo>): Map<String, SequenceInfo> =
+        sequenceMap.values
+            .filter { it.phaseType != PhaseType.PARALLEL }
+            .associateBy { it.activityName }
 
     /**
      * Returns the [SequenceInfo] entries for all successor activities of the given sequence.
