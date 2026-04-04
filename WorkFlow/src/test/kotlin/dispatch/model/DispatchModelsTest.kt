@@ -3,6 +3,8 @@ package com.workflow.dispatch.model
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
 import java.math.BigDecimal
+import java.time.LocalDateTime
+import java.time.temporal.ChronoUnit
 import kotlin.test.assertEquals
 
 class DispatchModelsTest {
@@ -41,5 +43,27 @@ class DispatchModelsTest {
     @Test
     fun `DispatchMode has QTY and RATIO`() {
         assertEquals(2, DispatchMode.entries.size)
+    }
+
+    @Test
+    fun `BatchStatus has NORMAL and DRYRUN values`() {
+        assertEquals(BatchStatus.NORMAL, BatchStatus.valueOf("NORMAL"))
+        assertEquals(BatchStatus.DRYRUN, BatchStatus.valueOf("DRYRUN"))
+        assertEquals(2, BatchStatus.entries.size)
+    }
+
+    @Test
+    fun `DispatchBatch holds batch metadata`() {
+        val now = LocalDateTime.now().truncatedTo(ChronoUnit.MICROS)
+        val batch = DispatchBatch(
+            batchToken = "20260403060000",
+            status = BatchStatus.NORMAL,
+            createdAt = now,
+            configCount = 3,
+        )
+        assertEquals("20260403060000", batch.batchToken)
+        assertEquals(BatchStatus.NORMAL, batch.status)
+        assertEquals(now, batch.createdAt)
+        assertEquals(3, batch.configCount)
     }
 }
