@@ -29,20 +29,18 @@ class GapBasedDispatchAlgorithm(
             val current = siteCurrents[st.siteId] ?: BigDecimal.ZERO
             GapEntry(st.siteId, gapComputer.computeGap(current, st.target, total), st.target)
         }
-        val siteId = selectByGap(siteEntries, lastSiteId) ?: return TargetSelection.NoTarget
-        val siteGap = siteEntries.first { it.id == siteId }.gap
+        val siteEntry = selectByGap(siteEntries, lastSiteId) ?: return TargetSelection.NoTarget
 
-        val bomMapping = bomMappings?.get(siteId)
-            ?: return TargetSelection.Selected(siteId, null, null, siteGap, null)
+        val bomMapping = bomMappings?.get(siteEntry.id)
+            ?: return TargetSelection.Selected(siteEntry.id, null, null, siteEntry.gap, null)
 
-        val bomTotal = siteCurrents[siteId] ?: BigDecimal.ZERO
+        val bomTotal = siteCurrents[siteEntry.id] ?: BigDecimal.ZERO
         val bomEntries = bomMapping.targetAllocations.map { alloc ->
-            val bomCurrent = bomCurrents[SiteBomKey(siteId, alloc.targetBomId)] ?: BigDecimal.ZERO
+            val bomCurrent = bomCurrents[SiteBomKey(siteEntry.id, alloc.targetBomId)] ?: BigDecimal.ZERO
             GapEntry(alloc.targetBomId, gapComputer.computeGap(bomCurrent, alloc.target, bomTotal), alloc.target)
         }
-        val targetBomId = selectByGap(bomEntries, lastBomId) ?: return TargetSelection.NoTarget
-        val bomGap = bomEntries.first { it.id == targetBomId }.gap
+        val bomEntry = selectByGap(bomEntries, lastBomId) ?: return TargetSelection.NoTarget
 
-        return TargetSelection.Selected(siteId, targetBomId, bomMapping.sourceBomId, siteGap, bomGap)
+        return TargetSelection.Selected(siteEntry.id, bomEntry.id, bomMapping.sourceBomId, siteEntry.gap, bomEntry.gap)
     }
 }

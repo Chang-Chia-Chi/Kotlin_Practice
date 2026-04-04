@@ -8,14 +8,11 @@ data class GapEntry(
     val target: BigDecimal,
 )
 
-fun selectByGap(entries: List<GapEntry>, lastSelected: String?): String? {
+fun selectByGap(entries: List<GapEntry>, lastSelected: String?): GapEntry? {
     if (entries.isEmpty()) return null
-    return entries
-        .sortedWith(
-            compareBy<GapEntry> { it.gap }
-                .thenByDescending { it.target }
-                .thenBy { it.id == lastSelected },
-        )
-        .first()
-        .id
+    return entries.minWithOrNull(
+        compareBy<GapEntry> { it.gap }
+            .thenByDescending { it.target }
+            .thenBy { it.id == lastSelected },
+    )
 }

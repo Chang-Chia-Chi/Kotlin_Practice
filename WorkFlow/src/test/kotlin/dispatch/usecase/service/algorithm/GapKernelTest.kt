@@ -13,7 +13,9 @@ class GapKernelTest {
             GapEntry("A", BigDecimal("-10"), BigDecimal("50")),
             GapEntry("B", BigDecimal("-20"), BigDecimal("50")),
         )
-        assertEquals("B", selectByGap(entries, null))
+        val result = selectByGap(entries, null)
+        assertEquals("B", result?.id)
+        assertEquals(BigDecimal("-20"), result?.gap)
     }
 
     @Test
@@ -22,7 +24,7 @@ class GapKernelTest {
             GapEntry("A", BigDecimal("-10"), BigDecimal("30")),
             GapEntry("B", BigDecimal("-10"), BigDecimal("50")),
         )
-        assertEquals("B", selectByGap(entries, null))
+        assertEquals("B", selectByGap(entries, null)?.id)
     }
 
     @Test
@@ -31,8 +33,8 @@ class GapKernelTest {
             GapEntry("A", BigDecimal("-10"), BigDecimal("50")),
             GapEntry("B", BigDecimal("-10"), BigDecimal("50")),
         )
-        assertEquals("B", selectByGap(entries, "A"))
-        assertEquals("A", selectByGap(entries, "B"))
+        assertEquals("B", selectByGap(entries, "A")?.id)
+        assertEquals("A", selectByGap(entries, "B")?.id)
     }
 
     @Test
@@ -46,7 +48,6 @@ class GapKernelTest {
             GapEntry("A", BigDecimal("-5"), BigDecimal("50")),
             GapEntry("B", BigDecimal("-20"), BigDecimal("50")),
         )
-        // B has lower gap, sticky on A should not override
-        assertEquals("B", selectByGap(entries, "A"))
+        assertEquals("B", selectByGap(entries, "A")?.id)
     }
 }
