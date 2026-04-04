@@ -77,6 +77,9 @@ class DefaultPhaseGate(
 
             val definition = objectMapper.readValue<WorkflowDefinition>(workflow.definitionJson)
             val sequenceMap = buildSequenceMap(definition)
+            val seqByName: Map<String, SequenceInfo> = sequenceMap.values
+                .filter { it.phaseType != PhaseType.PARALLEL }
+                .associateBy { it.activityName }
             val seqInfo = sequenceMap[sequenceNumber]
                 ?: throw IllegalStateException("Seq $sequenceNumber not in definition for $workflowId")
 
@@ -153,7 +156,7 @@ class DefaultPhaseGate(
 
             // Step 4: Successor evaluation
             val evalQueue = ArrayDeque<SequenceInfo>()
-            evalQueue += successorsOf(seqInfo, sequenceMap, definition)
+            evalQueue += successorsOf(seqInfo, seqByName, definition)
 
             while (evalQueue.isNotEmpty()) {
                 val successor = evalQueue.removeFirst()
@@ -204,7 +207,7 @@ class DefaultPhaseGate(
                         completionCheckSeqs += sSeq
                     } else {
                         // Cascade skip: add this successor's successors to the eval queue
-                        evalQueue += successorsOf(successor, sequenceMap, definition)
+                        evalQueue += successorsOf(successor, seqByName, definition)
                     }
                 }
             }
@@ -244,6 +247,9 @@ class DefaultPhaseGate(
 
             val definition = objectMapper.readValue<WorkflowDefinition>(workflow.definitionJson)
             val sequenceMap = buildSequenceMap(definition)
+            val seqByName: Map<String, SequenceInfo> = sequenceMap.values
+                .filter { it.phaseType != PhaseType.PARALLEL }
+                .associateBy { it.activityName }
             val now = Instant.now().truncatedTo(ChronoUnit.MICROS)
             val signalQueueSet = mutableSetOf<String>()
 
@@ -356,15 +362,13 @@ class DefaultPhaseGate(
      */
     private fun successorsOf(
         seqInfo: SequenceInfo,
-        sequenceMap: Map<Int, SequenceInfo>,
+        seqByName: Map<String, SequenceInfo>,
         definition: WorkflowDefinition,
     ): List<SequenceInfo> {
         val actName = seqInfo.activityName.removeSuffix(".__parallel__")
         val activity = definition.activities[actName] ?: return emptyList()
         return activity.successors.mapNotNull { edge ->
-            sequenceMap.values.firstOrNull {
-                it.activityName == edge.target && it.phaseType != PhaseType.PARALLEL
-            }
+            seqByName[edge.target]
         }.distinctBy { it.sequenceNumber }
     }
 
