@@ -4,17 +4,6 @@ import kotlin.test.Test
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
-/**
- * Tests for [KubernetesDetector] functional interface and [EnvKubernetesDetector].
- *
- * Note on [EnvKubernetesDetector]: It reads `System.getenv("KUBERNETES_SERVICE_HOST")`,
- * which is set by the Kubernetes runtime. In a test environment (not running in K8s),
- * this env var is absent, so `isRunningInKubernetes()` returns false. We cannot
- * reliably set env vars in a unit test without JVM tricks (e.g., reflection on
- * ProcessEnvironment), which is fragile across JVM versions. Instead, we:
- *   1. Test the actual [EnvKubernetesDetector] in the local (non-K8s) environment.
- *   2. Test the functional interface contract with explicit true/false lambdas.
- */
 class KubernetesDetectorTest {
 
     // -- Functional interface contract ----------------------------------------

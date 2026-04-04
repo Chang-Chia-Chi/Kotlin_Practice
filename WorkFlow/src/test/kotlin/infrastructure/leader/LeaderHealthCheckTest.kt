@@ -1,6 +1,5 @@
 package com.workflow.infrastructure.leader
 
-import com.workflow.infrastructure.leader.LeaderElectionConfig
 import org.eclipse.microprofile.health.HealthCheckResponse
 import org.junit.jupiter.api.Test
 import org.mockito.kotlin.mock

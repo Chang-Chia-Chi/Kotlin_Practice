@@ -1,6 +1,6 @@
 package com.workflow.infrastructure.leader
 
-import com.workflow.infrastructure.leader.LeaderElectionConfig as WorkflowLeaderElectionConfig
+import com.workflow.infrastructure.leader.LeaderElectionConfig as AppLeaderElectionConfig
 import com.workflow.infrastructure.shutdown.ShutdownConfig
 import com.workflow.worker.config.WorkerLoopConfig
 import io.fabric8.kubernetes.api.model.coordination.v1.Lease
@@ -17,10 +17,13 @@ import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import io.quarkus.runtime.StartupEvent
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.runBlocking
 import org.awaitility.kotlin.await
 import org.awaitility.kotlin.untilAsserted
+import org.junit.jupiter.api.AfterEach
 import org.mockito.kotlin.any
 import org.mockito.kotlin.argThat
 import org.mockito.kotlin.argumentCaptor
@@ -40,9 +43,6 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
-import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.Job
-import org.junit.jupiter.api.AfterEach
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class LeaderManagerTest {
@@ -54,7 +54,7 @@ class LeaderManagerTest {
         whenever(it.id()).thenReturn("worker-1")
     }
     private val shutdownConfig = mock<ShutdownConfig>()
-    private val leaderElectionConfig = mock<WorkflowLeaderElectionConfig>().also {
+    private val leaderElectionConfig = mock<AppLeaderElectionConfig>().also {
         whenever(it.namespace()).thenReturn("test-ns")
         whenever(it.leaseName()).thenReturn("test-lease")
         whenever(it.leaseDuration()).thenReturn(Duration.ofSeconds(15))
@@ -83,13 +83,6 @@ class LeaderManagerTest {
         return manager
     }
 
-    /**
-     * Mocks the K8s leaderElector() chain and captures the LeaderElectionConfig
-     * so tests can extract and invoke LeaderCallbacks.
-     *
-     * @param onRunInvoked called when leaderElector.run() is invoked, receives
-     *        the captured [LeaderElectionConfig] to let the test trigger callbacks.
-     */
     @Suppress("UNCHECKED_CAST")
     private fun mockLeaderElectorChain(
         onRunInvoked: (LeaderElectionConfig) -> Unit = {},
@@ -110,11 +103,6 @@ class LeaderManagerTest {
         }.whenever(leaderElector).run()
     }
 
-    /**
-     * Mocks the K8s leases() API chain for readLeaseTransitions and releaseLeaseExplicitly.
-     *
-     * @return the mock [Resource] for further stubbing of .get() and .patch()
-     */
     @Suppress("UNCHECKED_CAST")
     private fun mockLeasesApi(): Resource<Lease> {
         val leaseResource = mock<Resource<Lease>>()
@@ -130,9 +118,6 @@ class LeaderManagerTest {
         return leaseResource
     }
 
-    /**
-     * Creates a [Lease] with the given [leaseTransitions] and optional [holderIdentity].
-     */
     private fun leaseWithTransitions(
         leaseTransitions: Int,
         holderIdentity: String? = null,
@@ -143,6 +128,33 @@ class LeaderManagerTest {
         val lease = Lease()
         lease.spec = spec
         return lease
+    }
+
+    /**
+     * Boots a K8s-mode [LeaderManager], waits for the election loop to start, and returns
+     * the manager together with the captured [LeaderCallbacks] so tests can drive state transitions.
+     */
+    private fun startK8sManagerWithCallbacks(
+        lease: Lease?,
+        leaseResource: Resource<Lease> = mockLeasesApi(),
+        onRunInvoked: ((LeaderElectionConfig) -> Unit)? = null,
+    ): Pair<LeaderManager, LeaderCallbacks> {
+        whenever(leaseResource.get()).thenReturn(lease)
+
+        val callbacksReceived = CompletableDeferred<LeaderCallbacks>()
+        mockLeaderElectorChain { electionConfig ->
+            callbacksReceived.complete(electionConfig.leaderCallbacks)
+            onRunInvoked?.invoke(electionConfig) ?: Thread.sleep(2000)
+        }
+
+        val manager = createManager(detector = KubernetesDetector { true })
+        manager.onStart(startupEvent)
+
+        await.atMost(5, TimeUnit.SECONDS).untilAsserted {
+            assertTrue(callbacksReceived.isCompleted)
+        }
+
+        return manager to callbacksReceived.getCompleted()
     }
 
     // -- A. Non-Kubernetes Fallback -------------------------------------------
@@ -250,22 +262,6 @@ class LeaderManagerTest {
     // -- E. Metrics -----------------------------------------------------------
 
     @Test
-    fun `onStart registers leader_election_is_leader gauge`() {
-        val manager = createManager(detector = KubernetesDetector { false })
-        manager.onStart(startupEvent)
-
-        assertNotNull(meterRegistry.find("leader_election_is_leader").gauge())
-    }
-
-    @Test
-    fun `onStart registers leader_election_epoch gauge`() {
-        val manager = createManager(detector = KubernetesDetector { false })
-        manager.onStart(startupEvent)
-
-        assertNotNull(meterRegistry.find("leader_election_epoch").gauge())
-    }
-
-    @Test
     fun `is_leader gauge returns 1 when active and 0 when not`() = runBlocking<Unit> {
         val manager = createManager(
             detector = KubernetesDetector { false },
@@ -318,24 +314,8 @@ class LeaderManagerTest {
 
     @Test
     fun `onAcquire callback sets isActive true and token from leaseTransitions`() {
-        val leaseResource = mockLeasesApi()
-        whenever(leaseResource.get()).thenReturn(leaseWithTransitions(7))
+        val (manager, callbacks) = startK8sManagerWithCallbacks(leaseWithTransitions(7))
 
-        val callbacksReceived = CompletableDeferred<LeaderCallbacks>()
-        mockLeaderElectorChain { electionConfig ->
-            callbacksReceived.complete(electionConfig.leaderCallbacks)
-            // Block until the test completes to keep the election "running"
-            Thread.sleep(2000)
-        }
-
-        val manager = createManager(detector = KubernetesDetector { true })
-        manager.onStart(startupEvent)
-
-        await.atMost(5, TimeUnit.SECONDS).untilAsserted {
-            assertTrue(callbacksReceived.isCompleted)
-        }
-
-        val callbacks = callbacksReceived.getCompleted()
         callbacks.onStartLeading()
 
         assertTrue(manager.isActive)
@@ -344,29 +324,12 @@ class LeaderManagerTest {
 
     @Test
     fun `onLose callback sets isActive false but retains epoch`() {
-        val leaseResource = mockLeasesApi()
-        whenever(leaseResource.get()).thenReturn(leaseWithTransitions(5))
+        val (manager, callbacks) = startK8sManagerWithCallbacks(leaseWithTransitions(5))
 
-        val callbacksReceived = CompletableDeferred<LeaderCallbacks>()
-        mockLeaderElectorChain { electionConfig ->
-            callbacksReceived.complete(electionConfig.leaderCallbacks)
-            Thread.sleep(2000)
-        }
-
-        val manager = createManager(detector = KubernetesDetector { true })
-        manager.onStart(startupEvent)
-
-        await.atMost(5, TimeUnit.SECONDS).untilAsserted {
-            assertTrue(callbacksReceived.isCompleted)
-        }
-
-        val callbacks = callbacksReceived.getCompleted()
-        // First acquire
         callbacks.onStartLeading()
         assertTrue(manager.isActive)
         assertEquals(5L, manager.token)
 
-        // Then lose
         callbacks.onStopLeading()
         assertFalse(manager.isActive)
         assertEquals(5L, manager.token, "Epoch should be retained after losing leadership")
@@ -374,30 +337,11 @@ class LeaderManagerTest {
 
     @Test
     fun `epoch ordering - token is set before isActive becomes true`() {
-        val leaseResource = mockLeasesApi()
-        whenever(leaseResource.get()).thenReturn(leaseWithTransitions(42))
+        val (manager, callbacks) = startK8sManagerWithCallbacks(leaseWithTransitions(42))
 
-        // Track the order of state changes
-        val tokenWhenActivated = CompletableDeferred<Long>()
-        val callbacksReceived = CompletableDeferred<LeaderCallbacks>()
-
-        mockLeaderElectorChain { electionConfig ->
-            callbacksReceived.complete(electionConfig.leaderCallbacks)
-            Thread.sleep(2000)
-        }
-
-        val manager = createManager(detector = KubernetesDetector { true })
-        manager.onStart(startupEvent)
-
-        await.atMost(5, TimeUnit.SECONDS).untilAsserted {
-            assertTrue(callbacksReceived.isCompleted)
-        }
-
-        val callbacks = callbacksReceived.getCompleted()
         callbacks.onStartLeading()
 
-        // After onAcquire, both should be set. The production code sets
-        // _epoch.value = epoch BEFORE _isLeader.value = true
+        // Production code sets _epoch before _isLeader
         assertTrue(manager.isActive)
         assertEquals(42L, manager.token, "Token must reflect lease transitions after acquire")
     }
@@ -406,23 +350,10 @@ class LeaderManagerTest {
 
     @Test
     fun `readLeaseTransitions returns lease transitions count from K8s API`() {
-        val leaseResource = mockLeasesApi()
-        whenever(leaseResource.get()).thenReturn(leaseWithTransitions(5))
+        val (manager, callbacks) = startK8sManagerWithCallbacks(leaseWithTransitions(5))
 
-        val callbacksReceived = CompletableDeferred<LeaderCallbacks>()
-        mockLeaderElectorChain { electionConfig ->
-            callbacksReceived.complete(electionConfig.leaderCallbacks)
-            Thread.sleep(2000)
-        }
+        callbacks.onStartLeading()
 
-        val manager = createManager(detector = KubernetesDetector { true })
-        manager.onStart(startupEvent)
-
-        await.atMost(5, TimeUnit.SECONDS).untilAsserted {
-            assertTrue(callbacksReceived.isCompleted)
-        }
-
-        callbacksReceived.getCompleted().onStartLeading()
         assertEquals(5L, manager.token)
     }
 
@@ -462,23 +393,10 @@ class LeaderManagerTest {
 
     @Test
     fun `readLeaseTransitions returns 0 when lease is null`() {
-        val leaseResource = mockLeasesApi()
-        whenever(leaseResource.get()).thenReturn(null)
+        val (manager, callbacks) = startK8sManagerWithCallbacks(lease = null)
 
-        val callbacksReceived = CompletableDeferred<LeaderCallbacks>()
-        mockLeaderElectorChain { electionConfig ->
-            callbacksReceived.complete(electionConfig.leaderCallbacks)
-            Thread.sleep(2000)
-        }
+        callbacks.onStartLeading()
 
-        val manager = createManager(detector = KubernetesDetector { true })
-        manager.onStart(startupEvent)
-
-        await.atMost(5, TimeUnit.SECONDS).untilAsserted {
-            assertTrue(callbacksReceived.isCompleted)
-        }
-
-        callbacksReceived.getCompleted().onStartLeading()
         assertEquals(0L, manager.token, "Null lease should yield token=0")
     }
 
@@ -487,65 +405,31 @@ class LeaderManagerTest {
     @Test
     fun `shutdown in K8s mode releases lease by patching holderIdentity to null`() = runBlocking<Unit> {
         val leaseResource = mockLeasesApi()
-        val existingLease = leaseWithTransitions(2, holderIdentity = "worker-1")
-        whenever(leaseResource.get()).thenReturn(existingLease)
-        whenever(leaseResource.patch(any<Lease>())).thenReturn(existingLease)
-
+        val lease = leaseWithTransitions(2, holderIdentity = "worker-1")
+        whenever(leaseResource.patch(any<Lease>())).thenReturn(lease)
         whenever(shutdownConfig.leaderTeardownTimeout()).thenReturn(Duration.ofSeconds(10))
 
-        val callbacksReceived = CompletableDeferred<LeaderCallbacks>()
-        mockLeaderElectorChain { electionConfig ->
-            callbacksReceived.complete(electionConfig.leaderCallbacks)
-            Thread.sleep(2000)
-        }
-
-        val manager = createManager(
-            detector = KubernetesDetector { true },
-        )
-        manager.onStart(startupEvent)
-
-        await.atMost(5, TimeUnit.SECONDS).untilAsserted {
-            assertTrue(callbacksReceived.isCompleted)
-        }
-
-        callbacksReceived.getCompleted().onStartLeading()
+        val (manager, callbacks) = startK8sManagerWithCallbacks(lease, leaseResource)
+        callbacks.onStartLeading()
         assertTrue(manager.isActive)
 
         manager.shutdown()
 
         assertFalse(manager.isActive)
-        // Verify that patch was called with a lease where holderIdentity is null
         verify(leaseResource).patch(argThat<Lease> { this.spec.holderIdentity == null })
     }
 
     @Test
     fun `shutdown in K8s mode with exception during release does not crash`() = runBlocking<Unit> {
         val leaseResource = mockLeasesApi()
-        whenever(leaseResource.get()).thenReturn(leaseWithTransitions(1))
         whenever(shutdownConfig.leaderTeardownTimeout()).thenReturn(Duration.ofSeconds(10))
 
-        // Make the lease release fail during shutdown
-        val leaseForRelease = mockLeasesApi()
-        whenever(leaseForRelease.get()).thenThrow(RuntimeException("API connection refused"))
+        val (manager, callbacks) = startK8sManagerWithCallbacks(leaseWithTransitions(1), leaseResource)
+        callbacks.onStartLeading()
 
-        val callbacksReceived = CompletableDeferred<LeaderCallbacks>()
-        mockLeaderElectorChain { electionConfig ->
-            callbacksReceived.complete(electionConfig.leaderCallbacks)
-            Thread.sleep(2000)
-        }
+        // Make subsequent lease reads fail (simulates API failure during release)
+        whenever(leaseResource.get()).thenThrow(RuntimeException("API connection refused"))
 
-        val manager = createManager(
-            detector = KubernetesDetector { true },
-        )
-        manager.onStart(startupEvent)
-
-        await.atMost(5, TimeUnit.SECONDS).untilAsserted {
-            assertTrue(callbacksReceived.isCompleted)
-        }
-
-        callbacksReceived.getCompleted().onStartLeading()
-
-        // Should not throw even when release fails
         manager.shutdown()
         assertFalse(manager.isActive)
     }
@@ -553,29 +437,13 @@ class LeaderManagerTest {
     @Test
     fun `shutdown in K8s mode with null lease does not attempt patch`() = runBlocking<Unit> {
         val leaseResource = mockLeasesApi()
-        // First call for readLeaseTransitions returns a lease, then for release returns null
-        whenever(leaseResource.get())
-            .thenReturn(leaseWithTransitions(1))
-            .thenReturn(null)
-
         whenever(shutdownConfig.leaderTeardownTimeout()).thenReturn(Duration.ofSeconds(10))
 
-        val callbacksReceived = CompletableDeferred<LeaderCallbacks>()
-        mockLeaderElectorChain { electionConfig ->
-            callbacksReceived.complete(electionConfig.leaderCallbacks)
-            Thread.sleep(2000)
-        }
+        val (manager, callbacks) = startK8sManagerWithCallbacks(leaseWithTransitions(1), leaseResource)
+        callbacks.onStartLeading()
 
-        val manager = createManager(
-            detector = KubernetesDetector { true },
-        )
-        manager.onStart(startupEvent)
-
-        await.atMost(5, TimeUnit.SECONDS).untilAsserted {
-            assertTrue(callbacksReceived.isCompleted)
-        }
-
-        callbacksReceived.getCompleted().onStartLeading()
+        // After onStartLeading consumed the first get(), make subsequent calls return null
+        whenever(leaseResource.get()).thenReturn(null)
         manager.shutdown()
 
         assertFalse(manager.isActive)
@@ -585,48 +453,21 @@ class LeaderManagerTest {
     @Test
     fun `shutdown in K8s mode skips lease release when holderIdentity does not match`() = runBlocking<Unit> {
         val leaseResource = mockLeasesApi()
-        // First get() for readLeaseTransitions during onStartLeading
-        // Second get() for releaseLeaseExplicitly during shutdown — holder is a different pod
-        whenever(leaseResource.get())
-            .thenReturn(leaseWithTransitions(2, holderIdentity = "worker-1"))
-            .thenReturn(leaseWithTransitions(2, holderIdentity = "other-worker"))
-
         whenever(shutdownConfig.leaderTeardownTimeout()).thenReturn(Duration.ofSeconds(10))
 
-        val callbacksReceived = CompletableDeferred<LeaderCallbacks>()
-        mockLeaderElectorChain { electionConfig ->
-            callbacksReceived.complete(electionConfig.leaderCallbacks)
-            Thread.sleep(2000)
-        }
-
-        val manager = createManager(
-            detector = KubernetesDetector { true },
+        val (manager, callbacks) = startK8sManagerWithCallbacks(
+            leaseWithTransitions(2, holderIdentity = "worker-1"),
+            leaseResource,
         )
-        manager.onStart(startupEvent)
-
-        await.atMost(5, TimeUnit.SECONDS).untilAsserted {
-            assertTrue(callbacksReceived.isCompleted)
-        }
-
-        callbacksReceived.getCompleted().onStartLeading()
+        callbacks.onStartLeading()
         assertTrue(manager.isActive)
 
+        // During shutdown, lease is now held by a different pod
+        whenever(leaseResource.get()).thenReturn(leaseWithTransitions(2, holderIdentity = "other-worker"))
         manager.shutdown()
 
         assertFalse(manager.isActive, "Shutdown should complete even when lease is held by another pod")
         verify(leaseResource, never()).patch(any<Lease>())
-    }
-
-    @Test
-    fun `releaseLeaseExplicitly in non-K8s mode does not call kubernetesClient`() = runBlocking<Unit> {
-        val manager = createManager(
-            detector = KubernetesDetector { false },
-        )
-
-        manager.onStart(startupEvent)
-        manager.shutdown()
-
-        verifyNoInteractions(kubernetesClient)
     }
 
     // == Section D: electionLoop Error Recovery ================================
@@ -690,30 +531,15 @@ class LeaderManagerTest {
 
     @Test
     fun `scope cancellation exits election loop and sets isLeader false`() = runBlocking<Unit> {
-        val leaseResource = mockLeasesApi()
-        whenever(leaseResource.get()).thenReturn(leaseWithTransitions(1))
         whenever(shutdownConfig.leaderTeardownTimeout()).thenReturn(Duration.ofSeconds(10))
 
-        val callbacksReceived = CompletableDeferred<LeaderCallbacks>()
-        mockLeaderElectorChain { electionConfig ->
-            callbacksReceived.complete(electionConfig.leaderCallbacks)
-            // Block to simulate long-running election
-            Thread.sleep(10_000)
-        }
-
-        val manager = createManager(
-            detector = KubernetesDetector { true },
+        val (manager, callbacks) = startK8sManagerWithCallbacks(
+            leaseWithTransitions(1),
+            onRunInvoked = { Thread.sleep(10_000) },
         )
-        manager.onStart(startupEvent)
-
-        await.atMost(5, TimeUnit.SECONDS).untilAsserted {
-            assertTrue(callbacksReceived.isCompleted)
-        }
-
-        callbacksReceived.getCompleted().onStartLeading()
+        callbacks.onStartLeading()
         assertTrue(manager.isActive)
 
-        // Shutdown cancels scope, which should exit the election loop
         manager.shutdown()
 
         assertFalse(manager.isActive)
@@ -725,26 +551,16 @@ class LeaderManagerTest {
     @Test
     fun `shutdown in K8s mode sets isLeader false and cancels scope and releases lease`() = runBlocking<Unit> {
         val leaseResource = mockLeasesApi()
-        whenever(leaseResource.get()).thenReturn(leaseWithTransitions(2, holderIdentity = "worker-1"))
-        whenever(leaseResource.patch(any<Lease>())).thenReturn(leaseWithTransitions(2))
+        val lease = leaseWithTransitions(2, holderIdentity = "worker-1")
+        whenever(leaseResource.patch(any<Lease>())).thenReturn(lease)
         whenever(shutdownConfig.leaderTeardownTimeout()).thenReturn(Duration.ofSeconds(10))
 
-        val callbacksReceived = CompletableDeferred<LeaderCallbacks>()
-        mockLeaderElectorChain { electionConfig ->
-            callbacksReceived.complete(electionConfig.leaderCallbacks)
-            Thread.sleep(5000)
-        }
-
-        val manager = createManager(
-            detector = KubernetesDetector { true },
+        val (manager, callbacks) = startK8sManagerWithCallbacks(
+            lease,
+            leaseResource,
+            onRunInvoked = { Thread.sleep(5000) },
         )
-        manager.onStart(startupEvent)
-
-        await.atMost(5, TimeUnit.SECONDS).untilAsserted {
-            assertTrue(callbacksReceived.isCompleted)
-        }
-
-        callbacksReceived.getCompleted().onStartLeading()
+        callbacks.onStartLeading()
         assertTrue(manager.isActive)
         assertEquals(2L, manager.token)
 
@@ -752,7 +568,6 @@ class LeaderManagerTest {
 
         assertFalse(manager.isActive, "isLeader should be false after shutdown")
         assertTrue(testScopeJob.isCancelled, "Scope should be cancelled after shutdown")
-        // Verify lease release was attempted
         verify(leaseResource).patch(any<Lease>())
     }
 
@@ -760,27 +575,11 @@ class LeaderManagerTest {
 
     @Test
     fun `onNewLeader callback updates lastHeartbeat`() {
-        val leaseResource = mockLeasesApi()
-        whenever(leaseResource.get()).thenReturn(leaseWithTransitions(1))
+        val (manager, callbacks) = startK8sManagerWithCallbacks(leaseWithTransitions(1))
 
-        val callbacksReceived = CompletableDeferred<LeaderCallbacks>()
-        mockLeaderElectorChain { electionConfig ->
-            callbacksReceived.complete(electionConfig.leaderCallbacks)
-            Thread.sleep(2000)
-        }
-
-        val manager = createManager(detector = KubernetesDetector { true })
-        manager.onStart(startupEvent)
-
-        await.atMost(5, TimeUnit.SECONDS).untilAsserted {
-            assertTrue(callbacksReceived.isCompleted)
-        }
-
-        // The initial heartbeat is set to fixedInstant by our clock
         assertEquals(fixedInstant, manager.lastHeartbeat)
 
-        // The onNewLeader callback also updates heartbeat (using our fixed clock)
-        callbacksReceived.getCompleted().onNewLeader("")
+        callbacks.onNewLeader("")
         assertEquals(fixedInstant, manager.lastHeartbeat)
     }
 
@@ -788,59 +587,31 @@ class LeaderManagerTest {
 
     @Test
     fun `metrics reflect state changes through onAcquire and onLose in K8s mode`() {
-        val leaseResource = mockLeasesApi()
-        whenever(leaseResource.get()).thenReturn(leaseWithTransitions(10))
-
-        val callbacksReceived = CompletableDeferred<LeaderCallbacks>()
-        mockLeaderElectorChain { electionConfig ->
-            callbacksReceived.complete(electionConfig.leaderCallbacks)
-            Thread.sleep(5000)
-        }
-
-        val manager = createManager(detector = KubernetesDetector { true })
-        manager.onStart(startupEvent)
-
-        await.atMost(5, TimeUnit.SECONDS).untilAsserted {
-            assertTrue(callbacksReceived.isCompleted)
-        }
+        val (_, callbacks) = startK8sManagerWithCallbacks(
+            leaseWithTransitions(10),
+            onRunInvoked = { Thread.sleep(5000) },
+        )
 
         val isLeaderGauge = meterRegistry.find("leader_election_is_leader").gauge()!!
         val epochGauge = meterRegistry.find("leader_election_epoch").gauge()!!
 
-        // Before acquire: inactive
         assertEquals(0.0, isLeaderGauge.value(), "Gauge should be 0 before acquire")
         assertEquals(0.0, epochGauge.value(), "Epoch gauge should be 0 before acquire")
 
-        // After acquire
-        callbacksReceived.getCompleted().onStartLeading()
+        callbacks.onStartLeading()
         assertEquals(1.0, isLeaderGauge.value(), "Gauge should be 1 after acquire")
         assertEquals(10.0, epochGauge.value(), "Epoch gauge should reflect lease transitions")
 
-        // After lose
-        callbacksReceived.getCompleted().onStopLeading()
+        callbacks.onStopLeading()
         assertEquals(0.0, isLeaderGauge.value(), "Gauge should be 0 after lose")
         assertEquals(10.0, epochGauge.value(), "Epoch gauge should retain value after lose")
     }
 
     @Test
     fun `epoch gauge reflects epoch from readLeaseTransitions`() {
-        val leaseResource = mockLeasesApi()
-        whenever(leaseResource.get()).thenReturn(leaseWithTransitions(25))
+        val (_, callbacks) = startK8sManagerWithCallbacks(leaseWithTransitions(25))
 
-        val callbacksReceived = CompletableDeferred<LeaderCallbacks>()
-        mockLeaderElectorChain { electionConfig ->
-            callbacksReceived.complete(electionConfig.leaderCallbacks)
-            Thread.sleep(2000)
-        }
-
-        val manager = createManager(detector = KubernetesDetector { true })
-        manager.onStart(startupEvent)
-
-        await.atMost(5, TimeUnit.SECONDS).untilAsserted {
-            assertTrue(callbacksReceived.isCompleted)
-        }
-
-        callbacksReceived.getCompleted().onStartLeading()
+        callbacks.onStartLeading()
 
         val epochGauge = meterRegistry.find("leader_election_epoch").gauge()!!
         assertEquals(25.0, epochGauge.value(), "Epoch gauge should read from lease transitions counter")
@@ -875,33 +646,21 @@ class LeaderManagerTest {
     @Test
     fun `shutdown completes lease release within timeout`() = runBlocking<Unit> {
         val leaseResource = mockLeasesApi()
-        val existingLease = leaseWithTransitions(3, holderIdentity = "worker-1")
-        whenever(leaseResource.get()).thenReturn(existingLease)
-        whenever(leaseResource.patch(any<Lease>())).thenReturn(existingLease)
+        val lease = leaseWithTransitions(3, holderIdentity = "worker-1")
+        whenever(leaseResource.patch(any<Lease>())).thenReturn(lease)
         whenever(shutdownConfig.leaderTeardownTimeout()).thenReturn(Duration.ofSeconds(30))
 
-        val callbacksReceived = CompletableDeferred<LeaderCallbacks>()
-        mockLeaderElectorChain { electionConfig ->
-            callbacksReceived.complete(electionConfig.leaderCallbacks)
-            Thread.sleep(5000)
-        }
-
-        val manager = createManager(
-            detector = KubernetesDetector { true },
+        val (manager, callbacks) = startK8sManagerWithCallbacks(
+            lease,
+            leaseResource,
+            onRunInvoked = { Thread.sleep(5000) },
         )
-        manager.onStart(startupEvent)
-
-        await.atMost(5, TimeUnit.SECONDS).untilAsserted {
-            assertTrue(callbacksReceived.isCompleted)
-        }
-
-        callbacksReceived.getCompleted().onStartLeading()
+        callbacks.onStartLeading()
         assertTrue(manager.isActive)
 
         manager.shutdown()
 
         assertFalse(manager.isActive)
-        // The release should complete within the 30s timeout
         verify(leaseResource).patch(argThat<Lease> { this.spec.holderIdentity == null })
     }
 }

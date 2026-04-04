@@ -1,5 +1,6 @@
 package com.workflow.infrastructure.leader
 
+import com.workflow.infrastructure.coroutine.suspendCatching
 import com.workflow.infrastructure.shutdown.ShutdownConfig
 import com.workflow.infrastructure.shutdown.ShutdownParticipant
 import com.workflow.worker.config.WorkerLoopConfig
@@ -11,13 +12,10 @@ import io.micrometer.core.instrument.MeterRegistry
 import io.quarkus.runtime.StartupEvent
 import jakarta.enterprise.context.ApplicationScoped
 import jakarta.enterprise.event.Observes
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelAndJoin
-import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -25,7 +23,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
-import org.slf4j.Logger
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.slf4j.LoggerFactory
 import java.time.Clock
 import java.time.Duration
@@ -87,23 +86,22 @@ class LeaderManager(
     private fun releaseLeaseExplicitly() {
         if (!kubernetesDetector.isRunningInKubernetes()) {
             log.info("Not in Kubernetes — skipping explicit lease release")
-            _isLeader.value = false
             return
         }
         try {
-            val leaseApi = kubernetesClient.leases().inNamespace(leaderElectionConfig.namespace())
-            val lease = leaseApi.withName(leaderElectionConfig.leaseName()).get()
-            if (lease != null) {
-                val identity = workerLoopConfig.id()
-                if (lease.spec.holderIdentity == identity) {
-                    lease.spec.holderIdentity = null
-                    lease.spec.acquireTime = null
-                    leaseApi.withName(leaderElectionConfig.leaseName()).patch(lease)
-                    log.info("Lease released explicitly — new leader can acquire immediately")
-                } else {
-                    log.debug("Lease held by {}, not by this instance — skipping release", lease.spec.holderIdentity)
-                }
+            val leaseResource = kubernetesClient.leases()
+                .inNamespace(leaderElectionConfig.namespace())
+                .withName(leaderElectionConfig.leaseName())
+            val lease = leaseResource.get() ?: return
+            val identity = workerLoopConfig.id()
+            if (lease.spec.holderIdentity != identity) {
+                log.debug("Lease held by {}, not by this instance — skipping release", lease.spec.holderIdentity)
+                return
             }
+            lease.spec.holderIdentity = null
+            lease.spec.acquireTime = null
+            leaseResource.patch(lease)
+            log.info("Lease released explicitly — new leader can acquire immediately")
         } catch (e: Exception) {
             log.warn("Failed to release lease explicitly — new leader will acquire after lease expiry", e)
         }
@@ -116,15 +114,12 @@ class LeaderManager(
         try {
             while (true) {
                 _lastHeartbeat.value = Instant.now(clock)
-                try {
-                    runElection(identity)
-                    log.info("Leader election run() returned — will retry in {}ms", retryPeriodMs)
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    log.error("Leader election error — retrying in {}ms", retryPeriodMs, e)
-                    _isLeader.value = false
-                }
+                suspendCatching { runElection(identity) }
+                    .onSuccess { log.info("Leader election run() returned — will retry in {}ms", retryPeriodMs) }
+                    .onFailure { e ->
+                        log.error("Leader election error — retrying in {}ms", retryPeriodMs, e)
+                        _isLeader.value = false
+                    }
                 delay(retryPeriodMs)
             }
         } finally {

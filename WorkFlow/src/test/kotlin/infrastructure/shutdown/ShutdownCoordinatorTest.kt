@@ -1,6 +1,5 @@
 package com.workflow.infrastructure.shutdown
 
-import com.workflow.infrastructure.shutdown.ShutdownConfig
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import io.quarkus.runtime.ShutdownEvent
 import jakarta.enterprise.inject.Instance
@@ -55,6 +54,32 @@ class ShutdownCoordinatorTest {
         return instance
     }
 
+    /**
+     * Creates a coordinator with a participant that captures coordinator state during shutdown.
+     * Returns the coordinator and the captured value (available after [ShutdownCoordinator.onShutdown]).
+     */
+    private fun <T> createCoordinatorWithObserver(
+        observe: (ShutdownCoordinator) -> T,
+    ): Pair<ShutdownCoordinator, () -> T> {
+        var captured: T? = null
+        val participant = object : ShutdownParticipant {
+            override val shutdownOrder = 0
+            override val shutdownTimeout: Duration = Duration.ofSeconds(5)
+            lateinit var coordinatorRef: ShutdownCoordinator
+            override suspend fun shutdown() {
+                captured = observe(coordinatorRef)
+            }
+        }
+        val coord = ShutdownCoordinator(
+            participants = fakeInstance(listOf(participant)),
+            meterRegistry = SimpleMeterRegistry(),
+            shutdownConfig = shutdownConfig,
+        )
+        participant.coordinatorRef = coord
+        @Suppress("UNCHECKED_CAST")
+        return coord to { captured as T }
+    }
+
     // -- A. Initial State -----------------------------------------------------
 
     @Test
@@ -84,50 +109,22 @@ class ShutdownCoordinatorTest {
 
     @Test
     fun `onShutdown passes through DRAINING state`() {
-        var drainingObserved: ShutdownState? = null
-        val observingParticipant = object : ShutdownParticipant {
-            override val shutdownOrder = 0
-            override val shutdownTimeout: Duration = Duration.ofSeconds(5)
-            lateinit var coordinatorRef: ShutdownCoordinator
-            override suspend fun shutdown() {
-                drainingObserved = coordinatorRef.state
-            }
-        }
-        val coord = ShutdownCoordinator(
-            participants = fakeInstance(listOf(observingParticipant)),
-            meterRegistry = SimpleMeterRegistry(),
-            shutdownConfig = shutdownConfig,
-        )
-        observingParticipant.coordinatorRef = coord
+        val (coord, observedState) = createCoordinatorWithObserver { it.state }
 
         coord.onShutdown(shutdownEvent)
 
-        assertEquals(ShutdownState.DRAINING, drainingObserved)
+        assertEquals(ShutdownState.DRAINING, observedState())
         assertEquals(ShutdownState.TERMINATED, coord.state)
     }
 
     @Test
     fun `isShuttingDown is true during DRAINING phase`() {
-        var isShuttingDownDuringDrain: Boolean? = null
-        val observingParticipant = object : ShutdownParticipant {
-            override val shutdownOrder = 0
-            override val shutdownTimeout: Duration = Duration.ofSeconds(5)
-            lateinit var coordinatorRef: ShutdownCoordinator
-            override suspend fun shutdown() {
-                isShuttingDownDuringDrain = coordinatorRef.isShuttingDown
-            }
-        }
-        val coord = ShutdownCoordinator(
-            participants = fakeInstance(listOf(observingParticipant)),
-            meterRegistry = SimpleMeterRegistry(),
-            shutdownConfig = shutdownConfig,
-        )
-        observingParticipant.coordinatorRef = coord
+        val (coord, observedShuttingDown) = createCoordinatorWithObserver { it.isShuttingDown }
 
         coord.onShutdown(shutdownEvent)
 
-        assertTrue(isShuttingDownDuringDrain!!)
-        assertTrue(coord.isShuttingDown) // still true at TERMINATED
+        assertTrue(observedShuttingDown())
+        assertTrue(coord.isShuttingDown)
     }
 
     // -- C. Participant Invocation --------------------------------------------
