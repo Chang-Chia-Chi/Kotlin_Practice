@@ -42,14 +42,26 @@ class JdbiWorkflowRepository(private val jdbi: Jdbi) : WorkflowRepository {
             val cutoff = LocalDateTime.ofInstant(Instant.now().minus(gracePeriod), ZoneOffset.UTC)
             h.createQuery(
                 """
-                SELECT w.* FROM workflow w
+                WITH max_seq AS (
+                    SELECT t.workflow_id, MAX(t.sequence_number) AS max_seq_num
+                    FROM task t
+                    WHERE EXISTS (
+                        SELECT 1 FROM workflow w
+                        WHERE w.id = t.workflow_id
+                          AND w.status = 'RUNNING'
+                          AND w.updated_at < :cutoff
+                    )
+                    GROUP BY t.workflow_id
+                )
+                SELECT w.*
+                FROM workflow w
+                JOIN max_seq ms ON ms.workflow_id = w.id
                 WHERE w.status = 'RUNNING'
                   AND w.updated_at < :cutoff
-                  AND EXISTS (SELECT 1 FROM task t WHERE t.workflow_id = w.id)
                   AND NOT EXISTS (
                     SELECT 1 FROM task t
                     WHERE t.workflow_id = w.id
-                      AND t.sequence_number = (SELECT MAX(t2.sequence_number) FROM task t2 WHERE t2.workflow_id = w.id)
+                      AND t.sequence_number = ms.max_seq_num
                       AND t.status NOT IN ('COMPLETED', 'FAILED', 'TIMED_OUT', 'DEAD_LETTER', 'CANCELLED', 'SKIPPED')
                   )
                 """,
