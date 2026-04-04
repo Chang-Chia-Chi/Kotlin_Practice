@@ -46,27 +46,31 @@ class HttpWorkerNotifier(
     private fun broadcastFlowFor(queue: String): MutableSharedFlow<Unit> =
         broadcastFlows.computeIfAbsent(queue) { q ->
             MutableSharedFlow<Unit>(
-                replay = 0,
-                extraBufferCapacity = 1,
+                replay = 1,
+                extraBufferCapacity = 0,
                 onBufferOverflow = BufferOverflow.DROP_OLDEST,
             ).also { flow -> launchBroadcastCollector(q, flow) }
         }
 
     private fun launchBroadcastCollector(queue: String, flow: MutableSharedFlow<Unit>) {
-        broadcastScope.launch {
-            val encodedQueue = URLEncoder.encode(queue, Charsets.UTF_8)
-            flow.collect {
-                val peers = peerDiscovery.peers()
-                for (peer in peers) {
-                    launch {
-                        try {
-                            httpClient.post("http://$peer:8080/internal/dispatch-notify?queue=$encodedQueue")
-                        } catch (e: Exception) {
-                            log.debug("Peer notify failed for {}: {}", peer, e.message)
+        try {
+            broadcastScope.launch {
+                val encodedQueue = URLEncoder.encode(queue, Charsets.UTF_8)
+                flow.collect {
+                    val peers = peerDiscovery.peers()
+                    for (peer in peers) {
+                        launch {
+                            try {
+                                httpClient.post("http://$peer:8080/internal/dispatch-notify?queue=$encodedQueue")
+                            } catch (e: Exception) {
+                                log.debug("Peer notify failed for {}: {}", peer, e.message)
+                            }
                         }
                     }
                 }
             }
+        } catch (_: IllegalStateException) {
+            // broadcastScope already cancelled during shutdown — benign race
         }
     }
 
