@@ -261,7 +261,6 @@ class DispatchHandlersTest {
         val parquetFormatter = mock<ParquetFormatter>()
         val pathBuilder = DispatchPathBuilder("prod")
 
-        whenever(resultStore.findByBatchToken("dryrun-abc")).thenReturn(emptyList())
         whenever(resultStore.findBatchStatus("dryrun-abc")).thenReturn(BatchStatus.DRYRUN)
 
         val handler = DispatchJoinHandler(resultStore, storage, parquetFormatter, pathBuilder, "prod", objectMapper)
