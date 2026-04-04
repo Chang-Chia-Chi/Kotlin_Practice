@@ -29,6 +29,14 @@ class SimulationEngine(
             total = baseline.siteAllocations.values.fold(BigDecimal.ZERO, BigDecimal::add),
         )
 
+        val siteTargetMap = config.siteTargets.associateBy { it.siteId }
+        val bomTargetMap: Map<SiteBomKey, TargetBomAllocation> = config.bomMappings
+            ?.flatMap { (siteId, mapping) ->
+                mapping.targetAllocations.map { alloc ->
+                    SiteBomKey(siteId, alloc.targetBomId) to alloc
+                }
+            }?.toMap() ?: emptyMap()
+
         val maxIterations = candidates.size * config.siteTargets.size
         var iterations = 0
 
@@ -42,10 +50,9 @@ class SimulationEngine(
             )
             if (selection !is TargetSelection.Selected) break
 
-            val siteTarget = config.siteTargets.first { it.siteId == selection.siteId }
+            val siteTarget = siteTargetMap.getValue(selection.siteId)
             val bomTarget = if (selection.targetBomId != null) {
-                config.bomMappings?.get(selection.siteId)
-                    ?.targetAllocations?.firstOrNull { it.targetBomId == selection.targetBomId }
+                bomTargetMap[SiteBomKey(selection.siteId, selection.targetBomId)]
             } else null
             val idx = algorithm.candidateMatcher.findCandidate(
                 index, selection.sourceBomConstraint, context, siteTarget, bomTarget,
