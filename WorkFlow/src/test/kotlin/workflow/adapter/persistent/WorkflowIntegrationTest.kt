@@ -699,6 +699,184 @@ class WorkflowIntegrationTest {
         assertEquals(WorkflowStatus.COMPLETED, workflowRepo.findById(wfId)!!.status)
     }
 
+    // ── Three-way conditional with asymmetric depths ─────────────────────
+
+    @Test
+    fun `three-way conditional with asymmetric depths to shared join`() = runBlocking {
+        //          ┌──(A)──► b ──► c ──► d ──┐
+        //     a ──┤──(B)──► e ──► f ─────────├──► join
+        //          └──(C)──► h ──────────────┘
+        val def = workflow {
+            activity("a") {
+                transition("a.h")
+                on("A") { next("b") }
+                on("B") { next("e") }
+                on("C") { next("h") }
+            }
+            activity("b") { transition("b.h"); next("c") }
+            activity("c") { transition("c.h"); next("d") }
+            activity("d") { transition("d.h"); next("join") }
+            activity("e") { transition("e.h"); next("f") }
+            activity("f") { transition("f.h"); next("join") }
+            activity("h") { transition("h.h"); next("join") }
+            activity("join") { transition("j.h") }
+        }
+
+        // ── Branch C taken (shortest path): b→c→d and e→f all SKIPPED ──
+        val r1 = engine.startWorkflow(def)
+        val wfId1 = r1.workflowId
+        val seqA1 = seqOf(def, "a")
+        val aTask1 = taskRepo.findByWorkflowAndSequence(wfId1, seqA1)[0]
+        gate.onTaskCompleted(aTask1.id, wfId1, seqA1, TaskStatus.COMPLETED, """{"branch":"C"}""")
+
+        assertEquals(listOf("SKIPPED"), taskStatusAt(wfId1, seqOf(def, "b")))
+        assertEquals(listOf("SKIPPED"), taskStatusAt(wfId1, seqOf(def, "c")))
+        assertEquals(listOf("SKIPPED"), taskStatusAt(wfId1, seqOf(def, "d")))
+        assertEquals(listOf("SKIPPED"), taskStatusAt(wfId1, seqOf(def, "e")))
+        assertEquals(listOf("SKIPPED"), taskStatusAt(wfId1, seqOf(def, "f")))
+        assertEquals(listOf("PENDING"), taskStatusAt(wfId1, seqOf(def, "h")))
+        // join must NOT exist yet — h is still PENDING
+        assertTrue(taskStatusAt(wfId1, seqOf(def, "join")).isEmpty())
+
+        complete(wfId1, def, "h")
+        assertEquals(listOf("PENDING"), taskStatusAt(wfId1, seqOf(def, "join")))
+
+        complete(wfId1, def, "join")
+        assertEquals(WorkflowStatus.COMPLETED, workflowRepo.findById(wfId1)!!.status)
+
+        // ── Branch A taken (longest path): e→f and h all SKIPPED ──
+        val r2 = engine.startWorkflow(def)
+        val wfId2 = r2.workflowId
+        val seqA2 = seqOf(def, "a")
+        val aTask2 = taskRepo.findByWorkflowAndSequence(wfId2, seqA2)[0]
+        gate.onTaskCompleted(aTask2.id, wfId2, seqA2, TaskStatus.COMPLETED, """{"branch":"A"}""")
+
+        assertEquals(listOf("PENDING"), taskStatusAt(wfId2, seqOf(def, "b")))
+        assertEquals(listOf("SKIPPED"), taskStatusAt(wfId2, seqOf(def, "e")))
+        assertEquals(listOf("SKIPPED"), taskStatusAt(wfId2, seqOf(def, "f")))
+        assertEquals(listOf("SKIPPED"), taskStatusAt(wfId2, seqOf(def, "h")))
+        // c, d, join must NOT exist yet
+        assertTrue(taskStatusAt(wfId2, seqOf(def, "c")).isEmpty())
+        assertTrue(taskStatusAt(wfId2, seqOf(def, "d")).isEmpty())
+        assertTrue(taskStatusAt(wfId2, seqOf(def, "join")).isEmpty())
+
+        complete(wfId2, def, "b")
+        complete(wfId2, def, "c")
+        complete(wfId2, def, "d")
+        assertEquals(listOf("PENDING"), taskStatusAt(wfId2, seqOf(def, "join")))
+
+        complete(wfId2, def, "join")
+        assertEquals(WorkflowStatus.COMPLETED, workflowRepo.findById(wfId2)!!.status)
+    }
+
+    // ── Fork with embedded conditional then rejoin ───────────────────────
+
+    @Test
+    fun `fork with conditional routing inside one branch then rejoin`() = runBlocking {
+        //               ┌──► cond ──(X)──► taken ──┐
+        //     start ──┤         └──(Y)──► alt ─────├──► join ──► end
+        //               └──► linear ───────────────┘
+        val def = workflow {
+            activity("start")  { transition("s.h"); next("cond"); next("linear") }
+            activity("cond")   {
+                transition("c.h")
+                on("X") { next("taken") }
+                on("Y") { next("alt") }
+            }
+            activity("taken")  { transition("t.h"); next("join") }
+            activity("alt")    { transition("a.h"); next("join") }
+            activity("linear") { transition("l.h"); next("join") }
+            activity("join")   { transition("j.h"); next("end") }
+            activity("end")    { transition("e.h") }
+        }
+        val result = engine.startWorkflow(def)
+        val wfId = result.workflowId
+
+        // Fork: both cond and linear become PENDING
+        complete(wfId, def, "start")
+        assertEquals(listOf("PENDING"), taskStatusAt(wfId, seqOf(def, "cond")))
+        assertEquals(listOf("PENDING"), taskStatusAt(wfId, seqOf(def, "linear")))
+
+        // Conditional chooses X — taken PENDING, alt SKIPPED
+        val seqCond = seqOf(def, "cond")
+        val condTask = taskRepo.findByWorkflowAndSequence(wfId, seqCond)[0]
+        gate.onTaskCompleted(condTask.id, wfId, seqCond, TaskStatus.COMPLETED, """{"branch":"X"}""")
+
+        assertEquals(listOf("PENDING"), taskStatusAt(wfId, seqOf(def, "taken")))
+        assertEquals(listOf("SKIPPED"), taskStatusAt(wfId, seqOf(def, "alt")))
+        // join blocked: taken is PENDING, linear is PENDING
+        assertTrue(taskStatusAt(wfId, seqOf(def, "join")).isEmpty())
+
+        // Complete taken — join still blocked (linear not done)
+        complete(wfId, def, "taken")
+        assertTrue(taskStatusAt(wfId, seqOf(def, "join")).isEmpty())
+
+        // Complete linear — all three preds resolved, join dispatched
+        complete(wfId, def, "linear")
+        assertEquals(listOf("PENDING"), taskStatusAt(wfId, seqOf(def, "join")))
+
+        complete(wfId, def, "join")
+        complete(wfId, def, "end")
+        assertEquals(WorkflowStatus.COMPLETED, workflowRepo.findById(wfId)!!.status)
+    }
+
+    // ── Double diamond (two sequential conditional branch points) ────────
+
+    @Test
+    fun `double diamond two sequential conditionals reach COMPLETED`() = runBlocking {
+        //          ┌──(A)──► b1 ──┐          ┌──(X)──► d1 ──┐
+        //     a ──┤               ├──► c ──┤               ├──► e
+        //          └──(B)──► b2 ──┘          └──(Y)──► d2 ──┘
+        val def = workflow {
+            activity("a") {
+                transition("a.h")
+                on("A") { next("b1") }
+                on("B") { next("b2") }
+            }
+            activity("b1") { transition("b1.h"); next("c") }
+            activity("b2") { transition("b2.h"); next("c") }
+            activity("c") {
+                transition("c.h")
+                on("X") { next("d1") }
+                on("Y") { next("d2") }
+            }
+            activity("d1") { transition("d1.h"); next("e") }
+            activity("d2") { transition("d2.h"); next("e") }
+            activity("e") { transition("e.h") }
+        }
+        val result = engine.startWorkflow(def)
+        val wfId = result.workflowId
+
+        // First diamond: A taken, b2 SKIPPED
+        val seqA = seqOf(def, "a")
+        val aTask = taskRepo.findByWorkflowAndSequence(wfId, seqA)[0]
+        gate.onTaskCompleted(aTask.id, wfId, seqA, TaskStatus.COMPLETED, """{"branch":"A"}""")
+
+        assertEquals(listOf("PENDING"), taskStatusAt(wfId, seqOf(def, "b1")))
+        assertEquals(listOf("SKIPPED"), taskStatusAt(wfId, seqOf(def, "b2")))
+        // c must NOT exist — b1 still PENDING, cascade from b2 must be blocked
+        assertTrue(taskStatusAt(wfId, seqOf(def, "c")).isEmpty())
+
+        complete(wfId, def, "b1")
+        assertEquals(listOf("PENDING"), taskStatusAt(wfId, seqOf(def, "c")))
+
+        // Second diamond: Y taken, d1 SKIPPED
+        val seqC = seqOf(def, "c")
+        val cTask = taskRepo.findByWorkflowAndSequence(wfId, seqC)[0]
+        gate.onTaskCompleted(cTask.id, wfId, seqC, TaskStatus.COMPLETED, """{"branch":"Y"}""")
+
+        assertEquals(listOf("SKIPPED"), taskStatusAt(wfId, seqOf(def, "d1")))
+        assertEquals(listOf("PENDING"), taskStatusAt(wfId, seqOf(def, "d2")))
+        // e must NOT exist — d2 still PENDING
+        assertTrue(taskStatusAt(wfId, seqOf(def, "e")).isEmpty())
+
+        complete(wfId, def, "d2")
+        assertEquals(listOf("PENDING"), taskStatusAt(wfId, seqOf(def, "e")))
+
+        complete(wfId, def, "e")
+        assertEquals(WorkflowStatus.COMPLETED, workflowRepo.findById(wfId)!!.status)
+    }
+
     // ── Spec item 46 ─────────────────────────────────────────────────────
 
     @Test
