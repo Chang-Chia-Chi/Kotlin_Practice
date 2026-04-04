@@ -1,6 +1,5 @@
 package com.workflow.worker.usecase.port.outbound.notification
 
-import kotlinx.coroutines.supervisorScope
 import java.time.Duration
 
 /**
@@ -20,10 +19,11 @@ import java.time.Duration
 interface WorkerNotifier {
     /**
      * Signal that new work is available on [queueName].
-     * Wakes local workers immediately and broadcasts to all peer pods
-     * concurrently via HTTP POST within a [supervisorScope]. Awaits
-     * all peer notifications; individual failures are logged and do
-     * not cancel siblings. Called AFTER transaction commit.
+     * Wakes local workers immediately and enqueues an asynchronous
+     * broadcast to all peer pods via HTTP POST. The broadcast is
+     * fire-and-forget: this method returns as soon as the local flow
+     * is signaled. Individual peer failures are logged at debug level.
+     * Called AFTER transaction commit.
      */
     suspend fun signal(queueName: String)
 

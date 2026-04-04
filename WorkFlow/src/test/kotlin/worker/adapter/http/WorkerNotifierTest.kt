@@ -13,6 +13,10 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.yield
+import org.awaitility.kotlin.atMost
+import org.awaitility.kotlin.await
+import org.awaitility.kotlin.untilAsserted
+import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
@@ -34,6 +38,11 @@ class WorkerNotifierTest {
         peerRegistry = mock()
         whenever(peerRegistry.peers()).thenReturn(emptyList())
         notifier = HttpWorkerNotifier(peerRegistry, HttpClient(MockEngine { respond("") }))
+    }
+
+    @AfterEach
+    fun teardown() {
+        notifier.shutdown()
     }
 
     // ── A. signal() wakes awaitWork() ────────────────────────────────────
@@ -130,14 +139,29 @@ class WorkerNotifierTest {
         }
 
         @Test
-        fun `onRemoteSignal does not broadcast via HTTP`() = runTest {
+        fun `onRemoteSignal does not broadcast via HTTP`() = runTest(UnconfinedTestDispatcher()) {
             whenever(peerRegistry.peers()).thenReturn(listOf("10.0.0.2"))
             val engine = MockEngine { respond("") }
-            val notifier = HttpWorkerNotifier(peerRegistry, HttpClient(engine))
+            val localNotifier = HttpWorkerNotifier(peerRegistry, HttpClient(engine))
 
-            notifier.onRemoteSignal("default")
+            // First prove the broadcast collector IS active by calling signal()
+            localNotifier.signal("default")
+            await atMost Duration.ofSeconds(2) untilAsserted {
+                assertTrue(engine.requestHistory.size > 0, "signal() should have triggered HTTP broadcast")
+            }
+            val countAfterSignal = engine.requestHistory.size
 
-            assertTrue(engine.requestHistory.isEmpty(), "onRemoteSignal should not make HTTP calls")
+            // Now call onRemoteSignal and verify NO additional HTTP calls
+            localNotifier.onRemoteSignal("default")
+
+            // Wait to give any hypothetical broadcast time to execute, then verify
+            await.during(Duration.ofMillis(300)).atMost(Duration.ofSeconds(1)).untilAsserted {
+                assertEquals(
+                    countAfterSignal, engine.requestHistory.size,
+                    "onRemoteSignal should not trigger additional HTTP calls"
+                )
+            }
+            localNotifier.shutdown()
         }
     }
 
@@ -170,14 +194,16 @@ class WorkerNotifierTest {
     inner class SignalWithPeers {
 
         @Test
-        fun `signal with peers calls HTTP post once per peer`() = runTest {
+        fun `signal with peers calls HTTP post once per peer`() = runTest(UnconfinedTestDispatcher()) {
             whenever(peerRegistry.peers()).thenReturn(listOf("10.0.0.2", "10.0.0.3"))
             val engine = MockEngine { respond("") }
-            val notifier = HttpWorkerNotifier(peerRegistry, HttpClient(engine))
+            val localNotifier = HttpWorkerNotifier(peerRegistry, HttpClient(engine))
 
-            notifier.signal("default")
+            localNotifier.signal("default")
 
-            assertEquals(2, engine.requestHistory.size)
+            await atMost Duration.ofSeconds(2) untilAsserted {
+                assertEquals(2, engine.requestHistory.size)
+            }
             val hosts = engine.requestHistory.map { it.url.host }.toSet()
             assertEquals(setOf("10.0.0.2", "10.0.0.3"), hosts)
             engine.requestHistory.forEach { req ->
@@ -186,50 +212,156 @@ class WorkerNotifierTest {
                 assertEquals("/internal/dispatch-notify", req.url.encodedPath)
                 assertEquals("default", req.url.parameters["queue"])
             }
+            localNotifier.shutdown()
         }
 
         @Test
-        fun `signal with no peers does not make HTTP calls`() = runTest {
+        fun `signal with no peers does not make HTTP calls`() = runTest(UnconfinedTestDispatcher()) {
             whenever(peerRegistry.peers()).thenReturn(emptyList())
             val engine = MockEngine { respond("") }
-            val notifier = HttpWorkerNotifier(peerRegistry, HttpClient(engine))
+            val localNotifier = HttpWorkerNotifier(peerRegistry, HttpClient(engine))
 
-            notifier.signal("default")
+            localNotifier.signal("default")
 
-            assertTrue(engine.requestHistory.isEmpty())
+            await.during(Duration.ofMillis(300)).atMost(Duration.ofSeconds(1)).untilAsserted {
+                assertTrue(engine.requestHistory.isEmpty())
+            }
+            localNotifier.shutdown()
         }
 
         @Test
-        fun `signal propagates queue name in HTTP path`() = runTest {
+        fun `signal propagates queue name in HTTP path`() = runTest(UnconfinedTestDispatcher()) {
             whenever(peerRegistry.peers()).thenReturn(listOf("10.0.0.5"))
             val engine = MockEngine { respond("") }
-            val notifier = HttpWorkerNotifier(peerRegistry, HttpClient(engine))
+            val localNotifier = HttpWorkerNotifier(peerRegistry, HttpClient(engine))
 
-            notifier.signal("priority-queue")
+            localNotifier.signal("priority-queue")
 
-            assertEquals(1, engine.requestHistory.size)
+            await atMost Duration.ofSeconds(2) untilAsserted {
+                assertEquals(1, engine.requestHistory.size)
+            }
             assertEquals("priority-queue", engine.requestHistory[0].url.parameters["queue"])
+            localNotifier.shutdown()
         }
 
         @Test
-        fun `signal URL-encodes queue name with special characters`() = runTest {
+        fun `signal URL-encodes queue name with special characters`() = runTest(UnconfinedTestDispatcher()) {
             whenever(peerRegistry.peers()).thenReturn(listOf("10.0.0.7"))
             val engine = MockEngine { respond("") }
-            val notifier = HttpWorkerNotifier(peerRegistry, HttpClient(engine))
+            val localNotifier = HttpWorkerNotifier(peerRegistry, HttpClient(engine))
 
-            notifier.signal("queue with spaces")
+            localNotifier.signal("queue with spaces")
 
-            assertEquals(1, engine.requestHistory.size)
+            await atMost Duration.ofSeconds(2) untilAsserted {
+                assertEquals(1, engine.requestHistory.size)
+            }
             assertEquals("queue with spaces", engine.requestHistory[0].url.parameters["queue"])
+            localNotifier.shutdown()
         }
 
         @Test
-        fun `signal with HTTP failure does not throw`() = runTest {
+        fun `signal with HTTP failure does not throw`() = runTest(UnconfinedTestDispatcher()) {
             whenever(peerRegistry.peers()).thenReturn(listOf("10.0.0.9"))
             val engine = MockEngine { respond("", HttpStatusCode.InternalServerError) }
-            val notifier = HttpWorkerNotifier(peerRegistry, HttpClient(engine))
+            val localNotifier = HttpWorkerNotifier(peerRegistry, HttpClient(engine))
 
-            notifier.signal("default") // should not throw
+            localNotifier.signal("default")
+
+            // Wait for broadcast to actually execute with the 500 response
+            await atMost Duration.ofSeconds(2) untilAsserted {
+                assertTrue(engine.requestHistory.size > 0, "Broadcast should have executed")
+            }
+            localNotifier.shutdown()
+        }
+    }
+
+    // ── G. Fire-and-forget: signal returns before HTTP executes ─────────
+
+    @Nested
+    inner class FireAndForget {
+
+        @Test
+        fun `signal returns before HTTP executes`() = runTest {
+            // Use standard runTest (confined dispatcher)
+            // broadcastScope uses Dispatchers.IO, so broadcast hasn't run yet
+            whenever(peerRegistry.peers()).thenReturn(listOf("10.0.0.2"))
+            val engine = MockEngine { respond("") }
+            val localNotifier = HttpWorkerNotifier(peerRegistry, HttpClient(engine))
+
+            localNotifier.signal("default")
+
+            assertEquals(0, engine.requestHistory.size, "signal() should return before HTTP executes")
+            localNotifier.shutdown()
+        }
+    }
+
+    // ── H. Broadcast coalescing: rapid signals collapse into fewer HTTP calls
+
+    @Nested
+    inner class BroadcastCoalescing {
+
+        @Test
+        fun `rapid signals coalesce into fewer HTTP broadcasts`() = runTest(UnconfinedTestDispatcher()) {
+            whenever(peerRegistry.peers()).thenReturn(listOf("10.0.0.2"))
+            val engine = MockEngine { respond("") }
+            val localNotifier = HttpWorkerNotifier(peerRegistry, HttpClient(engine))
+
+            repeat(10) { localNotifier.signal("default") }
+
+            // Wait for at least one broadcast, then verify coalescing
+            await atMost Duration.ofSeconds(2) untilAsserted {
+                assertTrue(engine.requestHistory.size > 0, "At least one broadcast should have executed")
+            }
+            // Let any remaining broadcasts settle
+            await.during(Duration.ofMillis(300)).atMost(Duration.ofSeconds(1)).untilAsserted {
+                assertTrue(
+                    engine.requestHistory.size <= 2,
+                    "10 rapid signals should coalesce, but got ${engine.requestHistory.size} HTTP requests"
+                )
+            }
+            localNotifier.shutdown()
+        }
+    }
+
+    // ── I. Shutdown behavior ────────────────────────────────────────────
+
+    @Nested
+    inner class ShutdownBehavior {
+
+        @Test
+        fun `shutdown cancels broadcast collectors`() = runTest(UnconfinedTestDispatcher()) {
+            whenever(peerRegistry.peers()).thenReturn(listOf("10.0.0.2"))
+            val engine = MockEngine { respond("") }
+            val localNotifier = HttpWorkerNotifier(peerRegistry, HttpClient(engine))
+
+            localNotifier.signal("default")
+            await atMost Duration.ofSeconds(2) untilAsserted {
+                assertTrue(engine.requestHistory.size > 0, "Broadcast should have executed before shutdown")
+            }
+            val countBefore = engine.requestHistory.size
+
+            localNotifier.shutdown()
+
+            localNotifier.signal("default")
+
+            await.during(Duration.ofMillis(300)).atMost(Duration.ofSeconds(1)).untilAsserted {
+                assertEquals(countBefore, engine.requestHistory.size, "No HTTP calls after shutdown")
+            }
+        }
+
+        @Test
+        fun `post-shutdown signal on new queue does not throw`() = runTest(UnconfinedTestDispatcher()) {
+            whenever(peerRegistry.peers()).thenReturn(listOf("10.0.0.2"))
+            val engine = MockEngine { respond("") }
+            val localNotifier = HttpWorkerNotifier(peerRegistry, HttpClient(engine))
+
+            localNotifier.shutdown()
+
+            localNotifier.signal("never-seen-queue") // should not throw
+
+            await.during(Duration.ofMillis(300)).atMost(Duration.ofSeconds(1)).untilAsserted {
+                assertEquals(0, engine.requestHistory.size, "No HTTP after shutdown on new queue")
+            }
         }
     }
 }

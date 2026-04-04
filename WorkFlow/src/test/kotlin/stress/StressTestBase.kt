@@ -198,6 +198,7 @@ abstract class StressTestBase {
 
     @AfterAll
     fun tearDownInfrastructure() {
+        (notifier as HttpWorkerNotifier).shutdown()
         proxyDataSource.close()
         directDataSource.close()
     }

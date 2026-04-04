@@ -4,17 +4,22 @@ import com.workflow.worker.usecase.port.outbound.notification.WorkerNotifier
 import com.workflow.worker.usecase.port.outbound.peer.PeerDiscovery
 import io.ktor.client.HttpClient
 import io.ktor.client.request.post
+import jakarta.annotation.PreDestroy
 import jakarta.enterprise.context.ApplicationScoped
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.withTimeoutOrNull
 import org.slf4j.LoggerFactory
 import java.net.URLEncoder
 import java.time.Duration
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 
 @ApplicationScoped
 class HttpWorkerNotifier(
@@ -23,10 +28,14 @@ class HttpWorkerNotifier(
 ) : WorkerNotifier {
     private val log = LoggerFactory.getLogger(HttpWorkerNotifier::class.java)
 
-    private val flows = ConcurrentHashMap<String, MutableSharedFlow<Unit>>()
+    private val isShutdown = AtomicBoolean(false)
+    private val broadcastScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    private fun flowFor(queue: String) =
-        flows.getOrPut(queue) {
+    private val localFlows = ConcurrentHashMap<String, MutableSharedFlow<Unit>>()
+    private val broadcastFlows = ConcurrentHashMap<String, MutableSharedFlow<Unit>>()
+
+    private fun localFlowFor(queue: String): MutableSharedFlow<Unit> =
+        localFlows.computeIfAbsent(queue) {
             MutableSharedFlow(
                 replay = 0,
                 extraBufferCapacity = 1,
@@ -34,26 +43,42 @@ class HttpWorkerNotifier(
             )
         }
 
-    override suspend fun signal(queueName: String) {
-        flowFor(queueName).tryEmit(Unit)
-        val peers = peerDiscovery.peers()
-        if (peers.isEmpty()) return
-        val encodedQueue = URLEncoder.encode(queueName, Charsets.UTF_8)
-        supervisorScope {
-            for (peer in peers) {
-                launch {
-                    try {
-                        httpClient.post("http://$peer:8080/internal/dispatch-notify?queue=$encodedQueue")
-                    } catch (e: Exception) {
-                        log.debug("Peer notify failed for {}: {}", peer, e.message)
+    private fun broadcastFlowFor(queue: String): MutableSharedFlow<Unit> =
+        broadcastFlows.computeIfAbsent(queue) { q ->
+            MutableSharedFlow<Unit>(
+                replay = 0,
+                extraBufferCapacity = 1,
+                onBufferOverflow = BufferOverflow.DROP_OLDEST,
+            ).also { flow -> launchBroadcastCollector(q, flow) }
+        }
+
+    private fun launchBroadcastCollector(queue: String, flow: MutableSharedFlow<Unit>) {
+        broadcastScope.launch {
+            val encodedQueue = URLEncoder.encode(queue, Charsets.UTF_8)
+            flow.collect {
+                val peers = peerDiscovery.peers()
+                for (peer in peers) {
+                    launch {
+                        try {
+                            httpClient.post("http://$peer:8080/internal/dispatch-notify?queue=$encodedQueue")
+                        } catch (e: Exception) {
+                            log.debug("Peer notify failed for {}: {}", peer, e.message)
+                        }
                     }
                 }
             }
         }
     }
 
+    override suspend fun signal(queueName: String) {
+        localFlowFor(queueName).tryEmit(Unit)
+        if (!isShutdown.get()) {
+            broadcastFlowFor(queueName).tryEmit(Unit)
+        }
+    }
+
     override fun onRemoteSignal(queueName: String) {
-        flowFor(queueName).tryEmit(Unit)
+        localFlowFor(queueName).tryEmit(Unit)
     }
 
     override suspend fun awaitWork(
@@ -61,6 +86,12 @@ class HttpWorkerNotifier(
         timeout: Duration,
     ): Boolean =
         withTimeoutOrNull(timeout.toMillis()) {
-            flowFor(queueName).first()
+            localFlowFor(queueName).first()
         } != null
+
+    @PreDestroy
+    fun shutdown() {
+        isShutdown.set(true)
+        broadcastScope.cancel()
+    }
 }
