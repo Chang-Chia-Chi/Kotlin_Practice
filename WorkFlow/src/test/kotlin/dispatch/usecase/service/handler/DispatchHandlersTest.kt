@@ -43,6 +43,9 @@ class DispatchHandlersTest {
         assertTrue(arr.isArray)
         assertTrue(arr[0].has("configId"))
         assertTrue(arr[0].has("batchToken"))
+
+        verify(resultStore).createBatch(any(), eq(BatchStatus.NORMAL), eq(1))
+        verify(configRepo, never()).findById(any())
     }
 
     @Test
