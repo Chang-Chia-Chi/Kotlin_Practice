@@ -1,42 +1,42 @@
 package com.workflow.worker.usecase.service.execution
 
-import com.workflow.infrastructure.shutdown.ShutdownConfig
-import com.workflow.worker.config.WorkerLoopConfig
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.readValue
-import com.workflow.workflow.model.WorkflowDefinition
-import com.workflow.workflow.usecase.port.inbound.orchestration.PhaseGate
-import com.workflow.workflow.usecase.service.orchestration.ActivityInputResolver
-import com.workflow.workflow.model.Task
-import com.workflow.workflow.usecase.port.outbound.persistent.TaskRepository
-import com.workflow.workflow.model.TaskStatus
-import com.workflow.workflow.model.SequenceInfo
-import com.workflow.workflow.usecase.port.outbound.persistent.WorkflowRepository
-import com.workflow.workflow.model.buildSequenceMap
 import com.workflow.infrastructure.coroutine.indefinitelyRepeat
+import com.workflow.infrastructure.coroutine.suspendCatching
 import com.workflow.infrastructure.coroutine.takeUntilSignal
 import com.workflow.infrastructure.coroutine.unorderedMapAsync
+import com.workflow.infrastructure.shutdown.ShutdownConfig
 import com.workflow.infrastructure.shutdown.ShutdownParticipant
 import com.workflow.infrastructure.shutdown.ShutdownSignal
+import com.workflow.worker.config.WorkerLoopConfig
 import com.workflow.worker.usecase.port.inbound.execution.HandlerInput
 import com.workflow.worker.usecase.port.outbound.notification.WorkerNotifier
+import com.workflow.workflow.model.SequenceInfo
+import com.workflow.workflow.model.Task
+import com.workflow.workflow.model.TaskStatus
+import com.workflow.workflow.model.WorkflowDefinition
+import com.workflow.workflow.model.buildSequenceMap
+import com.workflow.workflow.usecase.port.inbound.orchestration.PhaseGate
+import com.workflow.workflow.usecase.port.outbound.persistent.TaskRepository
+import com.workflow.workflow.usecase.port.outbound.persistent.WorkflowRepository
+import com.workflow.workflow.usecase.service.orchestration.ActivityInputResolver
 import io.micrometer.core.instrument.Counter
 import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.Tags
 import io.quarkus.runtime.StartupEvent
 import jakarta.enterprise.context.ApplicationScoped
 import jakarta.enterprise.event.Observes
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.slf4j.MDCContext
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
-import kotlinx.coroutines.launch
 import org.slf4j.LoggerFactory
 import org.slf4j.MDC
 import java.time.Duration
@@ -78,7 +78,7 @@ private const val MAX_DEFINITION_CACHE_SIZE = 1024
  * No exception escapes the transform. If the barrier call itself fails for a
  * COMPLETED task, the failure is routed through the retry/failure path
  * ([handleTaskFailure]), which may trigger [TaskRepository.resetForRetry] if
- * retries remain, or [reportTaskFailed] if exhausted.
+ * retries remain, or [reportTaskCompleted] with FAILED status if exhausted.
  *
  * **Retry semantics:** On handler failure, if `task.retryCount < task.maxRetries`,
  * the task is atomically reset to PENDING via [TaskRepository.resetForRetry]
@@ -193,12 +193,8 @@ class WorkerLoop(
         maxBatchSize: Int,
     ) = withContext(MDCContext(mapOf("worker_id" to workerId))) {
         val queueName = "default"
-        val tasks =
-            try {
-                taskRepo.claimNext(workerId, maxBatchSize, queueName)
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
+        val tasks = suspendCatching { taskRepo.claimNext(workerId, maxBatchSize, queueName) }
+            .getOrElse { e ->
                 log.error("Failed to claim tasks", e)
                 claimTotal("error").increment()
                 notifier.awaitWork(queueName, fallbackPollInterval)
@@ -230,44 +226,41 @@ class WorkerLoop(
         withContext(MDCContext(taskMdc)) {
             _inFlightTasks.incrementAndGet()
             try {
-                val handler = handlerRegistry.resolve(task.handlerKey)
-
-                val resolvedInputs = resolveInputs(task)
-
-                val input =
-                    HandlerInput(
-                        taskId = task.id,
-                        workflowId = task.workflowId,
-                        sequenceNumber = task.sequenceNumber,
-                        inputs = resolvedInputs,
-                        item = task.item,
-                    )
-                val output = handler.execute(input)
-
-                try {
-                    phaseGate.onTaskCompleted(
-                        taskId = task.id,
-                        workflowId = task.workflowId,
-                        sequenceNumber = task.sequenceNumber,
-                        status = TaskStatus.COMPLETED,
-                        resultJson = output.result,
-                        claimedBy = task.claimedBy,
-                        claimedAt = task.claimedAt,
-                    )
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    log.error("Barrier failed for COMPLETED task {}, falling through to failure path", task.id, e)
-                    handleTaskFailure(task, e)
-                }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                handleTaskFailure(task, e)
+                executeAndReport(task)
             } finally {
                 _inFlightTasks.decrementAndGet()
                 _lastActivityTimestamp = Instant.now()
             }
+        }
+    }
+
+    private suspend fun executeAndReport(task: Task) {
+        val output = suspendCatching {
+            val handler = handlerRegistry.resolve(task.handlerKey)
+            val resolvedInputs = resolveInputs(task)
+            val input = HandlerInput(
+                taskId = task.id,
+                workflowId = task.workflowId,
+                sequenceNumber = task.sequenceNumber,
+                inputs = resolvedInputs,
+                item = task.item,
+            )
+            handler.execute(input)
+        }.getOrElse { e -> handleTaskFailure(task, e as Exception); return }
+
+        suspendCatching {
+            phaseGate.onTaskCompleted(
+                taskId = task.id,
+                workflowId = task.workflowId,
+                sequenceNumber = task.sequenceNumber,
+                status = TaskStatus.COMPLETED,
+                resultJson = output.result,
+                claimedBy = task.claimedBy,
+                claimedAt = task.claimedAt,
+            )
+        }.onFailure { e ->
+            log.error("Barrier failed for COMPLETED task {}, falling through to failure path", task.id, e)
+            handleTaskFailure(task, e as Exception)
         }
     }
 
@@ -305,34 +298,34 @@ class WorkerLoop(
         )
 
         if (task.retryCount < task.maxRetries) {
-            try {
+            suspendCatching {
                 taskRepo.resetForRetry(task.id, task.retryCount + 1)
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
+            }.onFailure { e ->
                 log.error("Failed to reset task {} for retry, reporting as FAILED", task.id, e)
-                reportTaskFailed(task)
+                reportTaskCompleted(task, TaskStatus.FAILED, resultJson = null)
             }
         } else {
-            reportTaskFailed(task)
+            reportTaskCompleted(task, TaskStatus.FAILED, resultJson = null)
         }
     }
 
-    private suspend fun reportTaskFailed(task: Task) {
-        try {
+    private suspend fun reportTaskCompleted(
+        task: Task,
+        status: TaskStatus,
+        resultJson: String?,
+    ) {
+        suspendCatching {
             phaseGate.onTaskCompleted(
                 taskId = task.id,
                 workflowId = task.workflowId,
                 sequenceNumber = task.sequenceNumber,
-                status = TaskStatus.FAILED,
-                resultJson = null,
+                status = status,
+                resultJson = resultJson,
                 claimedBy = task.claimedBy,
                 claimedAt = task.claimedAt,
             )
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            log.error("Failed to report task {} as FAILED to barrier", task.id, e)
+        }.onFailure { e ->
+            log.error("Failed to report task {} as {} to barrier", task.id, status, e)
         }
     }
 
