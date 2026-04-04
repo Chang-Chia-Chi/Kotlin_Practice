@@ -652,6 +652,53 @@ class WorkflowIntegrationTest {
         assertEquals(listOf("PENDING"), taskStatusAt(wfId, seqOf(def, "x")))
     }
 
+    // ── Asymmetric conditional join ──────────────────────────────────────
+
+    @Test
+    fun `asymmetric depth conditional routing join not prematurely skipped`() = runBlocking {
+        // Taken branch (GO) has depth 2 before the join; skipped branch (NO) has depth 1.
+        // The cascade skip from the short branch must NOT prematurely skip the join
+        // while the deep branch's intermediate nodes haven't been dispatched yet.
+        //
+        //        ┌──(GO)──► b ──► c ──┐
+        //   a ──┤                      ├──► join
+        //        └──(NO)──► x ────────┘
+        val def = workflow {
+            activity("a") {
+                transition("a.h")
+                on("GO") { next("b") }
+                on("NO") { next("x") }
+            }
+            activity("b") { transition("b.h"); next("c") }
+            activity("c") { transition("c.h"); next("join") }
+            activity("x") { transition("x.h"); next("join") }
+            activity("join") { transition("j.h") }
+        }
+        val result = engine.startWorkflow(def)
+        val wfId = result.workflowId
+
+        // Route to GO branch — x is skipped, cascade must NOT skip join
+        val seqA = seqOf(def, "a")
+        val aTask = taskRepo.findByWorkflowAndSequence(wfId, seqA)[0]
+        gate.onTaskCompleted(aTask.id, wfId, seqA, TaskStatus.COMPLETED, """{"branch":"GO"}""")
+
+        assertEquals(listOf("PENDING"), taskStatusAt(wfId, seqOf(def, "b")))
+        assertEquals(listOf("SKIPPED"), taskStatusAt(wfId, seqOf(def, "x")))
+        // c and join must NOT have tasks yet — b hasn't completed
+        assertTrue(taskStatusAt(wfId, seqOf(def, "c")).isEmpty())
+        assertTrue(taskStatusAt(wfId, seqOf(def, "join")).isEmpty())
+
+        // Complete the deep branch: b → c → join
+        complete(wfId, def, "b")
+        assertEquals(listOf("PENDING"), taskStatusAt(wfId, seqOf(def, "c")))
+
+        complete(wfId, def, "c")
+        assertEquals(listOf("PENDING"), taskStatusAt(wfId, seqOf(def, "join")))
+
+        complete(wfId, def, "join")
+        assertEquals(WorkflowStatus.COMPLETED, workflowRepo.findById(wfId)!!.status)
+    }
+
     // ── Spec item 46 ─────────────────────────────────────────────────────
 
     @Test
