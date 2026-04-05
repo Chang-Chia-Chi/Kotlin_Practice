@@ -3,7 +3,7 @@ package com.workflow.stress
 import com.workflow.workflow.model.workflowId
 import com.workflow.workflow.dsl.workflow
 import com.workflow.worker.usecase.port.inbound.execution.HandlerInput
-import com.workflow.worker.usecase.port.inbound.execution.HandlerOutput
+import com.workflow.worker.usecase.port.inbound.execution.HandlerResult
 import com.workflow.worker.usecase.port.inbound.execution.TransitionHandler
 import eu.rekawek.toxiproxy.model.ToxicDirection
 import kotlinx.coroutines.Dispatchers

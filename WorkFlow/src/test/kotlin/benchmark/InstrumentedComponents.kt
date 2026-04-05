@@ -12,7 +12,7 @@ import com.workflow.workflow.usecase.service.orchestration.DefaultPhaseGate
 import com.workflow.workflow.usecase.service.orchestration.ActivityInputResolver
 import com.workflow.worker.usecase.port.outbound.notification.WorkerNotifier
 import com.workflow.worker.usecase.port.inbound.execution.HandlerInput
-import com.workflow.worker.usecase.port.inbound.execution.HandlerOutput
+import com.workflow.worker.usecase.port.inbound.execution.HandlerResult
 import com.workflow.worker.usecase.port.inbound.execution.TransitionHandler
 import org.jdbi.v3.core.Handle
 import org.jdbi.v3.core.Jdbi
@@ -78,6 +78,6 @@ class TimedHandler(
     private val delegate: TransitionHandler,
     private val timer: PhaseTimer,
 ) : TransitionHandler {
-    override suspend fun execute(input: HandlerInput): HandlerOutput =
+    override suspend fun execute(input: HandlerInput): HandlerResult =
         timer.suspendTime("handler.execute") { delegate.execute(input) }
 }

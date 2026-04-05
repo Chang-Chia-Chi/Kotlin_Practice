@@ -1,7 +1,7 @@
 package com.workflow.worker.usecase.service.execution
 
 import com.workflow.worker.usecase.port.inbound.execution.HandlerInput
-import com.workflow.worker.usecase.port.inbound.execution.HandlerOutput
+import com.workflow.worker.usecase.port.inbound.execution.HandlerResult
 import com.workflow.worker.usecase.port.inbound.execution.TransitionHandler
 import com.workflow.worker.usecase.service.execution.MeteredTransitionHandler
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
@@ -32,11 +32,11 @@ class MeteredTransitionHandlerTest {
     @Test
     fun `records success timer and returns delegate output`() = runTest {
         val delegate = object : TransitionHandler {
-            override suspend fun execute(input: HandlerInput) = HandlerOutput(result = "ok")
+            override suspend fun execute(input: HandlerInput) = HandlerResult.Completed(result = "ok")
         }
         val metered = MeteredTransitionHandler(delegate, "order.validate", meterRegistry)
 
-        val output = metered.execute(input)
+        val output = metered.execute(input) as HandlerResult.Completed
 
         assertEquals("ok", output.result)
 
@@ -51,7 +51,7 @@ class MeteredTransitionHandlerTest {
     @Test
     fun `records failure timer and rethrows exception`() = runTest {
         val delegate = object : TransitionHandler {
-            override suspend fun execute(input: HandlerInput): HandlerOutput {
+            override suspend fun execute(input: HandlerInput): HandlerResult {
                 throw IllegalStateException("boom")
             }
         }
@@ -72,7 +72,7 @@ class MeteredTransitionHandlerTest {
     @Test
     fun `multiple executions accumulate in timer`() = runTest {
         val delegate = object : TransitionHandler {
-            override suspend fun execute(input: HandlerInput) = HandlerOutput(result = null)
+            override suspend fun execute(input: HandlerInput) = HandlerResult.Completed(result = null)
         }
         val metered = MeteredTransitionHandler(delegate, "step.process", meterRegistry)
 

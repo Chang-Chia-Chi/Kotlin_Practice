@@ -1,7 +1,7 @@
 package com.workflow.worker.usecase.service.execution
 
 import com.workflow.worker.usecase.port.inbound.execution.HandlerInput
-import com.workflow.worker.usecase.port.inbound.execution.HandlerOutput
+import com.workflow.worker.usecase.port.inbound.execution.HandlerResult
 import com.workflow.worker.usecase.port.inbound.execution.TransitionHandler
 import com.workflow.worker.usecase.service.execution.HandlerRegistry
 import com.workflow.worker.usecase.service.execution.WorkerLoop
@@ -167,7 +167,7 @@ class WorkerLoopTest {
         @Test
         fun `claim task and handler succeeds - barrier receives COMPLETED with resultJson`() = runTest {
             val task = makeTask()
-            val handlerResult = HandlerOutput(result = """{"status":"done"}""")
+            val handlerResult = HandlerResult.Completed(result = """{"status":"done"}""")
             val handler = mock<TransitionHandler>()
 
             whenever(taskRepo.claimNext(eq(workerId), eq(16), eq("default")))
@@ -207,7 +207,7 @@ class WorkerLoopTest {
                 .thenReturn(listOf(task))
                 .thenReturn(emptyList())
             whenever(handlerRegistry.resolve(task.handlerKey)).thenReturn(handler)
-            whenever(handler.execute(any())).thenReturn(HandlerOutput(result = null))
+            whenever(handler.execute(any())).thenReturn(HandlerResult.Completed(result = null))
 
             startAndAdvance(this)
 
@@ -235,8 +235,8 @@ class WorkerLoopTest {
                 .thenReturn(emptyList())
             whenever(handlerRegistry.resolve("step.one")).thenReturn(handler1)
             whenever(handlerRegistry.resolve("step.two")).thenReturn(handler2)
-            whenever(handler1.execute(any())).thenReturn(HandlerOutput("""{"r":1}"""))
-            whenever(handler2.execute(any())).thenReturn(HandlerOutput("""{"r":2}"""))
+            whenever(handler1.execute(any())).thenReturn(HandlerResult.Completed("""{"r":1}"""))
+            whenever(handler2.execute(any())).thenReturn(HandlerResult.Completed("""{"r":2}"""))
 
             startAndAdvance(this, ticks = 4)
 
@@ -280,7 +280,7 @@ class WorkerLoopTest {
                 .thenReturn(listOf(task))
                 .thenReturn(emptyList())
             whenever(handlerRegistry.resolve(task.handlerKey)).thenReturn(handler)
-            whenever(handler.execute(any())).thenReturn(HandlerOutput(result = """{"ok":true}"""))
+            whenever(handler.execute(any())).thenReturn(HandlerResult.Completed(result = """{"ok":true}"""))
             whenever(workflowRepo.findById(wfId)).thenReturn(wfRun)
             whenever(activityInputResolver.resolve(any(), any(), any())).thenReturn("""{"data":"resolved"}""")
 
@@ -490,7 +490,7 @@ class WorkerLoopTest {
                 .thenReturn(listOf(task))
                 .thenReturn(emptyList())
             whenever(handlerRegistry.resolve(task.handlerKey)).thenReturn(handler)
-            whenever(handler.execute(any())).thenReturn(HandlerOutput("ok"))
+            whenever(handler.execute(any())).thenReturn(HandlerResult.Completed("ok"))
 
             startAndAdvance(this, ticks = 4)
 
@@ -517,7 +517,7 @@ class WorkerLoopTest {
                 .thenReturn(listOf(task))
                 .thenReturn(emptyList())
             whenever(handlerRegistry.resolve(task.handlerKey)).thenReturn(handler)
-            whenever(handler.execute(any())).thenReturn(HandlerOutput("recovered"))
+            whenever(handler.execute(any())).thenReturn(HandlerResult.Completed("recovered"))
 
             startAndAdvance(this, ticks = 4)
 
@@ -560,10 +560,10 @@ class WorkerLoopTest {
             var signalObserved = false
             val task = makeTask()
             val handler = object : TransitionHandler {
-                override suspend fun execute(input: HandlerInput): HandlerOutput {
+                override suspend fun execute(input: HandlerInput): HandlerResult {
                     val signal = kotlin.coroutines.coroutineContext[ShutdownSignal]
                     signalObserved = signal != null
-                    return HandlerOutput(null)
+                    return HandlerResult.Completed(null)
                 }
             }
 
@@ -597,10 +597,10 @@ class WorkerLoopTest {
             val handlerCompleted = java.util.concurrent.atomic.AtomicBoolean(false)
             val task = makeTask()
             val handler = object : TransitionHandler {
-                override suspend fun execute(input: HandlerInput): HandlerOutput {
+                override suspend fun execute(input: HandlerInput): HandlerResult {
                     delay(500) // simulated work within drain window (30s default)
                     handlerCompleted.set(true)
-                    return HandlerOutput("""{"drained":"ok"}""")
+                    return HandlerResult.Completed("""{"drained":"ok"}""")
                 }
             }
 
@@ -638,11 +638,11 @@ class WorkerLoopTest {
             val handlerCompleted = java.util.concurrent.atomic.AtomicBoolean(false)
             val task = makeTask()
             val handler = object : TransitionHandler {
-                override suspend fun execute(input: HandlerInput): HandlerOutput {
+                override suspend fun execute(input: HandlerInput): HandlerResult {
                     handlerStarted.set(true)
                     delay(Long.MAX_VALUE) // block indefinitely — exceeds drain window
                     handlerCompleted.set(true)
-                    return HandlerOutput(null) // unreachable
+                    return HandlerResult.Completed(null) // unreachable
                 }
             }
 
@@ -701,9 +701,9 @@ class WorkerLoopTest {
             val task = makeTask()
             var inFlightDuringExecution = -1
             val handler = object : TransitionHandler {
-                override suspend fun execute(input: HandlerInput): HandlerOutput {
+                override suspend fun execute(input: HandlerInput): HandlerResult {
                     inFlightDuringExecution = workerLoop.inFlightTasks
-                    return HandlerOutput(null)
+                    return HandlerResult.Completed(null)
                 }
             }
 
@@ -723,7 +723,7 @@ class WorkerLoopTest {
             val task = makeTask(retryCount = 0, maxRetries = 0)
             var inFlightDuringExecution = -1
             val handler = object : TransitionHandler {
-                override suspend fun execute(input: HandlerInput): HandlerOutput {
+                override suspend fun execute(input: HandlerInput): HandlerResult {
                     inFlightDuringExecution = workerLoop.inFlightTasks
                     throw RuntimeException("boom")
                 }
@@ -784,8 +784,8 @@ class WorkerLoopTest {
                 .thenReturn(emptyList())
             whenever(handlerRegistry.resolve("step.one")).thenReturn(handler1)
             whenever(handlerRegistry.resolve("step.two")).thenReturn(handler2)
-            whenever(handler1.execute(any())).thenReturn(HandlerOutput("r1"))
-            whenever(handler2.execute(any())).thenReturn(HandlerOutput("r2"))
+            whenever(handler1.execute(any())).thenReturn(HandlerResult.Completed("r1"))
+            whenever(handler2.execute(any())).thenReturn(HandlerResult.Completed("r2"))
 
             doAnswer { throw RuntimeException("barrier blew up") }
                 .doAnswer { }
@@ -807,7 +807,7 @@ class WorkerLoopTest {
                 .thenReturn(listOf(task))
                 .thenReturn(emptyList())
             whenever(handlerRegistry.resolve(task.handlerKey)).thenReturn(handler)
-            whenever(handler.execute(any())).thenReturn(HandlerOutput("success"))
+            whenever(handler.execute(any())).thenReturn(HandlerResult.Completed("success"))
             doThrow(RuntimeException("barrier failed on COMPLETED"))
                 .whenever(phaseGate).onTaskCompleted(any(), any(), any(), any(), any(), any(), any())
 
@@ -831,7 +831,7 @@ class WorkerLoopTest {
             whenever(handlerRegistry.resolve("step.one")).thenReturn(handler1)
             whenever(handlerRegistry.resolve("step.two")).thenReturn(handler2)
             whenever(handler1.execute(any())).thenThrow(RuntimeException("permanent failure"))
-            whenever(handler2.execute(any())).thenReturn(HandlerOutput("r2"))
+            whenever(handler2.execute(any())).thenReturn(HandlerResult.Completed("r2"))
 
             // barrier throws on FAILED report for task1, succeeds for task2
             doAnswer { invocation ->
@@ -894,7 +894,7 @@ class WorkerLoopTest {
                 .thenReturn(listOf(task))
                 .thenReturn(emptyList())
             whenever(handlerRegistry.resolve(task.handlerKey)).thenReturn(handler)
-            whenever(handler.execute(any())).thenReturn(HandlerOutput("done"))
+            whenever(handler.execute(any())).thenReturn(HandlerResult.Completed("done"))
 
             // 1. Start
             workerLoop.start(this)
@@ -935,7 +935,7 @@ class WorkerLoopTest {
         fun `CancellationException from handler propagates - no retry, no barrier`() = runTest {
             val task = makeTask(retryCount = 0, maxRetries = 3)
             val handler = object : TransitionHandler {
-                override suspend fun execute(input: HandlerInput): HandlerOutput {
+                override suspend fun execute(input: HandlerInput): HandlerResult {
                     throw CancellationException("task cancelled")
                 }
             }
@@ -968,13 +968,13 @@ class WorkerLoopTest {
             )
             val capturedMdc = mutableMapOf<String, String?>()
             val handler = object : TransitionHandler {
-                override suspend fun execute(input: HandlerInput): HandlerOutput {
+                override suspend fun execute(input: HandlerInput): HandlerResult {
                     capturedMdc["worker_id"] = MDC.get("worker_id")
                     capturedMdc["task_id"] = MDC.get("task_id")
                     capturedMdc["workflow_id"] = MDC.get("workflow_id")
                     capturedMdc["handler_key"] = MDC.get("handler_key")
                     capturedMdc["attempt"] = MDC.get("attempt")
-                    return HandlerOutput(null)
+                    return HandlerResult.Completed(null)
                 }
             }
 
@@ -999,16 +999,16 @@ class WorkerLoopTest {
             val capturedMdcTask2 = mutableMapOf<String, String?>()
 
             val handler1 = object : TransitionHandler {
-                override suspend fun execute(input: HandlerInput): HandlerOutput {
-                    return HandlerOutput(null)
+                override suspend fun execute(input: HandlerInput): HandlerResult {
+                    return HandlerResult.Completed(null)
                 }
             }
             val handler2 = object : TransitionHandler {
-                override suspend fun execute(input: HandlerInput): HandlerOutput {
+                override suspend fun execute(input: HandlerInput): HandlerResult {
                     capturedMdcTask2["task_id"] = MDC.get("task_id")
                     capturedMdcTask2["workflow_id"] = MDC.get("workflow_id")
                     capturedMdcTask2["handler_key"] = MDC.get("handler_key")
-                    return HandlerOutput(null)
+                    return HandlerResult.Completed(null)
                 }
             }
 
@@ -1075,13 +1075,13 @@ class WorkerLoopTest {
             val task = makeTask()
             var gaugeValueDuringExecution = -1.0
             val handler = object : TransitionHandler {
-                override suspend fun execute(input: HandlerInput): HandlerOutput {
+                override suspend fun execute(input: HandlerInput): HandlerResult {
                     gaugeValueDuringExecution = meterRegistry
                         .find("taskqueue_worker_in_flight_tasks")
                         .tag("pod", workerId)
                         .gauge()
                         ?.value() ?: -1.0
-                    return HandlerOutput(null)
+                    return HandlerResult.Completed(null)
                 }
             }
 
@@ -1133,7 +1133,7 @@ class WorkerLoopTest {
                 .thenReturn(listOf(task))
                 .thenReturn(emptyList())
             whenever(handlerRegistry.resolve(task.handlerKey)).thenReturn(handler)
-            whenever(handler.execute(any())).thenReturn(HandlerOutput(null))
+            whenever(handler.execute(any())).thenReturn(HandlerResult.Completed(null))
 
             startAndAdvance(this)
 
@@ -1163,7 +1163,7 @@ class WorkerLoopTest {
                 .thenReturn(listOf(task))
                 .thenReturn(emptyList())
             whenever(handlerRegistry.resolve(task.handlerKey)).thenReturn(handler)
-            whenever(handler.execute(any())).thenReturn(HandlerOutput(null))
+            whenever(handler.execute(any())).thenReturn(HandlerResult.Completed(null))
 
             startAndAdvance(this, ticks = 4)
 
@@ -1215,6 +1215,79 @@ class WorkerLoopTest {
             assertTrue(
                 notifier.awaitQueues.all { it == "default" },
                 "awaitWork should be called with 'default' queue, got ${notifier.awaitQueues}",
+            )
+        }
+    }
+
+    // ── T. Defer Path ───────────────────────────────────────────────────
+
+    @Nested
+    inner class DeferPath {
+
+        @Test
+        fun `handler returning Defer calls taskRepo defer and does not call phaseGate`() = runTest {
+            val deferTask = makeTask(handlerKey = "defer-handler")
+            taskRepo.stub { onBlocking { claimNext(any(), any(), any()) } doReturn listOf(deferTask) doReturn emptyList() }
+
+            val deferHandler = object : TransitionHandler {
+                override fun key(): String = "defer-handler"
+                override suspend fun execute(input: HandlerInput): HandlerResult =
+                    HandlerResult.Defer(triggerType = "k8s-job", triggerMeta = """{"jobName":"j1","namespace":"ns"}""")
+            }
+            whenever(handlerRegistry.resolve("defer-handler")).thenReturn(deferHandler)
+            taskRepo.stub { onBlocking { defer(any(), any(), any()) } doReturn true }
+
+            startAndAdvance(this)
+
+            verify(taskRepo).defer(eq(deferTask.id), eq("k8s-job"), eq("""{"jobName":"j1","namespace":"ns"}"""))
+            verify(phaseGate, never()).onTaskCompleted(any(), any(), any(), any(), any(), any(), any())
+        }
+
+        @Test
+        fun `handler returning Defer when defer fails falls through to handleTaskFailure`() = runTest {
+            val deferTask = makeTask(handlerKey = "defer-handler")
+            taskRepo.stub { onBlocking { claimNext(any(), any(), any()) } doReturn listOf(deferTask) doReturn emptyList() }
+
+            val deferHandler = object : TransitionHandler {
+                override fun key(): String = "defer-handler"
+                override suspend fun execute(input: HandlerInput): HandlerResult =
+                    HandlerResult.Defer(triggerType = "sql-exec", triggerMeta = "{}")
+            }
+            whenever(handlerRegistry.resolve("defer-handler")).thenReturn(deferHandler)
+            taskRepo.stub { onBlocking { defer(any(), any(), any()) } doReturn false }
+
+            startAndAdvance(this)
+
+            verify(taskRepo).defer(eq(deferTask.id), any(), any())
+            // Falls through to handleTaskFailure which calls resetForRetry (retryCount=0 < maxRetries=3)
+            verify(taskRepo).resetForRetry(eq(deferTask.id), eq(1))
+        }
+
+        @Test
+        fun `handler returning Defer when defer fails and retries exhausted reports FAILED to barrier`() = runTest {
+            val deferTask = makeTask(handlerKey = "defer-handler", retryCount = 3, maxRetries = 3)
+            taskRepo.stub { onBlocking { claimNext(any(), any(), any()) } doReturn listOf(deferTask) doReturn emptyList() }
+
+            val deferHandler = object : TransitionHandler {
+                override fun key(): String = "defer-handler"
+                override suspend fun execute(input: HandlerInput): HandlerResult =
+                    HandlerResult.Defer(triggerType = "k8s-job", triggerMeta = """{"jobName":"j1"}""")
+            }
+            whenever(handlerRegistry.resolve("defer-handler")).thenReturn(deferHandler)
+            taskRepo.stub { onBlocking { defer(any(), any(), any()) } doReturn false }
+
+            startAndAdvance(this)
+
+            verify(taskRepo).defer(eq(deferTask.id), any(), any())
+            verify(taskRepo, never()).resetForRetry(any(), any())
+            verify(phaseGate).onTaskCompleted(
+                eq(deferTask.id),
+                eq(deferTask.workflowId),
+                eq(deferTask.sequenceNumber),
+                eq(TaskStatus.FAILED),
+                eq(null),
+                eq(workerId),
+                any(),
             )
         }
     }

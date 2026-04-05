@@ -1,7 +1,7 @@
 package com.workflow.stress
 
 import com.workflow.worker.usecase.port.inbound.execution.HandlerInput
-import com.workflow.worker.usecase.port.inbound.execution.HandlerOutput
+import com.workflow.worker.usecase.port.inbound.execution.HandlerResult
 import com.workflow.worker.usecase.port.inbound.execution.TransitionHandler
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -39,7 +39,7 @@ class CrashableHandler(
 
     private val invocationCount = AtomicInteger(0)
 
-    override suspend fun execute(input: HandlerInput): HandlerOutput {
+    override suspend fun execute(input: HandlerInput): HandlerResult {
         val n = invocationCount.incrementAndGet()
         val shouldCrash = (n == crashOnInvocation)
 
@@ -65,8 +65,8 @@ class CrashableHandler(
 
 /** Returns input as output result. Prefers item (scatter chunk) over inputs. */
 class PassThroughHandler : TransitionHandler {
-    override suspend fun execute(input: HandlerInput): HandlerOutput =
-        HandlerOutput(result = input.item ?: input.inputs)
+    override suspend fun execute(input: HandlerInput): HandlerResult =
+        HandlerResult.Completed(result = input.item ?: input.inputs)
 }
 
 /** Always throws after optional delay. */
@@ -74,7 +74,7 @@ class FailingHandler(
     private val delayMs: Long = 0,
     private val message: String = "Simulated failure",
 ) : TransitionHandler {
-    override suspend fun execute(input: HandlerInput): HandlerOutput {
+    override suspend fun execute(input: HandlerInput): HandlerResult {
         if (delayMs > 0) delay(delayMs)
         throw RuntimeException(message)
     }
@@ -85,7 +85,7 @@ class SlowHandler(
     private val delayMs: Long,
     private val delegate: TransitionHandler = PassThroughHandler(),
 ) : TransitionHandler {
-    override suspend fun execute(input: HandlerInput): HandlerOutput {
+    override suspend fun execute(input: HandlerInput): HandlerResult {
         delay(delayMs)
         return delegate.execute(input)
     }
@@ -100,7 +100,7 @@ class GatedHandler(
 ) : TransitionHandler {
     private val gate = CompletableDeferred<Unit>()
 
-    override suspend fun execute(input: HandlerInput): HandlerOutput {
+    override suspend fun execute(input: HandlerInput): HandlerResult {
         gate.await()
         return delegate.execute(input)
     }
@@ -117,7 +117,7 @@ class CountingHandler(
     val invocations = java.util.concurrent.ConcurrentHashMap<String, AtomicInteger>()
     val totalInvocations = AtomicInteger(0)
 
-    override suspend fun execute(input: HandlerInput): HandlerOutput {
+    override suspend fun execute(input: HandlerInput): HandlerResult {
         invocations.computeIfAbsent(input.taskId) { AtomicInteger(0) }.incrementAndGet()
         totalInvocations.incrementAndGet()
         return delegate.execute(input)
@@ -133,7 +133,7 @@ class FailNThenSucceedHandler(
 ) : TransitionHandler {
     private val count = AtomicInteger(0)
 
-    override suspend fun execute(input: HandlerInput): HandlerOutput {
+    override suspend fun execute(input: HandlerInput): HandlerResult {
         if (count.incrementAndGet() <= failCount) {
             throw RuntimeException("Simulated failure #${count.get()}")
         }

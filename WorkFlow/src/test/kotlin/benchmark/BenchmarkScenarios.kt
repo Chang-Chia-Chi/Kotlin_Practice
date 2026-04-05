@@ -5,7 +5,7 @@ import com.workflow.workflow.model.JoinPolicy
 import com.workflow.workflow.model.WorkflowDefinition
 import com.workflow.workflow.dsl.workflow
 import com.workflow.worker.usecase.port.inbound.execution.HandlerInput
-import com.workflow.worker.usecase.port.inbound.execution.HandlerOutput
+import com.workflow.worker.usecase.port.inbound.execution.HandlerResult
 import com.workflow.worker.usecase.service.execution.HandlerRegistry
 import com.workflow.worker.usecase.port.inbound.execution.TransitionHandler
 import kotlinx.coroutines.delay
@@ -78,13 +78,13 @@ object BenchmarkScenarios {
 
     private fun payloadHandler(sizeBytes: Int): TransitionHandler = object : TransitionHandler {
         private val payload = """{"data":"${"x".repeat((sizeBytes - 10).coerceAtLeast(0))}"}"""
-        override suspend fun execute(input: HandlerInput): HandlerOutput =
-            HandlerOutput(result = payload)
+        override suspend fun execute(input: HandlerInput): HandlerResult =
+            HandlerResult.Completed(result = payload)
     }
 
     private fun latencyHandler(delayMs: Long, delegate: TransitionHandler): TransitionHandler =
         object : TransitionHandler {
-            override suspend fun execute(input: HandlerInput): HandlerOutput {
+            override suspend fun execute(input: HandlerInput): HandlerResult {
                 delay(delayMs)
                 return delegate.execute(input)
             }
@@ -92,9 +92,9 @@ object BenchmarkScenarios {
 
     private fun scatterHandler(fanOutFactor: Int, objectMapper: ObjectMapper): TransitionHandler =
         object : TransitionHandler {
-            override suspend fun execute(input: HandlerInput): HandlerOutput {
+            override suspend fun execute(input: HandlerInput): HandlerResult {
                 val items = (1..fanOutFactor).map { mapOf("item" to it) }
-                return HandlerOutput(result = objectMapper.writeValueAsString(items))
+                return HandlerResult.Completed(result = objectMapper.writeValueAsString(items))
             }
         }
 }

@@ -6,7 +6,7 @@ import com.workflow.workflow.model.TaskStatus
 import com.workflow.workflow.model.workflowId
 import com.workflow.workflow.dsl.workflow
 import com.workflow.worker.usecase.port.inbound.execution.HandlerInput
-import com.workflow.worker.usecase.port.inbound.execution.HandlerOutput
+import com.workflow.worker.usecase.port.inbound.execution.HandlerResult
 import com.workflow.worker.usecase.port.inbound.execution.TransitionHandler
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.coroutineScope
@@ -46,9 +46,9 @@ class CorrectnessStressTest : StressTestBase() {
         }
 
         handlerRegistry.register("c1.scatter", object : TransitionHandler {
-            override suspend fun execute(input: HandlerInput): HandlerOutput {
+            override suspend fun execute(input: HandlerInput): HandlerResult {
                 val payloads = (1..scale.fanOutSize).map { """{"item":$it}""" }
-                return HandlerOutput(result = objectMapper.writeValueAsString(payloads))
+                return HandlerResult.Completed(result = objectMapper.writeValueAsString(payloads))
             }
         })
         val recorder = HistoryRecorder(PassThroughHandler())
@@ -95,9 +95,9 @@ class CorrectnessStressTest : StressTestBase() {
         }
 
         handlerRegistry.register("c2.scatter", object : TransitionHandler {
-            override suspend fun execute(input: HandlerInput): HandlerOutput {
+            override suspend fun execute(input: HandlerInput): HandlerResult {
                 val payloads = (1..n).map { """{"item":$it}""" }
-                return HandlerOutput(result = objectMapper.writeValueAsString(payloads))
+                return HandlerResult.Completed(result = objectMapper.writeValueAsString(payloads))
             }
         })
         handlerRegistry.register("c2.parallel", PassThroughHandler())
@@ -140,18 +140,18 @@ class CorrectnessStressTest : StressTestBase() {
         }
 
         handlerRegistry.register("c3.scatter", object : TransitionHandler {
-            override suspend fun execute(input: HandlerInput): HandlerOutput {
+            override suspend fun execute(input: HandlerInput): HandlerResult {
                 val payloads = (1..n).map { """{"item":$it}""" }
-                return HandlerOutput(result = objectMapper.writeValueAsString(payloads))
+                return HandlerResult.Completed(result = objectMapper.writeValueAsString(payloads))
             }
         })
 
         // Fail the first sub-task, succeed the rest
         val count = AtomicInteger(0)
         handlerRegistry.register("c3.parallel", object : TransitionHandler {
-            override suspend fun execute(input: HandlerInput): HandlerOutput {
+            override suspend fun execute(input: HandlerInput): HandlerResult {
                 if (count.incrementAndGet() == 1) throw RuntimeException("Simulated failure")
-                return HandlerOutput(result = input.item)
+                return HandlerResult.Completed(result = input.item)
             }
         })
 
@@ -211,17 +211,17 @@ class CorrectnessStressTest : StressTestBase() {
         }
 
         handlerRegistry.register("$handlerKey.scatter", object : TransitionHandler {
-            override suspend fun execute(input: HandlerInput): HandlerOutput {
+            override suspend fun execute(input: HandlerInput): HandlerResult {
                 val payloads = (1..totalTasks).map { """{"item":$it}""" }
-                return HandlerOutput(result = objectMapper.writeValueAsString(payloads))
+                return HandlerResult.Completed(result = objectMapper.writeValueAsString(payloads))
             }
         })
 
         val failCounter = AtomicInteger(0)
         handlerRegistry.register("$handlerKey.parallel", object : TransitionHandler {
-            override suspend fun execute(input: HandlerInput): HandlerOutput {
+            override suspend fun execute(input: HandlerInput): HandlerResult {
                 if (failCounter.incrementAndGet() <= failCount) throw RuntimeException("Simulated failure")
-                return HandlerOutput(result = input.item)
+                return HandlerResult.Completed(result = input.item)
             }
         })
         handlerRegistry.register("$handlerKey.final", PassThroughHandler())
@@ -268,17 +268,17 @@ class CorrectnessStressTest : StressTestBase() {
         }
 
         handlerRegistry.register("$handlerKey.scatter", object : TransitionHandler {
-            override suspend fun execute(input: HandlerInput): HandlerOutput {
+            override suspend fun execute(input: HandlerInput): HandlerResult {
                 val payloads = (1..totalTasks).map { """{"item":$it}""" }
-                return HandlerOutput(result = objectMapper.writeValueAsString(payloads))
+                return HandlerResult.Completed(result = objectMapper.writeValueAsString(payloads))
             }
         })
 
         val failCounter = AtomicInteger(0)
         handlerRegistry.register("$handlerKey.parallel", object : TransitionHandler {
-            override suspend fun execute(input: HandlerInput): HandlerOutput {
+            override suspend fun execute(input: HandlerInput): HandlerResult {
                 if (failCounter.incrementAndGet() <= failCount) throw RuntimeException("Simulated failure")
-                return HandlerOutput(result = input.item)
+                return HandlerResult.Completed(result = input.item)
             }
         })
         handlerRegistry.register("$handlerKey.final", PassThroughHandler())
@@ -385,16 +385,16 @@ class CorrectnessStressTest : StressTestBase() {
         }
 
         handlerRegistry.register("c8.step1", object : TransitionHandler {
-            override suspend fun execute(input: HandlerInput): HandlerOutput =
-                HandlerOutput(result = """{"phase":1,"data":"origin"}""")
+            override suspend fun execute(input: HandlerInput): HandlerResult =
+                HandlerResult.Completed(result = """{"phase":1,"data":"origin"}""")
         })
         handlerRegistry.register("c8.step2", object : TransitionHandler {
-            override suspend fun execute(input: HandlerInput): HandlerOutput =
-                HandlerOutput(result = """{"phase":2,"prev":${input.inputs}}""")
+            override suspend fun execute(input: HandlerInput): HandlerResult =
+                HandlerResult.Completed(result = """{"phase":2,"prev":${input.inputs}}""")
         })
         handlerRegistry.register("c8.step3", object : TransitionHandler {
-            override suspend fun execute(input: HandlerInput): HandlerOutput =
-                HandlerOutput(result = """{"phase":3,"prev":${input.inputs}}""")
+            override suspend fun execute(input: HandlerInput): HandlerResult =
+                HandlerResult.Completed(result = """{"phase":3,"prev":${input.inputs}}""")
         })
 
         val wfId = engine.startWorkflow(def).workflowId
@@ -449,14 +449,14 @@ class CorrectnessStressTest : StressTestBase() {
         }
 
         handlerRegistry.register("c9.scatter", object : TransitionHandler {
-            override suspend fun execute(input: HandlerInput): HandlerOutput {
+            override suspend fun execute(input: HandlerInput): HandlerResult {
                 val payloads = (1..n).map { """{"item":$it}""" }
-                return HandlerOutput(result = objectMapper.writeValueAsString(payloads))
+                return HandlerResult.Completed(result = objectMapper.writeValueAsString(payloads))
             }
         })
         handlerRegistry.register("c9.parallel", object : TransitionHandler {
-            override suspend fun execute(input: HandlerInput): HandlerOutput =
-                HandlerOutput(result = """{"processed":${input.item}}""")
+            override suspend fun execute(input: HandlerInput): HandlerResult =
+                HandlerResult.Completed(result = """{"processed":${input.item}}""")
         })
 
         val wfId = engine.startWorkflow(def).workflowId
@@ -500,9 +500,9 @@ class CorrectnessStressTest : StressTestBase() {
         handlerRegistry.register("c10.step1", PassThroughHandler())
         val step2Counter = AtomicInteger(0)
         handlerRegistry.register("c10.step2", object : TransitionHandler {
-            override suspend fun execute(input: HandlerInput): HandlerOutput {
+            override suspend fun execute(input: HandlerInput): HandlerResult {
                 if (step2Counter.incrementAndGet() == 1) throw RuntimeException("First attempt fails")
-                return HandlerOutput(result = input.inputs)
+                return HandlerResult.Completed(result = input.inputs)
             }
         })
         handlerRegistry.register("c10.step3", PassThroughHandler())
@@ -556,9 +556,9 @@ class CorrectnessStressTest : StressTestBase() {
         }
 
         handlerRegistry.register("c11.scatter", object : TransitionHandler {
-            override suspend fun execute(input: HandlerInput): HandlerOutput {
+            override suspend fun execute(input: HandlerInput): HandlerResult {
                 val payloads = (1..n).map { """{"item":$it}""" }
-                return HandlerOutput(result = objectMapper.writeValueAsString(payloads))
+                return HandlerResult.Completed(result = objectMapper.writeValueAsString(payloads))
             }
         })
         handlerRegistry.register("c11.parallel", PassThroughHandler())

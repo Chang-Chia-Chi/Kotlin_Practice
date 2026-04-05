@@ -1,7 +1,7 @@
 package com.workflow.stress
 
 import com.workflow.worker.usecase.port.inbound.execution.HandlerInput
-import com.workflow.worker.usecase.port.inbound.execution.HandlerOutput
+import com.workflow.worker.usecase.port.inbound.execution.HandlerResult
 import com.workflow.worker.usecase.port.inbound.execution.TransitionHandler
 import java.time.Instant
 import java.util.concurrent.ConcurrentLinkedQueue
@@ -44,7 +44,7 @@ class HistoryRecorder(
 
     fun snapshot(): List<HistoryEvent> = _events.toList()
 
-    override suspend fun execute(input: HandlerInput): HandlerOutput {
+    override suspend fun execute(input: HandlerInput): HandlerResult {
         val thread = Thread.currentThread().name
         _events.add(HistoryEvent(input.taskId, input.workflowId, thread, Instant.now(), EventType.EXECUTE_START))
         return try {

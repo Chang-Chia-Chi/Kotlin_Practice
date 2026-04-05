@@ -4,7 +4,7 @@ import com.workflow.workflow.model.FailurePolicy
 import com.workflow.workflow.model.workflowId
 import com.workflow.workflow.dsl.workflow
 import com.workflow.worker.usecase.port.inbound.execution.HandlerInput
-import com.workflow.worker.usecase.port.inbound.execution.HandlerOutput
+import com.workflow.worker.usecase.port.inbound.execution.HandlerResult
 import com.workflow.worker.usecase.port.inbound.execution.TransitionHandler
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -92,9 +92,9 @@ class FaultInjectionStressTest : StressTestBase() {
             }
 
             handlerRegistry.register("f3.scatter", object : TransitionHandler {
-                override suspend fun execute(input: HandlerInput): HandlerOutput {
+                override suspend fun execute(input: HandlerInput): HandlerResult {
                     val payloads = (1..10).map { """{"item":$it}""" }
-                    return HandlerOutput(result = objectMapper.writeValueAsString(payloads))
+                    return HandlerResult.Completed(result = objectMapper.writeValueAsString(payloads))
                 }
             })
             handlerRegistry.register("f3.parallel", PassThroughHandler())

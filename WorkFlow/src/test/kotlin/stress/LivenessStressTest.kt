@@ -7,7 +7,7 @@ import com.workflow.workflow.model.WorkflowStatus
 import com.workflow.workflow.model.workflowId
 import com.workflow.workflow.dsl.workflow
 import com.workflow.worker.usecase.port.inbound.execution.HandlerInput
-import com.workflow.worker.usecase.port.inbound.execution.HandlerOutput
+import com.workflow.worker.usecase.port.inbound.execution.HandlerResult
 import com.workflow.worker.usecase.port.inbound.execution.TransitionHandler
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -264,7 +264,7 @@ class LivenessStressTest : StressTestBase() {
             handlerRegistry.register(
                 "l6a.handler",
                 object : TransitionHandler {
-                    override suspend fun execute(input: HandlerInput): HandlerOutput {
+                    override suspend fun execute(input: HandlerInput): HandlerResult {
                         if (firstAttempt) {
                             firstAttempt = false
                             // Cut network — the barrier call after this will fail
@@ -273,7 +273,7 @@ class LivenessStressTest : StressTestBase() {
                             // Restore after a brief cut (simulates transient partition)
                             oracleProxy.toxics().get("cut-l6a").remove()
                         }
-                        return HandlerOutput(result = input.inputs)
+                        return HandlerResult.Completed(result = input.inputs)
                     }
                 },
             )
@@ -474,9 +474,9 @@ class LivenessStressTest : StressTestBase() {
             handlerRegistry.register(
                 "l11.scatter",
                 object : TransitionHandler {
-                    override suspend fun execute(input: HandlerInput): HandlerOutput {
+                    override suspend fun execute(input: HandlerInput): HandlerResult {
                         val payloads = (1..scale.fanOutSize).map { """{"item":$it}""" }
-                        return HandlerOutput(result = objectMapper.writeValueAsString(payloads))
+                        return HandlerResult.Completed(result = objectMapper.writeValueAsString(payloads))
                     }
                 },
             )

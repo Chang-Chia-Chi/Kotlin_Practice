@@ -1,7 +1,7 @@
 package com.workflow.worker.usecase.service.execution
 
 import com.workflow.worker.usecase.port.inbound.execution.HandlerInput
-import com.workflow.worker.usecase.port.inbound.execution.HandlerOutput
+import com.workflow.worker.usecase.port.inbound.execution.HandlerResult
 import com.workflow.worker.usecase.port.inbound.execution.TransitionHandler
 import com.workflow.worker.usecase.service.execution.HandlerRegistry
 import jakarta.enterprise.inject.Instance
@@ -29,8 +29,8 @@ class HandlerRegistryTest {
     @Test
     fun `register handler and resolve by key returns same handler`() = runTest {
         val handler = object : TransitionHandler {
-            override suspend fun execute(input: HandlerInput): HandlerOutput =
-                HandlerOutput(result = null)
+            override suspend fun execute(input: HandlerInput): HandlerResult =
+                HandlerResult.Completed(result = null)
         }
 
         registry.register("order.validate", handler)
@@ -53,12 +53,12 @@ class HandlerRegistryTest {
     @Test
     fun `register second handler with same key overwrites first`() = runTest {
         val firstHandler = object : TransitionHandler {
-            override suspend fun execute(input: HandlerInput): HandlerOutput =
-                HandlerOutput(result = "first")
+            override suspend fun execute(input: HandlerInput): HandlerResult =
+                HandlerResult.Completed(result = "first")
         }
         val secondHandler = object : TransitionHandler {
-            override suspend fun execute(input: HandlerInput): HandlerOutput =
-                HandlerOutput(result = "second")
+            override suspend fun execute(input: HandlerInput): HandlerResult =
+                HandlerResult.Completed(result = "second")
         }
 
         registry.register("step.one", firstHandler)
@@ -69,7 +69,7 @@ class HandlerRegistryTest {
 
         val output = resolved.execute(
             HandlerInput(taskId = "t1", workflowId = "wf1", sequenceNumber = 1, inputs = null, item = null),
-        )
+        ) as HandlerResult.Completed
         assertEquals("second", output.result)
     }
 }

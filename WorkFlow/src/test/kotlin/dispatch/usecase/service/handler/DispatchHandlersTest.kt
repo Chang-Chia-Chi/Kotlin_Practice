@@ -13,6 +13,7 @@ import com.workflow.dispatch.usecase.port.outbound.storage.ParquetFormatter
 import com.workflow.dispatch.usecase.port.outbound.storage.StorageGateway
 import com.workflow.dispatch.usecase.service.simulation.SimulationEngine
 import com.workflow.worker.usecase.port.inbound.execution.HandlerInput
+import com.workflow.worker.usecase.port.inbound.execution.HandlerResult
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Test
 import org.mockito.kotlin.*
@@ -37,7 +38,7 @@ class DispatchHandlersTest {
         val handler = DispatchScatterHandler(configRepo, resultStore, objectMapper)
         val output = handler.execute(
             HandlerInput("t1", "w1", 1, null, null),
-        )
+        ) as HandlerResult.Completed
 
         assertNotNull(output.result)
         val arr = objectMapper.readTree(output.result)
@@ -66,7 +67,7 @@ class DispatchHandlersTest {
         )
         val output = handler.execute(
             HandlerInput("t1", "w1", 1, null, item),
-        )
+        ) as HandlerResult.Completed
 
         val arr = objectMapper.readTree(output.result)
         assertTrue(arr.isArray)
@@ -92,7 +93,7 @@ class DispatchHandlersTest {
             batchTokenProvider = { "20260404140000" })
         val output = handler.execute(
             HandlerInput("t1", "w1", 1, null, null),
-        )
+        ) as HandlerResult.Completed
 
         val arr = objectMapper.readTree(output.result)
         assertTrue(arr.isArray)
@@ -135,7 +136,7 @@ class DispatchHandlersTest {
         val item = objectMapper.writeValueAsString(mapOf("configId" to "cfg1", "batchToken" to "20260329060000"))
         val output = handler.execute(
             HandlerInput("t1", "w1", 2, null, item),
-        )
+        ) as HandlerResult.Completed
 
         val order = inOrder(resultStore)
         order.verify(resultStore).saveDecisions(eq("20260329060000"), eq("cfg1"), any())
