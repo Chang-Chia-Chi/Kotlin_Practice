@@ -188,7 +188,8 @@ private fun runScenario(
     val testShutdownConfig = createTestShutdownConfig()
     val testWatchdogConfig = createTestWatchdogConfig()
     val workerScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    val loop = WorkerLoop(testWorkerConfig, testShutdownConfig, taskRepo, handlerRegistry, barrier, metrics.registry,
+    val taskSettler = com.workflow.worker.usecase.service.TaskSettler(taskRepo, barrier)
+    val loop = WorkerLoop(testWorkerConfig, testShutdownConfig, taskRepo, handlerRegistry, taskSettler, metrics.registry,
         activityInputResolver, workflowRepo, objectMapper, notifier)
     val workerJob = loop.start(workerScope)
 

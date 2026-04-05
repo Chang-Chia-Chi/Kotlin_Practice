@@ -234,14 +234,16 @@ abstract class StressTestBase {
     }
 
     protected fun startWorkerPool(): List<Job> {
-        val loop = WorkerLoop(testWorkerConfig, testShutdownConfig, taskRepo, handlerRegistry, barrier, meterRegistry, activityInputResolver, workflowRepo, objectMapper, notifier)
+        val taskSettler = com.workflow.worker.usecase.service.TaskSettler(taskRepo, barrier)
+        val loop = WorkerLoop(testWorkerConfig, testShutdownConfig, taskRepo, handlerRegistry, taskSettler, meterRegistry, activityInputResolver, workflowRepo, objectMapper, notifier)
         val job = loop.start(workerScope)
         workerJobs.add(job)
         return listOf(job)
     }
 
     protected fun startDirectWorkerPool(): List<Job> {
-        val loop = WorkerLoop(testWorkerConfig, testShutdownConfig, directTaskRepo, handlerRegistry, directBarrier, meterRegistry, activityInputResolver, directWorkflowRepo, objectMapper, notifier)
+        val directSettler = com.workflow.worker.usecase.service.TaskSettler(directTaskRepo, directBarrier)
+        val loop = WorkerLoop(testWorkerConfig, testShutdownConfig, directTaskRepo, handlerRegistry, directSettler, meterRegistry, activityInputResolver, directWorkflowRepo, objectMapper, notifier)
         val job = loop.start(workerScope)
         workerJobs.add(job)
         return listOf(job)

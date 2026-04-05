@@ -6,6 +6,7 @@ import com.workflow.worker.config.TriggerLoopConfig
 import com.workflow.worker.usecase.port.inbound.trigger.DeferredTaskRef
 import com.workflow.worker.usecase.port.inbound.trigger.TriggerDriver
 import com.workflow.worker.usecase.port.inbound.trigger.TriggerResult
+import com.workflow.worker.usecase.service.TaskSettler
 import com.workflow.workflow.model.TaskStatus
 import com.workflow.workflow.usecase.port.inbound.orchestration.PhaseGate
 import com.workflow.workflow.usecase.port.outbound.persistent.TaskRepository
@@ -49,6 +50,7 @@ class TriggerLoopTest {
     private lateinit var shutdownConfig: ShutdownConfig
     private lateinit var mockDriver: TriggerDriver
     private lateinit var driverBeans: Instance<TriggerDriver>
+    private lateinit var taskSettler: TaskSettler
     private lateinit var triggerLoop: TriggerLoop
 
     @BeforeEach
@@ -66,9 +68,10 @@ class TriggerLoopTest {
         driverBeans = mock {
             on { iterator() } doAnswer { mutableListOf(mockDriver).iterator() }
         }
+        taskSettler = TaskSettler(taskRepo, phaseGate)
 
         triggerLoop = TriggerLoop(
-            taskRepo, driverBeans, phaseGate, leaderGuard,
+            taskRepo, driverBeans, taskSettler, leaderGuard,
             meterRegistry, config, shutdownConfig,
         )
         // Initialize lateinit fields (drivers, pollCounter, sweepTimer) by
@@ -368,7 +371,7 @@ class TriggerLoopTest {
                 on { iterator() } doAnswer { mutableListOf(mockDriver, driver2).iterator() }
             }
             val loop = TriggerLoop(
-                taskRepo, beans, phaseGate, leaderGuard,
+                taskRepo, beans, taskSettler, leaderGuard,
                 localRegistry, config, shutdownConfig,
             )
             initLoop(loop)
@@ -414,7 +417,7 @@ class TriggerLoopTest {
                 on { iterator() } doAnswer { mutableListOf(failingDriver, goodDriver).iterator() }
             }
             val loop = TriggerLoop(
-                taskRepo, beans, phaseGate, leaderGuard,
+                taskRepo, beans, taskSettler, leaderGuard,
                 localRegistry, config, shutdownConfig,
             )
             initLoop(loop)
@@ -440,7 +443,7 @@ class TriggerLoopTest {
                 on { iterator() } doAnswer { mutableListOf(failingDriver, goodDriver).iterator() }
             }
             val loop = TriggerLoop(
-                taskRepo, beans, phaseGate, leaderGuard,
+                taskRepo, beans, taskSettler, leaderGuard,
                 localRegistry, config, shutdownConfig,
             )
             initLoop(loop)
@@ -632,7 +635,7 @@ class TriggerLoopTest {
                 on { iterator() } doAnswer { mutableListOf(failingDriver, goodDriver).iterator() }
             }
             val loop = TriggerLoop(
-                taskRepo, beans, phaseGate, leaderGuard,
+                taskRepo, beans, taskSettler, leaderGuard,
                 localRegistry, config, shutdownConfig,
             )
 

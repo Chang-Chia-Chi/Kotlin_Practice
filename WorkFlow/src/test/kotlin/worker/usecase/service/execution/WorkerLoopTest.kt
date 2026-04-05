@@ -3,6 +3,7 @@ package com.workflow.worker.usecase.service.execution
 import com.workflow.worker.usecase.port.inbound.execution.HandlerInput
 import com.workflow.worker.usecase.port.inbound.execution.HandlerResult
 import com.workflow.worker.usecase.port.inbound.execution.TransitionHandler
+import com.workflow.worker.usecase.service.TaskSettler
 import com.workflow.worker.usecase.service.execution.HandlerRegistry
 import com.workflow.worker.usecase.service.execution.WorkerLoop
 import com.fasterxml.jackson.databind.ObjectMapper
@@ -74,6 +75,7 @@ class WorkerLoopTest {
     private lateinit var workflowRepo: WorkflowRepository
     private lateinit var objectMapper: ObjectMapper
     private lateinit var notifier: FakeWorkerNotifier
+    private lateinit var taskSettler: TaskSettler
     private lateinit var workerLoop: WorkerLoop
 
     private val pollInterval = Duration.ofSeconds(1)
@@ -107,6 +109,7 @@ class WorkerLoopTest {
             .registerModule(com.fasterxml.jackson.module.kotlin.KotlinModule.Builder().build())
             .registerModule(com.fasterxml.jackson.datatype.jsr310.JavaTimeModule())
         notifier = FakeWorkerNotifier()
+        taskSettler = TaskSettler(taskRepo, phaseGate)
 
         // Default stub: return a no-inputs workflow so resolveInputs cache is populated
         val defaultDef = workflow { activity("default") { transition("order.validate") } }
@@ -119,7 +122,7 @@ class WorkerLoopTest {
         )
         workflowRepo.stub { onBlocking { findById(any()) } doReturn defaultWfRun }
 
-        workerLoop = WorkerLoop(workerConfig, shutdownConfig, taskRepo, handlerRegistry, phaseGate, meterRegistry, activityInputResolver, workflowRepo, objectMapper, notifier)
+        workerLoop = WorkerLoop(workerConfig, shutdownConfig, taskRepo, handlerRegistry, taskSettler, meterRegistry, activityInputResolver, workflowRepo, objectMapper, notifier)
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────
@@ -632,7 +635,7 @@ class WorkerLoopTest {
         @Test
         fun `force-cancel after drain timeout - long handler is cancelled`() = runTest {
             whenever(shutdownConfig.globalTimeout()).thenReturn(Duration.ofMillis(100))
-            val shortTimeoutLoop = WorkerLoop(workerConfig, shutdownConfig, taskRepo, handlerRegistry, phaseGate, meterRegistry, activityInputResolver, workflowRepo, objectMapper, notifier)
+            val shortTimeoutLoop = WorkerLoop(workerConfig, shutdownConfig, taskRepo, handlerRegistry, taskSettler, meterRegistry, activityInputResolver, workflowRepo, objectMapper, notifier)
 
             val handlerStarted = java.util.concurrent.atomic.AtomicBoolean(false)
             val handlerCompleted = java.util.concurrent.atomic.AtomicBoolean(false)
@@ -686,7 +689,7 @@ class WorkerLoopTest {
         fun `shutdownTimeout reflects config value`() {
             whenever(shutdownConfig.globalTimeout()).thenReturn(Duration.ofSeconds(45))
 
-            val freshLoop = WorkerLoop(workerConfig, shutdownConfig, taskRepo, handlerRegistry, phaseGate, meterRegistry, activityInputResolver, workflowRepo, objectMapper, notifier)
+            val freshLoop = WorkerLoop(workerConfig, shutdownConfig, taskRepo, handlerRegistry, taskSettler, meterRegistry, activityInputResolver, workflowRepo, objectMapper, notifier)
             assertEquals(Duration.ofSeconds(45), freshLoop.shutdownTimeout)
         }
     }
@@ -866,7 +869,7 @@ class WorkerLoopTest {
                 whenever(it.maxBatchSize()).thenReturn(16)
                 whenever(it.podIp()).thenReturn("localhost")
             }
-            val batchLoop = WorkerLoop(batchWorkerConfig, shutdownConfig, taskRepo, handlerRegistry, phaseGate, meterRegistry, activityInputResolver, workflowRepo, objectMapper, notifier)
+            val batchLoop = WorkerLoop(batchWorkerConfig, shutdownConfig, taskRepo, handlerRegistry, taskSettler, meterRegistry, activityInputResolver, workflowRepo, objectMapper, notifier)
 
             whenever(taskRepo.claimNext(eq(workerId), eq(16), eq("default")))
                 .thenReturn(emptyList())
