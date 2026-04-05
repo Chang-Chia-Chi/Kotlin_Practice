@@ -35,10 +35,10 @@ class InstrumentedWorkflowRepository(
     private val timer: PhaseTimer,
 ) : JdbiWorkflowRepository(jdbi) {
 
-    override fun casVersionWithHandle(
-        handle: Handle, id: String, expectedVersion: Int,
-    ): Boolean = timer.time("workflow.cas") {
-        super.casVersionWithHandle(handle, id, expectedVersion)
+    override fun incrementVersionWithHandle(
+        handle: Handle, id: String,
+    ) = timer.time("workflow.incrementVersion") {
+        super.incrementVersionWithHandle(handle, id)
     }
 }
 

@@ -282,7 +282,7 @@ class WorkflowIntegrationTest {
     inner class WorkerDeathSimulation {
 
         @Test
-        fun `watchdog recovers stuck workflow when worker died after task completion but before CAS`() = runTest {
+        fun `watchdog recovers stuck workflow when worker died after task completion but before DAG advance`() = runTest {
             // Build a 2-step linear definition
             val definition = workflow {
                 activity("step1") { transition("step1.handler"); next("step2") }
@@ -292,8 +292,8 @@ class WorkflowIntegrationTest {
             // Start workflow normally
             val runId = engine.startWorkflow(definition).workflowId
 
-            // Simulate worker completing task but dying before barrier:
-            // Set task at seq 1 to COMPLETED directly via SQL (bypassing barrier CAS)
+            // Simulate worker completing task but dying before lock-based advance:
+            // Set task at seq 1 to COMPLETED directly via SQL (bypassing phase gate)
             val tasks = taskRepo.findByWorkflowAndSequence(runId, 1)
             assertEquals(1, tasks.size)
             jdbi.useHandle<Exception> { handle ->
@@ -305,7 +305,7 @@ class WorkflowIntegrationTest {
                     .execute()
             }
 
-            // Workflow version still 0 — CAS was never executed
+            // Workflow version still 0 — lock-based advance was never executed
             var wf = readWorkflowDirect(runId)!!
             assertEquals(0, (wf["VERSION"] as Number).toInt())
 
@@ -328,7 +328,7 @@ class WorkflowIntegrationTest {
             assertEquals("step2.handler", seq2Tasks[0]["HANDLER_KEY"])
             assertEquals("PENDING", seq2Tasks[0]["STATUS"])
 
-            // WorkflowWatchdog idempotency: second patrol is a no-op (CAS version already advanced)
+            // WorkflowWatchdog idempotency: second patrol is a no-op (version already advanced)
             watchdog.patrol()
             val wfAfter = readWorkflowDirect(runId)!!
             assertEquals(1, (wfAfter["VERSION"] as Number).toInt())
@@ -341,7 +341,7 @@ class WorkflowIntegrationTest {
     // Spec calls for 100+ sub-tasks. Reduced to 20 because Oracle Free
     // container has ~20 PROCESSES and exhausts listener handlers (ORA-12516)
     // under high connection concurrency. 20 sub-tasks with Semaphore(3)
-    // still exercises real CAS contention across concurrent barrier calls.
+    // still exercises real lock contention across concurrent barrier calls.
     // ═══════════════════════════════════════════════════════════════════════
 
     @Nested
@@ -380,7 +380,7 @@ class WorkflowIntegrationTest {
             // Complete all near-simultaneously via async/awaitAll
             // Semaphore throttles concurrent JDBC connections to avoid ORA-12516
             // (Oracle Free has limited PROCESSES). 3 concurrent barrier calls
-            // still exercise real CAS contention without exhausting the listener.
+            // still exercise real lock contention without exhausting the listener.
             val semaphore = Semaphore(3)
             parallelTasks.map { task ->
                 async {
@@ -394,7 +394,7 @@ class WorkflowIntegrationTest {
 
             // Verify exactly ONE phase transition
             val wf = readWorkflowDirect(runId)!!
-            // Version should be 2 (scatter->parallel was v0->v1, parallel->linear is v1->v2)
+            // Version should be 2 (scatter->parallel was v0->v1, parallel->linear lock advance is v1->v2)
             assertEquals(2, (wf["VERSION"] as Number).toInt())
 
             // Verify exactly one set of downstream tasks (no duplicates)
@@ -880,7 +880,7 @@ class WorkflowIntegrationTest {
     // ── Spec item 46 ─────────────────────────────────────────────────────
 
     @Test
-    fun `CAS race two workers completing fork branches simultaneously no duplicate join dispatch`() = runBlocking {
+    fun `lock race two workers completing fork branches simultaneously no duplicate join dispatch`() = runBlocking {
         val def = workflow {
             activity("start") { transition("s.h"); next("b1"); next("b2") }
             activity("b1")    { transition("b1.h"); next("join") }
@@ -909,7 +909,7 @@ class WorkflowIntegrationTest {
     // ── Spec item 47 ─────────────────────────────────────────────────────
 
     @Test
-    fun `worker death after CAS before task insert sweeper re-dispatches`() = runBlocking {
+    fun `worker death after lock-based advance before task insert sweeper re-dispatches`() = runBlocking {
         val def = workflow {
             activity("a") { transition("a.h"); next("b") }
             activity("b") { transition("b.h") }

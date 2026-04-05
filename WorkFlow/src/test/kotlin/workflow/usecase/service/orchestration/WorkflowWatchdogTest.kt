@@ -559,14 +559,14 @@ class WorkflowWatchdogTest {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // Test 3: WorkflowWatchdog CAS loses to worker -> no duplicate downstream tasks
+    // Test 3: WorkflowWatchdog lock loses to worker -> no duplicate downstream tasks
     // ═══════════════════════════════════════════════════════════════════════
 
     @Nested
-    inner class WorkflowWatchdogCasLosesToWorker {
+    inner class WorkflowWatchdogLockLosesToWorker {
 
         @Test
-        fun `worker advances workflow before watchdog patrol - CAS fails, no duplicate tasks`() = runTest {
+        fun `worker advances workflow before watchdog patrol - lock serialization prevents duplicates`() = runTest {
             val def = twoStepLinearDef()
             val wfId = randomId()
             val pastGrace = Instant.now().minus(gracePeriod).minusSeconds(60)
@@ -605,7 +605,7 @@ class WorkflowWatchdogTest {
 
             watchdog.patrol()
 
-            // Workflow not double-advanced — version unchanged from worker advance (watchdog CAS failed)
+            // Workflow not double-advanced — version unchanged from worker advance (watchdog lock found no work)
             val updatedWf = readWorkflowDirect(wfId)
             assertNotNull(updatedWf)
             assertEquals(1, (updatedWf["VERSION"] as Number).toInt())
@@ -616,7 +616,7 @@ class WorkflowWatchdogTest {
         }
 
         @Test
-        fun `two concurrent recoverStuckWorkflow calls - exactly one CAS wins`() = runTest {
+        fun `two concurrent recoverStuckWorkflow calls - exactly one lock wins`() = runTest {
             val def = twoStepLinearDef()
             val wfId = randomId()
             val pastGrace = Instant.now().minus(gracePeriod).minusSeconds(60)
@@ -1368,7 +1368,7 @@ class WorkflowWatchdogTest {
             // D should NOT have a task yet (C is non-terminal, predecessor gate blocks)
             assertEquals(0, countTasksDirect(wfId, seqD))
 
-            // Workflow still RUNNING with CAS bumped
+            // Workflow still RUNNING with version bumped
             val row = readWorkflowDirect(wfId)
             assertNotNull(row)
             assertEquals("RUNNING", row["STATUS"])

@@ -276,103 +276,65 @@ class RepositoryTest {
             assertEquals(largeJson, found.definitionJson)
         }
 
-        // ── casVersion ───────────────────────────────────────────────────
+        // ── findByIdForUpdate ────────────────────────────────────────────
 
         @Test
-        fun `casVersion succeeds with matching version`() = runTest {
-            val wf = makeWorkflow(version = 0)
-            workflowRepo.insert(wf)
-
-            val result = workflowRepo.casVersion(
-                id = wf.id,
-                expectedVersion = 0,
+        fun `findByIdForUpdate returns workflow within transaction`() {
+            val wf = makeWorkflow(
+                definitionJson = """{"activities":[{"name":"lock-test"}]}""",
+                version = 5,
+                status = WorkflowStatus.RUNNING,
             )
+            insertWorkflowDirect(wf)
 
-            assertTrue(result)
-            val found = workflowRepo.findById(wf.id)
+            val found = jdbi.inTransaction<WorkflowRun?, Exception> { handle ->
+                workflowRepo.findByIdForUpdate(handle, wf.id)
+            }
+
             assertNotNull(found)
-            assertEquals(1, found.version)
+            assertEquals(wf.id, found.id)
+            assertEquals(wf.definitionJson, found.definitionJson)
+            assertEquals(5, found.version)
+            assertEquals(WorkflowStatus.RUNNING, found.status)
         }
 
         @Test
-        fun `casVersion fails on version mismatch`() = runTest {
-            val wf = makeWorkflow(version = 0)
-            workflowRepo.insert(wf)
-
-            val result = workflowRepo.casVersion(
-                id = wf.id,
-                expectedVersion = 99,
-            )
-
-            assertFalse(result)
-            // Row unchanged
-            val found = workflowRepo.findById(wf.id)
-            assertNotNull(found)
-            assertEquals(0, found.version)
+        fun `findByIdForUpdate returns null for non-existent id`() {
+            val found = jdbi.inTransaction<WorkflowRun?, Exception> { handle ->
+                workflowRepo.findByIdForUpdate(handle, randomId())
+            }
+            assertNull(found)
         }
 
-        @Test
-        fun `casVersion fails for non-existent id`() = runTest {
-            val result = workflowRepo.casVersion(
-                id = randomId(),
-                expectedVersion = 0,
-            )
-            assertFalse(result)
-        }
+        // ── incrementVersionWithHandle ──────────────────────────────────
 
         @Test
-        fun `casVersion increments version on success`() = runTest {
-            val wf = makeWorkflow(version = 0)
-            workflowRepo.insert(wf)
-
-            // First CAS
-            assertTrue(workflowRepo.casVersion(wf.id, 0))
-            val afterFirst = workflowRepo.findById(wf.id)!!
-            assertEquals(1, afterFirst.version)
-
-            // Second CAS with updated version
-            assertTrue(workflowRepo.casVersion(wf.id, 1))
-            val afterSecond = workflowRepo.findById(wf.id)!!
-            assertEquals(2, afterSecond.version)
-        }
-
-        @Test
-        fun `casVersion second attempt fails after first succeeds (stale version)`() = runTest {
-            val wf = makeWorkflow(version = 0)
-            workflowRepo.insert(wf)
-
-            // First CAS wins
-            assertTrue(workflowRepo.casVersion(wf.id, 0))
-            // Second CAS with stale version loses
-            assertFalse(workflowRepo.casVersion(wf.id, 0))
-        }
-
-        // ── casVersionWithHandle ─────────────────────────────────────────
-
-        @Test
-        fun `casVersionWithHandle succeeds within transaction`() {
+        fun `incrementVersionWithHandle bumps version by 1`() {
             val wf = makeWorkflow(version = 0)
             insertWorkflowDirect(wf)
 
-            val result = jdbi.inTransaction<Boolean, Exception> { handle ->
-                workflowRepo.casVersionWithHandle(handle, wf.id, 0)
+            jdbi.useTransaction<Exception> { handle ->
+                workflowRepo.incrementVersionWithHandle(handle, wf.id)
             }
 
-            assertTrue(result)
             val row = readWorkflowDirect(wf.id)!!
             assertEquals(1, (row["VERSION"] as Number).toInt())
         }
 
         @Test
-        fun `casVersionWithHandle fails on version mismatch`() {
+        fun `incrementVersionWithHandle increments consecutively`() {
             val wf = makeWorkflow(version = 0)
             insertWorkflowDirect(wf)
 
-            val result = jdbi.inTransaction<Boolean, Exception> { handle ->
-                workflowRepo.casVersionWithHandle(handle, wf.id, 99)
+            jdbi.useTransaction<Exception> { handle ->
+                workflowRepo.incrementVersionWithHandle(handle, wf.id)
+            }
+            jdbi.useTransaction<Exception> { handle ->
+                workflowRepo.incrementVersionWithHandle(handle, wf.id)
             }
 
-            assertFalse(result)
+            val row = readWorkflowDirect(wf.id)!!
+            assertEquals(2, (row["VERSION"] as Number).toInt())
         }
 
         // ── findByIdWithHandle ────────────────────────────────────────────

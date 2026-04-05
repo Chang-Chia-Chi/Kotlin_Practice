@@ -526,19 +526,7 @@ class DefaultPhaseGateTest {
         assertTrue(error.message!!.contains("BEST_EFFORT policy is incompatible with fanOut"))
     }
 
-    // -- Coverage gap 2: CAS retry exhaustion ------------------------------------
-    // SKIPPED: The CAS retry loop (max 10 attempts) is triggered by RetryableException,
-    // which is a private class thrown only when casVersionWithHandle returns false.
-    // To exhaust the retry loop we would need another concurrent transaction to
-    // increment the workflow version between each retry attempt — 10 times within
-    // the same test. This requires either (a) mocking internal repository methods
-    // (prohibited by CLAUDE.md: "mock at interface boundaries only") or (b) a
-    // real concurrent writer with precise timing that is inherently flaky.
-    // The positive CAS path is covered by every existing test that dispatches
-    // successors. The retry mechanism is a simple while-loop with a counter;
-    // a unit test would not add meaningful confidence beyond code inspection.
-
-    // -- Coverage gap 3: Idempotent completion (updateStatus returns false) -------
+    // -- Coverage gap 2: Idempotent completion (updateStatus returns false) -------
 
     @Test
     fun `idempotent completion is a no-op and does not create duplicate successors`() = runTest {

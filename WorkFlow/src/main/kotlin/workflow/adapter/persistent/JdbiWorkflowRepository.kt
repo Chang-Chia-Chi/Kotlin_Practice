@@ -27,11 +27,6 @@ class JdbiWorkflowRepository(private val jdbi: Jdbi) : WorkflowRepository {
     override suspend fun findById(id: String): WorkflowRun? =
         jdbi.withHandleSuspend<WorkflowRun?, Exception> { h: Handle -> findByIdWithHandle(h, id) }
 
-    override suspend fun casVersion(id: String, expectedVersion: Int): Boolean =
-        jdbi.inTransactionSuspend<Boolean, Exception> { h: Handle ->
-            casVersionWithHandle(h, id, expectedVersion)
-        }
-
     override suspend fun updateStatus(id: String, newStatus: WorkflowStatus, expectedStatus: WorkflowStatus): Boolean =
         jdbi.inTransactionSuspend<Boolean, Exception> { h: Handle ->
             updateStatusWithHandle(h, id, newStatus, expectedStatus)
@@ -97,19 +92,21 @@ class JdbiWorkflowRepository(private val jdbi: Jdbi) : WorkflowRepository {
             .map(::mapWorkflowRow)
             .orElse(null)
 
-    override fun casVersionWithHandle(handle: Handle, id: String, expectedVersion: Int): Boolean {
-        val count = handle.createUpdate(
-            """
-            UPDATE workflow
-            SET version = version + 1, updated_at = :now
-            WHERE id = :id AND version = :expectedVersion AND status = 'RUNNING'
-            """,
+    override fun findByIdForUpdate(handle: Handle, id: String): WorkflowRun? =
+        handle.createQuery("SELECT * FROM workflow WHERE id = :id FOR UPDATE")
+            .bind("id", id)
+            .mapToMap()
+            .findOne()
+            .map(::mapWorkflowRow)
+            .orElse(null)
+
+    override fun incrementVersionWithHandle(handle: Handle, id: String) {
+        handle.createUpdate(
+            "UPDATE workflow SET version = version + 1, updated_at = :now WHERE id = :id",
         )
             .bind("id", id)
-            .bind("expectedVersion", expectedVersion)
             .bind("now", LocalDateTime.now(ZoneOffset.UTC).truncatedTo(ChronoUnit.MICROS))
             .execute()
-        return count == 1
     }
 
     override fun updateStatusWithHandle(
