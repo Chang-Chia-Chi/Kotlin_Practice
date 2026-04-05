@@ -4,7 +4,7 @@
 
 **Goal:** Replace the CAS retry mechanism in `DefaultPhaseGate` with pessimistic `SELECT ... FOR UPDATE` locking. Wire `DefaultPhaseGate` to use `DagRouter` from Phase 1. Eliminate `withCasRetry`, `requireCasWin`, `RetryableException`, and `MAX_CAS_RETRIES`.
 
-**Architecture:** The workflow row lock serializes all DAG evaluations for a workflow. A threshold-based fast path keeps the common case (many tasks still pending) lock-free. `DefaultPhaseGate` becomes a thin transaction orchestrator that delegates routing decisions to `DagRouter`.
+**Architecture:** Two-transaction design. TX1 commits the task status update immediately so it is visible to all concurrent readers. TX2 performs the fast-path probe, acquires the workflow row lock when near completion, and routes the DAG. This eliminates the READ COMMITTED visibility gap where concurrent single-TX completers can't see each other's uncommitted updates, which would cause the fast-path to overestimate non-terminal counts and miss the last-mile lock. `DefaultPhaseGate` becomes a thin transaction orchestrator that delegates routing decisions to `DagRouter`.
 
 **Tech Stack:** Kotlin, JDBI, Oracle (`SELECT ... FOR UPDATE`), SmallRye Config
 
@@ -147,10 +147,20 @@ git commit -m "refactor(workflow): add findByIdForUpdate, remove CAS from Workfl
 
 ---
 
-### Task 3: Rewrite DefaultPhaseGate to use lock + DagRouter
+### Task 3: Rewrite DefaultPhaseGate to use 2-TX lock + DagRouter
 
 **Files:**
 - Rewrite: `src/main/kotlin/workflow/usecase/service/orchestration/DefaultPhaseGate.kt`
+
+**Design: Two-Transaction Split**
+
+The single-transaction approach has a READ COMMITTED visibility gap: concurrent completers cannot see each other's uncommitted task status updates, causing the fast-path count to overestimate non-terminal tasks. When many tasks complete simultaneously, ALL may take the fast-path exit and nobody advances the DAG.
+
+The fix splits `onTaskCompleted` into two transactions:
+- **TX1:** Fenced task status update → COMMIT (status is now visible to all readers)
+- **TX2:** Fast-path probe (accurate — sees all committed TX1s) → lock → recount → route → COMMIT
+
+Crash between TX1 and TX2 leaves a completed task with no DAG advance — the same failure mode the `WorkflowWatchdog` already handles (crash after commit but before notifier signal).
 
 - [ ] **Step 1: Rewrite DefaultPhaseGate**
 
@@ -185,11 +195,14 @@ import java.time.temporal.ChronoUnit
 /**
  * DAG-aware phase gate that evaluates successor activities after each task completion.
  *
- * Uses pessimistic locking (SELECT ... FOR UPDATE on the workflow row) to serialize
- * DAG evaluations. A threshold-based fast path keeps the common case lock-free:
- * only tasks completing near the sequence boundary acquire the lock.
+ * Uses a two-transaction design to eliminate the READ COMMITTED visibility gap:
+ * - TX1 commits the task status update so it is visible to all concurrent readers.
+ * - TX2 performs the fast-path probe (now accurate), acquires the workflow row lock
+ *   when near completion, and routes the DAG.
  *
- * All routing decisions are delegated to [DagRouter] (pure functions).
+ * A threshold-based fast path keeps the common case lock-free: only tasks completing
+ * near the sequence boundary acquire the lock. All routing decisions are delegated
+ * to [DagRouter] (pure functions).
  */
 @ApplicationScoped
 class DefaultPhaseGate(
@@ -212,18 +225,20 @@ class DefaultPhaseGate(
         claimedBy: String?,
         claimedAt: Instant?,
     ) {
-        val signalQueues = jdbi.inTransactionSuspend<List<String>, Exception> { handle ->
-            // Step 1: Fenced task update
-            val updated = taskRepo.updateStatusWithHandle(
-                handle, taskId, status, resultJson, claimedBy, claimedAt,
-            )
-            if (!updated) return@inTransactionSuspend emptyList()
+        // TX1: Commit task status update so it is visible to all concurrent readers.
+        val updated = jdbi.inTransactionSuspend<Boolean, Exception> { handle ->
+            taskRepo.updateStatusWithHandle(handle, taskId, status, resultJson, claimedBy, claimedAt)
+        }
+        if (!updated) return
 
-            // Step 2: Cheap barrier probe (no lock)
+        // TX2: Fast-path probe + lock + route.
+        // The count query now sees all committed TX1s from concurrent completers.
+        val signalQueues = jdbi.inTransactionSuspend<List<String>, Exception> { handle ->
+            // Cheap barrier probe (no lock) — accurate because TX1 committed
             val nonTerminal = taskRepo.countNonTerminalWithHandle(handle, workflowId, sequenceNumber)
             if (nonTerminal > phaseGateConfig.lastMileThreshold()) return@inTransactionSuspend emptyList()
 
-            // Step 3: Acquire workflow lock and recount
+            // Acquire workflow lock and recount
             val workflow = workflowRepo.findByIdForUpdate(handle, workflowId)
                 ?: throw IllegalStateException("Workflow not found: $workflowId")
             if (workflow.status != WorkflowStatus.RUNNING) return@inTransactionSuspend emptyList()
@@ -231,7 +246,7 @@ class DefaultPhaseGate(
             val confirmedNonTerminal = taskRepo.countNonTerminalWithHandle(handle, workflowId, sequenceNumber)
             if (confirmedNonTerminal > 0) return@inTransactionSuspend emptyList()
 
-            // Step 4: Build snapshot and route
+            // Build snapshot and route
             val snapshot = buildSnapshot(handle, workflowId, workflow.definitionJson)
             val seqInfo = snapshot.sequenceMap[sequenceNumber]
                 ?: throw IllegalStateException("Seq $sequenceNumber not in definition for $workflowId")
@@ -267,7 +282,7 @@ class DefaultPhaseGate(
                 PhaseDecision.Normal -> { /* fall through to successor evaluation */ }
             }
 
-            // Step 5: Dispatch successors
+            // Dispatch successors
             val forceDefault = decision == PhaseDecision.ForceDefaultBranch
             val result = dispatchSuccessors(snapshot, seqInfo, forceDefault)
 
@@ -275,7 +290,7 @@ class DefaultPhaseGate(
                 insertMixedTaskBatch(handle, result.tasksToInsert)
             }
 
-            // Step 6: Check global completion
+            // Check global completion
             val checkCompletion = result.hasTerminalCompletion || seqInfo.activity.isTerminal
             if (checkCompletion) {
                 val globalNonTerminal = taskRepo.countAllNonTerminalWithHandle(handle, workflowId)

@@ -105,24 +105,34 @@ The CAS retry mechanism was designed for linear workflows where only one task co
 
 ### The Fix
 
-Replace the optimistic CAS retry with pessimistic `SELECT ... FOR UPDATE` on the workflow row.
+Replace the optimistic CAS retry with a two-transaction design using pessimistic `SELECT ... FOR UPDATE` on the workflow row.
+
+**Why two transactions?** A single transaction that updates the task status AND counts non-terminal tasks suffers from READ COMMITTED invisibility: concurrent completers cannot see each other's uncommitted updates. The fast-path count overestimates non-terminal tasks, and under high concurrency ALL completers may take the fast-path exit — nobody advances the DAG. Splitting into two transactions ensures TX1 commits the status update before TX2's count query runs, making the fast-path accurate.
 
 ### New Flow: `onTaskCompleted`
 
 ```
+TX1 (fenced task update — commit immediately):
 1. BEGIN TRANSACTION
 2. Update task to terminal status (fenced write on own task row)
-3. COUNT non-terminal at this sequence (cheap read, no lock)
-4. If nonTerminal > LAST_MILE_THRESHOLD → return early (fast path, vast majority of calls)
-5. SELECT * FROM workflow WHERE id = :id FOR UPDATE (acquires row lock)
-6. If workflow.status != RUNNING → return early
-7. Recount non-terminal at this sequence (accurate — sees all committed state)
-8. If nonTerminal > 0 → return early (lock released on commit)
-9. Build GateSnapshot, call DagRouter.resolvePhaseDecision / dispatchSuccessors
-10. Apply effects (insert tasks, abort workflow, mark completed)
-11. Unconditional version increment (audit only)
-12. COMMIT (releases lock)
+3. If not updated (idempotent fence) → return early
+4. COMMIT (task status is now visible to all readers)
+
+TX2 (fast-path probe + lock + route):
+5. BEGIN TRANSACTION
+6. COUNT non-terminal at this sequence (accurate — sees all committed TX1s)
+7. If nonTerminal > LAST_MILE_THRESHOLD → return early (fast path, vast majority of calls)
+8. SELECT * FROM workflow WHERE id = :id FOR UPDATE (acquires row lock)
+9. If workflow.status != RUNNING → return early
+10. Recount non-terminal at this sequence (definitive — holds lock)
+11. If nonTerminal > 0 → return early (lock released on commit)
+12. Build GateSnapshot, call DagRouter.resolvePhaseDecision / dispatchSuccessors
+13. Apply effects (insert tasks, abort workflow, mark completed)
+14. Unconditional version increment (audit only)
+15. COMMIT (releases lock)
 ```
+
+**Crash safety:** If the process crashes between TX1 and TX2, the task is correctly marked COMPLETED but the DAG is not advanced. This is the same failure mode as a crash after commit but before queue notification — `recoverStuckWorkflow` (watchdog) handles it.
 
 ### New Flow: `recoverStuckWorkflow`
 
@@ -157,8 +167,8 @@ framework.phase-gate.last-mile-threshold=4
 ```
 
 The threshold controls when the workflow-row lock is acquired:
-- `nonTerminal > threshold` → fast path, return early (no lock). The vast majority of task completions.
-- `0 < nonTerminal <= threshold` → acquire lock, recount. Serializes the "last mile" to prevent the race where concurrent transactions each see the other's uncommitted writes as non-terminal.
+- `nonTerminal > threshold` → fast path, return early (no lock). The vast majority of task completions. Accurate because TX1 committed the status before this count runs.
+- `0 < nonTerminal <= threshold` → acquire lock, recount. Serializes the "last mile" completions to ensure exactly one completer advances the DAG.
 - `nonTerminal == 0` on first count → acquire lock, proceed to DAG evaluation.
 
 ### Version Field
@@ -167,10 +177,12 @@ The `version` column remains in the `workflow` table as an audit counter. It is 
 
 ### Why This Is Safe
 
-The `SELECT ... FOR UPDATE` on the workflow row serializes all DAG evaluations for the same workflow. At most one transaction at a time can be inside steps 5-12. This eliminates:
+The two-transaction split plus `SELECT ... FOR UPDATE` eliminates both the READ COMMITTED visibility gap and CAS contention:
 
-- **CAS contention on diamond joins:** The second branch blocks until the first commits, then reads accurate state. No retry needed.
-- **Last-mile race on parallel completions:** The lock ensures the recount at step 7 sees all committed state from concurrent transactions that held the lock before us.
+- **No lost wakeups:** TX1 commits the task status before TX2 counts. Concurrent completers' committed updates are visible to TX2's count query. The fast-path probe is accurate — it cannot overestimate non-terminal tasks due to uncommitted concurrent updates.
+- **CAS contention on diamond joins:** The second branch blocks on the `FOR UPDATE` lock until the first commits, then reads accurate state. No retry needed.
+- **Last-mile serialization:** At most one TX2 at a time is inside steps 8-15. The recount at step 10 sees all committed state from prior lock holders.
+- **Fast-path effectiveness improves:** In the single-TX design, the count overestimates non-terminal tasks (can't see concurrent uncommitted completions), causing unnecessary lock acquisitions. With 2 TXs, the count is accurate, so more tasks correctly take the fast-path exit.
 
 Lock hold time is bounded: one COUNT query + DagRouter evaluation (pure, microseconds) + batch insert. Low single-digit milliseconds in the worst case.
 
