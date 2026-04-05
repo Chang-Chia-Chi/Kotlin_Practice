@@ -210,28 +210,32 @@ Step 2: Await scatter completion
     Awaitility: scatter task claimed by WorkerLoop → DispatchScatterHandler
     → creates batch in Oracle, returns fan-out items (2-3 configIds)
 
-Step 3: Await simulation tasks claimed and DEFERRED
+Step 3: Await simulation tasks completed
     WorkerLoop claims N simulation tasks (parallel per fan-out)
     Each DispatchSimulationHandler:
       - Runs SimulationEngine with fixture data
       - Saves decisions to Oracle (dispatch_event table)
       - Formats CSV, GZIPs, uploads to MinIO
-      - Returns HandlerResult.Defer(K8S_JOB, meta={jobName, namespace})
-    WorkerLoop calls taskRepo.defer() → tasks become DEFERRED
+      - Returns HandlerResult.Completed (inline execution, no K8s)
 
-Step 4: Trigger loop settles via K8s mock
-    TriggerLoop sweep picks up DEFERRED tasks
+Step 4: Await join task claimed and DEFERRED
+    WorkerLoop claims join task → DispatchJoinHandler:
+      a. Reads all decisions from Oracle via resultStore.findByBatchToken()
+      b. DuckDbParquetFormatter converts to Parquet via fresh DuckDB connection
+      c. Uploads result.parquet to MinIO
+      d. Submits K8s Job for post-processing (validation/notification)
+      e. Returns HandlerResult.Defer(K8S_JOB, meta={jobName, namespace})
+    WorkerLoop calls taskRepo.defer() → join task becomes DEFERRED
+    Note: Parquet is already uploaded at this point. The K8s Job is a
+    lightweight post-processing step, not the heavy computation.
+
+Step 5: Trigger loop settles join via K8s mock
+    TriggerLoop sweep picks up DEFERRED join task
     K8sJobTriggerDriver.start() → creates Watch on mock server
-    Test pushes Job "Complete" condition to mock server for each Job
+    Test pushes Job "Complete" condition to mock server
     Test pushes ConfigMap "{jobName}-output" with result JSON
-    K8sJobTriggerDriver.poll() → TriggerResult.Succeeded per task
-    TriggerLoop settles tasks as COMPLETED
-
-Step 5: Await join completion
-    WorkerLoop claims join task → DispatchJoinHandler
-      - Reads all decisions from Oracle via resultStore.findByBatchToken()
-      - DuckDbParquetFormatter converts to Parquet via fresh DuckDB connection
-      - Uploads result.parquet to MinIO
+    K8sJobTriggerDriver.poll() → TriggerResult.Succeeded
+    TriggerLoop settles join task as COMPLETED
 
 Step 6: Await workflow COMPLETED
     Awaitility: workflow status = COMPLETED
@@ -273,15 +277,18 @@ Same as happy path test.
 #### Test Flow
 
 ```
-Step 1-3: Same as happy path (create workflow → scatter → simulation → DEFERRED)
+Step 1-3: Same as happy path (create workflow → scatter → simulation completes)
 
-Step 4: Partial K8s completion
-    Push "Complete" for 1 of N K8s Jobs only
-    Await: that 1 task settles as COMPLETED
+Step 4: Join task claimed and DEFERRED
+    DispatchJoinHandler:
+      - Reads decisions, converts to Parquet via DuckDB, uploads to MinIO
+      - Submits K8s Job for post-processing
+      - Returns Defer → join task becomes DEFERRED in Oracle
 
 Step 5: Trigger shutdown mid-flight
+    Do NOT push Job "Complete" to mock server
     Fire ShutdownEvent programmatically via CDI Event<ShutdownEvent>
-    While remaining Jobs are still "Running" (tasks still DEFERRED)
+    While the K8s Job is still "Running" (join task still DEFERRED)
 
 Step 6: Await shutdown completes within timeout
 ```
@@ -289,20 +296,21 @@ Step 6: Await shutdown completes within timeout
 #### Assertions — Preserved State
 
 ```
-a. Completed Job's task:
-   - Status = COMPLETED in Oracle
-   - CSV uploaded to MinIO
+a. Simulation tasks:
+   - All COMPLETED in Oracle
+   - CSV files uploaded to MinIO
 
-b. Remaining DEFERRED tasks:
+b. Join task (DEFERRED):
    - Still DEFERRED in Oracle (not lost, not orphaned as PROCESSING)
+   - Parquet already uploaded to MinIO (upload happens before Defer)
 
 c. TriggerLoop cleanup:
-   - driver.close() was called (Watches cleaned up)
+   - driver.close() was called (Watch cleaned up)
 
 d. No orphaned PROCESSING tasks in Oracle
 
-e. Join task:
-   - Never started (blocked by incomplete fan-out, JoinPolicy.All)
+e. Workflow:
+   - NOT COMPLETED (join not settled)
 ```
 
 #### Recovery Simulation
@@ -310,12 +318,12 @@ e. Join task:
 ```
 Step 7: Re-start WorkerLoop + TriggerLoop
 
-Step 8: Push remaining K8s Jobs to "Complete" on mock server
+Step 8: Push K8s Job "Complete" on mock server
 
-Step 9: Await remaining tasks settle → join completes → workflow COMPLETED
+Step 9: Await join task settles → workflow COMPLETED
 
-Step 10: Verify final Parquet in MinIO
-    - result.parquet exists, correct row count via DuckDB read-back
+Step 10: Verify Oracle state
+    - All tasks COMPLETED, workflow COMPLETED
 ```
 
 ---
@@ -363,24 +371,25 @@ system property override.
 
 ## 6. Handler Modification for K8s Trigger Path
 
-Currently `DispatchSimulationHandler` returns `HandlerResult.Completed(...)` after
-simulation. To exercise the K8s trigger path, the handler needs to return
-`HandlerResult.Defer(K8S_JOB, triggerMeta)` instead.
+Only the **join** handler uses the K8s trigger path. `DispatchSimulationHandler`
+continues to return `HandlerResult.Completed` (inline execution).
 
-**Design decision:** This should be a **production code change**, not a test hack.
-The simulation handler should support a configurable mode where, after completing
-the simulation and uploading CSV, it submits a K8s Job for post-processing and
-defers to the trigger loop. The K8s Job name and namespace are derived from the
-batch token and config ID.
+`DispatchJoinHandler` is modified to:
+1. Read all decisions from Oracle via `resultStore.findByBatchToken()`
+2. Convert to Parquet via `DuckDbParquetFormatter` (fresh DuckDB connection)
+3. Upload Parquet to MinIO via `StorageGateway`
+4. Submit a K8s Job for post-processing (validation, downstream notification)
+5. Return `HandlerResult.Defer(K8S_JOB, deferK8sJob(jobName, namespace))`
 
-The test exercises this path by having the K8s mock server simulate Job completion,
-which causes the trigger loop to settle the task.
+The heavy computation (DuckDB conversion + upload) happens in the handler before
+deferring. The K8s Job is a lightweight post-processing step. This ensures:
+- Parquet is already persisted before the defer (fault-tolerant)
+- The handler has CDI access to Oracle, DuckDB, and S3 (no infra duplication)
+- The integration test naturally exercises the full DuckDB pipeline
 
-If the K8s defer path is not yet needed in production, an alternative is to use a
-**test-specific handler** registered with the same key that wraps the real handler
-and returns `Defer` instead of `Completed`. This avoids modifying production code
-for test purposes. The choice depends on whether K8s Job dispatch is a production
-requirement.
+The job name is derived from the batch token (`dispatch-join-{batchToken}`).
+The trigger loop monitors the Job via `K8sJobTriggerDriver` and settles the
+join task when the Job completes.
 
 ---
 
