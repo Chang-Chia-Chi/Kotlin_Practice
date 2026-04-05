@@ -11,6 +11,7 @@ import com.workflow.infrastructure.shutdown.ShutdownParticipant
 import com.workflow.infrastructure.shutdown.ShutdownSignal
 import com.workflow.worker.config.WorkerLoopConfig
 import com.workflow.worker.usecase.port.inbound.execution.HandlerInput
+import com.workflow.worker.usecase.port.inbound.execution.HandlerResult
 import com.workflow.worker.usecase.port.outbound.notification.WorkerNotifier
 import com.workflow.workflow.model.SequenceInfo
 import com.workflow.workflow.model.Task
@@ -29,6 +30,7 @@ import jakarta.enterprise.context.ApplicationScoped
 import jakarta.enterprise.event.Observes
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelAndJoin
@@ -235,7 +237,7 @@ class WorkerLoop(
     }
 
     private suspend fun executeAndReport(task: Task) {
-        val output = suspendCatching {
+        val result = suspendCatching {
             val handler = handlerRegistry.resolve(task.handlerKey)
             val resolvedInputs = resolveInputs(task)
             val input = HandlerInput(
@@ -248,19 +250,38 @@ class WorkerLoop(
             handler.execute(input)
         }.getOrElse { e -> handleTaskFailure(task, e as Exception); return }
 
-        suspendCatching {
-            phaseGate.onTaskCompleted(
-                taskId = task.id,
-                workflowId = task.workflowId,
-                sequenceNumber = task.sequenceNumber,
-                status = TaskStatus.COMPLETED,
-                resultJson = output.result,
-                claimedBy = task.claimedBy,
-                claimedAt = task.claimedAt,
-            )
-        }.onFailure { e ->
-            log.error("Barrier failed for COMPLETED task {}, falling through to failure path", task.id, e)
-            handleTaskFailure(task, e as Exception)
+        when (result) {
+            is HandlerResult.Completed -> {
+                try {
+                    phaseGate.onTaskCompleted(
+                        taskId = task.id,
+                        workflowId = task.workflowId,
+                        sequenceNumber = task.sequenceNumber,
+                        status = TaskStatus.COMPLETED,
+                        resultJson = result.result,
+                        claimedBy = task.claimedBy,
+                        claimedAt = task.claimedAt,
+                    )
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    log.error("Barrier failed for COMPLETED task {}, falling through to failure path", task.id, e)
+                    handleTaskFailure(task, e)
+                }
+            }
+            is HandlerResult.Defer -> {
+                val deferred = taskRepo.defer(
+                    taskId = task.id,
+                    triggerType = result.triggerType,
+                    triggerMeta = result.triggerMeta,
+                )
+                if (deferred) {
+                    log.info("Task {} deferred to trigger type={}", task.id, result.triggerType)
+                } else {
+                    log.warn("Task {} defer failed (status was not PROCESSING), treating as failure", task.id)
+                    handleTaskFailure(task, IllegalStateException("Defer failed: task not in PROCESSING state"))
+                }
+            }
         }
     }
 

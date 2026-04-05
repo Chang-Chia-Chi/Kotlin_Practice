@@ -1,7 +1,7 @@
 package com.workflow.worker.usecase.service.execution
 
 import com.workflow.worker.usecase.port.inbound.execution.HandlerInput
-import com.workflow.worker.usecase.port.inbound.execution.HandlerOutput
+import com.workflow.worker.usecase.port.inbound.execution.HandlerResult
 import com.workflow.worker.usecase.port.inbound.execution.TransitionHandler
 import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.Timer
@@ -14,7 +14,7 @@ class MeteredTransitionHandler(
 
     override fun key(): String = delegate.key()
 
-    override suspend fun execute(input: HandlerInput): HandlerOutput {
+    override suspend fun execute(input: HandlerInput): HandlerResult {
         val sample = Timer.start(meterRegistry)
         try {
             val output = delegate.execute(input)

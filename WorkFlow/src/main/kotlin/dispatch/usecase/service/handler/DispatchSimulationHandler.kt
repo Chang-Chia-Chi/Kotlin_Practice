@@ -10,7 +10,7 @@ import com.workflow.dispatch.usecase.port.outbound.storage.CsvFormatter
 import com.workflow.dispatch.usecase.port.outbound.storage.StorageGateway
 import com.workflow.dispatch.usecase.service.simulation.SimulationEngine
 import com.workflow.worker.usecase.port.inbound.execution.HandlerInput
-import com.workflow.worker.usecase.port.inbound.execution.HandlerOutput
+import com.workflow.worker.usecase.port.inbound.execution.HandlerResult
 import com.workflow.worker.usecase.port.inbound.execution.TransitionHandler
 import jakarta.enterprise.context.ApplicationScoped
 import java.nio.file.Files
@@ -29,7 +29,7 @@ class DispatchSimulationHandler(
     private val objectMapper: ObjectMapper,
 ) : TransitionHandler {
 
-    override suspend fun execute(input: HandlerInput): HandlerOutput {
+    override suspend fun execute(input: HandlerInput): HandlerResult {
         val item = objectMapper.readTree(input.item!!)
         val configId = item["configId"].asText()
         val batchToken = item["batchToken"].asText()
@@ -56,7 +56,7 @@ class DispatchSimulationHandler(
             tmpFile.delete()
         }
 
-        return HandlerOutput(
+        return HandlerResult.Completed(
             objectMapper.writeValueAsString(
                 mapOf("configId" to configId, "batchToken" to batchToken),
             ),

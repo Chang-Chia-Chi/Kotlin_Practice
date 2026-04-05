@@ -33,7 +33,7 @@ package com.workflow.worker.usecase.port.inbound.execution
  */
 interface TransitionHandler {
     fun key(): String = this::class.simpleName!!
-    suspend fun execute(input: HandlerInput): HandlerOutput
+    suspend fun execute(input: HandlerInput): HandlerResult
 }
 
 /**
@@ -51,14 +51,4 @@ data class HandlerInput(
     val sequenceNumber: Int,
     val inputs: String?,
     val item: String?,
-)
-
-/**
- * Output returned by a [TransitionHandler] after task execution.
- *
- * @property result JSON output passed to the next step or stored as the final workflow result.
- *                  Return `null` if the handler produces no output.
- */
-data class HandlerOutput(
-    val result: String?,
 )

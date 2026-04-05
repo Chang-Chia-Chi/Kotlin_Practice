@@ -7,7 +7,7 @@ import com.workflow.dispatch.usecase.port.outbound.persistence.SimulationResultS
 import com.workflow.dispatch.usecase.port.outbound.storage.ParquetFormatter
 import com.workflow.dispatch.usecase.port.outbound.storage.StorageGateway
 import com.workflow.worker.usecase.port.inbound.execution.HandlerInput
-import com.workflow.worker.usecase.port.inbound.execution.HandlerOutput
+import com.workflow.worker.usecase.port.inbound.execution.HandlerResult
 import com.workflow.worker.usecase.port.inbound.execution.TransitionHandler
 import jakarta.enterprise.context.ApplicationScoped
 import org.eclipse.microprofile.config.inject.ConfigProperty
@@ -22,7 +22,7 @@ class DispatchJoinHandler(
     private val objectMapper: ObjectMapper,
 ) : TransitionHandler {
 
-    override suspend fun execute(input: HandlerInput): HandlerOutput {
+    override suspend fun execute(input: HandlerInput): HandlerResult {
         val inputsNode = objectMapper.readTree(input.inputs!!)
         val batchTokenNode = inputsNode["batchToken"]
         val batchToken = when {
@@ -38,6 +38,6 @@ class DispatchJoinHandler(
             storage.uploadParquet(pathBuilder.prodParquetPath(), parquet)
         }
 
-        return HandlerOutput(null)
+        return HandlerResult.Completed(null)
     }
 }
