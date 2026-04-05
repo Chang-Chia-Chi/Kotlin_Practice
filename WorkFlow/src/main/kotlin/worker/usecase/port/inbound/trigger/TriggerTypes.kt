@@ -8,10 +8,10 @@ object TriggerTypes {
     const val SQL_EXEC = "sql-exec"
 }
 
-fun deferK8sJob(objectMapper: ObjectMapper, jobName: String, namespace: String): HandlerResult.Defer =
+fun deferK8sJob(jobName: String, namespace: String): HandlerResult.Defer =
     HandlerResult.Defer(
         triggerType = TriggerTypes.K8S_JOB,
-        triggerMeta = objectMapper.writeValueAsString(mapOf("jobName" to jobName, "namespace" to namespace)),
+        triggerMeta = """{"jobName":"$jobName","namespace":"$namespace"}""",
     )
 
 fun deferSqlExec(

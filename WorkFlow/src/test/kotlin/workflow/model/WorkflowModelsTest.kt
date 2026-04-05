@@ -170,6 +170,7 @@ class WorkflowModelsTest {
             TaskStatus.DEFERRED to TaskStatus.FAILED,
             TaskStatus.DEFERRED to TaskStatus.TIMED_OUT,
             TaskStatus.DEFERRED to TaskStatus.CANCELLED,
+            TaskStatus.DEFERRED to TaskStatus.PENDING,
         )
         legal.forEach { (from, to) ->
             TaskStatus.requireTransition(from, to)
@@ -206,6 +207,7 @@ class WorkflowModelsTest {
             TaskStatus.DEFERRED to TaskStatus.FAILED,
             TaskStatus.DEFERRED to TaskStatus.TIMED_OUT,
             TaskStatus.DEFERRED to TaskStatus.CANCELLED,
+            TaskStatus.DEFERRED to TaskStatus.PENDING,
         )
         deferredTransitions.forEach { (from, to) ->
             org.junit.jupiter.api.assertDoesNotThrow {
@@ -218,7 +220,6 @@ class WorkflowModelsTest {
     fun `DEFERRED rejects illegal transitions`() {
         val illegal = listOf(
             TaskStatus.DEFERRED to TaskStatus.PROCESSING,
-            TaskStatus.DEFERRED to TaskStatus.PENDING,
             TaskStatus.DEFERRED to TaskStatus.DEAD_LETTER,
         )
         illegal.forEach { (from, to) ->

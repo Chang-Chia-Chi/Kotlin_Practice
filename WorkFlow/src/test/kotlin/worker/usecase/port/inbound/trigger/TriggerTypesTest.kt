@@ -19,7 +19,6 @@ class TriggerTypesTest {
     @Test
     fun `deferK8sJob creates Defer with correct type and meta`() {
         val result = deferK8sJob(
-            objectMapper = objectMapper,
             jobName = "my-batch-job",
             namespace = "production",
         )

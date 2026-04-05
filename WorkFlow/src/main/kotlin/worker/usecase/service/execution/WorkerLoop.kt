@@ -266,16 +266,23 @@ class WorkerLoop(
                 }
             }
             is HandlerResult.Defer -> {
-                val deferred = taskRepo.defer(
-                    taskId = task.id,
-                    triggerType = result.triggerType,
-                    triggerMeta = result.triggerMeta,
-                )
-                if (deferred) {
-                    log.info("Task {} deferred to trigger type={}", task.id, result.triggerType)
-                } else {
-                    log.warn("Task {} defer failed (status was not PROCESSING), treating as failure", task.id)
-                    handleTaskFailure(task, IllegalStateException("Defer failed: task not in PROCESSING state"))
+                try {
+                    val deferred = taskRepo.defer(
+                        taskId = task.id,
+                        triggerType = result.triggerType,
+                        triggerMeta = result.triggerMeta,
+                    )
+                    if (deferred) {
+                        log.info("Task {} deferred to trigger type={}", task.id, result.triggerType)
+                    } else {
+                        log.warn("Task {} defer failed (status was not PROCESSING), treating as failure", task.id)
+                        handleTaskFailure(task, IllegalStateException("Defer failed: task not in PROCESSING state"))
+                    }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    log.error("Defer failed for task {}, falling through to failure path", task.id, e)
+                    handleTaskFailure(task, e)
                 }
             }
         }

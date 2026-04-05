@@ -1267,6 +1267,54 @@ class WorkerLoopTest {
         }
 
         @Test
+        fun `handler returning Defer when taskRepo defer throws delegates to handleTaskFailure`() = runTest {
+            val deferTask = makeTask(handlerKey = "defer-handler")
+            taskRepo.stub { onBlocking { claimNext(any(), any(), any()) } doReturn listOf(deferTask) doReturn emptyList() }
+
+            val deferHandler = object : TransitionHandler {
+                override fun key(): String = "defer-handler"
+                override suspend fun execute(input: HandlerInput): HandlerResult =
+                    HandlerResult.Defer(triggerType = "k8s-job", triggerMeta = """{"jobName":"j1","namespace":"ns"}""")
+            }
+            whenever(handlerRegistry.resolve("defer-handler")).thenReturn(deferHandler)
+            taskRepo.stub { onBlocking { defer(any(), any(), any()) } doThrow RuntimeException("DB connection lost") }
+
+            startAndAdvance(this)
+
+            verify(taskRepo).defer(eq(deferTask.id), any(), any())
+            // handleTaskFailure should call resetForRetry since retryCount=0 < maxRetries=3
+            verify(taskRepo).resetForRetry(eq(deferTask.id), eq(1))
+        }
+
+        @Test
+        fun `handler returning Defer when taskRepo defer throws and retries exhausted reports FAILED to barrier`() = runTest {
+            val deferTask = makeTask(handlerKey = "defer-handler", retryCount = 3, maxRetries = 3)
+            taskRepo.stub { onBlocking { claimNext(any(), any(), any()) } doReturn listOf(deferTask) doReturn emptyList() }
+
+            val deferHandler = object : TransitionHandler {
+                override fun key(): String = "defer-handler"
+                override suspend fun execute(input: HandlerInput): HandlerResult =
+                    HandlerResult.Defer(triggerType = "k8s-job", triggerMeta = """{"jobName":"j1","namespace":"ns"}""")
+            }
+            whenever(handlerRegistry.resolve("defer-handler")).thenReturn(deferHandler)
+            taskRepo.stub { onBlocking { defer(any(), any(), any()) } doThrow RuntimeException("DB connection lost") }
+
+            startAndAdvance(this)
+
+            verify(taskRepo).defer(eq(deferTask.id), any(), any())
+            verify(taskRepo, never()).resetForRetry(any(), any())
+            verify(phaseGate).onTaskCompleted(
+                eq(deferTask.id),
+                eq(deferTask.workflowId),
+                eq(deferTask.sequenceNumber),
+                eq(TaskStatus.FAILED),
+                eq(null),
+                eq(workerId),
+                any(),
+            )
+        }
+
+        @Test
         fun `handler returning Defer when defer fails and retries exhausted reports FAILED to barrier`() = runTest {
             val deferTask = makeTask(handlerKey = "defer-handler", retryCount = 3, maxRetries = 3)
             taskRepo.stub { onBlocking { claimNext(any(), any(), any()) } doReturn listOf(deferTask) doReturn emptyList() }
