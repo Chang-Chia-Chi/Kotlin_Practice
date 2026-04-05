@@ -4,9 +4,9 @@
 
 **Goal:** Replace the CAS retry mechanism in `DefaultPhaseGate` with pessimistic `SELECT ... FOR UPDATE` locking. Wire `DefaultPhaseGate` to use `DagRouter` from Phase 1. Eliminate `withCasRetry`, `requireCasWin`, `RetryableException`, and `MAX_CAS_RETRIES`.
 
-**Architecture:** Two-transaction design. TX1 commits the task status update immediately so it is visible to all concurrent readers. TX2 performs the fast-path probe, acquires the workflow row lock when near completion, and routes the DAG. This eliminates the READ COMMITTED visibility gap where concurrent single-TX completers can't see each other's uncommitted updates, which would cause the fast-path to overestimate non-terminal counts and miss the last-mile lock. `DefaultPhaseGate` becomes a thin transaction orchestrator that delegates routing decisions to `DagRouter`.
+**Architecture:** Two-transaction design. TX1 commits the task status update immediately so it is visible to all concurrent readers. TX2 performs a fast-path probe (`nonTerminal > 0` → return early), acquires the workflow row lock only when all tasks at the sequence are terminal, and routes the DAG. Because TX1 commits before TX2 counts, the probe is accurate and no threshold is needed. This eliminates the READ COMMITTED visibility gap where concurrent single-TX completers can't see each other's uncommitted updates. `DefaultPhaseGate` becomes a thin transaction orchestrator that delegates routing decisions to `DagRouter`.
 
-**Tech Stack:** Kotlin, JDBI, Oracle (`SELECT ... FOR UPDATE`), SmallRye Config
+**Tech Stack:** Kotlin, JDBI, Oracle (`SELECT ... FOR UPDATE`)
 
 **Spec:** `docs/superpowers/specs/2026-04-05-phase-gate-refactoring-design.md` — Phase 2
 
@@ -18,57 +18,15 @@
 
 | File | Action | Responsibility |
 |------|--------|----------------|
-| `src/main/kotlin/workflow/config/PhaseGateConfig.kt` | Create | Config interface for `last-mile-threshold` |
 | `src/main/kotlin/workflow/usecase/port/outbound/persistent/WorkflowRepository.kt` | Modify | Add `findByIdForUpdate`, remove `casVersion`, `casVersionWithHandle` |
 | `src/main/kotlin/workflow/adapter/persistent/JdbiWorkflowRepository.kt` | Modify | Implement `findByIdForUpdate`, add `incrementVersionWithHandle`, remove CAS methods |
 | `src/main/kotlin/workflow/usecase/service/orchestration/DefaultPhaseGate.kt` | Rewrite | Replace CAS with lock, delegate to DagRouter |
-| `src/main/resources/application.properties` | Modify | Add `framework.phase-gate.last-mile-threshold` |
 | `src/test/kotlin/workflow/usecase/service/orchestration/DefaultPhaseGateTest.kt` | Modify | Remove version assertions tied to CAS semantics |
 | `src/test/kotlin/workflow/adapter/persistent/WorkflowIntegrationTest.kt` | Modify | Update version assertions |
 
 ---
 
-### Task 1: Add `PhaseGateConfig` and config property
-
-**Files:**
-- Create: `src/main/kotlin/workflow/config/PhaseGateConfig.kt`
-- Modify: `src/main/resources/application.properties`
-
-- [ ] **Step 1: Create PhaseGateConfig**
-
-Create `src/main/kotlin/workflow/config/PhaseGateConfig.kt`:
-
-```kotlin
-package com.workflow.workflow.config
-
-import io.smallrye.config.ConfigMapping
-import io.smallrye.config.WithDefault
-
-@ConfigMapping(prefix = "framework.phase-gate")
-interface PhaseGateConfig {
-    @WithDefault("4")
-    fun lastMileThreshold(): Int
-}
-```
-
-- [ ] **Step 2: Add config to application.properties**
-
-Append to `src/main/resources/application.properties`:
-
-```properties
-framework.phase-gate.last-mile-threshold=4
-```
-
-- [ ] **Step 3: Commit**
-
-```bash
-git add src/main/kotlin/workflow/config/PhaseGateConfig.kt src/main/resources/application.properties
-git commit -m "feat(workflow): add PhaseGateConfig with last-mile-threshold"
-```
-
----
-
-### Task 2: Add `findByIdForUpdate` and `incrementVersionWithHandle` to WorkflowRepository
+### Task 1: Add `findByIdForUpdate` and `incrementVersionWithHandle` to WorkflowRepository
 
 **Files:**
 - Modify: `src/main/kotlin/workflow/usecase/port/outbound/persistent/WorkflowRepository.kt`
@@ -136,7 +94,7 @@ Add `incrementVersionWithHandle` after `findByIdForUpdate`:
 - [ ] **Step 3: Verify compilation**
 
 Run: `/c/Users/maxch/.m2/wrapper/dists/apache-maven-3.9.8/af622e91/bin/mvn compile -pl .`
-Expected: Compilation failure — `DefaultPhaseGate` still references `casVersionWithHandle`. This is expected; Task 3 fixes it.
+Expected: Compilation failure — `DefaultPhaseGate` still references `casVersionWithHandle`. This is expected; Task 2 fixes it.
 
 - [ ] **Step 4: Commit**
 
@@ -147,7 +105,7 @@ git commit -m "refactor(workflow): add findByIdForUpdate, remove CAS from Workfl
 
 ---
 
-### Task 3: Rewrite DefaultPhaseGate to use 2-TX lock + DagRouter
+### Task 2: Rewrite DefaultPhaseGate to use 2-TX lock + DagRouter
 
 **Files:**
 - Rewrite: `src/main/kotlin/workflow/usecase/service/orchestration/DefaultPhaseGate.kt`
@@ -173,7 +131,6 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.readValue
 import com.workflow.infrastructure.persistence.inTransactionSuspend
 import com.workflow.worker.usecase.port.outbound.notification.WorkerNotifier
-import com.workflow.workflow.config.PhaseGateConfig
 import com.workflow.workflow.model.PhaseType
 import com.workflow.workflow.model.TaskStatus
 import com.workflow.workflow.model.WorkflowDefinition
@@ -198,10 +155,11 @@ import java.time.temporal.ChronoUnit
  * Uses a two-transaction design to eliminate the READ COMMITTED visibility gap:
  * - TX1 commits the task status update so it is visible to all concurrent readers.
  * - TX2 performs the fast-path probe (now accurate), acquires the workflow row lock
- *   when near completion, and routes the DAG.
+ *   only when nonTerminal == 0, and routes the DAG.
  *
- * A threshold-based fast path keeps the common case lock-free: only tasks completing
- * near the sequence boundary acquire the lock. All routing decisions are delegated
+ * Because TX1 commits before TX2 counts, the fast-path probe is accurate and no
+ * threshold is needed — a simple nonTerminal > 0 check short-circuits the vast
+ * majority of calls without acquiring a lock. All routing decisions are delegated
  * to [DagRouter] (pure functions).
  */
 @ApplicationScoped
@@ -211,7 +169,6 @@ class DefaultPhaseGate(
     private val taskRepo: TaskRepository,
     private val objectMapper: ObjectMapper,
     private val notifier: WorkerNotifier,
-    private val phaseGateConfig: PhaseGateConfig,
 ) : PhaseGate {
 
     private val log = LoggerFactory.getLogger(DefaultPhaseGate::class.java)
@@ -234,15 +191,16 @@ class DefaultPhaseGate(
         // TX2: Fast-path probe + lock + route.
         // The count query now sees all committed TX1s from concurrent completers.
         val signalQueues = jdbi.inTransactionSuspend<List<String>, Exception> { handle ->
-            // Cheap barrier probe (no lock) — accurate because TX1 committed
+            // Fast-path probe (no lock) — accurate because TX1 committed
             val nonTerminal = taskRepo.countNonTerminalWithHandle(handle, workflowId, sequenceNumber)
-            if (nonTerminal > phaseGateConfig.lastMileThreshold()) return@inTransactionSuspend emptyList()
+            if (nonTerminal > 0) return@inTransactionSuspend emptyList()
 
-            // Acquire workflow lock and recount
+            // All tasks at this sequence are terminal — acquire workflow lock to serialize DAG routing
             val workflow = workflowRepo.findByIdForUpdate(handle, workflowId)
                 ?: throw IllegalStateException("Workflow not found: $workflowId")
             if (workflow.status != WorkflowStatus.RUNNING) return@inTransactionSuspend emptyList()
 
+            // Recount under lock to handle concurrent completers who also saw nonTerminal == 0
             val confirmedNonTerminal = taskRepo.countNonTerminalWithHandle(handle, workflowId, sequenceNumber)
             if (confirmedNonTerminal > 0) return@inTransactionSuspend emptyList()
 
@@ -446,56 +404,14 @@ git commit -m "refactor(workflow): replace CAS retry with lock-based orchestrati
 
 ---
 
-### Task 4: Update tests for lock-based DefaultPhaseGate
+### Task 3: Update tests for lock-based DefaultPhaseGate
 
 **Files:**
 - Modify: `src/test/kotlin/workflow/usecase/service/orchestration/DefaultPhaseGateTest.kt`
 - Modify: `src/test/kotlin/workflow/adapter/persistent/WorkflowIntegrationTest.kt`
 - Modify: `src/test/kotlin/workflow/adapter/persistent/RepositoryTest.kt`
 
-- [ ] **Step 1: Fix DefaultPhaseGateTest constructor**
-
-`DefaultPhaseGate` now takes `PhaseGateConfig` as a constructor parameter. In `DefaultPhaseGateTest.kt`, update the `setup()` method:
-
-Replace the `gate = DefaultPhaseGate(...)` line in `@BeforeAll fun setup()`:
-
-```kotlin
-    private val testPhaseGateConfig = object : PhaseGateConfig {
-        override fun lastMileThreshold(): Int = 4
-    }
-
-    @BeforeAll
-    fun setup() {
-        jdbi = OracleTestContainer.jdbi
-        workflowRepo = JdbiWorkflowRepository(jdbi)
-        taskRepo = JdbiTaskRepository(jdbi)
-        notifier = FakeWorkerNotifier()
-        gate = DefaultPhaseGate(jdbi, workflowRepo, taskRepo, objectMapper, notifier, testPhaseGateConfig)
-        engine = WorkflowEngine(jdbi, workflowRepo, taskRepo, objectMapper, notifier)
-    }
-```
-
-- [ ] **Step 2: Fix WorkflowIntegrationTest constructor**
-
-In `WorkflowIntegrationTest.kt`, update `@BeforeAll fun setup()` — same pattern:
-
-```kotlin
-    private val testPhaseGateConfig = object : PhaseGateConfig {
-        override fun lastMileThreshold(): Int = 4
-    }
-
-    @BeforeAll
-    fun setup() {
-        jdbi = OracleTestContainer.jdbi
-        workflowRepo = JdbiWorkflowRepository(jdbi)
-        taskRepo = JdbiTaskRepository(jdbi)
-        engine = WorkflowEngine(jdbi, workflowRepo, taskRepo, objectMapper, notifier)
-        barrier = DefaultPhaseGate(jdbi, workflowRepo, taskRepo, objectMapper, notifier, testPhaseGateConfig)
-        watchdog = WorkflowWatchdog(jdbi, workflowRepo, taskRepo, barrier, testWatchdogConfig)
-    }
-```
-
-- [ ] **Step 3: Update version assertions in WorkflowIntegrationTest**
+- [ ] **Step 1: Update version assertions in WorkflowIntegrationTest**
 
 The version field is now an audit counter incremented unconditionally. Some test assertions check exact version numbers. Update tests that assert specific version values:
 
@@ -505,28 +421,16 @@ In `WorkerDeathSimulation` test (`worker death after CAS before task insert swee
 In `LinearWorkflowE2E` test (around L174, L189):
 - `assertEquals(1, (wf["VERSION"] as Number).toInt())` — version is still incremented, this should still pass.
 
-- [ ] **Step 4: Remove CAS-specific repository tests**
+- [ ] **Step 2: Remove CAS-specific repository tests**
 
 In `src/test/kotlin/workflow/adapter/persistent/RepositoryTest.kt`, remove the `casVersion` test block (around L279-347). These tests exercise `casVersion` and `casVersionWithHandle` which no longer exist.
 
-- [ ] **Step 5: Fix any other test files that construct DefaultPhaseGate**
-
-Search for other construction sites:
-
-```bash
-grep -rn "DefaultPhaseGate(" src/test/kotlin/
-```
-
-Update each to include `testPhaseGateConfig`. Common locations:
-- `src/test/kotlin/stress/StressTestBase.kt`
-- `src/test/kotlin/benchmark/InstrumentedComponents.kt`
-
-- [ ] **Step 6: Run full test suite**
+- [ ] **Step 3: Run full test suite**
 
 Run: `/c/Users/maxch/.m2/wrapper/dists/apache-maven-3.9.8/af622e91/bin/mvn test -pl .`
 Expected: All tests PASS.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
 git add src/test/kotlin/workflow/usecase/service/orchestration/DefaultPhaseGateTest.kt src/test/kotlin/workflow/adapter/persistent/WorkflowIntegrationTest.kt src/test/kotlin/workflow/adapter/persistent/RepositoryTest.kt

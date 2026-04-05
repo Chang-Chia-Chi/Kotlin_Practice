@@ -121,7 +121,7 @@ TX1 (fenced task update — commit immediately):
 TX2 (fast-path probe + lock + route):
 5. BEGIN TRANSACTION
 6. COUNT non-terminal at this sequence (accurate — sees all committed TX1s)
-7. If nonTerminal > LAST_MILE_THRESHOLD → return early (fast path, vast majority of calls)
+7. If nonTerminal > 0 → return early (fast path, vast majority of calls)
 8. SELECT * FROM workflow WHERE id = :id FOR UPDATE (acquires row lock)
 9. If workflow.status != RUNNING → return early
 10. Recount non-terminal at this sequence (definitive — holds lock)
@@ -158,18 +158,12 @@ TX2 (fast-path probe + lock + route):
 ### What Gets Added
 
 - `workflowRepo.findByIdForUpdate(handle, workflowId)` — new repository method, `SELECT * FROM workflow WHERE id = :id FOR UPDATE`
-- `LAST_MILE_THRESHOLD` — configurable via `PhaseGateConfig`, default 4
 
-### Configuration
+### Fast-Path Logic
 
-```properties
-framework.phase-gate.last-mile-threshold=4
-```
-
-The threshold controls when the workflow-row lock is acquired:
-- `nonTerminal > threshold` → fast path, return early (no lock). The vast majority of task completions. Accurate because TX1 committed the status before this count runs.
-- `0 < nonTerminal <= threshold` → acquire lock, recount. Serializes the "last mile" completions to ensure exactly one completer advances the DAG.
-- `nonTerminal == 0` on first count → acquire lock, proceed to DAG evaluation.
+Because TX1 commits the task status before TX2 counts, the fast-path probe is accurate without a threshold:
+- `nonTerminal > 0` → fast path, return early (no lock). The vast majority of task completions.
+- `nonTerminal == 0` → acquire lock, recount under lock to handle concurrent completers who also saw 0, then proceed to DAG evaluation.
 
 ### Version Field
 
@@ -182,7 +176,7 @@ The two-transaction split plus `SELECT ... FOR UPDATE` eliminates both the READ 
 - **No lost wakeups:** TX1 commits the task status before TX2 counts. Concurrent completers' committed updates are visible to TX2's count query. The fast-path probe is accurate — it cannot overestimate non-terminal tasks due to uncommitted concurrent updates.
 - **CAS contention on diamond joins:** The second branch blocks on the `FOR UPDATE` lock until the first commits, then reads accurate state. No retry needed.
 - **Last-mile serialization:** At most one TX2 at a time is inside steps 8-15. The recount at step 10 sees all committed state from prior lock holders.
-- **Fast-path effectiveness improves:** In the single-TX design, the count overestimates non-terminal tasks (can't see concurrent uncommitted completions), causing unnecessary lock acquisitions. With 2 TXs, the count is accurate, so more tasks correctly take the fast-path exit.
+- **Fast-path is accurate:** In the single-TX design, the count overestimates non-terminal tasks (can't see concurrent uncommitted completions), causing unnecessary lock acquisitions. With 2 TXs, the count is accurate — no threshold needed, a simple `nonTerminal > 0` check correctly short-circuits the vast majority of calls.
 
 Lock hold time is bounded: one COUNT query + DagRouter evaluation (pure, microseconds) + batch insert. Low single-digit milliseconds in the worst case.
 
@@ -339,7 +333,7 @@ Each phase is independently mergeable and testable:
 | Phase | Scope | Files Changed |
 |---|---|---|
 | 1 | Extract `DagRouter` + unit tests | 2 new (DagRouter.kt, DagRouterTest.kt), 0 modified |
-| 2 | Lock-based `DefaultPhaseGate` + config | ~4 modified (DefaultPhaseGate, WorkflowRepository, JdbiWorkflowRepository, + PhaseGateConfig new), existing tests updated |
+| 2 | Lock-based `DefaultPhaseGate` | ~3 modified (DefaultPhaseGate, WorkflowRepository, JdbiWorkflowRepository), existing tests updated |
 | 3 | `TaskRepository` cleanup | 3 modified (TaskRepository, JdbiTaskRepository, RepositoryTest) |
 | 4 | Multi-terminal integration tests | 1 modified (WorkflowIntegrationTest) |
 
