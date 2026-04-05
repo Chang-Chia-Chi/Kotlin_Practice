@@ -23,6 +23,7 @@ enum class TaskStatus {
             DEFERRED to FAILED,
             DEFERRED to TIMED_OUT,
             DEFERRED to CANCELLED,
+            DEFERRED to PENDING,
             WAITING_FOR_SIGNAL to COMPLETED,
             WAITING_FOR_SIGNAL to FAILED,
             WAITING_FOR_SIGNAL to TIMED_OUT,
