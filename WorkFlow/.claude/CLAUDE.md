@@ -45,7 +45,7 @@
 
 * **Constraint 1:** Do not use `Thread.sleep()` for assertions or waits. All asynchronous assertions must use `Awaitility.await().untilAsserted(...)`. Exception: `Thread.sleep()` inside mock callbacks to simulate blocking APIs (e.g., K8s `leaderElector.run()`) is acceptable.
 * **Constraint 2:** All pure unit tests must use `runTest` from `kotlinx-coroutines-test` for deterministic time control.
-* **Constraint 3:** Mock Kubernetes interactions strictly using `@InjectMock` on the Fabric8 `KubernetesClient`. Do not attempt to spin up a real Kubernetes cluster via Testcontainers.
+* **Constraint 3:** Mock Kubernetes interactions strictly using `@InjectMock` on the Fabric8 `KubernetesClient`. Do not attempt to spin up a real Kubernetes cluster via Testcontainers for unit test.
 * **Constraint 4:** Use `ToxiproxyContainer` for all network fault injection scenarios at the database layer.
 * **Constraint 5:** Use Oracle Free container (via Testcontainers) for repository/adapter tests. This ensures full SQL compatibility (SKIP LOCKED, CHECK constraints, CLOB behavior) without H2 dialect gaps.
 * **Constraint 9:** Share one Oracle container across test classes via `OracleTestContainer` singleton object (`src/test/kotlin/engine/OracleTestContainer.kt`). Do not create per-class containers.
