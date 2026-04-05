@@ -646,53 +646,6 @@ class RepositoryTest {
             assertEquals(3, countTasksDirect(wf.id, 1))
         }
 
-        // ── countNonTerminal ─────────────────────────────────────────────
-
-        @Test
-        fun `countNonTerminal counts PENDING and PROCESSING tasks`() = runTest {
-            val wf = makeWorkflow()
-            workflowRepo.insert(wf)
-
-            insertTaskDirect(makeTask(workflowId = wf.id, sequenceNumber = 1, status = TaskStatus.PENDING))
-            insertTaskDirect(makeTask(workflowId = wf.id, sequenceNumber = 1, status = TaskStatus.PROCESSING))
-            insertTaskDirect(makeTask(workflowId = wf.id, sequenceNumber = 1, status = TaskStatus.COMPLETED))
-            insertTaskDirect(makeTask(workflowId = wf.id, sequenceNumber = 1, status = TaskStatus.FAILED))
-
-            val count = taskRepo.countNonTerminal(wf.id, 1)
-            assertEquals(2, count)
-        }
-
-        @Test
-        fun `countNonTerminal returns zero when all tasks terminal`() = runTest {
-            val wf = makeWorkflow()
-            workflowRepo.insert(wf)
-
-            insertTaskDirect(makeTask(workflowId = wf.id, sequenceNumber = 1, status = TaskStatus.COMPLETED))
-            insertTaskDirect(makeTask(workflowId = wf.id, sequenceNumber = 1, status = TaskStatus.FAILED))
-
-            assertEquals(0, taskRepo.countNonTerminal(wf.id, 1))
-        }
-
-        @Test
-        fun `countNonTerminal returns zero when no tasks exist`() = runTest {
-            val wf = makeWorkflow()
-            workflowRepo.insert(wf)
-
-            assertEquals(0, taskRepo.countNonTerminal(wf.id, 1))
-        }
-
-        @Test
-        fun `countNonTerminal scoped to sequence number`() = runTest {
-            val wf = makeWorkflow()
-            workflowRepo.insert(wf)
-
-            insertTaskDirect(makeTask(workflowId = wf.id, sequenceNumber = 1, status = TaskStatus.PENDING))
-            insertTaskDirect(makeTask(workflowId = wf.id, sequenceNumber = 2, status = TaskStatus.PENDING))
-
-            assertEquals(1, taskRepo.countNonTerminal(wf.id, 1))
-            assertEquals(1, taskRepo.countNonTerminal(wf.id, 2))
-        }
-
         // ── countNonTerminalWithHandle ───────────────────────────────────
 
         @Test
@@ -707,155 +660,6 @@ class RepositoryTest {
             }
 
             assertEquals(1, count)
-        }
-
-        // ── countFailed ──────────────────────────────────────────────────
-
-        @Test
-        fun `countFailed counts FAILED tasks`() = runTest {
-            val wf = makeWorkflow()
-            workflowRepo.insert(wf)
-
-            insertTaskDirect(makeTask(workflowId = wf.id, sequenceNumber = 1, status = TaskStatus.FAILED))
-            insertTaskDirect(makeTask(workflowId = wf.id, sequenceNumber = 1, status = TaskStatus.FAILED))
-            insertTaskDirect(makeTask(workflowId = wf.id, sequenceNumber = 1, status = TaskStatus.COMPLETED))
-            insertTaskDirect(makeTask(workflowId = wf.id, sequenceNumber = 1, status = TaskStatus.PENDING))
-
-            assertEquals(2, taskRepo.countFailed(wf.id, 1))
-        }
-
-        @Test
-        fun `countFailed returns zero when no failures`() = runTest {
-            val wf = makeWorkflow()
-            workflowRepo.insert(wf)
-
-            insertTaskDirect(makeTask(workflowId = wf.id, sequenceNumber = 1, status = TaskStatus.COMPLETED))
-
-            assertEquals(0, taskRepo.countFailed(wf.id, 1))
-        }
-
-        @Test
-        fun `countFailed scoped to sequence number`() = runTest {
-            val wf = makeWorkflow()
-            workflowRepo.insert(wf)
-
-            insertTaskDirect(makeTask(workflowId = wf.id, sequenceNumber = 1, status = TaskStatus.FAILED))
-            insertTaskDirect(makeTask(workflowId = wf.id, sequenceNumber = 2, status = TaskStatus.FAILED))
-            insertTaskDirect(makeTask(workflowId = wf.id, sequenceNumber = 2, status = TaskStatus.FAILED))
-
-            assertEquals(1, taskRepo.countFailed(wf.id, 1))
-            assertEquals(2, taskRepo.countFailed(wf.id, 2))
-        }
-
-        // ── countFailedWithHandle ────────────────────────────────────────
-
-        @Test
-        fun `countFailedWithHandle works within transaction`() {
-            val wf = makeWorkflow()
-            insertWorkflowDirect(wf)
-            insertTaskDirect(makeTask(workflowId = wf.id, sequenceNumber = 1, status = TaskStatus.FAILED))
-            insertTaskDirect(makeTask(workflowId = wf.id, sequenceNumber = 1, status = TaskStatus.FAILED))
-
-            val count = jdbi.inTransaction<Int, Exception> { handle ->
-                taskRepo.countFailedWithHandle(handle, wf.id, 1)
-            }
-
-            assertEquals(2, count)
-        }
-
-        // ── countTotal ───────────────────────────────────────────────────
-
-        @Test
-        fun `countTotal counts all tasks at sequence`() = runTest {
-            val wf = makeWorkflow()
-            workflowRepo.insert(wf)
-
-            insertTaskDirect(makeTask(workflowId = wf.id, sequenceNumber = 1, status = TaskStatus.PENDING))
-            insertTaskDirect(makeTask(workflowId = wf.id, sequenceNumber = 1, status = TaskStatus.COMPLETED))
-            insertTaskDirect(makeTask(workflowId = wf.id, sequenceNumber = 1, status = TaskStatus.FAILED))
-
-            assertEquals(3, taskRepo.countTotal(wf.id, 1))
-        }
-
-        @Test
-        fun `countTotal returns zero when no tasks`() = runTest {
-            val wf = makeWorkflow()
-            workflowRepo.insert(wf)
-
-            assertEquals(0, taskRepo.countTotal(wf.id, 1))
-        }
-
-        @Test
-        fun `countTotal scoped to sequence number`() = runTest {
-            val wf = makeWorkflow()
-            workflowRepo.insert(wf)
-
-            insertTaskDirect(makeTask(workflowId = wf.id, sequenceNumber = 1, status = TaskStatus.PENDING))
-            insertTaskDirect(makeTask(workflowId = wf.id, sequenceNumber = 2, status = TaskStatus.PENDING))
-            insertTaskDirect(makeTask(workflowId = wf.id, sequenceNumber = 2, status = TaskStatus.PENDING))
-
-            assertEquals(1, taskRepo.countTotal(wf.id, 1))
-            assertEquals(2, taskRepo.countTotal(wf.id, 2))
-        }
-
-        // ── countTotalWithHandle ─────────────────────────────────────────
-
-        @Test
-        fun `countTotalWithHandle works within transaction`() {
-            val wf = makeWorkflow()
-            insertWorkflowDirect(wf)
-            insertTaskDirect(makeTask(workflowId = wf.id, sequenceNumber = 1, status = TaskStatus.PENDING))
-            insertTaskDirect(makeTask(workflowId = wf.id, sequenceNumber = 1, status = TaskStatus.COMPLETED))
-
-            val count = jdbi.inTransaction<Int, Exception> { handle ->
-                taskRepo.countTotalWithHandle(handle, wf.id, 1)
-            }
-
-            assertEquals(2, count)
-        }
-
-        // ── updateStatus ─────────────────────────────────────────────────
-
-        @Test
-        fun `updateStatus changes task status and sets completed_at for terminal`() = runTest {
-            val wf = makeWorkflow()
-            workflowRepo.insert(wf)
-            val task = makeTask(workflowId = wf.id, status = TaskStatus.PROCESSING)
-            insertTaskDirect(task)
-
-            taskRepo.updateStatus(task.id, TaskStatus.COMPLETED, """{"result":"ok"}""")
-
-            val row = readTaskDirect(task.id)!!
-            assertEquals("COMPLETED", row["STATUS"])
-            assertNotNull(row["COMPLETED_AT"], "completed_at should be set for terminal status")
-        }
-
-        @Test
-        fun `updateStatus sets resultJson`() = runTest {
-            val wf = makeWorkflow()
-            workflowRepo.insert(wf)
-            val task = makeTask(workflowId = wf.id, status = TaskStatus.PROCESSING)
-            insertTaskDirect(task)
-
-            taskRepo.updateStatus(task.id, TaskStatus.COMPLETED, """{"output":42}""")
-
-            val row = readTaskDirect(task.id)!!
-            assertEquals("""{"output":42}""", row["RESULT"])
-        }
-
-        @Test
-        fun `updateStatus with null resultJson`() = runTest {
-            val wf = makeWorkflow()
-            workflowRepo.insert(wf)
-            val task = makeTask(workflowId = wf.id, status = TaskStatus.PROCESSING)
-            insertTaskDirect(task)
-
-            taskRepo.updateStatus(task.id, TaskStatus.FAILED, null)
-
-            val row = readTaskDirect(task.id)!!
-            assertEquals("FAILED", row["STATUS"])
-            assertNull(row["RESULT"])
-            assertNotNull(row["COMPLETED_AT"], "completed_at should be set for FAILED (terminal) status")
         }
 
         // ── updateStatusWithHandle ───────────────────────────────────────
@@ -1244,31 +1048,6 @@ class RepositoryTest {
         }
 
         @Test
-        fun `countNonTerminal excludes DEAD_LETTER`() = runTest {
-            val wf = makeWorkflow()
-            workflowRepo.insert(wf)
-
-            insertTaskDirect(makeTask(workflowId = wf.id, sequenceNumber = 1, status = TaskStatus.DEAD_LETTER))
-            insertTaskDirect(makeTask(workflowId = wf.id, sequenceNumber = 1, status = TaskStatus.PENDING))
-
-            val count = taskRepo.countNonTerminal(wf.id, 1)
-            assertEquals(1, count, "DEAD_LETTER should be excluded from non-terminal count")
-        }
-
-        @Test
-        fun `countFailed includes DEAD_LETTER`() = runTest {
-            val wf = makeWorkflow()
-            workflowRepo.insert(wf)
-
-            insertTaskDirect(makeTask(workflowId = wf.id, sequenceNumber = 1, status = TaskStatus.FAILED))
-            insertTaskDirect(makeTask(workflowId = wf.id, sequenceNumber = 1, status = TaskStatus.DEAD_LETTER))
-            insertTaskDirect(makeTask(workflowId = wf.id, sequenceNumber = 1, status = TaskStatus.COMPLETED))
-
-            val count = taskRepo.countFailed(wf.id, 1)
-            assertEquals(2, count, "countFailed should include both FAILED and DEAD_LETTER")
-        }
-
-        @Test
         fun `updateStatusWithHandle rejects update to DEAD_LETTER task`() {
             val wf = makeWorkflow()
             insertWorkflowDirect(wf)
@@ -1280,33 +1059,6 @@ class RepositoryTest {
             }
 
             assertFalse(result, "should return false when task is DEAD_LETTER")
-        }
-
-        // ── R1.5 — Non-terminal status guard ──────────────────────────────
-
-        @Test
-        fun `non-terminal update rejects when task is already COMPLETED`() = runTest {
-            val wf = makeWorkflow()
-            workflowRepo.insert(wf)
-            val task = makeTask(workflowId = wf.id, status = TaskStatus.COMPLETED)
-            insertTaskDirect(task)
-
-            val result = taskRepo.updateStatus(task.id, TaskStatus.PROCESSING)
-
-            assertFalse(result, "non-terminal update should fail on COMPLETED task")
-            assertEquals("COMPLETED", readTaskDirect(task.id)!!["STATUS"])
-        }
-
-        @Test
-        fun `non-terminal update rejects when task is already PENDING`() = runTest {
-            val wf = makeWorkflow()
-            workflowRepo.insert(wf)
-            val task = makeTask(workflowId = wf.id, status = TaskStatus.PENDING)
-            insertTaskDirect(task)
-
-            val result = taskRepo.updateStatus(task.id, TaskStatus.PROCESSING)
-
-            assertFalse(result, "non-terminal update should fail on PENDING task (not PROCESSING)")
         }
 
         // ── Zombie guard via (claimed_by, claimed_at) ─────────────────────

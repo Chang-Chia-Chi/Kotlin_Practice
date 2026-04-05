@@ -79,39 +79,6 @@ class JdbiTaskRepository(
                 .map(::mapTaskRow)
         }
 
-    override suspend fun updateStatus(
-        id: String,
-        newStatus: TaskStatus,
-        resultJson: String?,
-    ): Boolean =
-        jdbi.inTransactionSuspend<Boolean, Exception> { h: Handle ->
-            updateStatusWithHandle(h, id, newStatus, resultJson)
-        }
-
-    override suspend fun countNonTerminal(
-        workflowId: String,
-        sequenceNumber: Int,
-    ): Int =
-        jdbi.withHandleSuspend<Int, Exception> { h: Handle ->
-            countNonTerminalWithHandle(h, workflowId, sequenceNumber)
-        }
-
-    override suspend fun countFailed(
-        workflowId: String,
-        sequenceNumber: Int,
-    ): Int =
-        jdbi.withHandleSuspend<Int, Exception> { h: Handle ->
-            countFailedWithHandle(h, workflowId, sequenceNumber)
-        }
-
-    override suspend fun countTotal(
-        workflowId: String,
-        sequenceNumber: Int,
-    ): Int =
-        jdbi.withHandleSuspend<Int, Exception> { h: Handle ->
-            countTotalWithHandle(h, workflowId, sequenceNumber)
-        }
-
     override suspend fun findByWorkflowAndSequence(
         workflowId: String,
         sequenceNumber: Int,
@@ -273,50 +240,6 @@ class JdbiTaskRepository(
             .mapTo(Int::class.java)
             .one()
 
-    override fun countFailedWithHandle(
-        handle: Handle,
-        workflowId: String,
-        sequenceNumber: Int,
-    ): Int =
-        handle
-            .createQuery(
-                """
-            SELECT COUNT(*) FROM task
-            WHERE workflow_id = :workflowId AND sequence_number = :seq
-              AND status IN ('FAILED', 'TIMED_OUT', 'DEAD_LETTER')
-            """,
-            ).bind("workflowId", workflowId)
-            .bind("seq", sequenceNumber)
-            .mapTo(Int::class.java)
-            .one()
-
-    override fun countTotalWithHandle(
-        handle: Handle,
-        workflowId: String,
-        sequenceNumber: Int,
-    ): Int =
-        handle
-            .createQuery(
-                "SELECT COUNT(*) FROM task WHERE workflow_id = :workflowId AND sequence_number = :seq",
-            ).bind("workflowId", workflowId)
-            .bind("seq", sequenceNumber)
-            .mapTo(Int::class.java)
-            .one()
-
-    override fun findByWorkflowAndSequenceWithHandle(
-        handle: Handle,
-        workflowId: String,
-        sequenceNumber: Int,
-    ): List<Task> =
-        handle
-            .createQuery(
-                "SELECT * FROM task WHERE workflow_id = :workflowId AND sequence_number = :seq",
-            ).bind("workflowId", workflowId)
-            .bind("seq", sequenceNumber)
-            .mapToMap()
-            .list()
-            .map(::mapTaskRow)
-
     override fun cancelPendingTasksWithHandle(handle: Handle, workflowId: String): Int {
         return handle.createUpdate(
             """
@@ -390,19 +313,6 @@ class JdbiTaskRepository(
               AND status NOT IN ('COMPLETED', 'FAILED', 'TIMED_OUT', 'DEAD_LETTER', 'CANCELLED', 'SKIPPED')
             """,
             ).bind("workflowId", workflowId)
-            .mapTo(Int::class.java)
-            .one()
-
-    override fun countCompletedWithHandle(handle: Handle, workflowId: String, sequenceNumber: Int): Int =
-        handle
-            .createQuery(
-                """
-            SELECT COUNT(*) FROM task
-            WHERE workflow_id = :workflowId AND sequence_number = :seq
-              AND status = 'COMPLETED'
-            """,
-            ).bind("workflowId", workflowId)
-            .bind("seq", sequenceNumber)
             .mapTo(Int::class.java)
             .one()
 
