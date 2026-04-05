@@ -1012,4 +1012,149 @@ class WorkflowIntegrationTest {
         assertTrue(b1Tasks.all { it.status == TaskStatus.CANCELLED })
         assertTrue(b2Tasks.all { it.status == TaskStatus.CANCELLED })
     }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Multi-terminal DAG: asymmetric depth + conditional routing
+    // ═══════════════════════════════════════════════════════════════════════
+
+    @Nested
+    inner class MultiTerminalDagCompletion {
+
+        //          ┌──► fast (terminal, depth 1)
+        // start ──┤
+        //          └──► router ──(A)──► deep1 ──► deep2 (terminal, depth 3)
+        //                       └──(B)──► alt (terminal, depth 2)
+        private val multiTerminalDef = workflow {
+            activity("start")  { transition("s.h"); next("fast"); next("router") }
+            activity("fast")   { transition("f.h") }
+            activity("router") {
+                transition("r.h")
+                on("A") { next("deep1") }
+                on("B") { next("alt") }
+            }
+            activity("deep1")  { transition("d1.h"); next("deep2") }
+            activity("deep2")  { transition("d2.h") }
+            activity("alt")    { transition("a.h") }
+        }
+
+        @Test
+        fun `branch A taken — terminals at depth 1 and depth 3`() = runBlocking {
+            val wfId = engine.startWorkflow(multiTerminalDef).workflowId
+
+            // Fork: start → fast PENDING, router PENDING
+            complete(wfId, multiTerminalDef, "start")
+            assertEquals(listOf("PENDING"), taskStatusAt(wfId, seqOf(multiTerminalDef, "fast")))
+            assertEquals(listOf("PENDING"), taskStatusAt(wfId, seqOf(multiTerminalDef, "router")))
+
+            // Route to A: deep1 PENDING, alt SKIPPED
+            val seqRouter = seqOf(multiTerminalDef, "router")
+            val routerTask = taskRepo.findByWorkflowAndSequence(wfId, seqRouter)[0]
+            gate.onTaskCompleted(routerTask.id, wfId, seqRouter, TaskStatus.COMPLETED, """{"branch":"A"}""")
+
+            assertEquals(listOf("PENDING"), taskStatusAt(wfId, seqOf(multiTerminalDef, "deep1")))
+            assertEquals(listOf("SKIPPED"), taskStatusAt(wfId, seqOf(multiTerminalDef, "alt")))
+            assertTrue(taskStatusAt(wfId, seqOf(multiTerminalDef, "deep2")).isEmpty())
+
+            // Complete fast (terminal at depth 1) — workflow still RUNNING
+            complete(wfId, multiTerminalDef, "fast")
+            assertEquals(WorkflowStatus.RUNNING, workflowRepo.findById(wfId)!!.status)
+
+            // Complete deep1 → deep2 PENDING
+            complete(wfId, multiTerminalDef, "deep1")
+            assertEquals(listOf("PENDING"), taskStatusAt(wfId, seqOf(multiTerminalDef, "deep2")))
+            assertEquals(WorkflowStatus.RUNNING, workflowRepo.findById(wfId)!!.status)
+
+            // Complete deep2 (terminal at depth 3) → workflow COMPLETED
+            complete(wfId, multiTerminalDef, "deep2")
+            assertEquals(WorkflowStatus.COMPLETED, workflowRepo.findById(wfId)!!.status)
+        }
+
+        @Test
+        fun `branch B taken — terminals at depth 1 and 2, skip cascade to depth 3`() = runBlocking {
+            val wfId = engine.startWorkflow(multiTerminalDef).workflowId
+
+            complete(wfId, multiTerminalDef, "start")
+
+            // Route to B: alt PENDING, deep1 SKIPPED, deep2 SKIPPED (cascade)
+            val seqRouter = seqOf(multiTerminalDef, "router")
+            val routerTask = taskRepo.findByWorkflowAndSequence(wfId, seqRouter)[0]
+            gate.onTaskCompleted(routerTask.id, wfId, seqRouter, TaskStatus.COMPLETED, """{"branch":"B"}""")
+
+            assertEquals(listOf("PENDING"), taskStatusAt(wfId, seqOf(multiTerminalDef, "alt")))
+            assertEquals(listOf("SKIPPED"), taskStatusAt(wfId, seqOf(multiTerminalDef, "deep1")))
+            assertEquals(listOf("SKIPPED"), taskStatusAt(wfId, seqOf(multiTerminalDef, "deep2")))
+
+            // Complete alt — workflow RUNNING (fast still PENDING)
+            complete(wfId, multiTerminalDef, "alt")
+            assertEquals(WorkflowStatus.RUNNING, workflowRepo.findById(wfId)!!.status)
+
+            // Complete fast → workflow COMPLETED (mix of COMPLETED and SKIPPED terminals)
+            complete(wfId, multiTerminalDef, "fast")
+            assertEquals(WorkflowStatus.COMPLETED, workflowRepo.findById(wfId)!!.status)
+        }
+
+        @Test
+        fun `branch A taken, fast completes first — early terminal does not short-circuit`() = runBlocking {
+            val wfId = engine.startWorkflow(multiTerminalDef).workflowId
+
+            complete(wfId, multiTerminalDef, "start")
+
+            // Fast completes before router — workflow still RUNNING
+            complete(wfId, multiTerminalDef, "fast")
+            assertEquals(WorkflowStatus.RUNNING, workflowRepo.findById(wfId)!!.status)
+
+            // Route to A
+            val seqRouter = seqOf(multiTerminalDef, "router")
+            val routerTask = taskRepo.findByWorkflowAndSequence(wfId, seqRouter)[0]
+            gate.onTaskCompleted(routerTask.id, wfId, seqRouter, TaskStatus.COMPLETED, """{"branch":"A"}""")
+
+            assertEquals(listOf("PENDING"), taskStatusAt(wfId, seqOf(multiTerminalDef, "deep1")))
+            assertEquals(listOf("SKIPPED"), taskStatusAt(wfId, seqOf(multiTerminalDef, "alt")))
+
+            // Complete deep chain
+            complete(wfId, multiTerminalDef, "deep1")
+            assertEquals(WorkflowStatus.RUNNING, workflowRepo.findById(wfId)!!.status)
+
+            complete(wfId, multiTerminalDef, "deep2")
+            assertEquals(WorkflowStatus.COMPLETED, workflowRepo.findById(wfId)!!.status)
+        }
+
+        @Test
+        fun `concurrent terminal completions produce exactly one COMPLETED transition`() = runBlocking {
+            val wfId = engine.startWorkflow(multiTerminalDef).workflowId
+
+            complete(wfId, multiTerminalDef, "start")
+
+            // Route to B: alt and fast are the two independent terminals
+            val seqRouter = seqOf(multiTerminalDef, "router")
+            val routerTask = taskRepo.findByWorkflowAndSequence(wfId, seqRouter)[0]
+            gate.onTaskCompleted(routerTask.id, wfId, seqRouter, TaskStatus.COMPLETED, """{"branch":"B"}""")
+
+            // Both terminals ready: fast (seq for fast) and alt (seq for alt)
+            val seqFast = seqOf(multiTerminalDef, "fast")
+            val seqAlt = seqOf(multiTerminalDef, "alt")
+            val fastTask = taskRepo.findByWorkflowAndSequence(wfId, seqFast)[0]
+            val altTask = taskRepo.findByWorkflowAndSequence(wfId, seqAlt)[0]
+
+            // Complete both concurrently
+            awaitAll(
+                async(Dispatchers.Default) {
+                    gate.onTaskCompleted(fastTask.id, wfId, seqFast, TaskStatus.COMPLETED, null)
+                },
+                async(Dispatchers.Default) {
+                    gate.onTaskCompleted(altTask.id, wfId, seqAlt, TaskStatus.COMPLETED, null)
+                },
+            )
+
+            // Workflow must reach COMPLETED (not stuck in RUNNING)
+            assertEquals(WorkflowStatus.COMPLETED, workflowRepo.findById(wfId)!!.status)
+
+            // Exactly one task at every sequence (no duplicates, no missing rows)
+            for (actName in listOf("start", "fast", "router", "alt", "deep1", "deep2")) {
+                val seq = seqOf(multiTerminalDef, actName)
+                val count = countTasksDirect(wfId, seq)
+                assertEquals(1, count, "Expected exactly 1 task at $actName (seq $seq), got $count")
+            }
+        }
+    }
 }
