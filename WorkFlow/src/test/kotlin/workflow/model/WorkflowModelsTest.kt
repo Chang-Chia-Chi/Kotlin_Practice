@@ -88,9 +88,9 @@ class WorkflowModelsTest {
     // ── TaskStatus enum ─────────────────────────────────────────────────
 
     @Test
-    fun `TaskStatus contains exactly nine values`() {
+    fun `TaskStatus contains exactly ten values`() {
         assertEquals(
-            setOf("PENDING", "PROCESSING", "WAITING_FOR_SIGNAL", "COMPLETED", "FAILED",
+            setOf("PENDING", "PROCESSING", "WAITING_FOR_SIGNAL", "DEFERRED", "COMPLETED", "FAILED",
                   "TIMED_OUT", "DEAD_LETTER", "CANCELLED", "SKIPPED"),
             TaskStatus.entries.map { it.name }.toSet(),
         )
@@ -165,6 +165,11 @@ class WorkflowModelsTest {
             TaskStatus.WAITING_FOR_SIGNAL to TaskStatus.CANCELLED,
             TaskStatus.FAILED to TaskStatus.PENDING,
             TaskStatus.FAILED to TaskStatus.DEAD_LETTER,
+            TaskStatus.PROCESSING to TaskStatus.DEFERRED,
+            TaskStatus.DEFERRED to TaskStatus.COMPLETED,
+            TaskStatus.DEFERRED to TaskStatus.FAILED,
+            TaskStatus.DEFERRED to TaskStatus.TIMED_OUT,
+            TaskStatus.DEFERRED to TaskStatus.CANCELLED,
         )
         legal.forEach { (from, to) ->
             TaskStatus.requireTransition(from, to)
@@ -179,6 +184,42 @@ class WorkflowModelsTest {
             TaskStatus.COMPLETED to TaskStatus.PENDING,
             TaskStatus.CANCELLED to TaskStatus.PENDING,
             TaskStatus.DEAD_LETTER to TaskStatus.PROCESSING,
+        )
+        illegal.forEach { (from, to) ->
+            val ex = org.junit.jupiter.api.assertThrows<IllegalArgumentException> {
+                TaskStatus.requireTransition(from, to)
+            }
+            assertTrue(ex.message!!.contains("Illegal task transition"))
+        }
+    }
+
+    @Test
+    fun `DEFERRED status is non-terminal`() {
+        assertEquals(false, TaskStatus.DEFERRED.isTerminal)
+    }
+
+    @Test
+    fun `DEFERRED allows transitions from PROCESSING and to terminal states`() {
+        val deferredTransitions = listOf(
+            TaskStatus.PROCESSING to TaskStatus.DEFERRED,
+            TaskStatus.DEFERRED to TaskStatus.COMPLETED,
+            TaskStatus.DEFERRED to TaskStatus.FAILED,
+            TaskStatus.DEFERRED to TaskStatus.TIMED_OUT,
+            TaskStatus.DEFERRED to TaskStatus.CANCELLED,
+        )
+        deferredTransitions.forEach { (from, to) ->
+            org.junit.jupiter.api.assertDoesNotThrow {
+                TaskStatus.requireTransition(from, to)
+            }
+        }
+    }
+
+    @Test
+    fun `DEFERRED rejects illegal transitions`() {
+        val illegal = listOf(
+            TaskStatus.DEFERRED to TaskStatus.PROCESSING,
+            TaskStatus.DEFERRED to TaskStatus.PENDING,
+            TaskStatus.DEFERRED to TaskStatus.DEAD_LETTER,
         )
         illegal.forEach { (from, to) ->
             val ex = org.junit.jupiter.api.assertThrows<IllegalArgumentException> {
@@ -306,6 +347,30 @@ class WorkflowModelsTest {
             val t = task(status = status)
             assertEquals(status, t.status)
         }
+    }
+
+    @Test
+    fun `Task with trigger fields preserves values`() {
+        val t = Task(
+            id = "task-defer-1",
+            workflowId = "wf-1",
+            activityName = "step1",
+            sequenceNumber = 1,
+            status = TaskStatus.DEFERRED,
+            handlerKey = "process.step1",
+            item = null,
+            resultJson = null,
+            claimedBy = null,
+            claimedAt = null,
+            completedAt = null,
+            retryCount = 0,
+            maxRetries = 3,
+            deadlineAt = later,
+            triggerType = "k8s-job",
+            triggerMeta = "{}",
+        )
+        assertEquals("k8s-job", t.triggerType)
+        assertEquals("{}", t.triggerMeta)
     }
 
     // ── Edge ────────────────────────────────────────────────────────────
