@@ -415,7 +415,7 @@ class JdbiTaskRepository(
         handle.createUpdate(
             """
             UPDATE task SET status = 'CANCELLED', completed_at = :now
-            WHERE status IN ('PENDING', 'WAITING_FOR_SIGNAL')
+            WHERE status IN ('PENDING', 'WAITING_FOR_SIGNAL', 'DEFERRED')
               AND workflow_id IN (
                 SELECT id FROM workflow WHERE status = 'RUNNING' AND deadline_at < :now
               )

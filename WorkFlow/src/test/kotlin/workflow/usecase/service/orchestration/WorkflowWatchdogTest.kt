@@ -1300,6 +1300,94 @@ class WorkflowWatchdogTest {
         }
 
         @Test
+        fun `overdue workflow cancels PENDING, WAITING_FOR_SIGNAL, and DEFERRED but not PROCESSING or terminal`() = runTest {
+            val definition = workflow {
+                activity("a") { transition("h"); next("b") }
+                activity("b") { transition("h"); next("c") }
+                activity("c") { transition("h"); next("d") }
+                activity("d") { transition("h"); next("e") }
+                activity("e") { transition("h"); next("f") }
+                activity("f") { transition("h") }
+            }
+            val wfId = randomId()
+            val wf = makeWorkflow(
+                id = wfId,
+                definition = definition,
+                updatedAt = now().minus(Duration.ofHours(1)),
+                deadlineAt = now().minus(Duration.ofMinutes(5)),
+            )
+            workflowRepo.insert(wf)
+
+            val pendingId = randomId()
+            val waitingId = randomId()
+            val deferredId = randomId()
+            val processingId = randomId()
+            val completedId = randomId()
+            val failedId = randomId()
+
+            val tasks = listOf(
+                makeTask(id = pendingId, workflowId = wfId, activityName = "a",
+                    sequenceNumber = 1, status = TaskStatus.PENDING, handlerKey = "h"),
+                makeTask(id = waitingId, workflowId = wfId, activityName = "b",
+                    sequenceNumber = 2, status = TaskStatus.WAITING_FOR_SIGNAL, handlerKey = "h"),
+                makeTask(id = deferredId, workflowId = wfId, activityName = "c",
+                    sequenceNumber = 3, status = TaskStatus.DEFERRED, handlerKey = "h"),
+                makeTask(id = processingId, workflowId = wfId, activityName = "d",
+                    sequenceNumber = 4, status = TaskStatus.PROCESSING, handlerKey = "h",
+                    claimedBy = "worker-1", claimedAt = Instant.now()),
+                makeTask(id = completedId, workflowId = wfId, activityName = "e",
+                    sequenceNumber = 5, status = TaskStatus.COMPLETED, handlerKey = "h",
+                    completedAt = Instant.now()),
+                makeTask(id = failedId, workflowId = wfId, activityName = "f",
+                    sequenceNumber = 6, status = TaskStatus.FAILED, handlerKey = "h",
+                    completedAt = Instant.now()),
+            )
+            tasks.forEach { insertTaskDirect(it) }
+
+            watchdog.patrol()
+
+            // Workflow itself transitions
+            val updatedWf = workflowRepo.findById(wfId)
+            assertNotNull(updatedWf)
+            assertEquals(WorkflowStatus.TIMED_OUT, updatedWf.status)
+
+            // Cancellable statuses → CANCELLED
+            assertEquals("CANCELLED", readTaskDirect(pendingId)!!["STATUS"])
+            assertEquals("CANCELLED", readTaskDirect(waitingId)!!["STATUS"])
+            assertEquals("CANCELLED", readTaskDirect(deferredId)!!["STATUS"])
+
+            // Non-cancellable statuses → unchanged
+            assertEquals("PROCESSING", readTaskDirect(processingId)!!["STATUS"])
+            assertEquals("COMPLETED", readTaskDirect(completedId)!!["STATUS"])
+            assertEquals("FAILED", readTaskDirect(failedId)!!["STATUS"])
+        }
+
+        @Test
+        fun `DEFERRED tasks in non-overdue workflow are not cancelled`() = runTest {
+            val definition = workflow {
+                activity("step1") { transition("handler1") }
+            }
+            val wfId = randomId()
+            val wf = makeWorkflow(
+                id = wfId,
+                definition = definition,
+                deadlineAt = now().plus(Duration.ofHours(1)),
+            )
+            workflowRepo.insert(wf)
+
+            val deferredId = randomId()
+            insertTaskDirect(
+                makeTask(id = deferredId, workflowId = wfId, activityName = "step1",
+                    sequenceNumber = 1, status = TaskStatus.DEFERRED, handlerKey = "handler1"),
+            )
+
+            watchdog.patrol()
+
+            assertEquals(WorkflowStatus.RUNNING, workflowRepo.findById(wfId)!!.status)
+            assertEquals("DEFERRED", readTaskDirect(deferredId)!!["STATUS"])
+        }
+
+        @Test
         fun `workflow within deadline is not expired`() = runTest {
             val definition = workflow {
                 activity("step1") { transition("handler1") }
