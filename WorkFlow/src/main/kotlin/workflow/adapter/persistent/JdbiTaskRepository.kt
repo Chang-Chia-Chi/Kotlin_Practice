@@ -6,6 +6,7 @@ import com.workflow.infrastructure.persistence.readClob
 import com.workflow.infrastructure.persistence.readNullableTimestamp
 import com.workflow.infrastructure.persistence.readTimestamp
 import com.workflow.infrastructure.persistence.withHandleSuspend
+import com.workflow.worker.usecase.port.inbound.trigger.DeferredTaskRef
 import com.workflow.workflow.model.Task
 import com.workflow.workflow.model.TaskStatus
 import com.workflow.workflow.model.TaskStatusCounts
@@ -176,6 +177,46 @@ class JdbiTaskRepository(
                 .execute()
         }
 
+    override suspend fun defer(taskId: String, triggerType: String, triggerMeta: String): Boolean =
+        jdbi.inTransactionSuspend<Boolean, Exception> { h: Handle ->
+            val update = h.createUpdate(
+                """
+                UPDATE task SET status = 'DEFERRED', trigger_type = :triggerType, trigger_meta = :triggerMeta
+                WHERE id = :taskId AND status = 'PROCESSING'
+                """,
+            ).bind("taskId", taskId)
+                .bind("triggerType", triggerType)
+            bindNullableClob(update, "triggerMeta", triggerMeta)
+            val count = update.execute()
+            count > 0
+        }
+
+    override suspend fun findDeferred(): List<DeferredTaskRef> =
+        jdbi.withHandleSuspend<List<DeferredTaskRef>, Exception> { h: Handle ->
+            h.createQuery(
+                """
+                SELECT id, workflow_id, sequence_number, trigger_type, trigger_meta,
+                       deadline_at, retry_count, max_retries
+                FROM task WHERE status = 'DEFERRED'
+                """,
+            ).mapToMap()
+                .list()
+                .map { row ->
+                    val ci = caseInsensitive(row)
+                    DeferredTaskRef(
+                        taskId = ci["ID"] as String,
+                        workflowId = ci["WORKFLOW_ID"] as String,
+                        sequenceNumber = (ci["SEQUENCE_NUMBER"] as Number).toInt(),
+                        triggerType = ci["TRIGGER_TYPE"] as String,
+                        triggerMeta = ci["TRIGGER_META"]?.let { readClob(it) }
+                            ?: error("DEFERRED task ${ci["ID"]} has null trigger_meta — data integrity violation"),
+                        deadlineAt = readNullableTimestamp(ci["DEADLINE_AT"]),
+                        retryCount = (ci["RETRY_COUNT"] as Number).toInt(),
+                        maxRetries = (ci["MAX_RETRIES"] as Number).toInt(),
+                    )
+                }
+        }
+
     // -- Handle methods (for barrier transaction) --
 
     override fun updateStatusWithHandle(
@@ -240,11 +281,12 @@ class JdbiTaskRepository(
             .mapTo(Int::class.java)
             .one()
 
+    // Cancels PENDING, WAITING_FOR_SIGNAL, and DEFERRED tasks for a workflow.
     override fun cancelPendingTasksWithHandle(handle: Handle, workflowId: String): Int {
         return handle.createUpdate(
             """
             UPDATE task SET status = 'CANCELLED', completed_at = :now
-            WHERE workflow_id = :workflowId AND status IN ('PENDING', 'WAITING_FOR_SIGNAL')
+            WHERE workflow_id = :workflowId AND status IN ('PENDING', 'WAITING_FOR_SIGNAL', 'DEFERRED')
             """,
         )
             .bind("workflowId", workflowId)
@@ -258,10 +300,12 @@ class JdbiTaskRepository(
             """
             INSERT INTO task (id, workflow_id, activity_name, sequence_number, status, handler_key,
                               item, result, claimed_by, claimed_at, completed_at,
-                              retry_count, max_retries, deadline_at, not_before, backoff_base, backoff_cap, queue_name)
+                              retry_count, max_retries, deadline_at, not_before, backoff_base, backoff_cap, queue_name,
+                              trigger_type, trigger_meta)
             VALUES (:id, :workflowId, :activityName, :sequenceNumber, :status, :handlerKey,
                     :item, :result, :claimedBy, :claimedAt, :completedAt,
-                    :retryCount, :maxRetries, :deadlineAt, :notBefore, :backoffBase, :backoffCap, :queueName)
+                    :retryCount, :maxRetries, :deadlineAt, :notBefore, :backoffBase, :backoffCap, :queueName,
+                    :triggerType, :triggerMeta)
             """,
         )
         for (task in tasks) {
@@ -286,6 +330,8 @@ class JdbiTaskRepository(
                 .bind("backoffBase", task.backoffBase)
                 .bind("backoffCap", task.backoffCap)
                 .bind("queueName", task.queueName)
+            if (task.triggerType != null) batch.bind("triggerType", task.triggerType) else batch.bindNull("triggerType", Types.VARCHAR)
+            bindNullableClob(batch, "triggerMeta", task.triggerMeta)
             batch.add()
         }
         batch.execute()
@@ -424,6 +470,8 @@ class JdbiTaskRepository(
             backoffCap = (ci["BACKOFF_CAP"] as Number).toInt(),
             enqueuedAt = readTimestamp(ci["ENQUEUED_AT"]),
             queueName = (ci["QUEUE_NAME"] as? String) ?: "default",
+            triggerType = ci["TRIGGER_TYPE"] as? String,
+            triggerMeta = ci["TRIGGER_META"]?.let { readClob(it) },
         )
     }
 }

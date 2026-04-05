@@ -1,5 +1,6 @@
 package com.workflow.workflow.usecase.port.outbound.persistent
 
+import com.workflow.worker.usecase.port.inbound.trigger.DeferredTaskRef
 import com.workflow.workflow.model.Task
 import com.workflow.workflow.model.TaskStatus
 import com.workflow.workflow.model.TaskStatusCounts
@@ -16,6 +17,8 @@ interface TaskRepository {
     suspend fun findExpired(now: Instant): List<Task>
     suspend fun resetStaleTasks(staleThreshold: Instant): Int
     suspend fun deadLetterExhaustedTasks(staleThreshold: Instant): Int
+    suspend fun defer(taskId: String, triggerType: String, triggerMeta: String): Boolean
+    suspend fun findDeferred(): List<DeferredTaskRef>
 
     fun updateStatusWithHandle(handle: Handle, id: String, newStatus: TaskStatus, resultJson: String? = null, claimedBy: String? = null, claimedAt: Instant? = null): Boolean
     fun countNonTerminalWithHandle(handle: Handle, workflowId: String, sequenceNumber: Int): Int

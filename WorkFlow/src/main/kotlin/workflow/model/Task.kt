@@ -23,6 +23,8 @@ data class Task(
     val backoffCap: Int = 300,
     val enqueuedAt: Instant = Instant.EPOCH,
     val queueName: String = "default",
+    val triggerType: String? = null,
+    val triggerMeta: String? = null,
 )
 
 internal fun createTaskForActivity(

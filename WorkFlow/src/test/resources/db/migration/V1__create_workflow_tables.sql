@@ -37,11 +37,13 @@ CREATE TABLE task (
     backoff_cap      NUMBER         DEFAULT 300  NOT NULL,
     enqueued_at      TIMESTAMP      DEFAULT SYSTIMESTAMP NOT NULL,
     queue_name       VARCHAR2(100)  DEFAULT 'default'    NOT NULL,
+    trigger_type     VARCHAR2(50),
+    trigger_meta     CLOB,
     CONSTRAINT pk_task PRIMARY KEY (id),
     CONSTRAINT fk_task_workflow FOREIGN KEY (workflow_id) REFERENCES workflow (id),
     CONSTRAINT chk_task_status CHECK (status IN (
         'PENDING', 'PROCESSING', 'COMPLETED', 'FAILED',
-        'TIMED_OUT', 'DEAD_LETTER', 'CANCELLED', 'WAITING_FOR_SIGNAL', 'SKIPPED'
+        'TIMED_OUT', 'DEAD_LETTER', 'CANCELLED', 'WAITING_FOR_SIGNAL', 'SKIPPED', 'DEFERRED'
     ))
 );
 
@@ -51,3 +53,4 @@ CREATE INDEX idx_task_not_before         ON task (status, not_before);
 CREATE INDEX idx_task_pending_enqueued   ON task (status, enqueued_at, id);
 CREATE INDEX idx_task_processing_claimed ON task (status, claimed_at);
 CREATE INDEX idx_task_queue_status       ON task (queue_name, status, not_before, claimed_at);
+CREATE INDEX idx_task_deferred           ON task (status, trigger_type);
