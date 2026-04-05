@@ -7,8 +7,9 @@ import com.workflow.worker.config.TriggerLoopConfig
 import com.workflow.worker.usecase.port.inbound.trigger.DeferredTaskRef
 import com.workflow.worker.usecase.port.inbound.trigger.TriggerDriver
 import com.workflow.worker.usecase.port.inbound.trigger.TriggerResult
+import com.workflow.worker.usecase.service.RetryOutcome
+import com.workflow.worker.usecase.service.TaskSettler
 import com.workflow.workflow.model.TaskStatus
-import com.workflow.workflow.usecase.port.inbound.orchestration.PhaseGate
 import com.workflow.workflow.usecase.port.outbound.persistent.TaskRepository
 import io.micrometer.core.instrument.Counter
 import io.micrometer.core.instrument.MeterRegistry
@@ -38,7 +39,7 @@ const val SHUTDOWN_ORDER_TRIGGER = 5
 /**
  * Leader-gated sweep loop that periodically loads DEFERRED tasks, dispatches
  * them to [TriggerDriver] instances, polls for results, and settles
- * completed/failed/expired tasks through the [PhaseGate].
+ * completed/failed/expired tasks through the [TaskSettler].
  *
  * Runs on a single-threaded coroutine dispatcher (`limitedParallelism(1)`)
  * with a [SupervisorJob] so that individual sweep failures do not cancel
@@ -48,7 +49,7 @@ const val SHUTDOWN_ORDER_TRIGGER = 5
 class TriggerLoop(
     private val taskRepo: TaskRepository,
     private val driverBeans: Instance<TriggerDriver>,
-    private val phaseGate: PhaseGate,
+    private val taskSettler: TaskSettler,
     private val leaderGuard: LeaderGuard,
     private val meterRegistry: MeterRegistry,
     private val triggerLoopConfig: TriggerLoopConfig,
@@ -173,7 +174,7 @@ class TriggerLoop(
 
     /**
      * Settles a single trigger result. Returns `true` if the task was settled
-     * (phaseGate called or retry reset), used to skip duplicate deadline expiry.
+     * (settler called or retry reset), used to skip duplicate deadline expiry.
      */
     private suspend fun settleResult(
         triggerType: String,
@@ -188,21 +189,34 @@ class TriggerLoop(
         return try {
             when (result) {
                 is TriggerResult.Succeeded -> {
-                    phaseGate.onTaskCompleted(
+                    taskSettler.settle(
                         taskId = result.taskId,
                         workflowId = task.workflowId,
                         sequenceNumber = task.sequenceNumber,
                         status = TaskStatus.COMPLETED,
                         resultJson = result.result,
-                        claimedBy = null,
-                        claimedAt = null,
                     )
                     settledCounter(triggerType, "succeeded").increment()
                     log.info("Trigger settled task {} as COMPLETED (type={})", result.taskId, triggerType)
                     true
                 }
                 is TriggerResult.Failed -> {
-                    handleTriggerFailure(result.taskId, triggerType, result.reason, taskIndex)
+                    val outcome = taskSettler.retryOrFail(
+                        taskId = result.taskId, workflowId = task.workflowId,
+                        sequenceNumber = task.sequenceNumber,
+                        retryCount = task.retryCount, maxRetries = task.maxRetries,
+                    )
+                    when (outcome) {
+                        RetryOutcome.Retried -> {
+                            settledCounter(triggerType, "retried").increment()
+                            log.info("Trigger task {} failed ({}), retrying ({}/{})",
+                                result.taskId, result.reason, task.retryCount + 1, task.maxRetries)
+                        }
+                        RetryOutcome.Failed -> {
+                            settledCounter(triggerType, "failed").increment()
+                            log.warn("Trigger task {} failed permanently ({})", result.taskId, result.reason)
+                        }
+                    }
                     true
                 }
             }
@@ -211,56 +225,6 @@ class TriggerLoop(
         } catch (e: Exception) {
             log.error("Failed to settle trigger result for task {}", result.taskId, e)
             false
-        }
-    }
-
-    private suspend fun handleTriggerFailure(
-        taskId: String,
-        triggerType: String,
-        reason: String,
-        taskIndex: Map<String, DeferredTaskRef>,
-    ) {
-        val task = taskIndex[taskId]
-        if (task == null) {
-            log.warn("TriggerFailure for unknown task {} (type={}), skipping", taskId, triggerType)
-            return
-        }
-
-        if (task.retryCount < task.maxRetries) {
-            try {
-                taskRepo.resetForRetry(taskId, task.retryCount + 1)
-                settledCounter(triggerType, "retried").increment()
-                log.info(
-                    "Trigger task {} failed ({}), retrying ({}/{})",
-                    taskId, reason, task.retryCount + 1, task.maxRetries,
-                )
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                log.error("Failed to reset task {} for retry, reporting as FAILED", taskId, e)
-                phaseGate.onTaskCompleted(
-                    taskId = taskId,
-                    workflowId = task.workflowId,
-                    sequenceNumber = task.sequenceNumber,
-                    status = TaskStatus.FAILED,
-                    resultJson = null,
-                    claimedBy = null,
-                    claimedAt = null,
-                )
-                settledCounter(triggerType, "failed").increment()
-            }
-        } else {
-            phaseGate.onTaskCompleted(
-                taskId = taskId,
-                workflowId = task.workflowId,
-                sequenceNumber = task.sequenceNumber,
-                status = TaskStatus.FAILED,
-                resultJson = null,
-                claimedBy = null,
-                claimedAt = null,
-            )
-            settledCounter(triggerType, "failed").increment()
-            log.warn("Trigger task {} failed permanently ({})", taskId, reason)
         }
     }
 
@@ -275,14 +239,12 @@ class TriggerLoop(
                     log.warn("Failed to cancel trigger for expired task {}", task.taskId, e)
                 }
             }
-            phaseGate.onTaskCompleted(
+            taskSettler.settle(
                 taskId = task.taskId,
                 workflowId = task.workflowId,
                 sequenceNumber = task.sequenceNumber,
                 status = TaskStatus.TIMED_OUT,
                 resultJson = null,
-                claimedBy = null,
-                claimedAt = null,
             )
             settledCounter(task.triggerType, "expired").increment()
             log.warn("DEFERRED task {} expired (deadline={})", task.taskId, task.deadlineAt)

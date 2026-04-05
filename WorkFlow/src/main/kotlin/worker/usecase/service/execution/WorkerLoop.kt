@@ -15,10 +15,10 @@ import com.workflow.worker.usecase.port.inbound.execution.HandlerResult
 import com.workflow.worker.usecase.port.outbound.notification.WorkerNotifier
 import com.workflow.workflow.model.SequenceInfo
 import com.workflow.workflow.model.Task
+import com.workflow.worker.usecase.service.TaskSettler
 import com.workflow.workflow.model.TaskStatus
 import com.workflow.workflow.model.WorkflowDefinition
 import com.workflow.workflow.model.buildSequenceMap
-import com.workflow.workflow.usecase.port.inbound.orchestration.PhaseGate
 import com.workflow.workflow.usecase.port.outbound.persistent.TaskRepository
 import com.workflow.workflow.usecase.port.outbound.persistent.WorkflowRepository
 import com.workflow.workflow.usecase.service.orchestration.ActivityInputResolver
@@ -75,18 +75,14 @@ private const val MAX_DEFINITION_CACHE_SIZE = 1024
  *   join returns.
  *
  * **Error contract:** The [processTask] transform catches ALL non-cancellation
- * exceptions from handler execution and reports them to
- * [DefaultPhaseGate.onTaskCompleted] with [TaskStatus.FAILED] BEFORE returning.
- * No exception escapes the transform. If the barrier call itself fails for a
- * COMPLETED task, the failure is routed through the retry/failure path
- * ([handleTaskFailure]), which may trigger [TaskRepository.resetForRetry] if
- * retries remain, or [reportTaskCompleted] with FAILED status if exhausted.
+ * exceptions from handler execution and settles them via [TaskSettler].
+ * No exception escapes the transform. If settlement fails for a COMPLETED task,
+ * the failure is routed through the retry/failure path ([handleTaskFailure]),
+ * which delegates to [TaskSettler.retryOrFail].
  *
- * **Retry semantics:** On handler failure, if `task.retryCount < task.maxRetries`,
- * the task is atomically reset to PENDING via [TaskRepository.resetForRetry]
- * (clears claim, increments retry count). The barrier is NOT called -- the
- * task re-enters the claimable pool. If retries are exhausted, the task is
- * marked FAILED and the barrier fires.
+ * **Retry semantics:** On handler failure, [TaskSettler.retryOrFail] decides
+ * whether to reset the task for retry (if attempts remain) or settle it as
+ * FAILED. The retry-or-fail business rule lives in [TaskSettler].
  */
 @ApplicationScoped
 class WorkerLoop(
@@ -94,7 +90,7 @@ class WorkerLoop(
     private val shutdownConfig: ShutdownConfig,
     private val taskRepo: TaskRepository,
     private val handlerRegistry: HandlerRegistry,
-    private val phaseGate: PhaseGate,
+    private val taskSettler: TaskSettler,
     private val meterRegistry: MeterRegistry,
     private val activityInputResolver: ActivityInputResolver,
     private val workflowRepo: WorkflowRepository,
@@ -253,7 +249,7 @@ class WorkerLoop(
         when (result) {
             is HandlerResult.Completed -> {
                 try {
-                    phaseGate.onTaskCompleted(
+                    taskSettler.settle(
                         taskId = task.id,
                         workflowId = task.workflowId,
                         sequenceNumber = task.sequenceNumber,
@@ -304,49 +300,20 @@ class WorkerLoop(
         }
     }
 
-    private suspend fun handleTaskFailure(
-        task: Task,
-        cause: Exception,
-    ) {
+    private suspend fun handleTaskFailure(task: Task, cause: Exception) {
         log.warn(
             "Task {} (handler={}) failed (retry {}/{}): {}",
-            task.id,
-            task.handlerKey,
-            task.retryCount,
-            task.maxRetries,
-            cause.message,
-            cause,
+            task.id, task.handlerKey, task.retryCount, task.maxRetries, cause.message, cause,
         )
-
-        if (task.retryCount < task.maxRetries) {
-            suspendCatching {
-                taskRepo.resetForRetry(task.id, task.retryCount + 1)
-            }.onFailure { e ->
-                log.error("Failed to reset task {} for retry, reporting as FAILED", task.id, e)
-                reportTaskCompleted(task, TaskStatus.FAILED, resultJson = null)
-            }
-        } else {
-            reportTaskCompleted(task, TaskStatus.FAILED, resultJson = null)
-        }
-    }
-
-    private suspend fun reportTaskCompleted(
-        task: Task,
-        status: TaskStatus,
-        resultJson: String?,
-    ) {
         suspendCatching {
-            phaseGate.onTaskCompleted(
-                taskId = task.id,
-                workflowId = task.workflowId,
+            taskSettler.retryOrFail(
+                taskId = task.id, workflowId = task.workflowId,
                 sequenceNumber = task.sequenceNumber,
-                status = status,
-                resultJson = resultJson,
-                claimedBy = task.claimedBy,
-                claimedAt = task.claimedAt,
+                retryCount = task.retryCount, maxRetries = task.maxRetries,
+                claimedBy = task.claimedBy, claimedAt = task.claimedAt,
             )
         }.onFailure { e ->
-            log.error("Failed to report task {} as {} to barrier", task.id, status, e)
+            log.error("Failed to handle task {} failure through settler", task.id, e)
         }
     }
 
