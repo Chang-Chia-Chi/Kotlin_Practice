@@ -508,31 +508,22 @@ class DefaultPhaseGateTest {
         assertEquals(listOf("SKIPPED"), taskStatusAt(wfId, seqParallel))
     }
 
-    // -- Coverage gap 1: SCATTER failure with BEST_EFFORT dispatches successors ---
+    // -- Coverage gap 1: SCATTER with BEST_EFFORT is rejected at definition time ---
 
     @Test
-    fun `SCATTER failure with BEST_EFFORT dispatches unconditional successors`() = runTest {
-        val def = workflow {
-            activity("scatter") {
-                transition("sc.h")
-                failurePolicy(FailurePolicy.BEST_EFFORT)
-                fanOut { transition("par.h") }
-                next("join")
+    fun `SCATTER with BEST_EFFORT is rejected at definition time`() {
+        val error = org.junit.jupiter.api.assertThrows<IllegalArgumentException> {
+            workflow {
+                activity("scatter") {
+                    transition("sc.h")
+                    failurePolicy(FailurePolicy.BEST_EFFORT)
+                    fanOut { transition("par.h") }
+                    next("join")
+                }
+                activity("join") { transition("j.h") }
             }
-            activity("join") { transition("j.h") }
         }
-        val seqMap = buildSequenceMap(def)
-        val (wfId, _) = startAndGetSeq(def)
-
-        val seqScatter = seqMap.values.first { it.activityName == "scatter" }.sequenceNumber
-        val scatterTasks = taskRepo.findByWorkflowAndSequence(wfId, seqScatter)
-        // Scatter itself fails (no parallel expansion) -- BEST_EFFORT should fall through
-        gate.onTaskCompleted(scatterTasks[0].id, wfId, seqScatter, TaskStatus.FAILED, null)
-
-        val seqJoin = seqMap.values.first { it.activityName == "join" }.sequenceNumber
-        assertEquals(listOf("PENDING"), taskStatusAt(wfId, seqJoin))
-        // Workflow should still be RUNNING (not FAILED), since BEST_EFFORT proceeds
-        assertEquals(WorkflowStatus.RUNNING, workflowStatus(wfId))
+        assertTrue(error.message!!.contains("BEST_EFFORT policy is incompatible with fanOut"))
     }
 
     // -- Coverage gap 2: CAS retry exhaustion ------------------------------------

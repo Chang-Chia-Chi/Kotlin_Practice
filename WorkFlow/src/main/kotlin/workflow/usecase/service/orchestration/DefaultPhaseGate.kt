@@ -234,7 +234,9 @@ class DefaultPhaseGate(
             val parallelInfo = ctx.sequenceMap[parallelSeq]!!
             PhaseDecision.ScatterExpand(items, parallelInfo)
         } else {
-            resolveFailureFallback(seqInfo.activity.failurePolicy)
+            // BEST_EFFORT is forbidden on scatter (validated at definition time),
+            // so failure always means abort.
+            PhaseDecision.Abort
         }
 
         PhaseType.PARALLEL -> {
