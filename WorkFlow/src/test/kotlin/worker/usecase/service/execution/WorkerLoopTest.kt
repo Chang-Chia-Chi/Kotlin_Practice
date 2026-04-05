@@ -1254,7 +1254,7 @@ class WorkerLoopTest {
             val deferHandler = object : TransitionHandler {
                 override fun key(): String = "defer-handler"
                 override suspend fun execute(input: HandlerInput): HandlerResult =
-                    HandlerResult.Defer(triggerType = "sql-exec", triggerMeta = "{}")
+                    HandlerResult.Defer(triggerType = "k8s-job", triggerMeta = "{}")
             }
             whenever(handlerRegistry.resolve("defer-handler")).thenReturn(deferHandler)
             taskRepo.stub { onBlocking { defer(any(), any(), any()) } doReturn false }

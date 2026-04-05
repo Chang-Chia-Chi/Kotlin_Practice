@@ -36,7 +36,7 @@ class DeferredTaskRefTest {
             taskId = "task-99",
             workflowId = "wf-1",
             sequenceNumber = 0,
-            triggerType = "sql-exec",
+            triggerType = "k8s-job",
             triggerMeta = "{}",
             deadlineAt = null,
             retryCount = 0,

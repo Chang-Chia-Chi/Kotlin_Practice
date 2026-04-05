@@ -33,7 +33,7 @@ class HandlerResultTest {
     fun `exhaustive when on HandlerResult`() {
         val results: List<HandlerResult> = listOf(
             HandlerResult.Completed(result = "done"),
-            HandlerResult.Defer(triggerType = "sql-exec", triggerMeta = "{}"),
+            HandlerResult.Defer(triggerType = "k8s-job", triggerMeta = "{}"),
         )
         val labels = results.map { hr ->
             when (hr) {
