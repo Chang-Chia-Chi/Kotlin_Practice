@@ -1,15 +1,25 @@
 # Project: Lock-Free Workflow Engine (Kotlin/Quarkus/Maven/JDBI)
+Welcome to Claude Code. In this project, you will operate as an Autonomous Backend Agent focusing on Kotlin development.
 
 * When asked to update memory, you must update `./.claude/CLAUDE.md` if it is not specified that another file should be modified.
 * What should be in CLAUDE.md is always things most important as highest guideline which will not changed overtime.
 
-## Core Stack
+## Core Behavioral Guidelines
+* **Plan Before Execution**: Before making destructive changes or cross-file modifications, you must use Plan Mode (`/plan` or Shift+Tab).
+* **Hierarchical Context Loading**: Dynamically reference the following documents based on the directory you are modifying:
+    * When modifying controllers, services, or routing logic in `src/main/kotlin/**`: reference @docs/skills/backend-api-patterns/SKILL.md
+* **Test-Driven Development (TDD)**: All refactoring must begin with creating Characterization Tests (using JUnit 5 or Kotest). Ensure tests pass 100% before modifying the main logic.
+* **Database Safety**: All database schema modifications must be done via declarative tools or migration scripts (e.g., Flyway or Liquibase). Never execute destructive `ALTER TABLE` SQL commands directly in production environments.
 
+## Terminal & Automation Integration
+* When large refactoring is needed, suggest using the `/batch` command to break tasks into 5-30 independent units.
+* When outputting JSON data to downstream scripts, strictly adhere to the `--json-schema` constraints.
+
+## Core Stack
 * **Runtime:** Kotlin 2.3.x (all-open active), Quarkus 3.x (Maven 3.9+)
 * **Data:** JDBI 3 (SQL Object API) + Oracle (RDBMS)
 
 ## Essential Commands
-
 * **Dev mode:** `mvn quarkus:dev`
 * **Build & Package:** `mvn package` (Add `-Dnative` for GraalVM)
 * **Testing:** `mvn test` (Continuous: `mvn quarkus:test`)
