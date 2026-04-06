@@ -1811,6 +1811,66 @@ class RepositoryTest {
             assertEquals(1, seq2.failed)
         }
 
+        // ── cancelPendingTasksWithHandle ────────────────────────────────
+
+        @Test
+        fun `cancelPendingTasksWithHandle cancels PENDING and DEFERRED tasks`() = runTest {
+            val wf = makeWorkflow()
+            workflowRepo.insert(wf)
+
+            // Insert a PENDING task
+            val pendingTask = makeTask(workflowId = wf.id, sequenceNumber = 1, status = TaskStatus.PENDING)
+            insertTaskDirect(pendingTask)
+
+            // Insert a PROCESSING task, then defer it to get a real DEFERRED task
+            val toDefer = makeTask(
+                workflowId = wf.id, sequenceNumber = 2, status = TaskStatus.PROCESSING,
+                claimedBy = "worker-1", claimedAt = now(),
+            )
+            insertTaskDirect(toDefer)
+            val deferred = taskRepo.defer(toDefer.id, "sql-exec", """{"datasource":"test","sql":"SELECT 1"}""")
+            assertTrue(deferred, "defer should succeed for PROCESSING task")
+
+            // Verify the task is now DEFERRED
+            assertEquals("DEFERRED", readTaskDirect(toDefer.id)!!["STATUS"])
+
+            // Cancel all pending/deferred tasks
+            val cancelled = jdbi.inTransaction<Int, Exception> { handle ->
+                taskRepo.cancelPendingTasksWithHandle(handle, wf.id)
+            }
+
+            assertEquals(2, cancelled)
+
+            // Verify both are CANCELLED
+            assertEquals("CANCELLED", readTaskDirect(pendingTask.id)!!["STATUS"])
+            assertEquals("CANCELLED", readTaskDirect(toDefer.id)!!["STATUS"])
+        }
+
+        @Test
+        fun `cancelPendingTasksWithHandle does not cancel PROCESSING or terminal tasks`() = runTest {
+            val wf = makeWorkflow()
+            workflowRepo.insert(wf)
+
+            val processingTask = makeTask(
+                workflowId = wf.id, sequenceNumber = 1, status = TaskStatus.PROCESSING,
+                claimedBy = "worker-1", claimedAt = now(),
+            )
+            val completedTask = makeTask(
+                workflowId = wf.id, sequenceNumber = 2, status = TaskStatus.COMPLETED,
+                completedAt = now(),
+            )
+            insertTaskDirect(processingTask)
+            insertTaskDirect(completedTask)
+
+            val cancelled = jdbi.inTransaction<Int, Exception> { handle ->
+                taskRepo.cancelPendingTasksWithHandle(handle, wf.id)
+            }
+
+            assertEquals(0, cancelled)
+            assertEquals("PROCESSING", readTaskDirect(processingTask.id)!!["STATUS"])
+            assertEquals("COMPLETED", readTaskDirect(completedTask.id)!!["STATUS"])
+        }
+
         // ── findByWorkflowIdWithHandle ──────────────────────────────────
 
         @Test

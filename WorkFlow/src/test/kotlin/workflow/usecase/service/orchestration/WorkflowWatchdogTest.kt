@@ -1410,6 +1410,73 @@ class WorkflowWatchdogTest {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
+    // Test 8b: findExpired / resetStaleTasks do not touch DEFERRED tasks
+    // ═══════════════════════════════════════════════════════════════════════
+
+    @Nested
+    inner class WatchdogIgnoresDeferredTasks {
+
+        @Test
+        fun `expireOverdueTasks does not expire DEFERRED tasks`() = runTest {
+            val def = singleStepDef()
+            val wfId = randomId()
+            val taskId = randomId()
+            val wf = makeWorkflow(id = wfId, definition = def, updatedAt = now())
+            insertWorkflowDirect(wf)
+
+            // DEFERRED task with a deadline that is already past — should NOT be expired
+            // because findExpired only targets status = 'PROCESSING'.
+            insertTaskDirect(
+                makeTask(
+                    id = taskId,
+                    workflowId = wfId,
+                    sequenceNumber = 1,
+                    status = TaskStatus.DEFERRED,
+                    handlerKey = "only.handler",
+                    deadlineAt = now().minus(Duration.ofMinutes(30)),
+                ),
+            )
+
+            watchdog.patrol()
+
+            // Task should remain DEFERRED — not touched by findExpired
+            val task = readTaskDirect(taskId)
+            assertNotNull(task)
+            assertEquals("DEFERRED", task["STATUS"])
+        }
+
+        @Test
+        fun `reclaimStaleTasks does not reclaim DEFERRED tasks`() = runTest {
+            val def = singleStepDef()
+            val wfId = randomId()
+            val taskId = randomId()
+            val wf = makeWorkflow(id = wfId, definition = def, updatedAt = now())
+            insertWorkflowDirect(wf)
+
+            // DEFERRED task with an old claimed_at — should NOT be reclaimed
+            // because resetStaleTasks only targets status = 'PROCESSING'.
+            insertTaskDirect(
+                makeTask(
+                    id = taskId,
+                    workflowId = wfId,
+                    sequenceNumber = 1,
+                    status = TaskStatus.DEFERRED,
+                    handlerKey = "only.handler",
+                    claimedBy = "worker-1",
+                    claimedAt = now().minus(Duration.ofMinutes(30)),
+                ),
+            )
+
+            watchdog.patrol()
+
+            // Task should remain DEFERRED — not touched by resetStaleTasks
+            val task = readTaskDirect(taskId)
+            assertNotNull(task)
+            assertEquals("DEFERRED", task["STATUS"])
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
     // Test 9: Diamond DAG recovery — iterate-all-sequences dispatches gap
     // ═══════════════════════════════════════════════════════════════════════
 
