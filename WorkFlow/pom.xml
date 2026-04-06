@@ -185,6 +185,13 @@
             <artifactId>s3</artifactId>
         </dependency>
 
+        <!-- DuckDB (in-memory Parquet conversion) -->
+        <dependency>
+            <groupId>org.duckdb</groupId>
+            <artifactId>duckdb_jdbc</artifactId>
+            <version>1.2.1</version>
+        </dependency>
+
         <!-- Test -->
         <dependency>
             <groupId>io.quarkus</groupId>
