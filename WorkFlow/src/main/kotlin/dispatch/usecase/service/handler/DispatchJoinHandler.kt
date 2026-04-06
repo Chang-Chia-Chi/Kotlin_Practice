@@ -9,6 +9,7 @@ import com.workflow.dispatch.usecase.port.outbound.storage.StorageGateway
 import com.workflow.worker.usecase.port.inbound.execution.HandlerInput
 import com.workflow.worker.usecase.port.inbound.execution.HandlerResult
 import com.workflow.worker.usecase.port.inbound.execution.TransitionHandler
+import com.workflow.worker.usecase.port.inbound.trigger.deferK8sJob
 import jakarta.enterprise.context.ApplicationScoped
 import org.eclipse.microprofile.config.inject.ConfigProperty
 
@@ -19,6 +20,7 @@ class DispatchJoinHandler(
     private val parquetFormatter: ParquetFormatter,
     private val pathBuilder: DispatchPathBuilder,
     @ConfigProperty(name = "dispatch.env", defaultValue = "prod") private val env: String,
+    @ConfigProperty(name = "dispatch.k8s.namespace", defaultValue = "default") private val namespace: String,
     private val objectMapper: ObjectMapper,
 ) : TransitionHandler {
 
@@ -38,6 +40,6 @@ class DispatchJoinHandler(
             storage.uploadParquet(pathBuilder.prodParquetPath(), parquet)
         }
 
-        return HandlerResult.Completed(null)
+        return deferK8sJob("dispatch-join-$batchToken", namespace)
     }
 }
