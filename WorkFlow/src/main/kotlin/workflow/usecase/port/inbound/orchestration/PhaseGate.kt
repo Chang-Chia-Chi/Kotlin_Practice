@@ -12,6 +12,7 @@ interface PhaseGate {
         resultJson: String?,
         claimedBy: String? = null,
         claimedAt: Instant? = null,
+        itemsJson: String? = null,
     )
 
     suspend fun recoverStuckWorkflow(workflowId: String)

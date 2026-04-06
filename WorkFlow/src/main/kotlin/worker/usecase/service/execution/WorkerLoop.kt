@@ -13,9 +13,9 @@ import com.workflow.worker.config.WorkerLoopConfig
 import com.workflow.worker.usecase.port.inbound.execution.HandlerInput
 import com.workflow.worker.usecase.port.inbound.execution.HandlerResult
 import com.workflow.worker.usecase.port.outbound.notification.WorkerNotifier
+import com.workflow.worker.usecase.service.TaskSettler
 import com.workflow.workflow.model.SequenceInfo
 import com.workflow.workflow.model.Task
-import com.workflow.worker.usecase.service.TaskSettler
 import com.workflow.workflow.model.TaskStatus
 import com.workflow.workflow.model.WorkflowDefinition
 import com.workflow.workflow.model.buildSequenceMap
@@ -28,9 +28,9 @@ import io.micrometer.core.instrument.Tags
 import io.quarkus.runtime.StartupEvent
 import jakarta.enterprise.context.ApplicationScoped
 import jakarta.enterprise.event.Observes
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelAndJoin
@@ -118,10 +118,12 @@ class WorkerLoop(
     )
 
     private val definitionCache: MutableMap<String, CachedDefinition> =
-        Collections.synchronizedMap(object : LinkedHashMap<String, CachedDefinition>(128, 0.75f, true) {
-            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, CachedDefinition>): Boolean =
-                size > MAX_DEFINITION_CACHE_SIZE
-        })
+        Collections.synchronizedMap(
+            object : LinkedHashMap<String, CachedDefinition>(128, 0.75f, true) {
+                override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, CachedDefinition>): Boolean =
+                    size > MAX_DEFINITION_CACHE_SIZE
+            },
+        )
 
     @Volatile
     private var activeJob: Job? = null
@@ -166,7 +168,13 @@ class WorkerLoop(
             }
         activeJob = job
 
-        log.info("Worker loop started: workerId={}, concurrency={}, maxBatchSize={}, fallbackPollInterval={}", workerId, concurrency, maxBatchSize, fallbackPollInterval)
+        log.info(
+            "Worker loop started: workerId={}, concurrency={}, maxBatchSize={}, fallbackPollInterval={}",
+            workerId,
+            concurrency,
+            maxBatchSize,
+            fallbackPollInterval,
+        )
         return job
     }
 
@@ -191,13 +199,14 @@ class WorkerLoop(
         maxBatchSize: Int,
     ) = withContext(MDCContext(mapOf("worker_id" to workerId))) {
         val queueName = "default"
-        val tasks = suspendCatching { taskRepo.claimNext(workerId, maxBatchSize, queueName) }
-            .getOrElse { e ->
-                log.error("Failed to claim tasks", e)
-                claimTotal("error").increment()
-                notifier.awaitWork(queueName, fallbackPollInterval)
-                return@withContext
-            }
+        val tasks =
+            suspendCatching { taskRepo.claimNext(workerId, maxBatchSize, queueName) }
+                .getOrElse { e ->
+                    log.error("Failed to claim tasks", e)
+                    claimTotal("error").increment()
+                    notifier.awaitWork(queueName, fallbackPollInterval)
+                    return@withContext
+                }
         _lastActivityTimestamp = Instant.now()
 
         if (tasks.isEmpty()) {
@@ -215,12 +224,14 @@ class WorkerLoop(
     }
 
     private suspend fun processTask(task: Task) {
-        val taskMdc = MDC.getCopyOfContextMap().orEmpty() + mapOf(
-            "task_id" to task.id,
-            "handler_key" to task.handlerKey,
-            "workflow_id" to task.workflowId,
-            "attempt" to task.retryCount.toString(),
-        )
+        val taskMdc =
+            MDC.getCopyOfContextMap().orEmpty() +
+                mapOf(
+                    "task_id" to task.id,
+                    "handler_key" to task.handlerKey,
+                    "workflow_id" to task.workflowId,
+                    "attempt" to task.retryCount.toString(),
+                )
         withContext(MDCContext(taskMdc)) {
             _inFlightTasks.incrementAndGet()
             try {
@@ -233,18 +244,23 @@ class WorkerLoop(
     }
 
     private suspend fun executeAndReport(task: Task) {
-        val result = suspendCatching {
-            val handler = handlerRegistry.resolve(task.handlerKey)
-            val resolvedInputs = resolveInputs(task)
-            val input = HandlerInput(
-                taskId = task.id,
-                workflowId = task.workflowId,
-                sequenceNumber = task.sequenceNumber,
-                inputs = resolvedInputs,
-                item = task.item,
-            )
-            handler.execute(input)
-        }.getOrElse { e -> handleTaskFailure(task, e as Exception); return }
+        val result =
+            suspendCatching {
+                val handler = handlerRegistry.resolve(task.handlerKey)
+                val resolvedInputs = resolveInputs(task)
+                val input =
+                    HandlerInput(
+                        taskId = task.id,
+                        workflowId = task.workflowId,
+                        sequenceNumber = task.sequenceNumber,
+                        inputs = resolvedInputs,
+                        item = task.item,
+                    )
+                handler.execute(input)
+            }.getOrElse { e ->
+                handleTaskFailure(task, e as Exception)
+                return
+            }
 
         when (result) {
             is HandlerResult.Completed -> {
@@ -255,6 +271,7 @@ class WorkerLoop(
                         sequenceNumber = task.sequenceNumber,
                         status = TaskStatus.COMPLETED,
                         resultJson = result.result,
+                        itemsJson = result.items,
                         claimedBy = task.claimedBy,
                         claimedAt = task.claimedAt,
                     )
@@ -265,13 +282,15 @@ class WorkerLoop(
                     handleTaskFailure(task, e)
                 }
             }
+
             is HandlerResult.Defer -> {
                 try {
-                    val deferred = taskRepo.defer(
-                        taskId = task.id,
-                        triggerType = result.triggerType,
-                        triggerMeta = result.triggerMeta,
-                    )
+                    val deferred =
+                        taskRepo.defer(
+                            taskId = task.id,
+                            triggerType = result.triggerType,
+                            triggerMeta = result.triggerMeta,
+                        )
                     if (deferred) {
                         log.info("Task {} deferred to trigger type={}", task.id, result.triggerType)
                     } else {
@@ -289,14 +308,16 @@ class WorkerLoop(
     }
 
     private suspend fun resolveInputs(task: Task): String? {
-        val cached = definitionCache.getOrPut(task.workflowId) {
-            val workflow = workflowRepo.findById(task.workflowId)
-                ?: throw IllegalStateException(
-                    "Workflow ${task.workflowId} not found while resolving inputs for task ${task.id}"
-                )
-            val definition = objectMapper.readValue<WorkflowDefinition>(workflow.definitionJson)
-            CachedDefinition(definition, buildSequenceMap(definition))
-        }
+        val cached =
+            definitionCache.getOrPut(task.workflowId) {
+                val workflow =
+                    workflowRepo.findById(task.workflowId)
+                        ?: throw IllegalStateException(
+                            "Workflow ${task.workflowId} not found while resolving inputs for task ${task.id}",
+                        )
+                val definition = objectMapper.readValue<WorkflowDefinition>(workflow.definitionJson)
+                CachedDefinition(definition, buildSequenceMap(definition))
+            }
 
         val seqInfo = cached.sequenceMap[task.sequenceNumber] ?: return null
         val activityInputs = seqInfo.activity.inputs
@@ -307,21 +328,31 @@ class WorkerLoop(
         }
     }
 
-    private suspend fun handleTaskFailure(task: Task, cause: Exception) {
+    private suspend fun handleTaskFailure(
+        task: Task,
+        cause: Exception,
+    ) {
         log.warn(
             "Task {} (handler={}) failed (retry {}/{}): {}",
-            task.id, task.handlerKey, task.retryCount, task.maxRetries, cause.message, cause,
+            task.id,
+            task.handlerKey,
+            task.retryCount,
+            task.maxRetries,
+            cause.message,
+            cause,
         )
         suspendCatching {
             taskSettler.retryOrFail(
-                taskId = task.id, workflowId = task.workflowId,
+                taskId = task.id,
+                workflowId = task.workflowId,
                 sequenceNumber = task.sequenceNumber,
-                retryCount = task.retryCount, maxRetries = task.maxRetries,
-                claimedBy = task.claimedBy, claimedAt = task.claimedAt,
+                retryCount = task.retryCount,
+                maxRetries = task.maxRetries,
+                claimedBy = task.claimedBy,
+                claimedAt = task.claimedAt,
             )
         }.onFailure { e ->
             log.error("Failed to handle task {} failure through settler", task.id, e)
         }
     }
-
 }

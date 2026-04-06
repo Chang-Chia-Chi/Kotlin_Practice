@@ -23,15 +23,14 @@ class DispatchJoinHandler(
     @ConfigProperty(name = "dispatch.k8s.namespace", defaultValue = "default") private val namespace: String,
     private val objectMapper: ObjectMapper,
 ) : TransitionHandler {
-
     override suspend fun execute(input: HandlerInput): HandlerResult {
         val inputsNode = objectMapper.readTree(input.inputs!!)
         val batchTokenNode = inputsNode["batchToken"]
-        val batchToken = when {
-            batchTokenNode.isArray -> batchTokenNode[0].asText()
-            else -> batchTokenNode.asText()
-        }
-
+        val batchToken =
+            when {
+                batchTokenNode.isArray -> batchTokenNode[0].asText()
+                else -> batchTokenNode.asText()
+            }
         val batchStatus = resultStore.findBatchStatus(batchToken)
 
         if (env == "prod" && batchStatus == BatchStatus.NORMAL) {

@@ -6,18 +6,23 @@ import jakarta.enterprise.inject.Instance
 import java.util.concurrent.ConcurrentHashMap
 
 @ApplicationScoped
-class HandlerRegistry(cdiBeans: Instance<TransitionHandler>) {
-
+class HandlerRegistry(
+    cdiBeans: Instance<TransitionHandler>,
+) {
     private val handlers = ConcurrentHashMap<String, TransitionHandler>()
 
     init {
-        cdiBeans.forEach { handlers[it.key()] = it }
+        cdiBeans.forEach {
+            handlers[it.key()] = it
+        }
     }
 
-    fun resolve(key: String): TransitionHandler =
-        handlers[key] ?: throw IllegalStateException("No handler found for key: $key")
+    fun resolve(key: String): TransitionHandler = handlers[key] ?: throw IllegalStateException("No handler found for key: $key")
 
-    fun register(key: String, handler: TransitionHandler) {
+    fun register(
+        key: String,
+        handler: TransitionHandler,
+    ) {
         handlers[key] = handler
     }
 }

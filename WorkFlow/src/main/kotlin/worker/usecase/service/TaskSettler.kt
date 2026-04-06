@@ -13,6 +13,7 @@ import java.time.Instant
  */
 sealed interface RetryOutcome {
     data object Retried : RetryOutcome
+
     data object Failed : RetryOutcome
 }
 
@@ -33,14 +34,18 @@ class TaskSettler(
     private val taskRepo: TaskRepository,
     private val phaseGate: PhaseGate,
 ) {
-
     /**
      * Settles a task by delegating to [PhaseGate.onTaskCompleted].
      */
     suspend fun settle(
-        taskId: String, workflowId: String, sequenceNumber: Int,
-        status: TaskStatus, resultJson: String?,
-        claimedBy: String? = null, claimedAt: Instant? = null,
+        taskId: String,
+        workflowId: String,
+        sequenceNumber: Int,
+        status: TaskStatus,
+        resultJson: String?,
+        claimedBy: String? = null,
+        claimedAt: Instant? = null,
+        itemsJson: String? = null,
     ) {
         phaseGate.onTaskCompleted(
             taskId = taskId,
@@ -48,6 +53,7 @@ class TaskSettler(
             sequenceNumber = sequenceNumber,
             status = status,
             resultJson = resultJson,
+            itemsJson = itemsJson,
             claimedBy = claimedBy,
             claimedAt = claimedAt,
         )
@@ -64,14 +70,19 @@ class TaskSettler(
      * [TaskStatus.FAILED] and returns [RetryOutcome.Failed].
      */
     suspend fun retryOrFail(
-        taskId: String, workflowId: String, sequenceNumber: Int,
-        retryCount: Int, maxRetries: Int,
-        claimedBy: String? = null, claimedAt: Instant? = null,
+        taskId: String,
+        workflowId: String,
+        sequenceNumber: Int,
+        retryCount: Int,
+        maxRetries: Int,
+        claimedBy: String? = null,
+        claimedAt: Instant? = null,
     ): RetryOutcome {
         if (retryCount < maxRetries) {
-            val resetResult = suspendCatching {
-                taskRepo.resetForRetry(taskId, retryCount + 1)
-            }
+            val resetResult =
+                suspendCatching {
+                    taskRepo.resetForRetry(taskId, retryCount + 1)
+                }
             if (resetResult.isSuccess) return RetryOutcome.Retried
             // resetForRetry failed — fall through to settle as FAILED
         }

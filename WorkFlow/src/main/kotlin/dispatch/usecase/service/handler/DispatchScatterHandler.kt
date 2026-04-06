@@ -15,27 +15,34 @@ class DispatchScatterHandler(
     private val configRepo: DispatchConfigRepository,
     private val resultStore: SimulationResultStore,
     private val objectMapper: ObjectMapper,
-    private val batchTokenProvider: () -> String = { currentBatchToken() },
 ) : TransitionHandler {
+    private var batchTokenProvider: () -> String = { currentBatchToken() }
+
+    fun setBatchTokenProviderForTest(provider: () -> String) {
+        this.batchTokenProvider = provider
+    }
 
     override suspend fun execute(input: HandlerInput): HandlerResult {
         val itemNode = input.item?.let { objectMapper.readTree(it) }
         val providedToken = itemNode?.get("batchToken")?.takeIf { !it.isNull }?.asText()
         val configIdsNode = itemNode?.get("configIds")?.takeIf { it.isArray }
 
-        return if (providedToken != null && configIdsNode != null) {
-            // Path A — dry-run: batch already created by endpoint, configs supplied explicitly
-            val configs = configIdsNode.map { configRepo.findById(it.asText()) }
-            val items = configs.map { mapOf("configId" to it.id, "batchToken" to providedToken) }
-            HandlerResult.Completed(objectMapper.writeValueAsString(items))
-        } else {
-            // Path B — cron: generate token, create batch, query all active configs
-            val now = LocalDateTime.now()
-            val batchToken = batchTokenProvider()
-            val configs = configRepo.findActiveConfigs(now)
-            resultStore.createBatch(batchToken, BatchStatus.NORMAL, configs.size)
-            val items = configs.map { mapOf("configId" to it.id, "batchToken" to batchToken) }
-            HandlerResult.Completed(objectMapper.writeValueAsString(items))
-        }
+        val (items, token) =
+            if (providedToken != null && configIdsNode != null) {
+                // Path A — dry-run: batch already created by endpoint, configs supplied explicitly
+                val configs = configIdsNode.map { configRepo.findById(it.asText()) }
+                configs.map { mapOf("configId" to it.id, "batchToken" to providedToken) } to providedToken
+            } else {
+                // Path B — cron: generate token, create batch, query all active configs
+                val now = LocalDateTime.now()
+                val batchToken = batchTokenProvider()
+                val configs = configRepo.findActiveConfigs(now)
+                resultStore.createBatch(batchToken, BatchStatus.NORMAL, configs.size)
+                configs.map { mapOf("configId" to it.id, "batchToken" to batchToken) } to batchToken
+            }
+        return HandlerResult.Completed(
+            result = objectMapper.writeValueAsString(mapOf("batchToken" to token)),
+            items = objectMapper.writeValueAsString(items),
+        )
     }
 }

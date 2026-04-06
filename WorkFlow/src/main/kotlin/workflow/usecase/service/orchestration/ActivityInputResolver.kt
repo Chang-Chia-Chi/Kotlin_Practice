@@ -45,30 +45,37 @@ class ActivityInputResolver(
         sequenceMap: Map<Int, SequenceInfo>,
         tasksBySequence: suspend (Int) -> List<Task>,
     ): JsonNode {
-        val seqEntry = sequenceMap.values.firstOrNull { it.activity.name == activityName }
-            ?: throw IllegalArgumentException(
-                "Input reference '$activityName' does not match any activity in the workflow. " +
-                    "Available activities: ${sequenceMap.values.map { it.activity.name }}"
-            )
+        val seqEntry =
+            sequenceMap.values.firstOrNull { it.activity.name == activityName }
+                ?: throw IllegalArgumentException(
+                    "Input reference '$activityName' does not match any activity in the workflow. " +
+                        "Available activities: ${sequenceMap.values.map { it.activity.name }}",
+                )
 
         return when (seqEntry.phaseType) {
             PhaseType.PARALLEL -> {
-                val tasks = tasksBySequence(seqEntry.sequenceNumber)
-                    .filter { it.status == TaskStatus.COMPLETED }
+                val tasks =
+                    tasksBySequence(seqEntry.sequenceNumber)
+                        .filter { it.status == TaskStatus.COMPLETED }
                 aggregateFanOut(tasks, fieldPath)
             }
+
             PhaseType.LINEAR, PhaseType.SCATTER -> {
-                val task = tasksBySequence(seqEntry.sequenceNumber)
-                    .firstOrNull { it.status == TaskStatus.COMPLETED }
-                val resultJson = task?.resultJson
-                    ?: return objectMapper.nullNode()
+                val task =
+                    tasksBySequence(seqEntry.sequenceNumber).firstOrNull { it.status == TaskStatus.COMPLETED }
+                val resultJson =
+                    task?.resultJson
+                        ?: return objectMapper.nullNode()
                 val resultTree = objectMapper.readTree(resultJson)
                 traversePath(resultTree, fieldPath)
             }
         }
     }
 
-    private fun traversePath(node: JsonNode, fieldPath: List<String>): JsonNode {
+    private fun traversePath(
+        node: JsonNode,
+        fieldPath: List<String>,
+    ): JsonNode {
         var current = node
         for (key in fieldPath) {
             current = current.path(key)

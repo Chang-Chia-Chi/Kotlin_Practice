@@ -266,6 +266,23 @@
             <artifactId>kubernetes-server-mock</artifactId>
             <version>6.13.4</version>
             <scope>test</scope>
+            <exclusions>
+                <!-- Fabric8 mockwebserver pulls okhttp3 mockwebserver 3.12.12, which calls
+                     okhttp3.internal.Internal#initializeInstanceForTests() — a method that
+                     exists only in okhttp 3.x. The AWS SDK pulls okhttp 5.0.0-alpha.14, so
+                     classpath load order picks the 5.x Internal class and the call fails
+                     with NoSuchMethodError. We force a matching version below. -->
+                <exclusion>
+                    <groupId>com.squareup.okhttp3</groupId>
+                    <artifactId>mockwebserver</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+        <dependency>
+            <groupId>com.squareup.okhttp3</groupId>
+            <artifactId>mockwebserver</artifactId>
+            <version>5.0.0-alpha.14</version>
+            <scope>test</scope>
         </dependency>
         <dependency>
             <groupId>com.cronutils</groupId>

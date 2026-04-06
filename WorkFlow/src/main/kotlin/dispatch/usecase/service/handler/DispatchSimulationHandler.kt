@@ -28,7 +28,6 @@ class DispatchSimulationHandler(
     private val pathBuilder: DispatchPathBuilder,
     private val objectMapper: ObjectMapper,
 ) : TransitionHandler {
-
     override suspend fun execute(input: HandlerInput): HandlerResult {
         val item = objectMapper.readTree(input.item!!)
         val configId = item["configId"].asText()
@@ -36,11 +35,12 @@ class DispatchSimulationHandler(
 
         val config = configRepo.findById(configId)
 
-        val result = simulationEngine.simulate(
-            config = config,
-            candidates = candidateQuery.queryCandidates(config),
-            baseline = baselineProvider.loadBaseline(config),
-        )
+        val result =
+            simulationEngine.simulate(
+                config = config,
+                candidates = candidateQuery.queryCandidates(config),
+                baseline = baselineProvider.loadBaseline(config),
+            )
 
         resultStore.saveDecisions(batchToken, configId, result.decisions)
 
@@ -56,10 +56,6 @@ class DispatchSimulationHandler(
             tmpFile.delete()
         }
 
-        return HandlerResult.Completed(
-            objectMapper.writeValueAsString(
-                mapOf("configId" to configId, "batchToken" to batchToken),
-            ),
-        )
+        return HandlerResult.Completed(null)
     }
 }

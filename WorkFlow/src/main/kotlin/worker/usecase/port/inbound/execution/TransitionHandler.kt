@@ -1,5 +1,7 @@
 package com.workflow.worker.usecase.port.inbound.execution
 
+import io.quarkus.arc.ClientProxy
+
 /**
  * Handler for task execution within the workflow engine.
  *
@@ -32,7 +34,17 @@ package com.workflow.worker.usecase.port.inbound.execution
  * skip optional work or checkpoint progress.
  */
 interface TransitionHandler {
-    fun key(): String = this::class.simpleName!!
+    fun key(): String {
+        // If it's a Quarkus proxy, ask it for the underlying bean class
+        val clazz =
+            if (this is ClientProxy) {
+                this.arc_bean().beanClass
+            } else {
+                this::class.java
+            }
+        return clazz.simpleName
+    }
+
     suspend fun execute(input: HandlerInput): HandlerResult
 }
 
