@@ -131,7 +131,7 @@ class DispatchHandlersTest {
 
             val handler =
                 DispatchScatterHandler(configRepo, resultStore, objectMapper).apply {
-                    setBatchTokenProviderForTest { "20260404140000" }
+                    setBatchTokenProvider { "20260404140000" }
                 }
             val output =
                 handler.execute(

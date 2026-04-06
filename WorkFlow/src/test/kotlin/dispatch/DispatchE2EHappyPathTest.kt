@@ -100,7 +100,7 @@ class DispatchE2EHappyPathTest {
             assertEquals("COMPLETED", joinTask?.get("STATUS"), "Join task should be COMPLETED")
         }
 
-        // Step 6: Await workflow COMPLETED
+        // Step 5: Await workflow COMPLETED
         await().atMost(30, TimeUnit.SECONDS).untilAsserted {
             runBlocking {
                 val wf = workflowRepo.findById(workflowId)

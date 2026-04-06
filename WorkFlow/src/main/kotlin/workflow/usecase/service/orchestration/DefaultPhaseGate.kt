@@ -93,7 +93,7 @@ class DefaultPhaseGate(
                                 "SCATTER phase requires scatter result for workflow $workflowId",
                             )
 
-                        val rootNode = objectMapper.readTree(itemsJson)
+                        val rootNode = objectMapper.readTree(jsonStr)
                         if (!rootNode.isArray) {
                             throw IllegalStateException("SCATTER phase result must be a JSON array")
                         }

@@ -18,7 +18,7 @@ class DispatchScatterHandler(
 ) : TransitionHandler {
     private var batchTokenProvider: () -> String = { currentBatchToken() }
 
-    fun setBatchTokenProviderForTest(provider: () -> String) {
+    internal fun setBatchTokenProvider(provider: () -> String) {
         this.batchTokenProvider = provider
     }
 

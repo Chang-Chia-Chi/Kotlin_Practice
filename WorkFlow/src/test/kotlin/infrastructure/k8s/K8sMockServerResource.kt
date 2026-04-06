@@ -12,6 +12,9 @@ import okhttp3.mockwebserver.MockWebServer
  * created via any client (test or production) automatically deliver Watch events
  * to active watchers — that is what allows [com.workflow.worker.adapter.trigger.K8sJobTriggerDriver]
  * to observe Job completion in the E2E test.
+ *
+ * NOTE: Not currently referenced by any active test. Reserved for future K8s-trigger integration
+ * tests once [com.workflow.worker.adapter.trigger.K8sJobTriggerDriver] is exercised via E2E.
  */
 class K8sMockServerResource : QuarkusTestResourceLifecycleManager {
 
