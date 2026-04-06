@@ -142,39 +142,6 @@ class WorkerLoopIntegrationTest {
     }
 
     @Nested
-    inner class DeferPath {
-
-        @Test
-        fun `WorkerLoop handler defers task — task transitions to DEFERRED in Oracle`() {
-            val deferHandler = object : TransitionHandler {
-                override fun key(): String = "e2e.defer"
-                override suspend fun execute(input: HandlerInput): HandlerResult =
-                    HandlerResult.Defer(triggerType = "test-trigger", triggerMeta = """{"key":"value"}""")
-            }
-
-            val job = buildWorkerLoop(deferHandler)
-            try {
-                val definition = workflow {
-                    activity("step1") { transition("e2e.defer") }
-                }
-                val wfId = runBlocking { engine.startWorkflow(definition, idempotencyKey = null, initialItem = null) }.workflowId
-
-                await().atMost(Duration.ofSeconds(30)).untilAsserted {
-                    val deferred = runBlocking { taskRepo.findDeferred() }
-                    assertEquals(1, deferred.size)
-                    assertEquals("test-trigger", deferred[0].triggerType)
-                    assertEquals("""{"key":"value"}""", deferred[0].triggerMeta)
-                    assertEquals(wfId, deferred[0].workflowId)
-                    val wf = runBlocking { workflowRepo.findById(wfId) }
-                    assertEquals(WorkflowStatus.RUNNING, wf?.status)
-                }
-            } finally {
-                job.cancel()
-            }
-        }
-    }
-
-    @Nested
     inner class RetryPath {
 
         @Test

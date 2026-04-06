@@ -5,9 +5,4 @@ sealed interface HandlerResult {
         val result: String?,
         val items: String? = null,
     ) : HandlerResult
-
-    data class Defer(
-        val triggerType: String,
-        val triggerMeta: String,
-    ) : HandlerResult
 }

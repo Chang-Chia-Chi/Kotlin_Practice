@@ -20,27 +20,15 @@ class HandlerResultTest {
     }
 
     @Test
-    fun `HandlerResult Defer carries trigger metadata`() {
-        val result = HandlerResult.Defer(
-            triggerType = "k8s-job",
-            triggerMeta = """{"jobName":"my-job","namespace":"default"}""",
-        )
-        assertEquals("k8s-job", result.triggerType)
-        assertEquals("""{"jobName":"my-job","namespace":"default"}""", result.triggerMeta)
-    }
-
-    @Test
     fun `exhaustive when on HandlerResult`() {
         val results: List<HandlerResult> = listOf(
             HandlerResult.Completed(result = "done"),
-            HandlerResult.Defer(triggerType = "k8s-job", triggerMeta = "{}"),
         )
         val labels = results.map { hr ->
             when (hr) {
                 is HandlerResult.Completed -> "completed"
-                is HandlerResult.Defer -> "defer"
             }
         }
-        assertEquals(listOf("completed", "defer"), labels)
+        assertEquals(listOf("completed"), labels)
     }
 }
