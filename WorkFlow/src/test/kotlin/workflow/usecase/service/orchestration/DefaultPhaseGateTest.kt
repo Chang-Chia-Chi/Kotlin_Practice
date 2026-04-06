@@ -508,7 +508,32 @@ class DefaultPhaseGateTest {
         assertEquals(listOf("SKIPPED"), taskStatusAt(wfId, seqParallel))
     }
 
-    // -- Coverage gap 1: SCATTER with BEST_EFFORT is rejected at definition time ---
+    // -- Coverage gap 1: SCATTER completes with null itemsJson throws ---------------
+
+    @Test
+    fun `SCATTER completion with null itemsJson throws IllegalStateException`() = runTest {
+        val def = workflow {
+            activity("scatter") {
+                transition("sc.h")
+                fanOut { transition("par.h") }
+                next("join")
+            }
+            activity("join") { transition("j.h") }
+        }
+        val seqMap = buildSequenceMap(def)
+        val (wfId, _) = startAndGetSeq(def)
+        val seqScatter = seqMap.values.first { it.activityName == "scatter" }.sequenceNumber
+        val scatterTasks = taskRepo.findByWorkflowAndSequence(wfId, seqScatter)
+
+        org.junit.jupiter.api.assertThrows<IllegalStateException> {
+            gate.onTaskCompleted(
+                scatterTasks[0].id, wfId, seqScatter, TaskStatus.COMPLETED,
+                resultJson = null, itemsJson = null,
+            )
+        }
+    }
+
+    // -- Coverage gap 2: SCATTER with BEST_EFFORT is rejected at definition time ---
 
     @Test
     fun `SCATTER with BEST_EFFORT is rejected at definition time`() {
