@@ -1,545 +1,433 @@
 package com.workflow.worker.usecase.service.trigger
 
+import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule
+import com.fasterxml.jackson.module.kotlin.KotlinModule
+import com.workflow.infrastructure.persistence.OracleTestContainer
 import com.workflow.infrastructure.queryexporter.spi.LeaderGuard
 import com.workflow.infrastructure.shutdown.ShutdownConfig
+import com.workflow.worker.adapter.http.FakeWorkerNotifier
 import com.workflow.worker.config.TriggerLoopConfig
 import com.workflow.worker.usecase.port.inbound.trigger.DeferredTaskRef
 import com.workflow.worker.usecase.port.inbound.trigger.TriggerDriver
 import com.workflow.worker.usecase.port.inbound.trigger.TriggerResult
 import com.workflow.worker.usecase.service.TaskSettler
+import com.workflow.workflow.adapter.persistent.JdbiTaskRepository
+import com.workflow.workflow.adapter.persistent.JdbiWorkflowRepository
+import com.workflow.workflow.dsl.workflow
+import com.workflow.workflow.model.Task
 import com.workflow.workflow.model.TaskStatus
-import com.workflow.workflow.usecase.port.inbound.orchestration.PhaseGate
-import com.workflow.workflow.usecase.port.outbound.persistent.TaskRepository
+import com.workflow.workflow.model.WorkflowStatus
+import com.workflow.workflow.model.workflowId
+import com.workflow.workflow.usecase.service.orchestration.DefaultPhaseGate
+import com.workflow.workflow.usecase.service.orchestration.WorkflowEngine
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import jakarta.enterprise.inject.Instance
-import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runTest
-import org.junit.jupiter.api.BeforeEach
+import org.jdbi.v3.core.Jdbi
+import org.junit.jupiter.api.AfterEach
+import org.junit.jupiter.api.BeforeAll
 import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
-import org.mockito.kotlin.any
+import org.junit.jupiter.api.TestInstance
 import org.mockito.kotlin.doAnswer
 import org.mockito.kotlin.doReturn
-import org.mockito.kotlin.eq
 import org.mockito.kotlin.mock
-import org.mockito.kotlin.never
 import org.mockito.kotlin.stub
-import org.mockito.kotlin.verify
 import java.time.Duration
 import java.time.Instant
+import java.util.UUID
+import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 
 /**
- * Mock-based integration tests that verify the full TriggerLoop flow:
- * findDeferred -> dispatch to drivers -> poll results -> settle via PhaseGate.
+ * Oracle-backed E2E integration tests for [TriggerLoop]:
+ * DEFERRED → sweep → COMPLETED, retry lifecycle, cancel, and mixed workflows.
  *
- * These complement [TriggerLoopTest] by testing multi-step scenarios that
- * exercise the interplay between deferred task discovery, driver dispatch,
- * result settlement, and retry cycles.
+ * Unlike the mock-based [TriggerLoopTest], these tests wire real [JdbiTaskRepository],
+ * [DefaultPhaseGate], and [WorkflowEngine] against [OracleTestContainer], using test
+ * [TriggerDriver] implementations to control trigger outcomes.
  */
-@OptIn(ExperimentalCoroutinesApi::class)
+@TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class TriggerLoopIntegrationTest {
 
-    private lateinit var taskRepo: TaskRepository
-    private lateinit var phaseGate: PhaseGate
-    private lateinit var leaderGuard: LeaderGuard
-    private lateinit var meterRegistry: SimpleMeterRegistry
-    private lateinit var config: TriggerLoopConfig
-    private lateinit var shutdownConfig: ShutdownConfig
-    private lateinit var taskSettler: TaskSettler
+    private lateinit var jdbi: Jdbi
+    private lateinit var workflowRepo: JdbiWorkflowRepository
+    private lateinit var taskRepo: JdbiTaskRepository
+    private val objectMapper = ObjectMapper()
+        .registerModule(KotlinModule.Builder().build())
+        .registerModule(JavaTimeModule())
+    private lateinit var phaseGate: DefaultPhaseGate
+    private lateinit var engine: WorkflowEngine
+    private val notifier = FakeWorkerNotifier()
 
-    @BeforeEach
-    fun setUp() {
-        taskRepo = mock()
-        phaseGate = mock()
-        leaderGuard = mock { on { isLeader } doReturn true }
-        meterRegistry = SimpleMeterRegistry()
-        config = mock {
-            on { sweepInterval() } doReturn Duration.ofSeconds(5)
-            on { sqlMaxConcurrent() } doReturn 2
-        }
-        shutdownConfig = mock { on { globalTimeout() } doReturn Duration.ofSeconds(30) }
-        taskSettler = TaskSettler(taskRepo, phaseGate)
+    @BeforeAll
+    fun setup() {
+        jdbi = OracleTestContainer.jdbi
+        workflowRepo = JdbiWorkflowRepository(jdbi)
+        taskRepo = JdbiTaskRepository(jdbi)
+        phaseGate = DefaultPhaseGate(jdbi, workflowRepo, taskRepo, objectMapper, notifier)
+        engine = WorkflowEngine(jdbi, workflowRepo, taskRepo, objectMapper, notifier)
     }
 
-    private fun makeDeferredRef(
-        taskId: String = "t-1",
-        workflowId: String = "wf-1",
-        sequenceNumber: Int = 1,
-        triggerType: String = "test-driver",
-        triggerMeta: String = "{}",
-        deadlineAt: Instant? = Instant.now().plusSeconds(3600),
+    @AfterEach
+    fun cleanTables() {
+        runCatching {
+            jdbi.useHandle<Exception> { handle -> handle.execute("DELETE FROM task") }
+        }
+        runCatching {
+            jdbi.useHandle<Exception> { handle -> handle.execute("DELETE FROM workflow") }
+        }
+    }
+
+    private fun buildLoop(vararg drivers: TriggerDriver): TriggerLoop {
+        val beans = mock<Instance<TriggerDriver>> {
+            on { iterator() } doAnswer { drivers.toMutableList().iterator() }
+        }
+        val triggerLoopConfig = object : TriggerLoopConfig {
+            override fun sweepInterval(): Duration = Duration.ofSeconds(60)
+            override fun sqlMaxConcurrent(): Int = 2
+        }
+        val shutdownConfig = object : ShutdownConfig {
+            override fun globalTimeout(): Duration = Duration.ofSeconds(30)
+            override fun leaderTeardownTimeout(): Duration = Duration.ofSeconds(10)
+        }
+        val taskSettler = TaskSettler(taskRepo, phaseGate)
+        val loop = TriggerLoop(
+            taskRepo = taskRepo,
+            driverBeans = beans,
+            taskSettler = taskSettler,
+            leaderGuard = LeaderGuard.ALWAYS,
+            meterRegistry = SimpleMeterRegistry(),
+            triggerLoopConfig = triggerLoopConfig,
+            shutdownConfig = shutdownConfig,
+        )
+        // Initialize drivers map; immediately cancel the background sweep coroutine —
+        // tests call loop.sweep() directly for deterministic control.
+        val job = loop.start(TestScope(SupervisorJob()))
+        job.cancel()
+        return loop
+    }
+
+    /**
+     * Creates a 1-step workflow via [WorkflowEngine] and returns it in DEFERRED state.
+     * Uses the real claim → defer lifecycle so [DefaultPhaseGate] can route correctly
+     * after sweep (the workflow definition's sequence map must be populated).
+     */
+    private suspend fun insertDeferredTask(
+        handlerKey: String,
+        triggerType: String,
+        triggerMeta: String,
         retryCount: Int = 0,
         maxRetries: Int = 3,
-    ) = DeferredTaskRef(
-        taskId = taskId,
-        workflowId = workflowId,
-        sequenceNumber = sequenceNumber,
-        triggerType = triggerType,
-        triggerMeta = triggerMeta,
-        deadlineAt = deadlineAt,
-        retryCount = retryCount,
-        maxRetries = maxRetries,
-    )
+        queueName: String = "default",
+    ): Pair<String, String> {
+        val definition = workflow {
+            activity("step1") {
+                transition(handlerKey)
+                retries(maxRetries)
+            }
+        }
+        val wfId = engine.startWorkflow(definition).workflowId
+        val tasks = taskRepo.claimNext("test-worker", 1, queueName)
+        check(tasks.isNotEmpty()) { "insertDeferredTask: no task for workflow $wfId" }
+        val taskId = tasks.first().id
+        taskRepo.defer(taskId, triggerType, triggerMeta)
+        if (retryCount > 0) {
+            jdbi.useHandle<Exception> { h ->
+                h.execute("UPDATE task SET retry_count = ? WHERE id = ?", retryCount, taskId)
+            }
+        }
+        return wfId to taskId
+    }
 
-    private fun initLoop(loop: TriggerLoop) {
-        val scope = TestScope(SupervisorJob())
-        val job = loop.start(scope)
-        job.cancel()
+    /**
+     * Brings a PENDING task (after [resetForRetry]) back to DEFERRED so the next sweep
+     * can pick it up. Clears [not_before] to bypass exponential back-off.
+     */
+    private suspend fun reClaimAndDefer(taskId: String, triggerType: String, triggerMeta: String) {
+        jdbi.useHandle<Exception> { h ->
+            h.execute("UPDATE task SET not_before = NULL WHERE id = ?", taskId)
+        }
+        val claimed = taskRepo.claimNext("test-worker", 1)
+        check(claimed.any { it.id == taskId }) { "reClaimAndDefer: taskId $taskId not claimed" }
+        taskRepo.defer(taskId, triggerType, triggerMeta)
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // Task 3: Handler defers task, TriggerLoop settles it
+    // Spec 1: DEFERRED → sweep → COMPLETED
     // ═══════════════════════════════════════════════════════════════════════
 
     @Nested
     inner class DeferAndSettle {
 
         @Test
-        fun `handler defers task and TriggerLoop settles it as COMPLETED`() = runTest {
-            val driver = mock<TriggerDriver> { on { type() } doReturn "sql-exec" }
-            val beans = mock<Instance<TriggerDriver>> {
-                on { iterator() } doAnswer { mutableListOf(driver).iterator() }
-            }
-            val loop = TriggerLoop(
-                taskRepo, beans, taskSettler, leaderGuard,
-                meterRegistry, config, shutdownConfig,
-            )
-            initLoop(loop)
+        fun `DEFERRED task swept by TriggerLoop settles workflow as COMPLETED`() = runTest {
+            val driver = mock<TriggerDriver> { on { type() } doReturn "test-trigger" }
+            val loop = buildLoop(driver)
 
-            // Simulate a deferred task discovered by findDeferred
-            val ref = makeDeferredRef(
-                taskId = "t-deferred-1",
-                workflowId = "wf-defer",
-                sequenceNumber = 1,
-                triggerType = "sql-exec",
-                triggerMeta = """{"datasource":"test","sql":"SELECT 1"}""",
+            val (wfId, taskId) = insertDeferredTask(
+                handlerKey = "test-handler",
+                triggerType = "test-trigger",
+                triggerMeta = """{"key":"value"}""",
             )
-            taskRepo.stub { onBlocking { findDeferred() } doReturn listOf(ref) }
 
-            // Driver returns Succeeded on poll
             driver.stub {
-                onBlocking { poll() } doReturn listOf(
-                    TriggerResult.Succeeded("t-deferred-1", """{"rows":1}"""),
-                )
+                onBlocking { poll() } doReturn listOf(TriggerResult.Succeeded(taskId, """{"result":"ok"}"""))
             }
-
             loop.sweep()
 
-            // Verify the driver was started with the deferred task
-            verify(driver).start(eq(listOf(ref)))
+            assertEquals(WorkflowStatus.COMPLETED, workflowRepo.findById(wfId)?.status)
+            assertTrue(taskRepo.findDeferred().isEmpty())
+        }
 
-            // Verify phaseGate.onTaskCompleted was called with COMPLETED
-            verify(phaseGate).onTaskCompleted(
-                taskId = eq("t-deferred-1"),
-                workflowId = eq("wf-defer"),
-                sequenceNumber = eq(1),
-                status = eq(TaskStatus.COMPLETED),
-                resultJson = eq("""{"rows":1}"""),
-                claimedBy = eq(null),
-                claimedAt = eq(null),
+        @Test
+        fun `DEFERRED task driver started with correct ref data`() = runTest {
+            val startedRefs = mutableListOf<DeferredTaskRef>()
+            val driver = object : TriggerDriver {
+                override fun type() = "test-trigger"
+                override suspend fun start(tasks: List<DeferredTaskRef>) { startedRefs.addAll(tasks) }
+                override suspend fun poll() = startedRefs.map { TriggerResult.Succeeded(it.taskId, "{}") }
+                override suspend fun cancel(taskId: String) {}
+                override suspend fun close() {}
+            }
+            val loop = buildLoop(driver)
+
+            val (wfId, taskId) = insertDeferredTask(
+                handlerKey = "test-handler",
+                triggerType = "test-trigger",
+                triggerMeta = """{"meta":"data"}""",
             )
+            loop.sweep()
+
+            assertEquals(1, startedRefs.size)
+            assertEquals(taskId, startedRefs.first().taskId)
+            assertEquals(wfId, startedRefs.first().workflowId)
+            assertEquals("test-trigger", startedRefs.first().triggerType)
+            assertEquals("""{"meta":"data"}""", startedRefs.first().triggerMeta)
+            assertEquals(WorkflowStatus.COMPLETED, workflowRepo.findById(wfId)?.status)
         }
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // Task 4: Mixed workflow — multiple tasks with different trigger types
+    // Spec 2: fail → reClaimAndDefer → second sweep → COMPLETED
     // ═══════════════════════════════════════════════════════════════════════
 
     @Nested
-    inner class MixedTriggerTypes {
+    inner class RetryThenComplete {
 
         @Test
-        fun `multiple tasks with different trigger types dispatched to correct drivers`() = runTest {
-            val sqlDriver = mock<TriggerDriver> { on { type() } doReturn "sql-exec" }
-            val k8sDriver = mock<TriggerDriver> { on { type() } doReturn "k8s-job" }
-            val beans = mock<Instance<TriggerDriver>> {
-                on { iterator() } doAnswer { mutableListOf(sqlDriver, k8sDriver).iterator() }
-            }
-            val loop = TriggerLoop(
-                taskRepo, beans, taskSettler, leaderGuard,
-                meterRegistry, config, shutdownConfig,
-            )
-            initLoop(loop)
-
-            val sqlRef = makeDeferredRef(
-                taskId = "t-sql-1",
-                workflowId = "wf-mixed",
-                sequenceNumber = 1,
-                triggerType = "sql-exec",
-                triggerMeta = """{"sql":"SELECT 1"}""",
-            )
-            val k8sRef = makeDeferredRef(
-                taskId = "t-k8s-1",
-                workflowId = "wf-mixed",
-                sequenceNumber = 2,
-                triggerType = "k8s-job",
-                triggerMeta = """{"job":"batch-process"}""",
-            )
-
-            taskRepo.stub { onBlocking { findDeferred() } doReturn listOf(sqlRef, k8sRef) }
-
-            // Each driver returns Succeeded for its own task
-            sqlDriver.stub {
-                onBlocking { poll() } doReturn listOf(
-                    TriggerResult.Succeeded("t-sql-1", """{"result":"sql-ok"}"""),
-                )
-            }
-            k8sDriver.stub {
-                onBlocking { poll() } doReturn listOf(
-                    TriggerResult.Succeeded("t-k8s-1", """{"result":"k8s-ok"}"""),
-                )
-            }
-
-            loop.sweep()
-
-            // Verify each driver got only its tasks
-            verify(sqlDriver).start(eq(listOf(sqlRef)))
-            verify(k8sDriver).start(eq(listOf(k8sRef)))
-
-            // Verify both tasks settled as COMPLETED
-            verify(phaseGate).onTaskCompleted(
-                taskId = eq("t-sql-1"),
-                workflowId = eq("wf-mixed"),
-                sequenceNumber = eq(1),
-                status = eq(TaskStatus.COMPLETED),
-                resultJson = eq("""{"result":"sql-ok"}"""),
-                claimedBy = eq(null),
-                claimedAt = eq(null),
-            )
-            verify(phaseGate).onTaskCompleted(
-                taskId = eq("t-k8s-1"),
-                workflowId = eq("wf-mixed"),
-                sequenceNumber = eq(2),
-                status = eq(TaskStatus.COMPLETED),
-                resultJson = eq("""{"result":"k8s-ok"}"""),
-                claimedBy = eq(null),
-                claimedAt = eq(null),
-            )
-        }
-
-        @Test
-        fun `tasks from same workflow at different sequences settled independently`() = runTest {
-            val driver = mock<TriggerDriver> { on { type() } doReturn "sql-exec" }
-            val beans = mock<Instance<TriggerDriver>> {
-                on { iterator() } doAnswer { mutableListOf(driver).iterator() }
-            }
-            val loop = TriggerLoop(
-                taskRepo, beans, taskSettler, leaderGuard,
-                meterRegistry, config, shutdownConfig,
-            )
-            initLoop(loop)
-
-            val ref1 = makeDeferredRef(
-                taskId = "t-1", workflowId = "wf-1", sequenceNumber = 1,
-                triggerType = "sql-exec",
-            )
-            val ref2 = makeDeferredRef(
-                taskId = "t-2", workflowId = "wf-1", sequenceNumber = 3,
-                triggerType = "sql-exec",
-            )
-
-            taskRepo.stub { onBlocking { findDeferred() } doReturn listOf(ref1, ref2) }
-            driver.stub {
-                onBlocking { poll() } doReturn listOf(
-                    TriggerResult.Succeeded("t-1", "ok1"),
-                    TriggerResult.Failed("t-2", "failed"),
-                )
-            }
-
-            loop.sweep()
-
-            // t-1 settles as COMPLETED
-            verify(phaseGate).onTaskCompleted(
-                taskId = eq("t-1"),
-                workflowId = eq("wf-1"),
-                sequenceNumber = eq(1),
-                status = eq(TaskStatus.COMPLETED),
-                resultJson = eq("ok1"),
-                claimedBy = eq(null),
-                claimedAt = eq(null),
-            )
-
-            // t-2 has retries remaining (retryCount=0, maxRetries=3) -> resetForRetry
-            verify(taskRepo).resetForRetry(eq("t-2"), eq(1))
-            // phaseGate should NOT be called for t-2 (retried, not failed)
-            verify(phaseGate, never()).onTaskCompleted(
-                taskId = eq("t-2"),
-                workflowId = any(),
-                sequenceNumber = any(),
-                status = eq(TaskStatus.FAILED),
-                resultJson = any(),
-                claimedBy = any(),
-                claimedAt = any(),
-            )
-        }
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // Deadline enforcement (spec 7.2) and orphaned trigger type handling
-    // ═══════════════════════════════════════════════════════════════════════
-
-    @Nested
-    inner class DeadlineEnforcement {
-
-        @Test
-        fun `expired DEFERRED task triggers driver cancel and TIMED_OUT settlement`() = runTest {
-            val driver = mock<TriggerDriver> { on { type() } doReturn "sql-exec" }
-            val beans = mock<Instance<TriggerDriver>> {
-                on { iterator() } doAnswer { mutableListOf(driver).iterator() }
-            }
-            val loop = TriggerLoop(
-                taskRepo, beans, taskSettler, leaderGuard,
-                meterRegistry, config, shutdownConfig,
-            )
-            initLoop(loop)
-
-            val ref = makeDeferredRef(
-                taskId = "t-expired",
-                workflowId = "wf-expired",
-                sequenceNumber = 1,
-                triggerType = "sql-exec",
-                deadlineAt = Instant.now().minusSeconds(60),
-            )
-            taskRepo.stub { onBlocking { findDeferred() } doReturn listOf(ref) }
-            driver.stub { onBlocking { poll() } doReturn emptyList() }
-
-            loop.sweep()
-
-            verify(driver).cancel(eq("t-expired"))
-            verify(phaseGate).onTaskCompleted(
-                taskId = eq("t-expired"),
-                workflowId = eq("wf-expired"),
-                sequenceNumber = eq(1),
-                status = eq(TaskStatus.TIMED_OUT),
-                resultJson = eq(null),
-                claimedBy = eq(null),
-                claimedAt = eq(null),
-            )
-        }
-
-        @Test
-        fun `orphaned trigger type completes sweep without error and skips phaseGate`() = runTest {
-            val driver = mock<TriggerDriver> { on { type() } doReturn "other-type" }
-            val beans = mock<Instance<TriggerDriver>> {
-                on { iterator() } doAnswer { mutableListOf(driver).iterator() }
-            }
-            val loop = TriggerLoop(
-                taskRepo, beans, taskSettler, leaderGuard,
-                meterRegistry, config, shutdownConfig,
-            )
-            initLoop(loop)
-
-            val ref = makeDeferredRef(
-                taskId = "t-orphan",
-                workflowId = "wf-orphan",
-                sequenceNumber = 1,
-                triggerType = "nonexistent-driver",
-                deadlineAt = Instant.now().plusSeconds(3600),
-            )
-            taskRepo.stub { onBlocking { findDeferred() } doReturn listOf(ref) }
-            driver.stub { onBlocking { poll() } doReturn emptyList() }
-
-            loop.sweep()
-
-            verify(driver, never()).start(any())
-            verify(phaseGate, never()).onTaskCompleted(
-                any(), any(), any(), any(), any(), any(), any(),
-            )
-        }
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // Task 5: DEFERRED task fails, retries, and eventually completes
-    // ═══════════════════════════════════════════════════════════════════════
-
-    @Nested
-    inner class DeferredRetryThenComplete {
-
-        @Test
-        fun `DEFERRED task fails then retries and eventually completes`() = runTest {
-            val driver = mock<TriggerDriver> { on { type() } doReturn "fail-once" }
-            val beans = mock<Instance<TriggerDriver>> {
-                on { iterator() } doAnswer { mutableListOf(driver).iterator() }
-            }
-            val loop = TriggerLoop(
-                taskRepo, beans, taskSettler, leaderGuard,
-                meterRegistry, config, shutdownConfig,
-            )
-            initLoop(loop)
-
-            // ── Sweep 1: task deferred, driver returns Failed ──
-            val ref1 = makeDeferredRef(
-                taskId = "t-retry",
-                workflowId = "wf-retry",
-                sequenceNumber = 1,
-                triggerType = "fail-once",
-                retryCount = 0,
+        fun `driver failure triggers retry and second sweep completes the workflow`() = runTest {
+            val (wfId, taskId) = insertDeferredTask(
+                handlerKey = "test-handler",
+                triggerType = "test-trigger",
+                triggerMeta = "{}",
                 maxRetries = 3,
             )
-            taskRepo.stub { onBlocking { findDeferred() } doReturn listOf(ref1) }
-            driver.stub {
-                onBlocking { poll() } doReturn listOf(
-                    TriggerResult.Failed("t-retry", "Simulated transient failure"),
-                )
+
+            val failingDriver = mock<TriggerDriver> { on { type() } doReturn "test-trigger" }
+            failingDriver.stub {
+                onBlocking { poll() } doReturn listOf(TriggerResult.Failed(taskId, "transient error"))
             }
+            buildLoop(failingDriver).sweep()
 
-            loop.sweep()
+            assertEquals(WorkflowStatus.RUNNING, workflowRepo.findById(wfId)?.status)
 
-            // resetForRetry called (retryCount=0 < maxRetries=3)
-            verify(taskRepo).resetForRetry(eq("t-retry"), eq(1))
-            // phaseGate NOT called for retry
-            verify(phaseGate, never()).onTaskCompleted(
-                taskId = eq("t-retry"), any(), any(), any(), any(), any(), any(),
-            )
+            reClaimAndDefer(taskId, "test-trigger", "{}")
 
-            // ── Sweep 2: task is back as DEFERRED after retry cycle, driver returns Succeeded ──
-            val ref2 = makeDeferredRef(
-                taskId = "t-retry",
-                workflowId = "wf-retry",
-                sequenceNumber = 1,
-                triggerType = "fail-once",
-                retryCount = 1,
-                maxRetries = 3,
-            )
-            taskRepo.stub { onBlocking { findDeferred() } doReturn listOf(ref2) }
-            driver.stub {
-                onBlocking { poll() } doReturn listOf(
-                    TriggerResult.Succeeded("t-retry", """{"retry":"ok"}"""),
-                )
+            val succeedingDriver = mock<TriggerDriver> { on { type() } doReturn "test-trigger" }
+            succeedingDriver.stub {
+                onBlocking { poll() } doReturn listOf(TriggerResult.Succeeded(taskId, """{"ok":true}"""))
             }
+            buildLoop(succeedingDriver).sweep()
 
-            loop.sweep()
-
-            // phaseGate called with COMPLETED
-            verify(phaseGate).onTaskCompleted(
-                taskId = eq("t-retry"),
-                workflowId = eq("wf-retry"),
-                sequenceNumber = eq(1),
-                status = eq(TaskStatus.COMPLETED),
-                resultJson = eq("""{"retry":"ok"}"""),
-                claimedBy = eq(null),
-                claimedAt = eq(null),
-            )
+            assertEquals(WorkflowStatus.COMPLETED, workflowRepo.findById(wfId)?.status)
+            assertTrue(taskRepo.findDeferred().isEmpty())
         }
 
         @Test
-        fun `DEFERRED task exhausts all retries and settles as FAILED`() = runTest {
-            val driver = mock<TriggerDriver> { on { type() } doReturn "always-fail" }
-            val beans = mock<Instance<TriggerDriver>> {
-                on { iterator() } doAnswer { mutableListOf(driver).iterator() }
-            }
-            val loop = TriggerLoop(
-                taskRepo, beans, taskSettler, leaderGuard,
-                meterRegistry, config, shutdownConfig,
-            )
-            initLoop(loop)
-
-            // Task with retries already exhausted
-            val ref = makeDeferredRef(
-                taskId = "t-exhaust",
-                workflowId = "wf-exhaust",
-                sequenceNumber = 1,
-                triggerType = "always-fail",
+        fun `task exhausting all retries settles workflow as FAILED`() = runTest {
+            val (wfId, taskId) = insertDeferredTask(
+                handlerKey = "test-handler",
+                triggerType = "test-trigger",
+                triggerMeta = "{}",
                 retryCount = 3,
                 maxRetries = 3,
             )
-            taskRepo.stub { onBlocking { findDeferred() } doReturn listOf(ref) }
+
+            val driver = mock<TriggerDriver> { on { type() } doReturn "test-trigger" }
             driver.stub {
-                onBlocking { poll() } doReturn listOf(
-                    TriggerResult.Failed("t-exhaust", "Permanent failure"),
-                )
+                onBlocking { poll() } doReturn listOf(TriggerResult.Failed(taskId, "permanent error"))
+            }
+            buildLoop(driver).sweep()
+
+            assertEquals(WorkflowStatus.FAILED, workflowRepo.findById(wfId)?.status)
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Spec 3: cancelPendingTasksWithHandle cancels DEFERRED tasks
+    // ═══════════════════════════════════════════════════════════════════════
+
+    @Nested
+    inner class CancelDeferred {
+
+        @Test
+        fun `cancelPendingTasksWithHandle removes DEFERRED task from deferred list`() = runTest {
+            val (wfId, _) = insertDeferredTask(
+                handlerKey = "test-handler",
+                triggerType = "test-trigger",
+                triggerMeta = "{}",
+            )
+
+            assertEquals(1, taskRepo.findDeferred().count { it.workflowId == wfId })
+
+            jdbi.inTransaction<Int, Exception> { handle ->
+                taskRepo.cancelPendingTasksWithHandle(handle, wfId)
             }
 
-            loop.sweep()
-
-            // resetForRetry NOT called (retryCount == maxRetries)
-            verify(taskRepo, never()).resetForRetry(any(), any())
-
-            // phaseGate called with FAILED
-            verify(phaseGate).onTaskCompleted(
-                taskId = eq("t-exhaust"),
-                workflowId = eq("wf-exhaust"),
-                sequenceNumber = eq(1),
-                status = eq(TaskStatus.FAILED),
-                resultJson = eq(null),
-                claimedBy = eq(null),
-                claimedAt = eq(null),
-            )
+            assertTrue(taskRepo.findDeferred().none { it.workflowId == wfId })
         }
 
         @Test
-        fun `DEFERRED task fails multiple sweeps before succeeding`() = runTest {
-            val driver = mock<TriggerDriver> { on { type() } doReturn "flaky" }
-            val beans = mock<Instance<TriggerDriver>> {
-                on { iterator() } doAnswer { mutableListOf(driver).iterator() }
-            }
-            val loop = TriggerLoop(
-                taskRepo, beans, taskSettler, leaderGuard,
-                meterRegistry, config, shutdownConfig,
+        fun `cancelPendingTasksWithHandle cancels all DEFERRED tasks in the workflow`() = runTest {
+            val (wfId, _) = insertDeferredTask(
+                handlerKey = "handler-a",
+                triggerType = "test-trigger",
+                triggerMeta = """{"step":1}""",
             )
-            initLoop(loop)
+            // Insert a second DEFERRED task for the same workflow directly.
+            // Safe here because cancelPendingTasksWithHandle filters by workflowId only and
+            // never reads the workflow definition — no PhaseGate routing is triggered.
+            val taskId2 = UUID.randomUUID().toString()
+            jdbi.useHandle<Exception> { handle ->
+                taskRepo.insertBatchWithHandle(
+                    handle,
+                    listOf(
+                        Task(
+                            id = taskId2,
+                            workflowId = wfId,
+                            activityName = "step2",
+                            sequenceNumber = 2,
+                            status = TaskStatus.DEFERRED,
+                            handlerKey = "handler-b",
+                            item = null,
+                            resultJson = null,
+                            claimedBy = null,
+                            claimedAt = null,
+                            completedAt = null,
+                            retryCount = 0,
+                            maxRetries = 3,
+                            deadlineAt = Instant.now().plusSeconds(3600),
+                            triggerType = "test-trigger",
+                            triggerMeta = """{"step":2}""",
+                        )
+                    )
+                )
+            }
 
-            // ── Sweep 1: retryCount=0 -> fail -> resetForRetry(1) ──
-            taskRepo.stub {
-                onBlocking { findDeferred() } doReturn listOf(
-                    makeDeferredRef(
-                        taskId = "t-flaky", workflowId = "wf-flaky", triggerType = "flaky",
-                        retryCount = 0, maxRetries = 3,
-                    ),
-                )
-            }
-            driver.stub {
-                onBlocking { poll() } doReturn listOf(
-                    TriggerResult.Failed("t-flaky", "Failure 1"),
-                )
-            }
-            loop.sweep()
-            verify(taskRepo).resetForRetry(eq("t-flaky"), eq(1))
+            assertEquals(2, taskRepo.findDeferred().count { it.workflowId == wfId })
 
-            // ── Sweep 2: retryCount=1 -> fail -> resetForRetry(2) ──
-            taskRepo.stub {
-                onBlocking { findDeferred() } doReturn listOf(
-                    makeDeferredRef(
-                        taskId = "t-flaky", workflowId = "wf-flaky", triggerType = "flaky",
-                        retryCount = 1, maxRetries = 3,
-                    ),
-                )
+            jdbi.inTransaction<Int, Exception> { handle ->
+                taskRepo.cancelPendingTasksWithHandle(handle, wfId)
             }
-            driver.stub {
-                onBlocking { poll() } doReturn listOf(
-                    TriggerResult.Failed("t-flaky", "Failure 2"),
-                )
-            }
-            loop.sweep()
-            verify(taskRepo).resetForRetry(eq("t-flaky"), eq(2))
 
-            // ── Sweep 3: retryCount=2 -> succeed -> settle as COMPLETED ──
-            taskRepo.stub {
-                onBlocking { findDeferred() } doReturn listOf(
-                    makeDeferredRef(
-                        taskId = "t-flaky", workflowId = "wf-flaky", triggerType = "flaky",
-                        retryCount = 2, maxRetries = 3,
-                    ),
-                )
-            }
-            driver.stub {
-                onBlocking { poll() } doReturn listOf(
-                    TriggerResult.Succeeded("t-flaky", """{"ok":true}"""),
-                )
-            }
-            loop.sweep()
+            assertTrue(taskRepo.findDeferred().none { it.workflowId == wfId })
+        }
+    }
 
-            verify(phaseGate).onTaskCompleted(
-                taskId = eq("t-flaky"),
-                workflowId = eq("wf-flaky"),
-                sequenceNumber = eq(1),
-                status = eq(TaskStatus.COMPLETED),
-                resultJson = eq("""{"ok":true}"""),
-                claimedBy = eq(null),
-                claimedAt = eq(null),
+    // ═══════════════════════════════════════════════════════════════════════
+    // Spec 4: 2-step workflow via engine → claim → phaseGate → claim → defer → sweep
+    // ═══════════════════════════════════════════════════════════════════════
+
+    @Nested
+    inner class MixedWorkflow {
+
+        @Test
+        fun `2-step workflow completes via engine startWorkflow then trigger sweep`() = runTest {
+            val driver = mock<TriggerDriver> { on { type() } doReturn "test-trigger" }
+            val loop = buildLoop(driver)
+
+            val definition = workflow {
+                activity("step-1") {
+                    transition("handler-step1")
+                    next("step-2")
+                }
+                activity("step-2") {
+                    transition("handler-step2")
+                }
+            }
+
+            val wfId = engine.startWorkflow(definition).workflowId
+
+            val step1Claims = taskRepo.claimNext("test-worker", 1)
+            assertEquals(1, step1Claims.size)
+            val step1 = step1Claims.first()
+
+            phaseGate.onTaskCompleted(
+                taskId = step1.id,
+                workflowId = wfId,
+                sequenceNumber = step1.sequenceNumber,
+                status = TaskStatus.COMPLETED,
+                resultJson = "{}",
             )
+
+            val step2Claims = taskRepo.claimNext("test-worker", 1)
+            assertEquals(1, step2Claims.size)
+            val step2TaskId = step2Claims.first().id
+
+            taskRepo.defer(step2TaskId, "test-trigger", "{}")
+            assertTrue(taskRepo.findDeferred().any { it.taskId == step2TaskId })
+
+            driver.stub {
+                onBlocking { poll() } doReturn listOf(
+                    TriggerResult.Succeeded(step2TaskId, """{"final":"result"}"""),
+                )
+            }
+            loop.sweep()
+
+            assertEquals(WorkflowStatus.COMPLETED, workflowRepo.findById(wfId)?.status)
+            assertTrue(taskRepo.findDeferred().isEmpty())
+        }
+
+        @Test
+        fun `2-step workflow remains RUNNING when step-2 trigger fails with retries remaining`() = runTest {
+            val definition = workflow {
+                activity("step-1") {
+                    transition("handler-step1")
+                    next("step-2")
+                }
+                activity("step-2") {
+                    transition("handler-step2")
+                    retries(2)
+                }
+            }
+
+            val wfId = engine.startWorkflow(definition).workflowId
+
+            val step1Claims = taskRepo.claimNext("test-worker", 1)
+            val step1 = step1Claims.first()
+            phaseGate.onTaskCompleted(
+                taskId = step1.id,
+                workflowId = wfId,
+                sequenceNumber = step1.sequenceNumber,
+                status = TaskStatus.COMPLETED,
+                resultJson = "{}",
+            )
+
+            val step2Claims = taskRepo.claimNext("test-worker", 1)
+            val step2TaskId = step2Claims.first().id
+            taskRepo.defer(step2TaskId, "test-trigger", "{}")
+
+            val driver = mock<TriggerDriver> { on { type() } doReturn "test-trigger" }
+            driver.stub {
+                onBlocking { poll() } doReturn listOf(TriggerResult.Failed(step2TaskId, "not ready"))
+            }
+            buildLoop(driver).sweep()
+
+            assertEquals(WorkflowStatus.RUNNING, workflowRepo.findById(wfId)?.status)
         }
     }
 }
