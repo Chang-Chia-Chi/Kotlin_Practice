@@ -21,6 +21,8 @@ import com.workflow.workflow.model.WorkflowStatus
 import com.workflow.workflow.model.workflowId
 import com.workflow.workflow.usecase.service.orchestration.DefaultPhaseGate
 import com.workflow.workflow.usecase.service.orchestration.WorkflowEngine
+import com.workflow.infrastructure.persistence.inTransactionSuspend
+import com.workflow.infrastructure.persistence.useHandleSuspend
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import jakarta.enterprise.inject.Instance
 import kotlinx.coroutines.SupervisorJob
@@ -136,7 +138,7 @@ class TriggerLoopIntegrationTest {
         val taskId = tasks.first().id
         taskRepo.defer(taskId, triggerType, triggerMeta)
         if (retryCount > 0) {
-            jdbi.useHandle<Exception> { h ->
+            jdbi.useHandleSuspend<Exception> { h ->
                 h.execute("UPDATE task SET retry_count = ? WHERE id = ?", retryCount, taskId)
             }
         }
@@ -148,7 +150,7 @@ class TriggerLoopIntegrationTest {
      * can pick it up. Clears [not_before] to bypass exponential back-off.
      */
     private suspend fun reClaimAndDefer(taskId: String, triggerType: String, triggerMeta: String) {
-        jdbi.useHandle<Exception> { h ->
+        jdbi.useHandleSuspend<Exception> { h ->
             h.execute("UPDATE task SET not_before = NULL WHERE id = ?", taskId)
         }
         val claimed = taskRepo.claimNext("test-worker", 1)
@@ -284,7 +286,7 @@ class TriggerLoopIntegrationTest {
 
             assertEquals(1, taskRepo.findDeferred().count { it.workflowId == wfId })
 
-            jdbi.inTransaction<Int, Exception> { handle ->
+            jdbi.inTransactionSuspend<Int, Exception> { handle ->
                 taskRepo.cancelPendingTasksWithHandle(handle, wfId)
             }
 
@@ -302,7 +304,7 @@ class TriggerLoopIntegrationTest {
             // Safe here because cancelPendingTasksWithHandle filters by workflowId only and
             // never reads the workflow definition — no PhaseGate routing is triggered.
             val taskId2 = UUID.randomUUID().toString()
-            jdbi.useHandle<Exception> { handle ->
+            jdbi.useHandleSuspend<Exception> { handle ->
                 taskRepo.insertBatchWithHandle(
                     handle,
                     listOf(
@@ -330,7 +332,7 @@ class TriggerLoopIntegrationTest {
 
             assertEquals(2, taskRepo.findDeferred().count { it.workflowId == wfId })
 
-            jdbi.inTransaction<Int, Exception> { handle ->
+            jdbi.inTransactionSuspend<Int, Exception> { handle ->
                 taskRepo.cancelPendingTasksWithHandle(handle, wfId)
             }
 
