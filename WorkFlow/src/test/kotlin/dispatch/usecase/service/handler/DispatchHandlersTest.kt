@@ -2,6 +2,7 @@ package com.workflow.dispatch.usecase.service.handler
 
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.KotlinModule
+import com.fasterxml.jackson.module.kotlin.readValue
 import com.workflow.dispatch.adapter.storage.DispatchPathBuilder
 import com.workflow.dispatch.model.*
 import com.workflow.dispatch.usecase.port.outbound.persistence.BaselineProvider
@@ -14,6 +15,7 @@ import com.workflow.dispatch.usecase.port.outbound.storage.StorageGateway
 import com.workflow.dispatch.usecase.service.simulation.SimulationEngine
 import com.workflow.worker.usecase.port.inbound.execution.HandlerInput
 import com.workflow.worker.usecase.port.inbound.execution.HandlerResult
+import com.workflow.worker.usecase.port.inbound.trigger.TriggerTypes
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Test
 import org.mockito.kotlin.*
@@ -222,16 +224,25 @@ class DispatchHandlersTest {
         whenever(resultStore.findBatchStatus("20260329060000")).thenReturn(BatchStatus.NORMAL)
         whenever(parquetFormatter.format(any())).thenReturn(byteArrayOf())
 
-        val handler = DispatchJoinHandler(resultStore, storage, parquetFormatter, pathBuilder, "prod", objectMapper)
+        val handler = DispatchJoinHandler(
+            resultStore, storage, parquetFormatter, pathBuilder, "prod", "default", objectMapper,
+        )
 
         val inputs = objectMapper.writeValueAsString(
             mapOf("batchToken" to listOf("20260329060000", "20260329060000")),
         )
-        handler.execute(
+        val result = handler.execute(
             HandlerInput("t1", "w1", 3, inputs, null),
         )
 
         verify(storage).uploadParquet(eq("env=prod/dispatch/result.parquet"), any())
+
+        assertTrue(result is HandlerResult.Defer)
+        val defer = result as HandlerResult.Defer
+        assertEquals(TriggerTypes.K8S_JOB, defer.triggerType)
+        val meta: Map<String, String> = objectMapper.readValue(defer.triggerMeta)
+        assertEquals("dispatch-join-20260329060000", meta["jobName"])
+        assertEquals("default", meta["namespace"])
     }
 
     @Test
@@ -245,14 +256,23 @@ class DispatchHandlersTest {
         whenever(resultStore.findBatchStatus("20260329060000")).thenReturn(BatchStatus.NORMAL)
         whenever(parquetFormatter.format(any())).thenReturn(byteArrayOf())
 
-        val handler = DispatchJoinHandler(resultStore, storage, parquetFormatter, pathBuilder, "prod", objectMapper)
+        val handler = DispatchJoinHandler(
+            resultStore, storage, parquetFormatter, pathBuilder, "prod", "default", objectMapper,
+        )
 
         val inputs = objectMapper.writeValueAsString(
             mapOf("batchToken" to listOf("20260329060000", "20260329060000")),
         )
-        handler.execute(HandlerInput("t1", "w1", 3, inputs, null))
+        val result = handler.execute(HandlerInput("t1", "w1", 3, inputs, null))
 
         verify(storage).uploadParquet(eq("env=prod/dispatch/result.parquet"), any())
+
+        assertTrue(result is HandlerResult.Defer)
+        val defer = result as HandlerResult.Defer
+        assertEquals(TriggerTypes.K8S_JOB, defer.triggerType)
+        val meta: Map<String, String> = objectMapper.readValue(defer.triggerMeta)
+        assertEquals("dispatch-join-20260329060000", meta["jobName"])
+        assertEquals("default", meta["namespace"])
     }
 
     @Test
@@ -264,15 +284,24 @@ class DispatchHandlersTest {
 
         whenever(resultStore.findBatchStatus("dryrun-abc")).thenReturn(BatchStatus.DRYRUN)
 
-        val handler = DispatchJoinHandler(resultStore, storage, parquetFormatter, pathBuilder, "prod", objectMapper)
+        val handler = DispatchJoinHandler(
+            resultStore, storage, parquetFormatter, pathBuilder, "prod", "default", objectMapper,
+        )
 
         val inputs = objectMapper.writeValueAsString(
             mapOf("batchToken" to listOf("dryrun-abc", "dryrun-abc")),
         )
-        handler.execute(HandlerInput("t1", "w1", 3, inputs, null))
+        val result = handler.execute(HandlerInput("t1", "w1", 3, inputs, null))
 
         verify(storage, never()).uploadParquet(any(), any())
         verify(parquetFormatter, never()).format(any())
+
+        assertTrue(result is HandlerResult.Defer)
+        val defer = result as HandlerResult.Defer
+        assertEquals(TriggerTypes.K8S_JOB, defer.triggerType)
+        val meta: Map<String, String> = objectMapper.readValue(defer.triggerMeta)
+        assertEquals("dispatch-join-dryrun-abc", meta["jobName"])
+        assertEquals("default", meta["namespace"])
     }
 
     @Test
@@ -284,15 +313,24 @@ class DispatchHandlersTest {
 
         whenever(resultStore.findBatchStatus("20260329060000")).thenReturn(BatchStatus.NORMAL)
 
-        val handler = DispatchJoinHandler(resultStore, storage, parquetFormatter, pathBuilder, "stg", objectMapper)
+        val handler = DispatchJoinHandler(
+            resultStore, storage, parquetFormatter, pathBuilder, "stg", "default", objectMapper,
+        )
 
         val inputs = objectMapper.writeValueAsString(
             mapOf("batchToken" to listOf("20260329060000", "20260329060000")),
         )
-        handler.execute(HandlerInput("t1", "w1", 3, inputs, null))
+        val result = handler.execute(HandlerInput("t1", "w1", 3, inputs, null))
 
         verify(resultStore).findBatchStatus("20260329060000")
         verify(storage, never()).uploadParquet(any(), any())
         verify(parquetFormatter, never()).format(any())
+
+        assertTrue(result is HandlerResult.Defer)
+        val defer = result as HandlerResult.Defer
+        assertEquals(TriggerTypes.K8S_JOB, defer.triggerType)
+        val meta: Map<String, String> = objectMapper.readValue(defer.triggerMeta)
+        assertEquals("dispatch-join-20260329060000", meta["jobName"])
+        assertEquals("default", meta["namespace"])
     }
 }
