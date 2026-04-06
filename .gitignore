@@ -66,3 +66,23 @@ nb-configuration.xml
 
 # Plugin directory
 /.quarkus/cli/plugins/
+
+# Claude
+.claude/
+!.claude/agents/
+!.claude/skills/
+!.claude/commands/
+!.claude/CLAUDE.md
+
+**/.mcp.json
+.mcp.json
+
+**/hooks.json
+
+**/settings.local.json
+**/settings.json
+
+# 治具執行產生的暫存檔與日誌
+.claude/audit-log.txt
+.claude/checkpoints/
+project-sdet-branch/
