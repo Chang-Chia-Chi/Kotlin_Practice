@@ -11,20 +11,13 @@ import com.workflow.dispatch.dsl.dispatchWorkflow
 import com.workflow.dispatch.usecase.port.outbound.persistence.BaselineProvider
 import com.workflow.dispatch.usecase.port.outbound.persistence.CandidateRepository
 import com.workflow.dispatch.usecase.port.outbound.persistence.DispatchConfigRepository
-import com.workflow.infrastructure.k8s.K8sMockServerResource
 import com.workflow.infrastructure.persistence.OracleTestResource
 import com.workflow.infrastructure.storage.MinioTestContainer
 import com.workflow.infrastructure.storage.MinioTestResource
-import com.workflow.worker.adapter.trigger.K8sJobTriggerDriver
 import com.workflow.workflow.model.WorkflowStatus
 import com.workflow.workflow.model.workflowId
 import com.workflow.workflow.usecase.port.inbound.orchestration.WorkflowLifecycle
 import com.workflow.workflow.usecase.port.outbound.persistent.WorkflowRepository
-import io.fabric8.kubernetes.api.model.ConfigMapBuilder
-import io.fabric8.kubernetes.api.model.batch.v1.JobBuilder
-import io.fabric8.kubernetes.api.model.batch.v1.JobConditionBuilder
-import io.fabric8.kubernetes.api.model.batch.v1.JobStatusBuilder
-import io.fabric8.kubernetes.client.KubernetesClient
 import io.quarkus.test.InjectMock
 import io.quarkus.test.common.QuarkusTestResource
 import io.quarkus.test.junit.QuarkusTest
@@ -45,7 +38,6 @@ import kotlin.test.assertTrue
 
 @QuarkusTest
 @QuarkusTestResource(OracleTestResource::class)
-@QuarkusTestResource(K8sMockServerResource::class)
 @QuarkusTestResource(MinioTestResource::class)
 class DispatchE2EHappyPathTest {
 
@@ -60,12 +52,6 @@ class DispatchE2EHappyPathTest {
 
     @Inject
     lateinit var jdbi: Jdbi
-
-    @Inject
-    lateinit var k8sClient: KubernetesClient
-
-    @Inject
-    lateinit var triggerDriver: K8sJobTriggerDriver
 
     @InjectMock
     lateinit var configRepo: DispatchConfigRepository
@@ -107,60 +93,11 @@ class DispatchE2EHappyPathTest {
             )
         }
 
-        // Step 4: Await join task DEFERRED
+        // Step 4: Await join task COMPLETED
         await().atMost(15, TimeUnit.SECONDS).untilAsserted {
             val tasks = findTasksByWorkflowId(workflowId)
             val joinTask = tasks.find { it["HANDLER_KEY"] == "DispatchJoinHandler" }
-            assertEquals("DEFERRED", joinTask?.get("STATUS"), "Join task should be DEFERRED")
-        }
-
-        // Step 5: Push K8s Job completion on mock server
-        val joinTask = findTasksByWorkflowId(workflowId)
-            .first { it["HANDLER_KEY"] == "DispatchJoinHandler" }
-        val triggerMeta = objectMapper.readTree(joinTask["TRIGGER_META"] as String)
-        val jobName = requireNotNull(triggerMeta["jobName"]?.asText()) {
-            "joinTask TRIGGER_META missing jobName: $triggerMeta"
-        }
-        val namespace = requireNotNull(triggerMeta["namespace"]?.asText()) {
-            "joinTask TRIGGER_META missing namespace: $triggerMeta"
-        }
-
-        // Create the Job resource on mock server with Complete condition
-        k8sClient.batch().v1().jobs().inNamespace(namespace)
-            .resource(
-                JobBuilder()
-                    .withNewMetadata().withName(jobName).withNamespace(namespace).endMetadata()
-                    .withStatus(
-                        JobStatusBuilder()
-                            .withConditions(
-                                JobConditionBuilder()
-                                    .withType("Complete")
-                                    .withStatus("True")
-                                    .build(),
-                            )
-                            .build(),
-                    )
-                    .build(),
-            )
-            .create()
-
-        // Create ConfigMap with result
-        k8sClient.configMaps().inNamespace(namespace)
-            .resource(
-                ConfigMapBuilder()
-                    .withNewMetadata().withName("$jobName-output").withNamespace(namespace).endMetadata()
-                    .addToData("result", """{"status":"ok"}""")
-                    .build(),
-            )
-            .create()
-
-        // Intermediate: verify Watch event was delivered (fast-fail diagnostic)
-        await().atMost(10, TimeUnit.SECONDS).untilAsserted {
-            assertEquals(
-                0,
-                triggerDriver.trackedCount(),
-                "K8sJobTriggerDriver should observe Job complete and untrack",
-            )
+            assertEquals("COMPLETED", joinTask?.get("STATUS"), "Join task should be COMPLETED")
         }
 
         // Step 6: Await workflow COMPLETED
