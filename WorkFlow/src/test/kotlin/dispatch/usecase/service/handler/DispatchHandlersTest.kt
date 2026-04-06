@@ -2,7 +2,6 @@ package com.workflow.dispatch.usecase.service.handler
 
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.KotlinModule
-import com.fasterxml.jackson.module.kotlin.readValue
 import com.workflow.dispatch.adapter.storage.DispatchPathBuilder
 import com.workflow.dispatch.model.*
 import com.workflow.dispatch.usecase.port.outbound.persistence.BaselineProvider
@@ -15,12 +14,10 @@ import com.workflow.dispatch.usecase.port.outbound.storage.StorageGateway
 import com.workflow.dispatch.usecase.service.simulation.SimulationEngine
 import com.workflow.worker.usecase.port.inbound.execution.HandlerInput
 import com.workflow.worker.usecase.port.inbound.execution.HandlerResult
-import com.workflow.worker.usecase.port.inbound.trigger.TriggerTypes
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Test
 import org.mockito.kotlin.*
 import java.math.BigDecimal
-import java.time.LocalDateTime
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
@@ -329,7 +326,6 @@ class DispatchHandlersTest {
                     parquetFormatter,
                     pathBuilder,
                     "prod",
-                    "default",
                     objectMapper,
                 )
 
@@ -343,13 +339,8 @@ class DispatchHandlersTest {
                 )
 
             verify(storage).uploadParquet(eq("env=prod/dispatch/result.parquet"), any())
-
-            assertTrue(result is HandlerResult.Defer)
-            val defer = result as HandlerResult.Defer
-            assertEquals(TriggerTypes.K8S_JOB, defer.triggerType)
-            val meta: Map<String, String> = objectMapper.readValue(defer.triggerMeta)
-            assertEquals("dispatch-join-20260329060000", meta["jobName"])
-            assertEquals("default", meta["namespace"])
+            assertTrue(result is HandlerResult.Completed)
+            assertNull((result as HandlerResult.Completed).result)
         }
 
     @Test
@@ -371,7 +362,6 @@ class DispatchHandlersTest {
                     parquetFormatter,
                     pathBuilder,
                     "prod",
-                    "default",
                     objectMapper,
                 )
 
@@ -382,13 +372,8 @@ class DispatchHandlersTest {
             val result = handler.execute(HandlerInput("t1", "w1", 3, inputs, null))
 
             verify(storage).uploadParquet(eq("env=prod/dispatch/result.parquet"), any())
-
-            assertTrue(result is HandlerResult.Defer)
-            val defer = result as HandlerResult.Defer
-            assertEquals(TriggerTypes.K8S_JOB, defer.triggerType)
-            val meta: Map<String, String> = objectMapper.readValue(defer.triggerMeta)
-            assertEquals("dispatch-join-20260329060000", meta["jobName"])
-            assertEquals("default", meta["namespace"])
+            assertTrue(result is HandlerResult.Completed)
+            assertNull((result as HandlerResult.Completed).result)
         }
 
     @Test
@@ -408,7 +393,6 @@ class DispatchHandlersTest {
                     parquetFormatter,
                     pathBuilder,
                     "prod",
-                    "default",
                     objectMapper,
                 )
 
@@ -420,13 +404,8 @@ class DispatchHandlersTest {
 
             verify(storage, never()).uploadParquet(any(), any())
             verify(parquetFormatter, never()).format(any())
-
-            assertTrue(result is HandlerResult.Defer)
-            val defer = result as HandlerResult.Defer
-            assertEquals(TriggerTypes.K8S_JOB, defer.triggerType)
-            val meta: Map<String, String> = objectMapper.readValue(defer.triggerMeta)
-            assertEquals("dispatch-join-dryrun-abc", meta["jobName"])
-            assertEquals("default", meta["namespace"])
+            assertTrue(result is HandlerResult.Completed)
+            assertNull((result as HandlerResult.Completed).result)
         }
 
     @Test
@@ -446,7 +425,6 @@ class DispatchHandlersTest {
                     parquetFormatter,
                     pathBuilder,
                     "stg",
-                    "default",
                     objectMapper,
                 )
 
@@ -459,12 +437,7 @@ class DispatchHandlersTest {
             verify(resultStore).findBatchStatus("20260329060000")
             verify(storage, never()).uploadParquet(any(), any())
             verify(parquetFormatter, never()).format(any())
-
-            assertTrue(result is HandlerResult.Defer)
-            val defer = result as HandlerResult.Defer
-            assertEquals(TriggerTypes.K8S_JOB, defer.triggerType)
-            val meta: Map<String, String> = objectMapper.readValue(defer.triggerMeta)
-            assertEquals("dispatch-join-20260329060000", meta["jobName"])
-            assertEquals("default", meta["namespace"])
+            assertTrue(result is HandlerResult.Completed)
+            assertNull((result as HandlerResult.Completed).result)
         }
 }
