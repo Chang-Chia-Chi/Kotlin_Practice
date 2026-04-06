@@ -182,7 +182,7 @@
         <!-- AWS S3 -->
         <dependency>
             <groupId>aws.sdk.kotlin</groupId>
-            <artifactId>s3</artifactId>
+            <artifactId>s3-jvm</artifactId>
         </dependency>
 
         <!-- DuckDB (in-memory Parquet conversion) -->

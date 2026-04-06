@@ -1,5 +1,8 @@
 package com.workflow.dispatch.adapter
 
+import aws.sdk.kotlin.runtime.auth.credentials.StaticCredentialsProvider
+import aws.sdk.kotlin.services.s3.S3Client
+import aws.smithy.kotlin.runtime.net.url.Url
 import com.workflow.dispatch.adapter.persistence.JdbiSimulationResultStore
 import com.workflow.dispatch.adapter.persistence.SyncRepository
 import com.workflow.dispatch.adapter.storage.DispatchPathBuilder
@@ -44,4 +47,21 @@ class DispatchProducers {
     @ApplicationScoped
     @IfBuildProfile("stg")
     fun syncRepository(jdbi: Jdbi): SyncRepository = SyncRepository(jdbi)
+
+    @Produces
+    @ApplicationScoped
+    fun s3Client(
+        @ConfigProperty(name = "storage.endpoint") endpoint: String,
+        @ConfigProperty(name = "storage.region") region: String,
+        @ConfigProperty(name = "storage.access-key") accessKey: String,
+        @ConfigProperty(name = "storage.secret-key") secretKey: String,
+    ): S3Client = S3Client {
+        this.region = region
+        endpointUrl = Url.parse(endpoint)
+        credentialsProvider = StaticCredentialsProvider {
+            accessKeyId = accessKey
+            secretAccessKey = secretKey
+        }
+        forcePathStyle = true
+    }
 }
