@@ -94,7 +94,7 @@ class FaultInjectionStressTest : StressTestBase() {
             handlerRegistry.register("f3.scatter", object : TransitionHandler {
                 override suspend fun execute(input: HandlerInput): HandlerResult {
                     val payloads = (1..10).map { """{"item":$it}""" }
-                    return HandlerResult.Completed(result = objectMapper.writeValueAsString(payloads))
+                    return HandlerResult.Completed(result = null, items = objectMapper.writeValueAsString(payloads))
                 }
             })
             handlerRegistry.register("f3.parallel", PassThroughHandler())

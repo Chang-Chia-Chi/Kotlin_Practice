@@ -236,7 +236,7 @@ class WorkflowIntegrationTest {
             val payloads = (1..50).map { """{"item":$it}""" }
             val scatterResult = objectMapper.writeValueAsString(payloads)
             barrier.onTaskCompleted(
-                scatterTasks[0].id, runId, 1, TaskStatus.COMPLETED, scatterResult,
+                scatterTasks[0].id, runId, 1, TaskStatus.COMPLETED, resultJson = null, itemsJson = scatterResult,
             )
 
             // Verify: 50 PENDING sub-tasks created at seq 2
@@ -370,7 +370,7 @@ class WorkflowIntegrationTest {
             val payloads = (1..subTaskCount).map { """{"i":$it}""" }
             barrier.onTaskCompleted(
                 scatterTasks[0].id, runId, 1, TaskStatus.COMPLETED,
-                objectMapper.writeValueAsString(payloads),
+                resultJson = null, itemsJson = objectMapper.writeValueAsString(payloads),
             )
 
             // Verify sub-tasks at seq 2
@@ -581,7 +581,7 @@ class WorkflowIntegrationTest {
 
         val seqScatter = seqOf(def, "scatter")
         val scatterTask = taskRepo.findByWorkflowAndSequence(wfId, seqScatter)[0]
-        gate.onTaskCompleted(scatterTask.id, wfId, seqScatter, TaskStatus.COMPLETED, """["item-a","item-b"]""")
+        gate.onTaskCompleted(scatterTask.id, wfId, seqScatter, TaskStatus.COMPLETED, resultJson = null, itemsJson = """["item-a","item-b"]""")
 
         val seqParallel = seqOf(def, "scatter.__parallel__")
         val parTasks = taskRepo.findByWorkflowAndSequence(wfId, seqParallel)

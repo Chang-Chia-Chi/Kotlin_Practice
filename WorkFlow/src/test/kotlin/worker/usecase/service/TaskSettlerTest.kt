@@ -43,7 +43,7 @@ class TaskSettlerTest {
         verify(phaseGate).onTaskCompleted(
             eq("t-1"), eq("wf-1"), eq(1),
             eq(TaskStatus.COMPLETED), eq("""{"ok":true}"""),
-            eq("worker-1"), eq(someInstant),
+            eq("worker-1"), eq(someInstant), eq(null),
         )
     }
 
@@ -54,7 +54,7 @@ class TaskSettlerTest {
         verify(phaseGate).onTaskCompleted(
             eq("t-1"), eq("wf-1"), eq(1),
             eq(TaskStatus.TIMED_OUT), eq(null),
-            eq(null), eq(null),
+            eq(null), eq(null), eq(null),
         )
     }
 
@@ -64,7 +64,7 @@ class TaskSettlerTest {
             onBlocking {
                 onTaskCompleted(
                     eq("t-1"), eq("wf-1"), eq(1),
-                    eq(TaskStatus.COMPLETED), eq(null), eq(null), eq(null),
+                    eq(TaskStatus.COMPLETED), eq(null), eq(null), eq(null), eq(null),
                 )
             } doThrow RuntimeException("db error")
         }
@@ -103,7 +103,7 @@ class TaskSettlerTest {
         verify(phaseGate).onTaskCompleted(
             eq("t-1"), eq("wf-1"), eq(1),
             eq(TaskStatus.FAILED), eq(null),
-            eq(null), eq(null),
+            eq(null), eq(null), eq(null),
         )
         assertEquals(RetryOutcome.Failed, outcome)
     }
@@ -129,7 +129,7 @@ class TaskSettlerTest {
         verify(phaseGate).onTaskCompleted(
             eq("t-1"), eq("wf-1"), eq(1),
             eq(TaskStatus.FAILED), eq(null),
-            eq(null), eq(null),
+            eq(null), eq(null), eq(null),
         )
         assertEquals(RetryOutcome.Failed, outcome)
     }
@@ -142,7 +142,7 @@ class TaskSettlerTest {
             onBlocking {
                 onTaskCompleted(
                     eq("t-1"), eq("wf-1"), eq(1),
-                    eq(TaskStatus.FAILED), eq(null), eq(null), eq(null),
+                    eq(TaskStatus.FAILED), eq(null), eq(null), eq(null), eq(null),
                 )
             } doThrow RuntimeException("phaseGate error")
         }
@@ -164,7 +164,7 @@ class TaskSettlerTest {
         verify(phaseGate).onTaskCompleted(
             eq("t-1"), eq("wf-1"), eq(1),
             eq(TaskStatus.FAILED), eq(null),
-            eq("worker-1"), eq(instant),
+            eq("worker-1"), eq(instant), eq(null),
         )
     }
 }

@@ -152,6 +152,7 @@ class TriggerLoopTest {
                 resultJson = eq("""{"ok":true}"""),
                 claimedBy = eq(null),
                 claimedAt = eq(null),
+                itemsJson = eq(null),
             )
             assertEquals(1.0, counterCount("trigger_settled_total", "type", "test-driver", "outcome", "succeeded"))
         }
@@ -170,7 +171,7 @@ class TriggerLoopTest {
 
             verify(taskRepo).resetForRetry(eq("t-1"), eq(1))
             verify(phaseGate, never()).onTaskCompleted(
-                any(), any(), any(), any(), any(), any(), any(),
+                any(), any(), any(), any(), any(), any(), any(), any(),
             )
             assertEquals(1.0, counterCount("trigger_settled_total", "type", "test-driver", "outcome", "retried"))
         }
@@ -195,6 +196,7 @@ class TriggerLoopTest {
                 resultJson = eq(null),
                 claimedBy = eq(null),
                 claimedAt = eq(null),
+                itemsJson = eq(null),
             )
             assertEquals(1.0, counterCount("trigger_settled_total", "type", "test-driver", "outcome", "failed"))
         }
@@ -251,7 +253,7 @@ class TriggerLoopTest {
 
             // phaseGate should not be called for unknown tasks
             verify(phaseGate, never()).onTaskCompleted(
-                any(), any(), any(), any(), any(), any(), any(),
+                any(), any(), any(), any(), any(), any(), any(), any(),
             )
         }
 
@@ -275,6 +277,7 @@ class TriggerLoopTest {
                 resultJson = eq(null),
                 claimedBy = eq(null),
                 claimedAt = eq(null),
+                itemsJson = eq(null),
             )
         }
 
@@ -306,6 +309,7 @@ class TriggerLoopTest {
                 resultJson = eq(null),
                 claimedBy = eq(null),
                 claimedAt = eq(null),
+                itemsJson = eq(null),
             )
             assertEquals(1.0, counterCount("trigger_settled_total", "type", "test-driver", "outcome", "expired"))
         }
@@ -320,7 +324,7 @@ class TriggerLoopTest {
 
             verify(mockDriver, never()).cancel(any())
             verify(phaseGate, never()).onTaskCompleted(
-                any(), any(), any(), eq(TaskStatus.TIMED_OUT), any(), any(), any(),
+                any(), any(), any(), eq(TaskStatus.TIMED_OUT), any(), any(), any(), any(),
             )
         }
 
@@ -345,9 +349,10 @@ class TriggerLoopTest {
                 resultJson = eq("ok"),
                 claimedBy = eq(null),
                 claimedAt = eq(null),
+                itemsJson = eq(null),
             )
             verify(phaseGate, never()).onTaskCompleted(
-                any(), any(), any(), eq(TaskStatus.TIMED_OUT), any(), any(), any(),
+                any(), any(), any(), eq(TaskStatus.TIMED_OUT), any(), any(), any(), any(),
             )
             verify(mockDriver, never()).cancel(any())
         }
@@ -467,6 +472,7 @@ class TriggerLoopTest {
                 resultJson = eq("ok"),
                 claimedBy = eq(null),
                 claimedAt = eq(null),
+                itemsJson = eq(null),
             )
         }
 
@@ -485,7 +491,7 @@ class TriggerLoopTest {
                 onBlocking {
                     onTaskCompleted(
                         eq("t-1"), eq("wf-1"), eq(1),
-                        eq(TaskStatus.COMPLETED), eq("data1"), eq(null), eq(null),
+                        eq(TaskStatus.COMPLETED), eq("data1"), eq(null), eq(null), eq(null),
                     )
                 } doThrow RuntimeException("phaseGate failed")
             }
@@ -501,6 +507,7 @@ class TriggerLoopTest {
                 resultJson = eq("data2"),
                 claimedBy = eq(null),
                 claimedAt = eq(null),
+                itemsJson = eq(null),
             )
         }
 
@@ -527,6 +534,7 @@ class TriggerLoopTest {
                 resultJson = eq(null),
                 claimedBy = eq(null),
                 claimedAt = eq(null),
+                itemsJson = eq(null),
             )
             assertEquals(1.0, counterCount("trigger_settled_total", "type", "test-driver", "outcome", "failed"))
         }
@@ -550,6 +558,7 @@ class TriggerLoopTest {
                 resultJson = eq(null),
                 claimedBy = eq(null),
                 claimedAt = eq(null),
+                itemsJson = eq(null),
             )
         }
 
@@ -566,7 +575,7 @@ class TriggerLoopTest {
                 onBlocking {
                     onTaskCompleted(
                         eq("t-1"), eq("wf-1"), eq(1),
-                        eq(TaskStatus.COMPLETED), eq("data"), eq(null), eq(null),
+                        eq(TaskStatus.COMPLETED), eq("data"), eq(null), eq(null), eq(null),
                     )
                 } doThrow CancellationException("cancelled")
             }
@@ -586,7 +595,7 @@ class TriggerLoopTest {
                 onBlocking {
                     onTaskCompleted(
                         eq("t-1"), eq("wf-1"), eq(1),
-                        eq(TaskStatus.TIMED_OUT), eq(null), eq(null), eq(null),
+                        eq(TaskStatus.TIMED_OUT), eq(null), eq(null), eq(null), eq(null),
                     )
                 } doThrow RuntimeException("phaseGate error")
             }
@@ -602,6 +611,7 @@ class TriggerLoopTest {
                 resultJson = eq(null),
                 claimedBy = eq(null),
                 claimedAt = eq(null),
+                itemsJson = eq(null),
             )
         }
     }
@@ -705,6 +715,7 @@ class TriggerLoopTest {
                 resultJson = eq(null),
                 claimedBy = eq(null),
                 claimedAt = eq(null),
+                itemsJson = eq(null),
             )
             verify(taskRepo, never()).resetForRetry(any(), any())
         }

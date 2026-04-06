@@ -374,7 +374,7 @@ class DefaultPhaseGateTest {
         // Scatter result = JSON array of items
         gate.onTaskCompleted(
             scatterTasks[0].id, wfId, seqScatter, TaskStatus.COMPLETED,
-            """["item1","item2","item3"]""",
+            resultJson = null, itemsJson = """["item1","item2","item3"]""",
         )
 
         val seqParallel = seqMap.values.first { it.activityName == "scatter.__parallel__" }.sequenceNumber
@@ -400,7 +400,7 @@ class DefaultPhaseGateTest {
 
         val seqScatter = seqMap.values.first { it.activityName == "scatter" }.sequenceNumber
         val scatterTasks = taskRepo.findByWorkflowAndSequence(wfId, seqScatter)
-        gate.onTaskCompleted(scatterTasks[0].id, wfId, seqScatter, TaskStatus.COMPLETED, """["i1","i2"]""")
+        gate.onTaskCompleted(scatterTasks[0].id, wfId, seqScatter, TaskStatus.COMPLETED, resultJson = null, itemsJson = """["i1","i2"]""")
 
         val seqParallel = seqMap.values.first { it.activityName == "scatter.__parallel__" }.sequenceNumber
         val parTasks = taskRepo.findByWorkflowAndSequence(wfId, seqParallel)
@@ -431,7 +431,7 @@ class DefaultPhaseGateTest {
 
         val seqScatter = seqMap.values.first { it.activityName == "scatter" }.sequenceNumber
         val scatterTasks = taskRepo.findByWorkflowAndSequence(wfId, seqScatter)
-        gate.onTaskCompleted(scatterTasks[0].id, wfId, seqScatter, TaskStatus.COMPLETED, """["i1","i2"]""")
+        gate.onTaskCompleted(scatterTasks[0].id, wfId, seqScatter, TaskStatus.COMPLETED, resultJson = null, itemsJson = """["i1","i2"]""")
 
         val seqParallel = seqMap.values.first { it.activityName == "scatter.__parallel__" }.sequenceNumber
         val parTasks = taskRepo.findByWorkflowAndSequence(wfId, seqParallel)
@@ -464,7 +464,7 @@ class DefaultPhaseGateTest {
 
         val seqScatter = seqMap.values.first { it.activityName == "scatter" }.sequenceNumber
         val scatterTasks = taskRepo.findByWorkflowAndSequence(wfId, seqScatter)
-        gate.onTaskCompleted(scatterTasks[0].id, wfId, seqScatter, TaskStatus.COMPLETED, """["i1","i2"]""")
+        gate.onTaskCompleted(scatterTasks[0].id, wfId, seqScatter, TaskStatus.COMPLETED, resultJson = null, itemsJson = """["i1","i2"]""")
 
         val seqParallel = seqMap.values.first { it.activityName == "scatter.__parallel__" }.sequenceNumber
         val parTasks = taskRepo.findByWorkflowAndSequence(wfId, seqParallel)

@@ -23,314 +23,448 @@ import java.math.BigDecimal
 import java.time.LocalDateTime
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class DispatchHandlersTest {
-
     private val objectMapper = ObjectMapper().registerModule(KotlinModule.Builder().build())
 
     @Test
-    fun `scatter handler returns JSON array of config items`() = runTest {
-        val configRepo = mock<DispatchConfigRepository>()
-        val resultStore = mock<SimulationResultStore>()
-        val config = DispatchConfig("cfg1", DispatchMode.QTY, "default", "bom",
-            listOf(SiteTarget("A", BigDecimal("100"))), null)
-        whenever(configRepo.findActiveConfigs(any())).thenReturn(listOf(config))
+    fun `scatter handler returns JSON array of config items`() =
+        runTest {
+            val configRepo = mock<DispatchConfigRepository>()
+            val resultStore = mock<SimulationResultStore>()
+            val config =
+                DispatchConfig(
+                    "cfg1",
+                    DispatchMode.QTY,
+                    "default",
+                    "bom",
+                    listOf(SiteTarget("A", BigDecimal("100"))),
+                    null,
+                )
+            whenever(configRepo.findActiveConfigs(any())).thenReturn(listOf(config))
 
-        val handler = DispatchScatterHandler(configRepo, resultStore, objectMapper)
-        val output = handler.execute(
-            HandlerInput("t1", "w1", 1, null, null),
-        ) as HandlerResult.Completed
+            val handler = DispatchScatterHandler(configRepo, resultStore, objectMapper)
+            val output =
+                handler.execute(
+                    HandlerInput("t1", "w1", 1, null, null),
+                ) as HandlerResult.Completed
 
-        assertNotNull(output.result)
-        val arr = objectMapper.readTree(output.result)
-        assertTrue(arr.isArray)
-        assertTrue(arr[0].has("configId"))
-        assertTrue(arr[0].has("batchToken"))
+            assertNotNull(output.items)
+            val arr = objectMapper.readTree(output.items)
+            assertTrue(arr.isArray)
+            assertTrue(arr[0].has("configId"))
+            assertTrue(arr[0].has("batchToken"))
 
-        verify(resultStore).createBatch(any(), eq(BatchStatus.NORMAL), eq(1))
-        verify(configRepo, never()).findById(any())
-    }
+            assertNotNull(output.result)
+            assertNotNull(objectMapper.readTree(output.result)["batchToken"].asText())
 
-    @Test
-    fun `scatter handler uses provided configIds and batchToken without creating batch`() = runTest {
-        val configRepo = mock<DispatchConfigRepository>()
-        val resultStore = mock<SimulationResultStore>()
-        val config1 = DispatchConfig("cfg1", DispatchMode.QTY, "default", "bom",
-            listOf(SiteTarget("A", BigDecimal("100"))), null)
-        val config2 = DispatchConfig("cfg2", DispatchMode.QTY, "default", "bom",
-            listOf(SiteTarget("B", BigDecimal("200"))), null)
-        whenever(configRepo.findById("cfg1")).thenReturn(config1)
-        whenever(configRepo.findById("cfg2")).thenReturn(config2)
-
-        val handler = DispatchScatterHandler(configRepo, resultStore, objectMapper)
-        val item = objectMapper.writeValueAsString(
-            mapOf("batchToken" to "custom-token", "configIds" to listOf("cfg1", "cfg2"))
-        )
-        val output = handler.execute(
-            HandlerInput("t1", "w1", 1, null, item),
-        ) as HandlerResult.Completed
-
-        val arr = objectMapper.readTree(output.result)
-        assertTrue(arr.isArray)
-        assertEquals(2, arr.size())
-        assertEquals("cfg1", arr[0]["configId"].asText())
-        assertEquals("custom-token", arr[0]["batchToken"].asText())
-        assertEquals("cfg2", arr[1]["configId"].asText())
-        assertEquals("custom-token", arr[1]["batchToken"].asText())
-
-        verify(configRepo, never()).findActiveConfigs(any())
-        verify(resultStore, never()).createBatch(any(), any(), any())
-    }
+            verify(resultStore).createBatch(any(), eq(BatchStatus.NORMAL), eq(1))
+            verify(configRepo, never()).findById(any())
+        }
 
     @Test
-    fun `scatter handler creates NORMAL batch and uses all active configs when no item`() = runTest {
-        val configRepo = mock<DispatchConfigRepository>()
-        val resultStore = mock<SimulationResultStore>()
-        val config = DispatchConfig("cfg1", DispatchMode.QTY, "default", "bom",
-            listOf(SiteTarget("A", BigDecimal("100"))), null)
-        whenever(configRepo.findActiveConfigs(any())).thenReturn(listOf(config))
+    fun `scatter handler uses provided configIds and batchToken without creating batch`() =
+        runTest {
+            val configRepo = mock<DispatchConfigRepository>()
+            val resultStore = mock<SimulationResultStore>()
+            val config1 =
+                DispatchConfig(
+                    "cfg1",
+                    DispatchMode.QTY,
+                    "default",
+                    "bom",
+                    listOf(SiteTarget("A", BigDecimal("100"))),
+                    null,
+                )
+            val config2 =
+                DispatchConfig(
+                    "cfg2",
+                    DispatchMode.QTY,
+                    "default",
+                    "bom",
+                    listOf(SiteTarget("B", BigDecimal("200"))),
+                    null,
+                )
+            whenever(configRepo.findById("cfg1")).thenReturn(config1)
+            whenever(configRepo.findById("cfg2")).thenReturn(config2)
 
-        val handler = DispatchScatterHandler(configRepo, resultStore, objectMapper,
-            batchTokenProvider = { "20260404140000" })
-        val output = handler.execute(
-            HandlerInput("t1", "w1", 1, null, null),
-        ) as HandlerResult.Completed
+            val handler = DispatchScatterHandler(configRepo, resultStore, objectMapper)
+            val item =
+                objectMapper.writeValueAsString(
+                    mapOf("batchToken" to "custom-token", "configIds" to listOf("cfg1", "cfg2")),
+                )
+            val output =
+                handler.execute(
+                    HandlerInput("t1", "w1", 1, null, item),
+                ) as HandlerResult.Completed
 
-        val arr = objectMapper.readTree(output.result)
-        assertTrue(arr.isArray)
-        assertEquals(1, arr.size())
-        assertEquals("cfg1", arr[0]["configId"].asText())
-        assertEquals("20260404140000", arr[0]["batchToken"].asText())
+            assertNotNull(output.items)
+            val arr = objectMapper.readTree(output.items)
+            assertTrue(arr.isArray)
+            assertEquals(2, arr.size())
+            assertEquals("cfg1", arr[0]["configId"].asText())
+            assertEquals("custom-token", arr[0]["batchToken"].asText())
+            assertEquals("cfg2", arr[1]["configId"].asText())
+            assertEquals("custom-token", arr[1]["batchToken"].asText())
 
-        verify(configRepo).findActiveConfigs(any())
-        verify(configRepo, never()).findById(any())
-        verify(resultStore).createBatch(eq("20260404140000"), eq(BatchStatus.NORMAL), eq(1))
-    }
+            assertNotNull(output.result)
+            assertEquals("custom-token", objectMapper.readTree(output.result)["batchToken"].asText())
 
-    @Test
-    fun `simulation handler calls engine and uploads CSV`() = runTest {
-        val configRepo = mock<DispatchConfigRepository>()
-        val candidateQuery = mock<CandidateRepository>()
-        val baselineProvider = mock<BaselineProvider>()
-        val simulationEngine = mock<SimulationEngine>()
-        val resultStore = mock<SimulationResultStore>()
-        val storage = mock<StorageGateway>()
-        val csvFormatter = mock<CsvFormatter>()
-        val pathBuilder = DispatchPathBuilder("prod")
-
-        val config = DispatchConfig("cfg1", DispatchMode.QTY, "default", "bom",
-            listOf(SiteTarget("A", BigDecimal("100"))), null)
-        whenever(configRepo.findById("cfg1")).thenReturn(config)
-        whenever(candidateQuery.queryCandidates(config)).thenReturn(emptyList())
-        whenever(baselineProvider.loadBaseline(config)).thenReturn(Baseline(emptyMap(), emptyMap()))
-        whenever(simulationEngine.simulate(eq(config), any(), any())).thenReturn(
-            SimulationResult(emptyList(), emptyMap(), emptyMap()),
-        )
-        whenever(csvFormatter.format(any(), any(), any())).thenReturn(byteArrayOf())
-        whenever(resultStore.findBatchStatus("20260329060000")).thenReturn(BatchStatus.NORMAL)
-
-        val handler = DispatchSimulationHandler(
-            configRepo, candidateQuery, baselineProvider, simulationEngine,
-            resultStore, storage, csvFormatter, pathBuilder, objectMapper,
-        )
-
-        val item = objectMapper.writeValueAsString(mapOf("configId" to "cfg1", "batchToken" to "20260329060000"))
-        val output = handler.execute(
-            HandlerInput("t1", "w1", 2, null, item),
-        ) as HandlerResult.Completed
-
-        val order = inOrder(resultStore)
-        order.verify(resultStore).saveDecisions(eq("20260329060000"), eq("cfg1"), any())
-        order.verify(resultStore).findBatchStatus(eq("20260329060000"))
-        verify(storage).uploadCsv(eq("env=prod/mode=normal/dispatch/20260329060000/simulation/cfg1.csv.gz"), any())
-        assertNotNull(output.result)
-    }
+            verify(configRepo, never()).findActiveConfigs(any())
+            verify(resultStore, never()).createBatch(any(), any(), any())
+        }
 
     @Test
-    fun `simulation handler uses env from pathBuilder in CSV path`() = runTest {
-        val configRepo = mock<DispatchConfigRepository>()
-        val candidateQuery = mock<CandidateRepository>()
-        val baselineProvider = mock<BaselineProvider>()
-        val simulationEngine = mock<SimulationEngine>()
-        val resultStore = mock<SimulationResultStore>()
-        val storage = mock<StorageGateway>()
-        val csvFormatter = mock<CsvFormatter>()
-        val pathBuilder = DispatchPathBuilder("staging")
+    fun `scatter handler creates NORMAL batch and uses all active configs when no item`() =
+        runTest {
+            val configRepo = mock<DispatchConfigRepository>()
+            val resultStore = mock<SimulationResultStore>()
+            val config =
+                DispatchConfig(
+                    "cfg1",
+                    DispatchMode.QTY,
+                    "default",
+                    "bom",
+                    listOf(SiteTarget("A", BigDecimal("100"))),
+                    null,
+                )
+            whenever(configRepo.findActiveConfigs(any())).thenReturn(listOf(config))
 
-        val config = DispatchConfig("cfg1", DispatchMode.QTY, "default", "bom",
-            listOf(SiteTarget("A", BigDecimal("100"))), null)
-        whenever(configRepo.findById("cfg1")).thenReturn(config)
-        whenever(candidateQuery.queryCandidates(config)).thenReturn(emptyList())
-        whenever(baselineProvider.loadBaseline(config)).thenReturn(Baseline(emptyMap(), emptyMap()))
-        whenever(simulationEngine.simulate(eq(config), any(), any())).thenReturn(
-            SimulationResult(emptyList(), emptyMap(), emptyMap()),
-        )
-        whenever(csvFormatter.format(any(), any(), any())).thenReturn(byteArrayOf())
-        whenever(resultStore.findBatchStatus("20260329060000")).thenReturn(BatchStatus.NORMAL)
+            val handler =
+                DispatchScatterHandler(configRepo, resultStore, objectMapper).apply {
+                    setBatchTokenProviderForTest { "20260404140000" }
+                }
+            val output =
+                handler.execute(
+                    HandlerInput("t1", "w1", 1, null, null),
+                ) as HandlerResult.Completed
 
-        val handler = DispatchSimulationHandler(
-            configRepo, candidateQuery, baselineProvider, simulationEngine,
-            resultStore, storage, csvFormatter, pathBuilder, objectMapper,
-        )
+            assertNotNull(output.items)
+            val arr = objectMapper.readTree(output.items)
+            assertTrue(arr.isArray)
+            assertEquals(1, arr.size())
+            assertEquals("cfg1", arr[0]["configId"].asText())
+            assertEquals("20260404140000", arr[0]["batchToken"].asText())
 
-        val item = objectMapper.writeValueAsString(mapOf("configId" to "cfg1", "batchToken" to "20260329060000"))
-        handler.execute(HandlerInput("t1", "w1", 2, null, item))
+            assertNotNull(output.result)
+            assertEquals("20260404140000", objectMapper.readTree(output.result)["batchToken"].asText())
 
-        verify(storage).uploadCsv(eq("env=staging/mode=normal/dispatch/20260329060000/simulation/cfg1.csv.gz"), any())
-    }
-
-    @Test
-    fun `simulation handler uses dryrun mode path for dryrun batch`() = runTest {
-        val configRepo = mock<DispatchConfigRepository>()
-        val candidateQuery = mock<CandidateRepository>()
-        val baselineProvider = mock<BaselineProvider>()
-        val simulationEngine = mock<SimulationEngine>()
-        val resultStore = mock<SimulationResultStore>()
-        val storage = mock<StorageGateway>()
-        val csvFormatter = mock<CsvFormatter>()
-        val pathBuilder = DispatchPathBuilder("prod")
-
-        val config = DispatchConfig("cfg1", DispatchMode.QTY, "default", "bom",
-            listOf(SiteTarget("A", BigDecimal("100"))), null)
-        whenever(configRepo.findById("cfg1")).thenReturn(config)
-        whenever(candidateQuery.queryCandidates(config)).thenReturn(emptyList())
-        whenever(baselineProvider.loadBaseline(config)).thenReturn(Baseline(emptyMap(), emptyMap()))
-        whenever(simulationEngine.simulate(eq(config), any(), any())).thenReturn(
-            SimulationResult(emptyList(), emptyMap(), emptyMap()),
-        )
-        whenever(csvFormatter.format(any(), any(), any())).thenReturn(byteArrayOf())
-        whenever(resultStore.findBatchStatus("dryrun-abc")).thenReturn(BatchStatus.DRYRUN)
-
-        val handler = DispatchSimulationHandler(
-            configRepo, candidateQuery, baselineProvider, simulationEngine,
-            resultStore, storage, csvFormatter, pathBuilder, objectMapper,
-        )
-
-        val item = objectMapper.writeValueAsString(mapOf("configId" to "cfg1", "batchToken" to "dryrun-abc"))
-        handler.execute(HandlerInput("t1", "w1", 2, null, item))
-
-        verify(storage).uploadCsv(eq("env=prod/mode=dryrun/dispatch/dryrun-abc/simulation/cfg1.csv.gz"), any())
-    }
+            verify(configRepo).findActiveConfigs(any())
+            verify(configRepo, never()).findById(any())
+            verify(resultStore).createBatch(eq("20260404140000"), eq(BatchStatus.NORMAL), eq(1))
+        }
 
     @Test
-    fun `join handler uploads parquet with merged results`() = runTest {
-        val resultStore = mock<SimulationResultStore>()
-        val storage = mock<StorageGateway>()
-        val parquetFormatter = mock<ParquetFormatter>()
-        val pathBuilder = DispatchPathBuilder("prod")
+    fun `simulation handler calls engine and uploads CSV`() =
+        runTest {
+            val configRepo = mock<DispatchConfigRepository>()
+            val candidateQuery = mock<CandidateRepository>()
+            val baselineProvider = mock<BaselineProvider>()
+            val simulationEngine = mock<SimulationEngine>()
+            val resultStore = mock<SimulationResultStore>()
+            val storage = mock<StorageGateway>()
+            val csvFormatter = mock<CsvFormatter>()
+            val pathBuilder = DispatchPathBuilder("prod")
 
-        whenever(resultStore.findByBatchToken("20260329060000")).thenReturn(emptyList())
-        whenever(resultStore.findBatchStatus("20260329060000")).thenReturn(BatchStatus.NORMAL)
-        whenever(parquetFormatter.format(any())).thenReturn(byteArrayOf())
+            val config =
+                DispatchConfig(
+                    "cfg1",
+                    DispatchMode.QTY,
+                    "default",
+                    "bom",
+                    listOf(SiteTarget("A", BigDecimal("100"))),
+                    null,
+                )
+            whenever(configRepo.findById("cfg1")).thenReturn(config)
+            whenever(candidateQuery.queryCandidates(config)).thenReturn(emptyList())
+            whenever(baselineProvider.loadBaseline(config)).thenReturn(Baseline(emptyMap(), emptyMap()))
+            whenever(simulationEngine.simulate(eq(config), any(), any())).thenReturn(
+                SimulationResult(emptyList(), emptyMap(), emptyMap()),
+            )
+            whenever(csvFormatter.format(any(), any(), any())).thenReturn(byteArrayOf())
+            whenever(resultStore.findBatchStatus("20260329060000")).thenReturn(BatchStatus.NORMAL)
 
-        val handler = DispatchJoinHandler(
-            resultStore, storage, parquetFormatter, pathBuilder, "prod", "default", objectMapper,
-        )
+            val handler =
+                DispatchSimulationHandler(
+                    configRepo,
+                    candidateQuery,
+                    baselineProvider,
+                    simulationEngine,
+                    resultStore,
+                    storage,
+                    csvFormatter,
+                    pathBuilder,
+                    objectMapper,
+                )
 
-        val inputs = objectMapper.writeValueAsString(
-            mapOf("batchToken" to listOf("20260329060000", "20260329060000")),
-        )
-        val result = handler.execute(
-            HandlerInput("t1", "w1", 3, inputs, null),
-        )
+            val item = objectMapper.writeValueAsString(mapOf("configId" to "cfg1", "batchToken" to "20260329060000"))
+            val output =
+                handler.execute(
+                    HandlerInput("t1", "w1", 2, null, item),
+                ) as HandlerResult.Completed
 
-        verify(storage).uploadParquet(eq("env=prod/dispatch/result.parquet"), any())
-
-        assertTrue(result is HandlerResult.Defer)
-        val defer = result as HandlerResult.Defer
-        assertEquals(TriggerTypes.K8S_JOB, defer.triggerType)
-        val meta: Map<String, String> = objectMapper.readValue(defer.triggerMeta)
-        assertEquals("dispatch-join-20260329060000", meta["jobName"])
-        assertEquals("default", meta["namespace"])
-    }
-
-    @Test
-    fun `join handler exports parquet for prod normal batch`() = runTest {
-        val resultStore = mock<SimulationResultStore>()
-        val storage = mock<StorageGateway>()
-        val parquetFormatter = mock<ParquetFormatter>()
-        val pathBuilder = DispatchPathBuilder("prod")
-
-        whenever(resultStore.findByBatchToken("20260329060000")).thenReturn(emptyList())
-        whenever(resultStore.findBatchStatus("20260329060000")).thenReturn(BatchStatus.NORMAL)
-        whenever(parquetFormatter.format(any())).thenReturn(byteArrayOf())
-
-        val handler = DispatchJoinHandler(
-            resultStore, storage, parquetFormatter, pathBuilder, "prod", "default", objectMapper,
-        )
-
-        val inputs = objectMapper.writeValueAsString(
-            mapOf("batchToken" to listOf("20260329060000", "20260329060000")),
-        )
-        val result = handler.execute(HandlerInput("t1", "w1", 3, inputs, null))
-
-        verify(storage).uploadParquet(eq("env=prod/dispatch/result.parquet"), any())
-
-        assertTrue(result is HandlerResult.Defer)
-        val defer = result as HandlerResult.Defer
-        assertEquals(TriggerTypes.K8S_JOB, defer.triggerType)
-        val meta: Map<String, String> = objectMapper.readValue(defer.triggerMeta)
-        assertEquals("dispatch-join-20260329060000", meta["jobName"])
-        assertEquals("default", meta["namespace"])
-    }
+            val order = inOrder(resultStore)
+            order.verify(resultStore).saveDecisions(eq("20260329060000"), eq("cfg1"), any())
+            order.verify(resultStore).findBatchStatus(eq("20260329060000"))
+            verify(storage).uploadCsv(eq("env=prod/mode=normal/dispatch/20260329060000/simulation/cfg1.csv.gz"), any())
+            assertNull(output.result)
+        }
 
     @Test
-    fun `join handler skips parquet for prod dryrun batch`() = runTest {
-        val resultStore = mock<SimulationResultStore>()
-        val storage = mock<StorageGateway>()
-        val parquetFormatter = mock<ParquetFormatter>()
-        val pathBuilder = DispatchPathBuilder("prod")
+    fun `simulation handler uses env from pathBuilder in CSV path`() =
+        runTest {
+            val configRepo = mock<DispatchConfigRepository>()
+            val candidateQuery = mock<CandidateRepository>()
+            val baselineProvider = mock<BaselineProvider>()
+            val simulationEngine = mock<SimulationEngine>()
+            val resultStore = mock<SimulationResultStore>()
+            val storage = mock<StorageGateway>()
+            val csvFormatter = mock<CsvFormatter>()
+            val pathBuilder = DispatchPathBuilder("staging")
 
-        whenever(resultStore.findBatchStatus("dryrun-abc")).thenReturn(BatchStatus.DRYRUN)
+            val config =
+                DispatchConfig(
+                    "cfg1",
+                    DispatchMode.QTY,
+                    "default",
+                    "bom",
+                    listOf(SiteTarget("A", BigDecimal("100"))),
+                    null,
+                )
+            whenever(configRepo.findById("cfg1")).thenReturn(config)
+            whenever(candidateQuery.queryCandidates(config)).thenReturn(emptyList())
+            whenever(baselineProvider.loadBaseline(config)).thenReturn(Baseline(emptyMap(), emptyMap()))
+            whenever(simulationEngine.simulate(eq(config), any(), any())).thenReturn(
+                SimulationResult(emptyList(), emptyMap(), emptyMap()),
+            )
+            whenever(csvFormatter.format(any(), any(), any())).thenReturn(byteArrayOf())
+            whenever(resultStore.findBatchStatus("20260329060000")).thenReturn(BatchStatus.NORMAL)
 
-        val handler = DispatchJoinHandler(
-            resultStore, storage, parquetFormatter, pathBuilder, "prod", "default", objectMapper,
-        )
+            val handler =
+                DispatchSimulationHandler(
+                    configRepo,
+                    candidateQuery,
+                    baselineProvider,
+                    simulationEngine,
+                    resultStore,
+                    storage,
+                    csvFormatter,
+                    pathBuilder,
+                    objectMapper,
+                )
 
-        val inputs = objectMapper.writeValueAsString(
-            mapOf("batchToken" to listOf("dryrun-abc", "dryrun-abc")),
-        )
-        val result = handler.execute(HandlerInput("t1", "w1", 3, inputs, null))
+            val item = objectMapper.writeValueAsString(mapOf("configId" to "cfg1", "batchToken" to "20260329060000"))
+            handler.execute(HandlerInput("t1", "w1", 2, null, item))
 
-        verify(storage, never()).uploadParquet(any(), any())
-        verify(parquetFormatter, never()).format(any())
-
-        assertTrue(result is HandlerResult.Defer)
-        val defer = result as HandlerResult.Defer
-        assertEquals(TriggerTypes.K8S_JOB, defer.triggerType)
-        val meta: Map<String, String> = objectMapper.readValue(defer.triggerMeta)
-        assertEquals("dispatch-join-dryrun-abc", meta["jobName"])
-        assertEquals("default", meta["namespace"])
-    }
+            verify(storage).uploadCsv(eq("env=staging/mode=normal/dispatch/20260329060000/simulation/cfg1.csv.gz"), any())
+        }
 
     @Test
-    fun `join handler skips parquet for stg env`() = runTest {
-        val resultStore = mock<SimulationResultStore>()
-        val storage = mock<StorageGateway>()
-        val parquetFormatter = mock<ParquetFormatter>()
-        val pathBuilder = DispatchPathBuilder("stg")
+    fun `simulation handler uses dryrun mode path for dryrun batch`() =
+        runTest {
+            val configRepo = mock<DispatchConfigRepository>()
+            val candidateQuery = mock<CandidateRepository>()
+            val baselineProvider = mock<BaselineProvider>()
+            val simulationEngine = mock<SimulationEngine>()
+            val resultStore = mock<SimulationResultStore>()
+            val storage = mock<StorageGateway>()
+            val csvFormatter = mock<CsvFormatter>()
+            val pathBuilder = DispatchPathBuilder("prod")
 
-        whenever(resultStore.findBatchStatus("20260329060000")).thenReturn(BatchStatus.NORMAL)
+            val config =
+                DispatchConfig(
+                    "cfg1",
+                    DispatchMode.QTY,
+                    "default",
+                    "bom",
+                    listOf(SiteTarget("A", BigDecimal("100"))),
+                    null,
+                )
+            whenever(configRepo.findById("cfg1")).thenReturn(config)
+            whenever(candidateQuery.queryCandidates(config)).thenReturn(emptyList())
+            whenever(baselineProvider.loadBaseline(config)).thenReturn(Baseline(emptyMap(), emptyMap()))
+            whenever(simulationEngine.simulate(eq(config), any(), any())).thenReturn(
+                SimulationResult(emptyList(), emptyMap(), emptyMap()),
+            )
+            whenever(csvFormatter.format(any(), any(), any())).thenReturn(byteArrayOf())
+            whenever(resultStore.findBatchStatus("dryrun-abc")).thenReturn(BatchStatus.DRYRUN)
 
-        val handler = DispatchJoinHandler(
-            resultStore, storage, parquetFormatter, pathBuilder, "stg", "default", objectMapper,
-        )
+            val handler =
+                DispatchSimulationHandler(
+                    configRepo,
+                    candidateQuery,
+                    baselineProvider,
+                    simulationEngine,
+                    resultStore,
+                    storage,
+                    csvFormatter,
+                    pathBuilder,
+                    objectMapper,
+                )
 
-        val inputs = objectMapper.writeValueAsString(
-            mapOf("batchToken" to listOf("20260329060000", "20260329060000")),
-        )
-        val result = handler.execute(HandlerInput("t1", "w1", 3, inputs, null))
+            val item = objectMapper.writeValueAsString(mapOf("configId" to "cfg1", "batchToken" to "dryrun-abc"))
+            handler.execute(HandlerInput("t1", "w1", 2, null, item))
 
-        verify(resultStore).findBatchStatus("20260329060000")
-        verify(storage, never()).uploadParquet(any(), any())
-        verify(parquetFormatter, never()).format(any())
+            verify(storage).uploadCsv(eq("env=prod/mode=dryrun/dispatch/dryrun-abc/simulation/cfg1.csv.gz"), any())
+        }
 
-        assertTrue(result is HandlerResult.Defer)
-        val defer = result as HandlerResult.Defer
-        assertEquals(TriggerTypes.K8S_JOB, defer.triggerType)
-        val meta: Map<String, String> = objectMapper.readValue(defer.triggerMeta)
-        assertEquals("dispatch-join-20260329060000", meta["jobName"])
-        assertEquals("default", meta["namespace"])
-    }
+    @Test
+    fun `join handler uploads parquet with merged results`() =
+        runTest {
+            val resultStore = mock<SimulationResultStore>()
+            val storage = mock<StorageGateway>()
+            val parquetFormatter = mock<ParquetFormatter>()
+            val pathBuilder = DispatchPathBuilder("prod")
+
+            whenever(resultStore.findByBatchToken("20260329060000")).thenReturn(emptyList())
+            whenever(resultStore.findBatchStatus("20260329060000")).thenReturn(BatchStatus.NORMAL)
+            whenever(parquetFormatter.format(any())).thenReturn(byteArrayOf())
+
+            val handler =
+                DispatchJoinHandler(
+                    resultStore,
+                    storage,
+                    parquetFormatter,
+                    pathBuilder,
+                    "prod",
+                    "default",
+                    objectMapper,
+                )
+
+            val inputs =
+                objectMapper.writeValueAsString(
+                    mapOf("batchToken" to listOf("20260329060000", "20260329060000")),
+                )
+            val result =
+                handler.execute(
+                    HandlerInput("t1", "w1", 3, inputs, null),
+                )
+
+            verify(storage).uploadParquet(eq("env=prod/dispatch/result.parquet"), any())
+
+            assertTrue(result is HandlerResult.Defer)
+            val defer = result as HandlerResult.Defer
+            assertEquals(TriggerTypes.K8S_JOB, defer.triggerType)
+            val meta: Map<String, String> = objectMapper.readValue(defer.triggerMeta)
+            assertEquals("dispatch-join-20260329060000", meta["jobName"])
+            assertEquals("default", meta["namespace"])
+        }
+
+    @Test
+    fun `join handler exports parquet for prod normal batch`() =
+        runTest {
+            val resultStore = mock<SimulationResultStore>()
+            val storage = mock<StorageGateway>()
+            val parquetFormatter = mock<ParquetFormatter>()
+            val pathBuilder = DispatchPathBuilder("prod")
+
+            whenever(resultStore.findByBatchToken("20260329060000")).thenReturn(emptyList())
+            whenever(resultStore.findBatchStatus("20260329060000")).thenReturn(BatchStatus.NORMAL)
+            whenever(parquetFormatter.format(any())).thenReturn(byteArrayOf())
+
+            val handler =
+                DispatchJoinHandler(
+                    resultStore,
+                    storage,
+                    parquetFormatter,
+                    pathBuilder,
+                    "prod",
+                    "default",
+                    objectMapper,
+                )
+
+            val inputs =
+                objectMapper.writeValueAsString(
+                    mapOf("batchToken" to listOf("20260329060000", "20260329060000")),
+                )
+            val result = handler.execute(HandlerInput("t1", "w1", 3, inputs, null))
+
+            verify(storage).uploadParquet(eq("env=prod/dispatch/result.parquet"), any())
+
+            assertTrue(result is HandlerResult.Defer)
+            val defer = result as HandlerResult.Defer
+            assertEquals(TriggerTypes.K8S_JOB, defer.triggerType)
+            val meta: Map<String, String> = objectMapper.readValue(defer.triggerMeta)
+            assertEquals("dispatch-join-20260329060000", meta["jobName"])
+            assertEquals("default", meta["namespace"])
+        }
+
+    @Test
+    fun `join handler skips parquet for prod dryrun batch`() =
+        runTest {
+            val resultStore = mock<SimulationResultStore>()
+            val storage = mock<StorageGateway>()
+            val parquetFormatter = mock<ParquetFormatter>()
+            val pathBuilder = DispatchPathBuilder("prod")
+
+            whenever(resultStore.findBatchStatus("dryrun-abc")).thenReturn(BatchStatus.DRYRUN)
+
+            val handler =
+                DispatchJoinHandler(
+                    resultStore,
+                    storage,
+                    parquetFormatter,
+                    pathBuilder,
+                    "prod",
+                    "default",
+                    objectMapper,
+                )
+
+            val inputs =
+                objectMapper.writeValueAsString(
+                    mapOf("batchToken" to listOf("dryrun-abc", "dryrun-abc")),
+                )
+            val result = handler.execute(HandlerInput("t1", "w1", 3, inputs, null))
+
+            verify(storage, never()).uploadParquet(any(), any())
+            verify(parquetFormatter, never()).format(any())
+
+            assertTrue(result is HandlerResult.Defer)
+            val defer = result as HandlerResult.Defer
+            assertEquals(TriggerTypes.K8S_JOB, defer.triggerType)
+            val meta: Map<String, String> = objectMapper.readValue(defer.triggerMeta)
+            assertEquals("dispatch-join-dryrun-abc", meta["jobName"])
+            assertEquals("default", meta["namespace"])
+        }
+
+    @Test
+    fun `join handler skips parquet for stg env`() =
+        runTest {
+            val resultStore = mock<SimulationResultStore>()
+            val storage = mock<StorageGateway>()
+            val parquetFormatter = mock<ParquetFormatter>()
+            val pathBuilder = DispatchPathBuilder("stg")
+
+            whenever(resultStore.findBatchStatus("20260329060000")).thenReturn(BatchStatus.NORMAL)
+
+            val handler =
+                DispatchJoinHandler(
+                    resultStore,
+                    storage,
+                    parquetFormatter,
+                    pathBuilder,
+                    "stg",
+                    "default",
+                    objectMapper,
+                )
+
+            val inputs =
+                objectMapper.writeValueAsString(
+                    mapOf("batchToken" to listOf("20260329060000", "20260329060000")),
+                )
+            val result = handler.execute(HandlerInput("t1", "w1", 3, inputs, null))
+
+            verify(resultStore).findBatchStatus("20260329060000")
+            verify(storage, never()).uploadParquet(any(), any())
+            verify(parquetFormatter, never()).format(any())
+
+            assertTrue(result is HandlerResult.Defer)
+            val defer = result as HandlerResult.Defer
+            assertEquals(TriggerTypes.K8S_JOB, defer.triggerType)
+            val meta: Map<String, String> = objectMapper.readValue(defer.triggerMeta)
+            assertEquals("dispatch-join-20260329060000", meta["jobName"])
+            assertEquals("default", meta["namespace"])
+        }
 }
