@@ -418,7 +418,10 @@ class DefaultPhaseGate(
             } catch (_: Exception) {
                 return rawItem
             }
-        if (!itemNode.isObject) return rawItem
+        if (!itemNode.isObject) {
+            log.warn("assembleChildItem: rawItem is not a JSON object — scatter context will not be merged: {}", rawItem.take(200))
+            return rawItem
+        }
         val assembled = objectMapper.createObjectNode()
         resultNode.fields().forEach { (k, v) -> assembled.set<JsonNode>(k, v) } // shared context base
         itemNode.fields().forEach { (k, v) -> assembled.set<JsonNode>(k, v) }   // item fields win
