@@ -3,6 +3,7 @@ package com.workflow.dispatch.usecase.service.handler
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.KotlinModule
 import com.workflow.dispatch.adapter.storage.DispatchPathBuilder
+import com.workflow.dispatch.usecase.service.handler.BatchTokenClock
 import com.workflow.dispatch.model.*
 import com.workflow.dispatch.usecase.port.outbound.persistence.BaselineProvider
 import com.workflow.dispatch.usecase.port.outbound.persistence.CandidateRepository
@@ -122,9 +123,7 @@ class DispatchHandlersTest {
             whenever(configRepo.findActiveConfigs(any())).thenReturn(listOf(config))
 
             val handler =
-                DispatchScatterHandler(configRepo, resultStore, objectMapper).apply {
-                    setBatchTokenProvider { "20260404140000" }
-                }
+                DispatchScatterHandler(configRepo, resultStore, objectMapper, BatchTokenClock { "20260404140000" })
             val output =
                 handler.execute(
                     HandlerInput("t1", "w1", 1, null, null),
@@ -340,39 +339,6 @@ class DispatchHandlersTest {
                 handler.execute(
                     HandlerInput("t1", "w1", 3, inputs, null),
                 )
-
-            verify(storage).uploadParquet(eq("env=prod/dispatch/result.parquet"), any())
-            assertTrue(result is HandlerResult.Completed)
-            assertNull((result as HandlerResult.Completed).result)
-        }
-
-    @Test
-    fun `join handler exports parquet for prod normal batch`() =
-        runTest {
-            val resultStore = mock<SimulationResultStore>()
-            val storage = mock<StorageGateway>()
-            val parquetFormatter = mock<ParquetFormatter>()
-            val pathBuilder = DispatchPathBuilder("prod")
-
-            whenever(resultStore.findByBatchToken("20260329060000")).thenReturn(emptyList())
-            whenever(resultStore.findBatchStatus("20260329060000")).thenReturn(BatchStatus.NORMAL)
-            whenever(parquetFormatter.format(any())).thenReturn(byteArrayOf())
-
-            val handler =
-                DispatchJoinHandler(
-                    resultStore,
-                    storage,
-                    parquetFormatter,
-                    pathBuilder,
-                    "prod",
-                    objectMapper,
-                )
-
-            val inputs =
-                objectMapper.writeValueAsString(
-                    mapOf("batchToken" to listOf("20260329060000", "20260329060000")),
-                )
-            val result = handler.execute(HandlerInput("t1", "w1", 3, inputs, null))
 
             verify(storage).uploadParquet(eq("env=prod/dispatch/result.parquet"), any())
             assertTrue(result is HandlerResult.Completed)
