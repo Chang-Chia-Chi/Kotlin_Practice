@@ -3,6 +3,7 @@ package com.workflow.workflow.usecase.service.orchestration
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule
 import com.fasterxml.jackson.module.kotlin.KotlinModule
+import com.fasterxml.jackson.module.kotlin.readValue
 import com.workflow.workflow.adapter.persistent.JdbiTaskRepository
 import com.workflow.workflow.adapter.persistent.JdbiWorkflowRepository
 import com.workflow.workflow.config.WatchdogConfig
@@ -120,6 +121,7 @@ class WorkflowWatchdogTest {
         notBefore: Instant? = null,
         backoffBase: Int = 1,
         backoffCap: Int = 300,
+        itemsJson: String? = null,
     ): Task = Task(
         id = id,
         workflowId = workflowId,
@@ -138,6 +140,7 @@ class WorkflowWatchdogTest {
         notBefore = notBefore,
         backoffBase = backoffBase,
         backoffCap = backoffCap,
+        itemsJson = itemsJson,
     )
 
     /** Insert a workflow directly via SQL (independent of repo under test). */
@@ -162,15 +165,16 @@ class WorkflowWatchdogTest {
     private fun insertTaskDirect(task: Task) {
         jdbi.useHandle<Exception> { handle ->
             val stmt = handle.createUpdate(
-                """INSERT INTO task (id, workflow_id, sequence_number, status, handler_key, item, result,
+                """INSERT INTO task (id, workflow_id, activity_name, sequence_number, status, handler_key, item, result, items,
                    claimed_by, claimed_at, completed_at, retry_count, max_retries, deadline_at, not_before,
                    backoff_base, backoff_cap)
-                   VALUES (:id, :workflowId, :sequenceNumber, :status, :handlerKey, :item, :result,
+                   VALUES (:id, :workflowId, :activityName, :sequenceNumber, :status, :handlerKey, :item, :result, :items,
                    :claimedBy, :claimedAt, :completedAt, :retryCount, :maxRetries, :deadlineAt, :notBefore,
                    :backoffBase, :backoffCap)""",
             )
                 .bind("id", task.id)
                 .bind("workflowId", task.workflowId)
+                .bind("activityName", task.activityName)
                 .bind("sequenceNumber", task.sequenceNumber)
                 .bind("status", task.status.name)
                 .bind("handlerKey", task.handlerKey)
@@ -186,6 +190,7 @@ class WorkflowWatchdogTest {
 
             bindStringOrNull("item", task.item)
             bindStringOrNull("result", task.resultJson)
+            bindStringOrNull("items", task.itemsJson)
             bindStringOrNull("claimedBy", task.claimedBy)
             bindTimestampOrNull("claimedAt", task.claimedAt)
             bindTimestampOrNull("completedAt", task.completedAt)
@@ -1604,6 +1609,186 @@ class WorkflowWatchdogTest {
             assertNotNull(row)
             assertEquals("FAILED", row["STATUS"])
             assertEquals(0, (row["VERSION"] as Number).toInt())
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Scatter Recovery: TX1-success / TX2-fail durability scenario
+    // ═══════════════════════════════════════════════════════════════════════
+
+    @Nested
+    inner class ScatterRecovery {
+
+        // fanOutThenLinearDef: seq 1 = SCATTER, seq 2 = PARALLEL, seq 3 = LINEAR
+        private val seqScatter = 1
+        private val seqParallel = 2
+        private val batchToken = "test-batch-token"
+        private val configIds = listOf("cfg-id-1", "cfg-id-2", "cfg-id-3")
+        private val itemsJson = """["cfg-id-1","cfg-id-2","cfg-id-3"]"""
+        private val scatterResultJson = """{"batchToken":"$batchToken"}"""
+
+        @Test
+        fun `recovery spawns PARALLEL tasks when SCATTER is COMPLETED but PARALLEL tasks are missing`() = runTest {
+            val def = fanOutThenLinearDef()
+            val wfId = randomId()
+            insertWorkflowDirect(makeWorkflow(id = wfId, definition = def))
+
+            // Simulate TX1 committed (SCATTER COMPLETED, items persisted) but TX2 never ran
+            insertTaskDirect(
+                makeTask(
+                    workflowId = wfId,
+                    activityName = "scatter-activity",
+                    sequenceNumber = seqScatter,
+                    status = TaskStatus.COMPLETED,
+                    handlerKey = "scatter.handler",
+                    resultJson = scatterResultJson,
+                    completedAt = now(),
+                    itemsJson = itemsJson,
+                ),
+            )
+
+            assertEquals(0, countTasksDirect(wfId, seqParallel), "no PARALLEL tasks before recovery")
+
+            barrier.recoverStuckWorkflow(wfId)
+
+            val parallelTasks = readTasksDirect(wfId, seqParallel)
+            assertEquals(configIds.size, parallelTasks.size, "exactly N PARALLEL tasks created")
+            assertTrue(parallelTasks.all { it["STATUS"] == "PENDING" }, "all PENDING")
+
+            val assembledItems = parallelTasks
+                .map { objectMapper.readValue<Map<String, String>>(it["ITEM"] as String) }
+                .sortedBy { it["configId"] }
+            val expectedItems = configIds.sorted().map { id ->
+                mapOf("configId" to id, "batchToken" to batchToken)
+            }
+            assertEquals(expectedItems, assembledItems, "each child item carries configId + batchToken")
+
+            // Second call must be a no-op (idempotent recovery)
+            barrier.recoverStuckWorkflow(wfId)
+            assertEquals(configIds.size, countTasksDirect(wfId, seqParallel), "second recovery call produces no duplicates")
+        }
+
+        @Test
+        fun `recovery called twice in succession produces no duplicate PARALLEL tasks`() = runTest {
+            val def = fanOutThenLinearDef()
+            val wfId = randomId()
+            insertWorkflowDirect(makeWorkflow(id = wfId, definition = def))
+
+            insertTaskDirect(
+                makeTask(
+                    workflowId = wfId,
+                    activityName = "scatter-activity",
+                    sequenceNumber = seqScatter,
+                    status = TaskStatus.COMPLETED,
+                    handlerKey = "scatter.handler",
+                    resultJson = scatterResultJson,
+                    completedAt = now(),
+                    itemsJson = itemsJson,
+                ),
+            )
+
+            awaitAll(
+                async { barrier.recoverStuckWorkflow(wfId) },
+                async { barrier.recoverStuckWorkflow(wfId) },
+            )
+
+            assertEquals(
+                configIds.size,
+                countTasksDirect(wfId, seqParallel),
+                "exactly N PARALLEL tasks after concurrent recovery calls — no duplicates",
+            )
+        }
+
+        @Test
+        fun `onTaskCompleted and recoverStuckWorkflow racing after TX1 produce exactly N PARALLEL tasks`() = runTest {
+            val def = fanOutThenLinearDef()
+            val wfId = randomId()
+            insertWorkflowDirect(makeWorkflow(id = wfId, definition = def))
+
+            // Insert SCATTER task as PENDING — onTaskCompleted TX1 will mark it COMPLETED
+            val scatterTaskId = randomId()
+            insertTaskDirect(
+                makeTask(
+                    id = scatterTaskId,
+                    workflowId = wfId,
+                    activityName = "scatter-activity",
+                    sequenceNumber = seqScatter,
+                    status = TaskStatus.PENDING,
+                    handlerKey = "scatter.handler",
+                ),
+            )
+
+            // Race: onTaskCompleted (TX1 marks COMPLETED, TX2 expands) vs recoverStuckWorkflow
+            // One path wins the workflow row lock; the other path must detect and skip re-insertion.
+            awaitAll(
+                async {
+                    barrier.onTaskCompleted(
+                        taskId = scatterTaskId,
+                        workflowId = wfId,
+                        sequenceNumber = seqScatter,
+                        status = TaskStatus.COMPLETED,
+                        resultJson = scatterResultJson,
+                        itemsJson = itemsJson,
+                    )
+                },
+                async { barrier.recoverStuckWorkflow(wfId) },
+            )
+
+            assertEquals(
+                configIds.size,
+                countTasksDirect(wfId, seqParallel),
+                "exactly N PARALLEL tasks — no duplicates from onTaskCompleted vs recovery race",
+            )
+        }
+
+        @Test
+        fun `recovery is no-op when PARALLEL tasks already exist from normal onTaskCompleted`() = runTest {
+            val def = fanOutThenLinearDef()
+            val wfId = randomId()
+            insertWorkflowDirect(makeWorkflow(id = wfId, definition = def))
+
+            // Start workflow normally so SCATTER task is PENDING at seq 1
+            val scatterTasks = taskRepo.findByWorkflowAndSequence(wfId, seqScatter)
+
+            // If the engine didn't auto-create it, insert it manually
+            val scatterTaskId: String
+            if (scatterTasks.isEmpty()) {
+                scatterTaskId = randomId()
+                insertTaskDirect(
+                    makeTask(
+                        id = scatterTaskId,
+                        workflowId = wfId,
+                        activityName = "scatter-activity",
+                        sequenceNumber = seqScatter,
+                        status = TaskStatus.PENDING,
+                        handlerKey = "scatter.handler",
+                    ),
+                )
+            } else {
+                scatterTaskId = scatterTasks[0].id
+            }
+
+            // Normal completion via onTaskCompleted (TX1 + TX2 both run)
+            barrier.onTaskCompleted(
+                taskId = scatterTaskId,
+                workflowId = wfId,
+                sequenceNumber = seqScatter,
+                status = TaskStatus.COMPLETED,
+                resultJson = scatterResultJson,
+                itemsJson = itemsJson,
+            )
+
+            val countAfterNormalCompletion = countTasksDirect(wfId, seqParallel)
+            assertEquals(configIds.size, countAfterNormalCompletion, "N PARALLEL tasks created by normal completion")
+
+            // Recovery called before any PARALLEL task is claimed — must be a no-op
+            barrier.recoverStuckWorkflow(wfId)
+
+            assertEquals(
+                configIds.size,
+                countTasksDirect(wfId, seqParallel),
+                "recovery after normal completion produces no duplicates",
+            )
         }
     }
 }

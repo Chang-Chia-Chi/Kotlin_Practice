@@ -90,7 +90,7 @@ class ThroughputBenchmarkTest : StressTestBase() {
                 object : TransitionHandler {
                     override suspend fun execute(input: HandlerInput): HandlerResult {
                         val payloads = (1..fanOut).map { """{"item":$it}""" }
-                        return HandlerResult.Completed(result = null, items = objectMapper.writeValueAsString(payloads))
+                        return HandlerResult.Completed(result = null, items = payloads)
                     }
                 },
             )

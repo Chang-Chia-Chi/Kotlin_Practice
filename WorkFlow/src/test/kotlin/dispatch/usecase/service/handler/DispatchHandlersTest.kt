@@ -49,10 +49,7 @@ class DispatchHandlersTest {
                 ) as HandlerResult.Completed
 
             assertNotNull(output.items)
-            val arr = objectMapper.readTree(output.items)
-            assertTrue(arr.isArray)
-            assertTrue(arr[0].has("configId"))
-            assertTrue(arr[0].has("batchToken"))
+            assertEquals(listOf("cfg1"), output.items)
 
             assertNotNull(output.result)
             assertNotNull(objectMapper.readTree(output.result)["batchToken"].asText())
@@ -98,13 +95,7 @@ class DispatchHandlersTest {
                 ) as HandlerResult.Completed
 
             assertNotNull(output.items)
-            val arr = objectMapper.readTree(output.items)
-            assertTrue(arr.isArray)
-            assertEquals(2, arr.size())
-            assertEquals("cfg1", arr[0]["configId"].asText())
-            assertEquals("custom-token", arr[0]["batchToken"].asText())
-            assertEquals("cfg2", arr[1]["configId"].asText())
-            assertEquals("custom-token", arr[1]["batchToken"].asText())
+            assertEquals(listOf("cfg1", "cfg2"), output.items)
 
             assertNotNull(output.result)
             assertEquals("custom-token", objectMapper.readTree(output.result)["batchToken"].asText())
@@ -139,11 +130,7 @@ class DispatchHandlersTest {
                 ) as HandlerResult.Completed
 
             assertNotNull(output.items)
-            val arr = objectMapper.readTree(output.items)
-            assertTrue(arr.isArray)
-            assertEquals(1, arr.size())
-            assertEquals("cfg1", arr[0]["configId"].asText())
-            assertEquals("20260404140000", arr[0]["batchToken"].asText())
+            assertEquals(listOf("cfg1"), output.items)
 
             assertNotNull(output.result)
             assertEquals("20260404140000", objectMapper.readTree(output.result)["batchToken"].asText())
