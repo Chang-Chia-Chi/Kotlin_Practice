@@ -17,12 +17,8 @@ class DispatchScatterHandler(
     private val configRepo: DispatchConfigRepository,
     private val resultStore: SimulationResultStore,
     private val objectMapper: ObjectMapper,
+    private val clock: BatchTokenClock = SystemBatchTokenClock(),
 ) : TransitionHandler {
-    private var batchTokenProvider: () -> String = { currentBatchToken() }
-
-    internal fun setBatchTokenProvider(provider: () -> String) {
-        this.batchTokenProvider = provider
-    }
 
     override suspend fun execute(input: HandlerInput): HandlerResult {
         val itemNode = input.item?.let { objectMapper.readTree(it) }
@@ -51,7 +47,7 @@ class DispatchScatterHandler(
 
     // Path B — cron: generate token, create batch, query all active configs
     private suspend fun handleCronTrigger(): Pair<List<String>, String> {
-        val token = batchTokenProvider()
+        val token = clock.generate()
         val configs = configRepo.findActiveConfigs(LocalDateTime.now())
         resultStore.createBatch(token, BatchStatus.NORMAL, configs.size)
         return toItems(configs) to token

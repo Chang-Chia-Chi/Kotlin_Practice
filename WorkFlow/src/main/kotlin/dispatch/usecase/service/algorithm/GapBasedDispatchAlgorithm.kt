@@ -11,7 +11,7 @@ import com.workflow.dispatch.usecase.port.inbound.algorithm.TerminationStrategy
 import java.math.BigDecimal
 
 class GapBasedDispatchAlgorithm(
-    private val gapComputer: GapComputer,
+    internal val gapComputer: GapComputer,
     override val candidateMatcher: CandidateMatcher,
     override val terminationStrategy: TerminationStrategy,
 ) : DispatchAlgorithm {
@@ -34,10 +34,10 @@ class GapBasedDispatchAlgorithm(
         val bomMapping = bomMappings?.get(siteEntry.id)
             ?: return TargetSelection.Selected(siteEntry.id, null, null, siteEntry.gap, null)
 
-        val bomTotal = siteCurrents[siteEntry.id] ?: BigDecimal.ZERO
+        val siteCurrent = siteCurrents[siteEntry.id] ?: BigDecimal.ZERO
         val bomEntries = bomMapping.targetAllocations.map { alloc ->
             val bomCurrent = bomCurrents[SiteBomKey(siteEntry.id, alloc.targetBomId)] ?: BigDecimal.ZERO
-            GapEntry(alloc.targetBomId, gapComputer.computeGap(bomCurrent, alloc.target, bomTotal), alloc.target)
+            GapEntry(alloc.targetBomId, gapComputer.computeGap(bomCurrent, alloc.target, siteCurrent), alloc.target)
         }
         val bomEntry = selectByGap(bomEntries, lastBomId) ?: return TargetSelection.NoTarget
 
