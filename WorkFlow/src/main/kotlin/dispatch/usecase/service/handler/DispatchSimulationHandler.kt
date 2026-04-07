@@ -29,7 +29,9 @@ class DispatchSimulationHandler(
     private val objectMapper: ObjectMapper,
 ) : TransitionHandler {
     override suspend fun execute(input: HandlerInput): HandlerResult {
-        val item = objectMapper.readTree(input.item!!)
+        val item = objectMapper.readTree(
+            requireNotNull(input.item) { "DispatchSimulationHandler requires a fan-out item; check workflow definition" }
+        )
         val configId = item["configId"].asText()
         val batchToken = item["batchToken"].asText()
 

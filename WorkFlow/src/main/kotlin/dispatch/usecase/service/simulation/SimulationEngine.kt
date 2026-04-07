@@ -61,7 +61,9 @@ class SimulationEngine(
             if (idx == null) {
                 val decision = algorithm.terminationStrategy
                     .onNoCandidate(selection.siteId, selection.targetBomId, context)
-                if (decision == TerminationDecision.STOP) break
+                when (decision) {
+                    TerminationDecision.STOP -> break
+                }
                 continue
             }
 
