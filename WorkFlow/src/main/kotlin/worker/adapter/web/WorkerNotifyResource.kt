@@ -19,7 +19,7 @@ class WorkerNotifyResource(
     private val notifier: WorkerNotifier,
 ) {
     @POST
-    fun notify(@QueryParam("queue") @DefaultValue("default") queue: String) {
+    fun notify(@QueryParam("queue") @DefaultValue(WorkerNotifier.DEFAULT_QUEUE) queue: String) {
         notifier.onRemoteSignal(queue)
     }
 }

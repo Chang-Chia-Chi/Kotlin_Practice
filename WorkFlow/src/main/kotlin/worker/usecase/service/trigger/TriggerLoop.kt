@@ -143,7 +143,6 @@ class TriggerLoop(
             }
         }
 
-        // Poll all drivers for results
         val settledTaskIds = mutableSetOf<String>()
         for ((type, driver) in drivers) {
             val results = try {
@@ -161,7 +160,7 @@ class TriggerLoop(
             }
         }
 
-        // Deadline enforcement — skip tasks already settled via poll results
+        // Deadline enforcement: skip tasks already settled in this sweep
         val now = Instant.now()
         for (task in deferred) {
             if (task.taskId !in settledTaskIds && task.deadlineAt != null && now.isAfter(task.deadlineAt)) {

@@ -17,6 +17,10 @@ import java.time.Duration
  * task claiming via SELECT FOR UPDATE SKIP LOCKED.
  */
 interface WorkerNotifier {
+    companion object {
+        const val DEFAULT_QUEUE = "default"
+    }
+
     /**
      * Signal that new work is available on [queueName].
      * Wakes local workers immediately and enqueues an asynchronous

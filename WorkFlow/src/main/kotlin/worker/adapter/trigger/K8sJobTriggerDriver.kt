@@ -119,7 +119,7 @@ class K8sJobTriggerDriver(
                     for (condition in conditions) {
                         if (condition.status != "True") continue
                         when (condition.type) {
-                            "Complete" -> {
+                            CONDITION_COMPLETE -> {
                                 if (!settledTaskIds.add(taskId)) return
                                 eventQueue.add(
                                     WatchEvent.Completed(taskId, meta.jobName, meta.namespace),
@@ -127,7 +127,7 @@ class K8sJobTriggerDriver(
                                 return
                             }
 
-                            "Failed" -> {
+                            CONDITION_FAILED -> {
                                 if (!settledTaskIds.add(taskId)) return
                                 eventQueue.add(
                                     WatchEvent.Failed(
@@ -257,4 +257,9 @@ class K8sJobTriggerDriver(
 
     /** Test accessor. */
     internal fun trackedCount(): Int = tracked.size
+
+    private companion object {
+        const val CONDITION_COMPLETE = "Complete"
+        const val CONDITION_FAILED = "Failed"
+    }
 }

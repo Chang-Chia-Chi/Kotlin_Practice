@@ -12,24 +12,29 @@ class MeteredTransitionHandler(
     private val meterRegistry: MeterRegistry,
 ) : TransitionHandler {
 
+    private val successTimer: Timer = Timer.builder("taskqueue_handler_duration_seconds")
+        .tag("handler", handlerKey)
+        .tag("status", "success")
+        .publishPercentileHistogram()
+        .register(meterRegistry)
+
+    private val failureTimer: Timer = Timer.builder("taskqueue_handler_duration_seconds")
+        .tag("handler", handlerKey)
+        .tag("status", "failure")
+        .publishPercentileHistogram()
+        .register(meterRegistry)
+
     override fun key(): String = delegate.key()
 
     override suspend fun execute(input: HandlerInput): HandlerResult {
         val sample = Timer.start(meterRegistry)
         try {
             val output = delegate.execute(input)
-            sample.stop(timer("success"))
+            sample.stop(successTimer)
             return output
         } catch (e: Exception) {
-            sample.stop(timer("failure"))
+            sample.stop(failureTimer)
             throw e
         }
     }
-
-    private fun timer(status: String): Timer =
-        Timer.builder("taskqueue_handler_duration_seconds")
-            .tag("handler", handlerKey)
-            .tag("status", status)
-            .publishPercentileHistogram()
-            .register(meterRegistry)
 }

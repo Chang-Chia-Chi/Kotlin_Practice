@@ -198,7 +198,7 @@ class WorkerLoop(
         fallbackPollInterval: Duration,
         maxBatchSize: Int,
     ) = withContext(MDCContext(mapOf("worker_id" to workerId))) {
-        val queueName = "default"
+        val queueName = WorkerNotifier.DEFAULT_QUEUE
         val tasks =
             suspendCatching { taskRepo.claimNext(workerId, maxBatchSize, queueName) }
                 .getOrElse { e ->
