@@ -44,34 +44,35 @@ data class Completed(val result: String?, val items: List<String>? = null) : Han
 
 Handlers return a typed list of ID strings. `DefaultPhaseGate` owns serialization (List → JSON) before TX1 and deserialization (JSON → List) on the recovery read path.
 
-### 3. Strip shared context from items
+### 3. Items are JSON object strings (item-specific fields only)
 
-`batchToken` is identical across all fan-out items. Handlers should return only the discriminating ID per item; shared context is carried in `task.result` (already durable in TX1).
+`batchToken` is identical across all fan-out items. Shared context is carried in `task.result` (already durable in TX1). Each item carries only its discriminating fields as a JSON object string.
 
 `DispatchScatterHandler` returns:
 ```kotlin
 HandlerResult.Completed(
     result = """{"batchToken":"$token"}""",
-    items = configs.map { it.id },  // List<String> — plain configId strings
+    items = configs.map { objectMapper.writeValueAsString(mapOf("configId" to it.id)) },
+    // List<String> — each element is a JSON object string, e.g. "{\"configId\":\"uuid1\"}"
 )
 ```
 
 Stored in `task.items`:
 ```json
-["uuid1", "uuid2", "uuid3"]
+["{\"configId\":\"uuid1\"}", "{\"configId\":\"uuid2\"}", "{\"configId\":\"uuid3\"}"]
 ```
 
 ### 4. PhaseGate assembles full child task items
 
-`FanOutDefinition` has no `inputs` field, and `DispatchSimulationHandler` reads both `configId` and `batchToken` from `input.item`. To preserve this contract without workflow DSL changes, `DefaultPhaseGate` assembles the full child `item` during ScatterExpand by merging each raw item string with the scatter task's `resultJson` fields:
+`FanOutDefinition` has no `inputs` field, and `DispatchSimulationHandler` reads both `configId` and `batchToken` from `input.item`. To preserve this contract without workflow DSL changes, `DefaultPhaseGate.assembleChildItem` merges each stored item JSON object with the scatter task's `resultJson` fields — scatter result forms the base, item fields win on collision:
 
 ```
-stored items:    ["id1", "id2"]
+stored item:     {"configId": "id1"}
 scatter result:  {"batchToken": "tok"}
 child task item: {"configId": "id1", "batchToken": "tok"}   ← assembled by PhaseGate
 ```
 
-`DispatchSimulationHandler` requires **no changes** — it continues reading `configId` and `batchToken` from `input.item`.
+`assembleChildItem` is generic — it works for any scatter handler that returns JSON object strings. `DispatchSimulationHandler` requires **no changes** — it continues reading `configId` and `batchToken` from `input.item`.
 
 ### 5. Durability — TX1 persists items
 
@@ -90,14 +91,19 @@ Recovery path (`recoverStuckWorkflow`): detects SCATTER tasks that are COMPLETED
 
 ```
 DispatchScatterHandler.execute()
-  → HandlerResult.Completed(result={"batchToken":tok}, items=["id1","id2",...])
+  → HandlerResult.Completed(
+        result={"batchToken":tok},
+        items=["{\"configId\":\"id1\"}", "{\"configId\":\"id2\"}", ...]
+    )
 
 WorkerLoop.executeAndReport()
   → TaskSettler.settle(resultJson, itemsJson=serialize(items))
 
 DefaultPhaseGate.onTaskCompleted()
-  TX1: task.result = {"batchToken":tok}, task.items = ["id1","id2",...]   ← durable
-  TX2: merge each id + scatter resultJson → spawn PARALLEL tasks
+  TX1: task.result = {"batchToken":tok}
+       task.items  = ["{\"configId\":\"id1\"}", "{\"configId\":\"id2\"}"]   ← durable
+  TX2: assembleChildItem(rawItem, scatterResultJson) per item
+       → merges {"configId":"id1"} + {"batchToken":"tok"}
        child task.item = {"configId":"id1","batchToken":"tok"}
 
 DispatchSimulationHandler.execute()

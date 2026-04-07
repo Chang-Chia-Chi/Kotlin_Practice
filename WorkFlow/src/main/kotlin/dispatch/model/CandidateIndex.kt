@@ -25,7 +25,10 @@ class CandidateIndex(private val candidates: List<CandidateProduct>) {
         val iter = pool.iterator()
         while (iter.hasNext()) {
             val idx = iter.next()
-            if (consumed[idx]) { iter.remove(); continue }
+            if (consumed[idx]) {
+                iter.remove() // prune stale entry so the pool stays compact on future scans
+                continue
+            }
             if (predicate(candidates[idx])) return idx
         }
         return null

@@ -1,7 +1,9 @@
 package com.workflow.dispatch.usecase.service.handler
 
+import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.workflow.dispatch.model.BatchStatus
+import com.workflow.dispatch.model.DispatchConfig
 import com.workflow.dispatch.usecase.port.outbound.persistence.DispatchConfigRepository
 import com.workflow.dispatch.usecase.port.outbound.persistence.SimulationResultStore
 import com.workflow.worker.usecase.port.inbound.execution.HandlerInput
@@ -27,22 +29,34 @@ class DispatchScatterHandler(
         val providedToken = itemNode?.get("batchToken")?.takeIf { !it.isNull }?.asText()
         val configIdsNode = itemNode?.get("configIds")?.takeIf { it.isArray }
 
-        val (configIds, token) =
-            if (providedToken != null && configIdsNode != null) {
-                // Path A — dry-run: batch already created by endpoint, configs supplied explicitly
-                val configs = configIdsNode.map { configRepo.findById(it.asText()) }
-                configs.map { objectMapper.writeValueAsString(mapOf("configId" to it.id)) } to providedToken
-            } else {
-                // Path B — cron: generate token, create batch, query all active configs
-                val now = LocalDateTime.now()
-                val batchToken = batchTokenProvider()
-                val configs = configRepo.findActiveConfigs(now)
-                resultStore.createBatch(batchToken, BatchStatus.NORMAL, configs.size)
-                configs.map { objectMapper.writeValueAsString(mapOf("configId" to it.id)) } to batchToken
-            }
+        val (items, token) = if (providedToken != null && configIdsNode != null) {
+            handleDryRun(configIdsNode, providedToken)
+        } else {
+            handleCronTrigger()
+        }
         return HandlerResult.Completed(
             result = objectMapper.writeValueAsString(mapOf("batchToken" to token)),
-            items = configIds,
+            items = items,
         )
     }
+
+    // Path A — dry-run: batch already created by endpoint, configs supplied explicitly
+    private suspend fun handleDryRun(
+        configIdsNode: JsonNode,
+        token: String,
+    ): Pair<List<String>, String> {
+        val configs = configIdsNode.map { configRepo.findById(it.asText()) }
+        return toItems(configs) to token
+    }
+
+    // Path B — cron: generate token, create batch, query all active configs
+    private suspend fun handleCronTrigger(): Pair<List<String>, String> {
+        val token = batchTokenProvider()
+        val configs = configRepo.findActiveConfigs(LocalDateTime.now())
+        resultStore.createBatch(token, BatchStatus.NORMAL, configs.size)
+        return toItems(configs) to token
+    }
+
+    private fun toItems(configs: List<DispatchConfig>): List<String> =
+        configs.map { objectMapper.writeValueAsString(mapOf("configId" to it.id)) }
 }
