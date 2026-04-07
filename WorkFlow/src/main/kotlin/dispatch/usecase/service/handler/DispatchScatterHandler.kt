@@ -31,14 +31,14 @@ class DispatchScatterHandler(
             if (providedToken != null && configIdsNode != null) {
                 // Path A — dry-run: batch already created by endpoint, configs supplied explicitly
                 val configs = configIdsNode.map { configRepo.findById(it.asText()) }
-                configs.map { it.id } to providedToken
+                configs.map { objectMapper.writeValueAsString(mapOf("configId" to it.id)) } to providedToken
             } else {
                 // Path B — cron: generate token, create batch, query all active configs
                 val now = LocalDateTime.now()
                 val batchToken = batchTokenProvider()
                 val configs = configRepo.findActiveConfigs(now)
                 resultStore.createBatch(batchToken, BatchStatus.NORMAL, configs.size)
-                configs.map { it.id } to batchToken
+                configs.map { objectMapper.writeValueAsString(mapOf("configId" to it.id)) } to batchToken
             }
         return HandlerResult.Completed(
             result = objectMapper.writeValueAsString(mapOf("batchToken" to token)),

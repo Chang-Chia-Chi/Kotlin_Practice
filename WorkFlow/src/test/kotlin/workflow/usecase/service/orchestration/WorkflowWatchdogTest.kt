@@ -1624,7 +1624,7 @@ class WorkflowWatchdogTest {
         private val seqParallel = 2
         private val batchToken = "test-batch-token"
         private val configIds = listOf("cfg-id-1", "cfg-id-2", "cfg-id-3")
-        private val itemsJson = """["cfg-id-1","cfg-id-2","cfg-id-3"]"""
+        private val itemsJson = """["{\"configId\":\"cfg-id-1\"}","{\"configId\":\"cfg-id-2\"}","{\"configId\":\"cfg-id-3\"}"]"""
         private val scatterResultJson = """{"batchToken":"$batchToken"}"""
 
         @Test

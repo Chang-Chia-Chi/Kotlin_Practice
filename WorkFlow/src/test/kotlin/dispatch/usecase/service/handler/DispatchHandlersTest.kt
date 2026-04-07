@@ -49,7 +49,7 @@ class DispatchHandlersTest {
                 ) as HandlerResult.Completed
 
             assertNotNull(output.items)
-            assertEquals(listOf("cfg1"), output.items)
+            assertEquals(listOf("""{"configId":"cfg1"}"""), output.items)
 
             assertNotNull(output.result)
             assertNotNull(objectMapper.readTree(output.result)["batchToken"].asText())
@@ -95,7 +95,7 @@ class DispatchHandlersTest {
                 ) as HandlerResult.Completed
 
             assertNotNull(output.items)
-            assertEquals(listOf("cfg1", "cfg2"), output.items)
+            assertEquals(listOf("""{"configId":"cfg1"}""", """{"configId":"cfg2"}"""), output.items)
 
             assertNotNull(output.result)
             assertEquals("custom-token", objectMapper.readTree(output.result)["batchToken"].asText())
@@ -130,7 +130,7 @@ class DispatchHandlersTest {
                 ) as HandlerResult.Completed
 
             assertNotNull(output.items)
-            assertEquals(listOf("cfg1"), output.items)
+            assertEquals(listOf("""{"configId":"cfg1"}"""), output.items)
 
             assertNotNull(output.result)
             assertEquals("20260404140000", objectMapper.readTree(output.result)["batchToken"].asText())

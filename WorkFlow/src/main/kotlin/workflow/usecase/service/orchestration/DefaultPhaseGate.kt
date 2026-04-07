@@ -382,14 +382,16 @@ class DefaultPhaseGate(
     }
 
     /**
-     * Assembles a PARALLEL child task's item string.
+     * Assembles a PARALLEL child task's item string by merging two JSON objects.
      *
-     * If [scatterResultJson] has fields, treats [rawItem] as a discriminating ID (configId) and
-     * merges it with the scatter result's fields. This preserves the shared context (e.g. batchToken)
-     * that all child tasks need, while keeping [rawItem] values small in storage.
+     * [rawItem] must be a JSON object string produced by the scatter handler. [scatterResultJson]
+     * carries shared context for all children (e.g. a batch token). Fields from [scatterResultJson]
+     * form the base; fields from [rawItem] are applied on top so item-specific values always win
+     * on collision.
      *
-     * If [scatterResultJson] is null or empty, [rawItem] is returned as-is to support workflows
-     * where children carry self-contained item strings.
+     * If either argument is null, blank, or not a JSON object, [rawItem] is returned as-is.
+     * This preserves backward compatibility for workflows where children carry self-contained
+     * item strings or where no shared scatter result exists.
      */
     private fun assembleChildItem(
         rawItem: String,
@@ -403,9 +405,16 @@ class DefaultPhaseGate(
                 return rawItem
             }
         if (!resultNode.isObject || resultNode.size() == 0) return rawItem
+        val itemNode =
+            try {
+                objectMapper.readTree(rawItem)
+            } catch (_: Exception) {
+                return rawItem
+            }
+        if (!itemNode.isObject) return rawItem
         val assembled = objectMapper.createObjectNode()
-        resultNode.fields().forEach { (k, v) -> assembled.set<JsonNode>(k, v) }
-        assembled.put("configId", rawItem) // written last so rawItem always wins over any configId in resultNode
+        resultNode.fields().forEach { (k, v) -> assembled.set<JsonNode>(k, v) } // shared context base
+        itemNode.fields().forEach { (k, v) -> assembled.set<JsonNode>(k, v) }   // item fields win
         return assembled.toString()
     }
 
