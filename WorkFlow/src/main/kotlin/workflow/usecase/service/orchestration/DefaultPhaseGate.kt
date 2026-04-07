@@ -1,5 +1,6 @@
 package com.workflow.workflow.usecase.service.orchestration
 
+import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.readValue
 import com.workflow.infrastructure.persistence.inTransactionSuspend
@@ -55,10 +56,10 @@ class DefaultPhaseGate(
         claimedAt: Instant?,
         itemsJson: String?,
     ) {
-        // TX1: Commit task status update so it is visible to all concurrent readers.
+        // TX1: Commit task status update — including items — so both are visible to all concurrent readers.
         val updated =
             jdbi.inTransactionSuspend<Boolean, Exception> { handle ->
-                taskRepo.updateStatusWithHandle(handle, taskId, status, resultJson, claimedBy, claimedAt)
+                taskRepo.updateStatusWithHandle(handle, taskId, status, resultJson, claimedBy, claimedAt, itemsJson)
             }
         if (!updated) return
 
@@ -114,6 +115,11 @@ class DefaultPhaseGate(
                     }
 
                     is PhaseDecision.ScatterExpand -> {
+                        // Live recount under lock: recoverStuckWorkflow may have committed PARALLEL tasks
+                        // between snapshot build and now. snapshot.allCounts is stale under READ COMMITTED.
+                        val existingParallelCount =
+                            taskRepo.countNonTerminalWithHandle(handle, workflowId, decision.parallelInfo.sequenceNumber)
+                        if (existingParallelCount > 0) return@inTransactionSuspend emptyList()
                         val parallelTasks =
                             decision.items.map {
                                 createTaskForActivity(
@@ -122,7 +128,7 @@ class DefaultPhaseGate(
                                     decision.parallelInfo.sequenceNumber,
                                     decision.parallelInfo.activity,
                                     snapshot.now,
-                                    item = it,
+                                    item = assembleChildItem(it, resultJson),
                                 )
                             }
                         taskRepo.insertBatchWithHandle(handle, parallelTasks)
@@ -219,7 +225,41 @@ class DefaultPhaseGate(
                         }
 
                         PhaseType.PARALLEL -> {
-                            continue
+                            // SCATTER predecessor is always exactly one sequence.
+                            val scatterSeq = seqInfo.predecessorSequences.firstOrNull() ?: continue
+                            val scatterTask =
+                                snapshot.tasksBySeq[scatterSeq]
+                                    ?.firstOrNull { it.status == TaskStatus.COMPLETED }
+                                    ?: continue
+
+                            val storedItemsJson = scatterTask.itemsJson ?: run {
+                                log.warn(
+                                    "SCATTER task {} has no stored items; skipping PARALLEL recovery for workflow {}",
+                                    scatterTask.id,
+                                    workflowId,
+                                )
+                                continue
+                            }
+                            val itemList: List<String> =
+                                try {
+                                    objectMapper.readValue(storedItemsJson)
+                                } catch (_: Exception) {
+                                    continue
+                                }
+
+                            val parallelTasks =
+                                itemList.map { rawItem ->
+                                    createTaskForActivity(
+                                        workflowId,
+                                        seqInfo.activityName,
+                                        seq,
+                                        seqInfo.activity,
+                                        snapshot.now,
+                                        item = assembleChildItem(rawItem, scatterTask.resultJson),
+                                    )
+                                }
+                            taskRepo.insertBatchWithHandle(handle, parallelTasks)
+                            signalQueueSet += seqInfo.activity.queue
                         }
 
                         PhaseType.LINEAR -> {
@@ -339,6 +379,34 @@ class DefaultPhaseGate(
                 WorkflowStatus.RUNNING,
             )
         if (statusUpdated) taskRepo.cancelPendingTasksWithHandle(handle, workflowId)
+    }
+
+    /**
+     * Assembles a PARALLEL child task's item string.
+     *
+     * If [scatterResultJson] has fields, treats [rawItem] as a discriminating ID (configId) and
+     * merges it with the scatter result's fields. This preserves the shared context (e.g. batchToken)
+     * that all child tasks need, while keeping [rawItem] values small in storage.
+     *
+     * If [scatterResultJson] is null or empty, [rawItem] is returned as-is to support workflows
+     * where children carry self-contained item strings.
+     */
+    private fun assembleChildItem(
+        rawItem: String,
+        scatterResultJson: String?,
+    ): String {
+        if (scatterResultJson.isNullOrBlank()) return rawItem
+        val resultNode =
+            try {
+                objectMapper.readTree(scatterResultJson)
+            } catch (_: Exception) {
+                return rawItem
+            }
+        if (!resultNode.isObject || resultNode.size() == 0) return rawItem
+        val assembled = objectMapper.createObjectNode()
+        resultNode.fields().forEach { (k, v) -> assembled.set<JsonNode>(k, v) }
+        assembled.put("configId", rawItem) // written last so rawItem always wins over any configId in resultNode
+        return assembled.toString()
     }
 
     private fun insertMixedTaskBatch(

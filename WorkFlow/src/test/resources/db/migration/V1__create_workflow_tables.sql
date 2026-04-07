@@ -39,6 +39,7 @@ CREATE TABLE task (
     queue_name       VARCHAR2(100)  DEFAULT 'default'    NOT NULL,
     trigger_type     VARCHAR2(50),
     trigger_meta     CLOB,
+    items            CLOB,
     CONSTRAINT pk_task PRIMARY KEY (id),
     CONSTRAINT fk_task_workflow FOREIGN KEY (workflow_id) REFERENCES workflow (id),
     CONSTRAINT chk_task_status CHECK (status IN (

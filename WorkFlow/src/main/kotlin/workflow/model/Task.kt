@@ -25,6 +25,7 @@ data class Task(
     val queueName: String = "default",
     val triggerType: String? = null,
     val triggerMeta: String? = null,
+    val itemsJson: String? = null,
 )
 
 internal fun createTaskForActivity(

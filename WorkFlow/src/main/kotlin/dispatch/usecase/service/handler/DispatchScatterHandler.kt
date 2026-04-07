@@ -27,22 +27,22 @@ class DispatchScatterHandler(
         val providedToken = itemNode?.get("batchToken")?.takeIf { !it.isNull }?.asText()
         val configIdsNode = itemNode?.get("configIds")?.takeIf { it.isArray }
 
-        val (items, token) =
+        val (configIds, token) =
             if (providedToken != null && configIdsNode != null) {
                 // Path A — dry-run: batch already created by endpoint, configs supplied explicitly
                 val configs = configIdsNode.map { configRepo.findById(it.asText()) }
-                configs.map { mapOf("configId" to it.id, "batchToken" to providedToken) } to providedToken
+                configs.map { it.id } to providedToken
             } else {
                 // Path B — cron: generate token, create batch, query all active configs
                 val now = LocalDateTime.now()
                 val batchToken = batchTokenProvider()
                 val configs = configRepo.findActiveConfigs(now)
                 resultStore.createBatch(batchToken, BatchStatus.NORMAL, configs.size)
-                configs.map { mapOf("configId" to it.id, "batchToken" to batchToken) } to batchToken
+                configs.map { it.id } to batchToken
             }
         return HandlerResult.Completed(
             result = objectMapper.writeValueAsString(mapOf("batchToken" to token)),
-            items = objectMapper.writeValueAsString(items),
+            items = configIds,
         )
     }
 }

@@ -271,7 +271,7 @@ class WorkerLoop(
                         sequenceNumber = task.sequenceNumber,
                         status = TaskStatus.COMPLETED,
                         resultJson = result.result,
-                        itemsJson = result.items,
+                        itemsJson = result.items?.let { objectMapper.writeValueAsString(it) },
                         claimedBy = task.claimedBy,
                         claimedAt = task.claimedAt,
                     )
