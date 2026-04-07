@@ -1846,5 +1846,54 @@ class WorkflowWatchdogTest {
 
             assertEquals(0, countTasksDirect(wfId, seqParallel), "no PARALLEL tasks created for corrupt items")
         }
+
+        @Test
+        fun `onTaskCompleted does not re-expand scatter when PARALLEL tasks already exist but are terminal`() = runTest {
+            val def = fanOutThenLinearDef()
+            val wfId = randomId()
+            insertWorkflowDirect(makeWorkflow(id = wfId, definition = def))
+
+            val scatterTaskId = randomId()
+            insertTaskDirect(
+                makeTask(
+                    id = scatterTaskId,
+                    workflowId = wfId,
+                    activityName = "scatter-activity",
+                    sequenceNumber = seqScatter,
+                    status = TaskStatus.PENDING,
+                    handlerKey = "scatter.handler",
+                    itemsJson = itemsJson,
+                ),
+            )
+
+            // Simulate the race: recovery already committed N PARALLEL tasks, and they have since completed.
+            configIds.forEach { configId ->
+                insertTaskDirect(
+                    makeTask(
+                        workflowId = wfId,
+                        sequenceNumber = seqParallel,
+                        status = TaskStatus.COMPLETED,
+                        completedAt = now(),
+                        resultJson = """{"configId":"$configId"}""",
+                    ),
+                )
+            }
+
+            // onTaskCompleted fires on the scatter task — must not spawn a second batch.
+            barrier.onTaskCompleted(
+                taskId = scatterTaskId,
+                workflowId = wfId,
+                sequenceNumber = seqScatter,
+                status = TaskStatus.COMPLETED,
+                resultJson = scatterResultJson,
+                itemsJson = itemsJson,
+            )
+
+            assertEquals(
+                configIds.size,
+                countTasksDirect(wfId, seqParallel),
+                "no second batch of PARALLEL tasks when terminal tasks already occupy the sequence",
+            )
+        }
     }
 }
