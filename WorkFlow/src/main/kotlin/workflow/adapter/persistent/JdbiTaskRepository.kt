@@ -284,6 +284,22 @@ class JdbiTaskRepository(
             .mapTo(Int::class.java)
             .one()
 
+    override fun countTotalBySequenceWithHandle(
+        handle: Handle,
+        workflowId: String,
+        sequenceNumber: Int,
+    ): Int =
+        handle
+            .createQuery(
+                """
+            SELECT COUNT(*) FROM task
+            WHERE workflow_id = :workflowId AND sequence_number = :seq
+            """,
+            ).bind("workflowId", workflowId)
+            .bind("seq", sequenceNumber)
+            .mapTo(Int::class.java)
+            .one()
+
     // Cancels PENDING, WAITING_FOR_SIGNAL, and DEFERRED tasks for a workflow.
     override fun cancelPendingTasksWithHandle(handle: Handle, workflowId: String): Int {
         return handle.createUpdate(

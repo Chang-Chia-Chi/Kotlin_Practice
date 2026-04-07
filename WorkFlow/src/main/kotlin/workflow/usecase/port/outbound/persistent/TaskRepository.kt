@@ -22,6 +22,7 @@ interface TaskRepository {
 
     fun updateStatusWithHandle(handle: Handle, id: String, newStatus: TaskStatus, resultJson: String? = null, claimedBy: String? = null, claimedAt: Instant? = null, itemsJson: String? = null): Boolean
     fun countNonTerminalWithHandle(handle: Handle, workflowId: String, sequenceNumber: Int): Int
+    fun countTotalBySequenceWithHandle(handle: Handle, workflowId: String, sequenceNumber: Int): Int
     fun cancelPendingTasksWithHandle(handle: Handle, workflowId: String): Int
     fun insertBatchWithHandle(handle: Handle, tasks: List<Task>)
     fun replayDeadLetterBatchWithHandle(handle: Handle, workflowId: String): Int

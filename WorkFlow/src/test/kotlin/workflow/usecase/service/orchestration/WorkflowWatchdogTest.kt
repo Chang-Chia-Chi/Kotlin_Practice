@@ -1790,5 +1790,61 @@ class WorkflowWatchdogTest {
                 "recovery after normal completion produces no duplicates",
             )
         }
+
+        @Test
+        fun `onTaskCompleted persists itemsJson to task items column in TX1`() = runTest {
+            val def = fanOutThenLinearDef()
+            val wfId = randomId()
+            insertWorkflowDirect(makeWorkflow(id = wfId, definition = def))
+
+            val scatterTaskId = randomId()
+            insertTaskDirect(
+                makeTask(
+                    id = scatterTaskId,
+                    workflowId = wfId,
+                    activityName = "scatter-activity",
+                    sequenceNumber = seqScatter,
+                    status = TaskStatus.PENDING,
+                    handlerKey = "scatter.handler",
+                ),
+            )
+
+            barrier.onTaskCompleted(
+                taskId = scatterTaskId,
+                workflowId = wfId,
+                sequenceNumber = seqScatter,
+                status = TaskStatus.COMPLETED,
+                resultJson = scatterResultJson,
+                itemsJson = itemsJson,
+            )
+
+            val row = readTaskDirect(scatterTaskId)
+            assertNotNull(row, "task row must exist")
+            assertEquals(itemsJson, row["ITEMS"], "task.items persisted by TX1")
+        }
+
+        @Test
+        fun `recovery skips SCATTER task when itemsJson is corrupt`() = runTest {
+            val def = fanOutThenLinearDef()
+            val wfId = randomId()
+            insertWorkflowDirect(makeWorkflow(id = wfId, definition = def))
+
+            insertTaskDirect(
+                makeTask(
+                    workflowId = wfId,
+                    activityName = "scatter-activity",
+                    sequenceNumber = seqScatter,
+                    status = TaskStatus.COMPLETED,
+                    handlerKey = "scatter.handler",
+                    resultJson = scatterResultJson,
+                    completedAt = now(),
+                    itemsJson = "not-valid-json",
+                ),
+            )
+
+            barrier.recoverStuckWorkflow(wfId)
+
+            assertEquals(0, countTasksDirect(wfId, seqParallel), "no PARALLEL tasks created for corrupt items")
+        }
     }
 }

@@ -117,8 +117,9 @@ class DefaultPhaseGate(
                     is PhaseDecision.ScatterExpand -> {
                         // Live recount under lock: recoverStuckWorkflow may have committed PARALLEL tasks
                         // between snapshot build and now. snapshot.allCounts is stale under READ COMMITTED.
+                        // Use total count (not non-terminal) to catch already-terminal PARALLEL tasks too.
                         val existingParallelCount =
-                            taskRepo.countNonTerminalWithHandle(handle, workflowId, decision.parallelInfo.sequenceNumber)
+                            taskRepo.countTotalBySequenceWithHandle(handle, workflowId, decision.parallelInfo.sequenceNumber)
                         if (existingParallelCount > 0) return@inTransactionSuspend emptyList()
                         val parallelTasks =
                             decision.items.map {
@@ -243,7 +244,13 @@ class DefaultPhaseGate(
                             val itemList: List<String> =
                                 try {
                                     objectMapper.readValue(storedItemsJson)
-                                } catch (_: Exception) {
+                                } catch (e: Exception) {
+                                    log.warn(
+                                        "recoverStuckWorkflow: corrupt items JSON for workflow={} seq={} — skipping",
+                                        workflowId,
+                                        seq,
+                                        e,
+                                    )
                                     continue
                                 }
 
