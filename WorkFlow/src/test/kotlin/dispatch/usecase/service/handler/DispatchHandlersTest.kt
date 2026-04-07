@@ -19,6 +19,7 @@ import org.junit.jupiter.api.Test
 import org.mockito.kotlin.*
 import java.math.BigDecimal
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -138,6 +139,21 @@ class DispatchHandlersTest {
             verify(configRepo).findActiveConfigs(any())
             verify(configRepo, never()).findById(any())
             verify(resultStore).createBatch(eq("20260404140000"), eq(BatchStatus.NORMAL), eq(1))
+        }
+
+    @Test
+    fun `simulation handler throws descriptive error when item is null`() =
+        runTest {
+            val handler =
+                DispatchSimulationHandler(
+                    mock(), mock(), mock(), mock(), mock(), mock(), mock(),
+                    DispatchPathBuilder("prod"),
+                    objectMapper,
+                )
+            val ex = assertFailsWith<IllegalArgumentException> {
+                handler.execute(HandlerInput("t1", "w1", 2, null, null))
+            }
+            assertTrue(ex.message!!.contains("DispatchSimulationHandler"))
         }
 
     @Test
