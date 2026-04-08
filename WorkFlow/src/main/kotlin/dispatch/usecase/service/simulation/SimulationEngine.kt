@@ -15,6 +15,9 @@ class SimulationEngine(
         baseline: Baseline,
     ): SimulationResult {
         config.bomMappings?.forEach { (siteId, mapping) ->
+            require(mapping.targetAllocations.isNotEmpty()) {
+                "Site $siteId has empty targetAllocations"
+            }
             require(mapping.sourceBomId.startsWith(config.sourceBomPrefix)) {
                 "Site $siteId LV2 sourceBomId '${mapping.sourceBomId}' " +
                     "must start with LV1 prefix '${config.sourceBomPrefix}'"

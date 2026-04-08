@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test
 import java.math.BigDecimal
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
+import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 class SimulationEngineTest {
@@ -790,5 +791,23 @@ class SimulationEngineTest {
 
         assertEquals(2, result.decisions.size)
         assertTrue(result.decisions.all { it.targetBomId == "tgt-1" })
+    }
+
+    @Test
+    fun `simulate throws when a site has empty targetAllocations`() {
+        val config = DispatchConfig(
+            id = "cfg", mode = DispatchMode.QTY, algorithmId = "default",
+            sourceBomPrefix = "src",
+            siteTargets = listOf(SiteTarget("A", BigDecimal("100"))),
+            bomMappings = mapOf(
+                "A" to BomMapping(sourceBomId = "src", targetAllocations = emptyList()),
+            ),
+        )
+        val candidates = listOf(CandidateProduct("p1", "src", 1))
+        val baseline = Baseline(siteAllocations = emptyMap(), bomAllocations = emptyMap())
+
+        assertFailsWith<IllegalArgumentException> {
+            engine.simulate(config, candidates, baseline)
+        }
     }
 }
