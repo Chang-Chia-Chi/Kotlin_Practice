@@ -37,6 +37,8 @@ class SimulationEngine(
                 }
             }?.toMap() ?: emptyMap()
 
+        // Safety cap: accommodates future skip-site strategies that consume iterations without consuming a candidate.
+        // With FailFastTermination (no skips), the real max is candidates.size.
         val maxIterations = candidates.size * config.siteTargets.size
         var iterations = 0
 
@@ -64,7 +66,6 @@ class SimulationEngine(
                 when (decision) {
                     TerminationDecision.STOP -> break
                 }
-                continue
             }
 
             val candidate = index[idx]
