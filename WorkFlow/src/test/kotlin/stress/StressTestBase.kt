@@ -125,6 +125,7 @@ abstract class StressTestBase {
             override fun maxBatchSize() = 16
             override fun podIp() = "localhost"
             override fun serviceName() = "workflow-engine"
+            override fun autoStart() = false
         }
     }
 

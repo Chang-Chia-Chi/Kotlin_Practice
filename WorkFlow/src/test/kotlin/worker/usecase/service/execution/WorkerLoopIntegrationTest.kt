@@ -62,6 +62,7 @@ class WorkerLoopIntegrationTest {
         override fun maxBatchSize(): Int = 1
         override fun podIp(): String = "localhost"
         override fun serviceName(): String = "workflow-engine"
+        override fun autoStart(): Boolean = false
     }
 
     private val testShutdownConfig = object : ShutdownConfig {

@@ -91,6 +91,7 @@ class TriggerLoopIntegrationTest {
         val triggerLoopConfig = object : TriggerLoopConfig {
             override fun sweepInterval(): Duration = Duration.ofSeconds(60)
             override fun sqlMaxConcurrent(): Int = 2
+            override fun autoStart(): Boolean = false
         }
         val shutdownConfig = object : ShutdownConfig {
             override fun globalTimeout(): Duration = Duration.ofSeconds(30)

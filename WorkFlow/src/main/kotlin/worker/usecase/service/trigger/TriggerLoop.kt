@@ -72,6 +72,7 @@ class TriggerLoop(
         meterRegistry.counter("trigger_settled_total", "type", type, "outcome", outcome)
 
     fun onStart(@Observes ev: StartupEvent) {
+        if (!triggerLoopConfig.autoStart()) return
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO.limitedParallelism(1))
         start(scope)
     }

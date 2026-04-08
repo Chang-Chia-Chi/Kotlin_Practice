@@ -22,4 +22,7 @@ interface WorkerLoopConfig {
     fun podIp(): String
     @WithDefault("workflow-engine")
     fun serviceName(): String
+
+    @WithDefault("true")
+    fun autoStart(): Boolean
 }

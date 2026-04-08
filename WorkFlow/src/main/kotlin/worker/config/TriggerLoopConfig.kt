@@ -11,4 +11,7 @@ interface TriggerLoopConfig {
 
     @WithDefault("5")
     fun sqlMaxConcurrent(): Int
+
+    @WithDefault("true")
+    fun autoStart(): Boolean
 }
