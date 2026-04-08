@@ -17,15 +17,12 @@ class QtyCandidateMatcher : CandidateMatcher {
         bomTarget: TargetBomAllocation?,
     ): Int? {
         val currentSiteQty = context.siteCurrents[siteTarget.siteId] ?: BigDecimal.ZERO
-        val currentBomQty = if (bomTarget != null) {
-            context.bomCurrents[SiteBomKey(siteTarget.siteId, bomTarget.targetBomId)]
-                ?: BigDecimal.ZERO
-        } else null
 
         return index.findFirst(sourceBomConstraint) { candidate ->
             val qty = candidate.qty.toBigDecimal()
             val siteFits = currentSiteQty + qty <= siteTarget.target
-            val bomFits = currentBomQty == null || currentBomQty + qty <= bomTarget!!.target
+            val bomFits = bomTarget == null ||
+                (context.bomCurrents[SiteBomKey(siteTarget.siteId, bomTarget.targetBomId)] ?: BigDecimal.ZERO) + qty <= bomTarget.target
             siteFits && bomFits
         }
     }
