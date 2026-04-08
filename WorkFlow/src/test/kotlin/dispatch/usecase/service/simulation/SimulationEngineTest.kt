@@ -811,4 +811,28 @@ class SimulationEngineTest {
         }
         assertEquals("Site A has empty targetAllocations", ex.message)
     }
+
+    @Test
+    fun `simulate runs normally when all selected bom ids are in bomTargetMap`() {
+        // This is a consistency smoke test: the algorithm must only select bomIds
+        // that exist in the config's targetAllocations (and therefore in bomTargetMap).
+        val config = DispatchConfig(
+            id = "cfg", mode = DispatchMode.QTY, algorithmId = "default",
+            sourceBomPrefix = "src",
+            siteTargets = listOf(SiteTarget("A", BigDecimal("100"))),
+            bomMappings = mapOf(
+                "A" to BomMapping(
+                    sourceBomId = "src-bom",
+                    targetAllocations = listOf(TargetBomAllocation("tgt-1", BigDecimal("100"))),
+                ),
+            ),
+        )
+        val candidates = listOf(CandidateProduct("p1", "src-bom", 5))
+        val baseline = Baseline(siteAllocations = emptyMap(), bomAllocations = emptyMap())
+
+        val result = engine.simulate(config, candidates, baseline)
+
+        assertEquals(1, result.decisions.size)
+        assertEquals("tgt-1", result.decisions[0].targetBomId)
+    }
 }

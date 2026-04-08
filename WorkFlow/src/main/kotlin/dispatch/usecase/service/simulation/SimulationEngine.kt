@@ -56,9 +56,10 @@ class SimulationEngine(
             if (selection !is TargetSelection.Selected) break
 
             val siteTarget = siteTargetMap.getValue(selection.siteId)
-            val bomTarget = if (selection.targetBomId != null) {
-                bomTargetMap[SiteBomKey(selection.siteId, selection.targetBomId)]
-            } else null
+            val bomTarget = selection.targetBomId?.let { bomId ->
+                bomTargetMap[SiteBomKey(selection.siteId, bomId)]
+                    ?: error("BOM mapping inconsistency: siteId=${selection.siteId}, targetBomId=$bomId not found in bomTargetMap")
+            }
             val idx = algorithm.candidateMatcher.findCandidate(
                 index, selection.sourceBomConstraint, context, siteTarget, bomTarget,
             )
