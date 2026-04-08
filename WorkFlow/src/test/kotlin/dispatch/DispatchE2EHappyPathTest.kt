@@ -21,6 +21,7 @@ import com.workflow.workflow.usecase.port.outbound.persistent.WorkflowRepository
 import io.quarkus.test.InjectMock
 import io.quarkus.test.common.QuarkusTestResource
 import io.quarkus.test.junit.QuarkusTest
+import io.quarkus.test.junit.TestProfile
 import jakarta.inject.Inject
 import kotlinx.coroutines.runBlocking
 import org.awaitility.Awaitility.await
@@ -37,6 +38,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 @QuarkusTest
+@TestProfile(E2ETestProfile::class)
 @QuarkusTestResource(OracleTestResource::class)
 @QuarkusTestResource(MinioTestResource::class)
 class DispatchE2EHappyPathTest {

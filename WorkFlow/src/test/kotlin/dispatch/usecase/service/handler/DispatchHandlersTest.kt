@@ -44,7 +44,7 @@ class DispatchHandlersTest {
                 )
             whenever(configRepo.findActiveConfigs(any())).thenReturn(listOf(config))
 
-            val handler = DispatchScatterHandler(configRepo, resultStore, objectMapper)
+            val handler = DispatchScatterHandler(configRepo, resultStore, objectMapper, SystemBatchTokenClock())
             val output =
                 handler.execute(
                     HandlerInput("t1", "w1", 1, null, null),
@@ -86,7 +86,7 @@ class DispatchHandlersTest {
             whenever(configRepo.findById("cfg1")).thenReturn(config1)
             whenever(configRepo.findById("cfg2")).thenReturn(config2)
 
-            val handler = DispatchScatterHandler(configRepo, resultStore, objectMapper)
+            val handler = DispatchScatterHandler(configRepo, resultStore, objectMapper, SystemBatchTokenClock())
             val item =
                 objectMapper.writeValueAsString(
                     mapOf("batchToken" to "custom-token", "configIds" to listOf("cfg1", "cfg2")),

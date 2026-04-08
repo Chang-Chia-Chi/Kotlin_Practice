@@ -17,7 +17,7 @@ class DispatchScatterHandler(
     private val configRepo: DispatchConfigRepository,
     private val resultStore: SimulationResultStore,
     private val objectMapper: ObjectMapper,
-    private val clock: BatchTokenClock = SystemBatchTokenClock(),
+    private val clock: BatchTokenClock,
 ) : TransitionHandler {
 
     override suspend fun execute(input: HandlerInput): HandlerResult {
