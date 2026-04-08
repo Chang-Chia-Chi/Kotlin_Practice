@@ -4,9 +4,9 @@ import com.workflow.dispatch.model.*
 import com.workflow.dispatch.usecase.service.algorithm.DefaultDispatchAlgorithmFactory
 import org.junit.jupiter.api.Test
 import java.math.BigDecimal
+import kotlin.test.assertFailsWith
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
-import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 class SimulationEngineTest {
@@ -806,8 +806,9 @@ class SimulationEngineTest {
         val candidates = listOf(CandidateProduct("p1", "src", 1))
         val baseline = Baseline(siteAllocations = emptyMap(), bomAllocations = emptyMap())
 
-        assertFailsWith<IllegalArgumentException> {
+        val ex = assertFailsWith<IllegalArgumentException> {
             engine.simulate(config, candidates, baseline)
         }
+        assertEquals("Site A has empty targetAllocations", ex.message)
     }
 }
