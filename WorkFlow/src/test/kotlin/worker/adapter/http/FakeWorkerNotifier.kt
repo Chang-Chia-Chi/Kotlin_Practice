@@ -36,9 +36,18 @@ class FakeWorkerNotifier : WorkerNotifier {
     private val _awaitTimeouts = mutableListOf<Duration>()
     val awaitTimeouts: List<Duration> get() = synchronized(_awaitTimeouts) { _awaitTimeouts.toList() }
 
+    /**
+     * Queues listed here will throw [RuntimeException] when signalled.
+     * Callers use this to verify that signal failures are isolated and
+     * do not prevent other queues from being notified.
+     */
+    @Volatile
+    var failQueues: Set<String> = emptySet()
+
     override suspend fun signal(queueName: String) {
         _signalCount.incrementAndGet()
         synchronized(_signalledQueues) { _signalledQueues.add(queueName) }
+        if (queueName in failQueues) throw RuntimeException("Simulated signal failure for queue: $queueName")
     }
 
     override fun onRemoteSignal(queueName: String) {

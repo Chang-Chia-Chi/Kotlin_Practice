@@ -1325,7 +1325,7 @@ class RepositoryTest {
             insertTaskDirect(task)
 
             val beforeReset = Instant.now()
-            taskRepo.resetForRetry(task.id, 2) // retryCount=2, default base=1 → backoff = 1*2^2 = 4s
+            taskRepo.resetForRetry(task.id, 2, null, null) // retryCount=2, default base=1 → backoff = 1*2^2 = 4s
 
             val row = readTaskDirect(task.id)!!
             assertEquals("PENDING", row["STATUS"])
@@ -1360,7 +1360,7 @@ class RepositoryTest {
             insertTaskDirect(task)
 
             val beforeReset = Instant.now()
-            taskRepo.resetForRetry(task.id, 10) // 1*2^10 = 1024, capped to 300
+            taskRepo.resetForRetry(task.id, 10, null, null) // 1*2^10 = 1024, capped to 300
 
             val row = readTaskDirect(task.id)!!
             val notBefore = readNullableTimestampDirect(row["NOT_BEFORE"])
@@ -1397,7 +1397,7 @@ class RepositoryTest {
             insertTaskDirect(task)
 
             val beforeReset = Instant.now()
-            taskRepo.resetForRetry(task.id, 2) // 5*2^2 = 20s
+            taskRepo.resetForRetry(task.id, 2, null, null) // 5*2^2 = 20s
 
             val row = readTaskDirect(task.id)!!
             val notBefore = readNullableTimestampDirect(row["NOT_BEFORE"])

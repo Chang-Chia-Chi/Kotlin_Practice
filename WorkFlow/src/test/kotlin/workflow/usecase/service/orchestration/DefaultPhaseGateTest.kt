@@ -579,4 +579,28 @@ class DefaultPhaseGateTest {
         val seq2TasksAfter = taskRepo.findByWorkflowAndSequence(wfId, 2)
         assertEquals(1, seq2TasksAfter.size)
     }
+
+    // -- Bug 2: signal exception must not propagate to caller or corrupt state ----
+
+    @Test
+    fun `signal exception does not propagate out of onTaskCompleted and tx2 is still committed`() = runTest {
+        val def = workflow {
+            activity("a") { transition("a.h"); next("b") }
+            activity("b") { transition("b.h") }
+        }
+        val (wfId, _) = startAndGetSeq(def)
+        val task = taskRepo.findByWorkflowAndSequence(wfId, 1).first()
+
+        // Use a local gate wired to a notifier that throws on every signal
+        val failingNotifier = FakeWorkerNotifier().apply { failQueues = setOf("default") }
+        val localGate = DefaultPhaseGate(jdbi, workflowRepo, taskRepo, objectMapper, failingNotifier)
+
+        // Must NOT throw despite notifier.signal throwing
+        localGate.onTaskCompleted(task.id, wfId, 1, TaskStatus.COMPLETED, null)
+
+        // TX2 committed: successor task "b" was inserted
+        val seq2Tasks = taskRepo.findByWorkflowAndSequence(wfId, 2)
+        assertEquals(1, seq2Tasks.size, "Successor task must exist — TX2 must have committed before signal")
+        assertEquals(TaskStatus.PENDING, seq2Tasks[0].status)
+    }
 }

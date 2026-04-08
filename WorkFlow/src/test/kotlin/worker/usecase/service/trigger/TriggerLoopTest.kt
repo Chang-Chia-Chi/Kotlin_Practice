@@ -22,6 +22,7 @@ import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
 import org.mockito.kotlin.any
+import org.mockito.kotlin.anyOrNull
 import org.mockito.kotlin.doAnswer
 import org.mockito.kotlin.doReturn
 import org.mockito.kotlin.doThrow
@@ -167,9 +168,11 @@ class TriggerLoopTest {
                 )
             }
 
+            taskRepo.stub { onBlocking { resetForRetry(eq("t-1"), eq(1), anyOrNull(), anyOrNull()) } doReturn true }
+
             triggerLoop.sweep()
 
-            verify(taskRepo).resetForRetry(eq("t-1"), eq(1))
+            verify(taskRepo).resetForRetry(eq("t-1"), eq(1), anyOrNull(), anyOrNull())
             verify(phaseGate, never()).onTaskCompleted(
                 any(), any(), any(), any(), any(), any(), any(), any(),
             )
@@ -516,7 +519,7 @@ class TriggerLoopTest {
             val ref = makeDeferredRef(retryCount = 0, maxRetries = 3)
             taskRepo.stub { onBlocking { findDeferred() } doReturn listOf(ref) }
             taskRepo.stub {
-                onBlocking { resetForRetry(eq("t-1"), eq(1)) } doThrow RuntimeException("DB error")
+                onBlocking { resetForRetry(eq("t-1"), eq(1), anyOrNull(), anyOrNull()) } doThrow RuntimeException("DB error")
             }
             mockDriver.stub {
                 onBlocking { poll() } doReturn listOf(
@@ -689,9 +692,11 @@ class TriggerLoopTest {
                 )
             }
 
+            taskRepo.stub { onBlocking { resetForRetry(eq("t-1"), eq(3), anyOrNull(), anyOrNull()) } doReturn true }
+
             triggerLoop.sweep()
 
-            verify(taskRepo).resetForRetry(eq("t-1"), eq(3))
+            verify(taskRepo).resetForRetry(eq("t-1"), eq(3), anyOrNull(), anyOrNull())
             assertEquals(1.0, counterCount("trigger_settled_total", "type", "test-driver", "outcome", "retried"))
         }
 
@@ -717,7 +722,7 @@ class TriggerLoopTest {
                 claimedAt = eq(null),
                 itemsJson = eq(null),
             )
-            verify(taskRepo, never()).resetForRetry(any(), any())
+            verify(taskRepo, never()).resetForRetry(any(), any(), anyOrNull(), anyOrNull())
         }
     }
 }

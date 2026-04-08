@@ -169,7 +169,11 @@ fun resolvePhaseDecision(
             "Fan-out produced 0 items for workflow ${snapshot.workflowId}"
         }
         val parallelSeq = seqInfo.sequenceNumber + 1
-        val parallelInfo = snapshot.sequenceMap[parallelSeq]!!
+        // Guard: sequenceMap must contain the synthetic PARALLEL companion.
+        // If missing (malformed definition), return Abort so TX2 can finalize the workflow
+        // to FAILED instead of throwing an NPE that would leave it permanently stuck.
+        val parallelInfo = snapshot.sequenceMap[parallelSeq]
+            ?: return PhaseDecision.Abort
         PhaseDecision.ScatterExpand(items, parallelInfo)
     } else {
         resolveFailureFallback(seqInfo.activity.failurePolicy)

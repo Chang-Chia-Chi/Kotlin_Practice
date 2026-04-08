@@ -11,7 +11,7 @@ interface TaskRepository {
     suspend fun insertBatch(tasks: List<Task>)
     suspend fun claimNext(workerId: String, limit: Int, queueName: String = "default"): List<Task>
     suspend fun findByWorkflowAndSequence(workflowId: String, sequenceNumber: Int): List<Task>
-    suspend fun resetForRetry(id: String, newRetryCount: Int)
+    suspend fun resetForRetry(id: String, newRetryCount: Int, claimedBy: String?, claimedAt: java.time.Instant?): Boolean
     suspend fun replayDeadLetterTask(taskId: String): Boolean
     suspend fun replayDeadLetterBatch(workflowId: String): Int
     suspend fun findExpired(now: Instant): List<Task>

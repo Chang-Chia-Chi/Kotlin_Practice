@@ -835,4 +835,46 @@ class SimulationEngineTest {
         assertEquals(1, result.decisions.size)
         assertEquals("tgt-1", result.decisions[0].targetBomId)
     }
+
+    @Test
+    fun `bom round-robin resets to first entry when arriving at a new site`() {
+        // Both sites share the same 3 BOM IDs: [bom1(50), bom2(50), bom3(50)].
+        // After dispatching to site A (→ bom1), the next dispatch goes to site B.
+        // Expected: B picks bom1 (round-robin resets), not bom2 (cross-site carry-over).
+        val sharedAllocations = listOf(
+            TargetBomAllocation("bom1", BigDecimal("50")),
+            TargetBomAllocation("bom2", BigDecimal("50")),
+            TargetBomAllocation("bom3", BigDecimal("50")),
+        )
+        val config = DispatchConfig(
+            id = "cfg", mode = DispatchMode.QTY, algorithmId = "default",
+            sourceBomPrefix = "src",
+            siteTargets = listOf(
+                SiteTarget("A", BigDecimal("200")),
+                SiteTarget("B", BigDecimal("200")),
+            ),
+            bomMappings = mapOf(
+                "A" to BomMapping("src", sharedAllocations),
+                "B" to BomMapping("src", sharedAllocations),
+            ),
+        )
+        // Equal currents (100 each) → tied gap → A wins on first dispatch (round-robin with null lastSite).
+        // After A gets +1, B has a lower gap → B is selected second.
+        val baseline = Baseline(
+            siteAllocations = mapOf("A" to BigDecimal("100"), "B" to BigDecimal("100")),
+            bomAllocations = emptyMap(),
+        )
+        val candidates = listOf(
+            CandidateProduct("p1", "src", 1),
+            CandidateProduct("p2", "src", 1),
+        )
+
+        val result = engine.simulate(config, candidates, baseline)
+
+        assertEquals(2, result.decisions.size)
+        assertEquals("A", result.decisions[0].targetSiteId)
+        assertEquals("bom1", result.decisions[0].targetBomId)   // first BOM for A (no prior state)
+        assertEquals("B", result.decisions[1].targetSiteId)
+        assertEquals("bom1", result.decisions[1].targetBomId)   // B's round-robin must reset: bom1, not bom2
+    }
 }

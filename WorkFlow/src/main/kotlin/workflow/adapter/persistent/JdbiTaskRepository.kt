@@ -98,23 +98,31 @@ class JdbiTaskRepository(
     override suspend fun resetForRetry(
         id: String,
         newRetryCount: Int,
-    ) {
-        jdbi.inTransactionSuspend<Unit, Exception> { h: Handle ->
-            h
-                .createUpdate(
-                    """
+        claimedBy: String?,
+        claimedAt: java.time.Instant?,
+    ): Boolean =
+        jdbi.inTransactionSuspend<Boolean, Exception> { h: Handle ->
+            val update = h.createUpdate(
+                """
                 UPDATE task
                 SET status = 'PENDING', claimed_by = NULL, claimed_at = NULL,
                     retry_count = :newRetryCount,
                     not_before = :now + NUMTODSINTERVAL(LEAST(backoff_base * POWER(2, :newRetryCount), backoff_cap), 'SECOND')
                 WHERE id = :id
+                  AND status IN ('PROCESSING', 'DEFERRED')
+                  AND (:claimedBy IS NULL OR (claimed_by = :claimedBy AND claimed_at = :claimedAt))
                 """,
-                ).bind("id", id)
+            ).bind("id", id)
                 .bind("newRetryCount", newRetryCount)
                 .bind("now", LocalDateTime.now(ZoneOffset.UTC).truncatedTo(java.time.temporal.ChronoUnit.MICROS))
-                .execute()
+            if (claimedBy != null) update.bind("claimedBy", claimedBy) else update.bindNull("claimedBy", Types.VARCHAR)
+            if (claimedAt != null) {
+                update.bind("claimedAt", LocalDateTime.ofInstant(claimedAt, ZoneOffset.UTC))
+            } else {
+                update.bindNull("claimedAt", Types.TIMESTAMP)
+            }
+            update.execute() > 0
         }
-    }
 
     override suspend fun replayDeadLetterTask(taskId: String): Boolean =
         jdbi.inTransactionSuspend<Boolean, Exception> { h: Handle ->

@@ -37,6 +37,7 @@ import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.TestInstance
 import org.mockito.kotlin.any
+import org.mockito.kotlin.anyOrNull
 import org.mockito.kotlin.isNull
 import org.mockito.kotlin.doReturn
 import org.mockito.kotlin.stub
@@ -315,10 +316,11 @@ class WorkerLoopTest {
                 .thenReturn(emptyList())
             whenever(handlerRegistry.resolve(task.handlerKey)).thenReturn(handler)
             whenever(handler.execute(any())).thenThrow(RuntimeException("transient failure"))
+            whenever(taskRepo.resetForRetry(eq(task.id), eq(1), anyOrNull(), anyOrNull())).thenReturn(true)
 
             startAndAdvance(this)
 
-            verify(taskRepo).resetForRetry(eq(task.id), eq(1))
+            verify(taskRepo).resetForRetry(eq(task.id), eq(1), anyOrNull(), anyOrNull())
             verifyNoInteractions(phaseGate)
         }
 
@@ -332,10 +334,11 @@ class WorkerLoopTest {
                 .thenReturn(emptyList())
             whenever(handlerRegistry.resolve(task.handlerKey)).thenReturn(handler)
             whenever(handler.execute(any())).thenThrow(RuntimeException("transient again"))
+            whenever(taskRepo.resetForRetry(eq(task.id), eq(2), anyOrNull(), anyOrNull())).thenReturn(true)
 
             startAndAdvance(this)
 
-            verify(taskRepo).resetForRetry(eq(task.id), eq(2))
+            verify(taskRepo).resetForRetry(eq(task.id), eq(2), anyOrNull(), anyOrNull())
             verifyNoInteractions(phaseGate)
         }
 
@@ -352,7 +355,7 @@ class WorkerLoopTest {
 
             startAndAdvance(this)
 
-            verify(taskRepo, never()).resetForRetry(any(), any())
+            verify(taskRepo, never()).resetForRetry(any(), any(), anyOrNull(), anyOrNull())
             verify(phaseGate).onTaskCompleted(
                 eq(task.id),
                 eq(task.workflowId),
@@ -377,7 +380,7 @@ class WorkerLoopTest {
 
             startAndAdvance(this)
 
-            verify(taskRepo, never()).resetForRetry(any(), any())
+            verify(taskRepo, never()).resetForRetry(any(), any(), anyOrNull(), anyOrNull())
             verify(phaseGate).onTaskCompleted(
                 eq(task.id),
                 eq(task.workflowId),
@@ -405,12 +408,12 @@ class WorkerLoopTest {
                 .thenReturn(emptyList())
             whenever(handlerRegistry.resolve(task.handlerKey)).thenReturn(handler)
             whenever(handler.execute(any())).thenThrow(RuntimeException("handler failed"))
-            whenever(taskRepo.resetForRetry(eq(task.id), eq(1)))
+            whenever(taskRepo.resetForRetry(eq(task.id), eq(1), anyOrNull(), anyOrNull()))
                 .thenThrow(RuntimeException("DB connection lost during retry reset"))
 
             startAndAdvance(this)
 
-            verify(taskRepo).resetForRetry(eq(task.id), eq(1))
+            verify(taskRepo).resetForRetry(eq(task.id), eq(1), anyOrNull(), anyOrNull())
             verify(phaseGate).onTaskCompleted(
                 eq(task.id),
                 eq(task.workflowId),
@@ -437,10 +440,11 @@ class WorkerLoopTest {
                 .thenReturn(emptyList())
             whenever(handlerRegistry.resolve("nonexistent.handler"))
                 .thenThrow(IllegalStateException("No handler found for key: nonexistent.handler"))
+            whenever(taskRepo.resetForRetry(eq(task.id), eq(1), anyOrNull(), anyOrNull())).thenReturn(true)
 
             startAndAdvance(this)
 
-            verify(taskRepo).resetForRetry(eq(task.id), eq(1))
+            verify(taskRepo).resetForRetry(eq(task.id), eq(1), anyOrNull(), anyOrNull())
             verifyNoInteractions(phaseGate)
         }
 
@@ -814,11 +818,12 @@ class WorkerLoopTest {
             whenever(handler.execute(any())).thenReturn(HandlerResult.Completed("success"))
             doThrow(RuntimeException("barrier failed on COMPLETED"))
                 .whenever(phaseGate).onTaskCompleted(any(), any(), any(), any(), any(), any(), any(), isNull())
+            whenever(taskRepo.resetForRetry(eq(task.id), eq(1), anyOrNull(), anyOrNull())).thenReturn(true)
 
             startAndAdvance(this)
 
             verify(handler).execute(any())
-            verify(taskRepo).resetForRetry(eq(task.id), eq(1))
+            verify(taskRepo).resetForRetry(eq(task.id), eq(1), anyOrNull(), anyOrNull())
         }
 
         @Test
@@ -952,7 +957,7 @@ class WorkerLoopTest {
             startAndAdvance(this)
 
             // CancellationException should NOT trigger retry or barrier
-            verify(taskRepo, never()).resetForRetry(any(), any())
+            verify(taskRepo, never()).resetForRetry(any(), any(), anyOrNull(), anyOrNull())
             verifyNoInteractions(phaseGate)
         }
     }
@@ -1056,8 +1061,8 @@ class WorkerLoopTest {
                     "handler_key" to MDC.get("handler_key"),
                     "attempt" to MDC.get("attempt"),
                 )
-                Unit
-            }.whenever(taskRepo).resetForRetry(eq("fail-task"), eq(3))
+                true
+            }.whenever(taskRepo).resetForRetry(eq("fail-task"), eq(3), anyOrNull(), anyOrNull())
 
             startAndAdvance(this)
 

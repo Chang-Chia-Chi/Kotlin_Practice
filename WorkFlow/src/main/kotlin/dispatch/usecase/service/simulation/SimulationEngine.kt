@@ -83,8 +83,9 @@ class SimulationEngine(
                 )
             }
             context.total += qty
+            // Reset BOM round-robin when the site changes so each site gets independent cycling.
+            context.lastBomId = if (selection.siteId == context.lastSiteId) selection.targetBomId else null
             context.lastSiteId = selection.siteId
-            context.lastBomId = selection.targetBomId
 
             context.decisions += DispatchDecision(
                 dispatchOrder = context.decisions.size + 1,

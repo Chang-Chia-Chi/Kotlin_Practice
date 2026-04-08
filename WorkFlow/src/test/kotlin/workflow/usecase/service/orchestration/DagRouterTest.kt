@@ -1,6 +1,7 @@
 package com.workflow.workflow.usecase.service.orchestration
 
 import com.workflow.workflow.model.ActivityDefinition
+import com.workflow.workflow.usecase.service.orchestration.GateSnapshot
 import com.workflow.workflow.model.DEFAULT_BRANCH
 import com.workflow.workflow.model.Edge
 import com.workflow.workflow.model.FailurePolicy
@@ -632,6 +633,41 @@ class DagRouterTest {
             val seqInfo = snap.sequenceMap.values.first { it.phaseType == PhaseType.PARALLEL }
             val decision = resolvePhaseDecision(snap, seqInfo, TaskStatus.COMPLETED, scatterItems = null)
             assertEquals(PhaseDecision.Normal, decision)
+        }
+
+        @Test
+        fun `SCATTER COMPLETED with parallel companion missing from sequenceMap returns Abort not NPE`() {
+            // Simulate a corrupted / partially-built sequenceMap: SCATTER at seq=1 but no PARALLEL at seq=2.
+            // The old code used `snapshot.sequenceMap[parallelSeq]!!` which NPE'd and left the workflow
+            // permanently stuck. The fix must return Abort so TX2 terminates cleanly.
+            // A valid WorkflowDefinition: scatter → sink (terminal).
+            // buildSequenceMap would produce SCATTER(1) + PARALLEL(2) + LINEAR(3) for this graph.
+            // We bypass it to produce a snapshot that only has SCATTER(1), simulating corruption.
+            val scatterAct = ActivityDefinition(
+                name = "scatter",
+                transition = "scatter.h",
+                fanOut = FanOutDefinition(transition = "parallel.h"),
+                successors = listOf(Edge("sink")),  // DEFAULT_BRANCH edge, valid with fanOut
+            )
+            val sinkAct = ActivityDefinition(name = "sink", transition = "sink.h") // terminal
+            val seqInfo = SequenceInfo(1, "scatter", scatterAct, PhaseType.SCATTER, emptyList())
+            val snap = GateSnapshot(
+                workflowId = "wf-1",
+                definition = WorkflowDefinition(
+                    activities = mapOf("scatter" to scatterAct, "sink" to sinkAct),
+                    start = "scatter",
+                ),
+                sequenceMap = mapOf(1 to seqInfo), // deliberately no PARALLEL companion at seq=2
+                seqByName = mapOf("scatter" to seqInfo),
+                allCounts = emptyMap(),
+                tasksBySeq = emptyMap(),
+                resultBranches = emptyMap(),
+                now = now,
+            )
+
+            val decision = resolvePhaseDecision(snap, seqInfo, TaskStatus.COMPLETED, scatterItems = listOf("a", "b"))
+
+            assertEquals(PhaseDecision.Abort, decision)
         }
 
         @Test

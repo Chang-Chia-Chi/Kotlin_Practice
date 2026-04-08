@@ -63,8 +63,9 @@ class TaskSettler(
      * Retries the task if attempts remain, otherwise settles it as FAILED.
      *
      * If [retryCount] < [maxRetries], attempts [TaskRepository.resetForRetry].
-     * On success returns [RetryOutcome.Retried]. If `resetForRetry` throws
-     * (non-CancellationException), falls through to settling as FAILED.
+     * Returns [RetryOutcome.Retried] only when the DB confirms the row was actually
+     * reset (returns `true`). If `resetForRetry` returns `false` (task already
+     * terminal, e.g. TIMED_OUT by watchdog) or throws, falls through to settling as FAILED.
      *
      * If retries are exhausted, calls [PhaseGate.onTaskCompleted] with
      * [TaskStatus.FAILED] and returns [RetryOutcome.Failed].
@@ -81,10 +82,13 @@ class TaskSettler(
         if (retryCount < maxRetries) {
             val resetResult =
                 suspendCatching {
-                    taskRepo.resetForRetry(taskId, retryCount + 1)
+                    taskRepo.resetForRetry(taskId, retryCount + 1, claimedBy, claimedAt)
                 }
-            if (resetResult.isSuccess) return RetryOutcome.Retried
-            // resetForRetry failed — fall through to settle as FAILED
+            // Only retry if the DB confirmed the row was actually reset (returns true).
+            // false means the task was already terminal (e.g., TIMED_OUT by watchdog) —
+            // fall through to settle as FAILED so PhaseGate can finalize the workflow.
+            if (resetResult.getOrDefault(false)) return RetryOutcome.Retried
+            // resetForRetry returned false or threw — fall through to settle as FAILED
         }
 
         phaseGate.onTaskCompleted(
