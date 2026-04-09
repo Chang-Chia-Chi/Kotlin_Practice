@@ -75,6 +75,17 @@ class TaskSettlerTest {
         }
     }
 
+    @Test
+    fun `settle passes non-null itemsJson to phaseGate`() = runTest {
+        settler.settle("t-1", "wf-1", 1, TaskStatus.COMPLETED, """{"ok":true}""", itemsJson = """["item1"]""")
+
+        verify(phaseGate).onTaskCompleted(
+            eq("t-1"), eq("wf-1"), eq(1),
+            eq(TaskStatus.COMPLETED), eq("""{"ok":true}"""),
+            eq(null), eq(null), eq("""["item1"]"""),
+        )
+    }
+
     // ── Step 2: retryOrFail() — retry path ──────────────────────────────
 
     @Test

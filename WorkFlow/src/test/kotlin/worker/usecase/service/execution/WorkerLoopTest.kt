@@ -228,6 +228,58 @@ class WorkerLoopTest {
         }
 
         @Test
+        fun `handler returns items list - settle is called with serialized itemsJson`() = runTest {
+            val task = makeTask()
+            val handler = mock<TransitionHandler>()
+
+            whenever(taskRepo.claimNext(eq(workerId), eq(16), eq("default")))
+                .thenReturn(listOf(task))
+                .thenReturn(emptyList())
+            whenever(handlerRegistry.resolve(task.handlerKey)).thenReturn(handler)
+            whenever(handler.execute(any())).thenReturn(
+                HandlerResult.Completed(result = """{"ok":true}""", items = listOf("item1", "item2")),
+            )
+
+            startAndAdvance(this)
+
+            verify(phaseGate).onTaskCompleted(
+                eq(task.id),
+                eq(task.workflowId),
+                eq(task.sequenceNumber),
+                eq(TaskStatus.COMPLETED),
+                eq("""{"ok":true}"""),
+                eq(workerId),
+                any(), eq("""["item1","item2"]"""),
+            )
+        }
+
+        @Test
+        fun `handler returns empty items list - itemsJson is null`() = runTest {
+            val task = makeTask()
+            val handler = mock<TransitionHandler>()
+
+            whenever(taskRepo.claimNext(eq(workerId), eq(16), eq("default")))
+                .thenReturn(listOf(task))
+                .thenReturn(emptyList())
+            whenever(handlerRegistry.resolve(task.handlerKey)).thenReturn(handler)
+            whenever(handler.execute(any())).thenReturn(
+                HandlerResult.Completed(result = null, items = emptyList()),
+            )
+
+            startAndAdvance(this)
+
+            verify(phaseGate).onTaskCompleted(
+                eq(task.id),
+                eq(task.workflowId),
+                eq(task.sequenceNumber),
+                eq(TaskStatus.COMPLETED),
+                eq(null),
+                eq(workerId),
+                any(), isNull(),
+            )
+        }
+
+        @Test
         fun `multiple tasks claimed sequentially are each processed`() = runTest {
             val task1 = makeTask(handlerKey = "step.one")
             val task2 = makeTask(handlerKey = "step.two")
