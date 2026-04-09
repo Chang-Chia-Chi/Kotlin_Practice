@@ -6,6 +6,7 @@ import com.fasterxml.jackson.module.kotlin.readValue
 import com.workflow.infrastructure.persistence.inTransactionSuspend
 import com.workflow.worker.usecase.port.outbound.notification.WorkerNotifier
 import com.workflow.workflow.model.PhaseType
+import com.workflow.workflow.model.SequenceInfo
 import com.workflow.workflow.model.TaskStatus
 import com.workflow.workflow.model.WorkflowDefinition
 import com.workflow.workflow.model.WorkflowStatus
@@ -21,6 +22,7 @@ import org.jdbi.v3.core.Jdbi
 import org.slf4j.LoggerFactory
 import java.time.Instant
 import java.time.temporal.ChronoUnit
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * DAG-aware phase gate that evaluates successor activities after each task completion.
@@ -44,6 +46,14 @@ class DefaultPhaseGate(
     private val notifier: WorkerNotifier,
 ) : PhaseGate {
     private val log = LoggerFactory.getLogger(DefaultPhaseGate::class.java)
+
+    private data class CachedDefinition(
+        val definition: WorkflowDefinition,
+        val sequenceMap: Map<Int, SequenceInfo>,
+        val seqByName: Map<String, SequenceInfo>,
+    )
+
+    private val definitionCache = ConcurrentHashMap<String, CachedDefinition>()
 
     override suspend fun onTaskCompleted(
         taskId: String,
@@ -152,6 +162,7 @@ class DefaultPhaseGate(
                                 WorkflowStatus.COMPLETED,
                                 WorkflowStatus.RUNNING,
                             )
+                            definitionCache.remove(workflowId)
                         }
                     }
                     return@inTransactionSuspend emptyList()
@@ -170,6 +181,7 @@ class DefaultPhaseGate(
                             WorkflowStatus.COMPLETED,
                             WorkflowStatus.RUNNING,
                         )
+                        definitionCache.remove(workflowId)
                         return@inTransactionSuspend emptyList()
                     }
                 }
@@ -316,6 +328,7 @@ class DefaultPhaseGate(
                         terminalStatus,
                         WorkflowStatus.RUNNING,
                     )
+                    definitionCache.remove(workflowId)
                     return@inTransactionSuspend emptyList()
                 }
 
@@ -338,12 +351,14 @@ class DefaultPhaseGate(
         workflowId: String,
         definitionJson: String,
     ): GateSnapshot {
-        val definition = objectMapper.readValue<WorkflowDefinition>(definitionJson)
-        val sequenceMap = buildSequenceMap(definition)
-        val seqByName =
-            sequenceMap.values
+        val cached = definitionCache.computeIfAbsent(workflowId) { _ ->
+            val definition = objectMapper.readValue<WorkflowDefinition>(definitionJson)
+            val sequenceMap = buildSequenceMap(definition)
+            val seqByName = sequenceMap.values
                 .filter { it.phaseType != PhaseType.PARALLEL }
                 .associateBy { it.activityName }
+            CachedDefinition(definition, sequenceMap, seqByName)
+        }
         val allCounts = taskRepo.countStatusSummariesByWorkflowWithHandle(handle, workflowId)
         val allTasks = taskRepo.findByWorkflowIdWithHandle(handle, workflowId)
         val tasksBySeq = allTasks.groupBy { it.sequenceNumber }
@@ -362,9 +377,9 @@ class DefaultPhaseGate(
 
         return GateSnapshot(
             workflowId,
-            definition,
-            sequenceMap,
-            seqByName,
+            cached.definition,
+            cached.sequenceMap,
+            cached.seqByName,
             allCounts,
             tasksBySeq,
             resultBranches,
@@ -385,7 +400,10 @@ class DefaultPhaseGate(
                 WorkflowStatus.FAILED,
                 WorkflowStatus.RUNNING,
             )
-        if (statusUpdated) taskRepo.cancelPendingTasksWithHandle(handle, workflowId)
+        if (statusUpdated) {
+            taskRepo.cancelPendingTasksWithHandle(handle, workflowId)
+            definitionCache.remove(workflowId)
+        }
     }
 
     /**

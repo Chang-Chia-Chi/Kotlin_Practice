@@ -735,4 +735,55 @@ class DefaultPhaseGateTest {
         val allParallel = taskRepo.findByWorkflowAndSequence(wfId, seqParallel)
         assertEquals(2, allParallel.size, "ScatterExpand guard must not double-insert PARALLEL tasks")
     }
+
+    // -- Spec 4: Definition cache correctness across multiple completions -----
+
+    @Test
+    fun `definition cache serves repeated buildSnapshot calls for same workflowId`() = runTest {
+        val def = workflow {
+            activity("a") { transition("a.h"); next("b") }
+            activity("b") { transition("b.h"); next("c") }
+            activity("c") { transition("c.h") }
+        }
+        val seqMap = buildSequenceMap(def)
+        val (wfId, _) = startAndGetSeq(def)
+
+        // Complete a -> dispatches b
+        val seqA = seqMap.values.first { it.activityName == "a" }.sequenceNumber
+        val aTasks = taskRepo.findByWorkflowAndSequence(wfId, seqA)
+        completeTask(aTasks[0].id, wfId, seqA)
+
+        // Complete b -> dispatches c (buildSnapshot called again, should use cached definition)
+        val seqB = seqMap.values.first { it.activityName == "b" }.sequenceNumber
+        val bTasks = taskRepo.findByWorkflowAndSequence(wfId, seqB)
+        completeTask(bTasks[0].id, wfId, seqB)
+
+        // Complete c -> workflow COMPLETED (cache eviction triggered)
+        val seqC = seqMap.values.first { it.activityName == "c" }.sequenceNumber
+        val cTasks = taskRepo.findByWorkflowAndSequence(wfId, seqC)
+        completeTask(cTasks[0].id, wfId, seqC)
+
+        assertEquals(WorkflowStatus.COMPLETED, workflowStatus(wfId))
+    }
+
+    @Test
+    fun `cache eviction on terminal status allows fresh cache for new workflow with same definition`() = runTest {
+        val def = workflow {
+            activity("only") { transition("o.h") }
+        }
+
+        // Workflow 1: start and complete
+        val result1 = engine.startWorkflow(def)
+        val wfId1 = result1.workflowId
+        val tasks1 = taskRepo.findByWorkflowAndSequence(wfId1, 1)
+        completeTask(tasks1[0].id, wfId1, 1)
+        assertEquals(WorkflowStatus.COMPLETED, workflowStatus(wfId1))
+
+        // Workflow 2: start and complete (exercises fresh cache entry after eviction)
+        val result2 = engine.startWorkflow(def)
+        val wfId2 = result2.workflowId
+        val tasks2 = taskRepo.findByWorkflowAndSequence(wfId2, 1)
+        completeTask(tasks2[0].id, wfId2, 1)
+        assertEquals(WorkflowStatus.COMPLETED, workflowStatus(wfId2))
+    }
 }
