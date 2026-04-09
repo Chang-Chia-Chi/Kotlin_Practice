@@ -3,6 +3,8 @@ package com.workflow.dispatch.usecase.service.algorithm
 import org.junit.jupiter.api.Test
 import java.math.BigDecimal
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
 
 class GapComputerTest {
 
@@ -38,5 +40,15 @@ class GapComputerTest {
         // total=0 -> currentRatio=0, target=50% -> gap=0-0.50=-0.50
         val gap = gc.computeGap(BigDecimal.ZERO, BigDecimal("50"), BigDecimal.ZERO)
         assertEquals(0, gap.compareTo(BigDecimal("-0.50")))
+    }
+
+    @Test
+    fun `QtyGapComputer does not use cumulative tiebreaker`() {
+        assertFalse(QtyGapComputer().useCumulativeTiebreaker)
+    }
+
+    @Test
+    fun `RatioGapComputer uses cumulative tiebreaker`() {
+        assertTrue(RatioGapComputer().useCumulativeTiebreaker)
     }
 }
