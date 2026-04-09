@@ -308,12 +308,12 @@ class JdbiTaskRepository(
             .mapTo(Int::class.java)
             .one()
 
-    // Cancels PENDING, WAITING_FOR_SIGNAL, and DEFERRED tasks for a workflow.
+    // Cancels PENDING and DEFERRED tasks for a workflow.
     override fun cancelPendingTasksWithHandle(handle: Handle, workflowId: String): Int {
         return handle.createUpdate(
             """
             UPDATE task SET status = 'CANCELLED', completed_at = :now
-            WHERE workflow_id = :workflowId AND status IN ('PENDING', 'WAITING_FOR_SIGNAL', 'DEFERRED')
+            WHERE workflow_id = :workflowId AND status IN ('PENDING', 'DEFERRED')
             """,
         )
             .bind("workflowId", workflowId)
@@ -437,13 +437,13 @@ class JdbiTaskRepository(
             .list()
             .map(::mapTaskRow)
 
-    // Cancels PENDING, WAITING_FOR_SIGNAL, and DEFERRED tasks. PROCESSING tasks are left alone —
+    // Cancels PENDING and DEFERRED tasks. PROCESSING tasks are left alone —
     // they will be handled by subsequent expireOverdueTasks/reclaimStaleTasks sweeps.
     override fun cancelTasksForOverdueWorkflowsWithHandle(handle: Handle, now: LocalDateTime): Int =
         handle.createUpdate(
             """
             UPDATE task SET status = 'CANCELLED', completed_at = :now
-            WHERE status IN ('PENDING', 'WAITING_FOR_SIGNAL', 'DEFERRED')
+            WHERE status IN ('PENDING', 'DEFERRED')
               AND workflow_id IN (
                 SELECT id FROM workflow WHERE status = 'RUNNING' AND deadline_at < :now
               )

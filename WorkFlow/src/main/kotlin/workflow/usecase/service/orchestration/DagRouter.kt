@@ -1,8 +1,6 @@
 package com.workflow.workflow.usecase.service.orchestration
 
 import com.workflow.workflow.model.DEFAULT_BRANCH
-import com.workflow.workflow.model.FailurePolicy
-import com.workflow.workflow.model.JoinPolicy
 import com.workflow.workflow.model.PhaseType
 import com.workflow.workflow.model.SequenceInfo
 import com.workflow.workflow.model.Task
@@ -32,7 +30,6 @@ data class GateSnapshot(
 sealed interface PhaseDecision {
     data object Abort : PhaseDecision
     data class ScatterExpand(val items: List<String>, val parallelInfo: SequenceInfo) : PhaseDecision
-    data object ForceDefaultBranch : PhaseDecision
     data object Normal : PhaseDecision
 }
 
@@ -41,21 +38,6 @@ data class SuccessorResult(
     val signalQueues: Set<String>,
     val hasTerminalCompletion: Boolean,
 )
-
-// -- Join policy --------------------------------------------------------------
-
-/**
- * Evaluates whether a fan-out join policy is satisfied given the completed count.
- */
-fun evaluateJoinPolicy(joinPolicy: JoinPolicy, completedCount: Int, totalCount: Int): Boolean =
-    when (joinPolicy) {
-        is JoinPolicy.All -> completedCount == totalCount
-        is JoinPolicy.Threshold -> completedCount >= joinPolicy.n
-        is JoinPolicy.Percentage -> {
-            val pct = if (totalCount > 0) (completedCount * 100) / totalCount else 0
-            pct >= joinPolicy.pct
-        }
-    }
 
 // -- Edge evaluation ----------------------------------------------------------
 
@@ -67,12 +49,8 @@ fun isEdgeTaken(
     taskStatus: TaskStatus,
     resultBranch: String?,
     edgeLabel: String,
-    predFailurePolicy: FailurePolicy,
 ): Boolean {
     if (!taskStatus.isTerminal) return false
-    if (taskStatus == TaskStatus.FAILED && predFailurePolicy == FailurePolicy.BEST_EFFORT) {
-        return edgeLabel == DEFAULT_BRANCH
-    }
     if (taskStatus != TaskStatus.COMPLETED) return false
     if (edgeLabel == DEFAULT_BRANCH) return true
     return resultBranch == edgeLabel
@@ -104,26 +82,8 @@ fun isAnyEdgeTaken(
         for (predTask in predTasks) {
             val branch = resultBranches[predTask.id]
             for (edge in edgesToTarget) {
-                if (isEdgeTaken(predTask.status, branch, edge.label, predActivity.failurePolicy)) return true
+                if (isEdgeTaken(predTask.status, branch, edge.label)) return true
             }
-        }
-    }
-    return false
-}
-
-/**
- * Checks whether any predecessor has a DEFAULT_BRANCH edge to the given [successor].
- * Used in force-dispatch mode (BEST_EFFORT fallthrough) where edge label matching
- * against task results is bypassed.
- */
-fun hasDefaultBranchEdge(
-    successor: SequenceInfo,
-    definition: WorkflowDefinition,
-): Boolean {
-    val targetActName = successor.activityName
-    for ((_, predActivity) in definition.activities) {
-        if (predActivity.successors.any { it.target == targetActName && it.label == DEFAULT_BRANCH }) {
-            return true
         }
     }
     return false
@@ -165,44 +125,33 @@ fun resolvePhaseDecision(
         val items = requireNotNull(scatterItems) {
             "SCATTER phase requires scatter result for workflow ${snapshot.workflowId}"
         }
-        require(items.isNotEmpty()) {
-            "Fan-out produced 0 items for workflow ${snapshot.workflowId}"
-        }
         val parallelSeq = seqInfo.sequenceNumber + 1
-        // Guard: sequenceMap must contain the synthetic PARALLEL companion.
-        // If missing (malformed definition), return Abort so TX2 can finalize the workflow
-        // to FAILED instead of throwing an NPE that would leave it permanently stuck.
+        // Both guards return Abort so TX2 finishes cleanly and the workflow is
+        // marked FAILED, rather than throwing and leaving it permanently stuck.
         val parallelInfo = snapshot.sequenceMap[parallelSeq]
-            ?: return PhaseDecision.Abort
-        PhaseDecision.ScatterExpand(items, parallelInfo)
+        when {
+            items.isEmpty() -> PhaseDecision.Abort
+            parallelInfo == null -> PhaseDecision.Abort
+            else -> PhaseDecision.ScatterExpand(items, parallelInfo)
+        }
     } else {
-        resolveFailureFallback(seqInfo.activity.failurePolicy)
+        PhaseDecision.Abort
     }
 
     PhaseType.PARALLEL -> {
         val counts = snapshot.allCounts[seqInfo.sequenceNumber] ?: TaskStatusCounts(0, 0, 0, 0)
-        val scatterActName = seqInfo.activityName.removeSuffix(".__parallel__")
-        val scatterActivity = snapshot.definition.activities[scatterActName]
-        val joinPolicy = scatterActivity?.fanOut?.joinPolicy ?: JoinPolicy.All
-        val joinPassed = evaluateJoinPolicy(joinPolicy, counts.completed, counts.total)
-        if (joinPassed) PhaseDecision.Normal
-        else resolveFailureFallback(seqInfo.activity.failurePolicy)
+        val joinPassed = counts.completed == counts.total
+        if (joinPassed) PhaseDecision.Normal else PhaseDecision.Abort
     }
 
     PhaseType.LINEAR -> {
-        if (status != TaskStatus.COMPLETED && status != TaskStatus.SKIPPED &&
-            seqInfo.activity.failurePolicy == FailurePolicy.ABORT
-        ) {
+        if (status != TaskStatus.COMPLETED && status != TaskStatus.SKIPPED) {
             PhaseDecision.Abort
         } else {
             PhaseDecision.Normal
         }
     }
 }
-
-private fun resolveFailureFallback(failurePolicy: FailurePolicy): PhaseDecision =
-    if (failurePolicy == FailurePolicy.ABORT) PhaseDecision.Abort
-    else PhaseDecision.ForceDefaultBranch
 
 // -- Successor dispatch -------------------------------------------------------
 
@@ -222,7 +171,6 @@ private fun resolveFailureFallback(failurePolicy: FailurePolicy): PhaseDecision 
 fun dispatchSuccessors(
     snapshot: GateSnapshot,
     seqInfo: SequenceInfo,
-    forceDefault: Boolean,
 ): SuccessorResult {
     val resolvedSeqs = mutableSetOf<Int>()
     for ((seq, counts) in snapshot.allCounts) {
@@ -263,11 +211,9 @@ fun dispatchSuccessors(
         if (sSeq in visitedSeqs) continue
         val successor = discovered[sSeq] ?: continue
 
-        val edgeTaken = if (forceDefault) {
-            hasDefaultBranchEdge(successor, snapshot.definition)
-        } else {
-            isAnyEdgeTaken(snapshot.tasksBySeq, snapshot.resultBranches, successor, snapshot.sequenceMap, snapshot.definition)
-        }
+        val edgeTaken = isAnyEdgeTaken(
+            snapshot.tasksBySeq, snapshot.resultBranches, successor, snapshot.sequenceMap, snapshot.definition,
+        )
 
         if (edgeTaken) {
             val task = createTaskForActivity(

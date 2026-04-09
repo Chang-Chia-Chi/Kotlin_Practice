@@ -1,7 +1,5 @@
 package com.workflow.stress
 
-import com.workflow.workflow.model.FailurePolicy
-import com.workflow.workflow.model.JoinPolicy
 import com.workflow.workflow.model.TaskStatus
 import com.workflow.workflow.model.WorkflowStatus
 import com.workflow.workflow.model.workflowId
@@ -426,7 +424,6 @@ class LivenessStressTest : StressTestBase() {
                     activity("step1") {
                         transition("l10.handler")
                         retries(1) // 1 retry = max 2 attempts
-                        failurePolicy(FailurePolicy.ABORT)
                     }
                 }
             val wfId = engine.startWorkflow(def).workflowId
@@ -446,58 +443,6 @@ class LivenessStressTest : StressTestBase() {
 
             assertWorkflowTerminates(wfId)
             assertWorkflowStatus(wfId, "FAILED")
-            sweepJob.cancel()
-        }
-
-    // ---- L11: Fan-out: all sub-tasks fail under BEST_EFFORT ----
-
-    @Test
-    fun `L11 - fan-out all sub-tasks fail with BEST_EFFORT - workflow terminates`() =
-        runBlocking(Dispatchers.Default) {
-            val def =
-                workflow {
-                    activity("scatter") {
-                        transition("l11.scatter")
-                        failurePolicy(FailurePolicy.BEST_EFFORT)
-                        fanOut {
-                            transition("l11.parallel")
-                            retries(0) // No retries — immediate failure
-                            failurePolicy(FailurePolicy.BEST_EFFORT)
-                            joinPolicy(JoinPolicy.All)
-                        }
-                        next("final")
-                    }
-                    activity("final") { transition("l11.final") }
-                }
-
-            // Scatter handler produces N payloads
-            handlerRegistry.register(
-                "l11.scatter",
-                object : TransitionHandler {
-                    override suspend fun execute(input: HandlerInput): HandlerResult {
-                        val payloads = (1..scale.fanOutSize).map { """{"item":$it}""" }
-                        return HandlerResult.Completed(result = null, items = payloads)
-                    }
-                },
-            )
-            // All parallel handlers fail
-            handlerRegistry.register("l11.parallel", FailingHandler())
-            handlerRegistry.register("l11.final", PassThroughHandler())
-
-            val wfId = engine.startWorkflow(def).workflowId
-            diagnostics.trackedWorkflows.add(wfId)
-
-            startWorkerPool()
-
-            val sweepJob =
-                launch(Dispatchers.IO) {
-                    while (true) {
-                        delay(sweepInterval.toMillis())
-                        runSweep()
-                    }
-                }
-
-            assertWorkflowTerminates(wfId)
             sweepJob.cancel()
         }
 

@@ -1,6 +1,5 @@
 package com.workflow.dispatch.dsl
 
-import com.workflow.workflow.model.JoinPolicy
 import com.workflow.workflow.model.buildSequenceMap
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
@@ -21,7 +20,6 @@ class DispatchWorkflowTest {
         assertNotNull(scatter.fanOut)
         assertEquals("DispatchSimulationHandler", scatter.fanOut!!.transition)
         assertEquals(2, scatter.fanOut!!.retries)
-        assertEquals(JoinPolicy.All, scatter.fanOut!!.joinPolicy)
     }
 
     @Test

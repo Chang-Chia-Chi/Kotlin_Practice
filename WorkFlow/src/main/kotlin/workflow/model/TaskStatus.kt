@@ -1,7 +1,7 @@
 package com.workflow.workflow.model
 
 enum class TaskStatus {
-    PENDING, PROCESSING, WAITING_FOR_SIGNAL, COMPLETED, FAILED,
+    PENDING, PROCESSING, COMPLETED, FAILED,
     TIMED_OUT, DEAD_LETTER, CANCELLED, DEFERRED,
     SKIPPED;   // terminal: inserted by phase gate when a conditional edge is not taken
 
@@ -17,17 +17,12 @@ enum class TaskStatus {
             PROCESSING to TIMED_OUT,
             PROCESSING to PENDING,
             PROCESSING to DEAD_LETTER,
-            PROCESSING to WAITING_FOR_SIGNAL,
             PROCESSING to DEFERRED,
             DEFERRED to COMPLETED,
             DEFERRED to FAILED,
             DEFERRED to TIMED_OUT,
             DEFERRED to CANCELLED,
             DEFERRED to PENDING,
-            WAITING_FOR_SIGNAL to COMPLETED,
-            WAITING_FOR_SIGNAL to FAILED,
-            WAITING_FOR_SIGNAL to TIMED_OUT,
-            WAITING_FOR_SIGNAL to CANCELLED,
             FAILED to PENDING,
             FAILED to DEAD_LETTER,
         )

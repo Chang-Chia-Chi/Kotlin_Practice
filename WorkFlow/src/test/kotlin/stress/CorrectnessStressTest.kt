@@ -1,7 +1,5 @@
 package com.workflow.stress
 
-import com.workflow.workflow.model.FailurePolicy
-import com.workflow.workflow.model.JoinPolicy
 import com.workflow.workflow.model.TaskStatus
 import com.workflow.workflow.model.workflowId
 import com.workflow.workflow.dsl.workflow
@@ -38,7 +36,6 @@ class CorrectnessStressTest : StressTestBase() {
                 transition("c1.scatter")
                 fanOut {
                     transition("c1.parallel")
-                    joinPolicy(JoinPolicy.All)
                 }
                 next("final")
             }
@@ -89,7 +86,6 @@ class CorrectnessStressTest : StressTestBase() {
                 transition("c2.scatter")
                 fanOut {
                     transition("c2.parallel")
-                    joinPolicy(JoinPolicy.All)
                 }
             }
         }
@@ -129,12 +125,9 @@ class CorrectnessStressTest : StressTestBase() {
         val def = workflow {
             activity("scatter") {
                 transition("c3.scatter")
-                failurePolicy(FailurePolicy.ABORT)
                 fanOut {
                     transition("c3.parallel")
                     retries(0)
-                    failurePolicy(FailurePolicy.ABORT)
-                    joinPolicy(JoinPolicy.All)
                 }
             }
         }
@@ -169,137 +162,7 @@ class CorrectnessStressTest : StressTestBase() {
         sweepJob.cancel()
     }
 
-    // ---- C4: JoinPolicy.Percentage(95) boundary precision ----
-
-    @Test
-    fun `C4 - JoinPolicy Percentage 95 at threshold - passes`() = runBlocking(Dispatchers.Default) {
-        // 95 of 100 succeed (5 fail) → 95% ≥ 95% → pass
-        val wfId = startPercentageTest(totalTasks = 100, failCount = 5, threshold = 95)
-        val sweepJob = launch(Dispatchers.IO) {
-            while (true) { delay(sweepInterval.toMillis()); runSweep() }
-        }
-        assertWorkflowTerminates(wfId)
-        assertWorkflowStatus(wfId, "COMPLETED")
-        sweepJob.cancel()
-    }
-
-    @Test
-    fun `C4 - JoinPolicy Percentage 95 below threshold - fails`() = runBlocking(Dispatchers.Default) {
-        // 94 of 100 succeed (6 fail) → 94% < 95% → fail
-        val wfId = startPercentageTest(totalTasks = 100, failCount = 6, threshold = 95)
-        val sweepJob = launch(Dispatchers.IO) {
-            while (true) { delay(sweepInterval.toMillis()); runSweep() }
-        }
-        assertWorkflowTerminates(wfId)
-        assertWorkflowStatus(wfId, "FAILED")
-        sweepJob.cancel()
-    }
-
-    private suspend fun startPercentageTest(totalTasks: Int, failCount: Int, threshold: Int): String {
-        val handlerKey = "c4-$totalTasks-$failCount"
-        val def = workflow {
-            activity("scatter") {
-                transition("$handlerKey.scatter")
-                fanOut {
-                    transition("$handlerKey.parallel")
-                    retries(0)
-                    joinPolicy(JoinPolicy.Percentage(threshold))
-                }
-                next("final")
-            }
-            activity("final") { transition("$handlerKey.final") }
-        }
-
-        handlerRegistry.register("$handlerKey.scatter", object : TransitionHandler {
-            override suspend fun execute(input: HandlerInput): HandlerResult {
-                val payloads = (1..totalTasks).map { """{"item":$it}""" }
-                return HandlerResult.Completed(result = null, items = payloads)
-            }
-        })
-
-        val failCounter = AtomicInteger(0)
-        handlerRegistry.register("$handlerKey.parallel", object : TransitionHandler {
-            override suspend fun execute(input: HandlerInput): HandlerResult {
-                if (failCounter.incrementAndGet() <= failCount) throw RuntimeException("Simulated failure")
-                return HandlerResult.Completed(result = input.item)
-            }
-        })
-        handlerRegistry.register("$handlerKey.final", PassThroughHandler())
-
-        val wfId = engine.startWorkflow(def).workflowId
-        diagnostics.trackedWorkflows.add(wfId)
-        startWorkerPool()
-        return wfId
-    }
-
-    // ---- C5: JoinPolicy.Threshold(N) boundary precision ----
-
-    @Test
-    fun `C5 - JoinPolicy Threshold boundary precision`() = runBlocking(Dispatchers.Default) {
-        val total = 20
-        val threshold = 15
-
-        // At threshold: 15 succeed → pass
-        verifyJoinPolicyThreshold(total, failCount = total - threshold, threshold = threshold, expectedStatus = "COMPLETED")
-        cleanUpTables()
-
-        // Below threshold: 14 succeed → fail
-        verifyJoinPolicyThreshold(total, failCount = total - threshold + 1, threshold = threshold, expectedStatus = "FAILED")
-    }
-
-    private suspend fun verifyJoinPolicyThreshold(
-        totalTasks: Int,
-        failCount: Int,
-        threshold: Int,
-        expectedStatus: String,
-    ) {
-        val handlerKey = "c5-$totalTasks-$failCount"
-        val def = workflow {
-            activity("scatter") {
-                transition("$handlerKey.scatter")
-                fanOut {
-                    transition("$handlerKey.parallel")
-                    retries(0)
-                    joinPolicy(JoinPolicy.Threshold(threshold))
-                }
-                next("final")
-            }
-            activity("final") { transition("$handlerKey.final") }
-        }
-
-        handlerRegistry.register("$handlerKey.scatter", object : TransitionHandler {
-            override suspend fun execute(input: HandlerInput): HandlerResult {
-                val payloads = (1..totalTasks).map { """{"item":$it}""" }
-                return HandlerResult.Completed(result = null, items = payloads)
-            }
-        })
-
-        val failCounter = AtomicInteger(0)
-        handlerRegistry.register("$handlerKey.parallel", object : TransitionHandler {
-            override suspend fun execute(input: HandlerInput): HandlerResult {
-                if (failCounter.incrementAndGet() <= failCount) throw RuntimeException("Simulated failure")
-                return HandlerResult.Completed(result = input.item)
-            }
-        })
-        handlerRegistry.register("$handlerKey.final", PassThroughHandler())
-
-        val wfId = engine.startWorkflow(def).workflowId
-        diagnostics.trackedWorkflows.add(wfId)
-
-        startWorkerPool()
-
-        coroutineScope {
-            val sweepJob = launch(Dispatchers.IO) {
-                while (true) { delay(sweepInterval.toMillis()); runSweep() }
-            }
-
-            assertWorkflowTerminates(wfId)
-            assertWorkflowStatus(wfId, expectedStatus)
-            sweepJob.cancel()
-        }
-    }
-
-    // ---- C6: FailurePolicy.ABORT mid-phase ----
+    // ---- C6: task failure aborts workflow mid-phase ----
 
     @Test
     fun `C6 - ABORT mid-phase - workflow fails and no new phase started`() = runBlocking(Dispatchers.Default) {
@@ -307,7 +170,6 @@ class CorrectnessStressTest : StressTestBase() {
             activity("step1") {
                 transition("c6.handler")
                 retries(0)
-                failurePolicy(FailurePolicy.ABORT)
                 next("step2")
             }
             activity("step2") { transition("c6.step2") }
@@ -331,38 +193,6 @@ class CorrectnessStressTest : StressTestBase() {
         // No step2 tasks should exist
         val step2Tasks = readTasksDirect(wfId, sequenceNumber = 2)
         assertEquals(0, step2Tasks.size, "No tasks should exist at seq 2 after ABORT")
-
-        sweepJob.cancel()
-    }
-
-    // ---- C7: FailurePolicy.BEST_EFFORT - all tasks fail ----
-
-    @Test
-    fun `C7 - BEST_EFFORT with all failures - workflow advances to next phase`() = runBlocking(Dispatchers.Default) {
-        val def = workflow {
-            activity("step1") {
-                transition("c7.handler")
-                retries(0)
-                failurePolicy(FailurePolicy.BEST_EFFORT)
-                next("step2")
-            }
-            activity("step2") { transition("c7.step2") }
-        }
-
-        handlerRegistry.register("c7.handler", FailingHandler())
-        handlerRegistry.register("c7.step2", PassThroughHandler())
-
-        val wfId = engine.startWorkflow(def).workflowId
-        diagnostics.trackedWorkflows.add(wfId)
-
-        startWorkerPool()
-
-        val sweepJob = launch(Dispatchers.IO) {
-            while (true) { delay(sweepInterval.toMillis()); runSweep() }
-        }
-
-        assertWorkflowTerminates(wfId)
-        assertWorkflowStatus(wfId, "COMPLETED")
 
         sweepJob.cancel()
     }
@@ -443,7 +273,6 @@ class CorrectnessStressTest : StressTestBase() {
                 transition("c9.scatter")
                 fanOut {
                     transition("c9.parallel")
-                    joinPolicy(JoinPolicy.All)
                 }
             }
         }
@@ -490,7 +319,6 @@ class CorrectnessStressTest : StressTestBase() {
             activity("step2") {
                 transition("c10.step2")
                 retries(0)
-                failurePolicy(FailurePolicy.ABORT)
                 next("step3")
             }
             activity("step3") { transition("c10.step3") }
@@ -548,7 +376,6 @@ class CorrectnessStressTest : StressTestBase() {
                 transition("c11.scatter")
                 fanOut {
                     transition("c11.parallel")
-                    joinPolicy(JoinPolicy.All)
                 }
                 next("final")
             }

@@ -3,9 +3,7 @@ package com.workflow.workflow.model
 import com.workflow.workflow.dsl.workflow
 import com.workflow.workflow.model.ActivityDefinition
 import com.workflow.workflow.model.Edge
-import com.workflow.workflow.model.FailurePolicy
 import com.workflow.workflow.model.FanOutDefinition
-import com.workflow.workflow.model.JoinPolicy
 import com.workflow.workflow.model.PhaseType
 import com.workflow.workflow.model.WorkflowDefinition
 import com.workflow.workflow.model.buildSequenceMap
@@ -90,7 +88,7 @@ class SequenceModelTest {
         val def = workflow {
             activity("scatter") {
                 transition("s.h")
-                fanOut { transition("p.h"); joinPolicy(JoinPolicy.All) }
+                fanOut { transition("p.h") }
                 next("join")
             }
             activity("join") { transition("j.h") }
@@ -178,26 +176,7 @@ class SequenceModelTest {
         }
     }
 
-    // ── Spec item 9: BEST_EFFORT + on() rejected ──────────────────────────
-
-    @Test
-    fun `BEST_EFFORT with conditional successors is rejected at build time`() {
-        assertFailsWith<IllegalArgumentException> {
-            WorkflowDefinition(
-                activities = mapOf(
-                    "a" to ActivityDefinition(
-                        "a", "a.h",
-                        failurePolicy = FailurePolicy.BEST_EFFORT,
-                        successors = listOf(Edge("b", "OK")),
-                    ),
-                    "b" to ActivityDefinition("b", "b.h"),
-                ),
-                start = "a",
-            )
-        }
-    }
-
-    // ── Spec item 10: fanOut + on() rejected ──────────────────────────────
+    // ── Spec item 9: fanOut + on() rejected ──────────────────────────────
 
     @Test
     fun `fanOut with conditional successors is rejected at build time`() {

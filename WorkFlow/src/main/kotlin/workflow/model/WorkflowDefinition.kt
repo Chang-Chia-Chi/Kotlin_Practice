@@ -21,16 +21,6 @@ data class WorkflowDefinition(
         }
 
         for ((name, activity) in activities) {
-            require(!(activity.failurePolicy == FailurePolicy.BEST_EFFORT &&
-                    activity.successors.any { it.label != DEFAULT_BRANCH })) {
-                "Activity '$name': BEST_EFFORT policy is incompatible with conditional (on()) successors"
-            }
-            require(!(activity.failurePolicy == FailurePolicy.BEST_EFFORT && activity.fanOut != null)) {
-                "Activity '$name': BEST_EFFORT policy is incompatible with fanOut (scatter failure leaves no items to join)"
-            }
-        }
-
-        for ((name, activity) in activities) {
             require(!(activity.fanOut != null &&
                     activity.successors.any { it.label != DEFAULT_BRANCH })) {
                 "Activity '$name': fanOut cannot be combined with conditional successors"

@@ -6,7 +6,6 @@ import com.fasterxml.jackson.module.kotlin.KotlinModule
 import com.workflow.workflow.adapter.persistent.JdbiTaskRepository
 import com.workflow.workflow.adapter.persistent.JdbiWorkflowRepository
 import com.workflow.workflow.config.WatchdogConfig
-import com.workflow.workflow.model.JoinPolicy
 import com.workflow.workflow.model.TaskStatus
 import com.workflow.workflow.model.WorkflowStatus
 import com.workflow.workflow.model.workflowId
@@ -217,8 +216,7 @@ class WorkflowIntegrationTest {
                     transition("batch.worker")
                     fanOut {
                         transition("batch.scatter")
-                        joinPolicy(JoinPolicy.All)
-                    }
+                        }
                     next("aggregate")
                 }
                 activity("aggregate") { transition("batch.aggregate") }
@@ -257,7 +255,7 @@ class WorkflowIntegrationTest {
                 )
             }
 
-            // Verify: JoinPolicy.All evaluated, next linear task created at seq 3
+            // Verify: all sub-tasks joined, next linear task created at seq 3
 
             val aggregateTasks = taskRepo.findByWorkflowAndSequence(runId, 3)
             assertEquals(1, aggregateTasks.size)
@@ -355,8 +353,7 @@ class WorkflowIntegrationTest {
                     transition("scatter.handler")
                     fanOut {
                         transition("parallel.handler")
-                        joinPolicy(JoinPolicy.All)
-                    }
+                        }
                     next("post-join")
                 }
                 activity("post-join") { transition("post.handler") }

@@ -41,7 +41,7 @@ CREATE TABLE task (
     CONSTRAINT fk_task_workflow FOREIGN KEY (workflow_id) REFERENCES workflow (id),
     CONSTRAINT chk_task_status CHECK (status IN (
         'PENDING', 'PROCESSING', 'COMPLETED', 'FAILED',
-        'TIMED_OUT', 'DEAD_LETTER', 'CANCELLED', 'WAITING_FOR_SIGNAL', 'SKIPPED'
+        'TIMED_OUT', 'DEAD_LETTER', 'CANCELLED', 'SKIPPED'
     ))
 );
 

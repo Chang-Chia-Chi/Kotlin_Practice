@@ -8,8 +8,6 @@ import com.workflow.infrastructure.persistence.OracleTestContainer
 import com.workflow.workflow.adapter.persistent.JdbiTaskRepository
 import com.workflow.workflow.adapter.persistent.JdbiWorkflowRepository
 import com.workflow.workflow.dsl.workflow
-import com.workflow.workflow.model.FailurePolicy
-import com.workflow.workflow.model.JoinPolicy
 import com.workflow.workflow.model.TaskStatus
 import com.workflow.workflow.model.WorkflowDefinition
 import com.workflow.workflow.model.WorkflowStatus
@@ -313,37 +311,13 @@ class DefaultPhaseGateTest {
         assertEquals(1, joinTasks.size)
     }
 
-    // -- Spec item 24: BEST_EFFORT failure -> unconditional successors dispatched
-
-    @Test
-    fun `BEST_EFFORT failed activity dispatches unconditional successors`() = runTest {
-        val def = workflow {
-            activity("risky") {
-                transition("r.h")
-                failurePolicy(FailurePolicy.BEST_EFFORT)
-                next("always-runs")
-            }
-            activity("always-runs") { transition("a.h") }
-        }
-        val seqMap = buildSequenceMap(def)
-        val (wfId, _) = startAndGetSeq(def)
-
-        val seqR = seqMap.values.first { it.activityName == "risky" }.sequenceNumber
-        val rTasks = taskRepo.findByWorkflowAndSequence(wfId, seqR)
-        gate.onTaskCompleted(rTasks[0].id, wfId, seqR, TaskStatus.FAILED, null)
-
-        val seqNext = seqMap.values.first { it.activityName == "always-runs" }.sequenceNumber
-        assertEquals(listOf("PENDING"), taskStatusAt(wfId, seqNext))
-    }
-
-    // -- Spec item 25: ABORT failure -> workflow FAILED -------------------------
+    // -- Spec item 24: ABORT failure -> workflow FAILED -------------------------
 
     @Test
     fun `ABORT failed activity marks workflow FAILED`() = runTest {
         val def = workflow {
             activity("risky") {
                 transition("r.h")
-                failurePolicy(FailurePolicy.ABORT)
                 next("never")
             }
             activity("never") { transition("n.h") }
@@ -421,11 +395,10 @@ class DefaultPhaseGateTest {
 
     @Test
     fun `PARALLEL join failure with ABORT marks workflow FAILED`() = runTest {
-        // scatter activity's failurePolicy governs the parallel join behavior
+        // parallel join failure aborts the workflow
         val def = workflow {
             activity("scatter") {
                 transition("sc.h")
-                failurePolicy(FailurePolicy.ABORT)
                 fanOut { transition("par.h") }
                 next("join")
             }
@@ -448,40 +421,7 @@ class DefaultPhaseGateTest {
         assertEquals(WorkflowStatus.FAILED, workflowStatus(wfId))
     }
 
-    // -- Spec item 29: PARALLEL join fails (BEST_EFFORT) -> unconditional successors dispatched
-
-    @Test
-    fun `PARALLEL join failure with BEST_EFFORT dispatches unconditional successors`() = runTest {
-        // fanOut.failurePolicy governs the parallel join behavior
-        val def = workflow {
-            activity("scatter") {
-                transition("sc.h")
-                fanOut {
-                    transition("par.h")
-                    failurePolicy(FailurePolicy.BEST_EFFORT)
-                }
-                next("join")
-            }
-            activity("join") { transition("j.h") }
-        }
-        val seqMap = buildSequenceMap(def)
-        val (wfId, _) = startAndGetSeq(def)
-
-        val seqScatter = seqMap.values.first { it.activityName == "scatter" }.sequenceNumber
-        val scatterTasks = taskRepo.findByWorkflowAndSequence(wfId, seqScatter)
-        gate.onTaskCompleted(scatterTasks[0].id, wfId, seqScatter, TaskStatus.COMPLETED, resultJson = null, itemsJson = """["i1","i2"]""")
-
-        val seqParallel = seqMap.values.first { it.activityName == "scatter.__parallel__" }.sequenceNumber
-        val parTasks = taskRepo.findByWorkflowAndSequence(wfId, seqParallel)
-        for (t in parTasks) {
-            gate.onTaskCompleted(t.id, wfId, seqParallel, TaskStatus.FAILED, null)
-        }
-
-        val seqJoin = seqMap.values.first { it.activityName == "join" }.sequenceNumber
-        assertEquals(listOf("PENDING"), taskStatusAt(wfId, seqJoin))
-    }
-
-    // -- Spec item 30: Fan-out activity SKIPPED -> SCATTER + PARALLEL + successors SKIPPED
+    // -- Spec item 29: Fan-out activity SKIPPED -> SCATTER + PARALLEL + successors SKIPPED
 
     @Test
     fun `fan-out activity on SKIPPED branch propagates SKIPPED to scatter, parallel, successors`() = runTest {
@@ -536,24 +476,6 @@ class DefaultPhaseGateTest {
                 resultJson = null, itemsJson = null,
             )
         }
-    }
-
-    // -- Coverage gap 2: SCATTER with BEST_EFFORT is rejected at definition time ---
-
-    @Test
-    fun `SCATTER with BEST_EFFORT is rejected at definition time`() {
-        val error = org.junit.jupiter.api.assertThrows<IllegalArgumentException> {
-            workflow {
-                activity("scatter") {
-                    transition("sc.h")
-                    failurePolicy(FailurePolicy.BEST_EFFORT)
-                    fanOut { transition("par.h") }
-                    next("join")
-                }
-                activity("join") { transition("j.h") }
-            }
-        }
-        assertTrue(error.message!!.contains("BEST_EFFORT policy is incompatible with fanOut"))
     }
 
     // -- Coverage gap 2: Idempotent completion (updateStatus returns false) -------
@@ -664,11 +586,11 @@ class DefaultPhaseGateTest {
         }
     }
 
-    // -- G6: SCATTER with empty items array throws ------------------------------
-    // require() in resolvePhaseDecision throws IllegalArgumentException (Kotlin require).
+    // -- G6: SCATTER with empty items array aborts workflow --------------------
+    // Empty items list is treated as PhaseDecision.Abort: workflow transitions to FAILED.
 
     @Test
-    fun `G6 SCATTER with empty items array throws IllegalArgumentException`() = runTest {
+    fun `G6 SCATTER with empty items array aborts workflow to FAILED`() = runTest {
         val def = workflow {
             activity("scatter") {
                 transition("sc.h")
@@ -682,12 +604,13 @@ class DefaultPhaseGateTest {
         val seqScatter = seqMap.values.first { it.activityName == "scatter" }.sequenceNumber
         val scatterTasks = taskRepo.findByWorkflowAndSequence(wfId, seqScatter)
 
-        org.junit.jupiter.api.assertThrows<IllegalArgumentException> {
-            gate.onTaskCompleted(
-                scatterTasks[0].id, wfId, seqScatter, TaskStatus.COMPLETED,
-                resultJson = null, itemsJson = """[]""",
-            )
-        }
+        gate.onTaskCompleted(
+            scatterTasks[0].id, wfId, seqScatter, TaskStatus.COMPLETED,
+            resultJson = null, itemsJson = """[]""",
+        )
+
+        val wf = workflowRepo.findById(wfId)
+        assertEquals(WorkflowStatus.FAILED, wf?.status)
     }
 
     // -- G7a: assembleChildItem merges scatter resultJson with item, item fields win on collision
@@ -760,9 +683,7 @@ class DefaultPhaseGateTest {
     fun `G11 TIMED_OUT task with ABORT policy marks workflow FAILED`() = runTest {
         val def = workflow {
             activity("step") {
-                transition("s.h")
-                failurePolicy(FailurePolicy.ABORT)
-            }
+                transition("s.h")            }
         }
         val seqMap = buildSequenceMap(def)
         val (wfId, _) = startAndGetSeq(def)
@@ -773,129 +694,6 @@ class DefaultPhaseGateTest {
         gate.onTaskCompleted(tasks[0].id, wfId, seqStep, TaskStatus.TIMED_OUT, null)
 
         assertEquals(WorkflowStatus.FAILED, workflowStatus(wfId))
-    }
-
-    // -- G12: TIMED_OUT task with BEST_EFFORT policy — successor is SKIPPED ------
-    //
-    // isEdgeTaken returns false for TIMED_OUT (only FAILED gets the BEST_EFFORT
-    // special-case; TIMED_OUT propagates like an unmatched completion), so the
-    // successor receives a SKIPPED row and the workflow completes rather than fails.
-
-    @Test
-    fun `G12 TIMED_OUT task with BEST_EFFORT policy skips successor and completes workflow`() = runTest {
-        val def = workflow {
-            activity("risky") {
-                transition("r.h")
-                failurePolicy(FailurePolicy.BEST_EFFORT)
-                next("always-runs")
-            }
-            activity("always-runs") { transition("a.h") }
-        }
-        val seqMap = buildSequenceMap(def)
-        val (wfId, _) = startAndGetSeq(def)
-
-        val seqR = seqMap.values.first { it.activityName == "risky" }.sequenceNumber
-        val rTasks = taskRepo.findByWorkflowAndSequence(wfId, seqR)
-
-        gate.onTaskCompleted(rTasks[0].id, wfId, seqR, TaskStatus.TIMED_OUT, null)
-
-        // TIMED_OUT does not satisfy isEdgeTaken for DEFAULT_BRANCH — successor is SKIPPED
-        val seqNext = seqMap.values.first { it.activityName == "always-runs" }.sequenceNumber
-        assertEquals(listOf("SKIPPED"), taskStatusAt(wfId, seqNext))
-        // All tasks terminal → workflow completes rather than fails (BEST_EFFORT)
-        assertEquals(WorkflowStatus.COMPLETED, workflowStatus(wfId))
-    }
-
-    // -- G14a: Threshold JoinPolicy — join dispatches despite some FAILED tasks ---
-    //
-    // The fast-path (nonTerminal > 0) gates entry to resolvePhaseDecision, so
-    // Threshold/Percentage only differ from All when all tasks are terminal but
-    // some have failed. With All + failures → Abort/ForceDefaultBranch. With
-    // Threshold(1) + 1 COMPLETED + 1 FAILED → evaluateJoinPolicy passes → Normal.
-
-    @Test
-    fun `G14a Threshold JoinPolicy dispatches join when completed count meets threshold despite failures`() = runTest {
-        val def = workflow {
-            activity("scatter") {
-                transition("sc.h")
-                fanOut {
-                    transition("par.h")
-                    joinPolicy(JoinPolicy.Threshold(1))
-                    failurePolicy(FailurePolicy.BEST_EFFORT)
-                }
-                next("join")
-            }
-            activity("join") { transition("j.h") }
-        }
-        val seqMap = buildSequenceMap(def)
-        val (wfId, _) = startAndGetSeq(def)
-
-        val seqScatter = seqMap.values.first { it.activityName == "scatter" }.sequenceNumber
-        val scatterTasks = taskRepo.findByWorkflowAndSequence(wfId, seqScatter)
-
-        // Expand 2 parallel tasks
-        gate.onTaskCompleted(
-            scatterTasks[0].id, wfId, seqScatter, TaskStatus.COMPLETED,
-            resultJson = null, itemsJson = """["item1","item2"]""",
-        )
-
-        val seqParallel = seqMap.values.first { it.activityName == "scatter.__parallel__" }.sequenceNumber
-        val parTasks = taskRepo.findByWorkflowAndSequence(wfId, seqParallel)
-        assertEquals(2, parTasks.size)
-
-        // Complete 1, fail 1 — with All policy the join would not pass (failure → Abort/ForceDefault);
-        // with Threshold(1) + BEST_EFFORT: completed=1 >= n=1 → evaluateJoinPolicy=true → Normal → join dispatched
-        gate.onTaskCompleted(parTasks[0].id, wfId, seqParallel, TaskStatus.COMPLETED, null)
-        gate.onTaskCompleted(parTasks[1].id, wfId, seqParallel, TaskStatus.FAILED, null)
-
-        // Join must be dispatched
-        val seqJoin = seqMap.values.first { it.activityName == "join" }.sequenceNumber
-        val joinTasks = taskRepo.findByWorkflowAndSequence(wfId, seqJoin)
-        assertEquals(1, joinTasks.size, "Join must be dispatched when Threshold(1) is met despite a failure")
-        assertEquals(TaskStatus.PENDING, joinTasks[0].status)
-    }
-
-    // -- G14b: Percentage JoinPolicy — join dispatches despite some FAILED tasks -
-
-    @Test
-    fun `G14b Percentage JoinPolicy dispatches join when completed percentage meets threshold despite failures`() = runTest {
-        val def = workflow {
-            activity("scatter") {
-                transition("sc.h")
-                fanOut {
-                    transition("par.h")
-                    joinPolicy(JoinPolicy.Percentage(50))
-                    failurePolicy(FailurePolicy.BEST_EFFORT)
-                }
-                next("join")
-            }
-            activity("join") { transition("j.h") }
-        }
-        val seqMap = buildSequenceMap(def)
-        val (wfId, _) = startAndGetSeq(def)
-
-        val seqScatter = seqMap.values.first { it.activityName == "scatter" }.sequenceNumber
-        val scatterTasks = taskRepo.findByWorkflowAndSequence(wfId, seqScatter)
-
-        // Expand 2 parallel tasks
-        gate.onTaskCompleted(
-            scatterTasks[0].id, wfId, seqScatter, TaskStatus.COMPLETED,
-            resultJson = null, itemsJson = """["item1","item2"]""",
-        )
-
-        val seqParallel = seqMap.values.first { it.activityName == "scatter.__parallel__" }.sequenceNumber
-        val parTasks = taskRepo.findByWorkflowAndSequence(wfId, seqParallel)
-        assertEquals(2, parTasks.size)
-
-        // Complete 1, fail 1 — Percentage(50): (1*100)/2 = 50 >= 50 → evaluateJoinPolicy=true → Normal → join
-        gate.onTaskCompleted(parTasks[0].id, wfId, seqParallel, TaskStatus.COMPLETED, null)
-        gate.onTaskCompleted(parTasks[1].id, wfId, seqParallel, TaskStatus.FAILED, null)
-
-        // Join must be dispatched
-        val seqJoin = seqMap.values.first { it.activityName == "join" }.sequenceNumber
-        val joinTasks = taskRepo.findByWorkflowAndSequence(wfId, seqJoin)
-        assertEquals(1, joinTasks.size, "Join must be dispatched when Percentage(50) is satisfied by 1/2 completed")
-        assertEquals(TaskStatus.PENDING, joinTasks[0].status)
     }
 
     // -- G4: ScatterExpand idempotency guard (existingParallelCount > 0) --------

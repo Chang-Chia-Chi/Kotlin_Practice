@@ -1,6 +1,5 @@
 package com.workflow.stress
 
-import com.workflow.workflow.model.JoinPolicy
 import com.workflow.workflow.model.workflowId
 import com.workflow.workflow.dsl.workflow
 import com.workflow.worker.usecase.port.inbound.execution.HandlerInput
@@ -78,7 +77,6 @@ class ThroughputBenchmarkTest : StressTestBase() {
                         transition("b2.scatter")
                         fanOut {
                             transition("b2.parallel")
-                            joinPolicy(JoinPolicy.All)
                         }
                         next("final")
                     }

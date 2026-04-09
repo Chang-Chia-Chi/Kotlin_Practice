@@ -4,9 +4,7 @@ import com.workflow.workflow.model.ActivityDefinition
 import com.workflow.workflow.usecase.service.orchestration.GateSnapshot
 import com.workflow.workflow.model.DEFAULT_BRANCH
 import com.workflow.workflow.model.Edge
-import com.workflow.workflow.model.FailurePolicy
 import com.workflow.workflow.model.FanOutDefinition
-import com.workflow.workflow.model.JoinPolicy
 import com.workflow.workflow.model.PhaseType
 import com.workflow.workflow.model.SequenceInfo
 import com.workflow.workflow.model.Task
@@ -31,12 +29,10 @@ class DagRouterTest {
         name: String,
         transition: String = "$name.handler",
         successors: List<Edge> = emptyList(),
-        failurePolicy: FailurePolicy = FailurePolicy.ABORT,
     ) = ActivityDefinition(
         name = name,
         transition = transition,
         successors = successors,
-        failurePolicy = failurePolicy,
     )
 
     private fun task(
@@ -87,59 +83,6 @@ class DagRouterTest {
     }
 
     // =========================================================================
-    // evaluateJoinPolicy
-    // =========================================================================
-
-    @Nested
-    inner class EvaluateJoinPolicyTest {
-
-        @Test
-        fun `All policy passes when completed equals total`() {
-            assertTrue(evaluateJoinPolicy(JoinPolicy.All, completedCount = 5, totalCount = 5))
-        }
-
-        @Test
-        fun `All policy fails when completed less than total`() {
-            assertFalse(evaluateJoinPolicy(JoinPolicy.All, completedCount = 4, totalCount = 5))
-        }
-
-        @Test
-        fun `Threshold policy passes when completed meets threshold`() {
-            assertTrue(evaluateJoinPolicy(JoinPolicy.Threshold(3), completedCount = 3, totalCount = 5))
-        }
-
-        @Test
-        fun `Threshold policy fails when completed below threshold`() {
-            assertFalse(evaluateJoinPolicy(JoinPolicy.Threshold(3), completedCount = 2, totalCount = 5))
-        }
-
-        @Test
-        fun `Threshold policy passes when completed exceeds threshold`() {
-            assertTrue(evaluateJoinPolicy(JoinPolicy.Threshold(3), completedCount = 5, totalCount = 5))
-        }
-
-        @Test
-        fun `Percentage policy passes at exact boundary`() {
-            assertTrue(evaluateJoinPolicy(JoinPolicy.Percentage(80), completedCount = 4, totalCount = 5))
-        }
-
-        @Test
-        fun `Percentage policy fails below boundary`() {
-            assertFalse(evaluateJoinPolicy(JoinPolicy.Percentage(80), completedCount = 3, totalCount = 5))
-        }
-
-        @Test
-        fun `Percentage policy handles zero total`() {
-            assertFalse(evaluateJoinPolicy(JoinPolicy.Percentage(50), completedCount = 0, totalCount = 0))
-        }
-
-        @Test
-        fun `All policy handles zero total - zero completed equals zero`() {
-            assertTrue(evaluateJoinPolicy(JoinPolicy.All, completedCount = 0, totalCount = 0))
-        }
-    }
-
-    // =========================================================================
     // isEdgeTaken
     // =========================================================================
 
@@ -148,58 +91,47 @@ class DagRouterTest {
 
         @Test
         fun `COMPLETED task with DEFAULT_BRANCH edge is taken`() {
-            assertTrue(isEdgeTaken(TaskStatus.COMPLETED, null, DEFAULT_BRANCH, FailurePolicy.ABORT))
+            assertTrue(isEdgeTaken(TaskStatus.COMPLETED, null, DEFAULT_BRANCH))
         }
 
         @Test
         fun `COMPLETED task with matching branch label is taken`() {
-            assertTrue(isEdgeTaken(TaskStatus.COMPLETED, "OK", "OK", FailurePolicy.ABORT))
+            assertTrue(isEdgeTaken(TaskStatus.COMPLETED, "OK", "OK"))
         }
 
         @Test
         fun `COMPLETED task with non-matching branch label is not taken`() {
-            assertFalse(isEdgeTaken(TaskStatus.COMPLETED, "OK", "FAIL", FailurePolicy.ABORT))
+            assertFalse(isEdgeTaken(TaskStatus.COMPLETED, "OK", "FAIL"))
         }
 
         @Test
-        fun `FAILED task with BEST_EFFORT takes DEFAULT_BRANCH`() {
-            assertTrue(isEdgeTaken(TaskStatus.FAILED, null, DEFAULT_BRANCH, FailurePolicy.BEST_EFFORT))
-        }
-
-        @Test
-        fun `FAILED task with BEST_EFFORT does not take conditional edge`() {
-            assertFalse(isEdgeTaken(TaskStatus.FAILED, null, "OK", FailurePolicy.BEST_EFFORT))
-        }
-
-        @Test
-        fun `FAILED task with ABORT is not taken`() {
-            assertFalse(isEdgeTaken(TaskStatus.FAILED, null, DEFAULT_BRANCH, FailurePolicy.ABORT))
+        fun `FAILED task is not taken`() {
+            assertFalse(isEdgeTaken(TaskStatus.FAILED, null, DEFAULT_BRANCH))
         }
 
         @Test
         fun `non-terminal task is not taken`() {
-            assertFalse(isEdgeTaken(TaskStatus.PROCESSING, null, DEFAULT_BRANCH, FailurePolicy.ABORT))
+            assertFalse(isEdgeTaken(TaskStatus.PROCESSING, null, DEFAULT_BRANCH))
         }
 
         @Test
         fun `COMPLETED task with null branch and conditional edge is not taken`() {
-            assertFalse(isEdgeTaken(TaskStatus.COMPLETED, null, "SOME_LABEL", FailurePolicy.ABORT))
+            assertFalse(isEdgeTaken(TaskStatus.COMPLETED, null, "SOME_LABEL"))
         }
 
         @Test
         fun `PENDING task is not taken`() {
-            assertFalse(isEdgeTaken(TaskStatus.PENDING, null, DEFAULT_BRANCH, FailurePolicy.ABORT))
+            assertFalse(isEdgeTaken(TaskStatus.PENDING, null, DEFAULT_BRANCH))
         }
 
         @Test
         fun `SKIPPED task is not taken for default edge`() {
-            // SKIPPED is terminal but neither COMPLETED nor FAILED-with-BEST_EFFORT
-            assertFalse(isEdgeTaken(TaskStatus.SKIPPED, null, DEFAULT_BRANCH, FailurePolicy.ABORT))
+            assertFalse(isEdgeTaken(TaskStatus.SKIPPED, null, DEFAULT_BRANCH))
         }
 
         @Test
-        fun `TIMED_OUT task with ABORT is not taken`() {
-            assertFalse(isEdgeTaken(TaskStatus.TIMED_OUT, null, DEFAULT_BRANCH, FailurePolicy.ABORT))
+        fun `TIMED_OUT task is not taken`() {
+            assertFalse(isEdgeTaken(TaskStatus.TIMED_OUT, null, DEFAULT_BRANCH))
         }
     }
 
@@ -302,52 +234,6 @@ class DagRouterTest {
             val resultBranches = emptyMap<String, String?>()
 
             assertFalse(isAnyEdgeTaken(tasksBySeq, resultBranches, sequenceMap.getValue(2), sequenceMap, definition))
-        }
-    }
-
-    // =========================================================================
-    // hasDefaultBranchEdge
-    // =========================================================================
-
-    @Nested
-    inner class HasDefaultBranchEdgeTest {
-
-        @Test
-        fun `returns true when predecessor has default edge to successor`() {
-            val succActivity = activity("succ")
-            val definition = WorkflowDefinition(
-                activities = mapOf(
-                    "pred" to activity("pred", successors = listOf(Edge("succ"))),
-                    "succ" to succActivity,
-                ),
-                start = "pred",
-            )
-            val successor = SequenceInfo(2, "succ", succActivity, PhaseType.LINEAR, listOf(1))
-            assertTrue(hasDefaultBranchEdge(successor, definition))
-        }
-
-        @Test
-        fun `returns false when predecessor has only conditional edges to successor`() {
-            val succActivity = activity("succ")
-            val definition = WorkflowDefinition(
-                activities = mapOf(
-                    "pred" to activity("pred", successors = listOf(Edge("succ", "OK"))),
-                    "succ" to succActivity,
-                ),
-                start = "pred",
-            )
-            val successor = SequenceInfo(2, "succ", succActivity, PhaseType.LINEAR, listOf(1))
-            assertFalse(hasDefaultBranchEdge(successor, definition))
-        }
-
-        @Test
-        fun `returns false when no predecessor edges target successor`() {
-            val def = WorkflowDefinition(
-                activities = mapOf("a" to activity("a")),
-                start = "a",
-            )
-            val orphan = SequenceInfo(99, "orphan", activity("orphan"), PhaseType.LINEAR, emptyList())
-            assertFalse(hasDefaultBranchEdge(orphan, def))
         }
     }
 
@@ -487,25 +373,13 @@ class DagRouterTest {
         @Test
         fun `LINEAR FAILED with ABORT returns Abort`() {
             val def = WorkflowDefinition(
-                activities = mapOf("a" to activity("a", failurePolicy = FailurePolicy.ABORT)),
+                activities = mapOf("a" to activity("a")),
                 start = "a",
             )
             val snap = emptySnapshot(definition = def)
             val seqInfo = snap.sequenceMap.getValue(1)
             val decision = resolvePhaseDecision(snap, seqInfo, TaskStatus.FAILED, scatterItems = null)
             assertEquals(PhaseDecision.Abort, decision)
-        }
-
-        @Test
-        fun `LINEAR FAILED with BEST_EFFORT returns Normal`() {
-            val def = WorkflowDefinition(
-                activities = mapOf("a" to activity("a", failurePolicy = FailurePolicy.BEST_EFFORT)),
-                start = "a",
-            )
-            val snap = emptySnapshot(definition = def)
-            val seqInfo = snap.sequenceMap.getValue(1)
-            val decision = resolvePhaseDecision(snap, seqInfo, TaskStatus.FAILED, scatterItems = null)
-            assertEquals(PhaseDecision.Normal, decision)
         }
 
         @Test
@@ -554,7 +428,7 @@ class DagRouterTest {
         @Test
         fun `PARALLEL join passed returns Normal`() {
             val scatterAct = activity("scatter", successors = listOf(Edge("join")))
-                .copy(fanOut = FanOutDefinition(transition = "par.h", joinPolicy = JoinPolicy.All))
+                .copy(fanOut = FanOutDefinition(transition = "par.h"))
             val joinAct = activity("join")
             val def = WorkflowDefinition(
                 activities = mapOf("scatter" to scatterAct, "join" to joinAct),
@@ -570,15 +444,9 @@ class DagRouterTest {
         }
 
         @Test
-        fun `PARALLEL join failed with ABORT returns Abort`() {
+        fun `PARALLEL join failed returns Abort`() {
             val scatterAct = activity("scatter", successors = listOf(Edge("join")))
-                .copy(
-                    fanOut = FanOutDefinition(
-                        transition = "par.h",
-                        joinPolicy = JoinPolicy.All,
-                        failurePolicy = FailurePolicy.ABORT,
-                    ),
-                )
+                .copy(fanOut = FanOutDefinition(transition = "par.h"))
             val joinAct = activity("join")
             val def = WorkflowDefinition(
                 activities = mapOf("scatter" to scatterAct, "join" to joinAct),
@@ -594,45 +462,25 @@ class DagRouterTest {
         }
 
         @Test
-        fun `PARALLEL join failed with BEST_EFFORT returns ForceDefaultBranch`() {
-            val scatterAct = activity("scatter", successors = listOf(Edge("join")))
-                .copy(
-                    fanOut = FanOutDefinition(
-                        transition = "par.h",
-                        joinPolicy = JoinPolicy.All,
-                        failurePolicy = FailurePolicy.BEST_EFFORT,
-                    ),
-                )
-            val joinAct = activity("join")
-            val def = WorkflowDefinition(
-                activities = mapOf("scatter" to scatterAct, "join" to joinAct),
-                start = "scatter",
+        fun `SCATTER COMPLETED with empty items returns Abort`() {
+            val scatterAct = ActivityDefinition(
+                name = "scatter",
+                transition = "scatter.h",
+                fanOut = FanOutDefinition(transition = "parallel.h"),
+                successors = listOf(Edge("sink")),
             )
+            val sinkAct = ActivityDefinition(name = "sink", transition = "sink.h")
             val snap = emptySnapshot(
-                definition = def,
-                allCounts = mapOf(2 to TaskStatusCounts(total = 3, completed = 2, nonTerminal = 0, failed = 1)),
+                definition = WorkflowDefinition(
+                    activities = mapOf("scatter" to scatterAct, "sink" to sinkAct),
+                    start = "scatter",
+                ),
             )
-            val seqInfo = snap.sequenceMap.values.first { it.phaseType == PhaseType.PARALLEL }
-            val decision = resolvePhaseDecision(snap, seqInfo, TaskStatus.COMPLETED, scatterItems = null)
-            assertEquals(PhaseDecision.ForceDefaultBranch, decision)
-        }
+            val seqInfo = snap.sequenceMap.values.first { it.phaseType == PhaseType.SCATTER }
 
-        @Test
-        fun `PARALLEL threshold join passes with enough completions`() {
-            val scatterAct = activity("scatter", successors = listOf(Edge("join")))
-                .copy(fanOut = FanOutDefinition(transition = "par.h", joinPolicy = JoinPolicy.Threshold(2)))
-            val joinAct = activity("join")
-            val def = WorkflowDefinition(
-                activities = mapOf("scatter" to scatterAct, "join" to joinAct),
-                start = "scatter",
-            )
-            val snap = emptySnapshot(
-                definition = def,
-                allCounts = mapOf(2 to TaskStatusCounts(total = 5, completed = 2, nonTerminal = 0, failed = 3)),
-            )
-            val seqInfo = snap.sequenceMap.values.first { it.phaseType == PhaseType.PARALLEL }
-            val decision = resolvePhaseDecision(snap, seqInfo, TaskStatus.COMPLETED, scatterItems = null)
-            assertEquals(PhaseDecision.Normal, decision)
+            val decision = resolvePhaseDecision(snap, seqInfo, TaskStatus.COMPLETED, scatterItems = emptyList())
+
+            assertEquals(PhaseDecision.Abort, decision)
         }
 
         @Test
@@ -673,7 +521,7 @@ class DagRouterTest {
         @Test
         fun `LINEAR TIMED_OUT with ABORT returns Abort`() {
             val def = WorkflowDefinition(
-                activities = mapOf("a" to activity("a", failurePolicy = FailurePolicy.ABORT)),
+                activities = mapOf("a" to activity("a")),
                 start = "a",
             )
             val snap = emptySnapshot(definition = def)
@@ -707,7 +555,7 @@ class DagRouterTest {
                 resultBranches = mapOf("t-a" to null),
             )
             val seqInfo = snap.sequenceMap.getValue(1)
-            val result = dispatchSuccessors(snap, seqInfo, forceDefault = false)
+            val result = dispatchSuccessors(snap, seqInfo)
 
             assertEquals(1, result.tasksToInsert.size)
             assertEquals(TaskStatus.PENDING, result.tasksToInsert[0].status)
@@ -737,7 +585,7 @@ class DagRouterTest {
                 resultBranches = mapOf("t-a" to "OK"),
             )
             val seqInfo = snap.sequenceMap.getValue(1)
-            val result = dispatchSuccessors(snap, seqInfo, forceDefault = false)
+            val result = dispatchSuccessors(snap, seqInfo)
 
             val pending = result.tasksToInsert.filter { it.status == TaskStatus.PENDING }
             val skipped = result.tasksToInsert.filter { it.status == TaskStatus.SKIPPED }
@@ -773,7 +621,7 @@ class DagRouterTest {
                 resultBranches = mapOf("t-a" to null, "t-b" to null),
             )
             val seqInfo = snap.sequenceMap.getValue(2) // b completing
-            val result = dispatchSuccessors(snap, seqInfo, forceDefault = false)
+            val result = dispatchSuccessors(snap, seqInfo)
 
             // join should NOT be dispatched (c not resolved)
             assertTrue(result.tasksToInsert.isEmpty())
@@ -803,7 +651,7 @@ class DagRouterTest {
                 resultBranches = mapOf("t-a" to "NO"),
             )
             val seqInfo = snap.sequenceMap.getValue(1)
-            val result = dispatchSuccessors(snap, seqInfo, forceDefault = false)
+            val result = dispatchSuccessors(snap, seqInfo)
 
             val names = result.tasksToInsert.map { it.activityName to it.status }
             assertTrue(names.contains("b" to TaskStatus.SKIPPED))
@@ -836,7 +684,7 @@ class DagRouterTest {
                 resultBranches = mapOf("t-route" to "SKIP"),
             )
             val seqInfo = snap.sequenceMap.getValue(1)
-            val result = dispatchSuccessors(snap, seqInfo, forceDefault = false)
+            val result = dispatchSuccessors(snap, seqInfo)
 
             val skipped = result.tasksToInsert.filter { it.status == TaskStatus.SKIPPED }
             assertTrue(skipped.any { it.activityName == "scatter" })
@@ -854,37 +702,11 @@ class DagRouterTest {
                 allCounts = mapOf(1 to TaskStatusCounts(1, 1, 0, 0)),
             )
             val seqInfo = snap.sequenceMap.getValue(1)
-            val result = dispatchSuccessors(snap, seqInfo, forceDefault = false)
+            val result = dispatchSuccessors(snap, seqInfo)
 
             assertTrue(result.tasksToInsert.isEmpty())
             assertTrue(result.signalQueues.isEmpty())
             assertFalse(result.hasTerminalCompletion)
-        }
-
-        @Test
-        fun `forceDefault mode dispatches only default-edged successors`() {
-            val def = WorkflowDefinition(
-                activities = mapOf(
-                    "a" to activity("a", successors = listOf(Edge("b"), Edge("c", "OK"))),
-                    "b" to activity("b"),
-                    "c" to activity("c"),
-                ),
-                start = "a",
-            )
-            // No tasksBySeq or resultBranches needed — forceDefault uses hasDefaultBranchEdge
-            val snap = emptySnapshot(
-                definition = def,
-                allCounts = mapOf(1 to TaskStatusCounts(1, 1, 0, 0)),
-            )
-            val seqInfo = snap.sequenceMap.getValue(1)
-            val result = dispatchSuccessors(snap, seqInfo, forceDefault = true)
-
-            val pending = result.tasksToInsert.filter { it.status == TaskStatus.PENDING }
-            val skipped = result.tasksToInsert.filter { it.status == TaskStatus.SKIPPED }
-            assertEquals(1, pending.size)
-            assertEquals("b", pending[0].activityName)
-            assertEquals(1, skipped.size)
-            assertEquals("c", skipped[0].activityName)
         }
 
         @Test
@@ -914,7 +736,7 @@ class DagRouterTest {
                 resultBranches = mapOf("t-a" to null, "t-b" to null, "t-c" to null),
             )
             val seqInfo = snap.sequenceMap.getValue(3) // c completing (b already resolved)
-            val result = dispatchSuccessors(snap, seqInfo, forceDefault = false)
+            val result = dispatchSuccessors(snap, seqInfo)
 
             assertEquals(1, result.tasksToInsert.size)
             assertEquals("join", result.tasksToInsert[0].activityName)
@@ -939,7 +761,7 @@ class DagRouterTest {
                 resultBranches = mapOf("t-a" to null),
             )
             val seqInfo = snap.sequenceMap.getValue(1)
-            val result = dispatchSuccessors(snap, seqInfo, forceDefault = false)
+            val result = dispatchSuccessors(snap, seqInfo)
 
             // "term" gets skipped (conditional edge "OK" not taken since branch is null)
             // "other" gets dispatched (default edge)
@@ -968,7 +790,7 @@ class DagRouterTest {
                 ),
             )
             val seqInfo = snap.sequenceMap.getValue(1)
-            val result = dispatchSuccessors(snap, seqInfo, forceDefault = false)
+            val result = dispatchSuccessors(snap, seqInfo)
 
             assertTrue(result.tasksToInsert.isEmpty())
         }
@@ -990,7 +812,7 @@ class DagRouterTest {
                 resultBranches = mapOf("t-a" to null),
             )
             val seqInfo = snap.sequenceMap.getValue(1)
-            val result = dispatchSuccessors(snap, seqInfo, forceDefault = false)
+            val result = dispatchSuccessors(snap, seqInfo)
 
             // Only b should be dispatched; c waits for b to complete
             assertEquals(1, result.tasksToInsert.size)

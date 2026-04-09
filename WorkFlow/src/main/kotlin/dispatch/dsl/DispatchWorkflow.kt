@@ -1,6 +1,5 @@
 package com.workflow.dispatch.dsl
 
-import com.workflow.workflow.model.JoinPolicy
 import com.workflow.workflow.model.WorkflowDefinition
 import com.workflow.workflow.dsl.workflow
 import java.time.Duration
@@ -14,7 +13,6 @@ val dispatchWorkflow: WorkflowDefinition = workflow {
             transition("DispatchSimulationHandler")
             retries(2)
             deadline(Duration.ofMinutes(30))
-            joinPolicy(JoinPolicy.All)
         }
         next("join")
     }

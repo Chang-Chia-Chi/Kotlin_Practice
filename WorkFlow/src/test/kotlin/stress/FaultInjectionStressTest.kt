@@ -1,6 +1,5 @@
 package com.workflow.stress
 
-import com.workflow.workflow.model.FailurePolicy
 import com.workflow.workflow.model.workflowId
 import com.workflow.workflow.dsl.workflow
 import com.workflow.worker.usecase.port.inbound.execution.HandlerInput
@@ -159,9 +158,7 @@ class FaultInjectionStressTest : StressTestBase() {
             val def = workflow {
                 activity("step1") {
                     transition("f5.handler")
-                    retries(1)
-                    failurePolicy(FailurePolicy.ABORT)
-                }
+                    retries(1)                }
             }
             val wfId = engine.startWorkflow(def).workflowId
             diagnostics.trackedWorkflows.add(wfId)

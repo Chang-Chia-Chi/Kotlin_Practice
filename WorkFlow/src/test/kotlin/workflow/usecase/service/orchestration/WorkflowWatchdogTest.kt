@@ -8,8 +8,7 @@ import com.workflow.workflow.adapter.persistent.JdbiTaskRepository
 import com.workflow.workflow.adapter.persistent.JdbiWorkflowRepository
 import com.workflow.workflow.config.WatchdogConfig
 import com.workflow.workflow.dsl.workflow
-import com.workflow.workflow.model.FailurePolicy
-import com.workflow.workflow.model.JoinPolicy
+
 import com.workflow.workflow.model.Task
 import com.workflow.workflow.model.TaskStatus
 import com.workflow.workflow.model.WorkflowDefinition
@@ -312,16 +311,6 @@ class WorkflowWatchdogTest {
         activity("only") { transition("only.handler") }
     }
 
-    /** Two linear with BEST_EFFORT on step1. */
-    private fun twoStepBestEffortDef() = workflow {
-        activity("step1") {
-            transition("step1.handler")
-            failurePolicy(FailurePolicy.BEST_EFFORT)
-            next("step2")
-        }
-        activity("step2") { transition("step2.handler") }
-    }
-
     /** Diamond DAG: A→B, A→C, B→D, C→D. Topo: A,C,B,D → Seq: A=1, C=2, B=3, D=4. */
     private fun diamondDagDef() = workflow {
         activity("A") { transition("a.handler"); next("B"); next("C") }
@@ -331,13 +320,10 @@ class WorkflowWatchdogTest {
     }
 
     /** Fan-out then linear: seq 1 (SCATTER) -> seq 2 (PARALLEL) -> seq 3 (LINEAR). */
-    private fun fanOutThenLinearDef(joinPolicy: JoinPolicy = JoinPolicy.All) = workflow {
+    private fun fanOutThenLinearDef() = workflow {
         activity("scatter-activity") {
             transition("scatter.handler")
-            fanOut {
-                transition("parallel.handler")
-                joinPolicy(joinPolicy)
-            }
+            fanOut { transition("parallel.handler") }
             next("final-step")
         }
         activity("final-step") { transition("final.handler") }
@@ -430,28 +416,6 @@ class WorkflowWatchdogTest {
             val row = readWorkflowDirect(wfId)
             assertNotNull(row)
             assertEquals("FAILED", row["STATUS"])
-        }
-
-        @Test
-        fun `all tasks FAILED with BEST_EFFORT - watchdog advances to next sequence`() = runTest {
-            val def = twoStepBestEffortDef()
-            val wfId = randomId()
-            val pastGrace = Instant.now().minus(gracePeriod).minusSeconds(60)
-            val wf = makeWorkflow(id = wfId, definition = def, updatedAt = pastGrace)
-            insertWorkflowDirect(wf)
-            insertTaskDirect(
-                makeTask(
-                    workflowId = wfId, sequenceNumber = 1,
-                    status = TaskStatus.FAILED, handlerKey = "step1.handler",
-                ),
-            )
-
-            watchdog.patrol()
-
-            val row = readWorkflowDirect(wfId)
-            assertNotNull(row)
-            assertEquals("RUNNING", row["STATUS"])
-            assertEquals(1, countTasksDirect(wfId, 2))
         }
 
         @Test
@@ -1102,8 +1066,7 @@ class WorkflowWatchdogTest {
                 definition = workflow {
                     activity("step1") {
                         transition("test.handler"); retries(5)
-                        deadline(Duration.ofHours(1)); failurePolicy(FailurePolicy.ABORT)
-                    }
+                        deadline(Duration.ofHours(1))                    }
                 },
             )
             insertWorkflowDirect(wf)
@@ -1145,8 +1108,7 @@ class WorkflowWatchdogTest {
             val definition = workflow {
                 activity("step1") {
                     transition("test.handler"); retries(0)
-                    deadline(Duration.ofHours(1)); failurePolicy(FailurePolicy.ABORT)
-                }
+                    deadline(Duration.ofHours(1))                }
             }
             val wf = makeWorkflow(
                 definition = definition,
@@ -1190,8 +1152,7 @@ class WorkflowWatchdogTest {
                 definition = workflow {
                     activity("step1") {
                         transition("test.handler"); retries(3)
-                        deadline(Duration.ofHours(1)); failurePolicy(FailurePolicy.ABORT)
-                    }
+                        deadline(Duration.ofHours(1))                    }
                 },
                 status = WorkflowStatus.FAILED,
             )
@@ -1221,8 +1182,7 @@ class WorkflowWatchdogTest {
                 definition = workflow {
                     activity("step1") {
                         transition("test.handler"); retries(0)
-                        deadline(Duration.ofHours(1)); failurePolicy(FailurePolicy.ABORT)
-                    }
+                        deadline(Duration.ofHours(1))                    }
                 },
                 status = WorkflowStatus.RUNNING,
             )
@@ -1240,8 +1200,7 @@ class WorkflowWatchdogTest {
                 definition = workflow {
                     activity("step1") {
                         transition("test.handler"); retries(0)
-                        deadline(Duration.ofHours(1)); failurePolicy(FailurePolicy.ABORT)
-                    }
+                        deadline(Duration.ofHours(1))                    }
                 },
                 status = WorkflowStatus.COMPLETED,
             )
@@ -1305,14 +1264,13 @@ class WorkflowWatchdogTest {
         }
 
         @Test
-        fun `overdue workflow cancels PENDING, WAITING_FOR_SIGNAL, and DEFERRED but not PROCESSING or terminal`() = runTest {
+        fun `overdue workflow cancels PENDING and DEFERRED but not PROCESSING or terminal`() = runTest {
             val definition = workflow {
                 activity("a") { transition("h"); next("b") }
                 activity("b") { transition("h"); next("c") }
                 activity("c") { transition("h"); next("d") }
                 activity("d") { transition("h"); next("e") }
-                activity("e") { transition("h"); next("f") }
-                activity("f") { transition("h") }
+                activity("e") { transition("h") }
             }
             val wfId = randomId()
             val wf = makeWorkflow(
@@ -1324,7 +1282,6 @@ class WorkflowWatchdogTest {
             workflowRepo.insert(wf)
 
             val pendingId = randomId()
-            val waitingId = randomId()
             val deferredId = randomId()
             val processingId = randomId()
             val completedId = randomId()
@@ -1333,18 +1290,16 @@ class WorkflowWatchdogTest {
             val tasks = listOf(
                 makeTask(id = pendingId, workflowId = wfId, activityName = "a",
                     sequenceNumber = 1, status = TaskStatus.PENDING, handlerKey = "h"),
-                makeTask(id = waitingId, workflowId = wfId, activityName = "b",
-                    sequenceNumber = 2, status = TaskStatus.WAITING_FOR_SIGNAL, handlerKey = "h"),
-                makeTask(id = deferredId, workflowId = wfId, activityName = "c",
-                    sequenceNumber = 3, status = TaskStatus.DEFERRED, handlerKey = "h"),
-                makeTask(id = processingId, workflowId = wfId, activityName = "d",
-                    sequenceNumber = 4, status = TaskStatus.PROCESSING, handlerKey = "h",
+                makeTask(id = deferredId, workflowId = wfId, activityName = "b",
+                    sequenceNumber = 2, status = TaskStatus.DEFERRED, handlerKey = "h"),
+                makeTask(id = processingId, workflowId = wfId, activityName = "c",
+                    sequenceNumber = 3, status = TaskStatus.PROCESSING, handlerKey = "h",
                     claimedBy = "worker-1", claimedAt = Instant.now()),
-                makeTask(id = completedId, workflowId = wfId, activityName = "e",
-                    sequenceNumber = 5, status = TaskStatus.COMPLETED, handlerKey = "h",
+                makeTask(id = completedId, workflowId = wfId, activityName = "d",
+                    sequenceNumber = 4, status = TaskStatus.COMPLETED, handlerKey = "h",
                     completedAt = Instant.now()),
-                makeTask(id = failedId, workflowId = wfId, activityName = "f",
-                    sequenceNumber = 6, status = TaskStatus.FAILED, handlerKey = "h",
+                makeTask(id = failedId, workflowId = wfId, activityName = "e",
+                    sequenceNumber = 5, status = TaskStatus.FAILED, handlerKey = "h",
                     completedAt = Instant.now()),
             )
             tasks.forEach { insertTaskDirect(it) }
@@ -1358,7 +1313,6 @@ class WorkflowWatchdogTest {
 
             // Cancellable statuses → CANCELLED
             assertEquals("CANCELLED", readTaskDirect(pendingId)!!["STATUS"])
-            assertEquals("CANCELLED", readTaskDirect(waitingId)!!["STATUS"])
             assertEquals("CANCELLED", readTaskDirect(deferredId)!!["STATUS"])
 
             // Non-cancellable statuses → unchanged

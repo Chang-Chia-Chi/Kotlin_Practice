@@ -62,13 +62,10 @@ fun buildSequenceMap(definition: WorkflowDefinition): Map<Int, SequenceInfo> {
 
             // Synthetic activity for parallel tasks — uses FanOutDefinition settings.
             // The transition (handlerKey) for each parallel worker comes from fanOut.transition.
-            // fanOut.failurePolicy governs join failure behavior; scatter activity's own
-            // failurePolicy governs what happens when the scatter phase itself fails.
             val parallelActivity = ActivityDefinition(
                 name = "$actName.__parallel__",
                 transition = fanOut.transition,
                 retries = fanOut.retries,
-                failurePolicy = fanOut.failurePolicy,
                 deadline = fanOut.deadline,
                 backoffBase = fanOut.backoffBase,
                 backoffCap = fanOut.backoffCap,

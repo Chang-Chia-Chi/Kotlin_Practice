@@ -2,9 +2,7 @@ package com.workflow.workflow.dsl
 
 import com.workflow.workflow.model.DEFAULT_BRANCH
 import com.workflow.workflow.model.Edge
-import com.workflow.workflow.model.FailurePolicy
 import com.workflow.workflow.model.FanOutDefinition
-import com.workflow.workflow.model.JoinPolicy
 import java.time.Duration
 import org.junit.jupiter.api.assertThrows
 import kotlin.test.Test
@@ -24,13 +22,11 @@ class WorkflowDslBuildersTest {
             activity("step-1") {
                 transition("process.step1")
                 retries(2)
-                failurePolicy(FailurePolicy.ABORT)
                 deadline(Duration.ofMinutes(10))
                 next("step-2")
             }
             activity("step-2") {
                 transition("process.step2")
-                failurePolicy(FailurePolicy.BEST_EFFORT)
             }
         }
 
@@ -40,7 +36,6 @@ class WorkflowDslBuildersTest {
         val first = def.activities["step-1"]!!
         assertEquals("process.step1", first.transition)
         assertEquals(2, first.retries)
-        assertEquals(FailurePolicy.ABORT, first.failurePolicy)
         assertEquals(Duration.ofMinutes(10), first.deadline)
         assertNull(first.fanOut)
         assertEquals(listOf(Edge("step-2", DEFAULT_BRANCH)), first.successors)
@@ -102,7 +97,6 @@ class WorkflowDslBuildersTest {
                 fanOut {
                     transition("DispatchSimulationHandler")
                     retries(2)
-                    joinPolicy(JoinPolicy.All)
                 }
                 next("join")
             }
@@ -113,7 +107,6 @@ class WorkflowDslBuildersTest {
         assertNotNull(scatter.fanOut)
         assertEquals("DispatchSimulationHandler", scatter.fanOut!!.transition)
         assertEquals(2, scatter.fanOut!!.retries)
-        assertEquals(JoinPolicy.All, scatter.fanOut!!.joinPolicy)
         assertEquals(listOf(Edge("join", DEFAULT_BRANCH)), scatter.successors)
     }
 
@@ -128,7 +121,6 @@ class WorkflowDslBuildersTest {
                 fanOut {
                     transition("DispatchSimulationHandler")
                     retries(2)
-                    joinPolicy(JoinPolicy.All)
                 }
                 next("join")
             }

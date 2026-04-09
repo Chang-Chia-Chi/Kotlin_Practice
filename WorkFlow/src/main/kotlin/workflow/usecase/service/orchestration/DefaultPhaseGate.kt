@@ -5,7 +5,6 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.readValue
 import com.workflow.infrastructure.persistence.inTransactionSuspend
 import com.workflow.worker.usecase.port.outbound.notification.WorkerNotifier
-import com.workflow.workflow.model.FailurePolicy
 import com.workflow.workflow.model.PhaseType
 import com.workflow.workflow.model.TaskStatus
 import com.workflow.workflow.model.WorkflowDefinition
@@ -137,14 +136,10 @@ class DefaultPhaseGate(
                         return@inTransactionSuspend listOf(decision.parallelInfo.activity.queue)
                     }
 
-                    PhaseDecision.ForceDefaultBranch,
-                    PhaseDecision.Normal,
-                    -> { /* fall through to successor evaluation */ }
+                    PhaseDecision.Normal -> { /* fall through to successor evaluation */ }
                 }
 
-                // Dispatch successors
-                val forceDefault = decision == PhaseDecision.ForceDefaultBranch
-                val result = dispatchSuccessors(snapshot, seqInfo, forceDefault)
+                val result = dispatchSuccessors(snapshot, seqInfo)
 
                 // No-op guard: another concurrent completer already routed this sequence
                 if (result.tasksToInsert.isEmpty()) {
@@ -309,13 +304,12 @@ class DefaultPhaseGate(
 
                 val globalNonTerminal = taskRepo.countAllNonTerminalWithHandle(handle, workflowId)
                 if (globalNonTerminal == 0) {
-                    val abortFailure =
+                    val hasFailure =
                         snapshot.sequenceMap.entries.any { (seq, seqInfo) ->
                             seqInfo.phaseType != PhaseType.PARALLEL &&
-                                seqInfo.activity.failurePolicy == FailurePolicy.ABORT &&
                                 (snapshot.allCounts[seq]?.failed ?: 0) > 0
                         }
-                    val terminalStatus = if (abortFailure) WorkflowStatus.FAILED else WorkflowStatus.COMPLETED
+                    val terminalStatus = if (hasFailure) WorkflowStatus.FAILED else WorkflowStatus.COMPLETED
                     workflowRepo.updateStatusWithHandle(
                         handle,
                         workflowId,

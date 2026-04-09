@@ -6,9 +6,7 @@ import com.workflow.workflow.model.WorkflowRun
 import com.workflow.workflow.model.WorkflowStatus
 import com.workflow.workflow.model.DEFAULT_BRANCH
 import com.workflow.workflow.model.Edge
-import com.workflow.workflow.model.FailurePolicy
 import com.workflow.workflow.model.FanOutDefinition
-import com.workflow.workflow.model.JoinPolicy
 import java.time.Duration
 import java.time.Instant
 import kotlin.test.Test
@@ -88,9 +86,9 @@ class WorkflowModelsTest {
     // ── TaskStatus enum ─────────────────────────────────────────────────
 
     @Test
-    fun `TaskStatus contains exactly ten values`() {
+    fun `TaskStatus contains exactly nine values`() {
         assertEquals(
-            setOf("PENDING", "PROCESSING", "WAITING_FOR_SIGNAL", "DEFERRED", "COMPLETED", "FAILED",
+            setOf("PENDING", "PROCESSING", "DEFERRED", "COMPLETED", "FAILED",
                   "TIMED_OUT", "DEAD_LETTER", "CANCELLED", "SKIPPED"),
             TaskStatus.entries.map { it.name }.toSet(),
         )
@@ -129,11 +127,6 @@ class WorkflowModelsTest {
     }
 
     @Test
-    fun `WAITING_FOR_SIGNAL is not terminal`() {
-        assertEquals(false, TaskStatus.WAITING_FOR_SIGNAL.isTerminal)
-    }
-
-    @Test
     fun `COMPLETED is terminal`() {
         assertEquals(true, TaskStatus.COMPLETED.isTerminal)
     }
@@ -158,11 +151,6 @@ class WorkflowModelsTest {
             TaskStatus.PROCESSING to TaskStatus.TIMED_OUT,
             TaskStatus.PROCESSING to TaskStatus.PENDING,
             TaskStatus.PROCESSING to TaskStatus.DEAD_LETTER,
-            TaskStatus.PROCESSING to TaskStatus.WAITING_FOR_SIGNAL,
-            TaskStatus.WAITING_FOR_SIGNAL to TaskStatus.COMPLETED,
-            TaskStatus.WAITING_FOR_SIGNAL to TaskStatus.FAILED,
-            TaskStatus.WAITING_FOR_SIGNAL to TaskStatus.TIMED_OUT,
-            TaskStatus.WAITING_FOR_SIGNAL to TaskStatus.CANCELLED,
             TaskStatus.FAILED to TaskStatus.PENDING,
             TaskStatus.FAILED to TaskStatus.DEAD_LETTER,
             TaskStatus.PROCESSING to TaskStatus.DEFERRED,
@@ -418,9 +406,7 @@ class WorkflowModelsTest {
         val fanOut = FanOutDefinition(transition = "MyHandler")
         assertEquals("MyHandler", fanOut.transition)
         assertEquals(0, fanOut.retries)
-        assertEquals(FailurePolicy.ABORT, fanOut.failurePolicy)
         assertEquals(Duration.ofMinutes(30), fanOut.deadline)
-        assertEquals(JoinPolicy.All, fanOut.joinPolicy)
         assertEquals(Duration.ofSeconds(1), fanOut.backoffBase)
         assertEquals(Duration.ofSeconds(300), fanOut.backoffCap)
         assertEquals("default", fanOut.queue)
@@ -431,17 +417,13 @@ class WorkflowModelsTest {
         val fanOut = FanOutDefinition(
             transition = "Handler",
             retries = 3,
-            failurePolicy = FailurePolicy.BEST_EFFORT,
             deadline = Duration.ofMinutes(5),
-            joinPolicy = JoinPolicy.Percentage(80),
             backoffBase = Duration.ofSeconds(2),
             backoffCap = Duration.ofSeconds(60),
             queue = "priority",
         )
         assertEquals(3, fanOut.retries)
-        assertEquals(FailurePolicy.BEST_EFFORT, fanOut.failurePolicy)
         assertEquals(Duration.ofMinutes(5), fanOut.deadline)
-        assertEquals(JoinPolicy.Percentage(80), fanOut.joinPolicy)
         assertEquals(Duration.ofSeconds(2), fanOut.backoffBase)
         assertEquals(Duration.ofSeconds(60), fanOut.backoffCap)
         assertEquals("priority", fanOut.queue)

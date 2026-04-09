@@ -1,6 +1,5 @@
 package com.workflow.stress
 
-import com.workflow.workflow.model.FailurePolicy
 import com.workflow.workflow.model.TaskStatus
 import com.workflow.workflow.model.WorkflowStatus
 import com.workflow.workflow.model.workflowId
@@ -139,9 +138,7 @@ class IdempotencyStressTest : StressTestBase() {
         val def = workflow {
             activity("step1") {
                 transition("i3.handler")
-                deadline(Duration.ofSeconds(3))
-                failurePolicy(FailurePolicy.ABORT)
-            }
+                deadline(Duration.ofSeconds(3))            }
         }
 
         // Handler that takes just long enough to race with deadline
@@ -202,9 +199,7 @@ class IdempotencyStressTest : StressTestBase() {
         val def = workflow {
             activity("step1") {
                 transition("i5.handler")
-                retries(0)
-                failurePolicy(FailurePolicy.ABORT)
-            }
+                retries(0)            }
             activity("step2") { transition("i5.handler") }
         }
 

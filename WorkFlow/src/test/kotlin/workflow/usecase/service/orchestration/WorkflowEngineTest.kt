@@ -6,8 +6,6 @@ import com.fasterxml.jackson.module.kotlin.KotlinModule
 import com.fasterxml.jackson.module.kotlin.readValue
 import com.workflow.workflow.adapter.persistent.JdbiTaskRepository
 import com.workflow.workflow.adapter.persistent.JdbiWorkflowRepository
-import com.workflow.workflow.model.FailurePolicy
-import com.workflow.workflow.model.JoinPolicy
 import com.workflow.workflow.model.StartResult
 import com.workflow.workflow.model.TaskStatus
 import com.workflow.workflow.model.WorkflowDefinition
@@ -123,9 +121,7 @@ class WorkflowEngineTest {
                 fanOut {
                     transition("batch.scatter")
                     retries(5)
-                    failurePolicy(FailurePolicy.BEST_EFFORT)
                     deadline(Duration.ofMinutes(60))
-                    joinPolicy(JoinPolicy.Percentage(95))
                 }
                 next("done")
             }
