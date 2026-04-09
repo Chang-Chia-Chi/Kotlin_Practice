@@ -69,4 +69,14 @@ class GapKernelTest {
         )
         assertEquals("B", selectByGap(entries, "A", false)?.id)
     }
+
+    @Test
+    fun `unrecognized lastSelected falls back to list order`() {
+        val entries = listOf(
+            GapEntry("A", BigDecimal("-10"), BigDecimal("50"), BigDecimal("40")),
+            GapEntry("B", BigDecimal("-10"), BigDecimal("50"), BigDecimal("40")),
+        )
+        // "MISSING" matches no entry → lastIdx = -1 → same as null → list order → A
+        assertEquals("A", selectByGap(entries, "MISSING", false)?.id)
+    }
 }
