@@ -43,7 +43,7 @@ import org.slf4j.LoggerFactory
 import org.slf4j.MDC
 import java.time.Duration
 import java.time.Instant
-import java.util.Collections
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -53,7 +53,6 @@ import java.util.concurrent.atomic.AtomicInteger
  * interference.
  */
 const val SHUTDOWN_ORDER_WORKER = 10
-private const val MAX_DEFINITION_CACHE_SIZE = 1024
 
 /**
  * Poll loop that claims PENDING tasks, executes handlers, and feeds results
@@ -109,6 +108,8 @@ class WorkerLoop(
     private var _lastActivityTimestamp: Instant = Instant.now()
     val lastActivityTimestamp: Instant get() = _lastActivityTimestamp
 
+    private val queueStartIndex = AtomicInteger(0)
+
     private lateinit var claimTotal: (String) -> Counter
     private lateinit var claimedTasksTotal: Counter
 
@@ -117,13 +118,7 @@ class WorkerLoop(
         val sequenceMap: Map<Int, SequenceInfo>,
     )
 
-    private val definitionCache: MutableMap<String, CachedDefinition> =
-        Collections.synchronizedMap(
-            object : LinkedHashMap<String, CachedDefinition>(128, 0.75f, true) {
-                override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, CachedDefinition>): Boolean =
-                    size > MAX_DEFINITION_CACHE_SIZE
-            },
-        )
+    private val definitionCache = ConcurrentHashMap<String, CachedDefinition>()
 
     @Volatile
     private var activeJob: Job? = null
@@ -199,28 +194,32 @@ class WorkerLoop(
         fallbackPollInterval: Duration,
         maxBatchSize: Int,
     ) = withContext(MDCContext(mapOf("worker_id" to workerId))) {
-        val queueName = WorkerNotifier.DEFAULT_QUEUE
-        val tasks =
-            suspendCatching { taskRepo.claimNext(workerId, maxBatchSize, queueName) }
-                .getOrElse { e ->
-                    log.error("Failed to claim tasks", e)
-                    claimTotal("error").increment()
-                    notifier.awaitWork(queueName, fallbackPollInterval)
-                    return@withContext
-                }
-        _lastActivityTimestamp = Instant.now()
+        val queues = workerLoopConfig.queues()
+        val startIdx = queueStartIndex.getAndIncrement().and(0x7FFFFFFF) % queues.size
+        val rotatedQueues = queues.drop(startIdx) + queues.take(startIdx)
+        var claimed = false
 
-        if (tasks.isEmpty()) {
-            claimTotal("empty").increment()
-            notifier.awaitWork(queueName, fallbackPollInterval)
-            return@withContext
+        for (queueName in rotatedQueues) {
+            val tasks =
+                suspendCatching { taskRepo.claimNext(workerId, maxBatchSize, queueName) }
+                    .getOrElse { e ->
+                        log.error("Failed to claim tasks from queue '{}'", queueName, e)
+                        claimTotal("error").increment()
+                        continue
+                    }
+            _lastActivityTimestamp = Instant.now()
+
+            if (tasks.isNotEmpty()) {
+                claimed = true
+                claimTotal("success").increment()
+                claimedTasksTotal.increment(tasks.size.toDouble())
+                for (task in tasks) processTask(task)
+            }
         }
 
-        claimTotal("success").increment()
-        claimedTasksTotal.increment(tasks.size.toDouble())
-
-        for (task in tasks) {
-            processTask(task)
+        if (!claimed) {
+            claimTotal("empty").increment()
+            notifier.awaitWork(queues.first(), fallbackPollInterval)
         }
     }
 
@@ -263,7 +262,7 @@ class WorkerLoop(
                 return
             }
 
-        when (result) {
+        val _exhaustive = when (result) {
             is HandlerResult.Completed -> {
                 try {
                     taskSettler.settle(
@@ -289,14 +288,15 @@ class WorkerLoop(
 
     private suspend fun resolveInputs(task: Task): String? {
         val cached =
-            definitionCache.getOrPut(task.workflowId) {
+            definitionCache[task.workflowId] ?: run {
                 val workflow =
                     workflowRepo.findById(task.workflowId)
                         ?: throw IllegalStateException(
                             "Workflow ${task.workflowId} not found while resolving inputs for task ${task.id}",
                         )
                 val definition = objectMapper.readValue<WorkflowDefinition>(workflow.definitionJson)
-                CachedDefinition(definition, buildSequenceMap(definition))
+                val newEntry = CachedDefinition(definition, buildSequenceMap(definition))
+                definitionCache.putIfAbsent(task.workflowId, newEntry) ?: newEntry
             }
 
         val seqInfo = cached.sequenceMap[task.sequenceNumber] ?: return null

@@ -63,6 +63,7 @@ class WorkerLoopIntegrationTest {
         override fun podIp(): String = "localhost"
         override fun serviceName(): String = "workflow-engine"
         override fun autoStart(): Boolean = false
+        override fun queues(): List<String> = listOf("default")
     }
 
     private val testShutdownConfig = object : ShutdownConfig {
@@ -87,7 +88,7 @@ class WorkerLoopIntegrationTest {
         }
     }
 
-    private fun buildWorkerLoop(vararg handlers: TransitionHandler): Job {
+    private fun buildWorkerLoop(vararg handlers: TransitionHandler, config: WorkerLoopConfig = testWorkerConfig): Job {
         val handlerBeans = mock<Instance<TransitionHandler>> {
             on { iterator() } doReturn Collections.emptyIterator()
         }
@@ -97,7 +98,7 @@ class WorkerLoopIntegrationTest {
         val taskSettler = TaskSettler(taskRepo, phaseGate)
         val inputResolver = ActivityInputResolver(objectMapper)
         val loop = WorkerLoop(
-            testWorkerConfig,
+            config,
             testShutdownConfig,
             taskRepo,
             handlerRegistry,
@@ -129,6 +130,48 @@ class WorkerLoopIntegrationTest {
                 val definition = workflow {
                     activity("step1") { transition("e2e.complete"); next("step2") }
                     activity("step2") { transition("e2e.complete") }
+                }
+                val wfId = runBlocking { engine.startWorkflow(definition, idempotencyKey = null, initialItem = null) }.workflowId
+
+                await().atMost(Duration.ofSeconds(30)).untilAsserted {
+                    val wf = runBlocking { workflowRepo.findById(wfId) }
+                    assertEquals(WorkflowStatus.COMPLETED, wf?.status)
+                }
+            } finally {
+                job.cancel()
+            }
+        }
+    }
+
+    @Nested
+    inner class MultiQueueWorkflow {
+
+        @Test
+        fun `WorkerLoop processes tasks from both default and priority queues`() {
+            val handler = object : TransitionHandler {
+                override fun key(): String = "e2e.multi-queue"
+                override suspend fun execute(input: HandlerInput): HandlerResult =
+                    HandlerResult.Completed("""{"step":${input.sequenceNumber}}""")
+            }
+
+            val multiQueueConfig = object : WorkerLoopConfig {
+                override fun id(): String = "e2e-worker"
+                override fun pollInterval(): Duration = Duration.ofMillis(200)
+                override fun fallbackPollInterval(): Duration = Duration.ofMillis(200)
+                override fun concurrency(): Int = 1
+                override fun batchSize(): Int = 1
+                override fun maxBatchSize(): Int = 1
+                override fun podIp(): String = "localhost"
+                override fun serviceName(): String = "workflow-engine"
+                override fun autoStart(): Boolean = false
+                override fun queues(): List<String> = listOf("default", "priority")
+            }
+
+            val job = buildWorkerLoop(handler, config = multiQueueConfig)
+            try {
+                val definition = workflow {
+                    activity("step1") { transition("e2e.multi-queue"); queue("default"); next("step2") }
+                    activity("step2") { transition("e2e.multi-queue"); queue("priority") }
                 }
                 val wfId = runBlocking { engine.startWorkflow(definition, idempotencyKey = null, initialItem = null) }.workflowId
 

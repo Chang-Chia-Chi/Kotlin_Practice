@@ -99,6 +99,7 @@ class WorkerLoopTest {
             whenever(it.fallbackPollInterval()).thenReturn(fallbackPollInterval)
             whenever(it.maxBatchSize()).thenReturn(16)
             whenever(it.podIp()).thenReturn("localhost")
+            whenever(it.queues()).thenReturn(listOf("default"))
         }
         shutdownConfig = mock<ShutdownConfig>().also {
             whenever(it.globalTimeout()).thenReturn(Duration.ofSeconds(30))
@@ -926,6 +927,7 @@ class WorkerLoopTest {
                 whenever(it.fallbackPollInterval()).thenReturn(fallbackPollInterval)
                 whenever(it.maxBatchSize()).thenReturn(16)
                 whenever(it.podIp()).thenReturn("localhost")
+                whenever(it.queues()).thenReturn(listOf("default"))
             }
             val batchLoop = WorkerLoop(batchWorkerConfig, shutdownConfig, taskRepo, handlerRegistry, taskSettler, meterRegistry, activityInputResolver, workflowRepo, objectMapper, notifier)
 
@@ -1276,6 +1278,120 @@ class WorkerLoopTest {
             assertTrue(
                 notifier.awaitQueues.all { it == "default" },
                 "awaitWork should be called with 'default' queue, got ${notifier.awaitQueues}",
+            )
+        }
+    }
+
+    // ── T. Cache Atomicity (Spec 1) ─────────────────────────────────────
+
+    @Nested
+    inner class CacheAtomicity {
+
+        @Test
+        fun `two tasks with same workflowId trigger only one findById call`() = runTest {
+            val sharedWfId = UUID.randomUUID().toString()
+            val task1 = makeTask(id = "t1", workflowId = sharedWfId)
+            val task2 = makeTask(id = "t2", workflowId = sharedWfId)
+            val handler = mock<TransitionHandler>()
+
+            whenever(taskRepo.claimNext(eq(workerId), eq(16), eq("default")))
+                .thenReturn(listOf(task1))
+                .thenReturn(listOf(task2))
+                .thenReturn(emptyList())
+            whenever(handlerRegistry.resolve(any())).thenReturn(handler)
+            whenever(handler.execute(any())).thenReturn(HandlerResult.Completed(null))
+
+            startAndAdvance(this, ticks = 4)
+
+            verify(workflowRepo, times(1)).findById(sharedWfId)
+        }
+    }
+
+    // ── U. Multi-Queue Polling (Spec 3) ─────────────────────────────────
+
+    @Nested
+    inner class MultiQueuePolling {
+
+        @Test
+        fun `polls all configured queues per iteration`() = runTest {
+            whenever(workerConfig.queues()).thenReturn(listOf("default", "priority"))
+            val multiQueueLoop = WorkerLoop(workerConfig, shutdownConfig, taskRepo, handlerRegistry, taskSettler, meterRegistry, activityInputResolver, workflowRepo, objectMapper, notifier)
+
+            whenever(taskRepo.claimNext(eq(workerId), eq(16), eq("default")))
+                .thenReturn(emptyList())
+            whenever(taskRepo.claimNext(eq(workerId), eq(16), eq("priority")))
+                .thenReturn(emptyList())
+
+            val job = multiQueueLoop.start(this)
+            advanceTimeBy(fallbackPollInterval.toMillis() * 2)
+            job.cancel()
+
+            verify(taskRepo, org.mockito.Mockito.atLeastOnce()).claimNext(eq(workerId), eq(16), eq("default"))
+            verify(taskRepo, org.mockito.Mockito.atLeastOnce()).claimNext(eq(workerId), eq(16), eq("priority"))
+        }
+
+        @Test
+        fun `per-queue claim error does not block other queues`() = runTest {
+            whenever(workerConfig.queues()).thenReturn(listOf("failing", "working"))
+            val multiQueueLoop = WorkerLoop(workerConfig, shutdownConfig, taskRepo, handlerRegistry, taskSettler, meterRegistry, activityInputResolver, workflowRepo, objectMapper, notifier)
+
+            val task = makeTask()
+            val handler = mock<TransitionHandler>()
+
+            whenever(taskRepo.claimNext(eq(workerId), eq(16), eq("failing")))
+                .thenThrow(RuntimeException("DB error on failing queue"))
+            whenever(taskRepo.claimNext(eq(workerId), eq(16), eq("working")))
+                .thenReturn(listOf(task))
+                .thenReturn(emptyList())
+            whenever(handlerRegistry.resolve(task.handlerKey)).thenReturn(handler)
+            whenever(handler.execute(any())).thenReturn(HandlerResult.Completed("ok"))
+
+            val job = multiQueueLoop.start(this)
+            advanceTimeBy(fallbackPollInterval.toMillis() * 2)
+            job.cancel()
+
+            verify(handler).execute(any())
+        }
+
+        @Test
+        fun `single queue config behaves identically to current behavior`() = runTest {
+            whenever(workerConfig.queues()).thenReturn(listOf("default"))
+
+            val task = makeTask()
+            val handler = mock<TransitionHandler>()
+
+            whenever(taskRepo.claimNext(eq(workerId), eq(16), eq("default")))
+                .thenReturn(listOf(task))
+                .thenReturn(emptyList())
+            whenever(handlerRegistry.resolve(task.handlerKey)).thenReturn(handler)
+            whenever(handler.execute(any())).thenReturn(HandlerResult.Completed("ok"))
+
+            startAndAdvance(this)
+
+            verify(handler).execute(any())
+            verify(phaseGate).onTaskCompleted(
+                eq(task.id), eq(task.workflowId), eq(task.sequenceNumber),
+                eq(TaskStatus.COMPLETED), eq("ok"), eq(workerId), any(), isNull(),
+            )
+        }
+
+        @Test
+        fun `awaitWork called on first queue when all queues empty`() = runTest {
+            whenever(workerConfig.queues()).thenReturn(listOf("alpha", "beta"))
+            val multiQueueLoop = WorkerLoop(workerConfig, shutdownConfig, taskRepo, handlerRegistry, taskSettler, meterRegistry, activityInputResolver, workflowRepo, objectMapper, notifier)
+
+            whenever(taskRepo.claimNext(eq(workerId), eq(16), eq("alpha")))
+                .thenReturn(emptyList())
+            whenever(taskRepo.claimNext(eq(workerId), eq(16), eq("beta")))
+                .thenReturn(emptyList())
+
+            val job = multiQueueLoop.start(this)
+            advanceTimeBy(fallbackPollInterval.toMillis() * 2)
+            job.cancel()
+
+            assertTrue(
+                notifier.awaitQueues.any { it == "alpha" },
+                "awaitWork should be called with first queue 'alpha', got ${notifier.awaitQueues}",
             )
         }
     }

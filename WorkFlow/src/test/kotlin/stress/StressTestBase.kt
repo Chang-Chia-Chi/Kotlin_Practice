@@ -126,6 +126,7 @@ abstract class StressTestBase {
             override fun podIp() = "localhost"
             override fun serviceName() = "workflow-engine"
             override fun autoStart() = false
+            override fun queues() = listOf("default")
         }
     }
 

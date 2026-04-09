@@ -25,4 +25,7 @@ interface WorkerLoopConfig {
 
     @WithDefault("true")
     fun autoStart(): Boolean
+
+    @WithDefault("default")
+    fun queues(): List<String>
 }
