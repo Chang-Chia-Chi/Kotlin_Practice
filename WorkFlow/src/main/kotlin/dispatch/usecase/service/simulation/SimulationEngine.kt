@@ -51,7 +51,7 @@ class SimulationEngine(
             val selection = algorithm.selectTarget(
                 config.siteTargets, context.siteCurrents,
                 config.bomMappings, context.bomCurrents,
-                context.lastSiteId, context.lastBomId, context.total,
+                context.lastSiteId, context.lastBomIds, context.total,
             )
             if (selection !is TargetSelection.Selected) break
 
@@ -83,8 +83,7 @@ class SimulationEngine(
                 )
             }
             context.total += qty
-            // Reset BOM round-robin when the site changes so each site gets independent cycling.
-            context.lastBomId = if (selection.siteId == context.lastSiteId) selection.targetBomId else null
+            if (selection.targetBomId != null) context.lastBomIds[selection.siteId] = selection.targetBomId
             context.lastSiteId = selection.siteId
 
             context.decisions += DispatchDecision(

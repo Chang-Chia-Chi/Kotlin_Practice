@@ -837,10 +837,10 @@ class SimulationEngineTest {
     }
 
     @Test
-    fun `bom round-robin resets to first entry when arriving at a new site`() {
+    fun `each site starts at first bom when no prior dispatch recorded for that site`() {
         // Both sites share the same 3 BOM IDs: [bom1(50), bom2(50), bom3(50)].
-        // After dispatching to site A (→ bom1), the next dispatch goes to site B.
-        // Expected: B picks bom1 (round-robin resets), not bom2 (cross-site carry-over).
+        // After dispatching to site A (→ bom1, stored in lastBomIds["A"]), the next dispatch goes to site B.
+        // Expected: B picks bom1 (no entry in lastBomIds for B → list order), not bom2.
         val sharedAllocations = listOf(
             TargetBomAllocation("bom1", BigDecimal("50")),
             TargetBomAllocation("bom2", BigDecimal("50")),

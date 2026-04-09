@@ -22,7 +22,7 @@ class GapBasedDispatchAlgorithm(
         bomMappings: Map<String, BomMapping>?,
         bomCurrents: Map<SiteBomKey, BigDecimal>,
         lastSiteId: String?,
-        lastBomId: String?,
+        lastBomIds: Map<String, String>,
         total: BigDecimal,
     ): TargetSelection {
         val siteEntries = siteTargets.map { st ->
@@ -39,7 +39,7 @@ class GapBasedDispatchAlgorithm(
             val bomCurrent = bomCurrents[SiteBomKey(siteEntry.id, alloc.targetBomId)] ?: BigDecimal.ZERO
             GapEntry(alloc.targetBomId, gapComputer.computeGap(bomCurrent, alloc.target, siteCurrent), alloc.target, bomCurrent)
         }
-        val bomEntry = selectByGap(bomEntries, lastBomId, gapComputer.useCumulativeTiebreaker) ?: return TargetSelection.NoTarget
+        val bomEntry = selectByGap(bomEntries, lastBomIds[siteEntry.id], gapComputer.useCumulativeTiebreaker) ?: return TargetSelection.NoTarget
 
         return TargetSelection.Selected(siteEntry.id, bomEntry.id, bomMapping.sourceBomId, siteEntry.gap, bomEntry.gap)
     }

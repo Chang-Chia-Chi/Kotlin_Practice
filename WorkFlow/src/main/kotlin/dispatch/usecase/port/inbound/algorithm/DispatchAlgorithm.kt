@@ -16,7 +16,7 @@ interface DispatchAlgorithm {
         bomMappings: Map<String, BomMapping>?,
         bomCurrents: Map<SiteBomKey, BigDecimal>,
         lastSiteId: String?,
-        lastBomId: String?,
+        lastBomIds: Map<String, String>,
         total: BigDecimal,
     ): TargetSelection
 }

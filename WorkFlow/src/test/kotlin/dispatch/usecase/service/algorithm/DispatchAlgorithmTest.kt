@@ -30,7 +30,7 @@ class DispatchAlgorithmTest {
         val currents = mapOf("A" to BigDecimal("80"), "B" to BigDecimal("60"))
 
         val result = algo.selectTarget(
-            targets, currents, null, emptyMap(), null, null, BigDecimal("140"),
+            targets, currents, null, emptyMap(), null, emptyMap(), BigDecimal("140"),
         )
 
         assertIs<TargetSelection.Selected>(result)
@@ -59,7 +59,7 @@ class DispatchAlgorithmTest {
         )
 
         val result = algo.selectTarget(
-            targets, currents, bomMappings, bomCurrents, null, null, BigDecimal("50"),
+            targets, currents, bomMappings, bomCurrents, null, emptyMap(), BigDecimal("50"),
         )
 
         assertIs<TargetSelection.Selected>(result)
@@ -72,8 +72,46 @@ class DispatchAlgorithmTest {
     fun `returns NoTarget when no sites`() {
         val algo = qtyAlgorithm()
         val result = algo.selectTarget(
-            emptyList(), emptyMap(), null, emptyMap(), null, null, BigDecimal.ZERO,
+            emptyList(), emptyMap(), null, emptyMap(), null, emptyMap(), BigDecimal.ZERO,
         )
         assertIs<TargetSelection.NoTarget>(result)
+    }
+
+    @Test
+    fun `lv2 sticky bom — returns last selected bom when all boms are tied`() {
+        val algo = qtyAlgorithm()
+        val targets = listOf(SiteTarget("A", BigDecimal("100")))
+        val currents = mapOf("A" to BigDecimal("0"))
+        val bomMappings = mapOf(
+            "A" to BomMapping(
+                sourceBomId = "src",
+                targetAllocations = listOf(
+                    TargetBomAllocation("bom1", BigDecimal("50")),
+                    TargetBomAllocation("bom2", BigDecimal("50")),
+                ),
+            ),
+        )
+        val bomCurrents = emptyMap<SiteBomKey, BigDecimal>()
+
+        // no prior → list order → bom1
+        val first = algo.selectTarget(
+            targets, currents, bomMappings, bomCurrents, null, emptyMap(), BigDecimal.ZERO,
+        )
+        assertIs<TargetSelection.Selected>(first)
+        assertEquals("bom1", first.targetBomId)
+
+        // last was bom1 for site A → sticky → bom1
+        val second = algo.selectTarget(
+            targets, currents, bomMappings, bomCurrents, null, mapOf("A" to "bom1"), BigDecimal.ZERO,
+        )
+        assertIs<TargetSelection.Selected>(second)
+        assertEquals("bom1", second.targetBomId)
+
+        // last was bom2 for site A → sticky → bom2
+        val third = algo.selectTarget(
+            targets, currents, bomMappings, bomCurrents, null, mapOf("A" to "bom2"), BigDecimal.ZERO,
+        )
+        assertIs<TargetSelection.Selected>(third)
+        assertEquals("bom2", third.targetBomId)
     }
 }
