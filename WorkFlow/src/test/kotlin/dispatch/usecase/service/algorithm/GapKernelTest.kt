@@ -10,61 +10,63 @@ class GapKernelTest {
     @Test
     fun `selects entry with lowest gap`() {
         val entries = listOf(
-            GapEntry("A", BigDecimal("-10"), BigDecimal("50")),
-            GapEntry("B", BigDecimal("-20"), BigDecimal("50")),
+            GapEntry("A", BigDecimal("-10"), BigDecimal("50"), BigDecimal("40")),
+            GapEntry("B", BigDecimal("-20"), BigDecimal("50"), BigDecimal("40")),
         )
-        val result = selectByGap(entries, null)
-        assertEquals("B", result?.id)
-        assertEquals(BigDecimal("-20"), result?.gap)
+        assertEquals("B", selectByGap(entries, null, false)?.id)
     }
 
     @Test
     fun `breaks tie by highest target`() {
         val entries = listOf(
-            GapEntry("A", BigDecimal("-10"), BigDecimal("30")),
-            GapEntry("B", BigDecimal("-10"), BigDecimal("50")),
+            GapEntry("A", BigDecimal("-10"), BigDecimal("30"), BigDecimal("40")),
+            GapEntry("B", BigDecimal("-10"), BigDecimal("50"), BigDecimal("40")),
         )
-        assertEquals("B", selectByGap(entries, null)?.id)
+        assertEquals("B", selectByGap(entries, null, false)?.id)
     }
 
     @Test
-    fun `breaks double tie with round-robin routing`() {
+    fun `breaks remaining tie by last dispatched — no prior defaults to list order`() {
         val entries = listOf(
-            GapEntry("A", BigDecimal("-10"), BigDecimal("50")),
-            GapEntry("B", BigDecimal("-10"), BigDecimal("50")),
+            GapEntry("A", BigDecimal("-10"), BigDecimal("50"), BigDecimal("40")),
+            GapEntry("B", BigDecimal("-10"), BigDecimal("50"), BigDecimal("40")),
         )
-        assertEquals("B", selectByGap(entries, "A")?.id)
-        assertEquals("A", selectByGap(entries, "B")?.id)
+        assertEquals("A", selectByGap(entries, null, false)?.id)   // no prior → list order → A
+        assertEquals("A", selectByGap(entries, "A", false)?.id)    // last was A → sticky → A
+        assertEquals("B", selectByGap(entries, "B", false)?.id)    // last was B → sticky → B
     }
 
     @Test
     fun `returns null for empty entries`() {
-        assertNull(selectByGap(emptyList(), null))
+        assertNull(selectByGap(emptyList(), null, false))
     }
 
     @Test
-    fun `breaks triple tie with full cyclic round-robin`() {
+    fun `breaks tie by lowest current when useCumulative is true`() {
         val entries = listOf(
-            GapEntry("A", BigDecimal("-10"), BigDecimal("50")),
-            GapEntry("B", BigDecimal("-10"), BigDecimal("50")),
-            GapEntry("C", BigDecimal("-10"), BigDecimal("50")),
+            GapEntry("A", BigDecimal("-10"), BigDecimal("50"), BigDecimal("60")),
+            GapEntry("B", BigDecimal("-10"), BigDecimal("50"), BigDecimal("40")),
         )
-        // null → first in list
-        assertEquals("A", selectByGap(entries, null)?.id)
-        // A → B (next in cycle)
-        assertEquals("B", selectByGap(entries, "A")?.id)
-        // B → C (next in cycle)
-        assertEquals("C", selectByGap(entries, "B")?.id)
-        // C → A (wraps around)
-        assertEquals("A", selectByGap(entries, "C")?.id)
+        // B has lower current → wins cumulative tiebreaker even though A was last
+        assertEquals("B", selectByGap(entries, "A", true)?.id)
     }
 
     @Test
-    fun `sticky routing does not override lower gap`() {
+    fun `sticky applies after cumulative when current is also tied`() {
         val entries = listOf(
-            GapEntry("A", BigDecimal("-5"), BigDecimal("50")),
-            GapEntry("B", BigDecimal("-20"), BigDecimal("50")),
+            GapEntry("A", BigDecimal("-10"), BigDecimal("50"), BigDecimal("40")),
+            GapEntry("B", BigDecimal("-10"), BigDecimal("50"), BigDecimal("40")),
         )
-        assertEquals("B", selectByGap(entries, "A")?.id)
+        // cumulative tied (same current) → sticky → B
+        assertEquals("B", selectByGap(entries, "B", true)?.id)
+    }
+
+    @Test
+    fun `sticky does not override lower gap`() {
+        val entries = listOf(
+            GapEntry("A", BigDecimal("-5"), BigDecimal("50"), BigDecimal("40")),
+            GapEntry("B", BigDecimal("-20"), BigDecimal("50"), BigDecimal("40")),
+        )
+        assertEquals("B", selectByGap(entries, "A", false)?.id)
     }
 }

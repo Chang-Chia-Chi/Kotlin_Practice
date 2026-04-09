@@ -6,18 +6,15 @@ data class GapEntry(
     val id: String,
     val gap: BigDecimal,
     val target: BigDecimal,
+    val current: BigDecimal,
 )
 
-fun selectByGap(entries: List<GapEntry>, lastSelected: String?): GapEntry? {
+fun selectByGap(entries: List<GapEntry>, lastSelected: String?, useCumulative: Boolean): GapEntry? {
     if (entries.isEmpty()) return null
-    val n = entries.size
     val lastIdx = entries.indexOfFirst { it.id == lastSelected }
-    // (i - lastIdx - 1 + n) % n: gives rank 0 to the entry just after lastSelected, cycling forward.
-    // +n ensures non-negative before %, since Kotlin % can return negative for negative dividends.
-    val cyclicRank = entries.mapIndexed { i, e -> e.id to (i - lastIdx - 1 + n) % n }.toMap()
-    return entries.minWithOrNull(
-        compareBy<GapEntry> { it.gap }
-            .thenByDescending { it.target }
-            .thenBy { cyclicRank[it.id] },
-    )
+    val comparator = compareBy<Int> { entries[it].gap }
+        .thenByDescending { entries[it].target }
+        .run { if (useCumulative) thenBy { entries[it].current } else this }
+        .thenBy { if (it == lastIdx) 0 else 1 }
+    return entries.indices.minWithOrNull(comparator)?.let { entries[it] }
 }
