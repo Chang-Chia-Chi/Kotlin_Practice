@@ -10,6 +10,7 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import com.workflow.infrastructure.shutdown.ShutdownConfig
 import com.workflow.worker.config.WorkerLoopConfig
 import com.workflow.workflow.model.Task
+import com.workflow.workflow.model.TaskCompletionEvent
 import com.workflow.workflow.model.TaskStatus
 import com.workflow.workflow.model.WorkflowRun
 import com.workflow.workflow.model.WorkflowStatus
@@ -42,6 +43,7 @@ import org.mockito.kotlin.isNull
 import org.mockito.kotlin.doReturn
 import org.mockito.kotlin.stub
 import org.mockito.kotlin.argumentCaptor
+import org.mockito.kotlin.check
 import org.mockito.kotlin.doAnswer
 import org.mockito.kotlin.doThrow
 import org.mockito.kotlin.eq
@@ -193,15 +195,15 @@ class WorkerLoopTest {
             assertNull(input.inputs)
             assertEquals(task.item, input.item)
 
-            verify(phaseGate).onTaskCompleted(
-                eq(task.id),
-                eq(task.workflowId),
-                eq(task.sequenceNumber),
-                eq(TaskStatus.COMPLETED),
-                eq(handlerResult.result),
-                eq(workerId),
-                any(), isNull(),
-            )
+            verify(phaseGate).onTaskCompleted(check<TaskCompletionEvent> { event ->
+                assertEquals(task.id, event.taskId)
+                assertEquals(task.workflowId, event.workflowId)
+                assertEquals(task.sequenceNumber, event.sequenceNumber)
+                assertEquals(TaskStatus.COMPLETED, event.status)
+                assertEquals(handlerResult.result, event.resultJson)
+                assertEquals(workerId, event.claimedBy)
+                assertNull(event.itemsJson)
+            })
         }
 
         @Test
@@ -217,15 +219,15 @@ class WorkerLoopTest {
 
             startAndAdvance(this)
 
-            verify(phaseGate).onTaskCompleted(
-                eq(task.id),
-                eq(task.workflowId),
-                eq(task.sequenceNumber),
-                eq(TaskStatus.COMPLETED),
-                eq(null),
-                eq(workerId),
-                any(), isNull(),
-            )
+            verify(phaseGate).onTaskCompleted(check<TaskCompletionEvent> { event ->
+                assertEquals(task.id, event.taskId)
+                assertEquals(task.workflowId, event.workflowId)
+                assertEquals(task.sequenceNumber, event.sequenceNumber)
+                assertEquals(TaskStatus.COMPLETED, event.status)
+                assertNull(event.resultJson)
+                assertEquals(workerId, event.claimedBy)
+                assertNull(event.itemsJson)
+            })
         }
 
         @Test
@@ -243,15 +245,15 @@ class WorkerLoopTest {
 
             startAndAdvance(this)
 
-            verify(phaseGate).onTaskCompleted(
-                eq(task.id),
-                eq(task.workflowId),
-                eq(task.sequenceNumber),
-                eq(TaskStatus.COMPLETED),
-                eq("""{"ok":true}"""),
-                eq(workerId),
-                any(), eq("""["item1","item2"]"""),
-            )
+            verify(phaseGate).onTaskCompleted(check<TaskCompletionEvent> { event ->
+                assertEquals(task.id, event.taskId)
+                assertEquals(task.workflowId, event.workflowId)
+                assertEquals(task.sequenceNumber, event.sequenceNumber)
+                assertEquals(TaskStatus.COMPLETED, event.status)
+                assertEquals("""{"ok":true}""", event.resultJson)
+                assertEquals(workerId, event.claimedBy)
+                assertEquals("""["item1","item2"]""", event.itemsJson)
+            })
         }
 
         @Test
@@ -269,15 +271,15 @@ class WorkerLoopTest {
 
             startAndAdvance(this)
 
-            verify(phaseGate).onTaskCompleted(
-                eq(task.id),
-                eq(task.workflowId),
-                eq(task.sequenceNumber),
-                eq(TaskStatus.COMPLETED),
-                eq(null),
-                eq(workerId),
-                any(), isNull(),
-            )
+            verify(phaseGate).onTaskCompleted(check<TaskCompletionEvent> { event ->
+                assertEquals(task.id, event.taskId)
+                assertEquals(task.workflowId, event.workflowId)
+                assertEquals(task.sequenceNumber, event.sequenceNumber)
+                assertEquals(TaskStatus.COMPLETED, event.status)
+                assertNull(event.resultJson)
+                assertEquals(workerId, event.claimedBy)
+                assertNull(event.itemsJson)
+            })
         }
 
         @Test
@@ -298,14 +300,24 @@ class WorkerLoopTest {
 
             startAndAdvance(this, ticks = 4)
 
-            verify(phaseGate).onTaskCompleted(
-                eq(task1.id), eq(task1.workflowId), eq(task1.sequenceNumber),
-                eq(TaskStatus.COMPLETED), eq("""{"r":1}"""), eq(workerId), any(), isNull(),
-            )
-            verify(phaseGate).onTaskCompleted(
-                eq(task2.id), eq(task2.workflowId), eq(task2.sequenceNumber),
-                eq(TaskStatus.COMPLETED), eq("""{"r":2}"""), eq(workerId), any(), isNull(),
-            )
+            verify(phaseGate).onTaskCompleted(check<TaskCompletionEvent> { event ->
+                assertEquals(task1.id, event.taskId)
+                assertEquals(task1.workflowId, event.workflowId)
+                assertEquals(task1.sequenceNumber, event.sequenceNumber)
+                assertEquals(TaskStatus.COMPLETED, event.status)
+                assertEquals("""{"r":1}""", event.resultJson)
+                assertEquals(workerId, event.claimedBy)
+                assertNull(event.itemsJson)
+            })
+            verify(phaseGate).onTaskCompleted(check<TaskCompletionEvent> { event ->
+                assertEquals(task2.id, event.taskId)
+                assertEquals(task2.workflowId, event.workflowId)
+                assertEquals(task2.sequenceNumber, event.sequenceNumber)
+                assertEquals(TaskStatus.COMPLETED, event.status)
+                assertEquals("""{"r":2}""", event.resultJson)
+                assertEquals(workerId, event.claimedBy)
+                assertNull(event.itemsJson)
+            })
         }
     }
 
@@ -409,15 +421,15 @@ class WorkerLoopTest {
             startAndAdvance(this)
 
             verify(taskRepo, never()).resetForRetry(any(), any(), anyOrNull(), anyOrNull())
-            verify(phaseGate).onTaskCompleted(
-                eq(task.id),
-                eq(task.workflowId),
-                eq(task.sequenceNumber),
-                eq(TaskStatus.FAILED),
-                eq(null),
-                eq(workerId),
-                any(), isNull(),
-            )
+            verify(phaseGate).onTaskCompleted(check<TaskCompletionEvent> { event ->
+                assertEquals(task.id, event.taskId)
+                assertEquals(task.workflowId, event.workflowId)
+                assertEquals(task.sequenceNumber, event.sequenceNumber)
+                assertEquals(TaskStatus.FAILED, event.status)
+                assertNull(event.resultJson)
+                assertEquals(workerId, event.claimedBy)
+                assertNull(event.itemsJson)
+            })
         }
 
         @Test
@@ -434,15 +446,15 @@ class WorkerLoopTest {
             startAndAdvance(this)
 
             verify(taskRepo, never()).resetForRetry(any(), any(), anyOrNull(), anyOrNull())
-            verify(phaseGate).onTaskCompleted(
-                eq(task.id),
-                eq(task.workflowId),
-                eq(task.sequenceNumber),
-                eq(TaskStatus.FAILED),
-                eq(null),
-                eq(workerId),
-                any(), isNull(),
-            )
+            verify(phaseGate).onTaskCompleted(check<TaskCompletionEvent> { event ->
+                assertEquals(task.id, event.taskId)
+                assertEquals(task.workflowId, event.workflowId)
+                assertEquals(task.sequenceNumber, event.sequenceNumber)
+                assertEquals(TaskStatus.FAILED, event.status)
+                assertNull(event.resultJson)
+                assertEquals(workerId, event.claimedBy)
+                assertNull(event.itemsJson)
+            })
         }
     }
 
@@ -467,15 +479,15 @@ class WorkerLoopTest {
             startAndAdvance(this)
 
             verify(taskRepo).resetForRetry(eq(task.id), eq(1), anyOrNull(), anyOrNull())
-            verify(phaseGate).onTaskCompleted(
-                eq(task.id),
-                eq(task.workflowId),
-                eq(task.sequenceNumber),
-                eq(TaskStatus.FAILED),
-                eq(null),
-                eq(workerId),
-                any(), isNull(),
-            )
+            verify(phaseGate).onTaskCompleted(check<TaskCompletionEvent> { event ->
+                assertEquals(task.id, event.taskId)
+                assertEquals(task.workflowId, event.workflowId)
+                assertEquals(task.sequenceNumber, event.sequenceNumber)
+                assertEquals(TaskStatus.FAILED, event.status)
+                assertNull(event.resultJson)
+                assertEquals(workerId, event.claimedBy)
+                assertNull(event.itemsJson)
+            })
         }
     }
 
@@ -513,15 +525,15 @@ class WorkerLoopTest {
 
             startAndAdvance(this)
 
-            verify(phaseGate).onTaskCompleted(
-                eq(task.id),
-                eq(task.workflowId),
-                eq(task.sequenceNumber),
-                eq(TaskStatus.FAILED),
-                eq(null),
-                eq(workerId),
-                any(), isNull(),
-            )
+            verify(phaseGate).onTaskCompleted(check<TaskCompletionEvent> { event ->
+                assertEquals(task.id, event.taskId)
+                assertEquals(task.workflowId, event.workflowId)
+                assertEquals(task.sequenceNumber, event.sequenceNumber)
+                assertEquals(TaskStatus.FAILED, event.status)
+                assertNull(event.resultJson)
+                assertEquals(workerId, event.claimedBy)
+                assertNull(event.itemsJson)
+            })
         }
     }
 
@@ -556,10 +568,13 @@ class WorkerLoopTest {
             startAndAdvance(this, ticks = 4)
 
             verify(handler).execute(any())
-            verify(phaseGate).onTaskCompleted(
-                eq(task.id), eq(task.workflowId), eq(task.sequenceNumber),
-                eq(TaskStatus.COMPLETED), eq("ok"), eq(workerId), any(), isNull(),
-            )
+            verify(phaseGate).onTaskCompleted(check<TaskCompletionEvent> { event ->
+                assertEquals(task.id, event.taskId)
+                assertEquals(TaskStatus.COMPLETED, event.status)
+                assertEquals("ok", event.resultJson)
+                assertEquals(workerId, event.claimedBy)
+                assertNull(event.itemsJson)
+            })
         }
     }
 
@@ -582,10 +597,13 @@ class WorkerLoopTest {
 
             startAndAdvance(this, ticks = 4)
 
-            verify(phaseGate).onTaskCompleted(
-                eq(task.id), eq(task.workflowId), eq(task.sequenceNumber),
-                eq(TaskStatus.COMPLETED), eq("recovered"), eq(workerId), any(), isNull(),
-            )
+            verify(phaseGate).onTaskCompleted(check<TaskCompletionEvent> { event ->
+                assertEquals(task.id, event.taskId)
+                assertEquals(TaskStatus.COMPLETED, event.status)
+                assertEquals("recovered", event.resultJson)
+                assertEquals(workerId, event.claimedBy)
+                assertNull(event.itemsJson)
+            })
         }
     }
 
@@ -684,10 +702,13 @@ class WorkerLoopTest {
             shutdownJob.join()
 
             assertTrue(handlerCompleted.get(), "Handler should complete within drain window (not cancelled)")
-            verify(phaseGate).onTaskCompleted(
-                eq(task.id), eq(task.workflowId), eq(task.sequenceNumber),
-                eq(TaskStatus.COMPLETED), eq("""{"drained":"ok"}"""), eq(workerId), any(), isNull(),
-            )
+            verify(phaseGate).onTaskCompleted(check<TaskCompletionEvent> { event ->
+                assertEquals(task.id, event.taskId)
+                assertEquals(TaskStatus.COMPLETED, event.status)
+                assertEquals("""{"drained":"ok"}""", event.resultJson)
+                assertEquals(workerId, event.claimedBy)
+                assertNull(event.itemsJson)
+            })
         }
 
         @Test
@@ -850,13 +871,16 @@ class WorkerLoopTest {
 
             doAnswer { throw RuntimeException("barrier blew up") }
                 .doAnswer { }
-                .whenever(phaseGate).onTaskCompleted(any(), any(), any(), any(), any(), any(), any(), isNull())
+                .doAnswer { }
+                .whenever(phaseGate).onTaskCompleted(any())
 
             startAndAdvance(this, ticks = 4)
 
             verify(handler1).execute(any())
             verify(handler2).execute(any())
-            verify(phaseGate, times(2)).onTaskCompleted(any(), any(), any(), any(), any(), any(), any(), isNull())
+            // 3 calls: (1) task1 COMPLETED settle throws, (2) task1 retryOrFail FAILED settle,
+            // (3) task2 COMPLETED settle succeeds
+            verify(phaseGate, times(3)).onTaskCompleted(any())
         }
 
         @Test
@@ -870,7 +894,7 @@ class WorkerLoopTest {
             whenever(handlerRegistry.resolve(task.handlerKey)).thenReturn(handler)
             whenever(handler.execute(any())).thenReturn(HandlerResult.Completed("success"))
             doThrow(RuntimeException("barrier failed on COMPLETED"))
-                .whenever(phaseGate).onTaskCompleted(any(), any(), any(), any(), any(), any(), any(), isNull())
+                .whenever(phaseGate).onTaskCompleted(any())
             whenever(taskRepo.resetForRetry(eq(task.id), eq(1), anyOrNull(), anyOrNull())).thenReturn(true)
 
             startAndAdvance(this)
@@ -897,12 +921,12 @@ class WorkerLoopTest {
 
             // barrier throws on FAILED report for task1, succeeds for task2
             doAnswer { invocation ->
-                val status = invocation.getArgument<TaskStatus>(3)
-                if (status == TaskStatus.FAILED) throw RuntimeException("barrier blew up on FAILED")
+                val event = invocation.getArgument<TaskCompletionEvent>(0)
+                if (event.status == TaskStatus.FAILED) throw RuntimeException("barrier blew up on FAILED")
                 Unit
             }
                 .doAnswer { }
-                .whenever(phaseGate).onTaskCompleted(any(), any(), any(), any(), any(), any(), any(), isNull())
+                .whenever(phaseGate).onTaskCompleted(any())
 
             startAndAdvance(this, ticks = 4)
 
@@ -1369,10 +1393,13 @@ class WorkerLoopTest {
             startAndAdvance(this)
 
             verify(handler).execute(any())
-            verify(phaseGate).onTaskCompleted(
-                eq(task.id), eq(task.workflowId), eq(task.sequenceNumber),
-                eq(TaskStatus.COMPLETED), eq("ok"), eq(workerId), any(), isNull(),
-            )
+            verify(phaseGate).onTaskCompleted(check<TaskCompletionEvent> { event ->
+                assertEquals(task.id, event.taskId)
+                assertEquals(TaskStatus.COMPLETED, event.status)
+                assertEquals("ok", event.resultJson)
+                assertEquals(workerId, event.claimedBy)
+                assertNull(event.itemsJson)
+            })
         }
 
         @Test

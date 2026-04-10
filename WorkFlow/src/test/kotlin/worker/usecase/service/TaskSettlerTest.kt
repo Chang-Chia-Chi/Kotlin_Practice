@@ -1,5 +1,6 @@
 package com.workflow.worker.usecase.service
 
+import com.workflow.workflow.model.TaskCompletionEvent
 import com.workflow.workflow.model.TaskStatus
 import com.workflow.workflow.usecase.port.inbound.orchestration.PhaseGate
 import com.workflow.workflow.usecase.port.outbound.persistent.TaskRepository
@@ -38,52 +39,41 @@ class TaskSettlerTest {
     @Test
     fun `settle delegates to phaseGate onTaskCompleted`() = runTest {
         val someInstant = Instant.parse("2026-01-01T00:00:00Z")
+        val event = TaskCompletionEvent("t-1", "wf-1", 1, TaskStatus.COMPLETED, """{"ok":true}""", "worker-1", someInstant)
 
-        settler.settle("t-1", "wf-1", 1, TaskStatus.COMPLETED, """{"ok":true}""", "worker-1", someInstant)
+        settler.settle(event)
 
-        verify(phaseGate).onTaskCompleted(
-            eq("t-1"), eq("wf-1"), eq(1),
-            eq(TaskStatus.COMPLETED), eq("""{"ok":true}"""),
-            eq("worker-1"), eq(someInstant), eq(null),
-        )
+        verify(phaseGate).onTaskCompleted(eq(event))
     }
 
     @Test
     fun `settle with null claimedBy and claimedAt defaults`() = runTest {
-        settler.settle("t-1", "wf-1", 1, TaskStatus.TIMED_OUT, null)
+        val event = TaskCompletionEvent("t-1", "wf-1", 1, TaskStatus.TIMED_OUT, null)
 
-        verify(phaseGate).onTaskCompleted(
-            eq("t-1"), eq("wf-1"), eq(1),
-            eq(TaskStatus.TIMED_OUT), eq(null),
-            eq(null), eq(null), eq(null),
-        )
+        settler.settle(event)
+
+        verify(phaseGate).onTaskCompleted(eq(event))
     }
 
     @Test
     fun `settle propagates phaseGate exception`() = runTest {
+        val event = TaskCompletionEvent("t-1", "wf-1", 1, TaskStatus.COMPLETED, null)
         phaseGate.stub {
-            onBlocking {
-                onTaskCompleted(
-                    eq("t-1"), eq("wf-1"), eq(1),
-                    eq(TaskStatus.COMPLETED), eq(null), eq(null), eq(null), eq(null),
-                )
-            } doThrow RuntimeException("db error")
+            onBlocking { onTaskCompleted(eq(event)) } doThrow RuntimeException("db error")
         }
 
         assertFailsWith<RuntimeException> {
-            settler.settle("t-1", "wf-1", 1, TaskStatus.COMPLETED, null)
+            settler.settle(event)
         }
     }
 
     @Test
     fun `settle passes non-null itemsJson to phaseGate`() = runTest {
-        settler.settle("t-1", "wf-1", 1, TaskStatus.COMPLETED, """{"ok":true}""", itemsJson = """["item1"]""")
+        val event = TaskCompletionEvent("t-1", "wf-1", 1, TaskStatus.COMPLETED, """{"ok":true}""", itemsJson = """["item1"]""")
 
-        verify(phaseGate).onTaskCompleted(
-            eq("t-1"), eq("wf-1"), eq(1),
-            eq(TaskStatus.COMPLETED), eq("""{"ok":true}"""),
-            eq(null), eq(null), eq("""["item1"]"""),
-        )
+        settler.settle(event)
+
+        verify(phaseGate).onTaskCompleted(eq(event))
     }
 
     // ── Step 2: retryOrFail() — retry path ──────────────────────────────
@@ -117,9 +107,7 @@ class TaskSettlerTest {
 
         verify(taskRepo, never()).resetForRetry(any(), any(), anyOrNull(), anyOrNull())
         verify(phaseGate).onTaskCompleted(
-            eq("t-1"), eq("wf-1"), eq(1),
-            eq(TaskStatus.FAILED), eq(null),
-            eq(null), eq(null), eq(null),
+            eq(TaskCompletionEvent("t-1", "wf-1", 1, TaskStatus.FAILED, null)),
         )
         assertEquals(RetryOutcome.Failed, outcome)
     }
@@ -142,9 +130,7 @@ class TaskSettlerTest {
 
         verify(taskRepo).resetForRetry(eq("t-1"), eq(1), eq(null), eq(null))
         verify(phaseGate).onTaskCompleted(
-            eq("t-1"), eq("wf-1"), eq(1),
-            eq(TaskStatus.FAILED), eq(null),
-            eq(null), eq(null), eq(null),
+            eq(TaskCompletionEvent("t-1", "wf-1", 1, TaskStatus.FAILED, null)),
         )
         assertEquals(RetryOutcome.Failed, outcome)
     }
@@ -160,24 +146,18 @@ class TaskSettlerTest {
 
         verify(taskRepo).resetForRetry(eq("t-1"), eq(1), eq(null), eq(null))
         verify(phaseGate).onTaskCompleted(
-            eq("t-1"), eq("wf-1"), eq(1),
-            eq(TaskStatus.FAILED), eq(null),
-            eq(null), eq(null), eq(null),
+            eq(TaskCompletionEvent("t-1", "wf-1", 1, TaskStatus.FAILED, null)),
         )
         assertEquals(RetryOutcome.Failed, outcome)
     }
 
     @Test
     fun `retryOrFail when resetForRetry throws AND phaseGate throws - propagates phaseGate exception`() = runTest {
+        val event = TaskCompletionEvent("t-1", "wf-1", 1, TaskStatus.FAILED, null)
         whenever(taskRepo.resetForRetry(eq("t-1"), eq(1), eq(null), eq(null)))
             .thenThrow(RuntimeException("DB error"))
         phaseGate.stub {
-            onBlocking {
-                onTaskCompleted(
-                    eq("t-1"), eq("wf-1"), eq(1),
-                    eq(TaskStatus.FAILED), eq(null), eq(null), eq(null), eq(null),
-                )
-            } doThrow RuntimeException("phaseGate error")
+            onBlocking { onTaskCompleted(eq(event)) } doThrow RuntimeException("phaseGate error")
         }
 
         val ex = assertFailsWith<RuntimeException> {
@@ -211,9 +191,7 @@ class TaskSettlerTest {
         settler.retryOrFail("t-1", "wf-1", 1, 3, 3, "worker-1", instant)
 
         verify(phaseGate).onTaskCompleted(
-            eq("t-1"), eq("wf-1"), eq(1),
-            eq(TaskStatus.FAILED), eq(null),
-            eq("worker-1"), eq(instant), eq(null),
+            eq(TaskCompletionEvent("t-1", "wf-1", 1, TaskStatus.FAILED, null, "worker-1", instant)),
         )
     }
 }

@@ -6,6 +6,7 @@ import com.fasterxml.jackson.module.kotlin.KotlinModule
 import com.workflow.workflow.adapter.persistent.JdbiTaskRepository
 import com.workflow.workflow.adapter.persistent.JdbiWorkflowRepository
 import com.workflow.workflow.config.WatchdogConfig
+import com.workflow.workflow.model.TaskCompletionEvent
 import com.workflow.workflow.model.TaskStatus
 import com.workflow.workflow.model.WorkflowStatus
 import com.workflow.workflow.model.workflowId
@@ -165,9 +166,9 @@ class WorkflowIntegrationTest {
 
             // Complete task 1 with result
             val task1Result = """{"validated":true}"""
-            barrier.onTaskCompleted(
+            barrier.onTaskCompleted(TaskCompletionEvent(
                 tasks[0].id, runId, 1, TaskStatus.COMPLETED, task1Result,
-            )
+            ))
 
             // Verify: workflow version incremented
             wf = readWorkflowDirect(runId)!!
@@ -179,9 +180,9 @@ class WorkflowIntegrationTest {
 
             // Complete task 2 with result
             val task2Result = """{"processed":true}"""
-            barrier.onTaskCompleted(
+            barrier.onTaskCompleted(TaskCompletionEvent(
                 tasks[0].id, runId, 2, TaskStatus.COMPLETED, task2Result,
-            )
+            ))
 
             // Verify: workflow version incremented again
             wf = readWorkflowDirect(runId)!!
@@ -192,9 +193,9 @@ class WorkflowIntegrationTest {
             assertEquals("order.notify", tasks[0].handlerKey)
 
             // Complete task 3
-            barrier.onTaskCompleted(
+            barrier.onTaskCompleted(TaskCompletionEvent(
                 tasks[0].id, runId, 3, TaskStatus.COMPLETED, """{"notified":true}""",
-            )
+            ))
 
             // Verify: workflow COMPLETED
             wf = readWorkflowDirect(runId)!!
@@ -233,9 +234,9 @@ class WorkflowIntegrationTest {
             // Complete scatter task with JSON array of 50 payloads
             val payloads = (1..50).map { """{"item":$it}""" }
             val scatterResult = objectMapper.writeValueAsString(payloads)
-            barrier.onTaskCompleted(
+            barrier.onTaskCompleted(TaskCompletionEvent(
                 scatterTasks[0].id, runId, 1, TaskStatus.COMPLETED, resultJson = null, itemsJson = scatterResult,
-            )
+            ))
 
             // Verify: 50 PENDING sub-tasks created at seq 2
 
@@ -250,9 +251,9 @@ class WorkflowIntegrationTest {
 
             // Complete all 50 sub-tasks
             for (task in parallelTasks) {
-                barrier.onTaskCompleted(
+                barrier.onTaskCompleted(TaskCompletionEvent(
                     task.id, runId, 2, TaskStatus.COMPLETED, """{"done":true}""",
-                )
+                ))
             }
 
             // Verify: all sub-tasks joined, next linear task created at seq 3
@@ -262,9 +263,9 @@ class WorkflowIntegrationTest {
             assertEquals("batch.aggregate", aggregateTasks[0].handlerKey)
 
             // Complete final task
-            barrier.onTaskCompleted(
+            barrier.onTaskCompleted(TaskCompletionEvent(
                 aggregateTasks[0].id, runId, 3, TaskStatus.COMPLETED, """{"aggregated":true}""",
-            )
+            ))
 
             // Verify: workflow COMPLETED
             wf = readWorkflowDirect(runId)!!
@@ -365,10 +366,10 @@ class WorkflowIntegrationTest {
             // Complete scatter with sub-task payloads
             val scatterTasks = taskRepo.findByWorkflowAndSequence(runId, 1)
             val payloads = (1..subTaskCount).map { """{"i":$it}""" }
-            barrier.onTaskCompleted(
+            barrier.onTaskCompleted(TaskCompletionEvent(
                 scatterTasks[0].id, runId, 1, TaskStatus.COMPLETED,
                 resultJson = null, itemsJson = objectMapper.writeValueAsString(payloads),
-            )
+            ))
 
             // Verify sub-tasks at seq 2
             val parallelTasks = taskRepo.findByWorkflowAndSequence(runId, 2)
@@ -382,9 +383,9 @@ class WorkflowIntegrationTest {
             parallelTasks.map { task ->
                 async {
                     semaphore.withPermit {
-                        barrier.onTaskCompleted(
+                        barrier.onTaskCompleted(TaskCompletionEvent(
                             task.id, runId, 2, TaskStatus.COMPLETED, """{"ok":true}""",
-                        )
+                        ))
                     }
                 }
             }.awaitAll()
@@ -420,7 +421,7 @@ class WorkflowIntegrationTest {
         val seq = seqOf(def, actName)
         val tasks = taskRepo.findByWorkflowAndSequence(wfId, seq)
         for (t in tasks.filter { it.status == TaskStatus.PENDING || it.status == TaskStatus.PROCESSING }) {
-            gate.onTaskCompleted(t.id, wfId, seq, TaskStatus.COMPLETED, result)
+            gate.onTaskCompleted(TaskCompletionEvent(t.id, wfId, seq, TaskStatus.COMPLETED, result))
         }
     }
 
@@ -462,7 +463,7 @@ class WorkflowIntegrationTest {
 
         val seqV = seqOf(def, "validate")
         val vTask = taskRepo.findByWorkflowAndSequence(wfId, seqV)[0]
-        gate.onTaskCompleted(vTask.id, wfId, seqV, TaskStatus.COMPLETED, """{"branch":"OK"}""")
+        gate.onTaskCompleted(TaskCompletionEvent(vTask.id, wfId, seqV, TaskStatus.COMPLETED, """{"branch":"OK"}"""))
 
         assertEquals(listOf("PENDING"), taskStatusAt(wfId, seqOf(def, "charge")))
         assertEquals(listOf("SKIPPED"), taskStatusAt(wfId, seqOf(def, "reject")))
@@ -491,7 +492,7 @@ class WorkflowIntegrationTest {
 
         val seqV = seqOf(def, "validate")
         val vTask = taskRepo.findByWorkflowAndSequence(wfId, seqV)[0]
-        gate.onTaskCompleted(vTask.id, wfId, seqV, TaskStatus.COMPLETED, """{"branch":"INVALID"}""")
+        gate.onTaskCompleted(TaskCompletionEvent(vTask.id, wfId, seqV, TaskStatus.COMPLETED, """{"branch":"INVALID"}"""))
 
         assertEquals(listOf("SKIPPED"), taskStatusAt(wfId, seqOf(def, "charge")))
         assertEquals(listOf("PENDING"), taskStatusAt(wfId, seqOf(def, "reject")))
@@ -578,14 +579,14 @@ class WorkflowIntegrationTest {
 
         val seqScatter = seqOf(def, "scatter")
         val scatterTask = taskRepo.findByWorkflowAndSequence(wfId, seqScatter)[0]
-        gate.onTaskCompleted(scatterTask.id, wfId, seqScatter, TaskStatus.COMPLETED, resultJson = null, itemsJson = """["item-a","item-b"]""")
+        gate.onTaskCompleted(TaskCompletionEvent(scatterTask.id, wfId, seqScatter, TaskStatus.COMPLETED, resultJson = null, itemsJson = """["item-a","item-b"]"""))
 
         val seqParallel = seqOf(def, "scatter.__parallel__")
         val parTasks = taskRepo.findByWorkflowAndSequence(wfId, seqParallel)
         assertEquals(2, parTasks.size)
 
         for (t in parTasks) {
-            gate.onTaskCompleted(t.id, wfId, seqParallel, TaskStatus.COMPLETED, null)
+            gate.onTaskCompleted(TaskCompletionEvent(t.id, wfId, seqParallel, TaskStatus.COMPLETED, null))
         }
 
         complete(wfId, def, "join")
@@ -614,7 +615,7 @@ class WorkflowIntegrationTest {
 
         val seqRoute = seqOf(def, "route")
         val routeTask = taskRepo.findByWorkflowAndSequence(wfId, seqRoute)[0]
-        gate.onTaskCompleted(routeTask.id, wfId, seqRoute, TaskStatus.COMPLETED, """{"branch":"SKIP"}""")
+        gate.onTaskCompleted(TaskCompletionEvent(routeTask.id, wfId, seqRoute, TaskStatus.COMPLETED, """{"branch":"SKIP"}"""))
 
         assertEquals(listOf("SKIPPED"), taskStatusAt(wfId, seqOf(def, "scatter")))
         assertEquals(listOf("SKIPPED"), taskStatusAt(wfId, seqOf(def, "scatter.__parallel__")))
@@ -641,7 +642,7 @@ class WorkflowIntegrationTest {
 
         val seqA = seqOf(def, "a")
         val aTask = taskRepo.findByWorkflowAndSequence(wfId, seqA)[0]
-        gate.onTaskCompleted(aTask.id, wfId, seqA, TaskStatus.COMPLETED, """{"branch":"NO"}""")
+        gate.onTaskCompleted(TaskCompletionEvent(aTask.id, wfId, seqA, TaskStatus.COMPLETED, """{"branch":"NO"}"""))
 
         assertEquals(listOf("SKIPPED"), taskStatusAt(wfId, seqOf(def, "b")))
         assertEquals(listOf("SKIPPED"), taskStatusAt(wfId, seqOf(def, "c")))
@@ -677,7 +678,7 @@ class WorkflowIntegrationTest {
         // Route to GO branch — x is skipped, cascade must NOT skip join
         val seqA = seqOf(def, "a")
         val aTask = taskRepo.findByWorkflowAndSequence(wfId, seqA)[0]
-        gate.onTaskCompleted(aTask.id, wfId, seqA, TaskStatus.COMPLETED, """{"branch":"GO"}""")
+        gate.onTaskCompleted(TaskCompletionEvent(aTask.id, wfId, seqA, TaskStatus.COMPLETED, """{"branch":"GO"}"""))
 
         assertEquals(listOf("PENDING"), taskStatusAt(wfId, seqOf(def, "b")))
         assertEquals(listOf("SKIPPED"), taskStatusAt(wfId, seqOf(def, "x")))
@@ -724,7 +725,7 @@ class WorkflowIntegrationTest {
         val wfId1 = r1.workflowId
         val seqA1 = seqOf(def, "a")
         val aTask1 = taskRepo.findByWorkflowAndSequence(wfId1, seqA1)[0]
-        gate.onTaskCompleted(aTask1.id, wfId1, seqA1, TaskStatus.COMPLETED, """{"branch":"C"}""")
+        gate.onTaskCompleted(TaskCompletionEvent(aTask1.id, wfId1, seqA1, TaskStatus.COMPLETED, """{"branch":"C"}"""))
 
         assertEquals(listOf("SKIPPED"), taskStatusAt(wfId1, seqOf(def, "b")))
         assertEquals(listOf("SKIPPED"), taskStatusAt(wfId1, seqOf(def, "c")))
@@ -746,7 +747,7 @@ class WorkflowIntegrationTest {
         val wfId2 = r2.workflowId
         val seqA2 = seqOf(def, "a")
         val aTask2 = taskRepo.findByWorkflowAndSequence(wfId2, seqA2)[0]
-        gate.onTaskCompleted(aTask2.id, wfId2, seqA2, TaskStatus.COMPLETED, """{"branch":"A"}""")
+        gate.onTaskCompleted(TaskCompletionEvent(aTask2.id, wfId2, seqA2, TaskStatus.COMPLETED, """{"branch":"A"}"""))
 
         assertEquals(listOf("PENDING"), taskStatusAt(wfId2, seqOf(def, "b")))
         assertEquals(listOf("SKIPPED"), taskStatusAt(wfId2, seqOf(def, "e")))
@@ -797,7 +798,7 @@ class WorkflowIntegrationTest {
         // Conditional chooses X — taken PENDING, alt SKIPPED
         val seqCond = seqOf(def, "cond")
         val condTask = taskRepo.findByWorkflowAndSequence(wfId, seqCond)[0]
-        gate.onTaskCompleted(condTask.id, wfId, seqCond, TaskStatus.COMPLETED, """{"branch":"X"}""")
+        gate.onTaskCompleted(TaskCompletionEvent(condTask.id, wfId, seqCond, TaskStatus.COMPLETED, """{"branch":"X"}"""))
 
         assertEquals(listOf("PENDING"), taskStatusAt(wfId, seqOf(def, "taken")))
         assertEquals(listOf("SKIPPED"), taskStatusAt(wfId, seqOf(def, "alt")))
@@ -847,7 +848,7 @@ class WorkflowIntegrationTest {
         // First diamond: A taken, b2 SKIPPED
         val seqA = seqOf(def, "a")
         val aTask = taskRepo.findByWorkflowAndSequence(wfId, seqA)[0]
-        gate.onTaskCompleted(aTask.id, wfId, seqA, TaskStatus.COMPLETED, """{"branch":"A"}""")
+        gate.onTaskCompleted(TaskCompletionEvent(aTask.id, wfId, seqA, TaskStatus.COMPLETED, """{"branch":"A"}"""))
 
         assertEquals(listOf("PENDING"), taskStatusAt(wfId, seqOf(def, "b1")))
         assertEquals(listOf("SKIPPED"), taskStatusAt(wfId, seqOf(def, "b2")))
@@ -860,7 +861,7 @@ class WorkflowIntegrationTest {
         // Second diamond: Y taken, d1 SKIPPED
         val seqC = seqOf(def, "c")
         val cTask = taskRepo.findByWorkflowAndSequence(wfId, seqC)[0]
-        gate.onTaskCompleted(cTask.id, wfId, seqC, TaskStatus.COMPLETED, """{"branch":"Y"}""")
+        gate.onTaskCompleted(TaskCompletionEvent(cTask.id, wfId, seqC, TaskStatus.COMPLETED, """{"branch":"Y"}"""))
 
         assertEquals(listOf("SKIPPED"), taskStatusAt(wfId, seqOf(def, "d1")))
         assertEquals(listOf("PENDING"), taskStatusAt(wfId, seqOf(def, "d2")))
@@ -894,8 +895,8 @@ class WorkflowIntegrationTest {
         val b2Task = taskRepo.findByWorkflowAndSequence(wfId, seqB2)[0]
 
         awaitAll(
-            async(Dispatchers.Default) { gate.onTaskCompleted(b1Task.id, wfId, seqB1, TaskStatus.COMPLETED, null) },
-            async(Dispatchers.Default) { gate.onTaskCompleted(b2Task.id, wfId, seqB2, TaskStatus.COMPLETED, null) },
+            async(Dispatchers.Default) { gate.onTaskCompleted(TaskCompletionEvent(b1Task.id, wfId, seqB1, TaskStatus.COMPLETED, null)) },
+            async(Dispatchers.Default) { gate.onTaskCompleted(TaskCompletionEvent(b2Task.id, wfId, seqB2, TaskStatus.COMPLETED, null)) },
         )
 
         val seqJoin = seqOf(def, "join")
@@ -949,7 +950,7 @@ class WorkflowIntegrationTest {
         complete(wfId, def, "step1")
         val seqS2 = seqOf(def, "step2")
         val s2Tasks = taskRepo.findByWorkflowAndSequence(wfId, seqS2)
-        gate.onTaskCompleted(s2Tasks[0].id, wfId, seqS2, TaskStatus.FAILED, null)
+        gate.onTaskCompleted(TaskCompletionEvent(s2Tasks[0].id, wfId, seqS2, TaskStatus.FAILED, null))
 
         assertEquals(WorkflowStatus.FAILED, workflowRepo.findById(wfId)!!.status)
 
@@ -1046,7 +1047,7 @@ class WorkflowIntegrationTest {
             // Route to A: deep1 PENDING, alt SKIPPED
             val seqRouter = seqOf(multiTerminalDef, "router")
             val routerTask = taskRepo.findByWorkflowAndSequence(wfId, seqRouter)[0]
-            gate.onTaskCompleted(routerTask.id, wfId, seqRouter, TaskStatus.COMPLETED, """{"branch":"A"}""")
+            gate.onTaskCompleted(TaskCompletionEvent(routerTask.id, wfId, seqRouter, TaskStatus.COMPLETED, """{"branch":"A"}"""))
 
             assertEquals(listOf("PENDING"), taskStatusAt(wfId, seqOf(multiTerminalDef, "deep1")))
             assertEquals(listOf("SKIPPED"), taskStatusAt(wfId, seqOf(multiTerminalDef, "alt")))
@@ -1075,7 +1076,7 @@ class WorkflowIntegrationTest {
             // Route to B: alt PENDING, deep1 SKIPPED, deep2 SKIPPED (cascade)
             val seqRouter = seqOf(multiTerminalDef, "router")
             val routerTask = taskRepo.findByWorkflowAndSequence(wfId, seqRouter)[0]
-            gate.onTaskCompleted(routerTask.id, wfId, seqRouter, TaskStatus.COMPLETED, """{"branch":"B"}""")
+            gate.onTaskCompleted(TaskCompletionEvent(routerTask.id, wfId, seqRouter, TaskStatus.COMPLETED, """{"branch":"B"}"""))
 
             assertEquals(listOf("PENDING"), taskStatusAt(wfId, seqOf(multiTerminalDef, "alt")))
             assertEquals(listOf("SKIPPED"), taskStatusAt(wfId, seqOf(multiTerminalDef, "deep1")))
@@ -1103,7 +1104,7 @@ class WorkflowIntegrationTest {
             // Route to A
             val seqRouter = seqOf(multiTerminalDef, "router")
             val routerTask = taskRepo.findByWorkflowAndSequence(wfId, seqRouter)[0]
-            gate.onTaskCompleted(routerTask.id, wfId, seqRouter, TaskStatus.COMPLETED, """{"branch":"A"}""")
+            gate.onTaskCompleted(TaskCompletionEvent(routerTask.id, wfId, seqRouter, TaskStatus.COMPLETED, """{"branch":"A"}"""))
 
             assertEquals(listOf("PENDING"), taskStatusAt(wfId, seqOf(multiTerminalDef, "deep1")))
             assertEquals(listOf("SKIPPED"), taskStatusAt(wfId, seqOf(multiTerminalDef, "alt")))
@@ -1125,7 +1126,7 @@ class WorkflowIntegrationTest {
             // Route to B: alt and fast are the two independent terminals
             val seqRouter = seqOf(multiTerminalDef, "router")
             val routerTask = taskRepo.findByWorkflowAndSequence(wfId, seqRouter)[0]
-            gate.onTaskCompleted(routerTask.id, wfId, seqRouter, TaskStatus.COMPLETED, """{"branch":"B"}""")
+            gate.onTaskCompleted(TaskCompletionEvent(routerTask.id, wfId, seqRouter, TaskStatus.COMPLETED, """{"branch":"B"}"""))
 
             // Both terminals ready: fast (seq for fast) and alt (seq for alt)
             val seqFast = seqOf(multiTerminalDef, "fast")
@@ -1136,10 +1137,10 @@ class WorkflowIntegrationTest {
             // Complete both concurrently
             awaitAll(
                 async(Dispatchers.Default) {
-                    gate.onTaskCompleted(fastTask.id, wfId, seqFast, TaskStatus.COMPLETED, null)
+                    gate.onTaskCompleted(TaskCompletionEvent(fastTask.id, wfId, seqFast, TaskStatus.COMPLETED, null))
                 },
                 async(Dispatchers.Default) {
-                    gate.onTaskCompleted(altTask.id, wfId, seqAlt, TaskStatus.COMPLETED, null)
+                    gate.onTaskCompleted(TaskCompletionEvent(altTask.id, wfId, seqAlt, TaskStatus.COMPLETED, null))
                 },
             )
 

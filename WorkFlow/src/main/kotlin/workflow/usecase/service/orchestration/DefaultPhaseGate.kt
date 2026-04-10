@@ -7,6 +7,7 @@ import com.workflow.infrastructure.persistence.inTransactionSuspend
 import com.workflow.worker.usecase.port.outbound.notification.WorkerNotifier
 import com.workflow.workflow.model.PhaseType
 import com.workflow.workflow.model.SequenceInfo
+import com.workflow.workflow.model.TaskCompletionEvent
 import com.workflow.workflow.model.TaskStatus
 import com.workflow.workflow.model.WorkflowDefinition
 import com.workflow.workflow.model.WorkflowStatus
@@ -55,16 +56,8 @@ class DefaultPhaseGate(
 
     private val definitionCache = ConcurrentHashMap<String, CachedDefinition>()
 
-    override suspend fun onTaskCompleted(
-        taskId: String,
-        workflowId: String,
-        sequenceNumber: Int,
-        status: TaskStatus,
-        resultJson: String?,
-        claimedBy: String?,
-        claimedAt: Instant?,
-        itemsJson: String?,
-    ) {
+    override suspend fun onTaskCompleted(event: TaskCompletionEvent) {
+        val (taskId, workflowId, sequenceNumber, status, resultJson, claimedBy, claimedAt, itemsJson) = event
         // TX1: Commit task status update — including items — so both are visible to all concurrent readers.
         val updated =
             jdbi.inTransactionSuspend<Boolean, Exception> { handle ->

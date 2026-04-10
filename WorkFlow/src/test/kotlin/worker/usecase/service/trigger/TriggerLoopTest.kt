@@ -7,6 +7,7 @@ import com.workflow.worker.usecase.port.inbound.trigger.DeferredTaskRef
 import com.workflow.worker.usecase.port.inbound.trigger.TriggerDriver
 import com.workflow.worker.usecase.port.inbound.trigger.TriggerResult
 import com.workflow.worker.usecase.service.TaskSettler
+import com.workflow.workflow.model.TaskCompletionEvent
 import com.workflow.workflow.model.TaskStatus
 import com.workflow.workflow.usecase.port.inbound.orchestration.PhaseGate
 import com.workflow.workflow.usecase.port.outbound.persistent.TaskRepository
@@ -146,14 +147,7 @@ class TriggerLoopTest {
             triggerLoop.sweep()
 
             verify(phaseGate).onTaskCompleted(
-                taskId = eq("t-1"),
-                workflowId = eq("wf-1"),
-                sequenceNumber = eq(1),
-                status = eq(TaskStatus.COMPLETED),
-                resultJson = eq("""{"ok":true}"""),
-                claimedBy = eq(null),
-                claimedAt = eq(null),
-                itemsJson = eq(null),
+                eq(TaskCompletionEvent("t-1", "wf-1", 1, TaskStatus.COMPLETED, """{"ok":true}""")),
             )
             assertEquals(1.0, counterCount("trigger_settled_total", "type", "test-driver", "outcome", "succeeded"))
         }
@@ -173,9 +167,7 @@ class TriggerLoopTest {
             triggerLoop.sweep()
 
             verify(taskRepo).resetForRetry(eq("t-1"), eq(1), anyOrNull(), anyOrNull())
-            verify(phaseGate, never()).onTaskCompleted(
-                any(), any(), any(), any(), any(), any(), any(), any(),
-            )
+            verify(phaseGate, never()).onTaskCompleted(any())
             assertEquals(1.0, counterCount("trigger_settled_total", "type", "test-driver", "outcome", "retried"))
         }
 
@@ -192,14 +184,7 @@ class TriggerLoopTest {
             triggerLoop.sweep()
 
             verify(phaseGate).onTaskCompleted(
-                taskId = eq("t-1"),
-                workflowId = eq("wf-1"),
-                sequenceNumber = eq(1),
-                status = eq(TaskStatus.FAILED),
-                resultJson = eq(null),
-                claimedBy = eq(null),
-                claimedAt = eq(null),
-                itemsJson = eq(null),
+                eq(TaskCompletionEvent("t-1", "wf-1", 1, TaskStatus.FAILED, null)),
             )
             assertEquals(1.0, counterCount("trigger_settled_total", "type", "test-driver", "outcome", "failed"))
         }
@@ -255,9 +240,7 @@ class TriggerLoopTest {
             triggerLoop.sweep()
 
             // phaseGate should not be called for unknown tasks
-            verify(phaseGate, never()).onTaskCompleted(
-                any(), any(), any(), any(), any(), any(), any(), any(),
-            )
+            verify(phaseGate, never()).onTaskCompleted(any())
         }
 
         @Test
@@ -273,14 +256,7 @@ class TriggerLoopTest {
             triggerLoop.sweep()
 
             verify(phaseGate).onTaskCompleted(
-                taskId = eq("t-1"),
-                workflowId = eq("wf-1"),
-                sequenceNumber = eq(1),
-                status = eq(TaskStatus.COMPLETED),
-                resultJson = eq(null),
-                claimedBy = eq(null),
-                claimedAt = eq(null),
-                itemsJson = eq(null),
+                eq(TaskCompletionEvent("t-1", "wf-1", 1, TaskStatus.COMPLETED, null)),
             )
         }
 
@@ -305,14 +281,7 @@ class TriggerLoopTest {
 
             verify(mockDriver).cancel(eq("t-1"))
             verify(phaseGate).onTaskCompleted(
-                taskId = eq("t-1"),
-                workflowId = eq("wf-1"),
-                sequenceNumber = eq(1),
-                status = eq(TaskStatus.TIMED_OUT),
-                resultJson = eq(null),
-                claimedBy = eq(null),
-                claimedAt = eq(null),
-                itemsJson = eq(null),
+                eq(TaskCompletionEvent("t-1", "wf-1", 1, TaskStatus.TIMED_OUT, null)),
             )
             assertEquals(1.0, counterCount("trigger_settled_total", "type", "test-driver", "outcome", "expired"))
         }
@@ -326,9 +295,7 @@ class TriggerLoopTest {
             triggerLoop.sweep()
 
             verify(mockDriver, never()).cancel(any())
-            verify(phaseGate, never()).onTaskCompleted(
-                any(), any(), any(), eq(TaskStatus.TIMED_OUT), any(), any(), any(), any(),
-            )
+            verify(phaseGate, never()).onTaskCompleted(any())
         }
 
         @Test
@@ -345,17 +312,10 @@ class TriggerLoopTest {
 
             // phaseGate should be called exactly once — as COMPLETED, not TIMED_OUT
             verify(phaseGate).onTaskCompleted(
-                taskId = eq("t-1"),
-                workflowId = eq("wf-1"),
-                sequenceNumber = eq(1),
-                status = eq(TaskStatus.COMPLETED),
-                resultJson = eq("ok"),
-                claimedBy = eq(null),
-                claimedAt = eq(null),
-                itemsJson = eq(null),
+                eq(TaskCompletionEvent("t-1", "wf-1", 1, TaskStatus.COMPLETED, "ok")),
             )
             verify(phaseGate, never()).onTaskCompleted(
-                any(), any(), any(), eq(TaskStatus.TIMED_OUT), any(), any(), any(), any(),
+                eq(TaskCompletionEvent("t-1", "wf-1", 1, TaskStatus.TIMED_OUT, null)),
             )
             verify(mockDriver, never()).cancel(any())
         }
@@ -468,14 +428,7 @@ class TriggerLoopTest {
             loop.sweep()
 
             verify(phaseGate).onTaskCompleted(
-                taskId = eq("t-1"),
-                workflowId = eq("wf-1"),
-                sequenceNumber = eq(1),
-                status = eq(TaskStatus.COMPLETED),
-                resultJson = eq("ok"),
-                claimedBy = eq(null),
-                claimedAt = eq(null),
-                itemsJson = eq(null),
+                eq(TaskCompletionEvent("t-1", "wf-1", 1, TaskStatus.COMPLETED, "ok")),
             )
         }
 
@@ -492,10 +445,7 @@ class TriggerLoopTest {
             }
             phaseGate.stub {
                 onBlocking {
-                    onTaskCompleted(
-                        eq("t-1"), eq("wf-1"), eq(1),
-                        eq(TaskStatus.COMPLETED), eq("data1"), eq(null), eq(null), eq(null),
-                    )
+                    onTaskCompleted(eq(TaskCompletionEvent("t-1", "wf-1", 1, TaskStatus.COMPLETED, "data1")))
                 } doThrow RuntimeException("phaseGate failed")
             }
 
@@ -503,14 +453,7 @@ class TriggerLoopTest {
 
             // Second task should still be settled despite first failure
             verify(phaseGate).onTaskCompleted(
-                taskId = eq("t-2"),
-                workflowId = eq("wf-1"),
-                sequenceNumber = eq(1),
-                status = eq(TaskStatus.COMPLETED),
-                resultJson = eq("data2"),
-                claimedBy = eq(null),
-                claimedAt = eq(null),
-                itemsJson = eq(null),
+                eq(TaskCompletionEvent("t-2", "wf-1", 1, TaskStatus.COMPLETED, "data2")),
             )
         }
 
@@ -530,14 +473,7 @@ class TriggerLoopTest {
             triggerLoop.sweep()
 
             verify(phaseGate).onTaskCompleted(
-                taskId = eq("t-1"),
-                workflowId = eq("wf-1"),
-                sequenceNumber = eq(1),
-                status = eq(TaskStatus.FAILED),
-                resultJson = eq(null),
-                claimedBy = eq(null),
-                claimedAt = eq(null),
-                itemsJson = eq(null),
+                eq(TaskCompletionEvent("t-1", "wf-1", 1, TaskStatus.FAILED, null)),
             )
             assertEquals(1.0, counterCount("trigger_settled_total", "type", "test-driver", "outcome", "failed"))
         }
@@ -554,14 +490,7 @@ class TriggerLoopTest {
             triggerLoop.sweep()
 
             verify(phaseGate).onTaskCompleted(
-                taskId = eq("t-1"),
-                workflowId = eq("wf-1"),
-                sequenceNumber = eq(1),
-                status = eq(TaskStatus.TIMED_OUT),
-                resultJson = eq(null),
-                claimedBy = eq(null),
-                claimedAt = eq(null),
-                itemsJson = eq(null),
+                eq(TaskCompletionEvent("t-1", "wf-1", 1, TaskStatus.TIMED_OUT, null)),
             )
         }
 
@@ -576,10 +505,7 @@ class TriggerLoopTest {
             }
             phaseGate.stub {
                 onBlocking {
-                    onTaskCompleted(
-                        eq("t-1"), eq("wf-1"), eq(1),
-                        eq(TaskStatus.COMPLETED), eq("data"), eq(null), eq(null), eq(null),
-                    )
+                    onTaskCompleted(eq(TaskCompletionEvent("t-1", "wf-1", 1, TaskStatus.COMPLETED, "data")))
                 } doThrow CancellationException("cancelled")
             }
 
@@ -596,10 +522,7 @@ class TriggerLoopTest {
             mockDriver.stub { onBlocking { poll() } doReturn emptyList() }
             phaseGate.stub {
                 onBlocking {
-                    onTaskCompleted(
-                        eq("t-1"), eq("wf-1"), eq(1),
-                        eq(TaskStatus.TIMED_OUT), eq(null), eq(null), eq(null), eq(null),
-                    )
+                    onTaskCompleted(eq(TaskCompletionEvent("t-1", "wf-1", 1, TaskStatus.TIMED_OUT, null)))
                 } doThrow RuntimeException("phaseGate error")
             }
 
@@ -607,14 +530,7 @@ class TriggerLoopTest {
 
             // Second expiry should still be attempted
             verify(phaseGate).onTaskCompleted(
-                taskId = eq("t-2"),
-                workflowId = eq("wf-1"),
-                sequenceNumber = eq(1),
-                status = eq(TaskStatus.TIMED_OUT),
-                resultJson = eq(null),
-                claimedBy = eq(null),
-                claimedAt = eq(null),
-                itemsJson = eq(null),
+                eq(TaskCompletionEvent("t-2", "wf-1", 1, TaskStatus.TIMED_OUT, null)),
             )
         }
     }
@@ -713,14 +629,7 @@ class TriggerLoopTest {
             triggerLoop.sweep()
 
             verify(phaseGate).onTaskCompleted(
-                taskId = eq("t-1"),
-                workflowId = eq("wf-1"),
-                sequenceNumber = eq(1),
-                status = eq(TaskStatus.FAILED),
-                resultJson = eq(null),
-                claimedBy = eq(null),
-                claimedAt = eq(null),
-                itemsJson = eq(null),
+                eq(TaskCompletionEvent("t-1", "wf-1", 1, TaskStatus.FAILED, null)),
             )
             verify(taskRepo, never()).resetForRetry(any(), any(), anyOrNull(), anyOrNull())
         }

@@ -9,6 +9,7 @@ import com.workflow.worker.usecase.port.inbound.trigger.TriggerDriver
 import com.workflow.worker.usecase.port.inbound.trigger.TriggerResult
 import com.workflow.worker.usecase.service.RetryOutcome
 import com.workflow.worker.usecase.service.TaskSettler
+import com.workflow.workflow.model.TaskCompletionEvent
 import com.workflow.workflow.model.TaskStatus
 import com.workflow.workflow.usecase.port.outbound.persistent.TaskRepository
 import io.micrometer.core.instrument.Counter
@@ -190,11 +191,13 @@ class TriggerLoop(
             when (result) {
                 is TriggerResult.Succeeded -> {
                     taskSettler.settle(
-                        taskId = result.taskId,
-                        workflowId = task.workflowId,
-                        sequenceNumber = task.sequenceNumber,
-                        status = TaskStatus.COMPLETED,
-                        resultJson = result.result,
+                        TaskCompletionEvent(
+                            taskId = result.taskId,
+                            workflowId = task.workflowId,
+                            sequenceNumber = task.sequenceNumber,
+                            status = TaskStatus.COMPLETED,
+                            resultJson = result.result,
+                        )
                     )
                     settledCounter(triggerType, "succeeded").increment()
                     log.info("Trigger settled task {} as COMPLETED (type={})", result.taskId, triggerType)
@@ -240,11 +243,13 @@ class TriggerLoop(
                 }
             }
             taskSettler.settle(
-                taskId = task.taskId,
-                workflowId = task.workflowId,
-                sequenceNumber = task.sequenceNumber,
-                status = TaskStatus.TIMED_OUT,
-                resultJson = null,
+                TaskCompletionEvent(
+                    taskId = task.taskId,
+                    workflowId = task.workflowId,
+                    sequenceNumber = task.sequenceNumber,
+                    status = TaskStatus.TIMED_OUT,
+                    resultJson = null,
+                )
             )
             settledCounter(task.triggerType, "expired").increment()
             log.warn("DEFERRED task {} expired (deadline={})", task.taskId, task.deadlineAt)

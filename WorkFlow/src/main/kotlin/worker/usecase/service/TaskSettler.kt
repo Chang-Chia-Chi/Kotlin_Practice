@@ -1,6 +1,7 @@
 package com.workflow.worker.usecase.service
 
 import com.workflow.infrastructure.coroutine.suspendCatching
+import com.workflow.workflow.model.TaskCompletionEvent
 import com.workflow.workflow.model.TaskStatus
 import com.workflow.workflow.usecase.port.inbound.orchestration.PhaseGate
 import com.workflow.workflow.usecase.port.outbound.persistent.TaskRepository
@@ -37,26 +38,8 @@ class TaskSettler(
     /**
      * Settles a task by delegating to [PhaseGate.onTaskCompleted].
      */
-    suspend fun settle(
-        taskId: String,
-        workflowId: String,
-        sequenceNumber: Int,
-        status: TaskStatus,
-        resultJson: String?,
-        claimedBy: String? = null,
-        claimedAt: Instant? = null,
-        itemsJson: String? = null,
-    ) {
-        phaseGate.onTaskCompleted(
-            taskId = taskId,
-            workflowId = workflowId,
-            sequenceNumber = sequenceNumber,
-            status = status,
-            resultJson = resultJson,
-            itemsJson = itemsJson,
-            claimedBy = claimedBy,
-            claimedAt = claimedAt,
-        )
+    suspend fun settle(event: TaskCompletionEvent) {
+        phaseGate.onTaskCompleted(event)
     }
 
     /**
@@ -92,13 +75,15 @@ class TaskSettler(
         }
 
         phaseGate.onTaskCompleted(
-            taskId = taskId,
-            workflowId = workflowId,
-            sequenceNumber = sequenceNumber,
-            status = TaskStatus.FAILED,
-            resultJson = null,
-            claimedBy = claimedBy,
-            claimedAt = claimedAt,
+            TaskCompletionEvent(
+                taskId = taskId,
+                workflowId = workflowId,
+                sequenceNumber = sequenceNumber,
+                status = TaskStatus.FAILED,
+                resultJson = null,
+                claimedBy = claimedBy,
+                claimedAt = claimedAt,
+            )
         )
         return RetryOutcome.Failed
     }

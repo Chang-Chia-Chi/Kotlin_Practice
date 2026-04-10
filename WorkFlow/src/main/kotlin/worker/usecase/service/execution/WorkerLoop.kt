@@ -16,6 +16,7 @@ import com.workflow.worker.usecase.port.outbound.notification.WorkerNotifier
 import com.workflow.worker.usecase.service.TaskSettler
 import com.workflow.workflow.model.SequenceInfo
 import com.workflow.workflow.model.Task
+import com.workflow.workflow.model.TaskCompletionEvent
 import com.workflow.workflow.model.TaskStatus
 import com.workflow.workflow.model.WorkflowDefinition
 import com.workflow.workflow.model.buildSequenceMap
@@ -266,14 +267,16 @@ class WorkerLoop(
             is HandlerResult.Completed -> {
                 try {
                     taskSettler.settle(
-                        taskId = task.id,
-                        workflowId = task.workflowId,
-                        sequenceNumber = task.sequenceNumber,
-                        status = TaskStatus.COMPLETED,
-                        resultJson = result.result,
-                        itemsJson = result.items?.takeIf { it.isNotEmpty() }?.let { objectMapper.writeValueAsString(it) },
-                        claimedBy = task.claimedBy,
-                        claimedAt = task.claimedAt,
+                        TaskCompletionEvent(
+                            taskId = task.id,
+                            workflowId = task.workflowId,
+                            sequenceNumber = task.sequenceNumber,
+                            status = TaskStatus.COMPLETED,
+                            resultJson = result.result,
+                            itemsJson = result.items?.takeIf { it.isNotEmpty() }?.let { objectMapper.writeValueAsString(it) },
+                            claimedBy = task.claimedBy,
+                            claimedAt = task.claimedAt,
+                        )
                     )
                 } catch (e: CancellationException) {
                     throw e

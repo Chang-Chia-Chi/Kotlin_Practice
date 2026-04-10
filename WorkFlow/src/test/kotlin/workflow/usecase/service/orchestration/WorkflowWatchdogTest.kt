@@ -10,6 +10,7 @@ import com.workflow.workflow.config.WatchdogConfig
 import com.workflow.workflow.dsl.workflow
 
 import com.workflow.workflow.model.Task
+import com.workflow.workflow.model.TaskCompletionEvent
 import com.workflow.workflow.model.TaskStatus
 import com.workflow.workflow.model.WorkflowDefinition
 import com.workflow.workflow.model.WorkflowRun
@@ -1127,13 +1128,15 @@ class WorkflowWatchdogTest {
             insertTaskDirect(task)
 
             barrier.onTaskCompleted(
-                taskId = task.id,
-                workflowId = wf.id,
-                sequenceNumber = 1,
-                status = TaskStatus.COMPLETED,
-                resultJson = """{"ok":true}""",
-                claimedBy = task.claimedBy,
-                claimedAt = task.claimedAt,
+                TaskCompletionEvent(
+                    taskId = task.id,
+                    workflowId = wf.id,
+                    sequenceNumber = 1,
+                    status = TaskStatus.COMPLETED,
+                    resultJson = """{"ok":true}""",
+                    claimedBy = task.claimedBy,
+                    claimedAt = task.claimedAt,
+                )
             )
 
             // Task should be updated to COMPLETED
@@ -1677,12 +1680,14 @@ class WorkflowWatchdogTest {
             awaitAll(
                 async {
                     barrier.onTaskCompleted(
-                        taskId = scatterTaskId,
-                        workflowId = wfId,
-                        sequenceNumber = seqScatter,
-                        status = TaskStatus.COMPLETED,
-                        resultJson = scatterResultJson,
-                        itemsJson = itemsJson,
+                        TaskCompletionEvent(
+                            taskId = scatterTaskId,
+                            workflowId = wfId,
+                            sequenceNumber = seqScatter,
+                            status = TaskStatus.COMPLETED,
+                            resultJson = scatterResultJson,
+                            itemsJson = itemsJson,
+                        )
                     )
                 },
                 async { barrier.recoverStuckWorkflow(wfId) },
@@ -1724,12 +1729,14 @@ class WorkflowWatchdogTest {
 
             // Normal completion via onTaskCompleted (TX1 + TX2 both run)
             barrier.onTaskCompleted(
-                taskId = scatterTaskId,
-                workflowId = wfId,
-                sequenceNumber = seqScatter,
-                status = TaskStatus.COMPLETED,
-                resultJson = scatterResultJson,
-                itemsJson = itemsJson,
+                TaskCompletionEvent(
+                    taskId = scatterTaskId,
+                    workflowId = wfId,
+                    sequenceNumber = seqScatter,
+                    status = TaskStatus.COMPLETED,
+                    resultJson = scatterResultJson,
+                    itemsJson = itemsJson,
+                )
             )
 
             val countAfterNormalCompletion = countTasksDirect(wfId, seqParallel)
@@ -1764,12 +1771,14 @@ class WorkflowWatchdogTest {
             )
 
             barrier.onTaskCompleted(
-                taskId = scatterTaskId,
-                workflowId = wfId,
-                sequenceNumber = seqScatter,
-                status = TaskStatus.COMPLETED,
-                resultJson = scatterResultJson,
-                itemsJson = itemsJson,
+                TaskCompletionEvent(
+                    taskId = scatterTaskId,
+                    workflowId = wfId,
+                    sequenceNumber = seqScatter,
+                    status = TaskStatus.COMPLETED,
+                    resultJson = scatterResultJson,
+                    itemsJson = itemsJson,
+                )
             )
 
             val row = readTaskDirect(scatterTaskId)
@@ -1835,12 +1844,14 @@ class WorkflowWatchdogTest {
 
             // onTaskCompleted fires on the scatter task — must not spawn a second batch.
             barrier.onTaskCompleted(
-                taskId = scatterTaskId,
-                workflowId = wfId,
-                sequenceNumber = seqScatter,
-                status = TaskStatus.COMPLETED,
-                resultJson = scatterResultJson,
-                itemsJson = itemsJson,
+                TaskCompletionEvent(
+                    taskId = scatterTaskId,
+                    workflowId = wfId,
+                    sequenceNumber = seqScatter,
+                    status = TaskStatus.COMPLETED,
+                    resultJson = scatterResultJson,
+                    itemsJson = itemsJson,
+                )
             )
 
             assertEquals(

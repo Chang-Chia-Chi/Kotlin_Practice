@@ -16,6 +16,7 @@ import com.workflow.workflow.adapter.persistent.JdbiTaskRepository
 import com.workflow.workflow.adapter.persistent.JdbiWorkflowRepository
 import com.workflow.workflow.dsl.workflow
 import com.workflow.workflow.model.Task
+import com.workflow.workflow.model.TaskCompletionEvent
 import com.workflow.workflow.model.TaskStatus
 import com.workflow.workflow.model.WorkflowStatus
 import com.workflow.workflow.model.workflowId
@@ -370,11 +371,13 @@ class TriggerLoopIntegrationTest {
             val step1 = step1Claims.first()
 
             phaseGate.onTaskCompleted(
-                taskId = step1.id,
-                workflowId = wfId,
-                sequenceNumber = step1.sequenceNumber,
-                status = TaskStatus.COMPLETED,
-                resultJson = "{}",
+                TaskCompletionEvent(
+                    taskId = step1.id,
+                    workflowId = wfId,
+                    sequenceNumber = step1.sequenceNumber,
+                    status = TaskStatus.COMPLETED,
+                    resultJson = "{}",
+                )
             )
 
             val step2Claims = taskRepo.claimNext("test-worker", 1)
@@ -413,11 +416,13 @@ class TriggerLoopIntegrationTest {
             val step1Claims = taskRepo.claimNext("test-worker", 1)
             val step1 = step1Claims.first()
             phaseGate.onTaskCompleted(
-                taskId = step1.id,
-                workflowId = wfId,
-                sequenceNumber = step1.sequenceNumber,
-                status = TaskStatus.COMPLETED,
-                resultJson = "{}",
+                TaskCompletionEvent(
+                    taskId = step1.id,
+                    workflowId = wfId,
+                    sequenceNumber = step1.sequenceNumber,
+                    status = TaskStatus.COMPLETED,
+                    resultJson = "{}",
+                )
             )
 
             val step2Claims = taskRepo.claimNext("test-worker", 1)

@@ -3,6 +3,7 @@ package com.workflow.workflow.usecase.service.orchestration
 import com.workflow.infrastructure.leader.NotLeader
 import com.workflow.infrastructure.persistence.inTransactionSuspend
 import com.workflow.workflow.config.WatchdogConfig
+import com.workflow.workflow.model.TaskCompletionEvent
 import com.workflow.workflow.model.TaskStatus
 import com.workflow.workflow.usecase.port.inbound.orchestration.PhaseGate
 import com.workflow.workflow.usecase.port.outbound.persistent.TaskRepository
@@ -45,11 +46,13 @@ class WorkflowWatchdog(
             try {
                 log.warn("Expiring overdue task {} (deadline={})", task.id, task.deadlineAt)
                 phaseGate.onTaskCompleted(
-                    taskId = task.id,
-                    workflowId = task.workflowId,
-                    sequenceNumber = task.sequenceNumber,
-                    status = TaskStatus.TIMED_OUT,
-                    resultJson = null,
+                    TaskCompletionEvent(
+                        taskId = task.id,
+                        workflowId = task.workflowId,
+                        sequenceNumber = task.sequenceNumber,
+                        status = TaskStatus.TIMED_OUT,
+                        resultJson = null,
+                    )
                 )
             } catch (e: Exception) {
                 log.error("Failed to expire task {}", task.id, e)

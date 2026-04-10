@@ -8,6 +8,7 @@ import com.workflow.infrastructure.persistence.OracleTestContainer
 import com.workflow.workflow.adapter.persistent.JdbiTaskRepository
 import com.workflow.workflow.adapter.persistent.JdbiWorkflowRepository
 import com.workflow.workflow.dsl.workflow
+import com.workflow.workflow.model.TaskCompletionEvent
 import com.workflow.workflow.model.TaskStatus
 import com.workflow.workflow.model.WorkflowDefinition
 import com.workflow.workflow.model.WorkflowStatus
@@ -67,7 +68,7 @@ class DefaultPhaseGateTest {
     }
 
     private suspend fun completeTask(taskId: String, wfId: String, seq: Int, result: String? = null) {
-        gate.onTaskCompleted(taskId, wfId, seq, TaskStatus.COMPLETED, result)
+        gate.onTaskCompleted(TaskCompletionEvent(taskId, wfId, seq, TaskStatus.COMPLETED, result))
     }
 
     private fun taskStatusAt(wfId: String, seq: Int): List<String> =
@@ -189,7 +190,7 @@ class DefaultPhaseGateTest {
 
         val seqV = seqMap.values.first { it.activityName == "validate" }.sequenceNumber
         val vTasks = taskRepo.findByWorkflowAndSequence(wfId, seqV)
-        gate.onTaskCompleted(vTasks[0].id, wfId, seqV, TaskStatus.COMPLETED, """{"branch":"OK"}""")
+        gate.onTaskCompleted(TaskCompletionEvent(vTasks[0].id, wfId, seqV, TaskStatus.COMPLETED, """{"branch":"OK"}"""))
 
         val seqCharge = seqMap.values.first { it.activityName == "charge" }.sequenceNumber
         val seqReject = seqMap.values.first { it.activityName == "reject" }.sequenceNumber
@@ -221,7 +222,7 @@ class DefaultPhaseGateTest {
 
         val seqV = seqMap.values.first { it.activityName == "validate" }.sequenceNumber
         val vTasks = taskRepo.findByWorkflowAndSequence(wfId, seqV)
-        gate.onTaskCompleted(vTasks[0].id, wfId, seqV, TaskStatus.COMPLETED, """{"branch":"INVALID"}""")
+        gate.onTaskCompleted(TaskCompletionEvent(vTasks[0].id, wfId, seqV, TaskStatus.COMPLETED, """{"branch":"INVALID"}"""))
 
         val seqCharge = seqMap.values.first { it.activityName == "charge" }.sequenceNumber
         val seqReject = seqMap.values.first { it.activityName == "reject" }.sequenceNumber
@@ -250,7 +251,7 @@ class DefaultPhaseGateTest {
         val seqA = seqMap.values.first { it.activityName == "a" }.sequenceNumber
         val aTasks = taskRepo.findByWorkflowAndSequence(wfId, seqA)
         // Take branch X -- skip-chain and skip-next never execute
-        gate.onTaskCompleted(aTasks[0].id, wfId, seqA, TaskStatus.COMPLETED, """{"branch":"X"}""")
+        gate.onTaskCompleted(TaskCompletionEvent(aTasks[0].id, wfId, seqA, TaskStatus.COMPLETED, """{"branch":"X"}"""))
 
         val seqSkipChain = seqMap.values.first { it.activityName == "skip-chain" }.sequenceNumber
         val seqSkipNext = seqMap.values.first { it.activityName == "skip-next" }.sequenceNumber
@@ -327,7 +328,7 @@ class DefaultPhaseGateTest {
 
         val seqR = seqMap.values.first { it.activityName == "risky" }.sequenceNumber
         val rTasks = taskRepo.findByWorkflowAndSequence(wfId, seqR)
-        gate.onTaskCompleted(rTasks[0].id, wfId, seqR, TaskStatus.FAILED, null)
+        gate.onTaskCompleted(TaskCompletionEvent(rTasks[0].id, wfId, seqR, TaskStatus.FAILED, null))
 
         val wf = workflowRepo.findById(wfId)
         assertEquals(WorkflowStatus.FAILED, wf!!.status)
@@ -351,10 +352,10 @@ class DefaultPhaseGateTest {
         val seqScatter = seqMap.values.first { it.activityName == "scatter" }.sequenceNumber
         val scatterTasks = taskRepo.findByWorkflowAndSequence(wfId, seqScatter)
         // Scatter result = JSON array of items
-        gate.onTaskCompleted(
+        gate.onTaskCompleted(TaskCompletionEvent(
             scatterTasks[0].id, wfId, seqScatter, TaskStatus.COMPLETED,
             resultJson = null, itemsJson = """["item1","item2","item3"]""",
-        )
+        ))
 
         val seqParallel = seqMap.values.first { it.activityName == "scatter.__parallel__" }.sequenceNumber
         val parallelTasks = taskRepo.findByWorkflowAndSequence(wfId, seqParallel)
@@ -379,12 +380,12 @@ class DefaultPhaseGateTest {
 
         val seqScatter = seqMap.values.first { it.activityName == "scatter" }.sequenceNumber
         val scatterTasks = taskRepo.findByWorkflowAndSequence(wfId, seqScatter)
-        gate.onTaskCompleted(scatterTasks[0].id, wfId, seqScatter, TaskStatus.COMPLETED, resultJson = null, itemsJson = """["i1","i2"]""")
+        gate.onTaskCompleted(TaskCompletionEvent(scatterTasks[0].id, wfId, seqScatter, TaskStatus.COMPLETED, resultJson = null, itemsJson = """["i1","i2"]"""))
 
         val seqParallel = seqMap.values.first { it.activityName == "scatter.__parallel__" }.sequenceNumber
         val parTasks = taskRepo.findByWorkflowAndSequence(wfId, seqParallel)
         for (t in parTasks) {
-            gate.onTaskCompleted(t.id, wfId, seqParallel, TaskStatus.COMPLETED, null)
+            gate.onTaskCompleted(TaskCompletionEvent(t.id, wfId, seqParallel, TaskStatus.COMPLETED, null))
         }
 
         val seqJoin = seqMap.values.first { it.activityName == "join" }.sequenceNumber
@@ -409,13 +410,13 @@ class DefaultPhaseGateTest {
 
         val seqScatter = seqMap.values.first { it.activityName == "scatter" }.sequenceNumber
         val scatterTasks = taskRepo.findByWorkflowAndSequence(wfId, seqScatter)
-        gate.onTaskCompleted(scatterTasks[0].id, wfId, seqScatter, TaskStatus.COMPLETED, resultJson = null, itemsJson = """["i1","i2"]""")
+        gate.onTaskCompleted(TaskCompletionEvent(scatterTasks[0].id, wfId, seqScatter, TaskStatus.COMPLETED, resultJson = null, itemsJson = """["i1","i2"]"""))
 
         val seqParallel = seqMap.values.first { it.activityName == "scatter.__parallel__" }.sequenceNumber
         val parTasks = taskRepo.findByWorkflowAndSequence(wfId, seqParallel)
         // Fail all parallel tasks
         for (t in parTasks) {
-            gate.onTaskCompleted(t.id, wfId, seqParallel, TaskStatus.FAILED, null)
+            gate.onTaskCompleted(TaskCompletionEvent(t.id, wfId, seqParallel, TaskStatus.FAILED, null))
         }
 
         assertEquals(WorkflowStatus.FAILED, workflowStatus(wfId))
@@ -444,7 +445,7 @@ class DefaultPhaseGateTest {
         val seqRoute = seqMap.values.first { it.activityName == "route" }.sequenceNumber
         val routeTasks = taskRepo.findByWorkflowAndSequence(wfId, seqRoute)
         // Take SKIP branch -- scatter never runs
-        gate.onTaskCompleted(routeTasks[0].id, wfId, seqRoute, TaskStatus.COMPLETED, """{"branch":"SKIP"}""")
+        gate.onTaskCompleted(TaskCompletionEvent(routeTasks[0].id, wfId, seqRoute, TaskStatus.COMPLETED, """{"branch":"SKIP"}"""))
 
         val seqScatter = seqMap.values.first { it.activityName == "scatter" }.sequenceNumber
         val seqParallel = seqMap.values.first { it.activityName == "scatter.__parallel__" }.sequenceNumber
@@ -471,10 +472,10 @@ class DefaultPhaseGateTest {
         val scatterTasks = taskRepo.findByWorkflowAndSequence(wfId, seqScatter)
 
         org.junit.jupiter.api.assertThrows<IllegalStateException> {
-            gate.onTaskCompleted(
+            gate.onTaskCompleted(TaskCompletionEvent(
                 scatterTasks[0].id, wfId, seqScatter, TaskStatus.COMPLETED,
                 resultJson = null, itemsJson = null,
-            )
+            ))
         }
     }
 
@@ -493,14 +494,14 @@ class DefaultPhaseGateTest {
         val taskId = seq1Tasks[0].id
 
         // First completion: should dispatch successor "b"
-        gate.onTaskCompleted(taskId, wfId, 1, TaskStatus.COMPLETED, null)
+        gate.onTaskCompleted(TaskCompletionEvent(taskId, wfId, 1, TaskStatus.COMPLETED, null))
         val seq2Tasks = taskRepo.findByWorkflowAndSequence(wfId, 2)
         assertEquals(1, seq2Tasks.size)
         assertEquals(TaskStatus.PENDING, seq2Tasks[0].status)
 
         // Second completion of the same task: updateStatusWithHandle returns false
         // because task is already in terminal status. Should be a complete no-op.
-        gate.onTaskCompleted(taskId, wfId, 1, TaskStatus.COMPLETED, null)
+        gate.onTaskCompleted(TaskCompletionEvent(taskId, wfId, 1, TaskStatus.COMPLETED, null))
 
         // Assert: still exactly 1 task for "b" (no duplicate successor created)
         val seq2TasksAfter = taskRepo.findByWorkflowAndSequence(wfId, 2)
@@ -523,7 +524,7 @@ class DefaultPhaseGateTest {
         val localGate = DefaultPhaseGate(jdbi, workflowRepo, taskRepo, objectMapper, failingNotifier)
 
         // Must NOT throw despite notifier.signal throwing
-        localGate.onTaskCompleted(task.id, wfId, 1, TaskStatus.COMPLETED, null)
+        localGate.onTaskCompleted(TaskCompletionEvent(task.id, wfId, 1, TaskStatus.COMPLETED, null))
 
         // TX2 committed: successor task "b" was inserted
         val seq2Tasks = taskRepo.findByWorkflowAndSequence(wfId, 2)
@@ -550,7 +551,7 @@ class DefaultPhaseGateTest {
             h.execute("UPDATE workflow SET status = 'FAILED' WHERE id = ?", wfId)
         }
 
-        gate.onTaskCompleted(aTasks[0].id, wfId, seqA, TaskStatus.COMPLETED, null)
+        gate.onTaskCompleted(TaskCompletionEvent(aTasks[0].id, wfId, seqA, TaskStatus.COMPLETED, null))
 
         // No successor dispatched
         val seqB = seqMap.values.first { it.activityName == "b" }.sequenceNumber
@@ -579,10 +580,10 @@ class DefaultPhaseGateTest {
         val scatterTasks = taskRepo.findByWorkflowAndSequence(wfId, seqScatter)
 
         org.junit.jupiter.api.assertThrows<IllegalStateException> {
-            gate.onTaskCompleted(
+            gate.onTaskCompleted(TaskCompletionEvent(
                 scatterTasks[0].id, wfId, seqScatter, TaskStatus.COMPLETED,
                 resultJson = null, itemsJson = """{"not":"array"}""",
-            )
+            ))
         }
     }
 
@@ -604,10 +605,10 @@ class DefaultPhaseGateTest {
         val seqScatter = seqMap.values.first { it.activityName == "scatter" }.sequenceNumber
         val scatterTasks = taskRepo.findByWorkflowAndSequence(wfId, seqScatter)
 
-        gate.onTaskCompleted(
+        gate.onTaskCompleted(TaskCompletionEvent(
             scatterTasks[0].id, wfId, seqScatter, TaskStatus.COMPLETED,
             resultJson = null, itemsJson = """[]""",
-        )
+        ))
 
         val wf = workflowRepo.findById(wfId)
         assertEquals(WorkflowStatus.FAILED, wf?.status)
@@ -631,11 +632,11 @@ class DefaultPhaseGateTest {
         val seqScatter = seqMap.values.first { it.activityName == "scatter" }.sequenceNumber
         val scatterTasks = taskRepo.findByWorkflowAndSequence(wfId, seqScatter)
 
-        gate.onTaskCompleted(
+        gate.onTaskCompleted(TaskCompletionEvent(
             scatterTasks[0].id, wfId, seqScatter, TaskStatus.COMPLETED,
             resultJson = """{"shared":"ctx","key":"from-scatter"}""",
             itemsJson = """[{"key":"from-item","extra":"data"}]""",
-        )
+        ))
 
         val seqParallel = seqMap.values.first { it.activityName == "scatter.__parallel__" }.sequenceNumber
         val parallelTasks = taskRepo.findByWorkflowAndSequence(wfId, seqParallel)
@@ -665,11 +666,11 @@ class DefaultPhaseGateTest {
         val seqScatter = seqMap.values.first { it.activityName == "scatter" }.sequenceNumber
         val scatterTasks = taskRepo.findByWorkflowAndSequence(wfId, seqScatter)
 
-        gate.onTaskCompleted(
+        gate.onTaskCompleted(TaskCompletionEvent(
             scatterTasks[0].id, wfId, seqScatter, TaskStatus.COMPLETED,
             resultJson = """{"shared":"context"}""",
             itemsJson = """["plain-string"]""",
-        )
+        ))
 
         val seqParallel = seqMap.values.first { it.activityName == "scatter.__parallel__" }.sequenceNumber
         val parallelTasks = taskRepo.findByWorkflowAndSequence(wfId, seqParallel)
@@ -691,7 +692,7 @@ class DefaultPhaseGateTest {
         val seqStep = seqMap.values.first { it.activityName == "step" }.sequenceNumber
         val tasks = taskRepo.findByWorkflowAndSequence(wfId, seqStep)
 
-        gate.onTaskCompleted(tasks[0].id, wfId, seqStep, TaskStatus.TIMED_OUT, null)
+        gate.onTaskCompleted(TaskCompletionEvent(tasks[0].id, wfId, seqStep, TaskStatus.TIMED_OUT, null))
 
         assertEquals(WorkflowStatus.FAILED, workflowStatus(wfId))
     }
@@ -726,10 +727,10 @@ class DefaultPhaseGateTest {
         }
 
         // Call gate with itemsJson containing 2 items — guard must detect existing rows and short-circuit
-        gate.onTaskCompleted(
+        gate.onTaskCompleted(TaskCompletionEvent(
             scatterTasks[0].id, wfId, seqScatter, TaskStatus.COMPLETED,
             resultJson = null, itemsJson = """["item1","item2"]""",
-        )
+        ))
 
         // Assert: exactly the 2 pre-inserted tasks — no additional tasks created
         val allParallel = taskRepo.findByWorkflowAndSequence(wfId, seqParallel)
