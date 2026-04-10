@@ -74,7 +74,7 @@ fun isAnyEdgeTaken(
 
         val predOutputSeq = sequenceMap.values
             .firstOrNull { si ->
-                val name = si.activityName.removeSuffix(".__parallel__")
+                val name = si.sourceActivityName
                 name == predActName && (si.phaseType == PhaseType.PARALLEL || si.phaseType == PhaseType.LINEAR)
             }?.sequenceNumber ?: continue
 
@@ -99,7 +99,7 @@ fun successorsOf(
     seqByName: Map<String, SequenceInfo>,
     definition: WorkflowDefinition,
 ): List<SequenceInfo> {
-    val actName = seqInfo.activityName.removeSuffix(".__parallel__")
+    val actName = seqInfo.sourceActivityName
     val activity = definition.activities[actName] ?: return emptyList()
     return activity.successors.mapNotNull { edge ->
         seqByName[edge.target]

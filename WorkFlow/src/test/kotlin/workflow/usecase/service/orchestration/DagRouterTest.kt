@@ -151,8 +151,8 @@ class DagRouterTest {
                 start = "pred",
             )
             val sequenceMap = mapOf(
-                1 to SequenceInfo(1, "pred", predActivity, PhaseType.LINEAR, emptyList()),
-                2 to SequenceInfo(2, "succ", succActivity, PhaseType.LINEAR, listOf(1)),
+                1 to SequenceInfo(1, "pred", "pred", predActivity, PhaseType.LINEAR, emptyList()),
+                2 to SequenceInfo(2, "succ", "succ", succActivity, PhaseType.LINEAR, listOf(1)),
             )
             val predTask = task(id = "t-pred", seq = 1, status = TaskStatus.COMPLETED)
             val tasksBySeq = mapOf(1 to listOf(predTask))
@@ -170,8 +170,8 @@ class DagRouterTest {
                 start = "pred",
             )
             val sequenceMap = mapOf(
-                1 to SequenceInfo(1, "pred", predActivity, PhaseType.LINEAR, emptyList()),
-                2 to SequenceInfo(2, "succ", succActivity, PhaseType.LINEAR, listOf(1)),
+                1 to SequenceInfo(1, "pred", "pred", predActivity, PhaseType.LINEAR, emptyList()),
+                2 to SequenceInfo(2, "succ", "succ", succActivity, PhaseType.LINEAR, listOf(1)),
             )
             val predTask = task(id = "t-pred", seq = 1, status = TaskStatus.PROCESSING)
             val tasksBySeq = mapOf(1 to listOf(predTask))
@@ -189,8 +189,8 @@ class DagRouterTest {
                 start = "pred",
             )
             val sequenceMap = mapOf(
-                1 to SequenceInfo(1, "pred", predActivity, PhaseType.LINEAR, emptyList()),
-                2 to SequenceInfo(2, "succ", succActivity, PhaseType.LINEAR, listOf(1)),
+                1 to SequenceInfo(1, "pred", "pred", predActivity, PhaseType.LINEAR, emptyList()),
+                2 to SequenceInfo(2, "succ", "succ", succActivity, PhaseType.LINEAR, listOf(1)),
             )
             val predTask = task(id = "t-pred", seq = 1, status = TaskStatus.COMPLETED)
             val tasksBySeq = mapOf(1 to listOf(predTask))
@@ -208,8 +208,8 @@ class DagRouterTest {
                 start = "pred",
             )
             val sequenceMap = mapOf(
-                1 to SequenceInfo(1, "pred", predActivity, PhaseType.LINEAR, emptyList()),
-                2 to SequenceInfo(2, "succ", succActivity, PhaseType.LINEAR, listOf(1)),
+                1 to SequenceInfo(1, "pred", "pred", predActivity, PhaseType.LINEAR, emptyList()),
+                2 to SequenceInfo(2, "succ", "succ", succActivity, PhaseType.LINEAR, listOf(1)),
             )
             val predTask = task(id = "t-pred", seq = 1, status = TaskStatus.COMPLETED)
             val tasksBySeq = mapOf(1 to listOf(predTask))
@@ -227,8 +227,8 @@ class DagRouterTest {
                 start = "pred",
             )
             val sequenceMap = mapOf(
-                1 to SequenceInfo(1, "pred", predActivity, PhaseType.LINEAR, emptyList()),
-                2 to SequenceInfo(2, "succ", succActivity, PhaseType.LINEAR, listOf(1)),
+                1 to SequenceInfo(1, "pred", "pred", predActivity, PhaseType.LINEAR, emptyList()),
+                2 to SequenceInfo(2, "succ", "succ", succActivity, PhaseType.LINEAR, listOf(1)),
             )
             val tasksBySeq = emptyMap<Int, List<Task>>()
             val resultBranches = emptyMap<String, String?>()
@@ -498,7 +498,7 @@ class DagRouterTest {
                 successors = listOf(Edge("sink")),  // DEFAULT_BRANCH edge, valid with fanOut
             )
             val sinkAct = ActivityDefinition(name = "sink", transition = "sink.h") // terminal
-            val seqInfo = SequenceInfo(1, "scatter", scatterAct, PhaseType.SCATTER, emptyList())
+            val seqInfo = SequenceInfo(1, "scatter", "scatter", scatterAct, PhaseType.SCATTER, emptyList())
             val snap = GateSnapshot(
                 workflowId = "wf-1",
                 definition = WorkflowDefinition(

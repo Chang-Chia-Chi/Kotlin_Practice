@@ -106,6 +106,28 @@ class SequenceModelTest {
         assertEquals(listOf(parallel.sequenceNumber), join.predecessorSequences)
     }
 
+    // ── sourceActivityName ──────────────────────────────────────────────
+
+    @Test
+    fun `sourceActivityName is base activity name for all phase types`() {
+        val def = workflow {
+            activity("scatter") {
+                transition("s.h")
+                fanOut { transition("p.h") }
+                next("end")
+            }
+            activity("end") { transition("e.h") }
+        }
+        val map = buildSequenceMap(def)
+        val scatter = map.values.first { it.phaseType == PhaseType.SCATTER }
+        val parallel = map.values.first { it.phaseType == PhaseType.PARALLEL }
+        val end = map.values.first { it.phaseType == PhaseType.LINEAR }
+
+        assertEquals("scatter", scatter.sourceActivityName)
+        assertEquals("scatter", parallel.sourceActivityName)
+        assertEquals("end", end.sourceActivityName)
+    }
+
     // ── Spec item 5: Fan-out inside DAG ───────────────────────────────────
 
     @Test

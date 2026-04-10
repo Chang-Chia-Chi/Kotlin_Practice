@@ -39,8 +39,8 @@ class ActivityInputResolverTest {
         val act1 = ActivityDefinition(name = "step1", transition = "step1.handler")
         val act2 = ActivityDefinition(name = "step2", transition = "step2.handler")
         return mapOf(
-            1 to SequenceInfo(1, "step1", act1, PhaseType.LINEAR, emptyList()),
-            2 to SequenceInfo(2, "step2", act2, PhaseType.LINEAR, listOf(1)),
+            1 to SequenceInfo(1, "step1", "step1", act1, PhaseType.LINEAR, emptyList()),
+            2 to SequenceInfo(2, "step2", "step2", act2, PhaseType.LINEAR, listOf(1)),
         )
     }
 
@@ -52,9 +52,9 @@ class ActivityInputResolverTest {
         val parallelAct = ActivityDefinition(name = "parallel", transition = "parallel.handler")
         val notifyAct = ActivityDefinition(name = "notify", transition = "notify.handler")
         return mapOf(
-            1 to SequenceInfo(1, "scatter", scatterAct, PhaseType.SCATTER, emptyList()),
-            2 to SequenceInfo(2, "scatter.__parallel__", parallelAct, PhaseType.PARALLEL, listOf(1)),
-            3 to SequenceInfo(3, "notify", notifyAct, PhaseType.LINEAR, listOf(2)),
+            1 to SequenceInfo(1, "scatter", "scatter", scatterAct, PhaseType.SCATTER, emptyList()),
+            2 to SequenceInfo(2, "scatter.__parallel__", "scatter", parallelAct, PhaseType.PARALLEL, listOf(1)),
+            3 to SequenceInfo(3, "notify", "notify", notifyAct, PhaseType.LINEAR, listOf(2)),
         )
     }
 
@@ -159,9 +159,9 @@ class ActivityInputResolverTest {
         val act2 = ActivityDefinition(name = "enrich", transition = "enrich.handler")
         val act3 = ActivityDefinition(name = "final", transition = "final.handler")
         val seqMap = mapOf(
-            1 to SequenceInfo(1, "init", act1, PhaseType.LINEAR, emptyList()),
-            2 to SequenceInfo(2, "enrich", act2, PhaseType.LINEAR, listOf(1)),
-            3 to SequenceInfo(3, "final", act3, PhaseType.LINEAR, listOf(2)),
+            1 to SequenceInfo(1, "init", "init", act1, PhaseType.LINEAR, emptyList()),
+            2 to SequenceInfo(2, "enrich", "enrich", act2, PhaseType.LINEAR, listOf(1)),
+            3 to SequenceInfo(3, "final", "final", act3, PhaseType.LINEAR, listOf(2)),
         )
         val inputs = mapOf("cfg" to "init.config", "meta" to "enrich.summary")
         val tasksBySeq: (Int) -> List<Task> = { seq ->

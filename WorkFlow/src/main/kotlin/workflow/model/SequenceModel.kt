@@ -5,6 +5,7 @@ enum class PhaseType { LINEAR, SCATTER, PARALLEL }
 data class SequenceInfo(
     val sequenceNumber: Int,
     val activityName: String,
+    val sourceActivityName: String,
     val activity: ActivityDefinition,
     val phaseType: PhaseType,
     val predecessorSequences: List<Int>,
@@ -55,6 +56,7 @@ fun buildSequenceMap(definition: WorkflowDefinition): Map<Int, SequenceInfo> {
             map[sSeq] = SequenceInfo(
                 sequenceNumber = sSeq,
                 activityName = actName,
+                sourceActivityName = actName,
                 activity = activity,
                 phaseType = PhaseType.SCATTER,
                 predecessorSequences = predSeqs,
@@ -74,6 +76,7 @@ fun buildSequenceMap(definition: WorkflowDefinition): Map<Int, SequenceInfo> {
             map[pSeq] = SequenceInfo(
                 sequenceNumber = pSeq,
                 activityName = "$actName.__parallel__",
+                sourceActivityName = actName,
                 activity = parallelActivity,
                 phaseType = PhaseType.PARALLEL,
                 predecessorSequences = listOf(sSeq),
@@ -83,6 +86,7 @@ fun buildSequenceMap(definition: WorkflowDefinition): Map<Int, SequenceInfo> {
             map[seq] = SequenceInfo(
                 sequenceNumber = seq,
                 activityName = actName,
+                sourceActivityName = actName,
                 activity = activity,
                 phaseType = PhaseType.LINEAR,
                 predecessorSequences = predSeqs,
