@@ -255,7 +255,7 @@ class WorkerLoop(
                         workflowId = task.workflowId,
                         sequenceNumber = task.sequenceNumber,
                         inputs = resolvedInputs,
-                        item = task.item,
+                        taskPayload = task.taskPayload,
                     )
                 handler.execute(input)
             }.getOrElse { e ->
@@ -273,7 +273,7 @@ class WorkerLoop(
                             sequenceNumber = task.sequenceNumber,
                             status = TaskStatus.COMPLETED,
                             resultJson = result.result,
-                            itemsJson = result.items?.takeIf { it.isNotEmpty() }?.let { objectMapper.writeValueAsString(it) },
+                            fanOutPayloadsJson = result.fanOutPayloads?.takeIf { it.isNotEmpty() }?.let { objectMapper.writeValueAsString(it) },
                             claimedBy = task.claimedBy,
                             claimedAt = task.claimedAt,
                         )

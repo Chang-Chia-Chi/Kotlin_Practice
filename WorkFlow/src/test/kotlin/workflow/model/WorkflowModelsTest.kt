@@ -259,7 +259,7 @@ class WorkflowModelsTest {
         sequenceNumber: Int = 1,
         status: TaskStatus = TaskStatus.PENDING,
         handlerKey: String = "process.step1",
-        item: String? = null,
+        taskPayload: String? = null,
         resultJson: String? = null,
         claimedBy: String? = null,
         claimedAt: Instant? = null,
@@ -270,21 +270,21 @@ class WorkflowModelsTest {
     ) = Task(
         id = id, workflowId = workflowId, activityName = activityName,
         sequenceNumber = sequenceNumber, status = status, handlerKey = handlerKey,
-        item = item, resultJson = resultJson, claimedBy = claimedBy,
+        taskPayload = taskPayload, resultJson = resultJson, claimedBy = claimedBy,
         claimedAt = claimedAt, completedAt = completedAt,
         retryCount = retryCount, maxRetries = maxRetries, deadlineAt = deadlineAt,
     )
 
     @Test
     fun `Task construction preserves all fields`() {
-        val t = task(item = """{"key":"value"}""")
+        val t = task(taskPayload ="""{"key":"value"}""")
         assertEquals("task-1", t.id)
         assertEquals("wf-1", t.workflowId)
         assertEquals("step1", t.activityName)
         assertEquals(1, t.sequenceNumber)
         assertEquals(TaskStatus.PENDING, t.status)
         assertEquals("process.step1", t.handlerKey)
-        assertEquals("""{"key":"value"}""", t.item)
+        assertEquals("""{"key":"value"}""", t.taskPayload)
         assertNull(t.resultJson)
         assertNull(t.claimedBy)
         assertNull(t.claimedAt)
@@ -297,14 +297,14 @@ class WorkflowModelsTest {
     @Test
     fun `Task with all nullable fields null`() {
         val t = task(
-            item = null,
+            taskPayload = null,
             resultJson = null,
             claimedBy = null,
             claimedAt = null,
             completedAt = null,
             deadlineAt = null,
         )
-        assertNull(t.item)
+        assertNull(t.taskPayload)
         assertNull(t.resultJson)
         assertNull(t.claimedBy)
         assertNull(t.claimedAt)
@@ -315,14 +315,14 @@ class WorkflowModelsTest {
     @Test
     fun `Task with all nullable fields populated`() {
         val t = task(
-            item = """{"data":1}""",
+            taskPayload = """{"data":1}""",
             resultJson = """{"result":"ok"}""",
             claimedBy = "worker-1",
             claimedAt = now,
             completedAt = later,
             deadlineAt = later,
         )
-        assertEquals("""{"data":1}""", t.item)
+        assertEquals("""{"data":1}""", t.taskPayload)
         assertEquals("""{"result":"ok"}""", t.resultJson)
         assertEquals("worker-1", t.claimedBy)
         assertEquals(now, t.claimedAt)
@@ -347,7 +347,7 @@ class WorkflowModelsTest {
             sequenceNumber = 1,
             status = TaskStatus.DEFERRED,
             handlerKey = "process.step1",
-            item = null,
+            taskPayload = null,
             resultJson = null,
             claimedBy = null,
             claimedAt = null,

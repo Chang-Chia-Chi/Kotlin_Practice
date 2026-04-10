@@ -10,7 +10,7 @@ data class Task(
     val sequenceNumber: Int,
     val status: TaskStatus,
     val handlerKey: String,
-    val item: String? = null,
+    val taskPayload: String? = null,
     val resultJson: String?,
     val claimedBy: String?,
     val claimedAt: Instant?,
@@ -25,7 +25,7 @@ data class Task(
     val queueName: String = "default",
     val triggerType: String? = null,
     val triggerMeta: String? = null,
-    val itemsJson: String? = null,
+    val fanOutPayloadsJson: String? = null,
 )
 
 internal fun createTaskForActivity(
@@ -34,7 +34,7 @@ internal fun createTaskForActivity(
     sequenceNumber: Int,
     activity: ActivityDefinition,
     now: Instant,
-    item: String? = null,
+    taskPayload: String? = null,
 ): Task = Task(
     id = UUID.randomUUID().toString(),
     workflowId = workflowId,
@@ -42,7 +42,7 @@ internal fun createTaskForActivity(
     sequenceNumber = sequenceNumber,
     status = TaskStatus.PENDING,
     handlerKey = activity.transition,
-    item = item,
+    taskPayload = taskPayload,
     resultJson = null,
     claimedBy = null,
     claimedAt = null,
@@ -68,7 +68,7 @@ internal fun createSkippedTaskForActivity(
     sequenceNumber = sequenceNumber,
     status = TaskStatus.SKIPPED,
     handlerKey = activity.transition,
-    item = null,
+    taskPayload = null,
     resultJson = null,
     claimedBy = null,
     claimedAt = null,

@@ -68,8 +68,8 @@ class TaskSettlerTest {
     }
 
     @Test
-    fun `settle passes non-null itemsJson to phaseGate`() = runTest {
-        val event = TaskCompletionEvent("t-1", "wf-1", 1, TaskStatus.COMPLETED, """{"ok":true}""", itemsJson = """["item1"]""")
+    fun `settle passes non-null fanOutPayloadsJson to phaseGate`() = runTest {
+        val event = TaskCompletionEvent("t-1", "wf-1", 1, TaskStatus.COMPLETED, """{"ok":true}""", fanOutPayloadsJson = """["item1"]""")
 
         settler.settle(event)
 

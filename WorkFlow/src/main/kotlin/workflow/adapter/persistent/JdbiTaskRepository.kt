@@ -234,14 +234,14 @@ class JdbiTaskRepository(
         resultJson: String?,
         claimedBy: String?,
         claimedAt: Instant?,
-        itemsJson: String?,
+        fanOutPayloadsJson: String?,
     ): Boolean {
         val count =
             if (newStatus.isTerminal) {
                 val update = handle
                     .createUpdate(
                         """
-                UPDATE task SET status = :status, result = :result, items = :items, completed_at = :now
+                UPDATE task SET status = :status, result = :result, fan_out_payloads = :fanOutPayloads, completed_at = :now
                 WHERE id = :id
                   AND status NOT IN ('COMPLETED', 'FAILED', 'TIMED_OUT', 'DEAD_LETTER', 'CANCELLED', 'SKIPPED')
                   AND (claimed_by = :claimedBy AND claimed_at = :claimedAt OR :claimedBy IS NULL)
@@ -258,7 +258,7 @@ class JdbiTaskRepository(
                         }
                     }
                 if (resultJson != null) update.bind("result", resultJson) else update.bindNull("result", Types.CLOB)
-                bindNullableClob(update, "items", itemsJson)
+                bindNullableClob(update, "fanOutPayloads", fanOutPayloadsJson)
                 update.execute()
             } else {
                 handle
@@ -326,11 +326,11 @@ class JdbiTaskRepository(
         val batch = handle.prepareBatch(
             """
             INSERT INTO task (id, workflow_id, activity_name, sequence_number, status, handler_key,
-                              item, result, items, claimed_by, claimed_at, completed_at,
+                              task_payload, result, fan_out_payloads, claimed_by, claimed_at, completed_at,
                               retry_count, max_retries, deadline_at, not_before, backoff_base, backoff_cap, queue_name,
                               trigger_type, trigger_meta)
             VALUES (:id, :workflowId, :activityName, :sequenceNumber, :status, :handlerKey,
-                    :item, :result, :items, :claimedBy, :claimedAt, :completedAt,
+                    :taskPayload, :result, :fanOutPayloads, :claimedBy, :claimedAt, :completedAt,
                     :retryCount, :maxRetries, :deadlineAt, :notBefore, :backoffBase, :backoffCap, :queueName,
                     :triggerType, :triggerMeta)
             """,
@@ -343,9 +343,9 @@ class JdbiTaskRepository(
                 .bind("sequenceNumber", task.sequenceNumber)
                 .bind("status", task.status.name)
                 .bind("handlerKey", task.handlerKey)
-            bindNullableClob(batch, "item", task.item)
+            bindNullableClob(batch, "taskPayload", task.taskPayload)
             bindNullableClob(batch, "result", task.resultJson)
-            bindNullableClob(batch, "items", task.itemsJson)
+            bindNullableClob(batch, "fanOutPayloads", task.fanOutPayloadsJson)
             batch.bind("claimedBy", task.claimedBy)
             bindNullableTimestamp(batch, "claimedAt", task.claimedAt)
             bindNullableTimestamp(batch, "completedAt", task.completedAt)
@@ -485,7 +485,7 @@ class JdbiTaskRepository(
             sequenceNumber = (ci["SEQUENCE_NUMBER"] as Number).toInt(),
             status = TaskStatus.valueOf(ci["STATUS"] as String),
             handlerKey = ci["HANDLER_KEY"] as String,
-            item = ci["ITEM"]?.let { readClob(it) },
+            taskPayload = ci["TASK_PAYLOAD"]?.let { readClob(it) },
             resultJson = ci["RESULT"]?.let { readClob(it) },
             claimedBy = ci["CLAIMED_BY"] as String?,
             claimedAt = readNullableTimestamp(ci["CLAIMED_AT"]),
@@ -500,7 +500,7 @@ class JdbiTaskRepository(
             queueName = (ci["QUEUE_NAME"] as? String) ?: "default",
             triggerType = ci["TRIGGER_TYPE"] as? String,
             triggerMeta = ci["TRIGGER_META"]?.let { readClob(it) },
-            itemsJson = ci["ITEMS"]?.let { readClob(it) },
+            fanOutPayloadsJson = ci["FAN_OUT_PAYLOADS"]?.let { readClob(it) },
         )
     }
 }

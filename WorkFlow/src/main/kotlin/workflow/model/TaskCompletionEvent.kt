@@ -10,5 +10,5 @@ data class TaskCompletionEvent(
     val resultJson: String?,
     val claimedBy: String? = null,
     val claimedAt: Instant? = null,
-    val itemsJson: String? = null,
+    val fanOutPayloadsJson: String? = null,
 )

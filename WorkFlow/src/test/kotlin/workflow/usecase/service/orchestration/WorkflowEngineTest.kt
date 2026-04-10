@@ -95,7 +95,7 @@ class WorkflowEngineTest {
         assertEquals(runId, task.workflowId)
         assertEquals(TaskStatus.PENDING, task.status)
         assertEquals("order.validate", task.handlerKey)
-        assertNull(task.item)
+        assertNull(task.taskPayload)
         assertEquals(3, task.maxRetries)
         assertEquals(0, task.retryCount)
         assertNotNull(task.deadlineAt)
@@ -146,7 +146,7 @@ class WorkflowEngineTest {
         assertEquals(TaskStatus.PENDING, scatterTask.status)
         // Scatter task uses activity.transition, activity.retries, activity.deadline
         assertEquals("batch.parallel-worker", scatterTask.handlerKey)
-        assertNull(scatterTask.item)
+        assertNull(scatterTask.taskPayload)
         assertEquals(1, scatterTask.maxRetries)
         assertEquals(0, scatterTask.retryCount)
         assertNotNull(scatterTask.deadlineAt)
@@ -163,7 +163,7 @@ class WorkflowEngineTest {
     }
 
     @Test
-    fun `start linear workflow with null payload creates task with null item`() = runTest {
+    fun `start linear workflow with null payload creates task with null taskPayload`() = runTest {
         val definition = workflow {
             activity("init") {
                 transition("system.init")
@@ -174,7 +174,7 @@ class WorkflowEngineTest {
 
         val tasks = taskRepo.findByWorkflowAndSequence(runId, 1)
         assertEquals(1, tasks.size)
-        assertNull(tasks.single().item)
+        assertNull(tasks.single().taskPayload)
     }
 
     @Test

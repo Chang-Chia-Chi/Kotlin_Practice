@@ -317,7 +317,7 @@ class TriggerLoopIntegrationTest {
                             sequenceNumber = 2,
                             status = TaskStatus.DEFERRED,
                             handlerKey = "handler-b",
-                            item = null,
+                            taskPayload = null,
                             resultJson = null,
                             claimedBy = null,
                             claimedAt = null,

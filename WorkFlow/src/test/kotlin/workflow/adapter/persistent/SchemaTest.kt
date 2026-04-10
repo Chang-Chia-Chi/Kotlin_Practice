@@ -92,7 +92,7 @@ class SchemaTest {
         sequenceNumber: Int = 1,
         status: String = "PENDING",
         handlerKey: String = "test.handler",
-        item: String? = null,
+        taskPayload: String? = null,
         result: String? = null,
         claimedBy: String? = null,
         claimedAt: Instant? = null,
@@ -116,8 +116,8 @@ class SchemaTest {
                 "handlerKey" to handlerKey,
             )
 
-            if (item != null) {
-                columns.add("item"); values.add(":item"); bindings["item"] = item
+            if (taskPayload != null) {
+                columns.add("task_payload"); values.add(":taskPayload"); bindings["taskPayload"] = taskPayload
             }
             if (result != null) {
                 columns.add("result"); values.add(":result"); bindings["result"] = result
@@ -220,7 +220,7 @@ class SchemaTest {
             sequenceNumber = 2,
             status = "PROCESSING",
             handlerKey = "order.process",
-            item = """{"orderId":123}""",
+            taskPayload = """{"orderId":123}""",
             result = """{"status":"ok"}""",
             claimedBy = "worker-1",
             claimedAt = ts,
@@ -245,7 +245,7 @@ class SchemaTest {
             assertEquals("PROCESSING", row["STATUS"])
             assertEquals("order.process", row["HANDLER_KEY"])
 
-            val itemVal = row["ITEM"]
+            val itemVal = row["TASK_PAYLOAD"]
             val itemStr = when (itemVal) {
                 is java.sql.Clob -> itemVal.characterStream.readText()
                 else -> itemVal.toString()
@@ -527,7 +527,7 @@ class SchemaTest {
         }
     }
 
-    // ── Test 15: Task item and result CLOB ────────────────────────────
+    // ── Test 15: Task task_payload and result CLOB ────────────────────
 
     @Test
     fun taskItemAndResultClob() {
@@ -543,19 +543,19 @@ class SchemaTest {
 
         val taskId = insertTask(
             workflowId = wfId,
-            item = largeItem,
+            taskPayload = largeItem,
             result = largeResult,
         )
 
         jdbi.useHandle<Exception> { handle ->
             val row = caseInsensitiveMap(
-                handle.createQuery("SELECT item, result FROM task WHERE id = :id")
+                handle.createQuery("SELECT task_payload, result FROM task WHERE id = :id")
                     .bind("id", taskId)
                     .mapToMap()
                     .one()
             )
 
-            val itemVal = row["ITEM"]
+            val itemVal = row["TASK_PAYLOAD"]
             val itemStr = when (itemVal) {
                 is java.sql.Clob -> itemVal.characterStream.readText()
                 else -> itemVal.toString()

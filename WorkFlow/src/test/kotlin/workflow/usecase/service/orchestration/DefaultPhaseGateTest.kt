@@ -354,7 +354,7 @@ class DefaultPhaseGateTest {
         // Scatter result = JSON array of items
         gate.onTaskCompleted(TaskCompletionEvent(
             scatterTasks[0].id, wfId, seqScatter, TaskStatus.COMPLETED,
-            resultJson = null, itemsJson = """["item1","item2","item3"]""",
+            resultJson = null, fanOutPayloadsJson = """["item1","item2","item3"]""",
         ))
 
         val seqParallel = seqMap.values.first { it.activityName == "scatter.__parallel__" }.sequenceNumber
@@ -380,7 +380,7 @@ class DefaultPhaseGateTest {
 
         val seqScatter = seqMap.values.first { it.activityName == "scatter" }.sequenceNumber
         val scatterTasks = taskRepo.findByWorkflowAndSequence(wfId, seqScatter)
-        gate.onTaskCompleted(TaskCompletionEvent(scatterTasks[0].id, wfId, seqScatter, TaskStatus.COMPLETED, resultJson = null, itemsJson = """["i1","i2"]"""))
+        gate.onTaskCompleted(TaskCompletionEvent(scatterTasks[0].id, wfId, seqScatter, TaskStatus.COMPLETED, resultJson = null, fanOutPayloadsJson = """["i1","i2"]"""))
 
         val seqParallel = seqMap.values.first { it.activityName == "scatter.__parallel__" }.sequenceNumber
         val parTasks = taskRepo.findByWorkflowAndSequence(wfId, seqParallel)
@@ -410,7 +410,7 @@ class DefaultPhaseGateTest {
 
         val seqScatter = seqMap.values.first { it.activityName == "scatter" }.sequenceNumber
         val scatterTasks = taskRepo.findByWorkflowAndSequence(wfId, seqScatter)
-        gate.onTaskCompleted(TaskCompletionEvent(scatterTasks[0].id, wfId, seqScatter, TaskStatus.COMPLETED, resultJson = null, itemsJson = """["i1","i2"]"""))
+        gate.onTaskCompleted(TaskCompletionEvent(scatterTasks[0].id, wfId, seqScatter, TaskStatus.COMPLETED, resultJson = null, fanOutPayloadsJson = """["i1","i2"]"""))
 
         val seqParallel = seqMap.values.first { it.activityName == "scatter.__parallel__" }.sequenceNumber
         val parTasks = taskRepo.findByWorkflowAndSequence(wfId, seqParallel)
@@ -454,10 +454,10 @@ class DefaultPhaseGateTest {
         assertEquals(listOf("SKIPPED"), taskStatusAt(wfId, seqParallel))
     }
 
-    // -- Coverage gap 1: SCATTER completes with null itemsJson throws ---------------
+    // -- Coverage gap 1: SCATTER completes with null fanOutPayloadsJson throws ---------------
 
     @Test
-    fun `SCATTER completion with null itemsJson throws IllegalStateException`() = runTest {
+    fun `SCATTER completion with null fanOutPayloadsJson throws IllegalStateException`() = runTest {
         val def = workflow {
             activity("scatter") {
                 transition("sc.h")
@@ -474,7 +474,7 @@ class DefaultPhaseGateTest {
         org.junit.jupiter.api.assertThrows<IllegalStateException> {
             gate.onTaskCompleted(TaskCompletionEvent(
                 scatterTasks[0].id, wfId, seqScatter, TaskStatus.COMPLETED,
-                resultJson = null, itemsJson = null,
+                resultJson = null, fanOutPayloadsJson = null,
             ))
         }
     }
@@ -562,10 +562,10 @@ class DefaultPhaseGateTest {
         assertEquals(WorkflowStatus.FAILED, workflowStatus(wfId))
     }
 
-    // -- G5: SCATTER with non-array itemsJson throws ----------------------------
+    // -- G5: SCATTER with non-array fanOutPayloadsJson throws ----------------------------
 
     @Test
-    fun `G5 SCATTER with non-array itemsJson throws IllegalStateException`() = runTest {
+    fun `G5 SCATTER with non-array fanOutPayloadsJson throws IllegalStateException`() = runTest {
         val def = workflow {
             activity("scatter") {
                 transition("sc.h")
@@ -582,7 +582,7 @@ class DefaultPhaseGateTest {
         org.junit.jupiter.api.assertThrows<IllegalStateException> {
             gate.onTaskCompleted(TaskCompletionEvent(
                 scatterTasks[0].id, wfId, seqScatter, TaskStatus.COMPLETED,
-                resultJson = null, itemsJson = """{"not":"array"}""",
+                resultJson = null, fanOutPayloadsJson = """{"not":"array"}""",
             ))
         }
     }
@@ -607,7 +607,7 @@ class DefaultPhaseGateTest {
 
         gate.onTaskCompleted(TaskCompletionEvent(
             scatterTasks[0].id, wfId, seqScatter, TaskStatus.COMPLETED,
-            resultJson = null, itemsJson = """[]""",
+            resultJson = null, fanOutPayloadsJson = """[]""",
         ))
 
         val wf = workflowRepo.findById(wfId)
@@ -635,14 +635,14 @@ class DefaultPhaseGateTest {
         gate.onTaskCompleted(TaskCompletionEvent(
             scatterTasks[0].id, wfId, seqScatter, TaskStatus.COMPLETED,
             resultJson = """{"shared":"ctx","key":"from-scatter"}""",
-            itemsJson = """[{"key":"from-item","extra":"data"}]""",
+            fanOutPayloadsJson = """[{"key":"from-item","extra":"data"}]""",
         ))
 
         val seqParallel = seqMap.values.first { it.activityName == "scatter.__parallel__" }.sequenceNumber
         val parallelTasks = taskRepo.findByWorkflowAndSequence(wfId, seqParallel)
         assertEquals(1, parallelTasks.size)
 
-        val itemMap = objectMapper.readValue<Map<String, Any>>(parallelTasks[0].item!!)
+        val itemMap = objectMapper.readValue<Map<String, Any>>(parallelTasks[0].taskPayload!!)
         assertEquals("ctx", itemMap["shared"], "shared field must come from scatter result")
         assertEquals("from-item", itemMap["key"], "item field must win over scatter on collision")
         assertEquals("data", itemMap["extra"], "extra field must come from item")
@@ -669,13 +669,13 @@ class DefaultPhaseGateTest {
         gate.onTaskCompleted(TaskCompletionEvent(
             scatterTasks[0].id, wfId, seqScatter, TaskStatus.COMPLETED,
             resultJson = """{"shared":"context"}""",
-            itemsJson = """["plain-string"]""",
+            fanOutPayloadsJson = """["plain-string"]""",
         ))
 
         val seqParallel = seqMap.values.first { it.activityName == "scatter.__parallel__" }.sequenceNumber
         val parallelTasks = taskRepo.findByWorkflowAndSequence(wfId, seqParallel)
         assertEquals(1, parallelTasks.size)
-        assertEquals("plain-string", parallelTasks[0].item, "Non-object rawItem must be returned as-is")
+        assertEquals("plain-string", parallelTasks[0].taskPayload, "Non-object rawItem must be returned as-is")
     }
 
     // -- G11: TIMED_OUT task with ABORT policy marks workflow FAILED ------------
@@ -720,16 +720,16 @@ class DefaultPhaseGateTest {
         // Pre-insert 2 PARALLEL task rows — simulates recoverStuckWorkflow having already committed them
         val now = Instant.now().truncatedTo(ChronoUnit.MICROS)
         val preInserted = listOf("pre-item-1", "pre-item-2").map { item ->
-            createTaskForActivity(wfId, "scatter.__parallel__", seqParallel, parallelActivity, now, item = item)
+            createTaskForActivity(wfId, "scatter.__parallel__", seqParallel, parallelActivity, now, taskPayload = item)
         }
         jdbi.useHandle<Exception> { h ->
             taskRepo.insertBatchWithHandle(h, preInserted)
         }
 
-        // Call gate with itemsJson containing 2 items — guard must detect existing rows and short-circuit
+        // Call gate with fanOutPayloadsJson containing 2 items — guard must detect existing rows and short-circuit
         gate.onTaskCompleted(TaskCompletionEvent(
             scatterTasks[0].id, wfId, seqScatter, TaskStatus.COMPLETED,
-            resultJson = null, itemsJson = """["item1","item2"]""",
+            resultJson = null, fanOutPayloadsJson = """["item1","item2"]""",
         ))
 
         // Assert: exactly the 2 pre-inserted tasks — no additional tasks created

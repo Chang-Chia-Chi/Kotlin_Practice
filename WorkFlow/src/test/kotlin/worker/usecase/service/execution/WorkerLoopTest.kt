@@ -139,7 +139,7 @@ class WorkerLoopTest {
         sequenceNumber: Int = 1,
         status: TaskStatus = TaskStatus.PROCESSING,
         handlerKey: String = "order.validate",
-        item: String? = """{"orderId":"abc"}""",
+        taskPayload: String? = """{"orderId":"abc"}""",
         resultJson: String? = null,
         retryCount: Int = 0,
         maxRetries: Int = 3,
@@ -151,7 +151,7 @@ class WorkerLoopTest {
         sequenceNumber = sequenceNumber,
         status = status,
         handlerKey = handlerKey,
-        item = item,
+        taskPayload = taskPayload,
         resultJson = resultJson,
         claimedBy = workerId,
         claimedAt = Instant.now(),
@@ -193,7 +193,7 @@ class WorkerLoopTest {
             assertEquals(task.workflowId, input.workflowId)
             assertEquals(task.sequenceNumber, input.sequenceNumber)
             assertNull(input.inputs)
-            assertEquals(task.item, input.item)
+            assertEquals(task.taskPayload, input.taskPayload)
 
             verify(phaseGate).onTaskCompleted(check<TaskCompletionEvent> { event ->
                 assertEquals(task.id, event.taskId)
@@ -202,7 +202,7 @@ class WorkerLoopTest {
                 assertEquals(TaskStatus.COMPLETED, event.status)
                 assertEquals(handlerResult.result, event.resultJson)
                 assertEquals(workerId, event.claimedBy)
-                assertNull(event.itemsJson)
+                assertNull(event.fanOutPayloadsJson)
             })
         }
 
@@ -226,12 +226,12 @@ class WorkerLoopTest {
                 assertEquals(TaskStatus.COMPLETED, event.status)
                 assertNull(event.resultJson)
                 assertEquals(workerId, event.claimedBy)
-                assertNull(event.itemsJson)
+                assertNull(event.fanOutPayloadsJson)
             })
         }
 
         @Test
-        fun `handler returns items list - settle is called with serialized itemsJson`() = runTest {
+        fun `handler returns items list - settle is called with serialized fanOutPayloadsJson`() = runTest {
             val task = makeTask()
             val handler = mock<TransitionHandler>()
 
@@ -240,7 +240,7 @@ class WorkerLoopTest {
                 .thenReturn(emptyList())
             whenever(handlerRegistry.resolve(task.handlerKey)).thenReturn(handler)
             whenever(handler.execute(any())).thenReturn(
-                HandlerResult.Completed(result = """{"ok":true}""", items = listOf("item1", "item2")),
+                HandlerResult.Completed(result = """{"ok":true}""", fanOutPayloads = listOf("item1", "item2")),
             )
 
             startAndAdvance(this)
@@ -252,12 +252,12 @@ class WorkerLoopTest {
                 assertEquals(TaskStatus.COMPLETED, event.status)
                 assertEquals("""{"ok":true}""", event.resultJson)
                 assertEquals(workerId, event.claimedBy)
-                assertEquals("""["item1","item2"]""", event.itemsJson)
+                assertEquals("""["item1","item2"]""", event.fanOutPayloadsJson)
             })
         }
 
         @Test
-        fun `handler returns empty items list - itemsJson is null`() = runTest {
+        fun `handler returns empty items list - fanOutPayloadsJson is null`() = runTest {
             val task = makeTask()
             val handler = mock<TransitionHandler>()
 
@@ -266,7 +266,7 @@ class WorkerLoopTest {
                 .thenReturn(emptyList())
             whenever(handlerRegistry.resolve(task.handlerKey)).thenReturn(handler)
             whenever(handler.execute(any())).thenReturn(
-                HandlerResult.Completed(result = null, items = emptyList()),
+                HandlerResult.Completed(result = null, fanOutPayloads = emptyList()),
             )
 
             startAndAdvance(this)
@@ -278,7 +278,7 @@ class WorkerLoopTest {
                 assertEquals(TaskStatus.COMPLETED, event.status)
                 assertNull(event.resultJson)
                 assertEquals(workerId, event.claimedBy)
-                assertNull(event.itemsJson)
+                assertNull(event.fanOutPayloadsJson)
             })
         }
 
@@ -307,7 +307,7 @@ class WorkerLoopTest {
                 assertEquals(TaskStatus.COMPLETED, event.status)
                 assertEquals("""{"r":1}""", event.resultJson)
                 assertEquals(workerId, event.claimedBy)
-                assertNull(event.itemsJson)
+                assertNull(event.fanOutPayloadsJson)
             })
             verify(phaseGate).onTaskCompleted(check<TaskCompletionEvent> { event ->
                 assertEquals(task2.id, event.taskId)
@@ -316,7 +316,7 @@ class WorkerLoopTest {
                 assertEquals(TaskStatus.COMPLETED, event.status)
                 assertEquals("""{"r":2}""", event.resultJson)
                 assertEquals(workerId, event.claimedBy)
-                assertNull(event.itemsJson)
+                assertNull(event.fanOutPayloadsJson)
             })
         }
     }
@@ -428,7 +428,7 @@ class WorkerLoopTest {
                 assertEquals(TaskStatus.FAILED, event.status)
                 assertNull(event.resultJson)
                 assertEquals(workerId, event.claimedBy)
-                assertNull(event.itemsJson)
+                assertNull(event.fanOutPayloadsJson)
             })
         }
 
@@ -453,7 +453,7 @@ class WorkerLoopTest {
                 assertEquals(TaskStatus.FAILED, event.status)
                 assertNull(event.resultJson)
                 assertEquals(workerId, event.claimedBy)
-                assertNull(event.itemsJson)
+                assertNull(event.fanOutPayloadsJson)
             })
         }
     }
@@ -486,7 +486,7 @@ class WorkerLoopTest {
                 assertEquals(TaskStatus.FAILED, event.status)
                 assertNull(event.resultJson)
                 assertEquals(workerId, event.claimedBy)
-                assertNull(event.itemsJson)
+                assertNull(event.fanOutPayloadsJson)
             })
         }
     }
@@ -532,7 +532,7 @@ class WorkerLoopTest {
                 assertEquals(TaskStatus.FAILED, event.status)
                 assertNull(event.resultJson)
                 assertEquals(workerId, event.claimedBy)
-                assertNull(event.itemsJson)
+                assertNull(event.fanOutPayloadsJson)
             })
         }
     }
@@ -573,7 +573,7 @@ class WorkerLoopTest {
                 assertEquals(TaskStatus.COMPLETED, event.status)
                 assertEquals("ok", event.resultJson)
                 assertEquals(workerId, event.claimedBy)
-                assertNull(event.itemsJson)
+                assertNull(event.fanOutPayloadsJson)
             })
         }
     }
@@ -602,7 +602,7 @@ class WorkerLoopTest {
                 assertEquals(TaskStatus.COMPLETED, event.status)
                 assertEquals("recovered", event.resultJson)
                 assertEquals(workerId, event.claimedBy)
-                assertNull(event.itemsJson)
+                assertNull(event.fanOutPayloadsJson)
             })
         }
     }
@@ -707,7 +707,7 @@ class WorkerLoopTest {
                 assertEquals(TaskStatus.COMPLETED, event.status)
                 assertEquals("""{"drained":"ok"}""", event.resultJson)
                 assertEquals(workerId, event.claimedBy)
-                assertNull(event.itemsJson)
+                assertNull(event.fanOutPayloadsJson)
             })
         }
 
@@ -1398,7 +1398,7 @@ class WorkerLoopTest {
                 assertEquals(TaskStatus.COMPLETED, event.status)
                 assertEquals("ok", event.resultJson)
                 assertEquals(workerId, event.claimedBy)
-                assertNull(event.itemsJson)
+                assertNull(event.fanOutPayloadsJson)
             })
         }
 

@@ -110,7 +110,7 @@ class WorkflowWatchdogTest {
         sequenceNumber: Int = 1,
         status: TaskStatus = TaskStatus.PENDING,
         handlerKey: String = "test.handler",
-        item: String? = null,
+        taskPayload: String? = null,
         resultJson: String? = null,
         claimedBy: String? = null,
         claimedAt: Instant? = null,
@@ -121,7 +121,7 @@ class WorkflowWatchdogTest {
         notBefore: Instant? = null,
         backoffBase: Int = 1,
         backoffCap: Int = 300,
-        itemsJson: String? = null,
+        fanOutPayloadsJson: String? = null,
     ): Task = Task(
         id = id,
         workflowId = workflowId,
@@ -129,7 +129,7 @@ class WorkflowWatchdogTest {
         sequenceNumber = sequenceNumber,
         status = status,
         handlerKey = handlerKey,
-        item = item,
+        taskPayload = taskPayload,
         resultJson = resultJson,
         claimedBy = claimedBy,
         claimedAt = claimedAt,
@@ -140,7 +140,7 @@ class WorkflowWatchdogTest {
         notBefore = notBefore,
         backoffBase = backoffBase,
         backoffCap = backoffCap,
-        itemsJson = itemsJson,
+        fanOutPayloadsJson = fanOutPayloadsJson,
     )
 
     /** Insert a workflow directly via SQL (independent of repo under test). */
@@ -165,10 +165,10 @@ class WorkflowWatchdogTest {
     private fun insertTaskDirect(task: Task) {
         jdbi.useHandle<Exception> { handle ->
             val stmt = handle.createUpdate(
-                """INSERT INTO task (id, workflow_id, activity_name, sequence_number, status, handler_key, item, result, items,
+                """INSERT INTO task (id, workflow_id, activity_name, sequence_number, status, handler_key, task_payload, result, fan_out_payloads,
                    claimed_by, claimed_at, completed_at, retry_count, max_retries, deadline_at, not_before,
                    backoff_base, backoff_cap)
-                   VALUES (:id, :workflowId, :activityName, :sequenceNumber, :status, :handlerKey, :item, :result, :items,
+                   VALUES (:id, :workflowId, :activityName, :sequenceNumber, :status, :handlerKey, :taskPayload, :result, :fanOutPayloads,
                    :claimedBy, :claimedAt, :completedAt, :retryCount, :maxRetries, :deadlineAt, :notBefore,
                    :backoffBase, :backoffCap)""",
             )
@@ -188,9 +188,9 @@ class WorkflowWatchdogTest {
                 if (value != null) stmt.bind(name, LocalDateTime.ofInstant(value, ZoneOffset.UTC))
                 else stmt.bindNull(name, java.sql.Types.TIMESTAMP)
 
-            bindStringOrNull("item", task.item)
+            bindStringOrNull("taskPayload", task.taskPayload)
             bindStringOrNull("result", task.resultJson)
-            bindStringOrNull("items", task.itemsJson)
+            bindStringOrNull("fanOutPayloads", task.fanOutPayloadsJson)
             bindStringOrNull("claimedBy", task.claimedBy)
             bindTimestampOrNull("claimedAt", task.claimedAt)
             bindTimestampOrNull("completedAt", task.completedAt)
@@ -1250,7 +1250,7 @@ class WorkflowWatchdogTest {
             val task = Task(
                 id = randomId(), workflowId = wfId, activityName = "step1", sequenceNumber = 1,
                 status = TaskStatus.PENDING, handlerKey = "handler1",
-                item = null, resultJson = null,
+                taskPayload = null, resultJson = null,
                 claimedBy = null, claimedAt = null, completedAt = null,
                 retryCount = 0, maxRetries = 3, deadlineAt = null,
             )
@@ -1581,7 +1581,7 @@ class WorkflowWatchdogTest {
         private val seqParallel = 2
         private val batchToken = "test-batch-token"
         private val configIds = listOf("cfg-id-1", "cfg-id-2", "cfg-id-3")
-        private val itemsJson = """["{\"configId\":\"cfg-id-1\"}","{\"configId\":\"cfg-id-2\"}","{\"configId\":\"cfg-id-3\"}"]"""
+        private val fanOutJson = """["{\"configId\":\"cfg-id-1\"}","{\"configId\":\"cfg-id-2\"}","{\"configId\":\"cfg-id-3\"}"]"""
         private val scatterResultJson = """{"batchToken":"$batchToken"}"""
 
         @Test
@@ -1600,7 +1600,7 @@ class WorkflowWatchdogTest {
                     handlerKey = "scatter.handler",
                     resultJson = scatterResultJson,
                     completedAt = now(),
-                    itemsJson = itemsJson,
+                    fanOutPayloadsJson = fanOutJson,
                 ),
             )
 
@@ -1613,7 +1613,7 @@ class WorkflowWatchdogTest {
             assertTrue(parallelTasks.all { it["STATUS"] == "PENDING" }, "all PENDING")
 
             val assembledItems = parallelTasks
-                .map { objectMapper.readValue<Map<String, String>>(it["ITEM"] as String) }
+                .map { objectMapper.readValue<Map<String, String>>(it["TASK_PAYLOAD"] as String) }
                 .sortedBy { it["configId"] }
             val expectedItems = configIds.sorted().map { id ->
                 mapOf("configId" to id, "batchToken" to batchToken)
@@ -1640,7 +1640,7 @@ class WorkflowWatchdogTest {
                     handlerKey = "scatter.handler",
                     resultJson = scatterResultJson,
                     completedAt = now(),
-                    itemsJson = itemsJson,
+                    fanOutPayloadsJson = fanOutJson,
                 ),
             )
 
@@ -1686,7 +1686,7 @@ class WorkflowWatchdogTest {
                             sequenceNumber = seqScatter,
                             status = TaskStatus.COMPLETED,
                             resultJson = scatterResultJson,
-                            itemsJson = itemsJson,
+                            fanOutPayloadsJson = fanOutJson,
                         )
                     )
                 },
@@ -1735,7 +1735,7 @@ class WorkflowWatchdogTest {
                     sequenceNumber = seqScatter,
                     status = TaskStatus.COMPLETED,
                     resultJson = scatterResultJson,
-                    itemsJson = itemsJson,
+                    fanOutPayloadsJson = fanOutJson,
                 )
             )
 
@@ -1753,7 +1753,7 @@ class WorkflowWatchdogTest {
         }
 
         @Test
-        fun `onTaskCompleted persists itemsJson to task items column in TX1`() = runTest {
+        fun `onTaskCompleted persists fanOutPayloadsJson to task fan_out_payloads column in TX1`() = runTest {
             val def = fanOutThenLinearDef()
             val wfId = randomId()
             insertWorkflowDirect(makeWorkflow(id = wfId, definition = def))
@@ -1777,17 +1777,17 @@ class WorkflowWatchdogTest {
                     sequenceNumber = seqScatter,
                     status = TaskStatus.COMPLETED,
                     resultJson = scatterResultJson,
-                    itemsJson = itemsJson,
+                    fanOutPayloadsJson = fanOutJson,
                 )
             )
 
             val row = readTaskDirect(scatterTaskId)
             assertNotNull(row, "task row must exist")
-            assertEquals(itemsJson, row["ITEMS"], "task.items persisted by TX1")
+            assertEquals(fanOutJson, row["FAN_OUT_PAYLOADS"], "task.fan_out_payloads persisted by TX1")
         }
 
         @Test
-        fun `recovery skips SCATTER task when itemsJson is corrupt`() = runTest {
+        fun `recovery skips SCATTER task when fanOutPayloadsJson is corrupt`() = runTest {
             val def = fanOutThenLinearDef()
             val wfId = randomId()
             insertWorkflowDirect(makeWorkflow(id = wfId, definition = def))
@@ -1801,7 +1801,7 @@ class WorkflowWatchdogTest {
                     handlerKey = "scatter.handler",
                     resultJson = scatterResultJson,
                     completedAt = now(),
-                    itemsJson = "not-valid-json",
+                    fanOutPayloadsJson = "not-valid-json",
                 ),
             )
 
@@ -1825,7 +1825,7 @@ class WorkflowWatchdogTest {
                     sequenceNumber = seqScatter,
                     status = TaskStatus.PENDING,
                     handlerKey = "scatter.handler",
-                    itemsJson = itemsJson,
+                    fanOutPayloadsJson = fanOutJson,
                 ),
             )
 
@@ -1850,7 +1850,7 @@ class WorkflowWatchdogTest {
                     sequenceNumber = seqScatter,
                     status = TaskStatus.COMPLETED,
                     resultJson = scatterResultJson,
-                    itemsJson = itemsJson,
+                    fanOutPayloadsJson = fanOutJson,
                 )
             )
 

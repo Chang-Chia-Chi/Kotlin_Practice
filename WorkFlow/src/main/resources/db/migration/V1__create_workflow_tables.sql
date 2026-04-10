@@ -23,7 +23,7 @@ CREATE TABLE task (
     sequence_number  NUMBER(10)     NOT NULL,
     status           VARCHAR2(20)   NOT NULL,
     handler_key      VARCHAR2(255)  NOT NULL,
-    item             CLOB,
+    task_payload      CLOB,
     result           CLOB,
     claimed_by       VARCHAR2(100),
     claimed_at       TIMESTAMP,

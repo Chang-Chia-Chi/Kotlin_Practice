@@ -396,7 +396,7 @@ abstract class StressTestBase {
         sequenceNumber: Int = 1,
         status: String = "PENDING",
         handlerKey: String = "test.handler",
-        item: String? = null,
+        taskPayload: String? = null,
         result: String? = null,
         claimedBy: String? = null,
         claimedAt: Instant? = null,
@@ -407,9 +407,9 @@ abstract class StressTestBase {
         val now = LocalDateTime.ofInstant(Instant.now().truncatedTo(ChronoUnit.MICROS), ZoneOffset.UTC)
         directJdbi.useHandle<Exception> { handle ->
             handle.createUpdate(
-                """INSERT INTO task (id, workflow_id, sequence_number, status, handler_key, item, result,
+                """INSERT INTO task (id, workflow_id, sequence_number, status, handler_key, task_payload, result,
                    claimed_by, claimed_at, retry_count, max_retries, deadline_at, enqueued_at)
-                   VALUES (:id, :wfId, :seq, :status, :key, :item, :result,
+                   VALUES (:id, :wfId, :seq, :status, :key, :taskPayload, :result,
                    :claimedBy, :claimedAt, :retryCount, :maxRetries, :deadlineAt, :enqueuedAt)""",
             )
                 .bind("id", id)
@@ -417,7 +417,7 @@ abstract class StressTestBase {
                 .bind("seq", sequenceNumber)
                 .bind("status", status)
                 .bind("key", handlerKey)
-                .bind("item", item)
+                .bind("taskPayload", taskPayload)
                 .bind("result", result)
                 .bind("claimedBy", claimedBy)
                 .apply {

@@ -235,7 +235,7 @@ class WorkflowIntegrationTest {
             val payloads = (1..50).map { """{"item":$it}""" }
             val scatterResult = objectMapper.writeValueAsString(payloads)
             barrier.onTaskCompleted(TaskCompletionEvent(
-                scatterTasks[0].id, runId, 1, TaskStatus.COMPLETED, resultJson = null, itemsJson = scatterResult,
+                scatterTasks[0].id, runId, 1, TaskStatus.COMPLETED, resultJson = null, fanOutPayloadsJson = scatterResult,
             ))
 
             // Verify: 50 PENDING sub-tasks created at seq 2
@@ -246,7 +246,7 @@ class WorkflowIntegrationTest {
             assertTrue(parallelTasks.all { it.handlerKey == "batch.scatter" })
             assertTrue(parallelTasks.all { it.status == TaskStatus.PENDING })
             // Each sub-task item matches one of the scatter payloads
-            val actualPayloads = parallelTasks.map { it.item }.toSet()
+            val actualPayloads = parallelTasks.map { it.taskPayload }.toSet()
             assertEquals(payloads.toSet(), actualPayloads)
 
             // Complete all 50 sub-tasks
@@ -368,7 +368,7 @@ class WorkflowIntegrationTest {
             val payloads = (1..subTaskCount).map { """{"i":$it}""" }
             barrier.onTaskCompleted(TaskCompletionEvent(
                 scatterTasks[0].id, runId, 1, TaskStatus.COMPLETED,
-                resultJson = null, itemsJson = objectMapper.writeValueAsString(payloads),
+                resultJson = null, fanOutPayloadsJson = objectMapper.writeValueAsString(payloads),
             ))
 
             // Verify sub-tasks at seq 2
@@ -579,7 +579,7 @@ class WorkflowIntegrationTest {
 
         val seqScatter = seqOf(def, "scatter")
         val scatterTask = taskRepo.findByWorkflowAndSequence(wfId, seqScatter)[0]
-        gate.onTaskCompleted(TaskCompletionEvent(scatterTask.id, wfId, seqScatter, TaskStatus.COMPLETED, resultJson = null, itemsJson = """["item-a","item-b"]"""))
+        gate.onTaskCompleted(TaskCompletionEvent(scatterTask.id, wfId, seqScatter, TaskStatus.COMPLETED, resultJson = null, fanOutPayloadsJson = """["item-a","item-b"]"""))
 
         val seqParallel = seqOf(def, "scatter.__parallel__")
         val parTasks = taskRepo.findByWorkflowAndSequence(wfId, seqParallel)

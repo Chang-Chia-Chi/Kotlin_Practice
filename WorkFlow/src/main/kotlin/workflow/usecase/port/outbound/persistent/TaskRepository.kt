@@ -20,7 +20,7 @@ interface TaskRepository {
     suspend fun defer(taskId: String, triggerType: String, triggerMeta: String): Boolean
     suspend fun findDeferred(): List<DeferredTaskRef>
 
-    fun updateStatusWithHandle(handle: Handle, id: String, newStatus: TaskStatus, resultJson: String? = null, claimedBy: String? = null, claimedAt: Instant? = null, itemsJson: String? = null): Boolean
+    fun updateStatusWithHandle(handle: Handle, id: String, newStatus: TaskStatus, resultJson: String? = null, claimedBy: String? = null, claimedAt: Instant? = null, fanOutPayloadsJson: String? = null): Boolean
     fun countNonTerminalWithHandle(handle: Handle, workflowId: String, sequenceNumber: Int): Int
     fun countTotalBySequenceWithHandle(handle: Handle, workflowId: String, sequenceNumber: Int): Int
     fun cancelPendingTasksWithHandle(handle: Handle, workflowId: String): Int

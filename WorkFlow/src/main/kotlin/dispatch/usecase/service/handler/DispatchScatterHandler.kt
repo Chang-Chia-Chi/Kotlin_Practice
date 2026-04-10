@@ -21,7 +21,7 @@ class DispatchScatterHandler(
 ) : TransitionHandler {
 
     override suspend fun execute(input: HandlerInput): HandlerResult {
-        val itemNode = input.item?.let { objectMapper.readTree(it) }
+        val itemNode = input.taskPayload?.let { objectMapper.readTree(it) }
         val providedToken = itemNode?.get("batchToken")?.takeIf { !it.isNull }?.asText()
         val configIdsNode = itemNode?.get("configIds")?.takeIf { it.isArray }
 
@@ -32,7 +32,7 @@ class DispatchScatterHandler(
         }
         return HandlerResult.Completed(
             result = objectMapper.writeValueAsString(mapOf("batchToken" to token)),
-            items = items,
+            fanOutPayloads = items,
         )
     }
 

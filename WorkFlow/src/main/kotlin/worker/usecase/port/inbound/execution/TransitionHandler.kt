@@ -55,12 +55,12 @@ interface TransitionHandler {
  * @property workflowId Parent workflow identifier.
  * @property sequenceNumber Position in the workflow DAG.
  * @property inputs Resolved input map from declared activity inputs. Null if no inputs declared.
- * @property item Scatter chunk for parallel tasks. Null for non-parallel tasks.
+ * @property taskPayload Scatter chunk for parallel tasks. Null for non-parallel tasks.
  */
 data class HandlerInput(
     val taskId: String,
     val workflowId: String,
     val sequenceNumber: Int,
     val inputs: String?,
-    val item: String?,
+    val taskPayload: String?,
 )

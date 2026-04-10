@@ -57,11 +57,11 @@ class DefaultPhaseGate(
     private val definitionCache = ConcurrentHashMap<String, CachedDefinition>()
 
     override suspend fun onTaskCompleted(event: TaskCompletionEvent) {
-        val (taskId, workflowId, sequenceNumber, status, resultJson, claimedBy, claimedAt, itemsJson) = event
-        // TX1: Commit task status update — including items — so both are visible to all concurrent readers.
+        val (taskId, workflowId, sequenceNumber, status, resultJson, claimedBy, claimedAt, fanOutPayloadsJson) = event
+        // TX1: Commit task status update — including fan-out payloads — so both are visible to all concurrent readers.
         val updated =
             jdbi.inTransactionSuspend<Boolean, Exception> { handle ->
-                taskRepo.updateStatusWithHandle(handle, taskId, status, resultJson, claimedBy, claimedAt, itemsJson)
+                taskRepo.updateStatusWithHandle(handle, taskId, status, resultJson, claimedBy, claimedAt, fanOutPayloadsJson)
             }
         if (!updated) return
 
@@ -92,7 +92,7 @@ class DefaultPhaseGate(
                 val scatterItems =
                     if (seqInfo.phaseType == PhaseType.SCATTER && status == TaskStatus.COMPLETED) {
                         val jsonStr =
-                            itemsJson ?: throw IllegalStateException(
+                            fanOutPayloadsJson ?: throw IllegalStateException(
                                 "SCATTER phase requires scatter result for workflow $workflowId",
                             )
 
@@ -131,7 +131,7 @@ class DefaultPhaseGate(
                                     decision.parallelInfo.sequenceNumber,
                                     decision.parallelInfo.activity,
                                     snapshot.now,
-                                    item = assembleChildItem(it, resultJson),
+                                    taskPayload = assembleChildItem(it, resultJson),
                                 )
                             }
                         taskRepo.insertBatchWithHandle(handle, parallelTasks)
@@ -236,9 +236,9 @@ class DefaultPhaseGate(
                                     ?.firstOrNull { it.status == TaskStatus.COMPLETED }
                                     ?: continue
 
-                            val storedItemsJson = scatterTask.itemsJson ?: run {
+                            val storedFanOutJson = scatterTask.fanOutPayloadsJson ?: run {
                                 log.warn(
-                                    "SCATTER task {} has no stored items; skipping PARALLEL recovery for workflow {}",
+                                    "SCATTER task {} has no stored fan-out payloads; skipping PARALLEL recovery for workflow {}",
                                     scatterTask.id,
                                     workflowId,
                                 )
@@ -246,10 +246,10 @@ class DefaultPhaseGate(
                             }
                             val itemList: List<String> =
                                 try {
-                                    objectMapper.readValue(storedItemsJson)
+                                    objectMapper.readValue(storedFanOutJson)
                                 } catch (e: Exception) {
                                     log.warn(
-                                        "recoverStuckWorkflow: corrupt items JSON for workflow={} seq={} — skipping",
+                                        "recoverStuckWorkflow: corrupt fan-out payloads JSON for workflow={} seq={} — skipping",
                                         workflowId,
                                         seq,
                                         e,
@@ -265,7 +265,7 @@ class DefaultPhaseGate(
                                         seq,
                                         seqInfo.activity,
                                         snapshot.now,
-                                        item = assembleChildItem(rawItem, scatterTask.resultJson),
+                                        taskPayload = assembleChildItem(rawItem, scatterTask.resultJson),
                                     )
                                 }
                             taskRepo.insertBatchWithHandle(handle, parallelTasks)
