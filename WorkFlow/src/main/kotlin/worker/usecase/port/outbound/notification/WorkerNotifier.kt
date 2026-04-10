@@ -45,4 +45,17 @@ interface WorkerNotifier {
         queueName: String,
         timeout: Duration,
     ): Boolean
+
+    /**
+     * Signal all [queues], catching and logging individual failures.
+     */
+    suspend fun signalAll(queues: Collection<String>, log: org.slf4j.Logger) {
+        for (queue in queues) {
+            try {
+                signal(queue)
+            } catch (e: Exception) {
+                log.warn("Failed to signal queue '{}': {}", queue, e.message)
+            }
+        }
+    }
 }

@@ -183,10 +183,7 @@ class DefaultPhaseGate(
                 result.signalQueues.toList()
             }
 
-        signalQueues.forEach { queue ->
-            try { notifier.signal(queue) }
-            catch (e: Exception) { log.warn("Failed to signal queue '{}': {}", queue, e.message) }
-        }
+        notifier.signalAll(signalQueues, log)
     }
 
     override suspend fun recoverStuckWorkflow(workflowId: String) {
@@ -331,10 +328,7 @@ class DefaultPhaseGate(
                 signalQueueSet.toList()
             }
 
-        signalQueues.forEach { queue ->
-            try { notifier.signal(queue) }
-            catch (e: Exception) { log.warn("Failed to signal queue '{}': {}", queue, e.message) }
-        }
+        notifier.signalAll(signalQueues, log)
     }
 
     // -- Snapshot builder ---------------------------------------------------------
