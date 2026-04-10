@@ -168,7 +168,7 @@ class DefaultPhaseGate(
                     return@inTransactionSuspend emptyList()
                 }
 
-                insertMixedTaskBatch(handle, result.tasksToInsert)
+                taskRepo.insertBatchWithHandle(handle, result.tasksToInsert)
 
                 // Check global completion
                 val checkCompletion = result.hasTerminalCompletion || seqInfo.activity.isTerminal
@@ -446,12 +446,4 @@ class DefaultPhaseGate(
         return assembled.toString()
     }
 
-    private fun insertMixedTaskBatch(
-        handle: Handle,
-        tasks: List<com.workflow.workflow.model.Task>,
-    ) {
-        val (skipped, pending) = tasks.partition { it.completedAt != null }
-        if (pending.isNotEmpty()) taskRepo.insertBatchWithHandle(handle, pending)
-        if (skipped.isNotEmpty()) taskRepo.insertBatchWithHandle(handle, skipped)
-    }
 }
