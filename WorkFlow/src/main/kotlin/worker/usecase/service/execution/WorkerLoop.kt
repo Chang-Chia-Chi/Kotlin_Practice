@@ -1,7 +1,6 @@
 package com.workflow.worker.usecase.service.execution
 
 import com.fasterxml.jackson.databind.ObjectMapper
-import com.fasterxml.jackson.module.kotlin.readValue
 import com.workflow.infrastructure.coroutine.indefinitelyRepeat
 import com.workflow.infrastructure.coroutine.suspendCatching
 import com.workflow.infrastructure.coroutine.takeUntilSignal
@@ -14,15 +13,14 @@ import com.workflow.worker.usecase.port.inbound.execution.HandlerInput
 import com.workflow.worker.usecase.port.inbound.execution.HandlerResult
 import com.workflow.worker.usecase.port.outbound.notification.WorkerNotifier
 import com.workflow.worker.usecase.service.TaskSettler
-import com.workflow.workflow.model.SequenceInfo
 import com.workflow.workflow.model.Task
 import com.workflow.workflow.model.TaskCompletionEvent
 import com.workflow.workflow.model.TaskStatus
-import com.workflow.workflow.model.WorkflowDefinition
-import com.workflow.workflow.model.buildSequenceMap
+import com.workflow.workflow.usecase.port.inbound.orchestration.PhaseGate
 import com.workflow.workflow.usecase.port.outbound.persistent.TaskRepository
 import com.workflow.workflow.usecase.port.outbound.persistent.WorkflowRepository
 import com.workflow.workflow.usecase.service.orchestration.ActivityInputResolver
+import com.workflow.workflow.usecase.service.orchestration.DefinitionCache
 import io.micrometer.core.instrument.Counter
 import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.Tags
@@ -44,7 +42,6 @@ import org.slf4j.LoggerFactory
 import org.slf4j.MDC
 import java.time.Duration
 import java.time.Instant
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -75,10 +72,10 @@ const val SHUTDOWN_ORDER_WORKER = 10
  *   join returns.
  *
  * **Error contract:** The [processTask] transform catches ALL non-cancellation
- * exceptions from handler execution and settles them via [TaskSettler].
- * No exception escapes the transform. If settlement fails for a COMPLETED task,
- * the failure is routed through the retry/failure path ([handleTaskFailure]),
- * which delegates to [TaskSettler.retryOrFail].
+ * exceptions from handler execution and settles them via [PhaseGate.onTaskCompleted]
+ * (or via [TaskSettler.retryOrFail] on failure). No exception escapes the transform.
+ * If settlement fails for a COMPLETED task, the failure is routed through the
+ * retry/failure path ([handleTaskFailure]), which delegates to [TaskSettler.retryOrFail].
  *
  * **Retry semantics:** On handler failure, [TaskSettler.retryOrFail] decides
  * whether to reset the task for retry (if attempts remain) or settle it as
@@ -90,12 +87,14 @@ class WorkerLoop(
     private val shutdownConfig: ShutdownConfig,
     private val taskRepo: TaskRepository,
     private val handlerRegistry: HandlerRegistry,
+    private val phaseGate: PhaseGate,
     private val taskSettler: TaskSettler,
     private val meterRegistry: MeterRegistry,
     private val activityInputResolver: ActivityInputResolver,
     private val workflowRepo: WorkflowRepository,
     private val objectMapper: ObjectMapper,
     private val notifier: WorkerNotifier,
+    private val definitionCache: DefinitionCache,
 ) : ShutdownParticipant {
     private val log = LoggerFactory.getLogger(WorkerLoop::class.java)
 
@@ -113,13 +112,6 @@ class WorkerLoop(
 
     private lateinit var claimTotal: (String) -> Counter
     private lateinit var claimedTasksTotal: Counter
-
-    private data class CachedDefinition(
-        val definition: WorkflowDefinition,
-        val sequenceMap: Map<Int, SequenceInfo>,
-    )
-
-    private val definitionCache = ConcurrentHashMap<String, CachedDefinition>()
 
     @Volatile
     private var activeJob: Job? = null
@@ -263,43 +255,36 @@ class WorkerLoop(
                 return
             }
 
-        val _exhaustive = when (result) {
-            is HandlerResult.Completed -> {
-                try {
-                    taskSettler.settle(
-                        TaskCompletionEvent(
-                            taskId = task.id,
-                            workflowId = task.workflowId,
-                            sequenceNumber = task.sequenceNumber,
-                            status = TaskStatus.COMPLETED,
-                            resultJson = result.result,
-                            fanOutPayloadsJson = result.fanOutPayloads?.takeIf { it.isNotEmpty() }?.let { objectMapper.writeValueAsString(it) },
-                            claimedBy = task.claimedBy,
-                            claimedAt = task.claimedAt,
-                        )
-                    )
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    log.error("Barrier failed for COMPLETED task {}, falling through to failure path", task.id, e)
-                    handleTaskFailure(task, e)
-                }
-            }
-
+        try {
+            phaseGate.onTaskCompleted(
+                TaskCompletionEvent(
+                    taskId = task.id,
+                    workflowId = task.workflowId,
+                    sequenceNumber = task.sequenceNumber,
+                    status = TaskStatus.COMPLETED,
+                    resultJson = result.result,
+                    fanOutPayloadsJson = result.fanOutPayloads?.takeIf { it.isNotEmpty() }?.let { objectMapper.writeValueAsString(it) },
+                    claimedBy = task.claimedBy,
+                    claimedAt = task.claimedAt,
+                )
+            )
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            log.error("Barrier failed for COMPLETED task {}, falling through to failure path", task.id, e)
+            handleTaskFailure(task, e)
         }
     }
 
     private suspend fun resolveInputs(task: Task): String? {
         val cached =
-            definitionCache[task.workflowId] ?: run {
+            definitionCache.getOrNull(task.workflowId) ?: run {
                 val workflow =
                     workflowRepo.findById(task.workflowId)
                         ?: throw IllegalStateException(
                             "Workflow ${task.workflowId} not found while resolving inputs for task ${task.id}",
                         )
-                val definition = objectMapper.readValue<WorkflowDefinition>(workflow.definitionJson)
-                val newEntry = CachedDefinition(definition, buildSequenceMap(definition))
-                definitionCache.putIfAbsent(task.workflowId, newEntry) ?: newEntry
+                definitionCache.load(task.workflowId, workflow.definitionJson)
             }
 
         val seqInfo = cached.sequenceMap[task.sequenceNumber] ?: return null

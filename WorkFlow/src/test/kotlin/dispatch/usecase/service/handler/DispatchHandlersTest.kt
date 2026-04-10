@@ -48,8 +48,7 @@ class DispatchHandlersTest {
             val output =
                 handler.execute(
                     HandlerInput("t1", "w1", 1, null, null),
-                ) as HandlerResult.Completed
-
+                )
             assertNotNull(output.fanOutPayloads)
             assertEquals(listOf("""{"configId":"cfg1"}"""), output.fanOutPayloads)
 
@@ -94,8 +93,7 @@ class DispatchHandlersTest {
             val output =
                 handler.execute(
                     HandlerInput("t1", "w1", 1, null, item),
-                ) as HandlerResult.Completed
-
+                )
             assertNotNull(output.fanOutPayloads)
             assertEquals(listOf("""{"configId":"cfg1"}""", """{"configId":"cfg2"}"""), output.fanOutPayloads)
 
@@ -127,8 +125,7 @@ class DispatchHandlersTest {
             val output =
                 handler.execute(
                     HandlerInput("t1", "w1", 1, null, null),
-                ) as HandlerResult.Completed
-
+                )
             assertNotNull(output.fanOutPayloads)
             assertEquals(listOf("""{"configId":"cfg1"}"""), output.fanOutPayloads)
 
@@ -202,8 +199,7 @@ class DispatchHandlersTest {
             val output =
                 handler.execute(
                     HandlerInput("t1", "w1", 2, null, item),
-                ) as HandlerResult.Completed
-
+                )
             val order = inOrder(resultStore)
             order.verify(resultStore).saveDecisions(eq("20260329060000"), eq("cfg1"), any())
             order.verify(resultStore).findBatchStatus(eq("20260329060000"))
@@ -341,8 +337,7 @@ class DispatchHandlersTest {
                 )
 
             verify(storage).uploadParquet(eq("env=prod/dispatch/result.parquet"), any())
-            assertTrue(result is HandlerResult.Completed)
-            assertNull((result as HandlerResult.Completed).result)
+            assertNull(result.result)
         }
 
     @Test
@@ -373,8 +368,7 @@ class DispatchHandlersTest {
 
             verify(storage, never()).uploadParquet(any(), any())
             verify(parquetFormatter, never()).format(any())
-            assertTrue(result is HandlerResult.Completed)
-            assertNull((result as HandlerResult.Completed).result)
+            assertNull(result.result)
         }
 
     @Test
@@ -406,7 +400,6 @@ class DispatchHandlersTest {
             verify(resultStore).findBatchStatus("20260329060000")
             verify(storage, never()).uploadParquet(any(), any())
             verify(parquetFormatter, never()).format(any())
-            assertTrue(result is HandlerResult.Completed)
-            assertNull((result as HandlerResult.Completed).result)
+            assertNull(result.result)
         }
 }

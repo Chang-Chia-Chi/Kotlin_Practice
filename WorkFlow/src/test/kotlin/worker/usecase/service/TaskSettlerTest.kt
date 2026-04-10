@@ -34,49 +34,7 @@ class TaskSettlerTest {
         settler = TaskSettler(taskRepo, phaseGate)
     }
 
-    // ── Step 1: settle() delegation ─────────────────────────────────────
-
-    @Test
-    fun `settle delegates to phaseGate onTaskCompleted`() = runTest {
-        val someInstant = Instant.parse("2026-01-01T00:00:00Z")
-        val event = TaskCompletionEvent("t-1", "wf-1", 1, TaskStatus.COMPLETED, """{"ok":true}""", "worker-1", someInstant)
-
-        settler.settle(event)
-
-        verify(phaseGate).onTaskCompleted(eq(event))
-    }
-
-    @Test
-    fun `settle with null claimedBy and claimedAt defaults`() = runTest {
-        val event = TaskCompletionEvent("t-1", "wf-1", 1, TaskStatus.TIMED_OUT, null)
-
-        settler.settle(event)
-
-        verify(phaseGate).onTaskCompleted(eq(event))
-    }
-
-    @Test
-    fun `settle propagates phaseGate exception`() = runTest {
-        val event = TaskCompletionEvent("t-1", "wf-1", 1, TaskStatus.COMPLETED, null)
-        phaseGate.stub {
-            onBlocking { onTaskCompleted(eq(event)) } doThrow RuntimeException("db error")
-        }
-
-        assertFailsWith<RuntimeException> {
-            settler.settle(event)
-        }
-    }
-
-    @Test
-    fun `settle passes non-null fanOutPayloadsJson to phaseGate`() = runTest {
-        val event = TaskCompletionEvent("t-1", "wf-1", 1, TaskStatus.COMPLETED, """{"ok":true}""", fanOutPayloadsJson = """["item1"]""")
-
-        settler.settle(event)
-
-        verify(phaseGate).onTaskCompleted(eq(event))
-    }
-
-    // ── Step 2: retryOrFail() — retry path ──────────────────────────────
+    // ── retryOrFail() — retry path ──────────────────────────────────────
 
     @Test
     fun `retryOrFail with retries remaining - resets and returns Retried`() = runTest {
@@ -99,7 +57,7 @@ class TaskSettlerTest {
         assertEquals(RetryOutcome.Retried, outcome)
     }
 
-    // ── Step 3: retryOrFail() — exhausted path ─────────────────────────
+    // ── retryOrFail() — exhausted path ─────────────────────────────────
 
     @Test
     fun `retryOrFail with retries exhausted - settles FAILED and returns Failed`() = runTest {
@@ -120,7 +78,7 @@ class TaskSettlerTest {
         assertEquals(RetryOutcome.Failed, outcome)
     }
 
-    // ── Step 4: retryOrFail() — resetForRetry false fallback (Bug 1 fix) ─
+    // ── retryOrFail() — resetForRetry false fallback (Bug 1 fix) ───────
 
     @Test
     fun `retryOrFail when resetForRetry returns false (task already terminal) - settles FAILED`() = runTest {
@@ -135,7 +93,7 @@ class TaskSettlerTest {
         assertEquals(RetryOutcome.Failed, outcome)
     }
 
-    // ── Step 5: retryOrFail() — resetForRetry exception fallback ────────
+    // ── retryOrFail() — resetForRetry exception fallback ───────────────
 
     @Test
     fun `retryOrFail when resetForRetry throws - falls through to FAILED`() = runTest {
@@ -166,7 +124,7 @@ class TaskSettlerTest {
         assertEquals("phaseGate error", ex.message)
     }
 
-    // ── Step 6: retryOrFail() — fencing token passthrough (Bug 1 fix) ───
+    // ── retryOrFail() — fencing token passthrough (Bug 1 fix) ──────────
 
     @Test
     fun `retryOrFail passes claimedBy and claimedAt to resetForRetry`() = runTest {
@@ -185,7 +143,7 @@ class TaskSettlerTest {
     }
 
     @Test
-    fun `retryOrFail passes claimedBy and claimedAt to settle on failure`() = runTest {
+    fun `retryOrFail passes claimedBy and claimedAt to phaseGate on failure`() = runTest {
         val instant = Instant.parse("2026-03-15T12:00:00Z")
 
         settler.retryOrFail("t-1", "wf-1", 1, 3, 3, "worker-1", instant)

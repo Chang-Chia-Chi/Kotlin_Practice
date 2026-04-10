@@ -30,7 +30,7 @@ class DispatchScatterHandler(
         } else {
             handleCronTrigger()
         }
-        return HandlerResult.Completed(
+        return HandlerResult(
             result = objectMapper.writeValueAsString(mapOf("batchToken" to token)),
             fanOutPayloads = items,
         )

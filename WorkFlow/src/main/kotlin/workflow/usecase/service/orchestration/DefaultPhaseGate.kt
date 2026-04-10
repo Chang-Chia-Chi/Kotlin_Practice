@@ -6,13 +6,9 @@ import com.fasterxml.jackson.module.kotlin.readValue
 import com.workflow.infrastructure.persistence.inTransactionSuspend
 import com.workflow.worker.usecase.port.outbound.notification.WorkerNotifier
 import com.workflow.workflow.model.PhaseType
-import com.workflow.workflow.model.SequenceInfo
 import com.workflow.workflow.model.TaskCompletionEvent
 import com.workflow.workflow.model.TaskStatus
-import com.workflow.workflow.model.WorkflowDefinition
 import com.workflow.workflow.model.WorkflowStatus
-import com.workflow.workflow.model.buildSequenceMap
-import com.workflow.workflow.model.createSkippedTaskForActivity
 import com.workflow.workflow.model.createTaskForActivity
 import com.workflow.workflow.usecase.port.inbound.orchestration.PhaseGate
 import com.workflow.workflow.usecase.port.outbound.persistent.TaskRepository
@@ -23,7 +19,6 @@ import org.jdbi.v3.core.Jdbi
 import org.slf4j.LoggerFactory
 import java.time.Instant
 import java.time.temporal.ChronoUnit
-import java.util.concurrent.ConcurrentHashMap
 
 /**
  * DAG-aware phase gate that evaluates successor activities after each task completion.
@@ -45,16 +40,9 @@ class DefaultPhaseGate(
     private val taskRepo: TaskRepository,
     private val objectMapper: ObjectMapper,
     private val notifier: WorkerNotifier,
+    private val definitionCache: DefinitionCache,
 ) : PhaseGate {
     private val log = LoggerFactory.getLogger(DefaultPhaseGate::class.java)
-
-    private data class CachedDefinition(
-        val definition: WorkflowDefinition,
-        val sequenceMap: Map<Int, SequenceInfo>,
-        val seqByName: Map<String, SequenceInfo>,
-    )
-
-    private val definitionCache = ConcurrentHashMap<String, CachedDefinition>()
 
     override suspend fun onTaskCompleted(event: TaskCompletionEvent) {
         val (taskId, workflowId, sequenceNumber, status, resultJson, claimedBy, claimedAt, fanOutPayloadsJson) = event
@@ -155,7 +143,7 @@ class DefaultPhaseGate(
                                 WorkflowStatus.COMPLETED,
                                 WorkflowStatus.RUNNING,
                             )
-                            definitionCache.remove(workflowId)
+                            definitionCache.invalidate(workflowId)
                         }
                     }
                     return@inTransactionSuspend emptyList()
@@ -174,7 +162,7 @@ class DefaultPhaseGate(
                             WorkflowStatus.COMPLETED,
                             WorkflowStatus.RUNNING,
                         )
-                        definitionCache.remove(workflowId)
+                        definitionCache.invalidate(workflowId)
                         return@inTransactionSuspend emptyList()
                     }
                 }
@@ -200,108 +188,62 @@ class DefaultPhaseGate(
                 val snapshot = buildSnapshot(handle, workflowId, workflow.definitionJson)
                 val signalQueueSet = mutableSetOf<String>()
 
+                // Pre-pass: PARALLEL re-fanout. Handled separately because it needs
+                // the scatter task's stored fan-out payloads, which dispatchReadySequences
+                // cannot access (it only walks forward via the DAG).
                 for ((seq, seqInfo) in snapshot.sequenceMap.entries.sortedBy { it.key }) {
+                    if (seqInfo.phaseType != PhaseType.PARALLEL) continue
                     if ((snapshot.allCounts[seq]?.total ?: 0) > 0) continue
 
-                    val allPredTerminal =
-                        seqInfo.predecessorSequences.isEmpty() ||
-                            seqInfo.predecessorSequences.all { predSeq ->
-                                (snapshot.allCounts[predSeq]?.total ?: 0) > 0 &&
-                                    (snapshot.allCounts[predSeq]?.nonTerminal ?: 0) == 0
-                            }
-                    if (!allPredTerminal) continue
+                    val scatterSeq = seqInfo.predecessorSequences.firstOrNull() ?: continue
+                    val scatterTask =
+                        snapshot.tasksBySeq[scatterSeq]
+                            ?.firstOrNull { it.status == TaskStatus.COMPLETED }
+                            ?: continue
 
-                    when (seqInfo.phaseType) {
-                        PhaseType.SCATTER -> {
-                            val task =
-                                createTaskForActivity(
-                                    workflowId,
-                                    seqInfo.activityName,
-                                    seq,
-                                    seqInfo.activity,
-                                    snapshot.now,
-                                )
-                            taskRepo.insertBatchWithHandle(handle, listOf(task))
-                            signalQueueSet += seqInfo.activity.queue
-                        }
-
-                        PhaseType.PARALLEL -> {
-                            // SCATTER predecessor is always exactly one sequence.
-                            val scatterSeq = seqInfo.predecessorSequences.firstOrNull() ?: continue
-                            val scatterTask =
-                                snapshot.tasksBySeq[scatterSeq]
-                                    ?.firstOrNull { it.status == TaskStatus.COMPLETED }
-                                    ?: continue
-
-                            val storedFanOutJson = scatterTask.fanOutPayloadsJson ?: run {
-                                log.warn(
-                                    "SCATTER task {} has no stored fan-out payloads; skipping PARALLEL recovery for workflow {}",
-                                    scatterTask.id,
-                                    workflowId,
-                                )
-                                continue
-                            }
-                            val itemList: List<String> =
-                                try {
-                                    objectMapper.readValue(storedFanOutJson)
-                                } catch (e: Exception) {
-                                    log.warn(
-                                        "recoverStuckWorkflow: corrupt fan-out payloads JSON for workflow={} seq={} — skipping",
-                                        workflowId,
-                                        seq,
-                                        e,
-                                    )
-                                    continue
-                                }
-
-                            val parallelTasks =
-                                itemList.map { rawItem ->
-                                    createTaskForActivity(
-                                        workflowId,
-                                        seqInfo.activityName,
-                                        seq,
-                                        seqInfo.activity,
-                                        snapshot.now,
-                                        taskPayload = assembleChildItem(rawItem, scatterTask.resultJson),
-                                    )
-                                }
-                            taskRepo.insertBatchWithHandle(handle, parallelTasks)
-                            signalQueueSet += seqInfo.activity.queue
-                        }
-
-                        PhaseType.LINEAR -> {
-                            val edgeTaken =
-                                isAnyEdgeTaken(
-                                    snapshot.tasksBySeq,
-                                    snapshot.resultBranches,
-                                    seqInfo,
-                                    snapshot.sequenceMap,
-                                    snapshot.definition,
-                                )
-                            if (edgeTaken || seqInfo.predecessorSequences.isEmpty()) {
-                                val task =
-                                    createTaskForActivity(
-                                        workflowId,
-                                        seqInfo.activityName,
-                                        seq,
-                                        seqInfo.activity,
-                                        snapshot.now,
-                                    )
-                                taskRepo.insertBatchWithHandle(handle, listOf(task))
-                                signalQueueSet += seqInfo.activity.queue
-                            } else {
-                                val skipped =
-                                    createSkippedTaskForActivity(
-                                        workflowId,
-                                        seqInfo.activityName,
-                                        seq,
-                                        seqInfo.activity,
-                                        snapshot.now,
-                                    )
-                                taskRepo.insertBatchWithHandle(handle, listOf(skipped))
-                            }
-                        }
+                    val storedFanOutJson = scatterTask.fanOutPayloadsJson ?: run {
+                        log.warn(
+                            "SCATTER task {} has no stored fan-out payloads; skipping PARALLEL recovery for workflow {}",
+                            scatterTask.id,
+                            workflowId,
+                        )
+                        continue
                     }
+                    val itemList: List<String> =
+                        try {
+                            objectMapper.readValue(storedFanOutJson)
+                        } catch (e: Exception) {
+                            log.warn(
+                                "recoverStuckWorkflow: corrupt fan-out payloads JSON for workflow={} seq={} — skipping",
+                                workflowId,
+                                seq,
+                                e,
+                            )
+                            continue
+                        }
+
+                    val parallelTasks =
+                        itemList.map { rawItem ->
+                            createTaskForActivity(
+                                workflowId,
+                                seqInfo.activityName,
+                                seq,
+                                seqInfo.activity,
+                                snapshot.now,
+                                taskPayload = assembleChildItem(rawItem, scatterTask.resultJson),
+                            )
+                        }
+                    taskRepo.insertBatchWithHandle(handle, parallelTasks)
+                    signalQueueSet += seqInfo.activity.queue
+                }
+
+                // Main: walk forward from every resolved sequence, dispatching
+                // LINEAR and SCATTER successors whose predecessors are all terminal.
+                // Uses the same indegree-BFS as the normal completion path.
+                val result = dispatchReadySequences(snapshot)
+                if (result.tasksToInsert.isNotEmpty()) {
+                    taskRepo.insertBatchWithHandle(handle, result.tasksToInsert)
+                    signalQueueSet += result.signalQueues
                 }
 
                 val globalNonTerminal = taskRepo.countAllNonTerminalWithHandle(handle, workflowId)
@@ -318,7 +260,7 @@ class DefaultPhaseGate(
                         terminalStatus,
                         WorkflowStatus.RUNNING,
                     )
-                    definitionCache.remove(workflowId)
+                    definitionCache.invalidate(workflowId)
                     return@inTransactionSuspend emptyList()
                 }
 
@@ -338,14 +280,8 @@ class DefaultPhaseGate(
         workflowId: String,
         definitionJson: String,
     ): GateSnapshot {
-        val cached = definitionCache.computeIfAbsent(workflowId) { _ ->
-            val definition = objectMapper.readValue<WorkflowDefinition>(definitionJson)
-            val sequenceMap = buildSequenceMap(definition)
-            val seqByName = sequenceMap.values
-                .filter { it.phaseType != PhaseType.PARALLEL }
-                .associateBy { it.activityName }
-            CachedDefinition(definition, sequenceMap, seqByName)
-        }
+        val cached = definitionCache.getOrNull(workflowId)
+            ?: definitionCache.load(workflowId, definitionJson)
         val allCounts = taskRepo.countStatusSummariesByWorkflowWithHandle(handle, workflowId)
         val allTasks = taskRepo.findByWorkflowIdWithHandle(handle, workflowId)
         val tasksBySeq = allTasks.groupBy { it.sequenceNumber }
@@ -389,7 +325,7 @@ class DefaultPhaseGate(
             )
         if (statusUpdated) {
             taskRepo.cancelPendingTasksWithHandle(handle, workflowId)
-            definitionCache.remove(workflowId)
+            definitionCache.invalidate(workflowId)
         }
     }
 

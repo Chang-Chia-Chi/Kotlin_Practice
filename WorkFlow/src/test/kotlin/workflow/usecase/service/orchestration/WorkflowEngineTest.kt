@@ -51,7 +51,7 @@ class WorkflowEngineTest {
         taskRepo = JdbiTaskRepository(jdbi)
         notifier = FakeWorkerNotifier()
         engine = WorkflowEngine(jdbi, workflowRepo, taskRepo, objectMapper, notifier)
-        phaseGate = DefaultPhaseGate(jdbi, workflowRepo, taskRepo, objectMapper, notifier)
+        phaseGate = DefaultPhaseGate(jdbi, workflowRepo, taskRepo, objectMapper, notifier, DefinitionCache(objectMapper))
     }
 
     @AfterEach

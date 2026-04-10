@@ -271,7 +271,7 @@ class LivenessStressTest : StressTestBase() {
                             // Restore after a brief cut (simulates transient partition)
                             oracleProxy.toxics().get("cut-l6a").remove()
                         }
-                        return HandlerResult.Completed(result = input.inputs)
+                        return HandlerResult(result = input.inputs)
                     }
                 },
             )

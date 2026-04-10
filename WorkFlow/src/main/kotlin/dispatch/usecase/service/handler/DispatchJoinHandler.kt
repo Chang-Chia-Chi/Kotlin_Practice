@@ -37,6 +37,6 @@ class DispatchJoinHandler(
             storage.uploadParquet(pathBuilder.prodParquetPath(), parquet)
         }
 
-        return HandlerResult.Completed(result = null)
+        return HandlerResult(result = null)
     }
 }

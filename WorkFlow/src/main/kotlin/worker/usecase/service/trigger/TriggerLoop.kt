@@ -11,6 +11,7 @@ import com.workflow.worker.usecase.service.RetryOutcome
 import com.workflow.worker.usecase.service.TaskSettler
 import com.workflow.workflow.model.TaskCompletionEvent
 import com.workflow.workflow.model.TaskStatus
+import com.workflow.workflow.usecase.port.inbound.orchestration.PhaseGate
 import com.workflow.workflow.usecase.port.outbound.persistent.TaskRepository
 import io.micrometer.core.instrument.Counter
 import io.micrometer.core.instrument.MeterRegistry
@@ -40,7 +41,8 @@ const val SHUTDOWN_ORDER_TRIGGER = 5
 /**
  * Leader-gated sweep loop that periodically loads DEFERRED tasks, dispatches
  * them to [TriggerDriver] instances, polls for results, and settles
- * completed/failed/expired tasks through the [TaskSettler].
+ * completed/failed/expired tasks via [PhaseGate.onTaskCompleted] (success/timeout)
+ * or [TaskSettler.retryOrFail] (failure).
  *
  * Runs on a single-threaded coroutine dispatcher (`limitedParallelism(1)`)
  * with a [SupervisorJob] so that individual sweep failures do not cancel
@@ -50,6 +52,7 @@ const val SHUTDOWN_ORDER_TRIGGER = 5
 class TriggerLoop(
     private val taskRepo: TaskRepository,
     private val driverBeans: Instance<TriggerDriver>,
+    private val phaseGate: PhaseGate,
     private val taskSettler: TaskSettler,
     private val leaderGuard: LeaderGuard,
     private val meterRegistry: MeterRegistry,
@@ -190,7 +193,7 @@ class TriggerLoop(
         return try {
             when (result) {
                 is TriggerResult.Succeeded -> {
-                    taskSettler.settle(
+                    phaseGate.onTaskCompleted(
                         TaskCompletionEvent(
                             taskId = result.taskId,
                             workflowId = task.workflowId,
@@ -242,7 +245,7 @@ class TriggerLoop(
                     log.warn("Failed to cancel trigger for expired task {}", task.taskId, e)
                 }
             }
-            taskSettler.settle(
+            phaseGate.onTaskCompleted(
                 TaskCompletionEvent(
                     taskId = task.taskId,
                     workflowId = task.workflowId,

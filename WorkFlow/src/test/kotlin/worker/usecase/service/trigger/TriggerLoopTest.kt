@@ -73,7 +73,7 @@ class TriggerLoopTest {
         taskSettler = TaskSettler(taskRepo, phaseGate)
 
         triggerLoop = TriggerLoop(
-            taskRepo, driverBeans, taskSettler, leaderGuard,
+            taskRepo, driverBeans, phaseGate, taskSettler, leaderGuard,
             meterRegistry, config, shutdownConfig,
         )
         // Initialize lateinit fields (drivers, pollCounter, sweepTimer) by
@@ -339,7 +339,7 @@ class TriggerLoopTest {
                 on { iterator() } doAnswer { mutableListOf(mockDriver, driver2).iterator() }
             }
             val loop = TriggerLoop(
-                taskRepo, beans, taskSettler, leaderGuard,
+                taskRepo, beans, phaseGate, taskSettler, leaderGuard,
                 localRegistry, config, shutdownConfig,
             )
             initLoop(loop)
@@ -385,7 +385,7 @@ class TriggerLoopTest {
                 on { iterator() } doAnswer { mutableListOf(failingDriver, goodDriver).iterator() }
             }
             val loop = TriggerLoop(
-                taskRepo, beans, taskSettler, leaderGuard,
+                taskRepo, beans, phaseGate, taskSettler, leaderGuard,
                 localRegistry, config, shutdownConfig,
             )
             initLoop(loop)
@@ -411,7 +411,7 @@ class TriggerLoopTest {
                 on { iterator() } doAnswer { mutableListOf(failingDriver, goodDriver).iterator() }
             }
             val loop = TriggerLoop(
-                taskRepo, beans, taskSettler, leaderGuard,
+                taskRepo, beans, phaseGate, taskSettler, leaderGuard,
                 localRegistry, config, shutdownConfig,
             )
             initLoop(loop)
@@ -564,7 +564,7 @@ class TriggerLoopTest {
                 on { iterator() } doAnswer { mutableListOf(failingDriver, goodDriver).iterator() }
             }
             val loop = TriggerLoop(
-                taskRepo, beans, taskSettler, leaderGuard,
+                taskRepo, beans, phaseGate, taskSettler, leaderGuard,
                 localRegistry, config, shutdownConfig,
             )
 

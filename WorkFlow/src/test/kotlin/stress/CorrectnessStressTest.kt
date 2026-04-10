@@ -45,7 +45,7 @@ class CorrectnessStressTest : StressTestBase() {
         handlerRegistry.register("c1.scatter", object : TransitionHandler {
             override suspend fun execute(input: HandlerInput): HandlerResult {
                 val payloads = (1..scale.fanOutSize).map { """{"item":$it}""" }
-                return HandlerResult.Completed(result = null, fanOutPayloads = payloads)
+                return HandlerResult(result = null, fanOutPayloads = payloads)
             }
         })
         val recorder = HistoryRecorder(PassThroughHandler())
@@ -93,7 +93,7 @@ class CorrectnessStressTest : StressTestBase() {
         handlerRegistry.register("c2.scatter", object : TransitionHandler {
             override suspend fun execute(input: HandlerInput): HandlerResult {
                 val payloads = (1..n).map { """{"item":$it}""" }
-                return HandlerResult.Completed(result = null, fanOutPayloads = payloads)
+                return HandlerResult(result = null, fanOutPayloads = payloads)
             }
         })
         handlerRegistry.register("c2.parallel", PassThroughHandler())
@@ -135,7 +135,7 @@ class CorrectnessStressTest : StressTestBase() {
         handlerRegistry.register("c3.scatter", object : TransitionHandler {
             override suspend fun execute(input: HandlerInput): HandlerResult {
                 val payloads = (1..n).map { """{"item":$it}""" }
-                return HandlerResult.Completed(result = null, fanOutPayloads = payloads)
+                return HandlerResult(result = null, fanOutPayloads = payloads)
             }
         })
 
@@ -144,7 +144,7 @@ class CorrectnessStressTest : StressTestBase() {
         handlerRegistry.register("c3.parallel", object : TransitionHandler {
             override suspend fun execute(input: HandlerInput): HandlerResult {
                 if (count.incrementAndGet() == 1) throw RuntimeException("Simulated failure")
-                return HandlerResult.Completed(result = input.taskPayload)
+                return HandlerResult(result = input.taskPayload)
             }
         })
 
@@ -216,15 +216,15 @@ class CorrectnessStressTest : StressTestBase() {
 
         handlerRegistry.register("c8.step1", object : TransitionHandler {
             override suspend fun execute(input: HandlerInput): HandlerResult =
-                HandlerResult.Completed(result = """{"phase":1,"data":"origin"}""")
+                HandlerResult(result = """{"phase":1,"data":"origin"}""")
         })
         handlerRegistry.register("c8.step2", object : TransitionHandler {
             override suspend fun execute(input: HandlerInput): HandlerResult =
-                HandlerResult.Completed(result = """{"phase":2,"prev":${input.inputs}}""")
+                HandlerResult(result = """{"phase":2,"prev":${input.inputs}}""")
         })
         handlerRegistry.register("c8.step3", object : TransitionHandler {
             override suspend fun execute(input: HandlerInput): HandlerResult =
-                HandlerResult.Completed(result = """{"phase":3,"prev":${input.inputs}}""")
+                HandlerResult(result = """{"phase":3,"prev":${input.inputs}}""")
         })
 
         val wfId = engine.startWorkflow(def).workflowId
@@ -280,12 +280,12 @@ class CorrectnessStressTest : StressTestBase() {
         handlerRegistry.register("c9.scatter", object : TransitionHandler {
             override suspend fun execute(input: HandlerInput): HandlerResult {
                 val payloads = (1..n).map { """{"item":$it}""" }
-                return HandlerResult.Completed(result = null, fanOutPayloads = payloads)
+                return HandlerResult(result = null, fanOutPayloads = payloads)
             }
         })
         handlerRegistry.register("c9.parallel", object : TransitionHandler {
             override suspend fun execute(input: HandlerInput): HandlerResult =
-                HandlerResult.Completed(result = """{"processed":${input.taskPayload}}""")
+                HandlerResult(result = """{"processed":${input.taskPayload}}""")
         })
 
         val wfId = engine.startWorkflow(def).workflowId
@@ -330,7 +330,7 @@ class CorrectnessStressTest : StressTestBase() {
         handlerRegistry.register("c10.step2", object : TransitionHandler {
             override suspend fun execute(input: HandlerInput): HandlerResult {
                 if (step2Counter.incrementAndGet() == 1) throw RuntimeException("First attempt fails")
-                return HandlerResult.Completed(result = input.inputs)
+                return HandlerResult(result = input.inputs)
             }
         })
         handlerRegistry.register("c10.step3", PassThroughHandler())
@@ -385,7 +385,7 @@ class CorrectnessStressTest : StressTestBase() {
         handlerRegistry.register("c11.scatter", object : TransitionHandler {
             override suspend fun execute(input: HandlerInput): HandlerResult {
                 val payloads = (1..n).map { """{"item":$it}""" }
-                return HandlerResult.Completed(result = null, fanOutPayloads = payloads)
+                return HandlerResult(result = null, fanOutPayloads = payloads)
             }
         })
         handlerRegistry.register("c11.parallel", PassThroughHandler())

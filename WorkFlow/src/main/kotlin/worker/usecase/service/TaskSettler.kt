@@ -19,29 +19,23 @@ sealed interface RetryOutcome {
 }
 
 /**
- * Centralises the retry-or-fail decision and task settlement through
- * [PhaseGate.onTaskCompleted]. Both [WorkerLoop][com.workflow.worker.usecase.service.execution.WorkerLoop]
- * and [TriggerLoop][com.workflow.worker.usecase.service.trigger.TriggerLoop] delegate here so the
- * business rule lives in one place.
+ * Centralises the retry-or-fail decision for failed tasks. Both
+ * [WorkerLoop][com.workflow.worker.usecase.service.execution.WorkerLoop] and
+ * [TriggerLoop][com.workflow.worker.usecase.service.trigger.TriggerLoop] delegate failure
+ * handling here so the business rule lives in one place. Successful completions
+ * go directly to [PhaseGate.onTaskCompleted] without passing through this class.
  *
- * **Error contract:** Both methods propagate exceptions (CancellationException-safe
+ * **Error contract:** [retryOrFail] propagates exceptions (CancellationException-safe
  * via [suspendCatching]). Callers are responsible for their own error boundaries.
- * [retryOrFail] internally catches [resetForRetry][TaskRepository.resetForRetry]
- * failures and falls through to settling as FAILED — but if
- * [PhaseGate.onTaskCompleted] itself throws, that propagates to the caller.
+ * It internally catches [resetForRetry][TaskRepository.resetForRetry] failures and
+ * falls through to settling as FAILED — but if [PhaseGate.onTaskCompleted] itself
+ * throws, that propagates to the caller.
  */
 @ApplicationScoped
 class TaskSettler(
     private val taskRepo: TaskRepository,
     private val phaseGate: PhaseGate,
 ) {
-    /**
-     * Settles a task by delegating to [PhaseGate.onTaskCompleted].
-     */
-    suspend fun settle(event: TaskCompletionEvent) {
-        phaseGate.onTaskCompleted(event)
-    }
-
     /**
      * Retries the task if attempts remain, otherwise settles it as FAILED.
      *

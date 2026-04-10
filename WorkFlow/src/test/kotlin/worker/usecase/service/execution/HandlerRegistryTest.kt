@@ -30,7 +30,7 @@ class HandlerRegistryTest {
     fun `register handler and resolve by key returns same handler`() = runTest {
         val handler = object : TransitionHandler {
             override suspend fun execute(input: HandlerInput): HandlerResult =
-                HandlerResult.Completed(result = null)
+                HandlerResult(result = null)
         }
 
         registry.register("order.validate", handler)
@@ -54,11 +54,11 @@ class HandlerRegistryTest {
     fun `register second handler with same key overwrites first`() = runTest {
         val firstHandler = object : TransitionHandler {
             override suspend fun execute(input: HandlerInput): HandlerResult =
-                HandlerResult.Completed(result = "first")
+                HandlerResult(result = "first")
         }
         val secondHandler = object : TransitionHandler {
             override suspend fun execute(input: HandlerInput): HandlerResult =
-                HandlerResult.Completed(result = "second")
+                HandlerResult(result = "second")
         }
 
         registry.register("step.one", firstHandler)
@@ -69,7 +69,7 @@ class HandlerRegistryTest {
 
         val output = resolved.execute(
             HandlerInput(taskId = "t1", workflowId = "wf1", sequenceNumber = 1, inputs = null, taskPayload = null),
-        ) as HandlerResult.Completed
+        )
         assertEquals("second", output.result)
     }
 }

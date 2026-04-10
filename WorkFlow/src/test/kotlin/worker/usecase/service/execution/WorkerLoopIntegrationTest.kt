@@ -18,6 +18,7 @@ import com.workflow.workflow.model.WorkflowStatus
 import com.workflow.workflow.model.workflowId
 import com.workflow.workflow.usecase.service.orchestration.ActivityInputResolver
 import com.workflow.workflow.usecase.service.orchestration.DefaultPhaseGate
+import com.workflow.workflow.usecase.service.orchestration.DefinitionCache
 import com.workflow.workflow.usecase.service.orchestration.WorkflowEngine
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import jakarta.enterprise.inject.Instance
@@ -76,7 +77,7 @@ class WorkerLoopIntegrationTest {
         jdbi = OracleTestContainer.jdbi
         workflowRepo = JdbiWorkflowRepository(jdbi)
         taskRepo = JdbiTaskRepository(jdbi)
-        phaseGate = DefaultPhaseGate(jdbi, workflowRepo, taskRepo, objectMapper, notifier)
+        phaseGate = DefaultPhaseGate(jdbi, workflowRepo, taskRepo, objectMapper, notifier, DefinitionCache(objectMapper))
         engine = WorkflowEngine(jdbi, workflowRepo, taskRepo, objectMapper, notifier)
     }
 
@@ -102,12 +103,14 @@ class WorkerLoopIntegrationTest {
             testShutdownConfig,
             taskRepo,
             handlerRegistry,
+            phaseGate,
             taskSettler,
             SimpleMeterRegistry(),
             inputResolver,
             workflowRepo,
             objectMapper,
             notifier,
+            DefinitionCache(objectMapper),
         )
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         val job = loop.start(scope)
@@ -122,7 +125,7 @@ class WorkerLoopIntegrationTest {
             val handler = object : TransitionHandler {
                 override fun key(): String = "e2e.complete"
                 override suspend fun execute(input: HandlerInput): HandlerResult =
-                    HandlerResult.Completed("""{"step":${input.sequenceNumber}}""")
+                    HandlerResult("""{"step":${input.sequenceNumber}}""")
             }
 
             val job = buildWorkerLoop(handler)
@@ -151,7 +154,7 @@ class WorkerLoopIntegrationTest {
             val handler = object : TransitionHandler {
                 override fun key(): String = "e2e.multi-queue"
                 override suspend fun execute(input: HandlerInput): HandlerResult =
-                    HandlerResult.Completed("""{"step":${input.sequenceNumber}}""")
+                    HandlerResult("""{"step":${input.sequenceNumber}}""")
             }
 
             val multiQueueConfig = object : WorkerLoopConfig {
@@ -196,7 +199,7 @@ class WorkerLoopIntegrationTest {
                 override suspend fun execute(input: HandlerInput): HandlerResult {
                     val attempt = attempts.incrementAndGet()
                     if (attempt == 1) throw RuntimeException("Simulated transient failure")
-                    return HandlerResult.Completed("""{"attempt":$attempt}""")
+                    return HandlerResult("""{"attempt":$attempt}""")
                 }
             }
 

@@ -21,6 +21,7 @@ import com.workflow.workflow.model.TaskStatus
 import com.workflow.workflow.model.WorkflowStatus
 import com.workflow.workflow.model.workflowId
 import com.workflow.workflow.usecase.service.orchestration.DefaultPhaseGate
+import com.workflow.workflow.usecase.service.orchestration.DefinitionCache
 import com.workflow.workflow.usecase.service.orchestration.WorkflowEngine
 import com.workflow.infrastructure.persistence.inTransactionSuspend
 import com.workflow.infrastructure.persistence.useHandleSuspend
@@ -71,7 +72,7 @@ class TriggerLoopIntegrationTest {
         jdbi = OracleTestContainer.jdbi
         workflowRepo = JdbiWorkflowRepository(jdbi)
         taskRepo = JdbiTaskRepository(jdbi)
-        phaseGate = DefaultPhaseGate(jdbi, workflowRepo, taskRepo, objectMapper, notifier)
+        phaseGate = DefaultPhaseGate(jdbi, workflowRepo, taskRepo, objectMapper, notifier, DefinitionCache(objectMapper))
         engine = WorkflowEngine(jdbi, workflowRepo, taskRepo, objectMapper, notifier)
     }
 
@@ -102,6 +103,7 @@ class TriggerLoopIntegrationTest {
         val loop = TriggerLoop(
             taskRepo = taskRepo,
             driverBeans = beans,
+            phaseGate = phaseGate,
             taskSettler = taskSettler,
             leaderGuard = LeaderGuard.ALWAYS,
             meterRegistry = SimpleMeterRegistry(),

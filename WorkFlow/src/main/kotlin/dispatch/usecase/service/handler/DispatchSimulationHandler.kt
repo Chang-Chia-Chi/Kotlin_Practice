@@ -58,6 +58,6 @@ class DispatchSimulationHandler(
             tmpFile.delete()
         }
 
-        return HandlerResult.Completed(null)
+        return HandlerResult(null)
     }
 }

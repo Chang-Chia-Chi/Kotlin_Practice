@@ -171,12 +171,39 @@ fun resolvePhaseDecision(
 fun dispatchSuccessors(
     snapshot: GateSnapshot,
     seqInfo: SequenceInfo,
+): SuccessorResult = bfsDispatch(snapshot, listOf(seqInfo))
+
+/**
+ * Walks forward from every sequence whose tasks are already terminal in the
+ * snapshot. Used by recovery to advance workflows whose completion-time
+ * dispatch was lost (TX1/TX2 crash gap): no single "just-completed" seqInfo
+ * exists, so we seed from every resolved sequence and let the BFS fan out.
+ *
+ * PARALLEL sequences with missing tasks are NOT dispatched here -- they
+ * require re-fan-out from the scatter task's stored payloads, which must
+ * be handled by the caller before calling this function.
+ */
+fun dispatchReadySequences(snapshot: GateSnapshot): SuccessorResult {
+    val seeds = snapshot.sequenceMap.values.filter { si ->
+        val counts = snapshot.allCounts[si.sequenceNumber]
+        counts != null && counts.total > 0 && counts.nonTerminal == 0
+    }
+    return bfsDispatch(snapshot, seeds)
+}
+
+/**
+ * Shared BFS core for [dispatchSuccessors] and [dispatchReadySequences].
+ * Seeds the indegree-BFS from [seedSeqInfos]' successors and walks forward.
+ */
+private fun bfsDispatch(
+    snapshot: GateSnapshot,
+    seedSeqInfos: List<SequenceInfo>,
 ): SuccessorResult {
     val resolvedSeqs = mutableSetOf<Int>()
     for ((seq, counts) in snapshot.allCounts) {
         if (counts.total > 0 && counts.nonTerminal == 0) resolvedSeqs += seq
     }
-    resolvedSeqs += seqInfo.sequenceNumber
+    for (si in seedSeqInfos) resolvedSeqs += si.sequenceNumber
 
     val pendingInserts = mutableListOf<Task>()
     val visitedSeqs = mutableSetOf<Int>()
@@ -204,7 +231,9 @@ fun dispatchSuccessors(
         }
     }
 
-    discoverSuccessors(successorsOf(seqInfo, snapshot.seqByName, snapshot.definition))
+    for (si in seedSeqInfos) {
+        discoverSuccessors(successorsOf(si, snapshot.seqByName, snapshot.definition))
+    }
 
     while (evalQueue.isNotEmpty()) {
         val sSeq = evalQueue.removeFirst()

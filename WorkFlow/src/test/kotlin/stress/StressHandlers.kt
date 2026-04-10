@@ -66,7 +66,7 @@ class CrashableHandler(
 /** Returns input as output result. Prefers taskPayload (scatter chunk) over inputs. */
 class PassThroughHandler : TransitionHandler {
     override suspend fun execute(input: HandlerInput): HandlerResult =
-        HandlerResult.Completed(result = input.taskPayload ?: input.inputs)
+        HandlerResult(result = input.taskPayload ?: input.inputs)
 }
 
 /** Always throws after optional delay. */

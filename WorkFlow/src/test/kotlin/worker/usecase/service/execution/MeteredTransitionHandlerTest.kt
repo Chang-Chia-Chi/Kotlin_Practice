@@ -32,11 +32,11 @@ class MeteredTransitionHandlerTest {
     @Test
     fun `records success timer and returns delegate output`() = runTest {
         val delegate = object : TransitionHandler {
-            override suspend fun execute(input: HandlerInput) = HandlerResult.Completed(result = "ok")
+            override suspend fun execute(input: HandlerInput) = HandlerResult(result = "ok")
         }
         val metered = MeteredTransitionHandler(delegate, "order.validate", meterRegistry)
 
-        val output = metered.execute(input) as HandlerResult.Completed
+        val output = metered.execute(input)
 
         assertEquals("ok", output.result)
 
@@ -72,7 +72,7 @@ class MeteredTransitionHandlerTest {
     @Test
     fun `multiple executions accumulate in timer`() = runTest {
         val delegate = object : TransitionHandler {
-            override suspend fun execute(input: HandlerInput) = HandlerResult.Completed(result = null)
+            override suspend fun execute(input: HandlerInput) = HandlerResult(result = null)
         }
         val metered = MeteredTransitionHandler(delegate, "step.process", meterRegistry)
 

@@ -11,6 +11,7 @@ import com.workflow.infrastructure.persistence.ToxiproxyTestContainer
 import com.workflow.workflow.adapter.persistent.JdbiTaskRepository
 import com.workflow.workflow.adapter.persistent.JdbiWorkflowRepository
 import com.workflow.workflow.usecase.service.orchestration.DefaultPhaseGate
+import com.workflow.workflow.usecase.service.orchestration.DefinitionCache
 import com.workflow.workflow.usecase.service.orchestration.ActivityInputResolver
 import com.workflow.workflow.usecase.service.orchestration.WorkflowWatchdog
 import com.workflow.workflow.usecase.service.orchestration.WorkflowEngine
@@ -181,7 +182,7 @@ abstract class StressTestBase {
         // Init components
         workflowRepo = JdbiWorkflowRepository(proxyJdbi)
         taskRepo = JdbiTaskRepository(proxyJdbi)
-        barrier = DefaultPhaseGate(proxyJdbi, workflowRepo, taskRepo, objectMapper, notifier)
+        barrier = DefaultPhaseGate(proxyJdbi, workflowRepo, taskRepo, objectMapper, notifier, DefinitionCache(objectMapper))
         engine = WorkflowEngine(proxyJdbi, workflowRepo, taskRepo, objectMapper, notifier)
         watchdog = WorkflowWatchdog(proxyJdbi, workflowRepo, taskRepo, barrier, testWatchdogConfig)
         activityInputResolver = ActivityInputResolver(objectMapper)
@@ -193,7 +194,7 @@ abstract class StressTestBase {
         // Init direct components (bypass proxy — for throughput benchmarks)
         directWorkflowRepo = JdbiWorkflowRepository(directPooledJdbi)
         directTaskRepo = JdbiTaskRepository(directPooledJdbi)
-        directBarrier = DefaultPhaseGate(directPooledJdbi, directWorkflowRepo, directTaskRepo, objectMapper, notifier)
+        directBarrier = DefaultPhaseGate(directPooledJdbi, directWorkflowRepo, directTaskRepo, objectMapper, notifier, DefinitionCache(objectMapper))
         directEngine = WorkflowEngine(directPooledJdbi, directWorkflowRepo, directTaskRepo, objectMapper, notifier)
         directWorkflowWatchdog = WorkflowWatchdog(directPooledJdbi, directWorkflowRepo, directTaskRepo, directBarrier, testWatchdogConfig)
     }
@@ -237,7 +238,7 @@ abstract class StressTestBase {
 
     protected fun startWorkerPool(): List<Job> {
         val taskSettler = com.workflow.worker.usecase.service.TaskSettler(taskRepo, barrier)
-        val loop = WorkerLoop(testWorkerConfig, testShutdownConfig, taskRepo, handlerRegistry, taskSettler, meterRegistry, activityInputResolver, workflowRepo, objectMapper, notifier)
+        val loop = WorkerLoop(testWorkerConfig, testShutdownConfig, taskRepo, handlerRegistry, barrier, taskSettler, meterRegistry, activityInputResolver, workflowRepo, objectMapper, notifier, DefinitionCache(objectMapper))
         val job = loop.start(workerScope)
         workerJobs.add(job)
         return listOf(job)
@@ -245,7 +246,7 @@ abstract class StressTestBase {
 
     protected fun startDirectWorkerPool(): List<Job> {
         val directSettler = com.workflow.worker.usecase.service.TaskSettler(directTaskRepo, directBarrier)
-        val loop = WorkerLoop(testWorkerConfig, testShutdownConfig, directTaskRepo, handlerRegistry, directSettler, meterRegistry, activityInputResolver, directWorkflowRepo, objectMapper, notifier)
+        val loop = WorkerLoop(testWorkerConfig, testShutdownConfig, directTaskRepo, handlerRegistry, directBarrier, directSettler, meterRegistry, activityInputResolver, directWorkflowRepo, objectMapper, notifier, DefinitionCache(objectMapper))
         val job = loop.start(workerScope)
         workerJobs.add(job)
         return listOf(job)

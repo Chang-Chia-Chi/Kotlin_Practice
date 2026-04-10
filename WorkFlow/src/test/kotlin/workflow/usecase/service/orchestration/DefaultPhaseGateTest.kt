@@ -47,7 +47,7 @@ class DefaultPhaseGateTest {
         workflowRepo = JdbiWorkflowRepository(jdbi)
         taskRepo = JdbiTaskRepository(jdbi)
         notifier = FakeWorkerNotifier()
-        gate = DefaultPhaseGate(jdbi, workflowRepo, taskRepo, objectMapper, notifier)
+        gate = DefaultPhaseGate(jdbi, workflowRepo, taskRepo, objectMapper, notifier, DefinitionCache(objectMapper))
         engine = WorkflowEngine(jdbi, workflowRepo, taskRepo, objectMapper, notifier)
     }
 
@@ -521,7 +521,7 @@ class DefaultPhaseGateTest {
 
         // Use a local gate wired to a notifier that throws on every signal
         val failingNotifier = FakeWorkerNotifier().apply { failQueues = setOf("default") }
-        val localGate = DefaultPhaseGate(jdbi, workflowRepo, taskRepo, objectMapper, failingNotifier)
+        val localGate = DefaultPhaseGate(jdbi, workflowRepo, taskRepo, objectMapper, failingNotifier, DefinitionCache(objectMapper))
 
         // Must NOT throw despite notifier.signal throwing
         localGate.onTaskCompleted(TaskCompletionEvent(task.id, wfId, 1, TaskStatus.COMPLETED, null))
