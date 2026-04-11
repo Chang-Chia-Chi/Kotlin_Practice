@@ -8,6 +8,7 @@ import com.workflow.infrastructure.coroutine.unorderedMapAsync
 import com.workflow.infrastructure.shutdown.ShutdownConfig
 import com.workflow.infrastructure.shutdown.ShutdownParticipant
 import com.workflow.infrastructure.shutdown.ShutdownSignal
+import com.workflow.infrastructure.shutdown.isShuttingDown
 import com.workflow.worker.config.WorkerLoopConfig
 import com.workflow.worker.usecase.port.inbound.execution.HandlerInput
 import com.workflow.worker.usecase.port.inbound.execution.HandlerResult
@@ -175,6 +176,12 @@ class WorkerLoop(
         log.info("Worker loop shutting down")
         _accepting.set(false)
         stopChannel.trySend(Unit)
+        // Wake any pollAndProcess coroutines suspended in awaitWork so the
+        // drain doesn't wait out the fallback poll interval. Local-only —
+        // we're shutting down, no point broadcasting to peers.
+        for (queue in workerLoopConfig.queues()) {
+            notifier.wakeLocalWaiters(queue)
+        }
         withTimeoutOrNull(shutdownTimeout.toMillis()) {
             activeJob?.join()
         }
@@ -187,6 +194,13 @@ class WorkerLoop(
         fallbackPollInterval: Duration,
         maxBatchSize: Int,
     ) = withContext(MDCContext(mapOf("worker_id" to workerId))) {
+        // Short-circuit if shutdown has already begun: the upstream pipeline
+        // may have pipelined one extra tick past takeUntilSignal before the
+        // close propagated, so a stale invocation can land here after
+        // shutdown. Returning immediately prevents it from subscribing to a
+        // fresh awaitWork that nobody will signal.
+        if (isShuttingDown()) return@withContext
+
         val queues = workerLoopConfig.queues()
         val startIdx = queueStartIndex.getAndIncrement().and(0x7FFFFFFF) % queues.size
         val rotatedQueues = queues.drop(startIdx) + queues.take(startIdx)

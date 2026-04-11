@@ -1,17 +1,22 @@
 package com.workflow.worker.adapter.http
 
 import com.workflow.worker.usecase.port.outbound.notification.WorkerNotifier
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeoutOrNull
 import java.time.Duration
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Test double for [WorkerNotifier] that provides deterministic control.
  *
- * - [awaitWork] suspends for the requested [timeout] duration (simulating the
- *   real notifier's fallback poll interval), then returns [awaitReturns].
- *   This ensures the poll loop yields to the test scheduler between iterations.
- * - [signal] and [onRemoteSignal] count invocations for assertions.
+ * - [awaitWork] suspends up to the requested [timeout], waking early if
+ *   [wakeLocalWaiters] is called for the same queue. On timeout it returns
+ *   [awaitReturns]; on wake it returns `true`.
+ * - [signal], [onRemoteSignal], and [wakeLocalWaiters] count invocations
+ *   for assertions.
  */
 class FakeWorkerNotifier : WorkerNotifier {
 
@@ -27,6 +32,12 @@ class FakeWorkerNotifier : WorkerNotifier {
     private val _remoteSignalCount = AtomicInteger(0)
     val remoteSignalCount: Int get() = _remoteSignalCount.get()
 
+    private val _wakeLocalCount = AtomicInteger(0)
+    val wakeLocalCount: Int get() = _wakeLocalCount.get()
+
+    private val _wakeLocalQueues = mutableListOf<String>()
+    val wakeLocalQueues: List<String> get() = synchronized(_wakeLocalQueues) { _wakeLocalQueues.toList() }
+
     private val _awaitCallCount = AtomicInteger(0)
     val awaitCallCount: Int get() = _awaitCallCount.get()
 
@@ -35,6 +46,17 @@ class FakeWorkerNotifier : WorkerNotifier {
 
     private val _awaitTimeouts = mutableListOf<Duration>()
     val awaitTimeouts: List<Duration> get() = synchronized(_awaitTimeouts) { _awaitTimeouts.toList() }
+
+    private val wakeFlows = ConcurrentHashMap<String, MutableSharedFlow<Unit>>()
+
+    private fun wakeFlowFor(queue: String): MutableSharedFlow<Unit> =
+        wakeFlows.computeIfAbsent(queue) {
+            MutableSharedFlow(
+                replay = 0,
+                extraBufferCapacity = 1,
+                onBufferOverflow = BufferOverflow.DROP_OLDEST,
+            )
+        }
 
     /**
      * Queues listed here will throw [RuntimeException] when signalled.
@@ -54,11 +76,20 @@ class FakeWorkerNotifier : WorkerNotifier {
         _remoteSignalCount.incrementAndGet()
     }
 
+    override fun wakeLocalWaiters(queueName: String) {
+        _wakeLocalCount.incrementAndGet()
+        synchronized(_wakeLocalQueues) { _wakeLocalQueues.add(queueName) }
+        wakeFlowFor(queueName).tryEmit(Unit)
+    }
+
     override suspend fun awaitWork(queueName: String, timeout: Duration): Boolean {
         _awaitCallCount.incrementAndGet()
         synchronized(_awaitQueues) { _awaitQueues.add(queueName) }
         synchronized(_awaitTimeouts) { _awaitTimeouts.add(timeout) }
-        delay(timeout.toMillis())
-        return awaitReturns
+        val woken = withTimeoutOrNull(timeout.toMillis()) {
+            wakeFlowFor(queueName).first()
+            true
+        }
+        return woken ?: awaitReturns
     }
 }

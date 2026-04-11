@@ -85,6 +85,10 @@ class HttpWorkerNotifier(
         localFlowFor(queueName).tryEmit(Unit)
     }
 
+    override fun wakeLocalWaiters(queueName: String) {
+        localFlowFor(queueName).tryEmit(Unit)
+    }
+
     override suspend fun awaitWork(
         queueName: String,
         timeout: Duration,

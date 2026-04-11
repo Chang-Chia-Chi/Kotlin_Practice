@@ -32,6 +32,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.currentTime
 import kotlinx.coroutines.test.runTest
 import org.slf4j.MDC
 import org.junit.jupiter.api.BeforeEach
@@ -746,6 +748,53 @@ class WorkerLoopTest {
             assertTrue(handlerStarted.get(), "Handler should have started before shutdown")
             assertFalse(handlerCompleted.get(), "Handler should have been force-cancelled")
             assertTrue(shutdownJob.isCompleted, "Shutdown should complete after force-cancel")
+        }
+
+        @Test
+        fun `idle worker shutdown wakes suspended awaitWork without waiting for poll interval`() = runTest {
+            whenever(taskRepo.claimNext(eq(workerId), eq(16), eq("default")))
+                .thenReturn(emptyList())
+
+            val ceh = CoroutineExceptionHandler { _, _ -> }
+            val supervisorScope = CoroutineScope(coroutineContext + SupervisorJob() + ceh)
+            workerLoop.start(supervisorScope)
+            advanceTimeBy(fallbackPollInterval.toMillis() / 2) // mid-wait — awaitWork is suspended
+            val awaitCallsBeforeShutdown = notifier.awaitCallCount
+            assertTrue(awaitCallsBeforeShutdown > 0, "awaitWork should be suspended on empty queue")
+
+            val shutdownStart = currentTime
+            val shutdownJob = launch { workerLoop.shutdown() }
+            advanceUntilIdle()
+            val elapsedVirtualMs = currentTime - shutdownStart
+
+            assertTrue(shutdownJob.isCompleted, "shutdown() should complete")
+            // Proves the wake path ran: virtual time did not advance past the poll interval timeout.
+            assertTrue(
+                elapsedVirtualMs < fallbackPollInterval.toMillis(),
+                "shutdown() should complete via wake before fallbackPollInterval (${fallbackPollInterval.toMillis()}ms) elapses, took ${elapsedVirtualMs}ms",
+            )
+            assertEquals(1, notifier.wakeLocalCount, "shutdown should wake local waiters exactly once per configured queue")
+            assertEquals(listOf("default"), notifier.wakeLocalQueues)
+        }
+
+        @Test
+        fun `shutdown wakes waiters on every configured queue`() = runTest {
+            whenever(workerConfig.queues()).thenReturn(listOf("alpha", "beta", "gamma"))
+            val multiQueueLoop = WorkerLoop(workerConfig, shutdownConfig, taskRepo, handlerRegistry, phaseGate, taskSettler, meterRegistry, activityInputResolver, workflowRepo, objectMapper, notifier, DefinitionCache(objectMapper))
+
+            whenever(taskRepo.claimNext(eq(workerId), eq(16), any())).thenReturn(emptyList())
+
+            val ceh = CoroutineExceptionHandler { _, _ -> }
+            val supervisorScope = CoroutineScope(coroutineContext + SupervisorJob() + ceh)
+            multiQueueLoop.start(supervisorScope)
+            advanceTimeBy(fallbackPollInterval.toMillis() / 2)
+
+            val shutdownJob = launch { multiQueueLoop.shutdown() }
+            advanceUntilIdle()
+
+            assertTrue(shutdownJob.isCompleted, "shutdown() should complete")
+            assertEquals(setOf("alpha", "beta", "gamma"), notifier.wakeLocalQueues.toSet(),
+                "wakeLocalWaiters should be called for every configured queue")
         }
     }
 

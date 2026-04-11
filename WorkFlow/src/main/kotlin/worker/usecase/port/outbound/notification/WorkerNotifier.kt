@@ -38,6 +38,15 @@ interface WorkerNotifier {
     fun onRemoteSignal(queueName: String)
 
     /**
+     * Wake any workers currently suspended in [awaitWork] for [queueName].
+     * Local-only: does NOT broadcast to peers. Intended for shutdown —
+     * lets the worker loop exit its idle wait immediately instead of
+     * waiting out the fallback poll interval. Idempotent; safe to call
+     * when no waiters are suspended.
+     */
+    fun wakeLocalWaiters(queueName: String)
+
+    /**
      * Suspend until work is signaled on [queueName] or [timeout] expires.
      * Returns true if woken by a signal, false on timeout.
      */

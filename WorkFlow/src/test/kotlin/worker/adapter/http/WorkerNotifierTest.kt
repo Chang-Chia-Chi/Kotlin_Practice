@@ -163,6 +163,73 @@ class WorkerNotifierTest {
         }
     }
 
+    // ── D2. wakeLocalWaiters wakes local only (no HTTP broadcast) ────────
+
+    @Nested
+    inner class WakeLocalWaiters {
+
+        @Test
+        fun `wakeLocalWaiters wakes suspended awaitWork`() = runTest(UnconfinedTestDispatcher()) {
+            val result = async {
+                notifier.awaitWork("default", Duration.ofSeconds(10))
+            }
+            yield()
+
+            notifier.wakeLocalWaiters("default")
+
+            assertTrue(result.await(), "wakeLocalWaiters should wake local waiter")
+        }
+
+        @Test
+        fun `wakeLocalWaiters wakes multiple concurrent waiters on same queue`() = runTest(UnconfinedTestDispatcher()) {
+            val result1 = async { notifier.awaitWork("default", Duration.ofSeconds(10)) }
+            val result2 = async { notifier.awaitWork("default", Duration.ofSeconds(10)) }
+            yield()
+
+            notifier.wakeLocalWaiters("default")
+
+            assertTrue(result1.await(), "First waiter should be woken")
+            assertTrue(result2.await(), "Second waiter should be woken")
+        }
+
+        @Test
+        fun `wakeLocalWaiters on queue a does not wake waiter on queue b`() = runTest(UnconfinedTestDispatcher()) {
+            val result = async {
+                notifier.awaitWork("b", Duration.ofSeconds(1))
+            }
+            yield()
+
+            notifier.wakeLocalWaiters("a")
+
+            assertFalse(result.await(), "wakeLocalWaiters on 'a' should not wake waiter on 'b'")
+        }
+
+        @Test
+        fun `wakeLocalWaiters does not broadcast via HTTP`() = runTest(UnconfinedTestDispatcher()) {
+            whenever(peerDiscovery.peers()).thenReturn(listOf("10.0.0.2"))
+            val engine = MockEngine { respond("") }
+            val localNotifier = HttpWorkerNotifier(peerDiscovery, HttpClient(engine))
+
+            // Prove the broadcast collector IS active: signal() fires HTTP
+            localNotifier.signal("default")
+            await atMost Duration.ofSeconds(2) untilAsserted {
+                assertTrue(engine.requestHistory.size > 0, "signal() should have triggered HTTP broadcast")
+            }
+            val countAfterSignal = engine.requestHistory.size
+
+            // wakeLocalWaiters must NOT trigger additional HTTP calls
+            localNotifier.wakeLocalWaiters("default")
+
+            await.during(Duration.ofMillis(300)).atMost(Duration.ofSeconds(1)).untilAsserted {
+                assertEquals(
+                    countAfterSignal, engine.requestHistory.size,
+                    "wakeLocalWaiters should not trigger additional HTTP calls"
+                )
+            }
+            localNotifier.shutdown()
+        }
+    }
+
     // ── E. Signal coalescing ─────────────────────────────────────────────
 
     @Nested
