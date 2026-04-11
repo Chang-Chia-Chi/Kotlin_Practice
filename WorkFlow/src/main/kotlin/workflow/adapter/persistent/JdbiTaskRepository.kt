@@ -132,7 +132,7 @@ class JdbiTaskRepository(
                     """
                 UPDATE task
                 SET status = 'PENDING', retry_count = 0,
-                    claimed_by = NULL, claimed_at = NULL,
+                    claimed_by = NULL, claimed_at = NULL, stale_at = NULL,
                     completed_at = NULL, result = NULL, not_before = NULL
                 WHERE id = :taskId AND status = 'DEAD_LETTER'
                 """,
@@ -371,7 +371,7 @@ class JdbiTaskRepository(
                 """
             UPDATE task
             SET status = 'PENDING', retry_count = 0,
-                claimed_by = NULL, claimed_at = NULL,
+                claimed_by = NULL, claimed_at = NULL, stale_at = NULL,
                 completed_at = NULL, result = NULL, not_before = NULL
             WHERE workflow_id = :workflowId AND status IN ('DEAD_LETTER', 'FAILED')
             """,
