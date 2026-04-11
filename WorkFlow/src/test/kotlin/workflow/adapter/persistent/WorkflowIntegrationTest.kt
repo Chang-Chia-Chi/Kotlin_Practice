@@ -16,6 +16,7 @@ import com.workflow.workflow.usecase.service.orchestration.DefinitionCache
 import com.workflow.workflow.usecase.service.orchestration.WorkflowWatchdog
 import com.workflow.workflow.usecase.service.orchestration.WorkflowEngine
 import com.workflow.worker.adapter.http.FakeWorkerNotifier
+import com.workflow.infrastructure.persistence.DB_ZONE
 import com.workflow.infrastructure.persistence.OracleTestContainer
 import com.workflow.infrastructure.persistence.inTransactionSuspend
 import com.workflow.workflow.model.WorkflowDefinition
@@ -38,7 +39,6 @@ import java.sql.Clob
 import java.time.Duration
 import java.time.Instant
 import java.time.LocalDateTime
-import java.time.ZoneOffset
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
@@ -134,7 +134,7 @@ class WorkflowIntegrationTest {
         jdbi.useHandle<Exception> { handle ->
             handle.createUpdate("UPDATE workflow SET updated_at = :updatedAt WHERE id = :id")
                 .bind("id", id)
-                .bind("updatedAt", LocalDateTime.ofInstant(updatedAt, ZoneOffset.UTC))
+                .bind("updatedAt", LocalDateTime.ofInstant(updatedAt, DB_ZONE))
                 .execute()
         }
     }
@@ -922,7 +922,7 @@ class WorkflowIntegrationTest {
             h.createUpdate(
                 "UPDATE workflow SET version = version + 1, updated_at = :cutoff WHERE id = :wfId"
             ).bind("wfId", wfId)
-                .bind("cutoff", LocalDateTime.now(ZoneOffset.UTC).minusMinutes(10))
+                .bind("cutoff", LocalDateTime.now(DB_ZONE).minusMinutes(10))
                 .execute()
         }
 

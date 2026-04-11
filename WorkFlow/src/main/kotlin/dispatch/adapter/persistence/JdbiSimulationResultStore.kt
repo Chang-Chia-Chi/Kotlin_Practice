@@ -3,6 +3,7 @@ package com.workflow.dispatch.adapter.persistence
 import com.workflow.dispatch.model.BatchStatus
 import com.workflow.dispatch.model.DispatchDecision
 import com.workflow.dispatch.usecase.port.outbound.persistence.SimulationResultStore
+import com.workflow.infrastructure.persistence.DB_ZONE
 import com.workflow.infrastructure.persistence.caseInsensitive
 import com.workflow.infrastructure.persistence.inTransactionSuspend
 import com.workflow.infrastructure.persistence.withHandleSuspend
@@ -10,7 +11,6 @@ import org.jdbi.v3.core.Jdbi
 import java.math.BigDecimal
 import java.sql.Types
 import java.time.LocalDateTime
-import java.time.ZoneOffset
 import java.time.temporal.ChronoUnit
 
 /**
@@ -27,7 +27,7 @@ class JdbiSimulationResultStore(
 ) : SimulationResultStore {
 
     override suspend fun createBatch(batchToken: String, status: BatchStatus, configCount: Int) {
-        val now = LocalDateTime.now(ZoneOffset.UTC).truncatedTo(ChronoUnit.MICROS)
+        val now = LocalDateTime.now(DB_ZONE).truncatedTo(ChronoUnit.MICROS)
         jdbi.inTransactionSuspend<Unit, Exception> { h ->
             h.createUpdate(
                 "INSERT INTO $batchTable (batch_token, status, created_at, config_count) " +

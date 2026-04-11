@@ -47,10 +47,10 @@ import org.junit.jupiter.api.TestInstance
 import org.junit.jupiter.api.extension.ExtensionContext
 import org.junit.jupiter.api.extension.TestWatcher
 import org.testcontainers.containers.ToxiproxyContainer
+import com.workflow.infrastructure.persistence.DB_ZONE
 import java.time.Duration
 import java.time.Instant
 import java.time.LocalDateTime
-import java.time.ZoneOffset
 import java.time.temporal.ChronoUnit
 import java.util.TreeMap
 import java.util.UUID
@@ -351,7 +351,7 @@ abstract class StressTestBase {
     protected fun updateWorkflowUpdatedAtDirect(workflowId: String, updatedAt: Instant) {
         directJdbi.useHandle<Exception> { handle ->
             handle.createUpdate("UPDATE workflow SET updated_at = :ts WHERE id = :id")
-                .bind("ts", LocalDateTime.ofInstant(updatedAt, ZoneOffset.UTC))
+                .bind("ts", LocalDateTime.ofInstant(updatedAt, DB_ZONE))
                 .bind("id", workflowId)
                 .execute()
         }
@@ -360,7 +360,7 @@ abstract class StressTestBase {
     protected fun updateTaskClaimedAtDirect(taskId: String, claimedAt: Instant) {
         directJdbi.useHandle<Exception> { handle ->
             handle.createUpdate("UPDATE task SET claimed_at = :ts WHERE id = :id")
-                .bind("ts", LocalDateTime.ofInstant(claimedAt, ZoneOffset.UTC))
+                .bind("ts", LocalDateTime.ofInstant(claimedAt, DB_ZONE))
                 .bind("id", taskId)
                 .execute()
         }
@@ -373,8 +373,8 @@ abstract class StressTestBase {
         status: String = "RUNNING",
         deadlineAt: Instant = Instant.now().plus(1, ChronoUnit.HOURS),
     ) {
-        val now = LocalDateTime.ofInstant(Instant.now().truncatedTo(ChronoUnit.MICROS), ZoneOffset.UTC)
-        val deadline = LocalDateTime.ofInstant(deadlineAt.truncatedTo(ChronoUnit.MICROS), ZoneOffset.UTC)
+        val now = LocalDateTime.ofInstant(Instant.now().truncatedTo(ChronoUnit.MICROS), DB_ZONE)
+        val deadline = LocalDateTime.ofInstant(deadlineAt.truncatedTo(ChronoUnit.MICROS), DB_ZONE)
         directJdbi.useHandle<Exception> { handle ->
             handle.createUpdate(
                 """INSERT INTO workflow (id, definition, version, status, created_at, updated_at, deadline_at)
@@ -404,7 +404,7 @@ abstract class StressTestBase {
         maxRetries: Int = 3,
         deadlineAt: Instant? = Instant.now().plus(30, ChronoUnit.MINUTES),
     ): String {
-        val now = LocalDateTime.ofInstant(Instant.now().truncatedTo(ChronoUnit.MICROS), ZoneOffset.UTC)
+        val now = LocalDateTime.ofInstant(Instant.now().truncatedTo(ChronoUnit.MICROS), DB_ZONE)
         directJdbi.useHandle<Exception> { handle ->
             handle.createUpdate(
                 """INSERT INTO task (id, workflow_id, sequence_number, status, handler_key, task_payload, result,
@@ -422,12 +422,12 @@ abstract class StressTestBase {
                 .bind("claimedBy", claimedBy)
                 .apply {
                     if (claimedAt != null) {
-                        bind("claimedAt", LocalDateTime.ofInstant(claimedAt.truncatedTo(ChronoUnit.MICROS), ZoneOffset.UTC))
+                        bind("claimedAt", LocalDateTime.ofInstant(claimedAt.truncatedTo(ChronoUnit.MICROS), DB_ZONE))
                     } else {
                         bindNull("claimedAt", java.sql.Types.TIMESTAMP)
                     }
                     if (deadlineAt != null) {
-                        bind("deadlineAt", LocalDateTime.ofInstant(deadlineAt.truncatedTo(ChronoUnit.MICROS), ZoneOffset.UTC))
+                        bind("deadlineAt", LocalDateTime.ofInstant(deadlineAt.truncatedTo(ChronoUnit.MICROS), DB_ZONE))
                     } else {
                         bindNull("deadlineAt", java.sql.Types.TIMESTAMP)
                     }

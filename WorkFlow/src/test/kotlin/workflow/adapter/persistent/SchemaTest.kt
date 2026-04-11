@@ -1,5 +1,6 @@
 package com.workflow.workflow.adapter.persistent
 
+import com.workflow.infrastructure.persistence.DB_ZONE
 import com.workflow.infrastructure.persistence.OracleTestContainer
 
 import org.jdbi.v3.core.Jdbi
@@ -11,7 +12,6 @@ import org.junit.jupiter.api.TestInstance
 import org.junit.jupiter.api.assertThrows
 import java.time.Instant
 import java.time.LocalDateTime
-import java.time.ZoneOffset
 import java.util.TreeMap
 import java.util.UUID
 import kotlin.test.assertEquals
@@ -52,8 +52,8 @@ class SchemaTest {
         createdAt: Instant = now(),
         updatedAt: Instant = now(),
     ): String {
-        val createdAtLdt = LocalDateTime.ofInstant(createdAt, ZoneOffset.UTC)
-        val updatedAtLdt = LocalDateTime.ofInstant(updatedAt, ZoneOffset.UTC)
+        val createdAtLdt = LocalDateTime.ofInstant(createdAt, DB_ZONE)
+        val updatedAtLdt = LocalDateTime.ofInstant(updatedAt, DB_ZONE)
         val deadlineAtLdt = createdAtLdt.plusHours(1)
         jdbi.useHandle<Exception> { handle ->
             if (version != null) {
@@ -127,11 +127,11 @@ class SchemaTest {
             }
             if (claimedAt != null) {
                 columns.add("claimed_at"); values.add(":claimedAt")
-                bindings["claimedAt"] = LocalDateTime.ofInstant(claimedAt, ZoneOffset.UTC)
+                bindings["claimedAt"] = LocalDateTime.ofInstant(claimedAt, DB_ZONE)
             }
             if (completedAt != null) {
                 columns.add("completed_at"); values.add(":completedAt")
-                bindings["completedAt"] = LocalDateTime.ofInstant(completedAt, ZoneOffset.UTC)
+                bindings["completedAt"] = LocalDateTime.ofInstant(completedAt, DB_ZONE)
             }
             if (retryCount != null) {
                 columns.add("retry_count"); values.add(":retryCount"); bindings["retryCount"] = retryCount
@@ -141,7 +141,7 @@ class SchemaTest {
             }
             if (deadlineAt != null) {
                 columns.add("deadline_at"); values.add(":deadlineAt")
-                bindings["deadlineAt"] = LocalDateTime.ofInstant(deadlineAt, ZoneOffset.UTC)
+                bindings["deadlineAt"] = LocalDateTime.ofInstant(deadlineAt, DB_ZONE)
             }
 
             val sql = "INSERT INTO task (${columns.joinToString()}) VALUES (${values.joinToString()})"
@@ -321,7 +321,7 @@ class SchemaTest {
 
     @Test
     fun workflowNotNullConstraints() {
-        val ts = LocalDateTime.ofInstant(now(), ZoneOffset.UTC)
+        val ts = LocalDateTime.ofInstant(now(), DB_ZONE)
         val dl = ts.plusHours(1)
 
         // null id

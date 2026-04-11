@@ -1,5 +1,6 @@
 package com.workflow.workflow.adapter.persistent
 
+import com.workflow.infrastructure.persistence.DB_ZONE
 import com.workflow.infrastructure.persistence.caseInsensitive
 import com.workflow.infrastructure.persistence.inTransactionSuspend
 import com.workflow.infrastructure.persistence.readClob
@@ -17,7 +18,6 @@ import org.jdbi.v3.core.Jdbi
 import java.sql.Types
 import java.time.Instant
 import java.time.LocalDateTime
-import java.time.ZoneOffset
 
 @ApplicationScoped
 class JdbiTaskRepository(
@@ -35,7 +35,7 @@ class JdbiTaskRepository(
         queueName: String,
     ): List<Task> =
         jdbi.inTransactionSuspend<List<Task>, Exception> { h: Handle ->
-            val now = LocalDateTime.now(ZoneOffset.UTC).truncatedTo(java.time.temporal.ChronoUnit.MICROS)
+            val now = LocalDateTime.now(DB_ZONE).truncatedTo(java.time.temporal.ChronoUnit.MICROS)
             val rows =
                 h
                     .createQuery(
@@ -115,10 +115,10 @@ class JdbiTaskRepository(
                 """,
             ).bind("id", id)
                 .bind("newRetryCount", newRetryCount)
-                .bind("now", LocalDateTime.now(ZoneOffset.UTC).truncatedTo(java.time.temporal.ChronoUnit.MICROS))
+                .bind("now", LocalDateTime.now(DB_ZONE).truncatedTo(java.time.temporal.ChronoUnit.MICROS))
             if (claimedBy != null) update.bind("claimedBy", claimedBy) else update.bindNull("claimedBy", Types.VARCHAR)
             if (claimedAt != null) {
-                update.bind("claimedAt", LocalDateTime.ofInstant(claimedAt, ZoneOffset.UTC))
+                update.bind("claimedAt", LocalDateTime.ofInstant(claimedAt, DB_ZONE))
             } else {
                 update.bindNull("claimedAt", Types.TIMESTAMP)
             }
@@ -151,7 +151,7 @@ class JdbiTaskRepository(
             h
                 .createQuery(
                     "SELECT * FROM task WHERE status = 'PROCESSING' AND deadline_at < :now",
-                ).bind("now", LocalDateTime.ofInstant(now, ZoneOffset.UTC))
+                ).bind("now", LocalDateTime.ofInstant(now, DB_ZONE))
                 .mapToMap()
                 .list()
                 .map(::mapTaskRow)
@@ -168,7 +168,7 @@ class JdbiTaskRepository(
                     not_before = :now + NUMTODSINTERVAL(LEAST(backoff_base * POWER(2, retry_count + 1), backoff_cap), 'SECOND')
                 WHERE status = 'PROCESSING' AND stale_at < :now AND retry_count < max_retries
                 """,
-                ).bind("now", LocalDateTime.ofInstant(now, ZoneOffset.UTC).truncatedTo(java.time.temporal.ChronoUnit.MICROS))
+                ).bind("now", LocalDateTime.ofInstant(now, DB_ZONE).truncatedTo(java.time.temporal.ChronoUnit.MICROS))
                 .execute()
         }
 
@@ -180,7 +180,7 @@ class JdbiTaskRepository(
                 UPDATE task SET status = 'DEAD_LETTER', completed_at = :now
                 WHERE status = 'PROCESSING' AND stale_at < :now AND retry_count >= max_retries
                 """,
-                ).bind("now", LocalDateTime.ofInstant(now, ZoneOffset.UTC).truncatedTo(java.time.temporal.ChronoUnit.MICROS))
+                ).bind("now", LocalDateTime.ofInstant(now, DB_ZONE).truncatedTo(java.time.temporal.ChronoUnit.MICROS))
                 .execute()
         }
 
@@ -247,11 +247,11 @@ class JdbiTaskRepository(
                 """,
                     ).bind("id", id)
                     .bind("status", newStatus.name)
-                    .bind("now", LocalDateTime.now(ZoneOffset.UTC))
+                    .bind("now", LocalDateTime.now(DB_ZONE))
                     .let { if (claimedBy != null) it.bind("claimedBy", claimedBy) else it.bindNull("claimedBy", Types.VARCHAR) }
                     .let {
                         if (claimedAt != null) {
-                            it.bind("claimedAt", LocalDateTime.ofInstant(claimedAt, ZoneOffset.UTC))
+                            it.bind("claimedAt", LocalDateTime.ofInstant(claimedAt, DB_ZONE))
                         } else {
                             it.bindNull("claimedAt", Types.TIMESTAMP)
                         }
@@ -316,7 +316,7 @@ class JdbiTaskRepository(
             """,
         )
             .bind("workflowId", workflowId)
-            .bind("now", LocalDateTime.now(ZoneOffset.UTC).truncatedTo(java.time.temporal.ChronoUnit.MICROS))
+            .bind("now", LocalDateTime.now(DB_ZONE).truncatedTo(java.time.temporal.ChronoUnit.MICROS))
             .execute()
     }
 
@@ -470,7 +470,7 @@ class JdbiTaskRepository(
         value: Instant?,
     ) {
         if (value != null) {
-            stmt.bind(name, LocalDateTime.ofInstant(value, ZoneOffset.UTC))
+            stmt.bind(name, LocalDateTime.ofInstant(value, DB_ZONE))
         } else {
             stmt.bindNull(name, java.sql.Types.TIMESTAMP)
         }

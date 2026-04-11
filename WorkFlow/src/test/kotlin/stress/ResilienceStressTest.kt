@@ -1,5 +1,6 @@
 package com.workflow.stress
 
+import com.workflow.infrastructure.persistence.DB_ZONE
 import com.workflow.workflow.model.workflowId
 import com.workflow.workflow.dsl.workflow
 import com.workflow.worker.usecase.port.inbound.execution.HandlerInput
@@ -171,7 +172,7 @@ class ResilienceStressTest : StressTestBase() {
         directJdbi.useHandle<Exception> { handle ->
             val pastTs = java.time.LocalDateTime.ofInstant(
                 Instant.now().minus(staleTaskThreshold.multipliedBy(2)),
-                java.time.ZoneOffset.UTC,
+                DB_ZONE,
             )
             handle.createUpdate(
                 "UPDATE task SET claimed_at = :ts, stale_at = :ts WHERE status = 'PROCESSING'",

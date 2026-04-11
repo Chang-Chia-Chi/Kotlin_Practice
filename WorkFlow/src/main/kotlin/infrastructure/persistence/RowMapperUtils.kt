@@ -5,6 +5,15 @@ import java.time.Instant
 import java.time.LocalDateTime
 import java.time.ZoneOffset
 
+/**
+ * Wall-clock zone used by the database server. All TIMESTAMP (without time zone) columns
+ * in this schema hold values in this zone — either written by Oracle's `SYSTIMESTAMP`
+ * (e.g. `task.enqueued_at`, `task.claimed_at`, `task.stale_at`) or by JDBC bindings that
+ * convert `Instant` values through this zone. Keeping both paths in the same zone is what
+ * makes JVM-side `:now` parameters comparable to `SYSTIMESTAMP`-sourced column values.
+ */
+val DB_ZONE: ZoneOffset = ZoneOffset.of("+08:00")
+
 fun readClob(value: Any?): String = when (value) {
     is Clob -> value.characterStream.use { it.readText() }
     null -> ""
@@ -12,14 +21,14 @@ fun readClob(value: Any?): String = when (value) {
 }
 
 fun readTimestamp(value: Any?): Instant = when (value) {
-    is LocalDateTime -> value.toInstant(ZoneOffset.UTC)
-    is java.sql.Timestamp -> value.toLocalDateTime().toInstant(ZoneOffset.UTC)
+    is LocalDateTime -> value.toInstant(DB_ZONE)
+    is java.sql.Timestamp -> value.toLocalDateTime().toInstant(DB_ZONE)
     else -> {
         // Oracle JDBC returns oracle.sql.TIMESTAMP — convert via timestampValue()
         val clazz = value?.javaClass
         if (clazz?.name == "oracle.sql.TIMESTAMP") {
             val sqlTs = clazz.getMethod("timestampValue").invoke(value) as java.sql.Timestamp
-            sqlTs.toLocalDateTime().toInstant(ZoneOffset.UTC)
+            sqlTs.toLocalDateTime().toInstant(DB_ZONE)
         } else {
             throw IllegalStateException("Unexpected timestamp type: $clazz")
         }

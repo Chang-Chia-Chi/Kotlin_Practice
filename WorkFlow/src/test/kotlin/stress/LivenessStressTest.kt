@@ -1,5 +1,6 @@
 package com.workflow.stress
 
+import com.workflow.infrastructure.persistence.DB_ZONE
 import com.workflow.workflow.model.TaskStatus
 import com.workflow.workflow.model.WorkflowStatus
 import com.workflow.workflow.model.workflowId
@@ -212,7 +213,7 @@ class LivenessStressTest : StressTestBase() {
             directJdbi.useHandle<Exception> { handle ->
                 val pastTs = java.time.LocalDateTime.ofInstant(
                     Instant.now().minus(staleTaskThreshold.multipliedBy(2)),
-                    java.time.ZoneOffset.UTC,
+                    DB_ZONE,
                 )
                 handle
                     .createUpdate(

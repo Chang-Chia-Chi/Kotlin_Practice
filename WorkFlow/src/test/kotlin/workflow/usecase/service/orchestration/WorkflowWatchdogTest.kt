@@ -17,6 +17,7 @@ import com.workflow.workflow.model.WorkflowRun
 import com.workflow.workflow.model.WorkflowStatus
 import com.workflow.workflow.model.buildSequenceMap
 import com.workflow.worker.adapter.http.FakeWorkerNotifier
+import com.workflow.infrastructure.persistence.DB_ZONE
 import com.workflow.infrastructure.persistence.OracleTestContainer
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -31,7 +32,6 @@ import java.sql.Clob
 import java.time.Duration
 import java.time.Instant
 import java.time.LocalDateTime
-import java.time.ZoneOffset
 import java.time.temporal.ChronoUnit
 import java.util.UUID
 import kotlin.test.assertEquals
@@ -156,9 +156,9 @@ class WorkflowWatchdogTest {
                 .bind("definition", run.definitionJson)
                 .bind("version", run.version)
                 .bind("status", run.status.name)
-                .bind("createdAt", LocalDateTime.ofInstant(run.createdAt, ZoneOffset.UTC))
-                .bind("updatedAt", LocalDateTime.ofInstant(run.updatedAt, ZoneOffset.UTC))
-                .bind("deadlineAt", LocalDateTime.ofInstant(run.deadlineAt, ZoneOffset.UTC))
+                .bind("createdAt", LocalDateTime.ofInstant(run.createdAt, DB_ZONE))
+                .bind("updatedAt", LocalDateTime.ofInstant(run.updatedAt, DB_ZONE))
+                .bind("deadlineAt", LocalDateTime.ofInstant(run.deadlineAt, DB_ZONE))
                 .execute()
         }
     }
@@ -188,7 +188,7 @@ class WorkflowWatchdogTest {
                 if (value != null) stmt.bind(name, value) else stmt.bindNull(name, java.sql.Types.VARCHAR)
 
             fun bindTimestampOrNull(name: String, value: Instant?) =
-                if (value != null) stmt.bind(name, LocalDateTime.ofInstant(value, ZoneOffset.UTC))
+                if (value != null) stmt.bind(name, LocalDateTime.ofInstant(value, DB_ZONE))
                 else stmt.bindNull(name, java.sql.Types.TIMESTAMP)
 
             bindStringOrNull("taskPayload", task.taskPayload)
@@ -284,7 +284,7 @@ class WorkflowWatchdogTest {
         jdbi.useHandle<Exception> { handle ->
             handle.createUpdate("UPDATE workflow SET updated_at = :updatedAt WHERE id = :id")
                 .bind("id", id)
-                .bind("updatedAt", LocalDateTime.ofInstant(updatedAt, ZoneOffset.UTC))
+                .bind("updatedAt", LocalDateTime.ofInstant(updatedAt, DB_ZONE))
                 .execute()
         }
     }
@@ -298,7 +298,7 @@ class WorkflowWatchdogTest {
             )
                 .bind("id", id)
                 .bind("ver", newVersion)
-                .bind("now", LocalDateTime.now(ZoneOffset.UTC))
+                .bind("now", LocalDateTime.now(DB_ZONE))
                 .execute()
         }
     }
@@ -1055,10 +1055,10 @@ class WorkflowWatchdogTest {
     /** Read a nullable Oracle timestamp from raw row data for assertions. */
     private fun readNullableTimestampDirect(value: Any?): Instant? = when (value) {
         null -> null
-        is java.sql.Timestamp -> value.toLocalDateTime().toInstant(ZoneOffset.UTC)
+        is java.sql.Timestamp -> value.toLocalDateTime().toInstant(DB_ZONE)
         else -> {
             val method = value::class.java.getMethod("timestampValue")
-            (method.invoke(value) as java.sql.Timestamp).toLocalDateTime().toInstant(ZoneOffset.UTC)
+            (method.invoke(value) as java.sql.Timestamp).toLocalDateTime().toInstant(DB_ZONE)
         }
     }
 

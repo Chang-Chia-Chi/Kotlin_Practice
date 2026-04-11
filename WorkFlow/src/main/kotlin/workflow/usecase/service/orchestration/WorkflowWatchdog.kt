@@ -1,6 +1,7 @@
 package com.workflow.workflow.usecase.service.orchestration
 
 import com.workflow.infrastructure.leader.NotLeader
+import com.workflow.infrastructure.persistence.DB_ZONE
 import com.workflow.infrastructure.persistence.inTransactionSuspend
 import com.workflow.workflow.config.WatchdogConfig
 import com.workflow.workflow.model.TaskCompletionEvent
@@ -15,7 +16,6 @@ import org.jdbi.v3.core.Jdbi
 import org.slf4j.LoggerFactory
 import java.time.Instant
 import java.time.LocalDateTime
-import java.time.ZoneOffset
 import java.time.temporal.ChronoUnit
 
 @ApplicationScoped
@@ -96,7 +96,7 @@ class WorkflowWatchdog(
     private suspend fun expireOverdueWorkflows() {
         val (timedOutCount, cancelledCount) =
             jdbi.inTransactionSuspend<Pair<Int, Int>, Exception> { handle ->
-                val now = LocalDateTime.now(ZoneOffset.UTC).truncatedTo(ChronoUnit.MICROS)
+                val now = LocalDateTime.now(DB_ZONE).truncatedTo(ChronoUnit.MICROS)
                 val cancelled = taskRepo.cancelTasksForOverdueWorkflowsWithHandle(handle, now)
                 val timedOut = workflowRepo.expireOverdueWithHandle(handle, now)
                 timedOut to cancelled

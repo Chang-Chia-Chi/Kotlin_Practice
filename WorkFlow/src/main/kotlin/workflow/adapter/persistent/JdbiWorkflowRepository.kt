@@ -1,5 +1,6 @@
 package com.workflow.workflow.adapter.persistent
 
+import com.workflow.infrastructure.persistence.DB_ZONE
 import com.workflow.infrastructure.persistence.caseInsensitive
 import com.workflow.infrastructure.persistence.inTransactionSuspend
 import com.workflow.infrastructure.persistence.readClob
@@ -14,7 +15,6 @@ import org.jdbi.v3.core.Jdbi
 import java.time.Duration
 import java.time.Instant
 import java.time.LocalDateTime
-import java.time.ZoneOffset
 import java.time.temporal.ChronoUnit
 
 @ApplicationScoped
@@ -34,7 +34,7 @@ class JdbiWorkflowRepository(private val jdbi: Jdbi) : WorkflowRepository {
 
     override suspend fun findStuck(gracePeriod: Duration): List<WorkflowRun> =
         jdbi.withHandleSuspend<List<WorkflowRun>, Exception> { h: Handle ->
-            val cutoff = LocalDateTime.ofInstant(Instant.now().minus(gracePeriod), ZoneOffset.UTC)
+            val cutoff = LocalDateTime.ofInstant(Instant.now().minus(gracePeriod), DB_ZONE)
             h.createQuery(
                 """
                 WITH max_seq AS (
@@ -78,9 +78,9 @@ class JdbiWorkflowRepository(private val jdbi: Jdbi) : WorkflowRepository {
             .bind("definition", run.definitionJson)
             .bind("version", run.version)
             .bind("status", run.status.name)
-            .bind("createdAt", LocalDateTime.ofInstant(run.createdAt, ZoneOffset.UTC))
-            .bind("updatedAt", LocalDateTime.ofInstant(run.updatedAt, ZoneOffset.UTC))
-            .bind("deadlineAt", LocalDateTime.ofInstant(run.deadlineAt, ZoneOffset.UTC))
+            .bind("createdAt", LocalDateTime.ofInstant(run.createdAt, DB_ZONE))
+            .bind("updatedAt", LocalDateTime.ofInstant(run.updatedAt, DB_ZONE))
+            .bind("deadlineAt", LocalDateTime.ofInstant(run.deadlineAt, DB_ZONE))
             .execute()
     }
 
@@ -105,7 +105,7 @@ class JdbiWorkflowRepository(private val jdbi: Jdbi) : WorkflowRepository {
             "UPDATE workflow SET version = version + 1, updated_at = :now WHERE id = :id",
         )
             .bind("id", id)
-            .bind("now", LocalDateTime.now(ZoneOffset.UTC).truncatedTo(ChronoUnit.MICROS))
+            .bind("now", LocalDateTime.now(DB_ZONE).truncatedTo(ChronoUnit.MICROS))
             .execute()
     }
 
@@ -122,7 +122,7 @@ class JdbiWorkflowRepository(private val jdbi: Jdbi) : WorkflowRepository {
             .bind("id", id)
             .bind("status", newStatus.name)
             .bind("expectedStatus", expectedStatus.name)
-            .bind("now", LocalDateTime.now(ZoneOffset.UTC).truncatedTo(ChronoUnit.MICROS))
+            .bind("now", LocalDateTime.now(DB_ZONE).truncatedTo(ChronoUnit.MICROS))
             .execute()
         return count == 1
     }
@@ -143,9 +143,9 @@ class JdbiWorkflowRepository(private val jdbi: Jdbi) : WorkflowRepository {
             .bind("definition", run.definitionJson)
             .bind("version", run.version)
             .bind("status", run.status.name)
-            .bind("createdAt", LocalDateTime.ofInstant(run.createdAt, ZoneOffset.UTC))
-            .bind("updatedAt", LocalDateTime.ofInstant(run.updatedAt, ZoneOffset.UTC))
-            .bind("deadlineAt", LocalDateTime.ofInstant(run.deadlineAt, ZoneOffset.UTC))
+            .bind("createdAt", LocalDateTime.ofInstant(run.createdAt, DB_ZONE))
+            .bind("updatedAt", LocalDateTime.ofInstant(run.updatedAt, DB_ZONE))
+            .bind("deadlineAt", LocalDateTime.ofInstant(run.deadlineAt, DB_ZONE))
             .execute()
 
         if (count == 1) return run.id to true

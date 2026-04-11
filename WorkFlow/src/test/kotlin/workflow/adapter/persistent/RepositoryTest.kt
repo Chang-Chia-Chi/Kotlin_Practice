@@ -1,5 +1,6 @@
 package com.workflow.workflow.adapter.persistent
 
+import com.workflow.infrastructure.persistence.DB_ZONE
 import com.workflow.infrastructure.persistence.OracleTestContainer
 
 import com.workflow.workflow.adapter.persistent.JdbiTaskRepository
@@ -20,7 +21,6 @@ import org.junit.jupiter.api.TestInstance
 import java.time.Duration
 import java.time.Instant
 import java.time.LocalDateTime
-import java.time.ZoneOffset
 import java.time.temporal.ChronoUnit
 import java.util.UUID
 import kotlin.test.assertEquals
@@ -128,9 +128,9 @@ class RepositoryTest {
                 .bind("definition", run.definitionJson)
                 .bind("version", run.version)
                 .bind("status", run.status.name)
-                .bind("createdAt", LocalDateTime.ofInstant(run.createdAt, ZoneOffset.UTC))
-                .bind("updatedAt", LocalDateTime.ofInstant(run.updatedAt, ZoneOffset.UTC))
-                .bind("deadlineAt", LocalDateTime.ofInstant(run.deadlineAt, ZoneOffset.UTC))
+                .bind("createdAt", LocalDateTime.ofInstant(run.createdAt, DB_ZONE))
+                .bind("updatedAt", LocalDateTime.ofInstant(run.updatedAt, DB_ZONE))
+                .bind("deadlineAt", LocalDateTime.ofInstant(run.deadlineAt, DB_ZONE))
                 .execute()
         }
     }
@@ -163,7 +163,7 @@ class RepositoryTest {
             fun bindStringOrNull(name: String, value: String?) =
                 if (value != null) stmt.bind(name, value) else stmt.bindNull(name, java.sql.Types.VARCHAR)
             fun bindTimestampOrNull(name: String, value: Instant?) =
-                if (value != null) stmt.bind(name, LocalDateTime.ofInstant(value, ZoneOffset.UTC))
+                if (value != null) stmt.bind(name, LocalDateTime.ofInstant(value, DB_ZONE))
                 else stmt.bindNull(name, java.sql.Types.TIMESTAMP)
 
             bindStringOrNull("taskPayload", task.taskPayload)
@@ -178,7 +178,7 @@ class RepositoryTest {
             stmt.bind("staleThresholdSecs", task.staleThresholdSecs)
             bindTimestampOrNull("staleAt", task.staleAt)
             if (enqueuedAt != null) {
-                stmt.bind("enqueuedAt", LocalDateTime.ofInstant(enqueuedAt, ZoneOffset.UTC))
+                stmt.bind("enqueuedAt", LocalDateTime.ofInstant(enqueuedAt, DB_ZONE))
             }
 
             stmt.execute()
@@ -1312,11 +1312,11 @@ class RepositoryTest {
         /** Read a nullable Oracle timestamp from raw row data for assertions. */
         private fun readNullableTimestampDirect(value: Any?): Instant? = when (value) {
             null -> null
-            is java.sql.Timestamp -> value.toLocalDateTime().toInstant(ZoneOffset.UTC)
+            is java.sql.Timestamp -> value.toLocalDateTime().toInstant(DB_ZONE)
             else -> {
                 // Oracle JDBC returns oracle.sql.TIMESTAMP — use reflection
                 val method = value::class.java.getMethod("timestampValue")
-                (method.invoke(value) as java.sql.Timestamp).toLocalDateTime().toInstant(ZoneOffset.UTC)
+                (method.invoke(value) as java.sql.Timestamp).toLocalDateTime().toInstant(DB_ZONE)
             }
         }
 
@@ -1568,7 +1568,7 @@ class RepositoryTest {
                 val raw = handle.createQuery("SELECT CAST(SYSTIMESTAMP AS TIMESTAMP) FROM DUAL")
                     .mapTo(java.sql.Timestamp::class.java)
                     .one()
-                raw.toLocalDateTime().toInstant(ZoneOffset.UTC)
+                raw.toLocalDateTime().toInstant(DB_ZONE)
             }
         }
 
