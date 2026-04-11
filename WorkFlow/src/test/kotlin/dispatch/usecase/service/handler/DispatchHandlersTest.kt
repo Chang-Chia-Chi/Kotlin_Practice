@@ -43,7 +43,7 @@ class DispatchHandlersTest {
                     siteTargets = listOf(SiteTarget("A", BigDecimal("100"))),
                     bomMappings = null,
                 )
-            whenever(configRepo.findActiveConfigs(any())).thenReturn(listOf(config))
+            whenever(configRepo.findActiveConfigs(any(), any())).thenReturn(listOf(config))
 
             val handler = DispatchScatterHandler(configRepo, resultStore, objectMapper, SystemBatchTokenClock())
             val output =
@@ -103,7 +103,7 @@ class DispatchHandlersTest {
             assertNotNull(output.result)
             assertEquals("custom-token", objectMapper.readTree(output.result)["batchToken"].asText())
 
-            verify(configRepo, never()).findActiveConfigs(any())
+            verify(configRepo, never()).findActiveConfigs(any(), any())
             verify(resultStore, never()).createBatch(any(), any(), any())
         }
 
@@ -122,7 +122,7 @@ class DispatchHandlersTest {
                     siteTargets = listOf(SiteTarget("A", BigDecimal("100"))),
                     bomMappings = null,
                 )
-            whenever(configRepo.findActiveConfigs(any())).thenReturn(listOf(config))
+            whenever(configRepo.findActiveConfigs(any(), any())).thenReturn(listOf(config))
 
             val handler =
                 DispatchScatterHandler(configRepo, resultStore, objectMapper, BatchTokenClock { "20260404140000" })
@@ -136,7 +136,7 @@ class DispatchHandlersTest {
             assertNotNull(output.result)
             assertEquals("20260404140000", objectMapper.readTree(output.result)["batchToken"].asText())
 
-            verify(configRepo).findActiveConfigs(any())
+            verify(configRepo).findActiveConfigs(any(), any())
             verify(configRepo, never()).findById(any())
             verify(resultStore).createBatch(eq("20260404140000"), eq(BatchStatus.NORMAL), eq(1))
         }

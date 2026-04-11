@@ -121,7 +121,7 @@ class DispatchE2EHappyPathTest {
     private suspend fun setupMocks() {
         val configs = fixture.configs()
 
-        whenever(configRepo.findActiveConfigs(any<LocalDateTime>())).thenReturn(configs)
+        whenever(configRepo.findActiveConfigs(any<LocalDateTime>(), any())).thenReturn(configs)
         for (config in configs) {
             whenever(configRepo.findById(config.id)).thenReturn(config)
             whenever(candidateRepo.queryCandidates(config)).thenReturn(fixture.candidates(config.id))

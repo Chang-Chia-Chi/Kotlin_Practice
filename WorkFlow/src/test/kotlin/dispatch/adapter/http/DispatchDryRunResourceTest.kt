@@ -61,7 +61,7 @@ class DispatchDryRunResourceTest {
             initialItem = argThat { contains("cfg1") && contains("cfg2") },
         )
         // configRepo must NOT be queried when configIds is provided
-        verify(configRepo, never()).findActiveConfigs(any())
+        verify(configRepo, never()).findActiveConfigs(any(), any())
     }
 
     @Test
@@ -125,14 +125,14 @@ class DispatchDryRunResourceTest {
             siteTargets = listOf(SiteTarget("A", BigDecimal("100"))),
             bomMappings = null,
         )
-        whenever(configRepo.findActiveConfigs(any())).thenReturn(listOf(config))
+        whenever(configRepo.findActiveConfigs(any(), any())).thenReturn(listOf(config))
         whenever(workflowEngine.startWorkflow(any(), any(), any())).thenReturn(StartResult.Created("w1"))
 
         val resource = DispatchDryRunResource(resultStore, workflowEngine, configRepo, objectMapper)
 
         val response = resource.dryRun(DryRunRequest(configIds = null))
 
-        verify(configRepo).findActiveConfigs(any())
+        verify(configRepo).findActiveConfigs(any(), any())
         verify(resultStore).createBatch(any(), eq(BatchStatus.DRYRUN), eq(1))
         verify(workflowEngine).startWorkflow(
             definition = any(),
@@ -168,7 +168,7 @@ class DispatchDryRunResourceTest {
                 bomMappings = null,
             ),
         )
-        whenever(configRepo.findActiveConfigs(any())).thenReturn(configs)
+        whenever(configRepo.findActiveConfigs(any(), any())).thenReturn(configs)
         whenever(workflowEngine.startWorkflow(any(), any(), any())).thenReturn(StartResult.Created("w2"))
 
         val resource = DispatchDryRunResource(resultStore, workflowEngine, configRepo, objectMapper)
@@ -196,7 +196,7 @@ class DispatchDryRunResourceTest {
         val resultStore = mock<SimulationResultStore>()
         val workflowEngine = mock<WorkflowLifecycle>()
         val configRepo = mock<DispatchConfigRepository>()
-        whenever(configRepo.findActiveConfigs(any())).thenReturn(emptyList())
+        whenever(configRepo.findActiveConfigs(any(), any())).thenReturn(emptyList())
 
         val resource = DispatchDryRunResource(resultStore, workflowEngine, configRepo, objectMapper)
 
@@ -222,7 +222,7 @@ class DispatchDryRunResourceTest {
         assertFailsWith<BadRequestException> {
             resource.dryRun(DryRunRequest(configIds = emptyList()))
         }
-        verify(configRepo, never()).findActiveConfigs(any())
+        verify(configRepo, never()).findActiveConfigs(any(), any())
         verify(resultStore, never()).createBatch(any(), any(), any())
         verify(workflowEngine, never()).startWorkflow(any(), any(), any())
     }
