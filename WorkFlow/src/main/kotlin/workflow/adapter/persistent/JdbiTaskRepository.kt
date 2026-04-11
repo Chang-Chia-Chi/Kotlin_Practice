@@ -469,11 +469,11 @@ class JdbiTaskRepository(
         name: String,
         value: Instant?,
     ) {
-        if (value != null) {
-            stmt.bind(name, LocalDateTime.ofInstant(value, DB_ZONE))
-        } else {
-            stmt.bindNull(name, java.sql.Types.TIMESTAMP)
-        }
+        // Use bindByType so nulls carry a concrete Java type. JDBI PreparedBatch caches
+        // the argument factory from the first bound row; a plain bindNull registers
+        // NullArgument, which then conflicts with real LocalDateTime values in later rows.
+        val ldt: LocalDateTime? = value?.let { LocalDateTime.ofInstant(it, DB_ZONE) }
+        stmt.bindByType(name, ldt, LocalDateTime::class.java)
     }
 
     private fun mapTaskRow(row: Map<String, Any?>): Task {
