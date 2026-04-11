@@ -247,6 +247,7 @@ private fun bfsDispatch(
         if (edgeTaken) {
             val task = createTaskForActivity(
                 snapshot.workflowId, successor.activityName, sSeq, successor.activity, snapshot.now,
+                staleThresholdSecs = snapshot.definition.staleThreshold.seconds.toInt(),
             )
             pendingInserts += task
             visitedSeqs += sSeq

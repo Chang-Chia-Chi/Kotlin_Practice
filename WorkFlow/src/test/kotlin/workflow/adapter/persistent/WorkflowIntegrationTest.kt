@@ -56,14 +56,12 @@ class WorkflowIntegrationTest {
     private lateinit var watchdog: WorkflowWatchdog
 
     private val gracePeriod = Duration.ofMinutes(2)
-    private val staleTaskThreshold = Duration.ofMinutes(10)
 
     private val notifier = FakeWorkerNotifier()
 
     private val testWatchdogConfig = object : WatchdogConfig {
         override fun interval(): Duration = Duration.ofSeconds(30)
         override fun gracePeriod(): Duration = gracePeriod
-        override fun staleTaskThreshold(): Duration = staleTaskThreshold
     }
 
     @BeforeAll

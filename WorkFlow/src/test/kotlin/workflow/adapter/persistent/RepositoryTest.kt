@@ -93,6 +93,8 @@ class RepositoryTest {
         notBefore: Instant? = null,
         backoffBase: Int = 1,
         backoffCap: Int = 300,
+        staleThresholdSecs: Int = 600,
+        staleAt: Instant? = claimedAt?.plusSeconds(staleThresholdSecs.toLong()),
     ) = Task(
         id = id,
         workflowId = workflowId,
@@ -111,6 +113,8 @@ class RepositoryTest {
         notBefore = notBefore,
         backoffBase = backoffBase,
         backoffCap = backoffCap,
+        staleThresholdSecs = staleThresholdSecs,
+        staleAt = staleAt,
     )
 
     /** Insert a workflow directly via SQL for test setup (independent of repo under test). */
@@ -137,13 +141,13 @@ class RepositoryTest {
             val columns = buildString {
                 append("id, workflow_id, sequence_number, status, handler_key, task_payload, result, ")
                 append("claimed_by, claimed_at, completed_at, retry_count, max_retries, deadline_at, not_before, ")
-                append("backoff_base, backoff_cap")
+                append("backoff_base, backoff_cap, stale_threshold_secs, stale_at")
                 if (enqueuedAt != null) append(", enqueued_at")
             }
             val values = buildString {
                 append(":id, :workflowId, :sequenceNumber, :status, :handlerKey, :taskPayload, :result, ")
                 append(":claimedBy, :claimedAt, :completedAt, :retryCount, :maxRetries, :deadlineAt, :notBefore, ")
-                append(":backoffBase, :backoffCap")
+                append(":backoffBase, :backoffCap, :staleThresholdSecs, :staleAt")
                 if (enqueuedAt != null) append(", :enqueuedAt")
             }
             val stmt = handle.createUpdate("INSERT INTO task ($columns) VALUES ($values)")
@@ -171,6 +175,8 @@ class RepositoryTest {
             bindTimestampOrNull("notBefore", task.notBefore)
             stmt.bind("backoffBase", task.backoffBase)
             stmt.bind("backoffCap", task.backoffCap)
+            stmt.bind("staleThresholdSecs", task.staleThresholdSecs)
+            bindTimestampOrNull("staleAt", task.staleAt)
             if (enqueuedAt != null) {
                 stmt.bind("enqueuedAt", LocalDateTime.ofInstant(enqueuedAt, ZoneOffset.UTC))
             }
@@ -998,13 +1004,15 @@ class RepositoryTest {
             val wf = makeWorkflow()
             workflowRepo.insert(wf)
 
-            val threshold = now().minus(Duration.ofMinutes(10))
-            // Exhausted: retryCount >= maxRetries, claimed before threshold
+            val nowRef = now()
+            val pastStaleAt = nowRef.minus(Duration.ofMinutes(5))
+            // Exhausted: retryCount >= maxRetries, stale_at in the past
             val exhausted = makeTask(
                 workflowId = wf.id,
                 status = TaskStatus.PROCESSING,
                 claimedBy = "worker-1",
-                claimedAt = threshold.minus(Duration.ofMinutes(5)),
+                claimedAt = nowRef.minus(Duration.ofMinutes(15)),
+                staleAt = pastStaleAt,
                 retryCount = 3,
                 maxRetries = 3,
             )
@@ -1013,16 +1021,18 @@ class RepositoryTest {
                 workflowId = wf.id,
                 status = TaskStatus.PROCESSING,
                 claimedBy = "worker-2",
-                claimedAt = threshold.minus(Duration.ofMinutes(5)),
+                claimedAt = nowRef.minus(Duration.ofMinutes(15)),
+                staleAt = pastStaleAt,
                 retryCount = 1,
                 maxRetries = 3,
             )
-            // Not stale: claimed recently
+            // Not stale: stale_at in the future
             val fresh = makeTask(
                 workflowId = wf.id,
                 status = TaskStatus.PROCESSING,
                 claimedBy = "worker-3",
-                claimedAt = now(),
+                claimedAt = nowRef,
+                staleAt = nowRef.plus(Duration.ofMinutes(10)),
                 retryCount = 3,
                 maxRetries = 3,
             )
@@ -1030,7 +1040,7 @@ class RepositoryTest {
             insertTaskDirect(retriable)
             insertTaskDirect(fresh)
 
-            val count = taskRepo.deadLetterExhaustedTasks(threshold)
+            val count = taskRepo.deadLetterExhaustedTasks(nowRef)
 
             assertEquals(1, count)
             val row = readTaskDirect(exhausted.id)!!

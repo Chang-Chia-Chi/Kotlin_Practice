@@ -169,12 +169,13 @@ class ResilienceStressTest : StressTestBase() {
 
         // Age stale tasks past threshold
         directJdbi.useHandle<Exception> { handle ->
-            handle.createUpdate(
-                "UPDATE task SET claimed_at = :ts WHERE status = 'PROCESSING'",
-            ).bind("ts", java.time.LocalDateTime.ofInstant(
+            val pastTs = java.time.LocalDateTime.ofInstant(
                 Instant.now().minus(staleTaskThreshold.multipliedBy(2)),
                 java.time.ZoneOffset.UTC,
-            )).execute()
+            )
+            handle.createUpdate(
+                "UPDATE task SET claimed_at = :ts, stale_at = :ts WHERE status = 'PROCESSING'",
+            ).bind("ts", pastTs).execute()
         }
 
         // Restart fresh workers

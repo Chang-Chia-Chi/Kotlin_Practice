@@ -171,6 +171,7 @@ class IdempotencyStressTest : StressTestBase() {
     @Test
     fun `I4 - stale reclaim races with task completion - no corruption`() = runBlocking(Dispatchers.Default) {
         val def = workflow {
+            staleThreshold(staleTaskThreshold)
             activity("step1") { transition("i4.handler"); retries(3) }
         }
         val wfId = engine.startWorkflow(def).workflowId

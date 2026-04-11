@@ -40,6 +40,8 @@ CREATE TABLE task (
     trigger_type     VARCHAR2(50),
     trigger_meta     CLOB,
     fan_out_payloads  CLOB,
+    stale_threshold_secs NUMBER         DEFAULT 600  NOT NULL,
+    stale_at             TIMESTAMP,
     CONSTRAINT pk_task PRIMARY KEY (id),
     CONSTRAINT fk_task_workflow FOREIGN KEY (workflow_id) REFERENCES workflow (id),
     CONSTRAINT chk_task_status CHECK (status IN (
@@ -52,6 +54,6 @@ CREATE INDEX idx_task_wf_seq_status      ON task (workflow_id, sequence_number, 
 CREATE INDEX idx_task_status_deadline    ON task (status, deadline_at);
 CREATE INDEX idx_task_not_before         ON task (status, not_before);
 CREATE INDEX idx_task_pending_enqueued   ON task (status, enqueued_at, id);
-CREATE INDEX idx_task_processing_claimed ON task (status, claimed_at);
+CREATE INDEX idx_task_stale_at           ON task (status, stale_at);
 CREATE INDEX idx_task_queue_status       ON task (queue_name, status, not_before, claimed_at);
 CREATE INDEX idx_task_deferred           ON task (status, trigger_type);

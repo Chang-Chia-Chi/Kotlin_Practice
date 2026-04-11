@@ -60,7 +60,11 @@ class WorkflowEngine(
         if (idempotencyKey == null) {
             val queueName = jdbi.inTransactionSuspend<String, Exception> { handle ->
                 workflowRepo.insertWithHandle(handle, run)
-                val task = createTaskForActivity(workflowId, startSeqInfo.activityName, startSeqInfo.sequenceNumber, startSeqInfo.activity, now, initialItem)
+                val task = createTaskForActivity(
+                    workflowId, startSeqInfo.activityName, startSeqInfo.sequenceNumber,
+                    startSeqInfo.activity, now, initialItem,
+                    staleThresholdSecs = definition.staleThreshold.seconds.toInt(),
+                )
                 taskRepo.insertBatchWithHandle(handle, listOf(task))
                 startSeqInfo.activity.queue
             }
@@ -72,7 +76,11 @@ class WorkflowEngine(
         val (mergeId, created, queueName) = jdbi.inTransactionSuspend<IdempotentResult, Exception> { handle ->
             val (mId, isNew) = workflowRepo.mergeIdempotentWithHandle(handle, run, idempotencyKey)
             if (isNew) {
-                val task = createTaskForActivity(mId, startSeqInfo.activityName, startSeqInfo.sequenceNumber, startSeqInfo.activity, now, initialItem)
+                val task = createTaskForActivity(
+                    mId, startSeqInfo.activityName, startSeqInfo.sequenceNumber,
+                    startSeqInfo.activity, now, initialItem,
+                    staleThresholdSecs = definition.staleThreshold.seconds.toInt(),
+                )
                 taskRepo.insertBatchWithHandle(handle, listOf(task))
                 IdempotentResult(mId, true, startSeqInfo.activity.queue)
             } else {

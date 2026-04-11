@@ -142,7 +142,6 @@ abstract class StressTestBase {
         object : WatchdogConfig {
             override fun interval() = this@StressTestBase.sweepInterval
             override fun gracePeriod() = this@StressTestBase.gracePeriod
-            override fun staleTaskThreshold() = this@StressTestBase.staleTaskThreshold
         }
     }
 

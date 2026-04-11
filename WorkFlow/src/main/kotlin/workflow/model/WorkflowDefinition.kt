@@ -6,10 +6,12 @@ data class WorkflowDefinition(
     val activities: Map<String, ActivityDefinition>,
     val start: String,
     val deadline: Duration = Duration.ofHours(1),
+    val staleThreshold: Duration = Duration.ofMinutes(10),
 ) {
     init {
         require(activities.isNotEmpty()) { "Workflow must have at least one activity" }
         require(deadline > Duration.ZERO) { "Workflow deadline must be positive" }
+        require(staleThreshold > Duration.ZERO) { "Stale threshold must be positive" }
         require(start in activities) { "Start activity '$start' not found in activities" }
 
         for ((name, activity) in activities) {

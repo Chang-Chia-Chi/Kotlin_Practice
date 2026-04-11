@@ -204,6 +204,23 @@ class WorkflowDslBuildersTest {
     }
 
     @Test
+    fun `workflow staleThreshold defaults to 10 minutes`() {
+        val def = workflow {
+            activity("step") { transition("h") }
+        }
+        assertEquals(Duration.ofMinutes(10), def.staleThreshold)
+    }
+
+    @Test
+    fun `workflow staleThreshold customizable`() {
+        val def = workflow {
+            staleThreshold(Duration.ofMinutes(5))
+            activity("step") { transition("h") }
+        }
+        assertEquals(Duration.ofMinutes(5), def.staleThreshold)
+    }
+
+    @Test
     fun `BranchBuilder supports multiple next() calls for fork on label`() {
         val def = workflow {
             activity("charge") {

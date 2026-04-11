@@ -64,7 +64,8 @@ class JdbiTaskRepository(
             h
                 .createUpdate(
                     """
-                UPDATE task SET status = 'PROCESSING', claimed_by = :workerId, claimed_at = SYSTIMESTAMP
+                UPDATE task SET status = 'PROCESSING', claimed_by = :workerId, claimed_at = SYSTIMESTAMP,
+                    stale_at = SYSTIMESTAMP + NUMTODSINTERVAL(stale_threshold_secs, 'SECOND')
                 WHERE id IN (<ids>)
                 """,
                 ).bind("workerId", workerId)
@@ -105,7 +106,7 @@ class JdbiTaskRepository(
             val update = h.createUpdate(
                 """
                 UPDATE task
-                SET status = 'PENDING', claimed_by = NULL, claimed_at = NULL,
+                SET status = 'PENDING', claimed_by = NULL, claimed_at = NULL, stale_at = NULL,
                     retry_count = :newRetryCount,
                     not_before = :now + NUMTODSINTERVAL(LEAST(backoff_base * POWER(2, :newRetryCount), backoff_cap), 'SECOND')
                 WHERE id = :id
@@ -156,32 +157,30 @@ class JdbiTaskRepository(
                 .map(::mapTaskRow)
         }
 
-    override suspend fun resetStaleTasks(staleThreshold: Instant): Int =
+    override suspend fun resetStaleTasks(now: Instant): Int =
         jdbi.inTransactionSuspend<Int, Exception> { h: Handle ->
             h
                 .createUpdate(
                     """
                 UPDATE task
-                SET status = 'PENDING', claimed_by = NULL, claimed_at = NULL,
+                SET status = 'PENDING', claimed_by = NULL, claimed_at = NULL, stale_at = NULL,
                     retry_count = retry_count + 1,
                     not_before = :now + NUMTODSINTERVAL(LEAST(backoff_base * POWER(2, retry_count + 1), backoff_cap), 'SECOND')
-                WHERE status = 'PROCESSING' AND claimed_at < :threshold AND retry_count < max_retries
+                WHERE status = 'PROCESSING' AND stale_at < :now AND retry_count < max_retries
                 """,
-                ).bind("threshold", LocalDateTime.ofInstant(staleThreshold, ZoneOffset.UTC))
-                .bind("now", LocalDateTime.now(ZoneOffset.UTC).truncatedTo(java.time.temporal.ChronoUnit.MICROS))
+                ).bind("now", LocalDateTime.ofInstant(now, ZoneOffset.UTC).truncatedTo(java.time.temporal.ChronoUnit.MICROS))
                 .execute()
         }
 
-    override suspend fun deadLetterExhaustedTasks(staleThreshold: Instant): Int =
+    override suspend fun deadLetterExhaustedTasks(now: Instant): Int =
         jdbi.inTransactionSuspend<Int, Exception> { h: Handle ->
             h
                 .createUpdate(
                     """
                 UPDATE task SET status = 'DEAD_LETTER', completed_at = :now
-                WHERE status = 'PROCESSING' AND claimed_at < :threshold AND retry_count >= max_retries
+                WHERE status = 'PROCESSING' AND stale_at < :now AND retry_count >= max_retries
                 """,
-                ).bind("now", LocalDateTime.now(ZoneOffset.UTC).truncatedTo(java.time.temporal.ChronoUnit.MICROS))
-                .bind("threshold", LocalDateTime.ofInstant(staleThreshold, ZoneOffset.UTC))
+                ).bind("now", LocalDateTime.ofInstant(now, ZoneOffset.UTC).truncatedTo(java.time.temporal.ChronoUnit.MICROS))
                 .execute()
         }
 
@@ -328,11 +327,11 @@ class JdbiTaskRepository(
             INSERT INTO task (id, workflow_id, activity_name, sequence_number, status, handler_key,
                               task_payload, result, fan_out_payloads, claimed_by, claimed_at, completed_at,
                               retry_count, max_retries, deadline_at, not_before, backoff_base, backoff_cap, queue_name,
-                              trigger_type, trigger_meta)
+                              trigger_type, trigger_meta, stale_threshold_secs)
             VALUES (:id, :workflowId, :activityName, :sequenceNumber, :status, :handlerKey,
                     :taskPayload, :result, :fanOutPayloads, :claimedBy, :claimedAt, :completedAt,
                     :retryCount, :maxRetries, :deadlineAt, :notBefore, :backoffBase, :backoffCap, :queueName,
-                    :triggerType, :triggerMeta)
+                    :triggerType, :triggerMeta, :staleThresholdSecs)
             """,
         )
         for (task in tasks) {
@@ -360,6 +359,7 @@ class JdbiTaskRepository(
                 .bind("queueName", task.queueName)
             if (task.triggerType != null) batch.bind("triggerType", task.triggerType) else batch.bindNull("triggerType", Types.VARCHAR)
             bindNullableClob(batch, "triggerMeta", task.triggerMeta)
+            batch.bind("staleThresholdSecs", task.staleThresholdSecs)
             batch.add()
         }
         batch.execute()
@@ -501,6 +501,8 @@ class JdbiTaskRepository(
             triggerType = ci["TRIGGER_TYPE"] as? String,
             triggerMeta = ci["TRIGGER_META"]?.let { readClob(it) },
             fanOutPayloadsJson = ci["FAN_OUT_PAYLOADS"]?.let { readClob(it) },
+            staleThresholdSecs = (ci["STALE_THRESHOLD_SECS"] as Number).toInt(),
+            staleAt = readNullableTimestamp(ci["STALE_AT"]),
         )
     }
 }

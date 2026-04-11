@@ -124,6 +124,7 @@ class WorkflowBuilder {
     private val activities = mutableMapOf<String, ActivityDefinition>()
     private var startName: String? = null
     private var deadline: Duration = Duration.ofHours(1)
+    private var staleThreshold: Duration = Duration.ofMinutes(10)
 
     fun start(name: String) { startName = name }
 
@@ -134,12 +135,15 @@ class WorkflowBuilder {
 
     fun deadline(d: Duration) { deadline = d }
 
+    fun staleThreshold(d: Duration) { staleThreshold = d }
+
     fun build(): WorkflowDefinition {
         require(activities.isNotEmpty()) { "Workflow must have at least one activity" }
         return WorkflowDefinition(
             activities = activities.toMap(),
             start = requireNotNull(startName) { "Workflow start activity is required" },
             deadline = deadline,
+            staleThreshold = staleThreshold,
         )
     }
 }

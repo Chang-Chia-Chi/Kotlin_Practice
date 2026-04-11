@@ -120,6 +120,7 @@ class DefaultPhaseGate(
                                     decision.parallelInfo.activity,
                                     snapshot.now,
                                     taskPayload = assembleChildItem(it, resultJson),
+                                    staleThresholdSecs = snapshot.definition.staleThreshold.seconds.toInt(),
                                 )
                             }
                         taskRepo.insertBatchWithHandle(handle, parallelTasks)
@@ -231,6 +232,7 @@ class DefaultPhaseGate(
                                 seqInfo.activity,
                                 snapshot.now,
                                 taskPayload = assembleChildItem(rawItem, scatterTask.resultJson),
+                                staleThresholdSecs = snapshot.definition.staleThreshold.seconds.toInt(),
                             )
                         }
                     taskRepo.insertBatchWithHandle(handle, parallelTasks)

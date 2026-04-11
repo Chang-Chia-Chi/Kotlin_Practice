@@ -61,14 +61,14 @@ class WorkflowWatchdog(
     }
 
     private suspend fun reclaimStaleTasks() {
-        val threshold = Instant.now().minus(watchdogConfig.staleTaskThreshold())
+        val now = Instant.now()
 
-        val reclaimed = taskRepo.resetStaleTasks(threshold)
+        val reclaimed = taskRepo.resetStaleTasks(now)
         if (reclaimed > 0) {
             log.info("Reclaimed {} stale task(s) for retry", reclaimed)
         }
 
-        val deadLettered = taskRepo.deadLetterExhaustedTasks(threshold)
+        val deadLettered = taskRepo.deadLetterExhaustedTasks(now)
         if (deadLettered > 0) {
             log.warn("Dead-lettered {} exhausted stale task(s)", deadLettered)
         }

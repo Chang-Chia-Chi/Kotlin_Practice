@@ -10,6 +10,4 @@ interface WatchdogConfig {
     fun interval(): Duration
     @WithDefault("PT2M")
     fun gracePeriod(): Duration
-    @WithDefault("PT10M")
-    fun staleTaskThreshold(): Duration
 }

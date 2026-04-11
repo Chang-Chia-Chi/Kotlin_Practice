@@ -52,14 +52,12 @@ class WorkflowWatchdogTest {
     private lateinit var watchdog: WorkflowWatchdog
 
     private val gracePeriod = Duration.ofMinutes(2)
-    private val staleTaskThreshold = Duration.ofMinutes(10)
 
     private val notifier = FakeWorkerNotifier()
 
     private val testWatchdogConfig = object : WatchdogConfig {
         override fun interval(): Duration = Duration.ofSeconds(30)
         override fun gracePeriod(): Duration = gracePeriod
-        override fun staleTaskThreshold(): Duration = staleTaskThreshold
     }
 
     @BeforeAll
@@ -122,6 +120,8 @@ class WorkflowWatchdogTest {
         backoffBase: Int = 1,
         backoffCap: Int = 300,
         fanOutPayloadsJson: String? = null,
+        staleThresholdSecs: Int = 600,
+        staleAt: Instant? = claimedAt?.plusSeconds(staleThresholdSecs.toLong()),
     ): Task = Task(
         id = id,
         workflowId = workflowId,
@@ -141,6 +141,8 @@ class WorkflowWatchdogTest {
         backoffBase = backoffBase,
         backoffCap = backoffCap,
         fanOutPayloadsJson = fanOutPayloadsJson,
+        staleThresholdSecs = staleThresholdSecs,
+        staleAt = staleAt,
     )
 
     /** Insert a workflow directly via SQL (independent of repo under test). */
@@ -167,10 +169,10 @@ class WorkflowWatchdogTest {
             val stmt = handle.createUpdate(
                 """INSERT INTO task (id, workflow_id, activity_name, sequence_number, status, handler_key, task_payload, result, fan_out_payloads,
                    claimed_by, claimed_at, completed_at, retry_count, max_retries, deadline_at, not_before,
-                   backoff_base, backoff_cap)
+                   backoff_base, backoff_cap, stale_threshold_secs, stale_at)
                    VALUES (:id, :workflowId, :activityName, :sequenceNumber, :status, :handlerKey, :taskPayload, :result, :fanOutPayloads,
                    :claimedBy, :claimedAt, :completedAt, :retryCount, :maxRetries, :deadlineAt, :notBefore,
-                   :backoffBase, :backoffCap)""",
+                   :backoffBase, :backoffCap, :staleThresholdSecs, :staleAt)""",
             )
                 .bind("id", task.id)
                 .bind("workflowId", task.workflowId)
@@ -180,6 +182,7 @@ class WorkflowWatchdogTest {
                 .bind("handlerKey", task.handlerKey)
                 .bind("retryCount", task.retryCount)
                 .bind("maxRetries", task.maxRetries)
+                .bind("staleThresholdSecs", task.staleThresholdSecs)
 
             fun bindStringOrNull(name: String, value: String?) =
                 if (value != null) stmt.bind(name, value) else stmt.bindNull(name, java.sql.Types.VARCHAR)
@@ -196,6 +199,7 @@ class WorkflowWatchdogTest {
             bindTimestampOrNull("completedAt", task.completedAt)
             bindTimestampOrNull("deadlineAt", task.deadlineAt)
             bindTimestampOrNull("notBefore", task.notBefore)
+            bindTimestampOrNull("staleAt", task.staleAt)
             stmt.bind("backoffBase", task.backoffBase)
             stmt.bind("backoffCap", task.backoffCap)
 
@@ -1083,9 +1087,8 @@ class WorkflowWatchdogTest {
             )
             insertTaskDirect(task)
 
-            val threshold = Instant.now().minus(Duration.ofMinutes(10))
             val beforeReclaim = Instant.now()
-            val reclaimed = taskRepo.resetStaleTasks(threshold)
+            val reclaimed = taskRepo.resetStaleTasks(Instant.now())
 
             assertEquals(1, reclaimed)
             val row = readTaskDirect(task.id)!!
@@ -1859,6 +1862,73 @@ class WorkflowWatchdogTest {
                 countTasksDirect(wfId, seqParallel),
                 "no second batch of PARALLEL tasks when terminal tasks already occupy the sequence",
             )
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Per-workflow stale threshold — stale_at is sourced from each task row,
+    // not a global config. Tasks with shorter thresholds are reclaimed sooner.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    @Nested
+    inner class PerWorkflowStaleThreshold {
+
+        @Test
+        fun `task with short stale threshold is reclaimed before task with long threshold`() = runTest {
+            val def = singleStepDef()
+            val wfId = randomId()
+            val wf = makeWorkflow(id = wfId, definition = def)
+            insertWorkflowDirect(wf)
+
+            val claimedAt = Instant.now().minus(Duration.ofMinutes(3))
+            // Short threshold (2 min): claimed 3 min ago → stale_at is 1 min in the past → should be reclaimed
+            val shortTask = makeTask(
+                workflowId = wfId,
+                sequenceNumber = 1,
+                status = TaskStatus.PROCESSING,
+                handlerKey = "only.handler",
+                claimedBy = "worker-1",
+                claimedAt = claimedAt,
+                maxRetries = 3,
+                retryCount = 0,
+                staleThresholdSecs = 120,
+                staleAt = claimedAt.plusSeconds(120),
+            )
+            insertTaskDirect(shortTask)
+
+            watchdog.patrol()
+
+            val row = readTaskDirect(shortTask.id)!!
+            assertEquals("PENDING", row["STATUS"])
+        }
+
+        @Test
+        fun `task with long stale threshold is NOT reclaimed`() = runTest {
+            val def = singleStepDef()
+            val wfId = randomId()
+            val wf = makeWorkflow(id = wfId, definition = def)
+            insertWorkflowDirect(wf)
+
+            val claimedAt = Instant.now().minus(Duration.ofMinutes(3))
+            // Long threshold (30 min): claimed 3 min ago → stale_at is 27 min in the future → not stale
+            val longTask = makeTask(
+                workflowId = wfId,
+                sequenceNumber = 1,
+                status = TaskStatus.PROCESSING,
+                handlerKey = "only.handler",
+                claimedBy = "worker-1",
+                claimedAt = claimedAt,
+                maxRetries = 3,
+                retryCount = 0,
+                staleThresholdSecs = 1800,
+                staleAt = claimedAt.plusSeconds(1800),
+            )
+            insertTaskDirect(longTask)
+
+            watchdog.patrol()
+
+            val row = readTaskDirect(longTask.id)!!
+            assertEquals("PROCESSING", row["STATUS"])
         }
     }
 }

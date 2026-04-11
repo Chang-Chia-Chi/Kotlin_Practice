@@ -26,6 +26,8 @@ data class Task(
     val triggerType: String? = null,
     val triggerMeta: String? = null,
     val fanOutPayloadsJson: String? = null,
+    val staleThresholdSecs: Int = 600,
+    val staleAt: Instant? = null,
 )
 
 internal fun createTaskForActivity(
@@ -35,6 +37,7 @@ internal fun createTaskForActivity(
     activity: ActivityDefinition,
     now: Instant,
     taskPayload: String? = null,
+    staleThresholdSecs: Int = 600,
 ): Task = Task(
     id = UUID.randomUUID().toString(),
     workflowId = workflowId,
@@ -53,6 +56,7 @@ internal fun createTaskForActivity(
     backoffBase = activity.backoffBase.seconds.toInt(),
     backoffCap = activity.backoffCap.seconds.toInt(),
     queueName = activity.queue,
+    staleThresholdSecs = staleThresholdSecs,
 )
 
 internal fun createSkippedTaskForActivity(

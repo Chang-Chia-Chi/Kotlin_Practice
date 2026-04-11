@@ -15,8 +15,8 @@ interface TaskRepository {
     suspend fun replayDeadLetterTask(taskId: String): Boolean
     suspend fun replayDeadLetterBatch(workflowId: String): Int
     suspend fun findExpired(now: Instant): List<Task>
-    suspend fun resetStaleTasks(staleThreshold: Instant): Int
-    suspend fun deadLetterExhaustedTasks(staleThreshold: Instant): Int
+    suspend fun resetStaleTasks(now: Instant): Int
+    suspend fun deadLetterExhaustedTasks(now: Instant): Int
     suspend fun defer(taskId: String, triggerType: String, triggerMeta: String): Boolean
     suspend fun findDeferred(): List<DeferredTaskRef>
 

@@ -210,16 +210,15 @@ class LivenessStressTest : StressTestBase() {
 
             // Make stale tasks visible to watchdog
             directJdbi.useHandle<Exception> { handle ->
+                val pastTs = java.time.LocalDateTime.ofInstant(
+                    Instant.now().minus(staleTaskThreshold.multipliedBy(2)),
+                    java.time.ZoneOffset.UTC,
+                )
                 handle
                     .createUpdate(
-                        "UPDATE task SET claimed_at = :ts WHERE status = 'PROCESSING'",
-                    ).bind(
-                        "ts",
-                        java.time.LocalDateTime.ofInstant(
-                            Instant.now().minus(staleTaskThreshold.multipliedBy(2)),
-                            java.time.ZoneOffset.UTC,
-                        ),
-                    ).execute()
+                        "UPDATE task SET claimed_at = :ts, stale_at = :ts WHERE status = 'PROCESSING'",
+                    ).bind("ts", pastTs)
+                    .execute()
             }
 
             // Start fresh workers with pass-through handler
