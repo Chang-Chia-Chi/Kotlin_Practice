@@ -35,12 +35,13 @@ class DispatchHandlersTest {
             val resultStore = mock<SimulationResultStore>()
             val config =
                 DispatchConfig(
-                    "cfg1",
-                    DispatchMode.QTY,
-                    "default",
-                    "bom",
-                    listOf(SiteTarget("A", BigDecimal("100"))),
-                    null,
+                    id = "cfg1",
+                    category = DispatchCategory.NORMAL,
+                    mode = DispatchMode.QTY,
+                    algorithmId = "default",
+                    sourceBomPrefix = "bom",
+                    siteTargets = listOf(SiteTarget("A", BigDecimal("100"))),
+                    bomMappings = null,
                 )
             whenever(configRepo.findActiveConfigs(any())).thenReturn(listOf(config))
 
@@ -66,21 +67,23 @@ class DispatchHandlersTest {
             val resultStore = mock<SimulationResultStore>()
             val config1 =
                 DispatchConfig(
-                    "cfg1",
-                    DispatchMode.QTY,
-                    "default",
-                    "bom",
-                    listOf(SiteTarget("A", BigDecimal("100"))),
-                    null,
+                    id = "cfg1",
+                    category = DispatchCategory.NORMAL,
+                    mode = DispatchMode.QTY,
+                    algorithmId = "default",
+                    sourceBomPrefix = "bom",
+                    siteTargets = listOf(SiteTarget("A", BigDecimal("100"))),
+                    bomMappings = null,
                 )
             val config2 =
                 DispatchConfig(
-                    "cfg2",
-                    DispatchMode.QTY,
-                    "default",
-                    "bom",
-                    listOf(SiteTarget("B", BigDecimal("200"))),
-                    null,
+                    id = "cfg2",
+                    category = DispatchCategory.NORMAL,
+                    mode = DispatchMode.QTY,
+                    algorithmId = "default",
+                    sourceBomPrefix = "bom",
+                    siteTargets = listOf(SiteTarget("B", BigDecimal("200"))),
+                    bomMappings = null,
                 )
             whenever(configRepo.findById("cfg1")).thenReturn(config1)
             whenever(configRepo.findById("cfg2")).thenReturn(config2)
@@ -111,12 +114,13 @@ class DispatchHandlersTest {
             val resultStore = mock<SimulationResultStore>()
             val config =
                 DispatchConfig(
-                    "cfg1",
-                    DispatchMode.QTY,
-                    "default",
-                    "bom",
-                    listOf(SiteTarget("A", BigDecimal("100"))),
-                    null,
+                    id = "cfg1",
+                    category = DispatchCategory.NORMAL,
+                    mode = DispatchMode.QTY,
+                    algorithmId = "default",
+                    sourceBomPrefix = "bom",
+                    siteTargets = listOf(SiteTarget("A", BigDecimal("100"))),
+                    bomMappings = null,
                 )
             whenever(configRepo.findActiveConfigs(any())).thenReturn(listOf(config))
 
@@ -166,12 +170,13 @@ class DispatchHandlersTest {
 
             val config =
                 DispatchConfig(
-                    "cfg1",
-                    DispatchMode.QTY,
-                    "default",
-                    "bom",
-                    listOf(SiteTarget("A", BigDecimal("100"))),
-                    null,
+                    id = "cfg1",
+                    category = DispatchCategory.NORMAL,
+                    mode = DispatchMode.QTY,
+                    algorithmId = "default",
+                    sourceBomPrefix = "bom",
+                    siteTargets = listOf(SiteTarget("A", BigDecimal("100"))),
+                    bomMappings = null,
                 )
             whenever(configRepo.findById("cfg1")).thenReturn(config)
             whenever(candidateQuery.queryCandidates(config)).thenReturn(emptyList())
@@ -221,12 +226,13 @@ class DispatchHandlersTest {
 
             val config =
                 DispatchConfig(
-                    "cfg1",
-                    DispatchMode.QTY,
-                    "default",
-                    "bom",
-                    listOf(SiteTarget("A", BigDecimal("100"))),
-                    null,
+                    id = "cfg1",
+                    category = DispatchCategory.NORMAL,
+                    mode = DispatchMode.QTY,
+                    algorithmId = "default",
+                    sourceBomPrefix = "bom",
+                    siteTargets = listOf(SiteTarget("A", BigDecimal("100"))),
+                    bomMappings = null,
                 )
             whenever(configRepo.findById("cfg1")).thenReturn(config)
             whenever(candidateQuery.queryCandidates(config)).thenReturn(emptyList())
@@ -270,12 +276,13 @@ class DispatchHandlersTest {
 
             val config =
                 DispatchConfig(
-                    "cfg1",
-                    DispatchMode.QTY,
-                    "default",
-                    "bom",
-                    listOf(SiteTarget("A", BigDecimal("100"))),
-                    null,
+                    id = "cfg1",
+                    category = DispatchCategory.NORMAL,
+                    mode = DispatchMode.QTY,
+                    algorithmId = "default",
+                    sourceBomPrefix = "bom",
+                    siteTargets = listOf(SiteTarget("A", BigDecimal("100"))),
+                    bomMappings = null,
                 )
             whenever(configRepo.findById("cfg1")).thenReturn(config)
             whenever(candidateQuery.queryCandidates(config)).thenReturn(emptyList())

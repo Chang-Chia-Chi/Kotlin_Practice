@@ -3,6 +3,7 @@ package com.workflow.dispatch.adapter.http
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.KotlinModule
 import com.workflow.dispatch.model.BatchStatus
+import com.workflow.dispatch.model.DispatchCategory
 import com.workflow.dispatch.model.DispatchConfig
 import com.workflow.dispatch.model.DispatchMode
 import com.workflow.dispatch.model.SiteTarget
@@ -116,8 +117,13 @@ class DispatchDryRunResourceTest {
         val workflowEngine = mock<WorkflowLifecycle>()
         val configRepo = mock<DispatchConfigRepository>()
         val config = DispatchConfig(
-            "cfg1", DispatchMode.QTY, "default", "bom",
-            listOf(SiteTarget("A", BigDecimal("100"))), null,
+            id = "cfg1",
+            category = DispatchCategory.NORMAL,
+            mode = DispatchMode.QTY,
+            algorithmId = "default",
+            sourceBomPrefix = "bom",
+            siteTargets = listOf(SiteTarget("A", BigDecimal("100"))),
+            bomMappings = null,
         )
         whenever(configRepo.findActiveConfigs(any())).thenReturn(listOf(config))
         whenever(workflowEngine.startWorkflow(any(), any(), any())).thenReturn(StartResult.Created("w1"))
@@ -143,10 +149,24 @@ class DispatchDryRunResourceTest {
         val workflowEngine = mock<WorkflowLifecycle>()
         val configRepo = mock<DispatchConfigRepository>()
         val configs = listOf(
-            DispatchConfig("id1", DispatchMode.QTY, "default", "bom",
-                listOf(SiteTarget("A", BigDecimal("10"))), null),
-            DispatchConfig("id2", DispatchMode.RATIO, "default", "bom",
-                listOf(SiteTarget("B", BigDecimal("50"))), null),
+            DispatchConfig(
+                id = "id1",
+                category = DispatchCategory.NORMAL,
+                mode = DispatchMode.QTY,
+                algorithmId = "default",
+                sourceBomPrefix = "bom",
+                siteTargets = listOf(SiteTarget("A", BigDecimal("10"))),
+                bomMappings = null,
+            ),
+            DispatchConfig(
+                id = "id2",
+                category = DispatchCategory.NORMAL,
+                mode = DispatchMode.RATIO,
+                algorithmId = "default",
+                sourceBomPrefix = "bom",
+                siteTargets = listOf(SiteTarget("B", BigDecimal("50"))),
+                bomMappings = null,
+            ),
         )
         whenever(configRepo.findActiveConfigs(any())).thenReturn(configs)
         whenever(workflowEngine.startWorkflow(any(), any(), any())).thenReturn(StartResult.Created("w2"))

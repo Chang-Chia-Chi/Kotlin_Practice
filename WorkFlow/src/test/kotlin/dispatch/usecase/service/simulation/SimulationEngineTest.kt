@@ -21,7 +21,7 @@ class SimulationEngineTest {
     @Test
     fun `lv1 only QTY mode distributes to site with lowest gap`() {
         val config = DispatchConfig(
-            id = "cfg1", mode = DispatchMode.QTY, algorithmId = "default",
+            id = "cfg1", category = DispatchCategory.NORMAL, mode = DispatchMode.QTY, algorithmId = "default",
             sourceBomPrefix = "bom",
             siteTargets = listOf(
                 SiteTarget("A", BigDecimal("100")),
@@ -48,7 +48,7 @@ class SimulationEngineTest {
     @Test
     fun `empty candidates produces empty result`() {
         val config = DispatchConfig(
-            id = "cfg1", mode = DispatchMode.QTY, algorithmId = "default",
+            id = "cfg1", category = DispatchCategory.NORMAL, mode = DispatchMode.QTY, algorithmId = "default",
             sourceBomPrefix = "bom",
             siteTargets = listOf(SiteTarget("A", BigDecimal("100"))),
             bomMappings = null,
@@ -62,7 +62,7 @@ class SimulationEngineTest {
     @Test
     fun `QTY mode stops when candidate exceeds site capacity`() {
         val config = DispatchConfig(
-            id = "cfg1", mode = DispatchMode.QTY, algorithmId = "default",
+            id = "cfg1", category = DispatchCategory.NORMAL, mode = DispatchMode.QTY, algorithmId = "default",
             sourceBomPrefix = "bom",
             siteTargets = listOf(SiteTarget("A", BigDecimal("10"))),
             bomMappings = null,
@@ -83,7 +83,7 @@ class SimulationEngineTest {
     @Test
     fun `dispatch order is 1-based sequential`() {
         val config = DispatchConfig(
-            id = "cfg1", mode = DispatchMode.QTY, algorithmId = "default",
+            id = "cfg1", category = DispatchCategory.NORMAL, mode = DispatchMode.QTY, algorithmId = "default",
             sourceBomPrefix = "bom",
             siteTargets = listOf(SiteTarget("A", BigDecimal("100"))),
             bomMappings = null,
@@ -107,7 +107,7 @@ class SimulationEngineTest {
     @Test
     fun `QTY multi-qty products across 3 sites fill proportionally to gap`() {
         val config = DispatchConfig(
-            id = "cfg1", mode = DispatchMode.QTY, algorithmId = "default",
+            id = "cfg1", category = DispatchCategory.NORMAL, mode = DispatchMode.QTY, algorithmId = "default",
             sourceBomPrefix = "bom",
             siteTargets = listOf(
                 SiteTarget("A", BigDecimal("200")),
@@ -142,7 +142,7 @@ class SimulationEngineTest {
     fun `QTY mode skips large candidates that exceed remaining capacity`() {
         // Site A target=20: can take qty=5 four times, but a qty=25 product won't fit
         val config = DispatchConfig(
-            id = "cfg1", mode = DispatchMode.QTY, algorithmId = "default",
+            id = "cfg1", category = DispatchCategory.NORMAL, mode = DispatchMode.QTY, algorithmId = "default",
             sourceBomPrefix = "bom",
             siteTargets = listOf(SiteTarget("A", BigDecimal("20"))),
             bomMappings = null,
@@ -172,7 +172,7 @@ class SimulationEngineTest {
     @Test
     fun `RATIO mode distributes proportionally`() {
         val config = DispatchConfig(
-            id = "cfg1", mode = DispatchMode.RATIO, algorithmId = "default",
+            id = "cfg1", category = DispatchCategory.NORMAL, mode = DispatchMode.RATIO, algorithmId = "default",
             sourceBomPrefix = "bom",
             siteTargets = listOf(
                 SiteTarget("A", BigDecimal("60")),
@@ -194,7 +194,7 @@ class SimulationEngineTest {
     fun `RATIO mode with multi-qty products distributes by quantity weight`() {
         // 3 sites: 50%, 30%, 20%. Products with qty 1-5.
         val config = DispatchConfig(
-            id = "cfg1", mode = DispatchMode.RATIO, algorithmId = "default",
+            id = "cfg1", category = DispatchCategory.NORMAL, mode = DispatchMode.RATIO, algorithmId = "default",
             sourceBomPrefix = "bom",
             siteTargets = listOf(
                 SiteTarget("X", BigDecimal("50")),
@@ -230,7 +230,7 @@ class SimulationEngineTest {
     @Test
     fun `RATIO 80-20 with 100 products of varying qty`() {
         val config = DispatchConfig(
-            id = "cfg1", mode = DispatchMode.RATIO, algorithmId = "default",
+            id = "cfg1", category = DispatchCategory.NORMAL, mode = DispatchMode.RATIO, algorithmId = "default",
             sourceBomPrefix = "bom",
             siteTargets = listOf(
                 SiteTarget("A", BigDecimal("80")),
@@ -256,7 +256,7 @@ class SimulationEngineTest {
     @Test
     fun `RATIO mode with existing baseline continues from prior state`() {
         val config = DispatchConfig(
-            id = "cfg1", mode = DispatchMode.RATIO, algorithmId = "default",
+            id = "cfg1", category = DispatchCategory.NORMAL, mode = DispatchMode.RATIO, algorithmId = "default",
             sourceBomPrefix = "bom",
             siteTargets = listOf(
                 SiteTarget("A", BigDecimal("50")),
@@ -287,7 +287,7 @@ class SimulationEngineTest {
     @Test
     fun `lv2 BOM mapping constrains sourceBomId`() {
         val config = DispatchConfig(
-            id = "cfg1", mode = DispatchMode.QTY, algorithmId = "default",
+            id = "cfg1", category = DispatchCategory.NORMAL, mode = DispatchMode.QTY, algorithmId = "default",
             sourceBomPrefix = "src",
             siteTargets = listOf(SiteTarget("A", BigDecimal("100"))),
             bomMappings = mapOf(
@@ -315,7 +315,7 @@ class SimulationEngineTest {
     fun `QTY lv2 with multiple target BOMs distributes by BOM gap`() {
         // 1 site, 2 target BOMs with QTY targets: tgt-A=60, tgt-B=40
         val config = DispatchConfig(
-            id = "cfg1", mode = DispatchMode.QTY, algorithmId = "default",
+            id = "cfg1", category = DispatchCategory.NORMAL, mode = DispatchMode.QTY, algorithmId = "default",
             sourceBomPrefix = "src",
             siteTargets = listOf(SiteTarget("factory1", BigDecimal("100"))),
             bomMappings = mapOf(
@@ -351,7 +351,7 @@ class SimulationEngineTest {
     fun `QTY lv2 multi-site with different BOM mappings per site`() {
         // LV1 prefix "PFX", LV2 full sourceBomIds "PFX-A-001" and "PFX-B-001" contain the prefix
         val config = DispatchConfig(
-            id = "cfg1", mode = DispatchMode.QTY, algorithmId = "default",
+            id = "cfg1", category = DispatchCategory.NORMAL, mode = DispatchMode.QTY, algorithmId = "default",
             sourceBomPrefix = "PFX",
             siteTargets = listOf(
                 SiteTarget("A", BigDecimal("50")),
@@ -394,7 +394,7 @@ class SimulationEngineTest {
     fun `RATIO lv2 distributes BOM targets by percentage within site`() {
         // 1 site, ratio mode, 2 target BOMs at 70%/30%
         val config = DispatchConfig(
-            id = "cfg1", mode = DispatchMode.RATIO, algorithmId = "default",
+            id = "cfg1", category = DispatchCategory.NORMAL, mode = DispatchMode.RATIO, algorithmId = "default",
             sourceBomPrefix = "src",
             siteTargets = listOf(SiteTarget("factory1", BigDecimal("100"))),
             bomMappings = mapOf(
@@ -430,7 +430,7 @@ class SimulationEngineTest {
         // Site A=60%, Site B=40%. Both sites share the SAME sourceBomId
         // so all candidates are eligible for either site.
         val config = DispatchConfig(
-            id = "cfg1", mode = DispatchMode.RATIO, algorithmId = "default",
+            id = "cfg1", category = DispatchCategory.NORMAL, mode = DispatchMode.RATIO, algorithmId = "default",
             sourceBomPrefix = "shared",
             siteTargets = listOf(
                 SiteTarget("A", BigDecimal("60")),
@@ -475,7 +475,7 @@ class SimulationEngineTest {
         // Different sourceBomId per site: once the gap-selected site's candidates
         // are exhausted, FailFastTermination halts the entire simulation.
         val config = DispatchConfig(
-            id = "cfg1", mode = DispatchMode.RATIO, algorithmId = "default",
+            id = "cfg1", category = DispatchCategory.NORMAL, mode = DispatchMode.RATIO, algorithmId = "default",
             sourceBomPrefix = "src",
             siteTargets = listOf(
                 SiteTarget("A", BigDecimal("60")),
@@ -517,7 +517,7 @@ class SimulationEngineTest {
     @Test
     fun `QTY mode 200 products with mixed qty across 4 sites`() {
         val config = DispatchConfig(
-            id = "cfg1", mode = DispatchMode.QTY, algorithmId = "default",
+            id = "cfg1", category = DispatchCategory.NORMAL, mode = DispatchMode.QTY, algorithmId = "default",
             sourceBomPrefix = "bom",
             siteTargets = listOf(
                 SiteTarget("S1", BigDecimal("500")),
@@ -552,7 +552,7 @@ class SimulationEngineTest {
     @Test
     fun `RATIO mode 300 products with qty 1-25 across 3 sites`() {
         val config = DispatchConfig(
-            id = "cfg1", mode = DispatchMode.RATIO, algorithmId = "default",
+            id = "cfg1", category = DispatchCategory.NORMAL, mode = DispatchMode.RATIO, algorithmId = "default",
             sourceBomPrefix = "bom",
             siteTargets = listOf(
                 SiteTarget("F1", BigDecimal("50")),
@@ -586,7 +586,7 @@ class SimulationEngineTest {
         // Both sites share the SAME sourceBomId, so all candidates are eligible for any site.
         // This tests LV2 BOM target sub-allocation at scale.
         val config = DispatchConfig(
-            id = "cfg1", mode = DispatchMode.QTY, algorithmId = "default",
+            id = "cfg1", category = DispatchCategory.NORMAL, mode = DispatchMode.QTY, algorithmId = "default",
             sourceBomPrefix = "shared",
             siteTargets = listOf(
                 SiteTarget("A", BigDecimal("500")),
@@ -639,7 +639,7 @@ class SimulationEngineTest {
         // Different sourceBomId per site: fail-fast terminates when gap-selected
         // site has no matching candidates remaining.
         val config = DispatchConfig(
-            id = "cfg1", mode = DispatchMode.QTY, algorithmId = "default",
+            id = "cfg1", category = DispatchCategory.NORMAL, mode = DispatchMode.QTY, algorithmId = "default",
             sourceBomPrefix = "PFX",
             siteTargets = listOf(
                 SiteTarget("A", BigDecimal("400")),
@@ -680,7 +680,7 @@ class SimulationEngineTest {
     @Test
     fun `no targetBomId when bomMappings is null`() {
         val config = DispatchConfig(
-            id = "cfg1", mode = DispatchMode.QTY, algorithmId = "default",
+            id = "cfg1", category = DispatchCategory.NORMAL, mode = DispatchMode.QTY, algorithmId = "default",
             sourceBomPrefix = "bom",
             siteTargets = listOf(SiteTarget("A", BigDecimal("100"))),
             bomMappings = null,
@@ -698,7 +698,7 @@ class SimulationEngineTest {
     @Test
     fun `each candidate dispatched exactly once - uniqueness invariant`() {
         val config = DispatchConfig(
-            id = "cfg1", mode = DispatchMode.RATIO, algorithmId = "default",
+            id = "cfg1", category = DispatchCategory.NORMAL, mode = DispatchMode.RATIO, algorithmId = "default",
             sourceBomPrefix = "bom",
             siteTargets = listOf(
                 SiteTarget("A", BigDecimal("50")),
@@ -722,7 +722,7 @@ class SimulationEngineTest {
     fun `QTY mode partial dispatch when capacity is insufficient for all`() {
         // 2 sites with limited capacity, more products than can fit
         val config = DispatchConfig(
-            id = "cfg1", mode = DispatchMode.QTY, algorithmId = "default",
+            id = "cfg1", category = DispatchCategory.NORMAL, mode = DispatchMode.QTY, algorithmId = "default",
             sourceBomPrefix = "bom",
             siteTargets = listOf(
                 SiteTarget("A", BigDecimal("30")),
@@ -749,7 +749,7 @@ class SimulationEngineTest {
     @Test
     fun `rejects LV2 sourceBomId that does not start with LV1 prefix`() {
         val config = DispatchConfig(
-            id = "cfg1", mode = DispatchMode.QTY, algorithmId = "default",
+            id = "cfg1", category = DispatchCategory.NORMAL, mode = DispatchMode.QTY, algorithmId = "default",
             sourceBomPrefix = "PFX-A",
             siteTargets = listOf(SiteTarget("A", BigDecimal("100"))),
             bomMappings = mapOf(
@@ -771,7 +771,7 @@ class SimulationEngineTest {
     fun `accepts LV2 sourceBomId that starts with LV1 prefix`() {
         // LV1 prefix "PFX", LV2 sourceBomId "PFX-A-001" starts with "PFX"
         val config = DispatchConfig(
-            id = "cfg1", mode = DispatchMode.QTY, algorithmId = "default",
+            id = "cfg1", category = DispatchCategory.NORMAL, mode = DispatchMode.QTY, algorithmId = "default",
             sourceBomPrefix = "PFX",
             siteTargets = listOf(SiteTarget("A", BigDecimal("100"))),
             bomMappings = mapOf(
@@ -796,7 +796,7 @@ class SimulationEngineTest {
     @Test
     fun `simulate throws when a site has empty targetAllocations`() {
         val config = DispatchConfig(
-            id = "cfg", mode = DispatchMode.QTY, algorithmId = "default",
+            id = "cfg", category = DispatchCategory.NORMAL, mode = DispatchMode.QTY, algorithmId = "default",
             sourceBomPrefix = "src",
             siteTargets = listOf(SiteTarget("A", BigDecimal("100"))),
             bomMappings = mapOf(
@@ -817,7 +817,7 @@ class SimulationEngineTest {
         // This is a consistency smoke test: the algorithm must only select bomIds
         // that exist in the config's targetAllocations (and therefore in bomTargetMap).
         val config = DispatchConfig(
-            id = "cfg", mode = DispatchMode.QTY, algorithmId = "default",
+            id = "cfg", category = DispatchCategory.NORMAL, mode = DispatchMode.QTY, algorithmId = "default",
             sourceBomPrefix = "src",
             siteTargets = listOf(SiteTarget("A", BigDecimal("100"))),
             bomMappings = mapOf(
@@ -847,7 +847,7 @@ class SimulationEngineTest {
             TargetBomAllocation("bom3", BigDecimal("50")),
         )
         val config = DispatchConfig(
-            id = "cfg", mode = DispatchMode.QTY, algorithmId = "default",
+            id = "cfg", category = DispatchCategory.NORMAL, mode = DispatchMode.QTY, algorithmId = "default",
             sourceBomPrefix = "src",
             siteTargets = listOf(
                 SiteTarget("A", BigDecimal("200")),

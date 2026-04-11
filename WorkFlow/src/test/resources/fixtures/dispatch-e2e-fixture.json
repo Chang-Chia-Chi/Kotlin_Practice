@@ -2,6 +2,7 @@
   "configs": [
     {
       "id": "CFG-A",
+      "category": "NORMAL",
       "mode": "QTY",
       "algorithmId": "default",
       "sourceBomPrefix": "BOM-A",
@@ -28,6 +29,7 @@
     },
     {
       "id": "CFG-B",
+      "category": "NORMAL",
       "mode": "RATIO",
       "algorithmId": "default",
       "sourceBomPrefix": "BOM-B",
@@ -39,6 +41,7 @@
     },
     {
       "id": "CFG-C",
+      "category": "NORMAL",
       "mode": "QTY",
       "algorithmId": "default",
       "sourceBomPrefix": "BOM-C",

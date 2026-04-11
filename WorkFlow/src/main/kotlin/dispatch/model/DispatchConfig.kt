@@ -2,6 +2,7 @@ package com.workflow.dispatch.model
 
 data class DispatchConfig(
     val id: String,
+    val category: DispatchCategory,
     val mode: DispatchMode,
     val algorithmId: String,
     /** Source BOM ID prefix (or full) used by CandidateRepository to filter candidates. */

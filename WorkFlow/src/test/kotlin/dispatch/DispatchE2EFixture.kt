@@ -6,6 +6,7 @@ import com.fasterxml.jackson.module.kotlin.KotlinModule
 import com.workflow.dispatch.model.Baseline
 import com.workflow.dispatch.model.BomMapping
 import com.workflow.dispatch.model.CandidateProduct
+import com.workflow.dispatch.model.DispatchCategory
 import com.workflow.dispatch.model.DispatchConfig
 import com.workflow.dispatch.model.DispatchMode
 import com.workflow.dispatch.model.SiteBomKey
@@ -25,6 +26,7 @@ object DispatchE2EFixture {
     fun configs(): List<DispatchConfig> = root["configs"].map { node ->
         DispatchConfig(
             id = node["id"].asText(),
+            category = DispatchCategory.valueOf(node["category"].asText()),
             mode = DispatchMode.valueOf(node["mode"].asText()),
             algorithmId = node["algorithmId"].asText(),
             sourceBomPrefix = node["sourceBomPrefix"].asText(),
