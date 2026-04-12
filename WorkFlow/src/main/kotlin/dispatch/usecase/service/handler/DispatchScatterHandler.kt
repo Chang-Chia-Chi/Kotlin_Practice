@@ -3,6 +3,7 @@ package com.workflow.dispatch.usecase.service.handler
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.workflow.dispatch.model.BatchStatus
+import com.workflow.dispatch.model.DispatchCategory
 import com.workflow.dispatch.model.DispatchConfig
 import com.workflow.dispatch.usecase.port.outbound.persistence.DispatchConfigRepository
 import com.workflow.dispatch.usecase.port.outbound.persistence.SimulationResultStore
@@ -28,7 +29,12 @@ class DispatchScatterHandler(
         val (items, token) = if (providedToken != null && configIdsNode != null) {
             handleDryRun(configIdsNode, providedToken)
         } else {
-            handleCronTrigger()
+            val categories = itemNode?.get("categories")
+                ?.takeIf { it.isArray }
+                ?.map { DispatchCategory.valueOf(it.asText()) }
+                ?.toSet()
+                ?: emptySet()
+            handleCronTrigger(categories)
         }
         return HandlerResult(
             result = objectMapper.writeValueAsString(mapOf("batchToken" to token)),
@@ -45,10 +51,12 @@ class DispatchScatterHandler(
         return toItems(configs) to token
     }
 
-    // Path B — cron: generate token, create batch, query all active configs
-    private suspend fun handleCronTrigger(): Pair<List<String>, String> {
+    // Path B — cron: generate token, create batch, query active configs (optionally filtered)
+    private suspend fun handleCronTrigger(
+        categories: Set<DispatchCategory>,
+    ): Pair<List<String>, String> {
         val token = clock.generate()
-        val configs = configRepo.findActiveConfigs(LocalDateTime.now())
+        val configs = configRepo.findActiveConfigs(LocalDateTime.now(), categories)
         resultStore.createBatch(token, BatchStatus.NORMAL, configs.size)
         return toItems(configs) to token
     }

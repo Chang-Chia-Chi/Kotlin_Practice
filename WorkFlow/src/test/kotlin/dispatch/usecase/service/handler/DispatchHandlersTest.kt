@@ -142,6 +142,84 @@ class DispatchHandlersTest {
         }
 
     @Test
+    fun `scatter handler cron trigger with single category filters repo call`() =
+        runTest {
+            val configRepo = mock<DispatchConfigRepository>()
+            val resultStore = mock<SimulationResultStore>()
+            val config =
+                DispatchConfig(
+                    id = "cfg1",
+                    category = DispatchCategory.URGENT,
+                    mode = DispatchMode.QTY,
+                    algorithmId = "default",
+                    sourceBomPrefix = "bom",
+                    siteTargets = listOf(SiteTarget("A", BigDecimal("100"))),
+                    bomMappings = null,
+                )
+            whenever(configRepo.findActiveConfigs(any(), any())).thenReturn(listOf(config))
+
+            val handler = DispatchScatterHandler(configRepo, resultStore, objectMapper, SystemBatchTokenClock())
+            val payload = """{"categories":["URGENT"]}"""
+            handler.execute(HandlerInput("t1", "w1", 1, null, payload))
+
+            val captor = argumentCaptor<Set<DispatchCategory>>()
+            verify(configRepo).findActiveConfigs(any(), captor.capture())
+            assertEquals(setOf(DispatchCategory.URGENT), captor.firstValue)
+        }
+
+    @Test
+    fun `scatter handler cron trigger with multiple categories passes full set`() =
+        runTest {
+            val configRepo = mock<DispatchConfigRepository>()
+            val resultStore = mock<SimulationResultStore>()
+            whenever(configRepo.findActiveConfigs(any(), any())).thenReturn(emptyList())
+
+            val handler = DispatchScatterHandler(configRepo, resultStore, objectMapper, SystemBatchTokenClock())
+            val payload = """{"categories":["URGENT","NORMAL"]}"""
+            handler.execute(HandlerInput("t1", "w1", 1, null, payload))
+
+            val captor = argumentCaptor<Set<DispatchCategory>>()
+            verify(configRepo).findActiveConfigs(any(), captor.capture())
+            assertEquals(setOf(DispatchCategory.URGENT, DispatchCategory.NORMAL), captor.firstValue)
+        }
+
+    @Test
+    fun `scatter handler cron trigger with missing or empty categories passes empty set`() =
+        runTest {
+            val configRepo = mock<DispatchConfigRepository>()
+            val resultStore = mock<SimulationResultStore>()
+            whenever(configRepo.findActiveConfigs(any(), any())).thenReturn(emptyList())
+            val handler = DispatchScatterHandler(configRepo, resultStore, objectMapper, SystemBatchTokenClock())
+
+            // Case 1: null payload
+            handler.execute(HandlerInput("t1", "w1", 1, null, null))
+            // Case 2: empty object
+            handler.execute(HandlerInput("t1", "w1", 1, null, "{}"))
+            // Case 3: explicit empty array
+            handler.execute(HandlerInput("t1", "w1", 1, null, """{"categories":[]}"""))
+
+            val captor = argumentCaptor<Set<DispatchCategory>>()
+            verify(configRepo, times(3)).findActiveConfigs(any(), captor.capture())
+            assertEquals(emptySet<DispatchCategory>(), captor.firstValue)
+            assertEquals(emptySet<DispatchCategory>(), captor.secondValue)
+            assertEquals(emptySet<DispatchCategory>(), captor.thirdValue)
+        }
+
+    @Test
+    fun `scatter handler cron trigger with unknown category throws IllegalArgumentException`() =
+        runTest {
+            val configRepo = mock<DispatchConfigRepository>()
+            val resultStore = mock<SimulationResultStore>()
+            val handler = DispatchScatterHandler(configRepo, resultStore, objectMapper, SystemBatchTokenClock())
+
+            assertFailsWith<IllegalArgumentException> {
+                handler.execute(HandlerInput("t1", "w1", 1, null, """{"categories":["BOGUS"]}"""))
+            }
+            verify(configRepo, never()).findActiveConfigs(any(), any())
+            verify(resultStore, never()).createBatch(any(), any(), any())
+        }
+
+    @Test
     fun `simulation handler throws descriptive error when item is null`() =
         runTest {
             val handler =
