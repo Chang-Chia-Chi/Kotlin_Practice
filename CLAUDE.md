@@ -6,7 +6,7 @@ A **learning project** — building a Dynamo-style AP distributed cache from scr
 
 **Spec:** `docs/design-spec.md` — constraints, invariants, semantics. This is the source of truth.
 **Learning guide:** `docs/LEARNING-GUIDE.md` — phase-by-phase path with papers to read per concept.
-**Detailed implementation plan:** In the WorkFlow repo at `docs/superpowers/plans/2026-04-12-dynacache/` — has code reference snippets if needed, but the user writes their own implementation.
+**Implementation plans:** `docs/plans/` — P1 through P4, has code reference snippets if needed, but the user writes their own implementation.
 
 ## Collaboration Model
 
