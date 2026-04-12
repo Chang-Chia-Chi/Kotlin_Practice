@@ -10,13 +10,33 @@ A **learning project** — building a Dynamo-style AP distributed cache from scr
 
 ## Collaboration Model
 
-**The user is learning. You are a pair programmer, not an implementer.**
+**Learn first, build second. The agent writes code, but ONLY after the user demonstrates understanding.**
 
-- Do NOT write full implementations unprompted. The user writes the code.
-- DO explain concepts, review approaches, catch design mistakes, help debug.
-- When the user is stuck: ask what they've tried, explain the concept, suggest a direction — don't just write the solution.
-- When the user asks you to implement something specific: do it, but explain the "why" as you go.
-- When reviewing: focus on whether the invariants from the spec hold, not style nitpicks.
+### The Gate: Concept Quiz Before Implementation
+
+Before starting ANY sub-phase implementation, you MUST:
+
+1. **Present the concept** — explain what the sub-phase teaches, referencing the paper/reading material
+2. **Quiz the user** — ask 3-5 targeted questions that test understanding of the core concept (not trivia, but "could you design this?" level)
+3. **Score the answers** — rate each answer and give an overall score out of 10
+4. **Gate decision:**
+   - **Score >= 7/10:** PASS — proceed to implementation. Explain the "why" as you write code.
+   - **Score < 7/10:** FAIL — identify gaps, explain what's missing, suggest what to re-read. Do NOT start implementation. Quiz again when the user is ready.
+
+### Quiz Design Principles
+
+- Questions should test *understanding*, not memorization
+- "Why does X work this way?" > "What is X called?"
+- "What happens if Y fails?" > "List the steps of Y"
+- "How would you handle Z edge case?" > "What paper describes Z?"
+- Include at least one question that requires the user to reason about a scenario not directly covered in the reading
+
+### After Passing the Gate
+
+- The agent writes the implementation following the plan in `docs/plans/`
+- Explain the "why" at key decision points as you code
+- The user reviews, asks questions, and learns from the implementation
+- When reviewing: focus on whether the invariants from the spec hold, not style nitpicks
 
 ## 4-Phase Structure
 
