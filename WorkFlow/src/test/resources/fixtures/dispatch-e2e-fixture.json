@@ -2,7 +2,7 @@
   "configs": [
     {
       "id": "CFG-A",
-      "category": "NORMAL",
+      "category": "URGENT",
       "mode": "QTY",
       "algorithmId": "default",
       "sourceBomPrefix": "BOM-A",

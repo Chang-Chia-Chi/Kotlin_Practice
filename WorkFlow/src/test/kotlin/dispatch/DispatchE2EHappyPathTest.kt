@@ -8,12 +8,14 @@ import aws.smithy.kotlin.runtime.content.toByteArray
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.workflow.dispatch.adapter.storage.DispatchPathBuilder
 import com.workflow.dispatch.dsl.dispatchWorkflow
+import com.workflow.dispatch.model.DispatchCategory
 import com.workflow.dispatch.usecase.port.outbound.persistence.BaselineProvider
 import com.workflow.dispatch.usecase.port.outbound.persistence.CandidateRepository
 import com.workflow.dispatch.usecase.port.outbound.persistence.DispatchConfigRepository
 import com.workflow.infrastructure.persistence.OracleTestResource
 import com.workflow.infrastructure.storage.MinioTestContainer
 import com.workflow.infrastructure.storage.MinioTestResource
+import com.workflow.workflow.model.StartResult
 import com.workflow.workflow.model.WorkflowStatus
 import com.workflow.workflow.model.workflowId
 import com.workflow.workflow.usecase.port.inbound.orchestration.WorkflowLifecycle
@@ -29,6 +31,8 @@ import org.jdbi.v3.core.Jdbi
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.mockito.kotlin.any
+import org.mockito.kotlin.eq
+import org.mockito.kotlin.verify
 import org.mockito.kotlin.whenever
 import java.sql.DriverManager
 import java.time.LocalDateTime
@@ -115,6 +119,64 @@ class DispatchE2EHappyPathTest {
             assertOracleState(workflowId)
             assertMinIOCsvArtifacts()
             assertMinIOParquetArtifact()
+        }
+    }
+
+    @Test
+    fun `cron trigger scoped to URGENT category dispatches only URGENT configs`() {
+        // Override the all-configs stub set up in setupMocks() with a URGENT-scoped stub.
+        // Mockito uses the most recently declared matching whenever(), so this supersedes
+        // the broader `any(), any()` stub for the URGENT matcher.
+        val urgentConfigs = fixture.configs().filter { it.category == DispatchCategory.URGENT }
+        assertEquals(1, urgentConfigs.size, "fixture must contain exactly one URGENT config (CFG-A)")
+        runBlocking {
+            whenever(
+                configRepo.findActiveConfigs(any<LocalDateTime>(), eq(setOf(DispatchCategory.URGENT))),
+            ).thenReturn(urgentConfigs)
+        }
+
+        // Drive the workflow with a URGENT-scoped payload — mirroring what DispatchScheduler.triggerUrgent() sends.
+        val workflowId = runBlocking {
+            val result = engine.startWorkflow(
+                definition = dispatchWorkflow,
+                idempotencyKey = "dispatch-URGENT-e2e-token",
+                initialItem = """{"categories":["URGENT"]}""",
+            )
+            (result as StartResult.Created).workflowId
+        }
+
+        // Await simulation tasks — there should be exactly ONE (for CFG-A only).
+        await().atMost(30, TimeUnit.SECONDS).untilAsserted {
+            val tasks = findTasksByWorkflowId(workflowId)
+            val simulationTasks = tasks.filter { it["HANDLER_KEY"] == "DispatchSimulationHandler" }
+            assertEquals(
+                1,
+                simulationTasks.size,
+                "URGENT-scoped dispatch should produce exactly one simulation task, got ${simulationTasks.size}",
+            )
+            assertTrue(
+                simulationTasks.all { it["STATUS"] == "COMPLETED" },
+                "Simulation task should be COMPLETED",
+            )
+        }
+
+        // Await join + workflow terminal state.
+        await().atMost(15, TimeUnit.SECONDS).untilAsserted {
+            val tasks = findTasksByWorkflowId(workflowId)
+            val joinTask = tasks.find { it["HANDLER_KEY"] == "DispatchJoinHandler" }
+            assertEquals("COMPLETED", joinTask?.get("STATUS"), "Join task should be COMPLETED")
+        }
+        await().atMost(30, TimeUnit.SECONDS).untilAsserted {
+            runBlocking {
+                val wf = workflowRepo.findById(workflowId)
+                assertEquals(WorkflowStatus.COMPLETED, wf?.status, "Workflow should be COMPLETED")
+            }
+        }
+
+        // Guard against Mockito stub-precedence fragility: confirm the URGENT-specific
+        // stub was actually consulted rather than the broad `any(), any()` fallback.
+        runBlocking {
+            verify(configRepo).findActiveConfigs(any(), eq(setOf(DispatchCategory.URGENT)))
         }
     }
 
