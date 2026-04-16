@@ -30,6 +30,8 @@ data class GateSnapshot(
 sealed interface PhaseDecision {
     data object Abort : PhaseDecision
     data class ScatterExpand(val items: List<String>, val parallelInfo: SequenceInfo) : PhaseDecision
+    /** Scatter completed with zero items — bypass PARALLEL, continue to successors. */
+    data class EmptyFanOut(val parallelInfo: SequenceInfo) : PhaseDecision
     data object Normal : PhaseDecision
 }
 
@@ -66,6 +68,7 @@ fun isAnyEdgeTaken(
     successor: SequenceInfo,
     sequenceMap: Map<Int, SequenceInfo>,
     definition: WorkflowDefinition,
+    emptyCompletedSeqs: Set<Int> = emptySet(),
 ): Boolean {
     val targetActName = successor.activityName
     for ((predActName, predActivity) in definition.activities) {
@@ -78,7 +81,12 @@ fun isAnyEdgeTaken(
                 name == predActName && (si.phaseType == PhaseType.PARALLEL || si.phaseType == PhaseType.LINEAR)
             }?.sequenceNumber ?: continue
 
-        val predTasks = tasksBySeq[predOutputSeq] ?: continue
+        val predTasks = tasksBySeq[predOutputSeq]
+        if (predTasks == null) {
+            // Empty-fanout PARALLEL: no tasks were inserted, but treat its default edge as taken.
+            if (predOutputSeq in emptyCompletedSeqs && edgesToTarget.any { it.label == DEFAULT_BRANCH }) return true
+            continue
+        }
         for (predTask in predTasks) {
             val branch = resultBranches[predTask.id]
             for (edge in edgesToTarget) {
@@ -130,8 +138,8 @@ fun resolvePhaseDecision(
         // marked FAILED, rather than throwing and leaving it permanently stuck.
         val parallelInfo = snapshot.sequenceMap[parallelSeq]
         when {
-            items.isEmpty() -> PhaseDecision.Abort
             parallelInfo == null -> PhaseDecision.Abort
+            items.isEmpty() -> PhaseDecision.EmptyFanOut(parallelInfo)
             else -> PhaseDecision.ScatterExpand(items, parallelInfo)
         }
     } else {
@@ -171,7 +179,8 @@ fun resolvePhaseDecision(
 fun dispatchSuccessors(
     snapshot: GateSnapshot,
     seqInfo: SequenceInfo,
-): SuccessorResult = bfsDispatch(snapshot, listOf(seqInfo))
+    emptyCompletedSeqs: Set<Int> = emptySet(),
+): SuccessorResult = bfsDispatch(snapshot, listOf(seqInfo), emptyCompletedSeqs)
 
 /**
  * Walks forward from every sequence whose tasks are already terminal in the
@@ -198,6 +207,7 @@ fun dispatchReadySequences(snapshot: GateSnapshot): SuccessorResult {
 private fun bfsDispatch(
     snapshot: GateSnapshot,
     seedSeqInfos: List<SequenceInfo>,
+    emptyCompletedSeqs: Set<Int> = emptySet(),
 ): SuccessorResult {
     val resolvedSeqs = mutableSetOf<Int>()
     for ((seq, counts) in snapshot.allCounts) {
@@ -242,6 +252,7 @@ private fun bfsDispatch(
 
         val edgeTaken = isAnyEdgeTaken(
             snapshot.tasksBySeq, snapshot.resultBranches, successor, snapshot.sequenceMap, snapshot.definition,
+            emptyCompletedSeqs,
         )
 
         if (edgeTaken) {

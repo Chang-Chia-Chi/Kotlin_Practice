@@ -104,6 +104,31 @@ class DefaultPhaseGate(
                         return@inTransactionSuspend emptyList()
                     }
 
+                    is PhaseDecision.EmptyFanOut -> {
+                        // Scatter returned 0 items — bypass PARALLEL, forward to successors.
+                        val result = dispatchSuccessors(snapshot, decision.parallelInfo,
+                            emptyCompletedSeqs = setOf(decision.parallelInfo.sequenceNumber))
+                        if (result.tasksToInsert.isEmpty()) {
+                            val globalNonTerminal = taskRepo.countAllNonTerminalWithHandle(handle, workflowId)
+                            if (globalNonTerminal == 0) {
+                                workflowRepo.updateStatusWithHandle(handle, workflowId, WorkflowStatus.COMPLETED, WorkflowStatus.RUNNING)
+                                definitionCache.invalidate(workflowId)
+                            }
+                            return@inTransactionSuspend emptyList()
+                        }
+                        taskRepo.insertBatchWithHandle(handle, result.tasksToInsert)
+                        if (result.hasTerminalCompletion) {
+                            val globalNonTerminal = taskRepo.countAllNonTerminalWithHandle(handle, workflowId)
+                            if (globalNonTerminal == 0) {
+                                workflowRepo.updateStatusWithHandle(handle, workflowId, WorkflowStatus.COMPLETED, WorkflowStatus.RUNNING)
+                                definitionCache.invalidate(workflowId)
+                                return@inTransactionSuspend emptyList()
+                            }
+                        }
+                        workflowRepo.incrementVersionWithHandle(handle, workflowId)
+                        return@inTransactionSuspend result.signalQueues.toList()
+                    }
+
                     is PhaseDecision.ScatterExpand -> {
                         // Live recount under lock: recoverStuckWorkflow may have committed PARALLEL tasks
                         // between snapshot build and now. snapshot.allCounts is stale under READ COMMITTED.
@@ -222,6 +247,17 @@ class DefaultPhaseGate(
                             )
                             continue
                         }
+
+                    if (itemList.isEmpty()) {
+                        // Empty fanout recovery: no PARALLEL tasks to spawn; forward to successors.
+                        val result = dispatchSuccessors(snapshot, seqInfo,
+                            emptyCompletedSeqs = setOf(seq))
+                        if (result.tasksToInsert.isNotEmpty()) {
+                            taskRepo.insertBatchWithHandle(handle, result.tasksToInsert)
+                            signalQueueSet += result.signalQueues
+                        }
+                        continue
+                    }
 
                     val parallelTasks =
                         itemList.map { rawItem ->

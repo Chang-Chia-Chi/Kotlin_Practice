@@ -462,7 +462,7 @@ class DagRouterTest {
         }
 
         @Test
-        fun `SCATTER COMPLETED with empty items returns Abort`() {
+        fun `SCATTER COMPLETED with empty items returns EmptyFanOut`() {
             val scatterAct = ActivityDefinition(
                 name = "scatter",
                 transition = "scatter.h",
@@ -480,7 +480,7 @@ class DagRouterTest {
 
             val decision = resolvePhaseDecision(snap, seqInfo, TaskStatus.COMPLETED, scatterItems = emptyList())
 
-            assertEquals(PhaseDecision.Abort, decision)
+            assertTrue(decision is PhaseDecision.EmptyFanOut)
         }
 
         @Test

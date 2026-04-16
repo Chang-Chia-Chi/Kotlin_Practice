@@ -479,6 +479,35 @@ class DefaultPhaseGateTest {
         }
     }
 
+    // -- Coverage gap 1b: SCATTER completes with empty items continues to join ----
+
+    @Test
+    fun `SCATTER completion with empty items continues to join task`() = runTest {
+        val def = workflow {
+            activity("scatter") {
+                transition("sc.h")
+                fanOut { transition("par.h") }
+                next("join")
+            }
+            activity("join") { transition("j.h") }
+        }
+        val seqMap = buildSequenceMap(def)
+        val (wfId, _) = startAndGetSeq(def)
+        val seqScatter = seqMap.values.first { it.activityName == "scatter" }.sequenceNumber
+        val seqParallel = seqMap.values.first { it.activityName == "scatter.__parallel__" }.sequenceNumber
+        val seqJoin = seqMap.values.first { it.activityName == "join" }.sequenceNumber
+        val scatterTasks = taskRepo.findByWorkflowAndSequence(wfId, seqScatter)
+
+        gate.onTaskCompleted(TaskCompletionEvent(
+            scatterTasks[0].id, wfId, seqScatter, TaskStatus.COMPLETED,
+            resultJson = """{"batchToken":"tok"}""", fanOutPayloadsJson = "[]",
+        ))
+
+        assertEquals(emptyList<String>(), taskStatusAt(wfId, seqParallel))
+        assertEquals(listOf("PENDING"), taskStatusAt(wfId, seqJoin))
+        assertEquals(WorkflowStatus.RUNNING, workflowStatus(wfId))
+    }
+
     // -- Coverage gap 2: Idempotent completion (updateStatus returns false) -------
 
     @Test
@@ -587,11 +616,12 @@ class DefaultPhaseGateTest {
         }
     }
 
-    // -- G6: SCATTER with empty items array aborts workflow --------------------
-    // Empty items list is treated as PhaseDecision.Abort: workflow transitions to FAILED.
+    // -- G6: SCATTER with empty items array continues to join -----------------
+    // Empty items list is treated as PhaseDecision.EmptyFanOut: workflow bypasses
+    // PARALLEL and continues to the join task as PENDING.
 
     @Test
-    fun `G6 SCATTER with empty items array aborts workflow to FAILED`() = runTest {
+    fun `G6 SCATTER with empty items array continues to join task`() = runTest {
         val def = workflow {
             activity("scatter") {
                 transition("sc.h")
@@ -603,6 +633,7 @@ class DefaultPhaseGateTest {
         val seqMap = buildSequenceMap(def)
         val (wfId, _) = startAndGetSeq(def)
         val seqScatter = seqMap.values.first { it.activityName == "scatter" }.sequenceNumber
+        val seqJoin = seqMap.values.first { it.activityName == "join" }.sequenceNumber
         val scatterTasks = taskRepo.findByWorkflowAndSequence(wfId, seqScatter)
 
         gate.onTaskCompleted(TaskCompletionEvent(
@@ -610,8 +641,8 @@ class DefaultPhaseGateTest {
             resultJson = null, fanOutPayloadsJson = """[]""",
         ))
 
-        val wf = workflowRepo.findById(wfId)
-        assertEquals(WorkflowStatus.FAILED, wf?.status)
+        assertEquals(listOf("PENDING"), taskStatusAt(wfId, seqJoin))
+        assertEquals(WorkflowStatus.RUNNING, workflowStatus(wfId))
     }
 
     // -- G7a: assembleChildItem merges scatter resultJson with item, item fields win on collision
