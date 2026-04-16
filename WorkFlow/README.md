@@ -1,6 +1,6 @@
 # Lock-Free Workflow Engine
 
-A Kotlin/Quarkus workflow engine that eliminates row-lock contention by replacing mutable counters with MVCC-based barrier detection and optimistic CAS transitions. Workers wake instantly via event-driven dispatch. Backed by Oracle, deployed on Kubernetes.
+A Kotlin/Quarkus workflow engine that eliminates row-lock contention by replacing mutable counters with MVCC-based barrier detection and a two-transaction commit design. Workers wake instantly via event-driven dispatch. Backed by Oracle, deployed on Kubernetes.
 
 `Kotlin` · `Quarkus` · `JDBI` · `Oracle` · `Kubernetes`
 
@@ -10,25 +10,35 @@ A Kotlin/Quarkus workflow engine that eliminates row-lock contention by replacin
 
 ### Declarative DSL
 
-A type-safe Kotlin DSL produces immutable `WorkflowDefinition` data classes — pure data, zero behaviour, JSON-serializable. `@DslMarker` prevents scope leakage; build-phase validation enforces required fields.
+A type-safe Kotlin DSL produces immutable `WorkflowDefinition` data classes — pure data, zero behaviour, JSON-serializable. `@DslMarker` prevents scope leakage; build-phase validation enforces required fields and mutual-exclusion rules (e.g. `on()` and `next()` cannot coexist on the same activity).
 
 **Linear pipeline** — activities execute in sequence, one task each:
 
 ```kotlin
 val etl = workflow {
-    activity("extract") {
-        transition("etl.extract")
-    }
-    activity("transform") {
-        transition("etl.transform")
-    }
-    activity("load") {
-        transition("etl.load")
-    }
+    activity("extract") { transition("etl.extract") }
+    activity("transform") { transition("etl.transform") }
+    activity("load") { transition("etl.load") }
 }
 ```
 
-**Fan-out with inputs** — scatter activity produces N payloads, engine creates N parallel tasks for the target activity. After the join policy passes, the next activity receives resolved inputs from prior activities:
+**Conditional branching** — activity result carries a `"branch"` field; `on()` routes to different successors based on its value:
+
+```kotlin
+val payment = workflow {
+    activity("validate") {
+        transition("payment.validate")
+        on("OK")      { next("charge") }
+        on("INVALID") { next("reject") }
+    }
+    activity("charge") { transition("payment.charge") }
+    activity("reject") { transition("payment.reject") }
+}
+```
+
+The handler completing `validate` must return `{"branch": "OK"}` or `{"branch": "INVALID"}`. The engine extracts the `"branch"` key from `resultJson` and evaluates each `Edge` label at routing time. Non-taken branches receive `SKIPPED` tasks and the BFS propagates through them in the same transaction.
+
+**Fan-out** — scatter activity produces N payloads; engine creates N parallel tasks for the named handler. After all parallel tasks complete, the next activity can pull resolved inputs from prior results:
 
 ```kotlin
 val pipeline = workflow {
@@ -36,91 +46,96 @@ val pipeline = workflow {
     activity("split") {
         transition("batch.prepare")
         retries(3)
-        deadline(Duration.ofMinutes(10))
-        fanOut("process")
-    }
-    activity("process") {
-        transition("batch.execute")
-        retries(2)
-        deadline(Duration.ofMinutes(5))
-        failurePolicy(FailurePolicy.BEST_EFFORT)
-        joinPolicy(JoinPolicy.Percentage(95))
+        fanOut { transition("batch.execute"); retries(2) }
+        next("report")
     }
     activity("report") {
         transition("batch.report")
-        inputs {
-            "batchId" from "split.batchId"
-        }
+        inputs { "batchId" from "split.batchId" }
     }
 }
 ```
 
-Reading: `split` returns a JSON array. The engine fans out one `batch.execute` task per item to the `process` activity. Once >= 95% succeed, `report` runs with `batchId` resolved from `split`'s result.
+`split` returns a JSON array. The engine fans out one `batch.execute` task per item. Once all parallel tasks complete, `report` runs with `batchId` resolved from `split`'s result. Fan-out config (transition, retries, deadline, backoff, queue) lives inside the `fanOut {}` block.
 
-**Advanced** — queue routing, custom join policy, exponential backoff:
+**Queue routing & backoff:**
 
 ```kotlin
-val advanced = workflow {
-    deadline(Duration.ofHours(4))
-    activity("discover") {
-        transition("crawl.discover")
-        queue("io-bound")
-        retries(5)
-        backoffBase(Duration.ofSeconds(2))
-        backoffCap(Duration.ofMinutes(5))
-        fanOut("process")
-    }
-    activity("process") {
-        transition("crawl.process")
-        queue("cpu-bound")
-        retries(3)
-        deadline(Duration.ofMinutes(15))
-        joinPolicy(JoinPolicy.Threshold(10))
-        failurePolicy(FailurePolicy.BEST_EFFORT)
-    }
-    activity("aggregate") {
-        transition("crawl.aggregate")
-        inputs {
-            "results" from "process.output"
-            "config" from "discover.crawlConfig"
-        }
-    }
+activity("fetch") {
+    transition("crawl.fetch")
+    queue("io-bound")
+    retries(5)
+    backoffBase(Duration.ofSeconds(2))
+    backoffCap(Duration.ofMinutes(5))
+    fanOut { transition("crawl.process"); queue("cpu-bound") }
+    next("aggregate")
 }
 ```
-
-Fan-out is an independent, named activity — not a nested block. `joinPolicy` and `failurePolicy` live on the fan-out target. `inputs {}` declares cross-activity data passing: the `ActivityInputResolver` determines single-value vs aggregate resolution from the workflow definition (linear activity = single task result, parallel activity = array of results).
 
 ### Engine Core
 
-The engine is sequence-driven. Each activity maps to a sequence number; fan-out targets are `PARALLEL` phases, everything else is `LINEAR`. The `AdvancementStrategyRegistry` dispatches to the appropriate strategy:
+Each activity compiles to one or two sequence numbers via `buildSequenceMap` (topological sort):
 
-- **`LinearAdvancementStrategy`** — single task per sequence. Advances on completion, aborts on failure (unless `BEST_EFFORT`).
-- **`ParallelAdvancementStrategy`** — N tasks per sequence. Evaluates `JoinPolicy` (All, Threshold, or Percentage) against completion counts. Advances only when the policy is satisfied.
+| Activity type | Phases assigned |
+|---|---|
+| Normal | `LINEAR` (seq N) |
+| Fan-out activity | `SCATTER` (seq N) + `PARALLEL` (seq N+1) |
 
-Both strategies resolve to an `AdvancementDecision`: `Advance(nextSequence)`, `Complete`, or `Abort(reason)`. The barrier evaluates this after every task completion via a read-only MVCC aggregate query (zero locks during task execution) and advances the workflow via optimistic CAS on the single workflow row. At most one actor wins the CAS per phase — this is the only serialization point in the entire design.
+`PhaseDecision` is the routing discriminant:
 
-**Two-Table Model.** The entire runtime state lives in two tables:
+- **`Abort`** — task failed, or SCATTER result was empty/missing → workflow → `FAILED`
+- **`ScatterExpand`** — SCATTER succeeded → insert N `PARALLEL` tasks
+- **`Normal`** — fall through to successor BFS
 
-- **`workflow`** — one mutable row per execution, sole CAS target. Columns: `id`, `definition` (CLOB), `current_sequence`, `version`, `status`, `deadline_at`, timestamps.
-- **`task`** — queue rows claimed via `SELECT FOR UPDATE SKIP LOCKED`. Each task belongs to a workflow at a specific sequence number. Includes retry/backoff fields (`not_before` for exponential backoff, `enqueued_at` for FIFO ordering).
+**Two-transaction design** (`DefaultPhaseGate`):
+
+- **TX1** commits the task status + `resultJson` so it is visible to all concurrent readers under READ COMMITTED.
+- **TX2** runs a fast-path non-terminal count (no lock). If all tasks at the sequence are terminal, it acquires a `SELECT FOR UPDATE` on the workflow row, recounts under lock, builds a `GateSnapshot`, and delegates to pure routing functions.
+
+**BFS successor dispatch** (`DagRouter.bfsDispatch`) uses Kahn's indegree algorithm:
+
+1. Seed from the just-completed sequence's direct successors.
+2. A successor is dequeued only when all its predecessor sequences are resolved (terminal in DB or decided-SKIPPED in this loop).
+3. `isAnyEdgeTaken` checks `resultBranch == edgeLabel` (or `DEFAULT_BRANCH` for unconditional edges).
+4. Taken → insert real `Task`. Not taken → insert `SKIPPED` task, mark resolved, enqueue *its* successors.
+
+All inserts are batched into a single `insertBatch` call at the end of TX2.
+
+**`ActivityInputResolver`** resolves `inputs {}` declarations at handler execution time. Linear/SCATTER sources return a single field value; PARALLEL sources aggregate into a JSON array across all completed parallel tasks.
+
+**Two-Table Model:**
+
+- **`workflow`** — one mutable row per execution. Columns: `id`, `definition_json` (CLOB), `version`, `status`, `deadline_at`, timestamps.
+- **`task`** — queue rows claimed via `SELECT FOR UPDATE SKIP LOCKED`. Columns include `result_json`, `fan_out_payloads_json`, `retry_count`, `not_before` (exponential backoff), `enqueued_at` (FIFO ordering), `sequence_number`, `queue_name`.
 
 ### Worker Layer
 
-Workers use event-driven dispatch. Instead of fixed-interval polling, workers suspend on a per-queue `SharedFlow` and wake instantly when signaled. Three signal sources:
+Workers use event-driven dispatch. The pipeline:
 
-- **Local signal** — `DispatchNotifier.signal()` emits to the in-process flow after task insertion, then broadcasts to all peer pods via HTTP POST.
-- **Remote signal** — `DispatchNotifyResource` receives the HTTP broadcast and emits to the local flow (no re-broadcast, preventing loops).
-- **Fallback probe** — `awaitWork()` times out after `fallback-poll-interval` (default 5s), triggering a poll to catch missed signals.
+```
+indefinitelyRepeat(Unit)
+  .takeUntilSignal(stopChannel)
+  .unorderedMapAsync(concurrency) { pollAndProcess(...) }
+  .collect {}
+```
+
+On each tick the loop rotates through configured queues (round-robin) and claims tasks via `SELECT FOR UPDATE SKIP LOCKED`. If no tasks are found it suspends on `WorkerNotifier.awaitWork()` until signaled or the fallback poll interval expires.
+
+Three signal sources:
+
+- **Local signal** — emitted after task insertion, then broadcasts to all peer pods via HTTP POST.
+- **Remote signal** — `WorkerNotifyResource` receives the HTTP broadcast and emits to the local flow (no re-broadcast).
+- **Fallback probe** — `awaitWork()` times out after `fallback-poll-interval` (default 5s).
 
 Peer discovery uses a Kubernetes Endpoints Watch (`PeerRegistry`) for real-time pod list updates. Outside Kubernetes, signaling stays in-process.
 
-**Correctness invariant:** Notifications are performance hints, never correctness requirements. Removing the entire notification layer degrades to fallback-poll mode but never affects task claiming.
+**Correctness invariant:** Signals are performance hints, never correctness requirements. Removing the notification layer degrades to fallback-poll mode but never affects claiming or routing.
 
 ### Resilience
 
-**Leader sweeper.** A K8s-lease-elected leader polls at low frequency to detect workflows stuck due to worker death between CAS success and transaction commit. The sweeper executes the same CAS + fan-out logic, which is inherently idempotent. Both workers and the sweeper share the same CAS predicate — at most one actor wins per phase.
+**Leader sweeper.** A K8s-lease-elected leader runs `WorkflowWatchdog`, which periodically calls `recoverStuckWorkflow`. Recovery seeds the indegree-BFS from every resolved sequence — the same pure routing logic as normal completion — making it inherently idempotent.
 
-**Graceful shutdown.** `ShutdownCoordinator` orchestrates ordered component teardown: leader (order 1) stops sweeper patrols first, then workers (order 10) drain in-flight tasks, all within a configurable global timeout.
+**Graceful shutdown.** `ShutdownCoordinator` orchestrates teardown in order: leader (order 1) stops sweeper patrols first, then workers (order 10) drain in-flight tasks, all within a configurable global timeout.
 
 **Health probes.** `WorkerLoopHealthCheck` (worker activity freshness) and `LeaderHealthCheck` (leader heartbeat freshness) serve as Kubernetes liveness probes.
 
@@ -130,16 +145,27 @@ Peer discovery uses a Kubernetes Endpoints Watch (`PeerRegistry`) for real-time 
 
 ```
 src/main/kotlin/
-  config/         FrameworkConfig (SmallRye @ConfigMapping)
-  dsl/            WorkflowDefinition data classes + type-safe builders
-  engine/         DefaultPhaseGate, AdvancementStrategyRegistry, ActivityInputResolver,
-                    WorkflowWatchdog, WorkflowEngine, repositories, models
-  extension/      Coroutine flow utilities (unorderedMapAsync, takeUntilSignal)
-  leader/         K8s Lease-based leader election + health check
-  queryexporter/  Config-driven SQL → Prometheus metric exporter
-  shutdown/       ShutdownCoordinator + ShutdownParticipant interface
-  worker/         WorkerLoop, HandlerRegistry, TransitionHandler,
-                    DispatchNotifier, PeerRegistry, health check
+  dispatch/                   Category-based dispatch algorithm (DSL, models, use cases)
+  infrastructure/
+    coroutine/                Flow utilities (indefinitelyRepeat, takeUntilSignal, unorderedMapAsync)
+    leader/                   K8s Lease-based leader election + health check
+    persistence/              JDBI extensions
+    queryexporter/            Config-driven SQL → Prometheus metric exporter
+    shutdown/                 ShutdownCoordinator + ShutdownParticipant SPI
+  worker/
+    adapter/http/             PeerRegistry, HttpWorkerNotifier, WorkerNotifyResource
+    adapter/trigger/          K8sJobTriggerDriver
+    usecase/service/
+      execution/              WorkerLoop, HandlerRegistry, MeteredTransitionHandler
+      trigger/                TriggerLoop
+      TaskSettler
+  workflow/
+    dsl/                      WorkflowDslBuilders (workflow {}, activity {}, on {}, fanOut {})
+    model/                    WorkflowDefinition, ActivityDefinition, Edge, SequenceModel,
+                                Task, TaskCompletionEvent, TaskStatus, PhaseType
+    usecase/service/orchestration/
+                              WorkflowEngine, DefaultPhaseGate, DagRouter,
+                                ActivityInputResolver, DefinitionCache, WorkflowWatchdog
 ```
 
 ---
@@ -169,9 +195,8 @@ All properties are under the `framework.*` prefix in `application.properties`.
 |-------|----------|---------|-------------|
 | worker | `fallback-poll-interval` | 5s | Poll probe frequency when no dispatch signal received |
 | worker | `concurrency` | 4 | Max concurrent handler executions |
-| worker | `batch-size` | 1 | Tasks per claim cycle |
 | worker | `max-batch-size` | 16 | Upper bound on adaptive batch sizing |
-| worker | `pod-ip` | localhost | This pod's IP (for peer exclusion in dispatch broadcast) |
+| worker | `pod-ip` | localhost | This pod's IP (excluded from peer broadcast) |
 | sweeper | `interval` | 30s | Patrol frequency (leader-only) |
 | sweeper | `grace-period` | 2m | Stuck workflow detection threshold |
 | sweeper | `stale-task-threshold` | 10m | Stale PROCESSING task reclaim age |
@@ -183,5 +208,4 @@ All properties are under the `framework.*` prefix in `application.properties`.
 
 ## Documentation
 
-- **[Design Document](docs/design.md)** — full algorithm details, data model, state machines, failure propagation, indexing strategy, decision log, and implementer checklist.
 - **[Feature Specs](docs/superpowers/specs/)** — design specs for cancel/timeout, metrics, dead-letter replay, engine enhancements, and more.
