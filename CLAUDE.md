@@ -2,11 +2,14 @@
 
 ## What This Is
 
-A **learning project** — building a Dynamo-style AP distributed cache from scratch in Kotlin. Redis-compatible data structures and wire protocol, but distributed using the Dynamo paper's techniques (not Raft/Paxos). The goal is deep understanding of AP distributed systems, not just getting code done.
+A **learning project** — building a distributed cache from scratch in Kotlin. Redis-compatible data structures and wire protocol. Primary engine is Dynamo-style AP; a Raft-backed CP subsystem (via MicroRaft) provides linearizable primitives (locks, counters, semaphores, latches, CAS) on the `cp:*` namespace — usable as a safe distributed lock service. Goal: deep understanding of both AP and CP distributed systems, not just getting code done.
 
-**Spec:** `docs/design-spec.md` — constraints, invariants, semantics. This is the source of truth.
+**Specs:**
+- `docs/design-spec.md` — AP engine constraints, invariants, semantics. Source of truth for P1–P4.
+- `docs/design-spec-cp.md` — CP subsystem constraints, invariants, semantics. Source of truth for P5.
+
 **Learning guide:** `docs/LEARNING-GUIDE.md` — phase-by-phase path with papers to read per concept.
-**Implementation plans:** `docs/plans/` — P1 through P4, has code reference snippets if needed, but the user writes their own implementation.
+**Implementation plans:** `docs/plans/` — P1 through P5, has code reference snippets if needed, but the user writes their own implementation.
 
 ## Collaboration Model
 
@@ -38,14 +41,15 @@ Before starting ANY sub-phase implementation, you MUST:
 - The user reviews, asks questions, and learns from the implementation
 - When reviewing: focus on whether the invariants from the spec hold, not style nitpicks
 
-## 4-Phase Structure
+## 5-Phase Structure
 
 | Phase | Theme | Key concepts | End state |
 |---|---|---|---|
-| **P1** | Data Engine + Single Node | Skip list, timer wheel, W-TinyLFU, RESP, Lua | `redis-cli` works against single node |
+| **P1** | Data Engine + Single Node | Skip list, timer wheel, W-TinyLFU, RESP, Lua, SCAN + custom hash table | `redis-cli` works against single node |
 | **P2** | Distribution | Consistent hashing, SWIM gossip, DVVs, quorum R/W | 3-node cluster, minority-failure tolerant |
 | **P3** | Fault Tolerance | Sloppy quorum, hinted handoff, read repair, Merkle anti-entropy, conflict merge | Partition → heal → converge |
-| **P4** | Persistence + Snapshots | RDB serialization, Chandy-Lamport algorithm | Warm restart + distributed snapshots |
+| **P4** | Persistence + Snapshots | RDB serialization, WAL (write-ahead log), Chandy-Lamport algorithm | Warm restart + WAL durability + distributed snapshots |
+| **P5** | CP Subsystem (Raft via MicroRaft) | Linearizability, Raft state machines, fencing tokens, session lifecycle, TTL-in-Raft | Distributed locks, atomic counters, semaphores, latches, CAS on `cp:*` keys |
 
 Each phase has sub-phases (1A, 1B, ...) that teach one concept each. The rhythm is: **read paper → write tests → build → verify key insight**.
 
@@ -53,14 +57,22 @@ Each phase has sub-phases (1A, 1B, ...) that teach one concept each. The rhythm 
 
 - [x] Project scaffolded — 3 Maven modules, builds clean
 - [ ] **P1A:** Command model + basic GET/SET — NOT STARTED
-- [ ] P1B: String completion + Hash + List
+- [ ] P1B: String completion + Hash + List + SCAN (custom hash table + reverse binary iteration)
 - [ ] P1C: Skip list + Sorted Set
 - [ ] P1D: Hierarchical timer wheel + TTL
 - [ ] P1E: Eviction — LRU + W-TinyLFU
 - [ ] P1F: RESP server + MULTI/EXEC + Lua
 - [ ] P2A–P2D: Distribution (hashing, gossip, DVVs, replication)
 - [ ] P3A–P3D: Fault tolerance (handoff, repair, anti-entropy, convergence)
-- [ ] P4A–P4C: Persistence + snapshots
+- [ ] P4A: RDB snapshots
+- [ ] P4B: Write-Ahead Log (WAL) — fsync policies, group commit, checkpoint, crash recovery
+- [ ] P4C: Chandy-Lamport distributed snapshots
+- [ ] P5A: MicroRaft integration + AtomicLong state machine
+- [ ] P5B: FencedLock + fencing tokens + lease TTL
+- [ ] P5C: Sessions + session-tied resource release
+- [ ] P5D: Semaphore + CountDownLatch + AtomicReference
+- [ ] P5E: Command dispatcher + Redis-compat routing (`cp:*` namespace)
+- [ ] P5F: Chaos tests + invariant verification (I13–I22)
 
 **Update this checklist as phases complete.**
 
@@ -72,6 +84,7 @@ Each phase has sub-phases (1A, 1B, ...) that teach one concept each. The rhythm 
 - **Server:** Netty 4.1.x (RESP protocol)
 - **Cluster:** gRPC-Kotlin + Protobuf (inter-node)
 - **Scripting:** LuaJ 3.0.x (embedded Lua)
+- **Consensus (CP subsystem, P5):** MicroRaft (embedded Raft library, Java)
 - **No framework** — pure Kotlin + coroutines, no Quarkus/Spring/Ktor
 
 ## Module Boundaries (compile-time enforced)
@@ -79,14 +92,15 @@ Each phase has sub-phases (1A, 1B, ...) that teach one concept each. The rhythm 
 ```
 dynacache-engine   → kotlin-stdlib ONLY (pure, no I/O)
 dynacache-cluster  → engine + coroutines + gRPC
-dynacache-server   → cluster + Netty + LuaJ
+dynacache-cp       → cluster + MicroRaft                     (added in P5)
+dynacache-server   → cp + Netty + LuaJ
 ```
 
 If the engine module imports Netty or gRPC, the build should fail. This is intentional.
 
 ## Key Design Decisions (locked)
 
-- **AP, not CP** — Dynamo-style. No consensus algorithm. Conflicts detected by DVVs, resolved by merge rules.
+- **AP core + CP subsystem** — Primary engine is Dynamo-style AP (no consensus; conflicts detected by DVVs, resolved by merge rules). A Raft-backed CP subsystem (MicroRaft) handles linearizable primitives on `cp:*` keys for safe distributed locks, atomic counters, etc. The two engines share nothing except the RESP dispatcher and gRPC transport. See `docs/design-spec-cp.md`.
 - **DVVs, not vector clocks** — bounded by cluster size, not client count.
 - **Timer wheel, not random sampling** — O(1) insert/cancel/expire for TTL.
 - **W-TinyLFU** — Caffeine-style eviction with Count-Min Sketch admission filter.
@@ -104,9 +118,14 @@ If the engine module imports Netty or gRPC, the build should fail. This is inten
 | Skip Lists (Pugh, 1990) | P1C |
 | Timer Wheels (Varghese & Lauck, 1987) | P1D |
 | TinyLFU (Einziger et al., 2017) | P1E |
+| Redis `dict.c` — `dictScan()` + incremental rehashing | P1B (SCAN) |
 | DVVs (Preguica et al., 2012) | P2C |
-| Chandy-Lamport (1985) | P4B |
-| DDIA Ch. 5-6 (Kleppmann) | Background |
+| ARIES (Mohan et al., 1992) — sections 1-6 | P4B (WAL) |
+| Chandy-Lamport (1985) | P4C |
+| Raft (Ongaro & Ousterhout, 2014) | P5A–P5B |
+| Kleppmann — "How to do distributed locking" (2016) | P5B (fencing tokens) |
+| ZooKeeper (Hunt et al., 2010) | P5C (session model) |
+| DDIA Ch. 5-6, 9 (Kleppmann) | Background (Ch. 9 for P5) |
 
 ## Build & Test Commands
 

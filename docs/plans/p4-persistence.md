@@ -12,6 +12,9 @@
 - Chandy-Lamport paper (1985) — 10 pages, the full algorithm
 - Mattern (1989) — Virtual Time, formalizes consistent cuts
 - Redis source: `rdb.c` — `rdbSave` / `rdbLoad` cycle
+- ARIES (Mohan et al., 1992) — sections 1-6 (~20 pages), foundational WAL paper
+- SQLite WAL mode documentation — most readable WAL explanation
+- Redis source: `aof.c` — ~1500 LOC, practical WAL (Redis calls it AOF)
 
 ---
 
@@ -275,11 +278,434 @@ git add -A && git commit -m "feat(server): periodic RDB save + restore on startu
 
 ---
 
-## Sub-phase 4B: Chandy-Lamport Distributed Snapshots
+## Sub-phase 4B: Write-Ahead Log (WAL)
+
+**Concept:** RDB snapshots are periodic — crash between snapshots and you lose up to 5 minutes of data. A Write-Ahead Log (WAL) closes this durability gap: every write is appended to a sequential log on disk **before** the in-memory state is updated. On crash recovery, replay the WAL from the last RDB checkpoint to reconstruct the exact pre-crash state. Zero acknowledged writes lost.
+
+WAL is one of the most fundamental database concepts — it appears in PostgreSQL (WAL), MySQL (redo log), SQLite (WAL mode), RocksDB (WAL), and Redis (AOF). The design decisions — fsync policy, group commit, log compaction, checkpoint interaction — are universal.
+
+**Learning goals:**
+- Write-ahead logging: why log-before-apply guarantees durability
+- Fsync policies and their throughput/durability tradeoffs
+- Group commit: amortize fsync cost across multiple writes
+- Log compaction / rewriting: keep WAL size bounded
+- Checkpoint coordination: how WAL interacts with RDB snapshots
+- Crash recovery: idempotent replay from a known-good checkpoint
+
+**Pre-reading:**
+- ARIES (Mohan et al., 1992) — the foundational WAL paper, sections 1-6 (~20 pages of the full 40)
+- SQLite WAL mode documentation — most readable WAL explanation
+- Redis source: `aof.c` — ~1500 LOC, practical WAL (Redis calls it AOF)
+- PostgreSQL docs: "Write-Ahead Logging (WAL)" chapter
+
+### Task 4: WAL entry format and writer
+
+**Files:**
+- Create: `dynacache-engine/src/main/kotlin/dynacache/engine/WriteOperation.kt`
+- Create: `dynacache-server/src/main/kotlin/dynacache/server/WalWriter.kt`
+- Create: `dynacache-server/src/test/kotlin/dynacache/server/WalWriterTest.kt`
+
+- [ ] **Step 1: Define WriteOperation in engine (pure, no I/O)**
+
+The engine emits what happened. The server decides how to persist it.
+
+```kotlin
+package dynacache.engine
+
+/**
+ * Represents a single mutation. Emitted by the engine after each write command.
+ * Carries enough information to replay the exact same state change.
+ */
+sealed class WriteOperation {
+    abstract val sequenceNumber: Long
+    abstract val timestampMs: Long
+
+    data class SetOp(
+        override val sequenceNumber: Long,
+        override val timestampMs: Long,
+        val key: String,
+        val value: ByteArray,
+        val expiresAtMs: Long,
+    ) : WriteOperation()
+
+    data class DelOp(
+        override val sequenceNumber: Long,
+        override val timestampMs: Long,
+        val keys: List<String>,
+    ) : WriteOperation()
+
+    data class HSetOp(
+        override val sequenceNumber: Long,
+        override val timestampMs: Long,
+        val key: String,
+        val fields: Map<String, ByteArray>,
+    ) : WriteOperation()
+
+    data class ListPushOp(
+        override val sequenceNumber: Long,
+        override val timestampMs: Long,
+        val key: String,
+        val values: List<ByteArray>,
+        val head: Boolean,  // true = LPUSH, false = RPUSH
+    ) : WriteOperation()
+
+    // One variant per mutating command...
+}
+```
+
+- [ ] **Step 2: Write failing tests for WAL writer/reader**
+
+```kotlin
+package dynacache.server
+
+import dynacache.engine.WriteOperation
+import org.assertj.core.api.Assertions.assertThat
+import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.io.TempDir
+import java.nio.file.Path
+
+class WalWriterTest {
+    @TempDir lateinit var tempDir: Path
+
+    @Test
+    fun `write and read back single entry`() {
+        val walPath = tempDir.resolve("test.wal")
+        val writer = WalWriter(walPath)
+
+        val op = WriteOperation.SetOp(
+            sequenceNumber = 1, timestampMs = 1000,
+            key = "foo", value = "bar".toByteArray(), expiresAtMs = -1,
+        )
+        writer.append(op)
+        writer.close()
+
+        val reader = WalReader(walPath)
+        val entries = reader.readAll()
+        assertThat(entries).hasSize(1)
+        val restored = entries[0] as WriteOperation.SetOp
+        assertThat(restored.key).isEqualTo("foo")
+        assertThat(String(restored.value)).isEqualTo("bar")
+        assertThat(restored.sequenceNumber).isEqualTo(1)
+    }
+
+    @Test
+    fun `entries survive simulated crash (partial last write ignored)`() {
+        val walPath = tempDir.resolve("test.wal")
+        val writer = WalWriter(walPath)
+        writer.append(WriteOperation.SetOp(1, 1000, "a", "1".toByteArray(), -1))
+        writer.append(WriteOperation.SetOp(2, 1001, "b", "2".toByteArray(), -1))
+        writer.close()
+
+        // Simulate crash: truncate last few bytes (incomplete entry)
+        val file = walPath.toFile()
+        val originalSize = file.length()
+        file.setLength(originalSize - 3)
+
+        val entries = WalReader(walPath).readAll()
+        // First entry intact, second (corrupted) skipped
+        assertThat(entries).hasSize(1)
+        assertThat((entries[0] as WriteOperation.SetOp).key).isEqualTo("a")
+    }
+
+    @Test
+    fun `CRC detects mid-file corruption`() {
+        val walPath = tempDir.resolve("test.wal")
+        val writer = WalWriter(walPath)
+        writer.append(WriteOperation.SetOp(1, 1000, "a", "1".toByteArray(), -1))
+        writer.append(WriteOperation.SetOp(2, 1001, "b", "2".toByteArray(), -1))
+        writer.append(WriteOperation.SetOp(3, 1002, "c", "3".toByteArray(), -1))
+        writer.close()
+
+        // Corrupt byte in the middle of the file
+        val bytes = walPath.toFile().readBytes()
+        bytes[bytes.size / 2] = (bytes[bytes.size / 2].toInt() xor 0xFF).toByte()
+        walPath.toFile().writeBytes(bytes)
+
+        val entries = WalReader(walPath).readAll()
+        // Reads entries until corruption, stops there
+        assertThat(entries.size).isLessThan(3)
+    }
+
+    @Test
+    fun `multiple entry types roundtrip`() {
+        val walPath = tempDir.resolve("test.wal")
+        val writer = WalWriter(walPath)
+        writer.append(WriteOperation.SetOp(1, 1000, "s", "v".toByteArray(), -1))
+        writer.append(WriteOperation.DelOp(2, 1001, listOf("s")))
+        writer.append(WriteOperation.HSetOp(3, 1002, "h", mapOf("f" to "v".toByteArray())))
+        writer.close()
+
+        val entries = WalReader(walPath).readAll()
+        assertThat(entries).hasSize(3)
+        assertThat(entries[0]).isInstanceOf(WriteOperation.SetOp::class.java)
+        assertThat(entries[1]).isInstanceOf(WriteOperation.DelOp::class.java)
+        assertThat(entries[2]).isInstanceOf(WriteOperation.HSetOp::class.java)
+    }
+}
+```
+
+- [ ] **Step 3: Implement WalWriter and WalReader**
+
+Binary format per entry:
+```
+┌─────────┬──────────┬──────────┬─────────┬──────────┐
+│ CRC32   │ Length   │ Seq No   │ OpType  │ Payload  │
+│ 4 bytes │ 4 bytes  │ 8 bytes  │ 1 byte  │ variable │
+└─────────┴──────────┴──────────┴─────────┴──────────┘
+```
+
+CRC32 covers `[Length][SeqNo][OpType][Payload]`. On read, recompute CRC and compare — mismatch means corruption, stop reading.
+
+Writer uses `FileOutputStream` with buffering. Reader scans sequentially, stopping at first CRC mismatch or incomplete entry.
+
+- [ ] **Step 4: Run tests — verify pass**
+- [ ] **Step 5: Commit**
+
+```bash
+git add -A && git commit -m "feat(server): WAL writer/reader with CRC integrity and crash safety"
+```
+
+### Task 5: Fsync policies
+
+**Files:**
+- Modify: `WalWriter.kt`
+- Create: `dynacache-server/src/test/kotlin/dynacache/server/WalFsyncTest.kt`
+
+- [ ] **Step 1: Write tests for fsync modes**
+
+```kotlin
+@Test
+fun `ALWAYS mode — entry durable after each append`() {
+    val writer = WalWriter(walPath, fsyncPolicy = FsyncPolicy.ALWAYS)
+    writer.append(WriteOperation.SetOp(1, 1000, "a", "1".toByteArray(), -1))
+    // Verify the file descriptor was fsync'd (check via spy/counter)
+    assertThat(writer.fsyncCount).isEqualTo(1)
+}
+
+@Test
+fun `EVERY_SECOND mode — batches fsync`() {
+    val writer = WalWriter(walPath, fsyncPolicy = FsyncPolicy.EVERY_SECOND)
+    for (i in 0 until 100) {
+        writer.append(WriteOperation.SetOp(i.toLong(), 1000, "k$i", "v".toByteArray(), -1))
+    }
+    // fsync count should be much less than 100
+    assertThat(writer.fsyncCount).isLessThan(10)
+}
+```
+
+- [ ] **Step 2: Implement three fsync policies**
+
+```kotlin
+enum class FsyncPolicy {
+    ALWAYS,        // fsync after every append — safest, ~1k-5k ops/sec
+    EVERY_SECOND,  // background coroutine fsyncs once per second — sweet spot
+    NEVER,         // OS decides — fastest, risk up to 30s of data loss
+}
+```
+
+For `EVERY_SECOND`: launch a coroutine that calls `fd.sync()` once per second. The writer just appends to the buffered stream without fsync.
+
+- [ ] **Step 3: Run tests — verify pass**
+- [ ] **Step 4: Commit**
+
+```bash
+git add -A && git commit -m "feat(server): WAL fsync policies — ALWAYS / EVERY_SECOND / NEVER"
+```
+
+### Task 6: Group commit
+
+**Files:**
+- Modify: `WalWriter.kt`
+- Create: `dynacache-server/src/test/kotlin/dynacache/server/WalGroupCommitTest.kt`
+
+- [ ] **Step 1: Write failing tests**
+
+```kotlin
+@Test
+fun `group commit batches concurrent appends into single fsync`() {
+    val writer = WalWriter(walPath, fsyncPolicy = FsyncPolicy.ALWAYS, groupCommit = true)
+
+    // Simulate 10 concurrent writes
+    val latch = CountDownLatch(10)
+    val threads = (0 until 10).map { i ->
+        Thread {
+            writer.append(WriteOperation.SetOp(i.toLong(), 1000, "k$i", "v".toByteArray(), -1))
+            latch.countDown()
+        }
+    }
+    threads.forEach { it.start() }
+    latch.await()
+
+    // Fsync count should be much less than 10
+    assertThat(writer.fsyncCount).isLessThan(5)
+    // But all entries are durable
+    val entries = WalReader(walPath).readAll()
+    assertThat(entries).hasSize(10)
+}
+```
+
+- [ ] **Step 2: Implement group commit**
+
+When multiple threads call `append()` concurrently, one becomes the leader and fsyncs for the entire batch. Others wait on the leader's fsync. This amortizes the fsync cost across N concurrent writes.
+
+```kotlin
+// Simplified approach:
+// 1. Lock, write to buffer
+// 2. If I'm first writer since last fsync → I'm the leader
+// 3. Leader: wait a few microseconds for more writers, then fsync
+// 4. Followers: wait on leader's fsync completion
+```
+
+- [ ] **Step 3: Run tests — verify pass**
+- [ ] **Step 4: Commit**
+
+```bash
+git add -A && git commit -m "feat(server): WAL group commit — amortize fsync across concurrent writes"
+```
+
+### Task 7: WAL checkpoint and truncation
+
+**Files:**
+- Modify: `WalWriter.kt`
+- Modify: `dynacache-server/src/main/kotlin/dynacache/server/SnapshotEngine.kt` (or equivalent)
+- Create: `dynacache-server/src/test/kotlin/dynacache/server/WalCheckpointTest.kt`
+
+- [ ] **Step 1: Write failing tests**
+
+```kotlin
+@Test
+fun `checkpoint truncates WAL after RDB snapshot`() {
+    val writer = WalWriter(walPath, fsyncPolicy = FsyncPolicy.ALWAYS)
+    for (i in 0 until 100) {
+        writer.append(WriteOperation.SetOp(i.toLong(), 1000, "k$i", "v".toByteArray(), -1))
+    }
+    val sizeBeforeCheckpoint = walPath.toFile().length()
+
+    // Simulate RDB snapshot at sequence 100
+    writer.checkpoint(upToSequence = 100)
+
+    val sizeAfterCheckpoint = walPath.toFile().length()
+    assertThat(sizeAfterCheckpoint).isLessThan(sizeBeforeCheckpoint)
+}
+
+@Test
+fun `recovery replays WAL from last RDB checkpoint`() {
+    // Write 50 entries, take RDB snapshot, write 50 more, "crash"
+    val writer = WalWriter(walPath, fsyncPolicy = FsyncPolicy.ALWAYS)
+    for (i in 0 until 50) {
+        writer.append(WriteOperation.SetOp(i.toLong(), 1000, "k$i", "v".toByteArray(), -1))
+    }
+    writer.checkpoint(upToSequence = 50)  // RDB covers seq 0-50
+    for (i in 50 until 100) {
+        writer.append(WriteOperation.SetOp(i.toLong(), 1000, "k$i", "v".toByteArray(), -1))
+    }
+    writer.close()
+
+    // On recovery: only need to replay seq 50-100
+    val entriesToReplay = WalReader(walPath).readAll()
+    assertThat(entriesToReplay).hasSize(50)
+    assertThat(entriesToReplay.first().sequenceNumber).isEqualTo(50)
+}
+```
+
+- [ ] **Step 2: Implement checkpoint**
+
+On checkpoint (triggered after successful RDB save):
+1. Record the RDB's last sequence number
+2. Rewrite the WAL file with only entries after that sequence number
+3. Or: rename current WAL, start fresh, delete old after confirming RDB is intact
+
+- [ ] **Step 3: Wire into startup recovery sequence**
+
+```
+Startup:
+  1. Load latest RDB snapshot → get base state + checkpoint sequence number
+  2. Open WAL → read entries with sequence > checkpoint
+  3. Replay each entry against the engine (idempotent by sequence number)
+  4. Engine is now at pre-crash state
+  5. Open WAL for appending, resume normal operation
+```
+
+- [ ] **Step 4: Run tests — verify pass**
+- [ ] **Step 5: Commit**
+
+```bash
+git add -A && git commit -m "feat(server): WAL checkpoint/truncation + crash recovery sequence"
+```
+
+### Task 8: WAL integration with DataEngine
+
+**Files:**
+- Modify: `DataEngine.kt` — emit WriteOperation on every mutation
+- Modify: `Main.kt` — wire WAL into command pipeline
+- Create: `dynacache-server/src/test/kotlin/dynacache/server/WalIntegrationTest.kt`
+
+- [ ] **Step 1: Write integration test**
+
+```kotlin
+@Test
+fun `full crash recovery — WAL replays missing writes after RDB`() {
+    // Start engine, write keys, take RDB, write more keys
+    val engine = DataEngine()
+    val walWriter = WalWriter(walPath, fsyncPolicy = FsyncPolicy.ALWAYS)
+
+    for (i in 0 until 10) {
+        val result = engine.execute(Command.Set("k$i", "v$i".toByteArray()))
+        walWriter.append(engine.lastWriteOperation!!)
+    }
+
+    // RDB snapshot covers seq 0-10
+    SnapshotEngine.save(engine, rdbPath)
+    walWriter.checkpoint(upToSequence = 10)
+
+    // More writes after snapshot
+    for (i in 10 until 20) {
+        engine.execute(Command.Set("k$i", "v$i".toByteArray()))
+        walWriter.append(engine.lastWriteOperation!!)
+    }
+    walWriter.close()
+
+    // "Crash" — create fresh engine, restore from RDB + WAL
+    val recovered = DataEngine()
+    SnapshotEngine.restore(recovered, rdbPath)
+    val walEntries = WalReader(walPath).readAll()
+    walEntries.forEach { recovered.replay(it) }
+
+    // All 20 keys present
+    for (i in 0 until 20) {
+        val res = recovered.execute(Command.Get("k$i")) as Response.BulkString
+        assertThat(String(res.value!!)).isEqualTo("v$i")
+    }
+}
+```
+
+- [ ] **Step 2: Add `replay(op: WriteOperation)` to DataEngine**
+
+Replay applies the operation directly without emitting a new WriteOperation (avoid infinite loop). Must be idempotent — replaying the same sequence number twice is a no-op.
+
+- [ ] **Step 3: Wire into server startup and command pipeline**
+
+```kotlin
+// In the command handler:
+val response = engine.execute(command)
+engine.lastWriteOperation?.let { walWriter.append(it) }
+ctx.write(response)
+```
+
+- [ ] **Step 4: Run all tests — verify pass**
+- [ ] **Step 5: Commit**
+
+```bash
+git add -A && git commit -m "feat: WAL integration — full crash recovery with RDB checkpoint + WAL replay"
+```
+
+---
+
+## Sub-phase 4C: Chandy-Lamport Distributed Snapshots
 
 **Concept:** Capture a globally consistent snapshot across all nodes while traffic is running. The Chandy-Lamport algorithm uses **markers** sent on all communication channels. When a node receives a marker, it records its local state and begins recording in-flight messages. The result is a consistent cut — if event A caused event B and B is in the snapshot, then A is too. Learn: what "consistent cut" means, why FIFO channel ordering is required, how markers propagate.
 
-### Task 4: Chandy-Lamport coordinator
+### Task 9: Chandy-Lamport coordinator
 
 **Files:**
 - Create: `dynacache-cluster/src/main/kotlin/dynacache/cluster/ChandyLamport.kt`
@@ -417,11 +843,11 @@ git add -A && git commit -m "feat(cluster): Chandy-Lamport distributed snapshots
 
 ---
 
-## Sub-phase 4C: Final Integration + Demo
+## Sub-phase 4D: Final Integration + Demo
 
-**Concept:** Wire everything together. Periodic RDB saves, on-demand Chandy-Lamport via HTTP endpoint, restore on startup. Run the full demo from the spec's success signal.
+**Concept:** Wire everything together. Periodic RDB saves, WAL durability, on-demand Chandy-Lamport via HTTP endpoint, restore on startup (RDB + WAL replay). Run the full demo from the spec's success signal.
 
-### Task 5: Snapshot HTTP endpoint + periodic save
+### Task 10: Snapshot HTTP endpoint + periodic save
 
 **Files:**
 - Modify: server `Main.kt`
@@ -443,7 +869,7 @@ Wire via a simple HTTP handler in Netty (no REST framework — just pattern-matc
 git add -A && git commit -m "feat(server): snapshot admin endpoints — trigger/status/restore"
 ```
 
-### Task 6: Full integration test — the success signal
+### Task 11: Full integration test — the success signal
 
 **Files:**
 - Create: `dynacache-cluster/src/test/kotlin/dynacache/cluster/FullIntegrationTest.kt`

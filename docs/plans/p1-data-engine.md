@@ -20,6 +20,7 @@
 - Caffeine source: `FrequencySketch.java` — ~200 LOC
 - Redis RESP2 protocol spec — ~5 pages
 - Redis source: `t_zset.c` (skip list + hash dual index) — ~500 LOC
+- Redis source: `dict.c` — `dictScan()` (~80 LOC, reverse binary iteration) + `_dictRehashStep()` (~50 LOC, incremental rehashing)
 
 ---
 
@@ -1013,6 +1014,239 @@ DEL/EXISTS iterate the key list. TYPE maps `DataType` to the Redis type name str
 
 ```bash
 git add -A && git commit -m "feat(engine): key management — DEL/EXISTS/TYPE/DBSIZE/FLUSHDB/KEYS"
+```
+
+### Task 7B: SCAN — Cursor-based iteration with reverse binary iteration
+
+**Concept:** `KEYS *` blocks the engine and is O(n) — unusable with large datasets. SCAN solves this with cursor-based iteration: stateless, non-blocking, handles rehashing mid-scan. The key insight is **reverse binary iteration** — iterating hash table buckets in bit-reversed order so that a hash table resize mid-scan never causes missed keys.
+
+This requires building a custom hash table (not `java.util.HashMap`) with:
+- Open addressing or chaining with known bucket layout
+- Incremental rehashing — migrate one bucket per operation instead of stop-the-world resize
+- Reverse binary cursor — the core SCAN algorithm
+
+**Learning goals:**
+- Hash table internals: bucket layout, load factor, resize triggers
+- Incremental rehashing (same idea as LSM compaction — amortize expensive restructuring)
+- Cursor design patterns (appears in every database: SQL cursors, DynamoDB LastEvaluatedKey, Kafka offsets, paginated APIs)
+- Consistency-completeness tradeoff: SCAN may duplicate, never miss
+
+**Pre-reading:**
+- Redis source: `dict.c` — `dictScan()` function (~80 LOC, the reverse binary iteration algorithm)
+- Redis source: `dict.c` — `_dictRehashStep()` (incremental rehashing)
+- Antirez blog post on SCAN (explains the cursor math)
+
+**Files:**
+- Create: `dynacache-engine/src/main/kotlin/dynacache/engine/ScanHashTable.kt`
+- Create: `dynacache-engine/src/test/kotlin/dynacache/engine/ScanHashTableTest.kt`
+- Modify: `dynacache-engine/src/main/kotlin/dynacache/engine/DataEngine.kt`
+- Modify: `dynacache-engine/src/test/kotlin/dynacache/engine/KeyCommandTest.kt`
+
+- [ ] **Step 1: Write failing tests for the custom hash table**
+
+```kotlin
+package dynacache.engine
+
+import org.assertj.core.api.Assertions.assertThat
+import org.junit.jupiter.api.Test
+
+class ScanHashTableTest {
+    @Test
+    fun `put and get roundtrip`() {
+        val ht = ScanHashTable<String, String>()
+        ht.put("a", "1")
+        assertThat(ht.get("a")).isEqualTo("1")
+    }
+
+    @Test
+    fun `remove returns old value`() {
+        val ht = ScanHashTable<String, String>()
+        ht.put("a", "1")
+        assertThat(ht.remove("a")).isEqualTo("1")
+        assertThat(ht.get("a")).isNull()
+    }
+
+    @Test
+    fun `incremental rehash spreads across operations`() {
+        val ht = ScanHashTable<String, String>(initialCapacity = 4)
+        // Insert enough to trigger rehash
+        for (i in 0 until 20) ht.put("key$i", "val$i")
+        // All keys retrievable after rehash
+        for (i in 0 until 20) assertThat(ht.get("key$i")).isEqualTo("val$i")
+    }
+
+    @Test
+    fun `scan returns all keys across full iteration`() {
+        val ht = ScanHashTable<String, String>()
+        val expected = (0 until 100).map { "key$it" }.toSet()
+        expected.forEach { ht.put(it, "v") }
+
+        val found = mutableSetOf<String>()
+        var cursor = 0L
+        do {
+            val result = ht.scan(cursor, count = 10)
+            found.addAll(result.entries.map { it.key })
+            cursor = result.cursor
+        } while (cursor != 0L)
+
+        assertThat(found).containsAll(expected)  // never misses
+    }
+
+    @Test
+    fun `scan during rehash misses no keys`() {
+        val ht = ScanHashTable<String, String>(initialCapacity = 4)
+        val keys = (0 until 50).map { "key$it" }.toSet()
+        keys.forEach { ht.put(it, "v") }
+
+        val found = mutableSetOf<String>()
+        var cursor = 0L
+        var steps = 0
+        do {
+            val result = ht.scan(cursor, count = 5)
+            found.addAll(result.entries.map { it.key })
+            cursor = result.cursor
+            // Insert more keys mid-scan to trigger rehash
+            if (steps < 10) ht.put("extra$steps", "v")
+            steps++
+        } while (cursor != 0L)
+
+        // All original keys must be found (may have duplicates — that's OK)
+        assertThat(found).containsAll(keys)
+    }
+
+    @Test
+    fun `scan with pattern filtering`() {
+        val ht = ScanHashTable<String, String>()
+        ht.put("user:1", "a")
+        ht.put("user:2", "b")
+        ht.put("order:1", "c")
+
+        val found = mutableSetOf<String>()
+        var cursor = 0L
+        do {
+            val result = ht.scan(cursor, count = 10, pattern = "user:*")
+            found.addAll(result.entries.map { it.key })
+            cursor = result.cursor
+        } while (cursor != 0L)
+
+        assertThat(found).containsExactlyInAnyOrder("user:1", "user:2")
+    }
+}
+```
+
+- [ ] **Step 2: Run tests — verify they fail**
+
+- [ ] **Step 3: Implement ScanHashTable**
+
+Core components:
+
+1. **Bucket array** with chaining (linked list per bucket). Power-of-2 sizing.
+
+2. **Incremental rehashing**: when load factor > 0.75, allocate `ht[1]` at 2x size. Each `put`/`get`/`remove`/`scan` call migrates one bucket from `ht[0]` to `ht[1]`. When `ht[0]` is empty, swap and null out `ht[1]`.
+
+3. **Reverse binary iteration** for `scan()`:
+
+```kotlin
+data class ScanResult<K, V>(
+    val cursor: Long,
+    val entries: List<Map.Entry<K, V>>,
+)
+
+fun scan(cursor: Long, count: Int = 10, pattern: String? = null): ScanResult<K, V> {
+    val results = mutableListOf<Map.Entry<K, V>>()
+    var c = cursor
+
+    // If rehashing, scan both tables
+    val scanned = if (isRehashing) {
+        scanBothTables(c, count, results)
+    } else {
+        scanSingleTable(c, count, results)
+    }
+
+    // Pattern filter
+    val filtered = if (pattern != null) {
+        val regex = globToRegex(pattern)
+        results.filter { regex.matches(it.key.toString()) }
+    } else results
+
+    return ScanResult(scanned, filtered)
+}
+
+// The reverse binary iteration: reverse bits, increment, reverse back
+private fun nextCursor(cursor: Long, mask: Long): Long {
+    var v = cursor or mask.inv()   // set high bits
+    v = v.reverseBits()            // reverse
+    v++                            // increment
+    v = v.reverseBits()            // reverse back
+    return v and mask              // mask to table size
+}
+```
+
+- [ ] **Step 4: Run tests — verify pass**
+
+- [ ] **Step 5: Integrate into DataEngine — replace HashMap with ScanHashTable**
+
+Replace the internal `store: HashMap<String, KeyEntry>` with `ScanHashTable<String, KeyEntry>`. Add `Command.Scan` and wire it:
+
+```kotlin
+is Command.Scan -> {
+    val result = store.scan(cmd.cursor, cmd.count, cmd.pattern)
+    Response.ArrayReply(listOf(
+        Response.BulkString(result.cursor.toString().toByteArray()),
+        Response.ArrayReply(result.entries.map {
+            Response.BulkString(it.key.toByteArray())
+        })
+    ))
+}
+```
+
+Also add HSCAN, SSCAN, ZSCAN as variants that scan within a single key's data structure.
+
+- [ ] **Step 6: Write integration tests for SCAN command**
+
+```kotlin
+@Test
+fun `SCAN iterates all keys`() {
+    for (i in 0 until 100) engine.execute(Command.Set("key$i", "v".toByteArray()))
+
+    val found = mutableSetOf<String>()
+    var cursor = 0L
+    do {
+        val res = engine.execute(Command.Scan(cursor, count = 10)) as Response.ArrayReply
+        cursor = String((res.values[0] as Response.BulkString).value!!).toLong()
+        val keys = (res.values[1] as Response.ArrayReply).values
+            .map { String((it as Response.BulkString).value!!) }
+        found.addAll(keys)
+    } while (cursor != 0L)
+
+    assertThat(found).hasSize(100)
+}
+
+@Test
+fun `SCAN with MATCH pattern`() {
+    engine.execute(Command.Set("user:1", "a".toByteArray()))
+    engine.execute(Command.Set("user:2", "b".toByteArray()))
+    engine.execute(Command.Set("order:1", "c".toByteArray()))
+
+    val found = mutableSetOf<String>()
+    var cursor = 0L
+    do {
+        val res = engine.execute(Command.Scan(cursor, count = 100, pattern = "user:*")) as Response.ArrayReply
+        cursor = String((res.values[0] as Response.BulkString).value!!).toLong()
+        val keys = (res.values[1] as Response.ArrayReply).values
+            .map { String((it as Response.BulkString).value!!) }
+        found.addAll(keys)
+    } while (cursor != 0L)
+
+    assertThat(found).containsExactlyInAnyOrder("user:1", "user:2")
+}
+```
+
+- [ ] **Step 7: Run all tests — verify pass**
+- [ ] **Step 8: Commit**
+
+```bash
+git add -A && git commit -m "feat(engine): SCAN with reverse binary iteration + custom hash table with incremental rehashing"
 ```
 
 ---

@@ -79,7 +79,9 @@ Commands: `EXPIRE`, `PEXPIRE`, `EXPIREAT`, `TTL`, `PTTL`, `PERSIST`.
 
 **Server** — introspection and management.
 
-Commands: `PING`, `INFO`, `DBSIZE`, `FLUSHDB`, `COMMAND`, `DEL`, `EXISTS`, `TYPE`, `KEYS` (pattern match), `RANDOMKEY`.
+Commands: `PING`, `INFO`, `DBSIZE`, `FLUSHDB`, `COMMAND`, `DEL`, `EXISTS`, `TYPE`, `KEYS` (pattern match), `RANDOMKEY`, `SCAN` (cursor-based iteration), `HSCAN`, `SSCAN`, `ZSCAN`.
+
+**SCAN** — cursor-based key iteration using reverse binary iteration over a custom hash table with incremental rehashing. Stateless cursor, non-blocking, handles rehash mid-scan. Guarantees: every key present for the entire scan is returned at least once; may return duplicates (client deduplicates). `HSCAN`/`SSCAN`/`ZSCAN` are per-key variants for Hash, Set, and Sorted Set respectively. Pattern filtering via `MATCH` parameter.
 
 ### 2.2 Atomic Execution
 
@@ -152,6 +154,8 @@ When memory usage exceeds the configured threshold, the eviction policy selects 
 
 **Local RDB snapshots** — periodic serialization of all owned partitions to a binary file. Format: `[header][entry]*[checksum]` where each entry is `[key_len:u32][key][type:u8][dvv][ttl:i64][value_bytes]`. Triggered by configurable interval (default 300s) and on graceful shutdown. Snapshot must not block the command path — use a consistent point-in-time copy of the data structures (COW or versioned references).
 
+**Write-Ahead Log (WAL)** — every mutation is appended to a sequential log on disk before the in-memory state is updated. On crash, replay the WAL from the last RDB checkpoint to recover all acknowledged writes. Format per entry: `[CRC32:u32][length:u32][seq_no:u64][op_type:u8][payload:variable]`. Three fsync policies: `ALWAYS` (safest, ~1k-5k ops/sec), `EVERY_SECOND` (sweet spot — lose at most 1s), `NEVER` (OS decides). Group commit amortizes fsync across concurrent writers. The WAL is checkpointed (truncated) after each successful RDB snapshot. Recovery sequence: load RDB → replay WAL entries after checkpoint sequence number → ready.
+
 **Chandy-Lamport distributed snapshots** — cluster-wide consistent snapshot coordinated across all nodes:
 
 1. **Initiator** records own local state, sends a **marker** on all outgoing gRPC channels
@@ -198,6 +202,8 @@ Rules that the implementation must never violate. These are hard gates — a vio
 | **C11** | **Lua isolation.** A Lua script cannot access the OS, filesystem, network, system clock, or random number generator. Scripts are pure functions of their inputs + current cache state. |
 | **C12** | **Partition-scoped atomicity.** MULTI/EXEC and EVAL operate on a single partition. If keys in a transaction or script span multiple partitions, the operation must be rejected before execution. |
 | **C13** | **Type safety.** Executing a command on the wrong type (e.g., LPUSH on a String key) must return a WRONGTYPE error. The key's data must not be corrupted. |
+| **C14** | **WAL write-ahead.** A write is appended to the WAL and (per fsync policy) durable on disk before the response is sent to the client. On crash, replaying the WAL from the last RDB checkpoint must recover every acknowledged write. |
+| **C15** | **SCAN completeness.** A full SCAN iteration (cursor 0 → 0) must return every key that existed for the entire duration of the scan. Keys inserted or deleted mid-scan may or may not appear. Duplicates are permitted. |
 
 ---
 
@@ -313,6 +319,18 @@ Named tests that serve as the project's definition of correctness. Organized by 
 | `zset_score_update` | ZADD existing member with new score updates, preserves ordering |
 | `wrongtype_rejected` | LPUSH on a String key → WRONGTYPE error, key unchanged |
 
+### 6.1b SCAN + Hash Table Tests
+
+| Test | Asserts |
+|---|---|
+| `scan_returns_all_keys` | Full SCAN iteration returns every key, no key missed |
+| `scan_cursor_zero_terminates` | SCAN loop terminates with cursor 0 |
+| `scan_match_filters` | SCAN with MATCH pattern returns only matching keys |
+| `scan_during_rehash_no_miss` | Insert keys mid-scan to trigger rehash → all pre-existing keys still returned |
+| `scan_may_duplicate` | Duplicates are acceptable (client deduplicates) |
+| `incremental_rehash_no_block` | Rehash spreads across operations, no single operation migrates all buckets |
+| `hashtable_put_get_remove` | Basic hash table operations work correctly |
+
 ### 6.2 Skip List Tests
 
 | Test | Asserts |
@@ -391,6 +409,20 @@ Named tests that serve as the project's definition of correctness. Organized by 
 | `chandy_lamport_restorable` | Restore cluster from snapshot → reads return snapshot-time values |
 | `chandy_lamport_timeout_aborts` | Kill a node mid-snapshot → snapshot aborts cleanly, no state corruption |
 
+### 6.8b WAL Tests
+
+| Test | Asserts |
+|---|---|
+| `wal_write_read_roundtrip` | Write entries to WAL, read back — all entries intact with correct sequence numbers |
+| `wal_crash_recovery` | Truncate last entry mid-write (simulated crash) → reader recovers all complete entries, skips partial |
+| `wal_crc_detects_corruption` | Flip a byte mid-file → reader stops at corrupted entry, returns all prior entries |
+| `wal_checkpoint_truncates` | After RDB snapshot, WAL checkpoint removes entries before snapshot sequence number |
+| `wal_full_recovery` | Write keys → RDB snapshot → more writes → "crash" → restore from RDB + WAL replay → all keys present |
+| `wal_fsync_always_durable` | With ALWAYS policy, each append triggers fsync |
+| `wal_fsync_every_second_batches` | With EVERY_SECOND policy, fsync count << write count |
+| `wal_group_commit_amortizes` | Concurrent writers share a single fsync — fsync count << writer count |
+| `wal_replay_idempotent` | Replaying the same WAL entry twice produces the same state as replaying once |
+
 ### 6.9 Transaction & Scripting Tests
 
 | Test | Asserts |
@@ -428,6 +460,8 @@ Organized by topic. Read the relevant section before starting the corresponding 
 | Redis source: `t_zset.c`, `server.h` (struct `zskiplist`) | ~500 LOC | Reference for dual skip-list + hash-map ZSet structure |
 | **TinyLFU: A Highly Efficient Cache Admission Policy** (Einziger et al., 2017) | ~15 | W-TinyLFU eviction — Count-Min Sketch + windowed LRU |
 | Caffeine source: `FrequencySketch.java`, `BoundedLocalCache.java` | ~200 LOC (sketch) | Production W-TinyLFU implementation |
+| Redis source: `dict.c` — `dictScan()` | ~80 LOC | Reverse binary iteration algorithm for SCAN |
+| Redis source: `dict.c` — `_dictRehashStep()` | ~50 LOC | Incremental rehashing — one bucket per operation |
 | **Hashed and Hierarchical Timing Wheels** (Varghese & Lauck, 1987) | 14 | Timer wheel for TTL expiration |
 | Netty source: `HashedWheelTimer.java` | ~600 LOC | JVM reference implementation of timer wheel |
 | Kafka source: `TimingWheel.scala` | ~200 LOC | Hierarchical timer wheel variant |
@@ -459,6 +493,9 @@ Organized by topic. Read the relevant section before starting the corresponding 
 | Resource | Pages | Relevant to |
 |---|---|---|
 | Redis source: `rdb.c` | ~2000 LOC | RDB serialization format — `rdbSave` / `rdbLoad` cycle |
+| **ARIES: A Transaction Recovery Method** (Mohan et al., 1992) | ~20 (sections 1-6) | The foundational WAL paper — write-ahead logging, checkpointing, crash recovery |
+| SQLite WAL mode documentation | ~5 | Most readable WAL explanation |
+| Redis source: `aof.c` | ~1500 LOC | Practical WAL implementation (Redis calls it AOF) |
 | **Virtual Time and Global States of Distributed Systems** (Mattern, 1989) | ~15 | Formalizes vector clocks and consistent cuts — useful alongside Chandy-Lamport |
 
 ### General Background (optional, high-value)
@@ -478,6 +515,7 @@ Sequenced for incremental correctness. Each milestone keeps all prior tests gree
 |---|---|---|---|
 | **M0** | Scaffold | Maven multi-module project, Kotlin 2.x, CI stub, empty module stubs | `mvn package` compiles |
 | **M1** | Data engine — String, Hash, List | Core command execution for String (incl. SET NX/XX/EX/PX, INCR/DECR), Hash, List | §6.1 String/Hash/List tests pass |
+| **M1b** | SCAN + custom hash table | Custom hash table with incremental rehashing, SCAN with reverse binary iteration, HSCAN/ZSCAN | §6.1b SCAN tests pass |
 | **M2** | Skip list + Sorted Set | Skip list implementation, ZSet dual-index, all ZADD–ZCARD commands | §6.1 ZSet tests + §6.2 skip list tests pass |
 | **M3** | Timer wheel + TTL | Hierarchical timer wheel, EXPIRE/PEXPIRE/TTL/PTTL/PERSIST, lazy + active expiry | §6.3 timer wheel tests pass |
 | **M4** | Eviction | LRU baseline, then W-TinyLFU (frequency sketch + admission window) | §6.4 eviction tests pass |
@@ -490,6 +528,7 @@ Sequenced for incremental correctness. Each milestone keeps all prior tests gree
 | **M11** | Read repair + Merkle anti-entropy | Read-path divergence detection, Merkle tree per vnode range, background sync | §6.7 `read_repair_fixes_stale` + `anti_entropy_heals_divergence` pass |
 | **M12** | Conflict resolution | DVV merge + type-specific merge rules for concurrent writes | §6.7 `convergence_after_partition` passes |
 | **M13** | Local RDB snapshots | Background snapshot without blocking commands, restore on startup | §6.8 `rdb_*` tests pass |
+| **M13b** | Write-Ahead Log | WAL writer/reader, fsync policies, group commit, checkpoint with RDB, crash recovery | §6.8b WAL tests pass |
 | **M14** | Chandy-Lamport distributed snapshots | Marker protocol, consistent cut capture, cluster-wide restore | §6.8 `chandy_lamport_*` tests pass |
 | **M15** | Full integration | 3-node cluster under chaos: random kills, partitions, concurrent traffic → convergence | All §6.7 + §6.8 tests pass; `redis-cli` works end-to-end |
 
