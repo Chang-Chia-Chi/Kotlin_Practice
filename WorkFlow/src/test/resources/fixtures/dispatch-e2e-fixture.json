@@ -1,0 +1,98 @@
+{
+  "configs": [
+    {
+      "id": "CFG-A",
+      "category": "URGENT",
+      "mode": "QTY",
+      "algorithmId": "default",
+      "sourceBomPrefix": "BOM-A",
+      "siteTargets": [
+        { "siteId": "SITE-1", "target": 100 },
+        { "siteId": "SITE-2", "target": 80 },
+        { "siteId": "SITE-3", "target": 60 }
+      ],
+      "bomMappings": {
+        "SITE-1": {
+          "sourceBomId": "BOM-A-001",
+          "targetAllocations": [
+            { "targetBomId": "TBOM-X", "target": 50 },
+            { "targetBomId": "TBOM-Y", "target": 50 }
+          ]
+        },
+        "SITE-2": {
+          "sourceBomId": "BOM-A-002",
+          "targetAllocations": [
+            { "targetBomId": "TBOM-X", "target": 80 }
+          ]
+        }
+      }
+    },
+    {
+      "id": "CFG-B",
+      "category": "NORMAL",
+      "mode": "RATIO",
+      "algorithmId": "default",
+      "sourceBomPrefix": "BOM-B",
+      "siteTargets": [
+        { "siteId": "SITE-1", "target": 60 },
+        { "siteId": "SITE-2", "target": 40 }
+      ],
+      "bomMappings": null
+    },
+    {
+      "id": "CFG-C",
+      "category": "NORMAL",
+      "mode": "QTY",
+      "algorithmId": "default",
+      "sourceBomPrefix": "BOM-C",
+      "siteTargets": [
+        { "siteId": "SITE-1", "target": 50 },
+        { "siteId": "SITE-3", "target": 50 }
+      ],
+      "bomMappings": null
+    }
+  ],
+  "candidates": {
+    "CFG-A": [
+      { "productId": "PROD-A1", "sourceBomId": "BOM-A-001", "qty": 5 },
+      { "productId": "PROD-A2", "sourceBomId": "BOM-A-001", "qty": 3 },
+      { "productId": "PROD-A3", "sourceBomId": "BOM-A-002", "qty": 8 },
+      { "productId": "PROD-A4", "sourceBomId": "BOM-A-001", "qty": 2 },
+      { "productId": "PROD-A5", "sourceBomId": "BOM-A-002", "qty": 10 },
+      { "productId": "PROD-A6", "sourceBomId": "BOM-A-001", "qty": 4 },
+      { "productId": "PROD-A7", "sourceBomId": "BOM-A-002", "qty": 6 }
+    ],
+    "CFG-B": [
+      { "productId": "PROD-B1", "sourceBomId": "BOM-B-001", "qty": 4 },
+      { "productId": "PROD-B2", "sourceBomId": "BOM-B-001", "qty": 7 },
+      { "productId": "PROD-B3", "sourceBomId": "BOM-B-001", "qty": 2 },
+      { "productId": "PROD-B4", "sourceBomId": "BOM-B-001", "qty": 5 },
+      { "productId": "PROD-B5", "sourceBomId": "BOM-B-001", "qty": 3 }
+    ],
+    "CFG-C": [
+      { "productId": "PROD-C1", "sourceBomId": "BOM-C-001", "qty": 6 },
+      { "productId": "PROD-C2", "sourceBomId": "BOM-C-001", "qty": 4 },
+      { "productId": "PROD-C3", "sourceBomId": "BOM-C-001", "qty": 8 },
+      { "productId": "PROD-C4", "sourceBomId": "BOM-C-001", "qty": 3 },
+      { "productId": "PROD-C5", "sourceBomId": "BOM-C-001", "qty": 5 }
+    ]
+  },
+  "baselines": {
+    "CFG-A": {
+      "siteAllocations": { "SITE-1": 20, "SITE-2": 15, "SITE-3": 10 },
+      "bomAllocations": {
+        "SITE-1:TBOM-X": 10,
+        "SITE-1:TBOM-Y": 10,
+        "SITE-2:TBOM-X": 15
+      }
+    },
+    "CFG-B": {
+      "siteAllocations": { "SITE-1": 30, "SITE-2": 20 },
+      "bomAllocations": {}
+    },
+    "CFG-C": {
+      "siteAllocations": { "SITE-1": 10, "SITE-3": 10 },
+      "bomAllocations": {}
+    }
+  }
+}

@@ -1,0 +1,163 @@
+queries:
+  # -- Workflow aggregate status --
+  workflow_by_status:
+    sql: "SELECT status, COUNT(*) AS cnt FROM workflow GROUP BY status"
+    datasource: "default"
+    schedule:
+      interval: "PT30S"
+    metrics:
+      - name: workflow_by_status
+        type: GAUGE
+        valueColumn: cnt
+        tagColumns: [status]
+
+  # -- Task aggregate status --
+  task_by_status:
+    sql: "SELECT status, COUNT(*) AS cnt FROM task GROUP BY status"
+    datasource: "default"
+    schedule:
+      interval: "PT30S"
+    metrics:
+      - name: task_by_status
+        type: GAUGE
+        valueColumn: cnt
+        tagColumns: [status]
+
+  # -- Stuck workflow detection (sweeper companion metric) --
+  workflow_stuck_count:
+    sql: >-
+      SELECT COUNT(*) AS cnt FROM workflow
+      WHERE status = 'RUNNING'
+      AND updated_at < SYSTIMESTAMP - INTERVAL '10' MINUTE
+    datasource: "default"
+    schedule:
+      interval: "PT60S"
+    metrics:
+      - name: workflow_stuck_count
+        type: GAUGE
+        valueColumn: cnt
+
+  # -- Task execution: tasks past their deadline --
+  task_past_deadline:
+    sql: >-
+      SELECT COUNT(*) AS cnt FROM task
+      WHERE status = 'PROCESSING'
+      AND deadline_at IS NOT NULL
+      AND deadline_at < SYSTIMESTAMP
+    datasource: "default"
+    schedule:
+      interval: "PT30S"
+    metrics:
+      - name: task_past_deadline
+        type: GAUGE
+        valueColumn: cnt
+
+  # -- Task execution: tasks stuck in PROCESSING (claimed but not completing) --
+  task_stuck_processing:
+    sql: >-
+      SELECT COUNT(*) AS cnt FROM task
+      WHERE status = 'PROCESSING'
+      AND claimed_at < SYSTIMESTAMP - INTERVAL '5' MINUTE
+    datasource: "default"
+    schedule:
+      interval: "PT30S"
+    metrics:
+      - name: task_stuck_processing
+        type: GAUGE
+        valueColumn: cnt
+
+  # -- Task execution: retry pressure --
+  task_retry_pressure:
+    sql: >-
+      SELECT COUNT(*) AS cnt FROM task
+      WHERE retry_count > 0
+      AND status IN ('PENDING', 'PROCESSING')
+    datasource: "default"
+    schedule:
+      interval: "PT30S"
+    metrics:
+      - name: task_retry_pressure
+        type: GAUGE
+        valueColumn: cnt
+
+  # -- Repository layer: barrier CAS contention (workflows with version churn) --
+  workflow_high_version:
+    sql: >-
+      SELECT COUNT(*) AS cnt FROM workflow
+      WHERE status = 'RUNNING'
+      AND version > 10
+    datasource: "default"
+    schedule:
+      interval: "PT60S"
+    metrics:
+      - name: workflow_high_version
+        type: GAUGE
+        valueColumn: cnt
+
+  # -- Pending task backlog per handler type (bounded cardinality) --
+  task_backlog_depth:
+    sql: >-
+      SELECT handler_key, COUNT(*) AS depth
+      FROM task
+      WHERE status = 'PENDING'
+      GROUP BY handler_key
+    datasource: "default"
+    schedule:
+      interval: "PT30S"
+    metrics:
+      - name: task_backlog_depth
+        type: GAUGE
+        valueColumn: depth
+        tagColumns: [handler_key]
+
+  # -- Anomaly detection: workflow instances with unusually deep pending backlog.
+  #    Threshold 10 = conservative default; most workflows have ≤ a few pending tasks. --
+  workflow_deep_backlog_count:
+    sql: >-
+      SELECT COUNT(*) AS cnt FROM (
+        SELECT workflow_id FROM task
+        WHERE status = 'PENDING'
+        GROUP BY workflow_id
+        HAVING COUNT(*) > 10
+      )
+    datasource: "default"
+    schedule:
+      interval: "PT60S"
+    metrics:
+      - name: workflow_deep_backlog_count
+        type: GAUGE
+        valueColumn: cnt
+
+  # -- Task success rate: failed vs completed in sliding 1-hour window --
+  task_outcome_counts:
+    sql: >-
+      SELECT
+        COUNT(CASE WHEN status = 'FAILED' THEN 1 END) AS failed_cnt,
+        COUNT(CASE WHEN status = 'COMPLETED' THEN 1 END) AS completed_cnt
+      FROM task
+      WHERE completed_at > SYSTIMESTAMP - INTERVAL '1' HOUR
+    datasource: "default"
+    schedule:
+      interval: "PT30S"
+    metrics:
+      - name: task_outcome_failed
+        type: GAUGE
+        valueColumn: failed_cnt
+      - name: task_outcome_completed
+        type: GAUGE
+        valueColumn: completed_cnt
+
+  # -- Task completion duration (PXX via SUMMARY): poll 30s window, each task recorded ~once --
+  task_completion_duration:
+    sql: >-
+      SELECT (CAST(completed_at AS DATE) - CAST(claimed_at AS DATE)) * 86400 AS duration_seconds
+      FROM task
+      WHERE status = 'COMPLETED'
+      AND completed_at > SYSTIMESTAMP - INTERVAL '30' SECOND
+    datasource: "default"
+    schedule:
+      interval: "PT30S"
+    metrics:
+      - name: task_completion_duration_seconds
+        type: SUMMARY
+        valueColumn: duration_seconds
