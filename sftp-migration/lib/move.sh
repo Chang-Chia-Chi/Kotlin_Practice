@@ -106,3 +106,48 @@ migrate_partition() {
     || warn "migrate: $bak not fully removed (likely .nfsXXXX held open); reconcile will sweep"
   log "migrated $date"
 }
+
+# migrate_run: reconcile, then drain NAS1 toward LOW while above HIGH,
+# oldest-eligible first, honoring the NAS2 fit check and yielding to live load.
+# Emits metrics on every exit path so the dead-man's-switch alert stays accurate.
+# All `local`s split.
+migrate_run() {
+  local used name size
+  reconcile
+  if ! check_nas2; then
+    metric_emit
+    return 1
+  fi
+  _M_FIT_CHECK_FAILED=0
+  used="$(nas_used_pct "$NAS1_ROOT")"
+  if [ "$used" -le "$HIGH_WATERMARK" ]; then
+    log "NAS1 at ${used}% <= HIGH; nothing to do"
+    _M_LAST_SUCCESS="$(date -u +%s)"
+    metric_emit
+    return 0
+  fi
+  while IFS= read -r name; do
+    [ -z "$name" ] && continue
+    if backfill_should_yield; then
+      log "yielding to live load"
+      break
+    fi
+    size="$(dir_size_bytes "$NAS1_ROOT/$name")"
+    if ! fits_on_nas2 "$size"; then
+      warn "fit-check: $name ($size B) does not fit on NAS2; stopping"
+      _M_FIT_CHECK_FAILED=1
+      break
+    fi
+    if ! migrate_partition "$name"; then
+      warn "migrate failed for $name; stopping"
+      break
+    fi
+    used="$(nas_used_pct "$NAS1_ROOT")"
+    if [ "$used" -lt "$LOW_WATERMARK" ]; then
+      log "NAS1 at ${used}% < LOW; done"
+      break
+    fi
+  done < <(list_eligible_oldest_first)
+  _M_LAST_SUCCESS="$(date -u +%s)"
+  metric_emit
+}
