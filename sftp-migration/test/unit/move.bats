@@ -87,3 +87,18 @@ teardown() { teardown_roots; }
   ! migrate_partition 20260101
   [ -d "$NAS1_ROOT/20260101" ]          # real dir still in place
 }
+
+@test "ENOTEMPTY: migrate succeeds when .bak can't be removed (simulated .nfsXXXX)" {
+  make_partition 20260101 catX 64
+  # Stub rm so the .bak removal "fails" the way a lingering .nfsXXXX file
+  # would on NFS — but only for that specific path. The migration itself
+  # (swap + symlink) has already succeeded by that point.
+  rm() {
+    if [[ "$*" == *.20260101.bak* ]]; then return 1; fi
+    command rm "$@"
+  }
+  migrate_partition 20260101
+  [ -L "$NAS1_ROOT/20260101" ]                      # swap completed
+  [ -e "$NAS1_ROOT/.20260101.bak" ]                 # .bak still around — reconcile sweeps later
+  [ -f "$NAS1_ROOT/20260101/catX/catX0001file" ]    # downstream still serves
+}

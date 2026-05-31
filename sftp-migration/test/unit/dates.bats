@@ -49,3 +49,21 @@ fixed_today() { export NOW_OVERRIDE; NOW_OVERRIDE=$(date -u -d 2026-06-01 +%s); 
   run parse_partition_epoch_days 20260100
   [ "$status" -ne 0 ]
 }
+
+@test "TZ-safety lint: no 'date' call in lib/ runs without -u" {
+  # Folder names are UTC. A future maintainer adding `date +%s` without -u
+  # anywhere in lib/ would silently shift age computations by the VM's local
+  # offset — under no-backup that means deleting a day of valid data.
+  # This static check makes the rule load-bearing in CI.
+  #
+  # The pattern matches `date` followed by a -flag or +format (command-shape
+  # invocation), excluding the `date` substring inside comments or variable
+  # names. Then we filter out any line that contains -u (the safe form).
+  local hits
+  hits="$(grep -rnE '\bdate[[:space:]]+[-+]' "$_LIB_DIR" 2>/dev/null | grep -v -- '-u' || true)"
+  if [ -n "$hits" ]; then
+    echo "Found 'date' calls without -u in lib/:"
+    echo "$hits"
+    false
+  fi
+}

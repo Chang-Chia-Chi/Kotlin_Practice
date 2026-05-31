@@ -43,13 +43,22 @@ lsof-gated deferred deletion of the `.bak` copy.
 - Already validated — symlinks are known to work on this VM.
 
 **Negative:**
-- A microsecond window exists between `mv` and `ln -s` where the path `/{date}`
-  does not exist. A brand-new `open()` landing exactly in that gap fails with
-  ENOENT. **Accepted because downstream clients retry**, and only long-term files
-  (5–70 days old, rarely downloaded) are ever affected. In-flight downloads are
-  never affected (open fds are inode-bound and survive the swap).
+- A sub-millisecond window exists between `mv` and `ln -s` where the path
+  `/{date}` does not exist. A brand-new `open()` landing exactly in that gap
+  fails with ENOENT. **We are explicitly throwing transient ENOENT errors at
+  any client unlucky enough to hit that window** — accepted because downstream
+  clients already retry and only long-term files (5–70 days old, rarely
+  downloaded) are affected. In-flight downloads are never affected (open fds
+  are inode-bound and survive the swap).
+- The two-syscall floor is unavoidable in plain bash. **Escape hatch if the
+  window ever bites in practice:** `renameat2(RENAME_EXCHANGE)` atomically
+  swaps two paths in a single syscall — but it requires Linux 3.15+ AND
+  filesystem support; **NFS support is implementation-dependent** (often
+  returns EINVAL/EOPNOTSUPP on remote exports), so verify on the target NAS
+  before committing to it. A tiny C helper or Python wrapper would be needed.
 - Migration logic lives in a script that must be correct (atomic-ish swap,
-  lsof-gated delete) rather than being handled structurally by the filesystem.
+  ENOTEMPTY-tolerant `rm -rf`, sentinel-via-bind-mount guard) rather than
+  being handled structurally by the filesystem.
 
 ## Alternative considered: union mount (mergerfs)
 

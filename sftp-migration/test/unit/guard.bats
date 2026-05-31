@@ -21,3 +21,13 @@ teardown() { teardown_roots; }
   run check_nas2
   [ "$status" -eq 0 ]
 }
+
+@test "check_nas2 fails when the .nas2 bind mount has dropped" {
+  # NAS2 itself is still "mounted" (NAS2_ROOT exists with the sentinel file),
+  # but the .nas2 bind mount that symlinks resolve through is gone. Reading
+  # the sentinel directly would falsely pass; reading via the bind path fails.
+  sentinel on
+  rm "$NAS1_ROOT/.nas2"
+  run check_nas2
+  [ "$status" -ne 0 ]
+}

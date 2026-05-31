@@ -33,7 +33,9 @@ setup_roots() {
   export TEST_TMP
   export NAS1_ROOT="$TEST_TMP/nas1"
   export NAS2_ROOT="$TEST_TMP/nas2"
-  export NAS2_SENTINEL="$NAS2_ROOT/.nas2_sentinel"
+  # Sentinel via the bind-mount path; matches the prod config.sh default and
+  # means removing the .nas2 link in a test simulates a bind-mount drop.
+  export NAS2_SENTINEL="$NAS1_ROOT/.nas2/.nas2_sentinel"
   export LOCK_FILE="$TEST_TMP/lock"
   export METRICS_FILE="$TEST_TMP/metrics.prom"
   mkdir -p "$NAS1_ROOT" "$NAS2_ROOT"
@@ -92,7 +94,12 @@ Create `sftp-migration/lib/config.sh`:
 # shellcheck shell=bash
 : "${NAS1_ROOT:=/mnt/nas1}"
 : "${NAS2_ROOT:=/mnt/nas2}"
-: "${NAS2_SENTINEL:=${NAS2_ROOT}/.nas2_sentinel}"
+# Sentinel is read THROUGH the .nas2 bind mount (the same path symlinks resolve
+# through) so a dropped bind mount — even while /mnt/nas2 itself stays mounted —
+# trips the guard. Reading via NAS2_ROOT directly would NOT catch this case and
+# every migrated partition's symlink would silently resolve into an empty local
+# dir on NAS1, defeating the migration.
+: "${NAS2_SENTINEL:=${NAS1_ROOT}/.nas2/.nas2_sentinel}"
 : "${LOCK_FILE:=/run/sftp-migration.lock}"
 : "${METRICS_FILE:=/var/lib/node_exporter/textfile_collector/sftp_migration.prom}"
 

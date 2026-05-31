@@ -96,6 +96,13 @@ migrate_partition() {
   rsync_partition "$date"  || { warn "rsync failed for $date";  return 1; }
   verify_partition "$date" || { warn "verify failed for $date; not swapping"; return 1; }
   swap_to_symlink "$date"
-  rm -rf "$bak"
+  # rm -rf may fail with ENOTEMPTY if NFS silly-renamed an in-flight file
+  # into .bak (.nfsXXXX). That's the expected NFS-safe path: the migration
+  # itself has succeeded (symlink in place, NAS2 copy verified); the reconcile
+  # sweep (Phase 4) removes the lingering dir once the open fd closes.
+  # Treat the rm failure as non-fatal and log loudly so it isn't misread as
+  # a real problem.
+  rm -rf "$bak" 2>/dev/null \
+    || warn "migrate: $bak not fully removed (likely .nfsXXXX held open); reconcile will sweep"
   log "migrated $date"
 }

@@ -6,7 +6,10 @@ setup_roots() {
   export TEST_TMP
   export NAS1_ROOT="$TEST_TMP/nas1"
   export NAS2_ROOT="$TEST_TMP/nas2"
-  export NAS2_SENTINEL="$NAS2_ROOT/.nas2_sentinel"
+  # Sentinel is read THROUGH the .nas2 bind mount; this matches the prod
+  # config.sh default and means removing the .nas2 link in a test simulates
+  # a bind-mount drop and trips the guard.
+  export NAS2_SENTINEL="$NAS1_ROOT/.nas2/.nas2_sentinel"
   export LOCK_FILE="$TEST_TMP/lock"
   export METRICS_FILE="$TEST_TMP/metrics.prom"
   mkdir -p "$NAS1_ROOT" "$NAS2_ROOT"
