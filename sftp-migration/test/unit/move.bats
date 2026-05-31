@@ -56,3 +56,34 @@ teardown() { teardown_roots; }
   ! migrate_partition 20260101
   assert_no_local_shadow_growth
 }
+
+@test "C1: verify_copy fails when rsync invocation itself fails" {
+  make_partition 20260101 catX 64
+  rsync_partition 20260101              # genuine copy first
+  rsync() { return 99; }                # stub: rsync binary "fails" with non-zero
+  ! verify_partition 20260101
+}
+
+@test "C2: migrate_partition aborts (no swap, no .bak) when rsync fails" {
+  make_partition 20260101 catX 64
+  rsync() { return 30; }                # ENOSPC-class failure
+  ! migrate_partition 20260101
+  [ ! -L "$NAS1_ROOT/20260101" ]
+  [ ! -e "$NAS1_ROOT/.20260101.bak" ]
+  [ -d "$NAS1_ROOT/20260101" ]          # source dir untouched
+}
+
+@test "I3: migrate_partition is a no-op when path is already a symlink" {
+  make_partition 20260101 catX 64
+  migrate_partition 20260101            # first migration
+  [ -L "$NAS1_ROOT/20260101" ]
+  migrate_partition 20260101            # re-run: no-op
+  [ -L "$NAS1_ROOT/20260101" ]
+}
+
+@test "I3: migrate_partition refuses when .<date>.bak exists from prior crash" {
+  make_partition 20260101 catX 64
+  mkdir -p "$NAS1_ROOT/.20260101.bak"   # simulate crash leftover
+  ! migrate_partition 20260101
+  [ -d "$NAS1_ROOT/20260101" ]          # real dir still in place
+}

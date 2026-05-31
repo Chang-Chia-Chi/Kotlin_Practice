@@ -61,15 +61,41 @@ Create `sftp-migration/lib/capacity.sh`:
 # shellcheck shell=bash
 # Usage is measured with df PER MOUNT — never du over the tree, because the
 # date symlinks and the .nas2 bind mount would make du miscount.
+#
+# Each helper validates that the awk pipeline produced a non-empty integer.
+# A failing df/du (stale mount, ENOENT, permission denied) otherwise leaks an
+# empty value into arithmetic — the Phase 6 watermark loop would silently
+# compare against bogus numbers.
 
-nas_used_pct()   { df -P  "$1" | awk 'NR==2 { gsub(/%/,"",$5); print $5 }'; }
-nas_free_bytes() { df -PB1 "$1" | awk 'NR==2 { print $4 }'; }
-dir_size_bytes() { du -sb "$1" | awk '{ print $1 }'; }
+_is_uint() { [[ "$1" =~ ^[0-9]+$ ]]; }
+
+nas_used_pct() {
+  local n
+  n="$(df -P "$1" 2>/dev/null | awk 'NR==2 { gsub(/%/,"",$5); print $5 }')"
+  _is_uint "$n" || { warn "nas_used_pct: invalid df output for $1"; return 1; }
+  echo "$n"
+}
+
+nas_free_bytes() {
+  local n
+  n="$(df -PB1 "$1" 2>/dev/null | awk 'NR==2 { print $4 }')"
+  _is_uint "$n" || { warn "nas_free_bytes: invalid df output for $1"; return 1; }
+  echo "$n"
+}
+
+dir_size_bytes() {
+  local n
+  n="$(du -sb "$1" 2>/dev/null | awk '{ print $1 }')"
+  _is_uint "$n" || { warn "dir_size_bytes: invalid du output for $1"; return 1; }
+  echo "$n"
+}
 
 # fits_on_nas2 <size_bytes>: 0 if the partition fits while preserving the reserve.
+# Propagates failure if the underlying free-bytes read couldn't be obtained.
 fits_on_nas2() {
-  local size="$1" free
-  free="$(nas_free_bytes "$NAS2_ROOT")"
+  local size free
+  size="$1"
+  free="$(nas_free_bytes "$NAS2_ROOT")" || return 1
   [ "$size" -le $(( free - NAS2_RESERVE_BYTES )) ]
 }
 ```
@@ -173,32 +199,53 @@ Create `sftp-migration/lib/move.sh`:
 
 # rsync_partition <date>: copy NAS1/<date> -> NAS2/<date>, preserving metadata,
 # resumable (--partial), bandwidth-capped. Source is read-only; safe to re-run.
+#
+# All `local`s split so the RHS never reads outer-scope $date (bash quirk).
 rsync_partition() {
-  local date="$1" src="$NAS1_ROOT/$date" dst="$NAS2_ROOT/$date"
-  local opts=(-a --delete --partial)
+  local date src dst opts
+  date="$1"
+  src="$NAS1_ROOT/$date"
+  dst="$NAS2_ROOT/$date"
+  opts=(-a --delete --partial)
   [ -n "$RSYNC_BWLIMIT" ] && opts+=(--bwlimit="$RSYNC_BWLIMIT")
   mkdir -p "$dst"
   rsync "${opts[@]}" "$src/" "$dst/"
 }
 
 # verify_partition <date>: gate before any swap. NAS2 copy must be byte-identical
-# (checksum) AND match ownership/mode (permission parity). Non-zero on mismatch.
-verify_partition() {
-  local date="$1" src="$NAS1_ROOT/$date" dst="$NAS2_ROOT/$date" diff rel s d
-  diff="$(rsync -an --checksum --delete "$src/" "$dst/" 2>/dev/null)"
+# (checksum) AND match ownership/mode (permission parity). Non-zero on mismatch,
+# INCLUDING a failure to actually run rsync (binary missing, OOM, NFS hang) —
+# empty stdout from rsync only means "identical" when rc==0.
+# NOTE: -i (--itemize-changes) is load-bearing. Without it, -an emits NOTHING
+# on a content mismatch and the gate silently passes corrupt copies.
+# NOTE: find -mindepth 1 — the src dir itself isn't matched by `${s#"$src"/}`
+# (no trailing slash), causing a spurious "missing" on every call without it.
+# All `local`s split to avoid the bash same-statement RHS-reads-outer quirk.
+verify_partition() { verify_copy "$NAS1_ROOT/$1" "$NAS2_ROOT/$1"; }
+
+verify_copy() {
+  local src dst diff rc rel s d
+  src="$1"
+  dst="$2"
+  diff="$(rsync -ani --checksum --delete "$src/" "$dst/" 2>/dev/null)"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    warn "verify: rsync invocation failed (rc=$rc) for $src vs $dst"
+    return 1
+  fi
   if [ -n "$diff" ]; then
-    warn "verify: content mismatch for $date"
+    warn "verify: content mismatch ($src vs $dst)"
     return 1
   fi
   while IFS= read -r -d '' s; do
     rel="${s#"$src"/}"
     d="$dst/$rel"
-    [ -e "$d" ] || { warn "verify: missing $rel on NAS2"; return 1; }
+    [ -e "$d" ] || { warn "verify: missing $rel"; return 1; }
     if [ "$(stat -c '%u:%g:%a' "$s")" != "$(stat -c '%u:%g:%a' "$d")" ]; then
       warn "verify: permission mismatch for $rel"
       return 1
     fi
-  done < <(find "$src" -print0)
+  done < <(find "$src" -mindepth 1 -print0)
   return 0
 }
 ```
@@ -273,8 +320,22 @@ Append to `sftp-migration/lib/move.sh`:
 # swap_to_symlink <date>: set the real dir aside as .<date>.bak (so in-flight,
 # inode-bound download fds keep reading), then create a RELATIVE symlink that
 # resolves through .nas2/ to the NAS2 copy. Relative target works inside chroot.
+# Defensive guards refuse to proceed on already-migrated paths or leftover .bak
+# (reconciliation territory) so the swap never enters an undefined state.
+# All `local`s split (bash same-statement RHS-reads-outer quirk).
 swap_to_symlink() {
-  local date="$1" path="$NAS1_ROOT/$date" bak="$NAS1_ROOT/.$date.bak"
+  local date path bak
+  date="$1"
+  path="$NAS1_ROOT/$date"
+  bak="$NAS1_ROOT/.$date.bak"
+  if [ -L "$path" ]; then
+    warn "swap: $path is already a symlink; skipping (already migrated)"
+    return 0
+  fi
+  if [ -e "$bak" ]; then
+    warn "swap: $bak already exists; reconcile required"
+    return 1
+  fi
   mv "$path" "$bak"
   ln -s "${SYMLINK_REL_PREFIX}${date}" "$path"
 }
@@ -283,8 +344,22 @@ swap_to_symlink() {
 # guard -> rsync -> verify gate -> swap -> immediate delete of .bak.
 # On NFS, immediate rm is safe (silly-rename preserves any open reader); the
 # reconciliation sweep (Phase 4) cleans any .bak left non-empty by a .nfsXXXX.
+#
+# Idempotency: a no-op when the partition is already a symlink (re-run safe).
+# A leftover .<date>.bak signals a prior crash and forces reconcile-first.
 migrate_partition() {
-  local date="$1" bak="$NAS1_ROOT/.$date.bak"
+  local date path bak
+  date="$1"
+  path="$NAS1_ROOT/$date"
+  bak="$NAS1_ROOT/.$date.bak"
+  if [ -L "$path" ]; then
+    log "migrate: $date already migrated; skipping"
+    return 0
+  fi
+  if [ -e "$bak" ]; then
+    warn "migrate: $bak exists from prior crash; reconcile required"
+    return 1
+  fi
   check_nas2 || return 1
   rsync_partition "$date"   || { warn "rsync failed for $date";  return 1; }
   verify_partition "$date"  || { warn "verify failed for $date; not swapping"; return 1; }
