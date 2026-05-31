@@ -33,3 +33,8 @@
 # .nas2 (a bind mount in prod), so a date symlink points to .nas2/<date> and
 # resolves inside any chroot. Trailing slash intentional.
 : "${SYMLINK_REL_PREFIX:=.nas2/}"
+
+# Long-term category retentions as space-separated "category:days" pairs.
+# Unknown categories are NEVER purged (fail-safe — under no-backup, refusing
+# to act is always safer than guessing). Tune per discovery.
+: "${LONGTERM_RETENTIONS:=catX:70 catY:90}"
