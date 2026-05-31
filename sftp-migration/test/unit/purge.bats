@@ -76,3 +76,12 @@ migrate_fixture() {
   purge_file_id 20260530 catShort 0042
   [ ! -e "$NAS1_ROOT/20260530/catShort/catShort0042report" ]
 }
+
+@test "bin/sftp-purge runs (dry-run) without deleting" {
+  export PURGE_DRY_RUN=1
+  migrate_fixture 20260301 catX catY
+  run "$BATS_TEST_DIRNAME/../../bin/sftp-purge"
+  [ "$status" -eq 0 ]
+  [ -e "$NAS2_ROOT/20260301/catX" ]
+  [ -e "$NAS2_ROOT/20260301/catY" ]
+}

@@ -36,6 +36,7 @@ release.properties
 .classpath
 .settings/
 bin/
+!sftp-migration/bin/
 
 # IntelliJ
 .idea

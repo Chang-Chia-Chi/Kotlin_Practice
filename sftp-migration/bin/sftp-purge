@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Long-term purge entrypoint. Shares the migration lock so the two jobs
+# never operate on the filesystem concurrently. Defaults to dry-run via
+# config.sh's PURGE_DRY_RUN=1 — only arm it after reviewing the dry-run log.
+set -uo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=/dev/null
+source "$HERE/lib/config.sh"
+# shellcheck source=/dev/null
+source "$HERE/lib/log.sh"
+# shellcheck source=/dev/null
+source "$HERE/lib/dates.sh"
+# shellcheck source=/dev/null
+source "$HERE/lib/lock.sh"
+# shellcheck source=/dev/null
+source "$HERE/lib/purge.sh"
+
+with_lock 300 purge_run
