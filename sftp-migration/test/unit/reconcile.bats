@@ -1,0 +1,68 @@
+#!/usr/bin/env bats
+load ../helpers/setup
+
+setup() {
+  setup_roots
+  load_lib log.sh guard.sh dates.sh capacity.sh move.sh reconcile.sh
+  sentinel on
+}
+teardown() { teardown_roots; }
+
+# Stage a "crash between mv-aside and ln -s": data in .bak, path missing.
+stage_bak() {
+  make_partition "$1" catX 1024
+  mv "$NAS1_ROOT/$1" "$NAS1_ROOT/.$1.bak"
+}
+
+@test "T1-20: .bak + missing D + complete NAS2 -> roll forward" {
+  stage_bak 20260101
+  rsync -a "$NAS1_ROOT/.20260101.bak/" "$NAS2_ROOT/20260101/"
+  reconcile
+  [ -L "$NAS1_ROOT/20260101" ]
+  [ ! -e "$NAS1_ROOT/.20260101.bak" ]
+  [ -f "$NAS1_ROOT/20260101/catX/catX0001file" ]
+}
+
+@test "T1-21: .bak + missing D + incomplete NAS2 -> roll back" {
+  stage_bak 20260101
+  mkdir -p "$NAS2_ROOT/20260101/catX"
+  echo partial > "$NAS2_ROOT/20260101/catX/catX0001file"
+  reconcile
+  [ -d "$NAS1_ROOT/20260101" ]
+  [ ! -L "$NAS1_ROOT/20260101" ]
+  [ ! -e "$NAS2_ROOT/20260101" ]
+  [ ! -e "$NAS1_ROOT/.20260101.bak" ]
+}
+
+@test "T1-22: .bak + D is symlink -> finish cleanup" {
+  stage_bak 20260101
+  rsync -a "$NAS1_ROOT/.20260101.bak/" "$NAS2_ROOT/20260101/"
+  ln -s ".nas2/20260101" "$NAS1_ROOT/20260101"
+  reconcile
+  [ -L "$NAS1_ROOT/20260101" ]
+  [ ! -e "$NAS1_ROOT/.20260101.bak" ]
+}
+
+@test "T1-23: .bak + D is real dir -> anomaly, no destruction" {
+  make_partition 20260101 catX 1024
+  cp -a "$NAS1_ROOT/20260101" "$NAS1_ROOT/.20260101.bak"
+  reconcile
+  [ -d "$NAS1_ROOT/20260101" ]
+  [ -e "$NAS1_ROOT/.20260101.bak" ]
+}
+
+@test "T1-24: empty .bak dir with symlink present is swept" {
+  mkdir -p "$NAS1_ROOT/.20260101.bak"
+  ln -s ".nas2/20260101" "$NAS1_ROOT/20260101"
+  reconcile
+  [ ! -e "$NAS1_ROOT/.20260101.bak" ]
+}
+
+@test "T1-25: reconcile is idempotent (second run is a no-op)" {
+  stage_bak 20260101
+  rsync -a "$NAS1_ROOT/.20260101.bak/" "$NAS2_ROOT/20260101/"
+  reconcile
+  run reconcile
+  [ "$status" -eq 0 ]
+  [ -L "$NAS1_ROOT/20260101" ]
+}
