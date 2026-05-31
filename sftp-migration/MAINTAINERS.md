@@ -1,99 +1,95 @@
 ---
 name: maintaining-sftp-migration
-description: File-by-file map and modification playbook for sftp-migration. Use when an agent or devops engineer needs to modify, extend, or debug code under sftp-migration/, or to understand the design discipline before changing anything. Distinct from README.md (operator/devops) — this file is for code-modifiers.
+description: Design summary and per-file map for sftp-migration. Use when an agent or maintainer needs to orient to the system before changing it, or to find which doc or source file answers a specific question.
 ---
 
-# Maintaining sftp-migration
+# sftp-migration — system map
 
-This is a **destructive, irreversible, no-backup** system. The discipline
-below isn't style — it's safety. Read this file before changing code under
-`sftp-migration/`. Pair it with `docs/sftp-migration/CONTEXT.md` (design
-glossary) and the per-phase plan files for the reasoning behind each decision.
+A bash + bats system that migrates aged long-term SFTP date-partitions from a
+full NAS1 to a second NAS2 via per-date symlinks, transparently to downstream,
+and rewrites the long-term purge to be UTC- and symlink-aware. **No backup;
+hardware redundancy only** — a wrong `rm` is permanent loss.
 
-## Where to find what
+## Core design (the invariants every change must preserve)
 
-| If you want to … | Go to |
+1. **Per-date symlink unification.** `NAS1/<date>` is either a real directory
+   (hot/recent partitions) or a RELATIVE symlink `.nas2/<date>` resolving via
+   a bind mount into NAS2 (migrated partitions). Downstream sees one tree.
+2. **The `.nas2` bind mount.** `/mnt/nas2` is bind-mounted at
+   `/mnt/nas1/.nas2` so relative symlinks resolve inside any chroot. The
+   sentinel is read THROUGH this path — so a bind-drop trips the guard.
+3. **No backup → defense in depth on the destructive side.** Every `rm`/`mv`
+   path passes through: (a) calendar round-trip date validation, (b) symlink
+   target allowlist to `NAS2_ROOT`, (c) sentinel-via-bind-mount NAS2 guard,
+   (d) `PURGE_DRY_RUN=1` default on the irreversible side. Each gate caught
+   a real bug in review.
+4. **Stateless reconciliation.** A crash anywhere in the `mv → ln -s` window
+   is repaired by inferring filesystem state on the next run — no journal,
+   idempotent, safe to re-run.
+5. **Shared local-disk lock.** Migration and purge mutex each other via
+   local-disk `flock` (NFS flock is unreliable). Both jobs run on the same
+   VM, so a local lock is authoritative.
+6. **UTC everywhere.** Folder names are UTC dates; every `date` call in `lib/`
+   uses `-u`; a CI lint catches regressions. Under no backup, off-by-one
+   from a TZ shift is permanent loss.
+7. **Adaptive watermark drain.** When NAS1 > HIGH, drain toward LOW
+   oldest-first, fit-checking each partition against NAS2's reserve, yielding
+   to live SFTP load via an active-sessions gate.
+8. **Atomic Prometheus emission.** `.tmp → mv` textfile; gauges drive
+   procurement forecast, fit-check alert, and a dead-man's switch.
+
+## File map — what each script owns
+
+### `bin/`
+
+| File | Owns |
+|------|------|
+| `sftp-migrate` | Hourly cron entry. Refuses root. Delegates to `migrate_run` under the shared lock. `migrate_run` owns the NAS2 guard so the dead-man's-switch advances on every exit path. |
+| `sftp-purge` | Daily cron entry. Refuses root. `check_nas2` runs INSIDE the lock (TOCTOU-safe), then `purge_run`. |
+
+### `lib/` (sourced; never `set -e` here — it leaks to the caller)
+
+| File | Owns |
+|------|------|
+| `config.sh` | All env-overridable defaults (`${VAR:=default}`). One place for tuning knobs. |
+| `log.sh` | `log` / `warn` / `die` printf helpers with UTC timestamps. |
+| `guard.sh` | `check_nas2`: reads the sentinel THROUGH the bind-mount path. Catches NAS2-unmounted, bind-dropped, and stale-handle in one syscall. |
+| `dates.sh` | UTC age math: `parse_partition_epoch_days`, `partition_age_days`. Round-trip guard rejects month-00 / day-00 / invalid calendar dates. |
+| `eligibility.sh` | `is_eligible`, `list_eligible_oldest_first`. Real-dir-only (no re-migration), `age > MIN_MIGRATE_AGE_DAYS` (strict). |
+| `capacity.sh` | `df`-based per-mount usage (NEVER `du` over the tree). Numeric-validated. `fits_on_nas2` enforces `NAS2_RESERVE_BYTES`. |
+| `move.sh` | The single-partition pipeline: `rsync_partition → verify_copy → swap_to_symlink → migrate_partition`. Plus the drain orchestrator `migrate_run`. |
+| `lock.sh` | `with_lock <timeout_secs> <cmd…>`. Closing the fd releases the lock. |
+| `reconcile.sh` | 4-state crash recovery; reuses `verify_copy` to gate roll-forward vs rollback. Validates date before any destructive op. |
+| `purge.sh` | The IRREVERSIBLE side. Two-phase per partition (per-category at its retention, then date-level cleanup). Allowlists symlink targets to `NAS2_ROOT`. |
+| `backfill.sh` | `active_sessions` + `backfill_should_yield`. The migration drain breaks out when load is too high. |
+| `metrics.sh` | Atomic textfile emission for the node_exporter textfile collector. |
+
+### `test/`
+
+| File | Owns |
+|------|------|
+| `helpers/setup.bash` | `setup_roots`, `make_partition`, `sentinel on\|off`, `load_lib`. Emulates the prod `.nas2` bind mount via a symlink. |
+| `helpers/assertions.bash` | Custom asserts (e.g. `assert_no_local_shadow_growth`). |
+| `unit/*.bats` | Tier-1 (CI/WSL). ~80 tests, all with `T1-*` IDs cited in commits. |
+| `nfs/semantics.bats` | Tier-2 (skip-gated by `RUN_NFS_TESTS=1`). The NFS silly-rename test. |
+| `nfs/RUNBOOK.md` | Semi-automated `T2-02`..`T2-10` checklist for the NFS-backed VM. |
+
+## Where to dig deeper
+
+| If your question is about… | Look at |
 |---|---|
-| Operate the system (cron, env vars) | `README.md` |
-| Understand WHAT each term means | `docs/sftp-migration/CONTEXT.md` |
-| Understand the symlink-vs-mergerfs choice | `docs/sftp-migration/adr/0001-…md` |
-| Discover prod-side facts before deploying | `docs/sftp-migration/discovery.md` |
-| Find which test pins which property | `docs/sftp-migration/test-plan.md` |
-| See how a phase was built from scratch | `docs/superpowers/plans/2026-05-28-sftp-migration-phase-{1..6}-*.md` |
+| **How** to operate it (cron, env, prereqs) | `README.md` |
+| **What** a term means | `docs/sftp-migration/CONTEXT.md` (glossary — terms only, no specs) |
+| **Why** symlinks instead of mergerfs | `docs/sftp-migration/adr/0001-…md` |
+| **Which** prod-side facts are still TBD | `docs/sftp-migration/discovery.md` |
+| **Which** test pins which property | `docs/sftp-migration/test-plan.md` (`T1-*` / `T2-*` IDs are cited in commits + code comments) |
+| **How** a phase was built from scratch | `docs/superpowers/plans/2026-05-28-sftp-migration-phase-{1..6}-*.md` |
+| **Why** a particular line is the way it is | `git log -p sftp-migration/lib/<file>.sh` — each commit names the bug class it closes |
+| **What** the actual code does | The source. Every non-trivial function has a docstring; the comments are the spec. |
 
-## File map
+## Meta-conventions (cheap to remember; expensive to violate)
 
-**`bin/`** (cron entries; refuse root; `set -uo pipefail` not `-e`)
-- `sftp-migrate` — hourly. `with_lock 300 migrate_run`. `migrate_run` owns the NAS2 guard so the dead-man's-switch metric advances even on guard-fail.
-- `sftp-purge` — daily. `check_nas2` runs **inside** the lock (TOCTOU-safe).
-
-**`lib/`** (sourced; never `set -e` here — it would leak to the caller)
-- `config.sh` — env-overridable defaults. Add new knobs as `: "${VAR:=default}"`.
-- `log.sh` — `log` / `warn` / `die` (UTC).
-- `guard.sh` — `check_nas2` reads sentinel THROUGH the `.nas2` bind mount.
-- `dates.sh` — UTC-forced age math; `parse_partition_epoch_days` round-trips parse→format→compare.
-- `eligibility.sh` — real-dir-only, oldest-first; rejects symlinks (already migrated).
-- `capacity.sh` — `df` per mount only; numeric-validated; never `du` over the tree.
-- `move.sh` — `rsync_partition`, `verify_copy`, `swap_to_symlink`, `migrate_partition`, `migrate_run`.
-- `lock.sh` — `with_lock <timeout> <cmd…>` (local-disk flock; closing fd releases).
-- `reconcile.sh` — 4-state crash recovery; subshell-scoped `shopt nullglob`; validates date.
-- `purge.sh` — IRREVERSIBLE; dry-run default; allowlists symlink targets to `NAS2_ROOT`.
-- `backfill.sh` — `active_sessions` + `backfill_should_yield`.
-- `metrics.sh` — atomic `.tmp → mv` textfile.
-
-**`test/`**
-- `helpers/setup.bash` — `setup_roots`, `make_partition`, `sentinel on|off`, `load_lib`. Emulates the prod `.nas2` bind mount with a symlink so relative symlinks resolve.
-- `helpers/assertions.bash` — `assert_no_local_shadow_growth`.
-- `unit/*.bats` — Tier-1 (CI, 80 tests in WSL Ubuntu).
-- `nfs/semantics.bats` — Tier-2 (skipped unless `RUN_NFS_TESTS=1` on real NFS).
-- `nfs/RUNBOOK.md` — semi-automated T2-02..T2-10 manual checklist.
-
-## Modification discipline (each rule came from a real bug)
-
-1. **Split `local` declarations.** `local a=$1 b=$a` reads OUTER `$a`. Write `local a b; a=$1; b=$a`. (Phase 2.)
-2. **Check exit codes separately from stdout.** Empty stdout ≠ success. Use `if ! out="$(cmd)"; then …` or capture `rc=$?`. (Phase 3 C1.)
-3. **`rsync -an --checksum` is silent on content diff.** Use `-ani`. Without `-i`, a tampered copy passes verify. (Phase 3.)
-4. **Negative tests are load-bearing.** Every destructive op needs a failure-path test. Happy-path can't catch "empty output mistaken for success." (Phases 3, 5, end-to-end.)
-5. **Read sentinels THROUGH the bind mount** (`$NAS1_ROOT/.nas2/.nas2_sentinel`). Reading directly at `$NAS2_ROOT` misses the bind-dropped case. (Staff review.)
-6. **`rm -rf` of an NFS dir can hit ENOTEMPTY** from a `.nfsXXXX` held by a live reader. Tolerate it (warn, continue); reconcile sweeps next cycle.
-7. **Wrap any `shopt`-using body in `( … )`** to scope the change. Skip `dotglob` unless you genuinely need `*` to match dotfiles. (Phase 4.)
-8. **Validate destructive-helper inputs CALLEE-side.** Don't trust callers. Regex-gate `date`/`cat`/`id`; pass `--` to `rm`. (Phase 5 C1.)
-9. **Refuse to follow symlinks outside `NAS2_ROOT`.** `resolve_partition_data_dir` is the allowlist gate; without it a compromised producer can plant a symlink that makes purge `rm -rf` arbitrary paths. (End-to-end SEC-C1.)
-10. **Entrypoints refuse to run as root.** Defense in depth.
-11. **Date math is always UTC.** A `date` call without `-u` in `lib/` fails the CI lint test.
-12. **Don't change `PURGE_DRY_RUN`'s default from `1`.** Arming destruction is an explicit operator action.
-
-## Common modifications
-
-### Add a new long-term category
-- Append to `LONGTERM_RETENTIONS` env (`catZ:120`).
-- No code change — `purge_run` discovers categories at runtime.
-- Validate: `PURGE_DRY_RUN=1 bin/sftp-purge`, look for `would delete … catZ`.
-
-### Add a new metric
-- Set a `_M_THING` global at the exit point in `migrate_run` / `purge_run`.
-- Add a `printf '… %s\n' "${_M_THING:-0}"` line to `metric_emit`.
-- Add a test asserting the gauge value (see T1-36/37/38).
-- Wire the Alertmanager rule outside this repo.
-
-### Change a watermark / reserve
-- Edit the env var in cron (`HIGH_WATERMARK`, `LOW_WATERMARK`, `NAS2_RESERVE_BYTES`).
-- No code change.
-
-### Extend the eligibility rule (e.g., per-category)
-- Modify `is_eligible` in `lib/eligibility.sh`. Add tests in `test/unit/eligibility.bats`. Update Phase 2 plan + glossary.
-
-## Debugging a failing run
-
-1. Inspect `$METRICS_FILE` for the textfile contents.
-2. `head -c1 $NAS1_ROOT/.nas2/.nas2_sentinel` — confirm guard.
-3. `ls -la $NAS1_ROOT/.*.bak` — lingering `.bak`? Run `bin/sftp-migrate` (which calls `reconcile` first).
-4. For corruption suspicions, run `verify_partition <date>` interactively against a single partition.
-5. For purge concerns, set `PURGE_DRY_RUN=1` and re-run; review log before re-arming.
-
-## Don't
-
-- Don't add `set -e` to `lib/*.sh`.
-- Don't call destructive helpers from new code without going through the date-regex + symlink-allowlist gates.
-- Don't run any test against a path that isn't under `mktemp -d` (real fs writes leak state across tests).
-- Don't add docs to `CONTEXT.md` that aren't glossary terms — it's a glossary, not a spec.
+- All `local`s split (`local a b; a=$1; b=$a`) — never `local a=$1 b=$a` (the RHS reads OUTER `$a`).
+- All sourced libs start `# shellcheck shell=bash`. No `set -e`.
+- Any function using `shopt` wraps its body in `( … )` so the change is subshell-scoped.
+- Every commit message names the bug class it closes — `git log` is the canonical "why was this written this way" trail.
