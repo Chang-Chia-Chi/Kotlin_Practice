@@ -76,3 +76,17 @@ teardown() { teardown_roots; }
   # Should still emit metrics + advance timestamp (cron is healthy).
   [ -f "$METRICS_FILE" ]
 }
+
+@test "migrate_run aborts mid-loop when NAS2 becomes unavailable" {
+  nas_used_pct()          { echo 85; }
+  fits_on_nas2()          { return 0; }
+  backfill_should_yield() { return 1; }
+  make_partition 20260101 catX 1024
+  make_partition 20260102 catX 1024
+  _hits=0
+  check_nas2() { _hits=$((_hits + 1)); [ $_hits -le 2 ]; }   # ok on top + iter 1; fail on iter 2
+  migrate_run
+  [ -L "$NAS1_ROOT/20260101" ]                  # iter 1 ran
+  [ -d "$NAS1_ROOT/20260102" ]                  # iter 2 aborted before migrate
+  [ ! -L "$NAS1_ROOT/20260102" ]
+}

@@ -93,6 +93,17 @@ hardware redundancy only** — a wrong `rm` is permanent loss.
 | **Why** a particular line is the way it is | `git log -p sftp-migration/lib/<file>.sh` — each commit names the bug class it closes |
 | **What** the actual code does | The source. Every non-trivial function has a docstring; the comments are the spec. |
 
+## Known limitations (acknowledged, not bugs)
+
+- **Stale partition list in long drains.** `migrate_run`'s loop iterates a
+  snapshot from `list_eligible_oldest_first` taken at the top. If the run
+  lasts long enough that the on-disk state diverges (operator drops or
+  migrates a partition manually mid-run), the loop continues against the
+  stale list. `migrate_partition` is idempotent (no-op on already-symlinked
+  paths; refuses on leftover `.bak`), so no corruption — just wasted no-op
+  iterations until the per-iteration `<LOW_WATERMARK` check breaks early.
+  Re-globbing per iteration was rejected as more cost than benefit.
+
 ## Meta-conventions (cheap to remember; expensive to violate)
 
 - All `local`s split (`local a b; a=$1; b=$a`) — never `local a=$1 b=$a` (the RHS reads OUTER `$a`).

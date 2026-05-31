@@ -4,10 +4,12 @@ load ../helpers/setup
 
 setup() {
   setup_roots
-  load_lib log.sh dates.sh purge.sh
+  load_lib log.sh guard.sh dates.sh purge.sh
   export NOW_OVERRIDE; NOW_OVERRIDE=$(date -u -d 2026-06-01 +%s)
   export PURGE_DRY_RUN=0
   export LONGTERM_RETENTIONS="catX:70 catY:90"
+  sentinel on   # purge_run now re-checks per iteration; tests that need
+                # NAS2-unavailable behavior explicitly call `sentinel off`.
 }
 teardown() { teardown_roots; }
 
@@ -160,4 +162,17 @@ migrate_fixture() {
   run purge_run                              # second run: nothing to do
   [ "$status" -eq 0 ]
   [ ! -e "$NAS1_ROOT/20260301" ]
+}
+
+@test "purge_run aborts mid-run when NAS2 becomes unavailable" {
+  # Bind-mount-drop-mid-run scenario: per-iteration check_nas2 must catch
+  # the drop and abort loudly rather than silently turning every remaining
+  # migrated partition into a "refused" warning.
+  migrate_fixture 20260301 catX catY
+  migrate_fixture 20260302 catX catY
+  _hits=0
+  check_nas2() { _hits=$((_hits + 1)); [ $_hits -le 1 ]; }
+  ! purge_run
+  [ ! -e "$NAS2_ROOT/20260301/catX" ]        # first partition processed
+  [ -e "$NAS2_ROOT/20260302/catX" ]          # second untouched — we aborted
 }

@@ -110,6 +110,15 @@ purge_run() (
   for entry in "$NAS1_ROOT"/*; do
     date="$(basename "$entry")"
     parse_partition_epoch_days "$date" >/dev/null || continue
+    # Re-check NAS2 availability every partition so a bind-mount drop mid-run
+    # aborts loudly. Without this, resolve_partition_data_dir would refuse
+    # every migrated partition (since their relative symlinks now resolve
+    # to $NAS1_ROOT/.nas2/... instead of $NAS2_ROOT/...), silently piling
+    # up warnings while NAS2 fills indefinitely.
+    if ! check_nas2; then
+      warn "purge_run: NAS2 became unavailable mid-run; aborting"
+      return 1
+    fi
     for pair in $LONGTERM_RETENTIONS; do
       cat="${pair%%:*}"
       purge_category "$date" "$cat"

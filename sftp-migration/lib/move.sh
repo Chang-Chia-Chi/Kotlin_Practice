@@ -19,8 +19,15 @@ rsync_partition() {
 # match ownership/mode of src. Non-zero on any mismatch — INCLUDING a failure
 # to actually run rsync (binary missing, OOM, NFS hang). Empty stdout from
 # rsync only means "identical" when rc==0; otherwise it's silent failure.
+#
+# `rsync -ani --checksum --delete` itemizes EVERY difference. With -a in play,
+# the itemize codes cover content (c), size (s), time (t), permissions (p),
+# owner (o), group (g) — so an empty diff under rc==0 means files are
+# identical in both content AND metadata. No separate stat-loop needed.
+# (Previously: per-file `stat` forks on NFS = 2N syscalls per partition;
+# for a 50k-file partition that's 100k forks. Catastrophic in prod.)
 verify_copy() {
-  local src dst diff rc rel s d
+  local src dst diff rc
   src="$1"
   dst="$2"
   # -i prints an itemized line per differing file; without it -an emits nothing
@@ -32,18 +39,9 @@ verify_copy() {
     return 1
   fi
   if [ -n "$diff" ]; then
-    warn "verify: content mismatch ($src vs $dst)"
+    warn "verify: mismatch ($src vs $dst): $diff"
     return 1
   fi
-  while IFS= read -r -d '' s; do
-    rel="${s#"$src"/}"
-    d="$dst/$rel"
-    [ -e "$d" ] || { warn "verify: missing $rel"; return 1; }
-    if [ "$(stat -c '%u:%g:%a' "$s")" != "$(stat -c '%u:%g:%a' "$d")" ]; then
-      warn "verify: permission mismatch for $rel"
-      return 1
-    fi
-  done < <(find "$src" -mindepth 1 -print0)
   return 0
 }
 
@@ -140,6 +138,13 @@ migrate_run() {
     [ -z "$name" ] && continue
     if backfill_should_yield; then
       log "yielding to live load"
+      break
+    fi
+    # Re-check NAS2 availability every iteration so a bind-mount drop mid-run
+    # aborts loudly instead of silently turning every remaining partition
+    # into a "refused" warning while space accumulates on NAS2.
+    if ! check_nas2; then
+      warn "migrate_run: NAS2 became unavailable mid-run; aborting"
       break
     fi
     size="$(dir_size_bytes "$NAS1_ROOT/$name")"
