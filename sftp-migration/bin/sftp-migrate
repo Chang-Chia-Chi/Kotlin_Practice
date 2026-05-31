@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# Migration entrypoint.
+#
+# Hourly cron. migrate_run owns the NAS2 sentinel guard and the metric emission
+# on every exit path, so the entrypoint just acquires the shared lock and
+# delegates — keeps the dead-man's-switch metric advancing even on the
+# guard-failure exit, which a pre-lock check_nas2 would not.
+set -uo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=/dev/null
+source "$HERE/lib/config.sh"
+# shellcheck source=/dev/null
+source "$HERE/lib/log.sh"
+# shellcheck source=/dev/null
+source "$HERE/lib/guard.sh"
+# shellcheck source=/dev/null
+source "$HERE/lib/dates.sh"
+# shellcheck source=/dev/null
+source "$HERE/lib/eligibility.sh"
+# shellcheck source=/dev/null
+source "$HERE/lib/capacity.sh"
+# shellcheck source=/dev/null
+source "$HERE/lib/move.sh"
+# shellcheck source=/dev/null
+source "$HERE/lib/lock.sh"
+# shellcheck source=/dev/null
+source "$HERE/lib/reconcile.sh"
+# shellcheck source=/dev/null
+source "$HERE/lib/backfill.sh"
+# shellcheck source=/dev/null
+source "$HERE/lib/metrics.sh"
+
+with_lock 300 migrate_run
