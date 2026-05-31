@@ -128,8 +128,12 @@ resolve_partition_data_dir() {
 # purge_category <date> <cat>: delete <cat> once age > its retention (strict >,
 # biasing toward keeping — deletes are irreversible). Resolves through the date
 # symlink so migrated data on NAS2 is reclaimed. Honors PURGE_DRY_RUN.
+# All `local`s split. `rm -rf` exit code is checked so a partial failure
+# (permission, EBUSY) is logged as warn for retry, not claimed as success.
 purge_category() {
-  local date="$1" cat="$2" age ret target
+  local date cat age ret target
+  date="$1"
+  cat="$2"
   age="$(partition_age_days "$date")" || return 0
   ret="$(category_retention "$cat")"  || return 0
   [ "$age" -gt "$ret" ] || return 0
@@ -137,33 +141,42 @@ purge_category() {
   [ -e "$target" ] || return 0
   if [ "$PURGE_DRY_RUN" = "1" ]; then
     log "DRY-RUN would delete $target (age=$age > ret=$ret)"
-  else
-    rm -rf "$target"
+  elif rm -rf "$target"; then
     log "purged $target (age=$age > ret=$ret)"
+  else
+    warn "purge_category: rm -rf $target returned non-zero; will retry next cycle"
   fi
 }
 
 # cleanup_partition <date>: once fully drained, remove the date symlink + empty
 # NAS2 dir (migrated) or the empty NAS1 dir (non-migrated). Honors PURGE_DRY_RUN.
+#
+# Uses rmdir's "fails iff non-empty" semantic as the atomic empty-check, then
+# only removes the symlink on success. Otherwise warns and leaves the symlink
+# intact so the next purge cycle retries — never orphan the NAS2 dir (a prior
+# "rmdir 2>/dev/null; rm -f symlink" pattern would have orphaned it on
+# ENOTEMPTY from a lingering .nfsXXXX). All `local`s split.
 cleanup_partition() {
-  local date="$1" path="$NAS1_ROOT/$date" target
+  local date path target
+  date="$1"
+  path="$NAS1_ROOT/$date"
   if [ -L "$path" ]; then
     target="$(readlink -f "$path")"
-    [ -n "$(ls -A "$target" 2>/dev/null)" ] && return 0
     if [ "$PURGE_DRY_RUN" = "1" ]; then
-      log "DRY-RUN would remove symlink $path and empty $target"
-    else
-      rmdir "$target" 2>/dev/null
+      log "DRY-RUN would attempt to remove $target and symlink $path (if empty)"
+    elif rmdir "$target" 2>/dev/null; then
       rm -f "$path"
       log "cleaned up migrated partition $date"
+    else
+      warn "cleanup_partition: $target not empty (likely .nfsXXXX or still-purging categories); symlink retained for retry"
     fi
   elif [ -d "$path" ]; then
-    [ -n "$(ls -A "$path" 2>/dev/null)" ] && return 0
     if [ "$PURGE_DRY_RUN" = "1" ]; then
-      log "DRY-RUN would rmdir $path"
-    else
-      rmdir "$path"
+      log "DRY-RUN would rmdir $path (if empty)"
+    elif rmdir "$path" 2>/dev/null; then
       log "cleaned up partition $date"
+    else
+      warn "cleanup_partition: $path not empty; will retry next cycle"
     fi
   fi
 }
@@ -242,9 +255,24 @@ Append to `sftp-migration/lib/purge.sh`:
 # INTERMEDIATE path component, so the glob follows it to the real file on NAS2
 # (works identically on a non-migrated real dir). This mirrors the existing
 # file-id purge, which therefore needs no change post-migration.
+#
+# Under no-backup, a destructive helper cannot trust its caller. Empty $id
+# would expand the glob to `${cat}*` and wipe the whole category; empty $cat
+# would wipe everything under the date; a $date containing `..` would traverse.
+# Each arg is regex-gated; `--` stops option-parsing so a `-`-leading id can't
+# be interpreted as a flag. All `local`s split.
 purge_file_id() {
-  local date="$1" cat="$2" id="$3"
-  rm -f "$NAS1_ROOT/$date/$cat/${cat}${id}"*
+  local date cat id
+  date="$1"
+  cat="$2"
+  id="$3"
+  parse_partition_epoch_days "$date" >/dev/null \
+    || { warn "purge_file_id: invalid date '$date'"; return 1; }
+  [[ "$cat" =~ ^[A-Za-z0-9_-]+$ ]] \
+    || { warn "purge_file_id: invalid category '$cat'"; return 1; }
+  [[ "$id" =~ ^[A-Za-z0-9]+$ ]] \
+    || { warn "purge_file_id: invalid id '$id'"; return 1; }
+  rm -f -- "$NAS1_ROOT/$date/$cat/${cat}${id}"*
 }
 ```
 
@@ -293,12 +321,25 @@ Create `sftp-migration/bin/sftp-purge`:
 
 ```bash
 #!/usr/bin/env bash
-set -euo pipefail
+# Long-term purge entrypoint.
+#
+# Operator workflow:
+#   1. First prod cycles run with PURGE_DRY_RUN=1 (config default). Review the
+#      "DRY-RUN would delete ..." log lines.
+#   2. Once the dry-run output matches expectation, set PURGE_DRY_RUN=0 in the
+#      cron env to arm real deletes. Deletes are IRREVERSIBLE (no backup).
+#
+# Shares the migration lock so the two jobs never operate on the filesystem
+# concurrently. Refuses to run when NAS2 isn't available (resolve_partition_data_dir
+# would silently dangle on every migrated partition and skip them).
+set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=/dev/null
 source "$HERE/lib/config.sh"
 # shellcheck source=/dev/null
 source "$HERE/lib/log.sh"
+# shellcheck source=/dev/null
+source "$HERE/lib/guard.sh"
 # shellcheck source=/dev/null
 source "$HERE/lib/dates.sh"
 # shellcheck source=/dev/null
@@ -306,7 +347,7 @@ source "$HERE/lib/lock.sh"
 # shellcheck source=/dev/null
 source "$HERE/lib/purge.sh"
 
-# Share the migration lock so purge never runs concurrently with a migration.
+check_nas2 || exit 1
 with_lock 300 purge_run
 ```
 

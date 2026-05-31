@@ -1,7 +1,15 @@
 #!/usr/bin/env bash
-# Long-term purge entrypoint. Shares the migration lock so the two jobs
-# never operate on the filesystem concurrently. Defaults to dry-run via
-# config.sh's PURGE_DRY_RUN=1 — only arm it after reviewing the dry-run log.
+# Long-term purge entrypoint.
+#
+# Operator workflow:
+#   1. First prod cycles run with PURGE_DRY_RUN=1 (config default). Review the
+#      "DRY-RUN would delete ..." log lines.
+#   2. Once the dry-run output matches expectation, set PURGE_DRY_RUN=0 in the
+#      cron env to arm real deletes. Deletes are IRREVERSIBLE (no backup).
+#
+# Shares the migration lock so the two jobs never operate on the filesystem
+# concurrently. Refuses to run when NAS2 isn't available (resolve_partition_data_dir
+# would silently dangle on every migrated partition and skip them).
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=/dev/null
@@ -9,10 +17,13 @@ source "$HERE/lib/config.sh"
 # shellcheck source=/dev/null
 source "$HERE/lib/log.sh"
 # shellcheck source=/dev/null
+source "$HERE/lib/guard.sh"
+# shellcheck source=/dev/null
 source "$HERE/lib/dates.sh"
 # shellcheck source=/dev/null
 source "$HERE/lib/lock.sh"
 # shellcheck source=/dev/null
 source "$HERE/lib/purge.sh"
 
+check_nas2 || exit 1
 with_lock 300 purge_run

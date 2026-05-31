@@ -79,9 +79,57 @@ migrate_fixture() {
 
 @test "bin/sftp-purge runs (dry-run) without deleting" {
   export PURGE_DRY_RUN=1
+  sentinel on
   migrate_fixture 20260301 catX catY
   run "$BATS_TEST_DIRNAME/../../bin/sftp-purge"
   [ "$status" -eq 0 ]
   [ -e "$NAS2_ROOT/20260301/catX" ]
   [ -e "$NAS2_ROOT/20260301/catY" ]
+}
+
+@test "C1: purge_file_id rejects empty id and deletes nothing" {
+  migrate_fixture 20260401 catShort
+  : > "$NAS2_ROOT/20260401/catShort/catShort0042report"
+  ! purge_file_id 20260401 catShort ""
+  [ -e "$NAS2_ROOT/20260401/catShort/catShort0042report" ]   # untouched
+}
+
+@test "C1: purge_file_id rejects empty category and deletes nothing" {
+  migrate_fixture 20260401 catShort
+  : > "$NAS2_ROOT/20260401/catShort/catShort0042report"
+  ! purge_file_id 20260401 "" 0042
+  [ -e "$NAS2_ROOT/20260401/catShort/catShort0042report" ]
+}
+
+@test "C1: purge_file_id rejects invalid date and deletes nothing" {
+  mkdir -p "$NAS1_ROOT/20260401/catShort"
+  : > "$NAS1_ROOT/20260401/catShort/catShort0042report"
+  ! purge_file_id "../etc" catShort 0042
+  [ -e "$NAS1_ROOT/20260401/catShort/catShort0042report" ]
+}
+
+@test "C1: purge_file_id rejects id with path-traversal characters" {
+  mkdir -p "$NAS1_ROOT/20260401/catShort"
+  : > "$NAS1_ROOT/20260401/catShort/catShort0042report"
+  ! purge_file_id 20260401 catShort "../.."
+  [ -e "$NAS1_ROOT/20260401/catShort/catShort0042report" ]
+}
+
+@test "I3: bin/sftp-purge refuses to run when NAS2 sentinel is absent" {
+  export PURGE_DRY_RUN=1
+  sentinel off
+  migrate_fixture 20260301 catX catY
+  run "$BATS_TEST_DIRNAME/../../bin/sftp-purge"
+  [ "$status" -ne 0 ]
+  [ -e "$NAS2_ROOT/20260301/catX" ]   # nothing touched
+}
+
+@test "I1: cleanup_partition refuses to remove symlink when NAS2 dir non-empty" {
+  # Simulate the "partition not fully drained" / .nfsXXXX case: a leftover
+  # file in NAS2/<date> means rmdir will fail. The symlink must stay so the
+  # next cycle retries — never orphan the NAS2 dir.
+  migrate_fixture 20260301 catX
+  cleanup_partition 20260301
+  [ -L "$NAS1_ROOT/20260301" ]                # symlink retained
+  [ -e "$NAS2_ROOT/20260301/catX" ]           # NAS2 untouched
 }

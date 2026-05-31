@@ -41,35 +41,45 @@ purge_category() {
   [ -e "$target" ] || return 0                       # already gone
   if [ "$PURGE_DRY_RUN" = "1" ]; then
     log "DRY-RUN would delete $target (age=$age > ret=$ret)"
-  else
-    rm -rf "$target"
+  elif rm -rf "$target"; then
     log "purged $target (age=$age > ret=$ret)"
+  else
+    warn "purge_category: rm -rf $target returned non-zero; will retry next cycle"
   fi
 }
 
 # cleanup_partition <date>: once fully drained, remove the date symlink + empty
 # NAS2 dir (migrated) or the empty NAS1 dir (non-migrated). Honors PURGE_DRY_RUN.
+#
+# Uses rmdir's "fails iff non-empty" semantic as the atomic empty-check, then
+# only removes the symlink on success. Otherwise: warn loudly and leave the
+# symlink intact so the next purge cycle retries — never orphan the NAS2 dir
+# (the previous "rmdir 2>/dev/null then unconditional rm -f symlink" pattern
+# would have orphaned it on ENOTEMPTY from a lingering .nfsXXXX).
 cleanup_partition() {
   local date path target
   date="$1"
   path="$NAS1_ROOT/$date"
   if [ -L "$path" ]; then
     target="$(readlink -f "$path")"
-    [ -n "$(ls -A "$target" 2>/dev/null)" ] && return 0
     if [ "$PURGE_DRY_RUN" = "1" ]; then
-      log "DRY-RUN would remove symlink $path and empty $target"
-    else
-      rmdir "$target" 2>/dev/null
+      log "DRY-RUN would attempt to remove $target and symlink $path (if empty)"
+    elif rmdir "$target" 2>/dev/null; then
       rm -f "$path"
       log "cleaned up migrated partition $date"
+    else
+      # Non-empty -> either categories still present (next cycle handles it)
+      # or a .nfsXXXX from an in-flight reader. Either way: leave the symlink
+      # intact so retry semantics are preserved; never orphan NAS2.
+      warn "cleanup_partition: $target not empty (likely .nfsXXXX or still-purging categories); symlink retained for retry"
     fi
   elif [ -d "$path" ]; then
-    [ -n "$(ls -A "$path" 2>/dev/null)" ] && return 0
     if [ "$PURGE_DRY_RUN" = "1" ]; then
-      log "DRY-RUN would rmdir $path"
-    else
-      rmdir "$path"
+      log "DRY-RUN would rmdir $path (if empty)"
+    elif rmdir "$path" 2>/dev/null; then
       log "cleaned up partition $date"
+    else
+      warn "cleanup_partition: $path not empty; will retry next cycle"
     fi
   fi
 }
@@ -95,10 +105,23 @@ purge_run() (
 # INTERMEDIATE path component, so the glob follows it to the real file on NAS2
 # (works identically on a non-migrated real dir). This mirrors the existing
 # file-id purge — proves it needs no change post-migration.
+#
+# Callee-side input validation: under no-backup, a destructive helper cannot
+# trust its caller. An empty $id would expand the glob to `${cat}*` and wipe
+# the whole category; an empty $cat would wipe everything under the date; a
+# $date containing `..` would traverse out of NAS1_ROOT entirely. Each arg
+# is therefore regex-gated before the rm is allowed to run, and `--` ends
+# option-parsing so an id beginning with `-` can't be interpreted as a flag.
 purge_file_id() {
   local date cat id
   date="$1"
   cat="$2"
   id="$3"
-  rm -f "$NAS1_ROOT/$date/$cat/${cat}${id}"*
+  parse_partition_epoch_days "$date" >/dev/null \
+    || { warn "purge_file_id: invalid date '$date'"; return 1; }
+  [[ "$cat" =~ ^[A-Za-z0-9_-]+$ ]] \
+    || { warn "purge_file_id: invalid category '$cat'"; return 1; }
+  [[ "$id" =~ ^[A-Za-z0-9]+$ ]] \
+    || { warn "purge_file_id: invalid id '$id'"; return 1; }
+  rm -f -- "$NAS1_ROOT/$date/$cat/${cat}${id}"*
 }
