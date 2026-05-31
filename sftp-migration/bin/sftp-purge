@@ -25,5 +25,16 @@ source "$HERE/lib/lock.sh"
 # shellcheck source=/dev/null
 source "$HERE/lib/purge.sh"
 
-check_nas2 || exit 1
-with_lock 300 purge_run
+# Refuse to run as root — the destructive helpers must operate under the
+# least-privileged UID. Defense in depth against the symlink-target case:
+# if a malicious symlink ever escaped the NAS2-allowlist, running as a
+# non-root UID limits the blast radius to that UID's writable scope.
+if [ "$(id -u)" -eq 0 ]; then
+  printf 'sftp-purge: refusing to run as root; configure cron under the sftp service UID\n' >&2
+  exit 1
+fi
+
+# check_nas2 inside the lock — closes the TOCTOU where NAS2 could vanish
+# between a pre-lock check and the rm -rf inside purge_run.
+purge_run_guarded() { check_nas2 || return 1; purge_run; }
+with_lock 300 purge_run_guarded

@@ -56,9 +56,23 @@ teardown() { teardown_roots; }
   [ ! -L "$NAS1_ROOT/20260101" ]
 }
 
-@test "migrate_run returns non-zero and emits metrics when NAS2 guard fails" {
+@test "CR-I2: migrate_run advances last_success_timestamp even when NAS2 guard fails" {
+  # Dead-man's-switch is "cron is running", not "work succeeded fully".
+  # NAS2 unavailability is a separate (infra-monitored) condition. Pinning
+  # the timestamp here keeps the two alerts unambiguous.
   sentinel off
   make_partition 20260101 catX 1024
   ! migrate_run
-  [ -f "$METRICS_FILE" ]            # metrics still written so dead-man's switch advances correctly
+  [ -f "$METRICS_FILE" ]
+  # Timestamp is a non-zero epoch (advanced this cycle).
+  local ts
+  ts="$(awk '/^sftp_migration_last_success_timestamp_seconds / {print $2}' "$METRICS_FILE")"
+  [ "$ts" -gt 0 ]
+}
+
+@test "CR-I1: migrate_run aborts cleanly when NAS1 usage is unreadable" {
+  nas_used_pct() { return 1; }                    # simulate df failure
+  ! migrate_run
+  # Should still emit metrics + advance timestamp (cron is healthy).
+  [ -f "$METRICS_FILE" ]
 }

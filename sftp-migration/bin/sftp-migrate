@@ -30,4 +30,12 @@ source "$HERE/lib/backfill.sh"
 # shellcheck source=/dev/null
 source "$HERE/lib/metrics.sh"
 
+# Refuse to run as root — destructive helpers must operate under the
+# least-privileged UID so a (hypothetical) symlink-escape can't touch
+# arbitrary paths.
+if [ "$(id -u)" -eq 0 ]; then
+  printf 'sftp-migrate: refusing to run as root; configure cron under the sftp service UID\n' >&2
+  exit 1
+fi
+
 with_lock 300 migrate_run

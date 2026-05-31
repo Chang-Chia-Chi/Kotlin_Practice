@@ -88,6 +88,15 @@ teardown() { teardown_roots; }
   [ -d "$NAS1_ROOT/20260101" ]          # real dir still in place
 }
 
+@test "CR-I3: verify gate fails when NAS2 has an extra file src doesn't have" {
+  # --delete in the verify rsync is load-bearing: without it, an extra file
+  # on dst would slip through and we'd swap in a copy that's actually superset.
+  make_partition 20260101 catX 2048
+  rsync_partition 20260101
+  : > "$NAS2_ROOT/20260101/catX/stray_extra_file"
+  ! verify_partition 20260101
+}
+
 @test "ENOTEMPTY: migrate succeeds when .bak can't be removed (simulated .nfsXXXX)" {
   make_partition 20260101 catX 64
   # Stub rm so the .bak removal "fails" the way a lingering .nfsXXXX file

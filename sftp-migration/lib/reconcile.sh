@@ -22,6 +22,11 @@ reconcile() (
     date="$(basename "$bak")"
     date="${date#.}"
     date="${date%.bak}"
+    # Validate that what we parsed is actually a calendar date before any
+    # destructive op on derived paths. Without this, a stray `.x.bak` would
+    # run `rm -rf $NAS2_ROOT/x` (under no-backup, permanent damage).
+    parse_partition_epoch_days "$date" >/dev/null \
+      || { warn "reconcile: ignoring non-partition .bak '$bak'"; continue; }
     path="$NAS1_ROOT/$date"
     if [ -L "$path" ]; then
       # Symlink already created -> interrupted cleanup; finish it.

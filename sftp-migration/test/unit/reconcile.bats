@@ -67,6 +67,19 @@ stage_bak() {
   [ -L "$NAS1_ROOT/20260101" ]
 }
 
+@test "CR-C1: reconcile ignores a .bak file whose name isn't a valid date" {
+  # A stray .x.bak (or .tmp.bak, .foo.bak) must NOT cause rm -rf "$NAS2_ROOT/x"
+  # or mv operations against non-date paths. Defense in depth on the
+  # destructive side under no-backup.
+  mkdir -p "$NAS1_ROOT/.x.bak"
+  : > "$NAS1_ROOT/.x.bak/sentinel"
+  mkdir -p "$NAS2_ROOT/x"
+  : > "$NAS2_ROOT/x/sentinel"
+  reconcile
+  [ -e "$NAS1_ROOT/.x.bak/sentinel" ]
+  [ -e "$NAS2_ROOT/x/sentinel" ]
+}
+
 @test "I-6: reconcile rolls back when verify_copy itself fails (rsync rc!=0)" {
   # Stage a "mid-swap" state with a COMPLETE NAS2 copy, but force verify_copy
   # to fail (simulating the rsync-binary-missing / OOM / NFS-hang case). The

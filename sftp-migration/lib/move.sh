@@ -114,12 +114,22 @@ migrate_partition() {
 migrate_run() {
   local used name size
   reconcile
+  # The dead-man's-switch advances on EVERY exit path that means "the cron is
+  # running" — NAS2-unavailability is a separate (infra-monitored) condition,
+  # not "the box is dead." Pinning the timestamp here avoids muddying the
+  # two alerts.
   if ! check_nas2; then
+    _M_LAST_SUCCESS="$(date -u +%s)"
     metric_emit
     return 1
   fi
   _M_FIT_CHECK_FAILED=0
-  used="$(nas_used_pct "$NAS1_ROOT")"
+  if ! used="$(nas_used_pct "$NAS1_ROOT")"; then
+    warn "migrate_run: NAS1 usage unreadable; aborting this cycle"
+    _M_LAST_SUCCESS="$(date -u +%s)"
+    metric_emit
+    return 1
+  fi
   if [ "$used" -le "$HIGH_WATERMARK" ]; then
     log "NAS1 at ${used}% <= HIGH; nothing to do"
     _M_LAST_SUCCESS="$(date -u +%s)"
@@ -142,7 +152,10 @@ migrate_run() {
       warn "migrate failed for $name; stopping"
       break
     fi
-    used="$(nas_used_pct "$NAS1_ROOT")"
+    if ! used="$(nas_used_pct "$NAS1_ROOT")"; then
+      warn "migrate_run: NAS1 usage unreadable mid-loop; stopping"
+      break
+    fi
     if [ "$used" -lt "$LOW_WATERMARK" ]; then
       log "NAS1 at ${used}% < LOW; done"
       break

@@ -20,11 +20,26 @@ category_retention() {
 
 # resolve_partition_data_dir <date> -> the real data dir, following the symlink
 # when migrated (so the irreversible rm actually reclaims NAS2 space).
+#
+# CRITICAL SAFETY: refuses to follow a symlink whose target doesn't resolve
+# under $NAS2_ROOT. Without this check, a compromised producer (or a sloppy
+# admin) that can write into $NAS1_ROOT could create a symlink to any path
+# (e.g., /etc), and the next purge cycle would run `rm -rf /etc/<cat>` —
+# permanent damage outside the NAS roots under no-backup.
 resolve_partition_data_dir() {
-  local date path
+  local date path real
   date="$1"
   path="$NAS1_ROOT/$date"
-  if [ -L "$path" ]; then readlink -f "$path"; else echo "$path"; fi
+  if [ -L "$path" ]; then
+    real="$(readlink -f "$path")" || return 1
+    case "$real/" in
+      "$NAS2_ROOT"/*) echo "$real" ;;
+      *) warn "resolve_partition_data_dir: $path resolves to $real (outside NAS2_ROOT); refusing"
+         return 1 ;;
+    esac
+  else
+    echo "$path"
+  fi
 }
 
 # purge_category <date> <cat>: delete <cat> once age > its retention (strict >,
@@ -37,7 +52,9 @@ purge_category() {
   age="$(partition_age_days "$date")" || return 0    # invalid name -> skip safely
   ret="$(category_retention "$cat")"  || return 0    # unknown cat -> NEVER purge
   [ "$age" -gt "$ret" ] || return 0                  # not old enough -> keep
-  target="$(resolve_partition_data_dir "$date")/$cat"
+  local resolved
+  resolved="$(resolve_partition_data_dir "$date")" || return 0   # refused -> skip
+  target="$resolved/$cat"
   [ -e "$target" ] || return 0                       # already gone
   if [ "$PURGE_DRY_RUN" = "1" ]; then
     log "DRY-RUN would delete $target (age=$age > ret=$ret)"
@@ -61,7 +78,7 @@ cleanup_partition() {
   date="$1"
   path="$NAS1_ROOT/$date"
   if [ -L "$path" ]; then
-    target="$(readlink -f "$path")"
+    target="$(resolve_partition_data_dir "$date")" || return 0   # refused -> skip
     if [ "$PURGE_DRY_RUN" = "1" ]; then
       log "DRY-RUN would attempt to remove $target and symlink $path (if empty)"
     elif rmdir "$target" 2>/dev/null; then
@@ -113,7 +130,7 @@ purge_run() (
 # is therefore regex-gated before the rm is allowed to run, and `--` ends
 # option-parsing so an id beginning with `-` can't be interpreted as a flag.
 purge_file_id() {
-  local date cat id
+  local date cat id resolved
   date="$1"
   cat="$2"
   id="$3"
@@ -123,5 +140,9 @@ purge_file_id() {
     || { warn "purge_file_id: invalid category '$cat'"; return 1; }
   [[ "$id" =~ ^[A-Za-z0-9]+$ ]] \
     || { warn "purge_file_id: invalid id '$id'"; return 1; }
-  rm -f -- "$NAS1_ROOT/$date/$cat/${cat}${id}"*
+  # Route through resolve_partition_data_dir so a symlink pointing OUTSIDE
+  # NAS2_ROOT is refused — same hardening as purge_category.
+  resolved="$(resolve_partition_data_dir "$date")" \
+    || { warn "purge_file_id: refused — symlink target outside NAS2_ROOT"; return 1; }
+  rm -f -- "$resolved/$cat/${cat}${id}"*
 }

@@ -133,3 +133,31 @@ migrate_fixture() {
   [ -L "$NAS1_ROOT/20260301" ]                # symlink retained
   [ -e "$NAS2_ROOT/20260301/catX" ]           # NAS2 untouched
 }
+
+@test "SEC-C1: purge refuses to follow a symlink whose target is outside NAS2_ROOT" {
+  # Producer-compromise scenario: a symlink in NAS1_ROOT pointing to an
+  # attacker-chosen directory must NOT cause rm -rf against that directory.
+  mkdir -p "$TEST_TMP/outside/catX"
+  : > "$TEST_TMP/outside/catX/sentinel"
+  ln -s "$TEST_TMP/outside" "$NAS1_ROOT/20260301"   # age 92, catX(70) eligible
+  purge_run
+  [ -L "$NAS1_ROOT/20260301" ]                       # symlink untouched
+  [ -e "$TEST_TMP/outside/catX/sentinel" ]           # outside path NOT deleted
+}
+
+@test "SEC-H1: purge_file_id refuses when date symlink target is outside NAS2_ROOT" {
+  mkdir -p "$TEST_TMP/outside/catShort"
+  : > "$TEST_TMP/outside/catShort/catShort0042report"
+  ln -s "$TEST_TMP/outside" "$NAS1_ROOT/20260401"
+  ! purge_file_id 20260401 catShort 0042
+  [ -e "$TEST_TMP/outside/catShort/catShort0042report" ]   # outside untouched
+}
+
+@test "CR-I5: purge_run is idempotent (second run is a no-op)" {
+  migrate_fixture 20260301 catX catY
+  purge_run                                  # first run drains and cleans up
+  [ ! -e "$NAS1_ROOT/20260301" ]
+  run purge_run                              # second run: nothing to do
+  [ "$status" -eq 0 ]
+  [ ! -e "$NAS1_ROOT/20260301" ]
+}
