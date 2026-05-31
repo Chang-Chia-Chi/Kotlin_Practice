@@ -183,8 +183,16 @@ Create `sftp-migration/lib/eligibility.sh`:
 # A partition is migration-eligible iff it is a REAL directory on NAS1 (not a
 # symlink — i.e. not already migrated), has a valid UTC date name, and is older
 # than MIN_MIGRATE_AGE_DAYS (so its short-term categories are already purged).
+#
+# NOTE: each `local` is its own statement. Combining them as
+#   `local name="$1" path="$NAS1_ROOT/$name" age`
+# triggers a bash quirk where the RHS of `path` reads the OUTER scope's $name
+# (empty), silently making path="$NAS1_ROOT/" and disabling the symlink check.
+# Caught originally by T1-07 during Phase 2 TDD.
 is_eligible() {
-  local name="$1" path="$NAS1_ROOT/$name" age
+  local name path age
+  name="$1"
+  path="$NAS1_ROOT/$name"
   [ -d "$path" ] || return 1
   [ -L "$path" ] && return 1
   age="$(partition_age_days "$name")" || return 1

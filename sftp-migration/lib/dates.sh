@@ -6,10 +6,17 @@ now_epoch() { echo "${NOW_OVERRIDE:-$(date -u +%s)}"; }
 
 # parse_partition_epoch_days <YYYYMMDD> -> epoch-day count (UTC), or return 1
 # for a name that is not a valid calendar date.
+#
+# Round-trip check (parse -> format -> compare) guards against any GNU date
+# version that silently interprets month=00, month=13, day=00 etc. relatively
+# instead of rejecting (no-backup posture: never let a misnamed partition
+# parse to a wrong real date).
 parse_partition_epoch_days() {
-  local name="$1" secs
+  local name="$1" secs roundtrip
   [[ "$name" =~ ^[0-9]{8}$ ]] || return 1
   secs="$(date -u -d "${name:0:4}-${name:4:2}-${name:6:2}" +%s 2>/dev/null)" || return 1
+  roundtrip="$(date -u -d "@$secs" +%Y%m%d)"
+  [ "$roundtrip" = "$name" ] || return 1
   echo $(( secs / 86400 ))
 }
 

@@ -40,3 +40,12 @@ fixed_today() { export NOW_OVERRIDE; NOW_OVERRIDE=$(date -u -d 2026-06-01 +%s); 
   run parse_partition_epoch_days 20260230
   [ "$status" -ne 0 ]
 }
+
+@test "T1-05+: month=00, month=13, day=00 are rejected (round-trip guard)" {
+  run parse_partition_epoch_days 20260001
+  [ "$status" -ne 0 ]
+  run parse_partition_epoch_days 20261301
+  [ "$status" -ne 0 ]
+  run parse_partition_epoch_days 20260100
+  [ "$status" -ne 0 ]
+}
