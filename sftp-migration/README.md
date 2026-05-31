@@ -6,6 +6,8 @@ UTC- and symlink-aware. Bash + bats-core.
 
 Design: `docs/sftp-migration/` (CONTEXT.md, adr/, discovery.md, test-plan.md).
 Implementation plan: `docs/superpowers/plans/2026-05-28-sftp-migration-*.md`.
+**Modifying the code?** Read `MAINTAINERS.md` first — file map + the rules
+each came from a real bug we caught.
 
 ## Schedule (hand to infra)
 
