@@ -24,3 +24,19 @@ load_lib() {
     source "$_LIB_DIR/$m"
   done
 }
+
+# sentinel on|off — simulate NAS2 available/unavailable.
+sentinel() {
+  case "$1" in
+    on)  printf 'ok' > "$NAS2_SENTINEL" ;;
+    off) rm -f "$NAS2_SENTINEL" ;;
+  esac
+}
+
+# make_partition <date> <category> [bytes] [root]
+# Deterministic content so checksums are stable across copies.
+make_partition() {
+  local date="$1" cat="$2" bytes="${3:-1024}" root="${4:-$NAS1_ROOT}"
+  mkdir -p "$root/$date/$cat"
+  head -c "$bytes" /dev/zero | tr '\0' 'x' > "$root/$date/$cat/${cat}0001file"
+}
