@@ -42,3 +42,31 @@ verify_copy() {
 
 # verify_partition <date>: verify the NAS1 source against the NAS2 copy.
 verify_partition() { verify_copy "$NAS1_ROOT/$1" "$NAS2_ROOT/$1"; }
+
+# swap_to_symlink <date>: set the real dir aside as .<date>.bak (so in-flight,
+# inode-bound download fds keep reading), then create a RELATIVE symlink that
+# resolves through .nas2/ to the NAS2 copy. Relative target works inside chroot.
+swap_to_symlink() {
+  local date path bak
+  date="$1"
+  path="$NAS1_ROOT/$date"
+  bak="$NAS1_ROOT/.$date.bak"
+  mv "$path" "$bak"
+  ln -s "${SYMLINK_REL_PREFIX}${date}" "$path"
+}
+
+# migrate_partition <date>: full safe move for one partition.
+# guard -> rsync -> verify gate -> swap -> immediate delete of .bak.
+# On NFS, immediate rm is safe (silly-rename preserves any open reader); the
+# reconciliation sweep (Phase 4) cleans any .bak left non-empty by a .nfsXXXX.
+migrate_partition() {
+  local date bak
+  date="$1"
+  bak="$NAS1_ROOT/.$date.bak"
+  check_nas2 || return 1
+  rsync_partition "$date"  || { warn "rsync failed for $date";  return 1; }
+  verify_partition "$date" || { warn "verify failed for $date; not swapping"; return 1; }
+  swap_to_symlink "$date"
+  rm -rf "$bak"
+  log "migrated $date"
+}
