@@ -15,9 +15,15 @@ hardware redundancy only** — a wrong `rm` is permanent loss.
 1. **Per-date symlink unification.** `NAS1/<date>` is either a real directory
    (hot/recent partitions) or a RELATIVE symlink `.nas2/<date>` resolving via
    a bind mount into NAS2 (migrated partitions). Downstream sees one tree.
-2. **The `.nas2` bind mount.** `/mnt/nas2` is bind-mounted at
-   `/mnt/nas1/.nas2` so relative symlinks resolve inside any chroot. The
-   sentinel is read THROUGH this path — so a bind-drop trips the guard.
+2. **The `.nas2` bind mount (REQUIRED infra prereq, not created by this code).**
+   `/mnt/nas2` is bind-mounted at `/mnt/nas1/.nas2` by infra (fstab entry with
+   `x-systemd.requires-mount-for=/mnt/nas2`, see README "Infra-owned
+   prerequisites"). This code ASSUMES the bind mount exists; without it,
+   relative symlinks dangle and `check_nas2` refuses to run. The bind point
+   is configurable — change `SYMLINK_REL_PREFIX` in `config.sh` AND the
+   fstab entry together if you need a different name. The sentinel is read
+   THROUGH this path so a bind-drop trips the guard. (See ADR-0001 for why
+   relative-via-bind-mount over absolute symlinks: it works under chroot.)
 3. **No backup → defense in depth on the destructive side.** Every `rm`/`mv`
    path passes through: (a) calendar round-trip date validation, (b) symlink
    target allowlist to `NAS2_ROOT`, (c) sentinel-via-bind-mount NAS2 guard,
