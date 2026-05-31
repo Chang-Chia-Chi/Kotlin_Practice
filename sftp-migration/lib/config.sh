@@ -23,3 +23,8 @@
 
 # Purge safety: 1 = log would-delete, delete nothing.
 : "${PURGE_DRY_RUN:=1}"
+
+# Relative target prefix for date symlinks. NAS2 is reachable under the root as
+# .nas2 (a bind mount in prod), so a date symlink points to .nas2/<date> and
+# resolves inside any chroot. Trailing slash intentional.
+: "${SYMLINK_REL_PREFIX:=.nas2/}"

@@ -10,6 +10,8 @@ setup_roots() {
   export LOCK_FILE="$TEST_TMP/lock"
   export METRICS_FILE="$TEST_TMP/metrics.prom"
   mkdir -p "$NAS1_ROOT" "$NAS2_ROOT"
+  # Emulate the prod bind mount so relative symlinks `.nas2/<date>` resolve.
+  ln -s "$NAS2_ROOT" "$NAS1_ROOT/.nas2"
 }
 
 teardown_roots() { rm -rf "$TEST_TMP"; }
