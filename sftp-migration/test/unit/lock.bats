@@ -17,3 +17,8 @@ teardown() { teardown_roots; }
   [ "$status" -ne 0 ]
   wait "$holder"
 }
+
+@test "with_lock propagates the wrapped command's exit code" {
+  run with_lock 1 false
+  [ "$status" -eq 1 ]
+}

@@ -57,20 +57,26 @@ Create `sftp-migration/lib/lock.sh`:
 # shellcheck shell=bash
 # with_lock <timeout_secs> <command...>: run the command holding an exclusive
 # lock on LOCK_FILE (local disk — NFS flock is unreliable, and migration+purge
-# both run on this VM so a local lock is authoritative). Returns non-zero if the
-# lock can't be acquired within the timeout (so a hung peer doesn't block forever).
+# both run on this VM so a local lock is authoritative). Returns non-zero if
+# the lock can't be acquired within the timeout (so a hung peer doesn't block
+# forever). Closing the fd releases the lock; no explicit `flock -u` needed.
 with_lock() {
-  local timeout="$1"; shift
+  local timeout
   local lockfd
-  exec {lockfd}> "$LOCK_FILE" || return 1
+  local rc
+  timeout="$1"
+  shift
+  if ! exec {lockfd}> "$LOCK_FILE"; then
+    warn "could not open lock file $LOCK_FILE (path inaccessible?)"
+    return 1
+  fi
   if ! flock -w "$timeout" "$lockfd"; then
     warn "could not acquire lock $LOCK_FILE within ${timeout}s"
     exec {lockfd}>&-
     return 1
   fi
   "$@"
-  local rc=$?
-  flock -u "$lockfd"
+  rc=$?
   exec {lockfd}>&-
   return "$rc"
 }
@@ -239,26 +245,43 @@ Create `sftp-migration/lib/reconcile.sh`:
 # repair them. Idempotent; safe to run at the start of every migration run and
 # on a fast standalone timer. Repairs the only dangerous window (between
 # mv-aside and ln -s) and finishes interrupted .bak cleanup.
-reconcile() {
+#
+# Concurrency: designed for at-most-one invocation at a time, but degrade-safe
+# under accidental concurrent calls (each rm is idempotent and the failing
+# loser just warns). Phase 6 entrypoints wrap reconcile in `with_lock`.
+#
+# Body runs in a subshell so `shopt nullglob` is scoped — caller shell state is
+# never mutated. (dotglob is unnecessary: the literal leading `.` in the glob
+# pattern already matches dotfiles.)
+# `log "finished cleanup"` only fires on actual rm success (not when ENOTEMPTY
+# kept .bak alive for the next sweep) — accurate operator signal.
+reconcile() (
   local bak date path
-  shopt -s nullglob dotglob
+  shopt -s nullglob
   for bak in "$NAS1_ROOT"/.*.bak; do
     [ -d "$bak" ] || continue
     date="$(basename "$bak")"; date="${date#.}"; date="${date%.bak}"
     path="$NAS1_ROOT/$date"
     if [ -L "$path" ]; then
-      # Symlink already created -> interrupted cleanup; finish it. (A lingering
-      # .nfsXXXX may keep .bak around; the next run removes it once empty.)
-      rm -rf "$bak"
-      log "reconcile: finished cleanup for $date"
+      # Symlink already created -> interrupted cleanup; finish it.
+      # rm non-fatal: an in-flight reader's .nfsXXXX may keep .bak around;
+      # the next run removes it once empty.
+      if rm -rf "$bak" 2>/dev/null; then
+        log "reconcile: finished cleanup for $date"
+      else
+        warn "reconcile: $bak not fully removed (likely .nfsXXXX held open); will retry next run"
+      fi
     elif [ -e "$path" ]; then
       warn "reconcile: anomaly for $date (real dir and .bak both present)"
     else
       # Path missing -> crashed mid-swap. Roll forward if NAS2 verified, else back.
       if verify_copy "$bak" "$NAS2_ROOT/$date"; then
         ln -s "${SYMLINK_REL_PREFIX}${date}" "$path"
-        rm -rf "$bak"
-        log "reconcile: rolled forward $date"
+        if rm -rf "$bak" 2>/dev/null; then
+          log "reconcile: rolled forward $date"
+        else
+          warn "reconcile: $bak not fully removed (likely .nfsXXXX held open); will retry next run"
+        fi
       else
         mv "$bak" "$path"
         rm -rf "${NAS2_ROOT:?}/$date"
@@ -266,8 +289,7 @@ reconcile() {
       fi
     fi
   done
-  shopt -u nullglob dotglob
-}
+)
 ```
 
 - [ ] **Step 4: Run the test to verify it passes**

@@ -66,3 +66,17 @@ stage_bak() {
   [ "$status" -eq 0 ]
   [ -L "$NAS1_ROOT/20260101" ]
 }
+
+@test "I-6: reconcile rolls back when verify_copy itself fails (rsync rc!=0)" {
+  # Stage a "mid-swap" state with a COMPLETE NAS2 copy, but force verify_copy
+  # to fail (simulating the rsync-binary-missing / OOM / NFS-hang case). The
+  # safe response is rollback, not roll forward on uncertainty.
+  stage_bak 20260101
+  rsync -a "$NAS1_ROOT/.20260101.bak/" "$NAS2_ROOT/20260101/"
+  verify_copy() { return 2; }                     # simulate invocation failure
+  reconcile
+  [ -d "$NAS1_ROOT/20260101" ]                    # path restored from .bak
+  [ ! -L "$NAS1_ROOT/20260101" ]                  # no symlink (didn't roll fwd)
+  [ ! -e "$NAS2_ROOT/20260101" ]                  # partial NAS2 cleaned up
+  [ ! -e "$NAS1_ROOT/.20260101.bak" ]             # .bak moved back to path
+}

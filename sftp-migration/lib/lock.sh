@@ -9,7 +9,10 @@ with_lock() {
   local rc
   timeout="$1"
   shift
-  exec {lockfd}> "$LOCK_FILE" || return 1
+  if ! exec {lockfd}> "$LOCK_FILE"; then
+    warn "could not open lock file $LOCK_FILE (path inaccessible?)"
+    return 1
+  fi
   if ! flock -w "$timeout" "$lockfd"; then
     warn "could not acquire lock $LOCK_FILE within ${timeout}s"
     exec {lockfd}>&-
@@ -17,7 +20,8 @@ with_lock() {
   fi
   "$@"
   rc=$?
-  flock -u "$lockfd"
+  # Closing the fd releases the flock (kernel drops on last close); no
+  # explicit `flock -u` needed.
   exec {lockfd}>&-
   return "$rc"
 }
