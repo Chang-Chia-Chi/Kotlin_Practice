@@ -90,3 +90,15 @@ purge_run() (
     cleanup_partition "$date"
   done
 )
+
+# purge_file_id <date> <cat> <id>: delete files by id. The date symlink is an
+# INTERMEDIATE path component, so the glob follows it to the real file on NAS2
+# (works identically on a non-migrated real dir). This mirrors the existing
+# file-id purge — proves it needs no change post-migration.
+purge_file_id() {
+  local date cat id
+  date="$1"
+  cat="$2"
+  id="$3"
+  rm -f "$NAS1_ROOT/$date/$cat/${cat}${id}"*
+}

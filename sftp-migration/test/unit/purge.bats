@@ -62,3 +62,17 @@ migrate_fixture() {
   [ -e "$NAS2_ROOT/20260301/catY" ]
   echo "$output" | grep -q "DRY-RUN would delete"
 }
+
+@test "T1-31: file-id purge globs through the date symlink to NAS2" {
+  migrate_fixture 20260401 catShort
+  : > "$NAS2_ROOT/20260401/catShort/catShort0042report"
+  purge_file_id 20260401 catShort 0042
+  [ ! -e "$NAS2_ROOT/20260401/catShort/catShort0042report" ]
+}
+
+@test "T1-32: file-id purge works on a non-migrated real dir too" {
+  mkdir -p "$NAS1_ROOT/20260530/catShort"
+  : > "$NAS1_ROOT/20260530/catShort/catShort0042report"
+  purge_file_id 20260530 catShort 0042
+  [ ! -e "$NAS1_ROOT/20260530/catShort/catShort0042report" ]
+}
