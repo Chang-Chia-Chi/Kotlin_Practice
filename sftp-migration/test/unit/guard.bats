@@ -15,3 +15,9 @@ teardown() { teardown_roots; }
   run check_nas2
   [ "$status" -ne 0 ]
 }
+
+@test "empty sentinel still passes — presence is the signal, not content" {
+  : > "$NAS2_SENTINEL"
+  run check_nas2
+  [ "$status" -eq 0 ]
+}
