@@ -86,3 +86,4 @@ nb-configuration.xml
 .claude/audit-log.txt
 .claude/checkpoints/
 project-sdet-branch/
+DynaCache/
