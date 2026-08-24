@@ -1,0 +1,91 @@
+# Gauntlet 的 Detekt 規則。搭配 buildUponDefaultConfig=true，
+# 這裡只寫「跟預設不一樣」的部分，其餘沿用 detekt 預設。
+build:
+  maxIssues: 0          # 零容忍：一個 issue 就 build fail
+  excludeCorrectable: false
+
+config:
+  validation: true
+  warningsAsErrors: true
+
+complexity:
+  ComplexMethod:
+    active: true
+    threshold: 10       # 圈複雜度上限
+    ignoreSingleWhenExpression: true
+  LongMethod:
+    active: true
+    threshold: 60
+  LongParameterList:
+    active: true
+    functionThreshold: 6
+    constructorThreshold: 8
+    ignoreDefaultParameters: true
+  NestedBlockDepth:
+    active: true
+    threshold: 4
+  TooManyFunctions:
+    active: true
+    thresholdInClasses: 15
+    ignorePrivate: true
+
+exceptions:
+  TooGenericExceptionCaught:
+    active: true
+    exceptionNames:
+      - ArrayIndexOutOfBoundsException
+      - Error
+      - Exception
+      - IllegalMonitorStateException
+      - IndexOutOfBoundsException
+      - NullPointerException
+      - RuntimeException
+      - Throwable
+  TooGenericExceptionThrown:
+    active: true
+  SwallowedException:
+    active: true
+  ThrowingExceptionsWithoutMessageOrCause:
+    active: true
+  ReturnFromFinally:
+    active: true
+
+potential-bugs:
+  # 下面兩條需要 type resolution（detekt 要拿得到 classpath）才會真的報。
+  # 沒設 classpath 時它們不會誤報，但也等於沒作用，見 README。
+  UnnecessarySafeCall:
+    active: true
+  UnnecessaryNotNullOperator:
+    active: true
+  UnsafeCallOnNullableType:
+    active: true
+  ImplicitDefaultLocale:
+    active: true
+  LateinitUsage:
+    active: true
+    excludes: ['**/test/**', '**/*Test.kt', '**/*Spec.kt']
+
+style:
+  MaxLineLength:
+    active: true
+    maxLineLength: 120
+  ReturnCount:
+    active: true
+    max: 3
+  ThrowsCount:
+    active: true
+    max: 0              # 這個專案不靠例外傳遞失敗
+  MagicNumber:
+    active: true
+    excludes: ['**/test/**', '**/*Test.kt', '**/*Spec.kt']
+    ignorePropertyDeclaration: true
+    ignoreCompanionObjectPropertyDeclaration: true
+  WildcardImport:
+    active: true
+  ForbiddenComment:
+    active: true
+    comments:
+      - reason: 'Agent 不准留 TODO 當作交付'
+        value: 'TODO:'
+      - reason: '未完成的東西要寫進 EVIDENCE.md 的 Unverified，不是藏在註解裡'
+        value: 'FIXME:'

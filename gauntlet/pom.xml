@@ -1,0 +1,359 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>com.example</groupId>
+  <artifactId>gauntlet</artifactId>
+  <version>1.0.0-SNAPSHOT</version>
+
+  <properties>
+    <!-- Quarkus 3.2 的基準是 JDK 17。要用 21 先確認你那條 3.2.x 支援。 -->
+    <maven.compiler.release>17</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+
+    <!-- Quarkus 3.2 BOM 本身帶的是 Kotlin 1.9.x，這裡往上蓋到 2.0.21。
+         往上蓋是安全方向：新編譯器讀得懂舊函式庫的 metadata，反過來才會爆。
+         但光改這個屬性不夠 —— 匯入的 BOM 不吃我們的 property，
+         kotlin-stdlib 還是會停在 1.9.x。所以下面 dependencyManagement
+         把 kotlin-bom 排在 quarkus-bom 之前（先宣告者勝）。 -->
+    <kotlin.version>2.0.21</kotlin.version>
+    <quarkus.platform.group-id>io.quarkus.platform</quarkus.platform.group-id>
+    <quarkus.platform.artifact-id>quarkus-bom</quarkus.platform.artifact-id>
+    <!-- 換成你實際在用的那個 3.2.x -->
+    <quarkus.platform.version>3.2.12.Final</quarkus.platform.version>
+
+    <!-- Arrow 2.x 是 Kotlin 2.x 的線，API（either / ensure / bind）與 1.2 相同。
+         版本要跟你的 Kotlin 對得上：從 2.0.x 起手，編得過再往上試；
+         看到 metadata 版本錯就往下退一階。 -->
+    <arrow.version>2.0.1</arrow.version>
+    <jdbi.version>3.45.4</jdbi.version>
+    <sqlite.version>3.46.1.3</sqlite.version>
+    <duckdb.version>1.1.3</duckdb.version>
+
+    <!-- Kotest 5.9.1 在 Kotlin 2.x 上可跑；要用 6.x 的話 DSL 有些搬家，先跑再說。 -->
+    <kotest.version>5.9.1</kotest.version>
+    <archunit.version>1.3.0</archunit.version>
+    <mockk.version>1.13.13</mockk.version>
+    <!-- 1.23.8 正好是對 Kotlin 2.0.21 編譯的，跟本專案完全對得上，不需要 alpha。 -->
+    <detekt.version>1.23.8</detekt.version>
+    <!-- JaCoCo 要支援你 JDK 的 class file version，JDK 升級時要一起升。 -->
+    <jacoco.version>0.8.12</jacoco.version>
+    <pitest.version>1.17.0</pitest.version>
+    <pitest.junit5.version>1.2.1</pitest.junit5.version>
+    <pitest.kotlin.version>1.2.0</pitest.kotlin.version>
+
+    <surefire-plugin.version>3.2.5</surefire-plugin.version>
+
+    <!-- 覆蓋率門檻，統一在這裡調整 -->
+    <coverage.branch.min>0.85</coverage.branch.min>
+    <mutation.threshold>80</mutation.threshold>
+  </properties>
+
+  <dependencyManagement>
+    <dependencies>
+      <!-- 順序重要：先宣告者勝。放在 quarkus-bom 之前，
+           才能把 kotlin-stdlib 等一票 Kotlin 產物一起拉到 2.0.21。 -->
+      <dependency>
+        <groupId>org.jetbrains.kotlin</groupId>
+        <artifactId>kotlin-bom</artifactId>
+        <version>${kotlin.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+      <dependency>
+        <groupId>${quarkus.platform.group-id}</groupId>
+        <artifactId>${quarkus.platform.artifact-id}</artifactId>
+        <version>${quarkus.platform.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+
+  <dependencies>
+    <!-- Quarkus：只用在 adapter / infrastructure，domain 一律不碰 -->
+    <dependency>
+      <groupId>io.quarkus</groupId>
+      <artifactId>quarkus-kotlin</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>io.quarkus</groupId>
+      <!-- 3.9 之後才改名為 quarkus-rest-jackson，3.2 要用舊名 -->
+      <artifactId>quarkus-resteasy-reactive-jackson</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>io.quarkus</groupId>
+      <artifactId>quarkus-arc</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>com.fasterxml.jackson.module</groupId>
+      <artifactId>jackson-module-kotlin</artifactId>
+    </dependency>
+
+    <!-- 純函數式錯誤處理 -->
+    <dependency>
+      <groupId>io.arrow-kt</groupId>
+      <artifactId>arrow-core</artifactId>
+      <version>${arrow.version}</version>
+    </dependency>
+
+    <!-- JDBI + 兩個嵌入式資料庫 -->
+    <dependency>
+      <groupId>org.jdbi</groupId>
+      <artifactId>jdbi3-core</artifactId>
+      <version>${jdbi.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.jdbi</groupId>
+      <artifactId>jdbi3-sqlobject</artifactId>
+      <version>${jdbi.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.jdbi</groupId>
+      <artifactId>jdbi3-kotlin</artifactId>
+      <version>${jdbi.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.jdbi</groupId>
+      <artifactId>jdbi3-kotlin-sqlobject</artifactId>
+      <version>${jdbi.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.xerial</groupId>
+      <artifactId>sqlite-jdbc</artifactId>
+      <version>${sqlite.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.duckdb</groupId>
+      <artifactId>duckdb_jdbc</artifactId>
+      <version>${duckdb.version}</version>
+    </dependency>
+
+    <!-- 測試 -->
+    <dependency>
+      <groupId>io.quarkus</groupId>
+      <artifactId>quarkus-junit5</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>io.kotest</groupId>
+      <artifactId>kotest-runner-junit5-jvm</artifactId>
+      <version>${kotest.version}</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>io.kotest</groupId>
+      <artifactId>kotest-assertions-core-jvm</artifactId>
+      <version>${kotest.version}</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>com.tngtech.archunit</groupId>
+      <artifactId>archunit-junit5</artifactId>
+      <version>${archunit.version}</version>
+      <scope>test</scope>
+    </dependency>
+
+    <!-- mock 是可以用的，但不准跟 JDBI 出現在同一個類別（見 MockBoundaryTest）。
+         用途：mock 自己定義的 port 來逼出無法用真 DB 重現的失敗路徑。 -->
+    <dependency>
+      <groupId>io.mockk</groupId>
+      <artifactId>mockk-jvm</artifactId>
+      <version>${mockk.version}</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <sourceDirectory>src/main/kotlin</sourceDirectory>
+    <testSourceDirectory>src/test/kotlin</testSourceDirectory>
+
+    <plugins>
+      <!-- ========== 第二層：零警告編譯 ========== -->
+      <plugin>
+        <groupId>org.jetbrains.kotlin</groupId>
+        <artifactId>kotlin-maven-plugin</artifactId>
+        <version>${kotlin.version}</version>
+        <executions>
+          <execution>
+            <id>compile</id>
+            <phase>compile</phase>
+            <goals><goal>compile</goal></goals>
+          </execution>
+          <execution>
+            <id>test-compile</id>
+            <phase>test-compile</phase>
+            <goals><goal>test-compile</goal></goals>
+          </execution>
+        </executions>
+        <configuration>
+          <jvmTarget>${maven.compiler.release}</jvmTarget>
+          <javaParameters>true</javaParameters>
+          <args>
+            <!-- K2 下 -Werror 一樣有效。Kotlin 2.2+ 若想只把特定警告升成錯誤，
+                 可改用 -Xwarning-level=NAME:error，不要整包放寬。 -->
+            <arg>-Werror</arg>
+            <arg>-Xjsr305=strict</arg>
+          </args>
+          <compilerPlugins>
+            <plugin>all-open</plugin>
+          </compilerPlugins>
+          <pluginOptions>
+            <option>all-open:annotation=jakarta.enterprise.context.ApplicationScoped</option>
+            <option>all-open:annotation=jakarta.ws.rs.Path</option>
+          </pluginOptions>
+        </configuration>
+        <dependencies>
+          <dependency>
+            <groupId>org.jetbrains.kotlin</groupId>
+            <artifactId>kotlin-maven-allopen</artifactId>
+            <version>${kotlin.version}</version>
+          </dependency>
+        </dependencies>
+      </plugin>
+
+      <!-- ========== 第二層：Detekt 靜態掃描（compile 之後、測試之前） ========== -->
+      <plugin>
+        <groupId>com.github.ozsie</groupId>
+        <artifactId>detekt-maven-plugin</artifactId>
+        <version>${detekt.version}</version>
+        <executions>
+          <execution>
+            <id>detekt-check</id>
+            <phase>process-classes</phase>
+            <goals><goal>check</goal></goals>
+          </execution>
+        </executions>
+        <configuration>
+          <config>detekt.yml</config>
+          <buildUponDefaultConfig>true</buildUponDefaultConfig>
+          <input>src/main/kotlin,src/test/kotlin</input>
+          <report>
+            <report>html:target/detekt/detekt.html</report>
+            <report>xml:target/detekt/detekt.xml</report>
+          </report>
+        </configuration>
+      </plugin>
+
+      <!-- ========== 第一 / 三層：真實 DB 測試 + ArchUnit（test phase） ========== -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>${surefire-plugin.version}</version>
+        <configuration>
+          <systemPropertyVariables>
+            <java.util.logging.manager>org.jboss.logmanager.LogManager</java.util.logging.manager>
+            <maven.home>${maven.home}</maven.home>
+          </systemPropertyVariables>
+        </configuration>
+      </plugin>
+
+      <!-- ========== 第四層：JaCoCo 覆蓋率門檻 ========== -->
+      <plugin>
+        <groupId>org.jacoco</groupId>
+        <artifactId>jacoco-maven-plugin</artifactId>
+        <version>${jacoco.version}</version>
+        <executions>
+          <execution>
+            <id>prepare-agent</id>
+            <goals><goal>prepare-agent</goal></goals>
+          </execution>
+          <execution>
+            <id>report</id>
+            <phase>verify</phase>
+            <goals><goal>report</goal></goals>
+          </execution>
+          <execution>
+            <id>check-domain-and-application</id>
+            <phase>verify</phase>
+            <goals><goal>check</goal></goals>
+            <configuration>
+              <rules>
+                <rule>
+                  <element>PACKAGE</element>
+                  <includes>
+                    <include>com.example.gauntlet.domain</include>
+                    <include>com.example.gauntlet.application</include>
+                  </includes>
+                  <limits>
+                    <limit>
+                      <counter>BRANCH</counter>
+                      <value>COVEREDRATIO</value>
+                      <minimum>${coverage.branch.min}</minimum>
+                    </limit>
+                  </limits>
+                </rule>
+              </rules>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+
+      <!-- ========== 第四層：Pitest 變異測試 ========== -->
+      <plugin>
+        <groupId>org.pitest</groupId>
+        <artifactId>pitest-maven</artifactId>
+        <version>${pitest.version}</version>
+        <dependencies>
+          <dependency>
+            <groupId>org.pitest</groupId>
+            <artifactId>pitest-junit5-plugin</artifactId>
+            <version>${pitest.junit5.version}</version>
+          </dependency>
+          <dependency>
+            <groupId>com.groupcdg.pitest</groupId>
+            <artifactId>pitest-kotlin-plugin</artifactId>
+            <version>${pitest.kotlin.version}</version>
+          </dependency>
+        </dependencies>
+        <executions>
+          <execution>
+            <id>mutation-coverage</id>
+            <phase>verify</phase>
+            <goals><goal>mutationCoverage</goal></goals>
+          </execution>
+        </executions>
+        <configuration>
+          <targetClasses>
+            <param>com.example.gauntlet.domain.*</param>
+            <param>com.example.gauntlet.application.*</param>
+          </targetClasses>
+          <targetTests>
+            <param>com.example.gauntlet.*</param>
+          </targetTests>
+          <excludedTestClasses>
+            <param>com.example.gauntlet.architecture.*</param>
+          </excludedTestClasses>
+          <features>
+            <feature>+KOTLIN</feature>
+          </features>
+          <mutationThreshold>${mutation.threshold}</mutationThreshold>
+          <timestampedReports>false</timestampedReports>
+          <outputFormats>
+            <param>HTML</param>
+            <param>XML</param>
+          </outputFormats>
+        </configuration>
+      </plugin>
+
+      <!-- Quarkus 打包放最後 -->
+      <plugin>
+        <groupId>${quarkus.platform.group-id}</groupId>
+        <artifactId>quarkus-maven-plugin</artifactId>
+        <version>${quarkus.platform.version}</version>
+        <extensions>true</extensions>
+        <executions>
+          <execution>
+            <goals>
+              <goal>build</goal>
+              <goal>generate-code</goal>
+              <goal>generate-code-tests</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>
