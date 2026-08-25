@@ -184,3 +184,19 @@ session looking at code that disagrees with the documents, which it will
 - P8: step 4 staging consequence above; A3/A7 and file-level A1 now have adapter-level coverage, E2E confirms them end to end; memory_limit display format on 1.1.3 is MiB text ("476.8 MiB" for 500MB).
 - P9: DuckDbGenerationStore is AutoCloseable (teardown); startup wipe = listOnDisk + delete per gen.
 - FD-count assertion first executes on Linux CI; the tracked-connection + zero-files assertions cover the leak class everywhere.
+
+## P5 - Deterministic concurrency suite  (2026-08-26)
+
+### Delivered
+- `core/HookDriver.kt` (60 lines) - the plan-P5 latch driver: one HookRunner serving registry and cycle hooks, selective parking per armed Hook, arm-once CAS, throwing 10s proceed-checks (broken interleavings fail loudly, never hang).
+- `core/ConcurrencySuiteTest.kt` (9 tests) - the six spec 17.4 rows VERBATIM at integration level (facade + cycle + registry + fake store), incl. the flagship mid-acquire case: acquirer parked at AFTER_READ_CURRENT, complete publish + GC while parked (gen1 DELETE asserted mid-park), released acquirer holds the post-swap LIVE gen - discriminates a split-critical-section implementation. Plus both plan-P5 shutdown interleavings and the N=20/M=100 stress with a per-round invariant sweep (I2 registry-vs-store cross-check, I3, I4 with the blocked-state exception via a bounded corrective gc-and-recheck loop, I6, I8 per handle) and exact end-state accounting.
+- `core/ReadableRuleFailureTest.kt` (P4b rider) - both readable-failure shapes pinned: verify connection unobtainable AND unqueryable classify as VERIFY_FAILED rule=readable (matches spec 8.1's observable); store-level open() failure stays disk_error per the P4 component ruling. The last unasserted spec 8.1 row is closed.
+- Flakiness acceptance: 20/20 repeat runs green (one-time check, surefire-XML confirmed). Build: 114 tests, 0 failures, 1 Unix-only skip. Review: APPROVED cycle 1.
+
+### Deviations from the documents
+- Size 753 lines vs the ~400-600 guidance - the overage is the FIXED 17.4 table breadth + the two plan-mandated shutdown interleavings + the assigned rider, declared and reviewer-accepted (same shape as P3's recorded overrun).
+- Shutdown initiated via registry.beginShutdown() - the facade has no shutdown entry until P9 (P3 precedent).
+
+### Notes for later phases
+- Reviewer suggestions open (non-blocking): progress assertion inside the I4 sweep's corrective loop; pin events.unavailable empty in the mid-acquire case.
+- HookDriver is reusable; P6's model test may consume it read-only.
