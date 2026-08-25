@@ -1,65 +1,62 @@
-# Checkpoint P0
+# Checkpoint P1
 
-- ID: P0-2026-08-25
-- Phase: P0 - Skeleton, API types, quality gates
-- Team: engineer + reviewer (composition table: nothing behavioural to test)
-- Baseline commit: 1acf5dd (pre-P0)
-- Status at checkpoint: PHASE COMPLETE (reviewer APPROVED after 1 refactor cycle)
+- ID: P1-2026-08-25
+- Phase: P1 - GenerationRegistry (pure core state machine)
+- Team: sdet + engineer + reviewer (composition table: highest-risk phase)
+- Baseline: tag `p0` (= 343e2ce, P0 complete)
+- Status at checkpoint: PHASE COMPLETE (reviewer APPROVED both agents, 0 refactor cycles; DoD gate passed; progress.md P1 entry appended)
 
 ## Build result
 
-    mvn -pl snapshotcache clean test  ->  BUILD SUCCESS
+    mvn test-compile  ->  OK (first-try integration against the lead-pinned surface)
+    mvn test          ->  BUILD SUCCESS
     ArchitectureTest              5 tests, 0 failures
+    GenerationRegistryTest       21 tests, 0 failures  (new, P1 sdet)
     MetricLabelContractTest       3 tests, 0 failures
     SnapshotCacheConfigDefaults   2 tests, 0 failures
-    total                        10 tests, 0 failures
-    production + test sources     639 lines
+    total                        31 tests, 0 failures
 
 ## Test-diff check
 
-    git diff --stat 1acf5dd..HEAD -- '**/test/**'   ->  empty
-
-No earlier-phase test file exists yet; P0 is the first phase. From P1 onward the
-baseline is the `p0` tag.
-
-## Gate-bites verification (lead-run, not delegated)
-
-A deliberate `java.sql.Connection` field was planted in
-`infra.snapshotcache.core` and the ArchUnit suite went RED with 3 precise
-violations, then green again after removal. The boundary rules enforce, they do
-not merely pass. Recorded because all five rules carry `allowEmptyShould(true)`,
-which would otherwise mask a broken importer. Review cycle 1 then REQUIRED their removal; all five rules now run without a silent-pass mode and none reported vacuous.
+    git diff --stat p0 -- '**/test/**'  ->  empty (no earlier-phase test touched)
+    Working tree: only core/GenerationRegistry.kt modified (engineer) and
+    src/test/kotlin/infra/snapshotcache/core/ added (sdet).
 
 ## Files produced
 
-    src/main/kotlin/infra/snapshotcache/api/  SnapshotCache, Values, Producer,
-                                              CacheAdmin, CacheEvents,
-                                              SnapshotCacheConfig, Hook
-    src/main/kotlin/infra/snapshotcache/spi/  GenerationStore
-    src/main/kotlin/infra/snapshotcache/core/ GenerationRegistry, RefreshCycle,
-                                              DefaultSnapshotCache (shells)
-    src/test/kotlin/infra/snapshotcache/      ArchitectureTest,
-                                              SnapshotCacheConfigDefaultsTest
+    src/main/kotlin/infra/snapshotcache/core/GenerationRegistry.kt
+        Lifecycle enum (BUILDING/OPENING/LIVE/RECLAIMING/GONE), RegistryLease,
+        GenerationRegistry filled from the P0 shell. Single ReentrantLock, zero
+        I/O, hooks fire outside the lock.
+    src/test/kotlin/infra/snapshotcache/core/GenerationRegistryTest.kt
+        21 tests: I2_/I3_/I4_/I6_/I8_ named tests, double-close,
+        AFTER_READ_CURRENT acquire-during-swap gate test, Clock-driven deadline
+        expiry, waiter release on publish and on shutdown. Helpers: MutableClock,
+        GateHooks (latch-based HookRunner). No sleeps.
 
-## Open items carried out of P0
+## Lead decisions this session
 
-All three were escalated to the user and DECIDED. Documents updated before code.
+1. Pinned a session-local GenerationRegistry integration surface (17 members
+   derived from the plan P1 deliverables) so sdet and engineer could build in
+   parallel without seeing each other's output. Core internals remain FREE per
+   the docs; this is coordination, not a contract change. It held: first-try
+   compile of the union.
+2. mvn is not on PATH on this machine; use
+   C:\Users\maxch\.m2\wrapper\dists\apache-maven-3.9.8-bin\337e6d14\apache-maven-3.9.8\bin\mvn.cmd
 
-1. ArchUnit rule 4 vs P3 - RESOLVED. Rule stands as written, not relaxed.
-   `OpenGeneration` (spi) produces the `Snapshot` handle; `core` holds it only as
-   `api.Snapshot` and supplies the release callback. plan 2.2 + D28.
-   **P3 must not implement `Snapshot` inside `core`.**
-2. spec 12.2 result labels - RESOLVED. Grew to seven: `disk_error` and
-   `shutdown_aborted` added. spec 9.2 gained the missing shutdown-abort row.
-   D26. Enum and label test updated.
-3. Lease-owner logging - RESOLVED. `org.jboss.logging.Logger`, never
-   `io.quarkus.logging.Log`. Host stack is Kotlin + Quarkus + DuckDB + JDBI,
-   now recorded in CLAUDE.md. D27. No call sites yet.
+## Notable agent-reported items for review / later phases
+
+- Engineer: shutdown does not gate tryAcquire/beginBuild (P3/P4 consult
+  isShuttingDown); awaitCurrent propagates InterruptedException raw (P3 owns
+  translation); generation counter is a plain Long under the monitor, not
+  AtomicLong (plan 2.5 supersedes spec 4.3's implementation hint; I3 unchanged).
+- Sdet assumptions: blockedByK() null at live == K, non-null strictly above K
+  (spec 6.1 read literally); exactly-at-deadline expiry unspecified; interrupt
+  behavior of awaitCurrent not asserted at registry level.
 
 ## Files to Re-read on resume
 
-- docs/snapshotcache/spec.md
-- docs/snapshotcache/plan.md
-- docs/snapshotcache/progress.md
-- snapshotcache/src/main/kotlin/infra/snapshotcache/api/
-- snapshotcache/src/main/kotlin/infra/snapshotcache/spi/GenerationStore.kt
+- docs/snapshotcache/progress.md (P1 entry appended only after the DoD gate)
+- snapshotcache/src/main/kotlin/infra/snapshotcache/core/GenerationRegistry.kt
+- snapshotcache/src/test/kotlin/infra/snapshotcache/core/GenerationRegistryTest.kt
+- This checkpoint
