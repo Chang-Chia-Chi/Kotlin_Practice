@@ -1,4 +1,14 @@
-# Checkpoint P4
+# Checkpoint P7 (supersedes P4/P4b entries below the fold)
+
+- ID: P7-2026-08-26
+- Phases closed this session: P4 (7c836d5, tag p4), P4b (c89c7b7, tag p4b), P7 (this commit, tag p7)
+- Status: P7 PHASE COMPLETE (REVISE cycle 1 -> APPROVED cycle 2; A4 deviation recorded in spec 17.6 + progress.md; VerifyGate catalog-filter cross-phase fix applied). 103 tests, 0 failures, 1 Unix-only skip.
+- Next: P5 (deterministic concurrency suite, sdet + reviewer) with the readable-rule rider; then P6; P8 unblocked after P5/P6.
+- P8 constraint carried: E2E step 4 stages its raw connection via OpenGeneration.connection() (A4 finding).
+
+---
+
+# Checkpoint P4 (historical)
 
 - ID: P4-2026-08-25
 - Phase: P4 - RefreshCycle: state machine, verify gate, failure paths

@@ -164,3 +164,23 @@ session looking at code that disagrees with the documents, which it will
 - **Open gap, assigned as a P5 rider: the `readable` rule's failure path** (verify-connection open or discovery query throwing -> Fail("readable")) is the one spec 8.1 row unasserted anywhere. ~15 lines reusing the wrapper pattern on open()'s OpenGeneration. Note: a real corrupt-file ATTACH failure classifies as disk_error (open() throws before the gate); the readable rule covers the verify-connection path specifically.
 - non_empty/readable non-disableable flags need no runtime gating test: no knob exists by construction (P0's computed vals + config defaults test).
 - QueryScript resolution order (queue -> patterns -> heuristics) verified against the real VerifyGate SQL; nullCounts keys match as SQL substrings (table-name scoping).
+
+## P7 - DuckDB storage adapter  (2026-08-26)
+
+### Delivered
+- `duckdb/DuckDbGenerationStore.kt` (~250 lines) - the only DuckDB-touching production code. Plain JDBC (no JDBI). File layout spec 3.1 verbatim (gen_<10-digit>.db / .db.tmp, per-group dir); promote via Files.move ATOMIC_MOVE; ATTACH READ_ONLY onto one store-owned in-memory serving instance (single memory_limit per spec 11.1); OpenGeneration.connection() = serving.duplicate() + USE; copyOut = target-instance file ATTACH + CTAS, counter-suffixed alias, current_database restored; Candidate.close = CHECKPOINT then close, idempotent, never throws; delete removes .db/.tmp/.wal (the D10 startup-wipe primitive); listOnDisk reports promoted and leftover .tmp.
+- `duckdb/DuckDbGenerationStoreTest.kt` (9 tests on real DuckDB 1.1.3): A3 (READ_ONLY rejects INSERT, same connection still reads), A4 (close throws IllegalStateException "still has" while a tracked connection is open; reader untouched; succeeds after close; file gone), memory_limit/temp_directory via current_setting, 20-rotation loop (zero files, zero tracked connections always; FD baseline Unix-only via UnixOperatingSystemMXBean + assumeTrue - runs on Linux CI, skipped on Windows dev), abort-shaped rounds (delete without close) leave tracking flat, copyOut rows/lineage/no catalog residue, crashed-build .tmp listed.
+- `pom.xml` - org.duckdb:duckdb_jdbc:1.1.3 (pinned; pre-authorized).
+- `spi/VerifyGate.kt` - one-line cross-phase defect fix (see deviations).
+- Build: 103 tests, 0 failures, 1 skipped (Unix-only FD). Review: REVISE cycle 1 (2 required changes), APPROVED cycle 2.
+
+### Deviations from the documents
+- **A4 is partially FALSE at engine level (probe-verified by both engineer and reviewer independently).** DuckDB 1.1.3 DETACH succeeds under an idle reader and invalidates the reader's next query. The spec 9.2 defer safeguard is enforced by adapter bookkeeping: the store tracks every connection it issues per generation and close(gen) throws while any is open. Deterministic and strictly stronger than the engine behavior the spec hoped for. Spec 17.6 A4 row updated. **Consequence for P8: E2E step 4 stages its "raw connection" through OpenGeneration.connection() and verifies the adapter guard.**
+- **VerifyGate discovery was instance-wide (cross-phase defect in P4-approved code, found by the reviewer's probe).** information_schema.tables on the shared serving instance returns other attached generations' identically-named tables. Fixed: discovery SQL now ends `AND table_catalog = current_database()` (probe-verified to return exactly the candidate's tables). P4b's discovery test tolerated the amendment unmodified, as designed.
+- **Review cycle 1 defect: `issued` tracking map leaked one entry per aborted round** (abort reaches delete without close). Fixed: delete(gen) drops the entry (safe per the SPI sequencing contract); discriminating abort-shaped test added.
+- Adapter close-in-use guard has a benign TOCTOU closed by the SPI's per-generation sequencing contract (commented in code).
+
+### Notes for later phases
+- P8: step 4 staging consequence above; A3/A7 and file-level A1 now have adapter-level coverage, E2E confirms them end to end; memory_limit display format on 1.1.3 is MiB text ("476.8 MiB" for 500MB).
+- P9: DuckDbGenerationStore is AutoCloseable (teardown); startup wipe = listOnDisk + delete per gen.
+- FD-count assertion first executes on Linux CI; the tracked-connection + zero-files assertions cover the leak class everywhere.

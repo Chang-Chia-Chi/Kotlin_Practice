@@ -958,7 +958,7 @@ The design rests on assumptions about DuckDB 1.1.3 behavior. Empirical leak/GC m
 | A1 | DETACH + file delete returns RSS to baseline | 50+ rotations, RSS trend per criteria below | **D2 collapses; the whole model must be rethought** | open (file-level subset in Sec 17.7) |
 | A2 | DROP TABLE does not shrink the file | create/drop repeatedly, measure file size | If it does shrink, a simpler single-file model becomes viable | open |
 | A3 | READ_ONLY attach rejects writes | attempt INSERT | One protection layer gone; discipline only | **covered by Sec 17.7** |
-| A4 | DETACH fails while a connection is in use | open connection, attempt DETACH | The Sec 9.2 safeguard doesn't exist and must be removed | **covered by Sec 17.7** |
+| A4 | DETACH fails while a connection is in use | open connection, attempt DETACH | The Sec 9.2 safeguard doesn't exist and must be removed | **partially false at engine level (P7, probe-verified)**: on 1.1.3, DETACH succeeds under an idle reader and breaks that reader's next query instead. The Sec 9.2 defer safeguard is therefore enforced by adapter-side connection bookkeeping (`DuckDbGenerationStore.close` throws while a store-issued connection into the generation is open). Sec 17.7 step 4 must stage its "raw connection" through `OpenGeneration.connection()` and verifies the adapter guard, not engine behavior. |
 | A5 | `memory_limit` is effective in file mode and spills to temp | load beyond the limit | Sec 11.1 budget math must change | open |
 | A6 | An unclosed Appender leaks | deliberately leave open, watch FD/memory | Confirms the discipline requirement | open |
 | A7 | Cross-instance ATTACH of another file works | prerequisite for copyOut | Sec 6.5 must be redesigned | **covered by Sec 17.7** |

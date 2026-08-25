@@ -29,7 +29,7 @@ internal sealed interface GateOutcome {
  * lifecycle: the verify connection is opened here and closed on every path.
  *
  * SQL is deliberately plain and standard (DuckDB 1.1.3 needs nothing newer):
- * - tables:            `SELECT table_name FROM information_schema.tables WHERE table_type = 'BASE TABLE'`
+ * - tables:            `SELECT table_name FROM information_schema.tables WHERE table_type = 'BASE TABLE' AND table_catalog = current_database()`
  * - row count:         `SELECT COUNT(*) FROM <t>`
  * - key uniqueness:    `SELECT COUNT(id) FROM <t>` vs `SELECT COUNT(DISTINCT id) FROM <t>`
  * - required non-null: `SELECT COUNT(*) FROM <t> WHERE <c> IS NULL`
@@ -63,7 +63,7 @@ internal class VerifyGate(
         // readable (spec 8.1, non-disableable): the candidate was reopened by the store;
         // this discovery query proves it can actually be queried.
         val tables = rule(RULE_READABLE, "candidate is not queryable") {
-            queryStrings(connection, "SELECT table_name FROM information_schema.tables WHERE table_type = 'BASE TABLE'")
+            queryStrings(connection, "SELECT table_name FROM information_schema.tables WHERE table_type = 'BASE TABLE' AND table_catalog = current_database()")
         }
 
         // non_empty (spec 8.2, non-disableable). Zero tables is the same fault as zero rows.
