@@ -73,3 +73,26 @@ session looking at code that disagrees with the documents, which it will
 - `expiredLeases` boundary at exactly-deadline is unspecified (tests pin -1s/+1s only).
 - `liveGenerations` includes BUILDING/OPENING/RECLAIMING records (fileBytes 0 until publish) as the admin diagnostic view; tests only pin LIVE presence and post-reclaim absence.
 - Reviewer suggestions left open (non-blocking): comment on the deliberate discarded read; move release's refcount check before mutation; exact-sequence hook assertion for P5; an IllegalStateException-on-invalid-transition test.
+
+## P2 - Test kit: fake storage + accounting fixture  (2026-08-25)
+
+### Delivered
+- `src/test/kotlin/infra/snapshotcache/testkit/` (502 lines, all test sources, depends on P0 only):
+  - `InMemoryGenerationStore.kt` - fake spi store; ordered thread-safe call recording (`StoreOp`/`StoreCall`), strict lifecycle guards (ISE on out-of-order transitions), one-shot scripted failures `failOnNth(op, n)` / `failOnGen(op, gen)` throwing `ScriptedFailureException`.
+  - `ConnectionTracker.kt` - dynamic-proxy `Connection` stub (close/isClosed only, everything else throws), creation stack captured per issued connection, `unclosed()` listing (spec 17.6 JVM-side detector).
+  - `AccountingFixture.kt` - JUnit `AfterEachCallback` asserting the four spec 17.3 equations verbatim plus the unclosed-connection check; `currentGeneration`/`refCounts` supplier seams feed registry-side facts; every violation names the exact generation and operation.
+  - Self-tests (18): store recording/guards/scripts/copyOut, and the seeded-leak acceptance tests - fixture demonstrably fails on deliberate leaks for equations 1, 3 (both directions), 4, and the connection detector.
+- Build: 49 tests, 0 failures. Earlier suites unchanged (diff vs tag `p1` empty); zero tracked files modified.
+
+### Deviations from the documents
+- **Equations count effects, not attempts.** A scripted-failure call is recorded with `failed=true` but excluded from the equations, since it mutated no state - required for the equations to hold on spec 9.2 abort paths (a failed promote renamed nothing). Pinned by `scriptedFailedCalls_doNotCountInTheEquations`.
+- **Equation 2 has no seeded-leak test.** The store's strict guards make opens != closes structurally unviolatable in isolation (still-open is equation 3's job); seeding it would require weakening the guards. It is still asserted verbatim in every `verify()`.
+- **Connection tracking uses direct bookkeeping, not PhantomReference.** Spec 17.6's PhantomReference wording targets the real-profile detector; for a fake, direct tracking is deterministic and strictly stronger. Creation stacks and unclosed reporting are as specified.
+
+### Notes for later phases
+- **P3-P6 review checklist item: every suite using the kit MUST register `AccountingFixture` via `@RegisterExtension`.** P2 has no mechanism to force registration, so "asserted at the end of every test" (spec 17.8) is enforced by each phase's review. `InMemoryGenerationStoreTest` itself is exempt by design (instrument self-tests end mid-lifecycle).
+- `store.close(gen)` does NOT auto-close connections issued from that generation - auto-closing would hide leaks from the detector. `OpenGeneration.connection()` issues a fresh tracked connection per call; the caller closes it.
+- Fake connections support only close/isClosed. P4's verify rules will need query behavior stubbed at the spi boundary - deliberately not prebuilt.
+- `Candidate.close()` is idempotent, never throws, closes the lazily issued write connection (P0 progress note honored).
+- Before P5's stress suite: set `fileBytesPerGeneration`/`copyOutRows` before spawning threads, or mark them `@Volatile` (reviewer note).
+- Reviewer suggestions left open (non-blocking): EngineTestKit case proving JUnit invokes the callback; comment on equation 1's best-effort leaked-set under gen-number reuse; comment protecting the nullable `afterEach` parameter from cleanup.

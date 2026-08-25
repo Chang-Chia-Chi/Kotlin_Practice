@@ -1,62 +1,59 @@
-# Checkpoint P1
+# Checkpoint P2
 
-- ID: P1-2026-08-25
-- Phase: P1 - GenerationRegistry (pure core state machine)
-- Team: sdet + engineer + reviewer (composition table: highest-risk phase)
-- Baseline: tag `p0` (= 343e2ce, P0 complete)
-- Status at checkpoint: PHASE COMPLETE (reviewer APPROVED both agents, 0 refactor cycles; DoD gate passed; progress.md P1 entry appended)
+- ID: P2-2026-08-25
+- Phase: P2 - Test kit: fake storage + accounting fixture
+- Team: sdet + reviewer (composition table: test-only phase)
+- Baseline: tag `p1` (= 0b5ebdc, P1 complete)
+- Status at checkpoint: PHASE COMPLETE (reviewer APPROVED, 0 refactor cycles; DoD gate passed; progress.md P2 entry appended)
 
 ## Build result
 
-    mvn test-compile  ->  OK (first-try integration against the lead-pinned surface)
-    mvn test          ->  BUILD SUCCESS
+    mvn test  ->  BUILD SUCCESS
     ArchitectureTest              5 tests, 0 failures
-    GenerationRegistryTest       21 tests, 0 failures  (new, P1 sdet)
+    GenerationRegistryTest       21 tests, 0 failures
     MetricLabelContractTest       3 tests, 0 failures
     SnapshotCacheConfigDefaults   2 tests, 0 failures
-    total                        31 tests, 0 failures
+    AccountingFixtureTest        10 tests, 0 failures  (new, P2)
+    InMemoryGenerationStoreTest   8 tests, 0 failures  (new, P2)
+    total                        49 tests, 0 failures
 
 ## Test-diff check
 
-    git diff --stat p0 -- '**/test/**'  ->  empty (no earlier-phase test touched)
-    Working tree: only core/GenerationRegistry.kt modified (engineer) and
-    src/test/kotlin/infra/snapshotcache/core/ added (sdet).
+    git diff --stat p1 -- '**/test/**'  ->  empty (no earlier-phase test touched)
+    Working tree: ONLY src/test/kotlin/infra/snapshotcache/testkit/ added
+    (untracked); zero tracked files modified. No production sources touched.
 
-## Files produced
+## Files produced (all under src/test/kotlin/infra/snapshotcache/testkit/)
 
-    src/main/kotlin/infra/snapshotcache/core/GenerationRegistry.kt
-        Lifecycle enum (BUILDING/OPENING/LIVE/RECLAIMING/GONE), RegistryLease,
-        GenerationRegistry filled from the P0 shell. Single ReentrantLock, zero
-        I/O, hooks fire outside the lock.
-    src/test/kotlin/infra/snapshotcache/core/GenerationRegistryTest.kt
-        21 tests: I2_/I3_/I4_/I6_/I8_ named tests, double-close,
-        AFTER_READ_CURRENT acquire-during-swap gate test, Clock-driven deadline
-        expiry, waiter release on publish and on shutdown. Helpers: MutableClock,
-        GateHooks (latch-based HookRunner). No sleeps.
+    InMemoryGenerationStore.kt   fake spi store: ordered thread-safe call
+                                 recording (StoreOp/StoreCall), strict lifecycle
+                                 guards, one-shot scripted failures
+                                 failOnNth(op, n) / failOnGen(op, gen)
+    ConnectionTracker.kt         dynamic-proxy Connection stub (close/isClosed
+                                 only), creation stack per issued connection
+    AccountingFixture.kt         JUnit AfterEachCallback asserting the four
+                                 spec 17.3 equations + 17.6 unclosed-connection
+                                 check; currentGeneration/refCounts supplier
+                                 seams for registry-side facts
+    InMemoryGenerationStoreTest.kt  8 store self-tests
+    AccountingFixtureTest.kt        10 fixture self-tests incl. seeded-leak
+                                    acceptance tests (equations 1/3/4 +
+                                    connection leak with creation stack)
 
-## Lead decisions this session
+## Notable sdet-reported design points for review
 
-1. Pinned a session-local GenerationRegistry integration surface (17 members
-   derived from the plan P1 deliverables) so sdet and engineer could build in
-   parallel without seeing each other's output. Core internals remain FREE per
-   the docs; this is coordination, not a contract change. It held: first-try
-   compile of the union.
-2. mvn is not on PATH on this machine; use
-   C:\Users\maxch\.m2\wrapper\dists\apache-maven-3.9.8-bin\337e6d14\apache-maven-3.9.8\bin\mvn.cmd
-
-## Notable agent-reported items for review / later phases
-
-- Engineer: shutdown does not gate tryAcquire/beginBuild (P3/P4 consult
-  isShuttingDown); awaitCurrent propagates InterruptedException raw (P3 owns
-  translation); generation counter is a plain Long under the monitor, not
-  AtomicLong (plan 2.5 supersedes spec 4.3's implementation hint; I3 unchanged).
-- Sdet assumptions: blockedByK() null at live == K, non-null strictly above K
-  (spec 6.1 read literally); exactly-at-deadline expiry unspecified; interrupt
-  behavior of awaitCurrent not asserted at registry level.
+- Equations count effects, not attempts: scripted-failure calls recorded with
+  failed=true but excluded from the equations.
+- Strict store guards (ISE on out-of-order transitions); under them equation 2
+  is structurally unviolatable in isolation but still asserted verbatim.
+- OpenGeneration.connection() issues a fresh tracked connection per call;
+  store.close(gen) does NOT auto-close issued connections (would hide leaks).
+- Fake connections stub only close/isClosed; query behavior deliberately not
+  prebuilt (P4's need, YAGNI).
+- Registry-side facts for equations 3-4 arrive via mutable supplier properties.
 
 ## Files to Re-read on resume
 
-- docs/snapshotcache/progress.md (P1 entry appended only after the DoD gate)
-- snapshotcache/src/main/kotlin/infra/snapshotcache/core/GenerationRegistry.kt
-- snapshotcache/src/test/kotlin/infra/snapshotcache/core/GenerationRegistryTest.kt
+- docs/snapshotcache/progress.md (P2 entry appended only after the DoD gate)
+- snapshotcache/src/test/kotlin/infra/snapshotcache/testkit/ (all five files)
 - This checkpoint
