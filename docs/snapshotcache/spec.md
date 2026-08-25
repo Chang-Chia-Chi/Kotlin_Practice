@@ -1,0 +1,1023 @@
+# DuckDB Generational Snapshot Cache - Design Spec
+
+Version: v1.0 (finalized)
+Scope: single ETL pod, in-process consumers
+Status: ready for implementation
+
+---
+
+## 1. Background and Goals
+
+### 1.1 Problem
+
+Multiple ETL jobs need to read the same set of Oracle data repeatedly. The source has no CDC mechanism, and downstream wants the data as fresh as possible. Letting every ETL hit Oracle on its own means duplicate queries, load on the source, and different jobs seeing data from different points in time.
+
+### 1.2 Goals
+
+- Maintain a local cache of the Oracle data inside the ETL pod, backed by DuckDB in file mode.
+- Refresh every 10 minutes. The swap must be invisible to consumers - nobody ever reads a half-built dataset.
+- At any moment, a consumer can obtain an **internally consistent** snapshot and know exactly what point in time it represents.
+- Old versions must genuinely release their resources (memory and disk). Long-running processes must not grow.
+- A slow consumer must not be able to block the swap indefinitely (which would silently make the data stale).
+
+### 1.3 Non-goals
+
+- No CDC / incremental update (interface leaves room for it - see Sec 14.1).
+- No multi-replica synchronization (single replica - see Sec 11.2).
+- No cross-process sharing (future extension via manifest + object storage - see Sec 14.2).
+
+---
+
+## 2. Terminology
+
+| Term | Definition |
+|---|---|
+| Group | A set of tables that must stay mutually consistent. All tables in a group are captured at the same source consistency point and swap together. |
+| Generation | One immutable version of a group, identified by a monotonically increasing integer. |
+| Current | The generation being served right now. This is what `acquire` hands out. |
+| Lease | A consumer's declaration that it is using a generation. While a lease exists, that generation cannot be reclaimed. |
+| Refresh | The full flow of pulling from Oracle and building a candidate generation. |
+| Publish | Moving the current pointer to a new generation. |
+| Verify | Quality checks run on a candidate generation before publishing. |
+| dataAsOf | The source data point in time for that generation (start of the read transaction). |
+| K | Maximum number of generations allowed to be alive at once. |
+
+---
+
+## 3. Overall Model
+
+### 3.1 Core decision: one generation = one standalone DuckDB file
+
+We are **not** using the "LEFT / RIGHT two-slot rotation" model. We use a generational model instead.
+
+**Why not two slots:**
+
+With two slots, the slot that refresh N+1 needs to write into is exactly the slot a consumer may still be reading. This couples refresh frequency to your slowest consumer, leaving only two bad options: wait for the reader to finish (data goes stale), or force-drop it (the consumer blows up mid-query).
+
+**Why not create/drop tables inside a single .db file:**
+
+DuckDB's `DROP TABLE` marks blocks reusable but **does not shrink the file**. DuckDB 1.1.3 has no vacuum that can shrink a database file. Repeatedly creating and dropping generations inside one file leaves the file sitting at its historical high-water mark, with fragmentation you have no way to clean up.
+
+**The model we're using:**
+
+```
+/data/cache/<group>/
+    gen_0000000123.db        <- old generation, still leased
+    gen_0000000124.db        <- current
+    gen_0000000125.db.tmp    <- being built
+```
+
+- Build writes into a `.tmp` file; on successful verify it's renamed to the final name.
+- Publishing attaches it read-only: `ATTACH '.../gen_0000000124.db' AS g124 (READ_ONLY)`.
+- Reclaiming means `DETACH g124` followed by **deleting the file**.
+
+What this buys us:
+
+- Memory and disk are genuinely returned. No high-water mark, no fragmentation.
+- All tables in a group live in one file, so the swap is atomic by construction.
+- Read-only attach prevents consumers from accidentally writing.
+- An immutable generation file is naturally the right unit to upload to object storage later (Sec 14.2).
+
+### 3.2 How to draw group boundaries
+
+**Group by "does this need to be consistent with that", not by convenience.**
+
+Every table in a group is refreshed together, so the slowest table holds up the whole group. Tables that don't need mutual consistency should live in separate groups with independent refresh cadences.
+
+**For this project:** the two source tables are used together in a union, so they belong to **one group** and are pulled inside a single Oracle read transaction.
+
+### 3.3 Handling the union
+
+Keep two separate physical tables underneath and expose a union view on top. **Do not merge them into a single physical table at write time.**
+
+Reasons:
+
+- The two schemas differ somewhat. Merging means filling NULLs for missing columns, and consumers can no longer tell "this value is genuinely empty" from "this source doesn't have this column."
+- After merging, ids may collide, forcing uniqueness checks onto a composite key. Two tables let each validate its own id - much simpler.
+- When a source schema changes, the two-table approach only needs the view definition adjusted.
+- A DuckDB view costs nothing physically and filter pushdown still works, so consumers still get the "it's just one table" experience.
+
+Structure inside a generation file:
+
+```sql
+CREATE TABLE t_a (...);
+CREATE TABLE t_b (...);
+
+CREATE VIEW t_unified AS
+  SELECT 'A' AS source, id, <aligned column list> FROM t_a
+  UNION ALL
+  SELECT 'B' AS source, id, <aligned column list> FROM t_b;
+```
+
+The view definition lives in the group spec and is created with every generation.
+
+**To be filled in: the column mapping table.** Before implementation, list the A/B column correspondence and clearly distinguish two cases:
+
+- **Same concept, different column name** -> align (rename) inside the view.
+- **That source genuinely lacks the concept** -> fill `NULL::<type>` and note why in the mapping table.
+
+Put this mapping under version control. Without it, nobody can reconstruct the reasoning later.
+
+---
+
+## 4. Refresh Flow
+
+### 4.1 State machine
+
+```
+        +---------+
+        |  IDLE   |<-------------------------------+
+        +----+----+                                |
+             | scheduled / manual trigger          |
+             v                                     |
+      +--------------+                             |
+      |  ACQUIRING   |  open source read txn       |
+      |              |  fetch -> Appender write    |
+      +------+-------+                             |
+             |                                     |
+             v                                     |
+      +--------------+                             |
+      |  BUILDING    |  create view / CHECKPOINT   |
+      +------+-------+                             |
+             |                                     |
+             v                                     |
+      +--------------+   verify failed             |
+      |  VERIFYING   +-------------+               |
+      +------+-------+             |               |
+             | verify passed       v               |
+             v            +----------------+       |
+      +--------------+    |    DISCARD     |       |
+      |  PUBLISHING  |    | delete candidate+------>+
+      | swap current |    | current stays  |       |
+      +------+-------+    +----------------+       |
+             |                                     |
+             v                                     |
+      +--------------+                             |
+      |      GC      |  reclaim refcount==0 gens   |
+      +------+-------+                             |
+             +-------------------------------------+
+```
+
+**Failure at any stage leaves the current pointer untouched.** The candidate file is simply deleted and the next round starts fresh. The refresh flow is stateless: a failure leaves nothing behind that needs repairing.
+
+### 4.2 Stage details
+
+**ACQUIRING**
+
+1. Allocate a generation number (monotonic - see Sec 4.3).
+2. Create candidate file `gen_NNNN.db.tmp`; set `memory_limit` and `temp_directory`.
+3. Open a read-only transaction against Oracle; record `dataAsOf`.
+4. Pull each table in the group in order, streaming into DuckDB via the Appender.
+5. Close the Oracle transaction.
+
+**BUILDING**
+
+1. Create the union view.
+2. Run `CHECKPOINT` to fold the WAL into the main file.
+3. Close the candidate file's write connection.
+
+**VERIFYING**
+
+Reopen the candidate file read-only and run verification (Sec 8). Reopening is deliberate - it confirms the file itself is complete and readable.
+
+**PUBLISHING**
+
+1. Rename `.tmp` to the final filename (rename within one filesystem is atomic).
+2. `ATTACH` it with `READ_ONLY` onto the serving DuckDB instance.
+3. Update the current pointer and generation registry inside a single critical section.
+
+**GC**
+
+Scan all non-current generations; for those with `refcount == 0`, DETACH and delete the file.
+
+### 4.3 Generation numbering
+
+- Monotonically increasing integer, held in an `AtomicLong` within the process.
+- **Do not use a timestamp as the number.** Timestamps aren't monotonic across restarts, clock corrections, or a future multi-node setup.
+- After a restart, numbering starts over at 1 (startup wipes all leftover files - see Sec 10.1), so nothing needs persisting.
+
+### 4.4 Scheduling
+
+- Use "N minutes after the previous round **finishes**", not a fixed cron. This way a slow round never causes a backlog.
+- **Overlapping runs are forbidden.** Two concurrent builds double both memory and disk requirements.
+- If the previous round is still running, skip this trigger and count `snapshot_refresh_total{result="skipped_overlap"}`.
+- Provide a manual trigger endpoint for operations.
+
+---
+
+## 5. Interface Definition
+
+Spec-level only; no implementation.
+
+### 5.1 Consumer side
+
+```
+interface SnapshotCache {
+
+    // Short lease: framework controls the lifecycle. Preferred usage.
+    fun <T> withSnapshot(
+        group: GroupId,
+        waitBudget: Duration = config.defaultWaitBudget,
+        block: (Snapshot) -> T
+    ): T
+
+    // Specialized short lease: copy a subset out, then release immediately
+    fun copyOut(
+        group: GroupId,
+        spec: CopyOutSpec,
+        waitBudget: Duration = config.defaultWaitBudget
+    ): CopyOutResult
+
+    // Long lease: caller is responsible for close()
+    fun acquire(group: GroupId, waitBudget: Duration = config.defaultWaitBudget): Snapshot
+
+    // No lease created; status only (for metrics / health checks / caller-side policy)
+    fun currentInfo(group: GroupId): GenerationInfo?
+}
+
+interface Snapshot : AutoCloseable {
+    val generation: Long
+    val dataAsOf: Instant
+    fun connection(): Connection      // read-only connection bound to this generation
+    override fun close()              // idempotent; repeated calls are harmless
+}
+
+data class GenerationInfo(
+    val generation: Long,
+    val dataAsOf: Instant,
+    val publishedAt: Instant,
+    val rowCounts: Map<String, Long>
+)
+
+data class CopyOutSpec(
+    val sql: String,
+    val targetTable: String,
+    val targetConnection: Connection
+)
+
+data class CopyOutResult(
+    val generation: Long,
+    val dataAsOf: Instant,
+    val rowsCopied: Long
+)
+```
+
+**Atomicity requirement for `acquire()`:** reading the current generation and incrementing its refcount must happen inside one critical section. Split into two steps, a swap plus reclaim in between hands the consumer a generation that has already been detached.
+
+**Prefer `withSnapshot` / `copyOut`.** `acquire()` stays available but is an advanced path; callers must wrap it in try-finally.
+
+**`waitBudget` semantics.** It is an upper bound, not a sleep. When a generation is already available, every acquire returns immediately regardless of the budget. The budget only applies before the first successful publish (Sec 9.3) - in steady state it is never consumed, because a failed refresh keeps serving the previous generation.
+
+- `Duration.ZERO` - fail fast, throw `NotReadyException` immediately.
+- `> 0` - wait, interruptibly, until a generation is available or the budget expires, then throw.
+
+Setting the budget generously costs nothing; setting it too low costs a missed run. Callers therefore pick by the cost of missing a run, not by expected latency:
+
+| Caller cadence | Suggested budget | Reasoning |
+|---|---|---|
+| Every 10 minutes | 0 - 30s | Missing one run costs 10 minutes |
+| Once per day | 15m | Missing one run costs a day; comfortably covers cold start and rolling deploy |
+
+**Caller-side scheduling policy (deliberate non-feature).** The framework never persists or reasons about run schedules, last-success times, or catch-up windows. That is scheduling, not caching. Two seams let a caller implement any such policy itself:
+
+- `waitBudget` is a **per-call parameter, not configuration**, so a caller may compute it at call time from whatever state it keeps.
+- `currentInfo()` returns null when nothing is published yet, and otherwise reports `generation` and `dataAsOf`, so a caller can inspect availability and freshness without taking a lease and decide to skip, wait, or proceed.
+
+A caller that wants "skip this run if my last success was recent" implements it against those two seams. See D24.
+
+### 5.2 Producer side (caller-injected)
+
+```
+interface GenerationSource {
+    fun refresh(ctx: BuildContext)
+}
+
+class BuildContext {
+    val group: GroupId
+    val generation: Long
+    val target: Connection        // write connection to the candidate generation file
+    val dataAsOf: Instant
+    val previous: Snapshot? // reserved for delta mode (Sec 14.1)
+}
+
+interface GenerationCheck {
+    fun verify(candidate: Connection, previous: GenerationInfo?): VerifyResult
+}
+
+sealed class VerifyResult {
+    object Pass : VerifyResult()
+    data class Fail(val rule: String, val detail: String) : VerifyResult()
+}
+```
+
+"How to pull the data" is injected by the caller. The framework only owns generation management, leases, the verify gate, and reclamation. Switching to delta mode later means swapping the `GenerationSource` implementation and nothing else.
+
+### 5.3 Admin side
+
+```
+interface CacheAdmin {
+    fun triggerRefresh(group: GroupId): RefreshOutcome
+    fun gc(group: GroupId): GcOutcome
+    fun liveGenerations(group: GroupId): List<GenerationState>
+}
+
+data class GenerationState(
+    val generation: Long,
+    val isCurrent: Boolean,
+    val refCount: Int,
+    val fileBytes: Long,
+    val leases: List<LeaseInfo>
+)
+
+data class LeaseInfo(
+    val owner: String,          // identifier of whoever took the lease
+    val acquiredAt: Instant,
+    val deadline: Instant
+)
+```
+
+---
+
+## 6. Concurrency and Lifecycle
+
+### 6.1 Generation cap K
+
+| Condition | Behavior |
+|---|---|
+| Live generations <= K | Refresh proceeds normally, unaffected by leases |
+| Live generations > K | **Pause refresh and alert**, wait for leases to release |
+
+Default `K = 3` (current plus two awaiting reclamation).
+
+This is the key to avoiding starvation. Under normal conditions a slow consumer only keeps an old generation around a bit longer - it **does not make the data stale**. Only when leases genuinely go out of control does the system degrade to "resource safety first", and that degradation is explicit and alerted, not a silent slowdown.
+
+### 6.2 What the lease deadline is for
+
+**The deadline is diagnostic, not enforcement.**
+
+There is no safe way to yank the underlying data out from under a query that is mid-execution. Therefore:
+
+- Past deadline -> record `snapshot_lease_expired_total`; log the owner and how long it has been held.
+- Because leases record an owner, you can immediately identify which job is stuck, instead of only seeing memory climb.
+- The real resource guardrail is K + pause refresh + alert.
+
+Default deadline 5 minutes, configurable.
+
+### 6.3 Orphaned lease protection
+
+An interrupted thread, or an exception path that skips close, leaves a refcount that never returns to zero. Defenses:
+
+1. **Offer scoped APIs first** (`withSnapshot`) so callers have no opportunity to forget.
+2. **Cleaner / PhantomReference as a backstop**: when the handle object is garbage collected, force the release and log a warning. This is a bug signal, not a normal path, and must be visible.
+3. `close()` must be idempotent - repeated calls must never drive refcount negative.
+
+### 6.4 Consistency limit of short leases
+
+`copyOut()` takes whatever is current at that moment. If one job calls it several times, **the results may come from different generations** and won't be consistent with each other.
+
+Rules:
+
+| Situation | Usage |
+|---|---|
+| One round needs one fetch (can be expressed in a single SQL) | `copyOut()` |
+| Needs repeated fetches, or computes as it queries | `withSnapshot()`, pinning one generation for the whole round |
+
+`copyOut()` returns `(generation, dataAsOf)`; the consumer must record these as data lineage.
+
+### 6.5 The consumer's second DuckDB instance
+
+Consumers may copy a subset into another DuckDB instance for processing. This has a real benefit: lease duration shrinks from "the whole ETL run" to "the few seconds of the copy", which is very friendly to reclamation.
+
+But it must be managed by the framework, not left to each job:
+
+- **Share a single consumer instance.** Don't open one per job - several unbounded instances will add up and eat the pod's memory budget.
+- That instance also needs a `memory_limit`, counted in the overall budget (Sec 11.1).
+- For cross-instance copies, attach the other file directly and read from it; don't serialize through the application.
+
+---
+
+## 7. Source-side Extraction
+
+### 7.1 Consistency
+
+All tables in a group must be read inside **one Oracle read-only transaction**. Reading them separately produces a torn snapshot: the union may show duplicates or gaps, intermittently, and it's extremely hard to reproduce after the fact.
+
+- Record `dataAsOf` when the transaction starts.
+- Pull every table on the same connection, in the same transaction, before committing.
+- If stricter guarantees become necessary, switch to a flashback query at an explicit SCN.
+
+### 7.2 JDBC settings
+
+**Fetch size must be tuned.** Oracle JDBC defaults to a fetch size of 10; pulling a million rows means over a hundred thousand round trips.
+
+Set it to 2000 as a starting point and tune from measurements. This single setting affects total time more than any other optimization, and it costs no complexity.
+
+### 7.3 Streaming writes
+
+**Never read the whole ResultSet into a List before writing.** A million rows means hundreds of MB of temporary objects on the JVM heap.
+
+Fetch and append in a stream, writing through the DuckDB Appender as rows arrive.
+
+Appender discipline:
+
+- Every Appender must be closed. It holds an internal buffer; not closing it is a leak.
+- Wrap it in the try-with-resources equivalent so exception paths close it too.
+- **Do not append to the same table from multiple threads** - it will produce write transaction conflicts.
+
+### 7.4 Update strategy: full reload
+
+**Decision: full reload. No incremental.**
+
+The source tables do have an update-time column, but the savings from incremental aren't on the DuckDB side:
+
+| Step | Full reload | Incremental |
+|---|---|---|
+| Oracle query + JDBC transfer | 1M rows, tens of seconds to minutes | changed rows, sub-second |
+| DuckDB write | append 1M, roughly 5-15s | copy previous gen + small delta, roughly 3s |
+
+The DuckDB-side difference is single-digit seconds - not worth the complexity. And incremental carries real costs:
+
+- **Delete detection.** An update-time column tells you what changed, never what was deleted. Deleted rows stay in the cache forever. Fixing that requires periodically pulling all keys for reconciliation - meaning you never actually escape the full pull.
+- **Drift doesn't self-heal.** A full reload is stateless: break it once and the next round repairs itself. Incremental is stateful: one mistake persists until the next reconciliation.
+- **Time-boundary problems.** Timestamp precision, and commit order not matching update-time assignment order, both cause missed rows.
+
+**Upgrade trigger:** if measured round time consistently exceeds 30% of the refresh interval (i.e. 3 minutes), reevaluate delta mode. At that point only the `GenerationSource` implementation changes.
+
+### 7.5 Performance expectations
+
+For 1M rows, no CLOBs, single-column id key, on an internal network:
+
+| Stage | Estimate |
+|---|---|
+| Oracle query execution | seconds to tens of seconds (depends on the query) |
+| JDBC fetch transfer | 30s - 2min (with fetch size tuned) |
+| DuckDB Appender write | 3 - 15s |
+| CHECKPOINT + verify | a few seconds |
+
+Both tables together should land in the 1-4 minute range.
+
+**Per-stage timing metrics are mandatory, not optional** (Sec 12). If you only measure total time, you have no way to tell "Oracle got slower" from "local writes got slower" when it regresses.
+
+### 7.6 Capacity estimate
+
+Assuming ~30 columns, mostly numeric and short strings:
+
+- Roughly 150-250 bytes per row uncompressed
+- 1M rows ~ 150-250 MB raw
+- After DuckDB compression, roughly 50-150 MB per generation file
+
+Two tables x K=3 generations ~ 300-800 MB on disk. A 5-10 GB volume leaves comfortable headroom.
+
+---
+
+## 8. Verify Gate
+
+Verification runs **before** the swap. Any failing rule aborts the candidate; current stays put.
+
+### 8.1 Rules
+
+| Rule | Description | Default |
+|---|---|---|
+| `non_empty` | Any table with zero rows fails | **On, cannot be disabled** |
+| `key_unique` | id is unique within its own table | On |
+| `required_non_null` | Designated critical columns must not be NULL | On, column list configurable |
+| `row_count_delta` | Fail if row count differs from previous by more than a ratio | **Off by default** |
+| `readable` | Candidate file can be reopened and queried | On, cannot be disabled |
+
+### 8.2 On `non_empty`
+
+Zero rows is almost never a real data state; it usually means a permission, connection, or predicate problem. Once published, every downstream job quietly computes "there's nothing" and writes that result. This class of error is the most expensive to recover from, so the check is non-disableable.
+
+### 8.3 On `row_count_delta`
+
+**Off by default. Observe first.**
+
+Data volume may legitimately spike, and there isn't enough history yet to pick a sensible threshold. The plan:
+
+1. Collect actual variation through the `snapshot_rows` metric.
+2. After two to three weeks of data, decide whether to enable it and at what threshold.
+3. Make the threshold configurable, with separate limits for decrease and increase (a drop generally warrants more suspicion than a rise).
+
+Until it's enabled, row-count movement can be an alert rather than a gate - it notifies without blocking the swap.
+
+### 8.4 Verification cost
+
+For a million rows all of the above run in sub-second to a few seconds. That's negligible against the cost of pulling from Oracle, so there's no reason to weaken the checks for performance.
+
+### 8.5 Consecutive failures
+
+- Escalate to critical once consecutive failures reach the threshold (**default 3, configurable**).
+- Keep serving the old data throughout; `snapshot_data_as_of` naturally reflects the growing staleness.
+- Every failure must log which rule failed and the details - never just "verification failed."
+
+---
+
+## 9. Failure Handling and Degradation
+
+### 9.1 Principle: serve stale data, but be loud about it
+
+On refresh failure, keep serving the existing generation. But stale must be **visibly** stale, never silently stale.
+
+- Every handle carries `dataAsOf` so consumers can judge for themselves.
+- The `snapshot_data_as_of` metric lets monitoring judge independently.
+- Consecutive failures escalate.
+
+### 9.2 Failure cases
+
+| Failure | Handling |
+|---|---|
+| Oracle connection failure / query timeout | Abort round, delete candidate, count `source_error` |
+| Verification failure | Abort round, delete candidate, count `verify_failed`, escalate to critical at threshold |
+| Insufficient disk space | Abort round, delete candidate, trigger emergency GC, count `disk_error`, alert |
+| Live generations exceed K | Pause refresh, alert, log all lease owners and hold durations |
+| DETACH fails (connection still in use) | Leave the generation for the next GC pass, log warning |
+| No generation yet, `waitBudget == 0` | `acquire()` **throws `NotReadyException` immediately**; does not block |
+| No generation yet, `waitBudget > 0` | Wait interruptibly up to the budget; on expiry throw `NotReadyException`, count `reason="timeout"` |
+| Shutdown in progress | `acquire()` throws `ShuttingDownException` immediately; threads already waiting are interrupted and released at once (Sec 10.2) |
+| In-flight refresh aborted by shutdown | Interrupt the source, delete the candidate, never promote, current pointer untouched, count `shutdown_aborted` (Sec 10.2 step 3, D23) |
+| Lease drain times out at shutdown | Log warning listing every outstanding lease owner and hold duration, then proceed to exit |
+
+### 9.3 On acquire before readiness
+
+This applies only before the first successful publish. In steady state a refresh failure keeps serving the previous generation, so acquire always has something to hand out.
+
+**Why the default is not "block indefinitely":** a blocking acquire occupies a scheduler thread. Several jobs blocking together exhaust the scheduler pool and stall unrelated jobs, producing the hard-to-diagnose symptom "nothing scheduled is running after startup."
+
+**Why the default is not zero either:** a job that runs once a day loses a whole day by failing fast during a cold start that would have finished in two minutes.
+
+The resolution is the bounded, caller-chosen `waitBudget` of Sec 5.1, defaulting to 30 seconds - long enough to absorb a normal cold start or rolling deploy, short enough that it cannot exhaust a scheduler pool. Callers that genuinely cannot wait pass `Duration.ZERO`; callers whose runs are expensive to miss pass minutes.
+
+Implementation requirements:
+
+- The wait must be **interruptible** and must release immediately on shutdown (Sec 10.2 step 1). A non-interruptible wait will be SIGKILLed by Kubernetes before graceful shutdown can run.
+- Waiters are signalled by a condition variable on publish, never by polling.
+- Record `snapshot_acquire_waited_seconds` (how long waits actually took) and `snapshot_acquire_unavailable_total{reason}` (gave up).
+
+Note that readiness probes (Sec 10.1) already keep external traffic away until the first publish. The wait/fail behavior here exists for **internal scheduled jobs**, which can fire before readiness flips. The two mechanisms are complementary, not redundant.
+
+---
+
+## 10. Startup and Shutdown
+
+### 10.1 Startup
+
+1. **Delete every `gen_*.db` and `.tmp` file under the cache directory.**
+
+   If the pod was OOMKilled or crashed, orphaned generation files are left on disk. Since the current pointer is not persisted, all such files are unowned. Wiping and rebuilding is the cleanest option - a cold start has to rebuild anyway.
+
+2. Initialize the serving DuckDB instance; set `memory_limit` and `temp_directory`.
+3. readiness = false.
+4. Start the first refresh immediately (don't wait for the schedule).
+5. readiness = true once the first generation publishes successfully.
+
+**Why wait for the first generation before ready:** consumers waiting is far better than consumers reading an empty table. An empty table makes ETL quietly produce "nothing at all" and write that downstream - the hardest kind of error to notice and the most expensive.
+
+### 10.2 Shutdown
+
+Every step is bounded. The ordering matters: releasing waiters first is what makes the rest of the sequence reachable at all.
+
+1. **Mark shutting down.**
+    - New acquires throw `ShuttingDownException` immediately; they no longer enter the wait path.
+    - Threads already waiting on `waitBudget` are interrupted and released **at once**, without consuming the remainder of their budget.
+
+2. **Stop scheduling.** No new refresh cycle starts.
+
+3. **Abort any in-flight refresh.**
+    - Interrupt the source connection.
+    - Delete the candidate `.tmp` file. **Never promote it**, even if it was nearly complete.
+    - The current pointer is untouched.
+
+   The candidate is an isolated file that was never promoted, never attached, and never visible through any handle, so discarding it is unobservable to every consumer. This is a direct benefit of one-file-per-generation: no long-running transaction is needed to protect the build. Letting a nearly-finished round complete would make shutdown duration unpredictable for no gain, since the build is stateless and the next startup rebuilds anyway.
+
+4. **Drain leases**, bounded by `shutdown.leaseDrainTimeout` (default 30s).
+    - On timeout, log a warning naming every outstanding lease owner and its hold duration, then proceed. This log is the only way to identify what is delaying shutdown.
+
+5. **Exit.** No delicate cleanup: generation files are wiped by the next startup, and connections die with the process.
+
+**Consumer responsibility.** If drain times out, in-flight consumer work is cut off. The framework guarantees that a snapshot a consumer holds never changes underneath it; it does not guarantee the consumer finishes. **Consumer writes must therefore be transactional or idempotent**, so an interrupted run is safely re-executed on the next cycle. Interruption risk lives on the consumer's output side, not in the cache - the cache's own state machine is unaffected by shutdown at any point.
+
+**Grace period alignment.** The total of steps 1-4 must be less than the pod's `terminationGracePeriodSeconds`, or Kubernetes SIGKILLs the process mid-sequence and the design has no effect. With the 30s default drain, set the grace period to 45-60s (Sec 11.3).
+
+---
+
+## 11. Deployment and Resources
+
+### 11.1 Memory budget (8 GB pod limit)
+
+| Purpose | Allocation |
+|---|---|
+| JVM heap (`-Xmx`) | 2 GB |
+| Serving DuckDB `memory_limit` | 3 GB |
+| Shared consumer instance `memory_limit` | 1 GB |
+| OS page cache, JDBC buffers, JVM non-heap, allocator fragmentation | remaining ~2 GB |
+
+**`memory_limit` must not approach the pod limit.** DuckDB only accounts for its own buffers; JVM heap, JDBC staging, and glibc allocator fragmentation are all outside its view. Setting it too high means DuckDB thinks it's healthy right up until the pod is OOMKilled.
+
+**`temp_directory` must be set** and pointed at a volume with real space. Without it there's nowhere to spill and you go straight to OOM.
+
+In practice the data is only a few hundred MB, so it will sit entirely in the buffer pool - query performance equals in-memory mode.
+
+### 11.2 Single replica
+
+- Set the Deployment to `strategy: Recreate`, or `maxSurge: 0`.
+
+  The default RollingUpdate briefly runs old and new pods together. We deliberately skip leader election: for a read-only cache, an overlap merely means pulling Oracle one extra time and cannot produce wrong data. Solving it with a deployment setting is far cheaper than writing election logic.
+
+- No standby pod. A standby would have to keep pulling Oracle to stay fresh, which isn't worth the cost. A few minutes of cold-start rebuild is acceptable.
+
+### 11.3 Probes
+
+| Probe | Setting |
+|---|---|
+| startupProbe | `failureThreshold` wide enough to cover **10 minutes**. The first refresh can take minutes; defaults will declare startup failed and restart the pod repeatedly. |
+| readinessProbe | Checks that a current generation exists. Takes over after startupProbe passes. |
+| livenessProbe | Process liveness only. **Do not** tie it to data freshness - stale data is not something a restart fixes, and tying it in just creates a useless restart loop. |
+| `terminationGracePeriodSeconds` | **45-60s** with the default 30s lease drain. Must exceed the total of Sec 10.2 steps 1-4, otherwise the graceful shutdown sequence is SIGKILLed partway and has no effect. |
+
+---
+
+## 12. Metrics and Alerting
+
+### 12.1 Version and freshness
+
+| Metric | Type | Labels | Description |
+|---|---|---|---|
+| `snapshot_current_generation` | gauge | group | Current generation number |
+| `snapshot_data_as_of_seconds` | gauge | group | Source point in time, as an **absolute Unix-seconds value** |
+| `snapshot_published_at_seconds` | gauge | group | When the swap completed |
+| `snapshot_rows` | gauge | group, table | Row count per table |
+
+**`data_as_of` must store an absolute timestamp, not "how old it is."** Alert rules compute `time() - snapshot_data_as_of_seconds > X`, which means thresholds can be adjusted any time without a code change.
+
+### 12.2 Refresh process
+
+| Metric | Type | Labels | Description |
+|---|---|---|---|
+| `snapshot_refresh_duration_seconds` | histogram | group, phase | phase = `query` / `fetch` / `append` / `checkpoint` / `verify` / `publish` |
+| `snapshot_refresh_total` | counter | group, result | result = `success` / `verify_failed` / `source_error` / `disk_error` / `shutdown_aborted` / `skipped_overlap` / `blocked_by_k` |
+| `snapshot_verify_failed_total` | counter | group, rule | Broken down by failing rule |
+| `snapshot_last_success_seconds` | gauge | group | Time of last successful publish |
+
+Per-phase timing is required, not optional. When performance regresses later, this is the only thing that distinguishes "Oracle got slower" from "local writes got slower."
+
+### 12.3 Lifecycle health
+
+| Metric | Type | Labels | Description |
+|---|---|---|---|
+| `snapshot_live_generations` | gauge | group | **The most important leak indicator.** Steady state should be 1 |
+| `snapshot_active_leases` | gauge | group | Current lease count |
+| `snapshot_lease_duration_seconds` | histogram | group | Distribution of lease hold times |
+| `snapshot_lease_expired_total` | counter | group | Leases that passed their deadline |
+| `snapshot_lease_orphaned_total` | counter | group | Leases force-released by the Cleaner. **Any non-zero value is a bug** |
+| `snapshot_acquire_waited_seconds` | histogram | group | How long acquires actually waited before a generation became available. Empty in steady state |
+| `snapshot_acquire_unavailable_total` | counter | group, reason | reason = `not_ready` (budget was zero) / `timeout` (budget expired) / `shutting_down` |
+
+### 12.4 Resources
+
+| Metric | Type | Labels | Description |
+|---|---|---|---|
+| `snapshot_db_file_bytes` | gauge | group | Total size of all live generation files |
+| `snapshot_gc_deleted_total` | counter | group | Generations reclaimed |
+
+Plus the existing JVM / process RSS metrics.
+
+**How to verify there's no leak:** run 100 consecutive generation rotations and watch whether process RSS and `snapshot_db_file_bytes` converge to a flat line. A continued climb means something isn't being released.
+
+### 12.5 Label cardinality
+
+**Never use `generation` as a metric label.** It increases monotonically and would grow time series without bound. Generation-level detail belongs in logs and the admin endpoint, not in metrics.
+
+### 12.6 Starting alert rules
+
+| Alert | Condition | Severity |
+|---|---|---|
+| Data stale | `time() - snapshot_data_as_of_seconds > 3 x interval` | warning |
+| Data badly stale | `time() - snapshot_data_as_of_seconds > 5 x interval` | critical |
+| Consecutive verify failures | consecutive count >= threshold (default 3) | critical |
+| Generations piling up | `snapshot_live_generations > 1` sustained for 15 minutes | warning |
+| Refresh blocked | `snapshot_refresh_total{result="blocked_by_k"}` increasing | critical |
+| Orphaned leases | `snapshot_lease_orphaned_total` increasing | warning (treat as a bug) |
+| Acquire giving up | `snapshot_acquire_unavailable_total{reason="timeout"}` increasing outside a deploy window | warning (a job is missing runs) |
+
+### 12.7 Admin endpoint
+
+Expose an internal endpoint returning full state for manual investigation:
+
+```
+GET /internal/snapshot/{group}
+{
+  "current": { "generation": 124, "dataAsOf": "...", "rowCounts": {...} },
+  "liveGenerations": [
+    { "generation": 123, "isCurrent": false, "refCount": 1, "fileBytes": 118000000,
+      "leases": [ { "owner": "etl-job-x", "acquiredAt": "...", "deadline": "..." } ] },
+    { "generation": 124, "isCurrent": true,  "refCount": 0, "fileBytes": 119000000,
+      "leases": [] }
+  ],
+  "lastRefresh": { "result": "success", "durations": { "query": 8.2, "fetch": 71.5, ... } }
+}
+```
+
+---
+
+## 13. Configuration
+
+| Parameter | Default | Description |
+|---|---|---|
+| `refresh.interval` | 10m | Gap after the previous round finishes |
+| `refresh.allowOverlap` | false | Overlapping runs forbidden |
+| `generation.maxLive` (K) | 3 | Live generation cap |
+| `acquire.defaultWaitBudget` | 30s | Default upper bound for acquire before first publish; overridable per call |
+| `lease.deadline` | 5m | Diagnostic threshold (no forced reclamation) |
+| `verify.nonEmpty` | true | Cannot be disabled |
+| `verify.keyUnique` | true | |
+| `verify.requiredNonNull` | (column list) | |
+| `verify.rowCountDelta.enabled` | **false** | Observe before enabling |
+| `verify.rowCountDelta.maxDecreaseRatio` | 0.20 | Applies once enabled |
+| `verify.rowCountDelta.maxIncreaseRatio` | 1.00 | Applies once enabled |
+| `verify.consecutiveFailureThreshold` | 3 | Failures before escalating to critical |
+| `jdbc.fetchSize` | 2000 | |
+| `duckdb.serving.memoryLimit` | 3GB | |
+| `duckdb.consumer.memoryLimit` | 1GB | |
+| `duckdb.tempDirectory` | (required) | |
+| `storage.path` | (required) | Generation file directory |
+| `startup.clearStaleFiles` | true | Wipe leftovers on startup |
+| `shutdown.leaseDrainTimeout` | 30s | Bound on Sec 10.2 step 4; keep pod `terminationGracePeriodSeconds` above this plus headroom |
+
+---
+
+## 14. Known Limitations and Future Extensions
+
+### 14.1 Incremental update (delta)
+
+Currently full reload. If refresh time starts approaching the interval, delta mode is available:
+
+```
+1. Copy the full previous generation into the new file
+   (DuckDB-internal copy of 1M rows is roughly a second)
+2. Pull only rows past the update-time watermark from Oracle
+3. DELETE the changed keys, then append the new values
+```
+
+**Must be solved before switching:**
+
+- **Delete detection**: requires periodic full key reconciliation (anti-join); frequency TBD.
+- **Watermark**: needs a safety overlap window, or switch to SCN as the watermark.
+- **Periodic full rebuild**: even under delta, rebuild fully on a schedule (e.g. daily) to clear accumulated drift.
+
+Interface-wise this only replaces `GenerationSource`; `BuildContext.previous` is already reserved.
+
+### 14.2 Cross-process sharing (manifest + object storage)
+
+Currently limited to in-process consumers. Since generation files are immutable and self-contained, the extension path is direct:
+
+```
+1. On successful publish, upload the generation file to object storage
+2. Maintain a manifest: { group, generation, dataAsOf, objectUrl, rowCounts, checksum }
+3. Other processes read the manifest, download the generation, and ATTACH it
+```
+
+This turns the current pointer into a globally consistent manifest version, solving both cross-replica version skew and duplicate Oracle pulls.
+
+Additional design needed: manifest storage and update atomicity, local cache and cleanup on the download side, retention period for old generations.
+
+### 14.3 Multiple replicas
+
+Not supported. Replicas refreshing independently would mean:
+
+- Different replicas serving different generations, so consecutive consumer calls could see the version go backwards.
+- Nx the pull load on Oracle.
+
+If it becomes necessary, go the Sec 14.2 route (single leader pulls, manifest distributes) rather than having each replica pull for itself.
+
+### 14.4 Schema changes
+
+When a source schema changes, the new generation fails to build and the system keeps serving the old one. That behavior is safe, but **verification failure must produce a visible alert** - otherwise the symptom is "everything looks fine but the data stopped updating."
+
+No automatic schema evolution for now.
+
+### 14.5 DuckDB version constraint
+
+Pinned to 1.1.3 (Linux component compatibility in the CI environment). Consequences:
+
+- No statement timeout, so query timeouts can't be set at the SQL level. Killing a runaway query requires interrupting the connection from the API layer.
+- No vacuum that shrinks files. The one-file-per-generation design sidesteps this entirely.
+
+---
+
+## 15. Decision Log
+
+| ID | Decision | Rationale |
+|---|---|---|
+| D1 | Generational model, not LEFT/RIGHT two-slot rotation | Two slots couple refresh frequency to the slowest consumer, forcing a choice between stale data and unsafe forced reclamation |
+| D2 | One generation = one standalone .db file | DuckDB 1.1.3's DROP TABLE doesn't shrink files and there's no vacuum; rotating within one file leaves a high-water mark and fragmentation |
+| D3 | ATTACH generation files READ_ONLY | Prevents accidental consumer writes; a failed DETACH also serves as an extra safety signal |
+| D4 | Both source tables in one group | They're used in a union and must come from the same consistency point |
+| D5 | Two physical tables + union view, not one merged table | Preserves column semantics, avoids id collisions, and limits schema-change impact to the view |
+| D6 | Full reload, no incremental | Incremental saves Oracle/JDBC time, not DuckDB time; delete detection and drift cost more than the savings. Upgrade path preserved in the interface |
+| D7 | K = 3; pause refresh and alert when exceeded | Slow consumers affect resource usage rather than freshness; genuine loss of control degrades explicitly and loudly |
+| D8 | Lease deadline is diagnostic, not enforcement | No safe way to pull data out from under a running query; recording the owner makes problems locatable |
+| D9 | Scoped API preferred, `acquire()` is advanced usage | Orphaned leases are the main leak source; eliminate them at the interface level |
+| D10 | Wipe all leftover files on startup | The current pointer isn't persisted, so leftovers are unowned; a cold start rebuilds anyway |
+| D11 | Readiness waits for the first generation | Consumers waiting beats consumers reading an empty table, which produces hard-to-notice downstream errors |
+| D12 | Single replica + `Recreate` strategy, no leader election | A read-only cache can't produce wrong data on overlap; a deployment setting is far cheaper than election logic |
+| D13 | `non_empty` is a non-disableable gate | Zero rows is almost always a fault, and publishing it makes every downstream quietly compute an empty result |
+| D14 | `row_count_delta` off by default, collect metrics first | Volume may legitimately spike; there's no basis yet for a sensible threshold |
+| D15 | Escalate to critical after 3 consecutive verify failures, configurable | Tolerate a single failure; sustained failure indicates a systemic problem |
+| D16 | Consumers share one DuckDB instance | Multiple unbounded instances would add up and consume the pod's memory budget |
+| D17 | `data_as_of` metric stores an absolute timestamp | Alert thresholds become adjustable without code changes |
+| D18 | `generation` is never a metric label | Monotonic growth would blow up time series cardinality |
+| D19 | DuckDB behavioral assumptions (A1-A8) documented but empirical leak/GC measurement deferred | No time budget for a pre-implementation spike; assumptions and pass criteria are recorded in Sec 17.6 so measurement can run later without redesigning the tests |
+| D20 | A real-DuckDB E2E feasibility test is mandatory before the framework is accepted | Fake-storage tests prove the framework's bookkeeping, not that DuckDB 1.1.3 actually behaves as assumed; a small synthetic-data E2E covers the functional subset cheaply |
+| D21 | Acquire uses a bounded, per-call `waitBudget` (default 30s) rather than fail-fast or block-forever | Fail-fast loses a whole run for daily jobs; blocking forever exhausts scheduler pools. A bound is the only option that serves both, and only the caller knows the cost of a missed run |
+| D22 | `waitBudget` is a call parameter, not configuration, and is not derived from historical statistics | It is an upper bound, not a sleep, so setting it generously is free while setting it low has a real cost; a one-sided cost function should be given headroom, not estimated. Rolling averages would also need persistence, and would be empty at cold start - the only moment the budget is used |
+| D23 | Shutdown aborts any in-flight refresh and discards the candidate rather than finishing the round | The candidate is an unpromoted, unattached file that no consumer can observe, so discarding it is invisible; finishing it would make shutdown duration unbounded for a build that is stateless and rebuilt on next start |
+| D24 | The framework holds no schedule state (last-success times, catch-up windows); callers implement such policy against `waitBudget` and `currentInfo()` | Scheduling is not caching. Persisting run history would add a store and new failure modes, and would be empty at cold start when it would be needed |
+| D26 | Sec 12.2's `result` label set grows to seven, adding `disk_error` and `shutdown_aborted` | Every row of Sec 9.2 must be distinguishable in metrics and in the Sec 17.8 "returns to a usable state" tests. Folding disk exhaustion and shutdown-abort into `source_error` made two distinct operational conditions indistinguishable on a dashboard, and left a P4 acceptance test unable to tell which failure it had exercised. The label is bounded and enumerable, so growth costs no cardinality |
+| D27 | `core` logs through `org.jboss.logging.Logger`, never `io.quarkus.logging.Log` | The host is a Quarkus service, so its log manager is already present and all `quarkus.log.*` configuration applies unchanged. Naming the Quarkus type in `core` would break the Sec 2.2 boundary rule and force the core suite to boot a framework, losing the millisecond feedback loop that makes Sec 17.4/17.5 affordable. JBoss Logging is the API Quarkus itself is built on, so the output is identical |
+| D28 | The `Snapshot` handle is constructed at the `spi` boundary, not in `core` | Sec 2.2 confines `java.sql` to api signatures, spi and duckdb. A handle implementation living in `core` would name `Connection` in its bytecode as a field, parameter and return type. `OpenGeneration` already owns the connection, so it produces the handle and `core` holds it only as the `api.Snapshot` type, keeping the rule verbatim and the lease bookkeeping unchanged |
+| D25 | Consumers are responsible for transactional or idempotent writes | Lease drain is bounded, so an interrupted consumer is possible by design. The cache guarantees snapshot stability, not consumer completion; the interruption risk lives on the consumer's output side |
+
+---
+
+## 16. Open Items Before Implementation
+
+1. **Column mapping table for tables A and B** - explicitly separate "same concept, different name" from "this source lacks the concept"; put it under version control.
+2. **The `requiredNonNull` column list** - which columns being NULL indicates broken data.
+3. **Baseline measurements** - per-stage timing, to confirm the 10-minute interval is comfortable and to tune fetch size. Deferred along with data-correctness validation; not part of framework acceptance (Sec 17).
+4. **Leak verification** - deferred; assumptions and pass criteria recorded in Sec 17.6 so the measurement can be executed later without redesign.
+
+---
+
+## 17. Acceptance Plan (Framework)
+
+Scope: this section covers acceptance of the **snapshot cache framework itself** - generation lifecycle, leases, K enforcement, GC, refresh orchestration, and failure handling. Data correctness (source transaction consistency, `dataAsOf` semantics, view column alignment) and performance baselines are explicitly out of scope for this phase and will be validated after implementation lands.
+
+The plan has three layers:
+
+1. Fast, deterministic tests against a **fake storage layer** - this is where correctness is actually proven.
+2. **Documented DuckDB behavioral assumptions** with pass criteria - measurement deferred (D19).
+3. A **real-DuckDB E2E feasibility test** with synthetic data - mandatory (D20), covering the functional subset of the assumptions.
+
+### 17.1 Test seams (prerequisite)
+
+The framework's real responsibilities - generation numbering, the current pointer, refcounts/leases, K enforcement, GC, refresh orchestration, state reporting - are all independent of DuckDB. To make them testable deterministically and at millisecond speed, three seams are required in the design:
+
+```
+interface GenerationStore {
+    fun createCandidate(gen: Long): Candidate
+    fun promote(gen: Long)                   // .tmp -> final name
+    fun open(gen: Long): OpenGeneration    // attach read-only
+    fun close(gen: Long)                     // detach
+    fun delete(gen: Long)                    // remove file
+    fun listOnDisk(): List<Long>
+}
+```
+
+- **`GenerationStore`** - the only component that touches DuckDB files. Production implements it with ATTACH/DETACH/delete; tests use an in-memory fake that records every call and can be scripted to fail on specific operations.
+- **Injectable `Clock`** - deadline, expiry, and staleness tests must not sleep for real minutes.
+- **Manually triggerable scheduler** - overlap prevention and skip logic must be testable without real `@Scheduled` timing.
+
+Acceptance requires that all Sec 17.2-Sec 17.5 tests run without DuckDB or Oracle on the classpath's runtime path.
+
+### 17.2 Invariants and named tests
+
+Each invariant must have a test named after its ID (e.g. `I3_generationStrictlyIncreasing`). This table is the contract; a future change that breaks a guarantee must break a correspondingly named test.
+
+| ID | Invariant |
+|---|---|
+| I1 | current only ever points to a verified generation; never to a candidate or a failed build |
+| I2 | A generation with refcount > 0 is always in the opened state; it is never closed or deleted |
+| I3 | Generation numbers are strictly increasing; no duplicates, no regression |
+| I4 | Live generations <= K, except in an explicit, recorded blocked state |
+| I5 | A generation that is non-current with refcount == 0 is eventually deleted |
+| I6 | refcount is never negative |
+| I7 | After a failed refresh, current is unchanged and no candidate resources remain |
+| I8 | A handle observes the same generation number for its entire lifetime |
+
+### 17.3 Resource accounting equations
+
+With the fake storage recording every call, leak detection at the framework level becomes exact arithmetic rather than trend observation. These equations are asserted automatically at the end of **every** test (in a shared fixture, not per-test):
+
+```
+count(createCandidate) == count(promote) + count(delete of candidates)
+per generation: count(open) == count(close)      // except still-live ones
+at test end: opened generations == { current } U { gens with refcount > 0 }
+at test end: generations on disk == opened generations
+```
+
+Any violated equation identifies the exact generation and operation that leaked - strictly more informative than observing RSS trends. The fake storage must also support scripted failures (e.g. "the 3rd close throws") to drive the Sec 9.2 failure-path tests.
+
+### 17.4 Deterministic concurrency tests
+
+**No `Thread.sleep`-based timing anywhere.** Sleep-tuned interleavings are flaky and end up disabled. Instead, the framework exposes test-only hooks at the dangerous points:
+
+```
+enum class Hook {
+    AFTER_READ_CURRENT,      // acquire has read the pointer, refcount++ not yet done
+    BEFORE_POINTER_SWAP,
+    AFTER_POINTER_SWAP,      // published, GC not yet run
+    BEFORE_DETACH,
+    AFTER_VERIFY
+}
+```
+
+Tests use latches at hook points to let another thread complete a full operation before releasing, making every interleaving deterministic and repeatable.
+
+The single most important case: **at `AFTER_READ_CURRENT`, force a complete publish + GC cycle, then assert the returned handle is still queryable.** This is the seam the Sec 5.1 atomicity requirement exists for, and it must be exercised deterministically, not left to stress-test luck.
+
+Required interleavings:
+
+| Case | Assertion |
+|---|---|
+| publish + GC occurs mid-acquire | handle valid and queryable; I2 holds |
+| lease held on an old gen while refreshing up to K | refresh blocks with explicit state; auto-resumes after release |
+| `close()` called twice | refcount decremented once; I6 holds |
+| handle garbage-collected without close | Cleaner force-releases; orphan counter +1 |
+| overlapping schedule trigger | second run skipped; never two candidates at once |
+| one handle spans two publishes | generation number unchanged; I8 holds |
+
+Plus a stress test: N consumer threads randomly acquire/query/close while refresh runs M rounds (suggested N=20, M=100), with all invariants checked after every round. This runs in CI against the fake storage, so it stays fast.
+
+### 17.5 Randomized model test
+
+Targeted cases cover the interleavings we can think of; a model test covers the ones we can't.
+
+- Model state: set of live generations, current pointer, per-generation refcount.
+- Randomly generated operation sequences: `acquire` / `close` / `refresh-success` / `refresh-failure` / `verify-failure` / `gc` / `orphan`.
+- **All of I1-I8 checked after every step.**
+- Fixed seed for reproducibility; on failure, the full operation sequence must be printed.
+
+Run several thousand sequences per CI execution - cheap against the fake storage. This class of test typically catches "three events in the wrong order" bugs that no one writes a targeted case for.
+
+### 17.6 DuckDB behavioral assumptions - documented, measurement deferred
+
+The design rests on assumptions about DuckDB 1.1.3 behavior. Empirical leak/GC measurement is **deferred** (D19). The assumptions and their pass criteria are recorded here so the measurement can be executed later exactly as specified, and so it is explicit which risks remain open until then.
+
+| ID | Assumption | Verification method (when executed) | Impact if false | Status |
+|---|---|---|---|---|
+| A1 | DETACH + file delete returns RSS to baseline | 50+ rotations, RSS trend per criteria below | **D2 collapses; the whole model must be rethought** | open (file-level subset in Sec 17.7) |
+| A2 | DROP TABLE does not shrink the file | create/drop repeatedly, measure file size | If it does shrink, a simpler single-file model becomes viable | open |
+| A3 | READ_ONLY attach rejects writes | attempt INSERT | One protection layer gone; discipline only | **covered by Sec 17.7** |
+| A4 | DETACH fails while a connection is in use | open connection, attempt DETACH | The Sec 9.2 safeguard doesn't exist and must be removed | **covered by Sec 17.7** |
+| A5 | `memory_limit` is effective in file mode and spills to temp | load beyond the limit | Sec 11.1 budget math must change | open |
+| A6 | An unclosed Appender leaks | deliberately leave open, watch FD/memory | Confirms the discipline requirement | open |
+| A7 | Cross-instance ATTACH of another file works | prerequisite for copyOut | Sec 6.5 must be redesigned | **covered by Sec 17.7** |
+| A8 | 1M-row append time and file size match Sec 7.5/Sec 7.6 | measure | Estimates must be corrected | open (deferred with perf work) |
+
+**Measurement methodology (for when the deferred run happens):**
+
+- **Fixed sampling point**: sample at the same phase of every rotation - after GC completes, before the next build starts. Random sampling catches build peaks and fakes a leak trend.
+- **Skip warmup**: the first 5-10 rotations include JIT, buffer pool fill, and allocator arena growth; judge only the later portion.
+- **Compare medians, not maxima**: `(median of last 10 rounds - median of rounds 10-20) / baseline < 5%`, or linear regression slope over the second half < 1 MB/round.
+- **Four signals together**:
+
+| Signal | Source | Pass criterion |
+|---|---|---|
+| FD count | `/proc/self/fd` entry count | **exactly zero growth after warmup - hard, no tolerance** |
+| Files in cache dir | filesystem | stable <= K - hard |
+| Cache dir total bytes | filesystem | later median ~ earlier median - hard |
+| JVM heap after forced GC | MXBean | growth < 5% - hard |
+| Process RSS | `/proc/self/status` VmRSS | growth < 5% - interpretive (see below) |
+
+- **RSS caveat**: glibc keeps freed memory in arenas. Set `MALLOC_ARENA_MAX=2` to reduce noise; if RSS alone exceeds the criterion, call `malloc_trim(0)` and re-measure before concluding a leak. FD count is the more sensitive and more decisive signal - unclosed connections/appenders/result sets show up there before RSS moves.
+- **JVM-side leak detector (test profile only)**: wrap the connection factory so every issued Connection/Appender is tracked via `PhantomReference` with its creation stack. At test end, assert all tracked objects were closed; print the creation stack of any that weren't. This pinpoints the leaking line instead of leaving a number to investigate.
+
+**Deferred executions** (documented now, run later):
+
+- Full leak regression: 200 rotations x 500k rows, nightly, all criteria above.
+- 24-hour soak at production cadence: once before go-live and after major changes.
+
+### 17.7 E2E feasibility test - real DuckDB, synthetic data (mandatory)
+
+One end-to-end test against real DuckDB 1.1.3, with a `SyntheticSource` injected in place of the Oracle-backed one (the `GenerationSource` seam makes this free). It generates a few thousand rows per table and writes them through the **real Appender path** into real generation files. No Oracle involved.
+
+Target: 20-30 rotations, total runtime under ~2 minutes, tagged so it runs in regular CI.
+
+Scenario script (single test, ordered):
+
+1. **Dirty startup** - pre-create leftover `gen_*.db` and `.tmp` files in the cache dir; start the framework; assert the directory is wiped, that `acquire(waitBudget = ZERO)` throws `NotReadyException` immediately, and that an `acquire(waitBudget = 30s)` issued before the first publish returns successfully once gen 1 lands, with `snapshot_acquire_waited_seconds` recorded (Sec 10.1, Sec 9.3).
+2. **First generation** - build gen 1 with synthetic rows for `t_a` / `t_b` plus the union view; verify passes; publish; readiness flips. Acquire and query through the union view; assert expected row counts and `source` values. Attempt an INSERT through the handle's connection; assert it is rejected (**A3**).
+3. **K enforcement with a held lease** - hold a lease on gen 1; run refreshes until live generations reach K; assert the next refresh records `blocked_by_k` and current data keeps serving; assert the held handle still queries gen 1 with unchanged results (I8). Release the lease; assert GC reclaims, files on disk drop back, and refresh resumes automatically.
+4. **DETACH-in-use** - open a raw connection to an old generation, trigger GC; assert reclamation is deferred with a warning (**A4**); close the connection, trigger GC again; assert the generation is detached and **its file is gone from disk** (file-level subset of **A1**).
+5. **Failure paths** - one round where the refresher throws mid-build: assert candidate file deleted, current unchanged (I7). One round producing 0 rows: assert `non_empty` rejects it, counter incremented, current unchanged.
+6. **copyOut across instances** - copy a subset into a second DuckDB instance via direct file ATTACH (**A7**); assert the result carries the correct `(generation, dataAsOf)` and the lease is released immediately after the copy.
+7. **Graceful shutdown** - start a refresh, and while it is mid-build, initiate shutdown with a lease still held. Assert: the candidate `.tmp` is deleted and never promoted, the current pointer is unchanged, an acquire issued during shutdown throws `ShuttingDownException`, a thread already inside `waitBudget` is released immediately rather than serving out its budget, and drain timeout logs the outstanding lease owner before exit (Sec 10.2).
+8. **End-of-test resource assertions** - FD count equals the post-warmup baseline; files on disk correspond exactly to live generations; no `.tmp` files remain; if the real storage is wrapped with a recording spy, the Sec 17.3 accounting equations hold.
+
+What this test proves: the full chain - build -> verify -> publish -> serve -> block-at-K -> GC -> delete - actually works on DuckDB 1.1.3, and assumptions A3/A4/A7 plus the file-level part of A1 hold. What it deliberately does **not** prove: absence of slow memory leaks (deferred, Sec 17.6) and performance at production scale (deferred, Sec 16.3).
+
+### 17.8 Definition of Done
+
+- [ ] `GenerationStore`, `Clock`, and the scheduler trigger are injectable; all Sec 17.2-Sec 17.5 tests run without DuckDB/Oracle
+- [ ] I1-I8 each have a named test
+- [ ] Accounting equations (Sec 17.3) asserted automatically at the end of every test via a shared fixture
+- [ ] At least the six deterministic interleavings of Sec 17.4, with zero sleeps; stress test in CI
+- [ ] Randomized model test in CI with fixed seed and reproducible failure output
+- [ ] Every Sec 9.2 failure case has a test asserting **return to a usable state**, not merely that an error was thrown
+- [ ] `acquire()` honors `waitBudget`: zero fails fast without blocking (verified under a 2-thread scheduler pool scenario), a positive budget waits interruptibly and returns on publish, and budget expiry throws with `reason="timeout"` recorded
+- [ ] Graceful shutdown sequence (Sec 10.2) verified: waiters released immediately, in-flight refresh aborted with candidate deleted and current unchanged, acquire during shutdown throws `ShuttingDownException`, drain timeout logs outstanding lease owners
+- [ ] The Sec 17.7 E2E test passes in CI
+- [ ] Admin endpoint (Sec 12.7) correctly reports all live generations and leases (it is the only investigation entry point later, so it is acceptance-relevant)
+- [ ] Sec 17.6 assumptions table reviewed: A3/A4/A7 and file-level A1 confirmed by the E2E; remaining items explicitly acknowledged as open risks
+
+A note on authorship of these tests: if the concurrency and accounting tests are delegated to an AI agent, the failure mode is tests that pass without testing anything - sleep-based interleavings go green, and leak tests without the accounting assertions go green. The invariant table (Sec 17.2), the equations (Sec 17.3), and the criteria in this section are therefore fixed by the spec; implementations may vary, assertions may not. Coverage percentage is not an acceptance signal here; invariant verification is.
