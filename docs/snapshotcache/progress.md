@@ -120,3 +120,31 @@ session looking at code that disagrees with the documents, which it will
 - Shutdown gating now lives at the facade (`ShuttingDownException` on every entry point); lease drain (spec 10.2 step 4) is P9's.
 - Reviewer suggestions left open (non-blocking): log swallowed connection-close failures in Cleaner cleanup; comment the interrupt-to-TIMEOUT mapping in code; pin negative-budget, connection-after-close ISE, and copyOut targetConnection ownership in tests.
 - P3 total ~670 lines incl. tests - slightly over the "roughly 200-600" guidance; driven by the D26-style breadth of the waitBudget/shutdown/orphan acceptance list, not speculative code.
+
+## P4 - RefreshCycle: state machine, verify gate, failure paths  (2026-08-26)
+
+### Delivered
+- `core/RefreshCycle.kt` - runOnce()/reclaimPass(); full round sequence (tryBeginRound -> K guard with reclaim-then-recheck -> beginBuild -> createCandidate -> source.refresh -> candidate.close/CHECKPOINT -> beginPublish -> promote -> open -> verify -> AFTER_VERIFY -> BEFORE_POINTER_SWAP -> publish(gen, opened, info) -> GC -> endRound in finally); RoundAbort + single abort() epilogue (record GONE before cleanup I/O; emergency GC iff DISK_ERROR; best-effort close/delete never masks the original failure); blocked-by-K owner dump via jboss Logger.
+- `spi/VerifyGate.kt` (new) - all built-in rules (readable, non_empty, key_unique, required_non_null, row_count_delta default-off), caller GenerationCheck composition, all SQL, verify-connection lifecycle. rowCounts feed GenerationInfo.
+- `core/GenerationRegistry.kt` - P4 additions: tryBeginRound/endRound (overlap state under the one monitor), recordVerifyFailure/resetVerifyFailures (counter in registry per the P1 note), discardBuild widened to BUILDING|OPENING.
+- `core/DefaultSnapshotCache.kt` - GroupRuntime gains defaulted `cycle` param; triggerRefresh/gc/liveGenerations wired; null cycle -> ISE.
+- Tests: `RefreshCycleTest.kt` (7), `RefreshCycleFailureTest.kt` (9), `P4TestSupport.kt` (QueryScript pattern/heuristic SQL stubbing - never exact-string; QueryStubGenerationStore delegating every call to the recording fake; AccountingFixture in both suites). I1_/I5_/I7_ named tests; every P4-scope spec 9.2 row asserts return-to-usable.
+- Build: 82 tests, 0 failures. Review: sdet APPROVED cycle 1; engineer APPROVED cycle 2.
+
+### Deviations from the documents
+- **Verify runs AFTER promote, via open(gen) read-only.** The frozen GenerationStore has no reopen-candidate seam (spec 4.2's "reopen the candidate" as written is unimplementable against it). I1 unaffected: the gen sits in OPENING (invisible to acquire) through promote/open/verify and the pointer swaps only after the gate passes. Crash window leaves an unattached unverified file; startup wipe (D10) removes it.
+- **Failure classification is by failing component, not exception inspection**: GenerationStore ops (incl. `candidate.connection()`, hoisted in review cycle 1) -> `disk_error` + emergency GC; source.refresh -> `source_error`; InterruptedException or shuttingDown at a stage boundary -> `shutdown_aborted`.
+- **VerifyGate lives in `spi`, not core.** Probe-proved: any java.sql METHOD CALL from core violates ArchUnit rule 4 (P0's probe only planted a field). D28 precedent; core keeps policy (when to verify, escalation, publish), spi keeps SQL. No frozen file modified.
+- **`config.allowOverlap` is a no-op knob.** Spec 4.4 says overlapping runs are forbidden, flatly; honoring `true` would double resource envelopes. The spec 13 knob remains asserted in config defaults but is never consulted.
+- **Escalation fires exactly once when the consecutive counter REACHES the threshold**; success resets and re-arms (spec 8.5 "once ... reach" read literally).
+- **`dataAsOf` = clock.instant() at round start.** BuildContext is frozen with a framework-supplied dataAsOf; true txn-start capture needs source cooperation and is P10's.
+- **Phase timings emitted: CHECKPOINT/VERIFY/PUBLISH only.** QUERY/FETCH/APPEND are source-side and land with P10's source (plan P10 lists per-step timing there).
+- **P4b split invoked** (plan P4's pre-authorized remedy; production ~470 + tests ~810 lines): detailed built-in-rule tests deferred to P4b. verify_failed coverage in P4 rides caller checks.
+- **Defect found and fixed in-phase**: blocked-by-K never auto-resumed (K guard before any reclaim; GC only on success). Sdet's suite caught it; fix = reclaimPass on tripped guard, re-check. Reviewer re-verified race-free (never reclaims current or leased gens).
+
+### Notes for later phases
+- **P4b scope**: built-in rule behavior (non_empty, key_unique, required_non_null table.column/bare forms, row_count_delta default-off publishes on wild deltas, BASE TABLE discovery filter / union-view key_unique exemption), candidate-connection()-throws -> DISK_ERROR test, round-entry shutdown short-circuit assertion. QueryScript heuristics in P4TestSupport are ready for reuse. LEAD RULING: P4TestSupport.kt may be EXTENDED add-only in P4b (it is the second half of P4 itself); RefreshCycleTest/RefreshCycleFailureTest assertions remain immutable.
+- All five hooks now wired (AFTER_READ_CURRENT/AFTER_POINTER_SWAP/BEFORE_DETACH in P1, AFTER_VERIFY/BEFORE_POINTER_SWAP in P4) - P5 has its full seam set.
+- A registry `check` failure inside the round bypasses the abort epilogue by design (invariant violation, not a 9.2 row).
+- `reclaimPass` treats InterruptedException as an ordinary reclaim failure (defer) without re-setting the flag; P9 owns interrupt delivery.
+- Reviewer suggestions open: comment the epilogue-bypass; testkit-toString coupling in one BuildContext assertion.

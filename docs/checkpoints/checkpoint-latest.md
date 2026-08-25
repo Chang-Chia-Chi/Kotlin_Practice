@@ -1,61 +1,61 @@
-# Checkpoint P3
+# Checkpoint P4
 
-- ID: P3-2026-08-25
-- Phase: P3 - SnapshotCache facade + orphan safety net
-- Team: sdet + engineer + reviewer (composition table: concurrency-sensitive)
-- Baseline: tag `p2` (= f867327, P2 complete)
-- Status at checkpoint: PHASE COMPLETE (engineer APPROVED cycle 1; sdet APPROVED cycle 2 after 1 required change - interruptible-wait test; DoD gate passed; progress.md P3 entry appended; 66 tests green)
+- ID: P4-2026-08-25
+- Phase: P4 - RefreshCycle: state machine, verify gate, failure paths
+- Team: sdet + engineer + reviewer
+- Baseline: tag `p3` (= f40bdfd, P3 complete)
+- Status at checkpoint: PHASE COMPLETE (sdet APPROVED cycle 1; engineer APPROVED cycle 2 after 1 required change - candidate.connection() DISK_ERROR hoist; DoD gate passed; progress.md P4 entry appended; 82 tests green). P4b (built-in verify-rule tests) remains open as the split's second half.
 
 ## Build result
 
-    mvn test  ->  BUILD SUCCESS, first-try integration of parallel work
-    ArchitectureTest              5   GenerationRegistryTest      21
-    DefaultSnapshotCacheTest     16 (new, P3)
-    MetricLabelContractTest       3   SnapshotCacheConfigDefaults  2
-    AccountingFixtureTest        10   InMemoryGenerationStoreTest  8
-    total                        65 tests, 0 failures
-    The orphan warning (D27 first log call site) visibly fired during the run.
+    mvn test  ->  BUILD SUCCESS
+    ArchitectureTest 5, DefaultSnapshotCacheTest 17, GenerationRegistryTest 21,
+    RefreshCycleTest 7 (new), RefreshCycleFailureTest 9 (new),
+    MetricLabelContractTest 3, ConfigDefaults 2, AccountingFixtureTest 10,
+    InMemoryGenerationStoreTest 8
+    total 82 tests, 0 failures
 
 ## Test-diff check
 
-    git diff --stat p2 -- '**/test/**'  ->  empty (no earlier-phase test touched)
-    Working tree: pom.xml + core/DefaultSnapshotCache.kt + core/GenerationRegistry.kt
-    modified (engineer), spi/SnapshotHandle.kt new (engineer),
-    core/DefaultSnapshotCacheTest.kt new (sdet).
+    git diff --stat p3 -- '**/test/**'  ->  empty (no earlier-phase test touched)
+    Working tree: core/RefreshCycle.kt + GenerationRegistry.kt +
+    DefaultSnapshotCache.kt modified, spi/VerifyGate.kt new (engineer);
+    P4TestSupport.kt + RefreshCycleTest.kt + RefreshCycleFailureTest.kt new (sdet).
 
-## Files produced
+## Session history (both agents survived infra stream-stalls and were resumed)
 
-    core/DefaultSnapshotCache.kt   GroupRuntime; pinned 4-arg ctor; withSnapshot/
-                                   acquire/copyOut/currentInfo; waitBudget path;
-                                   single release path firing events + orphan warning
-    core/GenerationRegistry.kt     pinned additions: publish(gen, opened, info)
-                                   overload, RegistryLease.opened (+generationInfo),
-                                   currentInfo(); P1 members untouched
-    spi/SnapshotHandle.kt          NEW - the D28 handle: Snapshot impl from
-                                   (OpenGeneration, dataAsOf, callback); shared
-                                   Cleaner; connection tracking; idempotent close
-    core/DefaultSnapshotCacheTest.kt  16 tests; AccountingFixture registered;
-                                   helpers MutableClock, RecordingCacheEvents,
-                                   awaitParked, publishGen
-    pom.xml                        + org.jboss.logging:jboss-logging:3.6.1.Final
+1. Both agents' first runs were killed by API infrastructure errors mid-flight;
+   lead resumed each from its transcript; all work recovered.
+2. Integration found ONE production defect, reported by the sdet with root
+   cause: blocked-by-K never auto-resumed (K guard evaluated before any
+   reclaim; GC only ran on successful rounds; "0 leases outstanding" yet still
+   blocked). Engineer fixed with a 7-line diff: on a tripped guard, run
+   reclaimPass then re-check before declaring BLOCKED_BY_K.
+3. Final: 82/82 green.
 
 ## Lead rulings this session
 
-1. pom.xml dependency (engineer, flagged out-of-boundary): APPROVED as
-   BLOCKED-IMPL resolution - D27 mandates the type, plan 2.4 forbids logging
-   facades not the mandated library; P4 needs it regardless.
-2. sdet awaitParked (polls Thread.state with 10s deadline to establish "waiter
-   parked" before publish/shutdown): ACCEPTED as a bounded precondition check,
-   not sleep sequencing - cannot pass by timing luck. Reviewer to confirm.
-3. Engineer deviation beyond the pin: RegistryLease also carries
-   generationInfo (dataAsOf must ride the lease atomically; currentInfo()
-   after acquire races a concurrent publish). Defaulted null; P1 tests compile
-   unchanged. Reviewer to judge.
+1. P4b SPLIT INVOKED (plan P4's pre-authorized remedy): detailed built-in
+   verify-rule tests (non_empty/key_unique/required_non_null/row_count_delta
+   default-off/table discovery) deferred to a P4b session. P4 covers
+   verify_failed via caller GenerationCheck. QueryScript heuristics in
+   P4TestSupport are ready for P4b reuse.
+2. VerifyGate lives in spi, not core (RATIFIED; supersedes the lead's pin 7
+   wording): engineer probe-proved java.sql METHOD CALLS from core violate
+   immutable ArchUnit rule 4 (P0's probe only planted a field). D28 precedent.
+3. Escalation semantics pinned: verifyFailureEscalated fires exactly once when
+   the consecutive counter REACHES the threshold; success resets and re-arms.
+4. Round sequence deviation (pre-ruled at spawn): verify runs AFTER promote via
+   open(gen) (frozen store has no reopen-candidate seam); I1 unaffected.
+5. Failure classification (pre-ruled): store exceptions -> DISK_ERROR
+   (+ emergency GC), source -> SOURCE_ERROR, interrupt/shutdown ->
+   SHUTDOWN_ABORTED - by failing component, not exception inspection.
 
 ## Files to Re-read on resume
 
-- docs/snapshotcache/progress.md (P3 entry appended only after the DoD gate)
-- snapshotcache/src/main/kotlin/infra/snapshotcache/core/DefaultSnapshotCache.kt
-- snapshotcache/src/main/kotlin/infra/snapshotcache/spi/SnapshotHandle.kt
-- snapshotcache/src/test/kotlin/infra/snapshotcache/core/DefaultSnapshotCacheTest.kt
+- docs/snapshotcache/progress.md (P4 entry appended only after the DoD gate)
+- snapshotcache/src/main/kotlin/infra/snapshotcache/core/RefreshCycle.kt
+- snapshotcache/src/main/kotlin/infra/snapshotcache/spi/VerifyGate.kt
+- snapshotcache/src/test/kotlin/infra/snapshotcache/core/RefreshCycleTest.kt,
+  RefreshCycleFailureTest.kt, P4TestSupport.kt
 - This checkpoint

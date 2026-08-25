@@ -54,6 +54,8 @@ internal class GenerationRegistry(
     private var nextGeneration = 0L
     private var currentGen: Long? = null
     private var shuttingDown = false
+    private var roundInProgress = false
+    private var consecutiveVerifyFailures = 0
 
     private class GenRecord(val generation: Long) {
         var state = Lifecycle.BUILDING
@@ -66,6 +68,35 @@ internal class GenerationRegistry(
 
     // ---- build path (RefreshCycle, P4) ----
 
+    /**
+     * Overlap guard (spec 4.4): true begins the round; false means one is already running
+     * and this trigger must be skipped. Registry state per plan 2.5 - the flag is mutable
+     * state, so it lives under the one monitor.
+     */
+    fun tryBeginRound(): Boolean = lock.withLock {
+        if (roundInProgress) {
+            false
+        } else {
+            roundInProgress = true
+            true
+        }
+    }
+
+    /** Ends the round begun by a successful [tryBeginRound]; called in a finally. */
+    fun endRound(): Unit = lock.withLock {
+        roundInProgress = false
+    }
+
+    /** Increments the consecutive verify-failure counter and returns the new count (spec 8.5). */
+    fun recordVerifyFailure(): Int = lock.withLock {
+        ++consecutiveVerifyFailures
+    }
+
+    /** Resets the consecutive verify-failure counter on a successful publish (spec 8.5). */
+    fun resetVerifyFailures(): Unit = lock.withLock {
+        consecutiveVerifyFailures = 0
+    }
+
     /** Allocates the next generation number (strictly increasing, I3) and registers it BUILDING. */
     fun beginBuild(): Long = lock.withLock {
         val gen = ++nextGeneration
@@ -73,9 +104,18 @@ internal class GenerationRegistry(
         gen
     }
 
-    /** BUILDING -> GONE. Candidate file deletion happens outside, after this call. */
+    /**
+     * BUILDING or OPENING -> GONE. Candidate file deletion happens outside, after this
+     * call. OPENING is legal because a round can fail after [beginPublish] - promote,
+     * attach or verify - and its cleanup uses the same edge (spec 9.2).
+     */
     fun discardBuild(gen: Long): Unit = lock.withLock {
-        remove(gen, Lifecycle.BUILDING)
+        val record = records.getValue(gen)
+        check(record.state == Lifecycle.BUILDING || record.state == Lifecycle.OPENING) {
+            "generation $gen is ${record.state}, expected BUILDING or OPENING"
+        }
+        record.state = Lifecycle.GONE
+        records.remove(gen)
     }
 
     /** BUILDING -> OPENING. Promote + attach run outside, between this and [publish]. */

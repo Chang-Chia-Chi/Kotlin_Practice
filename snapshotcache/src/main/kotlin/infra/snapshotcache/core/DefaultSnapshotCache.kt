@@ -30,6 +30,8 @@ private val log = Logger.getLogger(DefaultSnapshotCache::class.java)
 internal class GroupRuntime(
     val registry: GenerationRegistry,
     val store: GenerationStore,
+    /** Null only in wirings that never refresh (registry-only tests); the admin surface requires it. */
+    val cycle: RefreshCycle? = null,
 )
 
 /**
@@ -87,16 +89,19 @@ internal class DefaultSnapshotCache(
 
     override fun currentInfo(group: GroupId): GenerationInfo? = runtimeOf(group).registry.currentInfo()
 
-    override fun triggerRefresh(group: GroupId): RefreshOutcome = TODO("P4")
+    override fun triggerRefresh(group: GroupId): RefreshOutcome = cycleOf(group).runOnce()
 
-    override fun gc(group: GroupId): GcOutcome = TODO("P4")
+    override fun gc(group: GroupId): GcOutcome = cycleOf(group).reclaimPass()
 
-    override fun liveGenerations(group: GroupId): List<GenerationState> = TODO("P4")
+    override fun liveGenerations(group: GroupId): List<GenerationState> = runtimeOf(group).registry.liveGenerations()
 
     // ---- internals ----
 
     private fun runtimeOf(group: GroupId): GroupRuntime =
         requireNotNull(groups[group]) { "unknown group '$group'" }
+
+    private fun cycleOf(group: GroupId): RefreshCycle =
+        checkNotNull(runtimeOf(group).cycle) { "group '$group' was wired without a RefreshCycle" }
 
     /**
      * The `waitBudget` path (spec 5.1, 9.3, D21/D22). Shutdown is checked first; a zero
