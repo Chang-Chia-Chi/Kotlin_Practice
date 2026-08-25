@@ -1,10 +1,12 @@
 package infra.snapshotcache.core
 
+import infra.snapshotcache.api.GenerationInfo
 import infra.snapshotcache.api.GenerationState
 import infra.snapshotcache.api.Hook
 import infra.snapshotcache.api.HookRunner
 import infra.snapshotcache.api.LeaseInfo
 import infra.snapshotcache.api.NoOpHooks
+import infra.snapshotcache.spi.OpenGeneration
 import java.time.Clock
 import java.time.Duration
 import java.util.concurrent.locks.ReentrantLock
@@ -20,6 +22,10 @@ internal enum class Lifecycle { BUILDING, OPENING, LIVE, RECLAIMING, GONE }
 internal class RegistryLease(
     val generation: Long,
     val info: LeaseInfo,
+    /** Attached generation this lease pins; null only when published via the fileBytes-only overload. */
+    val opened: OpenGeneration? = null,
+    /** What the pinned generation contains; null only when published via the fileBytes-only overload. */
+    val generationInfo: GenerationInfo? = null,
 ) {
     /** Guarded by the owning registry's lock; makes [GenerationRegistry.release] idempotent. */
     var released = false
@@ -53,6 +59,8 @@ internal class GenerationRegistry(
         var state = Lifecycle.BUILDING
         var refCount = 0
         var fileBytes = 0L
+        var opened: OpenGeneration? = null
+        var info: GenerationInfo? = null
         val leases = mutableListOf<RegistryLease>()
     }
 
@@ -77,9 +85,25 @@ internal class GenerationRegistry(
 
     /** OPENING -> LIVE; the generation becomes current and every [awaitCurrent] waiter is signalled. */
     fun publish(gen: Long, fileBytes: Long) {
+        publishInternal(gen, fileBytes, opened = null, info = null)
+    }
+
+    /**
+     * OPENING -> LIVE with the attached [OpenGeneration] and its [GenerationInfo], which
+     * [tryAcquire] copies onto every lease of [gen] and [currentInfo] reports.
+     * [OpenGeneration.fileBytes] is captured before taking the lock - on the real adapter
+     * it is a file stat, and no I/O runs under the lock (plan 2.5).
+     */
+    fun publish(gen: Long, opened: OpenGeneration, info: GenerationInfo) {
+        publishInternal(gen, opened.fileBytes(), opened, info)
+    }
+
+    private fun publishInternal(gen: Long, fileBytes: Long, opened: OpenGeneration?, info: GenerationInfo?) {
         lock.withLock {
             val record = transition(gen, Lifecycle.OPENING, Lifecycle.LIVE)
             record.fileBytes = fileBytes
+            record.opened = opened
+            record.info = info
             currentGen = gen
             published.signalAll()
         }
@@ -104,7 +128,12 @@ internal class GenerationRegistry(
             check(record.state == Lifecycle.LIVE) { "current generation $gen is ${record.state}, not LIVE" }
             record.refCount++
             val acquiredAt = clock.instant()
-            val lease = RegistryLease(gen, LeaseInfo(owner, acquiredAt, acquiredAt.plus(leaseDeadline)))
+            val lease = RegistryLease(
+                gen,
+                LeaseInfo(owner, acquiredAt, acquiredAt.plus(leaseDeadline)),
+                record.opened,
+                record.info,
+            )
             record.leases += lease
             lease
         }
@@ -175,6 +204,11 @@ internal class GenerationRegistry(
     // ---- state / shutdown ----
 
     fun current(): Long? = lock.withLock { currentGen }
+
+    /** [GenerationInfo] of the current generation; null before the first publish (spec 5.1, D24). */
+    fun currentInfo(): GenerationInfo? = lock.withLock {
+        currentGen?.let { records.getValue(it).info }
+    }
 
     /** Snapshot of every registered generation, for the admin view (spec 5.3, 12.7). */
     fun liveGenerations(): List<GenerationState> = lock.withLock {

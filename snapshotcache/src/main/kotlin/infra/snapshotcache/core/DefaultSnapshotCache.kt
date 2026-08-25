@@ -1,41 +1,170 @@
 package infra.snapshotcache.core
 
+import infra.snapshotcache.api.AcquireUnavailableReason
 import infra.snapshotcache.api.CacheAdmin
+import infra.snapshotcache.api.CacheEvents
 import infra.snapshotcache.api.CopyOutResult
 import infra.snapshotcache.api.CopyOutSpec
 import infra.snapshotcache.api.GcOutcome
 import infra.snapshotcache.api.GenerationInfo
 import infra.snapshotcache.api.GenerationState
 import infra.snapshotcache.api.GroupId
+import infra.snapshotcache.api.NoOpCacheEvents
+import infra.snapshotcache.api.NotReadyException
 import infra.snapshotcache.api.RefreshOutcome
+import infra.snapshotcache.api.ShuttingDownException
 import infra.snapshotcache.api.Snapshot
 import infra.snapshotcache.api.SnapshotCache
 import infra.snapshotcache.api.SnapshotCacheConfig
+import infra.snapshotcache.spi.GenerationStore
+import infra.snapshotcache.spi.OpenGeneration
+import infra.snapshotcache.spi.SnapshotHandle
+import org.jboss.logging.Logger
+import java.time.Clock
 import java.time.Duration
+import java.time.Instant
+
+private val log = Logger.getLogger(DefaultSnapshotCache::class.java)
+
+/** Everything the facade needs to serve one group (plan 2.4: a map and a per-group loop). */
+internal class GroupRuntime(
+    val registry: GenerationRegistry,
+    val store: GenerationStore,
+)
 
 /**
- * Shell. P3 fills in the consumer surface; P4 wires the admin surface to [RefreshCycle].
+ * Consumer-facing surface over [GenerationRegistry] (spec 5.1). One class implements both
+ * interfaces on purpose (plan 2.3): callers that should not see the admin surface are
+ * handed the [SnapshotCache] type, not a second object.
  *
- * One class implements both interfaces on purpose (plan 2.3): callers that should not see
- * the admin surface are handed the [SnapshotCache] type, not a second object.
+ * The facade owns no mutable state and holds no lock: atomicity lives in the registry
+ * (spec 5.1), and events fire from here, always outside the registry lock. It also holds
+ * no schedule state (D24) - `waitBudget` is per call and [currentInfo] is the caller's
+ * freshness seam.
  */
 internal class DefaultSnapshotCache(
-    private val config: SnapshotCacheConfig,
+    config: SnapshotCacheConfig,
+    private val groups: Map<GroupId, GroupRuntime>,
+    private val events: CacheEvents = NoOpCacheEvents,
+    private val clock: Clock = Clock.systemUTC(),
 ) : SnapshotCache, CacheAdmin {
 
-    override val defaultWaitBudget: Duration get() = config.defaultWaitBudget
+    override val defaultWaitBudget: Duration = config.defaultWaitBudget
 
-    override fun <T> withSnapshot(group: GroupId, waitBudget: Duration, block: (Snapshot) -> T): T = TODO("P3")
+    override fun <T> withSnapshot(group: GroupId, waitBudget: Duration, block: (Snapshot) -> T): T {
+        val snapshot = acquire(group, waitBudget)
+        try {
+            return block(snapshot)
+        } finally {
+            snapshot.close()
+        }
+    }
 
-    override fun copyOut(group: GroupId, spec: CopyOutSpec, waitBudget: Duration): CopyOutResult = TODO("P3")
+    override fun copyOut(group: GroupId, spec: CopyOutSpec, waitBudget: Duration): CopyOutResult {
+        val runtime = runtimeOf(group)
+        val lease = acquireLease(runtime, group, waitBudget)
+        try {
+            val rows = runtime.store.copyOut(openedOf(lease), spec)
+            return CopyOutResult(lease.generation, dataAsOfOf(lease), rows)
+        } finally {
+            release(runtime, group, lease, orphaned = false)
+        }
+    }
 
-    override fun acquire(group: GroupId, waitBudget: Duration): Snapshot = TODO("P3")
+    override fun acquire(group: GroupId, waitBudget: Duration): Snapshot {
+        val runtime = runtimeOf(group)
+        val lease = acquireLease(runtime, group, waitBudget)
+        try {
+            // Constructed at the spi boundary, held here only as api.Snapshot (D28).
+            return SnapshotHandle(openedOf(lease), dataAsOfOf(lease)) { orphaned ->
+                release(runtime, group, lease, orphaned)
+            }
+        } catch (failure: Throwable) {
+            runtime.registry.release(lease)
+            throw failure
+        }
+    }
 
-    override fun currentInfo(group: GroupId): GenerationInfo? = TODO("P3")
+    override fun currentInfo(group: GroupId): GenerationInfo? = runtimeOf(group).registry.currentInfo()
 
     override fun triggerRefresh(group: GroupId): RefreshOutcome = TODO("P4")
 
     override fun gc(group: GroupId): GcOutcome = TODO("P4")
 
     override fun liveGenerations(group: GroupId): List<GenerationState> = TODO("P4")
+
+    // ---- internals ----
+
+    private fun runtimeOf(group: GroupId): GroupRuntime =
+        requireNotNull(groups[group]) { "unknown group '$group'" }
+
+    /**
+     * The `waitBudget` path (spec 5.1, 9.3, D21/D22). Shutdown is checked first; a zero
+     * budget never enters a wait; a positive budget waits on the registry condition -
+     * signalled by publish and shutdown, never polled - and a shutdown signal during the
+     * wait wins over the remaining budget (spec 10.2 step 1).
+     */
+    private fun acquireLease(runtime: GroupRuntime, group: GroupId, waitBudget: Duration): RegistryLease {
+        val registry = runtime.registry
+        if (registry.isShuttingDown()) refuseShuttingDown(group)
+        val owner = Thread.currentThread().name
+        registry.tryAcquire(owner)?.let { return it }
+        if (waitBudget <= Duration.ZERO) refuseUnavailable(group, AcquireUnavailableReason.NOT_READY)
+        val waitedFrom = clock.instant()
+        val available = try {
+            registry.awaitCurrent(waitBudget)
+        } catch (interrupted: InterruptedException) {
+            Thread.currentThread().interrupt()
+            if (registry.isShuttingDown()) refuseShuttingDown(group)
+            refuseUnavailable(group, AcquireUnavailableReason.TIMEOUT)
+        }
+        if (registry.isShuttingDown()) refuseShuttingDown(group)
+        if (available) {
+            registry.tryAcquire(owner)?.let { lease ->
+                events.acquireWaited(group, Duration.between(waitedFrom, clock.instant()))
+                return lease
+            }
+        }
+        refuseUnavailable(group, AcquireUnavailableReason.TIMEOUT)
+    }
+
+    /**
+     * Single release path for copyOut and the handle callback. The registry makes the
+     * refcount decrement idempotent (I6); the handle's cleanup runs at most once, so each
+     * lease produces exactly one leaseReleased or leaseOrphaned event, never both.
+     */
+    private fun release(runtime: GroupRuntime, group: GroupId, lease: RegistryLease, orphaned: Boolean) {
+        runtime.registry.release(lease)
+        val heldFor = Duration.between(lease.info.acquiredAt, clock.instant())
+        if (orphaned) {
+            log.warnf(
+                "Snapshot lease orphaned - handle garbage-collected without close(); force-released. " +
+                    "group=%s generation=%d owner=%s heldFor=%s. This is a consumer bug (spec 6.3).",
+                group,
+                lease.generation,
+                lease.info.owner,
+                heldFor,
+            )
+            events.leaseOrphaned(group, lease.info)
+        } else {
+            events.leaseReleased(group, lease.info, heldFor)
+        }
+    }
+
+    private fun refuseShuttingDown(group: GroupId): Nothing {
+        events.acquireUnavailable(group, AcquireUnavailableReason.SHUTTING_DOWN)
+        throw ShuttingDownException(group)
+    }
+
+    private fun refuseUnavailable(group: GroupId, reason: AcquireUnavailableReason): Nothing {
+        events.acquireUnavailable(group, reason)
+        throw NotReadyException(group, reason)
+    }
+
+    private fun openedOf(lease: RegistryLease): OpenGeneration =
+        checkNotNull(lease.opened) { "generation ${lease.generation} was published without its OpenGeneration" }
+
+    private fun dataAsOfOf(lease: RegistryLease): Instant =
+        checkNotNull(lease.generationInfo) { "generation ${lease.generation} was published without its GenerationInfo" }
+            .dataAsOf
 }

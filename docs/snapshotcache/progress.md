@@ -96,3 +96,27 @@ session looking at code that disagrees with the documents, which it will
 - `Candidate.close()` is idempotent, never throws, closes the lazily issued write connection (P0 progress note honored).
 - Before P5's stress suite: set `fileBytesPerGeneration`/`copyOutRows` before spawning threads, or mark them `@Volatile` (reviewer note).
 - Reviewer suggestions left open (non-blocking): EngineTestKit case proving JUnit invokes the callback; comment on equation 1's best-effort leaked-set under gen-number reuse; comment protecting the nullable `afterEach` parameter from cleanup.
+
+## P3 - SnapshotCache facade + orphan safety net  (2026-08-25)
+
+### Delivered
+- `core/DefaultSnapshotCache.kt` - `GroupRuntime(registry, store)`; ctor `(config, groups, events, clock)`; withSnapshot/acquire/copyOut/currentInfo; full waitBudget path (zero fast-fail, interruptible bounded wait, shutdown beats timeout classification); single release path firing leaseReleased/leaseOrphaned; the D27 orphan warning is the first log call site. CacheAdmin methods remain `TODO("P4")`.
+- `spi/SnapshotHandle.kt` (new) - the D28 handle: `Snapshot` built from `(OpenGeneration, dataAsOf, callback)`; one shared `Cleaner`; issued-connection tracking; idempotent close via `Cleanable.clean()` at-most-once + `@Volatile explicitClose` + `reachabilityFence` against mid-close GC misclassification.
+- `core/GenerationRegistry.kt` - P3 additions only: `publish(gen, opened, info)` overload (fileBytes evaluated outside the lock), `RegistryLease.opened` + `generationInfo`, `currentInfo()`. P1 members and semantics untouched (21/21 green).
+- `core/DefaultSnapshotCacheTest.kt` - 17 tests incl. the 2-thread-pool zero-budget scenario, interruptible-wait test (added in review cycle 1), shutdown-releases-waiter, orphan exactly-once via bounded Cleaner await, copyOut lineage + scripted failure recovery; AccountingFixture registered with suppliers wired.
+- `pom.xml` - `org.jboss.logging:jboss-logging:3.6.1.Final` (lead-approved; D27 mandates the type, no document had provisioned the artifact).
+- Build: 66 tests, 0 failures. Review: engineer APPROVED cycle 1; sdet APPROVED cycle 2 (one required change: the interruptible-wait test).
+
+### Deviations from the documents
+- **`RegistryLease` carries `generationInfo` in addition to the session-pinned `opened`.** `dataAsOf` must ride the lease atomically - reading `currentInfo()` after acquire races a concurrent publish and could stamp a handle with another generation's lineage (an I8 violation). Reviewer-confirmed necessary.
+- **`Snapshot.close()` also closes every connection the handle issued** (lead decision; spec silent). Consequence: DETACH-in-use (A4/spec 9.2) arises only from raw non-handle connections, which is exactly how spec 17.7 step 4 stages it.
+- **Non-shutdown interrupt of a waiting acquire maps to `NotReadyException(TIMEOUT)`** after re-setting the interrupt flag; shutdown-originated interrupts map to `ShuttingDownException`. The FIXED reason label set (spec 12.3) has no "interrupted" value; TIMEOUT is the least-wrong classification.
+- **Negative `waitBudget` treated as zero.** Spec defines only zero and positive.
+- **Test methodology: `awaitParked`** (poll of `Thread.state` under a 10s deadline) accepted as a bounded precondition check - it observes a definite JVM state and cannot produce a false pass; the FIXED Hook enum has no seam on the wait path. The 100ms real-wait expiry test accepted: `Condition.awaitNanos` runs on nanoTime, which an injected `Clock` cannot drive.
+
+### Notes for later phases
+- **P4 must publish via `publish(gen, opened, info)`.** The fileBytes-only overload exists solely for P1-test compatibility; a facade served from it trips `checkNotNull` at consumer time. Suggestion open: mark it as such.
+- `Snapshot.connection()` after close throws IllegalStateException (fail-fast; unasserted).
+- Shutdown gating now lives at the facade (`ShuttingDownException` on every entry point); lease drain (spec 10.2 step 4) is P9's.
+- Reviewer suggestions left open (non-blocking): log swallowed connection-close failures in Cleaner cleanup; comment the interrupt-to-TIMEOUT mapping in code; pin negative-budget, connection-after-close ISE, and copyOut targetConnection ownership in tests.
+- P3 total ~670 lines incl. tests - slightly over the "roughly 200-600" guidance; driven by the D26-style breadth of the waitBudget/shutdown/orphan acceptance list, not speculative code.
