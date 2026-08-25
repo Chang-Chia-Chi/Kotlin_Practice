@@ -148,3 +148,19 @@ session looking at code that disagrees with the documents, which it will
 - A registry `check` failure inside the round bypasses the abort epilogue by design (invariant violation, not a 9.2 row).
 - `reclaimPass` treats InterruptedException as an ordinary reclaim failure (defer) without re-setting the flag; P9 owns interrupt delivery.
 - Reviewer suggestions open: comment the epilogue-bypass; testkit-toString coupling in one BuildContext assertion.
+
+## P4b - Built-in verify-rule tests  (2026-08-26)
+
+### Delivered
+- `core/VerifyRulesTest.kt` (12 tests, ~280 lines, extends RefreshCycleTestBase so the AccountingFixture rides along): per-rule pass/fail/gating for non_empty (zero-row table + no-tables-at-all), key_unique (+ keyUnique=false publishes the same duplicates), required_non_null (table.column scoping, bare-column checked against every table, default-empty list publishes NULLs), row_count_delta (default-off publishes -90%/+900%; enabled: decrease and increase ratios proven independent in both directions; cold-start previous=null skips the gate), BASE TABLE discovery (union view exempt from key_unique and absent from rowCounts - discriminates an unfiltered implementation both ways). Plus the two P4-review follow-ups: candidate.connection()-throws -> DISK_ERROR + emergency GC (via CandidateConnectionRefusingStore, the seam failOnNth cannot script) and round-entry shutdown short-circuit (zero store calls).
+- Shared assertVerifyRejected (exact 8.1/12.2 rule label, non-generic detail naming the offender per spec 8.5) and assertCandidateCleaned in every fail case.
+- P4TestSupport.kt untouched (add-only permission unused); no production change.
+- Build: 102 tests, 0 failures, 1 skipped (P7's Unix-only FD assertion). Review: APPROVED cycle 1.
+
+### Deviations from the documents
+- none.
+
+### Notes for later phases
+- **Open gap, assigned as a P5 rider: the `readable` rule's failure path** (verify-connection open or discovery query throwing -> Fail("readable")) is the one spec 8.1 row unasserted anywhere. ~15 lines reusing the wrapper pattern on open()'s OpenGeneration. Note: a real corrupt-file ATTACH failure classifies as disk_error (open() throws before the gate); the readable rule covers the verify-connection path specifically.
+- non_empty/readable non-disableable flags need no runtime gating test: no knob exists by construction (P0's computed vals + config defaults test).
+- QueryScript resolution order (queue -> patterns -> heuristics) verified against the real VerifyGate SQL; nullCounts keys match as SQL substrings (table-name scoping).
