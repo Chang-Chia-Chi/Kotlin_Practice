@@ -449,7 +449,9 @@ Two consequences, both enforced at validation time where possible:
   Routing any of them through VARCHAR/DECIMAL/TIMESTAMP would make `Row.string`/`Row.decimal`/
   `Row.dateTime` throw on the real value type, and is the encoding trick this section refuses.
   Because duckdb_jdbc reports `columnNullable` for every column, all four are reachable from
-  any scratch-to-scratch pipe; the author's fix is a CAST in the source SQL.
+  any scratch-to-scratch pipe; the author's fix is a CAST in the source SQL. A column
+  declared in `transform.addColumns` states its type in the task file, so that case is
+  additionally rejected at startup (rule 15).
 
 Never write a bare `appender.append(null)`. It compiles, because the primitive overloads do
 not apply and it resolves to the String overload, but it is misleading to read and would
@@ -1008,10 +1010,20 @@ Any failure below prevents startup, or causes a reload to be rejected with no ch
     lacks `addColumns`. AUTO's DECIMAL precision cannot be validated at startup, because
     result set metadata exists only once the source query runs; that check is at writer open
     (4.4) and is named here for completeness.
-15. `createTable: REQUIRED` on a DuckDB target: no nullable column whose declared type is
-    outside VARCHAR, DECIMAL, TIMESTAMP, BIGINT (4.6). BIGINT was added once S3 showed the
-    cast is exact when the value comes from `Row.long()`. DATE is rejected whether nullable
-    or not, because the truncation in 4.6 is silent and does not depend on nullability.
+15. **DuckDB target column types (4.6).** No nullable column whose declared type is outside
+    VARCHAR, DECIMAL, TIMESTAMP, BIGINT, and no DATE, BLOB or TIMESTAMP WITH TIME ZONE column
+    whether nullable or not. BIGINT was added once S3 showed the cast is exact when the value
+    comes from `Row.long()`. DATE is rejected regardless of nullability, because the
+    truncation in 4.6 is silent and does not depend on it.
+
+    Startup enforces this over every column type a task file *states*, which is every
+    `transform.addColumns` entry (3.2, 9.1). It cannot enforce it over a *table's* declared
+    types: under `REQUIRED` those live in a catalog the run creates, and under `AUTO` they
+    come from result set metadata that exists only once the source query runs. duckdb_jdbc
+    1.1.3 offers no parse-to-AST path for DDL - `json_serialize_sql` parses a `CREATE TABLE`
+    but serializes SELECT only, `EXPLAIN` binds it without emitting a column list, and
+    `PREPARE` takes no DDL - so that half is enforced at writer open (4.6), before any row is
+    written, and is named here for completeness, as in rule 14.
 16. Cron expression valid, when present.
 17. Each step's field set matches its declared type exactly.
 18. A scratch target with `createTable: REQUIRED` and `retries > 0` is rejected (5.5). The
@@ -1220,6 +1232,17 @@ data class StepResult(
   See S4.
 - **S3. Implicit cast on append. ANSWERED (P0).** BIGINT casts exactly and is now allowed
   by rule 15; DATE truncates silently and stays rejected. See the table in 4.6.
+- **Rule 15 at startup. ANSWERED (P6), by splitting the rule where the information splits.**
+  The declared types of a target *table* are not reachable at startup on this classpath:
+  `json_serialize_sql` parses DDL but serializes SELECT only, `EXPLAIN` binds a
+  `CREATE TABLE` without emitting columns, and `PREPARE` takes no DDL. Executing a task's
+  scratch `sql` steps in a boot sandbox was measured and rejected - 1.1.3 *is* cancellable
+  (`Statement.cancel()` interrupts a runaway CTAS in ~200 ms) and `enable_external_access=false`
+  blocks read, write and attach, so the containment objection does not stand - but 3.4's own
+  `create index idx_wip_lot on wip_stg (lot_id)` and 5.4's own PL/SQL `sql` step both fail in
+  a boot sandbox, so the rule would either silently switch off or refuse to boot a correct
+  file. Rule 15 now enforces at startup the columns the file declares, and at writer open the
+  columns a catalog or a result set declares.
 - **Null task variable binding. ANSWERED (P5).** A null from a zero-row export binds with
   its export column's type. Untyped `Types.OTHER` was reachable the moment `export` shipped.
   No signature changed: measured, JDBI 3.45.4 binds an `Argument` value handed to `bindMap`

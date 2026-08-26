@@ -582,3 +582,120 @@ are individually reasonable and the failure arrives through a path nobody pictur
   rule 12 to key off.
 - `TaskDefinition.enabled`, `cron`, `logging`, `onSuccess`, `onFailure` and
   `PipeTarget.idempotent` are carried and unused - P6/P7/P8.
+
+---
+
+## P6 - YAML loading and validation  (2026-08-27)
+
+Team: engineer + sdet (composition table: no reviewer), plus one independent adjudicator.
+One review cycle. Final: 265 tests, 0 failures. P6 contributes 56.
+
+Production is 501 lines of code across two files, over the 200-600 budget that counts tests
+too. Eighteen rules plus the canaries that make them mean anything do not fit; recorded
+rather than trimmed by dropping coverage.
+
+### Delivered
+
+Production: `TaskYaml.kt` (spec 3's schema as one `internal` DTO per document node, with a
+`@JsonSubTypes` step hierarchy), `TaskFileLoader.kt` (`LoadResult`, `ValidationReport`,
+`ValidationError`, `TaskFileLoader`, the per-file rule pass, the DuckDB syntax check).
+
+Tests: `TaskFileFixtures.kt`, `TaskFileLoaderValidTest`, `TaskFileLoaderRulesTest`,
+`TaskFileLoaderSqlFidelityTest`, `TaskFileLoaderDirectoryTest`.
+
+### Deviations from the documents
+
+1. **Spec 10 rule 15 was amended, and the amendment made startup check MORE than before.**
+   Decided by an independent adjudicator. Both agents had independently concluded the rule
+   was unenforceable at startup; both were right about the half they could see and both
+   missed the other half. A *table's* declared types are genuinely unreachable - measured
+   three ways: `json_serialize_sql` parses a `CREATE TABLE` but serializes SELECT only,
+   `EXPLAIN create table` emits a single `CREATE_TABLE` box with no column list, and
+   `PREPARE` rejects DDL outright. But `transform.addColumns` states its types **in the YAML
+   text**, and the loader was accepting all of it: `DATE`, `BLOB`, `TIMESTAMP WITH TIME
+   ZONE`, nullable `BOOLEAN`, nullable `DOUBLE` and `DECIMAL` with default precision all
+   loaded clean and died at writer open. Rule 15 now splits where the information splits,
+   using the wording rule 14 already carries for the same reason.
+2. **`Result<List<TaskDefinition>, ValidationReport>` does not exist**, since Kotlin's
+   stdlib `Result` takes one type parameter. Replaced by a sealed
+   `LoadResult.Loaded` / `LoadResult.Invalid` pair. `kotlin.Result` plus a
+   `ValidationException` was rejected because reading the report would need an unchecked cast
+   at every call site and nothing constrains a `Result.failure` to carry that type. Follows
+   P5's `PipeTarget` precedent: the invalid state is unrepresentable, not merely documented.
+   Seventh phase running that the plan named public surface spec 11 never declared.
+3. **`TaskFileLoader(datasources: Set<String>, transforms: Map<String, RowTransform>,
+   hooks: Set<String>)`** is the answer to "rules 3, 4 and 5 need something the loader does
+   not own": plain data in, no registry invented. `transforms` is a map rather than a name
+   set because `PipeStep.transform` carries a resolved `RowTransform` while YAML carries a
+   name, and the loader is the only place the two can meet.
+4. **Rule 6 is enforced for scratch SQL and partial elsewhere.** DuckDB's own parser runs via
+   `json_serialize_sql`, which - measured - parses **without binding**, unlike `PREPARE` and
+   `EXPLAIN` which both bind and fail on a missing table. Non-scratch SQL gets blank,
+   positional and named-parameter checks only: DuckDB is the only dialect on the classpath
+   and it rejects a valid Oracle `MERGE`.
+5. **Rule 16 is structural, not a cron parse** - field count and legal characters. No cron
+   parser on the classpath; marked `ponytail:` with P7's `quarkus-scheduler` as the upgrade.
+6. **Five checks beyond spec 10**, each one line and each converting a mid-run failure into a
+   boot failure: duplicate YAML keys, non-scratch `format: PARQUET` (5.6),
+   `datasetIdentifier`'s character check, negative `retries`, non-positive `chunkSize`.
+7. **`unwritableToDuckDb` was lifted out of `DuckDbTableWriter`** to file level so the
+   startup check and the writer-open check call the same predicate. Same shape as P4's
+   `quote` -> `quoteIdentifier` lift. Verified by mutation: short-circuiting the predicate to
+   null breaks 5 tests in `DuckDbTableWriterAutoTest`, 5 in `DuckDbTableWriterRequiredTest`
+   and 6 in `TaskFileLoaderRulesTest` - direct evidence that one thing decides both checks,
+   rather than a KDoc claiming it.
+
+### The boot sandbox, refused on measurement rather than on the reason first given
+
+The engineer rejected executing a task's scratch `sql` steps in a boot sandbox for two
+reasons. The adjudicator measured the first one **false**: 1.1.3 *is* cancellable -
+`Statement.cancel()` from a watchdog interrupts a runaway CTAS in ~200 ms - and
+`set enable_external_access=false` refuses `read_parquet`, `COPY TO` and `ATTACH`. The
+containment objection does not stand.
+
+What defeats the sandbox is the engineer's **second** reason, which the adjudicator
+confirmed and which is mainstream rather than a corner case: **spec 3.4's own canonical
+example does not execute at boot.** `create index idx_wip_lot on wip_stg (lot_id)` fails
+with `Catalog Error: Table with name wip_stg does not exist`, because `wip_stg` is created by
+a `pipe` step and no pipe can run at boot. Spec 5.4's own PL/SQL `sql` step fails the same
+way. So a sandbox would either ignore those failures - silently switching rule 15 off for
+exactly the task files most likely to be complex - or honour them and refuse to boot a
+correct application over a `create index`.
+
+Fifth confidently-wrong driver claim in six phases, and the second refuted by an adjudicator
+rather than a reviewer. The engineer's own process fix, adopted: nothing goes in a KDoc that
+was not run in the scratchpad first. The two claims it *did* run this phase both survived.
+
+### A bug found by running rather than reading
+
+A file containing only `---`, or the literal `null`, deserialises to Java `null` rather than
+throwing, so startup died with a `NullPointerException` instead of producing a report. An
+empty file and a comments-only file do throw. Fixed.
+
+### Measured Jackson behaviours
+
+- `FAIL_ON_UNKNOWN_PROPERTIES` is already true by default on `YAMLMapper`; set explicitly
+  anyway, because it is an acceptance criterion rather than something to rest on a default.
+- `STRICT_DUPLICATE_DETECTION` is **off** by default: without it, `name:` twice parses
+  silently and the second wins. Enabled.
+- Every failure shape is a `JsonProcessingException` with a usable `location.lineNr`,
+  including `MarkedYAMLException`, which is *not* a `JsonMappingException`.
+- `As.PROPERTY` on a sealed interface consumes `type` and does not then report it as unknown.
+- `${env.FOO}` survives folded and literal block scalars byte for byte.
+
+### Notes for later phases
+
+- **P7 owns reload semantics** and the real cron parse (rule 16 is structural today).
+- **P7/P8 wire the loader's three constructor arguments**: datasource names, hook names, and
+  the CDI-supplied transform map.
+- **Rule 15's table half lives at writer open** (4.6, P2), before any row is written, with
+  `retries` forced to 0 by rule 18. Reproducible in seconds through spec 8.2's manual
+  trigger.
+- `cacheCopy` has no YAML schema by design (P9's); it surfaces as an unknown type id listing
+  the four known ones.
+- **Rule order within a report is untested by choice** - pinning it would encode the loader's
+  internal rule sequence, which nothing outside the class depends on. File-name ordering
+  *is* tested.
+- Non-scratch `materialize` output shares rule 9's uniqueness namespace with scratch
+  datasets, so two materialize steps writing the same table name to two different Oracle
+  datasources would be rejected. Matches 5.5's parenthetical literally.

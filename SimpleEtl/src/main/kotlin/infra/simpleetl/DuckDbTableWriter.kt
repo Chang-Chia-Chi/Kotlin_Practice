@@ -165,26 +165,7 @@ class DuckDbTableWriter(
 
     /** Every type and nullability combination that DuckDB cannot take without losing data. */
     private fun rejectUnwritable(column: ColumnMeta) {
-        val reason = when (column.type) {
-            CanonicalType.BYTES ->
-                "BLOB and RAW cannot be written to DuckDB. The 1.1.3 appender has no byte[] overload " +
-                    "at all, null or not. Convert the column in the source SQL, for example to base64 text."
-            CanonicalType.DATE ->
-                "DATE cannot be written to DuckDB, nullable or not. appendLocalDateTime stores the date " +
-                    "and drops the time component without an error, and seam 1 maps a date carrying a time " +
-                    "to LocalDateTime. Cast the column to TIMESTAMP in the source SQL."
-            CanonicalType.INSTANT ->
-                "TIMESTAMP WITH TIME ZONE cannot be written to DuckDB. The 1.1.3 appender has no method " +
-                    "that accepts an Instant or an OffsetDateTime. Cast the column to TIMESTAMP in the " +
-                    "source SQL, after converting it to the zone you want."
-            else -> if (column.nullable && column.type !in NULL_CAPABLE) {
-                "a nullable ${column.type.duckDbType} column cannot be written to DuckDB. Only VARCHAR, " +
-                    "DECIMAL, TIMESTAMP and BIGINT have an appender method that accepts null. Declare the " +
-                    "column NOT NULL, or cast it in the source SQL."
-            } else {
-                return
-            }
-        }
+        val reason = unwritableToDuckDb(column) ?: return
         throw IllegalArgumentException("step '$step', column '${column.name}': $reason")
     }
 
@@ -240,13 +221,44 @@ class DuckDbTableWriter(
         scale = scale,
     )
 
-    private companion object {
-        /** Validation rule 15: the target types with an appender method that accepts null. */
-        val NULL_CAPABLE = setOf(
-            CanonicalType.STRING,
-            CanonicalType.DECIMAL,
-            CanonicalType.DATETIME,
-            CanonicalType.LONG,
-        )
+}
+
+/** Validation rule 15: the target types with an appender method that accepts null. */
+private val NULL_CAPABLE = setOf(
+    CanonicalType.STRING,
+    CanonicalType.DECIMAL,
+    CanonicalType.DATETIME,
+    CanonicalType.LONG,
+)
+
+/**
+ * Validation rule 15 as a predicate: the reason [column] cannot be written to DuckDB, or null when
+ * it can. Spec 4.6's table, in one place.
+ *
+ * Lifted out of [DuckDbTableWriter] in P6 so that startup and writer open decide with the same
+ * code, the way P4 lifted `quote` to `quoteIdentifier`. The two reach it with column types from
+ * different places and neither can stand in for the other: `TaskFileLoader` applies it to every
+ * `transform.addColumns` entry, because a task file states those types outright (rule 15, spec
+ * 3.2), while a *table's* declared types live in a catalog the run creates or in result set
+ * metadata that exists only once the source query runs, so the writer applies it at open.
+ */
+internal fun unwritableToDuckDb(column: ColumnMeta): String? = when (column.type) {
+    CanonicalType.BYTES ->
+        "BLOB and RAW cannot be written to DuckDB. The 1.1.3 appender has no byte[] overload " +
+            "at all, null or not. Convert the column in the source SQL, for example to base64 text."
+    CanonicalType.DATE ->
+        "DATE cannot be written to DuckDB, nullable or not. appendLocalDateTime stores the date " +
+            "and drops the time component without an error, and seam 1 maps a date carrying a time " +
+            "to LocalDateTime. Cast the column to TIMESTAMP in the source SQL."
+    CanonicalType.INSTANT ->
+        "TIMESTAMP WITH TIME ZONE cannot be written to DuckDB. The 1.1.3 appender has no method " +
+            "that accepts an Instant or an OffsetDateTime. Cast the column to TIMESTAMP in the " +
+            "source SQL, after converting it to the zone you want."
+    else -> if (column.nullable && column.type !in NULL_CAPABLE) {
+        "a nullable ${column.type.duckDbType} column cannot be written to DuckDB. Only VARCHAR, " +
+            "DECIMAL, TIMESTAMP and BIGINT have an appender method that accepts null. Declare the " +
+            "column NOT NULL, or cast it in the source SQL."
+    } else {
+        null
     }
 }

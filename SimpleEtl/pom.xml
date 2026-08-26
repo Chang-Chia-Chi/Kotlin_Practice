@@ -20,6 +20,7 @@
         <ojdbc.version>23.5.0.24.07</ojdbc.version>
         <mockito.version>5.14.2</mockito.version>
         <jdbi.version>3.45.4</jdbi.version>
+        <jackson.version>2.18.2</jackson.version>
     </properties>
 
     <!-- testcontainers pulls byte-buddy 1.14.18, mockito 5.14.2 wants 1.15.4. On Java 22 the
@@ -62,6 +63,19 @@
             <groupId>org.duckdb</groupId>
             <artifactId>duckdb_jdbc</artifactId>
             <version>1.1.3</version>
+        </dependency>
+        <!-- P6: spec 10 loads task files by scanning a directory and deserialising with
+             Jackson YAML. Bean Validation is deliberately absent - the 17 rules of spec 10
+             are custom logic, and a validation framework for them is more code, not less. -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.dataformat</groupId>
+            <artifactId>jackson-dataformat-yaml</artifactId>
+            <version>${jackson.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.fasterxml.jackson.module</groupId>
+            <artifactId>jackson-module-kotlin</artifactId>
+            <version>${jackson.version}</version>
         </dependency>
         <!-- P2: spec 11.1 declares JdbcTableWriter(jdbi) and JdbcStatementWriter(jdbi). -->
         <dependency>
