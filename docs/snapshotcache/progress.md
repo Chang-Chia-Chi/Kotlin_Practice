@@ -200,3 +200,18 @@ session looking at code that disagrees with the documents, which it will
 ### Notes for later phases
 - Reviewer suggestions open (non-blocking): progress assertion inside the I4 sweep's corrective loop; pin events.unavailable empty in the mid-acquire case.
 - HookDriver is reusable; P6's model test may consume it read-only.
+
+## P6 - Randomized model test  (2026-08-26)
+
+### Delivered
+- `core/RandomizedModelTest.kt` (~400 lines) - spec 17.5 verbatim: per-sequence real integration stack (P5 wiring, K=3) vs an independent in-test model; 7-op weighted generator (acquire/close incl. deliberate double-close picks/refresh-success/refresh-failure/verify-failure/gc/orphan); I1-I8 checked after EVERY op in observable forms (I2 as exact openedGenerations == live-set equality; I7 as disk == live-set after every op; I4 with one corrective gc pass for the close-no-gc-yet transient); I5 + the 17.3 equations at every sequence end via AccountingFixture.verify(). Fixed seed 20260826, per-sequence seed = SEED+i, failure header prints seed + full op log + replay instruction. 5000 sequences x 40 ops (~5s) + a 10-sequence orphan-dedicated run (bounded Cleaner await).
+- Mandated sanity check executed under the strict protocol: dropped beginReclaim's refCount==0 filter -> caught in sequence #0 in 0.28s (leased gen reclaimed under its handle, model-vs-registry divergence named); revert proven byte-clean (git diff vs p5 on src/main EMPTY, lead-verified independently).
+- Build: 116 tests, 0 failures, 1 Unix-only skip. Review: REVISE cycle 1 (dead accounting-backstop extension removed - the explicit per-sequence verify() is the sole, documented mechanism), APPROVED cycle 2.
+
+### Deviations from the documents
+- Test names are `model_*`, not `I<n>_`: the spec 17.2 naming convention belongs to the pre-existing targeted per-invariant tests; spec 17.5 mandates no name.
+- Single-threaded by design: spec 17.5 sequences operations; interleavings are P5's contract.
+- Orphan determinism choice: bulk run excludes the orphan op; a dedicated 10-sequence run guarantees at least one per sequence (Cleaner nondeterminism kept out of the 5000-sequence budget).
+
+### Notes for later phases
+- The model's K-guard mirror is derived from spec 6.1 semantics over model state (reviewer-verified independent of production logic); the bug-injection run is standing evidence the oracle discriminates.
