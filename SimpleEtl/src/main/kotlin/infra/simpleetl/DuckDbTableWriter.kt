@@ -105,10 +105,10 @@ class DuckDbTableWriter(
     private fun generateTable(columns: List<ColumnMeta>) {
         columns.forEach(::rejectUnwritable)
         val definitions = columns.joinToString(", ") {
-            "${quote(it.name)} ${ddlType(it)}${if (it.nullable) "" else " not null"}"
+            "${quoteIdentifier(it.name)} ${ddlType(it)}${if (it.nullable) "" else " not null"}"
         }
         connection.createStatement().use {
-            it.execute("create table ${quote(schemaName)}.${quote(tableName)} ($definitions)")
+            it.execute("create table ${quoteIdentifier(schemaName)}.${quoteIdentifier(tableName)} ($definitions)")
         }
     }
 
@@ -239,8 +239,6 @@ class DuckDbTableWriter(
         precision = precision,
         scale = scale,
     )
-
-    private fun quote(identifier: String): String = "\"${identifier.replace("\"", "\"\"")}\""
 
     private companion object {
         /** Validation rule 15: the target types with an appender method that accepts null. */

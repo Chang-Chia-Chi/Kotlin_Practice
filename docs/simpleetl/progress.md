@@ -372,3 +372,101 @@ than the one that is.
 - **`RowPipe` owns the target writer's lifecycle** (open/write/close), so a `RowWriter` is
   single-use. Spec 9.5 constructs the writer inline, so no one else could close it.
 - `JdbcStatementWriter` is still unexercised by any pipe test.
+
+---
+
+## P4 - Scratch lifecycle  (2026-08-27)
+
+Team: sdet + engineer + reviewer. One review cycle. Final: 160 tests, 0 failures.
+First phase in which every driver claim the engineer made survived independent
+re-measurement.
+
+### Delivered
+
+Production: `ScratchDb.kt` (lazy per-run DuckDB instance, settings at open, cleanup on every
+path, runtime temporary-table guard), `DatasetNamer.kt` (attempt-suffixed names, stable view
+over a table or a parquet file, shared `quoteIdentifier`/`sqlLiteral` internals).
+
+Tests: `ScratchFixtures.kt`, `ScratchDbLifecycleTest`, `ScratchDbDeletionTest`,
+`DatasetNamerTest`, `NoTempTableTest`.
+
+### Deviations from the documents
+
+1. **Spec 11.2 declares only `connection()`, `duplicate()`, `close()`.** The implementation
+   needs a constructor: `ScratchDb(directory: Path, memoryLimitMb: Int, tempDirectory: Path
+   = directory.resolve("spill"))`, because 7.2 requires file location, memory limit and temp
+   directory to be decided at open. A public `val directory` was also added and then
+   **removed in review** - nothing read it, and P5 builds the run directory itself. The
+   public surface now matches 11.2 exactly.
+2. **`DatasetNamer` has no signature anywhere in spec 11.** Built as
+   `DatasetNamer(scratchDirectory)` with `physical`, `parquetPath`, `publishTable`,
+   `publishParquet`. The publish pair executes rather than returning SQL, so the path
+   escaping `read_parquet` needs lives in one place. Fourth phase running that the plan named
+   a public type spec 11 never declared, after `RowMapper`, the writers' `step`, and
+   `JdbcSource(handle)`.
+3. **`close()` can throw `IllegalStateException`**, which spec 11.2's bare `override fun
+   close()` does not sanction. Raised only for a leftover temporary table or a path that
+   survived deletion, and only **after** cleanup completes - so on a failure path it arrives
+   as suppressed and the run's own failure stays primary. Verified by probe, not by reading:
+   the guard fired and the directory was already empty.
+4. **`datasetIdentifier` validation was added on the engineer's initiative and kept.** Not
+   required by 5.5 or 11.2. The reviewer probed the case that justifies it: without the
+   check, `parquetPath("../../evil", 1)` resolves outside the scratch directory. A dataset
+   name arrives from a YAML file and becomes both a SQL identifier no prepared statement can
+   parameterise and a filesystem path. Validation at a trust boundary is not over-engineering.
+5. **`require(memoryLimitMb > 0)` and `require(attempt >= 1)`** are not in the spec. Recorded
+   rather than tested, following P3's precedent with `require(chunkSize > 0)`, so a later
+   session does not "simplify" them away. `require(attempt >= 1)` did get a test alongside
+   the identifier work.
+6. **The temp-table ban is met by two checks, not one.** The plan says "an ArchUnit rule or
+   an equivalent check", but ArchUnit reads bytecode and a temp table is a SQL string.
+   ArchUnit is also not on the classpath. So: a source scan over `.kt` in both roots, and a
+   runtime catalog guard in `close()` that asks **every issued connection** - measured, the
+   temporary catalog is per connection, so a guard asking only the primary would be a false
+   negative. Neither is complete: the scan cannot see SQL a YAML `sql` step assembles at run
+   time, and the guard only covers paths a run actually exercises. Both are now proven able
+   to fail.
+7. **P2's `DuckDbTableWriter.kt` was modified** - its private `quote` lifted to the shared
+   `internal quoteIdentifier`. Behaviour-identical (body verified byte-for-byte by the lead)
+   and P2's 29 tests pass unchanged.
+
+### The platform finding, which reaches beyond this phase
+
+`fileIsDeletedEvenWhenTheRunLeavesADuplicateOpen` was **structurally unfalsifiable on the
+Linux CI**. All its discriminating power came from a Windows file lock: on Windows
+`Files.delete` throws while any connection is open, so the test detects a leaked duplicate.
+On Linux the file unlinks successfully, the file-absence assertion passes, and the test goes
+green against an implementation that never closes duplicates - exactly the behaviour it
+exists to pin. Fixed with a platform-independent `leaked.isClosed()` assertion.
+
+**Every measurement this project has is from Windows; CI is Linux.** P0 recorded that as a
+precision caveat. It is not only precision: a test whose discriminating power comes from an
+OS behaviour stops discriminating on CI and stays green. The sdet swept the rest of the P4
+suite and found no other case - the deletion-path tests rest on delete *succeeding*, which is
+the easy direction on Linux. Later phases should keep asking the question. Spec 7.2's 32 GiB
+`sizeLimit` has the same exposure: it rests on bytes-per-value and spill-factor ratios
+measured on Windows/NVMe, and ratios should travel better than wall times, but nobody has
+confirmed that on Linux.
+
+### Measured on duckdb_jdbc 1.1.3, verified twice
+
+- The file is created at `getConnection`, before any statement runs.
+- Windows blocks deletion while any connection is open; an outstanding duplicate keeps the
+  lock and stays usable after the primary closes. **Windows-only.**
+- The temporary catalog is per connection: a temp table on the write connection is invisible
+  from a duplicate.
+- `'512MB'` reads back as `488.2 MiB` - DuckDB reads MB as a power of ten. `'512MiB'` reads
+  back as `512.0 MiB`.
+
+### Notes for later phases
+
+- **P5 owns when a retry happens and which attempt number to publish.** `DatasetNamer`
+  deliberately does not decide when an attempt has succeeded.
+- **P8 needs a way to reach the scratch file's size** for `etl_scratch_file_bytes` (9.3).
+  Deliberately not built speculatively; it is one line when P8 needs it.
+- `ScratchDb.close()`'s guard query is wrapped in `runCatching`, so a future driver change
+  renaming `duckdb_tables().temporary` would make it a silent no-op while the KDoc still
+  promises enforcement. The tripwire is the test that proves it fires, not runtime plumbing -
+  unwrapping it would turn a genuinely broken connection into a second failure at close.
+- `report()`'s undeleted-survivor branch is deliberately untested: it fires only where the OS
+  locks open files, so a test would pass on Windows and fail on Linux CI.
