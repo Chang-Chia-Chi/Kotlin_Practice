@@ -1,0 +1,1149 @@
+# YAML-Driven ETL Framework - Specification
+
+Stack: Kotlin, Quarkus, JDBI, Oracle, DuckDB (duckdb_jdbc 1.1.3, file mode)
+Build: Maven
+
+---
+
+## 1. Goals and Non-Goals
+
+### 1.1 Goals
+
+- Define an ETL task entirely in one YAML file. All task files share one identical schema.
+- Move data between JDBC datasources, optionally using DuckDB as a working area.
+- Express transformation as SQL executed inside a database engine, not as application code.
+- Make failure behaviour explicit and safe by default.
+- Fail at application startup, not at 03:00, when a task file is wrong.
+- Share the row-moving engine with the snapshot cache instead of duplicating it.
+
+### 1.2 Non-Goals
+
+- No DAG. Phases and steps are strictly sequential.
+- No distributed execution. Single pod, single JVM.
+- No transaction spanning chunks, steps, or phases. See 5.4.
+- No CDC or watermark semantics built in. A task needing a watermark uses an `export`
+  step plus its own bookkeeping table.
+- No UI for authoring.
+
+### 1.3 Design Rules Applied Throughout
+
+- The framework never guesses a type conversion. Ambiguity is a startup or runtime error.
+- The framework never reuses or deletes a DuckDB table. See 5.5.
+- Defaults are the safe choice. Unsafe behaviour must be written explicitly in YAML.
+
+### 1.4 Version Constraint
+
+`duckdb_jdbc` is pinned to 1.1.3. The CI environment provides a glibc older than 2.23,
+which the native library in 1.4.x and 1.5.x requires; both fail to load with
+`/lib64/libm.so.6: version 'GLIBC_2.23' not found`. This pin is a known constraint, not a
+preference: 1.1.3 is from November 2024 and receives no updates. Upgrading the CI and
+runtime base image is tracked separately; section 13 lists what becomes available when it
+happens.
+
+---
+
+## 2. Structure
+
+### 2.1 Two Layers
+
+**Layer 1 - RowPipe.** Moves rows from a JDBC source into a target, chunked and typed.
+Knows nothing about YAML, phases, scheduling, retry policy, or generations. Its only
+inputs are a source query, a target, and a chunk size.
+
+**Layer 2 - Task engine.** YAML loading and validation, phase and step sequencing, retry,
+variables, scratch lifecycle, scheduling, the admin API, hooks, and listeners. The `pipe`
+step is implemented by constructing a RowPipe and running it.
+
+The split exists because the snapshot cache needs Layer 1 and not Layer 2. Its
+`GenerationSource` seam hands the caller a write `Connection` to a candidate generation
+file and asks it to populate the file; a RowPipe is exactly that, so the cache reuses the
+row-moving, type-mapping, and appender code without inheriting the task model. See 9.5.
+
+`TaskDefinition` is a public, programmatically constructible type. YAML is one source of
+`TaskDefinition`, not the only one, so a caller that wants Layer 2 without YAML files can
+build a definition in code.
+
+### 2.2 Concept Model
+
+```
+Task            one YAML file, one schedule, one run at a time
+  Phase         ordered group of steps, for grouping and observability
+    Step        the unit of work, retry, and logging
+```
+
+A phase is an ordered, named group of steps. It has no transactional meaning and no
+concurrency meaning. Its purpose is grouping in logs and metrics so a 10-step task reads
+as "extract / build / publish" rather than as a flat list.
+
+### 2.3 Step Types
+
+Four step types. Each has a fixed field set, which is what keeps task files structurally
+identical.
+
+| Type | Purpose | Reads | Writes |
+|---|---|---|---|
+| `pipe` | move rows between datasources | one datasource via SQL | one datasource |
+| `materialize` | compute a derived dataset inside one datasource | one datasource via SQL | a table or parquet file in that datasource |
+| `sql` | run statements with no dataset output | one datasource | side effects only |
+| `export` | produce task variables | one datasource, or literals | task variable scope |
+
+`pipe` is the only step where rows pass through the JVM. Everything else executes inside
+the database engine.
+
+### 2.4 Supported Task Shapes
+
+DuckDB is optional. All of these are first class:
+
+```
+A. Oracle to Oracle, no DuckDB
+   pipe  oracle_mes -> report_oracle.wip_summary
+
+B. Oracle staged through DuckDB
+   pipe         oracle_mes -> scratch.wip_stg
+   pipe         oracle_mes -> scratch.lot_stg
+   materialize  scratch    -> scratch.summary
+   pipe         scratch    -> report_oracle.wip_summary
+
+C. Several external outputs
+   ... build in scratch ...
+   pipe  scratch -> report_oracle.wip_summary
+   pipe  scratch -> other_oracle.wip_daily
+
+D. Reading the snapshot cache
+   cacheCopy    wip_cache  -> scratch.wip_cache   (file-to-file, see 7.3)
+   materialize  scratch    -> scratch.summary
+   pipe         scratch    -> report_oracle.wip_summary
+```
+
+In shape A no scratch file is created. The scratch DuckDB instance is created lazily on
+first reference to the `scratch` datasource, so a task that never mentions it pays nothing.
+
+---
+
+## 3. YAML Schema
+
+### 3.1 Task
+
+```yaml
+name: wip-summary                 # required, unique, [a-z0-9-]{1,64}
+description: "..."                # optional
+enabled: true                     # optional, default true
+schedule:
+  cron: "0 */10 * * * ?"          # optional; omit for API-triggered-only tasks
+logging: true                     # optional, default true, see 9.2
+chunkSize: 5000                   # optional, task-level default, default 5000
+scratch:
+  memoryLimitMb: 4096             # optional, default from application config
+onSuccess: notify-downstream      # optional, hook name, see 9.4
+onFailure: null                   # optional, hook name
+vars:                             # optional, literal task variables
+  - name: siteCode
+    value: "F12"
+phases:
+  - name: extract
+    steps: [ ... ]
+```
+
+### 3.2 Step: pipe
+
+```yaml
+- name: load-wip
+  type: pipe
+  chunkSize: 20000                # optional, overrides the task-level default
+  source:
+    datasource: oracle_mes
+    sql: >
+      select lot_id, cast(qty as number(18,3)) as qty, upd_ts
+      from wip
+      where upd_ts > :lastTs
+  transform:                      # optional, see 9.1
+    bean: wipEnricher
+    addColumns:                   # required when the transform adds columns and
+      - name: row_hash            # the target uses createTable AUTO
+        type: VARCHAR
+  target:
+    datasource: scratch
+    # --- form 1: declarative table ---
+    table: wip_stg
+    createTable: AUTO             # AUTO | REQUIRED
+    # --- form 2: statement, non-DuckDB targets only ---
+    # sql: >
+    #   merge into ...
+    # idempotent: true
+  retries: 3                      # default 3 for a scratch target, 0 otherwise
+```
+
+Exactly one of `target.table` or `target.sql` must be present.
+
+### 3.3 Step: materialize
+
+```yaml
+- name: build-summary
+  type: materialize
+  datasource: scratch
+  output: summary                 # dataset name referenced by later steps
+  format: TABLE                   # TABLE | PARQUET
+  sql: >
+    select w.lot_id, sum(w.qty) as qty, l.product
+    from wip_stg w join lot_stg l using (lot_id)
+    group by 1, 3
+  retries: 3
+```
+
+### 3.4 Step: sql
+
+```yaml
+- name: index-staging
+  type: sql
+  datasource: scratch
+  statements:
+    - "create index idx_wip_lot on wip_stg (lot_id)"
+  retries: 3
+```
+
+### 3.5 Step: export
+
+```yaml
+- name: read-watermark
+  type: export
+  datasource: oracle_mes
+  vars:
+    - name: lastTs
+      sql: "select max(processed_ts) from etl_watermark where task_name = :taskName"
+```
+
+---
+
+## 4. Type Contract
+
+### 4.1 Canonical Types
+
+A `Row` value is always one of:
+
+```
+String, Boolean, Long, BigDecimal, Double,
+LocalDate, LocalDateTime, Instant, ByteArray, null
+```
+
+### 4.2 Row
+
+```kotlin
+class Row internal constructor(private val values: LinkedHashMap<String, Any?>) {
+
+    val columns: Set<String>                    // lower case, source order
+
+    operator fun get(name: String): Any?        // null if absent or SQL NULL
+    fun contains(name: String): Boolean         // distinguishes absent from NULL
+
+    fun string(name: String): String?
+    fun long(name: String): Long?
+    fun decimal(name: String): BigDecimal?
+    fun double(name: String): Double?
+    fun bool(name: String): Boolean?
+    fun date(name: String): LocalDate?
+    fun dateTime(name: String): LocalDateTime?
+    fun instant(name: String): Instant?
+    fun bytes(name: String): ByteArray?
+
+    fun with(name: String, value: Any?): Row    // add or replace, returns a new Row
+    fun without(name: String): Row
+}
+```
+
+A typed accessor throws a diagnostic error naming step, column, actual type and requested
+type, rather than silently coercing. `Row` is immutable; `with` and `without` return
+copies. A transform reads with the accessors and returns `row.with("row_hash", h)`.
+
+### 4.3 Seam 1: JDBC read into a Row
+
+| JDBC / Oracle type | Canonical type |
+|---|---|
+| NUMBER, NUMERIC, DECIMAL | BigDecimal |
+| INTEGER, BIGINT, SMALLINT | Long |
+| FLOAT, DOUBLE, BINARY_DOUBLE | Double |
+| VARCHAR2, CHAR, NVARCHAR2, CLOB | String |
+| Oracle DATE, TIMESTAMP (`Types.TIMESTAMP`) | LocalDateTime |
+| DuckDB DATE (`Types.DATE`) | LocalDate |
+| TIMESTAMP WITH TIME ZONE | Instant |
+| BOOLEAN | Boolean |
+| RAW, BLOB | ByteArray |
+| anything else | error |
+
+An unsupported type is a runtime error naming step and column. The fix is a CAST in the
+source SQL. The framework does not guess.
+
+Two rows in this table were corrected in P1, both because the original was written
+Oracle-first and neither case arises from Oracle.
+
+**DATE splits by JDBC type code, not by name.** An Oracle `DATE` column carries a time
+component and reaches the driver as `Types.TIMESTAMP` (93), because ojdbc's
+`mapDateToTimestamp` defaults to true; it maps to `LocalDateTime` and keeps its time, which
+is what the original row was protecting. `Types.DATE` (91) only ever arrives from DuckDB,
+where a DATE genuinely has no time, so it maps to `LocalDate`. Mapping 91 to `LocalDateTime`
+instead would make `CanonicalType.DATE` unreachable from any result set, and duckdb_jdbc
+1.1.3 refuses to convert a DATE column to `LocalDateTime` or `Timestamp` at all - both throw
+- so it would also require an `atStartOfDay` workaround to produce a value the source never
+had.
+
+**BOOLEAN was missing entirely.** Oracle had no SQL BOOLEAN when this table was written, but
+DuckDB has always had one and Oracle 23 now does too; both emit `Types.BOOLEAN` (16). Without
+this row a DuckDB BOOLEAN column cannot be read at all, which breaks task shapes B and C
+(2.4) as soon as a scratch table has a boolean, and makes the `BOOLEAN` branch of 4.6's
+writer dispatch unreachable by round trip.
+
+### 4.4 Seam 2: Row written to a target
+
+**Declarative target (`target.table`)**
+
+- `createTable: AUTO` (scratch only): the framework generates DuckDB DDL from the source
+  result set metadata using the mapping of 4.3 in reverse, subject to the nullable-column
+  rule in 4.6. One mapping table both creates the table and drives the appender, so the
+  two cannot disagree.
+  When the step has a `transform`, source metadata does not describe the columns the
+  transform adds, so `transform.addColumns` must declare them.
+- `createTable: REQUIRED` (default outside scratch, also available inside scratch): the
+  table must already exist. Before writing, the framework reads the target column list and
+  declared types from catalog metadata, then fills the positional appender or prepared
+  statement **by column name**. YAML never carries a column order, so a DDL change cannot
+  silently misalign data.
+- A Row key with no matching column, or a NOT NULL column with no matching Row key and no
+  default, is a runtime error naming step, column, and row ordinal.
+
+A middle table inside scratch needs no hand-written DDL in the common cases: a
+`materialize` step creates its output with CREATE TABLE AS SELECT, and a `pipe` step into
+scratch creates it from source metadata. An explicit `sql` step with CREATE TABLE is only
+needed when the author wants control the framework will not infer, such as a specific
+DECIMAL precision, and is then paired with `createTable: REQUIRED`.
+
+**Statement target (`target.sql`)**
+
+The statement runs as a JDBI prepared batch, once per chunk, with Row values bound by
+name: `:lot_id` binds the Row key `lot_id`. This is how MERGE and conditional INSERT are
+expressed, and it is what makes a step idempotent:
+
+```sql
+merge into wip_summary t
+using (select :lot_id as lot_id, :qty as qty from dual) s
+on (t.lot_id = s.lot_id)
+when matched then update set t.qty = s.qty
+when not matched then insert (lot_id, qty) values (s.lot_id, s.qty)
+```
+
+Not available for DuckDB targets, because DuckDB writes go through the appender, which
+takes a table and not a statement. Rejected at startup.
+
+Binding names cannot be validated at startup, because the Row key set is only known once
+the source query runs. They are checked against the first chunk and reported as a runtime
+error listing the missing keys.
+
+### 4.5 Column Name Case
+
+Oracle returns upper case identifiers, DuckDB lower case. All Row keys are normalised to
+lower case on read. Transforms and target mapping always see lower case. Not configurable.
+
+### 4.6 DuckDB Appender and Null
+
+DuckDB inserts always use `org.duckdb.DuckDBAppender`, never INSERT statements. Row-by-row
+and multi-row INSERT are both too slow at this row count.
+
+- The appender binds to a schema and table, not to SQL. This is why a DuckDB target is
+  always a declarative table reference.
+- Append is positional. Column order comes from catalog metadata, never from YAML.
+- A PRIMARY KEY or UNIQUE violation fails the whole append batch and inserts nothing.
+  Framework-created scratch tables therefore carry no constraints and no indexes. An index,
+  if needed, is added by a later `sql` step.
+- `flush()` marks the chunk boundary. It does **not** bound memory: S1 measured the same
+  peak RSS with and without it at both 1M and 10M rows, at a cost of roughly 32% of append
+  wall time. It is called once per chunk so that a chunk boundary is an observable event,
+  not to cap memory.
+
+**Null.** 1.1.3 has no public `appendNull()`, but it reaches the native
+`duckdb_jdbc_appender_append_null` through three object-typed methods, each of which null
+checks its argument:
+
+| Method | Accepts null |
+|---|---|
+| `append(String)` | yes |
+| `appendBigDecimal(BigDecimal)` | yes |
+| `appendLocalDateTime(LocalDateTime)` | yes |
+| `append(boolean/byte/short/int/long/float/double)` | no, primitive |
+| `byte[]` | no such overload exists |
+
+Because the framework owns the DDL for `createTable: AUTO`, the constraint is satisfied by
+choosing types rather than by encoding tricks: **a source column marked nullable is created
+as VARCHAR, DECIMAL, or TIMESTAMP**, all of which are reachable by a null-accepting method.
+NOT NULL columns keep their natural mapping and use the faster primitive path.
+
+The writer dispatches on the target column type read from catalog metadata, not on the
+value:
+
+```kotlin
+when (col.type) {
+    VARCHAR   -> appender.append(row.string(col.name))
+    DECIMAL   -> appender.appendBigDecimal(row.decimal(col.name))
+    TIMESTAMP -> appender.appendLocalDateTime(row.dateTime(col.name))
+    BIGINT    -> appender.append(row.long(col.name) ?: nullNotAllowed(step, col, ordinal))
+    DOUBLE    -> appender.append(row.double(col.name) ?: nullNotAllowed(step, col, ordinal))
+    BOOLEAN   -> appender.append(row.bool(col.name) ?: nullNotAllowed(step, col, ordinal))
+    DATE      -> rejectedAtOpen(step, col)   // S3: silently drops the time component
+}
+```
+
+The Java parameters carry no nullability annotations, so Kotlin sees platform types and
+passes a nullable value without complaint. The `?:` branches on the primitive paths are
+defensive: under `AUTO` they are unreachable by construction.
+
+Two consequences, both enforced at validation time where possible:
+
+- **BLOB and RAW cannot be written to DuckDB.** There is no `byte[]` overload at all, null
+  or not. Such a column must be converted in the source SQL, for example to base64 text.
+- **Under `createTable: REQUIRED`, a nullable column whose declared type is not VARCHAR,
+  DECIMAL, TIMESTAMP, or BIGINT is rejected.** S3 answered the cast question that this rule
+  was standing in for:
+
+  | Appender call | Column | Result |
+  |---|---|---|
+  | `appendBigDecimal(42)` | BIGINT | exact |
+  | `appendBigDecimal(42.7)` | BIGINT | stores 43, silent round |
+  | `appendBigDecimal(2^63)` | BIGINT | throws, loud |
+  | `appendLocalDateTime(...T13:45:30)` | DATE | stores the date, silent truncation |
+
+  BIGINT is therefore safe **by construction, not by luck**: the writer sources the value
+  from `Row.long()`, so the BigDecimal it builds has scale 0 and the rounding case is
+  unreachable, and a `Long` always fits INT64 so the overflow case is unreachable too.
+  Nullable BIGINT is written as `appender.appendBigDecimal(row.long(col.name)?.toBigDecimal())`.
+
+  DATE is **not** safe. Seam 1 (4.3) maps JDBC DATE and TIMESTAMP to `LocalDateTime`, so a
+  value reaching a DATE column carries a time component that DuckDB drops without error.
+  DOUBLE and BOOLEAN stay rejected: DOUBLE's BigDecimal boundary behaviour is untested, and
+  BOOLEAN is reachable only through a text round trip via `append(String)`.
+
+Never write a bare `appender.append(null)`. It compiles, because the primitive overloads do
+not apply and it resolves to the String overload, but it is misleading to read and would
+become ambiguous if a future version adds an overload. Always call the specifically named
+method.
+
+---
+
+## 5. Execution Semantics
+
+### 5.1 Order
+
+Phases run in file order. Steps run in file order within a phase. No parallelism.
+
+### 5.2 Chunking and Transaction Boundary
+
+For a `pipe` step:
+
+1. Open the source result set as a stream with `fetchSize = chunkSize`. Oracle defaults to
+   a fetch size of 10, unusable at this row count.
+2. Accumulate up to `chunkSize` Rows.
+3. Apply the transform, if any, to each Row.
+4. Write the chunk to the target and commit.
+5. Repeat until the source is exhausted.
+
+`chunkSize` resolves as step value, else task value, else 5000. A step moving wide rows can
+lower it and a step moving narrow rows can raise it without affecting the rest of the task.
+
+For `materialize`, `sql`, and `export`, each statement is its own transaction.
+
+### 5.3 Retry
+
+- Retry is per step. `retries` counts additional attempts after the first.
+- Defaults: 3 for a scratch target, 0 for any other target.
+- Retry applies only to transient failures: `SQLTransientException`,
+  `SQLRecoverableException`, `SQLTimeoutException`, and SQLState class `08`. Any other
+  failure, including a type or constraint error, fails immediately. Retrying a
+  deterministic failure three times only turns a 10 minute failure into a 30 minute one.
+- Backoff: exponential from 2s, doubling, capped at 30s.
+- Scratch cleanup before a retry: see 5.5.
+- A step with a non-scratch target and `retries > 0` must declare `idempotent: true`. This
+  is an assertion by the author, not something the framework can verify. Its purpose is to
+  force the intent to be stated, because the framework cannot make a partially written
+  external target safe on its own. In practice it is justified by a MERGE statement target,
+  or by a declarative target whose contents the step fully replaces.
+
+### 5.4 Failure and Partial State
+
+There is no rollback across chunks, steps, or phases. On failure, anything committed to
+`scratch` is irrelevant because the scratch file is deleted at run end, and anything
+committed to an external datasource stays committed.
+
+A task may write to several external targets. Those writes are never mutually atomic; the
+framework does not attempt it and cannot, since the targets may live in different
+instances. Two mitigations are chosen per target:
+
+- `idempotent: true` with a MERGE statement target. A rerun converges. This is the normal
+  answer and is sufficient for most cases.
+- Write to a work table and swap in a final `sql` step, for a target with live readers.
+  Chunked commits otherwise leave the table visibly half-updated for the duration of the
+  step, and permanently so if the step fails partway:
+
+  ```yaml
+  - name: load-work-table
+    type: pipe
+    target:
+      datasource: report_oracle
+      table: wip_summary_work
+      createTable: REQUIRED
+
+  - name: swap
+    type: sql
+    datasource: report_oracle
+    statements:
+      - "begin pkg_table_publish.swap('wip_summary'); end;"
+  ```
+
+  The atomic switch belongs to whatever publish mechanism already owns that table. The
+  framework needs no concept of staging or promotion to support this: a `pipe` step and a
+  `sql` step already express it.
+
+### 5.5 Never Reuse or Delete a DuckDB Table
+
+DuckDB 1.1.3 does not reliably reclaim space in a live database. `TRUNCATE` is an alias for
+unqualified `DELETE`; rows are only marked deleted and space returns at `CHECKPOINT`;
+`VACUUM` does not trigger deletion vacuuming; `VACUUM FULL` is not implemented; `DROP TABLE`
+is reported not to reduce database size, and in in-memory mode not to release memory until
+the connection closes.
+
+The framework therefore never cleans up by deleting:
+
+- Every dataset produced inside scratch is written under an attempt-suffixed name:
+  `wip_stg__a1`, `wip_stg__a2`, and so on.
+- After a successful write the framework creates the stable alias:
+  `create or replace view wip_stg as select * from wip_stg__a2`
+- Later steps always reference the stable name `wip_stg`.
+- A failed attempt leaves `wip_stg__a1` in place, unreferenced. Nothing is deleted.
+
+The same indirection covers parquet:
+`create or replace view summary as select * from read_parquet('<dir>/summary__a2.parquet')`
+so downstream SQL is identical regardless of the dataset's physical format, and `format`
+can change without touching any other step.
+
+Dataset names (`target.table` for scratch, `output` for materialize) are unique within a
+task and validated at startup, so a parquet file name is unambiguous across phases and no
+variable is involved.
+
+The only reliable reclamation point is closing the instance and deleting the file, once per
+run. Cost: with `retries: 3` a repeatedly failing dataset can occupy up to four copies, and
+only the failing dataset is duplicated.
+
+### 5.6 Parquet Materialisation
+
+`format: PARQUET` runs
+`COPY (<sql>) TO '<scratchDir>/<output>__a<n>.parquet' (FORMAT PARQUET)`
+and creates the stable view over `read_parquet`.
+
+What it buys: the dataset never becomes a DuckDB table, so it does not grow the scratch
+database file, and a retry overwrites a file instead of adding a table.
+
+What it does not buy: it does not release memory mid-run. The DuckDB instance stays open
+for the whole run (7.2), so whatever the buffer manager holds is bounded by `memory_limit`
+and released when the instance closes, not at a phase boundary.
+
+What it cannot do: the initial landing from an external datasource must go into a DuckDB
+table, because the appender can only append to a table. `format: PARQUET` is available on
+`materialize` only, never on a `pipe` target.
+
+---
+
+## 6. Variables and Parameter Binding
+
+### 6.1 Sources
+
+- Built-in, always available: `runId`, `taskName`, `triggerTime`, `attempt`.
+- Literal, from the task-level `vars` block.
+- Exported, from an `export` step.
+
+### 6.2 Scope and Evaluation
+
+Task scope, evaluated in step order, so a variable exported in phase 1 is available in
+phase 2. A variable may not be redefined once set.
+
+### 6.3 Binding Rules
+
+- Variables bind as JDBI named parameters: `where ts > :lastTs`.
+- An `export` query returns exactly one row and one column. More than one row is an error;
+  zero rows yields null.
+- In `target.sql`, names bind from Row keys. Task variables are also available there; a
+  collision between a Row key and a task variable name is a startup error.
+- No identifier interpolation. `select * from :tableName` is not valid SQL and no substitute
+  is provided. It would make startup SQL validation impossible and open an injection path
+  whenever the value came from a query. The snapshot cache case that motivated the request
+  is solved by 7.3 instead.
+
+---
+
+## 7. Resource Lifecycle
+
+### 7.1 Datasources
+
+Named Quarkus datasources with a Jdbi bean each. YAML refers to them by name. One name is
+reserved: `scratch`, the per-run DuckDB working file.
+
+### 7.2 Scratch DuckDB
+
+**Scope.** One DuckDB instance and one file per task run, created lazily on first reference
+and closed and deleted in a `finally` at run end, on success and failure alike. "Per run"
+means one execution of one task: one scheduled firing or one API trigger. Two different
+tasks running concurrently have separate files.
+
+**Connections.** Writes are sequential and use a single connection. Additional connections,
+if needed for concurrent reads, come from `DuckDBConnection.duplicate()`, which shares the
+instance. A single `Connection` must never be used from two threads at once; that crashes
+the JVM rather than raising an error. `memory_limit` is a database-level setting, so it is
+not multiplied by the number of connections.
+
+**Consequence of run-scoped lifetime.** There is no memory release point between phases.
+Within a run, memory is bounded by `memory_limit` and disk by whatever the run accumulates.
+This is accepted on the basis that a run lasts 5 to 30 minutes and the file is then deleted.
+If S2 shows otherwise, the mitigation is in section 13.
+
+**Settings applied at open**, matching what the snapshot cache already does:
+`SET memory_limit`, `SET temp_directory`, and optionally `SET threads`. `temp_directory`
+must point at disk-backed scratch space.
+
+S4b refuted the original reason given here ("without it a large join fails outright instead
+of spilling"). With `temp_directory` unset, DuckDB 1.1.3 creates `<dbfile>.tmp/` beside the
+database file and spills into it: same peak within 0.2%, same outcomes, same wall times.
+Nothing fails that would otherwise have succeeded. The real reason to set it is the inverse
+- an unset value silently places a gigabyte or more of spill wherever the database file
+happens to live, uncounted by anyone reading the YAML.
+
+Two further S4b results bear on sizing. **Spilling is not a safety net**: a hash aggregate
+ran out of memory at both a 256 MB and a 512 MB `memory_limit` after writing ~1 GB of spill,
+so a query can consume peak spill and still fail. And **spill peak does not scale with
+`memory_limit`**: doubling the limit moved the peak by under 10% and not consistently in one
+direction, because the peak is set by the query's working set. `memory_limit` is therefore
+not a lever on `sizeLimit`.
+
+**Rules.** File mode, never in-memory. Never `CREATE TEMP TABLE`: `CHECKPOINT` has no effect
+on temporary tables, which removes even the theoretical reclamation path.
+
+**Deployment.**
+
+- The scratch directory must be a disk-backed volume. An `emptyDir` with `medium: Memory`
+  is tmpfs and charges the scratch file against the pod memory limit, converting file mode
+  back into memory mode and causing OOMKill.
+- Set an explicit `sizeLimit`: **32 GiB**. Derived, not guessed:
+
+  ```
+  peak volume = (N + retries) x R x C x d     file at run end, all attempts retained (5.5)
+              + s x (bytes the heaviest query reads)      spill, concurrent with the file
+
+  d = 9.0 bytes per stored value, high entropy    S4a, flat from 4 to 30 columns
+      1.0 - 1.4 low entropy
+  s = 3.3x to 4.9x the input read                 S4b, flat in memory_limit
+  N = datasets in the task, R = rows, C = columns
+  ```
+
+  At the stated ceiling of R = 2M, C = 100, N = 4, `retries: 3`, high entropy, and a join
+  reading two datasets: 12.6 GB of file plus 17.6 GB of spill = 30.2 GB, rounded to 32 GiB.
+  The dominant term is `retries`, not the data: at `retries: 1` the file term falls from
+  12.6 GB to 9.0 GB. Watch `etl_scratch_file_bytes` (9.3) and re-cut from production.
+  Without an explicit limit a runaway scratch file consumes node disk and affects unrelated
+  pods.
+- Indicative budget at 8 GB pod memory: JVM heap 2 GB, DuckDB `memory_limit` 4 GB,
+  remainder for JVM off-heap and DuckDB native allocation beyond the limit.
+
+### 7.3 Reading the Snapshot Cache
+
+The snapshot cache owns generation numbering, promotion, leases, the verify gate, and
+reclamation. The ETL framework implements none of that and does not attach generation files
+itself.
+
+The cache serves reads from its own in-memory DuckDB instance with the generation file
+attached read-only; reader connections are duplicates of that serving connection. Those
+connections therefore belong to the cache's instance, not to the scratch instance, and
+cannot join scratch tables directly.
+
+The integration point is the cache's own `copyOut`, which attaches the generation file onto
+the caller's instance and runs `CREATE TABLE ... AS SELECT`, so no row passes through the
+application:
+
+```kotlin
+store.copyOut(opened, CopyOutSpec(
+    targetConnection = scratchConnection,
+    targetTable = "wip_cache",
+    sql = "select lot_id, qty from wip where site = 'F12'",
+))
+```
+
+This is exposed as a distinct step type rather than as a `pipe`, because it is a file-to-file
+copy and not a row pipeline.
+
+**Operational constraint.** The cache refuses to detach a generation while an issued
+connection into it is still open, and defers reclamation to the next pass. Generations that
+cannot be reclaimed accumulate, and once the configured limit is reached the cache pauses
+refreshing entirely. A task holding a lease for 30 minutes can therefore stall cache
+refreshes, with the cause sitting in a different system from the symptom. The rule is to
+copy the needed subset into scratch and release the lease immediately, rather than holding
+it for the duration of the task.
+
+### 7.4 Closing
+
+Every appender is opened in a `use` block. Every result set stream is closed explicitly.
+Every connection is returned in a `finally`. Release is never left to GC. The appender's
+`finalize` is a backstop for bugs, not a cleanup mechanism.
+
+---
+
+## 8. Triggering and Concurrency
+
+### 8.1 Schedule
+
+The cron expression lives in the task file, so scheduling is programmatic:
+`scheduler.newJob(taskName).setCron(cron).setTask { ... }.schedule()` at startup. The
+`@Scheduled` annotation is compile-time and cannot express one schedule per file.
+
+Two configuration requirements follow, both silent failures if missed:
+
+- `quarkus.scheduler.start-mode=forced`. By default the scheduler does not start unless a
+  `@Scheduled` business method exists. This application has none, so without this property
+  no task would ever fire.
+- The scheduled callback hands off to the task's own dispatcher rather than running inline.
+  Quarkus runs scheduled work on a Vert.x worker thread and the blocked-thread checker warns
+  past 60 seconds; tasks here run 5 to 30 minutes.
+
+`schedule` may be omitted, producing a task that runs only when triggered through the API.
+
+### 8.2 API Trigger
+
+An admin-only endpoint triggers any task on demand: reruns after a failure, backfills, and
+testing a new task file before attaching a schedule.
+
+```
+POST   /admin/etl/tasks/{name}/runs      -> 202 { runId }
+GET    /admin/etl/tasks                  -> tasks, schedules, last run outcome
+GET    /admin/etl/tasks/{name}/runs/{id} -> run status
+POST   /admin/etl/reload                 -> re-read task files, see 8.5
+```
+
+- All endpoints require the `etl-admin` role, enforced with `@RolesAllowed`.
+- Trigger is asynchronous: validate, allocate a runId, submit to the task's dispatcher,
+  return 202. A 30 minute request is never held open.
+- 409 if the task is already running, 404 if unknown, 400 if disabled.
+- An API-triggered run is identical to a scheduled run in every other respect. It appears in
+  logs and metrics with trigger source `API` and the caller identity.
+
+### 8.3 Threading Model
+
+Each task owns a `Dispatchers.IO.limitedParallelism(1)` view, tagged with
+`CoroutineName(taskName)`. Both the scheduled callback and the API trigger submit to it. The
+engine itself is ordinary blocking code: sequential steps, blocking JDBC.
+
+- A bare `Dispatchers.IO` is not used: it does not serialise work per task, so two firings of
+  the same task could overlap.
+- `newFixedThreadPoolContext` is not used: it is marked delicate, and a per-task pool would
+  keep an idle thread alive per task. A `limitedParallelism` view shares the underlying IO
+  threads and is not bounded by the IO parallelism limit.
+- Coroutines buy nothing inside the engine. A run is one thread blocked for 5 to 30 minutes
+  with nothing to yield to. The dispatcher is used for confinement, not for concurrency.
+
+### 8.4 Concurrency
+
+- A task never runs concurrently with itself, whether triggered by schedule or API. The
+  serialised dispatcher provides this. The framework rejects rather than queues, returning
+  409 for an API trigger and skipping a scheduled firing, so a slow run cannot accumulate a
+  backlog.
+- Different tasks may run concurrently, each with its own dispatcher and scratch file.
+- The guard is in-process only. The deployment is a single pod, an explicit assumption.
+  Multiple replicas would need leader election, out of scope, no hook reserved.
+
+### 8.5 Reload
+
+`POST /admin/etl/reload` re-reads the task directory and applies the result atomically:
+
+- All files are parsed and validated first. If any file fails, nothing changes and the
+  endpoint returns the errors. A bad edit cannot take the scheduler down.
+- A task currently running keeps the definition it started with. The definition is captured
+  at run start and never swapped mid-run.
+- Schedules are re-registered for tasks whose cron changed, unscheduled for removed tasks,
+  and scheduled for new ones.
+
+A filesystem watcher is deliberately not used. ConfigMap propagation to the volume is
+asynchronous and partial updates are visible mid-write, so an explicit reload gives a
+deterministic point at which a change takes effect. Startup runs the same load path, so
+there is one code path and one set of validation rules.
+
+---
+
+## 9. Extension Points
+
+### 9.1 Transform
+
+```kotlin
+fun interface RowTransform {
+    fun apply(row: Row): Row?     // null drops the row
+}
+```
+
+Resolved from YAML by CDI bean name. Three contractual rules:
+
+- Stateless. No accumulation across rows, no caching.
+- No database access of any kind.
+- No side effects.
+
+A stateful or effectful handler makes retry non-deterministic and hard to diagnose, and a
+transform is an escape hatch through which business logic migrates out of SQL and out of the
+YAML file, defeating a declarative framework. Intended uses are limited to computing a value
+the database cannot: a hash, a run identifier, a constant from the runtime context.
+
+Columns a transform adds must be declared in `transform.addColumns` when the target uses
+`createTable: AUTO`, because source metadata cannot describe them.
+
+### 9.2 Run Listener
+
+The existing in-house logging mechanism plugs in here. The framework supplies the call sites
+and ships a no-op default.
+
+```kotlin
+interface TaskRunListener {
+    fun onTaskStart(ctx: TaskContext)
+    fun onTaskEnd(ctx: TaskContext, outcome: Outcome)
+    fun onPhaseStart(ctx: PhaseContext)
+    fun onPhaseEnd(ctx: PhaseContext, outcome: Outcome)
+    fun onStepStart(ctx: StepContext)
+    fun onStepEnd(ctx: StepContext, result: StepResult)
+    fun onStepError(ctx: StepContext, attempt: Int, error: Throwable, willRetry: Boolean)
+}
+```
+
+`TaskContext` carries runId, taskName, triggerSource, triggeredBy, startedAt.
+`StepResult` carries rowsRead, rowsWritten, durationMs, attempt.
+`logging: false` suppresses listener invocation for that task.
+
+### 9.3 Metrics
+
+Micrometer, independent of the `logging` flag:
+
+```
+etl_task_runs_total{task, trigger, outcome}
+etl_task_duration_seconds{task}
+etl_step_duration_seconds{task, phase, step}
+etl_step_rows_total{task, phase, step, direction}   # direction = read | written
+etl_step_retries_total{task, phase, step}
+etl_scratch_file_bytes{task}                        # sampled at run end
+```
+
+### 9.4 Task Hooks
+
+```kotlin
+fun interface TaskHook {
+    fun run(ctx: TaskContext)
+}
+
+interface TaskHookRegistry {
+    fun register(name: String, hook: TaskHook)
+}
+```
+
+`onSuccess` runs once after every phase has succeeded. `onFailure` runs once on any failure.
+If `onSuccess` throws, the task becomes FAILED and `onFailure` then runs. If `onFailure`
+throws, the error is logged and not propagated.
+
+Hooks are named, and names are registered by the application at startup, which is what lets
+one implementation serve many instances without a per-instance CDI bean and without an
+argument map in YAML:
+
+```kotlin
+@Startup
+class EtlHookRegistration(registry: TaskHookRegistry, caches: List<SnapshotCache>) {
+    init {
+        caches.forEach { c -> registry.register("invalidate-${c.name}") { c.invalidate() } }
+    }
+}
+```
+
+A name not present in the registry fails startup validation, so a typo is caught at boot
+rather than at the end of a 30 minute run.
+
+`TaskContext` fields are for log correlation. A hook implementation should not pass `runId`
+or `taskName` to an external system as a business key; they are framework identifiers.
+
+Per-step hooks are deliberately not offered. Applied globally they make a YAML file an
+incomplete description of what happens; declared per step they duplicate what a `sql` step
+already does, while adding ambiguity about ordering with respect to retry.
+
+### 9.5 GenerationSource for the Snapshot Cache
+
+Layer 1 is used directly by the cache. `GenerationSource.refresh(ctx)` receives a write
+`Connection` to the candidate generation file; a RowPipe writes into it:
+
+```kotlin
+class PipeGenerationSource(private val specs: List<TableSpec>) : GenerationSource {
+    override fun refresh(ctx: BuildContext) {
+        specs.forEach { spec ->
+            RowPipe(
+                source = JdbcSource(oracleMes, spec.sql),
+                target = DuckDbTableWriter(ctx.target, spec.table, createTable = AUTO),
+                chunkSize = 5000,
+            ).run()
+        }
+    }
+}
+```
+
+The direction of control matters: the cache calls the ETL, not the other way round.
+Promotion, verification, leases, and reclamation stay with the cache, and the framework
+needs no concept of a generation. Layer 1 knows nothing about the cache in return; its only
+contract is a source query, a target connection, and a table name.
+
+---
+
+## 10. Startup and Reload Validation
+
+Task files are mounted from a Kubernetes volume, read by scanning the directory and
+deserialising with Jackson YAML plus Bean Validation. They are deliberately not read through
+Quarkus configuration: the config model is flat properties rather than a set of structurally
+identical documents, config performs property expansion which would corrupt SQL containing
+`${...}`, and binding failures report a property key rather than a file and line.
+
+Any failure below prevents startup, or causes a reload to be rejected with no change.
+
+1. YAML parses and deserialises; unknown fields rejected.
+2. `name` unique across files and matching the allowed pattern.
+3. Every referenced datasource name exists as a configured Jdbi bean.
+4. Every `transform.bean` resolves to a `RowTransform` CDI bean.
+5. Every `onSuccess` / `onFailure` name exists in the `TaskHookRegistry`.
+6. Every SQL text parses.
+7. Every `:name` in source, export, materialize, and statement SQL is a built-in, a literal
+   var, or an export appearing earlier in step order, except Row-bound names in `target.sql`,
+   which are checked at runtime (4.4).
+8. No variable defined twice; no Row key colliding with a task variable name.
+9. Dataset names unique within the task.
+10. Exactly one of `target.table` or `target.sql` present.
+11. `target.sql` not used on a DuckDB datasource.
+12. `retries > 0` on a non-scratch target requires `idempotent: true`.
+13. `format: PARQUET` only on `materialize`.
+14. `createTable: AUTO` only on scratch targets, and not combined with a transform that
+    lacks `addColumns`.
+15. `createTable: REQUIRED` on a DuckDB target: no nullable column whose declared type is
+    outside VARCHAR, DECIMAL, TIMESTAMP, BIGINT (4.6). BIGINT was added once S3 showed the
+    cast is exact when the value comes from `Row.long()`. DATE is rejected whether nullable
+    or not, because the truncation in 4.6 is silent and does not depend on nullability.
+16. Cron expression valid, when present.
+17. Each step's field set matches its declared type exactly.
+
+Errors report file name, step name, and where available the YAML line.
+
+---
+
+## 11. Public API
+
+The frozen contract. Everything below is what callers and later phases depend on;
+everything not listed is internal and free to change. The plan names the subset each phase
+introduces. Types described elsewhere in this document are cross-referenced rather than
+repeated in full.
+
+### 11.1 Layer 1
+
+```kotlin
+// Canonical values and the read seam (spec 4.1 to 4.3)
+enum class CanonicalType {
+    STRING, BOOLEAN, LONG, DECIMAL, DOUBLE, DATE, DATETIME, INSTANT, BYTES;
+
+    val duckDbType: String                    // natural mapping; 4.6's nullable rule overrides
+
+    companion object {
+        fun fromJdbc(sqlType: Int, typeName: String): CanonicalType   // 4.3, throws if unsupported
+    }
+}
+
+class Row {                                  // full signature in spec 4.2
+    val columns: Set<String>
+    operator fun get(name: String): Any?
+    fun contains(name: String): Boolean
+    // typed accessors: string, long, decimal, double, bool, date, dateTime, instant, bytes
+    fun with(name: String, value: Any?): Row
+    fun without(name: String): Row
+}
+
+class ColumnMeta(val name: String, val type: CanonicalType, val nullable: Boolean)
+
+// Result set to Row: applies 4.3, lower-cases keys per 4.5, reads metadata once.
+// `step` is carried so an unsupported type or a wrong typed accessor names the step (4.2, 4.3).
+class RowMapper(metaData: ResultSetMetaData, step: String) {
+    val columns: List<ColumnMeta>
+    fun map(rs: ResultSet): Row
+}
+
+// Source
+class JdbcSource(
+    val jdbi: Jdbi,
+    val sql: String,
+    val parameters: Map<String, Any?> = emptyMap(),
+)
+
+// Targets
+interface RowWriter : AutoCloseable {
+    fun open(columns: List<ColumnMeta>)
+    fun write(chunk: List<Row>): Int          // rows written
+    override fun close()
+}
+
+class DuckDbTableWriter(
+    connection: Connection,
+    table: String,
+    createTable: CreateTable,                 // AUTO | REQUIRED
+) : RowWriter
+
+class JdbcTableWriter(jdbi: Jdbi, table: String) : RowWriter
+
+class JdbcStatementWriter(jdbi: Jdbi, sql: String) : RowWriter
+
+// Transform (spec 9.1)
+fun interface RowTransform {
+    fun apply(row: Row): Row?
+}
+
+// The pipe
+class RowPipe(
+    source: JdbcSource,
+    target: RowWriter,
+    chunkSize: Int = 5000,
+    transform: RowTransform? = null,
+) {
+    fun run(): PipeResult
+}
+
+data class PipeResult(val rowsRead: Long, val rowsWritten: Long)
+```
+
+### 11.2 Layer 2
+
+```kotlin
+// Definition model. YAML is one source of these, not the only one (spec 2.1).
+data class TaskDefinition(
+    val name: String,
+    val enabled: Boolean = true,
+    val cron: String? = null,
+    val logging: Boolean = true,
+    val chunkSize: Int = 5000,
+    val scratchMemoryLimitMb: Int? = null,
+    val onSuccess: String? = null,
+    val onFailure: String? = null,
+    val vars: List<LiteralVar> = emptyList(),
+    val phases: List<Phase>,
+)
+
+data class Phase(val name: String, val steps: List<Step>)
+
+sealed interface Step {
+    val name: String
+    val retries: Int
+}
+class PipeStep : Step         // source, transform?, target, chunkSize?
+class MaterializeStep : Step  // datasource, output, format, sql
+class SqlStep : Step          // datasource, statements
+class ExportStep : Step       // datasource, vars
+class CacheCopyStep : Step    // cache, sql, output (spec 7.3)
+
+// Engine
+class TaskEngine {
+    fun run(definition: TaskDefinition, trigger: TriggerSource): TaskOutcome
+}
+
+enum class TriggerSource { SCHEDULE, API }
+enum class Outcome { SUCCEEDED, FAILED }
+data class TaskOutcome(val runId: String, val outcome: Outcome, val failure: Throwable?)
+
+// Loading
+class TaskFileLoader {
+    fun load(directory: Path): Result<List<TaskDefinition>, ValidationReport>
+}
+
+data class ValidationReport(val errors: List<ValidationError>)
+data class ValidationError(val file: String, val step: String?, val line: Int?, val message: String)
+
+// Scratch (spec 7.2)
+class ScratchDb : AutoCloseable {
+    fun connection(): Connection
+    fun duplicate(): Connection
+    override fun close()                      // closes the instance and deletes the file
+}
+```
+
+### 11.3 Extension Points
+
+```kotlin
+interface TaskRunListener            // full signature in spec 9.2
+fun interface TaskHook { fun run(ctx: TaskContext) }
+interface TaskHookRegistry { fun register(name: String, hook: TaskHook) }
+
+data class TaskContext(
+    val runId: String,
+    val taskName: String,
+    val triggerSource: TriggerSource,
+    val triggeredBy: String?,
+    val startedAt: Instant,
+)
+data class StepResult(
+    val rowsRead: Long,
+    val rowsWritten: Long,
+    val durationMs: Long,
+    val attempt: Int,
+)
+```
+
+---
+
+## 12. Open Items
+
+- **S1. Appender flush cost. ANSWERED (P0).** Flush costs ~32% of append wall time and
+  bounds no memory. Kept on regardless: it is the chunk boundary, and 0.5s per million rows
+  is noise against the Oracle read. 4.6 corrected.
+- **S2. Scratch growth and process RSS.** Simulate five steps of one million rows, force one
+  step to fail and retry twice, repeat ten runs. Measure process RSS against baseline and
+  scratch file size at run end. The target of measurement is RSS, not `database_size`. If
+  RSS does not return to baseline across runs, retry moves from step level to task level,
+  discarding the scratch file on retry. This spike also produces the volume `sizeLimit`.
+  **ANSWERED (P0):** RSS returns from a 392 MB in-run peak to ~104 MB against a 70 MB
+  baseline, every run; the file is flat at ~178 MB with no cross-run high-water mark. The
+  trigger did not fire, so **retry stays at step level** and 13's `scratch.scope: PHASE` is
+  not needed. `sizeLimit` is NOT answered: S2 measured 7.2 bytes per column-value at high
+  entropy and 0.54 at low, but the workload shape and the spill factor were never measured.
+  See S4.
+- **S3. Implicit cast on append. ANSWERED (P0).** BIGINT casts exactly and is now allowed
+  by rule 15; DATE truncates silently and stays rejected. See the table in 4.6.
+- **S4. Spill factor and wide-row density. ANSWERED (P0).** Storage density is
+  width-independent: 8.96 and 9.07 bytes per stored value at 15 and 30 columns, high
+  entropy, holding total values constant; 1.0 to 1.4 at low entropy. Spill peaks at 3.3x to
+  4.9x the bytes a query reads, flat in `memory_limit`, and is fully reclaimed on close even
+  after a failure. `sizeLimit` set to 32 GiB in 7.2 from these constants. S4b also refuted
+  7.2's `temp_directory` rationale; corrected there. The copy count is
+  `(N - 1) + 1 + retries`, not `1 + retries`: a failing dataset's siblings occupy the same
+  file, and a failed attempt keeps its partial rows because the appender's `close()` on the
+  exception path flushes what it had.
+- **NOT NULL DATE on a DuckDB target. ANSWERED (P0).** Confirmed: rule 15 rejects DATE
+  whether nullable or not. The 4.6 truncation does not depend on nullability, so a rule that
+  reached only nullable columns would have left the same hazard open. DATE is not a
+  supported DuckDB target column type; the author casts in source SQL, or uses TIMESTAMP.
+  `LocalDate` remains a canonical type (4.1) on the read side; it simply never appears as a
+  DuckDB write target.
+
+---
+
+## 13. Deferred
+
+- **`scratch.scope: PHASE`.** One scratch file per phase instead of per run, closing and
+  deleting the file at each phase boundary. This is the only way to get a real memory and
+  disk release point mid-run. It requires declaring which datasets survive the boundary:
+
+  ```yaml
+  - name: extract
+    carryOver: [wip_stg, lot_stg]   # copied into the next phase's file
+  ```
+
+  Everything not listed is discarded with the file. The cost is copying the carried
+  datasets, which is why it is not the default: it trades run time for a release point that
+  may not be needed. Decided by S2.
+- **Producing snapshot cache generations from a YAML task.** Requires a dynamic write target
+  (a target chosen at run time rather than a statically named datasource) and a matching
+  start-of-run hook. Not needed while the cache calls Layer 1 directly (9.5).
+- **After the base image is upgraded past glibc 2.23**: a newer `duckdb_jdbc` brings MERGE
+  INTO for DuckDB targets, partial space reclamation at CHECKPOINT, and concurrent reads
+  during checkpoint. Validation rule 15 and parts of 4.6 could then be relaxed.
+- Non-scalar export variables.
+- Parallel steps within a phase.
+- Leader election for a multi-replica deployment.

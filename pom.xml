@@ -30,6 +30,7 @@
         <module>dynacache-cluster</module>
         <module>dynacache-server</module>
         <module>snapshotcache</module>
+        <module>SimpleEtl</module>
     </modules>
 
     <dependencyManagement>
