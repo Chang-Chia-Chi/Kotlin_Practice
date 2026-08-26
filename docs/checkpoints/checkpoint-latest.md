@@ -1,75 +1,56 @@
-# Checkpoint - P1 Row and type mapping
+# Checkpoint - P2 Writers
 
-- Phase ID: P1
+- Phase ID: P2
 - Project: SimpleEtl (YAML-driven ETL framework)
-- Date: 2026-08-26
-- Team: sdet + engineer + reviewer (composition table: all three)
-- Status: PHASE COMPLETE. Build green 79/79. Reviewer ran, REVISE/REVISE, all 5 required changes landed and verified by the lead. Committed.
+- Date: 2026-08-27
+- Team: sdet + engineer + reviewer, plus one independent adjudicator
+- Status: PHASE COMPLETE. 115 tests, 0 failures. One review cycle. Committed.
+- NOTE: the composition table marks P2 "all three, plus human review". The human review has
+  NOT happened - the user instructed the lead to proceed without checking in. Flagged to the
+  user at the gate; recorded here so it is not lost.
 
-## Files produced
+## Files
 
-Engineer (src/main/kotlin/infra/simpleetl/):
-- CanonicalType.kt  - enum, duckDbType natural mapping, fromJdbc (spec 4.3)
-- Row.kt            - immutable Row, typed accessors, with/without, internal ctor carries step
-- RowMapper.kt      - ColumnMeta + RowMapper, metadata read once at construction
+Production, src/main/kotlin/infra/simpleetl/:
+- RowWriter.kt          - RowWriter interface, catalogColumns (single-schema guarded)
+- DuckDbTableWriter.kt  - CreateTable, AUTO DDL with DECIMAL(p,s), positional append, 4.6 dispatch
+- JdbcWriters.kt        - JdbcTableWriter, JdbcStatementWriter
+- RowMapper.kt          - ColumnMeta gained precision and scale
 
-SDET (src/test/kotlin/infra/simpleetl/):
-- DuckFixtures.kt          - SELECT-only DuckDB result sets, no table/INSERT/appender
-- CanonicalTypeTest.kt     - spec 4.3 as a table; duckDbType round-trip through real DuckDB
-- RowTest.kt               - spec 4.2/4.5 semantics, wrong-type message, cross-thread read
-- RowMapperDuckDbTest.kt   - real duckdb_jdbc 1.1.3, 12 column types, all-NULL row
-- RowMapperOracleTest.kt   - Testcontainers oracle-free, one container per class
-- RowMapperErrorTest.kt    - Mockito at ResultSetMetaData/ResultSet boundary only
+Tests, src/test/kotlin/infra/simpleetl/:
+- WriteFixtures.kt, DuckDbTableWriterAutoTest.kt, DuckDbTableWriterRequiredTest.kt, WriterOracleTest.kt
 
 ## Build
 
-    mvn -f <repo>/pom.xml -pl SimpleEtl clean test    -> BUILD SUCCESS, 81/81
+    mvn -f <repo>/pom.xml -pl SimpleEtl clean test    -> BUILD SUCCESS, 115/115
 
-ALWAYS use `clean`. Without it surefire runs stale compiled probe classes from target/test-classes
-that no longer exist in source; that produced three phantom passing tests in the first run.
+ALWAYS use `clean`. Maven is NOT on PATH:
+C:\Program Files\JetBrains\IntelliJ IDEA Community Edition 2024.1.4\plugins\maven\lib\maven3\bin\mvn.cmd
 
-Earlier-phase tests: P0's six *Spike files untouched, verified by mtime.
-Role boundary: engineer's revision touched only CanonicalType.kt and RowMapper.kt; no test file moved.
+## Driver facts measured in P2, all on real duckdb_jdbc 1.1.3
 
-## Reviewer findings, all fixed
+- Bare DECIMAL resolves to DECIMAL(18,3): 15 integer digits max, so an Oracle NUMBER(18)
+  key >= 1e15 fails the append. This is why ColumnMeta was widened.
+- getColumns(null, null, name, null) returns rows from EVERY schema with that table name,
+  interleaved after sorting by ORDINAL_POSITION. Now guarded.
+- `_` is a live wildcard in getColumns: "t_stg" matches "tXstg". The exact TABLE_NAME filter
+  is load-bearing.
+- DatabaseMetaData.getColumns reports nullability truthfully; ResultSetMetaData.isNullable
+  does not (columnNullable for everything). Never substitute one for the other.
+- Appender close(): completed rows flush; a PART-appended row discards the whole unflushed
+  buffer including completed rows; an empty beginRow is harmless.
+- DuckDBAppender is subclassable; DuckDBConnection is public final. No injection seam exists
+  in DuckDbTableWriter, which is what makes a leak double impossible.
 
-Engineer: `columns` returned the live mutable key set (Row is immutable per 4.2, and P3 hands
-Rows to caller-supplied transforms); duplicate column keys collapsed silently, which would
-have become wrong data in P2's positional writer; a KDoc stated falsely that duckdb_jdbc has
-no getBytes (it does - ojdbc is what rejects it on a BLOB).
+## Open for later phases
 
-SDET: nothing pinned the step label surviving with/without into the copy; Oracle BOOLEAN was
-the one amended-4.3 row with no real-Oracle test; the new duplicate-key rejection had no test.
-
-The reviewer also caught that CLAUDE.md had been deleted from the repo root during the
-session, outside every agent's file boundary. Restored.
-
-## Revision cycle 1 - what happened
-
-The sdet and engineer independently reached opposite readings of spec 4.3's DATE row, and
-both documented it. All 23 failures reduced to two root causes, both escalated to the user
-and both ruled in the sdet's favour:
-
-1. Types.DATE (91) -> CanonicalType.DATE, not DATETIME. Types.TIMESTAMP (93) stays DATETIME.
-2. Types.BOOLEAN (16) -> CanonicalType.BOOLEAN. 4.3 had no BOOLEAN row at all.
-
-spec.md 4.3 updated with both rows plus the rationale.
-
-## Measured facts recorded for P2
-
-- duckdb_jdbc 1.1.3 reports columnNullable for EVERY column, including `bigint not null`.
-  Verified by the lead on the real driver. So 4.6's "NOT NULL columns keep their natural
-  mapping and use the faster primitive path" is unreachable for a scratch-sourced pipe.
-- Oracle folds INTEGER, SMALLINT, FLOAT into NUMBER (all Types.NUMERIC, typeName NUMBER),
-  so 4.3's LONG row is unreachable from Oracle DDL and an Oracle FLOAT yields BigDecimal.
-  Combined with P0's ruling, the nullable-BIGINT path is reachable only when the author
-  CASTs in source SQL.
-- Oracle TIMESTAMP WITH TIME ZONE cannot be read as Instant directly (ORA-17004);
-  getObject(i, OffsetDateTime::class.java) works on both drivers.
-- DuckDB DATE refuses LocalDateTime/Timestamp conversion entirely.
+- P5: JdbcStatementWriter has no task-variable channel (spec 6.3). Constructor amendment or
+  pre-binding needed.
+- P4: budget scratch space from the three retention shapes, not one number.
+- Done-when 7 partially unmet by necessity; see progress.md P2 deviation 6.
 
 ## Files to re-read on resume
 
-- docs/simpleetl/spec.md sections 4.1 to 4.6, 11.1, 12
-- docs/simpleetl/plan.md P1 and P2 entries
-- docs/simpleetl/progress.md P0 entry
+- docs/simpleetl/spec.md sections 4.4, 4.6, 5.5, 7.2, 10, 11.1, 12
+- docs/simpleetl/plan.md P3 entry
+- docs/simpleetl/progress.md P0, P1, P2 entries

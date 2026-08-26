@@ -11,10 +11,27 @@ import java.time.OffsetDateTime
  *
  * @param name lower case, per spec 4.5.
  * @param nullable false only when the source states the column is NOT NULL. A source that does
- *   not report nullability at all - DuckDB 1.1.3 reports every column as nullable, including
- *   NOT NULL ones - yields true, which is the safe direction.
+ *   not report nullability at all - DuckDB 1.1.3's `ResultSetMetaData` reports every column as
+ *   nullable, including NOT NULL ones - yields true, which is the safe direction. Its
+ *   `DatabaseMetaData.getColumns` does report NOT NULL correctly, which is what target catalog
+ *   reads use.
+ *
+ * @param precision and @param scale as the source declares them. Only DECIMAL uses them, and
+ *   only `createTable: AUTO`, which emits `DECIMAL(precision,scale)`: bare `DECIMAL` resolves to
+ *   `DECIMAL(18,3)`, which rounds past three decimals and cannot hold a 16-digit key at all
+ *   (spec 4.4). Both construction sites populate them from the same catalog read that supplies
+ *   the type, so the pair is never a fabricated zero. A pair outside `1 <= p <= 38` and
+ *   `0 <= s <= p` is what the source reports for an unconstrained `NUMBER`, a `FLOAT`, a
+ *   negative scale, or any computed expression; the writer rejects it at open rather than
+ *   guessing a width.
  */
-class ColumnMeta(val name: String, val type: CanonicalType, val nullable: Boolean)
+class ColumnMeta(
+    val name: String,
+    val type: CanonicalType,
+    val nullable: Boolean,
+    val precision: Int = 0,
+    val scale: Int = 0,
+)
 
 /**
  * Turns the current row of a [ResultSet] into a [Row], applying the type mapping of spec 4.3 and
@@ -36,6 +53,8 @@ class RowMapper(metaData: ResultSetMetaData, private val step: String) {
             name = name,
             type = canonicalType(metaData.getColumnType(i + 1), metaData.getColumnTypeName(i + 1), name),
             nullable = metaData.isNullable(i + 1) != ResultSetMetaData.columnNoNulls,
+            precision = metaData.getPrecision(i + 1),
+            scale = metaData.getScale(i + 1),
         )
     }
 

@@ -19,6 +19,7 @@
         <testcontainers.version>1.20.4</testcontainers.version>
         <ojdbc.version>23.5.0.24.07</ojdbc.version>
         <mockito.version>5.14.2</mockito.version>
+        <jdbi.version>3.45.4</jdbi.version>
     </properties>
 
     <!-- testcontainers pulls byte-buddy 1.14.18, mockito 5.14.2 wants 1.15.4. On Java 22 the
@@ -61,6 +62,12 @@
             <groupId>org.duckdb</groupId>
             <artifactId>duckdb_jdbc</artifactId>
             <version>1.1.3</version>
+        </dependency>
+        <!-- P2: spec 11.1 declares JdbcTableWriter(jdbi) and JdbcStatementWriter(jdbi). -->
+        <dependency>
+            <groupId>org.jdbi</groupId>
+            <artifactId>jdbi3-core</artifactId>
+            <version>${jdbi.version}</version>
         </dependency>
         <dependency>
             <groupId>org.junit.jupiter</groupId>

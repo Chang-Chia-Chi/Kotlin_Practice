@@ -301,6 +301,23 @@ writer dispatch unreachable by round trip.
   two cannot disagree.
   When the step has a `transform`, source metadata does not describe the columns the
   transform adds, so `transform.addColumns` must declare them.
+
+  **DECIMAL takes its precision and scale from the source.** `CanonicalType.DECIMAL.duckDbType`
+  is the bare keyword, which DuckDB resolves to `DECIMAL(18,3)` - at most three decimal places
+  and fifteen integer digits. So bare DECIMAL silently rounds a `NUMBER(38,10)` value, and an
+  ordinary `NUMBER(18)` key at or above 1e15 fails the append outright, mid-write, after earlier
+  chunks have committed. AUTO therefore emits `DECIMAL(p,s)` from `ColumnMeta.precision` and
+  `ColumnMeta.scale`. A pair is usable when `1 <= p <= 38` and `0 <= s <= p`; DuckDB rejects
+  anything else at parse time. An unusable pair is a runtime error at writer open, before any
+  row is written, naming step and column: the fix is a CAST in the source SQL, and the
+  framework does not guess (1.3, and the rule 4.3 already applies to an unsupported type).
+
+  Measured on ojdbc 23.6: a declared `NUMBER(38,10)`, `NUMBER(18)`, `NUMBER(*,2)`, `INTEGER`
+  or `SMALLINT` reports a usable pair, and so does `cast(x as number(18,3))`. An unconstrained
+  `NUMBER` reports `p=0, s=-127`, a `FLOAT` reports `p=126, s=-127`, and every computed
+  expression - `sum`, `avg`, `count`, arithmetic, `nvl`, `round`, a numeric literal - reports
+  `p=0`. A DuckDB source always reports a usable pair, so a scratch-to-scratch pipe never hits
+  this error.
 - `createTable: REQUIRED` (default outside scratch, also available inside scratch): the
   table must already exist. Before writing, the framework reads the target column list and
   declared types from catalog metadata, then fills the positional appender or prepared
@@ -312,8 +329,9 @@ writer dispatch unreachable by round trip.
 A middle table inside scratch needs no hand-written DDL in the common cases: a
 `materialize` step creates its output with CREATE TABLE AS SELECT, and a `pipe` step into
 scratch creates it from source metadata. An explicit `sql` step with CREATE TABLE is only
-needed when the author wants control the framework will not infer, such as a specific
-DECIMAL precision, and is then paired with `createTable: REQUIRED`.
+needed when the author wants control the framework will not infer, such as a column wider
+than the source declares, a constraint, or a computed default, and is then paired with
+`createTable: REQUIRED`.
 
 **Statement target (`target.sql`)**
 
@@ -417,6 +435,18 @@ Two consequences, both enforced at validation time where possible:
   value reaching a DATE column carries a time component that DuckDB drops without error.
   DOUBLE and BOOLEAN stay rejected: DOUBLE's BigDecimal boundary behaviour is untested, and
   BOOLEAN is reachable only through a text round trip via `append(String)`.
+
+- **A nullable column with no null-accepting write path is rejected at open, under AUTO as
+  well as REQUIRED.** The dispatch above reads a value with the accessor matching the *target*
+  column type, so a nullable column must be created as a type whose accessor matches the
+  *source* canonical type. STRING/VARCHAR, DECIMAL/DECIMAL, DATETIME/TIMESTAMP and LONG/BIGINT
+  pair up. BOOLEAN and DOUBLE have only primitive `append` overloads; DATE is rejected by rule
+  15 either way; and **INSTANT has no branch in the dispatch at all** - 1.1.3's appender offers
+  no `Instant` or `OffsetDateTime` method, so `TIMESTAMP WITH TIME ZONE` cannot be appended.
+  Routing any of them through VARCHAR/DECIMAL/TIMESTAMP would make `Row.string`/`Row.decimal`/
+  `Row.dateTime` throw on the real value type, and is the encoding trick this section refuses.
+  Because duckdb_jdbc reports `columnNullable` for every column, all four are reachable from
+  any scratch-to-scratch pipe; the author's fix is a CAST in the source SQL.
 
 Never write a bare `appender.append(null)`. It compiles, because the primitive overloads do
 not apply and it resolves to the String overload, but it is misleading to read and would
@@ -917,7 +947,9 @@ Any failure below prevents startup, or causes a reload to be rejected with no ch
 12. `retries > 0` on a non-scratch target requires `idempotent: true`.
 13. `format: PARQUET` only on `materialize`.
 14. `createTable: AUTO` only on scratch targets, and not combined with a transform that
-    lacks `addColumns`.
+    lacks `addColumns`. AUTO's DECIMAL precision cannot be validated at startup, because
+    result set metadata exists only once the source query runs; that check is at writer open
+    (4.4) and is named here for completeness.
 15. `createTable: REQUIRED` on a DuckDB target: no nullable column whose declared type is
     outside VARCHAR, DECIMAL, TIMESTAMP, BIGINT (4.6). BIGINT was added once S3 showed the
     cast is exact when the value comes from `Row.long()`. DATE is rejected whether nullable
@@ -959,7 +991,16 @@ class Row {                                  // full signature in spec 4.2
     fun without(name: String): Row
 }
 
-class ColumnMeta(val name: String, val type: CanonicalType, val nullable: Boolean)
+// precision and scale are 0 when the source does not state them - an Oracle unconstrained
+// NUMBER, or any computed expression, reports p=0. Read for every column, consulted only
+// for DECIMAL, by AUTO DDL generation (4.4).
+class ColumnMeta(
+    val name: String,
+    val type: CanonicalType,
+    val nullable: Boolean,
+    val precision: Int = 0,
+    val scale: Int = 0,
+)
 
 // Result set to Row: applies 4.3, lower-cases keys per 4.5, reads metadata once.
 // `step` is carried so an unsupported type or a wrong typed accessor names the step (4.2, 4.3).
@@ -982,15 +1023,20 @@ interface RowWriter : AutoCloseable {
     override fun close()
 }
 
+// `step` is carried on every writer because 4.6 rejects a BLOB column at OPEN time, before
+// any Row exists, and 4.4 requires the error to name the step. Same reason as RowMapper.
 class DuckDbTableWriter(
     connection: Connection,
     table: String,
     createTable: CreateTable,                 // AUTO | REQUIRED
+    step: String,
 ) : RowWriter
 
-class JdbcTableWriter(jdbi: Jdbi, table: String) : RowWriter
+class JdbcTableWriter(jdbi: Jdbi, table: String, step: String) : RowWriter
 
-class JdbcStatementWriter(jdbi: Jdbi, sql: String) : RowWriter
+class JdbcStatementWriter(jdbi: Jdbi, sql: String, step: String) : RowWriter
+
+enum class CreateTable { AUTO, REQUIRED }
 
 // Transform (spec 9.1)
 fun interface RowTransform {
@@ -1106,6 +1152,11 @@ data class StepResult(
   See S4.
 - **S3. Implicit cast on append. ANSWERED (P0).** BIGINT casts exactly and is now allowed
   by rule 15; DATE truncates silently and stays rejected. See the table in 4.6.
+- **AUTO DECIMAL precision. ANSWERED (P2).** `ColumnMeta` widened with precision and scale;
+  AUTO emits `DECIMAL(p,s)`; an unstated or unusable pair is a loud error at writer open. Bare
+  `DECIMAL` resolves to `DECIMAL(18,3)`, which silently rounds past three decimals and cannot
+  hold a 16-digit key at all, so the previous wording made AUTO unusable for ordinary Oracle
+  `NUMBER(18)` keys.
 - **S4. Spill factor and wide-row density. ANSWERED (P0).** Storage density is
   width-independent: 8.96 and 9.07 bytes per stored value at 15 and 30 columns, high
   entropy, holding total values constant; 1.0 to 1.4 at low entropy. Spill peaks at 3.3x to
@@ -1113,8 +1164,21 @@ data class StepResult(
   after a failure. `sizeLimit` set to 32 GiB in 7.2 from these constants. S4b also refuted
   7.2's `temp_directory` rationale; corrected there. The copy count is
   `(N - 1) + 1 + retries`, not `1 + retries`: a failing dataset's siblings occupy the same
-  file, and a failed attempt keeps its partial rows because the appender's `close()` on the
-  exception path flushes what it had.
+  file. **What a failed attempt retains depends on where the failure came from** - measured
+  on 1.1.3 during P2, three cases:
+
+  | Shape before `close()` | Retained |
+  |---|---|
+  | every begun row completed with `endRow` | all of them |
+  | a row left part-appended when an `append` threw | **nothing unflushed**, including rows already completed in that chunk |
+  | `beginRow` with no values appended, then close | the completed rows |
+
+  So a failed attempt keeps every chunk already flushed, plus the completed rows of the
+  chunk in flight **only if no row was left part-appended**. A framework-detected error
+  (wrong type, missing key, unwritable column) is rejected before `beginRow` and retains
+  them; a driver-detected error inside an append - a DECIMAL value out of range, say -
+  discards the whole in-flight chunk. P4's accounting must allow for both; the worst case
+  is `floor(rows_written / chunkSize) * chunkSize`.
 - **NOT NULL DATE on a DuckDB target. ANSWERED (P0).** Confirmed: rule 15 rejects DATE
   whether nullable or not. The 4.6 truncation does not depend on nullability, so a rule that
   reached only nullable columns would have left the same hazard open. DATE is not a
