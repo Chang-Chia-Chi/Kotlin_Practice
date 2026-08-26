@@ -29,6 +29,12 @@ data class SnapshotCacheConfig(
     val servingMemoryLimit: String = "3GB",
     /** `duckdb.consumer.memoryLimit` - the one shared consumer instance (spec 6.5, 11.1). */
     val consumerMemoryLimit: String = "1GB",
+    /**
+     * `duckdb.serving.threads` - caps the serving instance's DuckDB thread pool; null =
+     * engine default. Matters on CPU-limited pods where the default equals hardware
+     * concurrency.
+     */
+    val servingThreads: Int? = null,
     /** `startup.clearStaleFiles` - leftover files are unowned because the pointer is not persisted (spec 10.1, D10). */
     val clearStaleFilesOnStartup: Boolean = true,
     /** `shutdown.leaseDrainTimeout` - keep `terminationGracePeriodSeconds` above this plus headroom (spec 10.2, 11.3). */
@@ -39,6 +45,9 @@ data class SnapshotCacheConfig(
         require(!defaultWaitBudget.isNegative) { "defaultWaitBudget must not be negative, was $defaultWaitBudget" }
         require(!refreshInterval.isNegative) { "refreshInterval must not be negative, was $refreshInterval" }
         require(jdbcFetchSize >= 1) { "jdbcFetchSize must be at least 1, was $jdbcFetchSize" }
+        require(servingThreads == null || servingThreads >= 1) {
+            "servingThreads must be at least 1 when set, was $servingThreads"
+        }
     }
 }
 

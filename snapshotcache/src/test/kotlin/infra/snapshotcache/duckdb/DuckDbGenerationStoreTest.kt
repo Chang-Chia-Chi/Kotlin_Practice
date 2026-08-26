@@ -190,6 +190,25 @@ class DuckDbGenerationStoreTest {
     }
 
     @Test
+    fun servingThreads_capsTheServingInstanceThreadPool() {
+        DuckDbGenerationStore(groupDir.resolve("threads"), tempDir, "500MB", servingThreads = 2).use { capped ->
+            capped.createCandidate(1).also { candidate ->
+                candidate.connection().createStatement().use { it.execute("CREATE TABLE t (id INTEGER)") }
+                candidate.close()
+            }
+            capped.promote(1)
+            capped.open(1).connection().use { connection ->
+                connection.createStatement().use { st ->
+                    st.executeQuery("SELECT current_setting('threads')").use { rs ->
+                        rs.next()
+                        assertThat(rs.getLong(1)).isEqualTo(2)
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
     fun abortShapedRounds_deleteWithoutClose_doNotGrowConnectionTracking() {
         // Abort paths (create/source/promote failure) reach delete without ever opening
         // the generation, so no close(gen) runs to drop the tracking entry.

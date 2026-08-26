@@ -738,6 +738,7 @@ GET /internal/snapshot/{group}
 | `jdbc.fetchSize` | 2000 | |
 | `duckdb.serving.memoryLimit` | 3GB | |
 | `duckdb.consumer.memoryLimit` | 1GB | |
+| `duckdb.serving.threads` | (null = engine default) | Optional cap on the serving instance's DuckDB thread pool. The engine default equals hardware concurrency, which oversubscribes CPU-limited pods; a cap also bounds how much of the pod a runaway reader can occupy (D29) |
 | `duckdb.tempDirectory` | (required) | |
 | `storage.path` | (required) | Generation file directory |
 | `startup.clearStaleFiles` | true | Wipe leftovers on startup |
@@ -836,6 +837,7 @@ Pinned to 1.1.3 (Linux component compatibility in the CI environment). Consequen
 | D27 | `core` logs through `org.jboss.logging.Logger`, never `io.quarkus.logging.Log` | The host is a Quarkus service, so its log manager is already present and all `quarkus.log.*` configuration applies unchanged. Naming the Quarkus type in `core` would break the Sec 2.2 boundary rule and force the core suite to boot a framework, losing the millisecond feedback loop that makes Sec 17.4/17.5 affordable. JBoss Logging is the API Quarkus itself is built on, so the output is identical |
 | D28 | The `Snapshot` handle is constructed at the `spi` boundary, not in `core` | Sec 2.2 confines `java.sql` to api signatures, spi and duckdb. A handle implementation living in `core` would name `Connection` in its bytecode as a field, parameter and return type. `OpenGeneration` already owns the connection, so it produces the handle and `core` holds it only as the `api.Snapshot` type, keeping the rule verbatim and the lease bookkeeping unchanged |
 | D25 | Consumers are responsible for transactional or idempotent writes | Lease drain is bounded, so an interrupted consumer is possible by design. The cache guarantees snapshot stability, not consumer completion; the interruption risk lives on the consumer's output side |
+| D29 | `duckdb.serving.threads` knob added (nullable, null = engine default); runaway readers are accepted-and-observed, not enforced | DuckDB's thread default equals hardware concurrency, which throttles CPU-limited pods and lets one runaway reader starve the shared serving instance (1.1.3 has no statement timeout, Sec 14.5). The cap bounds the blast radius; detection stays with the D8 lease-deadline diagnostics. An admin kill switch (interrupting a lease's connections - the Sec 14.5-sanctioned path, made safe by D25 idempotency) is deferred to P9+, to be added only if lease-duration histograms show real abuse |
 
 ---
 

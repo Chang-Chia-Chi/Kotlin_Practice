@@ -24,6 +24,7 @@ class SnapshotCacheConfigDefaultsTest {
         assertThat(config.jdbcFetchSize).isEqualTo(2000)
         assertThat(config.servingMemoryLimit).isEqualTo("3GB")
         assertThat(config.consumerMemoryLimit).isEqualTo("1GB")
+        assertThat(config.servingThreads).isNull()
         assertThat(config.clearStaleFilesOnStartup).isTrue()
         assertThat(config.leaseDrainTimeout).isEqualTo(Duration.ofSeconds(30))
     }

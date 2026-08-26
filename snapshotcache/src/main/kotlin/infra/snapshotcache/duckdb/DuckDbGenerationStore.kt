@@ -43,6 +43,8 @@ class DuckDbGenerationStore(
     private val directory: Path,
     private val tempDirectory: Path,
     private val memoryLimit: String,
+    /** Serving instance only; candidate builds keep the engine default and use the cores. */
+    private val servingThreads: Int? = null,
 ) : GenerationStore, AutoCloseable {
 
     private val log = Logger.getLogger(DuckDbGenerationStore::class.java)
@@ -57,6 +59,9 @@ class DuckDbGenerationStore(
         Files.createDirectories(tempDirectory)
         serving = DriverManager.getConnection("jdbc:duckdb:") as DuckDBConnection
         configure(serving)
+        if (servingThreads != null) {
+            serving.createStatement().use { it.execute("SET threads = $servingThreads") }
+        }
     }
 
     override fun createCandidate(gen: Long): Candidate {

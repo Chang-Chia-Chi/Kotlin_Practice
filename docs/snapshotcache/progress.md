@@ -215,3 +215,13 @@ session looking at code that disagrees with the documents, which it will
 
 ### Notes for later phases
 - The model's K-guard mirror is derived from spec 6.1 semantics over model state (reviewer-verified independent of production logic); the bug-injection run is standing evidence the oracle discriminates.
+
+## Design session - concurrent DuckDB reads  (2026-08-26, user-decided)
+
+Grill session on concurrent-read handling. Three decisions, all recorded in the documents:
+
+1. **`duckdb.serving.threads` knob added** (spec 13 + D29): nullable, null = engine default; capped on CPU-limited pods. Wired in SnapshotCacheConfig + DuckDbGenerationStore (serving instance only, not candidate builds); one ADDED assertion in the P0 config defaults test under the user-decided-document-change rule.
+2. **Runaway readers: accept + observe** (D29). No watchdog (would re-decide D8), no kill switch yet; the threads cap bounds the blast radius, lease-deadline diagnostics name the culprit. Kill switch deferred to P9+, only if lease-duration histograms demand it.
+3. **Shared consumer instance lives in P9's CDI wiring** (plan P9 amended): an @ApplicationScoped producer with consumerMemoryLimit + threads; CopyOutSpec.targetConnection stays caller-supplied. No new api surface; plan 2.3's five-interface budget intact.
+
+Confirmed already-covered (no action): release safety via identity-based idempotent leases (I2/I6/I8 + the adapter's per-generation connection guard); multiple simultaneous readers via serving.duplicate() per connection() call; withSnapshot as the consumer abstraction. Per-handle connection issuance deliberately unbounded (jobs are scheduler-bounded; plan 2.4).
