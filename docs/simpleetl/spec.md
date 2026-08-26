@@ -561,6 +561,16 @@ The only reliable reclamation point is closing the instance and deleting the fil
 run. Cost: with `retries: 3` a repeatedly failing dataset can occupy up to four copies, and
 only the failing dataset is duplicated.
 
+**The attempt suffix applies to datasets the framework creates, which is why a retried
+scratch target must be `createTable: AUTO`.** Under `AUTO` the framework owns the physical
+name and can write `wip_stg__a2` beside `wip_stg__a1`. Under `REQUIRED` the author owns a
+stable-named table the framework did not create, so there is no suffixed name to write and
+no view to repoint - a retry would append onto whatever the failed attempt already flushed,
+which is between zero and one chunk of rows (see 12). That is silent duplication, so the
+combination is rejected rather than performed: a scratch `createTable: REQUIRED` target with
+`retries > 0` is an error naming the step, telling the author to use `AUTO` or to state
+`retries: 0`. Rejected at step start, before the source query runs.
+
 ### 5.6 Parquet Materialisation
 
 `format: PARQUET` runs
@@ -588,6 +598,9 @@ table, because the appender can only append to a table. `format: PARQUET` is ava
 - Literal, from the task-level `vars` block.
 - Exported, from an `export` step.
 
+A literal var's value may not be null. Null carries no type, and 1.3 makes an untyped value
+an error rather than a guess. An author who wants SQL NULL writes `null` in the query.
+
 ### 6.2 Scope and Evaluation
 
 Task scope, evaluated in step order, so a variable exported in phase 1 is available in
@@ -598,8 +611,31 @@ phase 2. A variable may not be redefined once set.
 - Variables bind as JDBI named parameters: `where ts > :lastTs`.
 - An `export` query returns exactly one row and one column. More than one row is an error;
   zero rows yields null.
-- In `target.sql`, names bind from Row keys. Task variables are also available there; a
-  collision between a Row key and a task variable name is a startup error.
+
+  That null carries the export column's canonical type, taken from the query's result set
+  metadata, which exists whether or not a row came back (measured: a zero-row
+  `select max(ts)` reports `Types.TIMESTAMP`). It binds through `setNull(pos, <type>)`, not
+  as `Types.OTHER`, which Oracle rejects on some typed columns - the same reason 4.4's writer
+  uses `bindByType`. Mechanically it travels as a `java.sql.Types`-carrying
+  `org.jdbi.v3.core.argument.Argument` inside the existing `Map<String, Any?>` of 11.1, which
+  JDBI binds directly; no signature changes. Note the SQL consequence: `ts > :lastTs` with a
+  null watermark matches nothing. A task whose first run must read everything writes
+  `:lastTs is null or ts > :lastTs`.
+- In `target.sql`, every `:name` binds from a Row key. Task variables are **not** available
+  there. A statement target runs once per row, so a task variable a statement needs is
+  projected into the source query's select list -
+  `select lot_id, qty, :siteCode as site_code from wip` - where `JdbcSource.parameters` binds
+  it (11.1) and it arrives as an ordinary lower-cased Row key (4.5). One namespace, so a
+  `:name` in `target.sql` has exactly one meaning, and a name the source does not produce is
+  the runtime error 4.4 already raises.
+
+  Rejected: a `parameters` channel on `JdbcStatementWriter`. Measured on JDBI 3.45.4,
+  `PreparedBatch.add()` clears the binding, so "bind the variable once per batch" writes the
+  value into the chunk's first row and NULL into the rest - `(F12,1,1) (null,2,2)`, verified
+  through a recording `PreparedStatement`. Binding per row instead costs the same as a Row
+  key and buys a second namespace, a precedence rule, and a collision check startup cannot
+  perform, since Row keys are unknown until the source query runs (rule 7 already concedes
+  this).
 - No identifier interpolation. `select * from :tableName` is not valid SQL and no substitute
   is provided. It would make startup SQL validation impossible and open an injection path
   whenever the value came from a query. The snapshot cache case that motivated the request
@@ -960,7 +996,9 @@ Any failure below prevents startup, or causes a reload to be rejected with no ch
 7. Every `:name` in source, export, materialize, and statement SQL is a built-in, a literal
    var, or an export appearing earlier in step order, except Row-bound names in `target.sql`,
    which are checked at runtime (4.4).
-8. No variable defined twice; no Row key colliding with a task variable name.
+8. No variable defined twice. No literal var with a null value (6.1). The former
+    "no Row key colliding with a task variable name" clause is gone: with 6.3 amended, a Row
+    key and a task variable can no longer meet in the same statement.
 9. Dataset names unique within the task.
 10. Exactly one of `target.table` or `target.sql` present.
 11. `target.sql` not used on a DuckDB datasource.
@@ -976,6 +1014,9 @@ Any failure below prevents startup, or causes a reload to be rejected with no ch
     or not, because the truncation in 4.6 is silent and does not depend on nullability.
 16. Cron expression valid, when present.
 17. Each step's field set matches its declared type exactly.
+18. A scratch target with `createTable: REQUIRED` and `retries > 0` is rejected (5.5). The
+    attempt suffix needs a framework-owned physical name, so a retry onto an author-owned
+    stable table would append onto the failed attempt's flushed rows.
 
 Errors report file name, step name, and where available the YAML line.
 
@@ -1179,6 +1220,13 @@ data class StepResult(
   See S4.
 - **S3. Implicit cast on append. ANSWERED (P0).** BIGINT casts exactly and is now allowed
   by rule 15; DATE truncates silently and stays rejected. See the table in 4.6.
+- **Null task variable binding. ANSWERED (P5).** A null from a zero-row export binds with
+  its export column's type. Untyped `Types.OTHER` was reachable the moment `export` shipped.
+  No signature changed: measured, JDBI 3.45.4 binds an `Argument` value handed to `bindMap`
+  directly, so `Map<String, Any?>` already carries a typed null.
+- **Task variables in `target.sql`. ANSWERED (P5), by deleting the promise.** 6.3 offered
+  them; the frozen `JdbcStatementWriter` could not express it, and the obvious amendment was
+  refuted by measurement. The author projects the value into the source select list instead.
 - **AUTO DECIMAL precision. ANSWERED (P2).** `ColumnMeta` widened with precision and scale;
   AUTO emits `DECIMAL(p,s)`; an unstated or unusable pair is a loud error at writer open. Bare
   `DECIMAL` resolves to `DECIMAL(18,3)`, which silently rounds past three decimals and cannot

@@ -42,9 +42,13 @@ import java.sql.ResultSet
  *   than a silent no-op. Identifiers cannot be bound: `select * from :table` is not valid SQL and
  *   the framework offers no substitute (spec 6.3).
  *
- *   ponytail: a null value binds untyped, as `Types.OTHER`, which Oracle rejects on some columns.
- *   The map carries no type, so nothing here can do better. Upgrade path when an `export` step
- *   first yields a null (spec 6.2): a type channel like `JdbcWriters.bindColumn` already has.
+ *   A null needs no separate type channel, and this map is not the untyped hole it looks like:
+ *   JDBI binds an `org.jdbi.v3.core.argument.Argument` value **directly**, so a caller with a type
+ *   in hand puts a `NullArgument` in the map and gets `setNull(pos, <type>)` instead of
+ *   `Types.OTHER`. Measured on JDBI 3.45.4 through a recording `PreparedStatement` (P5 scratchpad
+ *   `P5Probe4`): a plain null records `setNull[1, 1111]`, a `NullArgument(Types.TIMESTAMP)` records
+ *   `setNull[1, 93]`. That is how a null task variable from a zero-row `export` reaches Oracle
+ *   typed (spec 6.3), with this signature unchanged.
  */
 class JdbcSource private constructor(
     private val openHandle: () -> Handle,

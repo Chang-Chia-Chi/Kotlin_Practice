@@ -470,3 +470,115 @@ confirmed that on Linux.
   unwrapping it would turn a genuinely broken connection into a second failure at close.
 - `report()`'s undeleted-survivor branch is deliberately untested: it fires only where the OS
   locks open files, so a test would pass on Windows and fail on Linux CI.
+
+---
+
+## P5 - Task model, variables, step executors  (2026-08-27)
+
+Team: sdet + engineer + reviewer, plus one independent adjudicator. One review cycle,
+interrupted mid-revision by a session limit and resumed. Final: 209 tests, 0 failures.
+Production is 642 lines across two files - over the 600 top of the size budget, recorded
+rather than rounded down.
+
+### Delivered
+
+Production: `TaskDefinition.kt` (the definition model), `TaskEngine.kt` (`VariableScope`,
+`TaskEngine`, four step executors, retry classification and backoff, the `addColumns` writer
+decorator).
+
+Tests: `TaskFixtures.kt`, `TaskEngineStepTypesTest`, `TaskEngineRetryTest`,
+`TaskEngineVariableTest`, `TaskEngineChunkSizeTest`, `TaskEngineFailureTest`,
+`TaskEngineGuardTest`, `VariableScopeTest`.
+
+### Deviations from the documents
+
+1. **Spec 6.3 no longer offers task variables in `target.sql`, and spec 11.1 was NOT
+   amended.** Decided by an independent adjudicator. The frozen
+   `JdbcStatementWriter(jdbi, sql, step)` has no parameter channel, and the obvious fix was
+   refuted by measurement: `PreparedBatch.add()` clears the binding on JDBI 3.45.4, so
+   "bind once per batch" writes the value into each chunk's **first row** and `Types.OTHER`
+   NULL into the rest - `(F12,1,1) (null,2,2)` through a recording `PreparedStatement`.
+   Binding per row instead costs what a Row key costs and buys a second namespace, a
+   precedence rule, and a collision check startup cannot perform. The author projects the
+   variable into the source select list instead: `select lot_id, :siteCode as site_code`.
+   Zero code changed, zero tests changed, and validation rule 8 lost its Row-key-collision
+   clause because the two can no longer meet. **First of the six contract gaps resolved by
+   deleting an unpriced promise rather than widening a signature.**
+2. **A null task variable carries its export column's type.** It travels as a JDBI
+   `Argument` inside the existing `Map<String, Any?>`, which JDBI binds directly - measured
+   `setNull(pos, 93)` versus `setNull(pos, 1111)` for a plain null. No signature change.
+   `org.jdbi.v3.core.argument.NullArgument` already ships in jdbi3-core, so the fix is zero
+   lines of new class. The engineer found a second null shape the ruling missed: `select
+   max(ts)` over an empty table returns **one row holding SQL NULL**, equally untyped; both
+   shapes are wrapped. `LiteralVar` with a null value is now an error - null carries no type
+   and 1.3 makes an untyped value an error rather than a guess.
+3. **Spec 5.5 gained a carve-out and spec 10 a rule 18: a scratch `createTable: REQUIRED`
+   target with `retries > 0` is rejected.** Found in review. `retries` defaults to 3 for any
+   scratch target including REQUIRED, but REQUIRED gets no attempt suffix - the framework
+   does not own the physical name - so a transient mid-pipe failure left up to a chunk of
+   flushed rows and the retry appended the whole source on top. Silent duplication, on a
+   default the author never wrote. The departure had existed only in a KDoc.
+4. **`VariableScope`, `LiteralVar`, `ExportVar`, `PipeSource`, `PipeTarget`/`TableTarget`/
+   `StatementTarget`, `MaterializeFormat` and `SCRATCH` are not named in spec 11.** Sixth
+   phase running that the plan named public surface spec 11 never declared. The reviewer
+   judged each: `PipeTarget`'s sealed pair "earns it - two implementations, and it makes
+   validation rule 10 unrepresentable rather than merely checked".
+5. **Two silent scope holes closed in review**: two `ExportVar`s with the same name inside
+   one step collided in a local map before `VariableScope.define` was reached, so 6.2's
+   redefinition rule never fired; and a literal or exported variable named `attempt` was
+   accepted by `define` and then silently discarded at bind time by the built-in. Both now
+   `require`. `TaskDefinition` is public and programmatically constructible, so P6's
+   validation is not the only gate.
+6. **`DeclaredColumns` closes P3's `addColumns` silent drop inside Layer 2**, not P6. A
+   private `RowWriter` decorator appends the declared columns to the list the target is
+   opened with. `RowPipe` is frozen with no channel for it. Confirmed to fix
+   `JdbcTableWriter` too: the column enters `open`'s `columns`, `bySource` picks it up, and
+   a target lacking it now fires the existing `unknown` check loudly instead of dropping it.
+
+### The mutation test, and why it matters
+
+The reviewer did what no earlier reviewer did: it **introduced a regression and ran the
+suite**. It replaced `it.sqlState?.startsWith("08") == true` with
+`it.sqlState!!.startsWith("08")` and `TaskEngineRetryTest` stayed green at 13/13 - the test
+whose KDoc claimed to reject exactly that implementation. The NPE is thrown inside
+`execute`'s own catch, propagates out of `run`'s `catch (e: Exception)`, and lands as a
+non-null `TaskOutcome.failure` with `attempts == 1` and no recorded delays, satisfying every
+assertion.
+
+The sdet had reported honestly that it could not mutation-test: editing `src/main/` is
+outside its role and the permission system refused it. The reviewer, which writes neither
+production nor test code, was the only agent positioned to falsify the tests.
+
+After the fix the lead re-ran the same mutation: exactly one test fails, and it is the right
+one. File restored, md5 verified against the pre-mutation checksum.
+
+**Adopt this for later phases.** Reading cannot find this class of defect - the assertions
+are individually reasonable and the failure arrives through a path nobody pictured.
+
+### Measured on the shipped classpath
+
+- Every JDBC failure reaches Layer 2 **wrapped**: `ResultSetException`,
+  `UnableToExecuteStatementException`, `ConnectionException`, each with the real exception as
+  cause. A classifier reading only the caught exception would retry **nothing**.
+  `isTransient` walks the chain, guards a self-referential cause and caps at 32 hops.
+- A DuckDB syntax error is a plain `java.sql.SQLException` with a **null** SQLState, so an
+  unguarded `sqlState.startsWith("08")` throws inside its own error handling.
+- `PreparedBatch.add()` clears bindings (deviation 1).
+- Result set metadata survives an exhausted result set unchanged, so a zero-row export knows
+  its column type.
+- A KDoc claim that JDBI rejects superfluous bindings was wrong: it is rejected **only when
+  the statement declares no parameters at all**. Fourth phase running with a confidently
+  wrong driver claim in a KDoc, and the first where the engineer re-measured and agreed.
+
+### Notes for later phases
+
+- **P6 owns validation rule 18** (scratch REQUIRED + retries) at startup; the engine
+  currently rejects it at step start.
+- **Untested and deferred to an Oracle-backed test**: the `StatementTarget` happy path and
+  the non-scratch `TableTarget` branch of `writer()`. Both need a non-DuckDB target, since a
+  `pipe` into DuckDB must use the appender. The *guards* on both paths are tested.
+- Non-scratch `materialize` retries will always fail the second attempt on "table already
+  exists" - loud, so not a defect, but `MaterializeStep` has no `idempotent` channel for
+  rule 12 to key off.
+- `TaskDefinition.enabled`, `cron`, `logging`, `onSuccess`, `onFailure` and
+  `PipeTarget.idempotent` are carried and unused - P6/P7/P8.
