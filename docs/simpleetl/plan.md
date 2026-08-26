@@ -99,8 +99,15 @@ The write seam, both targets, including the null handling of spec 4.6.
   connection mid-run.
 - A transform returning null drops the row; a transform adding a column lands that column.
 - The source stream and every connection are closed when the target throws mid-chunk.
-- The snapshot cache's `GenerationSource` is implemented in terms of `RowPipe` and its
-  existing test suite passes unchanged.
+- Layer 1 satisfies the snapshot cache's `GenerationSource` contract, proven inside
+  `SimpleEtl` with no dependency on the `snapshotcache` module:
+  1. A `RowPipe` populates a caller-supplied, file-mode DuckDB write `Connection` it did not
+     open, and leaves it open and usable after `run()` returns - exactly what
+     `BuildContext.target` provides.
+  2. Two `RowPipe`s writing two tables share one source read transaction (spec 9.5).
+  `PipeGenerationSource` is caller-land wiring, owned by the cache's own plan, and is not
+  built here. The original wording - "its existing test suite passes unchanged" - was struck
+  as evidence: nothing in that module is modified, so its suite passes trivially.
 
 **Not in scope:** retry, YAML, scratch lifecycle. A `RowPipe` failure propagates.
 

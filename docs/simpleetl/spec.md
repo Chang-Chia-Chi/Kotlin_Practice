@@ -370,10 +370,13 @@ and multi-row INSERT are both too slow at this row count.
 - A PRIMARY KEY or UNIQUE violation fails the whole append batch and inserts nothing.
   Framework-created scratch tables therefore carry no constraints and no indexes. An index,
   if needed, is added by a later `sql` step.
-- `flush()` marks the chunk boundary. It does **not** bound memory: S1 measured the same
-  peak RSS with and without it at both 1M and 10M rows, at a cost of roughly 32% of append
-  wall time. It is called once per chunk so that a chunk boundary is an observable event,
-  not to cap memory.
+- `flush()` marks the chunk boundary, and it is what makes the chunk visible. Measured in
+  P3 on 1.1.3: rows appended but not flushed are invisible even to the appending connection;
+  after `flush()` they are immediately visible to a `duplicate()` connection as well
+  (`autoCommit` is true by default). **For a DuckDB target, flush is the per-chunk commit of
+  5.2 step 4.** It does *not* bound memory: S1 measured the same peak RSS with and without
+  it at both 1M and 10M rows, at a cost of roughly 32% of append wall time. So it is called
+  once per chunk for visibility, not to cap memory.
 
 **Null.** 1.1.3 has no public `appendNull()`, but it reaches the native
 `duckdb_jdbc_appender_append_null` through three object-typed methods, each of which null
@@ -903,16 +906,33 @@ Layer 1 is used directly by the cache. `GenerationSource.refresh(ctx)` receives 
 ```kotlin
 class PipeGenerationSource(private val specs: List<TableSpec>) : GenerationSource {
     override fun refresh(ctx: BuildContext) {
-        specs.forEach { spec ->
-            RowPipe(
-                source = JdbcSource(oracleMes, spec.sql),
-                target = DuckDbTableWriter(ctx.target, spec.table, createTable = AUTO),
-                chunkSize = 5000,
-            ).run()
+        oracleMes.inTransaction<Unit, Exception> { handle ->     // ONE read transaction
+            specs.forEach { spec ->
+                RowPipe(
+                    source = JdbcSource(handle, spec.sql),       // borrowed, not closed
+                    target = DuckDbTableWriter(ctx.target, spec.table, AUTO, spec.step),
+                    step = spec.step,
+                    chunkSize = 5000,
+                ).run()
+            }
         }
     }
 }
 ```
+
+**The single transaction is load-bearing.** An earlier draft of this example passed the
+`Jdbi` to each `JdbcSource`, which opens a fresh `Handle` - and so a fresh connection and
+transaction - per pipe. `GenerationSource.refresh` requires all tables in the group to be
+read inside one source read transaction; reading them separately publishes a torn snapshot,
+where the union of tables shows duplicates or gaps intermittently. That is why `JdbcSource`
+takes a borrowed `Handle` (11.1). The cache's own end-to-end test cannot catch the mistake,
+because its synthetic source generates rows in-process with no source transaction at all.
+
+`PipeGenerationSource` itself is caller-land wiring and belongs to no library module: the
+cache's plan places `GenerationSource` implementations outside its framework packages and
+confines JDBI to caller-land implementations, and the cache's own later phase owns the real
+one. Adding a `snapshotcache -> SimpleEtl` dependency would also cycle against the
+`SimpleEtl -> snapshotcache` dependency that 7.3's cache-read step already requires.
 
 The direction of control matters: the cache calls the ETL, not the other way round.
 Promotion, verification, leases, and reclamation stay with the cache, and the framework
@@ -1009,12 +1029,16 @@ class RowMapper(metaData: ResultSetMetaData, step: String) {
     fun map(rs: ResultSet): Row
 }
 
-// Source
-class JdbcSource(
-    val jdbi: Jdbi,
-    val sql: String,
-    val parameters: Map<String, Any?> = emptyMap(),
-)
+// Source. Two forms, because the Jdbi form opens a fresh Handle - and so a fresh
+// transaction - per pipe, which cannot satisfy 9.5's "one source read transaction".
+class JdbcSource {
+    // Borrows the caller's Handle and never closes it, so N pipes share one read
+    // transaction. Required by the GenerationSource seam (9.5).
+    constructor(handle: Handle, sql: String, parameters: Map<String, Any?> = emptyMap())
+
+    // Convenience: opens one Handle for the run and closes it. Single-pipe use.
+    constructor(jdbi: Jdbi, sql: String, parameters: Map<String, Any?> = emptyMap())
+}
 
 // Targets
 interface RowWriter : AutoCloseable {
@@ -1044,9 +1068,12 @@ fun interface RowTransform {
 }
 
 // The pipe
+// `step` is carried for the same reason RowMapper and the writers carry it: 4.2 and 4.3
+// require errors to name the step, and RowPipe is what constructs the RowMapper.
 class RowPipe(
     source: JdbcSource,
     target: RowWriter,
+    step: String,
     chunkSize: Int = 5000,
     transform: RowTransform? = null,
 ) {

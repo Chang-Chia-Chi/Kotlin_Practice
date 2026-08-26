@@ -1,56 +1,53 @@
-# Checkpoint - P2 Writers
+# Checkpoint - P3 RowPipe (Layer 1 complete)
 
-- Phase ID: P2
+- Phase ID: P3
 - Project: SimpleEtl (YAML-driven ETL framework)
 - Date: 2026-08-27
 - Team: sdet + engineer + reviewer, plus one independent adjudicator
-- Status: PHASE COMPLETE. 115 tests, 0 failures. One review cycle. Committed.
-- NOTE: the composition table marks P2 "all three, plus human review". The human review has
-  NOT happened - the user instructed the lead to proceed without checking in. Flagged to the
-  user at the gate; recorded here so it is not lost.
+- Status: PHASE COMPLETE. 137 tests, 0 failures. One review cycle. Committed.
+- MILESTONE: Layer 1 is finished. The snapshot cache can adopt it. Everything after this
+  point is the task engine (Layer 2).
 
 ## Files
 
 Production, src/main/kotlin/infra/simpleetl/:
-- RowWriter.kt          - RowWriter interface, catalogColumns (single-schema guarded)
-- DuckDbTableWriter.kt  - CreateTable, AUTO DDL with DECIMAL(p,s), positional append, 4.6 dispatch
-- JdbcWriters.kt        - JdbcTableWriter, JdbcStatementWriter
-- RowMapper.kt          - ColumnMeta gained precision and scale
+- CanonicalType.kt, Row.kt, RowMapper.kt          (P1)
+- RowWriter.kt, DuckDbTableWriter.kt, JdbcWriters.kt (P2)
+- RowPipe.kt - JdbcSource (Handle + Jdbi forms), RowTransform, PipeResult, RowPipe (P3)
 
-Tests, src/test/kotlin/infra/simpleetl/:
-- WriteFixtures.kt, DuckDbTableWriterAutoTest.kt, DuckDbTableWriterRequiredTest.kt, WriterOracleTest.kt
+Tests, src/test/kotlin/infra/simpleetl/: P0's six spike/*Spike, P1's six, P2's four,
+and P3's PipeFixtures.kt, RowPipeTest, RowPipeCommitTest, RowPipeFailureTest, RowPipeOracleTest.
 
 ## Build
 
-    mvn -f <repo>/pom.xml -pl SimpleEtl clean test    -> BUILD SUCCESS, 115/115
+    mvn -f <repo>/pom.xml -pl SimpleEtl clean test    -> BUILD SUCCESS, 137/137
 
 ALWAYS use `clean`. Maven is NOT on PATH:
 C:\Program Files\JetBrains\IntelliJ IDEA Community Edition 2024.1.4\plugins\maven\lib\maven3\bin\mvn.cmd
 
-## Driver facts measured in P2, all on real duckdb_jdbc 1.1.3
+## Driver facts measured in P3
 
-- Bare DECIMAL resolves to DECIMAL(18,3): 15 integer digits max, so an Oracle NUMBER(18)
-  key >= 1e15 fails the append. This is why ColumnMeta was widened.
-- getColumns(null, null, name, null) returns rows from EVERY schema with that table name,
-  interleaved after sorting by ORDINAL_POSITION. Now guarded.
-- `_` is a live wildcard in getColumns: "t_stg" matches "tXstg". The exact TABLE_NAME filter
-  is load-bearing.
-- DatabaseMetaData.getColumns reports nullability truthfully; ResultSetMetaData.isNullable
-  does not (columnNullable for everything). Never substitute one for the other.
-- Appender close(): completed rows flush; a PART-appended row discards the whole unflushed
-  buffer including completed rows; an empty beginRow is harmless.
-- DuckDBAppender is subclassable; DuckDBConnection is public final. No injection seam exists
-  in DuckDbTableWriter, which is what makes a leak double impossible.
+- Appender flush() IS the per-chunk commit: unflushed rows are invisible even to the
+  appending connection; after flush they are immediately visible to a duplicate(). autoCommit
+  is true by default.
+- Jdbi.open(Connection) CLOSES the caller's connection - it uses a lambda ConnectionFactory
+  inheriting the interface default. Only Jdbi.create(Connection) is a no-op release. Verified
+  on the shipped classpath. This is why the Connection form was deleted.
+- duckdb_jdbc 1.1.3 accepts setFetchSize and goes on reporting 2048. Only Oracle can assert
+  the reading; assert the call on DuckDB.
+- Jdbi sets no fetch size of its own, so any recorded value is the pipe's.
+- Oracle's default READ COMMITTED gives statement-level consistency, so a shared-source-
+  transaction test must set SERIALIZABLE or it asserts nothing.
 
 ## Open for later phases
 
-- P5: JdbcStatementWriter has no task-variable channel (spec 6.3). Constructor amendment or
-  pre-binding needed.
-- P4: budget scratch space from the three retention shapes, not one number.
-- Done-when 7 partially unmet by necessity; see progress.md P2 deviation 6.
+- P5/P6: transform-added column silently dropped under AUTO; lands under REQUIRED.
+- P5: null in JdbcSource.parameters binds as Types.OTHER; Oracle rejects it on some columns.
+- P4: budget scratch space from P2's three retention shapes, not one number.
+- JdbcStatementWriter is unexercised by any pipe test.
 
 ## Files to re-read on resume
 
-- docs/simpleetl/spec.md sections 4.4, 4.6, 5.5, 7.2, 10, 11.1, 12
-- docs/simpleetl/plan.md P3 entry
-- docs/simpleetl/progress.md P0, P1, P2 entries
+- docs/simpleetl/spec.md sections 4.4, 4.6, 5.2, 5.5, 7.2, 9.5, 10, 11.1, 12
+- docs/simpleetl/plan.md P4 entry
+- docs/simpleetl/progress.md P0-P3 entries

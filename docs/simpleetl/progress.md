@@ -273,3 +273,102 @@ deleted-and-lying for two `getInt` calls on an open ResultSet.
   reports `columnNullable` for everything. The two must never be substituted for each other.
 - `JdbcTableWriter` emits column identifiers unquoted, so Oracle folds them to upper case. A
   target column created as a quoted lower-case identifier fails with ORA-00904.
+
+---
+
+## P3 - RowPipe, Layer 1 complete  (2026-08-27)
+
+Team: sdet + engineer + reviewer, plus one independent adjudicator. One review cycle.
+Final: 137 tests, 0 failures. **Milestone: the snapshot cache can now adopt Layer 1.**
+
+### Delivered
+
+Production: `RowPipe.kt` - `JdbcSource` (two forms), `RowTransform`, `PipeResult`, `RowPipe`.
+About 170 lines, half of it KDoc.
+
+Tests: `PipeFixtures.kt` (`Pipe`, `ProbeWriter`, `RecordingConnections`), `RowPipeTest`,
+`RowPipeCommitTest`, `RowPipeFailureTest`, `RowPipeOracleTest`.
+
+### Deviations from the documents
+
+1. **Spec 11.1: `JdbcSource` gained a borrowed-`Handle` form; spec 9.5's example was wrong.**
+   Decided by an independent adjudicator that had not worked on either module. The frozen
+   `JdbcSource(jdbi, sql)` opens a fresh `Handle` - fresh connection, fresh transaction - per
+   pipe. `GenerationSource.refresh` requires all tables in a group to be read inside ONE
+   source read transaction, so 9.5's own worked example published a torn snapshot: the union
+   of tables showing duplicates or gaps, intermittently. The cache's own E2E cannot detect
+   it, because its synthetic source generates rows in-process with no source transaction.
+   9.5's example now wraps the pipes in `inTransaction` and passes the borrowed handle.
+   Fifth instance of a contract written for one caller and never checked against the other.
+2. **Spec 11.1: `RowPipe` gained `step: String`.** Third instance of the same gap after
+   `RowMapper` (P1) and the three writers (P2). Settled by precedent, not adjudicated. Note
+   that 9.5 was amended to pass it before 11.1 declared it, so the two documents contradicted
+   each other until the reviewer caught it - the lead's omission.
+3. **The `GenerationSource` acceptance criterion was rewritten** (plan.md P3). The original -
+   "implemented in terms of `RowPipe` and its existing test suite passes unchanged" - cannot
+   be satisfied from inside this module and proves nothing as evidence:
+   - `GenerationSource` lives in the `snapshotcache` module, whose ArchUnit rule forbids it
+     depending on the surrounding service; ETL spec 9.5 forbids Layer 1 knowing about the
+     cache. `PipeGenerationSource` is caller-land, owned by the cache's own later phase.
+   - Adding `snapshotcache -> SimpleEtl` would cycle against the `SimpleEtl -> snapshotcache`
+     dependency that spec 7.3's cache-read step already requires at P9.
+   - "its existing test suite passes unchanged" is vacuous: nothing in that module is
+     modified, so it passes trivially. Worse, the cache's ArchUnit rule guards the literal
+     patterns `etl..` and `source..`, which this framework's package `infra.simpleetl` does
+     not match, and no rule names JDBI - so a cross-module dependency could have been added
+     with all five boundary rules still green. If a later phase does add one, widen that rule
+     in the snapshotcache project first, as its own change.
+   Replaced by two properties provable here: a pipe populates a caller-supplied file-mode
+   DuckDB connection and leaves it open and usable; two pipes share one source read
+   transaction.
+4. **Per-chunk commit needed no widening of `RowWriter`.** For a DuckDB target the per-chunk
+   `flush()` is the commit - measured: unflushed rows are invisible even to the appending
+   connection, and after flush they are immediately visible to a `duplicate()` connection.
+   For a JDBC target each chunk is one prepared-batch execute on a handle whose `autoCommit`
+   the framework never touches, so P1's ORA-17273 is unreachable. Spec 4.6's flush note now
+   records the visibility measurement.
+5. **`require(chunkSize > 0)` is not in the spec** and was kept deliberately. Recorded so it
+   is not "simplified" away later.
+
+### Bug found in review, not by tests
+
+The engineer added a third `JdbcSource(Connection, ...)` form on its own initiative, and it
+**closed the caller's connection** - the exact failure the borrowed form exists to prevent.
+Its KDoc cited `SingleConnectionFactory.closeConnection` being `return;`, which is true but
+about a method `Jdbi.open(Connection)` never calls: that goes through a lambda
+`ConnectionFactory` inheriting the interface default, which calls `connection.close()`.
+`SingleConnectionFactory` is reached only from `Jdbi.create(Connection)`. Measured on the
+shipped classpath:
+
+    Jdbi.open(conn)        -> caller connection closed = true
+    Jdbi.create(conn).open -> caller connection closed = false
+
+The form was deleted rather than fixed: absent from spec 11.1, unused, untested. **137 green
+tests did not catch it because that form had no test** - coverage of what exists says nothing
+about surface added on initiative.
+
+This is the third phase running in which a KDoc driver claim was wrong and a reviewer caught
+it, after P1's `getBytes` and P2's appender-subclassing note. All three sounded measured and
+were refuted by measurement. The failure mode is reasoning from source or bytecode without
+running the call path: here the engineer verified the method it expected to be called rather
+than the one that is.
+
+### Notes for later phases
+
+- **P5/P6: a transform-added column is silently dropped under `createTable: AUTO`.** AUTO's
+  DDL comes from source metadata, which cannot describe an added column, and P3's frozen
+  signature has no `addColumns` channel. Under `REQUIRED` the same column lands. The
+  behaviour differs by mode with no diagnostic either way. Validation rule 14 and spec 9.1
+  make this Layer 2's to carry.
+- **P5: a null in `JdbcSource.parameters` binds untyped** as `Types.OTHER`, which Oracle
+  rejects on some columns. `Map<String, Any?>` carries no type, so it cannot be fixed here -
+  note the asymmetry with `JdbcWriters.bindColumn`, which uses `bindByType` for exactly this
+  reason. Reachable once P5's `export` step yields null for a zero-row export. Marked with a
+  `ponytail:` comment.
+- **A shared source read transaction needs SERIALIZABLE to mean anything.** Oracle's default
+  READ COMMITTED gives statement-level consistency, so the shared-transaction test would pass
+  against a pipe that opened a connection per run. The test sets it explicitly; a real caller
+  must too.
+- **`RowPipe` owns the target writer's lifecycle** (open/write/close), so a `RowWriter` is
+  single-use. Spec 9.5 constructs the writer inline, so no one else could close it.
+- `JdbcStatementWriter` is still unexercised by any pipe test.
