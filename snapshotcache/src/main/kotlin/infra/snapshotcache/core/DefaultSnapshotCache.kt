@@ -9,6 +9,7 @@ import infra.snapshotcache.api.GcOutcome
 import infra.snapshotcache.api.GenerationInfo
 import infra.snapshotcache.api.GenerationState
 import infra.snapshotcache.api.GroupId
+import infra.snapshotcache.api.LeaseInfo
 import infra.snapshotcache.api.NoOpCacheEvents
 import infra.snapshotcache.api.NotReadyException
 import infra.snapshotcache.api.RefreshOutcome
@@ -52,6 +53,7 @@ internal class DefaultSnapshotCache(
 ) : SnapshotCache, CacheAdmin {
 
     override val defaultWaitBudget: Duration = config.defaultWaitBudget
+    private val leaseDrainTimeout: Duration = config.leaseDrainTimeout
 
     override fun <T> withSnapshot(group: GroupId, waitBudget: Duration, block: (Snapshot) -> T): T {
         val snapshot = acquire(group, waitBudget)
@@ -94,6 +96,37 @@ internal class DefaultSnapshotCache(
     override fun gc(group: GroupId): GcOutcome = cycleOf(group).reclaimPass()
 
     override fun liveGenerations(group: GroupId): List<GenerationState> = runtimeOf(group).registry.liveGenerations()
+
+    /**
+     * Spec 10.2 steps 1 + 4. Step 1: every group is marked shutting down first, so new
+     * acquires are refused everywhere and all budget-waiters release at once. Step 4:
+     * leases drain under ONE total [leaseDrainTimeout] deadline across all groups
+     * (nanoTime-based like the waits themselves, since an injected [Clock] cannot drive
+     * `awaitNanos`). Every lease still outstanding at the deadline is WARN-logged with
+     * owner and hold duration - the only way to identify what is delaying shutdown - and
+     * returned. Logging runs outside the registry lock (plan 2.5). Steps 2 (stop
+     * scheduling) and 3 (interrupting an in-flight build) are P9 wiring. Idempotent: a
+     * repeated call re-checks and returns the current outstanding list without error.
+     */
+    fun shutdown(): List<LeaseInfo> {
+        groups.values.forEach { it.registry.beginShutdown() }
+        val deadline = System.nanoTime() + leaseDrainTimeout.toNanos()
+        val outstanding = groups.flatMap { (group, runtime) ->
+            runtime.registry.awaitQuiescence(Duration.ofNanos(deadline - System.nanoTime()))
+                .map { lease -> group to lease }
+        }
+        val now = clock.instant()
+        for ((group, lease) in outstanding) {
+            log.warnf(
+                "Shutdown lease drain timed out with a lease still outstanding. " +
+                    "group=%s owner=%s heldFor=%s (spec 10.2 step 4).",
+                group,
+                lease.owner,
+                Duration.between(lease.acquiredAt, now),
+            )
+        }
+        return outstanding.map { it.second }
+    }
 
     // ---- internals ----
 

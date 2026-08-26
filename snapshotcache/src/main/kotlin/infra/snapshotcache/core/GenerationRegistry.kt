@@ -179,7 +179,11 @@ internal class GenerationRegistry(
         }
     }
 
-    /** Idempotent per lease instance: the refcount is decremented exactly once (I6). */
+    /**
+     * Idempotent per lease instance: the refcount is decremented exactly once (I6).
+     * Every effective release signals the condition so [awaitQuiescence] re-checks;
+     * orphan releases route through here too, so they signal as well (spec 10.2 step 4).
+     */
     fun release(lease: RegistryLease): Unit = lock.withLock {
         if (lease.released) return
         lease.released = true
@@ -187,6 +191,7 @@ internal class GenerationRegistry(
         record.refCount--
         record.leases.remove(lease)
         check(record.refCount >= 0) { "refcount of generation ${lease.generation} went negative" }
+        published.signalAll()
     }
 
     /**
@@ -276,6 +281,20 @@ internal class GenerationRegistry(
     }
 
     fun isShuttingDown(): Boolean = lock.withLock { shuttingDown }
+
+    /**
+     * Waits interruptibly, bounded by [budget], until zero leases are outstanding across
+     * all generations - signalled by [release], never polled (spec 10.2 step 4). Returns
+     * the leases still outstanding on exit: empty iff drained. A zero or negative budget
+     * returns the current outstanding snapshot immediately.
+     */
+    fun awaitQuiescence(budget: Duration): List<LeaseInfo> = lock.withLock {
+        var remaining = budget.toNanos()
+        while (remaining > 0 && records.values.any { it.leases.isNotEmpty() }) {
+            remaining = published.awaitNanos(remaining)
+        }
+        records.values.flatMap { record -> record.leases.map { it.info } }
+    }
 
     // ---- internals (caller must hold the lock) ----
 

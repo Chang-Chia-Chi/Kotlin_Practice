@@ -225,3 +225,26 @@ Grill session on concurrent-read handling. Three decisions, all recorded in the 
 3. **Shared consumer instance lives in P9's CDI wiring** (plan P9 amended): an @ApplicationScoped producer with consumerMemoryLimit + threads; CopyOutSpec.targetConnection stays caller-supplied. No new api surface; plan 2.3's five-interface budget intact.
 
 Confirmed already-covered (no action): release safety via identity-based idempotent leases (I2/I6/I8 + the adapter's per-generation connection guard); multiple simultaneous readers via serving.duplicate() per connection() call; withSnapshot as the consumer abstraction. Per-handle connection issuance deliberately unbounded (jobs are scheduler-bounded; plan 2.4).
+
+## P8 - E2E feasibility test + shutdown drain  (2026-08-26) - M1 COMPLETE
+
+### Delivered
+- Shutdown drain (user decision, pulled forward from P9; plan P8/P9 amended first): `GenerationRegistry.awaitQuiescence(budget)` (bounded interruptible wait on the existing `published` condition, signalled by release's effective path - orphans included; zero/negative budget = immediate snapshot) and `DefaultSnapshotCache.shutdown(): List<LeaseInfo>` (spec 10.2 steps 1+4: beginShutdown on every group, ONE nanoTime-based `leaseDrainTimeout` deadline across groups, per-lease WARN with owner + hold duration outside the lock, returns the outstanding list; stateless idempotency). ~55 lines. Steps 2+3 (stop scheduling, interrupt delivery) remain P9 wiring.
+- `e2e/SyntheticSource.kt` - real org.duckdb Appender path; t_a 2000 / t_b 3000 rows; spec 3.3 union view (source column, aligned names, typed NULLs); generation-stamped values make I8 content-provable.
+- `e2e/EndToEndFeasibilityTest.kt` (~640 lines, @Tag("e2e"), PER_CLASS ordered) - the seven spec 17.7 steps VERBATIM on the full real stack, 22 real build->publish->reclaim rotations + steady-state loop, RecordingStoreSpy asserting all four 17.3 equations on the real store, WarnCapture (JUL fallback) pinning the drain WARN, second never-published group making step 7's waitBudget-waiter clause reachable, FD baseline Unix-gated (P7 ruling).
+- Build: 127 tests, 0 failures, 2 Unix-only skips; E2E ~2s (stable across 3 runs), far under the 2-minute budget. Review: both agents APPROVED cycle 1.
+- Spec 17.6 table updated at the gate: A3, A7, file-level A1 confirmed; A4 confirmed in its adapter-guard form (per the P7 record).
+
+### Deviations from the documents
+- **Drain pulled into P8 from P9** (user decision 2026-08-26; plan P8/P9 amended before code). `shutdown()` lives on the concrete facade, not a frozen interface.
+- **Step 1's wipe is performed by the test through the store primitives** (listOnDisk + delete): startup orchestration (spec 10.1) is P9's; the E2E proves the primitives clean a dirty directory including WAL siblings.
+- **K=1 for step 3** (K=3 makes the blocked state unreachable with one held lease - per-round GC holds live at 2; spec 6.1 semantics are K-invariant; P5 precedent).
+- Self-managed temp root instead of @TempDir: JUnit 5.11 re-injects non-static @TempDir per method even under PER_CLASS, and per-method cleanup collides with still-ATTACHed files on Windows.
+- WarnCapture assumes the jboss-logging JUL fallback (no other backend on the test classpath); breaks if a logging backend is ever added there.
+- A second shutdown() call under still-stuck leases drains again (bounded) rather than returning instantly - lead-ruled acceptable; no drain-state invented.
+
+### Notes for later phases
+- **P9's remaining scope**: CDI producers (incl. the D29 consumer instance), @Scheduled adapter, Micrometer binder, admin endpoint, startup sequence (wipe orchestration + readiness), shutdown HOOK wiring steps 2+3 to cache.shutdown(), grace-period alignment. Reviewer red-flag: any P9 diff touching core beyond wiring seams.
+- The `published` condition now carries two predicates (publish/shutdown and quiescence) - reviewer suggestion open to comment it.
+- Other open suggestions: assert step 4's deferral warning via WarnCapture; per-rotation openIssuedConnections()==0 in the steady-state loop.
+- M1 (spec 17.8 framework acceptance) is complete on this machine except the two Unix-only FD assertions, which first execute on Linux CI. Deferred by design (D19): RSS-trend leak measurement, perf baselines (spec 16.3), data-correctness validation (P10).

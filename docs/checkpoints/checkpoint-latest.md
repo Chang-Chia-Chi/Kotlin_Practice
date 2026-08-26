@@ -1,71 +1,27 @@
-# Checkpoint P7 (supersedes P4/P4b entries below the fold)
+# Checkpoint P8 - M1 COMPLETE
 
-- ID: P7-2026-08-26
-- Phases closed this session: P4 (7c836d5, tag p4), P4b (c89c7b7, tag p4b), P7 (this commit, tag p7)
-- Status: P7 PHASE COMPLETE (REVISE cycle 1 -> APPROVED cycle 2; A4 deviation recorded in spec 17.6 + progress.md; VerifyGate catalog-filter cross-phase fix applied). 103 tests, 0 failures, 1 Unix-only skip.
-- Next: P5 (deterministic concurrency suite, sdet + reviewer) with the readable-rule rider; then P6; P8 unblocked after P5/P6.
-- P8 constraint carried: E2E step 4 stages its raw connection via OpenGeneration.connection() (A4 finding).
-
----
-
-# Checkpoint P4 (historical)
-
-- ID: P4-2026-08-25
-- Phase: P4 - RefreshCycle: state machine, verify gate, failure paths
-- Team: sdet + engineer + reviewer
-- Baseline: tag `p3` (= f40bdfd, P3 complete)
-- Status at checkpoint: PHASE COMPLETE (sdet APPROVED cycle 1; engineer APPROVED cycle 2 after 1 required change - candidate.connection() DISK_ERROR hoist; DoD gate passed; progress.md P4 entry appended; 82 tests green). P4b (built-in verify-rule tests) remains open as the split's second half.
-
-## Build result
-
-    mvn test  ->  BUILD SUCCESS
-    ArchitectureTest 5, DefaultSnapshotCacheTest 17, GenerationRegistryTest 21,
-    RefreshCycleTest 7 (new), RefreshCycleFailureTest 9 (new),
-    MetricLabelContractTest 3, ConfigDefaults 2, AccountingFixtureTest 10,
-    InMemoryGenerationStoreTest 8
-    total 82 tests, 0 failures
-
-## Test-diff check
-
-    git diff --stat p3 -- '**/test/**'  ->  empty (no earlier-phase test touched)
-    Working tree: core/RefreshCycle.kt + GenerationRegistry.kt +
-    DefaultSnapshotCache.kt modified, spi/VerifyGate.kt new (engineer);
-    P4TestSupport.kt + RefreshCycleTest.kt + RefreshCycleFailureTest.kt new (sdet).
-
-## Session history (both agents survived infra stream-stalls and were resumed)
-
-1. Both agents' first runs were killed by API infrastructure errors mid-flight;
-   lead resumed each from its transcript; all work recovered.
-2. Integration found ONE production defect, reported by the sdet with root
-   cause: blocked-by-K never auto-resumed (K guard evaluated before any
-   reclaim; GC only ran on successful rounds; "0 leases outstanding" yet still
-   blocked). Engineer fixed with a 7-line diff: on a tripped guard, run
-   reclaimPass then re-check before declaring BLOCKED_BY_K.
-3. Final: 82/82 green.
-
-## Lead rulings this session
-
-1. P4b SPLIT INVOKED (plan P4's pre-authorized remedy): detailed built-in
-   verify-rule tests (non_empty/key_unique/required_non_null/row_count_delta
-   default-off/table discovery) deferred to a P4b session. P4 covers
-   verify_failed via caller GenerationCheck. QueryScript heuristics in
-   P4TestSupport are ready for P4b reuse.
-2. VerifyGate lives in spi, not core (RATIFIED; supersedes the lead's pin 7
-   wording): engineer probe-proved java.sql METHOD CALLS from core violate
-   immutable ArchUnit rule 4 (P0's probe only planted a field). D28 precedent.
-3. Escalation semantics pinned: verifyFailureEscalated fires exactly once when
-   the consecutive counter REACHES the threshold; success resets and re-arms.
-4. Round sequence deviation (pre-ruled at spawn): verify runs AFTER promote via
-   open(gen) (frozen store has no reopen-candidate seam); I1 unaffected.
-5. Failure classification (pre-ruled): store exceptions -> DISK_ERROR
-   (+ emergency GC), source -> SOURCE_ERROR, interrupt/shutdown ->
-   SHUTDOWN_ABORTED - by failing component, not exception inspection.
+- ID: P8-2026-08-26
+- Phases closed since P7: P5 (040f212, tag p5), P6 (e3cf5fa, tag p6), design
+  session (e8b197b - D29 threads knob, consumer-instance ruling, runaway
+  acceptance), P8 (this commit, tag p8)
+- Status: P8 PHASE COMPLETE (both agents APPROVED cycle 1). M1 - the spec 17.8
+  framework acceptance scope - is COMPLETE on this machine; the two Unix-only
+  FD assertions first execute on Linux CI. 127 tests, 0 failures, 2 skips.
+- Spec 17.6 flips recorded: A3, A7, file-level A1 confirmed; A4 confirmed in
+  adapter-guard form. A2/A5/A6/A8 + RSS-trend measurement remain open (D19).
+- User decisions this stretch: drain pulled into P8 (plan P8/P9 amended);
+  D29 (serving threads knob, runaway accept+observe); consumer instance in
+  P9 CDI wiring.
+- Next: M2 starts only after the user accepts M1 (plan 3b gate). P9 scope:
+  CDI/scheduler/Micrometer/admin endpoint/startup wiring + shutdown hook
+  calling cache.shutdown() + interrupt delivery. Reviewer red-flag standing:
+  any P9 core diff beyond wiring seams. NOTE: the repo has no host Quarkus
+  service (P0 deviation) - P9 needs a user decision on where the service
+  lives.
 
 ## Files to Re-read on resume
 
-- docs/snapshotcache/progress.md (P4 entry appended only after the DoD gate)
-- snapshotcache/src/main/kotlin/infra/snapshotcache/core/RefreshCycle.kt
-- snapshotcache/src/main/kotlin/infra/snapshotcache/spi/VerifyGate.kt
-- snapshotcache/src/test/kotlin/infra/snapshotcache/core/RefreshCycleTest.kt,
-  RefreshCycleFailureTest.kt, P4TestSupport.kt
+- docs/snapshotcache/progress.md (P8 entry + design session)
+- snapshotcache/src/main/kotlin/infra/snapshotcache/core/DefaultSnapshotCache.kt (shutdown)
+- snapshotcache/src/test/kotlin/infra/snapshotcache/e2e/ (both files)
 - This checkpoint
