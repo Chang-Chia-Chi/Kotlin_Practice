@@ -216,6 +216,51 @@ Exactly one of `target.table` or `target.sql` must be present.
       sql: "select max(processed_ts) from etl_watermark where task_name = :taskName"
 ```
 
+### 3.6 Step: cacheCopy
+
+Added by the P9 amendment. Spec 3 defined four step types; the fifth existed in the model from P5
+with a stub executor and no YAML form.
+
+```yaml
+- name: copy-wip
+  type: cacheCopy
+  cache: wip_cache          # a name the host binds to (SnapshotCache, GroupId) - see 8.6
+  sql: select lot_id, qty from wip where site = 'F12'
+  output: wip_cache         # a scratch dataset; gets 5.5's attempt suffix and stable view
+  retries: 0                # see below - a non-zero value is rejected
+```
+
+`sql` runs **inside the cache's own DuckDB instance**, against the attached generation, and its
+result is materialised into scratch by `CREATE TABLE ... AS SELECT`. No row passes through the
+JVM (7.3).
+
+**`sql` may not bind a variable.** `CopyOutSpec.sql` is a plain `String` with no binding channel,
+and interpolating a task variable into it would be the injection path 6.3 refuses everywhere else.
+A task needing a variable copies the wider subset and filters in the following `materialize` step.
+Enforced at startup by rule 19, so it cannot die thirty minutes into a run.
+
+**`retries` is dead on this step type and a non-zero value is rejected** (rule 20). 5.3's retry
+classification is JDBC-shaped - `SQLTransientException`, `SQLRecoverableException`,
+`SQLTimeoutException`, SQLState `08` - and the cache's `copyOut` reaches a local DuckDB file
+through raw JDBC, so none of those ever arrives. `NotReadyException` and `ShuttingDownException`
+are plain `RuntimeException`s and are deliberately not added to the classification: the waiting
+mechanism is `copyOut`'s own `waitBudget`, which the framework does not override. Accepting a
+`retries` that can never fire would be a knob that lies; rules 12 and 18 already set the precedent
+of rejecting such a combination loudly.
+
+**Each `cacheCopy` step takes its own lease and may therefore read its own generation.** Two such
+steps against one group are not guaranteed to agree - the snapshot cache's own spec 6.4 calls that
+a torn read and prescribes `withSnapshot()` to pin one generation across a round. **This framework
+deliberately declines that remedy**: 7.3's operational constraint says a task holding a lease for
+30 minutes stalls cache refreshing entirely, with the cause in a different system from the symptom,
+and a run-scoped lease has nowhere to live across a failed step. A task needing two mutually
+consistent cache reads expresses them as one `sql` in one step. Recorded rather than left for a
+consumer to discover.
+
+**The step blocks for the cache's `defaultWaitBudget`** while no generation is available. That
+happens on the task's own confined dispatcher thread (8.3), and this framework has no step timeout
+anywhere - so the budget is the cache's policy and the task's whole latency floor.
+
 ---
 
 ## 4. Type Contract
@@ -756,6 +801,22 @@ store.copyOut(opened, CopyOutSpec(
 This is exposed as a distinct step type rather than as a `pipe`, because it is a file-to-file
 copy and not a row pipeline.
 
+**A contradiction with the cache's own specification, recorded rather than shrugged at.** The
+snapshot cache's spec 6.5 says: *"Share a single consumer instance. Don't open one per job - several
+unbounded instances will add up and eat the pod's memory budget."* SimpleEtl's `ScratchDb` is one
+DuckDB instance **per run**, at a default `memory_limit` of 4096 MB (7.2). That is one per job,
+which is what 6.5 forbids.
+
+SimpleEtl is right on its own terms and the deviation is deliberate: 7.2's per-run file exists
+because DuckDB 1.1.3 has no vacuum and `DROP TABLE` does not shrink a file, so a shared instance
+would carry a high-water mark forever, and 5.5's attempt-suffixed retries make that worse. The two
+instances are also different things - the cache's *consumer* instance serves reads from generation
+files, while scratch is a per-run working file that is deleted at run end. What P9 must not do is
+create a **second consumer** instance: `copyOut` writes into the scratch connection the framework
+already owns, so no new cache-side instance is opened, and 6.5's arithmetic is untouched. Under
+CLAUDE.md the documents win, so this is written down rather than left as two specifications that
+disagree.
+
 **Operational constraint.** The cache refuses to detach a generation while an issued
 connection into it is still open, and defers reclamation to the next pass. Generations that
 cannot be reclaimed accumulate, and once the configured limit is reached the cache pauses
@@ -889,6 +950,9 @@ list has grown with each phase that discovered another one - it was two when P7 
 | make `CronScheduler.schedule` throw on an unparseable cron | 8.5's atomic reload silently accepts a bad cron |
 | construct `TaskFileLoader` with the name set of the **same** `TaskHookRegistry` it hands `TaskEngine` | validation rule 5 passes for every hook name, and a typo dies at the end of a 30 minute run - precisely the failure 9.4 exists to prevent |
 | register `MicrometerTaskMetrics` against the application's `MeterRegistry` | every metric in 9.3 is silently absent; nothing fails and no dashboard populates |
+| construct the `SnapshotCache`, and own the `cache` name -> `CacheBinding(cache, group)` map handed to `TaskEngine` | a `cacheCopy` step fails at run time naming the unknown cache |
+| construct `TaskFileLoader` with the **same** cache-name set it hands `TaskEngine` | rule 21 passes for every name, and a typo dies at the end of a 30 minute run - the same failure the hooks row above records |
+| **assert that a generation becomes reclaimable after a `cacheCopy` step.** Not testable in this repository: reclamation lives in `DefaultSnapshotCache`, which is `internal` to the cache module, so SimpleEtl's tests use a double implementing the public interface. Plan P9's "a test asserts the generation becomes reclaimable" is achievable only in a host that owns a real cache | a step that holds or references a generation stalls refreshing, and this repository's suite cannot see it |
 | put `io.micrometer:micrometer-core` (>= 1.14.x) on the application's **runtime** classpath - the framework declares it `provided` and does not ship it | `NoClassDefFoundError: io/micrometer/core/instrument/MeterRegistry` when the binding is constructed. Loud, at wiring time, which is the good failure mode |
 
 Two notes on the metric binding, measured on micrometer 1.14.2 rather than assumed:
@@ -1089,6 +1153,14 @@ Any failure below prevents startup, or causes a reload to be rejected with no ch
     written, and is named here for completeness, as in rule 14.
 16. Cron expression valid, when present.
 17. Each step's field set matches its declared type exactly.
+19. **`cacheCopy` SQL binds no variable.** `CopyOutSpec.sql` is a plain string with no binding
+    channel (3.6, 7.3), so a `:name` in a `cacheCopy` step is rejected at startup naming the step.
+    Checked at load rather than at run time because the alternative is a file that boots green and
+    fails at the end of a 30 minute run - the failure this whole section exists to prevent.
+20. **`cacheCopy` with `retries > 0` is rejected.** No failure a cache copy can produce is
+    transient under 5.3, so the knob can never fire (3.6). Same treatment as rules 12 and 18.
+21. **Every `cache` name exists in the host-supplied binding set**, the exact analogue of rule 3
+    for datasources.
 18. A scratch target with `createTable: REQUIRED` and `retries > 0` is rejected (5.5). The
     attempt suffix needs a framework-owned physical name, so a retry onto an author-owned
     stable table would append onto the failed attempt's flushed rows.
@@ -1227,6 +1299,10 @@ class MaterializeStep : Step  // datasource, output, format, sql
 class SqlStep : Step          // datasource, statements
 class ExportStep : Step       // datasource, vars
 class CacheCopyStep : Step    // cache, sql, output (spec 7.3)
+
+// P9. What a task file's `cache:` name resolves to. Two fields, because one SnapshotCache serves
+// many groups - copyOut(group, ...) takes the group - so a name alone cannot identify both.
+data class CacheBinding(val cache: SnapshotCache, val group: GroupId)
 
 // Engine
 class TaskEngine {
