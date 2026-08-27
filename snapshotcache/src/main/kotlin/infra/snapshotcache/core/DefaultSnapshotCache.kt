@@ -144,9 +144,11 @@ internal class DefaultSnapshotCache(
      */
     private fun acquireLease(runtime: GroupRuntime, group: GroupId, waitBudget: Duration): RegistryLease {
         val registry = runtime.registry
-        if (registry.isShuttingDown()) refuseShuttingDown(group)
         val owner = Thread.currentThread().name
+        // tryAcquire refuses under shutdown from inside the registry lock, so the refusal
+        // below cannot be raced past by a caller preempted between the two calls.
         registry.tryAcquire(owner)?.let { return it }
+        if (registry.isShuttingDown()) refuseShuttingDown(group)
         if (waitBudget <= Duration.ZERO) refuseUnavailable(group, AcquireUnavailableReason.NOT_READY)
         val waitedFrom = clock.instant()
         val available = try {

@@ -158,11 +158,16 @@ internal class GenerationRegistry(
      * the pointer read before [Hook.AFTER_READ_CURRENT] is re-taken afterwards, so a
      * full publish + reclaim cycle interleaved at the hook still yields a LIVE
      * generation whose refcount is counted before any detach can be decided (I2).
+     *
+     * Also null once shutdown has begun, decided in the same critical section: a caller
+     * that checked the flag and was then preempted must not still be granted a lease over
+     * a store the drain has already reported clean (spec 10.2 step 1).
      */
     fun tryAcquire(owner: String): RegistryLease? {
         lock.withLock { currentGen }
         hooks.at(Hook.AFTER_READ_CURRENT)
         return lock.withLock {
+            if (shuttingDown) return null
             val gen = currentGen ?: return null
             val record = records.getValue(gen)
             check(record.state == Lifecycle.LIVE) { "current generation $gen is ${record.state}, not LIVE" }
