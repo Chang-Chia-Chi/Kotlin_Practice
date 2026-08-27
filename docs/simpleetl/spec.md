@@ -1125,6 +1125,19 @@ Any failure below prevents startup, or causes a reload to be rejected with no ch
 7. Every `:name` in source, export, materialize, and statement SQL is a built-in, a literal
    var, or an export appearing earlier in step order, except Row-bound names in `target.sql`,
    which are checked at runtime (4.4).
+
+    **Amended (review finding H3): a `materialize` step on a non-scratch datasource may bind
+    no variable at all, and one that does is a startup error.** Such a step runs
+    `CREATE TABLE <output> AS <sql>`, and Oracle rejects a bind variable in DDL outright with
+    ORA-01027 - so rule 7 was blessing a step shape that could never run. The engine's KDoc
+    claim that a CTAS accepts bound parameters was measured on duckdb_jdbc only, which is why
+    the identical step on `scratch` works and this surfaced only against a real Oracle.
+
+    Textual interpolation was considered and rejected. It is the injection surface every other
+    statement in this framework avoids by binding, and no quoting rule for an arbitrary task
+    variable is worth defending at the trust boundary a task file already is. The author
+    filters in a following step instead: materialize the wider set, then narrow it where
+    variables *can* bind. A scratch materialize is unaffected and keeps rule 7 in full.
 8. No variable defined twice. No literal var with a null value (6.1). The former
     "no Row key colliding with a task variable name" clause is gone: with 6.3 amended, a Row
     key and a task variable can no longer meet in the same statement.

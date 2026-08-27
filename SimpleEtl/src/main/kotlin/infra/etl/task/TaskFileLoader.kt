@@ -666,9 +666,23 @@ private class FileValidation(
         }
     }
 
+    /**
+     * Rule 13's scratch-only half, and **rule 7 as spec 10 amends it for a non-scratch
+     * materialize**: such a step may bind no variable at all.
+     *
+     * A non-scratch materialize runs `CREATE TABLE <output> AS <sql>` through `Handle.createUpdate`,
+     * which binds every `:name` it parses, and Oracle rejects a bind variable in DDL outright with
+     * ORA-01027. Rule 7 blessed the shape - it names `materialize` explicitly - so a file like
+     * `materialize {datasource: report_oracle, sql: "select ... where upd_ts > :lastTs"}` passed
+     * every startup rule and then failed on every firing, permanently, because ORA-01027 is not
+     * transient. The identical step on `scratch` works, which is why it could only surface in
+     * production: the engine's own measurement of "CTAS accepts bound parameters" was taken on
+     * duckdb_jdbc.
+     */
     private fun materialize(step: MaterializeYaml) {
         datasource(step.name, step.datasource)
         sql(step.name, "sql", step.sql, step.datasource, resolveNames = true)
+        if (step.datasource != SCRATCH) externalMaterializeBinds(step)
         dataset(step.name, step.output)
         // Rule 13's other half: PARQUET is structurally impossible on any other step type, and
         // spec 5.6 puts the file in the scratch directory, so it is scratch-only here too.
@@ -679,6 +693,30 @@ private class FileValidation(
                     "'$SCRATCH' datasource, not '${step.datasource}' (spec 5.6, rule 13).",
             )
         }
+    }
+
+    /**
+     * Every `:name` the SQL of a non-scratch materialize binds. Nothing is filtered: unlike a
+     * `cacheCopy`, this text *does* go through JDBI at run time, so whatever JDBI's parser calls a
+     * parameter is a parameter here - including the all-digit name it reads out of a DuckDB array
+     * slice, which would be rewritten to `?` and broken anyway.
+     *
+     * A parse failure and a positional `?` are already reported by [sql] for the same text, so
+     * both are passed over here rather than reported twice.
+     */
+    private fun externalMaterializeBinds(step: MaterializeYaml) {
+        val parameters = runCatching { SQL_PARSER.parse(step.sql, null).parameters }.getOrNull() ?: return
+        if (parameters.isPositional) return
+        val bound = parameters.parameterNames.distinct().sorted()
+        if (bound.isEmpty()) return
+        err(
+            step.name,
+            "sql binds ${bound.map { ":$it" }}, and a materialize on the non-scratch datasource " +
+                "'${step.datasource}' can bind nothing (rule 7). It runs as CREATE TABLE ${step.output} AS " +
+                "<sql>, and Oracle rejects a bind variable in DDL with ORA-01027 - so this step would fail " +
+                "on every run, not just some. Materialize the wider set here and filter it in a following " +
+                "step, where variables do bind (spec 6.3, 10 rule 7).",
+        )
     }
 
     /**

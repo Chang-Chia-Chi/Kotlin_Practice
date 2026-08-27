@@ -122,9 +122,15 @@ class VariableScope {
  * - `Jdbi.create(connection)` hands out handles over the caller's connection and closing the
  *   handle leaves that connection **open** - which is what lets scratch keep one write connection
  *   for the whole run. `Jdbi.open(connection)` closes it instead, so it is never used here (P3).
- * - DuckDB accepts bound parameters in `CREATE TABLE ... AS SELECT` and in `COPY (...) TO ...
+ * - **DuckDB** accepts bound parameters in `CREATE TABLE ... AS SELECT` and in `COPY (...) TO ...
  *   (FORMAT PARQUET)`; both report a row count of -1 and 3 respectively, so the return value is
  *   ignored. DDL through `Handle.createUpdate` works the same way.
+ *
+ *   **This does not generalise, and reading it as though it did was review finding H3.** Oracle
+ *   rejects a bind variable in DDL outright (ORA-01027), so a non-scratch `materialize` - which
+ *   is a CTAS through the same `update` path - can bind nothing. Spec 10 rule 7 is amended to say
+ *   so and the loader rejects such a file at startup, which is why `materialize` below still
+ *   binds unconditionally: by the time it runs, the only bound CTAS left is a scratch one.
  * - A `create or replace view` executed on the write connection is visible from a `duplicate()`
  *   opened before it, including after the view is repointed at a second attempt's table.
  * - Only the names a statement parses out are bound. JDBI's superfluous-binding check is **not**

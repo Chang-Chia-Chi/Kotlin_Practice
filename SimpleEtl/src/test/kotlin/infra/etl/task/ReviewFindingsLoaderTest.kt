@@ -9,7 +9,9 @@ import infra.etl.TaskFiles.loadOne
 import java.nio.file.Files
 import java.nio.file.Path
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertAll
 import org.junit.jupiter.api.io.TempDir
 
 /**
@@ -117,6 +119,61 @@ class ReviewFindingsLoaderTest {
                   createTable: REQUIRED
                 retries: 0
     """.trimIndent()
+
+    // --- H3: rule 7 as amended for a non-scratch materialize -----------------------------------
+
+    private val materializeSql = "sql: \"select lot_id, sum(qty) as qty from wip_stg group by 1\""
+    private val boundSql = "sql: \"select lot_id, sum(qty) as qty from wip_stg where qty > :lastTs group by 1\""
+    private val scratchMaterialize = "type: materialize\n        datasource: scratch"
+
+    /**
+     * The pair the amendment turns on. The *same* materialize SQL, binding the *same* variable,
+     * differing only in the datasource: on scratch it loads and keeps its variable, because DuckDB
+     * really does bind a CTAS; on Oracle it is a startup error, because ORA-01027 means it could
+     * never run at all.
+     *
+     * Without the scratch half this test would pass against a loader that banned variables in every
+     * materialize, which would break spec 3.3's own example.
+     */
+    @Test
+    fun aMaterializeBindingAVariableLoadsOnScratchAndIsRejectedOnAnExternalDatasource() {
+        val onScratch = edit(VALID, materializeSql, boundSql)
+        val onOracle = edit(onScratch, scratchMaterialize, "type: materialize\n        datasource: report_oracle")
+
+        val loaded = loadOne(dir("bound-scratch"), onScratch)
+
+        assertEquals(1, loaded.single().phases.count { it.name == "build" }) {
+            "the scratch half must load, or the rejection below proves nothing: " +
+                "${loaded.errors.map { it.message }}"
+        }
+        assertRejects(loadOne(dir("bound-oracle"), onOracle), file = "task.yaml", step = "build-summary", "lastTs")
+    }
+
+    /** The error has to say what to do instead, or the author's only move is to delete the step. */
+    @Test
+    fun theRejectionNamesOraAndTheFollowingStepAsTheRemedy() {
+        val onOracle = edit(
+            edit(VALID, materializeSql, boundSql),
+            scratchMaterialize,
+            "type: materialize\n        datasource: report_oracle",
+        )
+
+        val loaded = loadOne(dir("bound-message"), onOracle)
+        val message = loaded.errors.single { it.step == "build-summary" }.message
+
+        assertAll(
+            { assertTrue(message.contains("ORA-01027")) { "the error must name the Oracle failure: $message" } },
+            { assertTrue(message.contains("following step")) { "and the remedy: $message" } },
+        )
+    }
+
+    /** A materialize on an external datasource that binds nothing is untouched by the amendment. */
+    @Test
+    fun anExternalMaterializeThatBindsNothingStillLoads() {
+        val onOracle = edit(VALID, scratchMaterialize, "type: materialize\n        datasource: report_oracle")
+
+        loadOne(dir("unbound-oracle"), onOracle).tasksOrFail()
+    }
 
     // --- N1 and N2: the cacheCopy SQL ---------------------------------------------------------
 
