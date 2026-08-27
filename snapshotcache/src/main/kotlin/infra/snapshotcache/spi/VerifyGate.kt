@@ -5,7 +5,6 @@ import infra.snapshotcache.api.GenerationInfo
 import infra.snapshotcache.api.VerifyConfig
 import infra.snapshotcache.api.VerifyResult
 import java.sql.Connection
-import java.sql.ResultSet
 
 /**
  * What the verify gate concluded about a candidate. [Passed] carries the per-table row
@@ -28,10 +27,12 @@ internal sealed interface GateOutcome {
  * `core` decides *when* to verify; this class owns *how*, including the connection's
  * lifecycle: the verify connection is opened here and closed on every path.
  *
- * SQL is deliberately plain and standard (DuckDB 1.1.3 needs nothing newer):
+ * SQL is deliberately plain and standard (DuckDB 1.1.3 needs nothing newer), and every
+ * discovered or configured identifier is quoted - the names come from the data, not from
+ * this file, so a reserved word or a mixed-case table must not become a parse error:
  * - tables:            `SELECT table_name FROM information_schema.tables WHERE table_type = 'BASE TABLE' AND table_catalog = current_database()`
  * - row count:         `SELECT COUNT(*) FROM <t>`
- * - key uniqueness:    `SELECT COUNT(id) FROM <t>` vs `SELECT COUNT(DISTINCT id) FROM <t>`
+ * - key uniqueness:    `SELECT COUNT(id), COUNT(DISTINCT id) FROM <t>` - one scan, not two
  * - required non-null: `SELECT COUNT(*) FROM <t> WHERE <c> IS NULL`
  */
 internal class VerifyGate(
@@ -63,7 +64,7 @@ internal class VerifyGate(
         // readable (spec 8.1, non-disableable): the candidate was reopened by the store;
         // this discovery query proves it can actually be queried.
         val tables = rule(RULE_READABLE, "candidate is not queryable") {
-            queryStrings(connection, "SELECT table_name FROM information_schema.tables WHERE table_type = 'BASE TABLE' AND table_catalog = current_database()")
+            connection.queryStrings("SELECT table_name FROM information_schema.tables WHERE table_type = 'BASE TABLE' AND table_catalog = current_database()")
         }
 
         // non_empty (spec 8.2, non-disableable). Zero tables is the same fault as zero rows.
@@ -71,20 +72,19 @@ internal class VerifyGate(
         val rowCounts = LinkedHashMap<String, Long>()
         for (table in tables) {
             val count = rule(RULE_NON_EMPTY, "counting rows of table $table") {
-                queryLong(connection, "SELECT COUNT(*) FROM $table")
+                connection.queryLong("SELECT COUNT(*) FROM ${ident(table)}")
             }
             if (count == 0L) return GateOutcome.Failed(RULE_NON_EMPTY, "table $table has 0 rows")
             rowCounts[table] = count
         }
 
-        // key_unique (spec 8.1): id unique within its own table, one table at a time (spec 3.3).
+        // key_unique (spec 8.1): id unique within its own table, one table at a time
+        // (spec 3.3). Both counts come from a single scan - the candidate is attached but
+        // not yet published, so every table pass widens that window.
         if (config.keyUnique) {
             for (table in tables) {
-                val total = rule(RULE_KEY_UNIQUE, "counting ids of table $table") {
-                    queryLong(connection, "SELECT COUNT(id) FROM $table")
-                }
-                val distinct = rule(RULE_KEY_UNIQUE, "counting distinct ids of table $table") {
-                    queryLong(connection, "SELECT COUNT(DISTINCT id) FROM $table")
+                val (total, distinct) = rule(RULE_KEY_UNIQUE, "counting ids of table $table") {
+                    connection.queryTwoLongs("SELECT COUNT(id), COUNT(DISTINCT id) FROM ${ident(table)}")
                 }
                 if (total != distinct) {
                     return GateOutcome.Failed(RULE_KEY_UNIQUE, "table $table has $total ids but only $distinct distinct")
@@ -99,7 +99,7 @@ internal class VerifyGate(
             val column = entry.substringAfter('.')
             for (table in tablesToCheck) {
                 val nulls = rule(RULE_REQUIRED_NON_NULL, "checking $table.$column for NULLs") {
-                    queryLong(connection, "SELECT COUNT(*) FROM $table WHERE $column IS NULL")
+                    connection.queryLong("SELECT COUNT(*) FROM ${ident(table)} WHERE ${ident(column)} IS NULL")
                 }
                 if (nulls > 0L) {
                     return GateOutcome.Failed(RULE_REQUIRED_NON_NULL, "table $table column $column has $nulls NULL values")
@@ -144,34 +144,17 @@ internal class VerifyGate(
         throw RuleFailed(name, "$what: ${failure.describe()}")
     }
 
-    private fun queryLong(connection: Connection, sql: String): Long =
-        query(connection, sql) { rs ->
+    private fun Connection.queryLong(sql: String): Long = createStatement().use { it.queryLong(sql) }
+
+    private fun Connection.queryStrings(sql: String): List<String> = createStatement().use { it.queryStrings(sql) }
+
+    /** The one two-aggregate read of the gate; [Pair] keeps the call site a single line. */
+    private fun Connection.queryTwoLongs(sql: String): Pair<Long, Long> = createStatement().use { statement ->
+        statement.query(sql) { rs ->
             check(rs.next()) { "query returned no rows: $sql" }
-            rs.getLong(1)
-        }
-
-    private fun queryStrings(connection: Connection, sql: String): List<String> =
-        query(connection, sql) { rs ->
-            val values = mutableListOf<String>()
-            while (rs.next()) values += rs.getString(1)
-            values
-        }
-
-    private fun <T> query(connection: Connection, sql: String, read: (ResultSet) -> T): T {
-        val statement = connection.createStatement()
-        try {
-            val resultSet = statement.executeQuery(sql)
-            try {
-                return read(resultSet)
-            } finally {
-                runCatching { resultSet.close() }
-            }
-        } finally {
-            runCatching { statement.close() }
+            rs.getLong(1) to rs.getLong(2)
         }
     }
-
-    private fun Throwable.describe(): String = message ?: toString()
 
     private companion object {
         // Rule label values, verbatim from spec 8.1.
