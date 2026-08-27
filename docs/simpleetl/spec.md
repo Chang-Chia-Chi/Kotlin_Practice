@@ -1153,17 +1153,26 @@ Any failure below prevents startup, or causes a reload to be rejected with no ch
     written, and is named here for completeness, as in rule 14.
 16. Cron expression valid, when present.
 17. Each step's field set matches its declared type exactly.
+18. A scratch target with `createTable: REQUIRED` and `retries > 0` is rejected (5.5). The
+    attempt suffix needs a framework-owned physical name, so a retry onto an author-owned
+    stable table would append onto the failed attempt's flushed rows.
 19. **`cacheCopy` SQL binds no variable.** `CopyOutSpec.sql` is a plain string with no binding
     channel (3.6, 7.3), so a `:name` in a `cacheCopy` step is rejected at startup naming the step.
     Checked at load rather than at run time because the alternative is a file that boots green and
     fails at the end of a 30 minute run - the failure this whole section exists to prevent.
-20. **`cacheCopy` with `retries > 0` is rejected.** No failure a cache copy can produce is
-    transient under 5.3, so the knob can never fire (3.6). Same treatment as rules 12 and 18.
+20. **`cacheCopy` with a *stated* `retries > 0` is rejected.** No failure a cache copy can produce
+    is transient under 5.3, so the knob can never fire (3.6). Same treatment as rules 12 and 18 -
+    reject the combination rather than accept and ignore it.
+
+    **The YAML default for this step type is 0, not 3.** `CacheCopyStep.retries` defaults to 3 in
+    the programmatic model, frozen since P5, because every other scratch-targeted step does. If the
+    loader inherited that default, **every task file that omits `retries` would fail rule 20** -
+    caught while checking rule 18's precedent, which deliberately rejects the omitted-and-defaulted
+    case. So the loader resolves `retries ?: 0` for `cacheCopy` alone, and rule 20 tests the stated
+    value. The asymmetry between the YAML default and the model default is deliberate and is
+    recorded here because nothing else would explain it.
 21. **Every `cache` name exists in the host-supplied binding set**, the exact analogue of rule 3
     for datasources.
-18. A scratch target with `createTable: REQUIRED` and `retries > 0` is rejected (5.5). The
-    attempt suffix needs a framework-owned physical name, so a retry onto an author-owned
-    stable table would append onto the failed attempt's flushed rows.
 
 Errors report file name, step name, and where available the YAML line.
 

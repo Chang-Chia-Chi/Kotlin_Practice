@@ -336,9 +336,24 @@ subscriber, `replay = 0` discards everything while `tryEmit` still returns true.
 - The step copies a subset from a generation into scratch through the cache's `copyOut`,
   and no row passes through the JVM; asserted by instrumenting the JVM-side row counter and
   expecting zero.
-- The lease is acquired and released within the step, not held for the task, and a test
-  asserts the generation becomes reclaimable immediately after the step returns.
-- A test covers the case where the cache has no current generation.
+- The lease is acquired and released within the step, not held for the task. **The second half of
+  this criterion as originally written - "a test asserts the generation becomes reclaimable
+  immediately after the step returns" - is not achievable in this module and was struck during the
+  P9 contract round.** Reclamation lives in `DefaultSnapshotCache`, which is `internal` to the
+  cache module, so SimpleEtl's tests use a double implementing the public interface and a double
+  cannot reclaim anything. It is recorded as a host obligation in spec 8.6. What *is* provable
+  here: the engine calls only `copyOut`, never `acquire` or `withSnapshot`, and retains nothing
+  from the cache past the step - proved by a double that deletes its generation file inside
+  `copyOut` while a later step still reads the copied dataset.
+- A test covers the case where the cache has no current generation, **and asserts it is not
+  retried** despite the step type carrying a `retries` field.
+- **The step's `StepResult` is 0/0, like every non-pipe step.** `rowsCopied` is lineage, not
+  throughput: `etl_step_rows_total{direction}` is one series across all step types, and making it
+  mean "rows the cache's CTAS created" for this one would break the aggregation ruling already
+  shipped in `TaskEngine`. The count goes in the lineage log with `generation` and `dataAsOf`.
+- **The `Error` path keeps its coverage.** Removing `CacheCopyStep`'s `NotImplementedError` deletes
+  the framework's only production `Error`, which two earlier tests use to pin behaviour unrelated
+  to the cache. They migrate to an injected `Error`; they are not dropped.
 
 ---
 
