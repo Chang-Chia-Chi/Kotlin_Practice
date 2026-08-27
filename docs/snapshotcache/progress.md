@@ -248,3 +248,88 @@ Confirmed already-covered (no action): release safety via identity-based idempot
 - The `published` condition now carries two predicates (publish/shutdown and quiescence) - reviewer suggestion open to comment it.
 - Other open suggestions: assert step 4's deferral warning via WarnCapture; per-rotation openIssuedConnections()==0 in the steady-state loop.
 - M1 (spec 17.8 framework acceptance) is complete on this machine except the two Unix-only FD assertions, which first execute on Linux CI. Deferred by design (D19): RSS-trend leak measurement, perf baselines (spec 16.3), data-correctness validation (P10).
+
+## Review fix pass 1 - 2026-08-28 code review  (2026-08-28)
+
+Applied the pass-1 findings of `docs/snapshotcache/code-review-2026-08-28.md` (the ones
+needing no plan ruling): H1, H2, H3, M1, M2, M3, M4, M6, and the main-source half of L1.
+Build: 134 tests, 0 failures, 2 Unix-only skips. No earlier-phase test file changed.
+
+### Fixed
+- **H1 - reclaim wedged forever after close-succeeded-then-delete-failed.** `close(gen)` is
+  now idempotent at the store boundary: the DuckDB adapter tracks the attached set and
+  no-ops a DETACH of an unattached alias, so the next pass's retry of the close + delete
+  unit completes instead of failing on a catalog error every time. `abort()` now uses the
+  same protocol as `reclaimPass` - detach first, delete only once detached - so a failed
+  detach no longer leaves a dangling alias over a deleted file.
+- **H2 - a throwing `CacheEvents` sink skipped `abort()` and leaked a zombie record.**
+  Every `events.*` call in `RefreshCycle` goes through a `notify {}` guard that logs and
+  swallows; reporting is best-effort by contract. `candidate.close()` in the round now runs
+  inside `storeOp` (a third-party store's close failing is a disk error, not an escape
+  hatch) and inside `runCatching` on the abort path. `spi.Candidate.close`'s
+  idempotent-and-never-throws guarantee is now in the interface KDoc, not only in the
+  adapter and a P0 note. Hooks are deliberately NOT guarded: a `HookDriver` throw is a
+  broken interleaving and must stay loud.
+- **H3 - unquoted identifiers in the verify gate.** Table names come verbatim from
+  `information_schema` and columns from caller config, so a table named `order` made every
+  round VERIFY_FAILED for valid data (probe-verified on 1.1.3: `SELECT COUNT(*) FROM order`
+  is a parse error, quoted is fine). All three gate query builders now quote.
+- **M1 - one orphaned `.tmp` leaked per round whose `configure()` threw.** `abort()` calls
+  `store.delete(gen)` whenever the generation was detached, `candidate == null` included:
+  `createCandidate` creates the file before it can fail, and delete is deleteIfExists-safe.
+- **M2 - a lease could be granted after `beginShutdown`.** `GenerationRegistry.tryAcquire`
+  returns null under the shutting-down flag, decided inside its existing lock; the facade's
+  refusal moved after it, so neither of the two call sites has a window any more.
+- **M3 - unbounded tracking growth while one generation stays current.**
+  `DuckDbGenerationStore.track` and `SnapshotHandle.CleanupState.issue` drop closed entries
+  before appending.
+- **M4 - shutdown across the seconds-long verify still swapped the pointer.** One
+  `isShuttingDown()` check between the gate verdict and `registry.publish`, raising
+  `RoundAbort(SHUTDOWN_ABORTED)`.
+- **M6 - `copyOut` cleanup masked the real failure and swallowed a failed DETACH.** The
+  `USE <home>` restore is best-effort (`runCatching` + warn) so a connection that died
+  mid-CTAS still reports the CTAS error; a DETACH failure on the success path now
+  propagates - the lease still pins the generation there, so failing the copyOut is safe,
+  whereas a surviving attach becomes a dangling alias once the next reclaim deletes the file.
+- **L1, main-source items.** `spi/Internals.kt` holds the shared `ident` / `literal`,
+  the `Statement` scalar-query helpers (four hand-rolled copies collapsed into one), and
+  `Throwable.describe()` (was duplicated in `RefreshCycle` and `VerifyGate`).
+  `key_unique`'s two per-table scans became one `SELECT COUNT(id), COUNT(DISTINCT id)`.
+
+### Regression tests added
+- `core/ReviewFixRegressionTest.kt` (4): H1's reclaim retry, H2's throwing sink, M2's
+  post-shutdown `tryAcquire`, M4's shutdown across the verify window (HookDriver-parked).
+- `duckdb/DuckDbStoreReviewFixTest.kt` (3, real DuckDB 1.1.3): H1's idempotent detach,
+  H3's reserved-word (`order`) and mixed-case table names, M3's pruning.
+- Discrimination proven per test, the P6 way: each fix reverted in place, the suite run,
+  all seven confirmed failing, then restored. `store.trackedConnections(gen)` was added
+  next to the two existing internal leak-evidence accessors so M3's test can see the list.
+
+### Deviations from the documents
+- **`GenerationStore.close` is now contractually idempotent** (spec 9.2 gained a
+  delete-fails row, spec 17.1 the sentence). Written into the documents before the code, as
+  required: H1 is unfixable without it, because reclaim retries close + delete as a unit.
+- **`InMemoryGenerationStore.close` follows the new contract** - a second close of an
+  already-detached generation is a no-op - while a close of a *never*-opened generation
+  still throws, so P2's frozen `guards_rejectOutOfOrderTransitions` assertion is untouched.
+  Additive change to the fake, no test assertion modified.
+- **`key_unique`'s scan collapse is 2 queries per table, not 1.** Merging non_empty's
+  `COUNT(*)` in too needs a three-aggregate query, and P4's frozen `QueryScript` heuristic
+  answers a multi-count shape with exactly two columns. That last merge needs a documented
+  P4-test ruling; the two-scan version needed none and is where the review's per-table
+  saving mostly is.
+- **No `RefreshResult` for an internal error.** The review's alternative H2 fix - a
+  catch-all around `round()` - was not taken: spec 9.2's classification is fixed and every
+  existing label would be a lie in `snapshot_refresh_total`. The event sink, the only
+  caller-supplied callback the review proved reachable, is guarded at its source instead.
+
+### Not fixed in this pass
+- **M5** (lease-deadline diagnostics dead) needs the plan ruling the review asks for: does
+  P9 wiring poll `expiredLeases()` on the schedule tick, or does the core fire
+  `CacheEvents.leaseExpired` itself.
+- **L1's nullable test-only seams** (`publish(gen, fileBytes)`, nullable `GroupRuntime.cycle`)
+  and the **test-side consolidation** - both need a recorded ruling first, because frozen
+  earlier-phase tests depend on the seams. Pass 2.
+- M1 and M6 have no dedicated regression test: staging a `configure()` failure or a dead
+  target connection needs a fault-injection seam neither the fake nor the adapter has.
+  Both fixes are small and their surrounding paths are covered.
