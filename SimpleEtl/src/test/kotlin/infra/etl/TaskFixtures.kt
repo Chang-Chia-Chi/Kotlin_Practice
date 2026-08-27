@@ -37,7 +37,9 @@ import java.sql.DriverManager
 import java.sql.PreparedStatement
 import java.sql.ResultSet
 import java.sql.Statement
+import java.util.concurrent.TimeUnit.SECONDS
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.io.path.isRegularFile
 import org.duckdb.DuckDBConnection
 import org.jdbi.v3.core.ConnectionFactory
@@ -420,6 +422,26 @@ class TaskHarness(private val root: Path) : AutoCloseable {
      */
     fun register(name: String, jdbi: Jdbi): Jdbi = jdbi.also { datasources[name] = it }
 
+    /**
+     * P8c. Starts [definition] on a plain thread of its own, through this harness's single engine,
+     * and hands back the handle that joins it.
+     *
+     * Additive, and deliberately not a change to [run]: P5 owns that signature. What this adds is
+     * the only shape in which two runs are live at once *inside one engine and one listener*, which
+     * is what the P8c contract's interleaving criterion asks for. P7's `TaskRunner` cannot serve it
+     * - it confines each task to its own dispatcher and is a phase whose fixtures may not be edited
+     * - and spec 8.4 already says one engine serves concurrent tasks, so an ordinary thread per run
+     * is the engine's real contract rather than a test-only liberty.
+     *
+     * A plain `Thread` and not a coroutine on purpose: `TaskEngine.run` is blocking by design
+     * (spec 8.3), the two runs park inside a [ProbeDatasource] rather than suspending, and
+     * [BackgroundRun.outcome]'s `Thread.join` is what supplies the happens-before that makes a
+     * post-run read of the flow's `replayCache` safe from the test thread. Daemon, so a run that
+     * never gets released cannot hold surefire open past its own loud timeout.
+     */
+    fun start(definition: TaskDefinition, trigger: TriggerSource = TriggerSource.SCHEDULE): BackgroundRun =
+        BackgroundRun(definition.name) { engine.run(definition, trigger) }
+
     /** A path for a probe file. Deliberately not created: an ATTACH creates it and must own it. */
     fun probeFile(name: String): Path = root.resolve("$name-probe.duckdb")
 
@@ -443,6 +465,45 @@ class TaskHarness(private val root: Path) : AutoCloseable {
         }
 
     override fun close() = files.asReversed().forEach { runCatching { it.close() } }
+}
+
+/**
+ * P8c. One run in flight on its own thread, and the join that ends it.
+ *
+ * [outcome] is the only way to read the result, and it joins first, so no test can read a run's
+ * events before the thread that produced them has finished writing them. The bounded join with a
+ * loud failure at the deadline is [TIMEOUT_SECONDS]'s discipline from P7: nothing here waits "long
+ * enough", and an expiry means hung rather than slow.
+ *
+ * A throw from the run is re-raised out of [outcome] rather than being swallowed into a null - an
+ * `Error` escaping `TaskEngine.run` is a real path (a `CacheCopyStep`'s `NotImplementedError`), and
+ * a background thread that died quietly would present as a timeout on a latch somewhere else.
+ */
+class BackgroundRun internal constructor(private val label: String, body: () -> TaskOutcome) {
+
+    private val result = AtomicReference<TaskOutcome>()
+    private val failure = AtomicReference<Throwable>()
+
+    private val thread = Thread(
+        {
+            try {
+                result.set(body())
+            } catch (e: Throwable) {
+                failure.set(e)
+            }
+        },
+        "p8c-run-$label",
+    ).apply { isDaemon = true; start() }
+
+    /** Joins the run's thread and returns what it produced, re-raising anything it threw. */
+    fun outcome(): TaskOutcome {
+        thread.join(SECONDS.toMillis(TIMEOUT_SECONDS))
+        check(!thread.isAlive) {
+            "run of '$label' had still not finished ${TIMEOUT_SECONDS}s after it was released"
+        }
+        failure.get()?.let { throw it }
+        return result.get() ?: error("run of '$label' finished with neither an outcome nor a failure")
+    }
 }
 
 /**
