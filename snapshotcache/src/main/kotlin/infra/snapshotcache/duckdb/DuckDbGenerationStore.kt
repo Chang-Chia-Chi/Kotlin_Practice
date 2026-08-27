@@ -4,6 +4,10 @@ import infra.snapshotcache.api.CopyOutSpec
 import infra.snapshotcache.spi.Candidate
 import infra.snapshotcache.spi.GenerationStore
 import infra.snapshotcache.spi.OpenGeneration
+import infra.snapshotcache.spi.ident
+import infra.snapshotcache.spi.literal
+import infra.snapshotcache.spi.queryLong
+import infra.snapshotcache.spi.queryString
 import org.duckdb.DuckDBConnection
 import org.jboss.logging.Logger
 import java.nio.file.Files
@@ -11,7 +15,6 @@ import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.sql.Connection
 import java.sql.DriverManager
-import java.sql.Statement
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicBoolean
@@ -51,6 +54,9 @@ class DuckDbGenerationStore(
 
     /** Every connection issued for a generation: the candidate write connection and reader duplicates. */
     private val issued = ConcurrentHashMap<Long, CopyOnWriteArrayList<Connection>>()
+
+    /** Generations currently ATTACHed to [serving]; what makes [close] idempotent. */
+    private val attached = ConcurrentHashMap.newKeySet<Long>()
     private val copyOutSequence = AtomicLong()
     private val serving: DuckDBConnection
 
@@ -82,12 +88,17 @@ class DuckDbGenerationStore(
 
     override fun open(gen: Long): OpenGeneration {
         serving.createStatement().use { statement ->
-            statement.execute("ATTACH '${finalPath(gen).sql()}' AS ${alias(gen)} (READ_ONLY)")
+            statement.execute("ATTACH '${literal(finalPath(gen).toString())}' AS ${alias(gen)} (READ_ONLY)")
         }
+        attached += gen
         return DuckDbOpenGeneration(gen)
     }
 
     override fun close(gen: Long) {
+        // Idempotent (SPI contract): reclaim retries close+delete as one unit, so a detach
+        // that already succeeded must not fail the retry - DETACH of an unattached alias is
+        // a catalog error, and that would defer the generation forever.
+        if (gen !in attached) return
         // No TOCTOU between the count and the DETACH: the SPI sequences all calls for one
         // generation, so no new connection can be issued into [gen] while close runs.
         val inUse = issued[gen]?.count { !it.isClosed } ?: 0
@@ -95,6 +106,7 @@ class DuckDbGenerationStore(
         serving.createStatement().use { statement ->
             statement.execute("DETACH ${alias(gen)}")
         }
+        attached -= gen
         issued.remove(gen)
     }
 
@@ -110,6 +122,7 @@ class DuckDbGenerationStore(
         // entry per failed round forever. Safe: the SPI sequencing contract guarantees
         // every connection into a deleted generation is already closed.
         issued.remove(gen)
+        attached -= gen
     }
 
     override fun listOnDisk(): List<Long> {
@@ -131,19 +144,28 @@ class DuckDbGenerationStore(
         spec.targetConnection.createStatement().use { statement ->
             val home = statement.queryString("SELECT current_database()")
             val target = "${ident(home)}.${ident(spec.targetTable)}"
-            statement.execute("ATTACH '${finalPath(opened.generation).sql()}' AS $alias (READ_ONLY)")
-            try {
+            statement.execute("ATTACH '${literal(finalPath(opened.generation).toString())}' AS $alias (READ_ONLY)")
+            val rows = try {
                 statement.execute("USE $alias")
                 try {
                     statement.execute("CREATE TABLE $target AS ${spec.sql}")
                 } finally {
-                    statement.execute("USE ${ident(home)}")
+                    // Best effort: on a connection that died mid-CTAS this throws too, and
+                    // replacing the CTAS failure with "USE failed" would lose the root cause.
+                    runCatching { statement.execute("USE ${ident(home)}") }
+                        .onFailure { log.warnf("could not restore database %s after copyOut: %s", home, it.message) }
                 }
-            } finally {
+                statement.queryLong("SELECT COUNT(*) FROM $target")
+            } catch (failure: Exception) {
                 runCatching { statement.execute("DETACH $alias") }
-                    .onFailure { log.warnf("could not detach %s after copyOut: %s", alias, it.message) }
+                    .onFailure { log.warnf("could not detach %s after a failed copyOut: %s", alias, it.message) }
+                throw failure
             }
-            return statement.queryLong("SELECT COUNT(*) FROM $target")
+            // Propagates rather than being swallowed: the lease still pins the generation
+            // here, so failing the copyOut is safe - whereas a surviving attach on the
+            // caller's instance is a dangling alias once the next reclaim deletes the file.
+            statement.execute("DETACH $alias")
+            return rows
         }
     }
 
@@ -151,6 +173,7 @@ class DuckDbGenerationStore(
     override fun close() {
         issued.values.flatten().forEach { runCatching { it.close() } }
         issued.clear()
+        attached.clear()
         runCatching { serving.close() }
     }
 
@@ -159,6 +182,9 @@ class DuckDbGenerationStore(
 
     /** Generations with a live tracking entry. Leak evidence for the abort-path rotation test. */
     internal fun trackedGenerations(): Int = issued.size
+
+    /** Tracking entries held for [gen], closed ones included. Evidence that [track] prunes. */
+    internal fun trackedConnections(gen: Long): Int = issued[gen]?.size ?: 0
 
     private inner class DuckDbCandidate(
         override val generation: Long,
@@ -212,33 +238,26 @@ class DuckDbGenerationStore(
 
     private fun configure(connection: Connection) {
         connection.createStatement().use { statement ->
-            statement.execute("SET memory_limit = '${memoryLimit.sql()}'")
-            statement.execute("SET temp_directory = '${tempDirectory.sql()}'")
+            statement.execute("SET memory_limit = '${literal(memoryLimit)}'")
+            statement.execute("SET temp_directory = '${literal(tempDirectory.toString())}'")
         }
     }
 
+    /**
+     * Consumers acquire per request, so one long-lived current generation would otherwise
+     * accumulate an entry per issued connection for as long as it stays current. Closed
+     * entries are dropped on every append, so the list only holds connections still open.
+     */
     private fun track(gen: Long, connection: Connection) {
-        issued.computeIfAbsent(gen) { CopyOnWriteArrayList() }.add(connection)
+        val list = issued.computeIfAbsent(gen) { CopyOnWriteArrayList() }
+        list.removeIf { it.isClosed }
+        list.add(connection)
     }
 
     private fun finalPath(gen: Long): Path = directory.resolve("gen_${gen.padded()}.db")
     private fun tmpPath(gen: Long): Path = directory.resolve("gen_${gen.padded()}.db.tmp")
     private fun alias(gen: Long): String = "g$gen"
     private fun Long.padded(): String = toString().padStart(10, '0')
-
-    private fun Path.sql(): String = toString().sql()
-    private fun String.sql(): String = replace("'", "''")
-    private fun ident(name: String): String = "\"${name.replace("\"", "\"\"")}\""
-
-    private fun Statement.queryString(sql: String): String = executeQuery(sql).use { rs ->
-        check(rs.next()) { "query returned no rows: $sql" }
-        rs.getString(1)
-    }
-
-    private fun Statement.queryLong(sql: String): Long = executeQuery(sql).use { rs ->
-        check(rs.next()) { "query returned no rows: $sql" }
-        rs.getLong(1)
-    }
 
     private companion object {
         /** spec 3.1 layout: zero-padded final files, `.tmp` while building; both count as on-disk leftovers. */

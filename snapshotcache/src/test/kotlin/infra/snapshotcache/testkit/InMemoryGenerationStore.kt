@@ -37,6 +37,7 @@ class InMemoryGenerationStore : GenerationStore {
     private val calls = mutableListOf<StoreCall>()
     private val files = mutableMapOf<Long, FileState>()
     private val opened = mutableSetOf<Long>()
+    private val detached = mutableSetOf<Long>()
     private val scripts = mutableListOf<Script>()
     private val attempts = mutableMapOf<StoreOp, Int>()
 
@@ -96,6 +97,7 @@ class InMemoryGenerationStore : GenerationStore {
             check(gen !in opened) { "open($gen): already opened" }
             attemptAndMaybeFail(StoreOp.OPEN, gen)
             opened += gen
+            detached -= gen
             calls += StoreCall(StoreOp.OPEN, gen)
         }
         return FakeOpenGeneration(gen)
@@ -103,9 +105,14 @@ class InMemoryGenerationStore : GenerationStore {
 
     override fun close(gen: Long) {
         synchronized(lock) {
+            // Idempotent per the SPI contract: a second detach of an already-detached
+            // generation is a no-op, so reclaim can retry close + delete as one unit.
+            // Never-opened is still a guard violation, not an idempotent call.
+            if (gen in detached) return
             check(gen in opened) { "close($gen): not opened" }
             attemptAndMaybeFail(StoreOp.CLOSE, gen)
             opened -= gen
+            detached += gen
             calls += StoreCall(StoreOp.CLOSE, gen)
         }
     }
@@ -115,6 +122,7 @@ class InMemoryGenerationStore : GenerationStore {
             val state = checkNotNull(files[gen]) { "delete($gen): no file on disk" }
             attemptAndMaybeFail(StoreOp.DELETE, gen)
             files.remove(gen)
+            detached -= gen
             calls += StoreCall(
                 StoreOp.DELETE,
                 gen,

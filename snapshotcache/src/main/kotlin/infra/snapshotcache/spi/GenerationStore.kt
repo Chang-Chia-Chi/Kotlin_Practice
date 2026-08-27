@@ -30,6 +30,11 @@ interface GenerationStore {
     /**
      * Detaches [gen]. Throws if a connection is still using it, in which case the core
      * defers reclamation to the next pass (spec 9.2, A4).
+     *
+     * Idempotent: detaching a generation that is not attached is a no-op. Reclaim retries
+     * close + delete as one unit, so a close that already succeeded before a transient
+     * delete failure is called again on the next pass, and throwing there would defer the
+     * generation forever.
      */
     fun close(gen: Long)
 
@@ -54,6 +59,10 @@ interface Candidate : AutoCloseable {
     /** Write connection handed to the [infra.snapshotcache.api.GenerationSource]. */
     fun connection(): Connection
 
+    /**
+     * Idempotent, and must not throw: it runs on the abort path, where throwing would mask
+     * the failure that aborted the round. A failure folding the WAL is logged, not raised.
+     */
     override fun close()
 }
 

@@ -66,6 +66,9 @@ internal class SnapshotHandle(
 
         fun issue(): Connection = synchronized(this) {
             val open = checkNotNull(issued) { "snapshot is closed" }
+            // A long-lived withSnapshot job may issue and close thousands of connections
+            // before its lease ends; only the ones still open need closing at cleanup.
+            open.removeIf { it.isClosed }
             val connection = opened.connection()
             open += connection
             connection

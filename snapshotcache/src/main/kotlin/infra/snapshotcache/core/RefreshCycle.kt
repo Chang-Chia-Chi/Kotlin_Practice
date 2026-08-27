@@ -21,6 +21,7 @@ import infra.snapshotcache.spi.GateOutcome
 import infra.snapshotcache.spi.GenerationStore
 import infra.snapshotcache.spi.OpenGeneration
 import infra.snapshotcache.spi.VerifyGate
+import infra.snapshotcache.spi.describe
 import org.jboss.logging.Logger
 import java.time.Clock
 import java.time.Duration
@@ -112,10 +113,12 @@ internal class RefreshCycle(
                 throw RoundAbort(RefreshResult.SOURCE_ERROR, failure.describe())
             }
 
-            // CHECKPOINT: close() folds the WAL into the file and never throws (P0 note).
+            // CHECKPOINT: close() folds the WAL into the file. The adapter never throws
+            // here (P0 note) but the contract belongs to the store, so a third-party one
+            // that does throw classifies as a disk error rather than escaping the round.
             val checkpointStart = clock.instant()
-            candidate.close()
-            events.refreshPhase(group, RefreshPhase.CHECKPOINT, Duration.between(checkpointStart, clock.instant()))
+            storeOp { candidate.close() }
+            notify { events.refreshPhase(group, RefreshPhase.CHECKPOINT, Duration.between(checkpointStart, clock.instant())) }
 
             if (registry.isShuttingDown()) {
                 throw RoundAbort(RefreshResult.SHUTDOWN_ABORTED, "shutdown observed before promote; candidate never promoted")
@@ -132,7 +135,7 @@ internal class RefreshCycle(
             // VERIFYING, on a connection from the attached generation.
             val verifyStart = clock.instant()
             val verdict = gate.verify(opened, registry.currentInfo())
-            events.refreshPhase(group, RefreshPhase.VERIFY, Duration.between(verifyStart, clock.instant()))
+            notify { events.refreshPhase(group, RefreshPhase.VERIFY, Duration.between(verifyStart, clock.instant())) }
             hooks.at(Hook.AFTER_VERIFY)
 
             when (verdict) {
@@ -141,28 +144,39 @@ internal class RefreshCycle(
                         "Verify rejected candidate generation %d of group %s: rule=%s detail=%s",
                         gen, group, verdict.rule, verdict.detail,
                     )
-                    events.verifyFailed(group, verdict.rule, verdict.detail)
+                    notify { events.verifyFailed(group, verdict.rule, verdict.detail) }
                     val failures = registry.recordVerifyFailure()
                     if (failures == config.verify.consecutiveFailureThreshold) {
                         log.errorf(
                             "Group %s has failed verification %d times in a row; escalating to critical (spec 8.5)",
                             group, failures,
                         )
-                        events.verifyFailureEscalated(group, failures)
+                        notify { events.verifyFailureEscalated(group, failures) }
                     }
                     throw RoundAbort(RefreshResult.VERIFY_FAILED, "${verdict.rule}: ${verdict.detail}")
                 }
                 is GateOutcome.Passed -> {
                     registry.resetVerifyFailures()
+                    // Verify runs full-table scans and takes seconds; a shutdown that began
+                    // meanwhile must not still swap the pointer and reclaim mid-drain
+                    // (spec 10.2 step 3, 9.2 - current pointer untouched).
+                    if (registry.isShuttingDown()) {
+                        throw RoundAbort(
+                            RefreshResult.SHUTDOWN_ABORTED,
+                            "shutdown observed after verify; candidate never published",
+                        )
+                    }
                     // PUBLISHING, second half: the pointer swap.
                     hooks.at(Hook.BEFORE_POINTER_SWAP)
                     val publishedAt = clock.instant()
                     registry.publish(gen, opened, GenerationInfo(gen, dataAsOf, publishedAt, verdict.rowCounts))
-                    events.refreshPhase(
-                        group,
-                        RefreshPhase.PUBLISH,
-                        attachElapsed + Duration.between(publishedAt, clock.instant()),
-                    )
+                    notify {
+                        events.refreshPhase(
+                            group,
+                            RefreshPhase.PUBLISH,
+                            attachElapsed + Duration.between(publishedAt, clock.instant()),
+                        )
+                    }
                 }
             }
 
@@ -189,17 +203,22 @@ internal class RefreshCycle(
         result: RefreshResult,
         detail: String,
     ): RefreshOutcome {
-        candidate?.close()
+        runCatching { candidate?.close() }
+            .onFailure { log.warnf("Close of aborted candidate %d of group %s failed: %s", gen, group, it.message) }
         registry.discardBuild(gen)
         if (result == RefreshResult.DISK_ERROR) {
             log.warnf("Disk error while building generation %d of group %s; running emergency GC (spec 9.2): %s", gen, group, detail)
             reclaimPass()
         }
-        if (opened != null) {
-            runCatching { store.close(gen) }
-                .onFailure { log.warnf("Detach of aborted generation %d of group %s failed: %s", gen, group, it.message) }
-        }
-        if (candidate != null || opened != null) {
+        // Same protocol as reclaimPass: detach first, delete only once detached. Deleting a
+        // file still attached to the serving instance would leave a dangling alias, so a
+        // failed detach leaves the file for the startup wipe (D10) instead. The delete runs
+        // even when no candidate object exists - createCandidate creates the .tmp file
+        // before it can fail, and delete is deleteIfExists-safe on both paths.
+        val detached = opened == null || runCatching { store.close(gen) }
+            .onFailure { log.warnf("Detach of aborted generation %d of group %s failed: %s", gen, group, it.message) }
+            .isSuccess
+        if (detached) {
             runCatching { store.delete(gen) }
                 .onFailure { log.warnf("Delete of aborted generation %d of group %s failed: %s", gen, group, it.message) }
         }
@@ -209,8 +228,10 @@ internal class RefreshCycle(
     /**
      * One reclaim pass (spec 4.2 GC): the registry marks eligible generations RECLAIMING
      * under its lock, detach + delete run out here. A generation whose detach fails - a
-     * connection still in use (A4) - is deferred to the next pass with a warning, never
-     * blocking the rest of the pass (spec 9.2).
+     * connection still in use (A4) - or whose delete fails is deferred to the next pass
+     * with a warning, never blocking the rest of the pass (spec 9.2). The retry re-runs
+     * both calls, which is why [GenerationStore.close] is contractually idempotent: a
+     * close-succeeded-then-delete-failed generation must not wedge in a permanent defer.
      */
     fun reclaimPass(): GcOutcome {
         val marked = registry.beginReclaim()
@@ -231,7 +252,7 @@ internal class RefreshCycle(
                 continue
             }
             registry.reclaimed(gen)
-            events.generationReclaimed(group, gen)
+            notify { events.generationReclaimed(group, gen) }
             reclaimed += gen
         }
         return GcOutcome(reclaimed, deferred)
@@ -263,8 +284,21 @@ internal class RefreshCycle(
 
     /** Every round exit funnels through here: one refreshFinished event per round, [generation] only on success. */
     private fun finish(result: RefreshResult, generation: Long? = null, detail: String? = null): RefreshOutcome {
-        events.refreshFinished(group, result, generation)
+        notify { events.refreshFinished(group, result, generation) }
         return RefreshOutcome(result, generation, detail)
+    }
+
+    /**
+     * The event sink is caller-supplied (a metrics binder, typically). A throwing one must
+     * never break the round: it would skip [abort] and leave a zombie generation record
+     * plus its file behind for the process lifetime. Reporting is best-effort by contract.
+     */
+    private inline fun notify(fire: () -> Unit) {
+        try {
+            fire()
+        } catch (failure: Exception) {
+            log.warnf("CacheEvents sink of group %s threw and was ignored: %s", group, failure.describe())
+        }
     }
 
     /** A [GenerationStore] operation throwing is a disk problem (spec 9.2 classification). */
@@ -276,5 +310,4 @@ internal class RefreshCycle(
         throw RoundAbort(RefreshResult.DISK_ERROR, failure.describe())
     }
 
-    private fun Throwable.describe(): String = message ?: toString()
 }
