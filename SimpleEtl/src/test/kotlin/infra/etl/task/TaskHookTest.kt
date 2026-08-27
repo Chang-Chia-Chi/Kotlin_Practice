@@ -2,6 +2,7 @@ package infra.etl.task
 
 import infra.etl.Etl
 import infra.etl.EventTrace
+import infra.etl.InjectedError
 import infra.etl.TaskFiles
 import infra.etl.TaskHarness
 import infra.etl.task.LoadResult
@@ -314,10 +315,22 @@ class TaskHookTest {
     }
 
     /**
-     * Contract 4.13 and 2.4: an `Error` is not a task failure. It propagates out of `run` - which
-     * is P5's documented contract for a step that is not built yet - and `onTaskEnd` still fires,
-     * because it comes from a `finally` and a listener must never see a run that started and never
-     * ended. No hook runs: host code has no business executing while an `Error` unwinds.
+     * Contract 4.13 and 2.4: an `Error` is not a task failure. It propagates out of `run`, and
+     * `onTaskEnd` still fires, because it comes from a `finally` and a listener must never see a
+     * run that started and never ended. No hook runs: host code has no business executing while an
+     * `Error` unwinds.
+     *
+     * **The vehicle changed in P9; every assertion did not.** Until P9 the only `Error` raised
+     * inside the engine anywhere in production was `CacheCopyStep`'s `NotImplementedError` stub,
+     * and building that executor removes it. The `Error` is now injected at a step's execution
+     * through `DuckFile.failFirst`, which has always accepted any `Throwable`, and the three
+     * claims this test exists for - it escapes `run`, `onTaskEnd(FAILED)` is still the last thing
+     * a listener sees, and no hook fired - are asserted exactly as before. Deleting them along
+     * with the stub would have traded coverage of three engine behaviours for one new feature and
+     * left the suite greener while covering less.
+     *
+     * `afterRows = 0` raises the `Error` at the execution itself rather than part way through a
+     * result set, so it is unambiguously inside the step and not inside a writer's unwinding.
      *
      * The trace is asserted at its ends rather than whole. Whether `onPhaseEnd(FAILED)` fires on
      * this path is not fixed by the contract - a `catch (Exception)` around the phase skips it and
@@ -330,27 +343,26 @@ class TaskHookTest {
             harness.listener = trace.listener()
             harness.hooks.register("notify", trace.hook("notify"))
             harness.hooks.register("page", trace.hook("page"))
+            val mes = harness.datasource("oracle_mes")
+            mes.failFirst(count = 1, afterRows = 0) { InjectedError("probe: an Error raised inside a step") }
             val definition = Etl.withHooks(
                 Etl.task(
-                    "wip-cache-copy",
-                    Etl.phase(
-                        "only",
-                        Etl.cacheCopy("copy-in", cache = "wip", sql = "select 1", output = "wip_stg"),
-                    ),
+                    "error-unwind",
+                    Etl.phase("only", Etl.sql("touch", "oracle_mes", "select 1")),
                 ),
                 onSuccess = "notify",
                 onFailure = "page",
             )
 
-            assertThrows<NotImplementedError>(
-                { "P5's contract: a step that is not built yet propagates its Error" },
+            assertThrows<InjectedError>(
+                { "an Error is not a task failure: the engine catches Exception and lets this past" },
             ) { harness.run(definition) }
 
             assertAll(
                 { assertTrue(trace.entries.isNotEmpty()) { "the listener saw nothing at all" } },
-                { assertEquals("onTaskStart(wip-cache-copy)", trace.entries.first()) },
+                { assertEquals("onTaskStart(error-unwind)", trace.entries.first()) },
                 {
-                    assertEquals("onTaskEnd(wip-cache-copy, FAILED)", trace.entries.last()) {
+                    assertEquals("onTaskEnd(error-unwind, FAILED)", trace.entries.last()) {
                         "onTaskEnd comes from a finally, so no run starts without ending"
                     }
                 },

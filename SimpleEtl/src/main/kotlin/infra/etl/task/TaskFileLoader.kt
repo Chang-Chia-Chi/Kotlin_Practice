@@ -195,11 +195,17 @@ data class ValidationError(val file: String, val step: String?, val line: Int?, 
  *   name, so the loader is the only place the two can meet.
  * @param hooks the names registered in the `TaskHookRegistry` (validation rule 5). Names only: the
  *   loader never runs a hook, and building the registry is P8's.
+ * @param caches the `cache:` names the host bound to a `(SnapshotCache, GroupId)` pair (validation
+ *   rule 21, spec 3.6). Names only, for the same reason as [hooks]: the loader never reads a
+ *   cache, and the pairs themselves go to [TaskEngine]. **Fourth and last**, and defaulted: two
+ *   fixture call sites pass the earlier three positionally, so a parameter inserted anywhere else
+ *   would silently rebind `transforms`.
  */
 class TaskFileLoader(
     private val datasources: Set<String> = emptySet(),
     private val transforms: Map<String, RowTransform> = emptyMap(),
     private val hooks: Set<String> = emptySet(),
+    private val caches: Set<String> = emptySet(),
 ) {
 
     init {
@@ -250,7 +256,8 @@ class TaskFileLoader(
             files.map { it.fileName.toString() }.flatMap { name ->
                 unparsed[name]?.let { listOf(it) }
                     ?: FileValidation(
-                        name, parsed.getValue(name), datasources, transforms.keys, hooks, filesByTask, syntax,
+                        name, parsed.getValue(name), datasources, transforms.keys, hooks, caches,
+                        filesByTask, syntax,
                     ).validate()
             }
         }
@@ -290,10 +297,10 @@ private fun stepNameAt(text: String, pointer: String): String? {
 }
 
 /**
- * Rules 2 to 18 of spec 10 for one file, accumulating rather than stopping - a report naming one
+ * Rules 2 to 21 of spec 10 for one file, accumulating rather than stopping - a report naming one
  * error per file makes an author fix a ten-error file ten times.
  *
- * Four of the eighteen are not checked here because [TaskYaml]'s schema already makes them
+ * Four of the twenty-one are not checked here because [TaskYaml]'s schema already makes them
  * unrepresentable, which is stronger than checking them: **rule 1** (unknown fields) and **rule
  * 17** (each step's field set matches its declared type) are Jackson's per-subtype binding, and
  * **rule 13** (`format` only on `materialize`) is the absence of that field from every other step
@@ -305,6 +312,7 @@ private class FileValidation(
     private val datasources: Set<String>,
     private val transforms: Set<String>,
     private val hooks: Set<String>,
+    private val caches: Set<String>,
     private val filesByTask: Map<String, List<String>>,
     private val syntax: DuckDbSyntax,
 ) {
@@ -368,6 +376,88 @@ private class FileValidation(
             }
 
             is ExportYaml -> export(step)
+            is CacheCopyYaml -> cacheCopy(step)
+        }
+    }
+
+    /**
+     * Spec 3.6's `cacheCopy`: rules 21, 19, 20 and 9, in the order an author is best served by.
+     *
+     * **Rules 19 and 20 are startup rules and not runtime ones**, deliberately. Both could have
+     * been a `require` in the executor - and both would then let a file boot green and kill a task
+     * thirty minutes in, which is the failure spec 10 exists to prevent. Neither is a condition
+     * that might come good on the day: a `:name` in cache SQL cannot be bound at all, because
+     * `CopyOutSpec.sql` is a plain string with no binding channel, and a `retries` above zero can
+     * never fire, because spec 5.3's retry classification is JDBC-shaped and a local DuckDB
+     * file-to-file copy raises none of it. The executor keeps its own guard for the definitions
+     * spec 2.1 lets a host build in code, which have no loader in front of them.
+     */
+    private fun cacheCopy(step: CacheCopyYaml) {
+        // Rule 21, the exact analogue of rule 3 for datasources. First, so that a file with a
+        // mistyped name is told about the name rather than about its SQL.
+        if (step.cache !in caches) {
+            err(
+                step.name,
+                "cache '${step.cache}' is not bound (rule 21). Bound caches are ${caches.sorted()}. A " +
+                    "cache name is not a datasource: the host binds it to a snapshot cache and a group " +
+                    "(spec 3.6, 8.6).",
+            )
+        }
+        cacheSql(step.name, step.sql)
+        // Rule 20, over the value the file *states*. `retries ?: 0` below is this step type's
+        // default and is not the author's word, so it is not what this rule reads.
+        val stated = step.retries
+        if (stated != null && stated > 0) {
+            err(
+                step.name,
+                "retries $stated on a cacheCopy step is rejected (rule 20). No failure a cache copy can " +
+                    "produce is transient under spec 5.3, whose classification is JDBC-shaped, so the knob " +
+                    "can never fire; the waiting mechanism is the cache's own waitBudget (spec 3.6). Omit " +
+                    "retries or state 0.",
+            )
+        }
+        // Rule 9 and spec 5.5's character check: `output` is an ordinary scratch dataset and
+        // shares one namespace with every other dataset the task produces.
+        dataset(step.name, step.output)
+    }
+
+    /**
+     * Rule 19, and rule 6 for the same text.
+     *
+     * Rule 6's DuckDB parse applies here without the dialect caveat that limits it elsewhere: a
+     * `cacheCopy` runs **inside the cache's own DuckDB instance** (spec 7.3), so DuckDB is not a
+     * guess about the datasource's dialect but the dialect itself.
+     *
+     * Rule 19 is not `!text.contains(":")`. That would reject `qty::varchar` and `'a:b'`, both
+     * legal DuckDB and both correctly skipped by JDBI's own parser, and would make every task file
+     * needing a cast unwritable. The parse is what tells a bound name from punctuation.
+     */
+    private fun cacheSql(step: String, text: String) {
+        if (text.isBlank()) {
+            err(step, "sql is empty (rule 6).")
+            return
+        }
+        val parsed = try {
+            SQL_PARSER.parse(text, null)
+        } catch (e: RuntimeException) {
+            err(step, "sql does not parse: ${e.message} (rule 6).")
+            return
+        }
+        syntax.errorIn(parsed.sql)?.let { err(step, "sql does not parse: $it (rule 6).") }
+        val parameters = parsed.parameters
+        if (parameters.isPositional) {
+            err(step, "sql uses positional '?' parameters, and a cacheCopy binds nothing at all (rule 19).")
+            return
+        }
+        val bound = parameters.parameterNames.distinct().sorted()
+        if (bound.isNotEmpty()) {
+            err(
+                step,
+                "sql binds ${bound.map { ":$it" }}, and a cacheCopy takes no variables at all (rule 19). It " +
+                    "runs inside the cache's own DuckDB instance through CopyOutSpec.sql, a plain string " +
+                    "with no binding channel (spec 3.6, 7.3), so this cannot be bound even if the variable " +
+                    "is defined. Copy the wider subset and filter it in the following materialize step.",
+            )
         }
     }
 
@@ -735,6 +825,17 @@ private fun StepYaml.toStep(transforms: Map<String, RowTransform>): Step = when 
         name = name,
         datasource = datasource,
         vars = vars.map { ExportVar(it.name, it.sql) },
+        retries = retries ?: 0,
+    )
+
+    // `?: 0`, and not the 3 CacheCopyStep declares. Rule 20 rejects a stated non-zero value, so
+    // inheriting the model's default would fail every file that omits the field on a value its
+    // author never wrote. Spec 10 rule 20 records the asymmetry.
+    is CacheCopyYaml -> CacheCopyStep(
+        name = name,
+        cache = cache,
+        sql = sql,
+        output = output,
         retries = retries ?: 0,
     )
 }

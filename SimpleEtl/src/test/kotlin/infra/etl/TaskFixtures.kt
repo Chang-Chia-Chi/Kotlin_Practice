@@ -3,6 +3,7 @@ package infra.etl
 import infra.etl.duckdb.CreateTable
 import infra.etl.pipe.ColumnMeta
 import infra.etl.pipe.RowTransform
+import infra.etl.task.CacheBinding
 import infra.etl.task.CacheCopyStep
 import infra.etl.task.ExportStep
 import infra.etl.task.ExportVar
@@ -25,6 +26,8 @@ import infra.etl.task.TaskMetrics
 import infra.etl.task.TaskOutcome
 import infra.etl.task.TaskRunListener
 import infra.etl.task.TriggerSource
+import infra.snapshotcache.api.GroupId
+import infra.snapshotcache.api.SnapshotCache
 import java.io.File
 import java.lang.reflect.InvocationHandler
 import java.lang.reflect.InvocationTargetException
@@ -198,9 +201,20 @@ object Etl {
         }
     }
 
-    /** A `cacheCopy` step (spec 7.3). P9's; here only to prove its executor is not a no-op. */
-    fun cacheCopy(name: String, cache: String, sql: String, output: String): CacheCopyStep =
-        CacheCopyStep(name = name, cache = cache, sql = sql, output = output)
+    /**
+     * A `cacheCopy` step (spec 7.3).
+     *
+     * P9 addition: [retries] null leaves the field at `CacheCopyStep`'s declared default of 3,
+     * which is the value the no-retry-on-`NotReadyException` criterion needs in play - asserting
+     * that nothing was retried is vacuous against a step that was never allowed a second attempt.
+     * The **YAML** default is 0 and is a different thing; validation rule 20 records why.
+     */
+    fun cacheCopy(name: String, cache: String, sql: String, output: String, retries: Int? = null): CacheCopyStep =
+        if (retries == null) {
+            CacheCopyStep(name = name, cache = cache, sql = sql, output = output)
+        } else {
+            CacheCopyStep(name = name, cache = cache, sql = sql, output = output, retries = retries)
+        }
 
     // -------------------------------------------------------------------------------------
     // P8a additions (spec 9.2, 9.4). Additive only: every builder above keeps its name, its
@@ -369,6 +383,13 @@ class TaskHarness(private val root: Path) : AutoCloseable {
     private val datasources = LinkedHashMap<String, Jdbi>()
     private val files = ArrayList<DuckFile>()
 
+    /**
+     * P9. Spec 7.3's `cache:` names, resolved to the `(SnapshotCache, GroupId)` pair of contract
+     * 1.2. Mutated in place and handed to the engine below, so a binding registered after the
+     * harness's first run still arrives - the same reason [hooks] is one eagerly created registry.
+     */
+    private val caches = LinkedHashMap<String, CacheBinding>()
+
     // INTEGRATE: spec 11.2 freezes only `run`, so TaskEngine's constructor is the engineer's.
     private val engine: TaskEngine by lazy {
         TaskEngine(
@@ -380,8 +401,20 @@ class TaskHarness(private val root: Path) : AutoCloseable {
             hooks = hooks,
             metrics = ForwardingMetrics { metrics },
             clock = clock,
+            caches = caches,
         )
     }
+
+    /**
+     * P9. Binds a task file's `cache:` name to a cache and a group.
+     *
+     * Two fields and not one: a `SnapshotCache` serves many groups and `copyOut` takes the group,
+     * so a name alone would conflate two namespaces. [group] defaults to a value that is
+     * deliberately **not** [name], so a test asserting which group was asked for cannot be
+     * satisfied by an engine that passed the cache name through.
+     */
+    fun cache(name: String, cache: SnapshotCache, group: String = "wip"): CacheBinding =
+        CacheBinding(cache, GroupId(group)).also { caches[name] = it }
 
     fun run(definition: TaskDefinition, trigger: TriggerSource = TriggerSource.SCHEDULE): TaskOutcome =
         engine.run(definition, trigger)

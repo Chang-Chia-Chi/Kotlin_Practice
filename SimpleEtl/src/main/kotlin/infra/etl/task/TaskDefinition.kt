@@ -43,8 +43,8 @@ data class TaskDefinition(
 data class Phase(val name: String, val steps: List<Step>)
 
 /**
- * The unit of work, retry and logging (spec 2.2). Four executable types plus [CacheCopyStep],
- * whose executor is P9's.
+ * The unit of work, retry and logging (spec 2.2). Five executable types, [CacheCopyStep] included
+ * since P9 built its executor.
  *
  * [retries] counts *additional* attempts after the first, and defaults to 3 when the step writes
  * into [SCRATCH] and 0 everywhere else (spec 5.3). Retrying anything else needs the author to say
@@ -172,8 +172,21 @@ class ExportStep(
 ) : Step
 
 /**
- * The file-to-file copy out of a snapshot cache generation into scratch (spec 7.3). Declared here
- * so the sealed hierarchy is complete; the executor is P9's and throws [NotImplementedError].
+ * The file-to-file copy out of a snapshot cache generation into scratch (spec 3.6, 7.3). [cache]
+ * is a name the host binds to a `(SnapshotCache, GroupId)` pair - see [CacheBinding] - and
+ * [output] is an ordinary scratch dataset, so it gets spec 5.5's attempt-suffixed table and stable
+ * view like any other.
+ *
+ * [sql] runs inside the cache's own DuckDB instance and binds **no** variable: `CopyOutSpec.sql`
+ * is a plain string with no binding channel, so a `:name` here is rejected - by validation rule 19
+ * for a task file, and by the executor for a definition built in code (spec 2.1). A task needing a
+ * variable copies the wider subset and filters in the following `materialize`.
+ *
+ * [retries] keeps the 3 every scratch-targeted step declares, frozen since P5. It can never fire:
+ * spec 5.3's retry classification is JDBC-shaped and a local DuckDB copy raises none of it. The
+ * **YAML** default is 0 and a stated non-zero value is rejected by rule 20 - the asymmetry is
+ * deliberate, because inheriting the 3 here would make every task file that omits `retries` fail
+ * that rule on a value nobody wrote.
  */
 class CacheCopyStep(
     override val name: String,

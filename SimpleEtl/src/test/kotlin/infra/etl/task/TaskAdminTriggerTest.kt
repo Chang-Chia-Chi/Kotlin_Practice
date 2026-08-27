@@ -1,6 +1,8 @@
 package infra.etl.task
 
-import infra.etl.Etl
+import infra.etl.EventTrace
+import infra.etl.InjectedError
+import infra.etl.ListenerCall
 import infra.etl.P7Tasks
 import infra.etl.P7World
 import infra.etl.Trig
@@ -12,6 +14,7 @@ import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertInstanceOf
 import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertSame
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertAll
@@ -84,24 +87,49 @@ class TaskAdminTriggerTest {
 
     /**
      * The `Error` path, and the phase's only FAILED run through the admin surface. `TaskEngine.run`
-     * deliberately does not catch `Error`, so a `cacheCopy` step's `NotImplementedError` escapes
-     * the coroutine entirely and is recorded only by the runner's completion handler. Without that
-     * branch the run stays `running == true` for the life of the process and its task can never be
-     * triggered again - and nothing else in this suite would notice, because everything else waits
-     * on a success.
+     * deliberately does not catch `Error`, so it escapes the coroutine entirely and is recorded
+     * only by `TaskRunner.release(cause)`'s non-null-cause branch. Without that branch the run
+     * stays `running == true` for the life of the process and its task can never be triggered
+     * again - and nothing else in this suite would notice, because everything else waits on a
+     * success.
+     *
+     * **The vehicle changed in P9; every assertion did not.** The `Error` used to be a `cacheCopy`
+     * step's `NotImplementedError`, which was the only `Error` raised anywhere in production and
+     * which building that executor removes. It now comes from a listener, because `Events.isolate`
+     * catches `Exception` and not `Throwable` - a choice `P8aCoverageTest` pins deliberately - so
+     * a listener throwing an `Error` escapes the engine on exactly the path a step's would. Nothing
+     * about this test is about the snapshot cache and nothing about it has been weakened: FAILED,
+     * not `running`, triggerable again, and the failure held **by identity**.
+     *
+     * `assertSame` rather than `assertInstanceOf`: the clause worth pinning is that the runner
+     * recorded the throwable the run actually died on, not something it re-created from it.
      */
     @Test
     fun aRunThatDiesOnAnErrorIsRecordedFailedAndNoLongerRunning() {
-        val admin = world.admin(
-            Etl.task("cache-read", Etl.phase("copy", Etl.cacheCopy("copy-out", "wip_cache", "select 1", "wip"))),
+        val probe = world.probe("probe_ds")
+        probe.parking = false
+        val injected = InjectedError("probe: an Error escaping the engine")
+        world.listener = EventTrace().listener(
+            failAt = setOf(ListenerCall.STEP_END),
+            failure = { injected },
         )
+        val admin = world.admin(P7Tasks.parking("cache-read", "probe_ds"))
 
         val runId = Trig.acceptedRunId(admin.trigger("cache-read", "ops"))
         val outcome = Trig.awaitFinished(admin, "cache-read", runId)
 
         assertAll(
             { assertEquals(Outcome.FAILED, outcome.outcome) },
-            { assertInstanceOf(NotImplementedError::class.java, outcome.failure) },
+            {
+                assertSame(injected, outcome.failure) {
+                    "the runner records the Error the run died on; it recorded ${outcome.failure}"
+                }
+            },
+            {
+                assertTrue(probe.threads.isNotEmpty()) {
+                    "the step must really have run, or the Error was raised before there was a run to kill"
+                }
+            },
             {
                 val status = admin.list().single { it.name == "cache-read" }
                 assertFalse(status.running) {

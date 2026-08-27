@@ -12,6 +12,7 @@ import infra.etl.task.TaskDefinition
 import infra.etl.task.TaskEngine
 import infra.etl.task.TaskFileLoader
 import infra.etl.task.TaskOutcome
+import infra.etl.task.TaskRunListener
 import infra.etl.task.TaskRunner
 import infra.etl.task.TaskScheduler
 import infra.etl.task.TriggerResult
@@ -330,6 +331,22 @@ class P7World(private val root: Path) : AutoCloseable {
         return datasource.probe
     }
 
+    /**
+     * P9, additive. Spec 9.2's listener, read at every call through a [ForwardingListener] because
+     * the engine below is built `by lazy` and a listener passed straight into that constructor
+     * would be captured before any test could set one - `TaskHarness` carries the same seam for
+     * the same reason.
+     *
+     * P7 needed no listener at all. What it buys here is the **only** way this world can inject an
+     * `Error` into a run: its datasources are `ProbeDatasource`, which has no failure injection,
+     * and the run must die on an `Error` for `TaskRunner.release(cause)`'s non-null branch to be
+     * reachable. `Events.isolate` catches `Exception` and not `Throwable` - pinned by
+     * `P8aCoverageTest` - so an `Error` thrown from a listener call site escapes the engine
+     * exactly as a step's would.
+     */
+    @Volatile
+    var listener: TaskRunListener = TaskRunListener.NONE
+
     // INTEGRATE: P5's constructor, already reconciled once in TaskFixtures.
     private val engine: TaskEngine by lazy {
         TaskEngine(
@@ -337,6 +354,7 @@ class P7World(private val root: Path) : AutoCloseable {
             scratchDirectory = scratchRoot,
             scratchMemoryLimitMb = Etl.MEMORY_LIMIT_MB,
             sleeper = { error("no step in this phase retries, so no backoff should be requested") },
+            listener = ForwardingListener { listener },
         )
     }
 

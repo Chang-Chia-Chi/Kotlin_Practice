@@ -16,6 +16,7 @@ import infra.etl.pipe.Row
 import infra.etl.pipe.RowMapper
 import infra.etl.pipe.RowPipe
 import infra.etl.pipe.RowWriter
+import infra.snapshotcache.api.CopyOutSpec
 import java.nio.file.Path
 import java.sql.ResultSet
 import java.sql.SQLException
@@ -29,6 +30,7 @@ import org.jboss.logging.Logger
 import org.jdbi.v3.core.Handle
 import org.jdbi.v3.core.Jdbi
 import org.jdbi.v3.core.argument.NullArgument
+import org.jdbi.v3.core.statement.ColonPrefixSqlParser
 import org.jdbi.v3.core.statement.SqlStatements
 
 /** The built-in that changes between attempts of the same step, so it never lives in the scope. */
@@ -38,6 +40,18 @@ private val log = Logger.getLogger(TaskEngine::class.java)
 
 /** What a step type that moves no row through the JVM reports to [StepResult] (spec 2.3). */
 private val NO_ROWS = PipeResult(0, 0)
+
+/**
+ * JDBI's own parser, reached without a [Handle] for the one SQL text this engine parses but never
+ * binds: a `cacheCopy` step's (spec 3.6).
+ *
+ * The `Handle`-based path [TaskEngine.Run.variables] uses would open a connection - and on the
+ * `scratch` datasource that *creates the scratch file* - for a step that is about to be rejected.
+ * Measured on jdbi3-core 3.45.4: `parse(sql, null)` needs no `StatementContext` for a
+ * colon-prefixed parse, and it skips a colon inside a string literal, a `::` cast and a `--`
+ * comment, all of which are legal in the DuckDB SQL a cache copy runs.
+ */
+private val CACHE_SQL_PARSER = ColonPrefixSqlParser()
 
 /**
  * The task variables of spec 6: built-ins, task literals, and whatever `export` steps have
@@ -141,6 +155,11 @@ class VariableScope {
  *   no `System.nanoTime()` left here. A cost worth recording rather than hiding: a wall-clock
  *   `Clock` is not monotonic, so an NTP step mid-run can skew a `durationMs`. What it buys is that
  *   a duration is assertable exactly, by a test that never sleeps.
+ * @param caches the snapshot caches a `cacheCopy` step's `cache:` name resolves in (spec 3.6,
+ *   7.3), each bound to the group `copyOut` is asked for - see [CacheBinding]. Appended last and
+ *   defaulted, so every existing construction site is untouched. The same names the host hands
+ *   `TaskFileLoader` as validation rule 21's set, or a name this engine cannot resolve passes
+ *   startup and fails mid-run.
  */
 class TaskEngine(
     private val datasources: Map<String, Jdbi>,
@@ -151,6 +170,7 @@ class TaskEngine(
     private val hooks: TaskHooks = TaskHooks(),
     private val metrics: TaskMetrics = TaskMetrics.NONE,
     private val clock: Clock = Clock.systemUTC(),
+    private val caches: Map<String, CacheBinding> = emptyMap(),
 ) {
 
     init {
@@ -165,9 +185,12 @@ class TaskEngine(
      * result, not an exception, because P7's dispatcher and P8's listeners both need the run to
      * end normally.
      *
-     * An `Error` is not caught. A [CacheCopyStep] therefore propagates its [NotImplementedError]
-     * out of this method instead of being reported as an ordinary task failure, which is what a
-     * not-yet-built step should look like.
+     * An `Error` is not caught, and after P9 no step type raises one: the `NotImplementedError`
+     * a [CacheCopyStep] used to throw is gone, and every failure this engine can now produce -
+     * including the cache's own `NotReadyException` and `ShuttingDownException` - is a
+     * `RuntimeException` that the step loop sees and reports as an ordinary task failure. An
+     * `Error` that arrives anyway (an `OutOfMemoryError`, a listener that raises one) still
+     * propagates out of this method rather than being dressed up as a task failure.
      *
      * `onTaskStart` fires **first**, before [ScratchDb] is constructed: its `init` rejects a
      * non-positive `memory_limit`, and a run that dies there is still a run the listener has to
@@ -468,15 +491,96 @@ class TaskEngine(
             is MaterializeStep -> materialize(step, attempt)
             is SqlStep -> sql(step, attempt)
             is ExportStep -> export(step, attempt)
-            is CacheCopyStep -> throw NotImplementedError(
-                "step '${step.name}': the cache copy step of spec 7.3 is P9's, not P5's.",
+            is CacheCopyStep -> cacheCopy(step, attempt)
+        }
+
+        /**
+         * Spec 7.3's file-to-file copy out of a snapshot cache generation and into scratch: the
+         * one step type whose SQL this engine never executes itself.
+         *
+         * **No row passes through the JVM.** `copyOut` attaches the generation to the scratch
+         * connection and runs a `CREATE TABLE ... AS SELECT` across the two files inside DuckDB,
+         * so this reports [NO_ROWS] like every other non-`pipe` step. `CopyOutResult.rowsCopied`
+         * is *lineage*, not throughput, and goes in the log line below: one field meaning "rows
+         * piped" for one step type and "rows the database says it touched" for another would be a
+         * number nobody could aggregate, and `etl_step_rows_total{direction}` is one series across
+         * all five types (see `materialize`, which discards a real count for the same reason).
+         *
+         * **The lease is the cache's.** `copyOut` acquires and releases it, which is why spec 7.3
+         * names it rather than `acquire`; this framework never holds a `Snapshot`, and never
+         * across steps. A task holding a lease for thirty minutes stalls every refresh of the
+         * cache, with the cause in a different system from the symptom. Each `cacheCopy` therefore
+         * takes its own lease and may read its own generation - spec 3.6 records that, and
+         * declines `withSnapshot` as the remedy for exactly the reason above.
+         *
+         * **No `waitBudget` is passed.** The cache's own `defaultWaitBudget` is the waiting
+         * policy; overriding it here would invent one spec 7.3 does not give this framework, and
+         * that budget is the task's whole latency floor while no generation is available.
+         *
+         * `targetTable` goes over **unquoted**: `DuckDbGenerationStore.copyOut` quotes it itself,
+         * so a name quoted here would create a table whose name contains the quote characters and
+         * which every later step then fails to find. `materialize` quoting at its own call site is
+         * the shape to mirror, not that line. The connection handed over is scratch's **write**
+         * connection and not a `duplicate()`: `copyOut` runs `USE` on it and puts it back in its
+         * own `finally`, so a duplicate would restore the catalog on a connection nobody reads
+         * and leave later steps looking at the generation's catalog instead of scratch's.
+         *
+         * Failure needs no special handling. `NotReadyException` and `ShuttingDownException` are
+         * plain `RuntimeException`s, so the step loop sees them, the listener and metric call
+         * sites fire, and neither is transient under spec 5.3 - whose list is JDBC-shaped and is
+         * deliberately not extended - so the step fails on its first attempt however many retries
+         * the definition carries.
+         */
+        private fun cacheCopy(step: CacheCopyStep, attempt: Int): PipeResult {
+            val binding = caches[step.cache] ?: throw IllegalArgumentException(
+                "step '${step.name}': cache '${step.cache}' is not configured. Known caches are " +
+                    "${caches.keys.sorted()} (spec 3.6, 7.3).",
             )
+            // Rule 19's runtime guard, for a definition built in code (spec 2.1), which has no
+            // loader in front of it. Rejected rather than interpolated: CopyOutSpec.sql is a plain
+            // String with no binding channel, and substituting a value into the text would be the
+            // injection path every other statement in this engine avoids by binding.
+            val parsed = CACHE_SQL_PARSER.parse(step.sql, null).parameters
+            val bound = parsed.parameterNames.distinct().sorted()
+            require(!parsed.isPositional && bound.isEmpty()) {
+                val what = if (parsed.isPositional) "positional '?' parameters" else "${bound.map { ":$it" }}"
+                "step '${step.name}': cache SQL binds $what, and a cacheCopy takes no variables at all. " +
+                    "It runs inside the cache's own DuckDB instance through CopyOutSpec.sql, a plain " +
+                    "string with no binding channel (spec 3.6, 7.3), so this cannot be bound even if the " +
+                    "variable is defined. Copy the wider subset and filter it in the following " +
+                    "materialize step (validation rule 19 says the same thing at startup)."
+            }
+            val result = binding.cache.copyOut(
+                binding.group,
+                CopyOutSpec(
+                    sql = step.sql,
+                    targetTable = namer.physical(step.output, attempt),
+                    targetConnection = scratch.connection(),
+                ),
+            )
+            // Only once the copy has succeeded, as `materialize` does: publishing is what makes an
+            // attempt the live one (spec 5.5).
+            namer.publishTable(scratch.connection(), step.output, attempt)
+            // The cache's spec 6.4 obliges a consumer to record which generation it read. Logged
+            // rather than exported as a task variable: that would be public surface spec 11 does
+            // not declare, and nothing in this framework consumes it.
+            log.infov(
+                "run {0} task {1} step {2}: copied {3} rows from cache {4} group {5}, generation {6} " +
+                    "as of {7} into scratch dataset {8}",
+                task.runId, definition.name, step.name, result.rowsCopied, step.cache,
+                binding.group.value, result.generation, result.dataAsOf, step.output,
+            )
+            return NO_ROWS
         }
 
         /**
          * The one step type where rows pass through the JVM (spec 2.3), so the one type whose
          * [StepResult] carries a real pair. [RowPipe.run] already answers it; before P8a the
          * result was discarded only because the publish `if` was the last statement.
+         *
+         * `cacheCopy` is the sharpest case of the other four: its rows move file to file inside
+         * DuckDB and are counted by the database, and it still reports 0 / 0 here - see
+         * [cacheCopy] for why that count is lineage rather than throughput.
          */
         private fun pipe(step: PipeStep, attempt: Int): PipeResult {
             val target = step.target
@@ -520,7 +624,8 @@ class TaskEngine(
          * DuckDB 1.1.3, it is -1 for DDL and for CREATE TABLE AS SELECT (see `update` below). The
          * ruling does not rest on that either way: one field meaning "rows piped" for one step
          * type and "rows the database says it touched" for another would be a number nobody could
-         * aggregate.
+         * aggregate. P9's [cacheCopy] is held to the same ruling, where a real `rowsCopied` is on
+         * offer and is logged as lineage instead.
          */
         private fun materialize(step: MaterializeStep, attempt: Int): PipeResult {
             if (step.datasource != SCRATCH) {

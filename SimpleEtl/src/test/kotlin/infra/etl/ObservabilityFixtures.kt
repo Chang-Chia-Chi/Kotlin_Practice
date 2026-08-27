@@ -275,6 +275,21 @@ class ForwardingListener(private val target: () -> TaskRunListener) : TaskRunLis
 }
 
 /**
+ * P9. An `Error`, not an `Exception`, injected into a run on purpose.
+ *
+ * Until P9 the suite's only `Error` raised inside the engine was `CacheCopyStep`'s
+ * `NotImplementedError` stub, and three tests that have nothing to do with the snapshot cache
+ * were built on it: an `Error` propagates out of `run` uncaught, `onTaskEnd` still fires from the
+ * `finally`, no hook runs while it unwinds, and `TaskRunner.release(cause)` records the run FAILED
+ * instead of leaving it `running` for the life of the process. Building the executor removes the
+ * stub, so the vehicle moves here and the coverage stays where it was.
+ *
+ * It carries no state: the tests that use it assert on **identity**, which is what says the
+ * failure an operator reads is the one the run actually died on and not a re-wrap of it.
+ */
+class InjectedError(message: String) : Error(message)
+
+/**
  * The engine's clock, moved only by the injected sleeper.
  *
  * The cost the contract records is real and is accepted here: a `Clock` is wall-clock and not

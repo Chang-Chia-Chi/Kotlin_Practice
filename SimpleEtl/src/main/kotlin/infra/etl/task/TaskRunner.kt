@@ -194,8 +194,11 @@ private class TaskSlot(name: String) {
 
     /**
      * @param cause non-null when the coroutine died on something [TaskEngine.run] does not catch -
-     *   an `Error`, such as the `NotImplementedError` a [CacheCopyStep] throws until P9. Recorded
-     *   as the run's failure rather than left looking like a run that never ended.
+     *   an `Error`, such as an `OutOfMemoryError` or one raised by host code inside a listener.
+     *   No step type raises one since P9 removed [CacheCopyStep]'s `NotImplementedError` stub, but
+     *   the branch is not dead: an `Error` from anywhere under `run` arrives here, and without it
+     *   the run stays `running` for the life of the process. Recorded as the run's failure rather
+     *   than left looking like a run that never ended.
      */
     fun release(cause: Throwable?) {
         last?.let {

@@ -1218,3 +1218,104 @@ next person to reach for a flow here will need them:
   misses - so today it produces `scratchBytes` and `taskEnded(FAILED)` but no `stepEnded` and no
   `stepError`. P9 will meet this as "the metric is missing".
 
+
+---
+
+## P9 - The `cacheCopy` executor, its YAML form, and rules 19-21  (2026-08-27)
+
+The last phase of the plan, and the reason this framework depends on `snapshotcache` at all. Spec
+2.4's task shape D - `cacheCopy` into scratch, `materialize` over it, `pipe` out - is now
+executable end to end. `CacheCopyStep` had existed in the model since P5 with a stub throwing
+`NotImplementedError`; that stub is gone.
+
+**Delivered**
+
+- NEW `task/CacheBinding.kt` - `(SnapshotCache, GroupId)`. Two fields and not one: a cache serves
+  many groups and `copyOut` takes the group, so a name alone conflates the task file's vocabulary
+  with the cache's. It is the only file in `infra.etl` that names `infra.snapshotcache`.
+- `TaskEngine.caches: Map<String, CacheBinding> = emptyMap()`, appended **last** after `clock`, and
+  the `cacheCopy` executor: resolve the binding, reject bound variables, `copyOut(group,
+  CopyOutSpec(sql, namer.physical(output, attempt), scratch.connection()))`, `publishTable` on
+  success only, `NO_ROWS` returned, lineage logged at INFO.
+- `TaskYaml`: `CacheCopyYaml` registered as type id `cacheCopy`.
+- `TaskFileLoader.caches: Set<String> = emptySet()` as the **fourth and last** parameter, and rules
+  21, 19, 20 plus rule 9 and spec 5.5's identifier check for `output`.
+- Eight KDoc sites across four files that named the `NotImplementedError` as current behaviour.
+
+**283 production lines** against a ceiling of 1,000 - the first phase in this project to come in
+under its budget, and the reason is that the contract had already been through a confirmation round
+that measured the answer instead of reasoning about it.
+
+### Decisions worth the record
+
+- **`StepResult` is 0 / 0, not `rowsCopied`.** `etl_step_rows_total{direction}` is one counter
+  series across all five step types, and `TaskEngine.kt`'s own ruling says a field meaning "rows
+  piped" for one type and "rows the database says it touched" for another is a number nobody can
+  aggregate. `rowsCopied` is **lineage** and goes in the log line beside `generation` and
+  `dataAsOf`, which the cache's spec 6.4 obliges a consumer to record.
+- **The lease is never this framework's.** `copyOut` acquires and releases it; the engine never
+  calls `acquire` or `withSnapshot` and never holds a `Snapshot` across steps (spec 7.3's
+  30-minute stall). Each `cacheCopy` may therefore read its own generation - spec 3.6 records that
+  and declines `withSnapshot` as the remedy.
+- **`targetTable` goes over unquoted.** `DuckDbGenerationStore.copyOut` quotes it itself while
+  `materialize` quotes at its own call site, so mirroring `materialize` literally would create a
+  table whose name contains the quote characters, which every later step then fails to find.
+- **The connection handed over is scratch's write connection, never a `duplicate()`.** `copyOut`
+  runs `USE` on it and restores it in its own `finally`; a duplicate would restore the catalog on a
+  connection nobody reads and leave later steps looking at the generation's catalog. The symptom is
+  a missing table, which names nothing about the cause.
+- **No `waitBudget` is passed.** The cache's `defaultWaitBudget` is the policy; it is also
+  unobservable from a test, because Kotlin default arguments make it untestable - a code-review
+  item rather than an acceptance criterion.
+- **Rules 19 and 20 are startup rules, not runtime ones.** Both could have been a `require` in the
+  executor and both would then boot green and kill a task thirty minutes in. The executor keeps its
+  own guard for the definitions spec 2.1 lets a host build in code.
+- **The YAML default for `cacheCopy.retries` is 0 while `CacheCopyStep.retries` stays 3.** Rule 20
+  reads the *stated* value. Had the loader inherited the model's default, every file omitting
+  `retries` would have failed rule 20 on a value nobody wrote - caught in the contract round,
+  before a line was written.
+
+### The stub was load-bearing, and the coverage moved rather than died
+
+`CacheCopyStep`'s `NotImplementedError` was the **only `throw` of an `Error` anywhere in
+production**, and three tests with nothing to do with the snapshot cache stood on it: `run` lets an
+`Error` past while `onTaskEnd` still fires from the `finally`, no hook runs while one unwinds, and
+`TaskRunner.release(cause)`'s non-null branch records the run FAILED instead of leaving it
+`running` for the life of the process. The SDET caught this at contract time. The ruling was that
+the permit is **to change the vehicle, not to drop the coverage**: `TaskHookTest` now injects
+through `DuckFile.failFirst`, `TaskAdminTriggerTest` through a listener (`Events.isolate` catches
+`Exception`, not `Throwable`), and every assertion survived with its meaning intact. Deleting them
+would have taken the suite from 324 green to 336 green while covering strictly less, and no test
+count would have shown it.
+
+### The cache ArchUnit rule had never constrained anything - now falsified
+
+`grep -rn "infra.snapshotcache" SimpleEtl/src/main` returned nothing before this phase, so
+`only task may depend on the snapshot cache` had been green for nine phases with no class in its
+scope. Falsified on the interstitial's standard: a real `infra.snapshotcache.api.GroupId` import was
+introduced into `infra.etl.pipe.RowPipe`, the suite run, and **that rule and only that rule failed**
+(10 architecture tests, 1 failure, naming the rule and its `because`). Reverted, and `clean` run -
+ArchUnit reads bytecode, so a reverted probe leaves a phantom violation until the classes go.
+The rule does **not** assert that `infra.etl.task` *does* depend on the cache, and needs no canary
+for that direction: `CacheBinding` failing to compile is louder than any rule.
+
+### Recorded, not fixed
+
+- **`DuckDbGenerationStore.copyOut` only WARNs if its `DETACH` fails**, leaving the generation
+  attached to the *scratch* instance until `ScratchDb.close()` - spec 7.3's reclamation-stall
+  hazard arriving by a second route. Not this module's to fix; it belongs to the snapshotcache
+  module.
+- **The micrometer assertion in `CacheCopyStepTest` breaks a convention this project states.**
+  `TaskMetricsTest`'s KDoc says "nothing here knows what Micrometer is", and criterion 8's series
+  half imports `MicrometerTaskMetrics` and `SimpleMeterRegistry` into `infra.etl.task`. The lead
+  ruled it should move to `micrometer/MetricLabelContractTest.kt`; it has not moved, because doing
+  so means editing a test and the phase's rule is that the engineer never does. ArchUnit cannot
+  catch it - the class graph is imported `DO_NOT_INCLUDE_TESTS` - which is why it has to be a
+  decision rather than a green build.
+- **P8a's M1 is still open**: `TaskRunner`'s caller-identity pass-through has no test. P9 did not
+  close it, deliberately - it needs a fixture change outside this phase's boundary. `P7World` now
+  carries a listener seam, so the change is cheaper than it was.
+
+**Suite: 336 tests, 0 failures** (`mvn -pl SimpleEtl clean test -Dtest='!*OracleTest,!*Spike'`),
+up from a 324 baseline; the SDET's twelve. Docker is unavailable, so the three `*OracleTest`
+classes still cannot run. Nothing in the contract failed to survive contact with the code.

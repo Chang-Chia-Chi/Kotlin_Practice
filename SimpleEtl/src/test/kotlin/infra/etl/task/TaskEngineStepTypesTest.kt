@@ -1,15 +1,14 @@
 package infra.etl.task
 
 import infra.etl.Etl
+import infra.etl.FakeSnapshotCache
 import infra.etl.TaskHarness
 import infra.etl.pipe.CanonicalType
 import infra.etl.pipe.ColumnMeta
 import infra.etl.pipe.RowTransform
 import infra.etl.task.MaterializeFormat
-import infra.etl.task.Outcome
 import java.nio.file.Path
 import org.junit.jupiter.api.Assertions.assertEquals
-import org.junit.jupiter.api.Assertions.assertInstanceOf
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertAll
@@ -259,19 +258,26 @@ class TaskEngineStepTypesTest {
     }
 
     /**
-     * The lead's ruling: `CacheCopyStep` belongs to P9 and its executor is a stub throwing
-     * `NotImplementedError`. This test does not test the step; it tests that the stub is a stub.
+     * The fifth step type, now that P9 has built it. **Rewritten, and this is the one earlier-phase
+     * test the P9 contract permits touching** (contract 4, inherited trap 2).
      *
-     * A stub that silently returned would make a task file referring to the snapshot cache look
-     * like it worked - the worst possible reading of a not-yet-built feature - and P9 would then
-     * inherit a green suite that proves nothing. `NotImplementedError` is an `Error`, not an
-     * `Exception`, so the engine may reasonably let it escape `run` instead of recording it in
-     * `TaskOutcome`; both are accepted here, and a silent success is not.
+     * What it used to assert was that `CacheCopyStep`'s executor was a stub raising
+     * `NotImplementedError` - a claim whose whole purpose was to stop a task file referring to the
+     * snapshot cache from looking as though it worked. That claim is now false by construction, so
+     * the test asserts the thing it was standing in for: the step is still not silently a no-op,
+     * because it really copies its subset out of a generation and into scratch.
+     *
+     * The full executor contract - the lease, the row counts, the two observation seams, the
+     * failure paths - is `CacheCopyStepTest`'s. This file's item is "all step types execute from a
+     * definition built in code", and that is all this asserts.
      */
     @Test
     fun aCacheCopyStepIsNotSilentlyANoOp() {
         TaskHarness(root).use { harness ->
-            harness.datasource("report_oracle")
+            val cache = FakeSnapshotCache(root.resolve("generations/wip.duckdb"))
+            cache.seed("wip", rows = 9)
+            harness.cache("wip_cache", cache)
+            val probe = harness.probeFile("cache-copy")
 
             val definition = Etl.task(
                 "wip-cache",
@@ -280,19 +286,28 @@ class TaskEngineStepTypesTest {
                     Etl.cacheCopy(
                         name = "copy-cache",
                         cache = "wip_cache",
-                        sql = "select lot_id, qty from wip where site = 'F12'",
+                        sql = "select lot_id, qty from wip where lot_id < 7",
                         output = "wip_cache",
                     ),
                 ),
+                Etl.phase("observe", Etl.probeScratch("probe", probe, "wip_cache")),
             )
 
-            val attempt = runCatching { harness.run(definition) }
-            val failure = attempt.exceptionOrNull() ?: attempt.getOrNull()?.failure
+            harness.runExpectingSuccess(definition)
 
-            assertInstanceOf(NotImplementedError::class.java, failure) {
-                "a cacheCopy step must fail loudly until P9 builds it, not succeed quietly"
-            }
-            attempt.getOrNull()?.let { assertEquals(Outcome.FAILED, it.outcome) }
+            val copied = harness.readProbe(probe) { Etl.longAt(it, "select count(*) from wip_cache") }
+            assertAll(
+                {
+                    assertEquals(7L, copied) {
+                        "the step copied 7 of the generation's 9 rows into scratch, or it did nothing"
+                    }
+                },
+                {
+                    assertEquals(1, cache.copyOuts.size) {
+                        "and it reached the generation through copyOut; the cache saw ${cache.copyOuts}"
+                    }
+                },
+            )
         }
     }
 }

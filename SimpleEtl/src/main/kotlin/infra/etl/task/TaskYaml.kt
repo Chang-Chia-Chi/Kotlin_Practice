@@ -54,8 +54,9 @@ internal data class PhaseYaml(val name: String, val steps: List<StepYaml> = empt
 /**
  * Measured on jackson-databind 2.18.2: `As.PROPERTY` consumes `type` and does not then report it
  * as an unknown field, an unknown value gives `InvalidTypeIdException` listing the known ids, and
- * a missing one says so - all three carrying a line number. `cacheCopy` is deliberately absent:
- * spec 3 does not define its YAML and plan P9 owns it, so it arrives as an unknown type id.
+ * a missing one says so - all three carrying a line number. `cacheCopy` joined the four in P9,
+ * which is when spec 3 gained 3.6 and the step type gained an executor; until then it was
+ * deliberately absent and arrived as an unknown type id.
  */
 @JsonTypeInfo(use = JsonTypeInfo.Id.NAME, include = JsonTypeInfo.As.PROPERTY, property = "type")
 @JsonSubTypes(
@@ -63,6 +64,7 @@ internal data class PhaseYaml(val name: String, val steps: List<StepYaml> = empt
     JsonSubTypes.Type(value = MaterializeYaml::class, name = "materialize"),
     JsonSubTypes.Type(value = SqlYaml::class, name = "sql"),
     JsonSubTypes.Type(value = ExportYaml::class, name = "export"),
+    JsonSubTypes.Type(value = CacheCopyYaml::class, name = "cacheCopy"),
 )
 internal sealed interface StepYaml {
     val name: String
@@ -144,3 +146,22 @@ internal data class ExportYaml(
 ) : StepYaml
 
 internal data class ExportVarYaml(val name: String, val sql: String)
+
+/**
+ * Spec 3.6's `cacheCopy`, added in P9. Four fields and no more: [cache] is a host-bound name and
+ * not a datasource, [sql] runs inside the cache's own DuckDB instance, and [output] is an ordinary
+ * scratch dataset.
+ *
+ * [retries] is null for "not stated" like every other step type, but resolves to **0** rather than
+ * to the 3 a scratch-targeted step normally gets - and a stated value above 0 is validation rule
+ * 20's rejection. Had this inherited the 3, every file that omits `retries` would fail that rule
+ * on a value its author never wrote. The asymmetry with `CacheCopyStep.retries`, which is still 3,
+ * is deliberate and is recorded in spec 10's rule 20.
+ */
+internal data class CacheCopyYaml(
+    override val name: String,
+    val cache: String,
+    val sql: String,
+    val output: String,
+    override val retries: Int? = null,
+) : StepYaml

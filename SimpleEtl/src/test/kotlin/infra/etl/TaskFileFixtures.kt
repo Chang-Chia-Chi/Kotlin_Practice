@@ -62,6 +62,16 @@ object TaskFiles {
     val HOOKS: Set<String> = setOf("notify-downstream", "page-oncall")
 
     /**
+     * P9. The `cache:` names the host binds (spec 10 rule 21, contract 1.4).
+     *
+     * Two of them, and only one appears in [VALID_CACHE_COPY]: rule 21's test has to reject a
+     * name while a *sibling* name is registered and accepted, or an empty set rejects everything
+     * and the test passes against a loader that knows nothing about caches at all - the P8b
+     * lesson, one rule further on.
+     */
+    val CACHES: Set<String> = setOf("wip_cache", "lot_cache")
+
+    /**
      * What one call to `TaskFileLoader.load` produced, in a shape the tests can assert on.
      *
      * [tasks] is null exactly when the load was rejected, which is the distinction the
@@ -81,10 +91,18 @@ object TaskFiles {
     // INTEGRATE: the only place naming TaskFileLoader's constructor. If the engineer resolved
     // datasources / transforms / hooks through some other channel - a resolver interface, CDI,
     // a builder - change this one expression.
-    private fun newLoader(): TaskFileLoader = TaskFileLoader(DATASOURCES, TRANSFORMS, HOOKS)
+    private fun newLoader(): TaskFileLoader = TaskFileLoader(DATASOURCES, TRANSFORMS, HOOKS, CACHES)
 
     /** INTEGRATE: the other place naming the constructor, for the one test that varies it. */
     fun loaderWithDatasources(datasources: Set<String>): TaskFileLoader = TaskFileLoader(datasources)
+
+    /**
+     * P9. INTEGRATE: `caches` is the **fourth and last** constructor parameter. `newLoader` above
+     * and `loaderWithDatasources` both call positionally, so a parameter inserted anywhere else
+     * silently rebinds `transforms` and every rule 4 test starts asserting something else.
+     */
+    fun loaderWithCaches(caches: Set<String>): TaskFileLoader =
+        TaskFileLoader(DATASOURCES, TRANSFORMS, HOOKS, caches)
 
     /**
      * INTEGRATE: the only place that assumes what `load` returns.
@@ -94,8 +112,11 @@ object TaskFiles {
      * instead. Reconciling the two was this one function, exactly as intended - no test class
      * was touched.
      */
-    fun load(directory: Path): Loaded =
-        when (val result = newLoader().load(directory)) {
+    fun load(directory: Path): Loaded = load(directory, newLoader())
+
+    /** P9. The same unwrapping for a loader a test configured itself. */
+    fun load(directory: Path, loader: TaskFileLoader): Loaded =
+        when (val result = loader.load(directory)) {
             is LoadResult.Loaded -> Loaded(result.tasks, emptyList())
             is LoadResult.Invalid -> Loaded(null, result.report.errors)
         }
@@ -110,6 +131,10 @@ object TaskFiles {
     }
 
     fun loadOne(root: Path, yaml: String): Loaded = load(dirOf(root, "task.yaml" to yaml))
+
+    /** P9. One file through a loader that knows only [caches], for rule 21's paired test. */
+    fun loadOneWithCaches(root: Path, yaml: String, caches: Set<String>): Loaded =
+        load(dirOf(root, "task.yaml" to yaml), loaderWithCaches(caches))
 
     // -----------------------------------------------------------------------------------
     // One-rule-away editing.
@@ -310,6 +335,54 @@ object TaskFiles {
                 target:
                   datasource: scratch
                   table: wip_req
+                  createTable: REQUIRED
+                retries: 0
+    """.trimIndent()
+
+    /**
+     * P9's baseline: spec 2.4's task **shape D** - `cacheCopy` into scratch, `materialize` over
+     * what landed, `pipe` out - which is the shape the framework depends on `snapshotcache` for.
+     *
+     * Arranged so each of rules 19, 20, 21, 9 and spec 5.5's dataset-name check is one [edit]
+     * away, and asserted to load in `CacheCopyLoaderTest` so that none of those rejections is the
+     * reading of a loader that rejects everything.
+     *
+     * `retries` is **omitted** on the `cacheCopy` step, deliberately. Rule 20 rejects a *stated*
+     * non-zero value, and the YAML default for this step type is 0 rather than `CacheCopyStep`'s
+     * model default of 3 - if the loader inherited the model's default, this file and every other
+     * one that omits `retries` would fail rule 20 on a value nobody wrote.
+     *
+     * The `sql` carries no `:name`, no `::` cast and no colon inside a literal. Rule 19's test
+     * adds each of those in turn, and only the first is a rejection.
+     */
+    val VALID_CACHE_COPY: String = """
+        name: wip-cache-copy
+        phases:
+          - name: copy
+            steps:
+              - name: copy-wip
+                type: cacheCopy
+                cache: wip_cache
+                sql: "select lot_id, qty from wip where site = 'F12'"
+                output: wip_cache
+          - name: build
+            steps:
+              - name: build-summary
+                type: materialize
+                datasource: scratch
+                output: summary
+                sql: "select lot_id, sum(qty) as qty from wip_cache group by 1"
+                retries: 3
+          - name: publish
+            steps:
+              - name: publish-summary
+                type: pipe
+                source:
+                  datasource: scratch
+                  sql: "select lot_id, qty from summary"
+                target:
+                  datasource: report_oracle
+                  table: wip_summary
                   createTable: REQUIRED
                 retries: 0
     """.trimIndent()
