@@ -1,6 +1,7 @@
 # SimpleEtl Code Review — 2026-08-27
 
-> **Fix passes 1 and 2 have landed. Every behaviour finding is closed.**
+> **All three fix passes have landed. 31 of the 32 findings are closed; one
+> awaits a ruling.**
 >
 > - **Pass 1** (no ruling needed): H1, M1, M2, M4, M5, M6, M7, M8, M9, L1, N1, N2,
 >   N3, N4, N5.
@@ -9,12 +10,23 @@
 >   refused outright; **H3** — rule 7 narrowed, a non-scratch materialize may bind
 >   nothing; **H4** — spec 7.1 states the pool minimum and it is logged per
 >   datasource at boot; **M3** — spec 5.2's chunk order restored.
-> - **Still open:** the dedup and drift findings only — **M10–M12, L2–L10**. None
->   is a behaviour change. L11 was already sanctioned.
+> - **Pass 3** (behaviour preserving, no test edited to make one pass): M10, M11,
+>   L2, L3, L4, L5, L7 (in part), L8, L9.
+> - **Declined, with reasons in `progress.md`:** **L6** (a JDBI prepared batch is
+>   executed once by design; statement caching belongs to the pool's configuration)
+>   and **L10** (spec 11.2 declares `TaskScheduler(cron)` and P7 already recorded
+>   one widening of it — a second is a ruling, not a refactor).
+> - **Open, pending a ruling: M12 only.** Its premise weakened once P8/P9
+>   centralised `readFrom` / `onDatasource`: of the seven sites, two are already
+>   the single place, three are policy predicates a sealed type would rename rather
+>   than remove, and `writer` needs a raw `Connection` and a `Jdbi` rather than a
+>   `Handle`, so the proposed type cannot serve it. Since a mispairing here is spec
+>   7.2's JVM crash and no test pins it, it was not attempted for a rename.
+>   **L11** was already sanctioned.
 >
-> What changed and why is in `progress.md`, sections "Review fix pass 1" and
-> "Review fix pass 2". The entries below are left exactly as written so the
-> reasoning behind each finding stays readable.
+> What changed and why is in `progress.md`, sections "Review fix pass 1", "2" and
+> "3". The entries below are left exactly as written so the reasoning behind each
+> finding stays readable.
 
 > **Updated same day with a second pass.** The findings below were produced
 > against commit `a62a983` (P7 state); the 13 P8/P9 commits (`a62a983..b34f509`)

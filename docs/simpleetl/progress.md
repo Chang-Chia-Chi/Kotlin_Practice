@@ -1617,3 +1617,108 @@ and its writes the single write connection, so it is not a pool anyone can size.
 Only the dedup and drift findings: **M10-M12, L2-L10**. None is a behaviour change. M12 is the one
 with teeth - a mispaired connection discipline is spec 7.2's JVM crash rather than a red test - and
 M10 must preserve P9's recorded `cacheCopy` retries asymmetry.
+
+## Review fix pass 3 - the dedup refactors  (2026-08-27)
+
+Behaviour preserving throughout, and held to it: **no test was edited to make a refactor pass.**
+Suite 362 green after every one of the seven commits, unchanged from the number pass 2 finished
+with, which is the point - a dedup that moves a test count has changed behaviour.
+
+The one test file that *is* touched is L8, and it deletes private duplicates without touching an
+assertion. That is argued below rather than assumed.
+
+### Landed
+
+- **L3** `precision in 1..38 && scale in 0..precision` appeared verbatim in
+  `DuckDbTableWriter.ddlType` and `TaskFileLoader.addColumn`. P6 lifted the rest of rule 15 into
+  `unwritableToDuckDb` precisely so startup and writer open decide with the same code; this clause
+  was left behind by that lift and now sits beside it as `isDuckDbDecimalPair`. A free function
+  taking the pair rather than a method, because the two callers reach it from opposite directions -
+  a pair a task file *states*, and a pair result set metadata *reports*. Both messages stay put:
+  they explain different mistakes.
+- **L2** Both table writers opened with the same set difference and the same sentence about it.
+  `requireSourceSubset` now sits beside `catalogColumns`, which both already shared.
+- **M10** The retries and createTable defaults were re-derived at ten sites. `defaultRetries` and
+  `defaultCreateTable` sit next to `SCRATCH`; a grep for the old expressions finds only the
+  helpers' own bodies. **P9's asymmetry is preserved and the helper's KDoc says so**: `CacheCopyStep`
+  declares 3 while its YAML default is 0, because rule 20 rejects a stated non-zero value. Neither
+  cacheCopy site was touched, and neither now looks like an oversight beside nine that share a
+  helper. H2's two new checks also stay inline on purpose - both return early on scratch, and off
+  scratch the default is 0, so neither needs the datasource-dependent answer.
+- **M11** `BUILT_IN_VARIABLES` and `ATTEMPT_VARIABLE` now live in the task model. The part that
+  makes it one source rather than two is `defineRunBuiltIns`, which holds the *values* next to the
+  names and checks the two agree: adding a name to the set without giving it a value fails every
+  run immediately and by name, instead of at whichever later step first writes it.
+- **L4** Five copies of the named-parameter parse, two of them building a throwaway
+  `handle.createUpdate(sql)` for a `StatementContext` a colon-prefixed parse never touches - and
+  which, on scratch, opens a connection and so creates the scratch file. `parseNamedParameters`
+  lives in `infra.etl.pipe`, not beside either caller: ArchUnit forbids `infra.etl.jdbc` from
+  depending on `infra.etl.task` and both need it. It takes the parser as an optional argument, so
+  the two sites holding a `Handle` still parse with that handle's own configured parser and nothing
+  changes about which rules run where. **The messages stayed at the call sites**: each cites a
+  different rule and offers a different remedy, so the sentence was never the duplication.
+- **L5** One `openConfigured` for the handle open-and-release protocol, `addSuppressed` included.
+  It returns the handle rather than assigning it, so a writer whose `open` throws is left with a
+  null handle and a closed connection - the same end state by a shorter route. A shared base class
+  was the alternative and is not worth a type hierarchy for the three remaining shared lines.
+- **L7, the tractable half** `JdbcStatementWriter` pairs each bind name with its declared type once
+  at open instead of lowercasing and hashing in the innermost per-row loop. The rest of L7 stays:
+  `Row` lowercases on every lookup and this is the caller that makes that load-bearing.
+- **L9** The parsed/unparsed map stitch is gone. Two `LinkedHashMap`s plus a third walk joining
+  them by name with `unparsed[name] ?: parsed.getValue(name)` was correct only while every name
+  landed in exactly one map - an invariant held by the shape of one if/else and by nothing the
+  compiler could see. A sealed `ReadFile` with `Parsed` and `Failed` removes the convention rather
+  than documenting it.
+- **L8** `RowPipeOracleTest` declared private `exec` and `count` byte for byte identical to
+  `Pipe.exec` and `Pipe.rowCount` - from its own phase's fixture file, which the class already
+  imports for its DuckDB connections. **This edits a P3 test, which the standing rule forbids**, and
+  the exemption is narrow and stated: it deletes private helpers and repoints their call sites at
+  an identical implementation, touching no assertion, no scenario and no expected value. The rule
+  exists to stop a later phase weakening an earlier phase's guarantees, and nothing here does.
+  Verified by compilation, not execution - the class needs Docker.
+
+### Declined, with reasons
+
+- **L6 (prepare once per step rather than per chunk).** Not the small change it looks like. A JDBI
+  `PreparedBatch` is executed once by design; per-chunk commit comes from `autoCommit` on
+  `executeBatch` rather than from statement lifetime; and ojdbc defers the parse to execution
+  anyway, which is why the review measured it as minor against batch-insert I/O. Implicit statement
+  caching on the datasource is the better lever and belongs to whoever configures the pool.
+- **L10 (one authoritative definitions map behind a lookup).** A ruling, not a refactor. Spec 11.2
+  writes `class TaskScheduler(cron: CronScheduler)`, and P7 already recorded widening that to
+  `(cron, runner)` as a deviation - noting in terms that a second required parameter breaks the
+  declared call. Changing the constructor again to take a `(String) -> TaskDefinition?` is a second
+  deviation from a signature the spec does declare, for a finding the review itself rated PLAUSIBLE
+  with no reachable failure. It needs the lead, not a refactor pass.
+
+### M12 - stopped and reported, and the premise has weakened
+
+The finding asks for a sealed `Scratch` / `External` type resolved once per step, owning the
+connection discipline, to replace seven string comparisons in `TaskEngine`. Reading all seven
+before starting, they are not seven of the same thing.
+
+**Four are connection discipline**, and two of those are already the single place:
+
+- `readFrom` - a scratch read takes `duplicate()`, because one DuckDB connection must never carry a
+  streaming read and an appender at once.
+- `onDatasource` - a scratch statement runs on the single write connection.
+- `materialize` - branches to choose between those two plus the parquet path.
+- `writer` - and this is the one that breaks the proposed shape. It needs a raw `Connection` for
+  the DuckDB appender and a `Jdbi` for `JdbcTableWriter`. **Neither is a `Handle`**, so a sealed
+  type exposing `readHandle()` / `statementHandle()` cannot serve it, and adding a third accessor
+  re-opens exactly the choice the type was meant to close.
+
+**Three are policy predicates**, not connection discipline, and a sealed type would rename them
+rather than remove them: rule 18's runtime half ("is this an un-suffixed scratch table"),
+`physicalDataset` ("does this dataset get an attempt suffix"), and rule 11's runtime half ("a
+statement target on scratch"). The `init` guard on the reserved name is a fourth of that kind.
+
+So the honest reckoning is that P8 and P9 already did most of M12 when they centralised `readFrom`
+and `onDatasource`, and what remains would add a type and an indirection while leaving `writer`
+where it is. Net reduction in mispairing risk is close to zero.
+
+That matters because the risk of doing it is real and unchanged: no test pins the pairing, and
+spec 7.2 makes a mispaired connection a JVM crash rather than a red test. A refactor whose upside
+is a rename is not worth running that on. **Recorded as open pending a ruling** rather than done or
+closed: if the lead still wants the type, the design question to settle first is what `writer`
+gets from it.
