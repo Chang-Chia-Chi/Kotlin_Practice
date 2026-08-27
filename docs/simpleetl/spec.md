@@ -877,6 +877,17 @@ because no host module exists in it; that is a real gap, recorded rather than pa
 | expose `AdminResource`, mapping `TaskAdmin`'s sealed results to 202 / 409 / 404 / 400 | - |
 | put `@RolesAllowed("etl-admin")` on every endpoint | an unauthenticated caller can trigger any task |
 | make `CronScheduler.schedule` throw on an unparseable cron | 8.5's atomic reload silently accepts a bad cron |
+| construct `TaskFileLoader` with the name set of the **same** `TaskHookRegistry` it hands `TaskEngine` | validation rule 5 passes for every hook name, and a typo dies at the end of a 30 minute run - precisely the failure 9.4 exists to prevent |
+| register `MicrometerTaskMetrics` against the application's `MeterRegistry` | every metric in 9.3 is silently absent; nothing fails and no dashboard populates |
+
+Two notes on the metric binding, measured on micrometer 1.14.2 rather than assumed:
+
+- Prometheus's naming convention appends `_total` to a counter and `_seconds` to a timer **only
+  when not already suffixed**, so every name in 9.3 exports byte-identical. The feared
+  `etl_task_runs_total_total` does not occur.
+- A Micrometer `Timer` exports as `_count` + `_sum` plus a separate `_max` gauge, so
+  `etl_task_duration_seconds` is three Prometheus series, not one. That is standard Timer
+  behaviour and is the host's to know when writing a dashboard.
 
 ---
 
@@ -1262,9 +1273,21 @@ class ScratchDb : AutoCloseable {
 ### 11.3 Extension Points
 
 ```kotlin
-interface TaskRunListener            // full signature in spec 9.2
+interface TaskRunListener {          // full signature in spec 9.2
+    companion object {
+        val NONE: TaskRunListener                                  // the no-op default 9.2 ships
+        fun of(vararg listeners: TaskRunListener): TaskRunListener // fan-out, isolated per listener
+    }
+}
 fun interface TaskHook { fun run(ctx: TaskContext) }
 interface TaskHookRegistry { fun register(name: String, hook: TaskHook) }
+
+/** The concrete registry. 9.4 declares registration only; the engine and `TaskFileLoader`
+ *  also need lookup and the name set, so the shipped class adds them. */
+class TaskHooks : TaskHookRegistry {
+    val names: Set<String>
+    operator fun get(name: String): TaskHook?
+}
 
 data class TaskContext(
     val runId: String,
@@ -1273,13 +1296,34 @@ data class TaskContext(
     val triggeredBy: String?,
     val startedAt: Instant,
 )
+data class PhaseContext(val task: TaskContext, val phase: String)
+data class StepContext(val task: TaskContext, val phase: String, val step: String)
 data class StepResult(
     val rowsRead: Long,
     val rowsWritten: Long,
     val durationMs: Long,
     val attempt: Int,
 )
+
+/** The metric seam of 9.3, kept technology-free so `core` names no Micrometer type.
+ *  `MicrometerTaskMetrics` is the shipped binding and is the only class that may. */
+interface TaskMetrics {
+    fun taskEnded(ctx: TaskContext, outcome: Outcome, durationMs: Long)
+    fun stepEnded(ctx: StepContext, result: StepResult)
+    fun stepRetried(ctx: StepContext)
+    fun scratchBytes(ctx: TaskContext, bytes: Long)
+    companion object { val NONE: TaskMetrics }
+}
 ```
+
+`PhaseContext`, `StepContext`, `TaskHooks`, `TaskMetrics`, `TaskRunListener.NONE` and
+`TaskRunListener.of` were added by the P8 amendment. 9.2 names `PhaseContext` and `StepContext`
+inside a FIXED signature and never defined them, and `(task, phase)` / `(task, phase, step)` is
+the only shape that produces 9.3's `{task, phase, step}` label sets. The rest are forced the same
+way: 9.4 declares hook registration but nothing that can look a hook up, and 9.3 declares meter
+names but nothing that emits them. This is the ninth consecutive phase in which 11's declared
+surface proved narrower than the phase needed - recorded in progress.md rather than left as a
+pattern nobody named.
 
 ---
 

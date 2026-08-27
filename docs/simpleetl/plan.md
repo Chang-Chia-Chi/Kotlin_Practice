@@ -212,20 +212,90 @@ host's (spec 8.6); `AdminResource` is therefore not built here.
 
 ## P8 - Listener, metrics, hooks
 
+**Split into three sequential phases by the P8 contract round.** Two independent estimates put
+the phase at 2.4x-3.3x the 200-600 budget, which CLAUDE.md makes a stop-and-report trigger. The
+split also isolates the single most consequential and most reversible decision - whether the
+framework takes a Micrometer dependency at all - into a phase of its own. P8a and P8b both edit
+`TaskEngine.kt`, so they cannot be parallelised with each other.
+
+### P8a - Run listener and task hooks (spec 9.2, 9.4)
+
+JDK + kotlin-stdlib only; no new library on the compile classpath except the logging API
+CLAUDE.md already fixes.
+
 **Public surface**
-- `TaskRunListener` and the no-op default
-- `TaskHook`, `TaskHookRegistry`
-- The metric names of spec 9.3
+- `TaskRunListener`, `TaskRunListener.NONE`, `TaskRunListener.of`
+- `TaskContext`, `PhaseContext`, `StepContext`, `StepResult`
+- `TaskHook`, `TaskHookRegistry`, `TaskHooks`
+- `TaskEngine`: an injected `java.time.Clock`, a `listener`, a `hooks`, and `triggeredBy` on `run`
 
 **Done when**
 - Every call site in spec 9.2 fires in the right order for a successful run, a failed run,
-  and a run with retries.
-- `logging: false` suppresses listener calls but not metrics.
+  and a run with retries - asserted as a whole ordered trace, not as a subsequence.
+- `logging: false` suppresses listener calls, asserted in a true/false pair so that an engine
+  with no call sites at all cannot pass.
 - `onSuccess` runs once after all phases succeed; a throwing `onSuccess` marks the task
-  FAILED and then runs `onFailure`; a throwing `onFailure` is logged and swallowed.
-- A hook name absent from the registry fails startup validation.
-- Metric label sets are asserted by a contract test, so a later refactor cannot silently
-  change a label and break dashboards.
+  FAILED and then runs `onFailure`; a throwing `onFailure` is logged and swallowed, with the
+  original failure surviving by identity.
+- A hook name absent from the registry fails startup validation, proved through the real
+  composition - one `TaskHooks` instance handed to both `TaskEngine` and `TaskFileLoader`.
+  `TaskFileLoader(hooks = TaskHooks().names)` is an empty set that rejects everything and
+  proves nothing.
+- A throwing listener never changes a run's outcome, and `of` keeps a thrower from robbing the
+  listeners behind it.
+- `durationMs` is exact under an injected clock the test sleeper advances. Without the clock the
+  claim that a duration spans all attempts is unfalsifiable, because the test sleeper does not
+  sleep.
+- An `Error` escaping the engine still propagates **and** still produces `onTaskEnd(FAILED)`.
+
+**Not in scope:** metrics of any kind.
+
+### P8b - Metrics (spec 9.3)
+
+**Public surface**
+- `TaskMetrics` and its no-op default; `MicrometerTaskMetrics` in `infra.etl.micrometer`
+- `ScratchDb.diskBytes()`
+
+**Done when**
+- Metric label sets are asserted by a contract test **from a real engine run into a real
+  `SimpleMeterRegistry`**, so a later refactor cannot silently change a label and break
+  dashboards. Asserting constants instead would assert nothing about what is emitted.
+- Metrics fire regardless of `logging: false`.
+- `micrometer-core` is `provided` scope, so Layer 1's consumers do not inherit it - spec 2.1's
+  whole reason for existing is that Layer 1 ships without Layer 2, and Maven has no layer
+  granularity.
+- The `etl_scratch_file_bytes` gauge is backed by a strongly held `AtomicLong` per task.
+  Measured: Micrometer holds a gauge's referent weakly and a locally-scoped one reads `NaN`
+  after GC, silently.
+- `diskBytes()` sums every regular file under the run directory. Measured: after 500,000
+  appended rows the DuckDB file was 12,288 bytes and its WAL held 10,416,115, so summing only
+  the database file under-reports by three orders of magnitude.
+- ArchUnit confines `io.micrometer` to `infra.etl.micrometer` and stops anything in `infra.etl`
+  depending on that package, with a positive canary rule so the confinement rules cannot pass
+  over an empty package.
+
+### P8c - Coroutine-native event stream
+
+Requested by the project owner, who asked that the framework be coroutine-friendly and that a
+notification mechanism use `SharedFlow`. Spec 9.2's listener interface is FIXED and cannot be
+replaced, so the flow is offered alongside it and is fed by an ordinary `TaskRunListener`.
+
+**Public surface**
+- `TaskEvent` - the flow-shaped form of spec 9.2's seven call sites
+- `TaskEventFlow : TaskRunListener`, exposing `SharedFlow<TaskEvent>`
+
+**Done when**
+- A collector receives one run's events in P8a's order, after filtering by `runId` - one
+  `TaskEngine` serves concurrent tasks, so the stream interleaves runs.
+- A slow collector neither blocks nor fails the run: emission is `tryEmit`, never `emit`, so
+  telemetry can never back-pressure an ETL job.
+- `delivered + dropped == emitted` under a wedged collector. Measured on coroutines 1.10.1:
+  with `onBufferOverflow = DROP_OLDEST`, `tryEmit` never returns false and a `dropped` counter
+  would be structurally always zero; only `SUSPEND` makes a lost event countable, and `tryEmit`
+  does not suspend under any policy.
+- The KDoc states what a collector is NOT promised: with no subscriber at all, `replay = 0`
+  discards every event and `tryEmit` still returns true under every policy, so no counter of any
+  design can report "nobody was listening".
 
 ---
 
@@ -263,10 +333,16 @@ P6 YAML loading
   |
 P7 Scheduling, API, threading
   |
-P8 Listener, metrics, hooks
+P8a Listener and hooks
+  |
+P8b Metrics
+  |
+P8c Event stream
   |
 P9 Cache read step
 ```
 
-P8 and P9 are independent of each other and can be swapped or parallelised. Everything
-else is a chain.
+P8a, P8b, P8c and P9 all edit `TaskEngine.kt` and are a chain. The earlier claim that
+"P8 and P9 are independent of each other and can be swapped or parallelised" was wrong and is
+struck: P7's own handover note already recorded that P8 owns the listener call sites in the same
+file P9 edits for the cache read step, and that two agents cannot build them in parallel.
