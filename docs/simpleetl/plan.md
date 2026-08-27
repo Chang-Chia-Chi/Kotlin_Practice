@@ -272,7 +272,20 @@ CLAUDE.md already fixes.
   the database file under-reports by three orders of magnitude.
 - ArchUnit confines `io.micrometer` to `infra.etl.micrometer` and stops anything in `infra.etl`
   depending on that package, with a positive canary rule so the confinement rules cannot pass
-  over an empty package.
+  over an empty package. The confinement rules pass vacuously when the adapter does not exist
+  because their `that()` clause selects a non-empty set either way - not because of ArchUnit's
+  `failOnEmptyShould`, which never fires here. The canary must therefore be a plain assertion
+  over `JavaClasses`, not another `that()` rule.
+
+**Not in scope, and moved out during the contract round:** injecting a `Clock` into `TaskRunner`.
+That was drafted as a fix for `RunStatus.startedAt` and `TaskContext.startedAt` disagreeing, and
+the fix does not work: one `Clock` gives one time *source*, not one time. `submit` reads it when
+the trigger arrives and the engine reads it when the coroutine is dispatched, and a
+`limitedParallelism(1)` view queues between them, so the two still differ in production by exactly
+the queue delay. Equality holds only under a frozen test clock, which would have made the test
+prove same-source while the stated defect stood. The two values measure different things - submit
+time and run-start time - and the gap between them is the queue delay, which is information worth
+having. The honest resolution is to name them distinctly, not to unify them.
 
 ### P8c - Coroutine-native event stream
 

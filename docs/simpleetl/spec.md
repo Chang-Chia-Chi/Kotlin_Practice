@@ -716,6 +716,15 @@ on temporary tables, which removes even the theoretical reclamation path.
   reading two datasets: 12.6 GB of file plus 17.6 GB of spill = 30.2 GB, rounded to 32 GiB.
   The dominant term is `retries`, not the data: at `retries: 1` the file term falls from
   12.6 GB to 9.0 GB. Watch `etl_scratch_file_bytes` (9.3) and re-cut from production.
+
+  **`etl_scratch_file_bytes` does not carry the spill term of this formula.** It is sampled once
+  at run end (9.3), and DuckDB reclaims spill files as queries finish, so by then the spill is
+  almost always gone - while at this ceiling spill is 17.6 of the 30.2 GB, the majority of it.
+  What the metric prices is the file, its WAL and any retained attempt copies and parquet
+  outputs, which is the `(N + retries) x R x C x d` half. Re-cutting the volume from the metric
+  alone therefore under-sizes it. The spill term has to come from S4b's measured factor, not from
+  the gauge. Recorded in P8b after the metric's rationale was written the other way round and
+  refuted.
   Without an explicit limit a runaway scratch file consumes node disk and affects unrelated
   pods.
 - Indicative budget at 8 GB pod memory: JVM heap 2 GB, DuckDB `memory_limit` 4 GB,
@@ -866,9 +875,10 @@ there is one code path and one set of validation rules.
 
 ### 8.6 Host Wiring Contract
 
-Two of this section's requirements cannot be met by a library and are the host application's,
-enumerated here with the symptom of missing each. **Neither is tested in this repository**,
-because no host module exists in it; that is a real gap, recorded rather than papered over.
+Several of this section's requirements cannot be met by a library and are the host application's,
+enumerated here with the symptom of missing each. **None of them is tested in this repository**,
+because no host module exists in it; that is a real gap, recorded rather than papered over. The
+list has grown with each phase that discovered another one - it was two when P7 wrote it.
 
 | The host must | Symptom if missed |
 |---|---|
@@ -879,6 +889,7 @@ because no host module exists in it; that is a real gap, recorded rather than pa
 | make `CronScheduler.schedule` throw on an unparseable cron | 8.5's atomic reload silently accepts a bad cron |
 | construct `TaskFileLoader` with the name set of the **same** `TaskHookRegistry` it hands `TaskEngine` | validation rule 5 passes for every hook name, and a typo dies at the end of a 30 minute run - precisely the failure 9.4 exists to prevent |
 | register `MicrometerTaskMetrics` against the application's `MeterRegistry` | every metric in 9.3 is silently absent; nothing fails and no dashboard populates |
+| put `io.micrometer:micrometer-core` (>= 1.14.x) on the application's **runtime** classpath - the framework declares it `provided` and does not ship it | `NoClassDefFoundError: io/micrometer/core/instrument/MeterRegistry` when the binding is constructed. Loud, at wiring time, which is the good failure mode |
 
 Two notes on the metric binding, measured on micrometer 1.14.2 rather than assumed:
 
@@ -1266,6 +1277,7 @@ class TaskAdmin {                             // what AdminResource maps to HTTP
 class ScratchDb : AutoCloseable {
     fun connection(): Connection
     fun duplicate(): Connection
+    fun diskBytes(): Long                     // total bytes under the run directory; feeds 9.3's gauge
     override fun close()                      // closes the instance and deletes the file
 }
 ```
