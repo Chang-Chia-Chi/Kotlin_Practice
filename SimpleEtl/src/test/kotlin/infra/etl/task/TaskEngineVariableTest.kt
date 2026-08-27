@@ -4,8 +4,12 @@ import infra.etl.Etl
 import infra.etl.TaskHarness
 import infra.etl.task.Outcome
 import java.nio.file.Path
-import org.assertj.core.api.Assertions.assertThat
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNotNull
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertAll
 import org.junit.jupiter.api.io.TempDir
 
 /**
@@ -62,18 +66,28 @@ class TaskEngineVariableTest {
 
             val outcome = harness.runExpectingSuccess(definition)
 
-            assertThat(report.strings("select last_ts from published"))
-                .describedAs("exported in phase 1, bound in phase 2")
-                .containsExactly("2026-08-01")
-            assertThat(report.strings("select site from published"))
-                .describedAs("literal task variable (spec 6.1)")
-                .containsExactly("F12")
-            assertThat(report.strings("select task from published"))
-                .describedAs("built-in taskName")
-                .containsExactly("wip-summary")
-            assertThat(report.strings("select run_id from published"))
-                .describedAs("the built-in runId must be the runId the caller was handed")
-                .containsExactly(outcome.runId)
+            assertAll(
+                {
+                    assertEquals(listOf("2026-08-01"), report.strings("select last_ts from published")) {
+                        "exported in phase 1, bound in phase 2"
+                    }
+                },
+                {
+                    assertEquals(listOf("F12"), report.strings("select site from published")) {
+                        "literal task variable (spec 6.1)"
+                    }
+                },
+                {
+                    assertEquals(listOf("wip-summary"), report.strings("select task from published")) {
+                        "built-in taskName"
+                    }
+                },
+                {
+                    assertEquals(listOf(outcome.runId), report.strings("select run_id from published")) {
+                        "the built-in runId must be the runId the caller was handed"
+                    }
+                },
+            )
         }
     }
 
@@ -105,14 +119,21 @@ class TaskEngineVariableTest {
 
             val outcome = harness.run(definition)
 
-            assertThat(outcome.outcome).isEqualTo(Outcome.FAILED)
-            assertThat(outcome.failure).isNotNull()
-            assertThat(outcome.failure.toString())
-                .describedAs("the diagnostic names the variable the author must export first")
-                .contains("lastTs")
-            assertThat(report.tableExists("published"))
-                .describedAs("a step whose variables do not resolve must not half-run")
-                .isFalse()
+            assertAll(
+                { assertEquals(Outcome.FAILED, outcome.outcome) },
+                { assertNotNull(outcome.failure) { "a FAILED run carries no failure" } },
+                {
+                    assertTrue("lastTs" in outcome.failure.toString()) {
+                        "the diagnostic names the variable the author must export first; " +
+                            "failure was: ${outcome.failure}"
+                    }
+                },
+                {
+                    assertFalse(report.tableExists("published")) {
+                        "a step whose variables do not resolve must not half-run, but 'published' exists"
+                    }
+                },
+            )
         }
     }
 
@@ -143,14 +164,21 @@ class TaskEngineVariableTest {
 
             val outcome = harness.run(definition)
 
-            assertThat(outcome.outcome).isEqualTo(Outcome.FAILED)
-            assertThat(outcome.failure).isNotNull()
-            assertThat(outcome.failure.toString())
-                .describedAs("the diagnostic names the export step or its variable")
-                .containsAnyOf("read-watermark", "lastTs")
-            assertThat(report.tableExists("published"))
-                .describedAs("the run stopped at the bad export, so the later phase never ran")
-                .isFalse()
+            assertAll(
+                { assertEquals(Outcome.FAILED, outcome.outcome) },
+                { assertNotNull(outcome.failure) { "a FAILED run carries no failure" } },
+                {
+                    val failure = outcome.failure.toString()
+                    assertTrue(listOf("read-watermark", "lastTs").any { it in failure }) {
+                        "the diagnostic names the export step or its variable; failure was: $failure"
+                    }
+                },
+                {
+                    assertFalse(report.tableExists("published")) {
+                        "the run stopped at the bad export, so the later phase never ran, but 'published' exists"
+                    }
+                },
+            )
         }
     }
 
@@ -185,9 +213,9 @@ class TaskEngineVariableTest {
 
             harness.runExpectingSuccess(definition)
 
-            assertThat(report.longAt("select count(*) from published where last_ts is null"))
-                .describedAs("zero rows yields null, not an error and not an empty string (spec 6.3)")
-                .isEqualTo(1L)
+            assertEquals(1L, report.longAt("select count(*) from published where last_ts is null")) {
+                "zero rows yields null, not an error and not an empty string (spec 6.3)"
+            }
         }
     }
 
@@ -208,8 +236,15 @@ class TaskEngineVariableTest {
 
             val outcome = harness.run(definition)
 
-            assertThat(outcome.outcome).isEqualTo(Outcome.FAILED)
-            assertThat(outcome.failure.toString()).containsAnyOf("siteCode", "read-site-again")
+            assertAll(
+                { assertEquals(Outcome.FAILED, outcome.outcome) },
+                {
+                    val failure = outcome.failure.toString()
+                    assertTrue(listOf("siteCode", "read-site-again").any { it in failure }) {
+                        "the diagnostic names neither the variable nor the step; failure was: $failure"
+                    }
+                },
+            )
         }
     }
 
@@ -238,17 +273,25 @@ class TaskEngineVariableTest {
                 )
             }
 
-            assertThat(attempt.exceptionOrNull() ?: attempt.getOrNull()?.failure)
-                .describedAs("a null literal var has no type to bind as (spec 1.3)")
-                .isNotNull()
+            assertNotNull(attempt.exceptionOrNull() ?: attempt.getOrNull()?.failure) {
+                "a null literal var has no type to bind as (spec 1.3)"
+            }
             // The assertion that makes this test mean what it says. "Something threw" is also
             // satisfied by a driver refusing an untyped null at bind time, which is a different
             // defect with a different fix and would leave the rule unimplemented behind a green
             // test. A rule rejects the definition before the step reaches the database.
-            assertThat(report.attempts.get())
-                .describedAs("a null literal is rejected as a definition, not discovered at the driver")
-                .isZero()
-            assertThat(report.tableExists("published")).isFalse()
+            assertAll(
+                {
+                    assertEquals(0, report.attempts.get()) {
+                        "a null literal is rejected as a definition, not discovered at the driver"
+                    }
+                },
+                {
+                    assertFalse(report.tableExists("published")) {
+                        "'published' exists, so the rejected step reached the database"
+                    }
+                },
+            )
         }
     }
 
@@ -287,9 +330,10 @@ class TaskEngineVariableTest {
             harness.runExpectingSuccess(definition)
 
             harness.readProbe(probe) { probeDb ->
-                assertThat(Etl.strings(probeDb, "select site_code from wip_stg order by lot_id"))
-                    .describedAs("the projected task variable landed as an ordinary column")
-                    .containsExactly("F12", "F12", "F12")
+                assertEquals(
+                    listOf("F12", "F12", "F12"),
+                    Etl.strings(probeDb, "select site_code from wip_stg order by lot_id"),
+                ) { "the projected task variable landed as an ordinary column" }
             }
         }
     }
@@ -337,12 +381,18 @@ class TaskEngineVariableTest {
             harness.runExpectingSuccess(definition)
 
             harness.readProbe(probe) { probeDb ->
-                assertThat(Etl.longAt(probeDb, "select count(*) from wip_strict"))
-                    .describedAs("a comparison against a null watermark matches nothing")
-                    .isZero()
-                assertThat(Etl.longAt(probeDb, "select count(*) from wip_guarded"))
-                    .describedAs("the explicit guard is how a first run reads everything")
-                    .isEqualTo(4L)
+                assertAll(
+                    {
+                        assertEquals(0L, Etl.longAt(probeDb, "select count(*) from wip_strict")) {
+                            "a comparison against a null watermark matches nothing"
+                        }
+                    },
+                    {
+                        assertEquals(4L, Etl.longAt(probeDb, "select count(*) from wip_guarded")) {
+                            "the explicit guard is how a first run reads everything"
+                        }
+                    },
+                )
             }
         }
     }
@@ -377,9 +427,10 @@ class TaskEngineVariableTest {
             harness.runExpectingSuccess(definition)
 
             harness.readProbe(probe) { probeDb ->
-                assertThat(Etl.strings(probeDb, "select lot_code from wip_stg order by lot_id"))
-                    .describedAs("the exported watermark filtered the source query")
-                    .containsExactly("w-3", "w-4", "w-5")
+                assertEquals(
+                    listOf("w-3", "w-4", "w-5"),
+                    Etl.strings(probeDb, "select lot_code from wip_stg order by lot_id"),
+                ) { "the exported watermark filtered the source query" }
             }
         }
     }

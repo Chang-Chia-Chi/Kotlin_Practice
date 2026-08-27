@@ -7,9 +7,14 @@ import infra.etl.Trig
 import infra.etl.task.Outcome
 import infra.etl.task.TriggerResult
 import java.nio.file.Path
-import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.AfterEach
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertInstanceOf
+import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertAll
 import org.junit.jupiter.api.io.TempDir
 
 /**
@@ -53,18 +58,28 @@ class TaskAdminTriggerTest {
         val runId = Trig.acceptedRunId(admin.trigger("wip-summary", "ops"))
         probe.awaitEntry()
 
-        assertThat(runId).isNotBlank()
-        assertThat(admin.run("wip-summary", runId))
-            .describedAs("the trigger returned before the run reached an outcome")
-            .isNull()
+        assertAll(
+            { assertTrue(runId.isNotBlank()) { "the trigger handed back a blank runId: '$runId'" } },
+            {
+                val inFlight = admin.run("wip-summary", runId)
+                assertNull(inFlight) {
+                    "the trigger returned before the run reached an outcome, but it already had $inFlight"
+                }
+            },
+        )
 
         probe.release()
         val outcome = Trig.awaitSucceeded(admin, "wip-summary", runId)
 
         // The runId has to discriminate, or `Trig.awaitFinished` - which every wait in this phase
         // routes through - would be satisfied by any finished run of the same task.
-        assertThat(outcome.runId).isEqualTo(runId)
-        assertThat(admin.run("wip-summary", "not-a-run-id")).isNull()
+        assertAll(
+            { assertEquals(runId, outcome.runId) },
+            {
+                val other = admin.run("wip-summary", "not-a-run-id")
+                assertNull(other) { "an unknown runId resolved to $other" }
+            },
+        )
     }
 
     /**
@@ -84,14 +99,22 @@ class TaskAdminTriggerTest {
         val runId = Trig.acceptedRunId(admin.trigger("cache-read", "ops"))
         val outcome = Trig.awaitFinished(admin, "cache-read", runId)
 
-        assertThat(outcome.outcome).isEqualTo(Outcome.FAILED)
-        assertThat(outcome.failure).isInstanceOf(NotImplementedError::class.java)
-        assertThat(admin.list().single { it.name == "cache-read" }.running)
-            .describedAs("a run killed by an Error must not be left looking in flight")
-            .isFalse()
-        assertThat(admin.trigger("cache-read", "ops"))
-            .describedAs("and its task must be triggerable again")
-            .isInstanceOf(TriggerResult.Accepted::class.java)
+        assertAll(
+            { assertEquals(Outcome.FAILED, outcome.outcome) },
+            { assertInstanceOf(NotImplementedError::class.java, outcome.failure) },
+            {
+                val status = admin.list().single { it.name == "cache-read" }
+                assertFalse(status.running) {
+                    "a run killed by an Error must not be left looking in flight; status was $status"
+                }
+            },
+            {
+                assertInstanceOf(
+                    TriggerResult.Accepted::class.java,
+                    admin.trigger("cache-read", "ops"),
+                ) { "and its task must be triggerable again" }
+            },
+        )
     }
 
     /**
@@ -108,22 +131,30 @@ class TaskAdminTriggerTest {
             P7Tasks.parking("api-only", "probe_ds", enabled = false),
         )
 
-        assertThat(admin.list().map { Triple(it.name, it.enabled, it.cron) })
-            .containsExactlyInAnyOrder(
-                Triple("wip-summary", true, "0 */10 * * * ?"),
-                Triple("api-only", false, null),
-            )
-        assertThat(admin.list().map { it.running }).containsOnly(false)
+        assertAll(
+            {
+                assertEquals(
+                    setOf(
+                        Triple("wip-summary", true, "0 */10 * * * ?"),
+                        Triple("api-only", false, null),
+                    ),
+                    admin.list().map { Triple(it.name, it.enabled, it.cron) }.toSet(),
+                )
+            },
+            { assertEquals(setOf(false), admin.list().map { it.running }.toSet()) },
+        )
 
         val runId = Trig.acceptedRunId(admin.trigger("wip-summary", "ops"))
         probe.awaitEntry()
-        assertThat(admin.list().single { it.name == "wip-summary" }.running)
-            .describedAs("the run is parked inside its own step right now")
-            .isTrue()
+        val parked = admin.list().single { it.name == "wip-summary" }
+        assertTrue(parked.running) {
+            "the run is parked inside its own step right now, but the listing said $parked"
+        }
 
         probe.release()
         Trig.awaitSucceeded(admin, "wip-summary", runId)
-        assertThat(admin.list().single { it.name == "wip-summary" }.running).isFalse()
+        val finished = admin.list().single { it.name == "wip-summary" }
+        assertFalse(finished.running) { "the run has ended, but the listing said $finished" }
     }
 
     @Test
@@ -132,8 +163,15 @@ class TaskAdminTriggerTest {
         probe.parking = false
         val admin = world.admin(P7Tasks.parking("wip-summary", "probe_ds"))
 
-        assertThat(admin.trigger("no-such-task", "ops")).isEqualTo(TriggerResult.Unknown)
-        assertThat(admin.trigger("wip-summary", "ops")).isInstanceOf(TriggerResult.Accepted::class.java)
+        assertAll(
+            { assertEquals(TriggerResult.Unknown, admin.trigger("no-such-task", "ops")) },
+            {
+                assertInstanceOf(
+                    TriggerResult.Accepted::class.java,
+                    admin.trigger("wip-summary", "ops"),
+                )
+            },
+        )
     }
 
     @Test
@@ -145,8 +183,15 @@ class TaskAdminTriggerTest {
             P7Tasks.parking("switched-on", "probe_ds"),
         )
 
-        assertThat(admin.trigger("switched-off", "ops")).isEqualTo(TriggerResult.Disabled)
-        assertThat(admin.trigger("switched-on", "ops")).isInstanceOf(TriggerResult.Accepted::class.java)
+        assertAll(
+            { assertEquals(TriggerResult.Disabled, admin.trigger("switched-off", "ops")) },
+            {
+                assertInstanceOf(
+                    TriggerResult.Accepted::class.java,
+                    admin.trigger("switched-on", "ops"),
+                )
+            },
+        )
     }
 
     /**
@@ -165,8 +210,8 @@ class TaskAdminTriggerTest {
             Trig.awaitSucceeded(admin, "wip-summary", runId)
         }
 
-        assertThat(probe.threads)
-            .describedAs("all three identities produced a real run")
-            .hasSize(3)
+        assertEquals(3, probe.threads.size) {
+            "all three identities produced a real run; probe threads were ${probe.threads}"
+        }
     }
 }

@@ -75,16 +75,31 @@ interface TaskRunListener {
 
     fun onPhaseStart(ctx: PhaseContext)
 
-    /** [Outcome.FAILED] when a step of the phase failed terminally; no later phase then starts. */
+    /**
+     * [Outcome.FAILED] when a step of the phase failed terminally; no later phase then starts.
+     *
+     * Carries the same unpaired hazard as [onStepStart]: an `Error` escaping the engine skips
+     * this call, so [onPhaseStart] can be the last phase event a listener sees.
+     */
     fun onPhaseEnd(ctx: PhaseContext, outcome: Outcome)
 
-    /** Once per step, before its first attempt and before any guard that can reject the step. */
+    /**
+     * Once per step, before its first attempt and before any guard that can reject the step.
+     *
+     * **Not always paired.** A step normally closes with [onStepEnd] or [onStepError], but an
+     * `Error` - not an `Exception` - escapes the engine uncaught, and then neither fires: the
+     * step, and its phase, end with no closing event at all. Only [onTaskEnd] is guaranteed,
+     * because it is reached from a `finally`. A listener holding per-step state - an MDC push, a
+     * log scope, a tracing span - must therefore be able to unwind that state at [onTaskEnd] as
+     * well, or it leaks on exactly the path a not-yet-implemented step takes.
+     */
     fun onStepStart(ctx: StepContext)
 
     /**
      * Success only. A step that fails terminally ends with `onStepError(willRetry = false)` and no
      * `onStepEnd`. A listener that pairs start with end - an MDC push/pop, a log scope, a tracing
-     * span - must close on either.
+     * span - must close on either of those, **and** on [onTaskEnd] for the `Error` path where
+     * neither of them fires at all (see [onStepStart]).
      */
     fun onStepEnd(ctx: StepContext, result: StepResult)
 
@@ -92,7 +107,10 @@ interface TaskRunListener {
      * One failed attempt.
      *
      * @param attempt numbered from 1.
-     * @param error the failure itself, unwrapped, so a listener can inspect its cause chain.
+     * @param error the failure as the step threw it - the engine adds no wrapper of its own, but
+     *   removes none either. On every JDBI path this is an `UnableToExecuteStatementException`
+     *   around the `SQLException`, so a listener classifying a failure walks the cause chain
+     *   rather than testing the top-level type (spec 5.3 does the same).
      * @param willRetry decided and reported **before** the backoff sleep, so a listener sees the
      *   decision at the moment it is made rather than after the delay it causes. False both for a
      *   non-transient failure and for a transient one that has run out of attempts (spec 5.3).

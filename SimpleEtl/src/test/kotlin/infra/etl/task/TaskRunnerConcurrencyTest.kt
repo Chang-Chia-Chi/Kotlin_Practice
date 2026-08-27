@@ -5,9 +5,14 @@ import infra.etl.P7World
 import infra.etl.Trig
 import infra.etl.task.TriggerResult
 import java.nio.file.Path
-import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.AfterEach
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertNotSame
+import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertSame
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertAll
 import org.junit.jupiter.api.io.TempDir
 
 /**
@@ -62,13 +67,19 @@ class TaskRunnerConcurrencyTest {
         val secondThread = probe.awaitEntry()
         Trig.awaitSucceeded(admin, "wip-summary", second)
 
-        assertThat(firstThread)
-            .describedAs("the run must not execute inline on the triggering thread (spec 8.1)")
-            .isNotSameAs(triggering)
-        assertThat(secondThread).isNotSameAs(triggering)
-        assertThat(secondThread)
-            .describedAs("one task is confined to one worker (spec 8.3)")
-            .isSameAs(firstThread)
+        assertAll(
+            {
+                assertNotSame(triggering, firstThread) {
+                    "the run must not execute inline on the triggering thread (spec 8.1)"
+                }
+            },
+            { assertNotSame(triggering, secondThread) },
+            {
+                assertSame(firstThread, secondThread) {
+                    "one task is confined to one worker (spec 8.3); they were $firstThread and $secondThread"
+                }
+            },
+        )
     }
 
     /** Done-when: a second `TaskAdmin.trigger` during a run is rejected, not queued. */
@@ -83,7 +94,7 @@ class TaskRunnerConcurrencyTest {
 
         val rejected = admin.trigger("wip-summary", "ops")
 
-        assertThat(rejected).isEqualTo(TriggerResult.AlreadyRunning)
+        assertEquals(TriggerResult.AlreadyRunning, rejected)
 
         probe.release()
         Trig.awaitSucceeded(admin, "wip-summary", first)
@@ -92,9 +103,9 @@ class TaskRunnerConcurrencyTest {
         // queued: a queued run would be parked at the probe right now and this would never accept.
         val third = Trig.awaitAccepted(admin, "wip-summary", "ops")
         probe.awaitEntry()
-        assertThat(probe.threads)
-            .describedAs("the rejected trigger must never have reached the task body")
-            .hasSize(2)
+        assertEquals(2, probe.threads.size) {
+            "the rejected trigger must never have reached the task body; probe threads were ${probe.threads}"
+        }
 
         probe.release()
         Trig.awaitSucceeded(admin, "wip-summary", third)
@@ -110,23 +121,24 @@ class TaskRunnerConcurrencyTest {
         val probe = world.probe("probe_ds")
         val definition = P7Tasks.parking("wip-summary", "probe_ds", cron = "0 */10 * * * ?")
         val admin = world.admin(definition)
-        assertThat(Trig.apply(world.scheduler, listOf(definition))).isNull()
+        val rejectedSchedule = Trig.apply(world.scheduler, listOf(definition))
+        assertNull(rejectedSchedule) { "the schedule was rejected: ${rejectedSchedule?.errors}" }
 
         world.cron.fire("wip-summary")
         probe.awaitEntry()
 
         world.cron.fire("wip-summary")
-        assertThat(admin.trigger("wip-summary", "ops"))
-            .describedAs("a run started by the schedule blocks an API trigger too (spec 8.4)")
-            .isEqualTo(TriggerResult.AlreadyRunning)
+        assertEquals(TriggerResult.AlreadyRunning, admin.trigger("wip-summary", "ops")) {
+            "a run started by the schedule blocks an API trigger too (spec 8.4)"
+        }
 
         probe.release()
 
         val next = Trig.awaitAccepted(admin, "wip-summary", "ops")
         probe.awaitEntry()
-        assertThat(probe.threads)
-            .describedAs("the skipped firing must never have accumulated into a backlog")
-            .hasSize(2)
+        assertEquals(2, probe.threads.size) {
+            "the skipped firing must never have accumulated into a backlog; probe threads were ${probe.threads}"
+        }
 
         probe.release()
         Trig.awaitSucceeded(admin, "wip-summary", next)
@@ -150,24 +162,24 @@ class TaskRunnerConcurrencyTest {
         val runB = Trig.acceptedRunId(admin.trigger("task-b", "ops"))
         val threadB = probeB.awaitEntry()
 
-        assertThat(threadB)
-            .describedAs("two tasks are two dispatchers, so they do not share a worker (spec 8.3)")
-            .isNotSameAs(threadA)
+        assertNotSame(threadA, threadB) {
+            "two tasks are two dispatchers, so they do not share a worker (spec 8.3); both were $threadA"
+        }
         // By runId, not by count: this is the only phase-visible tie between the `Accepted(runId)`
         // a caller was handed and the run's own scratch directory, and it is the whole reason
         // P5's shipped `TaskEngine.run` was widened to take the runId. A count of two passes
         // against an engine that names the directory from a fresh UUID of its own.
-        assertThat(world.liveScratchFiles())
-            .describedAs("one DuckDB file per run, both live at once, each named for its runId (spec 7.2)")
-            .containsExactlyInAnyOrder(runA, runB)
+        assertEquals(setOf(runA, runB), world.liveScratchFiles().toSet()) {
+            "one DuckDB file per run, both live at once, each named for its runId (spec 7.2)"
+        }
 
         probeA.release()
         probeB.release()
         Trig.awaitSucceeded(admin, "task-a", runA)
         Trig.awaitSucceeded(admin, "task-b", runB)
 
-        assertThat(world.liveScratchFiles())
-            .describedAs("each run deletes its own file at run end (spec 7.2)")
-            .isEmpty()
+        assertTrue(world.liveScratchFiles().isEmpty()) {
+            "each run deletes its own file at run end (spec 7.2); live files were ${world.liveScratchFiles()}"
+        }
     }
 }

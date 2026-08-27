@@ -12,8 +12,11 @@ import infra.etl.task.TriggerSource
 import java.nio.file.Path
 import java.sql.SQLException
 import java.sql.SQLTransientException
-import org.assertj.core.api.Assertions.assertThat
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertAll
 import org.junit.jupiter.api.io.TempDir
 import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.Arguments
@@ -96,17 +99,20 @@ class TaskListenerOrderTest {
                 ),
             )
 
-            assertThat(trace.entries).containsExactly(
-                "onTaskStart(wip-summary)",
-                "onPhaseStart(extract)",
-                "onStepStart(extract/load-wip)",
-                "onStepEnd(extract/load-wip, attempt=1)",
-                "onPhaseEnd(extract, SUCCEEDED)",
-                "onPhaseStart(publish)",
-                "onStepStart(publish/publish-summary)",
-                "onStepEnd(publish/publish-summary, attempt=1)",
-                "onPhaseEnd(publish, SUCCEEDED)",
-                "onTaskEnd(wip-summary, SUCCEEDED)",
+            assertEquals(
+                listOf(
+                    "onTaskStart(wip-summary)",
+                    "onPhaseStart(extract)",
+                    "onStepStart(extract/load-wip)",
+                    "onStepEnd(extract/load-wip, attempt=1)",
+                    "onPhaseEnd(extract, SUCCEEDED)",
+                    "onPhaseStart(publish)",
+                    "onStepStart(publish/publish-summary)",
+                    "onStepEnd(publish/publish-summary, attempt=1)",
+                    "onPhaseEnd(publish, SUCCEEDED)",
+                    "onTaskEnd(wip-summary, SUCCEEDED)",
+                ),
+                trace.entries,
             )
         }
     }
@@ -140,22 +146,32 @@ class TaskListenerOrderTest {
                 ),
             )
 
-            assertThat(outcome.outcome).isEqualTo(Outcome.FAILED)
-            assertThat(trace.entries).containsExactly(
-                "onTaskStart(wip-failing)",
-                "onPhaseStart(extract)",
-                "onStepStart(extract/load-wip)",
-                "onStepEnd(extract/load-wip, attempt=1)",
-                "onPhaseEnd(extract, SUCCEEDED)",
-                "onPhaseStart(build)",
-                "onStepStart(build/bad-step)",
-                "onStepError(build/bad-step, attempt=1, willRetry=false)",
-                "onPhaseEnd(build, FAILED)",
-                "onTaskEnd(wip-failing, FAILED)",
+            assertAll(
+                { assertEquals(Outcome.FAILED, outcome.outcome) },
+                {
+                    assertEquals(
+                        listOf(
+                            "onTaskStart(wip-failing)",
+                            "onPhaseStart(extract)",
+                            "onStepStart(extract/load-wip)",
+                            "onStepEnd(extract/load-wip, attempt=1)",
+                            "onPhaseEnd(extract, SUCCEEDED)",
+                            "onPhaseStart(build)",
+                            "onStepStart(build/bad-step)",
+                            "onStepError(build/bad-step, attempt=1, willRetry=false)",
+                            "onPhaseEnd(build, FAILED)",
+                            "onTaskEnd(wip-failing, FAILED)",
+                        ),
+                        trace.entries,
+                    )
+                },
+                {
+                    val chain = causeChainOf(events.stepErrors.single().error)
+                    assertTrue(chain.any { it is SQLException }) {
+                        "the listener is handed the failure itself, not a marker object; chain was $chain"
+                    }
+                },
             )
-            assertThat(causeChainOf(events.stepErrors.single().error))
-                .describedAs("the listener is handed the failure itself, not a marker object")
-                .anyMatch { it is SQLException }
         }
     }
 
@@ -174,20 +190,33 @@ class TaskListenerOrderTest {
 
             harness.runExpectingSuccess(Etl.task("wip-retried", Etl.phase("extract", loadWip(retries = 2))))
 
-            assertThat(trace.entries).containsExactly(
-                "onTaskStart(wip-retried)",
-                "onPhaseStart(extract)",
-                "onStepStart(extract/load-wip)",
-                "onStepError(extract/load-wip, attempt=1, willRetry=true)",
-                "onStepError(extract/load-wip, attempt=2, willRetry=true)",
-                "onStepEnd(extract/load-wip, attempt=3)",
-                "onPhaseEnd(extract, SUCCEEDED)",
-                "onTaskEnd(wip-retried, SUCCEEDED)",
+            assertAll(
+                {
+                    assertEquals(
+                        listOf(
+                            "onTaskStart(wip-retried)",
+                            "onPhaseStart(extract)",
+                            "onStepStart(extract/load-wip)",
+                            "onStepError(extract/load-wip, attempt=1, willRetry=true)",
+                            "onStepError(extract/load-wip, attempt=2, willRetry=true)",
+                            "onStepEnd(extract/load-wip, attempt=3)",
+                            "onPhaseEnd(extract, SUCCEEDED)",
+                            "onTaskEnd(wip-retried, SUCCEEDED)",
+                        ),
+                        trace.entries,
+                    )
+                },
+                {
+                    assertEquals(3, events.result("load-wip").attempt) {
+                        "with retries: 2 the attempts run 1..3 and the third is the one that worked"
+                    }
+                },
+                {
+                    assertEquals(1, events.stepStarts.size) {
+                        "onStepStart fires once per step, not per attempt; starts were ${events.stepStarts}"
+                    }
+                },
             )
-            assertThat(events.result("load-wip").attempt)
-                .describedAs("with retries: 2 the attempts run 1..3 and the third is the one that worked")
-                .isEqualTo(3)
-            assertThat(events.stepStarts).describedAs("onStepStart fires once per step, not per attempt").hasSize(1)
         }
     }
 
@@ -210,19 +239,28 @@ class TaskListenerOrderTest {
 
             val outcome = harness.run(Etl.task("wip-exhausted", Etl.phase("extract", loadWip(retries = 1))))
 
-            assertThat(outcome.outcome).isEqualTo(Outcome.FAILED)
-            assertThat(trace.entries).containsExactly(
-                "onTaskStart(wip-exhausted)",
-                "onPhaseStart(extract)",
-                "onStepStart(extract/load-wip)",
-                "onStepError(extract/load-wip, attempt=1, willRetry=true)",
-                "onStepError(extract/load-wip, attempt=2, willRetry=false)",
-                "onPhaseEnd(extract, FAILED)",
-                "onTaskEnd(wip-exhausted, FAILED)",
+            assertAll(
+                { assertEquals(Outcome.FAILED, outcome.outcome) },
+                {
+                    assertEquals(
+                        listOf(
+                            "onTaskStart(wip-exhausted)",
+                            "onPhaseStart(extract)",
+                            "onStepStart(extract/load-wip)",
+                            "onStepError(extract/load-wip, attempt=1, willRetry=true)",
+                            "onStepError(extract/load-wip, attempt=2, willRetry=false)",
+                            "onPhaseEnd(extract, FAILED)",
+                            "onTaskEnd(wip-exhausted, FAILED)",
+                        ),
+                        trace.entries,
+                    )
+                },
+                {
+                    assertEquals(listOf(2_000L), harness.delaysMillis) {
+                        "willRetry is decided and reported before the sleeper is asked for anything"
+                    }
+                },
             )
-            assertThat(harness.delaysMillis)
-                .describedAs("willRetry is decided and reported before the sleeper is asked for anything")
-                .containsExactly(2_000L)
         }
     }
 
@@ -245,10 +283,17 @@ class TaskListenerOrderTest {
                 ),
             )
 
-            assertThat(outcome.outcome).isEqualTo(Outcome.FAILED)
-            assertThat(trace.entries).containsExactly(
-                "onTaskStart(wip-no-scratch)",
-                "onTaskEnd(wip-no-scratch, FAILED)",
+            assertAll(
+                { assertEquals(Outcome.FAILED, outcome.outcome) },
+                {
+                    assertEquals(
+                        listOf(
+                            "onTaskStart(wip-no-scratch)",
+                            "onTaskEnd(wip-no-scratch, FAILED)",
+                        ),
+                        trace.entries,
+                    )
+                },
             )
         }
     }
@@ -289,21 +334,29 @@ class TaskListenerOrderTest {
 
             harness.listener = trace.listener()
             harness.runExpectingSuccess(Etl.withLogging(definition, logging = true))
-            assertThat(trace.entries).describedAs("logging: true").containsExactlyElementsOf(loud)
+            assertEquals(loud, trace.entries) { "logging: true" }
 
             trace.clear()
             val quiet = trace.listener()
             harness.listener = quiet
             harness.runExpectingSuccess(Etl.withLogging(definition, logging = false))
-            assertThat(quiet.calls).describedAs("logging: false suppresses every call site").isEmpty()
-            assertThat(trace.entries)
-                .describedAs("a hook is not a listener call, so the flag does not reach it")
-                .containsExactly("hook(notify)")
+            assertAll(
+                {
+                    assertTrue(quiet.calls.isEmpty()) {
+                        "logging: false suppresses every call site; calls were ${quiet.calls}"
+                    }
+                },
+                {
+                    assertEquals(listOf("hook(notify)"), trace.entries) {
+                        "a hook is not a listener call, so the flag does not reach it"
+                    }
+                },
+            )
 
             trace.clear()
             harness.listener = trace.listener()
             harness.runExpectingSuccess(Etl.withLogging(definition, logging = true))
-            assertThat(trace.entries).describedAs("logging: true again, on a third listener").containsExactlyElementsOf(loud)
+            assertEquals(loud, trace.entries) { "logging: true again, on a third listener" }
         }
     }
 
@@ -328,10 +381,18 @@ class TaskListenerOrderTest {
 
             harness.runExpectingSuccess(Etl.task("wip-quick", Etl.phase("extract", loadWip())))
 
-            assertThat(harness.delaysMillis).isEmpty()
-            assertThat(events.result("load-wip").durationMs)
-                .describedAs("nothing slept, so no time passed at all")
-                .isZero()
+            assertAll(
+                {
+                    assertTrue(harness.delaysMillis.isEmpty()) {
+                        "requested backoff was ${harness.delaysMillis}"
+                    }
+                },
+                {
+                    assertEquals(0L, events.result("load-wip").durationMs) {
+                        "nothing slept, so no time passed at all"
+                    }
+                },
+            )
         }
 
         TaskHarness(root.resolve("retried")).use { harness ->
@@ -342,11 +403,15 @@ class TaskListenerOrderTest {
 
             harness.runExpectingSuccess(Etl.task("wip-slow", Etl.phase("extract", loadWip(retries = 2))))
 
-            assertThat(harness.delaysMillis).containsExactly(2_000L, 4_000L)
-            assertThat(events.result("load-wip").durationMs)
-                .describedAs("all three attempts and both backoffs, cross-checked against what was requested")
-                .isEqualTo(harness.delaysMillis.sum())
-            assertThat(events.result("load-wip").durationMs).isEqualTo(6_000L)
+            assertAll(
+                { assertEquals(listOf(2_000L, 4_000L), harness.delaysMillis) },
+                {
+                    assertEquals(harness.delaysMillis.sum(), events.result("load-wip").durationMs) {
+                        "all three attempts and both backoffs, cross-checked against what was requested"
+                    }
+                },
+                { assertEquals(6_000L, events.result("load-wip").durationMs) },
+            )
         }
     }
 
@@ -383,13 +448,19 @@ class TaskListenerOrderTest {
                 ),
             )
 
-            assertThat(events.result("load-wip").rowsRead).describedAs("rows read").isEqualTo(6L)
-            assertThat(events.result("load-wip").rowsWritten)
-                .describedAs("the transform dropped one row, which is why these are two numbers")
-                .isEqualTo(5L)
+            assertAll(
+                { assertEquals(6L, events.result("load-wip").rowsRead) { "rows read" } },
+                {
+                    assertEquals(5L, events.result("load-wip").rowsWritten) {
+                        "the transform dropped one row, which is why these are two numbers"
+                    }
+                },
+            )
             listOf("build-summary", "touch", "read-one").forEach { step ->
-                assertThat(events.result(step).rowsRead).describedAs("%s rows read", step).isZero()
-                assertThat(events.result(step).rowsWritten).describedAs("%s rows written", step).isZero()
+                assertAll(
+                    { assertEquals(0L, events.result(step).rowsRead) { "$step rows read" } },
+                    { assertEquals(0L, events.result(step).rowsWritten) { "$step rows written" } },
+                )
             }
         }
     }
@@ -414,27 +485,36 @@ class TaskListenerOrderTest {
 
             val outcome = harness.runTriggeredBy(definition, TriggerSource.API, by = "alice")
 
-            assertThat(outcome.outcome).isEqualTo(Outcome.SUCCEEDED)
+            assertEquals(Outcome.SUCCEEDED, outcome.outcome)
             val ctx = triggered.taskStarts.single()
-            assertThat(ctx.runId).describedAs("one id names the run everywhere").isEqualTo(outcome.runId)
-            assertThat(ctx.taskName).isEqualTo("wip-context")
-            assertThat(ctx.triggerSource).isEqualTo(TriggerSource.API)
-            assertThat(ctx.triggeredBy).describedAs("the caller identity of spec 8.2").isEqualTo("alice")
-            assertThat(ctx.startedAt)
-                .describedAs("startedAt is read from the injected clock, not from Instant.now()")
-                .isEqualTo(harness.clock.instant())
-            assertThat(triggered.taskEnds.single().first)
-                .describedAs("start and end describe the same run")
-                .isEqualTo(ctx)
+            assertAll(
+                { assertEquals(outcome.runId, ctx.runId) { "one id names the run everywhere" } },
+                { assertEquals("wip-context", ctx.taskName) },
+                { assertEquals(TriggerSource.API, ctx.triggerSource) },
+                { assertEquals("alice", ctx.triggeredBy) { "the caller identity of spec 8.2" } },
+                {
+                    assertEquals(harness.clock.instant(), ctx.startedAt) {
+                        "startedAt is read from the injected clock, not from Instant.now()"
+                    }
+                },
+                {
+                    assertEquals(ctx, triggered.taskEnds.single().first) {
+                        "start and end describe the same run"
+                    }
+                },
+            )
 
             val scheduled = trace.listener()
             harness.listener = scheduled
             harness.runExpectingSuccess(definition)
 
-            assertThat(scheduled.taskStarts.single().triggeredBy)
-                .describedAs("a scheduled firing has no caller identity")
-                .isNull()
-            assertThat(scheduled.taskStarts.single().triggerSource).isEqualTo(TriggerSource.SCHEDULE)
+            assertAll(
+                {
+                    val by = scheduled.taskStarts.single().triggeredBy
+                    assertNull(by) { "a scheduled firing has no caller identity, but carried '$by'" }
+                },
+                { assertEquals(TriggerSource.SCHEDULE, scheduled.taskStarts.single().triggerSource) },
+            )
         }
     }
 
@@ -484,19 +564,33 @@ class TaskListenerOrderTest {
 
             val outcome = harness.run(Etl.task("wip-guard", Etl.phase("only", step)))
 
-            assertThat(outcome.outcome).describedAs(label).isEqualTo(Outcome.FAILED)
-            assertThat(trace.entries).describedAs(label).containsExactly(
-                "onTaskStart(wip-guard)",
-                "onPhaseStart(only)",
-                "onStepStart(only/bad-step)",
-                "onStepError(only/bad-step, attempt=1, willRetry=false)",
-                "onPhaseEnd(only, FAILED)",
-                "onTaskEnd(wip-guard, FAILED)",
+            assertAll(
+                { assertEquals(Outcome.FAILED, outcome.outcome) { label } },
+                {
+                    assertEquals(
+                        listOf(
+                            "onTaskStart(wip-guard)",
+                            "onPhaseStart(only)",
+                            "onStepStart(only/bad-step)",
+                            "onStepError(only/bad-step, attempt=1, willRetry=false)",
+                            "onPhaseEnd(only, FAILED)",
+                            "onTaskEnd(wip-guard, FAILED)",
+                        ),
+                        trace.entries,
+                    ) { label }
+                },
+                {
+                    val message = events.stepErrors.single().error.message
+                    assertTrue(message?.contains("bad-step") == true) {
+                        "the listener is handed the guard's own diagnostic; message was: $message"
+                    }
+                },
+                {
+                    assertTrue(harness.delaysMillis.isEmpty()) {
+                        "a rejected step is not retried; delays were ${harness.delaysMillis}"
+                    }
+                },
             )
-            assertThat(events.stepErrors.single().error.message)
-                .describedAs("the listener is handed the guard's own diagnostic")
-                .contains("bad-step")
-            assertThat(harness.delaysMillis).describedAs("a rejected step is not retried").isEmpty()
         }
     }
 

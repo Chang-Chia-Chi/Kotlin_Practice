@@ -6,10 +6,16 @@ import infra.etl.duckdb.CreateTable
 import infra.etl.duckdb.DuckDbTableWriter
 import java.math.BigDecimal
 import java.time.LocalDateTime
-import org.assertj.core.api.Assertions.assertThat
-import org.assertj.core.api.Assertions.catchThrowable
 import org.junit.jupiter.api.AfterEach
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNotEquals
+import org.junit.jupiter.api.Assertions.assertNotNull
+import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertAll
+import org.junit.jupiter.api.assertThrows
 import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.Arguments
 import org.junit.jupiter.params.provider.MethodSource
@@ -60,18 +66,28 @@ class DuckDbTableWriterRequiredTest {
         listOf("in_order", "reordered").forEach { table ->
             writer(table).use {
                 it.open(source.columns)
-                assertThat(it.write(source.rows)).isEqualTo(1)
+                assertEquals(1, it.write(source.rows))
             }
         }
 
         listOf("in_order", "reordered").forEach { table ->
             val row = Scratch.read(connection, "select lot_code, note, qty, upd_ts, lot_id from $table").rows.single()
-            assertThat(row.string("lot_code")).describedAs("lot_code in %s", table).isEqualTo("alpha")
-            assertThat(row.string("note")).describedAs("note in %s", table).isEqualTo("epsilon")
-            assertThat(row.decimal("qty")).describedAs("qty in %s", table).isEqualByComparingTo(BigDecimal("1.500"))
-            assertThat(row.dateTime("upd_ts")).describedAs("upd_ts in %s", table)
-                .isEqualTo(LocalDateTime.parse("2024-01-02T03:04:05"))
-            assertThat(row.long("lot_id")).describedAs("lot_id in %s", table).isEqualTo(7L)
+            assertAll(
+                { assertEquals("alpha", row.string("lot_code")) { "lot_code in $table" } },
+                { assertEquals("epsilon", row.string("note")) { "note in $table" } },
+                {
+                    val qty = row.decimal("qty")
+                    assertTrue(qty != null && qty.compareTo(BigDecimal("1.500")) == 0) {
+                        "qty in $table must compare equal to 1.500 whatever its scale, was $qty"
+                    }
+                },
+                {
+                    assertEquals(LocalDateTime.parse("2024-01-02T03:04:05"), row.dateTime("upd_ts")) {
+                        "upd_ts in $table"
+                    }
+                },
+                { assertEquals(7L, row.long("lot_id")) { "lot_id in $table" } },
+            )
         }
     }
 
@@ -84,21 +100,28 @@ class DuckDbTableWriterRequiredTest {
     @Test
     fun `REQUIRED accepts a nullable BIGINT column and round trips both a value and a null through it`() {
         Scratch.exec(connection, "create table wip_stg (lot_id BIGINT, lot_code VARCHAR)")
-        assertThat(Scratch.nullability(connection, "wip_stg")).containsEntry("lot_id", true)
+        val nullability = Scratch.nullability(connection, "wip_stg")
+        assertEquals(true, nullability["lot_id"]) { "target nullability was $nullability" }
         val source = Scratch.read(connection, "select CAST(7 AS BIGINT) as lot_id, CAST('L1' AS VARCHAR) as lot_code")
         val nullRow = Scratch.read(connection, "select CAST(NULL AS BIGINT) as lot_id, CAST('L2' AS VARCHAR) as lot_code")
 
         writer("wip_stg").use {
             it.open(source.columns)
-            assertThat(it.write(source.rows + nullRow.rows)).isEqualTo(2)
+            assertEquals(2, it.write(source.rows + nullRow.rows))
         }
 
         val back = Scratch.read(connection, "select lot_id, lot_code from wip_stg order by lot_code").rows
-        assertThat(back[0].long("lot_id")).isEqualTo(7L)
-        // Sentinel guard through the untyped accessor: assertThat(Long?) binds AssertJ's primitive
-        // LongAssert, whose isNotEqualTo demands non-null first and so never tests the sentinel.
-        assertThat(back[1]["lot_id"]).isNotEqualTo(0L).isNull()
-        assertThat(back[1].long("lot_id")).isNull()
+        assertAll(
+            { assertEquals(7L, back[0].long("lot_id")) },
+            // Sentinel guard through the UNTYPED accessor, deliberately. The original wording here
+            // described an AssertJ overload trap that no longer exists after the JUnit 5 migration;
+            // the guard itself still earns its place. `Row.get` returns Any?, so this compares
+            // boxed and a returned 0L would fail it, while the two assertNulls below establish
+            // that what came back is genuinely null rather than merely not-zero.
+            { assertNotEquals(0L, back[1]["lot_id"]) },
+            { assertNull(back[1]["lot_id"]) { "was ${back[1]["lot_id"]}" } },
+            { assertNull(back[1].long("lot_id")) { "was ${back[1].long("lot_id")}" } },
+        )
     }
 
     /**
@@ -113,13 +136,14 @@ class DuckDbTableWriterRequiredTest {
         Scratch.exec(connection, "create table wip_stg (risky $declaration)")
         val source = Scratch.read(connection, "select $expression as risky")
 
-        val thrown = catchThrowable { writer("wip_stg").use { it.open(source.columns) } }
+        val thrown = assertThrows<Throwable> { writer("wip_stg").use { it.open(source.columns) } }
 
-        assertThat(thrown)
-            .isNotInstanceOf(NullPointerException::class.java)
-            .hasMessageContaining(STEP)
-            .hasMessageContaining("risky")
-        assertThat(Scratch.rowCount(connection, "wip_stg")).isZero()
+        assertAll(
+            { assertFalse(thrown is NullPointerException) { "expected a diagnostic, not: $thrown" } },
+            { assertTrue(thrown.message?.contains(STEP) == true) { "message was: ${thrown.message}" } },
+            { assertTrue(thrown.message?.contains("risky") == true) { "message was: ${thrown.message}" } },
+            { assertEquals(0L, Scratch.rowCount(connection, "wip_stg")) },
+        )
     }
 
     /**
@@ -135,12 +159,14 @@ class DuckDbTableWriterRequiredTest {
 
         writer("wip_stg").use {
             it.open(source.columns)
-            assertThat(it.write(source.rows)).isEqualTo(1)
+            assertEquals(1, it.write(source.rows))
         }
 
         val row = Scratch.read(connection, "select ratio, is_active from wip_stg").rows.single()
-        assertThat(row.double("ratio")).isEqualTo(2.5)
-        assertThat(row.bool("is_active")).isTrue()
+        assertAll(
+            { assertEquals(2.5, row.double("ratio")) },
+            { assertTrue(row.bool("is_active") == true) { "is_active was ${row.bool("is_active")}" } },
+        )
     }
 
     /**
@@ -168,23 +194,32 @@ class DuckDbTableWriterRequiredTest {
 
         writer("wip_stg").use {
             it.open(source.columns)
-            assertThat(it.write(source.rows)).isEqualTo(1)
+            assertEquals(1, it.write(source.rows))
         }
 
         val row = Scratch.read(connection, "select lot_id, lot_code, note from wip_stg").rows.single()
-        assertThat(row.long("lot_id")).isEqualTo(7L)
-        assertThat(row.string("lot_code")).isEqualTo("alpha")
-        assertThat(row.string("note")).isEqualTo("epsilon")
-        assertThat(Scratch.rowCount(connection, "wipXstg")).describedAs("the decoy table").isZero()
+        assertAll(
+            { assertEquals(7L, row.long("lot_id")) },
+            { assertEquals("alpha", row.string("lot_code")) },
+            { assertEquals("epsilon", row.string("note")) },
+            { assertEquals(0L, Scratch.rowCount(connection, "wipXstg")) { "the decoy table" } },
+        )
     }
 
     @Test
     fun `REQUIRED fails naming the step and the table when the table does not exist`() {
         val source = Scratch.read(connection, "select CAST('L1' AS VARCHAR) as lot_code")
 
-        val thrown = catchThrowable { writer("no_such_table").use { it.open(source.columns) } }
+        val thrown = assertThrows<Throwable> { writer("no_such_table").use { it.open(source.columns) } }
 
-        assertThat(thrown).hasMessageContaining(STEP).hasMessageContaining("no_such_table")
+        assertAll(
+            { assertTrue(thrown.message?.contains(STEP) == true) { "message was: ${thrown.message}" } },
+            {
+                assertTrue(thrown.message?.contains("no_such_table") == true) {
+                    "message was: ${thrown.message}"
+                }
+            },
+        )
     }
 
     /** Spec 4.4: a Row key with no matching target column is an error, not a silently dropped value. */
@@ -196,15 +231,22 @@ class DuckDbTableWriterRequiredTest {
             "select CAST('L1' AS VARCHAR) as lot_code, CAST('x' AS VARCHAR) as not_in_target",
         )
 
-        val thrown = catchThrowable {
+        val thrown = assertThrows<Throwable> {
             writer("wip_stg").use {
                 it.open(source.columns)
                 it.write(source.rows)
             }
         }
 
-        assertThat(thrown).hasMessageContaining(STEP).hasMessageContaining("not_in_target")
-        assertThat(Scratch.rowCount(connection, "wip_stg")).isZero()
+        assertAll(
+            { assertTrue(thrown.message?.contains(STEP) == true) { "message was: ${thrown.message}" } },
+            {
+                assertTrue(thrown.message?.contains("not_in_target") == true) {
+                    "message was: ${thrown.message}"
+                }
+            },
+            { assertEquals(0L, Scratch.rowCount(connection, "wip_stg")) },
+        )
     }
 
     /** Spec 4.4: a NOT NULL target column with no matching Row key is an error naming that column. */
@@ -213,15 +255,18 @@ class DuckDbTableWriterRequiredTest {
         Scratch.exec(connection, "create table wip_stg (lot_code VARCHAR, lot_id BIGINT NOT NULL)")
         val source = Scratch.read(connection, "select CAST('L1' AS VARCHAR) as lot_code")
 
-        val thrown = catchThrowable {
+        val thrown = assertThrows<Throwable> {
             writer("wip_stg").use {
                 it.open(source.columns)
                 it.write(source.rows)
             }
         }
 
-        assertThat(thrown).hasMessageContaining(STEP).hasMessageContaining("lot_id")
-        assertThat(Scratch.rowCount(connection, "wip_stg")).isZero()
+        assertAll(
+            { assertTrue(thrown.message?.contains(STEP) == true) { "message was: ${thrown.message}" } },
+            { assertTrue(thrown.message?.contains("lot_id") == true) { "message was: ${thrown.message}" } },
+            { assertEquals(0L, Scratch.rowCount(connection, "wip_stg")) },
+        )
     }
 
     /**
@@ -240,18 +285,20 @@ class DuckDbTableWriterRequiredTest {
         val bad = Scratch.read(connection, "select CAST(NULL AS BIGINT) as lot_id, CAST('L2' AS VARCHAR) as lot_code")
         val failed = writer("wip_stg")
 
-        val thrown = catchThrowable {
+        val thrown = assertThrows<Throwable> {
             failed.open(good.columns)
             failed.write(good.rows + bad.rows)
         }
 
         // 4.6: a null reaching a NOT NULL column is reported, never appended as a placeholder.
-        assertThat(thrown).isNotInstanceOf(NullPointerException::class.java)
-            .hasMessageContaining(STEP)
-            .hasMessageContaining("lot_id")
+        assertAll(
+            { assertFalse(thrown is NullPointerException) { "expected a diagnostic, not: $thrown" } },
+            { assertTrue(thrown.message?.contains(STEP) == true) { "message was: ${thrown.message}" } },
+            { assertTrue(thrown.message?.contains("lot_id") == true) { "message was: ${thrown.message}" } },
+        )
         failed.close()
         failed.close()
-        assertThat(connection.isClosed).describedAs("the writer does not own the caller's connection").isFalse()
+        assertFalse(connection.isClosed) { "the writer does not own the caller's connection" }
         // What the failed chunk leaves behind, measured rather than assumed. The writer rejects
         // the bad row before it calls beginRow for it, so the good row ahead of it was already
         // complete and close() flushed it: one row of a two-row chunk is committed. P0's claim
@@ -261,17 +308,23 @@ class DuckDbTableWriterRequiredTest {
         //
         // Asserting the count alone would not distinguish which row survived, so both are pinned.
         // P4 accounts for scratch space on this answer and a retry re-reads the same source rows.
-        assertThat(Scratch.rowCount(connection, "wip_stg")).isEqualTo(1)
-        assertThat(Scratch.read(connection, "select lot_id from wip_stg").rows.single().long("lot_id"))
-            .describedAs("the row completed before the failure, and only that row")
-            .isEqualTo(7L)
+        assertAll(
+            { assertEquals(1L, Scratch.rowCount(connection, "wip_stg")) },
+            {
+                assertEquals(
+                    7L,
+                    Scratch.read(connection, "select lot_id from wip_stg").rows.single().long("lot_id"),
+                ) { "the row completed before the failure, and only that row" }
+            },
+        )
 
         val recovery = Scratch.read(connection, "select CAST(9 AS BIGINT) as lot_id, CAST('L9' AS VARCHAR) as lot_code")
         writer("wip_stg").use {
             it.open(recovery.columns)
-            assertThat(it.write(recovery.rows)).isEqualTo(1)
+            assertEquals(1, it.write(recovery.rows))
         }
-        assertThat(Scratch.read(connection, "select lot_code from wip_stg where lot_id = 9").rows).hasSize(1)
+        val recovered = Scratch.read(connection, "select lot_code from wip_stg where lot_id = 9").rows
+        assertEquals(1, recovered.size) { "was $recovered" }
     }
 
     /**
@@ -306,21 +359,25 @@ class DuckDbTableWriterRequiredTest {
         // real driver - duckdb_jdbc_appender_append_decimal raises it from within write(). If a
         // later change rejects the width at open, this fails here rather than passing vacuously.
         writer.open(fits.columns)
-        val thrown = catchThrowable { writer.write(fits.rows + tooWide.rows) }
+        val thrown = assertThrows<Throwable> { writer.write(fits.rows + tooWide.rows) }
 
-        assertThat(thrown).isNotNull()
+        assertNotNull(thrown) { "the driver must reject a value too wide for the target column" }
         writer.close()
-        assertThat(Scratch.rowCount(connection, "wip_stg"))
-            .describedAs("the completed first row goes with the buffer")
-            .isZero()
-        assertThat(connection.isClosed).isFalse()
+        assertAll(
+            {
+                assertEquals(0L, Scratch.rowCount(connection, "wip_stg")) {
+                    "the completed first row goes with the buffer"
+                }
+            },
+            { assertFalse(connection.isClosed) { "the writer does not own the caller's connection" } },
+        )
     }
 
     @Test
     fun `closing a writer that was never opened is safe`() {
         writer("wip_stg").close()
 
-        assertThat(connection.isClosed).isFalse()
+        assertFalse(connection.isClosed) { "the writer does not own the caller's connection" }
     }
 
     companion object {

@@ -7,9 +7,13 @@ import infra.etl.Trig
 import infra.etl.task.TaskDefinition
 import infra.etl.task.TriggerResult
 import java.nio.file.Path
-import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.AfterEach
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertNotNull
+import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertAll
 import org.junit.jupiter.api.io.TempDir
 
 /**
@@ -38,7 +42,8 @@ class TaskAdminReloadTest {
     fun tearDown() = world.close()
 
     private fun startingSchedule(definition: TaskDefinition) {
-        assertThat(Trig.apply(world.scheduler, listOf(definition))).isNull()
+        val rejected = Trig.apply(world.scheduler, listOf(definition))
+        assertNull(rejected) { "the starting schedule was rejected: ${rejected?.errors}" }
     }
 
     @Test
@@ -49,7 +54,7 @@ class TaskAdminReloadTest {
         startingSchedule(original)
         val before = world.cron.registered
         // Without this the "unchanged" assertion below would be satisfied by two empty maps.
-        assertThat(before).isNotEmpty()
+        assertTrue(before.isNotEmpty()) { "nothing was registered to begin with, so 'unchanged' would be vacuous" }
 
         val directory = P7Tasks.directory(
             root.resolve("tasks-invalid"),
@@ -59,16 +64,24 @@ class TaskAdminReloadTest {
 
         val report = admin.reload(directory)
 
-        assertThat(report).isNotNull()
-        assertThat(report!!.errors.map { it.file })
-            .describedAs("the report names the file that failed and no phantom errors for the other")
-            .containsOnly("b-bad.yaml")
-        assertThat(world.cron.registered)
-            .describedAs("a bad edit cannot take the scheduler down (spec 8.5)")
-            .containsExactlyInAnyOrderEntriesOf(before)
-        assertThat(admin.trigger("loaded-a", "ops"))
-            .describedAs("the valid file in the rejected batch was not applied either")
-            .isEqualTo(TriggerResult.Unknown)
+        assertNotNull(report) { "the batch carrying an invalid file was accepted" }
+        assertAll(
+            {
+                assertEquals(setOf("b-bad.yaml"), report!!.errors.map { it.file }.toSet()) {
+                    "the report names the file that failed and no phantom errors for the other"
+                }
+            },
+            {
+                assertEquals(before, world.cron.registered) {
+                    "a bad edit cannot take the scheduler down (spec 8.5)"
+                }
+            },
+            {
+                assertEquals(TriggerResult.Unknown, admin.trigger("loaded-a", "ops")) {
+                    "the valid file in the rejected batch was not applied either"
+                }
+            },
+        )
     }
 
     @Test
@@ -86,11 +99,16 @@ class TaskAdminReloadTest {
 
         val report = admin.reload(directory)
 
-        assertThat(report).isNull()
-        assertThat(world.cron.registered).containsExactlyInAnyOrderEntriesOf(
-            mapOf("loaded-a" to "0 */5 * * * ?", "loaded-b" to "0 0 * * * ?"),
+        assertAll(
+            { assertNull(report) { "an entirely valid batch was rejected: ${report?.errors}" } },
+            {
+                assertEquals(
+                    mapOf("loaded-a" to "0 */5 * * * ?", "loaded-b" to "0 0 * * * ?"),
+                    world.cron.registered,
+                )
+            },
+            { assertEquals(TriggerResult.Unknown, admin.trigger("no-longer-there", "ops")) },
         )
-        assertThat(admin.trigger("no-longer-there", "ops")).isEqualTo(TriggerResult.Unknown)
     }
 
     /**
@@ -111,7 +129,7 @@ class TaskAdminReloadTest {
         val admin = world.admin(original)
         startingSchedule(original)
         val before = world.cron.registered
-        assertThat(before).isNotEmpty()
+        assertTrue(before.isNotEmpty()) { "nothing was registered to begin with, so 'unchanged' would be vacuous" }
         world.cron.rejectCron = { it == "0 0 30 * * ?" }
 
         val directory = P7Tasks.directory(
@@ -122,12 +140,19 @@ class TaskAdminReloadTest {
 
         val report = admin.reload(directory)
 
-        assertThat(report).isNotNull()
-        assertThat(report!!.errors.map { it.message }.joinToString("\n")).contains("loaded-b")
-        assertThat(world.cron.registered).containsExactlyInAnyOrderEntriesOf(before)
-        assertThat(admin.trigger("loaded-a", "ops"))
-            .describedAs("the definition set must not be swapped when the scheduler refused")
-            .isEqualTo(TriggerResult.Unknown)
+        assertNotNull(report) { "the batch carrying an unparseable cron was accepted" }
+        assertAll(
+            {
+                val messages = report!!.errors.map { it.message }.joinToString("\n")
+                assertTrue("loaded-b" in messages) { "no error named loaded-b; messages were: $messages" }
+            },
+            { assertEquals(before, world.cron.registered) },
+            {
+                assertEquals(TriggerResult.Unknown, admin.trigger("loaded-a", "ops")) {
+                    "the definition set must not be swapped when the scheduler refused"
+                }
+            },
+        )
     }
 
     /**
@@ -151,17 +176,20 @@ class TaskAdminReloadTest {
             root.resolve("tasks-same-cron"),
             "wip.yaml" to P7Tasks.yaml("wip-summary", cron = "0 */10 * * * ?"),
         )
-        assertThat(admin.reload(directory)).isNull()
-        assertThat(world.cron.since(mark))
-            .describedAs("the cron did not change, so the registration is kept as it stands")
-            .isEmpty()
+        val report = admin.reload(directory)
+        assertNull(report) { "the reload was rejected: ${report?.errors}" }
+        assertTrue(world.cron.since(mark).isEmpty()) {
+            "the cron did not change, so the registration is kept as it stands; churn was " +
+                "${world.cron.since(mark)}"
+        }
 
         world.cron.fire("wip-summary")
         val runId = Trig.awaitFinishedRun(admin, "wip-summary").runId
 
-        assertThat(probe.threads)
-            .describedAs("the firing ran the reloaded definition, which never reaches the probe")
-            .isEmpty()
+        assertTrue(probe.threads.isEmpty()) {
+            "the firing ran the reloaded definition, which never reaches the probe; probe threads " +
+                "were ${probe.threads}"
+        }
         Trig.awaitSucceeded(admin, "wip-summary", runId)
     }
 
@@ -190,16 +218,21 @@ class TaskAdminReloadTest {
         )
         val report = admin.reload(directory)
 
-        assertThat(report).isNull()
-        assertThat(world.cron.registered)
-            .describedAs("the reload committed while the run was still parked")
-            .containsExactlyEntriesOf(mapOf("wip-summary" to "0 */2 * * * ?"))
+        assertAll(
+            { assertNull(report) { "the reload was rejected: ${report?.errors}" } },
+            {
+                assertEquals(mapOf("wip-summary" to "0 */2 * * * ?"), world.cron.registered) {
+                    "the reload committed while the run was still parked"
+                }
+            },
+        )
 
         probe.release()
         Trig.awaitSucceeded(admin, "wip-summary", runId)
 
-        assertThat(probe.threads)
-            .describedAs("the run finished the definition it started with, exactly once")
-            .hasSize(1)
+        assertEquals(1, probe.threads.size) {
+            "the run finished the definition it started with, exactly once; probe threads were " +
+                "${probe.threads}"
+        }
     }
 }

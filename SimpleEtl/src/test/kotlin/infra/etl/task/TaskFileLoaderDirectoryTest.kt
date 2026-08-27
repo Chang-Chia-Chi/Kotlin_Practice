@@ -7,9 +7,13 @@ import infra.etl.TaskFiles.load
 import infra.etl.TaskFiles.minimal
 import infra.etl.task.SCRATCH
 import java.nio.file.Path
-import org.assertj.core.api.Assertions.assertThat
-import org.assertj.core.api.Assertions.assertThatThrownBy
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertNotNull
+import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertAll
+import org.junit.jupiter.api.assertThrows
 import org.junit.jupiter.api.io.TempDir
 
 /**
@@ -43,8 +47,7 @@ class TaskFileLoaderDirectoryTest {
 
         val tasks = load(directory).tasksOrFail()
 
-        assertThat(tasks.map { it.name })
-            .containsExactlyInAnyOrderElementsOf(goodNames + "task-10")
+        assertEquals((goodNames + "task-10").toSet(), tasks.map { it.name }.toSet())
     }
 
     @Test
@@ -53,10 +56,18 @@ class TaskFileLoaderDirectoryTest {
 
         val loaded = load(directory)
 
-        assertThat(loaded.tasks)
-            .describedAs("nine good files do not make a bad one loadable (spec 10, spec 8.5)")
-            .isNull()
-        assertThat(loaded.errors).isNotEmpty()
+        assertAll(
+            {
+                assertNull(loaded.tasks) {
+                    "nine good files do not make a bad one loadable (spec 10, spec 8.5)"
+                }
+            },
+            {
+                assertTrue(loaded.errors.isNotEmpty()) {
+                    "the bad file produced no error at all"
+                }
+            },
+        )
     }
 
     @Test
@@ -65,15 +76,26 @@ class TaskFileLoaderDirectoryTest {
 
         val loaded = load(directory)
 
-        assertThat(loaded.errors).allSatisfy { assertThat(it.file).contains("broken.yaml") }
-        assertThat(loaded.errors)
-            .describedAs("the report must name the offending field, not merely the file")
-            .anySatisfy { assertThat(it.message).contains("chunkSizeTypo") }
+        assertAll(
+            {
+                assertTrue(loaded.errors.all { "broken.yaml" in it.file }) {
+                    "an error was attributed to a file other than broken.yaml; files were " +
+                        "${loaded.errors.map { it.file }}"
+                }
+            },
+            {
+                assertTrue(loaded.errors.any { "chunkSizeTypo" in it.message }) {
+                    "the report must name the offending field, not merely the file; messages were " +
+                        "${loaded.errors.map { it.message }}"
+                }
+            },
+        )
 
         goodNames.forEach { good ->
-            assertThat(loaded.errors)
-                .describedAs("a phantom error was reported against the untouched file %s", good)
-                .noneMatch { it.file.contains(good) || it.message.contains(good) }
+            assertTrue(loaded.errors.none { good in it.file || good in it.message }) {
+                "a phantom error was reported against the untouched file $good; errors were " +
+                    "${loaded.errors}"
+            }
         }
     }
 
@@ -96,7 +118,7 @@ class TaskFileLoaderDirectoryTest {
 
         val tasks = load(directory).tasksOrFail()
 
-        assertThat(tasks.map { it.name }).containsExactlyInAnyOrder("task-1", "task-2")
+        assertEquals(setOf("task-1", "task-2"), tasks.map { it.name }.toSet())
     }
 
     /**
@@ -119,12 +141,19 @@ class TaskFileLoaderDirectoryTest {
         val fromJackson = load(dirOf(root, "a.yaml" to unknownField)).errors.first { "nope" in it.message }
         val fromRule2 = load(dirOf(root, "b.yaml" to badName)).errors.first { "Bad_Name" in it.message }
 
-        assertThat(fromJackson.line)
-            .describedAs("Jackson reports a position for every deserialisation failure")
-            .isNotNull()
-        assertThat(fromRule2.line)
-            .describedAs("the semantic rules work on an object tree that holds no source positions")
-            .isNull()
+        assertAll(
+            {
+                assertNotNull(fromJackson.line) {
+                    "Jackson reports a position for every deserialisation failure"
+                }
+            },
+            {
+                assertNull(fromRule2.line) {
+                    "the semantic rules work on an object tree that holds no source positions; " +
+                        "the line was ${fromRule2.line}"
+                }
+            },
+        )
     }
 
     /**
@@ -147,7 +176,7 @@ class TaskFileLoaderDirectoryTest {
 
         val files = load(directory).errors.map { it.file }
 
-        assertThat(files).containsExactly("a.yaml", "b.yaml", "c.yaml")
+        assertEquals(listOf("a.yaml", "b.yaml", "c.yaml"), files)
     }
 
     /**
@@ -159,8 +188,9 @@ class TaskFileLoaderDirectoryTest {
      */
     @Test
     fun theReservedScratchNameCannotAlsoBeAConfiguredDatasource() {
-        assertThatThrownBy { TaskFiles.loaderWithDatasources(setOf(SCRATCH)) }
-            .isInstanceOf(IllegalArgumentException::class.java)
-            .hasMessageContaining(SCRATCH)
+        val rejected = assertThrows<IllegalArgumentException> {
+            TaskFiles.loaderWithDatasources(setOf(SCRATCH))
+        }
+        assertTrue(rejected.message?.contains(SCRATCH) == true) { "message was: ${rejected.message}" }
     }
 }

@@ -12,13 +12,17 @@ import java.math.BigDecimal
 import java.sql.Connection
 import java.sql.DriverManager
 import java.time.LocalDateTime
-import org.assertj.core.api.Assertions.assertThat
-import org.assertj.core.api.Assertions.catchThrowable
 import org.jdbi.v3.core.Jdbi
 import org.junit.jupiter.api.AfterAll
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertNotEquals
+import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeAll
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertAll
+import org.junit.jupiter.api.assertThrows
 import org.testcontainers.junit.jupiter.Container
 import org.testcontainers.junit.jupiter.Testcontainers
 import org.testcontainers.oracle.OracleContainer
@@ -131,21 +135,24 @@ class WriterOracleTest {
     @Test
     fun `AUTO DDL gives a NOT NULL source column its natural DuckDB mapping`() {
         val source = source(allColumns)
-        assertThat(source.columns.filter { it.nullable }.map { it.name })
-            .describedAs("Oracle reports nullability truthfully; the NOT NULL branch is only reachable from here")
-            .containsExactly("note")
+        assertEquals(listOf("note"), source.columns.filter { it.nullable }.map { it.name }) {
+            "Oracle reports nullability truthfully; the NOT NULL branch is only reachable from here"
+        }
 
         Scratch.open().use { duck ->
             DuckDbTableWriter(duck, "wip_stg", CreateTable.AUTO, STEP).use { it.open(source.columns) }
 
-            assertThat(Scratch.declaredTypes(duck, "wip_stg")).containsExactly(
-                "lot_id" to "DECIMAL(18,0)",
-                "lot_code" to "VARCHAR",
-                "upd_ts" to "TIMESTAMP",
-                "is_active" to "BOOLEAN",
-                "ratio" to "DOUBLE",
-                "big_qty" to "DECIMAL(38,10)",
-                "note" to "VARCHAR",
+            assertEquals(
+                listOf(
+                    "lot_id" to "DECIMAL(18,0)",
+                    "lot_code" to "VARCHAR",
+                    "upd_ts" to "TIMESTAMP",
+                    "is_active" to "BOOLEAN",
+                    "ratio" to "DOUBLE",
+                    "big_qty" to "DECIMAL(38,10)",
+                    "note" to "VARCHAR",
+                ),
+                Scratch.declaredTypes(duck, "wip_stg"),
             )
         }
     }
@@ -163,16 +170,22 @@ class WriterOracleTest {
         Scratch.open().use { duck ->
             DuckDbTableWriter(duck, "wip_stg", CreateTable.AUTO, STEP).use {
                 it.open(source.columns)
-                assertThat(it.write(source.rows)).isEqualTo(1)
+                assertEquals(1, it.write(source.rows))
             }
 
             val row = Scratch.read(duck, "select big_qty, is_active, ratio, upd_ts, note from wip_stg").rows.single()
-            assertThat(row.decimal("big_qty")).isEqualByComparingTo(BigDecimal(BIG))
-            // The primitive append path, reachable only from a source that reports NOT NULL.
-            assertThat(row.bool("is_active")).isTrue()
-            assertThat(row.double("ratio")).isEqualTo(2.5)
-            assertThat(row.dateTime("upd_ts")).isEqualTo(LocalDateTime.parse("2024-01-02T03:04:05"))
-            assertThat(row.string("note")).isEqualTo("note-1")
+            assertAll(
+                {
+                    assertTrue(row.decimal("big_qty")?.compareTo(BigDecimal(BIG)) == 0) {
+                        "expected $BIG by comparison, was ${row.decimal("big_qty")}"
+                    }
+                },
+                // The primitive append path, reachable only from a source that reports NOT NULL.
+                { assertTrue(row.bool("is_active") == true) { "is_active was ${row.bool("is_active")}" } },
+                { assertEquals(2.5, row.double("ratio")) },
+                { assertEquals(LocalDateTime.parse("2024-01-02T03:04:05"), row.dateTime("upd_ts")) },
+                { assertEquals("note-1", row.string("note")) },
+            )
         }
     }
 
@@ -191,18 +204,32 @@ class WriterOracleTest {
 
         JdbcTableWriter(jdbi, "wip_tgt", STEP).use {
             it.open(source.columns)
-            assertThat(it.write(source.rows)).isEqualTo(2)
+            assertEquals(2, it.write(source.rows))
         }
 
         val back = Scratch.read(connection, "select lot_id, lot_code, qty, note from wip_tgt order by lot_id").rows
-        assertThat(back[0].decimal("lot_id")).isEqualByComparingTo(BigDecimal("7"))
-        assertThat(back[0].string("lot_code")).isEqualTo("L1")
-        assertThat(back[0].decimal("qty")).isEqualByComparingTo(BigDecimal("1.5"))
-        assertThat(back[0].string("note")).isEqualTo("note-1")
+        assertAll(
+            {
+                assertTrue(back[0].decimal("lot_id")?.compareTo(BigDecimal("7")) == 0) {
+                    "expected 7 by comparison, was ${back[0].decimal("lot_id")}"
+                }
+            },
+            { assertEquals("L1", back[0].string("lot_code")) },
+            {
+                assertTrue(back[0].decimal("qty")?.compareTo(BigDecimal("1.5")) == 0) {
+                    "expected 1.5 by comparison, was ${back[0].decimal("qty")}"
+                }
+            },
+            { assertEquals("note-1", back[0].string("note")) },
+        )
 
-        assertThat(back[1].string("lot_code")).isEqualTo("L2")
-        assertThat(back[1].decimal("qty")).isNotEqualTo(BigDecimal.ZERO).isNull()
-        assertThat(back[1].string("note")).isNotEqualTo("").isNull()
+        assertAll(
+            { assertEquals("L2", back[1].string("lot_code")) },
+            { assertNotEquals(BigDecimal.ZERO, back[1].decimal("qty")) },
+            { assertNull(back[1].decimal("qty")) { "was ${back[1].decimal("qty")}" } },
+            { assertNotEquals("", back[1].string("note")) },
+            { assertNull(back[1].string("note")) { "was ${back[1].string("note")}" } },
+        )
 
         counting.assertCatalogReadBalanced("successful table write")
     }
@@ -217,12 +244,18 @@ class WriterOracleTest {
             STEP,
         ).use {
             it.open(source.columns)
-            assertThat(it.write(source.rows)).isEqualTo(1)
+            assertEquals(1, it.write(source.rows))
         }
 
         val row = Scratch.read(connection, "select lot_id, lot_code, qty, note from wip_tgt").rows.single()
-        assertThat(row.decimal("lot_id")).isEqualByComparingTo(BigDecimal("7"))
-        assertThat(row.string("note")).isEqualTo("note-1")
+        assertAll(
+            {
+                assertTrue(row.decimal("lot_id")?.compareTo(BigDecimal("7")) == 0) {
+                    "expected 7 by comparison, was ${row.decimal("lot_id")}"
+                }
+            },
+            { assertEquals("note-1", row.string("note")) },
+        )
 
         counting.assertBalanced("successful statement write")
     }
@@ -237,7 +270,7 @@ class WriterOracleTest {
     fun `JdbcStatementWriter lists every missing bind name and writes nothing`() {
         val source = source("select lot_id, lot_code, qty, note from wip_src where lot_id = 7")
 
-        val thrown = catchThrowable {
+        val thrown = assertThrows<Throwable> {
             JdbcStatementWriter(
                 jdbi,
                 "insert into wip_tgt (lot_id, lot_code, qty, note) " +
@@ -249,11 +282,20 @@ class WriterOracleTest {
             }
         }
 
-        assertThat(thrown)
-            .hasMessageContaining(STEP)
-            .hasMessageContaining("missing_qty")
-            .hasMessageContaining("missing_note")
-        assertThat(Scratch.rowCount(connection, "wip_tgt")).isZero()
+        assertAll(
+            { assertTrue(thrown.message?.contains(STEP) == true) { "message was: ${thrown.message}" } },
+            {
+                assertTrue(thrown.message?.contains("missing_qty") == true) {
+                    "every missing bind name must be listed; message was: ${thrown.message}"
+                }
+            },
+            {
+                assertTrue(thrown.message?.contains("missing_note") == true) {
+                    "every missing bind name must be listed; message was: ${thrown.message}"
+                }
+            },
+            { assertEquals(0L, Scratch.rowCount(connection, "wip_tgt")) },
+        )
         counting.assertNothingLeaked("missing bind names")
     }
 
@@ -267,23 +309,22 @@ class WriterOracleTest {
     fun `statements and connections are closed when the write throws mid chunk`() {
         val source = source("select lot_id, lot_code, qty, rpad('x', 40, 'x') as note from wip_src where lot_id = 7")
 
-        val thrown = catchThrowable {
+        assertThrows<Throwable> {
             JdbcTableWriter(jdbi, "wip_tgt", STEP).use {
                 it.open(source.columns)
                 it.write(source.rows)
             }
         }
 
-        assertThat(thrown).isNotNull()
         counting.assertCatalogReadBalanced("failed table write")
 
         // Return to a usable state: the target still takes a good chunk afterwards.
         val good = source("select lot_id, lot_code, qty, note from wip_src where lot_id = 7")
         JdbcTableWriter(jdbi, "wip_tgt", STEP).use {
             it.open(good.columns)
-            assertThat(it.write(good.rows)).isEqualTo(1)
+            assertEquals(1, it.write(good.rows))
         }
-        assertThat(Scratch.rowCount(connection, "wip_tgt")).isEqualTo(1)
+        assertEquals(1L, Scratch.rowCount(connection, "wip_tgt"))
     }
 
     @Test

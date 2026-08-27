@@ -5,8 +5,8 @@ import infra.etl.Etl
 import infra.etl.RecordingConnections
 import infra.etl.TaskHarness
 import java.nio.file.Path
-import org.assertj.core.api.Assertions.assertThat
 import org.jdbi.v3.core.Jdbi
+import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 
@@ -69,9 +69,9 @@ class TaskEngineChunkSizeTest {
 
             harness.runExpectingSuccess(task(stepChunkSize = 101, taskChunkSize = 202))
 
-            assertThat(recording.fetchSizesRequested)
-                .describedAs("the step's own chunkSize reaches the source statement")
-                .containsExactly(101)
+            assertEquals(listOf(101), recording.fetchSizesRequested) {
+                "the step's own chunkSize reaches the source statement"
+            }
         }
     }
 
@@ -82,9 +82,9 @@ class TaskEngineChunkSizeTest {
 
             harness.runExpectingSuccess(task(stepChunkSize = null, taskChunkSize = 202))
 
-            assertThat(recording.fetchSizesRequested)
-                .describedAs("the task-level default reaches a step that states none")
-                .containsExactly(202)
+            assertEquals(listOf(202), recording.fetchSizesRequested) {
+                "the task-level default reaches a step that states none"
+            }
         }
     }
 
@@ -100,7 +100,7 @@ class TaskEngineChunkSizeTest {
 
             harness.runExpectingSuccess(task(stepChunkSize = null, taskChunkSize = null))
 
-            assertThat(recording.fetchSizesRequested).containsExactly(5000)
+            assertEquals(listOf(5000), recording.fetchSizesRequested)
         }
     }
 }

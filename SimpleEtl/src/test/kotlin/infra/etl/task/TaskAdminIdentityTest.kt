@@ -5,8 +5,8 @@ import infra.etl.P7World
 import infra.etl.Trig
 import infra.etl.task.TaskAdmin
 import java.nio.file.Path
-import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.AfterEach
+import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 
@@ -62,8 +62,8 @@ class TaskAdminIdentityTest {
             triggeredBy(admin, "wip-summary")
         }
 
-        assertThat(recorded)
-            .describedAs("each trigger's own identity, not a constant and not the task name")
-            .containsExactly("alice", "bob", null)
+        assertEquals(listOf("alice", "bob", null), recorded) {
+            "each trigger's own identity, not a constant and not the task name"
+        }
     }
 }

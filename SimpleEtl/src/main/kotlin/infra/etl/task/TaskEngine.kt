@@ -448,9 +448,12 @@ class TaskEngine(
 
         /**
          * Reports 0 / 0, like every step type but `pipe`: nothing here moves a row through the
-         * JVM. A non-scratch CTAS does have an affected-row count to hand, and it is deliberately
-         * not used - one field that meant "rows piped" for one step type and "rows the database
-         * says it touched" for another would be a number nobody could aggregate.
+         * JVM. Whether a non-scratch CTAS hands back a usable affected-row count is the driver's
+         * business and is not measured here - on the one datasource this project can actually run,
+         * DuckDB 1.1.3, it is -1 for DDL and for CREATE TABLE AS SELECT (see `update` below). The
+         * ruling does not rest on that either way: one field meaning "rows piped" for one step
+         * type and "rows the database says it touched" for another would be a number nobody could
+         * aggregate.
          */
         private fun materialize(step: MaterializeStep, attempt: Int): PipeResult {
             if (step.datasource != SCRATCH) {

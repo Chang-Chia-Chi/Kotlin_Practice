@@ -9,10 +9,15 @@ import infra.etl.pipe.CanonicalType
 import infra.etl.pipe.ColumnMeta
 import java.math.BigDecimal
 import java.time.LocalDateTime
-import org.assertj.core.api.Assertions.assertThat
-import org.assertj.core.api.Assertions.catchThrowable
 import org.junit.jupiter.api.AfterEach
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNotEquals
+import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertAll
+import org.junit.jupiter.api.assertThrows
 import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.Arguments
 import org.junit.jupiter.params.provider.MethodSource
@@ -60,19 +65,24 @@ class DuckDbTableWriterAutoTest {
     @Test
     fun `AUTO DDL creates every nullable source column as a null accepting type`() {
         val source = Scratch.read(connection, values)
-        assertThat(source.columns.map { it.nullable })
-            .describedAs("duckdb_jdbc reports every column nullable; if this changes the split with the Oracle suite must be revisited")
-            .containsOnly(true)
+        val nullability = source.columns.map { it.nullable }
+        assertTrue(nullability.isNotEmpty() && nullability.all { it }) {
+            "duckdb_jdbc reports every column nullable; if this changes the split with the Oracle " +
+                "suite must be revisited. Was $nullability"
+        }
 
         writer("wip_stg").use { it.open(source.columns) }
 
-        assertThat(Scratch.declaredTypes(connection, "wip_stg")).containsExactly(
-            "lot_code" to "VARCHAR",
-            // BIGINT joined VARCHAR/DECIMAL/TIMESTAMP when S3 showed appendBigDecimal is exact
-            // at scale 0 and the value comes from Row.long(). See P0's ruling on rule 15.
-            "lot_id" to "BIGINT",
-            "qty" to "DECIMAL(18,3)",
-            "upd_ts" to "TIMESTAMP",
+        assertEquals(
+            listOf(
+                "lot_code" to "VARCHAR",
+                // BIGINT joined VARCHAR/DECIMAL/TIMESTAMP when S3 showed appendBigDecimal is exact
+                // at scale 0 and the value comes from Row.long(). See P0's ruling on rule 15.
+                "lot_id" to "BIGINT",
+                "qty" to "DECIMAL(18,3)",
+                "upd_ts" to "TIMESTAMP",
+            ),
+            Scratch.declaredTypes(connection, "wip_stg"),
         )
     }
 
@@ -83,7 +93,7 @@ class DuckDbTableWriterAutoTest {
 
         writer("wip_stg").use { it.open(source.columns) }
 
-        assertThat(Scratch.declaredTypes(connection, "wip_stg")).containsExactly("big_qty" to "DECIMAL(38,10)")
+        assertEquals(listOf("big_qty" to "DECIMAL(38,10)"), Scratch.declaredTypes(connection, "wip_stg"))
     }
 
     /**
@@ -102,8 +112,10 @@ class DuckDbTableWriterAutoTest {
 
         writer("wip_stg").use { it.open(columns) }
 
-        assertThat(Scratch.declaredTypes(connection, "wip_stg"))
-            .containsExactly("total" to "DECIMAL($precision,$scale)")
+        assertEquals(
+            listOf("total" to "DECIMAL($precision,$scale)"),
+            Scratch.declaredTypes(connection, "wip_stg"),
+        )
     }
 
     /**
@@ -121,13 +133,17 @@ class DuckDbTableWriterAutoTest {
     ) {
         val columns = listOf(decimal(precision, scale))
 
-        val thrown = catchThrowable { writer("wip_stg").use { it.open(columns) } }
+        val thrown = assertThrows<Throwable> { writer("wip_stg").use { it.open(columns) } }
 
-        assertThat(thrown)
-            .isNotInstanceOf(NullPointerException::class.java)
-            .hasMessageContaining(STEP)
-            .hasMessageContaining("total")
-        assertThat(Scratch.declaredTypes(connection, "wip_stg")).isEmpty()
+        assertAll(
+            { assertFalse(thrown is NullPointerException) { "expected a diagnostic, not: $thrown" } },
+            { assertTrue(thrown.message?.contains(STEP) == true) { "message was: ${thrown.message}" } },
+            { assertTrue(thrown.message?.contains("total") == true) { "message was: ${thrown.message}" } },
+            {
+                val declared = Scratch.declaredTypes(connection, "wip_stg")
+                assertTrue(declared.isEmpty()) { "the guard must fire before CREATE TABLE, declared $declared" }
+            },
+        )
     }
 
     private fun decimal(precision: Int, scale: Int) =
@@ -144,32 +160,45 @@ class DuckDbTableWriterAutoTest {
 
         writer("wip_stg").use {
             it.open(source.columns)
-            assertThat(it.write(source.rows + nullRow.rows)).isEqualTo(2)
+            assertEquals(2, it.write(source.rows + nullRow.rows))
         }
 
         val back = Scratch.read(
             connection,
             "select lot_code, lot_id, qty, upd_ts from wip_stg order by lot_id nulls last",
         ).rows
-        assertThat(back).hasSize(2)
+        assertEquals(2, back.size) { "was $back" }
 
-        assertThat(back[0].string("lot_code")).isEqualTo("L1")
-        assertThat(back[0].long("lot_id")).isEqualTo(7L)
-        assertThat(back[0].decimal("qty")).isEqualByComparingTo(BigDecimal("1.500"))
-        assertThat(back[0].dateTime("upd_ts")).isEqualTo(LocalDateTime.parse("2024-01-02T03:04:05"))
+        assertAll(
+            { assertEquals("L1", back[0].string("lot_code")) },
+            { assertEquals(7L, back[0].long("lot_id")) },
+            {
+                val qty = back[0].decimal("qty")
+                assertTrue(qty != null && qty.compareTo(BigDecimal("1.500")) == 0) {
+                    "qty must compare equal to 1.500 whatever its scale, was $qty"
+                }
+            },
+            { assertEquals(LocalDateTime.parse("2024-01-02T03:04:05"), back[0].dateTime("upd_ts")) },
+        )
 
-        assertThat(back[1].string("lot_code")).isNotEqualTo("").isNull()
-        // Row.long() is Long?, which Kotlin resolves to AssertJ's *primitive* LongAssert, whose
-        // isNotEqualTo asserts non-null before it compares - so on a correct null it fails with
-        // "Expecting actual not to be null" and the sentinel is never checked at all. The untyped
-        // accessor is Any? and gets the Object assertion, which does compare.
-        assertThat(back[1]["lot_id"]).isNotEqualTo(0L).isNull()
-        assertThat(back[1].long("lot_id")).isNull()
-        assertThat(back[1].decimal("qty")).isNotEqualTo(BigDecimal.ZERO).isNull()
-        assertThat(back[1].dateTime("upd_ts")).isNull()
-        // The column is present and holds SQL NULL, not absent and not a sentinel string.
-        assertThat(back[1].contains("upd_ts")).isTrue()
-        assertThat(back[1]["upd_ts"]).isNotEqualTo("").isNull()
+        assertAll(
+            { assertNotEquals("", back[1].string("lot_code")) },
+            { assertNull(back[1].string("lot_code")) { "was ${back[1].string("lot_code")}" } },
+            // Row.long() is Long?, which Kotlin resolves to AssertJ's *primitive* LongAssert, whose
+            // isNotEqualTo asserts non-null before it compares - so on a correct null it fails with
+            // "Expecting actual not to be null" and the sentinel is never checked at all. The untyped
+            // accessor is Any? and gets the Object assertion, which does compare.
+            { assertNotEquals(0L, back[1]["lot_id"]) },
+            { assertNull(back[1]["lot_id"]) { "was ${back[1]["lot_id"]}" } },
+            { assertNull(back[1].long("lot_id")) { "was ${back[1].long("lot_id")}" } },
+            { assertNotEquals(BigDecimal.ZERO, back[1].decimal("qty")) },
+            { assertNull(back[1].decimal("qty")) { "was ${back[1].decimal("qty")}" } },
+            { assertNull(back[1].dateTime("upd_ts")) { "was ${back[1].dateTime("upd_ts")}" } },
+            // The column is present and holds SQL NULL, not absent and not a sentinel string.
+            { assertTrue(back[1].contains("upd_ts")) { "the column must be present, row was ${back[1]}" } },
+            { assertNotEquals("", back[1]["upd_ts"]) },
+            { assertNull(back[1]["upd_ts"]) { "was ${back[1]["upd_ts"]}" } },
+        )
     }
 
     /**
@@ -184,21 +213,35 @@ class DuckDbTableWriterAutoTest {
         )
         val writer = writer("wip_stg")
 
-        val thrown = catchThrowable { writer.open(source.columns) }
+        val thrown = assertThrows<Throwable> { writer.open(source.columns) }
 
-        assertThat(thrown)
-            .isNotInstanceOf(ClassCastException::class.java)
-            .isNotInstanceOf(NullPointerException::class.java)
-            .hasMessageContaining(STEP)
-            .hasMessageContaining("payload")
-        assertThat(thrown.message!!.uppercase()).containsAnyOf("BLOB", "RAW", "BYTE")
-        assertThat(Scratch.declaredTypes(connection, "wip_stg")).isEmpty()
+        assertAll(
+            { assertFalse(thrown is ClassCastException) { "expected a diagnostic, not: $thrown" } },
+            { assertFalse(thrown is NullPointerException) { "expected a diagnostic, not: $thrown" } },
+            { assertTrue(thrown.message?.contains(STEP) == true) { "message was: ${thrown.message}" } },
+            { assertTrue(thrown.message?.contains("payload") == true) { "message was: ${thrown.message}" } },
+            {
+                val message = thrown.message!!.uppercase()
+                assertTrue(listOf("BLOB", "RAW", "BYTE").any { it in message }) {
+                    "the message must name the type it rejected, was: $message"
+                }
+            },
+            {
+                val declared = Scratch.declaredTypes(connection, "wip_stg")
+                assertTrue(declared.isEmpty()) { "the table must not exist yet, declared $declared" }
+            },
+        )
 
         // Return to a usable state: close after a failed open is safe and the caller's
         // connection - which the writer does not own - is still open.
         writer.close()
-        assertThat(connection.isClosed).isFalse()
-        assertThat(Scratch.read(connection, "select 1 as ok").rows).hasSize(1)
+        assertAll(
+            { assertFalse(connection.isClosed) { "the writer does not own the caller's connection" } },
+            {
+                val rows = Scratch.read(connection, "select 1 as ok").rows
+                assertEquals(1, rows.size) { "was $rows" }
+            },
+        )
     }
 
     /**
@@ -227,13 +270,17 @@ class DuckDbTableWriterAutoTest {
     fun `a nullable source column with no null accepting write path is rejected at open`(expression: String) {
         val source = Scratch.read(connection, "select $expression as risky")
 
-        val thrown = catchThrowable { writer("wip_stg").use { it.open(source.columns) } }
+        val thrown = assertThrows<Throwable> { writer("wip_stg").use { it.open(source.columns) } }
 
-        assertThat(thrown)
-            .isNotInstanceOf(NullPointerException::class.java)
-            .hasMessageContaining(STEP)
-            .hasMessageContaining("risky")
-        assertThat(Scratch.declaredTypes(connection, "wip_stg")).isEmpty()
+        assertAll(
+            { assertFalse(thrown is NullPointerException) { "expected a diagnostic, not: $thrown" } },
+            { assertTrue(thrown.message?.contains(STEP) == true) { "message was: ${thrown.message}" } },
+            { assertTrue(thrown.message?.contains("risky") == true) { "message was: ${thrown.message}" } },
+            {
+                val declared = Scratch.declaredTypes(connection, "wip_stg")
+                assertTrue(declared.isEmpty()) { "the rejection must come before CREATE TABLE, declared $declared" }
+            },
+        )
     }
 
     companion object {

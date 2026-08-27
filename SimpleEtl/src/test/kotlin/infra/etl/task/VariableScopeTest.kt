@@ -2,9 +2,13 @@ package infra.etl.task
 
 import infra.etl.task.VariableScope
 import java.time.Instant
-import org.assertj.core.api.Assertions.assertThat
-import org.assertj.core.api.Assertions.assertThatThrownBy
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertAll
+import org.junit.jupiter.api.assertThrows
 
 /**
  * `VariableScope` on its own, because the plan names it as P5 public surface and a public type
@@ -28,9 +32,11 @@ class VariableScopeTest {
 
         scope.define("lastTs", "2026-08-01")
 
-        assertThat(scope["lastTs"]).isEqualTo("2026-08-01")
-        assertThat(scope.contains("lastTs")).isTrue()
-        assertThat(scope.names).contains("lastTs")
+        assertAll(
+            { assertEquals("2026-08-01", scope["lastTs"]) },
+            { assertTrue(scope.contains("lastTs")) { "contains said false; names were ${scope.names}" } },
+            { assertTrue("lastTs" in scope.names) { "names were ${scope.names}" } },
+        )
     }
 
     /**
@@ -45,8 +51,10 @@ class VariableScopeTest {
         scope.define("triggerTime", triggerTime)
         scope.define("lastLot", 42L)
 
-        assertThat(scope["triggerTime"]).isEqualTo(triggerTime)
-        assertThat(scope["lastLot"]).isEqualTo(42L)
+        assertAll(
+            { assertEquals(triggerTime, scope["triggerTime"]) },
+            { assertEquals(42L, scope["lastLot"]) },
+        )
     }
 
     /**
@@ -60,10 +68,24 @@ class VariableScopeTest {
 
         scope.define("lastTs", null)
 
-        assertThat(scope["lastTs"]).isNull()
-        assertThat(scope.contains("lastTs")).describedAs("defined as null is still defined").isTrue()
-        assertThat(scope["neverExported"]).isNull()
-        assertThat(scope.contains("neverExported")).isFalse()
+        assertAll(
+            { assertNull(scope["lastTs"]) { "lastTs was defined as null, but read back as ${scope["lastTs"]}" } },
+            {
+                assertTrue(scope.contains("lastTs")) {
+                    "defined as null is still defined; names were ${scope.names}"
+                }
+            },
+            {
+                assertNull(scope["neverExported"]) {
+                    "neverExported was never defined, but read back as ${scope["neverExported"]}"
+                }
+            },
+            {
+                assertFalse(scope.contains("neverExported")) {
+                    "neverExported was never defined; names were ${scope.names}"
+                }
+            },
+        )
     }
 
     /**
@@ -77,12 +99,11 @@ class VariableScopeTest {
         val scope = VariableScope()
         scope.define("lastTs", "2026-08-01")
 
-        assertThatThrownBy { scope.define("lastTs", "2026-08-02") }
-            .isInstanceOf(IllegalArgumentException::class.java)
-            .hasMessageContaining("lastTs")
+        val rejected = assertThrows<IllegalArgumentException> { scope.define("lastTs", "2026-08-02") }
+        assertTrue(rejected.message?.contains("lastTs") == true) { "message was: ${rejected.message}" }
 
-        assertThat(scope["lastTs"]).isEqualTo("2026-08-01")
-        assertThat(scope.names).describedAs("no ghost entry was added").containsExactly("lastTs")
+        assertEquals("2026-08-01", scope["lastTs"])
+        assertEquals(setOf("lastTs"), scope.names) { "no ghost entry was added" }
     }
 
     /** A null value is still a definition, so redefining it is still rejected. */
@@ -91,9 +112,8 @@ class VariableScopeTest {
         val scope = VariableScope()
         scope.define("lastTs", null)
 
-        assertThatThrownBy { scope.define("lastTs", "2026-08-01") }
-            .isInstanceOf(IllegalArgumentException::class.java)
-            .hasMessageContaining("lastTs")
+        val rejected = assertThrows<IllegalArgumentException> { scope.define("lastTs", "2026-08-01") }
+        assertTrue(rejected.message?.contains("lastTs") == true) { "message was: ${rejected.message}" }
     }
 
     /** [VariableScope.names] is a view for diagnostics, not a handle on the scope's insides. */
@@ -104,7 +124,7 @@ class VariableScopeTest {
 
         @Suppress("UNCHECKED_CAST")
         val names = scope.names as MutableSet<String>
-        assertThatThrownBy { names.add("smuggled") }.isInstanceOf(UnsupportedOperationException::class.java)
-        assertThat(scope.contains("smuggled")).isFalse()
+        assertThrows<UnsupportedOperationException> { names.add("smuggled") }
+        assertFalse(scope.contains("smuggled")) { "the scope was mutated; names were ${scope.names}" }
     }
 }

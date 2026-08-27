@@ -7,7 +7,10 @@ import infra.etl.task.TaskFileLoader
 import infra.etl.task.ValidationError
 import java.nio.file.Path
 import kotlin.io.path.writeText
-import org.assertj.core.api.Assertions.assertThat
+import org.junit.jupiter.api.Assertions.assertNotNull
+import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertTrue
+import org.junit.jupiter.api.assertAll
 
 /**
  * P6 test support: task files on disk, the one-rule-away editing helpers, and the two
@@ -68,9 +71,7 @@ object TaskFiles {
 
         /** The tasks, or a failure that prints the report rather than an opaque NPE. */
         fun tasksOrFail(): List<TaskDefinition> {
-            assertThat(tasks)
-                .describedAs("expected a clean load, got %s", errors.joinToString("\n"))
-                .isNotNull()
+            assertNotNull(tasks) { "expected a clean load, got ${errors.joinToString("\n")}" }
             return tasks!!
         }
 
@@ -164,32 +165,39 @@ object TaskFiles {
      * a guess about the implementation rather than the contract.
      */
     fun assertRejects(loaded: Loaded, file: String, step: String?, vararg mentions: String) {
-        assertThat(loaded.tasks)
-            .describedAs("this file is one rule away from a sibling that loads, so it must be rejected")
-            .isNull()
-        assertThat(loaded.errors).describedAs("a rejection with no errors is not a report").isNotEmpty()
+        assertAll(
+            {
+                assertNull(loaded.tasks) {
+                    "this file is one rule away from a sibling that loads, so it must be rejected"
+                }
+            },
+            {
+                assertTrue(loaded.errors.isNotEmpty()) {
+                    "a rejection with no errors is not a report; errors were ${loaded.errors}"
+                }
+            },
+        )
 
-        assertThat(loaded.errors).allSatisfy { error ->
-            assertThat(error.file)
-                .describedAs("every error must identify the file it came from")
-                .contains(file)
-            val line = error.line
-            assertThat(line == null || line > 0)
-                .describedAs("line %s is not a YAML line number", line)
-                .isTrue()
-        }
+        assertAll(
+            loaded.errors.map { error ->
+                {
+                    assertTrue(error.file.contains(file)) {
+                        "every error must identify the file it came from; file was '${error.file}'"
+                    }
+                    val line = error.line
+                    assertTrue(line == null || line > 0) { "line $line is not a YAML line number" }
+                }
+            },
+        )
 
         val matching = loaded.errors.filter { it.step == step }
-        assertThat(matching)
-            .describedAs(
-                "no error carries step=%s; the report carried steps %s and messages %s",
-                step,
-                loaded.errors.map { it.step },
-                loaded.errors.map { it.message },
-            )
-            .isNotEmpty()
-        assertThat(matching).anySatisfy { error ->
-            mentions.forEach { assertThat(error.message).containsIgnoringCase(it) }
+        assertTrue(matching.isNotEmpty()) {
+            "no error carries step=$step; the report carried steps ${loaded.errors.map { it.step }} " +
+                "and messages ${loaded.errors.map { it.message }}"
+        }
+        assertTrue(matching.any { error -> mentions.all { error.message.contains(it, ignoreCase = true) } }) {
+            "no error with step=$step mentioned all of ${mentions.toList()} (ignoring case); " +
+                "messages were ${matching.map { it.message }}"
         }
     }
 

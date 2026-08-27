@@ -12,9 +12,12 @@ import infra.etl.task.SCRATCH
 import infra.etl.task.Step
 import infra.etl.task.TaskOutcome
 import java.nio.file.Path
-import org.assertj.core.api.Assertions.assertThat
 import org.jdbi.v3.core.Jdbi
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertAll
 import org.junit.jupiter.api.io.TempDir
 import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.Arguments
@@ -76,10 +79,18 @@ class TaskEngineGuardTest {
                 )
             }
 
-            assertThat(failure).hasMessageContaining("load-wip")
-            assertThat(mes.attempts.get())
-                .describedAs("rejected before the source query ran, so no row was ever read")
-                .isZero()
+            assertAll(
+                {
+                    assertTrue(failure.message?.contains("load-wip") == true) {
+                        "the diagnostic does not name the step; message was: ${failure.message}"
+                    }
+                },
+                {
+                    assertEquals(0, mes.attempts.get()) {
+                        "rejected before the source query ran, so no row was ever read"
+                    }
+                },
+            )
         }
     }
 
@@ -120,13 +131,24 @@ class TaskEngineGuardTest {
                 )
             }
 
-            assertThat(failure).hasMessageContaining("load-wip")
-            assertThat(failure.message)
-                .describedAs("the diagnostic points at the remedy, not only at the refusal")
-                .contains("AUTO")
-            assertThat(mes.attempts.get())
-                .describedAs("rejected before any row was appended - a late guard would be too late")
-                .isZero()
+            assertAll(
+                {
+                    assertTrue(failure.message?.contains("load-wip") == true) {
+                        "the diagnostic does not name the step; message was: ${failure.message}"
+                    }
+                },
+                {
+                    assertTrue(failure.message?.contains("AUTO") == true) {
+                        "the diagnostic points at the remedy, not only at the refusal; " +
+                            "message was: ${failure.message}"
+                    }
+                },
+                {
+                    assertEquals(0, mes.attempts.get()) {
+                        "rejected before any row was appended - a late guard would be too late"
+                    }
+                },
+            )
         }
     }
 
@@ -163,10 +185,19 @@ class TaskEngineGuardTest {
                 )
             }
 
-            assertThat(failure).hasMessageContaining("load-wip")
-            assertThat(failure.message)
-                .describedAs("the diagnostic names the clashing column, lower cased as Row keys are")
-                .contains("lot_code")
+            assertAll(
+                {
+                    assertTrue(failure.message?.contains("load-wip") == true) {
+                        "the diagnostic does not name the step; message was: ${failure.message}"
+                    }
+                },
+                {
+                    assertTrue(failure.message?.contains("lot_code") == true) {
+                        "the diagnostic names the clashing column, lower cased as Row keys are; " +
+                            "message was: ${failure.message}"
+                    }
+                },
+            )
         }
     }
 
@@ -193,7 +224,9 @@ class TaskEngineGuardTest {
                 )
             }
 
-            assertThat(failure).hasMessageContaining("siteCode")
+            assertTrue(failure.message?.contains("siteCode") == true) {
+                "message was: ${failure.message}"
+            }
         }
     }
 
@@ -215,7 +248,9 @@ class TaskEngineGuardTest {
                 )
             }
 
-            assertThat(failure).hasMessageContaining("attempt")
+            assertTrue(failure.message?.contains("attempt") == true) {
+                "message was: ${failure.message}"
+            }
         }
     }
 
@@ -235,7 +270,9 @@ class TaskEngineGuardTest {
                 )
             }
 
-            assertThat(failure).hasMessageContaining(Etl.SCRATCH)
+            assertTrue(failure.message?.contains(Etl.SCRATCH) == true) {
+                "message was: ${failure.message}"
+            }
         }
     }
 
@@ -269,10 +306,18 @@ class TaskEngineGuardTest {
 
             val failure = rejection { harness.run(Etl.task("wip-guard", Etl.phase("publish", step))) }
 
-            assertThat(failure).describedAs(label).hasMessageContaining(fragment)
-            assertThat(report.tableExists("published"))
-                .describedAs("a rejected step must not half-run")
-                .isFalse()
+            assertAll(
+                {
+                    assertTrue(failure.message?.contains(fragment) == true) {
+                        "$label: message was: ${failure.message}"
+                    }
+                },
+                {
+                    assertFalse(report.tableExists("published")) {
+                        "a rejected step must not half-run, but 'published' exists"
+                    }
+                },
+            )
         }
     }
 }

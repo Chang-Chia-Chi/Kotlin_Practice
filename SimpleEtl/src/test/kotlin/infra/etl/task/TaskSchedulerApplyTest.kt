@@ -7,9 +7,13 @@ import infra.etl.Trig
 import infra.etl.task.TaskDefinition
 import infra.etl.task.ValidationReport
 import java.nio.file.Path
-import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.AfterEach
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertNotNull
+import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertAll
 import org.junit.jupiter.api.io.TempDir
 
 /**
@@ -52,9 +56,14 @@ class TaskSchedulerApplyTest {
             P7Tasks.scheduled("disabled", cron = "0 0 * * * ?", enabled = false),
         )
 
-        assertThat(report).isNull()
-        assertThat(cron.registered).containsExactlyInAnyOrderEntriesOf(
-            mapOf("scheduled-a" to "0 */10 * * * ?", "scheduled-b" to "0 */5 * * * ?"),
+        assertAll(
+            { assertNull(report) { "a batch of valid crons was rejected: ${report?.errors}" } },
+            {
+                assertEquals(
+                    mapOf("scheduled-a" to "0 */10 * * * ?", "scheduled-b" to "0 */5 * * * ?"),
+                    cron.registered,
+                )
+            },
         )
     }
 
@@ -68,8 +77,10 @@ class TaskSchedulerApplyTest {
 
         apply(P7Tasks.scheduled("kept", cron = "0 */10 * * * ?"))
 
-        assertThat(cron.registered).containsOnlyKeys("kept")
-        assertThat(cron.since(mark)).containsExactly("cancel:removed")
+        assertAll(
+            { assertEquals(setOf("kept"), cron.registered.keys) },
+            { assertEquals(listOf("cancel:removed"), cron.since(mark)) },
+        )
     }
 
     @Test
@@ -79,8 +90,10 @@ class TaskSchedulerApplyTest {
 
         apply(P7Tasks.scheduled("switchable", cron = "0 */10 * * * ?", enabled = false))
 
-        assertThat(cron.registered).isEmpty()
-        assertThat(cron.since(mark)).containsExactly("cancel:switchable")
+        assertAll(
+            { assertTrue(cron.registered.isEmpty()) { "still registered: ${cron.registered}" } },
+            { assertEquals(listOf("cancel:switchable"), cron.since(mark)) },
+        )
     }
 
     @Test
@@ -90,8 +103,10 @@ class TaskSchedulerApplyTest {
 
         apply(P7Tasks.scheduled("was-scheduled", cron = null))
 
-        assertThat(cron.registered).isEmpty()
-        assertThat(cron.since(mark)).containsExactly("cancel:was-scheduled")
+        assertAll(
+            { assertTrue(cron.registered.isEmpty()) { "still registered: ${cron.registered}" } },
+            { assertEquals(listOf("cancel:was-scheduled"), cron.since(mark)) },
+        )
     }
 
     /**
@@ -111,11 +126,19 @@ class TaskSchedulerApplyTest {
             P7Tasks.scheduled("arriving", cron = "0 0 * * * ?"),
         )
 
-        assertThat(cron.since(mark))
-            .describedAs("'steady' kept its cron, so nothing about it may appear in the churn")
-            .containsExactlyInAnyOrder("cancel:going", "schedule:arriving:0 0 * * * ?")
-        assertThat(cron.registered).containsExactlyInAnyOrderEntriesOf(
-            mapOf("steady" to "0 */10 * * * ?", "arriving" to "0 0 * * * ?"),
+        assertAll(
+            {
+                assertEquals(
+                    setOf("cancel:going", "schedule:arriving:0 0 * * * ?"),
+                    cron.since(mark).toSet(),
+                ) { "'steady' kept its cron, so nothing about it may appear in the churn" }
+            },
+            {
+                assertEquals(
+                    mapOf("steady" to "0 */10 * * * ?", "arriving" to "0 0 * * * ?"),
+                    cron.registered,
+                )
+            },
         )
     }
 
@@ -126,8 +149,10 @@ class TaskSchedulerApplyTest {
 
         apply(P7Tasks.scheduled("moving", cron = "0 */2 * * * ?"))
 
-        assertThat(cron.since(mark)).containsExactly("cancel:moving", "schedule:moving:0 */2 * * * ?")
-        assertThat(cron.registered).containsExactlyEntriesOf(mapOf("moving" to "0 */2 * * * ?"))
+        assertAll(
+            { assertEquals(listOf("cancel:moving", "schedule:moving:0 */2 * * * ?"), cron.since(mark)) },
+            { assertEquals(mapOf("moving" to "0 */2 * * * ?"), cron.registered) },
+        )
     }
 
     /**
@@ -141,7 +166,7 @@ class TaskSchedulerApplyTest {
         apply(P7Tasks.scheduled("already-live", cron = "0 */10 * * * ?"))
         val before = cron.registered
         // Without this the "unchanged" assertion below would be satisfied by two empty maps.
-        assertThat(before).isNotEmpty()
+        assertTrue(before.isNotEmpty()) { "nothing was registered to begin with, so 'unchanged' would be vacuous" }
         cron.rejectCron = { it == "not a cron" }
 
         val report = Trig.apply(
@@ -153,14 +178,21 @@ class TaskSchedulerApplyTest {
             ),
         )
 
-        assertThat(report).isNotNull()
-        assertThat(report!!.errors).isNotEmpty()
-        assertThat(report.errors.map { it.message }.joinToString("\n"))
-            .describedAs("the report has to say which task's cron is unusable")
-            .contains("broken")
-        assertThat(cron.registered)
-            .describedAs("nothing changes: neither the new sibling nor the broken task")
-            .containsExactlyInAnyOrderEntriesOf(before)
+        assertNotNull(report) { "a batch carrying an unparseable cron was accepted" }
+        assertAll(
+            { assertTrue(report!!.errors.isNotEmpty()) { "the report carries no errors" } },
+            {
+                val messages = report!!.errors.map { it.message }.joinToString("\n")
+                assertTrue("broken" in messages) {
+                    "the report has to say which task's cron is unusable; messages were: $messages"
+                }
+            },
+            {
+                assertEquals(before, cron.registered) {
+                    "nothing changes: neither the new sibling nor the broken task"
+                }
+            },
+        )
     }
 
     /**
@@ -183,10 +215,14 @@ class TaskSchedulerApplyTest {
             P7Tasks.scheduled("broken", cron = "not a cron"),
         )
 
-        assertThat(report).isNotNull()
-        assertThat(cron.registered)
-            .describedAs("'steady' was cancelled to make way for its new cron and must be put back")
-            .containsExactlyEntriesOf(mapOf("steady" to "0 */10 * * * ?"))
+        assertAll(
+            { assertNotNull(report) { "a batch carrying an unparseable cron was accepted" } },
+            {
+                assertEquals(mapOf("steady" to "0 */10 * * * ?"), cron.registered) {
+                    "'steady' was cancelled to make way for its new cron and must be put back"
+                }
+            },
+        )
     }
 
     /**
@@ -202,7 +238,9 @@ class TaskSchedulerApplyTest {
             P7Tasks.scheduled("good-b", cron = "0 */5 * * * ?"),
         )
 
-        assertThat(report).isNull()
-        assertThat(cron.registered).containsOnlyKeys("good-a", "good-b")
+        assertAll(
+            { assertNull(report) { "a batch of parseable crons was rejected: ${report?.errors}" } },
+            { assertEquals(setOf("good-a", "good-b"), cron.registered.keys) },
+        )
     }
 }

@@ -4,8 +4,10 @@ import infra.etl.TaskFiles.loadOne
 import infra.etl.task.MaterializeStep
 import infra.etl.task.SqlStep
 import java.nio.file.Path
-import org.assertj.core.api.Assertions.assertThat
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertAll
 import org.junit.jupiter.api.io.TempDir
 
 /**
@@ -72,9 +74,9 @@ class TaskFileLoaderSqlFidelityTest {
         val task = loadOne(root, yaml).single()
         val step = task.phases.single().steps.first() as MaterializeStep
 
-        assertThat(step.sql)
-            .describedAs("SQL is read from the file, never through a config layer that expands it")
-            .isEqualTo(expectedSql)
+        assertEquals(expectedSql, step.sql) {
+            "SQL is read from the file, never through a config layer that expands it"
+        }
     }
 
     /**
@@ -87,7 +89,7 @@ class TaskFileLoaderSqlFidelityTest {
         val task = loadOne(root, yaml).single()
         val step = task.phases.single().steps.last() as SqlStep
 
-        assertThat(step.statements).containsExactly(expectedStatement)
+        assertEquals(listOf(expectedStatement), step.statements)
     }
 
     /**
@@ -102,9 +104,18 @@ class TaskFileLoaderSqlFidelityTest {
         val task = loadOne(root, yaml).single()
         val step = task.phases.single().steps.first() as MaterializeStep
 
-        assertThat(step.sql).contains("\${SITE}")
-        assertThat(step.sql.lines())
-            .describedAs("the block scalar's five lines, neither folded into one nor re-indented")
-            .hasSize(5)
+        assertAll(
+            {
+                assertTrue("\${SITE}" in step.sql) {
+                    "the property placeholder was expanded; SQL was: ${step.sql}"
+                }
+            },
+            {
+                assertEquals(5, step.sql.lines().size) {
+                    "the block scalar's five lines, neither folded into one nor re-indented; " +
+                        "was ${step.sql.lines()}"
+                }
+            },
+        )
     }
 }

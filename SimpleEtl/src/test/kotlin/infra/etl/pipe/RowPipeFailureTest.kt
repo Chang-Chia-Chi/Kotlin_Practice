@@ -10,11 +10,14 @@ import infra.etl.pipe.JdbcSource
 import infra.etl.pipe.PipeResult
 import infra.etl.pipe.RowPipe
 import infra.etl.pipe.RowTransform
-import org.assertj.core.api.Assertions.assertThat
-import org.assertj.core.api.Assertions.catchThrowable
 import org.jdbi.v3.core.Jdbi
 import org.junit.jupiter.api.AfterEach
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertInstanceOf
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertAll
+import org.junit.jupiter.api.assertThrows
 
 /**
  * Done-when item 5: the source stream and every connection are closed when the target throws
@@ -59,18 +62,23 @@ class RowPipeFailureTest {
             failOnChunk = 2,
         )
 
-        val thrown = catchThrowable {
+        val thrown = assertThrows<TargetFailure> {
             RowPipe(source(), probe, Pipe.STEP, chunkSize = 50).run()
         }
 
-        assertThat(thrown).isInstanceOf(TargetFailure::class.java)
-            .hasMessageContaining(Pipe.STEP)
+        assertTrue(thrown.message?.contains(Pipe.STEP) == true) { "message was: ${thrown.message}" }
         recording.assertStreamed("target throws mid-chunk")
-        assertThat(probe.closes).describedAs("the target is closed on the failure path too").isEqualTo(1)
-        assertThat(probe.chunkSizes).describedAs("the pipe stopped at the failing chunk").containsExactly(50, 50)
-        // The 50 rows of chunk 1 and the 25 the failing chunk flushed before it threw. Spec 12:
-        // a flushed row survives, and a chunk left part-appended does not.
-        assertThat(Pipe.rowCount(targetDb, "wip_stg")).isEqualTo(75L)
+        assertAll(
+            { assertEquals(1, probe.closes) { "the target is closed on the failure path too" } },
+            {
+                assertEquals(listOf(50, 50), probe.chunkSizes) {
+                    "the pipe stopped at the failing chunk"
+                }
+            },
+            // The 50 rows of chunk 1 and the 25 the failing chunk flushed before it threw. Spec 12:
+            // a flushed row survives, and a chunk left part-appended does not.
+            { assertEquals(75L, Pipe.rowCount(targetDb, "wip_stg")) },
+        )
     }
 
     /**
@@ -83,7 +91,11 @@ class RowPipeFailureTest {
     fun `a failed pipe leaves the source usable for the next pipe`() {
         Pipe.createSourceTable(sourceDb, "wip_src", rows = 175)
         val failing = ProbeWriter(failOnChunk = 2)
-        catchThrowable { RowPipe(source(), failing, Pipe.STEP, chunkSize = 50).run() }
+        // Swallowed, not asserted: this test's subject is the SECOND pipe. The original used
+        // AssertJ's catchThrowable here for the same reason. Asserting the throw would be a
+        // stronger test than the one this phase inherited, and a migration may not change what
+        // an earlier phase's test accepts.
+        runCatching { RowPipe(source(), failing, Pipe.STEP, chunkSize = 50).run() }
 
         val result = RowPipe(
             source(),
@@ -92,9 +104,15 @@ class RowPipeFailureTest {
             chunkSize = 50,
         ).run()
 
-        assertThat(result).isEqualTo(PipeResult(175L, 175L))
-        assertThat(Pipe.rowCount(targetDb, "wip_retry")).isEqualTo(175L)
-        assertThat(recording.connectionsOpened.get()).describedAs("one connection per run, two runs").isEqualTo(2)
+        assertAll(
+            { assertEquals(PipeResult(175L, 175L), result) },
+            { assertEquals(175L, Pipe.rowCount(targetDb, "wip_retry")) },
+            {
+                assertEquals(2, recording.connectionsOpened.get()) {
+                    "one connection per run, two runs"
+                }
+            },
+        )
         recording.assertStreamed("failed run then a good one")
     }
 
@@ -110,15 +128,23 @@ class RowPipeFailureTest {
         Pipe.createSourceTable(sourceDb, "wip_src", rows = 175)
         val probe = ProbeWriter(failOnChunk = 2, failOnClose = true)
 
-        val thrown = catchThrowable { RowPipe(source(), probe, Pipe.STEP, chunkSize = 50).run() }
+        val thrown = assertThrows<TargetFailure> { RowPipe(source(), probe, Pipe.STEP, chunkSize = 50).run() }
 
-        assertThat(thrown).isInstanceOf(TargetFailure::class.java)
-            .describedAs("the caller sees the write failure, not the close failure")
-            .hasMessageContaining("chunk 2")
-        assertThat(thrown.suppressed).hasSize(1)
-        assertThat(thrown.suppressed[0]).isInstanceOf(TargetFailure::class.java)
-            .hasMessageContaining("close")
-        assertThat(probe.closes).isEqualTo(1)
+        assertAll(
+            {
+                assertTrue(thrown.message?.contains("chunk 2") == true) {
+                    "the caller sees the write failure, not the close failure; message was: ${thrown.message}"
+                }
+            },
+            { assertEquals(1, thrown.suppressed.size) { "suppressed were ${thrown.suppressed.toList()}" } },
+            { assertInstanceOf(TargetFailure::class.java, thrown.suppressed[0]) },
+            {
+                assertTrue(thrown.suppressed[0].message?.contains("close") == true) {
+                    "the suppressed failure must be the close one; message was: ${thrown.suppressed[0].message}"
+                }
+            },
+            { assertEquals(1, probe.closes) },
+        )
         recording.assertStreamed("target throws from write and from close")
     }
 
@@ -133,10 +159,11 @@ class RowPipeFailureTest {
         Pipe.createSourceTable(sourceDb, "wip_src", rows = 10)
         val probe = ProbeWriter(failOnOpen = true)
 
-        val thrown = catchThrowable { RowPipe(source(), probe, Pipe.STEP, chunkSize = 4).run() }
+        assertThrows<TargetFailure> { RowPipe(source(), probe, Pipe.STEP, chunkSize = 4).run() }
 
-        assertThat(thrown).isInstanceOf(TargetFailure::class.java)
-        assertThat(probe.chunkSizes).describedAs("no chunk is written after a failed open").isEmpty()
+        assertTrue(probe.chunkSizes.isEmpty()) {
+            "no chunk is written after a failed open; chunks were ${probe.chunkSizes}"
+        }
         recording.assertStreamed("target throws at open")
     }
 
@@ -149,7 +176,7 @@ class RowPipeFailureTest {
         Pipe.createSourceTable(sourceDb, "wip_src", rows = 175)
         val probe = ProbeWriter(DuckDbTableWriter(targetDb, "wip_stg", CreateTable.AUTO, Pipe.STEP))
 
-        val thrown = catchThrowable {
+        val thrown = assertThrows<IllegalStateException> {
             RowPipe(
                 source(),
                 probe,
@@ -162,9 +189,8 @@ class RowPipeFailureTest {
             ).run()
         }
 
-        assertThat(thrown).isInstanceOf(IllegalStateException::class.java)
-            .hasMessageContaining("lot 60")
+        assertTrue(thrown.message?.contains("lot 60") == true) { "message was: ${thrown.message}" }
         recording.assertStreamed("transform throws")
-        assertThat(probe.closes).isEqualTo(1)
+        assertEquals(1, probe.closes)
     }
 }

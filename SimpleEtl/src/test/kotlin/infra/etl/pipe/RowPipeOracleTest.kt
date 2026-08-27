@@ -12,11 +12,14 @@ import infra.etl.pipe.RowPipe
 import infra.etl.pipe.RowTransform
 import java.sql.Connection
 import java.sql.DriverManager
-import org.assertj.core.api.Assertions.assertThat
 import org.jdbi.v3.core.Jdbi
 import org.junit.jupiter.api.AfterAll
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeAll
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertAll
 import org.testcontainers.junit.jupiter.Container
 import org.testcontainers.junit.jupiter.Testcontainers
 import org.testcontainers.oracle.OracleContainer
@@ -91,7 +94,7 @@ class RowPipeOracleTest {
     @Test
     fun `the source statement's fetch size is the chunk size, not the Oracle default`() {
         val driverDefault = connection.prepareStatement("select 1 from dual").use { it.fetchSize }
-        assertThat(driverDefault).describedAs("ojdbc's own default fetch size").isEqualTo(10)
+        assertEquals(10, driverDefault) { "ojdbc's own default fetch size" }
 
         Pipe.openDuck().use { duck ->
             RowPipe(
@@ -101,13 +104,22 @@ class RowPipeOracleTest {
                 chunkSize = 2500,
             ).run()
 
-            assertThat(Pipe.rowCount(duck, "wip_stg")).isEqualTo(1000L)
+            assertEquals(1000L, Pipe.rowCount(duck, "wip_stg"))
         }
 
-        assertThat(recording.fetchSizesAtExecute)
-            .describedAs("fetch size the source statement reported when it was executed")
-            .containsOnly(2500)
-        assertThat(recording.fetchSizesAtExecute).doesNotContain(driverDefault)
+        assertAll(
+            {
+                assertEquals(setOf(2500), recording.fetchSizesAtExecute.toSet()) {
+                    "fetch size the source statement reported when it was executed; " +
+                        "was ${recording.fetchSizesAtExecute}"
+                }
+            },
+            {
+                assertFalse(driverDefault in recording.fetchSizesAtExecute) {
+                    "the driver default $driverDefault was used; was ${recording.fetchSizesAtExecute}"
+                }
+            },
+        )
         recording.assertStreamed("fetch size")
     }
 
@@ -138,19 +150,23 @@ class RowPipeOracleTest {
         val small = streamed(rows = 100_000, chunkSize = 10_000)
         val large = streamed(rows = 1_000_000, chunkSize = 10_000)
 
-        assertThat(small.result).isEqualTo(PipeResult(100_000L, 100_000L))
-        assertThat(large.result).isEqualTo(PipeResult(1_000_000L, 1_000_000L))
-        assertThat(large.rowsInTarget).isEqualTo(1_000_000L)
-        assertThat(large.largestChunk).describedAs("no chunk exceeded the chunk size").isEqualTo(10_000)
-        assertThat(small.liveHeapAtLastRow).describedAs("the baseline reading must be a real one").isPositive()
+        assertAll(
+            { assertEquals(PipeResult(100_000L, 100_000L), small.result) },
+            { assertEquals(PipeResult(1_000_000L, 1_000_000L), large.result) },
+            { assertEquals(1_000_000L, large.rowsInTarget) },
+            { assertEquals(10_000, large.largestChunk) { "no chunk exceeded the chunk size" } },
+            {
+                assertTrue(small.liveHeapAtLastRow > 0L) {
+                    "the baseline reading must be a real one; was ${small.liveHeapAtLastRow}"
+                }
+            },
+        )
 
         val growth = large.liveHeapAtLastRow - small.liveHeapAtLastRow
-        assertThat(growth)
-            .describedAs(
-                "live heap at the last row grew by %d bytes for 900000 more rows (100000: %d, 1000000: %d)",
-                growth, small.liveHeapAtLastRow, large.liveHeapAtLastRow,
-            )
-            .isLessThan(64L * 1024 * 1024)
+        assertTrue(growth < 64L * 1024 * 1024) {
+            "live heap at the last row grew by $growth bytes for 900000 more rows " +
+                "(100000: ${small.liveHeapAtLastRow}, 1000000: ${large.liveHeapAtLastRow})"
+        }
     }
 
     /**
@@ -205,19 +221,27 @@ class RowPipeOracleTest {
                     chunkSize = 50,
                 ).run()
 
-                assertThat(first.rowsWritten).isEqualTo(2L)
-                assertThat(second.rowsWritten)
-                    .describedAs("the second pipe reads the transaction's snapshot, not the table")
-                    .isEqualTo(2L)
-                assertThat(Pipe.rowCount(generation, "wip")).isEqualTo(2L)
-                assertThat(Pipe.rowCount(generation, "lot")).isEqualTo(2L)
-                assertThat(count(connection, "gen_src"))
-                    .describedAs("outside the shared transaction the third row is committed and visible")
-                    .isEqualTo(3L)
-                assertThat(handle.isClosed).describedAs("the pipe borrows the Handle").isFalse()
-                assertThat(handle.isInTransaction)
-                    .describedAs("the pipe neither commits nor rolls back a borrowed transaction")
-                    .isTrue()
+                assertAll(
+                    { assertEquals(2L, first.rowsWritten) },
+                    {
+                        assertEquals(2L, second.rowsWritten) {
+                            "the second pipe reads the transaction's snapshot, not the table"
+                        }
+                    },
+                    { assertEquals(2L, Pipe.rowCount(generation, "wip")) },
+                    { assertEquals(2L, Pipe.rowCount(generation, "lot")) },
+                    {
+                        assertEquals(3L, count(connection, "gen_src")) {
+                            "outside the shared transaction the third row is committed and visible"
+                        }
+                    },
+                    { assertFalse(handle.isClosed) { "the pipe borrows the Handle and must not close it" } },
+                    {
+                        assertTrue(handle.isInTransaction) {
+                            "the pipe neither commits nor rolls back a borrowed transaction"
+                        }
+                    },
+                )
             } finally {
                 handle.rollback()
                 handle.close()
@@ -249,11 +273,15 @@ class RowPipeOracleTest {
             },
         ).run()
 
-        assertThat(result).isEqualTo(PipeResult(175L, 175L))
-        assertThat(visibleAtRow)
-            .describedAs("rows committed to Oracle and visible to another session while row k was in the transform")
-            .isEqualTo(List(175) { k -> (k / 50) * 50L })
-        assertThat(count(connection, "wip_tgt")).isEqualTo(175L)
+        assertAll(
+            { assertEquals(PipeResult(175L, 175L), result) },
+            {
+                assertEquals(List(175) { k -> (k / 50) * 50L }, visibleAtRow) {
+                    "rows committed to Oracle and visible to another session while row k was in the transform"
+                }
+            },
+            { assertEquals(175L, count(connection, "wip_tgt")) },
+        )
     }
 
     private class Streamed(

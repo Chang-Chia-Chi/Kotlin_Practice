@@ -8,10 +8,11 @@ import infra.etl.pipe.PipeResult
 import infra.etl.pipe.RowPipe
 import infra.etl.pipe.RowTransform
 import java.sql.Connection
-import org.assertj.core.api.Assertions.assertThat
 import org.jdbi.v3.core.Jdbi
 import org.junit.jupiter.api.AfterEach
+import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertAll
 
 /**
  * Done-when item 3: the commit happens once per chunk, verified by counting rows visible from a
@@ -70,14 +71,20 @@ class RowPipeCommitTest {
             },
         ).run()
 
-        assertThat(result).isEqualTo(PipeResult(175L, 175L))
-        assertThat(visibleAtRow).hasSize(175)
-        assertThat(visibleAtRow)
-            .describedAs("rows visible to the second connection while row k was in the transform")
-            .isEqualTo(List(175) { k -> (k / 50) * 50L })
-        assertThat(Pipe.rowCount(observer, "wip_stg"))
-            .describedAs("the final chunk is visible once the run returns")
-            .isEqualTo(175L)
+        assertAll(
+            { assertEquals(PipeResult(175L, 175L), result) },
+            { assertEquals(175, visibleAtRow.size) { "the transform saw ${visibleAtRow.size} rows" } },
+            {
+                assertEquals(List(175) { k -> (k / 50) * 50L }, visibleAtRow) {
+                    "rows visible to the second connection while row k was in the transform"
+                }
+            },
+            {
+                assertEquals(175L, Pipe.rowCount(observer, "wip_stg")) {
+                    "the final chunk is visible once the run returns"
+                }
+            },
+        )
     }
 
     /**
@@ -102,9 +109,14 @@ class RowPipeCommitTest {
             },
         ).run()
 
-        assertThat(visibleAtRow).hasSize(175)
-        assertThat(visibleAtRow).describedAs("one chunk, so nothing is visible until it is written")
-            .containsOnly(0L)
-        assertThat(Pipe.rowCount(observer, "wip_stg")).isEqualTo(175L)
+        assertAll(
+            { assertEquals(175, visibleAtRow.size) { "the transform saw ${visibleAtRow.size} rows" } },
+            {
+                assertEquals(setOf(0L), visibleAtRow.toSet()) {
+                    "one chunk, so nothing is visible until it is written; readings were ${visibleAtRow.distinct()}"
+                }
+            },
+            { assertEquals(175L, Pipe.rowCount(observer, "wip_stg")) },
+        )
     }
 }

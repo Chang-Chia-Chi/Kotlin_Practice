@@ -11,9 +11,15 @@ import infra.etl.task.TaskHook
 import infra.etl.task.TaskHooks
 import java.nio.file.Files
 import java.nio.file.Path
-import org.assertj.core.api.Assertions.assertThat
-import org.assertj.core.api.Assertions.assertThatThrownBy
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertInstanceOf
+import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertSame
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertAll
+import org.junit.jupiter.api.assertThrows
 import org.junit.jupiter.api.io.TempDir
 
 /**
@@ -79,12 +85,22 @@ class TaskHookTest {
                 Etl.withHooks(okTask(), onSuccess = "notify", onFailure = "page"),
             )
 
-            assertThat(trace.entries)
-                .containsExactlyElementsOf(successPrefix + listOf("hook(notify)", "onTaskEnd(wip-hooks, SUCCEEDED)"))
-            assertThat(notify.runs).describedAs("once, not once per phase").isEqualTo(1)
-            assertThat(page.runs).describedAs("a successful run has nothing for onFailure to report").isZero()
-            assertThat(notify.contexts.single().runId).isEqualTo(outcome.runId)
-            assertThat(notify.contexts.single().taskName).isEqualTo("wip-hooks")
+            assertAll(
+                {
+                    assertEquals(
+                        successPrefix + listOf("hook(notify)", "onTaskEnd(wip-hooks, SUCCEEDED)"),
+                        trace.entries,
+                    )
+                },
+                { assertEquals(1, notify.runs) { "once, not once per phase" } },
+                {
+                    assertEquals(0, page.runs) {
+                        "a successful run has nothing for onFailure to report"
+                    }
+                },
+                { assertEquals(outcome.runId, notify.contexts.single().runId) },
+                { assertEquals("wip-hooks", notify.contexts.single().taskName) },
+            )
         }
     }
 
@@ -106,14 +122,21 @@ class TaskHookTest {
 
             val outcome = harness.run(Etl.withHooks(okTask(), onSuccess = "notify", onFailure = "page"))
 
-            assertThat(outcome.outcome).isEqualTo(Outcome.FAILED)
-            assertThat(outcome.failure)
-                .describedAs("the run carries the hook's own throwable, unwrapped and unreplaced")
-                .isSameAs(boom)
-            assertThat(trace.entries).containsExactlyElementsOf(
-                successPrefix + listOf("hook(notify)", "hook(page)", "onTaskEnd(wip-hooks, FAILED)"),
+            assertAll(
+                { assertEquals(Outcome.FAILED, outcome.outcome) },
+                {
+                    assertSame(boom, outcome.failure) {
+                        "the run carries the hook's own throwable, unwrapped and unreplaced"
+                    }
+                },
+                {
+                    assertEquals(
+                        successPrefix + listOf("hook(notify)", "hook(page)", "onTaskEnd(wip-hooks, FAILED)"),
+                        trace.entries,
+                    )
+                },
+                { assertEquals(1, page.runs) },
             )
-            assertThat(page.runs).isEqualTo(1)
         }
     }
 
@@ -136,15 +159,24 @@ class TaskHookTest {
 
             val outcome = harness.run(Etl.withHooks(okTask(), onSuccess = "notify", onFailure = "page"))
 
-            assertThat(outcome.outcome).isEqualTo(Outcome.FAILED)
-            assertThat(outcome.failure)
-                .describedAs("the onFailure throwable never becomes the run's failure")
-                .isSameAs(boom)
-            assertThat(page.runs)
-                .describedAs("swallowed means called and its exception dropped, not never called")
-                .isEqualTo(1)
-            assertThat(trace.entries).containsExactlyElementsOf(
-                successPrefix + listOf("hook(notify)", "hook(page)", "onTaskEnd(wip-hooks, FAILED)"),
+            assertAll(
+                { assertEquals(Outcome.FAILED, outcome.outcome) },
+                {
+                    assertSame(boom, outcome.failure) {
+                        "the onFailure throwable never becomes the run's failure"
+                    }
+                },
+                {
+                    assertEquals(1, page.runs) {
+                        "swallowed means called and its exception dropped, not never called"
+                    }
+                },
+                {
+                    assertEquals(
+                        successPrefix + listOf("hook(notify)", "hook(page)", "onTaskEnd(wip-hooks, FAILED)"),
+                        trace.entries,
+                    )
+                },
             )
         }
     }
@@ -167,13 +199,22 @@ class TaskHookTest {
 
             val outcome = harness.run(Etl.withHooks(okTask(), onSuccess = "missing-hook", onFailure = "page"))
 
-            assertThat(outcome.outcome).isEqualTo(Outcome.FAILED)
-            assertThat(outcome.failure?.message)
-                .describedAs("the diagnostic names the task and the hook an operator has to go and register")
-                .contains("wip-hooks", "missing-hook")
-            assertThat(page.runs).isEqualTo(1)
-            assertThat(trace.entries).containsExactlyElementsOf(
-                successPrefix + listOf("hook(page)", "onTaskEnd(wip-hooks, FAILED)"),
+            assertAll(
+                { assertEquals(Outcome.FAILED, outcome.outcome) },
+                {
+                    val message = outcome.failure?.message.orEmpty()
+                    assertTrue(listOf("wip-hooks", "missing-hook").all { it in message }) {
+                        "the diagnostic names the task and the hook an operator has to go and register; " +
+                            "message was: ${outcome.failure?.message}"
+                    }
+                },
+                { assertEquals(1, page.runs) },
+                {
+                    assertEquals(
+                        successPrefix + listOf("hook(page)", "onTaskEnd(wip-hooks, FAILED)"),
+                        trace.entries,
+                    )
+                },
             )
         }
     }
@@ -190,8 +231,7 @@ class TaskHookTest {
 
             harness.runExpectingSuccess(Etl.withHooks(okTask(), onFailure = "missing-hook"))
 
-            assertThat(trace.entries)
-                .containsExactlyElementsOf(successPrefix + listOf("onTaskEnd(wip-hooks, SUCCEEDED)"))
+            assertEquals(successPrefix + listOf("onTaskEnd(wip-hooks, SUCCEEDED)"), trace.entries)
         }
     }
 
@@ -214,17 +254,24 @@ class TaskHookTest {
                 ),
             )
 
-            assertThat(outcome.outcome).isEqualTo(Outcome.FAILED)
+            assertEquals(Outcome.FAILED, outcome.outcome)
             val reported = generateSequence(outcome.failure) { if (it.cause === it) null else it.cause }
                 .take(16)
                 .joinToString(" ") { it.message.orEmpty() }
-            assertThat(reported)
-                .describedAs("the step's own failure is what the run carries")
-                .contains("this is not sql")
-            assertThat(reported)
-                .describedAs("the missing hook did not overwrite the failure it was there to report")
-                .doesNotContain("missing-hook")
-            assertThat(trace.entries.last()).isEqualTo("onTaskEnd(wip-hooks, FAILED)")
+            assertAll(
+                {
+                    assertTrue("this is not sql" in reported) {
+                        "the step's own failure is what the run carries; reported was: $reported"
+                    }
+                },
+                {
+                    assertFalse("missing-hook" in reported) {
+                        "the missing hook did not overwrite the failure it was there to report; " +
+                            "reported was: $reported"
+                    }
+                },
+                { assertEquals("onTaskEnd(wip-hooks, FAILED)", trace.entries.last()) },
+            )
         }
     }
 
@@ -247,20 +294,22 @@ class TaskHookTest {
             val loader = TaskFileLoader(hooks = harness.hooks.names)
 
             val accepted = loader.load(taskFileNaming("notify-downstream", "accepted"))
-            assertThat(accepted)
-                .describedAs("a registered name is a valid task file")
-                .isInstanceOf(LoadResult.Loaded::class.java)
+            assertInstanceOf(LoadResult.Loaded::class.java, accepted) {
+                "a registered name is a valid task file"
+            }
             harness.runExpectingSuccess((accepted as LoadResult.Loaded).tasks.single())
-            assertThat(notify.runs)
-                .describedAs("the name the loader accepted resolved to the hook the engine ran")
-                .isEqualTo(1)
+            assertEquals(1, notify.runs) {
+                "the name the loader accepted resolved to the hook the engine ran"
+            }
 
             val rejected = loader.load(taskFileNaming("not-registered", "rejected"))
-            assertThat(rejected)
-                .describedAs("a typo is caught at boot, not at the end of a 30 minute run")
-                .isInstanceOf(LoadResult.Invalid::class.java)
-            assertThat((rejected as LoadResult.Invalid).report.errors.joinToString(" ") { it.message })
-                .contains("not-registered")
+            assertInstanceOf(LoadResult.Invalid::class.java, rejected) {
+                "a typo is caught at boot, not at the end of a 30 minute run"
+            }
+            val messages = (rejected as LoadResult.Invalid).report.errors.joinToString(" ") { it.message }
+            assertTrue("not-registered" in messages) {
+                "the report does not name the unregistered hook; messages were: $messages"
+            }
         }
     }
 
@@ -293,18 +342,24 @@ class TaskHookTest {
                 onFailure = "page",
             )
 
-            assertThatThrownBy { harness.run(definition) }
-                .describedAs("P5's contract: a step that is not built yet propagates its Error")
-                .isInstanceOf(NotImplementedError::class.java)
+            assertThrows<NotImplementedError>(
+                { "P5's contract: a step that is not built yet propagates its Error" },
+            ) { harness.run(definition) }
 
-            assertThat(trace.entries).isNotEmpty()
-            assertThat(trace.entries.first()).isEqualTo("onTaskStart(wip-cache-copy)")
-            assertThat(trace.entries.last())
-                .describedAs("onTaskEnd comes from a finally, so no run starts without ending")
-                .isEqualTo("onTaskEnd(wip-cache-copy, FAILED)")
-            assertThat(trace.entries)
-                .describedAs("no host code runs while an Error unwinds")
-                .noneMatch { it.startsWith("hook(") }
+            assertAll(
+                { assertTrue(trace.entries.isNotEmpty()) { "the listener saw nothing at all" } },
+                { assertEquals("onTaskStart(wip-cache-copy)", trace.entries.first()) },
+                {
+                    assertEquals("onTaskEnd(wip-cache-copy, FAILED)", trace.entries.last()) {
+                        "onTaskEnd comes from a finally, so no run starts without ending"
+                    }
+                },
+                {
+                    assertTrue(trace.entries.none { it.startsWith("hook(") }) {
+                        "no host code runs while an Error unwinds; the trace was ${trace.entries}"
+                    }
+                },
+            )
         }
     }
 
@@ -320,13 +375,14 @@ class TaskHookTest {
         val first = TaskHook { }
         hooks.register("notify", first)
 
-        assertThatThrownBy { hooks.register("notify", TaskHook { }) }
-            .isInstanceOf(IllegalArgumentException::class.java)
-            .hasMessageContaining("notify")
+        val rejected = assertThrows<IllegalArgumentException> { hooks.register("notify", TaskHook { }) }
+        assertTrue(rejected.message?.contains("notify") == true) { "message was: ${rejected.message}" }
 
-        assertThat(hooks.names).describedAs("what TaskFileLoader validates against").containsExactly("notify")
-        assertThat(hooks["notify"]).describedAs("the first registration stands").isSameAs(first)
-        assertThat(hooks["absent"]).isNull()
+        assertAll(
+            { assertEquals(setOf("notify"), hooks.names) { "what TaskFileLoader validates against" } },
+            { assertSame(first, hooks["notify"]) { "the first registration stands" } },
+            { assertNull(hooks["absent"]) { "an unregistered name resolved to ${hooks["absent"]}" } },
+        )
     }
 
     /**

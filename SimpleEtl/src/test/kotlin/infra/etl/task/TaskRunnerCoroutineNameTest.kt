@@ -8,9 +8,14 @@ import java.nio.file.Path
 import kotlin.coroutines.ContinuationInterceptor
 import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.Dispatchers
-import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.AfterEach
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertInstanceOf
+import org.junit.jupiter.api.Assertions.assertNotNull
+import org.junit.jupiter.api.Assertions.assertNotSame
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertAll
 import org.junit.jupiter.api.io.TempDir
 
 /**
@@ -58,8 +63,10 @@ class TaskRunnerCoroutineNameTest {
     fun theCoroutineNameHandedIntoTheRunBodyIsTheTaskName() {
         // Two tasks, not one: a runner handing over a constant, or the wrong task's name, passes
         // a single-task assertion and fails this one.
-        assertThat(nameIn("wip-summary")).isEqualTo("wip-summary")
-        assertThat(nameIn("lot-rollup")).isEqualTo("lot-rollup")
+        assertAll(
+            { assertEquals("wip-summary", nameIn("wip-summary")) },
+            { assertEquals("lot-rollup", nameIn("lot-rollup")) },
+        )
     }
 
     /**
@@ -72,13 +79,23 @@ class TaskRunnerCoroutineNameTest {
         val first = world.runner.context("wip-summary")[ContinuationInterceptor]
         val second = world.runner.context("lot-rollup")[ContinuationInterceptor]
 
-        assertThat(first)
-            .describedAs("a bare Dispatchers.IO does not serialise per task (spec 8.3)")
-            .isNotNull()
-            .isNotSameAs(Dispatchers.IO)
-        assertThat(second)
-            .describedAs("one view per task, or two tasks could not run at once (spec 8.4)")
-            .isNotSameAs(first)
+        assertAll(
+            {
+                assertNotNull(first) {
+                    "a bare Dispatchers.IO does not serialise per task (spec 8.3); there was no interceptor at all"
+                }
+            },
+            {
+                assertNotSame(Dispatchers.IO, first) {
+                    "a bare Dispatchers.IO does not serialise per task (spec 8.3); was $first"
+                }
+            },
+            {
+                assertNotSame(first, second) {
+                    "one view per task, or two tasks could not run at once (spec 8.4); both were $first"
+                }
+            },
+        )
     }
 
     /**
@@ -92,18 +109,29 @@ class TaskRunnerCoroutineNameTest {
         probe.parking = false
         val definition = P7Tasks.parking("wip-summary", "probe_ds")
 
-        assertThat(nameIn(definition.name)).isEqualTo(definition.name)
-        assertThat(world.runner.submit(definition, TriggerSource.API, "ops"))
-            .isInstanceOf(TriggerResult.Accepted::class.java)
+        assertEquals(definition.name, nameIn(definition.name))
+        assertInstanceOf(
+            TriggerResult.Accepted::class.java,
+            world.runner.submit(definition, TriggerSource.API, "ops"),
+        )
 
         val worker = probe.awaitEntry()
-        assertThat(worker).isNotSameAs(Thread.currentThread())
-        // "not Dispatchers.IO" and "not the same object" are both satisfied by a per-task
-        // newSingleThreadContext, which spec 8.3 rejects by name for keeping an idle thread alive
-        // per task. The pool's thread-name *prefix* is what separates them, and unlike the
-        // `@taskName#1` suffix it does not depend on `-ea`.
-        assertThat(worker.name)
-            .describedAs("a limited view shares the IO pool rather than owning a thread (spec 8.3)")
-            .startsWith("DefaultDispatcher-worker")
+        assertAll(
+            {
+                assertNotSame(Thread.currentThread(), worker) {
+                    "the run body executed on the triggering thread: $worker"
+                }
+            },
+            // "not Dispatchers.IO" and "not the same object" are both satisfied by a per-task
+            // newSingleThreadContext, which spec 8.3 rejects by name for keeping an idle thread alive
+            // per task. The pool's thread-name *prefix* is what separates them, and unlike the
+            // `@taskName#1` suffix it does not depend on `-ea`.
+            {
+                assertTrue(worker.name.startsWith("DefaultDispatcher-worker")) {
+                    "a limited view shares the IO pool rather than owning a thread (spec 8.3); " +
+                        "the worker was named ${worker.name}"
+                }
+            },
+        )
     }
 }

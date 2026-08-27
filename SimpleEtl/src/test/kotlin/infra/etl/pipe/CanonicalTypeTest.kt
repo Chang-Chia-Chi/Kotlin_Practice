@@ -3,9 +3,12 @@ package infra.etl.pipe
 import infra.etl.Duck
 import infra.etl.pipe.CanonicalType
 import java.sql.Types
-import org.assertj.core.api.Assertions.assertThat
-import org.assertj.core.api.Assertions.catchThrowable
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertAll
+import org.junit.jupiter.api.assertThrows
 import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.Arguments
 import org.junit.jupiter.params.provider.EnumSource
@@ -82,16 +85,22 @@ class CanonicalTypeTest {
     @ParameterizedTest(name = "{1} ({0}) -> {2}")
     @MethodSource("supported")
     fun `fromJdbc maps every type in spec 4 3`(sqlType: Int, typeName: String, expected: CanonicalType) {
-        assertThat(CanonicalType.fromJdbc(sqlType, typeName)).isEqualTo(expected)
+        assertEquals(expected, CanonicalType.fromJdbc(sqlType, typeName))
     }
 
     @ParameterizedTest(name = "{1} ({0}) is an error")
     @MethodSource("unsupported")
     fun `fromJdbc rejects anything else and names the type`(sqlType: Int, typeName: String) {
-        val thrown = catchThrowable { CanonicalType.fromJdbc(sqlType, typeName) }
+        val thrown = assertThrows<Throwable> { CanonicalType.fromJdbc(sqlType, typeName) }
 
-        assertThat(thrown).isNotNull().isNotInstanceOf(ClassCastException::class.java)
-        assertThat(thrown.message!!.lowercase()).contains(typeName.lowercase())
+        assertAll(
+            { assertFalse(thrown is ClassCastException) { "expected a diagnostic error, was $thrown" } },
+            {
+                assertTrue(thrown.message!!.lowercase().contains(typeName.lowercase())) {
+                    "the error did not name $typeName; message was: ${thrown.message}"
+                }
+            },
+        )
     }
 
     /**
@@ -104,11 +113,24 @@ class CanonicalTypeTest {
     fun `duckDbType is valid DDL and round-trips back to the same canonical type`(type: CanonicalType) {
         val columns = Duck.read("select CAST(NULL AS ${type.duckDbType}) as c", "ddl-round-trip").columns
 
-        assertThat(columns.single().type).isEqualTo(type)
+        assertEquals(type, columns.single().type)
     }
 
     @Test
     fun `every canonical type declares a duckDb type`() {
-        assertThat(CanonicalType.entries.map { it.duckDbType }).doesNotContainNull().noneMatch { it.isBlank() }
+        assertAll(
+            {
+                assertTrue(CanonicalType.entries.mapNotNull { it.duckDbType }.size == CanonicalType.entries.size) {
+                    "a canonical type declared no duckDb type: " +
+                        "${CanonicalType.entries.map { it.name to it.duckDbType }}"
+                }
+            },
+            {
+                assertTrue(CanonicalType.entries.none { it.duckDbType.isBlank() }) {
+                    "a canonical type declared a blank duckDb type: " +
+                        "${CanonicalType.entries.map { it.name to it.duckDbType }}"
+                }
+            },
+        )
     }
 }

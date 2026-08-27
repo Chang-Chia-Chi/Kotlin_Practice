@@ -10,11 +10,14 @@ import infra.etl.pipe.PipeResult
 import infra.etl.pipe.RowPipe
 import infra.etl.pipe.RowTransform
 import java.nio.file.Path
-import org.assertj.core.api.Assertions.assertThat
-import org.assertj.core.api.Assertions.catchThrowable
 import org.jdbi.v3.core.Jdbi
 import org.junit.jupiter.api.AfterEach
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertAll
+import org.junit.jupiter.api.assertThrows
 import org.junit.jupiter.api.io.TempDir
 
 /**
@@ -64,16 +67,26 @@ class RowPipeTest {
             chunkSize = 50,
         ).run()
 
-        assertThat(result.rowsRead).isEqualTo(175L)
-        assertThat(result.rowsWritten).isEqualTo(175L)
-        assertThat(probe.chunkSizes).containsExactly(50, 50, 50, 25)
-        assertThat(probe.opens).isEqualTo(1)
-        assertThat(probe.closes).isEqualTo(1)
-        assertThat(Pipe.rowCount(targetDb, "wip_stg")).isEqualTo(175L)
-        assertThat(Pipe.longs(targetDb, "select lot_id from wip_stg order by lot_id"))
-            .isEqualTo((0L until 175L).toList())
-        assertThat(Pipe.strings(targetDb, "select lot_code from wip_stg order by lot_id").take(3))
-            .containsExactly("L0", "L1", "L2")
+        assertAll(
+            { assertEquals(175L, result.rowsRead) },
+            { assertEquals(175L, result.rowsWritten) },
+            { assertEquals(listOf(50, 50, 50, 25), probe.chunkSizes) },
+            { assertEquals(1, probe.opens) },
+            { assertEquals(1, probe.closes) },
+            { assertEquals(175L, Pipe.rowCount(targetDb, "wip_stg")) },
+            {
+                assertEquals(
+                    (0L until 175L).toList(),
+                    Pipe.longs(targetDb, "select lot_id from wip_stg order by lot_id"),
+                )
+            },
+            {
+                assertEquals(
+                    listOf("L0", "L1", "L2"),
+                    Pipe.strings(targetDb, "select lot_code from wip_stg order by lot_id").take(3),
+                )
+            },
+        )
     }
 
     /** A chunk size larger than the source is one short chunk, not one empty chunk plus one. */
@@ -89,8 +102,10 @@ class RowPipeTest {
             chunkSize = 5000,
         ).run()
 
-        assertThat(result).isEqualTo(PipeResult(7L, 7L))
-        assertThat(probe.chunkSizes).containsExactly(7)
+        assertAll(
+            { assertEquals(PipeResult(7L, 7L), result) },
+            { assertEquals(listOf(7), probe.chunkSizes) },
+        )
     }
 
     /**
@@ -110,12 +125,22 @@ class RowPipeTest {
             chunkSize = 50,
         ).run()
 
-        assertThat(result).isEqualTo(PipeResult(0L, 0L))
-        assertThat(probe.opens).isEqualTo(1)
-        assertThat(probe.closes).isEqualTo(1)
-        assertThat(probe.chunkSizes).describedAs("an empty source writes no chunk at all").isEmpty()
-        assertThat(Pipe.tableExists(targetDb, "wip_stg")).isTrue()
-        assertThat(Pipe.rowCount(targetDb, "wip_stg")).isZero()
+        assertAll(
+            { assertEquals(PipeResult(0L, 0L), result) },
+            { assertEquals(1, probe.opens) },
+            { assertEquals(1, probe.closes) },
+            {
+                assertTrue(probe.chunkSizes.isEmpty()) {
+                    "an empty source writes no chunk at all; chunks were ${probe.chunkSizes}"
+                }
+            },
+            {
+                assertTrue(Pipe.tableExists(targetDb, "wip_stg")) {
+                    "the target table was not created by an empty source"
+                }
+            },
+            { assertEquals(0L, Pipe.rowCount(targetDb, "wip_stg")) },
+        )
         recording.assertStreamed("empty source")
     }
 
@@ -136,10 +161,16 @@ class RowPipeTest {
             transform = RowTransform { row -> if (row.long("lot_id")!! % 2L == 0L) row else null },
         ).run()
 
-        assertThat(result.rowsRead).isEqualTo(10L)
-        assertThat(result.rowsWritten).isEqualTo(5L)
-        assertThat(Pipe.longs(targetDb, "select lot_id from wip_stg order by lot_id"))
-            .containsExactly(0L, 2L, 4L, 6L, 8L)
+        assertAll(
+            { assertEquals(10L, result.rowsRead) },
+            { assertEquals(5L, result.rowsWritten) },
+            {
+                assertEquals(
+                    listOf(0L, 2L, 4L, 6L, 8L),
+                    Pipe.longs(targetDb, "select lot_id from wip_stg order by lot_id"),
+                )
+            },
+        )
     }
 
     /** The degenerate end of the same rule: every row dropped is a legal, empty, successful run. */
@@ -156,10 +187,12 @@ class RowPipeTest {
             transform = RowTransform { null },
         ).run()
 
-        assertThat(result.rowsRead).isEqualTo(10L)
-        assertThat(result.rowsWritten).isZero()
-        assertThat(Pipe.rowCount(targetDb, "wip_stg")).isZero()
-        assertThat(probe.closes).isEqualTo(1)
+        assertAll(
+            { assertEquals(10L, result.rowsRead) },
+            { assertEquals(0L, result.rowsWritten) },
+            { assertEquals(0L, Pipe.rowCount(targetDb, "wip_stg")) },
+            { assertEquals(1, probe.closes) },
+        )
     }
 
     /**
@@ -189,9 +222,15 @@ class RowPipeTest {
             transform = RowTransform { row -> row.with("row_hash", "h-" + row.string("lot_code")) },
         ).run()
 
-        assertThat(result).isEqualTo(PipeResult(6L, 6L))
-        assertThat(Pipe.strings(targetDb, "select row_hash from wip_stg order by lot_id"))
-            .containsExactly("h-L0", "h-L1", "h-L2", "h-L3", "h-L4", "h-L5")
+        assertAll(
+            { assertEquals(PipeResult(6L, 6L), result) },
+            {
+                assertEquals(
+                    listOf("h-L0", "h-L1", "h-L2", "h-L3", "h-L4", "h-L5"),
+                    Pipe.strings(targetDb, "select row_hash from wip_stg order by lot_id"),
+                )
+            },
+        )
     }
 
     /** `JdbcSource.parameters` binds by name, so the filter runs in the database, not in the JVM. */
@@ -211,8 +250,10 @@ class RowPipeTest {
             chunkSize = 50,
         ).run()
 
-        assertThat(result.rowsRead).describedAs("the unbound site must never reach the JVM").isEqualTo(6L)
-        assertThat(Pipe.strings(targetDb, "select distinct site from wip_stg")).containsExactly("F14")
+        assertAll(
+            { assertEquals(6L, result.rowsRead) { "the unbound site must never reach the JVM" } },
+            { assertEquals(listOf("F14"), Pipe.strings(targetDb, "select distinct site from wip_stg")) },
+        )
     }
 
     /**
@@ -233,9 +274,9 @@ class RowPipeTest {
             chunkSize = 137,
         ).run()
 
-        assertThat(recording.fetchSizesRequested)
-            .describedAs("every fetch size the pipe asked the source statement for")
-            .containsOnly(137)
+        assertEquals(setOf(137), recording.fetchSizesRequested.toSet()) {
+            "every fetch size the pipe asked the source statement for; was ${recording.fetchSizesRequested}"
+        }
     }
 
     /**
@@ -254,7 +295,7 @@ class RowPipeTest {
             chunkSize = 50,
         ).run()
 
-        assertThat(recording.connectionsOpened.get()).isEqualTo(1)
+        assertEquals(1, recording.connectionsOpened.get())
         recording.assertStreamed("Jdbi form")
     }
 
@@ -263,7 +304,7 @@ class RowPipeTest {
     fun `a chunk size below one is rejected`() {
         Pipe.createSourceTable(sourceDb, "wip_src", rows = 1)
 
-        val thrown = catchThrowable {
+        assertThrows<IllegalArgumentException> {
             RowPipe(
                 source = source("select lot_id, lot_code, qty, site from wip_src"),
                 target = target("wip_stg"),
@@ -271,8 +312,6 @@ class RowPipeTest {
                 chunkSize = 0,
             ).run()
         }
-
-        assertThat(thrown).isInstanceOf(IllegalArgumentException::class.java)
     }
 
     /**
@@ -302,12 +341,14 @@ class RowPipeTest {
                 ).run()
             }
 
-            assertThat(generation.isClosed).describedAs("the pipe borrowed this connection").isFalse()
-            assertThat(Pipe.rowCount(generation, "wip")).isEqualTo(40L)
-            assertThat(Pipe.rowCount(generation, "lot")).isEqualTo(40L)
+            assertAll(
+                { assertFalse(generation.isClosed) { "the pipe borrowed this connection and closed it" } },
+                { assertEquals(40L, Pipe.rowCount(generation, "wip")) },
+                { assertEquals(40L, Pipe.rowCount(generation, "lot")) },
+            )
             // Still writable, which is what the cache does next: it verifies and promotes the file.
             Pipe.exec(generation, "create table verify as select count(*) as n from wip")
-            assertThat(Pipe.longs(generation, "select n from verify")).containsExactly(40L)
+            assertEquals(listOf(40L), Pipe.longs(generation, "select n from verify"))
         } finally {
             generation.close()
         }

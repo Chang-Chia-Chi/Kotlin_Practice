@@ -896,3 +896,163 @@ timing rather than by contract. Same register as P4's Windows-file-lock finding.
 - A non-scratch Jdbi must be pool-backed now that two runs are concurrent; a
   `Jdbi.create(singleConnection)` would hand one Connection to two runs, which spec 7.2 calls
   a JVM crash rather than an error.
+
+---
+
+## P8a - Run listener and task hooks  (2026-08-27)
+
+Team: engineer + sdet + reviewer, contract confirmed by all three before any code was written.
+One review cycle. Final: **309 tests, 0 failures**. Production 490 lines added across five files;
+tests 1,407. **1,897 lines against a 200-600 budget - the fourth consecutive overrun, and this
+one after the phase had already been split three ways to avoid it.** Recorded, not trimmed. P8b
+should be re-scoped before it is written.
+
+### Delivered
+
+`task/Observability.kt` (TaskContext, PhaseContext, StepContext, StepResult, TaskRunListener with
+NONE and `of`), `task/TaskHooks.kt` (TaskHook, TaskHookRegistry, TaskHooks), TaskEngine's eleven
+call sites plus an injected `java.time.Clock`, `TaskRunner` passing caller identity through, and
+`jboss-logging` declared.
+
+Tests: ObservabilityFixtures.kt, TaskListenerOrderTest, TaskHookTest, TaskListenerIsolationTest,
+plus additive growth of TaskFixtures.kt.
+
+### Deviations from the documents
+
+1. **P8 was split into P8a / P8b / P8c.** Two independent estimates put the drafted phase at
+   2.4x-3.3x budget, which CLAUDE.md makes a stop-and-report trigger. plan.md amended before the
+   phase opened. The split isolated the Micrometer dependency decision into P8b, where it can be
+   taken on its own evidence.
+2. **`java.time.Clock` injected into `TaskEngine`** - additive, defaulted. Without it the
+   contract's "durationMs spans all attempts" was **unfalsifiable**: the test sleeper does not
+   sleep, so a retried step reports ~2 ms against correct code and no observation separates right
+   from wrong. Root CLAUDE.md already mandates injected `Clock`; nothing observed engine time
+   before (measured).
+3. **`onTaskEnd` is emitted from a `finally`.** Without it an `Error` escaping the engine left
+   `TaskAdmin` reporting FAILED while the listener never saw the run end - two subsystems
+   disagreeing on the path P9 makes routine. The catch stays `Exception`, so P5's documented
+   `NotImplementedError` propagation is untouched.
+4. **Six types spec 11.3 never declared** - PhaseContext, StepContext, TaskHooks, TaskMetrics,
+   `TaskRunListener.NONE`, `TaskRunListener.of`. Ninth consecutive phase in which spec 11's
+   surface proved narrower than the phase needed. spec.md amended before the phase.
+5. **`SimpleEtl/CLAUDE.md` created.** The root CLAUDE.md describes only the snapshot cache and
+   says "modify only `infra/snapshotcache/`" - read literally it forbade eight phases of this
+   module's work.
+
+### Three contract justifications the confirmation round refuted
+
+Written down because each was the lead's, stated confidently, and wrong:
+
+1. "Hooks run after scratch close because a hook must not be able to hold the file." A `TaskHook`
+   receives only a `TaskContext` and holds nothing. The real reason is that `ScratchDb.close()`
+   **can throw**, and inside the `use` block that failure would arrive as a suppressed exception
+   *after* `onSuccess` had already declared the run good.
+2. "Rows are 0/0 for non-pipe steps because DuckDB answers -1." A non-scratch `sql`/`materialize`
+   does have a real affected-row count and the engine discards it. The ruling stands on "only
+   `pipe` moves rows through the JVM" alone.
+3. "`ScratchDb.diskBytes()` prices the spill term of spec 7.2." Sampled once at run end it cannot:
+   spill is reclaimed as queries finish, and spec 7.2's own arithmetic makes spill 17.6 of the
+   30.2 GB. Carried into P8b's plan entry as a constraint, not a claim.
+
+### Measured this phase (lead's scratchpad, not quoted from memory)
+
+- `MutableSharedFlow(replay=0, extraBufferCapacity=N, onBufferOverflow=DROP_OLDEST)` -
+  `tryEmit` returned **false 0 times out of 100** with a wedged subscriber and 0 with none. A
+  `dropped` counter under that policy is **structurally always zero**. `SUSPEND` returned false
+  91 times for 91 lost events. **P8c must use SUSPEND.** Also: with *no* subscriber, `replay = 0`
+  discards everything and `tryEmit` returns true under **every** policy, so no counter of any
+  design can report "nobody was listening".
+- Micrometer 1.14.2 exports `etl_task_runs_total` to Prometheus **verbatim** - the feared
+  `_total_total` does not occur. A `Timer` exports as `_count` + `_sum` + a separate `_max` gauge.
+- A Micrometer gauge holds its referent **weakly**: a locally-scoped `AtomicLong` read `NaN`
+  after GC. P8b must hold it in a field.
+- After 500,000 appended rows the DuckDB file was **12,288 bytes** and its WAL held
+  **10,416,115**. `diskBytes()` must sum the directory, not the file.
+
+### Open review findings, carried to P8b
+
+Reviewer returned CHANGES REQUIRED. The blocking item and two overclaims are fixed in this
+commit; these remain:
+
+- **`TaskRunner`'s caller-identity pass-through has no test** - deleting it leaves the suite green
+  (mutation M1). Nothing in `SchedulingFixtures` builds an engine with a listener.
+- **`TaskHooks.names`' live-view guarantee is untested** (M2).
+- **Hook placement outside the `use` block is unfalsifiable by this suite** (M3): no test
+  distinguishes it from hooks inside. The reviewer named a POSIX route (a listener plants an
+  undeletable path under the public `scratchRoot`); the SDET's KDoc claim that "none can currently
+  falsify it" is wrong and is the honest gap here.
+- **Two start times for one run**: `TaskRunner` still stamps `Instant.now()` while the engine uses
+  the injected clock. Inject the same `Clock` into `TaskRunner` in P8b, or record it.
+- Non-scratch `materialize`'s 0/0 is unasserted; `isolate`'s `Exception`-not-`Throwable` catch is
+  untested (M4).
+
+---
+
+## Interstitial - AssertJ replaced by JUnit 5 assertions  (2026-08-27)
+
+Not a phase. Done at the project owner's direction, after they asked why the tests used
+`assertThat` rather than JUnit 5. The lead argued against it and was overruled; that is the
+owner's call and it is recorded here rather than smuggled in.
+
+### What was argued, and why it lost
+
+Measured side by side on the shape P8a's ordering tests actually assert - a whole event trace.
+JUnit 5: `iterable contents differ at index [4], expected: <X> but was: <Y>`. AssertJ prints both
+traces plus "some elements were not found" / "others were not expected". For an ordering suite
+that is the difference between a five-second and a five-minute diagnosis. The owner's decision
+stands regardless; `assertAll` is the genuine win in the other direction and is now used in 168
+places.
+
+### Scope and cost
+
+**SimpleEtl only.** 781 call sites, 40 files, +2,631/-1,361. `snapshotcache`'s 649 call sites are
+untouched: it is a separate completed project and destabilising it as a side effect was not on the
+table. `assertj-core` therefore stays declared in the pom.
+
+**This deliberately violates CLAUDE.md's "never modify a test written by an earlier phase."** Every
+phase P1-P8a had its assertions rewritten. The rule exists to stop a new phase weakening old
+evidence, so the migration was verified against exactly that risk rather than against green.
+
+### How it was verified - green was explicitly not the bar
+
+309 tests before, 309 after; zero `@Test` lines added or removed; zero production changes. Then
+**eleven mutations were re-applied to the migrated suite**: the four that were green before stayed
+green, and **all seven that were red before stayed red** (M6-M12). A suite whose assertions had
+been quietly blunted would have reported 309/0 just the same.
+
+### Traps caught, each of which would have passed green
+
+- `isEqualByComparingTo(BigDecimal)` -> `assertEquals` would have made **scale** significant, so
+  `1.500` stops equalling `1.5`. Rendered as an explicit `compareTo(...) == 0`.
+- `Row.columns` is a `Set` and `containsExactly` was asserting **iteration order**; a `setOf`
+  comparison would have compiled, passed, and silently deleted that assertion. Rendered as
+  `assertEquals(listOf(...), columns.toList())`.
+- `ByteArray` needs `assertArrayEquals`; `assertEquals` compares identity and lies both ways.
+- `isZero()` on a `Long` must be `assertEquals(0L, ...)`; an `Integer 0` passes the compiler and
+  fails at runtime for the wrong reason.
+- A bare `assertTrue(list.any { ... })` prints only `expected <true> but was <false>`, which is
+  strictly weaker than the AssertJ form. **Every** introduced `assertTrue`/`assertFalse` carries a
+  lazy message lambda printing the actual value.
+
+### One change reverted by the lead
+
+`RowPipeFailureTest` used a bare `catchThrowable { }` purely to swallow a failure - the test's
+subject is the *second* pipe. The migration turned it into `assertThrows<TargetFailure>`, making
+that failure a requirement. Defensible, but a migration may not change what an earlier phase's
+test accepts. Reverted to `runCatching`.
+
+### A mutation that was itself wrong
+
+`willRetry = isTransient(failure)` deletes the attempts-exhausted bound, so the retry loop never
+terminates and, with a non-sleeping test sleeper, spins forever. It hung the battery rather than
+reporting. Replaced with `willRetry = attempt <= step.retries`, which breaks the same clause
+without looping, and the harness now applies a per-mutation timeout. Worth recording: a mutation
+that hangs looks like an infrastructure problem and is actually a finding about the code.
+
+### A correction to earlier phases' run commands
+
+`-Dtest='!*OracleTest'` **replaces** surefire's default `*Test` include pattern and so re-enables
+the five P0 `*Spike` classes, one of which appends 6.2M rows ten times. Earlier phase reports that
+used it counted five spike classes as tests: **P8a's real figures are 280 -> 309, not 285 -> 314**.
+The correct exclusion is `-Dtest='!*OracleTest,!*Spike'`, now recorded in `SimpleEtl/CLAUDE.md`.
+

@@ -12,8 +12,12 @@ import java.sql.SQLRecoverableException
 import java.sql.SQLTimeoutException
 import java.sql.SQLTransientException
 import java.util.function.Supplier
-import org.assertj.core.api.Assertions.assertThat
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNotNull
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertAll
 import org.junit.jupiter.api.io.TempDir
 import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.Arguments
@@ -109,12 +113,16 @@ class TaskEngineRetryTest {
 
             val outcome = harness.run(oneStatementTask(retries = 2))
 
-            assertThat(outcome.outcome).describedAs("%s is transient (spec 5.3)", label).isEqualTo(Outcome.SUCCEEDED)
-            assertThat(report.attempts.get()).describedAs("attempts").isEqualTo(3)
-            assertThat(harness.delaysMillis).describedAs("requested backoff").containsExactly(2_000L, 4_000L)
-            assertThat(report.tableExists("touched"))
-                .describedAs("the third attempt did the work, not just the bookkeeping")
-                .isTrue()
+            assertAll(
+                { assertEquals(Outcome.SUCCEEDED, outcome.outcome) { "$label is transient (spec 5.3)" } },
+                { assertEquals(3, report.attempts.get()) { "attempts" } },
+                { assertEquals(listOf(2_000L, 4_000L), harness.delaysMillis) { "requested backoff" } },
+                {
+                    assertTrue(report.tableExists("touched")) {
+                        "the third attempt did the work, not just the bookkeeping, but 'touched' is absent"
+                    }
+                },
+            )
         }
     }
 
@@ -131,12 +139,20 @@ class TaskEngineRetryTest {
 
             val outcome = harness.run(oneStatementTask(retries = 2))
 
-            assertThat(outcome.outcome).describedAs("%s is not transient (spec 5.3)", label).isEqualTo(Outcome.FAILED)
-            assertThat(outcome.failure).describedAs("the failure the task carries").isNotNull()
-            assertThat(report.attempts.get())
-                .describedAs("attempts for %s - retrying this would turn a 10 minute failure into a 30 minute one", label)
-                .isEqualTo(1)
-            assertThat(harness.delaysMillis).describedAs("requested backoff").isEmpty()
+            assertAll(
+                { assertEquals(Outcome.FAILED, outcome.outcome) { "$label is not transient (spec 5.3)" } },
+                { assertNotNull(outcome.failure) { "the failure the task carries" } },
+                {
+                    assertEquals(1, report.attempts.get()) {
+                        "attempts for $label - retrying this would turn a 10 minute failure into a 30 minute one"
+                    }
+                },
+                {
+                    assertTrue(harness.delaysMillis.isEmpty()) {
+                        "requested backoff was ${harness.delaysMillis}"
+                    }
+                },
+            )
         }
     }
 
@@ -154,9 +170,15 @@ class TaskEngineRetryTest {
 
             val outcome = harness.run(oneStatementTask(retries = 2, statement = "this is not sql"))
 
-            assertThat(outcome.outcome).isEqualTo(Outcome.FAILED)
-            assertThat(report.attempts.get()).describedAs("attempts").isEqualTo(1)
-            assertThat(harness.delaysMillis).isEmpty()
+            assertAll(
+                { assertEquals(Outcome.FAILED, outcome.outcome) },
+                { assertEquals(1, report.attempts.get()) { "attempts" } },
+                {
+                    assertTrue(harness.delaysMillis.isEmpty()) {
+                        "requested backoff was ${harness.delaysMillis}"
+                    }
+                },
+            )
 
             // The assertions that make this test falsifiable. A classifier written as
             // `sqlState!!.startsWith("08")` raises a NullPointerException on this very case, and
@@ -166,14 +188,25 @@ class TaskEngineRetryTest {
             // What the task carries has to be the driver's failure, not one the retry loop raised
             // while deciding what to do about it.
             val chain = generateSequence(outcome.failure) { if (it.cause === it) null else it.cause }.take(16).toList()
-            assertThat(chain)
-                .describedAs("the carried failure chain")
-                .isNotEmpty
-                .noneMatch { it is NullPointerException }
-                .anyMatch { it is SQLException }
-            assertThat(chain.joinToString(" ") { it.message.orEmpty() })
-                .describedAs("the diagnostic names the statement the author has to fix")
-                .contains("this is not sql")
+            assertAll(
+                { assertTrue(chain.isNotEmpty()) { "the carried failure chain was empty" } },
+                {
+                    assertTrue(chain.none { it is NullPointerException }) {
+                        "the carried failure chain holds a NullPointerException; chain was $chain"
+                    }
+                },
+                {
+                    assertTrue(chain.any { it is SQLException }) {
+                        "the carried failure chain holds no SQLException; chain was $chain"
+                    }
+                },
+                {
+                    val messages = chain.joinToString(" ") { it.message.orEmpty() }
+                    assertTrue("this is not sql" in messages) {
+                        "the diagnostic names the statement the author has to fix; messages were: $messages"
+                    }
+                },
+            )
         }
     }
 
@@ -189,11 +222,16 @@ class TaskEngineRetryTest {
 
             val outcome = harness.run(oneStatementTask(retries = 6))
 
-            assertThat(outcome.outcome).isEqualTo(Outcome.FAILED)
-            assertThat(report.attempts.get()).describedAs("one attempt plus six retries").isEqualTo(7)
-            assertThat(harness.delaysMillis)
-                .describedAs("spec 5.3 backoff")
-                .containsExactly(2_000L, 4_000L, 8_000L, 16_000L, 30_000L, 30_000L)
+            assertAll(
+                { assertEquals(Outcome.FAILED, outcome.outcome) },
+                { assertEquals(7, report.attempts.get()) { "one attempt plus six retries" } },
+                {
+                    assertEquals(
+                        listOf(2_000L, 4_000L, 8_000L, 16_000L, 30_000L, 30_000L),
+                        harness.delaysMillis,
+                    ) { "spec 5.3 backoff" }
+                },
+            )
         }
     }
 
@@ -221,9 +259,11 @@ class TaskEngineRetryTest {
 
             val outcome = harness.run(definition)
 
-            assertThat(outcome.outcome).isEqualTo(Outcome.SUCCEEDED)
-            assertThat(mes.attempts.get()).describedAs("attempts on an unstated scratch retries").isEqualTo(3)
-            assertThat(harness.delaysMillis).containsExactly(2_000L, 4_000L)
+            assertAll(
+                { assertEquals(Outcome.SUCCEEDED, outcome.outcome) },
+                { assertEquals(3, mes.attempts.get()) { "attempts on an unstated scratch retries" } },
+                { assertEquals(listOf(2_000L, 4_000L), harness.delaysMillis) },
+            )
         }
     }
 
@@ -248,11 +288,19 @@ class TaskEngineRetryTest {
 
             val outcome = harness.run(definition)
 
-            assertThat(outcome.outcome).isEqualTo(Outcome.FAILED)
-            assertThat(report.attempts.get())
-                .describedAs("attempts on an unstated non-scratch retries - the transient set does not override the default")
-                .isEqualTo(1)
-            assertThat(harness.delaysMillis).isEmpty()
+            assertAll(
+                { assertEquals(Outcome.FAILED, outcome.outcome) },
+                {
+                    assertEquals(1, report.attempts.get()) {
+                        "attempts on an unstated non-scratch retries - the transient set does not override the default"
+                    }
+                },
+                {
+                    assertTrue(harness.delaysMillis.isEmpty()) {
+                        "requested backoff was ${harness.delaysMillis}"
+                    }
+                },
+            )
         }
     }
 
@@ -296,21 +344,40 @@ class TaskEngineRetryTest {
 
             harness.runExpectingSuccess(definition)
 
-            assertThat(mes.attempts.get()).describedAs("attempts").isEqualTo(2)
-            assertThat(harness.delaysMillis).containsExactly(2_000L)
+            assertAll(
+                { assertEquals(2, mes.attempts.get()) { "attempts" } },
+                { assertEquals(listOf(2_000L), harness.delaysMillis) },
+            )
 
             harness.readProbe(probe) { probeDb ->
-                assertThat(Etl.strings(probeDb, "select lot_code from wip_stg order by lot_id"))
-                    .describedAs("the stable name resolves to the attempt that succeeded")
-                    .containsExactly("w-0", "w-1", "w-2", "w-3", "w-4", "w-5")
-
-                assertThat(Etl.strings(probeDb, "select table_name from probe_tables"))
-                    .describedAs("the failed attempt is left in place, never dropped (spec 5.5)")
-                    .contains("wip_stg__a1", "wip_stg__a2")
+                assertAll(
+                    {
+                        assertEquals(
+                            listOf("w-0", "w-1", "w-2", "w-3", "w-4", "w-5"),
+                            Etl.strings(probeDb, "select lot_code from wip_stg order by lot_id"),
+                        ) { "the stable name resolves to the attempt that succeeded" }
+                    },
+                    {
+                        val tables = Etl.strings(probeDb, "select table_name from probe_tables")
+                        assertTrue(tables.containsAll(listOf("wip_stg__a1", "wip_stg__a2"))) {
+                            "the failed attempt is left in place, never dropped (spec 5.5); tables were $tables"
+                        }
+                    },
+                )
 
                 val stable = Etl.strings(probeDb, "select sql from probe_views where view_name = 'wip_stg'").single()
-                assertThat(stable).describedAs("the stable view").contains("wip_stg__a2")
-                assertThat(stable).describedAs("the first attempt is unreferenced").doesNotContain("wip_stg__a1")
+                assertAll(
+                    {
+                        assertTrue(stable?.contains("wip_stg__a2") == true) {
+                            "the stable view does not read the second attempt; view was: $stable"
+                        }
+                    },
+                    {
+                        assertFalse(stable?.contains("wip_stg__a1") == true) {
+                            "the first attempt is unreferenced; view was: $stable"
+                        }
+                    },
+                )
             }
         }
     }

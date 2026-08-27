@@ -19,8 +19,12 @@ import infra.etl.task.Step
 import infra.etl.task.TableTarget
 import infra.etl.task.TaskDefinition
 import java.nio.file.Path
-import org.assertj.core.api.Assertions.assertThat
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertSame
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertAll
 import org.junit.jupiter.api.io.TempDir
 
 /**
@@ -51,43 +55,58 @@ class TaskFileLoaderValidTest {
     fun theBaselineLoadsAndEveryFieldSurvives() {
         val task = loadOne(root, VALID).single()
 
-        assertThat(task.name).isEqualTo("wip-summary")
-        assertThat(task.enabled).isTrue()
-        assertThat(task.cron).isEqualTo("0 */10 * * * ?")
-        assertThat(task.logging).isTrue()
-        assertThat(task.chunkSize).isEqualTo(5000)
-        assertThat(task.scratchMemoryLimitMb).isEqualTo(4096)
-        assertThat(task.onSuccess).isEqualTo("notify-downstream")
-        assertThat(task.onFailure).isEqualTo("page-oncall")
+        assertAll(
+            { assertEquals("wip-summary", task.name) },
+            { assertTrue(task.enabled) { "the baseline states no 'enabled', so it must default to true" } },
+            { assertEquals("0 */10 * * * ?", task.cron) },
+            { assertTrue(task.logging) { "the baseline states no 'logging', so it must default to true" } },
+            { assertEquals(5000, task.chunkSize) },
+            { assertEquals(4096, task.scratchMemoryLimitMb) },
+            { assertEquals("notify-downstream", task.onSuccess) },
+            { assertEquals("page-oncall", task.onFailure) },
 
-        assertThat(task.vars).hasSize(1)
-        assertThat(task.vars.single().name).isEqualTo("siteCode")
-        assertThat(task.vars.single().value).isEqualTo("F12")
+            { assertEquals(1, task.vars.size) { "was ${task.vars}" } },
+            { assertEquals("siteCode", task.vars.single().name) },
+            { assertEquals("F12", task.vars.single().value) },
 
-        assertThat(task.phases.map { it.name })
-            .describedAs("phases run in file order (spec 5.1)")
-            .containsExactly("extract", "build", "publish")
-        assertThat(task.phases.flatMap { it.steps }.map { it.name })
-            .describedAs("steps run in file order within a phase (spec 5.1)")
-            .containsExactly(
-                "read-watermark",
-                "load-wip",
-                "build-summary",
-                "index-staging",
-                "publish-summary",
-            )
+            {
+                assertEquals(listOf("extract", "build", "publish"), task.phases.map { it.name }) {
+                    "phases run in file order (spec 5.1)"
+                }
+            },
+            {
+                assertEquals(
+                    listOf(
+                        "read-watermark",
+                        "load-wip",
+                        "build-summary",
+                        "index-staging",
+                        "publish-summary",
+                    ),
+                    task.phases.flatMap { it.steps }.map { it.name },
+                ) { "steps run in file order within a phase (spec 5.1)" }
+            },
+        )
     }
 
     @Test
     fun theExportStepSurvives() {
         val step = loadOne(root, VALID).single().step("read-watermark") as ExportStep
 
-        assertThat(step.datasource).isEqualTo("oracle_mes")
-        assertThat(step.vars.map { it.name }).containsExactly("lastTs")
-        assertThat(step.vars.single().sql).contains(":taskName")
-        assertThat(step.retries)
-            .describedAs("an export step has no target, so spec 5.3's scratch default does not apply")
-            .isEqualTo(0)
+        assertAll(
+            { assertEquals("oracle_mes", step.datasource) },
+            { assertEquals(listOf("lastTs"), step.vars.map { it.name }) },
+            {
+                assertTrue(":taskName" in step.vars.single().sql) {
+                    "the export query was: ${step.vars.single().sql}"
+                }
+            },
+            {
+                assertEquals(0, step.retries) {
+                    "an export step has no target, so spec 5.3's scratch default does not apply"
+                }
+            },
+        )
     }
 
     /**
@@ -99,22 +118,34 @@ class TaskFileLoaderValidTest {
     fun thePipeStepSurvivesIncludingItsTransformAndAddedColumns() {
         val step = loadOne(root, VALID).single().step("load-wip") as PipeStep
 
-        assertThat(step.chunkSize)
-            .describedAs("the step value wins over the task value (spec 5.2)")
-            .isEqualTo(20000)
-        assertThat(step.retries).isEqualTo(3)
-        assertThat(step.source.datasource).isEqualTo("oracle_mes")
-        assertThat(step.source.sql).contains(":lastTs", ":siteCode")
-        assertThat(step.transform).isSameAs(TaskFiles.WIP_ENRICHER)
-        assertThat(step.addColumns.map { it.name }).containsExactly("row_hash")
-        assertThat(step.addColumns.single().type)
-            .describedAs("spec 3.2 writes the DuckDB type name; VARCHAR is CanonicalType.STRING")
-            .isEqualTo(CanonicalType.STRING)
+        assertAll(
+            {
+                assertEquals(20000, step.chunkSize) {
+                    "the step value wins over the task value (spec 5.2)"
+                }
+            },
+            { assertEquals(3, step.retries) },
+            { assertEquals("oracle_mes", step.source.datasource) },
+            {
+                assertTrue(listOf(":lastTs", ":siteCode").all { it in step.source.sql }) {
+                    "the source query was: ${step.source.sql}"
+                }
+            },
+            { assertSame(TaskFiles.WIP_ENRICHER, step.transform) },
+            { assertEquals(listOf("row_hash"), step.addColumns.map { it.name }) },
+            {
+                assertEquals(CanonicalType.STRING, step.addColumns.single().type) {
+                    "spec 3.2 writes the DuckDB type name; VARCHAR is CanonicalType.STRING"
+                }
+            },
+        )
 
         val target = step.target as TableTarget
-        assertThat(target.datasource).isEqualTo(SCRATCH)
-        assertThat(target.table).isEqualTo("wip_stg")
-        assertThat(target.createTable).isEqualTo(CreateTable.AUTO)
+        assertAll(
+            { assertEquals(SCRATCH, target.datasource) },
+            { assertEquals("wip_stg", target.table) },
+            { assertEquals(CreateTable.AUTO, target.createTable) },
+        )
     }
 
     @Test
@@ -122,27 +153,39 @@ class TaskFileLoaderValidTest {
         val task = loadOne(root, VALID).single()
 
         val materialize = task.step("build-summary") as MaterializeStep
-        assertThat(materialize.datasource).isEqualTo(SCRATCH)
-        assertThat(materialize.output).isEqualTo("summary")
-        assertThat(materialize.format).isEqualTo(MaterializeFormat.TABLE)
-        assertThat(materialize.retries).isEqualTo(3)
+        assertAll(
+            { assertEquals(SCRATCH, materialize.datasource) },
+            { assertEquals("summary", materialize.output) },
+            { assertEquals(MaterializeFormat.TABLE, materialize.format) },
+            { assertEquals(3, materialize.retries) },
+        )
 
         val sql = task.step("index-staging") as SqlStep
-        assertThat(sql.datasource).isEqualTo(SCRATCH)
-        assertThat(sql.statements).containsExactly("create index idx_wip_lot on wip_stg (lot_id)")
+        assertAll(
+            { assertEquals(SCRATCH, sql.datasource) },
+            { assertEquals(listOf("create index idx_wip_lot on wip_stg (lot_id)"), sql.statements) },
+        )
     }
 
     @Test
     fun theStatementTargetSurvivesWithItsIdempotentAssertion() {
         val step = loadOne(root, VALID).single().step("publish-summary") as PipeStep
 
-        assertThat(step.retries).isEqualTo(2)
+        assertEquals(2, step.retries)
         val target = step.target as StatementTarget
-        assertThat(target.datasource).isEqualTo("report_oracle")
-        assertThat(target.sql).contains(":lot_id", ":qty")
-        assertThat(target.idempotent)
-            .describedAs("rule 12's assertion by the author, which the framework cannot verify")
-            .isTrue()
+        assertAll(
+            { assertEquals("report_oracle", target.datasource) },
+            {
+                assertTrue(listOf(":lot_id", ":qty").all { it in target.sql }) {
+                    "the target statement was: ${target.sql}"
+                }
+            },
+            {
+                assertTrue(target.idempotent) {
+                    "rule 12's assertion by the author, which the framework cannot verify"
+                }
+            },
+        )
     }
 
     @Test
@@ -150,10 +193,14 @@ class TaskFileLoaderValidTest {
         val task = loadOne(root, VALID_REQUIRED).single()
 
         val step = task.phases.flatMap { it.steps }.single { it.name == "load-required" } as PipeStep
-        assertThat((step.target as TableTarget).createTable).isEqualTo(CreateTable.REQUIRED)
-        assertThat(step.retries)
-            .describedAs("rule 18 permits a REQUIRED scratch target only at retries 0")
-            .isEqualTo(0)
+        assertAll(
+            { assertEquals(CreateTable.REQUIRED, (step.target as TableTarget).createTable) },
+            {
+                assertEquals(0, step.retries) {
+                    "rule 18 permits a REQUIRED scratch target only at retries 0"
+                }
+            },
+        )
     }
 
     /**
@@ -165,26 +212,31 @@ class TaskFileLoaderValidTest {
     fun theMinimalFileLoadsAndOmittedFieldsTakeTheirDeclaredDefaults() {
         val task = loadOne(root, minimal("task-1")).single()
 
-        assertThat(task.name).isEqualTo("task-1")
-        assertThat(task.enabled).isTrue()
-        assertThat(task.cron).isNull()
-        assertThat(task.chunkSize).isEqualTo(5000)
-        assertThat(task.scratchMemoryLimitMb).isNull()
-        assertThat(task.onSuccess).isNull()
-        assertThat(task.vars).isEmpty()
+        assertAll(
+            { assertEquals("task-1", task.name) },
+            { assertTrue(task.enabled) { "an omitted 'enabled' must default to true" } },
+            { assertNull(task.cron) { "an omitted cron was read as ${task.cron}" } },
+            { assertEquals(5000, task.chunkSize) },
+            {
+                assertNull(task.scratchMemoryLimitMb) {
+                    "an omitted scratchMemoryLimitMb was read as ${task.scratchMemoryLimitMb}"
+                }
+            },
+            { assertNull(task.onSuccess) { "an omitted onSuccess was read as ${task.onSuccess}" } },
+            { assertTrue(task.vars.isEmpty()) { "an omitted vars list was read as ${task.vars}" } },
+        )
 
         val step = task.phases.single().steps.single() as SqlStep
-        assertThat(step.retries)
-            .describedAs("spec 5.3 defaults retries to 3 for a step on the scratch datasource")
-            .isEqualTo(3)
+        assertEquals(3, step.retries) {
+            "spec 5.3 defaults retries to 3 for a step on the scratch datasource"
+        }
     }
 
     @Test
     fun aVariableExportedBeforeItsUseLoads() {
         val task = loadOne(root, orderedVars(exportFirst = true)).single()
 
-        assertThat(task.phases.single().steps.map { it.name })
-            .containsExactly("read-watermark", "use-watermark")
+        assertEquals(listOf("read-watermark", "use-watermark"), task.phases.single().steps.map { it.name })
     }
 
     /**
@@ -200,6 +252,6 @@ class TaskFileLoaderValidTest {
 
         val task = loadOne(root, yaml).single()
 
-        assertThat(task.name).isEqualTo("wip-summary")
+        assertEquals("wip-summary", task.name)
     }
 }

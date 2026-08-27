@@ -3,8 +3,11 @@ package infra.etl.duckdb
 import infra.etl.Scratchpad
 import infra.etl.duckdb.ScratchDb
 import java.nio.file.Path
-import org.assertj.core.api.Assertions.assertThat
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertNotSame
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertAll
 import org.junit.jupiter.api.io.TempDir
 
 /**
@@ -32,15 +35,17 @@ class ScratchDbLifecycleTest {
         val spill = Scratchpad.spillDir(root)
         val db = ScratchDb(root, Scratchpad.MEMORY_LIMIT_MB, spill)
 
-        assertThat(Scratchpad.regularFiles(root))
-            .describedAs("shape A of spec 2.4 never references scratch, so nothing may be created")
-            .isEmpty()
+        val untouched = Scratchpad.regularFiles(root)
+        assertTrue(untouched.isEmpty()) {
+            "shape A of spec 2.4 never references scratch, so nothing may be created; files were $untouched"
+        }
 
         db.use { scratch ->
             scratch.connection()
-            assertThat(Scratchpad.regularFiles(root))
-                .describedAs("the first connection() must create the file, or the negative half above is vacuous")
-                .isNotEmpty()
+            val connected = Scratchpad.regularFiles(root)
+            assertTrue(connected.isNotEmpty()) {
+                "the first connection() must create the file, or the negative half above is vacuous"
+            }
         }
     }
 
@@ -52,7 +57,8 @@ class ScratchDbLifecycleTest {
     fun closeWithoutEverConnecting_isSilentAndLeavesNothingOnDisk() {
         ScratchDb(root, Scratchpad.MEMORY_LIMIT_MB, Scratchpad.spillDir(root)).use { }
 
-        assertThat(Scratchpad.regularFiles(root)).isEmpty()
+        val files = Scratchpad.regularFiles(root)
+        assertTrue(files.isEmpty()) { "expected nothing on disk, was $files" }
     }
 
     /**
@@ -67,9 +73,11 @@ class ScratchDbLifecycleTest {
         ScratchDb(root, Scratchpad.MEMORY_LIMIT_MB, Scratchpad.spillDir(root)).use { scratch ->
             val setting = Scratchpad.currentSetting(scratch.connection(), "memory_limit")
 
-            assertThat(Scratchpad.settingBytes(setting))
-                .describedAs("memory_limit read back as '%s'; DuckDB's default is a large fraction of machine RAM", setting)
-                .isBetween(400.0 * 1024 * 1024, 600.0 * 1024 * 1024)
+            val bytes = Scratchpad.settingBytes(setting)
+            assertTrue(bytes in (400.0 * 1024 * 1024)..(600.0 * 1024 * 1024)) {
+                "memory_limit read back as '$setting' ($bytes bytes); DuckDB's default is a large " +
+                    "fraction of machine RAM"
+            }
         }
     }
 
@@ -87,8 +95,10 @@ class ScratchDbLifecycleTest {
         ScratchDb(root, Scratchpad.MEMORY_LIMIT_MB, spill).use { scratch ->
             val setting = Scratchpad.currentSetting(scratch.connection(), "temp_directory")
 
-            assertThat(Scratchpad.normalisePath(setting))
-                .isEqualTo(Scratchpad.normalisePath(spill.toAbsolutePath().toString()))
+            assertEquals(
+                Scratchpad.normalisePath(spill.toAbsolutePath().toString()),
+                Scratchpad.normalisePath(setting),
+            )
         }
     }
 
@@ -109,12 +119,22 @@ class ScratchDbLifecycleTest {
 
             val read = scratch.duplicate()
             try {
-                assertThat(read).isNotSameAs(write)
-                assertThat(Scratchpad.rowCount(read, "wip_stg__a1")).isEqualTo(4L)
-                assertThat(Scratchpad.currentSetting(read, "temp_directory"))
-                    .isEqualTo(Scratchpad.currentSetting(write, "temp_directory"))
-                assertThat(Scratchpad.currentSetting(read, "memory_limit"))
-                    .isEqualTo(Scratchpad.currentSetting(write, "memory_limit"))
+                assertAll(
+                    { assertNotSame(write, read) },
+                    { assertEquals(4L, Scratchpad.rowCount(read, "wip_stg__a1")) },
+                    {
+                        assertEquals(
+                            Scratchpad.currentSetting(write, "temp_directory"),
+                            Scratchpad.currentSetting(read, "temp_directory"),
+                        )
+                    },
+                    {
+                        assertEquals(
+                            Scratchpad.currentSetting(write, "memory_limit"),
+                            Scratchpad.currentSetting(read, "memory_limit"),
+                        )
+                    },
+                )
             } finally {
                 read.close()
             }

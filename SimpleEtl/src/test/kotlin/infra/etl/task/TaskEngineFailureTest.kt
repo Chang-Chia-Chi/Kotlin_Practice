@@ -5,8 +5,12 @@ import infra.etl.TaskHarness
 import infra.etl.task.Outcome
 import infra.etl.task.TriggerSource
 import java.nio.file.Path
-import org.assertj.core.api.Assertions.assertThat
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertNotEquals
+import org.junit.jupiter.api.Assertions.assertNotNull
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertAll
 import org.junit.jupiter.api.io.TempDir
 
 /**
@@ -68,15 +72,17 @@ class TaskEngineFailureTest {
 
             val outcome = harness.run(definition)
 
-            assertThat(outcome.outcome).isEqualTo(Outcome.FAILED)
-            assertThat(outcome.failure).isNotNull()
+            assertAll(
+                { assertEquals(Outcome.FAILED, outcome.outcome) },
+                { assertNotNull(outcome.failure) { "a FAILED run carries no failure" } },
+            )
 
-            assertThat(report.tableExists("wip_summary_work"))
-                .describedAs("spec 5.4: an external write committed in phase 1 stays committed")
-                .isTrue()
-            assertThat(report.longAt("select count(*) from wip_summary_work"))
-                .describedAs("every row phase 1 wrote is still there")
-                .isEqualTo(3L)
+            assertTrue(report.tableExists("wip_summary_work")) {
+                "spec 5.4: an external write committed in phase 1 stays committed, but the table is gone"
+            }
+            assertEquals(3L, report.longAt("select count(*) from wip_summary_work")) {
+                "every row phase 1 wrote is still there"
+            }
         }
     }
 
@@ -101,10 +107,15 @@ class TaskEngineFailureTest {
                 Etl.phase("swap", Etl.sql("swap", "report_oracle", "select * from a_table_that_does_not_exist")),
             )
             val failed = harness.run(failing)
-            assertThat(failed.outcome).isEqualTo(Outcome.FAILED)
-            assertThat(harness.scratchFiles())
-                .describedAs("spec 7.2: the scratch file is deleted on failure as well as on success")
-                .isEmpty()
+            assertAll(
+                { assertEquals(Outcome.FAILED, failed.outcome) },
+                {
+                    assertTrue(harness.scratchFiles().isEmpty()) {
+                        "spec 7.2: the scratch file is deleted on failure as well as on success; " +
+                            "was ${harness.scratchFiles()}"
+                    }
+                },
+            )
 
             val probe = harness.probeFile("after-failure")
             val good = Etl.task(
@@ -117,13 +128,13 @@ class TaskEngineFailureTest {
             )
             val recovered = harness.runExpectingSuccess(good, TriggerSource.API)
 
-            assertThat(recovered.runId)
-                .describedAs("a second run is a different run")
-                .isNotEqualTo(failed.runId)
+            assertNotEquals(failed.runId, recovered.runId) { "a second run is a different run" }
             harness.readProbe(probe) { probeDb ->
-                assertThat(Etl.longAt(probeDb, "select count(*) from wip_stg")).isEqualTo(4L)
+                assertEquals(4L, Etl.longAt(probeDb, "select count(*) from wip_stg"))
             }
-            assertThat(harness.scratchFiles()).isEmpty()
+            assertTrue(harness.scratchFiles().isEmpty()) {
+                "expected no scratch file, was ${harness.scratchFiles()}"
+            }
         }
     }
 
@@ -149,10 +160,18 @@ class TaskEngineFailureTest {
 
             harness.runExpectingSuccess(definition)
 
-            assertThat(report.longAt("select files from scratch_seen"))
-                .describedAs("files under the scratch root while the task was running")
-                .isZero()
-            assertThat(harness.scratchFiles()).isEmpty()
+            assertAll(
+                {
+                    assertEquals(0L, report.longAt("select files from scratch_seen")) {
+                        "files under the scratch root while the task was running"
+                    }
+                },
+                {
+                    assertTrue(harness.scratchFiles().isEmpty()) {
+                        "expected no scratch file, was ${harness.scratchFiles()}"
+                    }
+                },
+            )
         }
     }
 
@@ -179,12 +198,19 @@ class TaskEngineFailureTest {
 
             harness.runExpectingSuccess(definition)
 
-            assertThat(report.longAt("select files from scratch_seen"))
-                .describedAs("a task that uses scratch has a scratch file while it runs")
-                .isPositive()
-            assertThat(harness.scratchFiles())
-                .describedAs("and none once the run has ended (spec 7.2)")
-                .isEmpty()
+            assertAll(
+                {
+                    val seen = report.longAt("select files from scratch_seen")
+                    assertTrue(seen > 0L) {
+                        "a task that uses scratch has a scratch file while it runs; files seen was $seen"
+                    }
+                },
+                {
+                    assertTrue(harness.scratchFiles().isEmpty()) {
+                        "and none once the run has ended (spec 7.2); was ${harness.scratchFiles()}"
+                    }
+                },
+            )
         }
     }
 }

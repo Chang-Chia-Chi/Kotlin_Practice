@@ -15,8 +15,11 @@ import infra.etl.task.MaterializeFormat
 import infra.etl.task.MaterializeStep
 import infra.etl.task.PipeStep
 import java.nio.file.Path
-import org.assertj.core.api.Assertions.assertThat
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertAll
 import org.junit.jupiter.api.io.TempDir
 import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.CsvSource
@@ -52,9 +55,15 @@ class TaskFileLoaderRulesTest {
 
         val loaded = loadOne(root, yaml)
 
-        assertThat(loaded.tasks).isNull()
-        assertThat(loaded.errors).isNotEmpty()
-        assertThat(loaded.errors).allSatisfy { assertThat(it.file).contains("task.yaml") }
+        assertAll(
+            { assertNull(loaded.tasks) { "unparseable YAML loaded anyway" } },
+            { assertTrue(loaded.errors.isNotEmpty()) { "unparseable YAML produced no error" } },
+            {
+                assertTrue(loaded.errors.all { "task.yaml" in it.file }) {
+                    "an error was attributed to another file; files were ${loaded.errors.map { it.file }}"
+                }
+            },
+        )
     }
 
     /**
@@ -93,14 +102,21 @@ class TaskFileLoaderRulesTest {
     fun rule02TheSameTaskNameInTwoFilesIsRejected() {
         val loaded = load(dirOf(root, "a.yaml" to VALID, "b.yaml" to VALID))
 
-        assertThat(loaded.tasks).isNull()
-        assertThat(loaded.errors).isNotEmpty()
-        assertThat(loaded.errors).allSatisfy {
-            assertThat(it.file).containsAnyOf("a.yaml", "b.yaml")
-        }
-        assertThat(loaded.errors)
-            .describedAs("the report must name the duplicated task, not just say 'duplicate'")
-            .anySatisfy { assertThat(it.message).contains("wip-summary") }
+        assertAll(
+            { assertNull(loaded.tasks) { "a duplicated task name loaded anyway" } },
+            { assertTrue(loaded.errors.isNotEmpty()) { "a duplicated task name produced no error" } },
+            {
+                assertTrue(loaded.errors.all { error -> listOf("a.yaml", "b.yaml").any { it in error.file } }) {
+                    "an error was attributed to another file; files were ${loaded.errors.map { it.file }}"
+                }
+            },
+            {
+                assertTrue(loaded.errors.any { "wip-summary" in it.message }) {
+                    "the report must name the duplicated task, not just say 'duplicate'; messages were " +
+                        "${loaded.errors.map { it.message }}"
+                }
+            },
+        )
     }
 
     // --- rule 3: every referenced datasource exists -------------------------------------
@@ -280,7 +296,7 @@ class TaskFileLoaderRulesTest {
         val step = loadOne(root, yaml).single()
             .phases.flatMap { it.steps }.single { it.name == "build-summary" } as MaterializeStep
 
-        assertThat(step.format).isEqualTo(MaterializeFormat.PARQUET)
+        assertEquals(MaterializeFormat.PARQUET, step.format)
     }
 
     // --- rule 14: createTable AUTO only on scratch, and not with an undeclared transform ----
@@ -363,7 +379,7 @@ class TaskFileLoaderRulesTest {
         val step = loadOne(root, yaml).single()
             .phases.flatMap { it.steps }.single { it.name == "load-wip" } as PipeStep
 
-        assertThat(step.addColumns.single().name).isEqualTo("row_hash")
+        assertEquals("row_hash", step.addColumns.single().name)
     }
 
     /**

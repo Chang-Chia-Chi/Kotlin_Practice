@@ -8,8 +8,11 @@ import infra.etl.pipe.RowTransform
 import infra.etl.task.MaterializeFormat
 import infra.etl.task.Outcome
 import java.nio.file.Path
-import org.assertj.core.api.Assertions.assertThat
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertInstanceOf
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertAll
 import org.junit.jupiter.api.io.TempDir
 
 /**
@@ -85,24 +88,28 @@ class TaskEngineStepTypesTest {
 
             // pipe: every source row landed under the stable name of spec 5.5
             harness.readProbe(probe) { probeDb ->
-                assertThat(Etl.strings(probeDb, "select lot_code from wip_stg order by lot_id"))
-                    .describedAs("the pipe step's rows, read through the stable view")
-                    .containsExactly("w-0", "w-1", "w-2", "w-3", "w-4", "w-5")
+                assertEquals(
+                    listOf("w-0", "w-1", "w-2", "w-3", "w-4", "w-5"),
+                    Etl.strings(probeDb, "select lot_code from wip_stg order by lot_id"),
+                ) { "the pipe step's rows, read through the stable view" }
 
                 // materialize: derived inside scratch, four of the six rows
-                assertThat(Etl.strings(probeDb, "select lot_code from summary order by lot_code"))
-                    .describedAs("the materialize step's output")
-                    .containsExactly("w-2", "w-3", "w-4", "w-5")
+                assertEquals(
+                    listOf("w-2", "w-3", "w-4", "w-5"),
+                    Etl.strings(probeDb, "select lot_code from summary order by lot_code"),
+                ) { "the materialize step's output" }
 
                 // both datasets are reached through a stable view, not a bare table (spec 5.5)
-                assertThat(Etl.strings(probeDb, "select view_name from probe_views"))
-                    .contains("wip_stg", "summary")
+                val views = Etl.strings(probeDb, "select view_name from probe_views")
+                assertTrue(views.containsAll(listOf("wip_stg", "summary"))) {
+                    "both datasets are reached through a stable view; views were $views"
+                }
             }
 
             // export + sql: the exported variable bound into a later step's statement
-            assertThat(report.tableExists("wip_summary")).isTrue()
-            assertThat(report.strings("select site from wip_summary")).containsExactly("F12")
-            assertThat(report.longAt("select rows_seen from wip_summary")).isEqualTo(4L)
+            assertTrue(report.tableExists("wip_summary")) { "the sql step's target table was never created" }
+            assertEquals(listOf("F12"), report.strings("select site from wip_summary"))
+            assertEquals(4L, report.longAt("select rows_seen from wip_summary"))
         }
     }
 
@@ -141,11 +148,21 @@ class TaskEngineStepTypesTest {
             harness.runExpectingSuccess(definition)
 
             harness.readProbe(probe) { probeDb ->
-                assertThat(Etl.strings(probeDb, "select lot_code from summary order by lot_id"))
-                    .containsExactly("p-0", "p-1", "p-2")
-                assertThat(Etl.strings(probeDb, "select sql from probe_views where view_name = 'summary'").single())
-                    .describedAs("the stable view of a PARQUET materialisation reads the file (spec 5.6)")
-                    .contains("read_parquet")
+                assertAll(
+                    {
+                        assertEquals(
+                            listOf("p-0", "p-1", "p-2"),
+                            Etl.strings(probeDb, "select lot_code from summary order by lot_id"),
+                        )
+                    },
+                    {
+                        val view = Etl.strings(probeDb, "select sql from probe_views where view_name = 'summary'").single()
+                        assertTrue(view?.contains("read_parquet") == true) {
+                            "the stable view of a PARQUET materialisation reads the file (spec 5.6); " +
+                                "view was: $view"
+                        }
+                    },
+                )
             }
         }
     }
@@ -187,9 +204,10 @@ class TaskEngineStepTypesTest {
             harness.runExpectingSuccess(definition)
 
             harness.readProbe(probe) { probeDb ->
-                assertThat(Etl.strings(probeDb, "select lot_code from wip_stg order by lot_id"))
-                    .describedAs("the transform dropped the odd rows")
-                    .containsExactly("t-0", "t-2", "t-4")
+                assertEquals(
+                    listOf("t-0", "t-2", "t-4"),
+                    Etl.strings(probeDb, "select lot_code from wip_stg order by lot_id"),
+                ) { "the transform dropped the odd rows" }
             }
         }
     }
@@ -232,9 +250,10 @@ class TaskEngineStepTypesTest {
             harness.runExpectingSuccess(definition)
 
             harness.readProbe(probe) { probeDb ->
-                assertThat(Etl.strings(probeDb, "select row_hash from wip_stg order by lot_id"))
-                    .describedAs("a declared, transform-added column reaches the target under AUTO")
-                    .containsExactly("h:0", "h:1", "h:2", "h:3")
+                assertEquals(
+                    listOf("h:0", "h:1", "h:2", "h:3"),
+                    Etl.strings(probeDb, "select row_hash from wip_stg order by lot_id"),
+                ) { "a declared, transform-added column reaches the target under AUTO" }
             }
         }
     }
@@ -270,10 +289,10 @@ class TaskEngineStepTypesTest {
             val attempt = runCatching { harness.run(definition) }
             val failure = attempt.exceptionOrNull() ?: attempt.getOrNull()?.failure
 
-            assertThat(failure)
-                .describedAs("a cacheCopy step must fail loudly until P9 builds it, not succeed quietly")
-                .isInstanceOf(NotImplementedError::class.java)
-            attempt.getOrNull()?.let { assertThat(it.outcome).isEqualTo(Outcome.FAILED) }
+            assertInstanceOf(NotImplementedError::class.java, failure) {
+                "a cacheCopy step must fail loudly until P9 builds it, not succeed quietly"
+            }
+            attempt.getOrNull()?.let { assertEquals(Outcome.FAILED, it.outcome) }
         }
     }
 }

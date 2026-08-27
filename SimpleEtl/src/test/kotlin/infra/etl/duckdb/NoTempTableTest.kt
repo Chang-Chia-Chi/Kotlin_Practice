@@ -5,9 +5,10 @@ import infra.etl.TempTableBan
 import infra.etl.duckdb.DatasetNamer
 import infra.etl.duckdb.ScratchDb
 import java.nio.file.Path
-import org.assertj.core.api.Assertions.assertThat
-import org.assertj.core.api.Assertions.assertThatThrownBy
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertAll
+import org.junit.jupiter.api.assertThrows
 import org.junit.jupiter.api.io.TempDir
 
 /**
@@ -48,7 +49,9 @@ class NoTempTableTest {
             listOf("create", "temp", "table", "t (id bigint)").joinToString("\n  "),
         )
 
-        assertThat(banned).allMatch { TempTableBan.matches(it) }
+        assertTrue(banned.all { TempTableBan.matches(it) }) {
+            "the detector missed ${banned.filterNot { TempTableBan.matches(it) }}"
+        }
     }
 
     /**
@@ -71,17 +74,23 @@ class NoTempTableTest {
             sql("CREATE", "TEMP", "TABLE") + " is banned (spec 7.2): CHECKPOINT has no effect",
         )
 
-        assertThat(allowed).noneMatch { TempTableBan.matches(it) }
+        assertTrue(allowed.none { TempTableBan.matches(it) }) {
+            "the detector fired on ${allowed.filter { TempTableBan.matches(it) }}"
+        }
     }
 
     @Test
     fun noKotlinSourceInTheModuleCreatesATemporaryTable() {
         val scan = TempTableBan.scan(roots)
 
-        assertThat(scan.filesScanned)
-            .describedAs("the scan found no Kotlin source at %s - it would pass vacuously", roots)
-            .isGreaterThan(10)
-        assertThat(scan.offences).isEmpty()
+        assertAll(
+            {
+                assertTrue(scan.filesScanned > 10) {
+                    "the scan found ${scan.filesScanned} Kotlin sources at $roots - it would pass vacuously"
+                }
+            },
+            { assertTrue(scan.offences.isEmpty()) { "expected no offences, was ${scan.offences}" } },
+        )
     }
 
     /**
@@ -105,16 +114,22 @@ class NoTempTableTest {
         val scratch = ScratchDb(root, Scratchpad.MEMORY_LIMIT_MB, Scratchpad.spillDir(root))
         Scratchpad.exec(scratch.connection(), sql("create", "temp", "table", "leak_stg (id bigint)"))
 
-        assertThatThrownBy { scratch.close() }
-            .isInstanceOf(IllegalStateException::class.java)
-            .hasMessageContaining("leak_stg")
+        val thrown = assertThrows<IllegalStateException> { scratch.close() }
+        assertTrue(thrown.message?.contains("leak_stg") == true) { "message was: ${thrown.message}" }
 
-        assertThat(Scratchpad.regularFiles(root))
-            .describedAs("the run was rejected, so it must not also leave its file behind")
-            .isEmpty()
-        assertThatThrownBy { scratch.connection() }
-            .describedAs("a closed scratch must refuse to reopen rather than create a second file")
-            .isInstanceOf(IllegalStateException::class.java)
+        assertAll(
+            {
+                val files = Scratchpad.regularFiles(root)
+                assertTrue(files.isEmpty()) {
+                    "the run was rejected, so it must not also leave its file behind; files were $files"
+                }
+            },
+            {
+                assertThrows<IllegalStateException>(
+                    { "a closed scratch must refuse to reopen rather than create a second file" },
+                ) { scratch.connection() }
+            },
+        )
     }
 
     /**
@@ -132,11 +147,11 @@ class NoTempTableTest {
         val scratch = ScratchDb(root, Scratchpad.MEMORY_LIMIT_MB, Scratchpad.spillDir(root))
         Scratchpad.exec(scratch.duplicate(), sql("create", "temp", "table", "leak_dup (id bigint)"))
 
-        assertThatThrownBy { scratch.close() }
-            .isInstanceOf(IllegalStateException::class.java)
-            .hasMessageContaining("leak_dup")
+        val thrown = assertThrows<IllegalStateException> { scratch.close() }
+        assertTrue(thrown.message?.contains("leak_dup") == true) { "message was: ${thrown.message}" }
 
-        assertThat(Scratchpad.regularFiles(root)).isEmpty()
+        val files = Scratchpad.regularFiles(root)
+        assertTrue(files.isEmpty()) { "expected no file left behind, was $files" }
     }
 
     /**
@@ -158,10 +173,20 @@ class NoTempTableTest {
             Scratchpad.createAttemptTable(connection, namer.physical("wip_stg", 2), "a2", rows = 5)
             namer.publishTable(connection, "wip_stg", 2)
 
-            assertThat(Scratchpad.tableNames(connection))
-                .describedAs("the fixture created nothing, so the assertion below would be vacuous")
-                .isNotEmpty()
-            assertThat(Scratchpad.temporaryTableNames(connection)).isEmpty()
+            assertAll(
+                {
+                    val tables = Scratchpad.tableNames(connection)
+                    assertTrue(tables.isNotEmpty()) {
+                        "the fixture created nothing, so the assertion below would be vacuous"
+                    }
+                },
+                {
+                    val temporary = Scratchpad.temporaryTableNames(connection)
+                    assertTrue(temporary.isEmpty()) {
+                        "the run left a temporary relation in the catalog: $temporary"
+                    }
+                },
+            )
         }
     }
 }

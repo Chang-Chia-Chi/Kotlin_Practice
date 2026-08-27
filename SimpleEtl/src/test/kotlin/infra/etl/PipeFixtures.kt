@@ -15,9 +15,11 @@ import java.sql.ResultSet
 import java.sql.Statement
 import java.util.Collections
 import java.util.concurrent.atomic.AtomicInteger
-import org.assertj.core.api.Assertions.assertThat
 import org.duckdb.DuckDBConnection
 import org.jdbi.v3.core.ConnectionFactory
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertTrue
+import org.junit.jupiter.api.assertAll
 
 /**
  * P3 test support. Written for this phase rather than shared with P1's `Duck` or P2's `Scratch`,
@@ -199,19 +201,32 @@ class RecordingConnections(private val open: () -> Connection) : ConnectionFacto
 
     /** Opens must be non-zero as well as balanced, so a pipe that never queried cannot pass. */
     fun assertStreamed(path: String) {
-        assertThat(connectionsOpened.get()).describedAs("source connections opened, %s", path).isPositive()
-        assertThat(statementsOpened.get()).describedAs("source statements opened, %s", path).isPositive()
-        assertThat(resultSetsOpened.get()).describedAs("source result sets opened, %s", path).isPositive()
+        assertAll(
+            {
+                assertTrue(connectionsOpened.get() > 0) {
+                    "source connections opened, $path, was ${connectionsOpened.get()}, expected more than 0"
+                }
+            },
+            {
+                assertTrue(statementsOpened.get() > 0) {
+                    "source statements opened, $path, was ${statementsOpened.get()}, expected more than 0"
+                }
+            },
+            {
+                assertTrue(resultSetsOpened.get() > 0) {
+                    "source result sets opened, $path, was ${resultSetsOpened.get()}, expected more than 0"
+                }
+            },
+        )
         assertNothingLeaked(path)
     }
 
     fun assertNothingLeaked(path: String) {
-        assertThat(connectionsClosed.get()).describedAs("source connections closed, %s", path)
-            .isEqualTo(connectionsOpened.get())
-        assertThat(statementsClosed.get()).describedAs("source statements closed, %s", path)
-            .isEqualTo(statementsOpened.get())
-        assertThat(resultSetsClosed.get()).describedAs("source result sets closed, %s", path)
-            .isEqualTo(resultSetsOpened.get())
+        assertAll(
+            { assertEquals(connectionsOpened.get(), connectionsClosed.get()) { "source connections closed, $path" } },
+            { assertEquals(statementsOpened.get(), statementsClosed.get()) { "source statements closed, $path" } },
+            { assertEquals(resultSetsOpened.get(), resultSetsClosed.get()) { "source result sets closed, $path" } },
+        )
     }
 
     private fun proxy(real: Any, faces: Array<Class<*>>, closes: AtomicInteger?): Any =

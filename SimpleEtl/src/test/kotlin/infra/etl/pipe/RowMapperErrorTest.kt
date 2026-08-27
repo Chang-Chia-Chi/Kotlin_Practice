@@ -5,9 +5,12 @@ import infra.etl.pipe.RowMapper
 import java.sql.ResultSet
 import java.sql.ResultSetMetaData
 import java.sql.Types
-import org.assertj.core.api.Assertions.assertThat
-import org.assertj.core.api.Assertions.catchThrowable
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertAll
+import org.junit.jupiter.api.assertThrows
 import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.CsvSource
 import org.mockito.Mockito
@@ -45,11 +48,13 @@ class RowMapperErrorTest {
     fun `an unsupported column type names the step, the column and the type`(sqlType: Int, typeName: String) {
         val md = metaData(Triple("ODD_COLUMN", sqlType, typeName))
 
-        val thrown = catchThrowable { RowMapper(md, "load-wip").map(emptyResultSet) }
+        val thrown = assertThrows<Throwable> { RowMapper(md, "load-wip").map(emptyResultSet) }
 
-        assertThat(thrown).isNotInstanceOf(ClassCastException::class.java)
+        assertFalse(thrown is ClassCastException) { "expected a diagnostic error, was $thrown" }
         val message = thrown.message!!.lowercase()
-        assertThat(message).contains("load-wip", "odd_column", typeName.lowercase())
+        assertTrue(listOf("load-wip", "odd_column", typeName.lowercase()).all { it in message }) {
+            "the message must name the step, the column and the type; was: $message"
+        }
     }
 
     @Test
@@ -61,21 +66,25 @@ class RowMapperErrorTest {
             Triple("QTY", Types.NUMERIC, "NUMBER"),
         )
 
-        val message = catchThrowable { RowMapper(md, "load-wip").map(emptyResultSet) }.message!!.lowercase()
+        val message = assertThrows<Throwable> { RowMapper(md, "load-wip").map(emptyResultSet) }.message!!.lowercase()
 
-        assertThat(message).contains("geo_shape")
-        assertThat(message).doesNotContain("lot_code")
+        assertAll(
+            { assertTrue("geo_shape" in message) { "the message did not name the offending column; was: $message" } },
+            { assertFalse("lot_code" in message) { "the message named an innocent column; was: $message" } },
+        )
     }
 
     @Test
     fun `a mapper over supported metadata still works after another mapper was rejected`() {
         val bad = metaData(Triple("GEO_SHAPE", Types.STRUCT, "SDO_GEOMETRY"))
-        assertThat(catchThrowable { RowMapper(bad, "load-wip").map(emptyResultSet) }).isNotNull()
+        assertThrows<Throwable> { RowMapper(bad, "load-wip").map(emptyResultSet) }
 
         val read = Duck.read("select 1 as lot_id, 'L1' as lot_code", "load-wip")
 
-        assertThat(read.columns.map { it.name }).containsExactly("lot_id", "lot_code")
-        assertThat(read.row.string("lot_code")).isEqualTo("L1")
+        assertAll(
+            { assertEquals(listOf("lot_id", "lot_code"), read.columns.map { it.name }) },
+            { assertEquals("L1", read.row.string("lot_code")) },
+        )
     }
 
     @Test
@@ -83,7 +92,7 @@ class RowMapperErrorTest {
         Duck.withResultSet("select * from (values (1, 'a'), (2, 'b'), (3, 'c')) as t(lot_id, lot_code)") { rs ->
             val md = Mockito.spy(rs.metaData)
             val mapper = RowMapper(md, "load-wip")
-            assertThat(mapper.columns).hasSize(2)
+            assertEquals(2, mapper.columns.size) { "columns were ${mapper.columns.map { it.name }}" }
 
             Mockito.clearInvocations(md)
             var rows = 0
@@ -92,7 +101,7 @@ class RowMapperErrorTest {
                 rows++
             }
 
-            assertThat(rows).isEqualTo(3)
+            assertEquals(3, rows)
             Mockito.verifyNoMoreInteractions(md)
         }
     }
@@ -115,12 +124,15 @@ class RowMapperErrorTest {
 
         val columns = RowMapper(md, "load-wip").columns
 
-        assertThat(columns.map { it.name to it.nullable }).containsExactly(
-            "required_col" to false,
-            "optional_col" to true,
-            // Unknown must fall to nullable: 4.6 picks the null-accepting DuckDB type from
-            // this flag, and guessing NOT NULL would produce a column that cannot take a null.
-            "unknown_col" to true,
+        assertEquals(
+            listOf(
+                "required_col" to false,
+                "optional_col" to true,
+                // Unknown must fall to nullable: 4.6 picks the null-accepting DuckDB type from
+                // this flag, and guessing NOT NULL would produce a column that cannot take a null.
+                "unknown_col" to true,
+            ),
+            columns.map { it.name to it.nullable },
         )
     }
 }

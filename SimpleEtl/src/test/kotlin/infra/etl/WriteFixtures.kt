@@ -14,8 +14,10 @@ import java.sql.PreparedStatement
 import java.sql.ResultSet
 import java.sql.Statement
 import java.util.concurrent.atomic.AtomicInteger
-import org.assertj.core.api.Assertions.assertThat
 import org.jdbi.v3.core.ConnectionFactory
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertTrue
+import org.junit.jupiter.api.assertAll
 
 /**
  * P2 test support. Deliberately separate from P1's `Duck`, which is SELECT-only by design and
@@ -140,8 +142,18 @@ class CountingConnections(private val open: () -> Connection) : ConnectionFactor
 
     /** Both counts must be non-zero, so a writer that never touched the database cannot pass. */
     fun assertBalanced(path: String) {
-        assertThat(connectionsOpened.get()).describedAs("connections opened on the %s path", path).isPositive()
-        assertThat(statementsOpened.get()).describedAs("statements opened on the %s path", path).isPositive()
+        assertAll(
+            {
+                assertTrue(connectionsOpened.get() > 0) {
+                    "connections opened on the $path path was ${connectionsOpened.get()}, expected more than 0"
+                }
+            },
+            {
+                assertTrue(statementsOpened.get() > 0) {
+                    "statements opened on the $path path was ${statementsOpened.get()}, expected more than 0"
+                }
+            },
+        )
         assertNothingLeaked(path)
     }
 
@@ -153,16 +165,29 @@ class CountingConnections(private val open: () -> Connection) : ConnectionFactor
      */
     fun assertCatalogReadBalanced(path: String) {
         assertBalanced(path)
-        assertThat(resultSetsOpened.get()).describedAs("result sets opened on the %s path", path).isPositive()
+        assertTrue(resultSetsOpened.get() > 0) {
+            "result sets opened on the $path path was ${resultSetsOpened.get()}, expected more than 0"
+        }
     }
 
     fun assertNothingLeaked(path: String) {
-        assertThat(connectionsClosed.get()).describedAs("connections closed on the %s path", path)
-            .isEqualTo(connectionsOpened.get())
-        assertThat(statementsClosed.get()).describedAs("statements closed on the %s path", path)
-            .isEqualTo(statementsOpened.get())
-        assertThat(resultSetsClosed.get()).describedAs("result sets closed on the %s path", path)
-            .isEqualTo(resultSetsOpened.get())
+        assertAll(
+            {
+                assertEquals(connectionsOpened.get(), connectionsClosed.get()) {
+                    "connections closed on the $path path"
+                }
+            },
+            {
+                assertEquals(statementsOpened.get(), statementsClosed.get()) {
+                    "statements closed on the $path path"
+                }
+            },
+            {
+                assertEquals(resultSetsOpened.get(), resultSetsClosed.get()) {
+                    "result sets closed on the $path path"
+                }
+            },
+        )
     }
 
     private fun countStatement(real: Statement): Statement {

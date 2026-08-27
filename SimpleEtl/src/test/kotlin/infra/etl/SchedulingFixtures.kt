@@ -27,9 +27,10 @@ import java.util.concurrent.TimeUnit.SECONDS
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.io.path.isDirectory
 import kotlin.io.path.writeText
-import org.assertj.core.api.Assertions.assertThat
 import org.jdbi.v3.core.ConnectionFactory
 import org.jdbi.v3.core.Jdbi
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertInstanceOf
 
 /**
  * P7 test support: the recording `CronScheduler`, the parking probe that lets a test assert on a
@@ -390,7 +391,7 @@ object Trig {
 
     /** The runId of an [TriggerResult.Accepted], failing with the actual result if it is not one. */
     fun acceptedRunId(result: TriggerResult): String {
-        assertThat(result).isInstanceOf(TriggerResult.Accepted::class.java)
+        assertInstanceOf(TriggerResult.Accepted::class.java, result)
         return (result as TriggerResult.Accepted).runId
     }
 
@@ -449,9 +450,7 @@ object Trig {
 
     fun awaitSucceeded(admin: TaskAdmin, task: String, runId: String): TaskOutcome {
         val outcome = awaitFinished(admin, task, runId)
-        assertThat(outcome.outcome)
-            .describedAs("run '%s' failed: %s", runId, outcome.failure)
-            .isEqualTo(Outcome.SUCCEEDED)
+        assertEquals(Outcome.SUCCEEDED, outcome.outcome) { "run '$runId' failed: ${outcome.failure}" }
         return outcome
     }
 }

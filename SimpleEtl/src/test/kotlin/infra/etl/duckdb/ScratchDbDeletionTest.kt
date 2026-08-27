@@ -2,12 +2,16 @@ package infra.etl.duckdb
 
 import infra.etl.Scratchpad
 import infra.etl.duckdb.ScratchDb
+import java.nio.file.Files
 import java.nio.file.Path
 import java.sql.Connection
 import java.sql.SQLException
-import org.assertj.core.api.Assertions.assertThat
-import org.assertj.core.api.Assertions.assertThatThrownBy
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertNotNull
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertAll
+import org.junit.jupiter.api.assertThrows
 import org.junit.jupiter.api.io.TempDir
 
 /**
@@ -33,12 +37,11 @@ class ScratchDbDeletionTest {
     fun fileIsDeletedOnSuccess() {
         ScratchDb(root, Scratchpad.MEMORY_LIMIT_MB, Scratchpad.spillDir(root)).use { scratch ->
             Scratchpad.createAttemptTable(scratch.connection(), "wip_stg__a1", "a1", rows = 8)
-            assertThat(Scratchpad.regularFiles(root)).isNotEmpty()
+            assertTrue(Scratchpad.regularFiles(root).isNotEmpty()) { "the run created no scratch file" }
         }
 
-        assertThat(Scratchpad.regularFiles(root))
-            .describedAs("scratch artefacts left behind after a successful run")
-            .isEmpty()
+        val left = Scratchpad.regularFiles(root)
+        assertTrue(left.isEmpty()) { "scratch artefacts left behind after a successful run: $left" }
     }
 
     /**
@@ -53,16 +56,19 @@ class ScratchDbDeletionTest {
         ScratchDb(root, Scratchpad.MEMORY_LIMIT_MB, Scratchpad.spillDir(root)).use { scratch ->
             val connection = scratch.connection()
             Scratchpad.createAttemptTable(connection, "wip_stg__a1", "a1", rows = 8)
-            assertThat(Scratchpad.regularFiles(root)).isNotEmpty()
+            assertTrue(Scratchpad.regularFiles(root).isNotEmpty()) { "the run created no scratch file" }
 
             val thrown = runCatching { Scratchpad.rowCount(connection, "no_such_dataset") }.exceptionOrNull()
             failure = (thrown as SQLException?)?.message
         }
 
-        assertThat(failure).describedAs("the fixture's own failure injection did not fire").isNotNull()
-        assertThat(Scratchpad.regularFiles(root))
-            .describedAs("scratch artefacts left behind after a failed step")
-            .isEmpty()
+        assertAll(
+            { assertNotNull(failure) { "the fixture's own failure injection did not fire" } },
+            {
+                val left = Scratchpad.regularFiles(root)
+                assertTrue(left.isEmpty()) { "scratch artefacts left behind after a failed step: $left" }
+            },
+        )
     }
 
     /**
@@ -74,19 +80,19 @@ class ScratchDbDeletionTest {
     fun fileIsDeletedWhenTheRunBlockThrows_andTheFailurePropagates() {
         val scratch = ScratchDb(root, Scratchpad.MEMORY_LIMIT_MB, Scratchpad.spillDir(root))
 
-        assertThatThrownBy {
+        val thrown = assertThrows<IllegalStateException> {
             scratch.use {
                 Scratchpad.createAttemptTable(it.connection(), "wip_stg__a1", "a1", rows = 8)
-                assertThat(Scratchpad.regularFiles(root)).isNotEmpty()
+                assertTrue(Scratchpad.regularFiles(root).isNotEmpty()) { "the run created no scratch file" }
                 throw IllegalStateException("step 'build-summary' blew up")
             }
         }
-            .isInstanceOf(IllegalStateException::class.java)
-            .hasMessageContaining("build-summary")
+        assertTrue(thrown.message?.contains("build-summary") == true) { "message was: ${thrown.message}" }
 
-        assertThat(Scratchpad.regularFiles(root))
-            .describedAs("scratch artefacts left behind after an exception from inside the run block")
-            .isEmpty()
+        val left = Scratchpad.regularFiles(root)
+        assertTrue(left.isEmpty()) {
+            "scratch artefacts left behind after an exception from inside the run block: $left"
+        }
     }
 
     /**
@@ -106,22 +112,27 @@ class ScratchDbDeletionTest {
         ScratchDb(root, Scratchpad.MEMORY_LIMIT_MB, Scratchpad.spillDir(root)).use { scratch ->
             Scratchpad.createAttemptTable(scratch.connection(), "wip_stg__a1", "a1", rows = 4)
             leaked = scratch.duplicate()
-            assertThat(Scratchpad.rowCount(leaked, "wip_stg__a1")).isEqualTo(4L)
-            assertThat(Scratchpad.regularFiles(root)).isNotEmpty()
+            assertEquals(4L, Scratchpad.rowCount(leaked, "wip_stg__a1"))
+            assertTrue(Scratchpad.regularFiles(root).isNotEmpty()) { "the run created no scratch file" }
         }
 
-        assertThat(leaked.isClosed())
-            .describedAs(
-                "the duplicate the run forgot must be closed by close(). File absence cannot " +
-                    "answer this on its own: every measurement behind this suite is from Windows, " +
-                    "where an open handle blocks the delete, but CI is Linux, where the file " +
-                    "unlinks happily while the handle is open - so on CI the assertion below " +
-                    "passes against an implementation that never closes a duplicate.",
-            )
-            .isTrue()
-        assertThat(Scratchpad.regularFiles(root))
-            .describedAs("an unclosed duplicate kept the scratch file alive past the end of the run")
-            .isEmpty()
+        assertAll(
+            {
+                assertTrue(leaked.isClosed()) {
+                    "the duplicate the run forgot must be closed by close(). File absence cannot " +
+                        "answer this on its own: every measurement behind this suite is from Windows, " +
+                        "where an open handle blocks the delete, but CI is Linux, where the file " +
+                        "unlinks happily while the handle is open - so on CI the assertion below " +
+                        "passes against an implementation that never closes a duplicate."
+                }
+            },
+            {
+                val left = Scratchpad.regularFiles(root)
+                assertTrue(left.isEmpty()) {
+                    "an unclosed duplicate kept the scratch file alive past the end of the run: $left"
+                }
+            },
+        )
     }
 
     /**
@@ -135,6 +146,9 @@ class ScratchDbDeletionTest {
             Scratchpad.createAttemptTable(scratch.connection(), "wip_stg__a1", "a1", rows = 2)
         }
 
-        assertThat(root).exists().isDirectory()
+        assertAll(
+            { assertTrue(Files.exists(root)) { "the caller's directory was deleted: $root" } },
+            { assertTrue(Files.isDirectory(root)) { "the caller's directory is no longer a directory: $root" } },
+        )
     }
 }

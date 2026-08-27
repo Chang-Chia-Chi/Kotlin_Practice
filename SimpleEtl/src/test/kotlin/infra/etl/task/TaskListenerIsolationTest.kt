@@ -10,8 +10,10 @@ import infra.etl.task.TaskRunListener
 import infra.etl.taskContext
 import java.nio.file.Path
 import java.sql.SQLTransientException
-import org.assertj.core.api.Assertions.assertThat
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertSame
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertAll
 import org.junit.jupiter.api.io.TempDir
 import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.EnumSource
@@ -93,15 +95,23 @@ class TaskListenerIsolationTest {
 
             val outcome = harness.run(retryingTask())
 
-            assertThat(outcome.outcome)
-                .describedAs("a listener that throws from %s must not fail the run", site)
-                .isEqualTo(Outcome.SUCCEEDED)
-            assertThat(thrower.thrown)
-                .describedAs("the site under test actually fired; an engine that never calls one cannot fail this")
-                .isEqualTo(1)
-            assertThat(thrower.calls)
-                .describedAs("the engine kept calling the listener after it threw")
-                .containsExactlyElementsOf(allSites)
+            assertAll(
+                {
+                    assertEquals(Outcome.SUCCEEDED, outcome.outcome) {
+                        "a listener that throws from $site must not fail the run"
+                    }
+                },
+                {
+                    assertEquals(1, thrower.thrown) {
+                        "the site under test actually fired; an engine that never calls one cannot fail this"
+                    }
+                },
+                {
+                    assertEquals(allSites, thrower.calls) {
+                        "the engine kept calling the listener after it threw"
+                    }
+                },
+            )
         }
     }
 
@@ -122,14 +132,21 @@ class TaskListenerIsolationTest {
 
         TaskRunListener.of(first, second, third).onTaskStart(taskContext())
 
-        assertThat(trace.entries).containsExactly(
-            "first:onTaskStart(wip-summary)",
-            "second:onTaskStart(wip-summary)",
-            "third:onTaskStart(wip-summary)",
+        assertAll(
+            {
+                assertEquals(
+                    listOf(
+                        "first:onTaskStart(wip-summary)",
+                        "second:onTaskStart(wip-summary)",
+                        "third:onTaskStart(wip-summary)",
+                    ),
+                    trace.entries,
+                )
+            },
+            { assertEquals(1, first.thrown) { "the thrower really threw" } },
+            { assertSame(TaskRunListener.NONE, TaskRunListener.of()) { "of() is the no-op" } },
+            { assertSame(second, TaskRunListener.of(second)) { "of(one) is that one, unwrapped" } },
         )
-        assertThat(first.thrown).describedAs("the thrower really threw").isEqualTo(1)
-        assertThat(TaskRunListener.of()).describedAs("of() is the no-op").isSameAs(TaskRunListener.NONE)
-        assertThat(TaskRunListener.of(second)).describedAs("of(one) is that one, unwrapped").isSameAs(second)
     }
 
     /**
@@ -147,14 +164,24 @@ class TaskListenerIsolationTest {
 
             val outcome = harness.run(retryingTask())
 
-            assertThat(outcome.outcome).isEqualTo(Outcome.SUCCEEDED)
-            assertThat(thrower.thrown).describedAs("it threw from every site it was given").isEqualTo(allSites.size)
-            assertThat(downstream.calls)
-                .describedAs("every event still reached the listener behind it")
-                .containsExactlyElementsOf(allSites)
-            assertThat(trace.entries.first())
-                .describedAs("argument order, so the thrower is the one that goes first")
-                .isEqualTo("thrower:onTaskStart(wip-isolation)")
+            assertAll(
+                { assertEquals(Outcome.SUCCEEDED, outcome.outcome) },
+                {
+                    assertEquals(allSites.size, thrower.thrown) {
+                        "it threw from every site it was given"
+                    }
+                },
+                {
+                    assertEquals(allSites, downstream.calls) {
+                        "every event still reached the listener behind it"
+                    }
+                },
+                {
+                    assertEquals("thrower:onTaskStart(wip-isolation)", trace.entries.first()) {
+                        "argument order, so the thrower is the one that goes first"
+                    }
+                },
+            )
         }
     }
 }

@@ -7,10 +7,14 @@ import java.time.Instant
 import java.time.LocalDateTime
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
-import org.assertj.core.api.Assertions.assertThat
-import org.assertj.core.api.Assertions.assertThatCode
-import org.assertj.core.api.Assertions.catchThrowable
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertAll
+import org.junit.jupiter.api.assertDoesNotThrow
+import org.junit.jupiter.api.assertThrows
 
 /**
  * Row semantics of spec 4.2 and 4.5, exercised through Rows produced by RowMapper
@@ -33,67 +37,105 @@ class RowTest {
 
     @Test
     fun `columns are lower case and in source order`() {
-        assertThat(row().columns)
-            .containsExactly("lot_id", "lot_code", "qty", "note", "scrap_qty", "upd_ts", "active")
+        assertEquals(
+            listOf("lot_id", "lot_code", "qty", "note", "scrap_qty", "upd_ts", "active"),
+            row().columns.toList(),
+        )
     }
 
     @Test
     fun `get returns null both for an absent key and for a SQL NULL`() {
         val row = row()
-        assertThat(row["note"]).isNull()
-        assertThat(row["no_such_column"]).isNull()
-        assertThat(row["lot_code"]).isEqualTo("L1")
+        assertAll(
+            { assertNull(row["note"]) { "a SQL NULL must read back as null, was ${row["note"]}" } },
+            {
+                assertNull(row["no_such_column"]) {
+                    "an absent key must read back as null, was ${row["no_such_column"]}"
+                }
+            },
+            { assertEquals("L1", row["lot_code"]) },
+        )
     }
 
     @Test
     fun `contains distinguishes an absent key from a SQL NULL`() {
         val row = row()
-        assertThat(row.contains("note")).isTrue()
-        assertThat(row.contains("scrap_qty")).isTrue()
-        assertThat(row.contains("no_such_column")).isFalse()
+        assertAll(
+            { assertTrue(row.contains("note")) { "contains(note) was false; columns were ${row.columns}" } },
+            { assertTrue(row.contains("scrap_qty")) { "contains(scrap_qty) was false; columns were ${row.columns}" } },
+            {
+                assertFalse(row.contains("no_such_column")) {
+                    "contains(no_such_column) was true; columns were ${row.columns}"
+                }
+            },
+        )
     }
 
     @Test
     fun `typed accessors return the canonical value`() {
         val row = row()
-        assertThat(row.long("lot_id")).isEqualTo(7L)
-        assertThat(row.string("lot_code")).isEqualTo("L1")
-        assertThat(row.decimal("qty")).isEqualByComparingTo(BigDecimal("1.500"))
-        assertThat(row.dateTime("upd_ts")).isEqualTo(LocalDateTime.of(2024, 1, 2, 3, 4, 5))
-        assertThat(row.bool("active")).isTrue()
+        assertAll(
+            { assertEquals(7L, row.long("lot_id")) },
+            { assertEquals("L1", row.string("lot_code")) },
+            {
+                assertTrue(row.decimal("qty")?.compareTo(BigDecimal("1.500")) == 0) {
+                    "expected 1.500 by comparison, was ${row.decimal("qty")}"
+                }
+            },
+            { assertEquals(LocalDateTime.of(2024, 1, 2, 3, 4, 5), row.dateTime("upd_ts")) },
+            { assertTrue(row.bool("active") == true) { "active was ${row.bool("active")}" } },
+        )
     }
 
     @Test
     fun `typed accessors return null for a SQL NULL, never a placeholder`() {
         val row = row()
-        assertThat(row.string("note")).isNull()
-        assertThat(row.decimal("scrap_qty")).isNull()
+        assertAll(
+            { assertNull(row.string("note")) { "was ${row.string("note")}" } },
+            { assertNull(row.decimal("scrap_qty")) { "was ${row.decimal("scrap_qty")}" } },
+        )
     }
 
     @Test
     fun `a typed accessor for the wrong type reports step, column, actual and requested type`() {
-        val thrown = catchThrowable { row(step = "map-lots").long("lot_code") }
+        val thrown = assertThrows<Throwable> { row(step = "map-lots").long("lot_code") }
 
-        assertThat(thrown).isNotInstanceOf(ClassCastException::class.java)
-        assertThat(thrown.message!!.lowercase()).contains("map-lots", "lot_code", "string", "long")
+        assertAll(
+            { assertFalse(thrown is ClassCastException) { "expected a diagnostic error, was $thrown" } },
+            {
+                val message = thrown.message!!.lowercase()
+                assertTrue(listOf("map-lots", "lot_code", "string", "long").all { it in message }) {
+                    "the message must name the step, the column, the actual and the requested type; " +
+                        "was: ${thrown.message}"
+                }
+            },
+        )
     }
 
     @Test
     fun `a wrong-type accessor error also names the requested type for the temporal accessors`() {
-        val thrown = catchThrowable { row().dateTime("qty") }
+        val thrown = assertThrows<Throwable> { row().dateTime("qty") }
 
-        assertThat(thrown).isNotInstanceOf(ClassCastException::class.java)
-        assertThat(thrown.message!!.lowercase()).contains("qty", "decimal", "datetime")
+        assertAll(
+            { assertFalse(thrown is ClassCastException) { "expected a diagnostic error, was $thrown" } },
+            {
+                assertTrue(listOf("qty", "decimal", "datetime").all { it in thrown.message!!.lowercase() }) {
+                    "the message must name the column, the actual and the requested type; was: ${thrown.message}"
+                }
+            },
+        )
     }
 
     @Test
     fun `the row is still usable after a wrong-type accessor error`() {
         val row = row()
-        assertThat(catchThrowable { row.instant("lot_code") }).isNotNull()
+        assertThrows<Throwable> { row.instant("lot_code") }
 
-        assertThat(row.string("lot_code")).isEqualTo("L1")
-        assertThat(row.long("lot_id")).isEqualTo(7L)
-        assertThat(row.columns).contains("lot_code")
+        assertAll(
+            { assertEquals("L1", row.string("lot_code")) },
+            { assertEquals(7L, row.long("lot_id")) },
+            { assertTrue("lot_code" in row.columns) { "columns were ${row.columns}" } },
+        )
     }
 
     @Test
@@ -101,10 +143,12 @@ class RowTest {
         val row = row()
         val enriched = row.with("row_hash", "abc")
 
-        assertThat(enriched.string("row_hash")).isEqualTo("abc")
-        assertThat(enriched.columns).contains("row_hash")
-        assertThat(row.columns).doesNotContain("row_hash")
-        assertThat(row["row_hash"]).isNull()
+        assertAll(
+            { assertEquals("abc", enriched.string("row_hash")) },
+            { assertTrue("row_hash" in enriched.columns) { "enriched columns were ${enriched.columns}" } },
+            { assertFalse("row_hash" in row.columns) { "the original row's columns were ${row.columns}" } },
+            { assertNull(row["row_hash"]) { "the original row gained a value: ${row["row_hash"]}" } },
+        )
     }
 
     @Test
@@ -112,17 +156,21 @@ class RowTest {
         val row = row()
         val replaced = row.with("lot_code", "L2")
 
-        assertThat(replaced.string("lot_code")).isEqualTo("L2")
-        assertThat(row.string("lot_code")).isEqualTo("L1")
-        assertThat(replaced.columns).isEqualTo(row.columns)
+        assertAll(
+            { assertEquals("L2", replaced.string("lot_code")) },
+            { assertEquals("L1", row.string("lot_code")) },
+            { assertEquals(row.columns, replaced.columns) },
+        )
     }
 
     @Test
     fun `with accepts null and the column stays present`() {
         val cleared = row().with("lot_code", null)
 
-        assertThat(cleared.contains("lot_code")).isTrue()
-        assertThat(cleared["lot_code"]).isNull()
+        assertAll(
+            { assertTrue(cleared.contains("lot_code")) { "columns were ${cleared.columns}" } },
+            { assertNull(cleared["lot_code"]) { "was ${cleared["lot_code"]}" } },
+        )
     }
 
     @Test
@@ -130,19 +178,28 @@ class RowTest {
         val row = row()
         val trimmed = row.without("lot_code")
 
-        assertThat(trimmed.contains("lot_code")).isFalse()
-        assertThat(trimmed["lot_code"]).isNull()
-        assertThat(row.contains("lot_code")).isTrue()
-        assertThat(trimmed.columns).containsExactly("lot_id", "qty", "note", "scrap_qty", "upd_ts", "active")
+        assertAll(
+            { assertFalse(trimmed.contains("lot_code")) { "trimmed columns were ${trimmed.columns}" } },
+            { assertNull(trimmed["lot_code"]) { "was ${trimmed["lot_code"]}" } },
+            { assertTrue(row.contains("lot_code")) { "the original row's columns were ${row.columns}" } },
+            {
+                assertEquals(
+                    listOf("lot_id", "qty", "note", "scrap_qty", "upd_ts", "active"),
+                    trimmed.columns.toList(),
+                )
+            },
+        )
     }
 
     @Test
     fun `a transform chain of with and without composes`() {
         val transformed = row().with("row_hash", "abc").without("note").with("row_hash", "def")
 
-        assertThat(transformed.string("row_hash")).isEqualTo("def")
-        assertThat(transformed.contains("note")).isFalse()
-        assertThatCode { transformed.long("lot_id") }.doesNotThrowAnyException()
+        assertAll(
+            { assertEquals("def", transformed.string("row_hash")) },
+            { assertFalse(transformed.contains("note")) { "columns were ${transformed.columns}" } },
+            { assertDoesNotThrow { transformed.long("lot_id") } },
+        )
     }
 
     /**
@@ -155,9 +212,11 @@ class RowTest {
     fun `the step survives with and without into the copied row`() {
         val transformed = row(step = "map-lots").with("row_hash", "abc").without("note")
 
-        val message = catchThrowable { transformed.long("row_hash") }.message!!.lowercase()
+        val message = assertThrows<Throwable> { transformed.long("row_hash") }.message!!.lowercase()
 
-        assertThat(message).contains("map-lots", "row_hash", "string", "long")
+        assertTrue(listOf("map-lots", "row_hash", "string", "long").all { it in message }) {
+            "the copied row's error must still name the step, the column and both types; was: $message"
+        }
     }
 
     /**
@@ -177,8 +236,14 @@ class RowTest {
                 }
             }.map { it.get(30, TimeUnit.SECONDS) }
 
-            assertThat(results).allMatch { it == results.first() }
-            assertThat(results.first()[0]).isEqualTo(7L)
+            assertAll(
+                {
+                    assertTrue(results.all { it == results.first() }) {
+                        "concurrent reads disagreed; distinct results were ${results.distinct()}"
+                    }
+                },
+                { assertEquals(7L, results.first()[0]) },
+            )
         } finally {
             pool.shutdownNow()
         }
@@ -188,6 +253,6 @@ class RowTest {
     fun `the instant accessor returns the canonical instant`() {
         val row = Duck.row("select TIMESTAMPTZ '2024-01-02 03:04:05+00' as event_ts")
 
-        assertThat(row.instant("event_ts")).isEqualTo(Instant.parse("2024-01-02T03:04:05Z"))
+        assertEquals(Instant.parse("2024-01-02T03:04:05Z"), row.instant("event_ts"))
     }
 }
