@@ -15,7 +15,7 @@ retrying, observable task. Layer 2 depends on Layer 1; nothing depends on Layer 
 ## Commands
 
 ```bash
-mvn -pl SimpleEtl -am test -Dtest='!*OracleTest' -DfailIfNoSpecifiedTests=false
+mvn -pl SimpleEtl -am test -Dtest='!*OracleTest,!*Spike' -Dsurefire.failIfNoSpecifiedTests=false
 mvn -pl SimpleEtl -am test          # everything, including the three Testcontainers Oracle classes
 
 # First check when reviewing any phase - did it touch earlier tests?
@@ -24,8 +24,12 @@ git diff --stat <prev-phase-tag>..HEAD -- '**/test/**'
 
 `-am` is required: the reactor builds `snapshotcache` first. The `*OracleTest` classes need
 Docker; where Docker is absent they cannot run and any claim about them is inherited from an
-earlier phase rather than re-measured. Spikes are named `*Spike` so surefire's `*Test` pattern
-skips them; run one with `-Dtest=<name> -DfailIfNoSpecifiedTests=false`.
+earlier phase rather than re-measured.
+
+`!*Spike` has to be written out. Spikes are named `*Spike` so that surefire's **default** include
+pattern skips them - but any `-Dtest=` replaces that default, so `-Dtest='!*OracleTest'` alone
+*runs* them, one of which appends 6.2M rows ten times. Run one deliberately with
+`-Dtest=<name> -Dsurefire.failIfNoSpecifiedTests=false`.
 
 ## Documents
 
@@ -102,5 +106,9 @@ triggering thread and released from `invokeOnCompletion` on whatever thread fini
 coroutine. A `Mutex` locked by one party and unlocked by another is a misuse of the abstraction.
 It is a claim/release token modelling a state machine, which is what a CAS flag is for.
 
-Where a **notification** mechanism is built, prefer the Kotlin-native shape: `SharedFlow`, emitted
-with `tryEmit` and never `emit`, so telemetry can never back-pressure an ETL run (P8c).
+A **notification** mechanism is a plain listener interface called on the run's own thread, not a
+`SharedFlow`. P8c built the flow and P8c's revert removed it: `tryEmit` buys "never suspends", not
+"never blocks", and an `Unconfined` collector was measured running 300 ms inline in the producer -
+so the back-pressure guarantee the flow was added for did not exist. Isolation is the listener
+call site's job (`ForwardingListener`, and the engine catching what a listener throws). Do not
+rebuild the flow.
