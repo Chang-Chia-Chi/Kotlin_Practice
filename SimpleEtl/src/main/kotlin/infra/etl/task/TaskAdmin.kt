@@ -55,10 +55,23 @@ class TaskAdmin(
      * `POST /admin/etl/tasks/{name}/runs`. Returns as soon as the run is submitted, never when it
      * finishes: a 30 minute run must not be held open behind an HTTP request (spec 8.2).
      *
+     * Synchronised against [reload] because the lookup, the enabled check and the submit are one
+     * admission decision. Left unsynchronised they are a check-then-act over a map another thread
+     * replaces: an operator who disables a task, reloads, and is told the reload succeeded could
+     * still watch a trigger that read the map a moment earlier launch a half-hour run of the old
+     * enabled definition - the very thing the disable was meant to stop - while [list] reports the
+     * task disabled. Spec 8.5's "a task currently running keeps the definition it started with"
+     * covers runs already under way, not which runs are allowed to start.
+     *
+     * The cost is that a trigger waits out a concurrent reload's file read. A reload is an operator
+     * action measured in hundreds of milliseconds, and this method only submits: the run itself is
+     * launched on [TaskRunner]'s dispatcher and never holds this monitor.
+     *
      * @param by the caller identity from the host's security context, recorded into the run
      *   ([RunStatus.triggeredBy]) so an API-triggered run is distinguishable in the listing from a
      *   scheduled one. Nothing here checks it.
      */
+    @Synchronized
     fun trigger(name: String, by: String?): TriggerResult {
         val definition = definitions[name] ?: return TriggerResult.Unknown
         if (!definition.enabled) return TriggerResult.Disabled

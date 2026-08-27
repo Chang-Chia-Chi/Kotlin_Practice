@@ -104,9 +104,19 @@ class RowMapper(metaData: ResultSetMetaData, private val step: String) {
             CanonicalType.BYTES -> when (val value = rs.getObject(i)) {
                 null -> null
                 is ByteArray -> value
-                // 7.4: released here, not left to GC. A 2M-row pipe would otherwise hold two
-                // million server-side locators open for the length of the step.
-                is Blob -> value.getBytes(1, value.length().toInt()).also { value.free() }
+                // 7.4: released here, not left to GC, and from a finally so a throwing read
+                // releases it too. A 2M-row pipe would otherwise hold two million server-side
+                // locators open for the length of the step.
+                is Blob -> try {
+                    val length = value.length()
+                    require(length <= Int.MAX_VALUE) {
+                        "step '$step', column '${column.name}': the BLOB is $length bytes and no byte[] " +
+                            "can hold it. length().toInt() would wrap and truncate it silently."
+                    }
+                    value.getBytes(1, length.toInt())
+                } finally {
+                    value.free()
+                }
                 else -> throw IllegalArgumentException(
                     "step '$step', column '${column.name}': ${value.javaClass.name} is not a byte source",
                 )

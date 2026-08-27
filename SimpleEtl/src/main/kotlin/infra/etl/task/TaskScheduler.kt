@@ -59,12 +59,24 @@ class TaskScheduler(private val cron: CronScheduler, private val runner: TaskRun
      * Cancels run before registrations, so a changed cron is unregistered and registered in that
      * order rather than briefly being live twice.
      *
+     * **The definitions are published before anything is registered**, because [fire] reads them
+     * from the host's own scheduler thread and cannot be made to wait. Registering first leaves a
+     * window in which a callback exists but the map it looks in does not yet hold its task: at
+     * startup that window is the whole of `apply`, and a task registered a moment before its cron
+     * boundary fires into an empty map and is dropped in silence - indistinguishable from the
+     * removed-task skip [fire] documents. Published first, the only firing that can straddle the
+     * swap is one for a registration that already existed, which then runs the new definition -
+     * which is what a reload is for. The error path puts the previous map back with the previous
+     * registrations.
+     *
      * @return null when every registration succeeded, or the errors when the [CronScheduler]
      *   rejected at least one expression - in which case nothing has changed.
      */
     @Synchronized
     fun apply(definitions: List<TaskDefinition>): ValidationReport? {
         val wanted = definitions.filter { it.enabled && it.cron != null }.associate { it.name to it.cron!! }
+        val previous = current
+        current = definitions.associateBy { it.name }
 
         // Removed, disabled, cron dropped, or cron changed - all four are "what is registered is not
         // what is wanted", and all four are cancelled before anything new is registered.
@@ -100,10 +112,10 @@ class TaskScheduler(private val cron: CronScheduler, private val runner: TaskRun
             // stateless callback. A host that now rejects what it accepted a moment ago has lost
             // that schedule either way, and there is nothing better to do than leave it out.
             cancelled.forEach { (name, registration) -> runCatching { register(name, registration.cron) } }
+            current = previous
             return ValidationReport(errors)
         }
 
-        current = definitions.associateBy { it.name }
         return null
     }
 

@@ -166,6 +166,21 @@ class DuckDbTableWriter(
                     "table '$table' declares ${column.type} (${column.type.duckDbType}). CAST the column " +
                     "in the source SQL, or correct the table."
             }
+            // A source scale wider than the target's is rounded away by appendBigDecimal without an
+            // error - S3's silent-rounding case, which [ddlType] rejects on the AUTO path and which
+            // REQUIRED reached only because the type comparison above ignores the (p,s) pair.
+            //
+            // Only a source that declares a usable scale is judged. An unconstrained NUMBER, a FLOAT
+            // and every computed expression report scale -127, which states no scale to compare;
+            // those stay the appender's business exactly as they were before this check.
+            if (column.type == CanonicalType.DECIMAL && sourceColumn != null && sourceColumn.scale in 1..38) {
+                require(sourceColumn.scale <= column.scale) {
+                    "step '$step', column '${column.name}': the source produces DECIMAL scale " +
+                        "${sourceColumn.scale} and table '$table' declares scale ${column.scale}, so every " +
+                        "value would be rounded to ${column.scale} decimal places with no error at all. " +
+                        "Widen the target column, or ROUND the column in the source SQL to say so out loud."
+                }
+            }
         }
     }
 

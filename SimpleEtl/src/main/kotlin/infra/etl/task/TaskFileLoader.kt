@@ -116,8 +116,15 @@ private class DuckDbSyntax : AutoCloseable {
         }
     }
 
-    /** The syntax error in [sql], or null when it parses. */
-    fun errorIn(sql: String): String? {
+    /**
+     * The syntax error in [sql], or null when it parses.
+     *
+     * @param selectOnly also reports the `not implemented` answer of the table above - the
+     *   statement parsed but is not a SELECT. Off for a `sql` step, where DDL is the whole point;
+     *   on for `cacheCopy`, whose text is spliced into `CREATE TABLE <output> AS <sql>` and is
+     *   therefore legal only as a SELECT.
+     */
+    fun errorIn(sql: String, selectOnly: Boolean = false): String? {
         val statement: PreparedStatement = session.value.second
         statement.setString(1, sql)
         val answer = statement.executeQuery().use { rows ->
@@ -125,8 +132,14 @@ private class DuckDbSyntax : AutoCloseable {
             rows.getString(1)
         }
         val result = JSON.readTree(answer)
-        if (!result.path("error").asBoolean() || result.path("error_type").asText() != "parser") return null
-        return "${result.path("error_message").asText()} (at character ${result.path("position").asText()})"
+        if (!result.path("error").asBoolean()) return null
+        val message = result.path("error_message").asText()
+        return when {
+            result.path("error_type").asText() == "parser" ->
+                "$message (at character ${result.path("position").asText()})"
+            selectOnly -> "it parses, but is not a SELECT statement (DuckDB: $message)"
+            else -> null
+        }
     }
 
     override fun close() {
@@ -355,9 +368,28 @@ private class FileValidation(
             }
             variable(null, literal.name)
         }
-        // Not a rule of spec 10: RowPipe requires a positive chunk size, and catching it here turns
-        // a failure five minutes into a run into a failure at boot.
+        // Not a rule of spec 10: RowPipe requires a positive chunk size and ScratchDb a positive
+        // memory limit. Catching them here turns a failure five minutes into a run - or, for the
+        // memory limit, at the first line of every run forever - into a failure at boot.
         if (yaml.chunkSize <= 0) err(null, "chunkSize must be positive, got ${yaml.chunkSize} (spec 5.2).")
+        yaml.scratch?.memoryLimitMb?.let {
+            if (it <= 0) {
+                err(
+                    null,
+                    "scratch.memoryLimitMb must be positive, got $it (spec 7.2). There is no value that " +
+                        "means unlimited; omit the field to take the engine default.",
+                )
+            }
+        }
+        // Also not a rule of spec 10, and here for the same reason: a task with no step at all runs,
+        // reports SUCCEEDED and updates nothing, which is spec 1.1's 03:00 failure exactly. Spec 3.1
+        // annotates every optional field '# optional' and `phases` carries no such annotation.
+        if (yaml.phases.isEmpty()) {
+            err(null, "the task declares no phases, so every run would succeed having done nothing (spec 3.1).")
+        }
+        yaml.phases.filter { it.steps.isEmpty() }.forEach {
+            err(null, "phase '${it.name}' declares no steps, so it would do nothing (spec 3.1).")
+        }
 
         yaml.phases.forEach { phase -> phase.steps.forEach(::step) }
         return errors
@@ -431,6 +463,15 @@ private class FileValidation(
      * Rule 19 is not `!text.contains(":")`. That would reject `qty::varchar` and `'a:b'`, both
      * legal DuckDB and both correctly skipped by JDBI's own parser, and would make every task file
      * needing a cast unwritable. The parse is what tells a bound name from punctuation.
+     *
+     * **JDBI's parser is not the last word on what a bind name is here.** Its lexer reads a colon
+     * followed by digits as a parameter - measured on jdbi3-core 3.45.4, `select site_code[1:3]`
+     * yields the name `3` and the rewrite `select site_code[1?]`, and `{'k':1}` yields `1`. Both
+     * are ordinary DuckDB syntax, an array slice and a struct literal, and both parse clean as
+     * written (measured on duckdb_jdbc 1.1.3). A cacheCopy's text reaches the cache verbatim
+     * through `CopyOutSpec.sql` and never passes through JDBI, so an all-digit "name" is
+     * punctuation here rather than a binding - and it is the **raw text**, never JDBI's
+     * `?`-substituted rewrite, that DuckDB is asked to parse.
      */
     private fun cacheSql(step: String, text: String) {
         if (text.isBlank()) {
@@ -443,13 +484,12 @@ private class FileValidation(
             err(step, "sql does not parse: ${e.message} (rule 6).")
             return
         }
-        syntax.errorIn(parsed.sql)?.let { err(step, "sql does not parse: $it (rule 6).") }
         val parameters = parsed.parameters
         if (parameters.isPositional) {
             err(step, "sql uses positional '?' parameters, and a cacheCopy binds nothing at all (rule 19).")
             return
         }
-        val bound = parameters.parameterNames.distinct().sorted()
+        val bound = parameters.parameterNames.filterNot { name -> name.all(Char::isDigit) }.distinct().sorted()
         if (bound.isNotEmpty()) {
             err(
                 step,
@@ -458,7 +498,13 @@ private class FileValidation(
                     "with no binding channel (spec 3.6, 7.3), so this cannot be bound even if the variable " +
                     "is defined. Copy the wider subset and filter it in the following materialize step.",
             )
+            return
         }
+        // selectOnly: the runtime splices this text into `CREATE TABLE <output> AS <sql>`, which is
+        // legal only for a SELECT. Without it a parsed non-SELECT - `copy (...) to ...`, a CTAS -
+        // comes back "not implemented", passes every rule, and then fails at run time on every
+        // firing, after the run has waited on the cache and taken a lease.
+        syntax.errorIn(text, selectOnly = true)?.let { err(step, "sql does not parse: $it (rule 6, 19).") }
     }
 
     /**
@@ -569,7 +615,7 @@ private class FileValidation(
                         "${transforms.sorted()}.",
                 )
             }
-            transform.addColumns.forEach { addColumn(name, it) }
+            transform.addColumns.forEach { addColumn(name, it, duckDbTarget = scratch) }
         }
     }
 
@@ -580,8 +626,17 @@ private class FileValidation(
      *
      * `nullable` defaults to true (spec 3.2), so `type: BOOLEAN` with nothing else written is a
      * rejection - hence the message naming `nullable: false` as one of the two fixes.
+     *
+     * @param duckDbTarget whether the pipe's target is the scratch DuckDB. Rule 15's own scope is
+     *   "DuckDB target column types (4.6)" and the whole predicate is about what the 1.1.3 appender
+     *   can express, so it is asked only of a step that reaches that appender. An added column on a
+     *   REQUIRED Oracle target - legal, and wired into `JdbcTableWriter` in P5 - is bound by
+     *   `JdbcWriters.javaType`, which takes a nullable DOUBLE, a DATE, an INSTANT and a BYTES
+     *   without complaint. Applying rule 15 there made those columns inexpressible: undeclared they
+     *   were dropped silently, declared they failed startup with a DuckDB-shaped message about a
+     *   table DuckDB never sees.
      */
-    private fun addColumn(step: String, column: AddColumnYaml) {
+    private fun addColumn(step: String, column: AddColumnYaml, duckDbTarget: Boolean) {
         val type = canonicalOf(column.type)
         if (type == null) {
             err(
@@ -592,6 +647,7 @@ private class FileValidation(
             )
             return
         }
+        if (!duckDbTarget) return
         val meta = ColumnMeta(column.name, type, column.nullable, column.precision, column.scale)
         unwritableToDuckDb(meta)?.let {
             err(step, "transform.addColumns column '${column.name}': $it (rule 15).")

@@ -17,6 +17,7 @@ import infra.etl.pipe.RowMapper
 import infra.etl.pipe.RowPipe
 import infra.etl.pipe.RowWriter
 import infra.snapshotcache.api.CopyOutSpec
+import java.nio.file.Files
 import java.nio.file.Path
 import java.sql.ResultSet
 import java.sql.SQLException
@@ -222,8 +223,8 @@ class TaskEngine(
             var failure: Throwable? = try {
                 ScratchDb(directory, memoryLimit).use { scratch ->
                     // The scratch footprint is sampled from a `finally` *inside* the `use`, which
-                    // is the only place the directory still exists: close() deletes it on every
-                    // path (spec 7.2). Sampled after the close, the gauge would read 0 on every
+                    // is the only place the directory still holds anything: close() empties it on
+                    // every path (spec 7.2). Sampled after the close, the gauge would read 0 on every
                     // run forever, silently, and an operator sizing spec 7.2's volume would see a
                     // flat zero. A run that never entered this block - ScratchDb's own
                     // `require(memoryLimitMb > 0)` is the reachable case - reports no sample at
@@ -238,6 +239,13 @@ class TaskEngine(
             } catch (e: Exception) {
                 e
             }
+            // ScratchDb empties this directory but leaves it standing, because a caller-supplied
+            // directory belongs to its caller (spec 7.2). This one is the run's own - resolved per
+            // runId, so nothing ever reuses it - and a ten-minute task would otherwise leave some
+            // 52,000 empty directories a year on the very volume spec 7.2 sizes. deleteIfExists
+            // rather than a sweep: anything that survived inside has already made close() throw,
+            // and that is the failure worth reporting.
+            runCatching { Files.deleteIfExists(directory) }
             // Hooks run here rather than inside the `use` because ScratchDb.close() can throw -
             // report() raises on a leftover temporary table or an unreclaimed path. Inside the
             // block that failure would arrive as a suppressed exception *after* onSuccess had
@@ -554,8 +562,13 @@ class TaskEngine(
             // loader in front of it. Rejected rather than interpolated: CopyOutSpec.sql is a plain
             // String with no binding channel, and substituting a value into the text would be the
             // injection path every other statement in this engine avoids by binding.
+            // An all-digit "name" is not one: JDBI's lexer reads a colon followed by digits as a
+            // parameter, so DuckDB's own `site_code[1:3]` slice and `{'k':1}` struct literal arrive
+            // here as `:3` and `:1`. This text never passes through JDBI - copyOut executes it
+            // verbatim - so rejecting them would refuse SQL the cache runs perfectly well. The
+            // loader's rule 19 skips them for the same reason.
             val parsed = CACHE_SQL_PARSER.parse(step.sql, null).parameters
-            val bound = parsed.parameterNames.distinct().sorted()
+            val bound = parsed.parameterNames.filterNot { name -> name.all(Char::isDigit) }.distinct().sorted()
             require(!parsed.isPositional && bound.isEmpty()) {
                 val what = if (parsed.isPositional) "positional '?' parameters" else "${bound.map { ":$it" }}"
                 "step '${step.name}': cache SQL binds $what, and a cacheCopy takes no variables at all. " +

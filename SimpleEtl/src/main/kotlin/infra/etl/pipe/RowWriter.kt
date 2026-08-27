@@ -63,7 +63,10 @@ internal class CatalogColumn(
  * and `wip_stg` also matches `wipXstg` - measured on duckdb_jdbc 1.1.3. Over-matched rows are
  * dropped by comparing `TABLE_NAME` exactly rather than by escaping, because escaping depends on
  * the driver honouring `getSearchStringEscape` and a stray extra column would shift every value
- * of a positional append by one.
+ * of a positional append by one. The **schema** is a pattern for the same reason and is compared
+ * the same way whenever [table] states one: without that, `etl_stg.wip` also matches `etl1stg.wip`,
+ * which either trips the one-owner check below - telling an already-qualified target to qualify
+ * itself - or silently supplies the wrong schema's column list when only that schema has the table.
  *
  * An unqualified [table] also searches every schema, so a same-named table in a second schema
  * contributes its own columns and the two interleave once sorted by ordinal - `main.t1(a,b)` plus
@@ -88,6 +91,7 @@ internal fun catalogColumns(connection: Connection, table: String, step: String)
     meta.getColumns(null, schema?.let { meta.stored(it) }, meta.stored(name), null).use { rs ->
         while (rs.next()) {
             if (!rs.getString("TABLE_NAME").equals(name, ignoreCase = true)) continue
+            if (schema != null && !rs.getString("TABLE_SCHEM").orEmpty().equals(schema, ignoreCase = true)) continue
             val owner = listOfNotNull(rs.getString("TABLE_CAT"), rs.getString("TABLE_SCHEM")).joinToString(".")
             byOwner.getOrPut(owner) { mutableListOf() } += rs.getInt("ORDINAL_POSITION") to CatalogColumn(
                 name = rs.getString("COLUMN_NAME").lowercase(),

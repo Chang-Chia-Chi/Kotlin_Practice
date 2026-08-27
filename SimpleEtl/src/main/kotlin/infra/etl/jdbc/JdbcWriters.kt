@@ -21,7 +21,8 @@ import org.jdbi.v3.core.statement.SqlStatements
  * The column list comes from the target's catalog, not from YAML and not from the source query,
  * and the generated INSERT names every column it binds. Reordering the target table's columns
  * therefore changes nothing. A Row key the target does not have is an error at [open], never a
- * silently dropped column.
+ * silently dropped column - and a key only a Row carries, which is a transform addition no
+ * `transform.addColumns` declared, is an error against the first chunk for the same reason.
  *
  * A target column the source does not produce is left out of the INSERT, so the database's own
  * default applies and its own NOT NULL constraint reports the violation. The framework does not
@@ -47,6 +48,7 @@ class JdbcTableWriter(
     private var handle: Handle? = null
     private var binds: List<ColumnMeta> = emptyList()
     private var sql = ""
+    private var checked = false
 
     override fun open(columns: List<ColumnMeta>) {
         check(handle == null) { "step '$step': the writer for '$table' is already open." }
@@ -85,6 +87,22 @@ class JdbcTableWriter(
     override fun write(chunk: List<Row>): Int {
         val opened = checkNotNull(handle) { "step '$step': write called before open on '$table'." }
         if (chunk.isEmpty()) return 0
+        // The INSERT is fixed at open from the columns the source declared, so a key that first
+        // appears on a Row - a transform's addition that `transform.addColumns` did not declare -
+        // is bound nowhere and the column silently takes its database default. Spec 4.4 promises a
+        // runtime error for a Row key with no matching column; this is where it is raised. Checked
+        // against the first chunk, like JdbcStatementWriter's bind names, because a set difference
+        // per row is work in the innermost loop.
+        if (!checked) {
+            checked = true
+            val bound = binds.mapTo(mutableSetOf()) { it.name }
+            val unmatched = chunk.first().columns.filterNot { it in bound }.sorted()
+            require(unmatched.isEmpty()) {
+                "step '$step', row 1: the row carries columns $unmatched which this step does not write " +
+                    "to table '$table'. A transform that adds a column must declare it in " +
+                    "transform.addColumns, or its value is dropped silently (spec 4.4, 9.1)."
+            }
+        }
         return opened.prepareBatch(sql).use { batch ->
             chunk.forEach { row ->
                 binds.forEach { batch.bindColumn(it.name, it.type, row) }
