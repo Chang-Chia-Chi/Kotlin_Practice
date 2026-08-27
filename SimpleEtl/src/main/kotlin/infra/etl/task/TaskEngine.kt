@@ -520,10 +520,24 @@ class TaskEngine(
          * `targetTable` goes over **unquoted**: `DuckDbGenerationStore.copyOut` quotes it itself,
          * so a name quoted here would create a table whose name contains the quote characters and
          * which every later step then fails to find. `materialize` quoting at its own call site is
-         * the shape to mirror, not that line. The connection handed over is scratch's **write**
-         * connection and not a `duplicate()`: `copyOut` runs `USE` on it and puts it back in its
-         * own `finally`, so a duplicate would restore the catalog on a connection nobody reads
-         * and leave later steps looking at the generation's catalog instead of scratch's.
+         * the shape to mirror, not that line.
+         *
+         * The connection handed over is scratch's **write** connection and not a `duplicate()`,
+         * for two ordinary reasons: `ScratchDb.duplicate()` records into `issued` and holds the
+         * connection open until the run closes, so a cacheCopy step would leak one per attempt;
+         * and there is no concurrent reader here to justify a second connection, because the step
+         * runs on the task's confined dispatcher thread.
+         *
+         * It is **not** because `USE` would strand a later step. `USE` is per-connection on
+         * duckdb_jdbc 1.1.3, and this repository ships the counter-example:
+         * `DuckDbGenerationStore.connection()` runs `USE` on a *duplicate* of the serving
+         * connection exactly so the serving connection keeps its own catalog. An earlier version
+         * of this KDoc claimed the opposite and was self-refuting - if the restore landed on a
+         * connection nobody reads, nothing had switched the write connection either.
+         *
+         * The genuine residual hazard runs the other way: because the write connection is the one
+         * handed over, a throw from `copyOut`'s inner `USE <home>` restore would leave the run's
+         * only write connection pointed at a catalog that is then detached.
          *
          * Failure needs no special handling. `NotReadyException` and `ShuttingDownException` are
          * plain `RuntimeException`s, so the step loop sees them, the listener and metric call

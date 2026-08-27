@@ -1323,8 +1323,22 @@ enum class Outcome { SUCCEEDED, FAILED }
 data class TaskOutcome(val runId: String, val outcome: Outcome, val failure: Throwable?)
 
 // Loading
-class TaskFileLoader {
-    fun load(directory: Path): Result<List<TaskDefinition>, ValidationReport>
+class TaskFileLoader {                        // (datasources, transforms, hooks, caches)
+    fun load(directory: Path): LoadResult
+}
+
+/**
+ * P6 amendment, reconciled here in P9. This section declared
+ * `Result<List<TaskDefinition>, ValidationReport>`, which does not exist: Kotlin's stdlib
+ * `Result` takes one type parameter. `kotlin.Result` plus a `ValidationException` was rejected
+ * because reading the report would need an unchecked cast at every call site and nothing
+ * constrains a `Result.failure` to carry that type. The sealed pair makes the invalid state
+ * unrepresentable rather than merely documented. Recorded as a deviation in progress.md at P6 and
+ * left unreconciled here for three phases - a frozen document that disagreed with shipped code.
+ */
+sealed interface LoadResult {
+    data class Loaded(val tasks: List<TaskDefinition>) : LoadResult
+    data class Invalid(val report: ValidationReport) : LoadResult
 }
 
 data class ValidationReport(val errors: List<ValidationError>)

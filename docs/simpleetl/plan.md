@@ -385,7 +385,8 @@ P8c Event stream
 P9 Cache read step
 ```
 
-P8a, P8b, P8c and P9 all edit `TaskEngine.kt` and are a chain. The earlier claim that
+P8a, P8b and P9 all edit `TaskEngine.kt` and were a chain. P8c did **not** - it added a listener
+and no engine call site, which is the one thing that phase got right - and it was reverted anyway. The earlier claim that
 "P8 and P9 are independent of each other and can be swapped or parallelised" was wrong and is
 struck: P7's own handover note already recorded that P8 owns the listener call sites in the same
 file P9 edits for the cache read step, and that two agents cannot build them in parallel.

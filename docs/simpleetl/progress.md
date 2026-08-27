@@ -1262,7 +1262,11 @@ that measured the answer instead of reasoning about it.
   table whose name contains the quote characters, which every later step then fails to find.
 - **The connection handed over is scratch's write connection, never a `duplicate()`.** `copyOut`
   runs `USE` on it and restores it in its own `finally`; a duplicate would restore the catalog on a
-  connection nobody reads and leave later steps looking at the generation's catalog. The symptom is
+  scratch's own write connection is handed over because `duplicate()` would leak a connection
+  per attempt into `issued` and there is no concurrent reader to justify one. **Not** because `USE`
+  would strand a later step - `USE` is per-connection, and `DuckDbGenerationStore.connection()`
+  ships the counter-example. The first version of that KDoc claimed otherwise; it was the tenth
+  confidently-wrong claim in this project and it was self-refuting.
   a missing table, which names nothing about the cause.
 - **No `waitBudget` is passed.** The cache's `defaultWaitBudget` is the policy; it is also
   unobservable from a test, because Kotlin default arguments make it untestable - a code-review
@@ -1319,3 +1323,54 @@ for that direction: `CacheBinding` failing to compile is louder than any rule.
 **Suite: 336 tests, 0 failures** (`mvn -pl SimpleEtl clean test -Dtest='!*OracleTest,!*Spike'`),
 up from a 324 baseline; the SDET's twelve. Docker is unavailable, so the three `*OracleTest`
 classes still cannot run. Nothing in the contract failed to survive contact with the code.
+
+### P9 - documents amended (missing from the entry above)
+
+Recorded because progress.md is the handover map and the commit message is not:
+
+- **spec 3.6** - the `cacheCopy` YAML schema. Spec 3 defined four step types; the fifth had been
+  in the model since P5 with a stub executor and no YAML form.
+- **spec 10, rules 19, 20, 21** - no variables in cacheCopy SQL, no stated `retries > 0`, and every
+  `cache` name present in the host-supplied set. Rule 20 as first written would have rejected every
+  valid cacheCopy file, because the model defaults `retries` to 3; the loader resolves `?: 0` for
+  this step type alone and rule 20 tests the *stated* value.
+- **spec 11.2** - `CacheBinding`, and `ScratchDb.diskBytes()` from P8b.
+- **spec 8.6** - three host obligations, including the honest one: plan P9's "a test asserts the
+  generation becomes reclaimable" is **not achievable in this module**, because reclamation lives
+  in `DefaultSnapshotCache`, which is `internal` to the cache module.
+- **spec 7.3** - the cross-document contradiction with the cache's own spec 6.5 ("share a single
+  consumer instance; don't open one per job") against SimpleEtl 7.2's one DuckDB per run, recorded
+  as a deliberate deviation rather than left as two specifications that disagree.
+- **plan.md P9** - the reclaimability criterion **struck**, with its reason, and replaced by what is
+  provable here: the double deletes its generation file inside `copyOut` while a later step still
+  reads the copied dataset.
+
+A future session reading only this file would otherwise not learn that the plan's own acceptance
+criterion was amended mid-phase.
+
+### The micrometer-placement ruling, withdrawn by the lead
+
+Recorded because it was a live instruction with no owner, and the reviewer was right to say so.
+
+The lead ruled that `CacheCopyStepTest`'s `etl_step_rows_total` assertion should move to
+`micrometer/MetricLabelContractTest.kt`, because importing `MicrometerTaskMetrics` into a test in
+`infra.etl.task` breaks the convention `TaskMetricsTest`'s KDoc states. The engineer declined to
+execute it - correctly, since it is a test edit and the engineer never makes one - so it survived
+into the final review as an unexecuted ruling.
+
+**Withdrawn on looking at the code.** Criterion 8 is one behavioural claim about one run: *the
+listener and metric seams both see a cache-copy step*. The two assertions read the same
+`StepResult` and the same registry from the same `runExpectingSuccess`. Splitting them across two
+files would mean two runs each asserting half of one property, which is weaker evidence and more
+brittle, in exchange for a naming convention that belongs to a different file. The convention's
+purpose - that the engine's own tests do not depend on the metrics binding - is not served by
+moving an assertion whose whole subject *is* the metrics binding.
+
+The cost is real and stays: `infra.etl.task` now has one test that knows what Micrometer is, and
+ArchUnit cannot see it (`DO_NOT_INCLUDE_TESTS`). A future phase adding a second such import should
+treat this entry as the precedent to argue with, not as permission.
+
+The general lesson, and the reason this is written down rather than quietly dropped: a ruling made
+from a report is not the same as a ruling made from the code. This one was made from a summary,
+and reading the file reversed it.
+
