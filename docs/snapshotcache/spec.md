@@ -531,6 +531,7 @@ On refresh failure, keep serving the existing generation. But stale must be **vi
 | Insufficient disk space | Abort round, delete candidate, trigger emergency GC, count `disk_error`, alert |
 | Live generations exceed K | Pause refresh, alert, log all lease owners and hold durations |
 | DETACH fails (connection still in use) | Leave the generation for the next GC pass, log warning |
+| File delete fails after a successful DETACH | Leave the generation for the next GC pass, log warning; the retry re-runs DETACH + delete as one unit, so `GenerationStore.close` must be idempotent (Sec 17.1) |
 | No generation yet, `waitBudget == 0` | `acquire()` **throws `NotReadyException` immediately**; does not block |
 | No generation yet, `waitBudget > 0` | Wait interruptibly up to the budget; on expiry throw `NotReadyException`, count `reason="timeout"` |
 | Shutdown in progress | `acquire()` throws `ShuttingDownException` immediately; threads already waiting are interrupted and released at once (Sec 10.2) |
@@ -875,7 +876,7 @@ interface GenerationStore {
 }
 ```
 
-- **`GenerationStore`** - the only component that touches DuckDB files. Production implements it with ATTACH/DETACH/delete; tests use an in-memory fake that records every call and can be scripted to fail on specific operations.
+- **`GenerationStore`** - the only component that touches DuckDB files. Production implements it with ATTACH/DETACH/delete; tests use an in-memory fake that records every call and can be scripted to fail on specific operations. `close(gen)` is **idempotent**: detaching a generation that is not attached is a no-op, because the GC pass of Sec 9.2 retries DETACH + delete as one unit after a failed delete.
 - **Injectable `Clock`** - deadline, expiry, and staleness tests must not sleep for real minutes.
 - **Manually triggerable scheduler** - overlap prevention and skip logic must be testable without real `@Scheduled` timing.
 
