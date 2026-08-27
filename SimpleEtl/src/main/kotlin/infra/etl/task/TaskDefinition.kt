@@ -13,6 +13,35 @@ import infra.etl.pipe.RowTransform
 const val SCRATCH = "scratch"
 
 /**
+ * Spec 5.3's `retries` default: 3 for a step writing into scratch, 0 for anywhere else.
+ *
+ * Scratch may be retried freely because spec 5.5 gives each attempt its own suffixed dataset name,
+ * so a failed attempt's rows are unreferenced rather than mixed into the next one's. An external
+ * datasource has no such protection, so the default is not to retry and rule 12 makes an author who
+ * wants one say that a rerun converges.
+ *
+ * Here, next to [SCRATCH], because both defaults were re-derived independently at ten sites - the
+ * loader's validation, the loader's model building, and the model's own constructors - and a change
+ * applied to some of them would make validation judge a value the engine never runs, or make a
+ * YAML-built definition differ from a code-built one for identical input (review finding M10).
+ *
+ * **`CacheCopyStep` deliberately does not use this** and neither does its loader branch: the model
+ * declares 3 and the YAML default is 0, an asymmetry spec 10 rule 20 records and both sites
+ * comment. A helper that "fixed" it would break every task file omitting `retries`.
+ */
+fun defaultRetries(datasource: String): Int = if (datasource == SCRATCH) 3 else 0
+
+/**
+ * Spec 4.4's `createTable` default: AUTO for a scratch target, REQUIRED for anywhere else.
+ *
+ * AUTO generates DuckDB DDL from source metadata, which is only meaningful where the target is
+ * DuckDB; off scratch the author owns the table and the framework requires it to exist. Shared for
+ * the reasons given on [defaultRetries].
+ */
+fun defaultCreateTable(datasource: String): CreateTable =
+    if (datasource == SCRATCH) CreateTable.AUTO else CreateTable.REQUIRED
+
+/**
  * One ETL task (spec 3.1). YAML is one source of these and not the only one, so every field is
  * constructible in code and P6's loader is just another caller (spec 2.1).
  *
@@ -83,8 +112,7 @@ sealed interface PipeTarget {
 class TableTarget(
     override val datasource: String,
     val table: String,
-    val createTable: CreateTable =
-        if (datasource == SCRATCH) CreateTable.AUTO else CreateTable.REQUIRED,
+    val createTable: CreateTable = defaultCreateTable(datasource),
     override val idempotent: Boolean = false,
 ) : PipeTarget
 
@@ -123,7 +151,7 @@ class PipeStep(
     val transform: RowTransform? = null,
     val addColumns: List<ColumnMeta> = emptyList(),
     val chunkSize: Int? = null,
-    override val retries: Int = if (target.datasource == SCRATCH) 3 else 0,
+    override val retries: Int = defaultRetries(target.datasource),
 ) : Step
 
 /** How a [MaterializeStep] stores its output (spec 5.6). PARQUET is scratch-only. */
@@ -142,7 +170,7 @@ class MaterializeStep(
     val output: String,
     val sql: String,
     val format: MaterializeFormat = MaterializeFormat.TABLE,
-    override val retries: Int = if (datasource == SCRATCH) 3 else 0,
+    override val retries: Int = defaultRetries(datasource),
 ) : Step
 
 /**
@@ -158,7 +186,7 @@ class SqlStep(
     override val name: String,
     val datasource: String,
     val statements: List<String>,
-    override val retries: Int = if (datasource == SCRATCH) 3 else 0,
+    override val retries: Int = defaultRetries(datasource),
     val idempotent: Boolean = false,
 ) : Step
 

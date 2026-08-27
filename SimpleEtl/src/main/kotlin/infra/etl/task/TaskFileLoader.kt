@@ -549,13 +549,13 @@ private class FileValidation(
         val target = step.target
         datasource(name, target.datasource)
         val scratch = target.datasource == SCRATCH
-        val retries = step.retries ?: if (scratch) 3 else 0
+        val retries = step.retries ?: defaultRetries(target.datasource)
 
         // Rule 10.
         if ((target.table == null) == (target.sql == null)) {
             err(name, "exactly one of target.table and target.sql must be present (spec 3.2, rule 10).")
         } else if (target.table != null) {
-            val createTable = target.createTable ?: if (scratch) CreateTable.AUTO else CreateTable.REQUIRED
+            val createTable = target.createTable ?: defaultCreateTable(target.datasource)
             if (createTable == CreateTable.AUTO) {
                 // Rule 14.
                 if (!scratch) {
@@ -923,7 +923,6 @@ private fun TaskYaml.toDefinition(transforms: Map<String, RowTransform>) = TaskD
 
 private fun StepYaml.toStep(transforms: Map<String, RowTransform>): Step = when (this) {
     is PipeYaml -> {
-        val scratch = target.datasource == SCRATCH
         PipeStep(
             name = name,
             source = PipeSource(source.datasource, source.sql),
@@ -931,8 +930,7 @@ private fun StepYaml.toStep(transforms: Map<String, RowTransform>): Step = when 
                 TableTarget(
                     datasource = target.datasource,
                     table = target.table,
-                    createTable = target.createTable
-                        ?: if (scratch) CreateTable.AUTO else CreateTable.REQUIRED,
+                    createTable = target.createTable ?: defaultCreateTable(target.datasource),
                     idempotent = target.idempotent,
                 )
             } else {
@@ -943,7 +941,7 @@ private fun StepYaml.toStep(transforms: Map<String, RowTransform>): Step = when 
                 ColumnMeta(it.name, canonicalOf(it.type)!!, it.nullable, it.precision, it.scale)
             },
             chunkSize = chunkSize,
-            retries = retries ?: if (scratch) 3 else 0,
+            retries = retries ?: defaultRetries(target.datasource),
         )
     }
 
@@ -953,14 +951,14 @@ private fun StepYaml.toStep(transforms: Map<String, RowTransform>): Step = when 
         output = output,
         sql = sql,
         format = format,
-        retries = retries ?: if (datasource == SCRATCH) 3 else 0,
+        retries = retries ?: defaultRetries(datasource),
     )
 
     is SqlYaml -> SqlStep(
         name = name,
         datasource = datasource,
         statements = statements,
-        retries = retries ?: if (datasource == SCRATCH) 3 else 0,
+        retries = retries ?: defaultRetries(datasource),
         idempotent = idempotent,
     )
 
