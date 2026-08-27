@@ -54,11 +54,7 @@ class JdbcTableWriter(
 
     override fun open(columns: List<ColumnMeta>) {
         check(handle == null) { "step '$step': the writer for '$table' is already open." }
-        val opened = jdbi.open()
-        handle = opened
-        // The handle is this writer's own; release it here rather than relying on the caller
-        // reaching a `use` block it never entered (spec 7.4).
-        try {
+        handle = jdbi.openConfigured { opened ->
             val target = catalogColumns(opened.connection, table, step).map { it.name }
             val bySource = columns.associateBy { it.name }
             requireSourceSubset(bySource.keys, target.toSet(), table, step)
@@ -72,13 +68,6 @@ class JdbcTableWriter(
             // the lower-cased names of spec 4.5 case-sensitive and unresolvable on Oracle.
             sql = "insert into $table (${binds.joinToString { it.name }}) " +
                 "values (${binds.joinToString { ":${it.name}" }})"
-        } catch (e: Throwable) {
-            try {
-                close()
-            } catch (releaseFailure: Throwable) {
-                e.addSuppressed(releaseFailure)
-            }
-            throw e
         }
     }
 
@@ -144,16 +133,25 @@ class JdbcStatementWriter(
 ) : RowWriter {
 
     private var handle: Handle? = null
-    private var binds: List<String> = emptyList()
-    private var types: Map<String, CanonicalType> = emptyMap()
+
+    /**
+     * Each bind name exactly as the statement writes it, paired with the canonical type the source
+     * declared for the matching column, or null when the column list does not describe it - a
+     * transform's addition, which binds untyped.
+     *
+     * Paired once at [open] rather than looked up per bind per row: the name has to be lower-cased
+     * to meet the column list's keys (spec 4.5) and the statement's own casing has to be preserved
+     * for JDBI, and doing both in the innermost loop was review finding L7. The remaining per-row
+     * lowercase is [Row]'s own, on the value lookup, and is load-bearing: this is the caller that
+     * passes it raw SQL bind names.
+     */
+    private var binds: List<Pair<String, CanonicalType?>> = emptyList()
     private var checked = false
 
     override fun open(columns: List<ColumnMeta>) {
         check(handle == null) { "step '$step': the statement writer is already open." }
-        val opened = jdbi.open()
-        handle = opened
-        try {
-            types = columns.associate { it.name to it.type }
+        handle = jdbi.openConfigured { opened ->
+            val types = columns.associate { it.name to it.type }
             // The handle's own parser, so that the names checked here are exactly the names JDBI
             // will look for; it already skips a colon inside a string literal.
             val parser = opened.getConfig(SqlStatements::class.java).sqlParser
@@ -162,14 +160,7 @@ class JdbcStatementWriter(
                 "step '$step': target.sql uses positional '?' parameters. Row values bind by name, so " +
                     "write ':column' instead (spec 4.4)."
             }
-            binds = parameters.parameterNames
-        } catch (e: Throwable) {
-            try {
-                close()
-            } catch (releaseFailure: Throwable) {
-                e.addSuppressed(releaseFailure)
-            }
-            throw e
+            binds = parameters.parameterNames.map { it to types[it.lowercase()] }
         }
     }
 
@@ -179,7 +170,7 @@ class JdbcStatementWriter(
         if (!checked) {
             checked = true
             val row = chunk.first()
-            val missing = binds.filter { it.lowercase() !in row.columns }.sorted()
+            val missing = binds.map { it.first }.filter { it.lowercase() !in row.columns }.sorted()
             require(missing.isEmpty()) {
                 "step '$step': target.sql binds ${missing.map { ":$it" }} which the source row does not " +
                     "provide. The row has ${row.columns.toList()}. Add the columns to the source SQL, or " +
@@ -188,7 +179,7 @@ class JdbcStatementWriter(
         }
         return opened.prepareBatch(sql).use { batch ->
             chunk.forEach { row ->
-                binds.forEach { batch.bindColumn(it, types[it.lowercase()], row) }
+                binds.forEach { (name, type) -> batch.bindColumn(name, type, row) }
                 batch.add()
             }
             batch.rowsAffected()
@@ -201,6 +192,34 @@ class JdbcStatementWriter(
         handle = null
         open?.close()
     }
+}
+
+/**
+ * Opens a handle and prepares it with [configure], releasing it if [configure] throws.
+ *
+ * Both writers own their handle from [RowWriter.open] onward, and spec 7.4 makes releasing it on
+ * that failure path theirs too: a caller whose `open` threw never entered the `use` block that
+ * would have closed it. Each had its own copy of the eight-line catch that does this, including
+ * the `addSuppressed` that keeps a failing release from hiding the failure that caused it - a
+ * protocol two implementations had to get right separately, with no test pinning either (review
+ * finding L5).
+ *
+ * The handle is returned rather than assigned, so a writer whose `open` throws is left with a null
+ * handle and a closed connection, and its own idempotent `close` afterwards is a no-op.
+ */
+private fun Jdbi.openConfigured(configure: (Handle) -> Unit): Handle {
+    val opened = open()
+    try {
+        configure(opened)
+    } catch (e: Throwable) {
+        try {
+            opened.close()
+        } catch (releaseFailure: Throwable) {
+            e.addSuppressed(releaseFailure)
+        }
+        throw e
+    }
+    return opened
 }
 
 /**
