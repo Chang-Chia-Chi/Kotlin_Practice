@@ -46,8 +46,10 @@ data class StepContext(val task: TaskContext, val phase: String, val step: Strin
  *   `materialize` affected-row count would make one field mean a different thing per step type.
  * @param durationMs the whole step, from its first attempt to the attempt that succeeded,
  *   including the retry backoff in between, measured on the engine's injected `Clock`.
- * @param attempt the attempt that succeeded, numbered from 1. With `retries: n` the attempts run
- *   1..n+1.
+ * @param attempt the attempt this result describes, numbered from 1. With `retries: n` the
+ *   attempts run 1..n+1. It is the attempt that **succeeded** wherever a [TaskRunListener] is
+ *   handed this, because [TaskRunListener.onStepEnd] is success-only; [TaskMetrics.stepEnded] also
+ *   fires on terminal failure, and there it is the attempt that failed terminally.
  */
 data class StepResult(val rowsRead: Long, val rowsWritten: Long, val durationMs: Long, val attempt: Int)
 

@@ -133,6 +133,9 @@ class VariableScope {
  * @param hooks the registry `onSuccess` and `onFailure` names resolve in (spec 9.4). The same
  *   instance whose [TaskHooks.names] the host hands `TaskFileLoader`, or validation rule 5 checks
  *   names against a set the engine does not read.
+ * @param metrics the host's metrics seam (spec 9.3), reached alongside the listener and never
+ *   through it: `logging: false` suppresses the listener and leaves metrics untouched. Never
+ *   allowed to fail a run either - see [Events].
  * @param clock the only source of time in this file. `TaskContext.startedAt`, the `triggerTime`
  *   task variable and every [StepResult.durationMs] come from it; there is no `Instant.now()` and
  *   no `System.nanoTime()` left here. A cost worth recording rather than hiding: a wall-clock
@@ -146,6 +149,7 @@ class TaskEngine(
     private val sleeper: (Long) -> Unit = { Thread.sleep(it) },
     private val listener: TaskRunListener = TaskRunListener.NONE,
     private val hooks: TaskHooks = TaskHooks(),
+    private val metrics: TaskMetrics = TaskMetrics.NONE,
     private val clock: Clock = Clock.systemUTC(),
 ) {
 
@@ -194,7 +198,18 @@ class TaskEngine(
             val memoryLimit = definition.scratchMemoryLimitMb ?: scratchMemoryLimitMb
             var failure: Throwable? = try {
                 ScratchDb(directory, memoryLimit).use { scratch ->
-                    Run(definition, task, scratch, DatasetNamer(directory), events).execute()
+                    // The scratch footprint is sampled from a `finally` *inside* the `use`, which
+                    // is the only place the directory still exists: close() deletes it on every
+                    // path (spec 7.2). Sampled after the close, the gauge would read 0 on every
+                    // run forever, silently, and an operator sizing spec 7.2's volume would see a
+                    // flat zero. A run that never entered this block - ScratchDb's own
+                    // `require(memoryLimitMb > 0)` is the reachable case - reports no sample at
+                    // all, and that is deliberate: it is not "0 bytes", it is "never got there".
+                    try {
+                        Run(definition, task, scratch, DatasetNamer(directory), events).execute()
+                    } finally {
+                        events.scratchSampled { scratch.diskBytes() }
+                    }
                 }
                 null
             } catch (e: Exception) {
@@ -210,6 +225,11 @@ class TaskEngine(
             outcome = if (failure == null) Outcome.SUCCEEDED else Outcome.FAILED
             return TaskOutcome(runId, outcome, failure)
         } finally {
+            // Read here, so the duration spans the hooks and ScratchDb.close() as well as the
+            // engine's work - and metered before onTaskEnd, because a listener throwing an Error
+            // escapes this method and anything sequenced after it would be lost on exactly the
+            // run an operator most needs counted.
+            events.taskMetered(outcome, clock.millis() - task.startedAt.toEpochMilli())
             events.taskEnd(outcome)
         }
     }
@@ -267,16 +287,24 @@ class TaskEngine(
     }
 
     /**
-     * The seven call sites of spec 9.2, each of which catches, logs at WARN and continues.
+     * The seven listener call sites of spec 9.2 and the four metrics call sites of spec 9.3, each
+     * of which catches, logs at WARN and continues.
      *
-     * A listener never changes a run's outcome - a logging plug-in that failed the ETL run it was
+     * Neither seam ever changes a run's outcome - a logging plug-in that failed the ETL run it was
      * logging would invert the point of the seam. [TaskRunListener.of] applies the same isolation
-     * per listener, so for a composite this catch never fires; it is not redundant, because a host
-     * may attach a bare listener, and both guards log so nothing is lost either way.
+     * per listener, so for a composite the listener catch never fires; it is not redundant,
+     * because a host may attach a bare listener, and both guards log so nothing is lost either way.
      *
      * `logging: false` is implemented by binding [sink] to [TaskRunListener.NONE] for the whole
      * run rather than by an `if` at each site: one decision, taken once, that no later call site
-     * can forget. Hooks and (from P8b) metrics are reached elsewhere and are unaffected.
+     * can forget. **Metrics do not travel through [sink]**, which is the whole of spec 9.3's
+     * "`logging: false` does not suppress metrics" - they read [TaskEngine.metrics] directly.
+     * Hooks are reached elsewhere and are unaffected either way.
+     *
+     * **Where a metrics site and a listener site describe the same moment, the metric goes
+     * first.** Not for tidiness: [guard] catches `Exception` and not `Throwable`, deliberately and
+     * pinned by a test, so a listener throwing an `Error` escapes the engine and a slow listener
+     * parks the run. Metrics-first means the metric is already recorded when either happens.
      */
     private inner class Events(private val task: TaskContext, logging: Boolean) {
 
@@ -298,15 +326,43 @@ class TaskEngine(
         fun stepError(step: StepContext, attempt: Int, error: Throwable, willRetry: Boolean) =
             isolate("onStepError") { sink.onStepError(step, attempt, error, willRetry) }
 
+        fun taskMetered(outcome: Outcome, durationMs: Long) =
+            meter("taskEnded") { metrics.taskEnded(task, outcome, durationMs) }
+
+        fun stepMetered(step: StepContext, result: StepResult) =
+            meter("stepEnded") { metrics.stepEnded(step, result) }
+
+        fun retryMetered(step: StepContext) = meter("stepRetried") { metrics.stepRetried(step) }
+
+        /**
+         * [bytes] is a lambda so that the sampling itself is inside the guard, not only the
+         * recorder call. This runs in a `finally`, and a Kotlin `finally` that throws **replaces**
+         * the in-flight exception rather than being suppressed by it - so a throw from either half
+         * would erase the run's real failure and report the observability path instead.
+         */
+        fun scratchSampled(bytes: () -> Long) = meter("scratchBytes") { metrics.scratchBytes(task, bytes()) }
+
         fun step(phase: String, step: String) = StepContext(task, phase, step)
 
-        private fun isolate(site: String, call: () -> Unit) {
+        private fun isolate(site: String, call: () -> Unit) = guard(site, "listener", call)
+
+        private fun meter(site: String, call: () -> Unit) = guard(site, "metrics recorder", call)
+
+        /**
+         * One catch for both seams, so that the two cannot drift apart, with [subject] naming
+         * which one it was: a WARN that says "the listener threw" about a metrics recorder sends
+         * an operator to the wrong plug-in.
+         *
+         * `Exception`, not `Throwable`, and that is load-bearing rather than stylistic - see the
+         * ordering note on [Events].
+         */
+        private fun guard(site: String, subject: String, call: () -> Unit) {
             try {
                 call()
             } catch (e: Exception) {
                 log.warn(
-                    "${task.describe()}: the listener threw from $site and was ignored. A listener " +
-                        "never fails the run it is observing (spec 9.2).",
+                    "${task.describe()}: the $subject threw from $site and was ignored. Neither seam " +
+                        "ever fails the run it is observing (spec 9.2, 9.3).",
                     e,
                 )
             }
@@ -362,7 +418,9 @@ class TaskEngine(
          * rejected out of hand still reports a start and then a terminal `onStepError` like any
          * other failure - a guard placed above the call site would leave a phase that failed with
          * no step in it. `onStepEnd` fires only on success; a terminal failure ends with
-         * `onStepError(willRetry = false)` and nothing else.
+         * `onStepError(willRetry = false)` and nothing else. The **metrics** seam is deliberately
+         * not symmetric with that: `stepEnded` fires on both, and `stepRetried` fires once per
+         * retried attempt (spec 9.3).
          *
          * `willRetry` is decided and reported before [sleeper] is asked for anything, so a
          * listener sees the decision when it is made and not after the delay it causes. It is not
@@ -379,10 +437,19 @@ class TaskEngine(
                 try {
                     val rows = runOnce(step, attempt)
                     val elapsed = clock.millis() - startedAt
-                    events.stepEnd(ctx, StepResult(rows.rowsRead, rows.rowsWritten, elapsed, attempt))
+                    val result = StepResult(rows.rowsRead, rows.rowsWritten, elapsed, attempt)
+                    events.stepMetered(ctx, result)
+                    events.stepEnd(ctx, result)
                     return
                 } catch (failure: Exception) {
                     val willRetry = attempt <= step.retries && isTransient(failure)
+                    // The metric for this moment, before the listener call describing it. A
+                    // terminal failure is metered as a step that *ended* - the timer carries no
+                    // outcome tag, and a step that always fails would otherwise have no duration
+                    // series at all - carrying rows 0/0, because the rows a failed attempt
+                    // happened to flush are not rows the step moved.
+                    if (willRetry) events.retryMetered(ctx)
+                    else events.stepMetered(ctx, StepResult(0, 0, clock.millis() - startedAt, attempt))
                     events.stepError(ctx, attempt, failure, willRetry)
                     if (!willRetry) throw failure
                     sleeper(backoffMillis(attempt))

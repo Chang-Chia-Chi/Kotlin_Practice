@@ -21,6 +21,7 @@ import infra.etl.task.TableTarget
 import infra.etl.task.TaskDefinition
 import infra.etl.task.TaskEngine
 import infra.etl.task.TaskHooks
+import infra.etl.task.TaskMetrics
 import infra.etl.task.TaskOutcome
 import infra.etl.task.TaskRunListener
 import infra.etl.task.TriggerSource
@@ -353,6 +354,18 @@ class TaskHarness(private val root: Path) : AutoCloseable {
     /** P8a. The registry the engine resolves `onSuccess` / `onFailure` names in. */
     val hooks: TaskHooks = TaskHooks()
 
+    /**
+     * P8b. Spec 9.3's metrics seam, read at every call site through a [ForwardingMetrics] for the
+     * same `by lazy` reason [listener] is.
+     *
+     * **The default is [TaskMetrics.NONE] and must stay that way.** Every P8a ordering test
+     * asserts a *whole* trace with `assertEquals`, and those traces contain no `metric.` lines. A
+     * harness that attached a recorder of its own by default would turn all of them red at once
+     * while the engine was behaving perfectly - the single easiest way for this phase to break the
+     * previous one. A test that wants metrics attaches its own.
+     */
+    var metrics: TaskMetrics = TaskMetrics.NONE
+
     private val datasources = LinkedHashMap<String, Jdbi>()
     private val files = ArrayList<DuckFile>()
 
@@ -365,6 +378,7 @@ class TaskHarness(private val root: Path) : AutoCloseable {
             sleeper = { millis -> recorded += millis; clock.advance(millis) },
             listener = ForwardingListener { listener },
             hooks = hooks,
+            metrics = ForwardingMetrics { metrics },
             clock = clock,
         )
     }

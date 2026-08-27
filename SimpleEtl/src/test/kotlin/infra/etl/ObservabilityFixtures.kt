@@ -6,6 +6,7 @@ import infra.etl.task.StepContext
 import infra.etl.task.StepResult
 import infra.etl.task.TaskContext
 import infra.etl.task.TaskHook
+import infra.etl.task.TaskMetrics
 import infra.etl.task.TaskRunListener
 import infra.etl.task.TriggerSource
 import java.time.Clock
@@ -108,6 +109,23 @@ class EventTrace {
      *   `onFailure` needs, since an engine that never calls the hook also never propagates from it.
      */
     fun hook(name: String, failure: Throwable? = null): RecordingHook = RecordingHook(this, name, failure)
+
+    /**
+     * P8b. A [infra.etl.task.TaskMetrics] writing into this trace, alongside the listener and the
+     * hooks, because spec 9.3's ordering clauses are all *relative* ones - `stepRetried` before
+     * `onStepError(willRetry = true)`, `scratchBytes` before the `onSuccess` hook. Two separate
+     * recordings could express neither, and those two orderings are the ones that carry a failure
+     * mode.
+     *
+     * @param failAt the call sites this recorder throws from, *after* recording them - the same
+     *   discipline [listener] follows and for the same reason: "a throwing `TaskMetrics` did not
+     *   fail the run" is satisfied for free by an engine with no metrics call sites in it at all,
+     *   so the test also asserts [RecordingMetrics.thrown] and that the later sites still fired.
+     */
+    fun metrics(
+        failAt: Set<MetricsCall> = emptySet(),
+        failure: () -> Throwable = { IllegalStateException("probe: the metrics recorder threw") },
+    ): RecordingMetrics = RecordingMetrics(this, failAt, failure)
 }
 
 /** The seven call sites of spec 9.2, as a value a parameterized test can enumerate. */
@@ -313,3 +331,119 @@ fun taskContext(
     triggeredBy = triggeredBy,
     startedAt = startedAt,
 )
+
+/** The four call sites of spec 9.3's metrics seam, as a value a parameterized test can enumerate. */
+enum class MetricsCall { TASK_ENDED, STEP_ENDED, STEP_RETRIED, SCRATCH_BYTES }
+
+/**
+ * P8b. A [TaskMetrics] that records what it was told, and optionally throws from chosen call sites.
+ *
+ * Thread safe for the same reason [RecordingListener] is: spec 8.4 runs N tasks through one engine
+ * and every method here is reached from all of them.
+ *
+ * **`scratchBytes`'s byte count is deliberately absent from the trace line.** It is the size of a
+ * DuckDB file this suite does not control to the byte, so a whole-trace `assertEquals` carrying it
+ * would be a flaky equality. The number is asserted where it is falsifiable - through
+ * [scratchSamples], as `> 0` for a run that used scratch and `== 0` for one that did not. The same
+ * reasoning does *not* apply to `stepEnded`: its attempt and its two row counts are exact under
+ * the harness's clock and its fixed source table, so they are in the line, where a whole-trace
+ * assertion checks them for free.
+ */
+class RecordingMetrics internal constructor(
+    private val trace: EventTrace,
+    private val failAt: Set<MetricsCall>,
+    private val failure: () -> Throwable,
+) : TaskMetrics {
+
+    /** What `taskEnded` carried. [durationMs] is the engine's own clock reading, kept for assertion. */
+    data class TaskEnded(val ctx: TaskContext, val outcome: Outcome, val durationMs: Long)
+
+    /** What `stepEnded` carried. Unlike the listener's, this fires on terminal failure too. */
+    data class StepEnded(val ctx: StepContext, val result: StepResult)
+
+    /** What `scratchBytes` carried. */
+    data class ScratchSample(val ctx: TaskContext, val bytes: Long)
+
+    private val callsSeen = Collections.synchronizedList(ArrayList<MetricsCall>())
+    private val taskEndsSeen = Collections.synchronizedList(ArrayList<TaskEnded>())
+    private val stepEndsSeen = Collections.synchronizedList(ArrayList<StepEnded>())
+    private val retriesSeen = Collections.synchronizedList(ArrayList<StepContext>())
+    private val scratchSeen = Collections.synchronizedList(ArrayList<ScratchSample>())
+    private val thrownCount = AtomicInteger()
+
+    /** Every call site that fired, in order. Empty is what a `TaskMetrics.NONE` binding looks like. */
+    val calls: List<MetricsCall> get() = copyOf(callsSeen)
+
+    val taskEndings: List<TaskEnded> get() = copyOf(taskEndsSeen)
+    val stepEndings: List<StepEnded> get() = copyOf(stepEndsSeen)
+
+    /** One entry per *retried attempt*, not per retried step (spec 9.3, contract 3.2). */
+    val retries: List<StepContext> get() = copyOf(retriesSeen)
+
+    val scratchSamples: List<ScratchSample> get() = copyOf(scratchSeen)
+
+    /** How many times this recorder threw. A site that never fired cannot have thrown. */
+    val thrown: Int get() = thrownCount.get()
+
+    /** The [StepResult] the named step was metered with. Fails loudly rather than returning null. */
+    fun result(step: String): StepResult =
+        stepEndings.singleOrNull { it.ctx.step == step }?.result
+            ?: error("no single stepEnded for step '$step'; saw ${stepEndings.map { it.ctx.step }}")
+
+    override fun taskEnded(ctx: TaskContext, outcome: Outcome, durationMs: Long) {
+        taskEndsSeen += TaskEnded(ctx, outcome, durationMs)
+        fired(MetricsCall.TASK_ENDED, "metric.taskEnded(${ctx.taskName}, $outcome)")
+    }
+
+    override fun stepEnded(ctx: StepContext, result: StepResult) {
+        stepEndsSeen += StepEnded(ctx, result)
+        fired(
+            MetricsCall.STEP_ENDED,
+            "metric.stepEnded(${ctx.phase}/${ctx.step}, attempt=${result.attempt}, " +
+                "read=${result.rowsRead}, written=${result.rowsWritten})",
+        )
+    }
+
+    override fun stepRetried(ctx: StepContext) {
+        retriesSeen += ctx
+        fired(MetricsCall.STEP_RETRIED, "metric.stepRetried(${ctx.phase}/${ctx.step})")
+    }
+
+    override fun scratchBytes(ctx: TaskContext, bytes: Long) {
+        scratchSeen += ScratchSample(ctx, bytes)
+        fired(MetricsCall.SCRATCH_BYTES, "metric.scratchBytes(${ctx.taskName})")
+    }
+
+    /** Records, then throws. Never the other way round - see [RecordingListener]. */
+    private fun fired(call: MetricsCall, entry: String) {
+        callsSeen += call
+        trace.record(entry)
+        if (call in failAt) {
+            thrownCount.incrementAndGet()
+            throw failure()
+        }
+    }
+
+    private fun <T> copyOf(source: MutableList<T>): List<T> = synchronized(source) { ArrayList(source) }
+}
+
+/**
+ * Reads [target] at every call instead of capturing it once - [ForwardingListener]'s trap, in the
+ * seam P8b adds.
+ *
+ * `TaskHarness` builds its `TaskEngine` `by lazy`, so a `TaskMetrics` passed straight into that
+ * constructor is frozen at the harness's first run and a later `harness.metrics = ...` would never
+ * arrive. Two of this phase's tests swap the recorder between runs of one harness - the paired
+ * `logging: true` / `logging: false` assertion is one of them - and both would otherwise assert an
+ * empty recorder and pass for the wrong reason.
+ */
+class ForwardingMetrics(private val target: () -> TaskMetrics) : TaskMetrics {
+    override fun taskEnded(ctx: TaskContext, outcome: Outcome, durationMs: Long) =
+        target().taskEnded(ctx, outcome, durationMs)
+
+    override fun stepEnded(ctx: StepContext, result: StepResult) = target().stepEnded(ctx, result)
+
+    override fun stepRetried(ctx: StepContext) = target().stepRetried(ctx)
+
+    override fun scratchBytes(ctx: TaskContext, bytes: Long) = target().scratchBytes(ctx, bytes)
+}

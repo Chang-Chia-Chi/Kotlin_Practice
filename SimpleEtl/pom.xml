@@ -110,6 +110,22 @@
             <artifactId>jboss-logging</artifactId>
             <version>3.6.1.Final</version>
         </dependency>
+        <!-- P8b: spec 9.3's six meters, bound in infra.etl.micrometer and named nowhere else.
+             `provided` and not compile, and that is load-bearing: spec 2.1's whole reason for
+             existing is that Layer 1 ships to the snapshot cache without Layer 2, and Maven has
+             no layer granularity - at compile scope every Layer 1 consumer would inherit
+             Micrometer. `provided` is on this module's compile AND test classpath, so
+             SimpleMeterRegistry is available to the label contract test, and it is not
+             transitive. Measured on a throwaway two-module reactor: a consumer of a
+             `provided`-scoped library resolved zero micrometer artefacts while all five were on
+             the library's own test classpath. A host wiring MicrometerTaskMetrics necessarily
+             already has a MeterRegistry. -->
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-core</artifactId>
+            <version>1.14.2</version>
+            <scope>provided</scope>
+        </dependency>
         <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter</artifactId>

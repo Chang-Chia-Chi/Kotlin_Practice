@@ -88,6 +88,43 @@ class ScratchDb(
     }
 
     /**
+     * Total bytes of every regular file under [directory], recursively. 0 if the instance was
+     * never opened, because then the directory does not exist either.
+     *
+     * **The whole directory is summed, not the database file**, and that is measured rather than
+     * reasoned: after 500,000 appended rows the database file held **12,288 bytes** while
+     * `scratch.duckdb.wal` beside it held **10,416,115**. `Files.size(dbFile)` would under-report
+     * a live run by three orders of magnitude. Parquet materialisations (spec 5.6) land in the
+     * same directory and are included for the same reason.
+     *
+     * **No `CHECKPOINT` is taken first.** Measured on the same state, checkpointing folded
+     * 10,428,403 bytes into 2,633,728 - a factor of four - so sampling after one would tell an
+     * operator to size spec 7.2's volume at a quarter of what the run actually needed. It is also
+     * a write against a database that is about to be deleted, on the failure path too.
+     *
+     * **Spill is included only if it is still live**, which at the point this is sampled it
+     * usually is not - DuckDB reclaims it as the query that needed it finishes. So this number
+     * does **not** carry spec 7.2's spill term, and spec 7.2's own arithmetic makes spill 17.6 of
+     * its 30.2 GB. Sizing a volume from this alone would size it for the smaller half.
+     *
+     * **Never throws**, per file and overall: it is called from an observability path inside a
+     * `finally`, and a `finally` that throws replaces the run's real failure. An unreadable path
+     * contributes 0 rather than an exception. That branch is not covered by a test: this build
+     * runs as root, so a permission-based case would be vacuous rather than green.
+     *
+     * Takes no lock. It reads the filesystem, not this object's state, and a lock here would put
+     * a directory walk in front of every `connection()` a concurrently running task makes.
+     */
+    fun diskBytes(): Long = runCatching {
+        if (!Files.isDirectory(directory)) return@runCatching 0L
+        Files.walk(directory).use { paths ->
+            paths.filter { Files.isRegularFile(it) }
+                .mapToLong { path -> runCatching { Files.size(path) }.getOrElse { 0L } }
+                .sum()
+        }
+    }.getOrElse { 0L }
+
+    /**
      * Closes every issued connection and empties [directory]. Idempotent, and silent if the
      * instance was never opened.
      *
