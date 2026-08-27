@@ -114,7 +114,7 @@ class TaskRunner(private val engine: TaskEngine) {
         if (!slot.claim()) return TriggerResult.AlreadyRunning
         val runId = UUID.randomUUID().toString()
         slot.begin(Run(runId, trigger, by, Instant.now()))
-        val job = scope.launch(slot.context) { slot.end(engine.run(definition, trigger, runId)) }
+        val job = scope.launch(slot.context) { slot.end(engine.run(definition, trigger, runId, by)) }
         job.invokeOnCompletion { cause -> slot.release(cause) }
         return TriggerResult.Accepted(runId)
     }

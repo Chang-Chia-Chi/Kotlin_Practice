@@ -99,6 +99,17 @@
             <artifactId>jdbi3-core</artifactId>
             <version>${jdbi.version}</version>
         </dependency>
+        <!-- P8a: spec 9.2's listener isolation and 9.4's swallowed onFailure both log. CLAUDE.md
+             fixes the API as org.jboss.logging.Logger, not io.quarkus.logging.Log: Quarkus is
+             built on JBoss Logging so quarkus.log.* config applies unchanged, and naming the
+             Quarkus type would drag a framework into a module that deliberately boots none
+             (spec 8.6). On the classpath today only through an undeclared transitive edge from
+             snapshotcache; declared here so it survives that edge moving. -->
+        <dependency>
+            <groupId>org.jboss.logging</groupId>
+            <artifactId>jboss-logging</artifactId>
+            <version>3.6.1.Final</version>
+        </dependency>
         <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter</artifactId>

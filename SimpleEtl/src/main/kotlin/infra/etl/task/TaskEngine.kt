@@ -11,6 +11,7 @@ import infra.etl.jdbc.JdbcStatementWriter
 import infra.etl.jdbc.JdbcTableWriter
 import infra.etl.pipe.ColumnMeta
 import infra.etl.pipe.JdbcSource
+import infra.etl.pipe.PipeResult
 import infra.etl.pipe.Row
 import infra.etl.pipe.RowMapper
 import infra.etl.pipe.RowPipe
@@ -21,9 +22,10 @@ import java.sql.SQLException
 import java.sql.SQLRecoverableException
 import java.sql.SQLTimeoutException
 import java.sql.SQLTransientException
-import java.time.Instant
+import java.time.Clock
 import java.util.Collections
 import java.util.UUID
+import org.jboss.logging.Logger
 import org.jdbi.v3.core.Handle
 import org.jdbi.v3.core.Jdbi
 import org.jdbi.v3.core.argument.NullArgument
@@ -31,6 +33,11 @@ import org.jdbi.v3.core.statement.SqlStatements
 
 /** The built-in that changes between attempts of the same step, so it never lives in the scope. */
 private const val ATTEMPT = "attempt"
+
+private val log = Logger.getLogger(TaskEngine::class.java)
+
+/** What a step type that moves no row through the JVM reports to [StepResult] (spec 2.3). */
+private val NO_ROWS = PipeResult(0, 0)
 
 /**
  * The task variables of spec 6: built-ins, task literals, and whatever `export` steps have
@@ -121,12 +128,25 @@ class VariableScope {
  *   of pod memory.
  * @param sleeper the retry backoff, injected so a test does not spend spec 5.3's 2, 4, 8 seconds
  *   actually waiting.
+ * @param listener the host's observation seam (spec 9.2). One listener; a host with several
+ *   composes them with [TaskRunListener.of]. Never allowed to fail a run - see [Events].
+ * @param hooks the registry `onSuccess` and `onFailure` names resolve in (spec 9.4). The same
+ *   instance whose [TaskHooks.names] the host hands `TaskFileLoader`, or validation rule 5 checks
+ *   names against a set the engine does not read.
+ * @param clock the only source of time in this file. `TaskContext.startedAt`, the `triggerTime`
+ *   task variable and every [StepResult.durationMs] come from it; there is no `Instant.now()` and
+ *   no `System.nanoTime()` left here. A cost worth recording rather than hiding: a wall-clock
+ *   `Clock` is not monotonic, so an NTP step mid-run can skew a `durationMs`. What it buys is that
+ *   a duration is assertable exactly, by a test that never sleeps.
  */
 class TaskEngine(
     private val datasources: Map<String, Jdbi>,
     private val scratchDirectory: Path,
     private val scratchMemoryLimitMb: Int = 4096,
     private val sleeper: (Long) -> Unit = { Thread.sleep(it) },
+    private val listener: TaskRunListener = TaskRunListener.NONE,
+    private val hooks: TaskHooks = TaskHooks(),
+    private val clock: Clock = Clock.systemUTC(),
 ) {
 
     init {
@@ -145,42 +165,188 @@ class TaskEngine(
      * out of this method instead of being reported as an ordinary task failure, which is what a
      * not-yet-built step should look like.
      *
+     * `onTaskStart` fires **first**, before [ScratchDb] is constructed: its `init` rejects a
+     * non-positive `memory_limit`, and a run that dies there is still a run the listener has to
+     * have seen start and end. `onTaskEnd` fires from a `finally`, so the `Error` above ends the
+     * run for the listener on its way past - two subsystems reporting the same run must not
+     * disagree about whether it ended. Hooks are not run on that path: executing host code while
+     * an `OutOfMemoryError` unwinds is a worse failure than not reporting.
+     *
      * @param runId defaulted so a direct caller need not invent one, and passed in by
      *   [TaskRunner], which has to answer `Accepted(runId)` the instant a run is submitted and
      *   long before this method returns (spec 8.2). One id, so the scratch directory, the `runId`
      *   task variable and the admin API all name the same run.
+     * @param triggeredBy the caller identity of spec 8.2, null for a scheduled firing. Carried
+     *   into [TaskContext] and nowhere else: this module records it and authorises nothing.
      */
     fun run(
         definition: TaskDefinition,
         trigger: TriggerSource,
         runId: String = UUID.randomUUID().toString(),
+        triggeredBy: String? = null,
     ): TaskOutcome {
-        val directory = scratchDirectory.resolve(runId)
-        val memoryLimit = definition.scratchMemoryLimitMb ?: scratchMemoryLimitMb
-        val failure = try {
-            ScratchDb(directory, memoryLimit).use { scratch ->
-                val run = Run(definition, runId, scratch, DatasetNamer(directory))
-                definition.phases.forEach { phase -> phase.steps.forEach(run::execute) }
+        val task = TaskContext(runId, definition.name, trigger, triggeredBy, clock.instant())
+        val events = Events(task, definition.logging)
+        var outcome = Outcome.FAILED
+        try {
+            events.taskStart()
+            val directory = scratchDirectory.resolve(runId)
+            val memoryLimit = definition.scratchMemoryLimitMb ?: scratchMemoryLimitMb
+            var failure: Throwable? = try {
+                ScratchDb(directory, memoryLimit).use { scratch ->
+                    Run(definition, task, scratch, DatasetNamer(directory), events).execute()
+                }
+                null
+            } catch (e: Exception) {
+                e
             }
+            // Hooks run here rather than inside the `use` because ScratchDb.close() can throw -
+            // report() raises on a leftover temporary table or an unreclaimed path. Inside the
+            // block that failure would arrive as a suppressed exception *after* onSuccess had
+            // already declared the run good, flipping the outcome underneath a hook that had
+            // already fired. Out here the close is decided first and onSuccess sees the truth.
+            if (failure == null) failure = onSuccess(task, definition.onSuccess)
+            if (failure != null) onFailure(task, definition.onFailure)
+            outcome = if (failure == null) Outcome.SUCCEEDED else Outcome.FAILED
+            return TaskOutcome(runId, outcome, failure)
+        } finally {
+            events.taskEnd(outcome)
+        }
+    }
+
+    /**
+     * Spec 9.4's success hook, or the failure that stands in for it.
+     *
+     * A name is resolved **at invocation**, so a name absent from the registry is reported exactly
+     * as a hook that threw would be: the run fails, and `onFailure` then runs. Deferring the
+     * lookup is what makes that possible, and the diagnostic names both the task and the hook so
+     * an operator knows which registration is missing.
+     */
+    private fun onSuccess(task: TaskContext, name: String?): Throwable? {
+        if (name == null) return null
+        val hook = hooks[name] ?: return IllegalArgumentException(
+            "task '${task.taskName}': the onSuccess hook '$name' is not registered (spec 9.4). Known " +
+                "hooks are ${hooks.names.sorted()}. The run itself succeeded and is reported failed " +
+                "because a hook that was asked for and never ran is not a success.",
+        )
+        return try {
+            hook.run(task)
             null
         } catch (e: Exception) {
             e
         }
-        return TaskOutcome(runId, if (failure == null) Outcome.SUCCEEDED else Outcome.FAILED, failure)
+    }
+
+    /**
+     * Spec 9.4's failure hook. Both ways it can go wrong - unregistered, or throwing - are logged
+     * and swallowed, and neither touches the outcome or replaces the failure being reported.
+     *
+     * That asymmetry with [onSuccess] is the point: the failure-reporting path may never change
+     * the failure it reports, or an operator reading `TaskOutcome.failure` would be looking at the
+     * reporting mechanism instead of at what broke.
+     */
+    private fun onFailure(task: TaskContext, name: String?) {
+        if (name == null) return
+        val hook = hooks[name]
+        if (hook == null) {
+            log.warn(
+                "${task.describe()}: the onFailure hook '$name' is not registered (spec 9.4). Known " +
+                    "hooks are ${hooks.names.sorted()}. The run's own failure is reported unchanged.",
+            )
+            return
+        }
+        try {
+            hook.run(task)
+        } catch (e: Exception) {
+            log.warn(
+                "${task.describe()}: the onFailure hook '$name' threw. It is swallowed: the run keeps " +
+                    "the failure this hook was called to report.",
+                e,
+            )
+        }
+    }
+
+    /**
+     * The seven call sites of spec 9.2, each of which catches, logs at WARN and continues.
+     *
+     * A listener never changes a run's outcome - a logging plug-in that failed the ETL run it was
+     * logging would invert the point of the seam. [TaskRunListener.of] applies the same isolation
+     * per listener, so for a composite this catch never fires; it is not redundant, because a host
+     * may attach a bare listener, and both guards log so nothing is lost either way.
+     *
+     * `logging: false` is implemented by binding [sink] to [TaskRunListener.NONE] for the whole
+     * run rather than by an `if` at each site: one decision, taken once, that no later call site
+     * can forget. Hooks and (from P8b) metrics are reached elsewhere and are unaffected.
+     */
+    private inner class Events(private val task: TaskContext, logging: Boolean) {
+
+        private val sink: TaskRunListener = if (logging) listener else TaskRunListener.NONE
+
+        fun taskStart() = isolate("onTaskStart") { sink.onTaskStart(task) }
+
+        fun taskEnd(outcome: Outcome) = isolate("onTaskEnd") { sink.onTaskEnd(task, outcome) }
+
+        fun phaseStart(phase: String) = isolate("onPhaseStart") { sink.onPhaseStart(PhaseContext(task, phase)) }
+
+        fun phaseEnd(phase: String, outcome: Outcome) =
+            isolate("onPhaseEnd") { sink.onPhaseEnd(PhaseContext(task, phase), outcome) }
+
+        fun stepStart(step: StepContext) = isolate("onStepStart") { sink.onStepStart(step) }
+
+        fun stepEnd(step: StepContext, result: StepResult) = isolate("onStepEnd") { sink.onStepEnd(step, result) }
+
+        fun stepError(step: StepContext, attempt: Int, error: Throwable, willRetry: Boolean) =
+            isolate("onStepError") { sink.onStepError(step, attempt, error, willRetry) }
+
+        fun step(phase: String, step: String) = StepContext(task, phase, step)
+
+        private fun isolate(site: String, call: () -> Unit) {
+            try {
+                call()
+            } catch (e: Exception) {
+                log.warn(
+                    "${task.describe()}: the listener threw from $site and was ignored. A listener " +
+                        "never fails the run it is observing (spec 9.2).",
+                    e,
+                )
+            }
+        }
     }
 
     private inner class Run(
         private val definition: TaskDefinition,
-        runId: String,
+        private val task: TaskContext,
         private val scratch: ScratchDb,
         private val namer: DatasetNamer,
+        private val events: Events,
     ) {
 
         private val scope = VariableScope().apply {
-            define("runId", runId)
+            define("runId", task.runId)
             define("taskName", definition.name)
-            define("triggerTime", Instant.now())
+            define("triggerTime", task.startedAt)
             definition.vars.forEach { define(it.name, it.value) }
+        }
+
+        /**
+         * Every phase in order, each reported started and ended.
+         *
+         * A terminal step failure ends its phase FAILED and rethrows, so no later step and no
+         * later phase starts (spec 2.2). The catch is on `Exception` and not `Throwable` for the
+         * same reason [run]'s is: an `Error` is not a task failure and has no business being
+         * dressed up as one on its way out.
+         */
+        fun execute() {
+            definition.phases.forEach { phase ->
+                events.phaseStart(phase.name)
+                try {
+                    phase.steps.forEach { execute(phase.name, it) }
+                } catch (e: Exception) {
+                    events.phaseEnd(phase.name, Outcome.FAILED)
+                    throw e
+                }
+                events.phaseEnd(phase.name, Outcome.SUCCEEDED)
+            }
         }
 
         /**
@@ -191,22 +357,46 @@ class TaskEngine(
          * failed attempt's rows - between nothing and one chunk short of everything it wrote
          * (spec 12) - stay where they are, unreferenced, and cost only space in a file that is
          * deleted at run end (spec 5.5).
+         *
+         * `onStepStart` fires once, before attempt 1 and **before the guard below**, so a step
+         * rejected out of hand still reports a start and then a terminal `onStepError` like any
+         * other failure - a guard placed above the call site would leave a phase that failed with
+         * no step in it. `onStepEnd` fires only on success; a terminal failure ends with
+         * `onStepError(willRetry = false)` and nothing else.
+         *
+         * `willRetry` is decided and reported before [sleeper] is asked for anything, so a
+         * listener sees the decision when it is made and not after the delay it causes. It is not
+         * `isTransient` alone: a transient failure on the last attempt reports false.
          */
-        fun execute(step: Step) {
-            require(step.retries >= 0) { "step '${step.name}': retries must not be negative, got ${step.retries}." }
+        fun execute(phase: String, step: Step) {
+            val ctx = events.step(phase, step.name)
+            events.stepStart(ctx)
+            // durationMs spans the whole step - every attempt and every backoff between them -
+            // read from the injected clock rather than from the wall or from nanoTime.
+            val startedAt = clock.millis()
             var attempt = 1
             while (true) {
                 try {
-                    return runOnce(step, attempt)
+                    val rows = runOnce(step, attempt)
+                    val elapsed = clock.millis() - startedAt
+                    events.stepEnd(ctx, StepResult(rows.rowsRead, rows.rowsWritten, elapsed, attempt))
+                    return
                 } catch (failure: Exception) {
-                    if (attempt > step.retries || !isTransient(failure)) throw failure
+                    val willRetry = attempt <= step.retries && isTransient(failure)
+                    events.stepError(ctx, attempt, failure, willRetry)
+                    if (!willRetry) throw failure
                     sleeper(backoffMillis(attempt))
                     attempt++
                 }
             }
         }
 
-        private fun runOnce(step: Step, attempt: Int) = when (step) {
+        private fun runOnce(step: Step, attempt: Int): PipeResult {
+            require(step.retries >= 0) { "step '${step.name}': retries must not be negative, got ${step.retries}." }
+            return dispatch(step, attempt)
+        }
+
+        private fun dispatch(step: Step, attempt: Int): PipeResult = when (step) {
             is PipeStep -> pipe(step, attempt)
             is MaterializeStep -> materialize(step, attempt)
             is SqlStep -> sql(step, attempt)
@@ -216,7 +406,12 @@ class TaskEngine(
             )
         }
 
-        private fun pipe(step: PipeStep, attempt: Int) {
+        /**
+         * The one step type where rows pass through the JVM (spec 2.3), so the one type whose
+         * [StepResult] carries a real pair. [RowPipe.run] already answers it; before P8a the
+         * result was discarded only because the publish `if` was the last statement.
+         */
+        private fun pipe(step: PipeStep, attempt: Int): PipeResult {
             val target = step.target
             // Spec 5.5 is unconditional: every dataset produced inside scratch is written under an
             // attempt-suffixed name. REQUIRED cannot be, because the author created the table under
@@ -235,7 +430,7 @@ class TaskEngine(
                     "retries: 0 to accept a single attempt."
             }
             val physical = physicalDataset(target, attempt)
-            readFrom(step.source.datasource) { handle ->
+            val rows = readFrom(step.source.datasource) { handle ->
                 val parameters = variables(handle, step.source.sql, step.name, attempt)
                 RowPipe(
                     source = JdbcSource(handle, step.source.sql, parameters),
@@ -248,9 +443,16 @@ class TaskEngine(
             // Publishing is what makes an attempt the live one, so it happens only once the whole
             // attempt has succeeded (spec 5.5). DatasetNamer deliberately does not decide this.
             if (physical != null) namer.publishTable(scratch.connection(), (target as TableTarget).table, attempt)
+            return rows
         }
 
-        private fun materialize(step: MaterializeStep, attempt: Int) {
+        /**
+         * Reports 0 / 0, like every step type but `pipe`: nothing here moves a row through the
+         * JVM. A non-scratch CTAS does have an affected-row count to hand, and it is deliberately
+         * not used - one field that meant "rows piped" for one step type and "rows the database
+         * says it touched" for another would be a number nobody could aggregate.
+         */
+        private fun materialize(step: MaterializeStep, attempt: Int): PipeResult {
             if (step.datasource != SCRATCH) {
                 require(step.format == MaterializeFormat.TABLE) {
                     "step '${step.name}': format PARQUET writes a file into the scratch directory, so it " +
@@ -258,10 +460,11 @@ class TaskEngine(
                 }
                 // Unquoted, so that Oracle folds it to its own storage case exactly as
                 // JdbcTableWriter's column names are folded.
-                return onDatasource(step.datasource) { handle ->
+                onDatasource(step.datasource) { handle ->
                     val ctas = "create table ${datasetIdentifier(step.output)} as ${step.sql}"
                     update(handle, ctas, step.name, attempt)
                 }
+                return NO_ROWS
             }
             val connection = scratch.connection()
             val statement = when (step.format) {
@@ -276,11 +479,15 @@ class TaskEngine(
                 MaterializeFormat.TABLE -> namer.publishTable(connection, step.output, attempt)
                 MaterializeFormat.PARQUET -> namer.publishParquet(connection, step.output, attempt)
             }
+            return NO_ROWS
         }
 
         /** Each statement is its own transaction (spec 5.2), so a retry re-runs all of them. */
-        private fun sql(step: SqlStep, attempt: Int) = onDatasource(step.datasource) { handle ->
-            step.statements.forEach { update(handle, it, step.name, attempt) }
+        private fun sql(step: SqlStep, attempt: Int): PipeResult {
+            onDatasource(step.datasource) { handle ->
+                step.statements.forEach { update(handle, it, step.name, attempt) }
+            }
+            return NO_ROWS
         }
 
         /**
@@ -288,7 +495,7 @@ class TaskEngine(
          * succeeded. Defining as we go would make a retry after a partial success fail on
          * "already defined" (spec 6.2) and bury the failure that caused the retry.
          */
-        private fun export(step: ExportStep, attempt: Int) {
+        private fun export(step: ExportStep, attempt: Int): PipeResult {
             val exported = LinkedHashMap<String, Any?>()
             onDatasource(step.datasource) { handle ->
                 step.vars.forEach { variable ->
@@ -308,6 +515,7 @@ class TaskEngine(
                 }
             }
             exported.forEach { (name, value) -> scope.define(name, value) }
+            return NO_ROWS
         }
 
         /**
