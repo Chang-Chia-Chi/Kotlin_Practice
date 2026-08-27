@@ -712,6 +712,31 @@ phase 2. A variable may not be redefined once set.
 Named Quarkus datasources with a Jdbi bean each. YAML refers to them by name. One name is
 reserved: `scratch`, the per-run DuckDB working file.
 
+**Pool sizing is a contract, not a tuning knob (review finding H4).** A `pipe` step whose source
+and target name the *same* datasource holds **two connections from that pool at once**: the
+engine takes a handle for the source and holds it open for the whole step, streaming, while
+`RowWriter.open` takes a second from the same `Jdbi` for the target. Each such datasource's pool
+must therefore hold at least
+
+> 2 × the number of tasks that may concurrently run a same-datasource pipe step on it
+
+and a pool-backed `Jdbi` is already required, since 8.4 runs tasks concurrently and a
+`Jdbi.create(singleConnection)` would hand one `Connection` to two runs - 7.2's JVM crash rather
+than an error.
+
+Undersizing it deadlocks, and no acquisition order can prevent that: both connections come from
+one pool, so two runs that each hold one and wait for a second are in a circular wait whatever
+order they acquire in. With no acquisition timeout configured, both runs then hang indefinitely
+holding `busy = true`, and every later firing of both tasks is skipped as `AlreadyRunning` - the
+schedule stalls in silence.
+
+The framework states the requirement and cannot check it. It computes the required minimum from
+the loaded definitions and logs it per datasource at startup and on every reload, because that
+number is knowable here; the *configured* pool size is not, since `Jdbi` exposes neither its
+`ConnectionFactory` nor its `DataSource` and reading the pool would mean reflecting into a third
+party's private fields. Comparing the two is the operator's, which is why the number is logged
+rather than merely documented.
+
 ### 7.2 Scratch DuckDB
 
 **Scope.** One DuckDB instance and one file per task run, created lazily on first reference

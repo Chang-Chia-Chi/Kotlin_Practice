@@ -1,6 +1,7 @@
 package infra.etl.task
 
 import java.nio.file.Path
+import org.jboss.logging.Logger
 
 /**
  * One row of spec 8.2's `GET /admin/etl/tasks`: the task, its schedule, and its last run outcome.
@@ -112,6 +113,66 @@ class TaskAdmin(
         val rejected = scheduler.apply(loaded)
         if (rejected != null) return rejected
         definitions = loaded.associateBy { it.name }
+        reportPoolMinimums(loaded)
         return null
     }
+
+    /**
+     * Spec 7.1's pool-sizing contract, as the half of it this framework can actually answer
+     * (review finding H4).
+     *
+     * A pipe whose source and target name the same datasource holds two connections from that
+     * pool at once - the streaming source handle for the whole step, and the target's, taken by
+     * `RowWriter.open` from the same `Jdbi`. Two runs that each hold one and wait for the second
+     * are in a circular wait, and no acquisition order can break it, because both connections come
+     * from one pool. Undersized, that hangs both runs indefinitely with `busy = true` and every
+     * later firing of either task is skipped as `AlreadyRunning`: the schedule stalls in silence.
+     *
+     * **Logged, not checked, and the asymmetry is the point.** The requirement's left-hand side is
+     * knowable here - it is a property of the definitions just loaded. Its right-hand side is not:
+     * `Jdbi` exposes neither its `ConnectionFactory` nor its `DataSource` (verified against
+     * jdbi3-core 3.45.4), so reading the configured pool size would mean reflecting into a third
+     * party's private fields, which is a worse thing to own than the problem. Emitting the number
+     * an operator has to compare against is the honest half.
+     *
+     * Counted per *task*, not per step: `TaskRunner` admits one run per task at a time (spec 8.4),
+     * so two same-datasource pipes in one task cannot overlap and must not be counted twice.
+     */
+    private fun reportPoolMinimums(tasks: List<TaskDefinition>) {
+        sameDatasourcePipeUsers(tasks).forEach { (datasource, users) ->
+            log.infov(
+                "datasource {0} needs a connection pool of at least {1}: {2} task(s) {3} run a pipe step " +
+                    "whose source and target are both {0}, and each such step holds two connections at " +
+                    "once. A smaller pool deadlocks the runs against each other (spec 7.1).",
+                datasource, users.size * 2, users.size, users,
+            )
+        }
+    }
 }
+
+/**
+ * The tasks that run a same-datasource pipe step, by datasource, in load order - the left-hand
+ * side of spec 7.1's pool minimum, which is `2 × users.size`.
+ *
+ * Separate from the logging so it can be asserted on directly: a test that had to read a log
+ * appender would be testing the logging framework, and one that asserted nothing would let the
+ * arithmetic drift unnoticed.
+ *
+ * A task appears once per datasource however many such steps it has, because [TaskRunner] admits
+ * one run per task at a time (spec 8.4) and two steps of one task therefore cannot overlap.
+ */
+internal fun sameDatasourcePipeUsers(tasks: List<TaskDefinition>): Map<String, List<String>> {
+    val users = LinkedHashMap<String, MutableList<String>>()
+    tasks.forEach { task ->
+        task.phases.asSequence()
+            .flatMap { it.steps.asSequence() }
+            .filterIsInstance<PipeStep>()
+            .filter { it.source.datasource != SCRATCH && it.source.datasource == it.target.datasource }
+            .map { it.source.datasource }
+            .distinct()
+            .forEach { users.getOrPut(it) { mutableListOf() } += task.name }
+    }
+    return users
+}
+
+private val log: Logger = Logger.getLogger(TaskAdmin::class.java)
