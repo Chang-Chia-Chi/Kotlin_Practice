@@ -287,30 +287,45 @@ prove same-source while the stated defect stood. The two values measure differen
 time and run-start time - and the gap between them is the queue delay, which is information worth
 having. The honest resolution is to name them distinctly, not to unify them.
 
-### P8c - Coroutine-native event stream
+### P8c - Coroutine-native event stream - **BUILT, THEN REVERTED**
 
-Requested by the project owner, who asked that the framework be coroutine-friendly and that a
-notification mechanism use `SharedFlow`. Spec 9.2's listener interface is FIXED and cannot be
-replaced, so the flow is offered alongside it and is fed by an ordinary `TaskRunListener`.
+Built to completion (900 lines, 331 tests green, commit `a78a49d`) and then **reverted on the
+project owner's ruling**. Recorded here rather than deleted, because the next session will
+otherwise rebuild it.
 
-**Public surface**
-- `TaskEvent` - the flow-shaped form of spec 9.2's seven call sites
-- `TaskEventFlow : TaskRunListener`, exposing `SharedFlow<TaskEvent>`
+**Why it was built.** The owner asked that the framework be coroutine-friendly and that a
+notification mechanism use `SharedFlow`, adding "just a recommendation, not a must follow". The
+lead turned that into a mandated phase.
 
-**Done when**
-- A collector receives one run's events in P8a's order, after filtering by `runId` - one
-  `TaskEngine` serves concurrent tasks, so the stream interleaves runs.
-- A slow collector neither blocks nor fails the run: emission is `tryEmit`, never `emit`, so
-  telemetry can never back-pressure an ETL job.
-- `delivered + dropped == emitted` under a wedged collector. Measured on coroutines 1.10.1:
-  with `onBufferOverflow = DROP_OLDEST`, `tryEmit` never returns false and a `dropped` counter
-  would be structurally always zero; only `SUSPEND` makes a lost event countable, and `tryEmit`
-  does not suspend under any policy.
-- The KDoc states what a collector is NOT promised: with no subscriber at all, `replay = 0`
-  discards every event and `tryEmit` still returns true under every policy, so no counter of any
-  design can report "nobody was listening".
+**Why it was reverted.** The owner's actual bar was *adopt it where it is really required, and
+where it makes the code more scalable, simpler, more concise and easier to maintain.* Measured
+against that bar the phase failed on every count:
 
----
+| Test | Result |
+|---|---|
+| Really required? | **No consumer existed.** Zero references from production; only its own test and fixture touched it |
+| Simpler? | No - a **second** observation surface parallel to `TaskRunListener`, so every future call-site change lands in two places |
+| Concise? | 1,231 lines added for ~25 lines of mechanism |
+| Easier to maintain? | No - the `events` KDoc needed **eleven** separate "Not promised" caveats to be used safely |
+
+The eleven caveats are the tell, and none of them was padding: the stream is lossy, interleaves
+concurrent runs, never completes, is silenced by `logging: false`, cannot report that nobody is
+listening, and can **park an ETL run** if a host collects on an unconfined dispatcher. It was
+strictly weaker than the `TaskRunListener` it duplicated.
+
+The reviewer made this objection in the P8 contract round - *"a second, permanently-parallel public
+surface for the same seven call sites"* - and the lead answered it by deferring the phase rather
+than by dropping it. That was the error; deferring an objection is not answering it.
+
+**When to revisit.** Only when a real consumer needs fan-out to multiple independent subscribers.
+The engine is blocking JDBC by spec 8.3, and `TaskRunner` already uses coroutines where they earn
+their place - one `limitedParallelism(1)` view per task. Until such a consumer exists, this is
+speculative API.
+
+**What was learned and is worth keeping** (all in progress.md, none of it requiring the code):
+`BufferOverflow.SUSPEND` is the only policy under which a lost event is countable; `tryEmit` buys
+"never suspends", not "never blocks"; `replayCache` is cumulative across runs; and with no
+subscriber, `replay = 0` discards everything while `tryEmit` still returns true.
 
 ## P9 - Snapshot cache read step
 

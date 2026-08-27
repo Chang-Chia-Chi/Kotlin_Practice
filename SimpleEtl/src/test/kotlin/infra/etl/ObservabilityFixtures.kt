@@ -5,7 +5,6 @@ import infra.etl.task.PhaseContext
 import infra.etl.task.StepContext
 import infra.etl.task.StepResult
 import infra.etl.task.TaskContext
-import infra.etl.task.TaskEvent
 import infra.etl.task.TaskHook
 import infra.etl.task.TaskMetrics
 import infra.etl.task.TaskRunListener
@@ -448,44 +447,3 @@ class ForwardingMetrics(private val target: () -> TaskMetrics) : TaskMetrics {
 
     override fun scratchBytes(ctx: TaskContext, bytes: Long) = target().scratchBytes(ctx, bytes)
 }
-
-// -------------------------------------------------------------------------------------------
-// P8c. The flow-shaped form of the same seven call sites (spec 9.2, P8c contract 1.1).
-// Additive: nothing above changes, and no existing trace line moves.
-// -------------------------------------------------------------------------------------------
-
-/**
- * One [TaskEvent] rendered into the grammar [RecordingListener] already writes, with the event's
- * own noun in place of the call site's verb - `TaskStarted(wip-summary)` where the listener writes
- * `onTaskStart(wip-summary)`.
- *
- * **Only the actual side goes through this**, exactly as the file KDoc says of the listener's
- * formatter: every expected list in `TaskEventFlowTest` is a literal. A fixture that formatted both
- * sides would assert that the flow agrees with itself.
- *
- * **Why a rendering and not value equality over whole `TaskEvent`s.** Every event carries the run's
- * [TaskContext], whose `runId` is a fresh UUID and whose `startedAt` is the harness clock's origin,
- * so an expected `TaskEvent` could only be built by reading the actual one first. The rendering
- * carries the identifying half - task, phase, step, attempt, `willRetry`, outcome - and the payload
- * that does not survive a string (a `StepResult`, a `Throwable`'s identity, a `TaskContext`'s
- * identity) is asserted from the typed events themselves, against a co-attached
- * [RecordingListener]. Same division of labour as P8a's, for the same reason.
- *
- * The event names deliberately stay 1:1 with the seven call sites: that vocabulary is what the
- * contract's criterion 7 asserts, and a renderer that collapsed `StepError` and `StepEnded` into
- * one line shape would hide exactly the mapping under test.
- */
-fun rendered(event: TaskEvent): String = when (event) {
-    is TaskEvent.TaskStarted -> "TaskStarted(${event.task.taskName})"
-    is TaskEvent.TaskEnded -> "TaskEnded(${event.task.taskName}, ${event.outcome})"
-    is TaskEvent.PhaseStarted -> "PhaseStarted(${event.phase.phase})"
-    is TaskEvent.PhaseEnded -> "PhaseEnded(${event.phase.phase}, ${event.outcome})"
-    is TaskEvent.StepStarted -> "StepStarted(${event.step.phase}/${event.step.step})"
-    is TaskEvent.StepEnded -> "StepEnded(${event.step.phase}/${event.step.step}, attempt=${event.result.attempt})"
-    is TaskEvent.StepError ->
-        "StepError(${event.step.phase}/${event.step.step}, attempt=${event.attempt}, " +
-            "willRetry=${event.willRetry})"
-}
-
-/** [rendered] over a whole replay cache, which is the order half of every ordering assertion. */
-fun rendered(events: List<TaskEvent>): List<String> = events.map { rendered(it) }

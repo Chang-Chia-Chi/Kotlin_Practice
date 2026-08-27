@@ -1156,3 +1156,65 @@ falsification exercise in this module must run `clean` after reverting, or it ch
   `MicrometerTaskMetrics` to `infra.etl.task` should turn the canary red while rules 1 and 2 stay
   green - is the one exercise most worth running.
 
+---
+
+## P8c - Coroutine-native event stream: built, then reverted  (2026-08-27)
+
+Team: engineer + sdet + reviewer. Contract took **three revisions**; shipped green at 331 tests and
+900 lines; **reverted on the project owner's ruling** the same session. `plan.md`'s P8c entry
+carries the full reasoning. Summarised here because this is the entry a later session reads.
+
+### Why it was reverted
+
+The owner's bar was *adopt `SharedFlow` where it is really required, and where it makes the code
+more scalable, simpler, more concise and easier to maintain.* The phase failed all four: no
+production consumer existed, it was a **second** observation surface parallel to `TaskRunListener`,
+it cost 1,231 lines for ~25 lines of mechanism, and its `events` KDoc needed **eleven** "Not
+promised" caveats to be usable safely.
+
+**The lead's process error, which matters more than the code.** The reviewer raised exactly this
+objection during the P8 contract round - "a second, permanently-parallel public surface for the same
+seven call sites, and every future change to a call site made in two places forever" - and the lead
+answered it by **deferring the phase into its own slot rather than dropping it**. Deferring an
+objection is not answering it. Three contract revisions and four agent rounds then went into
+hardening speculative API. The check that would have caught it is one line: *who consumes this?*
+
+### What was measured, and is worth more than the code was
+
+Kept because these are facts about kotlinx-coroutines 1.10.1 that cost real probe time, and the
+next person to reach for a flow here will need them:
+
+- **`BufferOverflow.SUSPEND` is the only policy under which a lost event is countable.** Under
+  `DROP_OLDEST`, `tryEmit` returned false **0 times in 100** with a wedged collector, so a `dropped`
+  counter is structurally always zero.
+- **`tryEmit` buys "never suspends", NOT "never blocks".** A collector on `Dispatchers.Unconfined`
+  or started `UNDISPATCHED` runs its body **inline on the producer's thread inside `tryEmit`** -
+  measured, an emitter did not return for 300 ms while such a collector blocked.
+- **`delivered + dropped == emitted` is false** by exactly `extraBufferCapacity`: events sit
+  accepted by `tryEmit` but never handed to a wedged collector, counted in neither bucket.
+- **`replayCache` is cumulative across runs**, and `resetReplayCache()` is on `MutableSharedFlow`,
+  not `SharedFlow`.
+- **With no subscriber at all**, `replay = 0` discards everything and `tryEmit` returns true under
+  every policy - so no counter of any design can report "nobody was listening".
+
+### Two review findings that died with the code, recorded so they are not rediscovered
+
+- The shipped KDoc's "Not exception-isolated" bullet was **wrong**: a throwing collector on a real
+  dispatcher does not reach the *ETL* thread's uncaught handler, and the consequence that actually
+  matters - **the throw cancels the collection and the host silently stops receiving events** - was
+  absent. Ninth confidently-wrong claim in this project.
+- The engineer reported a correction to the contract ("five delegating subtypes should be six").
+  The reviewer checked and it was **five**; applying the correction would have introduced a tenth
+  wrong claim as the fix for the ninth. Recorded because it is the first time an agent's
+  *correction* was the error.
+
+### Still open, inherited by P9
+
+- **P8a M1**: `TaskRunner`'s caller-identity pass-through has no test - deleting the `by` argument
+  leaves the suite green. `SchedulingFixtures` builds no engine with a listener.
+- `plan.md`'s "P8a, P8b, P8c and P9 all edit `TaskEngine.kt` and are a chain" is stale: P8c edited
+  no engine code, and P9's merge surface is P8b's.
+- `CacheCopyStep` throws `NotImplementedError`, an `Error`, which the step loop's `catch (Exception)`
+  misses - so today it produces `scratchBytes` and `taskEnded(FAILED)` but no `stepEnded` and no
+  `stepError`. P9 will meet this as "the metric is missing".
+
