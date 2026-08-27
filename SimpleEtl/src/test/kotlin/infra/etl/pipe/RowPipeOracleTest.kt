@@ -66,16 +66,10 @@ class RowPipeOracleTest {
         @JvmStatic
         fun closeFixtureConnection() = connection.close()
 
-        private fun exec(connection: Connection, vararg sql: String) =
-            connection.createStatement().use { statement -> sql.forEach { statement.execute(it) } }
-
-        private fun count(connection: Connection, table: String): Long =
-            connection.createStatement().use { statement ->
-                statement.executeQuery("select count(*) from $table").use { rs ->
-                    rs.next()
-                    rs.getLong(1)
-                }
-            }
+        // exec / count used to be declared here, byte for byte the same as Pipe.exec and
+        // Pipe.rowCount, which this class already imports for its DuckDB connections. Both take a
+        // plain java.sql.Connection, so the Oracle one needed no copy of its own (review finding
+        // L8). Deleting them touched no assertion.
     }
 
     private val recording = RecordingConnections { connect() }
@@ -189,7 +183,7 @@ class RowPipeOracleTest {
      */
     @Test
     fun `two pipes over one borrowed Handle read from a single source transaction`() {
-        exec(
+        Pipe.exec(
             connection,
             "create table gen_src (lot_id number(18) not null, lot_code varchar2(20) not null)",
             "insert into gen_src (lot_id, lot_code) values (1, 'L1')",
@@ -211,7 +205,7 @@ class RowPipeOracleTest {
 
                 // A different connection, committed (ojdbc's autoCommit is on), between the pipes.
                 connect().use { other ->
-                    exec(other, "insert into gen_src (lot_id, lot_code) values (3, 'L3')")
+                    Pipe.exec(other, "insert into gen_src (lot_id, lot_code) values (3, 'L3')")
                 }
 
                 val second = RowPipe(
@@ -231,7 +225,7 @@ class RowPipeOracleTest {
                     { assertEquals(2L, Pipe.rowCount(generation, "wip")) },
                     { assertEquals(2L, Pipe.rowCount(generation, "lot")) },
                     {
-                        assertEquals(3L, count(connection, "gen_src")) {
+                        assertEquals(3L, Pipe.rowCount(connection, "gen_src")) {
                             "outside the shared transaction the third row is committed and visible"
                         }
                     },
@@ -259,7 +253,7 @@ class RowPipeOracleTest {
      */
     @Test
     fun `each chunk is committed to an Oracle target at its chunk boundary`() {
-        exec(connection, "create table wip_tgt (lot_id number(18), lot_code varchar2(40))")
+        Pipe.exec(connection, "create table wip_tgt (lot_id number(18), lot_code varchar2(40))")
         val visibleAtRow = ArrayList<Long>()
 
         val result = RowPipe(
@@ -268,7 +262,7 @@ class RowPipeOracleTest {
             step = Pipe.STEP,
             chunkSize = 50,
             transform = RowTransform { row ->
-                visibleAtRow.add(count(connection, "wip_tgt"))
+                visibleAtRow.add(Pipe.rowCount(connection, "wip_tgt"))
                 row
             },
         ).run()
@@ -280,7 +274,7 @@ class RowPipeOracleTest {
                     "rows committed to Oracle and visible to another session while row k was in the transform"
                 }
             },
-            { assertEquals(175L, count(connection, "wip_tgt")) },
+            { assertEquals(175L, Pipe.rowCount(connection, "wip_tgt")) },
         )
     }
 
