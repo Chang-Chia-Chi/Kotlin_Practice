@@ -20,7 +20,9 @@ import infra.etl.task.Step
 import infra.etl.task.TableTarget
 import infra.etl.task.TaskDefinition
 import infra.etl.task.TaskEngine
+import infra.etl.task.TaskHooks
 import infra.etl.task.TaskOutcome
+import infra.etl.task.TaskRunListener
 import infra.etl.task.TriggerSource
 import java.io.File
 import java.lang.reflect.InvocationHandler
@@ -200,6 +202,37 @@ object Etl {
         CacheCopyStep(name = name, cache = cache, sql = sql, output = output)
 
     // -------------------------------------------------------------------------------------
+    // P8a additions (spec 9.2, 9.4). Additive only: every builder above keeps its name, its
+    // signature, its defaults and its behaviour. These three are `copy` calls rather than new
+    // parameters on [task] precisely so that they can be, and because the three fields they set
+    // are carried by P5's model and acted on for the first time by P8a - so a P5 test that never
+    // mentions them still means what it meant.
+    // -------------------------------------------------------------------------------------
+
+    /** Spec 9.2's per-task switch: `false` suppresses every listener call for that run. */
+    fun withLogging(definition: TaskDefinition, logging: Boolean): TaskDefinition =
+        definition.copy(logging = logging)
+
+    /**
+     * Spec 9.4's two hook names. A null name means *the task names no hook*, which is a different
+     * thing from a name that is not in the registry - and telling those two apart is the whole of
+     * contract 2.3's resolution rule.
+     */
+    fun withHooks(
+        definition: TaskDefinition,
+        onSuccess: String? = null,
+        onFailure: String? = null,
+    ): TaskDefinition = definition.copy(onSuccess = onSuccess, onFailure = onFailure)
+
+    /**
+     * The per-task DuckDB `memory_limit` (spec 7.2). Its only use here is 0, which `ScratchDb`'s
+     * own `init` refuses - the one way a test can kill a run *before* scratch exists and still ask
+     * what the listener saw.
+     */
+    fun withScratchMemoryLimitMb(definition: TaskDefinition, limit: Int): TaskDefinition =
+        definition.copy(scratchMemoryLimitMb = limit)
+
+    // -------------------------------------------------------------------------------------
     // Probe steps - ordinary steps whose side effect is a durable mid-run observation
     // -------------------------------------------------------------------------------------
 
@@ -282,6 +315,25 @@ object Etl {
  * actually waited would take a minute per case and be timing-flaky besides. The engine takes an
  * injected sleeper, and [delaysMillis] records what it asked for - which is the assertion this
  * phase calls for: the *requested* delays, never elapsed wall time. Nothing in this suite sleeps.
+ *
+ * ### P8a: the clock, the listener and the hook registry
+ *
+ * The sleeper now also advances [clock], which contract 1.3 makes the engine's only source of
+ * time. Nothing that existed before P8a observes the engine's clock, so this changes no earlier
+ * assertion; what it buys is that `StepResult.durationMs` is an exact number - a step retried
+ * twice reports 6000, cross-checked against [delaysMillis] - instead of a stopwatch reading that
+ * cannot tell a correct engine from one that times only the last attempt.
+ *
+ * [listener] is a `var` and is handed to the engine through a [ForwardingListener], which reads
+ * it at every call. The engine below is built `by lazy`: a listener passed straight into that
+ * constructor would be captured at the harness's first run, and a later `harness.listener = ...`
+ * would silently never arrive - leaving a test asserting an empty recorder and passing for the
+ * wrong reason. Two of this phase's tests swap the listener between runs of one harness, which is
+ * the shape the paired `logging: true` / `logging: false` assertion needs.
+ *
+ * [hooks] is one registry, created eagerly and mutated in place, so the instance the engine
+ * resolves names in is the same instance whose `.names` a test hands to `TaskFileLoader`. Spec
+ * 9.4's startup validation only means something when both sides read the same registry.
  */
 class TaskHarness(private val root: Path) : AutoCloseable {
 
@@ -292,6 +344,15 @@ class TaskHarness(private val root: Path) : AutoCloseable {
     /** Every delay the engine asked for, in order, across every run on this harness. */
     val delaysMillis: List<Long> get() = recorded
 
+    /** P8a. The engine's only source of time, moved only by the sleeper below. */
+    val clock: MutableClock = MutableClock()
+
+    /** P8a. Read at every call site, never captured - see the class KDoc. */
+    var listener: TaskRunListener = TaskRunListener.NONE
+
+    /** P8a. The registry the engine resolves `onSuccess` / `onFailure` names in. */
+    val hooks: TaskHooks = TaskHooks()
+
     private val datasources = LinkedHashMap<String, Jdbi>()
     private val files = ArrayList<DuckFile>()
 
@@ -301,12 +362,23 @@ class TaskHarness(private val root: Path) : AutoCloseable {
             datasources = datasources,
             scratchDirectory = scratchRoot,
             scratchMemoryLimitMb = Etl.MEMORY_LIMIT_MB,
-            sleeper = { millis -> recorded += millis },
+            sleeper = { millis -> recorded += millis; clock.advance(millis) },
+            listener = ForwardingListener { listener },
+            hooks = hooks,
+            clock = clock,
         )
     }
 
     fun run(definition: TaskDefinition, trigger: TriggerSource = TriggerSource.SCHEDULE): TaskOutcome =
         engine.run(definition, trigger)
+
+    /**
+     * P8a. A run carrying the caller identity of spec 8.2, which the two-argument [run] leaves
+     * null. Separate rather than a defaulted parameter on [run], because [run] belongs to P5 and
+     * its signature may not change.
+     */
+    fun runTriggeredBy(definition: TaskDefinition, trigger: TriggerSource, by: String?): TaskOutcome =
+        engine.run(definition, trigger, triggeredBy = by)
 
     /** Runs, and fails the test if the run did not succeed, so a later assertion cannot be vacuous. */
     fun runExpectingSuccess(definition: TaskDefinition, trigger: TriggerSource = TriggerSource.SCHEDULE): TaskOutcome {
