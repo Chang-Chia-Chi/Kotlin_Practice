@@ -139,6 +139,25 @@ private class DuckDbSyntax : AutoCloseable {
 }
 
 /**
+ * One task file after reading, in file-name order: either it deserialised or it did not.
+ *
+ * Replaces the two parallel `LinkedHashMap`s the load pass used to build - one of parsed documents,
+ * one of parse errors - which a third walk then stitched back together by name with
+ * `unparsed[name] ?: parsed.getValue(name)`. That worked only while every name landed in exactly
+ * one of the two maps, an invariant held by the shape of a single if/else and by nothing else; a
+ * later edit that added a third outcome, or forgot a map, would turn it into a
+ * `NoSuchElementException` at startup (review finding L9). One ordered list of a two-case type
+ * cannot fall out of step with itself.
+ */
+private sealed interface ReadFile {
+    val name: String
+
+    class Parsed(override val name: String, val task: TaskYaml) : ReadFile
+
+    class Failed(override val name: String, val error: ValidationError) : ReadFile
+}
+
+/**
  * What [TaskFileLoader.load] returns.
  *
  * Spec 11.2 writes `Result<List<TaskDefinition>, ValidationReport>`, which does not exist: Kotlin's
@@ -230,9 +249,7 @@ class TaskFileLoader(
             .filter { Files.isRegularFile(it) && it.fileName.toString().isTaskFile() }
             .sortedBy { it.fileName.toString() }
 
-        val parsed = LinkedHashMap<String, TaskYaml>()
-        val unparsed = LinkedHashMap<String, ValidationError>()
-        for (file in files) {
+        val read = files.map { file ->
             val name = file.fileName.toString()
             val text = Files.readString(file)
             try {
@@ -240,31 +257,35 @@ class TaskFileLoader(
                 // but a document that is only `---`, or the literal `null`, deserialises to Java
                 // null instead - so without this branch such a file leaves startup with a
                 // NullPointerException rather than with a report.
-                val task: TaskYaml? = YAML.readValue(text, TaskYaml::class.java)
-                if (task == null) {
-                    unparsed[name] = ValidationError(name, null, 1, "the file holds no task document (rule 1).")
-                } else {
-                    parsed[name] = task
+                when (val task: TaskYaml? = YAML.readValue(text, TaskYaml::class.java)) {
+                    null -> ReadFile.Failed(
+                        name,
+                        ValidationError(name, null, 1, "the file holds no task document (rule 1)."),
+                    )
+                    else -> ReadFile.Parsed(name, task)
                 }
             } catch (e: JsonProcessingException) {
-                unparsed[name] = parseError(name, text, e)
+                ReadFile.Failed(name, parseError(name, text, e))
             }
         }
+        val parsed = read.filterIsInstance<ReadFile.Parsed>()
 
         // Rule 2's cross-file half needs every file read before any file can be judged, which is
         // the same reason nothing is loaded until everything has validated.
-        val filesByTask = parsed.entries.groupBy({ it.value.name }, { it.key })
+        val filesByTask = parsed.groupBy({ it.task.name }, { it.name })
         val errors = DuckDbSyntax().use { syntax ->
-            files.map { it.fileName.toString() }.flatMap { name ->
-                unparsed[name]?.let { listOf(it) }
-                    ?: FileValidation(
-                        name, parsed.getValue(name), datasources, transforms.keys, hooks, caches,
+            read.flatMap { file ->
+                when (file) {
+                    is ReadFile.Failed -> listOf(file.error)
+                    is ReadFile.Parsed -> FileValidation(
+                        file.name, file.task, datasources, transforms.keys, hooks, caches,
                         filesByTask, syntax,
                     ).validate()
+                }
             }
         }
 
-        return if (errors.isEmpty()) LoadResult.Loaded(parsed.values.map { it.toDefinition(transforms) })
+        return if (errors.isEmpty()) LoadResult.Loaded(parsed.map { it.task.toDefinition(transforms) })
         else LoadResult.Invalid(ValidationReport(errors))
     }
 }
