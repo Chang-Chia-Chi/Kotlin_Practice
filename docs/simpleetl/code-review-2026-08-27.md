@@ -1,5 +1,14 @@
 # SimpleEtl Code Review — 2026-08-27
 
+> **Updated same day with a second pass.** The findings below were produced
+> against commit `a62a983` (P7 state); the 13 P8/P9 commits (`a62a983..b34f509`)
+> landed mid-review. A second pass reviewed that delta and re-validated all 27
+> findings against the current tree. See **"P8/P9 delta — second pass"** at the
+> end of this document for: 5 new findings (N1–N5), corrected line anchors for
+> the findings below (several shifted), and status changes (L11 is partially
+> fixed and the remainder sanctioned; L4 got worse; M6 sharpened; M10/M12
+> restructured). A fixing session should read that section first.
+
 Scope: all main and test sources under `SimpleEtl/`, reviewed against
 `docs/simpleetl/spec.md`, `docs/simpleetl/plan.md`, and the deviations recorded in
 `docs/simpleetl/progress.md`. Method: 8 independent finder passes (line-by-line,
@@ -497,3 +506,154 @@ the forbidden thread-name assertion.
 3. M1/M8 together (they interlock: the addColumns/REQUIRED story), M3 (decide:
    restore spec order or record deviation).
 4. M10–M12 refactors, then the LOW list opportunistically.
+
+---
+
+# P8/P9 delta — second pass (same day)
+
+The 13 commits `a62a983..b34f509` (P8a listeners/hooks, P8b metrics, the P8c
+SharedFlow revert, P9 cacheCopy) were reviewed separately: line-by-line
+correctness, spec-contract audit (spec 3.6, 7.3, 9.2–9.4, rules 19–21),
+cross-file integration, and quality/conventions, each adversarially checked
+against the code, the current spec, and the P8/P9 progress.md entries.
+
+Overall verdict on the new code: **strong**. The spec-contract audit found zero
+unrecorded violations — every divergence traces to a recorded deviation.
+Conventions are clean (no `Thread.sleep`, no Quarkus imports, Micrometer
+`provided`-scoped and ArchUnit-confined with a non-vacuous canary, DuckDB 1.1.3
+APIs only, no P8c residue in main sources). Two code findings and three
+documentation findings survived.
+
+## New findings
+
+### N1. MEDIUM — cacheCopy boot validation passes non-SELECT SQL that fails every run
+`SimpleEtl/src/main/kotlin/infra/etl/task/TaskFileLoader.kt:446` — CONFIRMED
+
+Rule 6/19 validation for cacheCopy accepts any statement that merely parses:
+`DuckDbSyntax.errorIn` (line 128) returns null for every `error_type` other
+than `"parser"`, and its own measured table (lines 87–88) records that parsed
+non-SELECTs — `create table t (a int)`, `copy (...) to ...` — come back
+`"not implemented"`, i.e. pass. That leniency is correct for `sql` steps (DDL
+is legitimate there) but wrong for cacheCopy: the runtime splices the text into
+`CREATE TABLE <target> AS <sql>` (`DuckDbGenerationStore.copyOut`), which is
+legal only for a SELECT.
+
+Failure scenario: an author writes `type: cacheCopy, sql: copy (select ...) to
+'wip.parquet'` (confusing it with a parquet materialize) or a CTAS. Rules 6,
+19, 20, 21 all report clean and the directory loads; at run time the spliced
+`CREATE TABLE ... AS copy (...)` is a DuckDB parser error — after the run has
+started, waited up to the cache's wait budget, and taken/released a lease.
+Every firing fails terminally mid-run while validation keeps reporting the file
+valid — the exact boot-vs-run divergence the phase's own KDoc (lines 388–392)
+says the startup rules exist to close. `errorIn` already distinguishes the
+rejectable case; `cacheSql` just discards the `"not implemented"` signal.
+
+Suggested fix: in the cacheCopy path only, treat `error_type: "not implemented"`
+as a rule-19-class boot error ("cacheCopy SQL must be a SELECT").
+
+### N2. MEDIUM — rule 19 false-rejects legal DuckDB `:digit` syntax (slices, struct literals)
+`SimpleEtl/src/main/kotlin/infra/etl/task/TaskFileLoader.kt:452` (and the duplicated runtime guard at `TaskEngine.kt:557`) — CONFIRMED
+
+JDBI's ColonPrefixSqlParser lexes `:` followed by digits or letters (outside a
+string literal) as a named parameter — verified against JDBI 3.45.4's
+`ColonStatementLexer.g4` (`NAMED_PARAM = COLON (NAME)+`, `NAME` includes
+`[0-9]`). The KDoc's measured skip-list (lines 431–433: string literals, `::`
+casts, comments) does not cover `:digit` forms.
+
+Failure scenario: a valid cacheCopy `sql: select site_code[1:3] as prefix from
+wip` (DuckDB bracket slicing, legal on 1.1.3) fails startup with the misleading
+"sql binds [:3] ... (rule 19)"; the struct literal `{'k':1}` fails identically
+via `:1`. Line 446 additionally runs `errorIn` over the `?`-substituted
+`parsed.sql` (`select site_code[1?]`), emitting a second spurious rule-6 parse
+error. The same mis-parse in the runtime guard (TaskEngine.kt:557–566) makes a
+code-built CacheCopyStep with the same legal SQL fail every run — `copyOut`
+itself would execute the text verbatim and succeed.
+
+Suggested fix: validate the raw `text` (not `parsed.sql`) with `errorIn`, and
+either whitelist all-digit "parameter names" or detect binds against the raw
+text with a parse that understands DuckDB slice/struct syntax; apply the same
+fix to the runtime guard.
+
+### N3. MEDIUM (docs) — module CLAUDE.md still mandates the reverted P8c SharedFlow idiom
+`SimpleEtl/CLAUDE.md` (closing "Concurrency idiom" paragraph) — CONFIRMED
+
+The paragraph "Where a notification mechanism is built, prefer ... `SharedFlow`,
+emitted with `tryEmit` ... so telemetry can never back-pressure an ETL run
+(P8c)" survived the P8c revert (commit 458fe57). progress.md's own measurements
+falsified the guarantee ("tryEmit buys never suspends, NOT never blocks" — an
+Unconfined collector ran 300 ms inline in the producer). Since CLAUDE.md
+instructions override defaults for future sessions, this steers a future
+session to rebuild exactly what the revert recorded "so it is not rebuilt".
+Fix: delete or invert the paragraph, citing the P8c measurement.
+
+### N4. LOW (docs) — module CLAUDE.md quick-test command re-enables the Spike classes
+`SimpleEtl/CLAUDE.md` (Commands section) — CONFIRMED
+
+`mvn -pl SimpleEtl -am test -Dtest='!*OracleTest' ...` replaces surefire's
+default `*Test` include, so the `*Spike` classes (one appends 6.2M rows ten
+times) run. progress.md:1061–1064 records this exact command as the mistake
+that inflated earlier test counts, states the correct form
+(`-Dtest='!*OracleTest,!*Spike'`), and claims it was recorded in
+SimpleEtl/CLAUDE.md — but the file was never updated, and its own line
+"surefire's `*Test` pattern skips them" is false under this flag.
+Fix: correct the command in CLAUDE.md.
+
+### N5. LOW (docs) — progress.md's copyOut connection bullet is garbled and half-reasserts the withdrawn claim
+`docs/simpleetl/progress.md:1263-1270` — CONFIRMED
+
+Commit b34f509's fix of the "tenth confidently-wrong claim" left the old
+sentence's head spliced mid-sentence into the new text ("...a duplicate would
+restore the catalog on a / scratch's own write connection is handed over
+because...") plus an orphaned fragment at line 1270 ("a missing table, which
+names nothing about the cause."). The legible fragment is precisely the
+withdrawn wrong claim, in the file this project makes authoritative — the only
+record P10+ sessions have of the copyOut connection decision.
+Fix: rewrite the bullet cleanly (correct rationale: write connection handed
+over because `duplicate()` would leak a connection per attempt into `issued`
+and there is no concurrent reader; NOT because `USE` would strand a later step).
+
+## Re-validation of the original 27 findings
+
+All four HIGH findings and all MEDIUM findings **still hold** on the current
+tree. Corrected anchors and status changes (files not listed were untouched by
+the delta, anchors unchanged):
+
+| ID | Status | Current anchor | Note |
+|---|---|---|---|
+| H1 | STILL VALID | DuckDbTableWriter.kt:164 | unchanged |
+| H2 | STILL VALID | TaskFileLoader.kt:554 | was 464; P9's rule 20 covers only cacheCopy |
+| H3 | STILL VALID | TaskEngine.kt:653 (update() at 783) | was 262 |
+| H4 | STILL VALID | JdbcWriters.kt:53 (readFrom now TaskEngine.kt:820-822) | unchanged |
+| M1 | STILL VALID | JdbcWriters.kt:65 | unchanged |
+| M2 | STILL VALID | RowWriter.kt:88 | unchanged |
+| M3 | STILL VALID | RowPipe.kt:176 | no P8/P9 progress entry records the ordering deviation |
+| M4 | STILL VALID | TaskScheduler.kt:106 | unchanged |
+| M5 | STILL VALID | TaskAdmin.kt:63 | unchanged |
+| M6 | STILL VALID, sharpened | TaskEngine.kt:220 (deleteContents ScratchDb.kt:206-217) | code still leaks the per-run directory while the new SimpleEtl/CLAUDE.md and a TaskEngine comment now CLAIM "the whole run directory is deleted" — code/docs contradiction |
+| M7 | STILL VALID | TaskYaml.kt:42 (steps line 52) | rules 19-21 are cacheCopy-only |
+| M8 | STILL VALID | TaskFileLoader.kt:596 | was 482 |
+| M9 | STILL VALID | TaskFileLoader.kt:360 | was 352; TaskEngine.kt:229 even KDocs it as "the reachable case" |
+| M10 | CHANGED, still valid | TaskFileLoader.kt:504/510, 793/804/814/821; TaskDefinition.kt:87/126/145/156 | site set moved and grew; P9 recorded a deliberate asymmetry (cacheCopy loader default 0 vs model default 3) that a shared-helper fix must preserve |
+| M11 | STILL VALID | TaskFileLoader.kt:24 vs TaskEngine.kt:404-406, ATTEMPT at 37 | unchanged in substance |
+| M12 | CHANGED, still valid | TaskEngine.kt 608, 645, 753, 760, 769, 821, 826 | now 7 sites, two partially centralized (readFrom/onDatasource); the P9 cacheCopy executor did NOT re-derive the pairing (uses scratch.connection() directly, documented); reserved-name duplication remains (engine 177 vs loader 213) |
+| L1 | STILL VALID | RowMapper.kt:109 | unchanged |
+| L2 | STILL VALID | DuckDbTableWriter.kt:148 / JdbcWriters.kt:60 | unchanged |
+| L3 | STILL VALID | TaskFileLoader.kt:603 / DuckDbTableWriter.kt:136 | was 513 |
+| L4 | WORSE | TaskEngine.kt:796 and 557; JdbcWriters.kt:144; TaskFileLoader.kt:441 and 720 | grew from three to FIVE copies with P9's cacheCopy parse paths |
+| L5 | STILL VALID | JdbcWriters.kt:52 | unchanged |
+| L6 | STILL VALID | JdbcWriters.kt:88/173 | unchanged |
+| L7 | STILL VALID | JdbcWriters.kt:175 | unchanged |
+| L8 | STILL VALID | RowPipeOracleTest.kt:69/72 | was 66; survived the AssertJ migration |
+| L9 | STILL VALID | TaskFileLoader.kt:~256 (231-263) | was 250 |
+| L10 | STILL VALID | TaskAdmin.kt:101 / TaskScheduler.kt:52/106 | unchanged |
+| L11 | PARTIALLY FIXED, remainder SANCTIONED | TaskRunner.kt:116/192/206 | P8a injected java.time.Clock into TaskEngine (triggerTime now deterministic; SimpleEtl/CLAUDE.md now mandates injected Clock); TaskRunner's Instant.now reads survive under progress.md's explicitly struck clock clause (submit-time vs run-start-time deliberately distinct). Drop from the fix list. |
+
+## Updated fix-order notes
+
+- Add N1/N2 to tier 2 (both are contained changes in `cacheSql` + the
+  TaskEngine runtime guard) and the three doc fixes (N3–N5) as a quick
+  batch — they mislead every future session until corrected.
+- M6's fix is now doubly motivated: either delete the run directory (making the
+  new docs true) or correct the docs — prefer deleting the directory.
+- L11 is done/sanctioned; remove it from the fix list.
+- Any M10 fix must preserve P9's recorded cacheCopy retries asymmetry.
