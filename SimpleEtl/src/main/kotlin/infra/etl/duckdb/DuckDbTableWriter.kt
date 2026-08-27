@@ -6,6 +6,7 @@ import infra.etl.pipe.ColumnMeta
 import infra.etl.pipe.Row
 import infra.etl.pipe.RowWriter
 import infra.etl.pipe.catalogColumns
+import infra.etl.pipe.requireSourceSubset
 import java.sql.Connection
 import org.duckdb.DuckDBAppender
 import org.duckdb.DuckDBConnection
@@ -145,11 +146,7 @@ class DuckDbTableWriter(
 
     private fun validate(source: List<ColumnMeta>) {
         val bySource = source.associateBy { it.name }
-        val unknown = (bySource.keys - targets.mapTo(mutableSetOf()) { it.name }).sorted()
-        require(unknown.isEmpty()) {
-            "step '$step': the source produces columns $unknown which table '$table' does not have. " +
-                "Drop them in the source SQL, or add them to the table."
-        }
+        requireSourceSubset(bySource.keys, targets.mapTo(mutableSetOf()) { it.name }, table, step)
         targets.forEach { column ->
             rejectUnwritable(column)
             val sourceColumn = bySource[column.name]

@@ -120,6 +120,26 @@ internal fun catalogColumns(connection: Connection, table: String, step: String)
     return columns
 }
 
+/**
+ * The check both table writers make first: every column the source produces has somewhere to go.
+ *
+ * A column the target does not have cannot be written by either mechanism - the positional
+ * appender has no slot for it, and a generated INSERT has no column to name - so both writers
+ * raised byte-identical errors from byte-identical set differences. Lifted here, beside
+ * [catalogColumns], because it is the same question about the same two lists whichever writer is
+ * asking, and a message that drifted between them would describe the same mistake two ways.
+ *
+ * @param source the columns the source query produces, plus any a transform declares (spec 9.1).
+ * @param target the target table's column names, from [catalogColumns] and never from YAML.
+ */
+internal fun requireSourceSubset(source: Set<String>, target: Set<String>, table: String, step: String) {
+    val unknown = (source - target).sorted()
+    require(unknown.isEmpty()) {
+        "step '$step': the source produces columns $unknown which table '$table' does not have. " +
+            "Drop them in the source SQL, or add them to the table."
+    }
+}
+
 /** The identifier as the driver stores it, so that a catalog lookup by name finds the table. */
 private fun DatabaseMetaData.stored(identifier: String): String = when {
     storesUpperCaseIdentifiers() -> identifier.uppercase()

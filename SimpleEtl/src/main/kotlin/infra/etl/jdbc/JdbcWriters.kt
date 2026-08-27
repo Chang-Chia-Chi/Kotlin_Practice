@@ -5,6 +5,7 @@ import infra.etl.pipe.ColumnMeta
 import infra.etl.pipe.Row
 import infra.etl.pipe.RowWriter
 import infra.etl.pipe.catalogColumns
+import infra.etl.pipe.requireSourceSubset
 import java.math.BigDecimal
 import java.time.Instant
 import java.time.LocalDate
@@ -59,11 +60,7 @@ class JdbcTableWriter(
         try {
             val target = catalogColumns(opened.connection, table, step).map { it.name }
             val bySource = columns.associateBy { it.name }
-            val unknown = (bySource.keys - target.toSet()).sorted()
-            require(unknown.isEmpty()) {
-                "step '$step': the source produces columns $unknown which table '$table' does not have. " +
-                    "Drop them in the source SQL, or add them to the table."
-            }
+            requireSourceSubset(bySource.keys, target.toSet(), table, step)
             binds = target.mapNotNull { bySource[it] }
             require(binds.isNotEmpty()) {
                 "step '$step': the source and table '$table' have no column name in common, so the step " +
