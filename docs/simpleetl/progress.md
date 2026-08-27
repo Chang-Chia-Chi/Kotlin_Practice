@@ -1493,3 +1493,127 @@ rejecting everything.
   at ten sites, the built-in variable set encoded twice, scratch-ness string-compared at seven,
   named-parameter parsing now in five copies. All still open; none is a behaviour change, and any
   M10 fix must preserve P9's recorded `cacheCopy` retries asymmetry.
+
+## Review fix pass 2 - the four behaviour findings  (2026-08-27)
+
+The findings held back from pass 1 because each changes something a document states.
+The document moved first in every case; the commits are one per finding.
+
+Suite: **362 tests green** (`-Dtest='!*OracleTest,!*Spike'`), 349 before, 13 added. No earlier
+test was modified. One earlier test in this session's own pass-1 file had to be *adjusted* rather
+than modified in spirit - see H2 below - and that is called out rather than buried.
+
+### M3 - the chunk loop order. No ruling needed, and that was the finding.
+
+`RowPipe.pump` applied the transform to each row as it was read, so a chunk filled with
+`chunkSize` *surviving* rows. Spec 5.2 and the class's own KDoc both fix the order the other way.
+No progress entry sanctioned the deviation, so the rule "documents win unless progress.md records
+a deliberate deviation" already decided it - it needed a test, not a decision, and holding it back
+in pass 1 was over-caution.
+
+The test was written first and observed `[4, 1]` where the spec order gives `[2, 2, 1]`: ten
+source rows, chunk size four, every second row dropped. Both orders read ten and write five, so
+the chunk sizes are the only thing that tells them apart.
+
+What the deviation cost was the span of source rows one commit covered. A transform keeping one
+row in a thousand turned a chunk size of 5000 into a single commit across five million source
+rows: a transient failure four million rows in committed nothing and the retry re-read the whole
+span. It also deferred `JdbcStatementWriter`'s first-chunk bind check by the same factor.
+
+New, and pinned by its own test: a chunk the transform empties is **not** written. That could not
+arise under the old order - the buffer simply stayed short - and must not arise now, because
+`DuckDbTableWriter.write` flushes its appender on every call and an empty write would add a commit
+boundary for a chunk with nothing to commit.
+
+### H3 - rule 7 narrowed for a non-scratch materialize.
+
+Spec 10 rule 7 explicitly blessed variables in materialize SQL. A non-scratch materialize runs
+`CREATE TABLE <output> AS <sql>` through `Handle.createUpdate`, which binds every `:name` it
+parses, and Oracle rejects a bind variable in DDL outright with ORA-01027. The rule was blessing a
+step shape that could never run: the file passed every startup check and then failed on every
+firing, permanently, since ORA-01027 is not transient.
+
+**Where the wrong belief came from is worth keeping.** The engine's KDoc recorded "DuckDB accepts
+bound parameters in CREATE TABLE ... AS SELECT" - true, measured, and about DuckDB. It was then
+read as a fact about CTAS. The bullet now carries the correction at the point of the claim, and
+the scratch path still binds, which is why the identical step works on scratch and this could only
+surface in production.
+
+Interpolating the value textually was the alternative and is rejected in the amendment itself: it
+is the injection surface every other statement in this framework avoids by binding, and no quoting
+rule for an arbitrary task variable is worth defending at the trust boundary a task file already
+is. The author materializes the wider set and filters in a following step.
+
+The loader reports every name JDBI's parser finds, with nothing filtered - unlike a `cacheCopy`,
+this text really does go through JDBI, so even the all-digit "name" JDBI reads out of a DuckDB
+array slice is a parameter here, and would be rewritten to `?` and broken anyway. That is the
+opposite of the N2 ruling one file away, and the two comments each say why.
+
+### H2 - rule 12 enforced as the step-level rule it was always worded as.
+
+Rule 12 reads "a **step** with a non-scratch target and retries > 0", and was checked only inside
+`pipe()`. Both other step types that write to an external datasource escaped it.
+
+- **`sql`** gains an `idempotent` field (spec 3.4, and `SqlStep` in spec 11.2), defaulting to
+  false. Each statement is its own transaction (spec 5.2), so a retry re-runs the whole list: a
+  transient drop between two committed statements re-executed the first, duplicated rows in an
+  external table, and the run then reported SUCCEEDED.
+- **`materialize`** gets no such field. A non-scratch materialize with `retries > 0` is a startup
+  error outright, because a CTAS retry fails deterministically on table-already-exists and
+  `idempotent: true` would be a promise no author could keep. Rules 18 and 20 already set the
+  precedent: a knob that cannot work is refused, not accepted and ignored.
+
+**`CREATE TABLE IF NOT EXISTS` was raised and rejected, and the reasoning is in the spec** so it
+is not re-proposed. It cannot distinguish the table a failed attempt left behind from the table
+*last run* produced, and `output` is a fixed name - so the second run of any external materialize
+would silently no-op and freeze the downstream table while reporting SUCCEEDED, which trades a
+loud failure for spec 1.1's silent staleness. It barely helps within a run either: a CTAS is one
+statement, so a part-way failure leaves no table at all and the plain CREATE already succeeds on
+retry; the only case where a table survives a failed attempt is one where the CTAS committed and
+the failure came after it, and there the data is already correct. Drop-and-recreate would work
+mechanically and is refused for authority: spec 5.4 gives this framework no licence to destroy
+data outside scratch. The retryable external build is a `sql` step with MERGE or build-and-rename,
+which is exactly what this finding made expressible.
+
+Neither new check needs the datasource-dependent retries default: both return early on scratch,
+and off scratch spec 5.3 defaults `retries` to 0, so only a stated value can trip them. That
+keeps M10's site list from growing while M10 is still open.
+
+**One pass-1 test was adjusted.** `anExternalMaterializeThatBindsNothingStillLoads` moved VALID's
+materialize to `report_oracle`, and VALID states `retries: 3` - which rule 12 now refuses. The
+file states `retries: 0` instead, and a sibling test asserts the refusal. A second test that used
+`errors.single { it.step == "build-summary" }` now selects on the message too, because two rules
+legitimately report against that step. Both are the new rule being correct, not a test being bent
+to fit; the tests are this session's own, not an earlier phase's.
+
+### H4 - spec 7.1 states the pool contract; the boot check is half of one, on purpose.
+
+A pipe whose source and target name the same datasource holds two connections from that pool at
+once. Two runs that each hold one and wait for the second are in a circular wait, and **no
+acquisition order can break it** - both connections come from one pool, so ordering, which is the
+usual remedy, does not apply. Undersized, both runs hang indefinitely with `busy = true` and every
+later firing of either task is skipped as `AlreadyRunning`: the schedule stalls in silence.
+
+Spec 7.1 now states the minimum - 2 x the number of tasks that may concurrently run a
+same-datasource pipe step on that datasource - and `TaskAdmin.reload`, which is also the startup
+path, computes and logs it per datasource with the tasks responsible.
+
+**It logs rather than validates, and the spec records why.** The left-hand side of the inequality
+is a property of the definitions just loaded and is knowable here. The right-hand side is not:
+`javap` on jdbi3-core 3.45.4 confirms `Jdbi` exposes neither its `ConnectionFactory` nor its
+`DataSource`, so reading the configured pool size means reflecting into a third party's private
+fields. That is a worse thing to own than the problem it would detect, and it would rot the first
+time JDBI renames a field. Emitting the number an operator must compare against is the honest
+half. The work order asked for Agroal/Hikari introspection where available; this is the deviation
+from it, and the reason is that there is no supported path from a `Jdbi` to its pool at all.
+
+The arithmetic is an internal function rather than inline in the log call, so a test asserts it
+without reading a log appender. Counted per *task*, not per step, because `TaskRunner` admits one
+run per task at a time (spec 8.4). Scratch is excluded: its reads take a `ScratchDb.duplicate()`
+and its writes the single write connection, so it is not a pool anyone can size.
+
+### Still open after this pass
+
+Only the dedup and drift findings: **M10-M12, L2-L10**. None is a behaviour change. M12 is the one
+with teeth - a mispaired connection discipline is spec 7.2's JVM crash rather than a red test - and
+M10 must preserve P9's recorded `cacheCopy` retries asymmetry.

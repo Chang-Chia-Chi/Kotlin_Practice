@@ -1,11 +1,20 @@
 # SimpleEtl Code Review — 2026-08-27
 
-> **Fix pass 1 has landed.** Fixed: H1, M1, M2, M4, M5, M6, M7, M8, M9, L1, N1,
-> N2, N3, N4, N5. Still open, each needing a spec or plan ruling before it can be
-> fixed: **H2, H3, H4, M3**. Still open and purely mechanical: **M10–M12, L2–L10**
-> (L11 was already sanctioned). What changed and why is in `progress.md`, section
-> "Review fix pass 1"; the entries below are left exactly as written so the
-> reasoning behind each one stays readable.
+> **Fix passes 1 and 2 have landed. Every behaviour finding is closed.**
+>
+> - **Pass 1** (no ruling needed): H1, M1, M2, M4, M5, M6, M7, M8, M9, L1, N1, N2,
+>   N3, N4, N5.
+> - **Pass 2** (each moved a document first): **H2** — rule 12 enforced across step
+>   types, `idempotent` added to `sql` steps, non-scratch `materialize` retries
+>   refused outright; **H3** — rule 7 narrowed, a non-scratch materialize may bind
+>   nothing; **H4** — spec 7.1 states the pool minimum and it is logged per
+>   datasource at boot; **M3** — spec 5.2's chunk order restored.
+> - **Still open:** the dedup and drift findings only — **M10–M12, L2–L10**. None
+>   is a behaviour change. L11 was already sanctioned.
+>
+> What changed and why is in `progress.md`, sections "Review fix pass 1" and
+> "Review fix pass 2". The entries below are left exactly as written so the
+> reasoning behind each finding stays readable.
 
 > **Updated same day with a second pass.** The findings below were produced
 > against commit `a62a983` (P7 state); the 13 P8/P9 commits (`a62a983..b34f509`)
