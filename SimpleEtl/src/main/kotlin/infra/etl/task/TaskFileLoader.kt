@@ -9,6 +9,7 @@ import com.fasterxml.jackson.dataformat.yaml.YAMLMapper
 import com.fasterxml.jackson.module.kotlin.kotlinModule
 import infra.etl.duckdb.CreateTable
 import infra.etl.duckdb.datasetIdentifier
+import infra.etl.duckdb.isDuckDbDecimalPair
 import infra.etl.duckdb.unwritableToDuckDb
 import infra.etl.pipe.CanonicalType
 import infra.etl.pipe.ColumnMeta
@@ -657,7 +658,7 @@ private class FileValidation(
         // an added column states its own, so the pair DuckDbTableWriter.ddlType demands is knowable
         // here. Default precision 0 is rejected: the bare keyword resolves to DECIMAL(18,3), which
         // rounds past three decimals and cannot hold a 16-digit key (spec 4.4).
-        if (type == CanonicalType.DECIMAL && !(column.precision in 1..38 && column.scale in 0..column.precision)) {
+        if (type == CanonicalType.DECIMAL && !isDuckDbDecimalPair(column.precision, column.scale)) {
             err(
                 step,
                 "transform.addColumns column '${column.name}' declares DECIMAL precision ${column.precision} " +

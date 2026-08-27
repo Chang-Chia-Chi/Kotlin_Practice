@@ -133,7 +133,7 @@ class DuckDbTableWriter(
      */
     private fun ddlType(column: ColumnMeta): String {
         if (column.type != CanonicalType.DECIMAL) return column.type.duckDbType
-        require(column.precision in 1..38 && column.scale in 0..column.precision) {
+        require(isDuckDbDecimalPair(column.precision, column.scale)) {
             "step '$step', column '${column.name}': the source declares DECIMAL precision " +
                 "${column.precision} and scale ${column.scale}, which is not a DuckDB DECIMAL(p,s) - p " +
                 "must be 1 to 38 and s 0 to p. An unconstrained NUMBER, a FLOAT, a negative scale and " +
@@ -243,6 +243,22 @@ class DuckDbTableWriter(
     )
 
 }
+
+/**
+ * Whether `DECIMAL(precision, scale)` is a pair DuckDB can declare: p from 1 to 38, s from 0 to p.
+ *
+ * Beside [unwritableToDuckDb] and lifted here for the same reason P6 lifted that one - so startup
+ * and writer open decide with the same code rather than two copies of one condition. The two reach
+ * it from opposite directions: `TaskFileLoader` asks about a pair an `addColumns` entry *states*,
+ * and [DuckDbTableWriter.ddlType] about one a source's result set metadata *reports*.
+ *
+ * A source reports an unusable pair for an unconstrained `NUMBER` (p=0, s=-127), a `FLOAT`
+ * (p=126, s=-127), a negative scale, and every computed expression; a task file states one by
+ * writing `type: DECIMAL` and leaving precision at its default of 0, which would resolve to
+ * DuckDB's own `DECIMAL(18,3)` and round past three decimal places.
+ */
+internal fun isDuckDbDecimalPair(precision: Int, scale: Int): Boolean =
+    precision in 1..38 && scale in 0..precision
 
 /** Validation rule 15: the target types with an appender method that accepts null. */
 private val NULL_CAPABLE = setOf(
