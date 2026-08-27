@@ -1675,7 +1675,8 @@ assertion. That is argued below rather than assumed.
   the exemption is narrow and stated: it deletes private helpers and repoints their call sites at
   an identical implementation, touching no assertion, no scenario and no expected value. The rule
   exists to stop a later phase weakening an earlier phase's guarantees, and nothing here does.
-  Verified by compilation, not execution - the class needs Docker.
+  Verified by compilation when the change was made, because the class needs Docker, and by
+  execution afterwards - see the closing note.
 
 ### Declined, with reasons
 
@@ -1722,3 +1723,34 @@ spec 7.2 makes a mispaired connection a JVM crash rather than a red test. A refa
 is a rename is not worth running that on. **Recorded as open pending a ruling** rather than done or
 closed: if the lead still wants the type, the design question to settle first is what `writer`
 gets from it.
+
+### Closing note: the Oracle suite was run, and the inherited claims are now measured
+
+Every number quoted in passes 1 to 3 above is 362, which is the suite **without Docker** - the
+three Testcontainers Oracle classes could not run while the work was being done, so two claims in
+pass 3 were made by reading the code rather than by executing it, and both were labelled as such
+at the time.
+
+Docker was started afterwards and the full suite run: **382 tests, 0 failures, 0 errors, 0 skipped,
+BUILD SUCCESS** (`-Dtest='!*Spike'`, the image `gvenzl/oracle-free:slim-faststart` already cached).
+`WriterOracleTest` 7, `RowMapperOracleTest` 9, `RowPipeOracleTest` 4, each about 45 seconds
+including its container.
+
+What that converts from inherited to measured:
+
+- **L5.** `WriterOracleTest` holds the leak counters for the *failure* path - `open()` throws and
+  the connection must still be closed, with a failing release recorded through `addSuppressed`
+  rather than replacing the original failure. That is exactly the protocol L5 moved into
+  `openConfigured`, and it is the only place that asserts it. A leaked connection on that path is
+  invisible until the pool runs dry, which is the kind of defect a green non-Docker suite would
+  have kept quiet about indefinitely.
+- **L8.** The repointed call sites now pass as well as compile, so `Pipe.exec` and `Pipe.rowCount`
+  really are equivalent to the private helpers they replaced and not merely equivalent-looking.
+- **M3, incidentally.** `RowPipeOracleTest`'s chunk-boundary test watches the target row count from
+  a *second* Oracle session, so the restored accumulate-transform-write order is confirmed against
+  a real commit timeline and not only against `ProbeWriter`'s recorded chunk sizes.
+
+Nothing needed amending: no commit's claims turned out to be wrong. The caveat sentences in the L5
+commit message and in `SimpleEtl/CLAUDE.md`'s note about inherited Oracle claims are left as
+written - they were true when written, and rewriting a pushed message to look better afterwards is
+how a history stops being evidence.
