@@ -1260,14 +1260,19 @@ that measured the answer instead of reasoning about it.
 - **`targetTable` goes over unquoted.** `DuckDbGenerationStore.copyOut` quotes it itself while
   `materialize` quotes at its own call site, so mirroring `materialize` literally would create a
   table whose name contains the quote characters, which every later step then fails to find.
-- **The connection handed over is scratch's write connection, never a `duplicate()`.** `copyOut`
-  runs `USE` on it and restores it in its own `finally`; a duplicate would restore the catalog on a
-  scratch's own write connection is handed over because `duplicate()` would leak a connection
-  per attempt into `issued` and there is no concurrent reader to justify one. **Not** because `USE`
-  would strand a later step - `USE` is per-connection, and `DuckDbGenerationStore.connection()`
-  ships the counter-example. The first version of that KDoc claimed otherwise; it was the tenth
-  confidently-wrong claim in this project and it was self-refuting.
-  a missing table, which names nothing about the cause.
+- **The connection handed over is scratch's write connection, never a `duplicate()`.** The reason
+  is resource lifetime, not catalog state: `ScratchDb` records every connection `duplicate()`
+  issues in `issued` and releases none until the run ends, so a duplicate here would leak one
+  connection per attempt, and there is no concurrent reader that would justify one. `copyOut` runs
+  `USE` on whatever connection it is given and restores it in its own `finally`.
+
+  **Not** because a `USE` on a duplicate would strand a later step. `USE` is per connection -
+  `DuckDbGenerationStore.connection()` runs it on a *duplicate* of the serving connection precisely
+  so that the serving connection keeps its own catalog - so a duplicate would have been safe on that
+  count. The first version of the `cacheCopy` KDoc claimed the opposite, was self-refuting, and was
+  the tenth confidently-wrong claim in this project. The residual hazard runs the other way: because
+  the write connection is the one handed over, a throw from `copyOut`'s inner `USE <home>` restore
+  would leave the run's only write connection pointed at a catalog that is then detached.
 - **No `waitBudget` is passed.** The cache's `defaultWaitBudget` is the policy; it is also
   unobservable from a test, because Kotlin default arguments make it untestable - a code-review
   item rather than an acceptance criterion.
@@ -1374,3 +1379,117 @@ The general lesson, and the reason this is written down rather than quietly drop
 from a report is not the same as a ruling made from the code. This one was made from a summary,
 and reading the file reversed it.
 
+
+## Review fix pass 1 - the findings that needed no ruling  (2026-08-27)
+
+Against `docs/simpleetl/code-review-2026-08-27.md`, both passes. This entry covers only the
+findings whose fix was a code change inside an existing contract. Everything that needs a spec or
+plan decision is listed as outstanding at the end and was deliberately **not** touched: deciding
+one unilaterally is how the code and the documents diverge.
+
+Suite: **349 tests green** (`-Dtest='!*OracleTest,!*Spike'`), 336 before, 13 added. No earlier test
+was modified or deleted. Each new test was run with the fixes stashed: 10 of the 13 fail without
+them, and the 3 that pass are the paired controls that stop a stricter implementation passing by
+rejecting everything.
+
+### Fixed
+
+- **H1** `DuckDbTableWriter.validate` compared only the canonical type of a DECIMAL pair, so under
+  `REQUIRED` a source wider in scale than the target was accepted at open and rounded away by
+  `appendBigDecimal` on every row - the silent-rounding case `ddlType` refuses on the AUTO path.
+  Now rejected at open. Only a source declaring a *usable* scale is judged: an unconstrained
+  `NUMBER`, a `FLOAT` and every computed expression report scale -127 and state no scale to
+  compare, so those stay exactly where they were.
+- **M1** `JdbcTableWriter` fixes its INSERT at open from the source's columns, so a transform
+  addition that `transform.addColumns` did not declare was bound nowhere and silently took the
+  target's database default. Spec 4.4 promises a runtime error for a Row key with no matching
+  column; it is now raised against the first chunk, the way `JdbcStatementWriter` already checked
+  its bind names. A set difference per row would be work in the innermost loop.
+- **M2** `catalogColumns` passed the schema to `getColumns` as a **pattern** and compared only
+  `TABLE_NAME` exactly, so `etl_stg.wip` also matched `etl1stg.wip` - which either tripped the
+  one-owner check, telling an already-qualified target to qualify itself, or silently supplied the
+  wrong schema's column list. `TABLE_SCHEM` is now compared the same way `TABLE_NAME` is.
+- **M4** `TaskScheduler.apply` registered cron callbacks before publishing `current`, so a task
+  registered a moment before its cron boundary fired into an empty map at startup and was dropped
+  in silence - indistinguishable from `fire`'s sanctioned removed-task skip. The definitions are
+  published first; the error path restores the previous map along with the previous registrations.
+- **M5** `TaskAdmin.trigger` was an unsynchronised check-then-act over a map `reload` replaces. An
+  operator could disable a task, reload, be told the reload succeeded, and still watch a concurrent
+  trigger launch the old enabled definition. `trigger` is now `@Synchronized` against `reload`; it
+  only submits, and the run itself is launched on `TaskRunner`'s dispatcher outside the monitor.
+- **M6** Each run resolves its own directory under the scratch root, and `ScratchDb.close` empties
+  the directory but leaves it standing - right for a directory its caller owns. Nothing deleted the
+  run's own: some 52,000 empty directories a year at a ten-minute cadence, on the volume spec 7.2
+  sizes. `TaskEngine` now deletes it after the `use` (`deleteIfExists`, because anything that
+  survived inside has already made `close()` throw). The comment claiming `close()` "deletes it on
+  every path" meant *empties* all along and now says so.
+- **M7** `phases` carries no `# optional` annotation in spec 3.1 but defaulted to the empty list,
+  and no rule rejected one. A task with no step scheduled, ran and reported SUCCEEDED every ten
+  minutes while its table stopped updating - spec 1.1's 03:00 failure. Zero phases, and a phase
+  with zero steps, are now boot errors.
+- **M8** Rule 15 is about what the DuckDB 1.1.3 appender can express, and it was applied to every
+  `transform.addColumns` entry whatever the target. A nullable DOUBLE on a REQUIRED Oracle target -
+  which `JdbcWriters.javaType` binds without complaint - was inexpressible: undeclared it was
+  dropped silently (M1), declared it failed startup with a DuckDB-shaped message about a table
+  DuckDB never sees. The rule now runs only when the pipe's target is scratch. The type-name check
+  stays unconditional.
+- **M9** `chunkSize` and `retries` are validated at boot precisely so a bad value is not a failure
+  five minutes into a run; `scratch.memoryLimitMb` was not, and `ScratchDb`'s own `require` then
+  fired at the first line of every run, forever. Checked at boot alongside the other two.
+- **N1** A `cacheCopy`'s SQL is spliced into `CREATE TABLE <output> AS <sql>`, so it must be a
+  SELECT. `json_serialize_sql` answers `not implemented` for a parsed non-SELECT and `errorIn`
+  discarded that answer, so `copy (...) to ...` and a CTAS loaded clean and then failed on every
+  firing, after the run had waited on the cache and taken a lease. `errorIn` gained a `selectOnly`
+  flag: on for `cacheCopy`, off for a `sql` step, where DDL is the whole point.
+- **N2** JDBI's lexer reads a colon followed by digits as a parameter name. Re-measured here on
+  jdbi3-core 3.45.4: `select site_code[1:3] as prefix from wip` yields the name `3` and the rewrite
+  `select site_code[1?]`, and `{'k':1}` yields `1`; both parse clean *as written* on duckdb_jdbc
+  1.1.3. A cacheCopy's text reaches the cache verbatim through `CopyOutSpec.sql` and never passes
+  through JDBI, so an all-digit "name" is punctuation there. Rule 19 and the executor's runtime
+  guard now skip them, and rule 6 parses the **raw** text rather than JDBI's `?`-substituted
+  rewrite, which was itself producing a syntax error the author never wrote.
+
+  Note what is *not* fixed by this: the same mis-parse in an ordinary scratch `sql`, `source.sql`
+  or `materialize` text is genuine. That text does go through JDBI at run time, so the rewrite
+  breaks the statement whatever validation says, and rejecting it at boot is the right answer even
+  though the message names a variable the author never wrote.
+- **L1** The BLOB read released its locator from `.also`, which does not run when `getBytes` throws,
+  and truncated silently through `length().toInt()` past 2^31. Now `try`/`finally`, with a range
+  check that names step and column.
+- **N3, N4** `SimpleEtl/CLAUDE.md`: the closing paragraph still told a future session to prefer a
+  `SharedFlow` emitted with `tryEmit` "so telemetry can never back-pressure an ETL run (P8c)" - the
+  guarantee P8c's own revert measured away. Inverted, with the measurement. The quick-test command
+  said `-Dtest='!*OracleTest'`, which replaces surefire's default include and therefore *runs* the
+  spikes, one of which appends 6.2M rows ten times; `!*Spike` is now written out, with the reason.
+- **N5** The `copyOut` connection bullet in this file had the withdrawn claim spliced mid-sentence
+  into its replacement, plus an orphaned fragment. Rewritten: the reason is connection lifetime
+  (`issued` grows one per attempt), not catalog state, and the residual hazard is named.
+
+### Not fixed - each needs a document decision first
+
+- **H2** Rule 12 ("a **step** with a non-scratch target and retries > 0 must declare idempotent")
+  is enforced only inside `pipe()`. A `sql` step with a non-scratch datasource and `retries: 3`
+  loads clean and re-runs every already-committed statement on a retry. Fixing it means either
+  adding `idempotent` to the `sql` and `materialize` YAML - a schema change - or rejecting
+  non-scratch retries on those step types outright. Spec 3 and rule 12 have to say which.
+- **H3** Validation rule 7 blesses variables in `materialize` SQL, and a non-scratch materialize
+  runs `create table <output> as <sql>` through `update()`, which binds every parsed `:name`.
+  Oracle rejects bind variables in DDL outright (ORA-01027), and the KDoc's "CTAS accepts bound
+  parameters" was measured on duckdb_jdbc only. Either rule 7 loses that blessing for an external
+  materialize, or the engine interpolates - and interpolation is the injection surface this engine
+  otherwise avoids by binding.
+- **H4** A same-datasource pipe holds two connections from one pool: the source handle for the whole
+  step, and the writer's from inside `RowPipe.pump`. Two concurrent runs against a pool of two
+  deadlock, with no acquisition timeout, and both tasks then skip every later firing as
+  AlreadyRunning. Ordered acquisition does **not** fix it - both connections come from the same
+  pool, so ordering cannot break the cycle. The remedies are a documented minimum pool size per
+  datasource (spec 7.1 states none) or one connection for a same-datasource pipe; the first is a
+  document change, the second changes how `RowWriter` is constructed.
+- **M3** `RowPipe.pump` transforms before accumulating; spec 5.2 and RowPipe's own KDoc fix the
+  order the other way. A selective transform makes one commit span far more source rows than
+  `chunkSize`, which lengthens the span a retry must re-read. Either restore the spec order or
+  record the deviation with that consequence stated.
+- **M10-M12, L2-L10** The duplication and drift findings: datasource-dependent defaults re-derived
+  at ten sites, the built-in variable set encoded twice, scratch-ness string-compared at seven,
+  named-parameter parsing now in five copies. All still open; none is a behaviour change, and any
+  M10 fix must preserve P9's recorded `cacheCopy` retries asymmetry.

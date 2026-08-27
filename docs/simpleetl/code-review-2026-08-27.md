@@ -1,5 +1,12 @@
 # SimpleEtl Code Review — 2026-08-27
 
+> **Fix pass 1 has landed.** Fixed: H1, M1, M2, M4, M5, M6, M7, M8, M9, L1, N1,
+> N2, N3, N4, N5. Still open, each needing a spec or plan ruling before it can be
+> fixed: **H2, H3, H4, M3**. Still open and purely mechanical: **M10–M12, L2–L10**
+> (L11 was already sanctioned). What changed and why is in `progress.md`, section
+> "Review fix pass 1"; the entries below are left exactly as written so the
+> reasoning behind each one stays readable.
+
 > **Updated same day with a second pass.** The findings below were produced
 > against commit `a62a983` (P7 state); the 13 P8/P9 commits (`a62a983..b34f509`)
 > landed mid-review. A second pass reviewed that delta and re-validated all 27
