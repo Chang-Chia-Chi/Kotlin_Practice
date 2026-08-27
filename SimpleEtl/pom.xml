@@ -19,6 +19,7 @@
         <testcontainers.version>1.20.4</testcontainers.version>
         <ojdbc.version>23.5.0.24.07</ojdbc.version>
         <mockito.version>5.14.2</mockito.version>
+        <archunit.version>1.3.0</archunit.version>
         <jdbi.version>3.45.4</jdbi.version>
         <jackson.version>2.18.2</jackson.version>
     </properties>
@@ -78,6 +79,21 @@
             <version>${jackson.version}</version>
         </dependency>
         <!-- P2: spec 11.1 declares JdbcTableWriter(jdbi) and JdbcStatementWriter(jdbi). -->
+        <!-- P9: spec 7.3's cache read step calls the cache's own copyOut, so no row passes
+             through the JVM. One-way: snapshotcache has no dependency back, and the reactor
+             already builds it first. Only infra.etl.task may import it - see ArchitectureTest. -->
+        <dependency>
+            <groupId>dynacache</groupId>
+            <artifactId>snapshotcache</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <!-- P7: limitedParallelism(1) per task (spec 8.3). Version managed by the parent.
+             Quarkus is deliberately absent: spec 8.6 makes the cron binding and the HTTP
+             resource host obligations, so this module boots no framework to test itself. -->
+        <dependency>
+            <groupId>org.jetbrains.kotlinx</groupId>
+            <artifactId>kotlinx-coroutines-core</artifactId>
+        </dependency>
         <dependency>
             <groupId>org.jdbi</groupId>
             <artifactId>jdbi3-core</artifactId>
@@ -90,6 +106,14 @@
         <dependency>
             <groupId>org.assertj</groupId>
             <artifactId>assertj-core</artifactId>
+        </dependency>
+        <!-- The package split of infra.etl is a dependency contract, not a filing scheme.
+             These rules are what keep it true; see ArchitectureTest. -->
+        <dependency>
+            <groupId>com.tngtech.archunit</groupId>
+            <artifactId>archunit-junit5</artifactId>
+            <version>${archunit.version}</version>
+            <scope>test</scope>
         </dependency>
         <dependency>
             <groupId>org.mockito</groupId>

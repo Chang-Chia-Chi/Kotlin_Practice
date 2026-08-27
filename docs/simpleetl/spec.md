@@ -63,6 +63,10 @@ row-moving, type-mapping, and appender code without inheriting the task model. S
 `TaskDefinition`, not the only one, so a caller that wants Layer 2 without YAML files can
 build a definition in code.
 
+Scheduling and the admin API are Layer 2 logic and live here. Their two *adapters* do not: a
+cron registration binding and an HTTP resource. This follows 7.1 and 9.1, where Quarkus
+datasources and CDI transforms are also named by this document and arrive as plain data.
+
 ### 2.2 Concept Model
 
 ```
@@ -767,11 +771,15 @@ The cron expression lives in the task file, so scheduling is programmatic:
 `scheduler.newJob(taskName).setCron(cron).setTask { ... }.schedule()` at startup. The
 `@Scheduled` annotation is compile-time and cannot express one schedule per file.
 
-Two configuration requirements follow, both silent failures if missed:
+Two requirements follow, and both fall on the **host application** (8.6), not on this
+framework. `TaskScheduler` takes a `CronScheduler` and registers each enabled task's cron
+with it; the host implements `CronScheduler` over Quarkus's programmatic `Scheduler`.
 
 - `quarkus.scheduler.start-mode=forced`. By default the scheduler does not start unless a
   `@Scheduled` business method exists. This application has none, so without this property
-  no task would ever fire.
+  no task would ever fire. **This module cannot ship the property even if it wanted to:
+  Quarkus does not read an `application.properties` out of a dependency jar**, so a copy
+  here would be read by this module's own tests and by nothing else.
 - The scheduled callback hands off to the task's own dispatcher rather than running inline.
   Quarkus runs scheduled work on a Vert.x worker thread and the blocked-thread checker warns
   past 60 seconds; tasks here run 5 to 30 minutes.
@@ -797,6 +805,13 @@ POST   /admin/etl/reload                 -> re-read task files, see 8.5
 - An API-triggered run is identical to a scheduled run in every other respect. It appears in
   logs and metrics with trigger source `API` and the caller identity.
 
+The endpoint table above is the contract the **host** exposes. The framework surface is
+`TaskAdmin`, returning a sealed result per operation - `Accepted(runId)`, `AlreadyRunning`,
+`Unknown`, `Disabled`, and a `ValidationReport` for reload. The host's `AdminResource` maps
+those to 202 / 409 / 404 / 400 and carries `@RolesAllowed("etl-admin")`. `TaskAdmin.trigger`
+takes the caller identity as a parameter, for `TaskContext.triggeredBy`, and performs no
+authorisation of its own.
+
 ### 8.3 Threading Model
 
 Each task owns a `Dispatchers.IO.limitedParallelism(1)` view, tagged with
@@ -810,6 +825,13 @@ engine itself is ordinary blocking code: sequential steps, blocking JDBC.
   threads and is not bounded by the IO parallelism limit.
 - Coroutines buy nothing inside the engine. A run is one thread blocked for 5 to 30 minutes
   with nothing to yield to. The dispatcher is used for confinement, not for concurrency.
+
+`CoroutineName` is passed into the run body by `TaskRunner`. It is **not** readable from the
+run itself, precisely because the engine is blocking code, and the `@name` suffix on the
+thread name exists only under `-ea` - surefire's default, absent in production. Measured:
+with assertions enabled the thread reads `DefaultDispatcher-worker-1 @wip-summary#1`, and
+without them `DefaultDispatcher-worker-2`. A test must never assert the coroutine name via
+the thread name.
 
 ### 8.4 Concurrency
 
@@ -832,10 +854,29 @@ engine itself is ordinary blocking code: sequential steps, blocking JDBC.
 - Schedules are re-registered for tasks whose cron changed, unscheduled for removed tasks,
   and scheduled for new ones.
 
+Rule 16 stays structural at load. `CronScheduler.schedule` is contractually required to
+throw on an unparseable expression; `TaskScheduler.apply` registers into a staging set and
+converts such a throw into a `ValidationError` before committing the swap, so a bad cron is
+rejected atomically rather than taking the scheduler down.
+
 A filesystem watcher is deliberately not used. ConfigMap propagation to the volume is
 asynchronous and partial updates are visible mid-write, so an explicit reload gives a
 deterministic point at which a change takes effect. Startup runs the same load path, so
 there is one code path and one set of validation rules.
+
+### 8.6 Host Wiring Contract
+
+Two of this section's requirements cannot be met by a library and are the host application's,
+enumerated here with the symptom of missing each. **Neither is tested in this repository**,
+because no host module exists in it; that is a real gap, recorded rather than papered over.
+
+| The host must | Symptom if missed |
+|---|---|
+| set `quarkus.scheduler.start-mode=forced` in the **application's** `application.properties` | no task ever fires, and no error is raised |
+| implement `CronScheduler` over the programmatic `Scheduler`, handing off to `TaskRunner` rather than running inline | Vert.x blocked-thread warnings past 60s; a 5-30 minute run pinned to a worker thread |
+| expose `AdminResource`, mapping `TaskAdmin`'s sealed results to 202 / 409 / 404 / 400 | - |
+| put `@RolesAllowed("etl-admin")` on every endpoint | an unauthenticated caller can trigger any task |
+| make `CronScheduler.schedule` throw on an unparseable cron | 8.5's atomic reload silently accepts a bad cron |
 
 ---
 
@@ -1181,6 +1222,34 @@ class TaskFileLoader {
 
 data class ValidationReport(val errors: List<ValidationError>)
 data class ValidationError(val file: String, val step: String?, val line: Int?, val message: String)
+
+// Scheduling, triggering, concurrency (spec 8). The two adapters - a cron binding and an
+// HTTP resource - are the host's (8.6) and are deliberately absent here.
+fun interface CronScheduler {                 // host-implemented over Quarkus's Scheduler
+    fun schedule(taskName: String, cron: String, run: () -> Unit): AutoCloseable
+}
+
+class TaskScheduler(cron: CronScheduler) {
+    fun apply(definitions: List<TaskDefinition>)   // register / unregister / re-register
+}
+
+class TaskRunner {                            // one limitedParallelism(1) view per task
+    fun submit(definition: TaskDefinition, trigger: TriggerSource, by: String?): TriggerResult
+}
+
+sealed interface TriggerResult {
+    data class Accepted(val runId: String) : TriggerResult
+    data object AlreadyRunning : TriggerResult
+    data object Unknown : TriggerResult
+    data object Disabled : TriggerResult
+}
+
+class TaskAdmin {                             // what AdminResource maps to HTTP
+    fun trigger(name: String, by: String?): TriggerResult
+    fun list(): List<TaskStatus>
+    fun run(name: String, runId: String): TaskOutcome?
+    fun reload(directory: Path): ValidationReport?    // null when the reload succeeded
+}
 
 // Scratch (spec 7.2)
 class ScratchDb : AutoCloseable {

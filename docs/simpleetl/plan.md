@@ -186,19 +186,27 @@ after this point is the task engine.
 - `AdminResource` - the four endpoints of spec 8.2
 
 **Done when**
-- `quarkus.scheduler.start-mode=forced` is set and a test proves a task fires with no
-  `@Scheduled` method present in the application.
-- A run executes on the task's own `limitedParallelism(1)` dispatcher, not on the Vert.x
-  worker thread; asserted by capturing the thread and coroutine name inside the run.
-- A second trigger while a run is in progress is rejected, not queued, from both the
-  scheduled path and the API path.
-- The API returns 202 immediately for a task that then runs for longer than the HTTP
-  timeout.
-- All endpoints reject a caller without `etl-admin`.
+- `TaskScheduler.apply(definitions)` registers exactly the enabled tasks carrying a cron,
+  unregisters removed ones, and re-registers only those whose cron changed - proved against
+  a recording `CronScheduler`. A `CronScheduler` that throws on a bad cron leaves the
+  registry unchanged and yields a `ValidationReport` (spec 8.5).
+- Two runs of one task observe the same single worker thread, neither of which is the
+  triggering thread, and the `CoroutineName` handed into the run body equals the task name.
+  **Not asserted via the thread name** - measured, the `@name` tag exists only under `-ea`
+  and is absent in production (spec 8.3).
+- A second trigger while a run is in progress is rejected, not queued, from the
+  `CronScheduler` callback and from `TaskAdmin.trigger` alike; after the first run
+  completes, the rejected trigger has still not run.
+- `TaskAdmin.trigger` returns `Accepted(runId)` while the run is parked, so a run outliving
+  an HTTP timeout is never held open. No HTTP involved.
+- `TaskAdmin` records the caller identity into the run and performs no authorisation of its
+  own. **The `etl-admin` check itself is a host obligation (spec 8.6) and is not tested in
+  this repository.**
 - Reload with one invalid file changes nothing and returns the errors; reload while a task
   is running does not affect that run.
 
-**Not in scope:** multi-replica coordination.
+**Not in scope:** multi-replica coordination. The cron binding and the HTTP resource are the
+host's (spec 8.6); `AdminResource` is therefore not built here.
 
 ---
 

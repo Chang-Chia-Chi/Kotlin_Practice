@@ -699,3 +699,200 @@ empty file and a comments-only file do throw. Fixed.
 - Non-scratch `materialize` output shares rule 9's uniqueness namespace with scratch
   datasets, so two materialize steps writing the same table name to two different Oracle
   datasources would be rejected. Matches 5.5's parenthetical literally.
+
+---
+
+## Interstitial - package restructure  (2026-08-27)
+
+Not a phase. Done between P7 and P8, at the user's direction, after they asked why sixteen
+production files sat in one flat package with no enforcement.
+
+### What was wrong
+
+The engineer charter this project runs under says: "Keep Layer 1 free of YAML, scheduling and
+task concepts; keep the core free of DuckDB-specific types outside the writer. **ArchUnit
+enforces this**." That was never set up. The lead mandated one flat package, `infra.simpleetl`,
+in every spawn prompt so that the engineer and sdet - who work blind to each other - would
+compile together. Real problem, cheap fix, and it left spec 2.1's Layer 1 / Layer 2 boundary
+as prose only. Nothing stopped `RowPipe` importing `TaskEngine`, and the snapshot cache
+adopting Layer 1 would have taken the YAML loader, the scheduler and Jackson with it.
+
+### The convention now shared with the snapshotcache module
+
+Agreed with the user as a decision procedure, not a fixed tree, because the two modules
+differ in one structural fact: **snapshotcache ships one consumable unit; SimpleEtl ships
+two** - Layer 1 is consumed without Layer 2, which is spec 2.1's whole reason for existing.
+
+1. If a module ships more than one independently consumable unit, split by unit first.
+   Otherwise the module is the unit.
+2. Within a unit: `api` (callers call inward), `spi` (callers implement outward), `core`
+   (internal) - the same three words meaning the same thing in both modules. Applied when a
+   unit outgrows roughly a dozen files, so the names are decided in advance and only the
+   timing is judgement.
+3. Every technology adapter is its own package named for the technology, and adapters are
+   leaves.
+4. Rules are written as dependency sentences and enforced by ArchUnit. Packages are the
+   mechanism, not the point.
+
+**snapshotcache is unchanged** by this: `api`/`spi`/`core`/`duckdb` is what the procedure
+generates for a one-unit module, and its `api` vs `spi` split is already a direction
+distinction rather than a stack.
+
+### The layout
+
+| Package | Files |
+|---|---|
+| `infra.etl.pipe` | CanonicalType, Row, RowMapper, RowWriter, RowPipe |
+| `infra.etl.duckdb` | DuckDbTableWriter, ScratchDb, DatasetNamer |
+| `infra.etl.jdbc` | JdbcWriters |
+| `infra.etl.task` | TaskDefinition, TaskEngine, TaskYaml, TaskFileLoader, TaskRunner, TaskScheduler, TaskAdmin |
+
+Tests stay in one package, `infra.etl`, plus `infra.etl.spike`. The fixtures are shared
+across seven phases and splitting them is a separate decision nobody has made.
+
+### The rules, all six proven able to fail
+
+Each was proven by introducing a real violation into a real source file, confirming that
+rule failed, and reverting - not by asserting they pass on a clean tree.
+
+| Rule | Because |
+|---|---|
+| `pipe` must not depend on `task` | Layer 1 ships to the cache without the task engine |
+| `pipe` must not depend on `duckdb` or `jdbc` | Layer 1 defines the `RowWriter` seam; adapters implement it |
+| only `duckdb` may depend on `org.duckdb` | one adapter, named for its technology |
+| `duckdb` and `jdbc` must not depend on `task` | adapters are leaves |
+| `duckdb` and `jdbc` must not depend on each other | a JDBC target must not drag DuckDB in behind it |
+| no cycles across `infra.etl.(*)..` | a cycle makes the split unenforceable |
+
+Probe 3 tripped only its own rule, confirming the rules are independent rather than one rule
+wearing six hats.
+
+### A trap worth recording
+
+Three KDoc links in `pipe/RowPipe.kt` pointed at `DuckDbTableWriter` and the JDBC writers.
+After the split they no longer resolve. **Making them resolve would require an import, and
+that import is exactly the dependency rule 2 forbids - and ArchUnit reads bytecode, so a
+KDoc-only import leaves no trace and the rule would have stayed green.** "Fix the broken doc
+link" would have silently created the coupling the split exists to prevent. The links are
+now plain backticks: the prose survives, the coupling does not.
+
+### Cost
+
+289 tests before, 295 after - the 6 new ArchitectureTest methods. No test added, deleted,
+weakened or reordered; git recorded every file move as a rename. No `internal` symbol was
+widened to make the move easier.
+
+---
+
+## P7 - Scheduling, triggering, threading, reload  (2026-08-27)
+
+Team: engineer + sdet + reviewer, plus one independent adjudicator. One review cycle.
+Final: 300 tests, 0 failures. Production 169 lines across three files; tests 696. Third phase
+running over the 200-600 budget that counts tests - recorded, not trimmed.
+
+### Delivered
+
+`TaskRunner.kt` (TriggerResult, RunStatus, TaskRunner, the per-task slot and guard),
+`TaskScheduler.kt` (CronScheduler, TaskScheduler), `TaskAdmin.kt` (TaskStatus, TaskAdmin),
+plus a defaulted `runId` parameter on `TaskEngine.run`.
+
+Tests: SchedulingFixtures.kt, TaskSchedulerApplyTest, TaskRunnerConcurrencyTest,
+TaskAdminTriggerTest, TaskAdminReloadTest, TaskRunnerCoroutineNameTest, TaskAdminIdentityTest.
+
+### Deviations from the documents
+
+1. **Quarkus stays out of this module; spec 8.6 "Host Wiring Contract" is new.** Decided by an
+   independent adjudicator. Spec 7.1's Quarkus datasources already arrived as
+   `Map<String, Jdbi>` in P5, and 9.1's CDI transforms as `Map<String, RowTransform>` in P6;
+   spec 8's `@Scheduled` and `@RolesAllowed` are the same sentence in a new place. The
+   decisive measurement: **Quarkus does not read `application.properties` from a dependency
+   jar**, so shipping `quarkus.scheduler.start-mode=forced` here would have put it in a file
+   only this module's own tests read, while the real deployment fired nothing - a green test
+   for a production failure. `TaskScheduler` takes a host-implemented `CronScheduler`;
+   `TaskAdmin` returns sealed results a host's `AdminResource` maps to HTTP.
+   **Two acceptance criteria are consequently untested anywhere in this repository** -
+   `start-mode=forced` and the `etl-admin` role check - recorded in 8.6 with the symptom of
+   missing each. A real gap, taken because the alternative was false evidence.
+2. **One acceptance criterion was untestable as originally written, under any option.** The
+   plan asked to assert the dispatcher by "capturing the thread and coroutine name inside the
+   run". Measured: `coroutineContext` is unreachable from the blocking engine body (8.3 says
+   coroutines buy nothing inside the engine), and the `@taskName#1` thread-name tag exists
+   **only under `-ea`** - surefire's default, absent in production. Rewritten to assert the
+   name the runner hands *into* the run body.
+3. **`TaskScheduler(cron, runner)` is a constructor widening, not an addition.** Spec 11.2
+   declares `TaskScheduler(cron)`; a second required parameter breaks that call. Justified - a
+   firing must reach the runner and 11.2 declares no other route - but recorded as a
+   deviation. Same for `TaskAdmin(runner, scheduler, loader, tasks)`, which 11.2 gives no
+   constructor at all. Eighth phase running that the plan named public surface spec 11
+   under-declares. **P7 is the first phase where the lead declared the surface in 11.2 before
+   the phase started**, and these two are what that pass still missed.
+4. **`TaskRunner.lastRun` / `outcome` / `context`, and `TaskEngine.run`'s defaulted `runId`,
+   are additive.** The default is the identical expression P5 used internally, so P5's suite
+   is unchanged - verified by diff and by 209 tests passing untouched. One id now names the
+   scratch directory, the runId task variable, and the admin API.
+
+### The mutation results, run by the lead
+
+Six mutations. Two, nominated by the sdet, killed exactly what it predicted - the guard's
+position in front of `launch`, and the per-task view. **Four others survived**, all on paths
+the code's own KDoc called load-bearing:
+
+| Mutation | Before | After the sdet's five changes |
+|---|---|---|
+| TaskScheduler rollback restore deleted | 24/24 green | killed by aRejectedApplyRestoresTheRegistrationItHadAlreadyCancelled |
+| TaskAdmin.reload ignores the scheduler | 24/24 green | killed by aReloadTheSchedulerRejectsChangesNeitherTheScheduleNorTheDefinitions |
+| scratch directory named from a fresh UUID | 67/67 green | killed by differentTasksRunConcurrentlyEachWithItsOwnScratchFile |
+| outcome() drops the runId filter | 24/24 green | killed by triggerReturnsAcceptedWhileTheRunIsStillInProgress |
+
+The third is the sharpest: the only justification for widening P5's shipped `TaskEngine.run`
+signature was that one id must name all three places, and nothing pinned it.
+
+### A process correction, recorded because it changed the rules
+
+The reviewer executed builds, mutations and probes. The user ruled that a reviewer's job is to
+review code, not to execute it, and the same now applies to adjudicators. **From P8: only the
+engineer (production), the sdet (tests) and the lead (everything else) execute.** Reviewers
+and adjudicators read, and end with a "For the lead to run" section naming the mutations and
+measurements they want; the lead runs them and reports back. An adjudication may therefore
+come back conditional on a measurement the lead then takes.
+
+### Measured on the shipped classpath
+
+- **A `limitedParallelism(1)` view queues.** With the first coroutine blocked the second did
+  not run; after release, order `[1, 2]`. `dispatchInternal` does `queue.addLast(block)`. So
+  the self-concurrency guard must sit **in front of** the submit - submitting first and
+  rejecting after is spec 8.4's backlog with extra steps.
+- **`Job.invokeOnCompletion` fires after the block and receives an Error as its cause.** On a
+  job cancelled before it ever started it still fires, with no body event - which is the
+  property the design rests on, since a `finally` inside the block would never have run.
+- **`LimitedDispatcher.dispatch` hands itself to the underlying dispatcher, never the
+  coroutine's context.** So a recording dispatcher wrapping `Dispatchers.IO` *below* the view
+  reads `context[CoroutineName]` as null **against a correct implementation**. The sdet had
+  written that test, read the coroutines source, and discarded it before shipping. Third
+  distinct mechanism this project has found for a test that passes while proving nothing.
+
+### A known CI exposure, recorded not fixed
+
+`twoRunsOfOneTaskShareOneWorkerThreadAndNeitherIsTheTriggeringThread` asserts thread
+*affinity*, but `limitedParallelism(1)` guarantees only *serialisation*. It holds because an
+idle `Dispatchers.IO` pops the most recently parked worker. Measured: the real test shape held
+100/100 at each of four configurations including 48 blocked IO coroutines and
+`-XX:ActiveProcessorCount=2`; a synthetic shape with a trivial body degraded to 4/100. The
+criterion is FIXED, the test implements it faithfully, and the property holds by scheduler
+timing rather than by contract. Same register as P4's Windows-file-lock finding.
+
+### Notes for later phases
+
+- **P8 owns the listener call sites** in TaskEngine, which is the same file P9 edits for the
+  cache read step. They cannot be built by two agents in parallel.
+- `TaskAdmin.run(name, runId)` cannot say "still running" - TaskOutcome has only SUCCEEDED and
+  FAILED and its signature is frozen. TaskStatus.running separates the cases; a host needs
+  both calls to map a poll correctly.
+- Only the current-or-last run per task is retained, marked `ponytail:`. A run displaced by a
+  later firing 404s.
+- TaskScheduler puts a **task name** into ValidationError.file, since a TaskDefinition does not
+  know its file. A reload report mixes loader errors (file names) with scheduler errors (task
+  names).
+- A non-scratch Jdbi must be pool-backed now that two runs are concurrent; a
+  `Jdbi.create(singleConnection)` would hand one Connection to two runs, which spec 7.2 calls
+  a JVM crash rather than an error.
