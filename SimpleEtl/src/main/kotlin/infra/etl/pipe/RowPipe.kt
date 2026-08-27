@@ -91,7 +91,10 @@ data class PipeResult(val rowsRead: Long, val rowsWritten: Long)
  * the task model (spec 9.5).
  *
  * The loop is spec 5.2: open the source with `fetchSize = chunkSize`, accumulate up to
- * [chunkSize] Rows, apply [transform] to each, write the chunk, repeat.
+ * [chunkSize] Rows, apply [transform] to the chunk, write what survives, repeat. The order
+ * matters and is the spec's: a chunk boundary falls every [chunkSize] **source** rows, so a
+ * selective transform shortens the chunks it writes rather than stretching the span of source
+ * rows one commit covers.
  *
  * **Memory is flat in row count.** The driver holds one fetch, the pipe holds one chunk in a
  * buffer it reuses, and nothing accumulates a result list. Oracle's default fetch size is 10,
@@ -172,14 +175,30 @@ class RowPipe(
         var written = 0L
         while (rows.next()) {
             read++
-            val row = mapper.map(rows)
-            chunk += if (transform == null) row else transform.apply(row) ?: continue
+            chunk += mapper.map(rows)
             if (chunk.size == chunkSize) {
-                written += writer.write(chunk)
+                written += writeChunk(writer, chunk)
                 chunk.clear()
             }
         }
-        if (chunk.isNotEmpty()) written += writer.write(chunk)
+        if (chunk.isNotEmpty()) written += writeChunk(writer, chunk)
         PipeResult(read, written)
+    }
+
+    /**
+     * Spec 5.2's steps 3 and 4: the transform runs over an accumulated chunk, not over each row as
+     * it is read, so a chunk boundary falls every [chunkSize] **source** rows whatever the
+     * transform drops.
+     *
+     * A chunk the transform empties is not written. `write(emptyList())` is legal on every writer
+     * but `DuckDbTableWriter` flushes its appender on every call, so an empty write would add a
+     * commit boundary for a chunk with nothing to commit.
+     *
+     * `mapNotNull` allocates one list per chunk, and only when a transform exists. Memory stays
+     * flat in row count - two chunk-sized lists rather than one, and neither grows with the source.
+     */
+    private fun writeChunk(writer: RowWriter, chunk: List<Row>): Int {
+        val surviving = if (transform == null) chunk else chunk.mapNotNull(transform::apply)
+        return if (surviving.isEmpty()) 0 else writer.write(surviving)
     }
 }
