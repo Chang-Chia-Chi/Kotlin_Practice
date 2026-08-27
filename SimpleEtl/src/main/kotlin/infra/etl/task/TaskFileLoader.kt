@@ -21,9 +21,6 @@ import java.sql.DriverManager
 import java.sql.PreparedStatement
 import org.jdbi.v3.core.statement.ColonPrefixSqlParser
 
-/** The four built-ins of spec 6.1. Always defined, never redefinable. */
-private val BUILT_INS = setOf("runId", "taskName", "triggerTime", "attempt")
-
 /** Spec 3.1: `[a-z0-9-]{1,64}`. */
 private val TASK_NAME = Regex("[a-z0-9-]{1,64}")
 
@@ -332,7 +329,7 @@ private class FileValidation(
 ) {
 
     private val errors = mutableListOf<ValidationError>()
-    private val defined = BUILT_INS.toMutableSet()
+    private val defined = BUILT_IN_VARIABLES.toMutableSet()
     private val datasets = mutableSetOf<String>()
 
     fun validate(): List<ValidationError> {
@@ -816,7 +813,7 @@ private class FileValidation(
             err(
                 step,
                 "variable '$name' is defined more than once (rule 8). A variable may not be redefined once " +
-                    "set (spec 6.2). The built-ins ${BUILT_INS.sorted()} are always defined.",
+                    "set (spec 6.2). The built-ins ${BUILT_IN_VARIABLES.sorted()} are always defined.",
             )
         }
     }

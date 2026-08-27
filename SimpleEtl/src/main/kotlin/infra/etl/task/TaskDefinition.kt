@@ -42,6 +42,46 @@ fun defaultCreateTable(datasource: String): CreateTable =
     if (datasource == SCRATCH) CreateTable.AUTO else CreateTable.REQUIRED
 
 /**
+ * The built-in that changes between attempts of the same step, so it never lives in a
+ * [VariableScope]: the engine supplies its value per attempt (spec 6.1).
+ */
+const val ATTEMPT_VARIABLE = "attempt"
+
+/**
+ * The four built-in variables of spec 6.1. Always defined, never redefinable.
+ *
+ * One declaration, because there were two: validation rule 7 seeded its resolvable-name set from a
+ * private copy in `TaskFileLoader` while the engine defined the same names imperatively and kept
+ * `attempt` in a private constant of its own (review finding M11). Drift in either direction was
+ * silent and asymmetric - a built-in added to the engine alone makes rule 7 reject valid files at
+ * boot, and one added to the rule alone boots clean and then dies mid-run on "no built-in ... has
+ * defined", which is exactly the mid-run failure spec 10 exists to convert into a boot failure.
+ *
+ * [defineRunBuiltIns] holds the values, next to the names, and checks the two agree.
+ */
+val BUILT_IN_VARIABLES: Set<String> = setOf("runId", "taskName", "triggerTime", ATTEMPT_VARIABLE)
+
+/**
+ * Seeds the three built-ins whose value is fixed for a whole run. [ATTEMPT_VARIABLE] is the fourth
+ * and is deliberately absent: a scope defines each name exactly once, and this one changes between
+ * attempts of one step.
+ *
+ * The `check` is what makes [BUILT_IN_VARIABLES] a single source rather than a second copy. Adding
+ * a name to that set without giving it a value here fails every run immediately and by name,
+ * instead of at whichever later step first writes `:theNewOne`.
+ */
+internal fun VariableScope.defineRunBuiltIns(runId: String, taskName: String, triggerTime: Any?) {
+    define("runId", runId)
+    define("taskName", taskName)
+    define("triggerTime", triggerTime)
+    check(names + ATTEMPT_VARIABLE == BUILT_IN_VARIABLES) {
+        "the built-ins this run defined are ${(names + ATTEMPT_VARIABLE).sorted()} but spec 6.1 declares " +
+            "${BUILT_IN_VARIABLES.sorted()}. Both come from BUILT_IN_VARIABLES, so one of them was " +
+            "changed without the other."
+    }
+}
+
+/**
  * One ETL task (spec 3.1). YAML is one source of these and not the only one, so every field is
  * constructible in code and P6's loader is just another caller (spec 2.1).
  *

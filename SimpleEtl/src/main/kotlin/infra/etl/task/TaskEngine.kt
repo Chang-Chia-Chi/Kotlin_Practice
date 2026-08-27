@@ -34,9 +34,6 @@ import org.jdbi.v3.core.argument.NullArgument
 import org.jdbi.v3.core.statement.ColonPrefixSqlParser
 import org.jdbi.v3.core.statement.SqlStatements
 
-/** The built-in that changes between attempts of the same step, so it never lives in the scope. */
-private const val ATTEMPT = "attempt"
-
 private val log = Logger.getLogger(TaskEngine::class.java)
 
 /** What a step type that moves no row through the JVM reports to [StepResult] (spec 2.3). */
@@ -84,7 +81,7 @@ class VariableScope {
      *   built-in or with a task literal.
      */
     fun define(name: String, value: Any?) {
-        require(name != ATTEMPT) {
+        require(name != ATTEMPT_VARIABLE) {
             "variable '$name' is a reserved built-in (spec 6.1). It is resolved per attempt by the " +
                 "engine, so a literal var or an export of that name would be accepted and then " +
                 "silently ignored."
@@ -415,9 +412,7 @@ class TaskEngine(
     ) {
 
         private val scope = VariableScope().apply {
-            define("runId", task.runId)
-            define("taskName", definition.name)
-            define("triggerTime", task.startedAt)
+            defineRunBuiltIns(task.runId, definition.name, task.startedAt)
             definition.vars.forEach { define(it.name, it.value) }
         }
 
@@ -820,14 +815,14 @@ class TaskEngine(
                     "':name' instead (spec 6.3)."
             }
             val undefined = parsed.parameterNames
-                .filterNot { it == ATTEMPT || scope.contains(it) }.distinct().sorted()
+                .filterNot { it == ATTEMPT_VARIABLE || scope.contains(it) }.distinct().sorted()
             require(undefined.isEmpty()) {
                 "step '$step': the SQL binds ${undefined.map { ":$it" }}, which no built-in, literal var " +
                     "or earlier export has defined. Variables resolve in step order, so an export step " +
                     "must come before its use (spec 6.2). Defined at this point: " +
-                    "${(scope.names + ATTEMPT).sorted()}."
+                    "${(scope.names + ATTEMPT_VARIABLE).sorted()}."
             }
-            return parsed.parameterNames.associateWith { if (it == ATTEMPT) attempt else scope[it] }
+            return parsed.parameterNames.associateWith { if (it == ATTEMPT_VARIABLE) attempt else scope[it] }
         }
 
         /**
