@@ -16,6 +16,7 @@ import infra.etl.pipe.Row
 import infra.etl.pipe.RowMapper
 import infra.etl.pipe.RowPipe
 import infra.etl.pipe.RowWriter
+import infra.etl.pipe.parseNamedParameters
 import infra.snapshotcache.api.CopyOutSpec
 import java.nio.file.Files
 import java.nio.file.Path
@@ -31,25 +32,12 @@ import org.jboss.logging.Logger
 import org.jdbi.v3.core.Handle
 import org.jdbi.v3.core.Jdbi
 import org.jdbi.v3.core.argument.NullArgument
-import org.jdbi.v3.core.statement.ColonPrefixSqlParser
 import org.jdbi.v3.core.statement.SqlStatements
 
 private val log = Logger.getLogger(TaskEngine::class.java)
 
 /** What a step type that moves no row through the JVM reports to [StepResult] (spec 2.3). */
 private val NO_ROWS = PipeResult(0, 0)
-
-/**
- * JDBI's own parser, reached without a [Handle] for the one SQL text this engine parses but never
- * binds: a `cacheCopy` step's (spec 3.6).
- *
- * The `Handle`-based path [TaskEngine.Run.variables] uses would open a connection - and on the
- * `scratch` datasource that *creates the scratch file* - for a step that is about to be rejected.
- * Measured on jdbi3-core 3.45.4: `parse(sql, null)` needs no `StatementContext` for a
- * colon-prefixed parse, and it skips a colon inside a string literal, a `::` cast and a `--`
- * comment, all of which are legal in the DuckDB SQL a cache copy runs.
- */
-private val CACHE_SQL_PARSER = ColonPrefixSqlParser()
 
 /**
  * The task variables of spec 6: built-ins, task literals, and whatever `export` steps have
@@ -563,12 +551,16 @@ class TaskEngine(
             // loader in front of it. Rejected rather than interpolated: CopyOutSpec.sql is a plain
             // String with no binding channel, and substituting a value into the text would be the
             // injection path every other statement in this engine avoids by binding.
+            // Parsed without a Handle, deliberately: the handle-based path variables() uses would
+            // open a connection - and on scratch that *creates the scratch file* - for a step about
+            // to be rejected.
+            //
             // An all-digit "name" is not one: JDBI's lexer reads a colon followed by digits as a
             // parameter, so DuckDB's own `site_code[1:3]` slice and `{'k':1}` struct literal arrive
             // here as `:3` and `:1`. This text never passes through JDBI - copyOut executes it
             // verbatim - so rejecting them would refuse SQL the cache runs perfectly well. The
             // loader's rule 19 skips them for the same reason.
-            val parsed = CACHE_SQL_PARSER.parse(step.sql, null).parameters
+            val parsed = parseNamedParameters(step.sql).parameters
             val bound = parsed.parameterNames.filterNot { name -> name.all(Char::isDigit) }.distinct().sorted()
             require(!parsed.isPositional && bound.isEmpty()) {
                 val what = if (parsed.isPositional) "positional '?' parameters" else "${bound.map { ":$it" }}"
@@ -807,9 +799,8 @@ class TaskEngine(
          * see the class KDoc for what JDBI's superfluous-binding check does and does not catch.
          */
         private fun variables(handle: Handle, sql: String, step: String, attempt: Int): Map<String, Any?> {
-            val parsed = handle.createUpdate(sql).use { statement ->
-                handle.getConfig(SqlStatements::class.java).sqlParser.parse(sql, statement.context).parameters
-            }
+            val parsed = parseNamedParameters(sql, handle.getConfig(SqlStatements::class.java).sqlParser)
+                .parameters
             require(!parsed.isPositional) {
                 "step '$step': the SQL uses positional '?' parameters. Variables bind by name, so write " +
                     "':name' instead (spec 6.3)."

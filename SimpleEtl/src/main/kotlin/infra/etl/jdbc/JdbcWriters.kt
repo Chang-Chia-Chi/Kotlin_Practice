@@ -5,6 +5,7 @@ import infra.etl.pipe.ColumnMeta
 import infra.etl.pipe.Row
 import infra.etl.pipe.RowWriter
 import infra.etl.pipe.catalogColumns
+import infra.etl.pipe.parseNamedParameters
 import infra.etl.pipe.requireSourceSubset
 import java.math.BigDecimal
 import java.time.Instant
@@ -153,10 +154,10 @@ class JdbcStatementWriter(
         handle = opened
         try {
             types = columns.associate { it.name to it.type }
-            // JDBI's own parser, so that the names checked here are exactly the names JDBI will
-            // look for: it already skips a colon inside a string literal.
+            // The handle's own parser, so that the names checked here are exactly the names JDBI
+            // will look for; it already skips a colon inside a string literal.
             val parser = opened.getConfig(SqlStatements::class.java).sqlParser
-            val parameters = opened.createUpdate(sql).use { parser.parse(sql, it.context).parameters }
+            val parameters = parseNamedParameters(sql, parser).parameters
             require(!parameters.isPositional) {
                 "step '$step': target.sql uses positional '?' parameters. Row values bind by name, so " +
                     "write ':column' instead (spec 4.4)."

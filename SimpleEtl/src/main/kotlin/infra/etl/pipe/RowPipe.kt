@@ -2,6 +2,9 @@ package infra.etl.pipe
 
 import org.jdbi.v3.core.Handle
 import org.jdbi.v3.core.Jdbi
+import org.jdbi.v3.core.statement.ColonPrefixSqlParser
+import org.jdbi.v3.core.statement.ParsedSql
+import org.jdbi.v3.core.statement.SqlParser
 import java.sql.ResultSet
 
 /**
@@ -70,6 +73,42 @@ class JdbcSource private constructor(
         return if (ownsHandle) handle.use(block) else block(handle)
     }
 }
+
+/**
+ * The one [SqlParser] every startup check uses, so that the names checked before a run are exactly
+ * the names JDBI looks for during it. Cached and thread safe.
+ */
+private val COLON_PREFIX: SqlParser = ColonPrefixSqlParser()
+
+/**
+ * The `:name` parameters [sql] binds, and JDBI's `?`-substituted rewrite of it.
+ *
+ * One function because there were five copies of this parse - the loader's rule 6, rule 19 and the
+ * amended rule 7, the engine's variable resolution and its cacheCopy guard, and
+ * `JdbcStatementWriter`'s bind names - and two of them built a throwaway `handle.createUpdate(sql)`
+ * solely to obtain a `StatementContext` (review finding L4). Measured on jdbi3-core 3.45.4:
+ * `parse(sql, null)` works, because a colon-prefixed parse never touches the context.
+ *
+ * It lives in this package rather than beside any one caller because `infra.etl.jdbc` may not
+ * depend on `infra.etl.task`, and both need it.
+ *
+ * **The callers keep their own error messages.** Every one of them rejects a positional `?`, but
+ * each cites a different rule and offers a different remedy - a task variable, a Row key, or
+ * nothing bindable at all - so the sentence is not the duplication; the parse was.
+ *
+ * Two measured facts the callers rely on. The parser skips a colon inside a string literal, a `::`
+ * cast and a `--` comment, all of which appear in real task SQL. It does **not** skip a colon
+ * followed by digits: `select site_code[1:3]` yields the name `3` and the rewrite
+ * `select site_code[1?]`, and `{'k':1}` yields `1`. Whether that matters depends on whether the
+ * text later passes through JDBI - for a `cacheCopy` it does not, and rule 19 ignores such names;
+ * everywhere else it does, and they are real if broken bindings.
+ *
+ * @param parser the handle's own configured parser where a caller has a handle, so run time cannot
+ *   parse by one rule while startup parsed by another. Defaults to JDBI's colon-prefix parser,
+ *   which is what a handle carries unless a host replaced it.
+ */
+internal fun parseNamedParameters(sql: String, parser: SqlParser = COLON_PREFIX): ParsedSql =
+    parser.parse(sql, null)
 
 /**
  * Caller-supplied per-row code (spec 9.1). Returning null drops the row, which is why

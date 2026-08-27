@@ -14,12 +14,12 @@ import infra.etl.duckdb.unwritableToDuckDb
 import infra.etl.pipe.CanonicalType
 import infra.etl.pipe.ColumnMeta
 import infra.etl.pipe.RowTransform
+import infra.etl.pipe.parseNamedParameters
 import java.nio.file.Files
 import java.nio.file.Path
 import java.sql.Connection
 import java.sql.DriverManager
 import java.sql.PreparedStatement
-import org.jdbi.v3.core.statement.ColonPrefixSqlParser
 
 /** Spec 3.1: `[a-z0-9-]{1,64}`. */
 private val TASK_NAME = Regex("[a-z0-9-]{1,64}")
@@ -33,15 +33,6 @@ private val TASK_NAME = Regex("[a-z0-9-]{1,64}")
  * `quarkus-scheduler` and with it a real parser; swap this for it there.
  */
 private val CRON_FIELD = Regex("[0-9*?/,\\-A-Za-z#]+")
-
-/**
- * JDBI's own parser, so the names checked at startup are exactly the names JDBI looks for at run
- * time (the same call [TaskEngine] makes). Measured on jdbi3-core 3.45.4 (P6 scratchpad
- * `Probe2.kt`): `parse(sql, null)` works without a `StatementContext` - the context is not touched
- * for a colon-prefixed parse - and the parser skips a colon inside a string literal, a `::` cast
- * and a `--` comment, all three of which appear in real task SQL. It is cached and thread safe.
- */
-private val SQL_PARSER = ColonPrefixSqlParser()
 
 /**
  * Measured on jackson-dataformat-yaml / jackson-databind 2.18.2 (P6 scratchpad `Probe.kt`,
@@ -478,7 +469,7 @@ private class FileValidation(
             return
         }
         val parsed = try {
-            SQL_PARSER.parse(text, null)
+            parseNamedParameters(text)
         } catch (e: RuntimeException) {
             err(step, "sql does not parse: ${e.message} (rule 6).")
             return
@@ -750,7 +741,7 @@ private class FileValidation(
      * both are passed over here rather than reported twice.
      */
     private fun externalMaterializeBinds(step: MaterializeYaml) {
-        val parameters = runCatching { SQL_PARSER.parse(step.sql, null).parameters }.getOrNull() ?: return
+        val parameters = runCatching { parseNamedParameters(step.sql).parameters }.getOrNull() ?: return
         if (parameters.isPositional) return
         val bound = parameters.parameterNames.distinct().sorted()
         if (bound.isEmpty()) return
@@ -856,7 +847,7 @@ private class FileValidation(
             return
         }
         val parsed = try {
-            SQL_PARSER.parse(text, null)
+            parseNamedParameters(text)
         } catch (e: RuntimeException) {
             err(step, "$where does not parse: ${e.message} (rule 6).")
             return
