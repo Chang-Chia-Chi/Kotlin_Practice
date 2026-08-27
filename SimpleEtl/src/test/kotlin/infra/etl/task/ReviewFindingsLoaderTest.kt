@@ -159,7 +159,9 @@ class ReviewFindingsLoaderTest {
         )
 
         val loaded = loadOne(dir("bound-message"), onOracle)
-        val message = loaded.errors.single { it.step == "build-summary" }.message
+        // Not `single`: moving the step off scratch also trips rule 12 on its retries, and both
+        // errors carry this step. That the two rules report separately is the point of accumulating.
+        val message = loaded.errors.single { it.step == "build-summary" && it.message.contains("binds") }.message
 
         assertAll(
             { assertTrue(message.contains("ORA-01027")) { "the error must name the Oracle failure: $message" } },
@@ -167,12 +169,86 @@ class ReviewFindingsLoaderTest {
         )
     }
 
-    /** A materialize on an external datasource that binds nothing is untouched by the amendment. */
+    /**
+     * A materialize on an external datasource that binds nothing is untouched by the amendment.
+     * `retries: 0` is stated because rule 12 refuses a non-scratch materialize any retries at all,
+     * and a file rejected for that would say nothing about rule 7.
+     */
     @Test
     fun anExternalMaterializeThatBindsNothingStillLoads() {
-        val onOracle = edit(VALID, scratchMaterialize, "type: materialize\n        datasource: report_oracle")
+        val onOracle = edit(
+            edit(VALID, scratchMaterialize, "type: materialize\n        datasource: report_oracle"),
+            "sql: \"select lot_id, sum(qty) as qty from wip_stg group by 1\"\n        retries: 3",
+            "sql: \"select lot_id, sum(qty) as qty from wip_stg group by 1\"\n        retries: 0",
+        )
 
         loadOne(dir("unbound-oracle"), onOracle).tasksOrFail()
+    }
+
+    // --- H2: rule 12 enforced as the step-level rule it is worded as ---------------------------
+
+    private fun externalSqlStep(extra: String = ""): String = """
+        name: external-sql
+        phases:
+          - name: publish
+            steps:
+              - name: bookkeeping
+                type: sql
+                datasource: report_oracle
+                statements:
+                  - "insert into audit_log (task_name) values ('external-sql')"
+                  - "update watermark set processed_ts = sysdate"
+                retries: 3$extra
+    """.trimIndent()
+
+    /**
+     * The pair rule 12 turns on for a `sql` step. Without `idempotent` the file is refused; with
+     * it, the identical file loads and the flag reaches the model. A transient drop between those
+     * two committed statements re-runs the insert, and spec 5.2 makes each statement its own
+     * transaction, so nothing in the framework can undo it - the author says the rerun converges
+     * or does not get the retry.
+     */
+    @Test
+    fun aNonScratchSqlStepWithRetriesNeedsIdempotentAndLoadsOnceItHasIt() {
+        val rejected = loadOne(dir("sql-retries"), externalSqlStep())
+        val accepted = loadOne(dir("sql-idempotent"), externalSqlStep("\n                idempotent: true"))
+
+        assertAll(
+            { assertRejects(rejected, file = "task.yaml", step = "bookkeeping", "idempotent") },
+            {
+                assertTrue((accepted.single().phases.single().steps.single() as SqlStep).idempotent) {
+                    "the stated flag must reach the model; errors were ${accepted.errors.map { it.message }}"
+                }
+            },
+        )
+    }
+
+    /** A scratch sql step keeps its default retries: spec 5.5's attempt suffix is what makes it safe. */
+    @Test
+    fun aScratchSqlStepWithRetriesNeedsNoPromise() {
+        val yaml = edit(externalSqlStep(), "datasource: report_oracle", "datasource: scratch")
+
+        loadOne(dir("sql-scratch"), yaml).tasksOrFail()
+    }
+
+    /**
+     * A non-scratch materialize with retries is refused outright, with no flag that could rescue
+     * it: a CTAS retry fails on table-already-exists every time. The scratch sibling still loads
+     * with the same retries, which is what stops this being a test that bans retries everywhere.
+     */
+    @Test
+    fun aNonScratchMaterializeWithRetriesIsRejectedOutrightWhileTheScratchOneLoads() {
+        val onOracle = edit(VALID, scratchMaterialize, "type: materialize\n        datasource: report_oracle")
+
+        assertAll(
+            {
+                assertRejects(
+                    loadOne(dir("mat-retries"), onOracle),
+                    file = "task.yaml", step = "build-summary", "retries",
+                )
+            },
+            { loadOne(dir("mat-scratch"), VALID).tasksOrFail() },
+        )
     }
 
     // --- N1 and N2: the cacheCopy SQL ---------------------------------------------------------

@@ -131,11 +131,18 @@ internal data class MaterializeYaml(
     override val retries: Int? = null,
 ) : StepYaml
 
+/**
+ * `idempotent` is spec 3.4's field, added by review finding H2 so that rule 12 can be enforced on
+ * a `sql` step the way it always read - as a rule about a step, not about a pipe target. It
+ * defaults to false, so an author who says nothing is refused a non-scratch retry rather than
+ * given one on a promise nobody made.
+ */
 internal data class SqlYaml(
     override val name: String,
     val datasource: String,
     val statements: List<String> = emptyList(),
     override val retries: Int? = null,
+    val idempotent: Boolean = false,
 ) : StepYaml
 
 internal data class ExportYaml(

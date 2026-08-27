@@ -405,6 +405,7 @@ private class FileValidation(
             is SqlYaml -> {
                 datasource(step.name, step.datasource)
                 step.statements.forEach { sql(step.name, "statements", it, step.datasource, resolveNames = true) }
+                sqlRetries(step)
             }
 
             is ExportYaml -> export(step)
@@ -667,8 +668,53 @@ private class FileValidation(
     }
 
     /**
-     * Rule 13's scratch-only half, and **rule 7 as spec 10 amends it for a non-scratch
-     * materialize**: such a step may bind no variable at all.
+     * **Rule 12 on a `sql` step**, which spec 10 amends to enforce as the step-level rule it has
+     * always been worded as (review finding H2).
+     *
+     * Each statement is its own transaction (spec 5.2), so a retry re-runs the whole list: a
+     * transient drop between two committed statements re-executes the first, duplicating rows in
+     * an external table, and the run then reports SUCCEEDED. That is the same hazard rule 12
+     * covers on a pipe target, so it takes the same answer - the author states that a rerun
+     * converges, and the framework holds them to having said it.
+     */
+    private fun sqlRetries(step: SqlYaml) {
+        if (step.datasource == SCRATCH) return
+        // Off scratch spec 5.3 defaults retries to 0, so a stated value is the only way to have one
+        // - which is why this does not need the datasource-dependent default at all.
+        val retries = step.retries ?: 0
+        if (retries <= 0 || step.idempotent) return
+        err(
+            step.name,
+            "retries $retries on the non-scratch datasource '${step.datasource}' requires idempotent: true " +
+                "(rule 12). Each statement is its own transaction, so a retry re-runs all of them - a failure " +
+                "after the first statement committed would run it a second time (spec 5.2, 5.3).",
+        )
+    }
+
+    /**
+     * **Rule 12 on a `materialize` step.** A non-scratch materialize with retries is rejected
+     * outright rather than made conditional on an `idempotent` flag, because it runs
+     * `CREATE TABLE <output> AS <sql>`: a retry after the table was created fails deterministically
+     * on table-already-exists, so `idempotent: true` would be a promise no author could keep.
+     * Spec 10 rule 12 records the ruling, including why drop-and-recreate was refused.
+     */
+    private fun materializeRetries(step: MaterializeYaml) {
+        if (step.datasource == SCRATCH) return
+        val retries = step.retries ?: 0
+        if (retries <= 0) return
+        err(
+            step.name,
+            "retries $retries on the non-scratch datasource '${step.datasource}' is rejected for a " +
+                "materialize (rule 12). It runs as CREATE TABLE ${step.output} AS <sql>, so a retry after " +
+                "the table was created fails on table-already-exists every time - there is no idempotent: " +
+                "true that could make it converge. State retries: 0, or build the table with a sql step " +
+                "that can express its own recovery (spec 5.3, 5.4).",
+        )
+    }
+
+    /**
+     * Rule 13's scratch-only half, rule 12 as spec 10 amends it for a materialize, and **rule 7 as
+     * spec 10 amends it for a non-scratch materialize**: such a step may bind no variable at all.
      *
      * A non-scratch materialize runs `CREATE TABLE <output> AS <sql>` through `Handle.createUpdate`,
      * which binds every `:name` it parses, and Oracle rejects a bind variable in DDL outright with
@@ -683,6 +729,7 @@ private class FileValidation(
         datasource(step.name, step.datasource)
         sql(step.name, "sql", step.sql, step.datasource, resolveNames = true)
         if (step.datasource != SCRATCH) externalMaterializeBinds(step)
+        materializeRetries(step)
         dataset(step.name, step.output)
         // Rule 13's other half: PARQUET is structurally impossible on any other step type, and
         // spec 5.6 puts the file in the scratch directory, so it is scratch-only here too.
@@ -913,6 +960,7 @@ private fun StepYaml.toStep(transforms: Map<String, RowTransform>): Step = when 
         datasource = datasource,
         statements = statements,
         retries = retries ?: if (datasource == SCRATCH) 3 else 0,
+        idempotent = idempotent,
     )
 
     is ExportYaml -> ExportStep(

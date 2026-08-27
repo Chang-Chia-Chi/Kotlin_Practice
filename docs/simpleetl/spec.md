@@ -203,7 +203,18 @@ Exactly one of `target.table` or `target.sql` must be present.
   statements:
     - "create index idx_wip_lot on wip_stg (lot_id)"
   retries: 3
+  idempotent: false               # optional; required true for retries > 0 off scratch
 ```
+
+**`idempotent` added by review finding H2.** Rule 12 has always been written about a *step*, but
+only `pipe` had a field to state it with, so a `sql` step with a non-scratch datasource and
+`retries: 3` loaded clean - and 5.2 makes every statement its own transaction, so a retry re-runs
+all of them. A transient connection drop between two committed statements therefore re-executed
+the first, silently duplicating rows in an external table, and the run then reported SUCCEEDED.
+The field means the same thing here as on a pipe target: the author states that re-running the
+whole statement list converges. The framework cannot check that and does not try.
+
+A `materialize` step gets **no such field**, deliberately - see rule 12.
 
 ### 3.5 Step: export
 
@@ -1145,6 +1156,40 @@ Any failure below prevents startup, or causes a reload to be rejected with no ch
 10. Exactly one of `target.table` or `target.sql` present.
 11. `target.sql` not used on a DuckDB datasource.
 12. `retries > 0` on a non-scratch target requires `idempotent: true`.
+
+    **Amended (review finding H2): this is a rule about a *step*, and it is now enforced as one.**
+    It was checked only inside `pipe`, so the two other step types that write to an external
+    datasource escaped it entirely.
+
+    - **`sql`** gains an `idempotent` field (3.4) and the rule applies to it unchanged. Each
+      statement is its own transaction (5.2), so a retry re-runs the whole list; without the rule
+      a transient failure between two committed statements silently duplicated the first.
+    - **`materialize`** gets no such field: a non-scratch `materialize` with `retries > 0` is a
+      startup error outright. It runs `CREATE TABLE <output> AS <sql>`, so a retry after the
+      table was created fails deterministically on table-already-exists - `idempotent: true`
+      would be a promise no author could keep. Retrying it is not a knob whose value is wrong;
+      it is a knob that cannot work, which is the treatment rules 18 and 20 already give.
+      Two ways of making the CTAS itself survive a retry were considered and both rejected.
+
+      **`CREATE TABLE IF NOT EXISTS`** cannot distinguish the table this attempt's predecessor
+      left behind from the table *last run* produced, and `output` is a fixed name. So the second
+      run of any external materialize would silently no-op, the downstream table would freeze at
+      the first run's data, and every run afterwards would report SUCCEEDED - trading a loud
+      failure for the silent staleness of 1.1. It barely helps within a run either: a CTAS is one
+      statement, so a failure part way through leaves no table at all and the plain CREATE already
+      succeeds on retry; the only case where a table survives a failed attempt is one where the
+      CTAS committed and the failure came after it, and there the data is already correct.
+
+      **Drop-and-recreate** would work, and is refused for authority rather than mechanism:
+      silently dropping an external table is a worse failure than not retrying, and 5.4 gives this
+      framework no licence to destroy data outside scratch.
+
+      An author who needs a retryable external build writes it as a `sql` step - MERGE, or build
+      beside and rename - and states `idempotent: true`, which is the shape that can actually
+      express its own recovery.
+
+    A scratch target is unaffected in all three cases: 5.5's attempt suffix is what makes a
+    scratch retry safe without any promise from the author.
 13. `format: PARQUET` only on `materialize`.
 14. `createTable: AUTO` only on scratch targets, and not combined with a transform that
     lacks `addColumns`. AUTO's DECIMAL precision cannot be validated at startup, because
@@ -1318,7 +1363,7 @@ sealed interface Step {
 }
 class PipeStep : Step         // source, transform?, target, chunkSize?
 class MaterializeStep : Step  // datasource, output, format, sql
-class SqlStep : Step          // datasource, statements
+class SqlStep : Step          // datasource, statements, idempotent (H2)
 class ExportStep : Step       // datasource, vars
 class CacheCopyStep : Step    // cache, sql, output (spec 7.3)
 

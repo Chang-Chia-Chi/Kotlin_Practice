@@ -148,12 +148,18 @@ class MaterializeStep(
 /**
  * Statements with no dataset output: an index, a publish procedure, a bookkeeping update
  * (spec 3.4). Each statement is its own transaction (spec 5.2), so a retry re-runs all of them.
+ *
+ * @param idempotent the author's statement that re-running the whole list converges - spec 10's
+ *   rule 12, which reads "a step with a non-scratch target and retries > 0" and until review
+ *   finding H2 was enforced only on a pipe. Nothing here can check it; what it buys is that the
+ *   duplicate rows a retry can leave in an external table are a consequence someone chose.
  */
 class SqlStep(
     override val name: String,
     val datasource: String,
     val statements: List<String>,
     override val retries: Int = if (datasource == SCRATCH) 3 else 0,
+    val idempotent: Boolean = false,
 ) : Step
 
 /** One exported task variable: a query returning exactly one row and one column (spec 6.3). */
