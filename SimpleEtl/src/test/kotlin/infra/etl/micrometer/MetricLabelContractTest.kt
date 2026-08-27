@@ -2,6 +2,7 @@ package infra.etl.micrometer
 
 import infra.etl.Etl
 import infra.etl.TaskHarness
+import infra.etl.pipe.RowTransform
 import infra.etl.task.Outcome
 import infra.etl.task.TriggerSource
 import io.micrometer.core.instrument.MeterRegistry
@@ -35,11 +36,15 @@ private const val SCRATCH = "etl_scratch_file_bytes"
  * ### Two runs, and why each is shaped as it is
  *
  * Run 1 succeeds on `SCHEDULE`, retries a step twice, and pipes into scratch - a scratch pipe with
- * a retry is the one step shape that registers all six meters by itself. Run 2 fails **on a step**
- * on `API`; a run failed by a *hook* would never register `etl_step_*` at all and would leave the
- * failure half of this contract untested. Between them the `outcome` and `trigger` tags take both
- * of their values, which is what makes a value assertion possible - a key-only assertion passes
- * happily against `outcome="SUCCEEDED"`, and Prometheus label values are case sensitive.
+ * a retry is the one step shape that registers all six meters by itself. Its transform drops one
+ * row, so the pipe reports 6 read and 5 written: without that the two directions are one number
+ * twice, and a binding that fed `rowsRead` into both counters would pass. Run 2 fails **on a step**
+ * on `API`. A *hook* failure would not do: an `onSuccess` hook fires only after every step has
+ * already succeeded, so `stepEnded` has already run and every `etl_step_*` series is there - what
+ * it never reaches is `stepEnded` for a step that *failed*, which is the path that registers the
+ * 0-row `etl_step_rows_total` series asserted below. Between them the `outcome` and `trigger` tags
+ * take both of their values, which is what makes a value assertion possible - a key-only assertion
+ * passes happily against `outcome="SUCCEEDED"`, and Prometheus label values are case sensitive.
  *
  * ### The order the assertions are in is load-bearing
  *
@@ -58,7 +63,10 @@ private const val SCRATCH = "etl_scratch_file_bytes"
  * - **A `Timer` takes milliseconds in and reports seconds out.** `record(durationMs, SECONDS)` is
  *   off by a factor of 1000 and passes every name and tag assertion ever written, so the retried
  *   step's `totalTime(SECONDS)` is checked against the exact number the harness's injected clock
- *   fixes: 6.0, being the 2s and 4s of backoff the sleeper was asked for.
+ *   fixes: 6.0, being the 2s and 4s of backoff the sleeper was asked for. `etl_task_duration_seconds`
+ *   is a **separate** timer with its own `record` call, so it is checked separately or the same
+ *   1000x error survives there; the harness clock moves only when the sleeper moves it, so run 1's
+ *   whole task spans those same 6 seconds and nothing else.
  *
  * A `Timer` also exports as `_count` + `_sum` plus a separate `_max` **gauge** on a Prometheus
  * scrape. That is a scrape artefact and not a seventh `Meter`: `registry.meters` holds six, which
@@ -90,6 +98,10 @@ class MetricLabelContractTest {
                             sql = "select lot_id, lot_code, qty from wip",
                             table = "wip_stg",
                             retries = 2,
+                            // Drops one row, so read and written are two different numbers. With
+                            // 6/6 the two counters are indistinguishable and a binding feeding
+                            // rowsRead into both passes - see the class KDoc.
+                            transform = RowTransform { row -> if (row["lot_code"] == "w-0") null else row },
                         ),
                     ),
                 ),
@@ -99,7 +111,9 @@ class MetricLabelContractTest {
                 Etl.task(
                     "wip-broken",
                     // A real DuckDB syntax error: non-transient, so this is one attempt and a
-                    // terminal step failure - not a hook failure, which registers no step meter.
+                    // terminal step failure - not a hook failure. A hook failure would leave every
+                    // etl_step_* series registered too, just none of them from a step that failed,
+                    // which is the path the 0-row assertion below is about.
                     Etl.phase("build", Etl.sql("bad-step", "report_oracle", "this is not sql")),
                 ),
                 TriggerSource.API,
@@ -148,6 +162,7 @@ class MetricLabelContractTest {
             val stepTimer = registry.get(STEP_DURATION)
                 .tags("task", "wip-labels", "phase", "extract", "step", "load-wip")
                 .timer()
+            val taskTimer = registry.get(TASK_DURATION).tags("task", "wip-labels").timer()
             assertAll(
                 {
                     assertEquals(6.0, stepTimer.totalTime(TimeUnit.SECONDS), 1e-9) {
@@ -156,6 +171,33 @@ class MetricLabelContractTest {
                     }
                 },
                 { assertEquals(1L, stepTimer.count()) { "one record per step that ended, not per attempt" } },
+                {
+                    assertEquals(6.0, taskTimer.totalTime(TimeUnit.SECONDS), 1e-9) {
+                        "the task timer is a separate record call and needs its own unit assertion. " +
+                            "The clock moves only when the sleeper moves it, so the whole run spans " +
+                            "the same 2s + 4s; SECONDS instead of MILLISECONDS reads 6000.0 here"
+                    }
+                },
+                { assertEquals(1L, taskTimer.count()) { "one record per run that ended" } },
+                {
+                    assertEquals(
+                        6.0,
+                        registry.get(ROWS)
+                            .tags("task", "wip-labels", "phase", "extract", "step", "load-wip", "direction", "read")
+                            .counter().count(),
+                    ) { "rows read: the source held six rows" }
+                },
+                {
+                    assertEquals(
+                        5.0,
+                        registry.get(ROWS)
+                            .tags("task", "wip-labels", "phase", "extract", "step", "load-wip", "direction", "written")
+                            .counter().count(),
+                    ) {
+                        "rows written: the transform dropped one, which is what makes read and " +
+                            "written two different numbers rather than one number twice"
+                    }
+                },
                 {
                     assertEquals(
                         2.0,

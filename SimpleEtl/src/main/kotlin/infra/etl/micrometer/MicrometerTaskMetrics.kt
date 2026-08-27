@@ -42,14 +42,16 @@ private const val SCRATCH = "etl_scratch_file_bytes"
  * - **Timers take milliseconds in and report seconds out.** Every duration this class is handed is
  *   a `durationMs`, so every `record` states [TimeUnit.MILLISECONDS]. Recording it as SECONDS is
  *   off by a factor of 1000 and passes every name and tag assertion ever written.
- * - `Meter.Id.getTags()` returns tags sorted by **key**, not in spec 9.3's table order:
+ * - `Meter.Id.getTags()` returns tags sorted by **key**, not in spec 9.3's table order (measured
+ *   on 1.14.2 in the P8b review round, `SimpleMeterRegistry`, printed verbatim):
  *   `etl_step_rows_total` reads back `[direction, phase, step, task]`.
  *
  * ### Two operational consequences worth knowing before an alert is written against these
  *
  * A task's meters are registered on its **first run**, so a newly deployed task has no series at
- * all until it fires - an alert on the absence of a series will fire on deployment. And Micrometer
- * never removes a meter, so a task renamed across a reload leaves a stale
+ * all until it fires - an alert on the absence of a series will fire on deployment. And **this
+ * binding** never removes one - `MeterRegistry.remove` and `clear` do exist and were measured to
+ * work; nothing here calls them - so a task renamed across a reload leaves a stale
  * `etl_scratch_file_bytes{task=old}` behind forever, reading whatever its last run reported.
  *
  * Thread safe as [TaskMetrics] requires: [MeterRegistry] is, [ConcurrentHashMap] is, and
@@ -85,7 +87,8 @@ class MicrometerTaskMetrics(private val registry: MeterRegistry) : TaskMetrics {
 
     /**
      * **Both** row directions are registered on every step that ends, including at 0 - measured,
-     * `increment(0.0)` registers the meter with `count() == 0.0`. A step that moved no row and had
+     * `increment(0.0)` registers the meter with `count() == 0.0` - measured on 1.14.2, the meter is
+     * findable afterwards. A step that moved no row and had
      * no series at all would leave a hole in its task's dashboard exactly where an operator looks
      * first. `read` is emitted before `written` so the two halves of a pair agree on order.
      */

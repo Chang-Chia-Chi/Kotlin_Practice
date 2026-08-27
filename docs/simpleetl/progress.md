@@ -969,22 +969,29 @@ Written down because each was the lead's, stated confidently, and wrong:
 - After 500,000 appended rows the DuckDB file was **12,288 bytes** and its WAL held
   **10,416,115**. `diskBytes()` must sum the directory, not the file.
 
-### Open review findings, carried to P8b
+### Open review findings - **updated after P8b; read the P8b entry below for the current list**
 
-Reviewer returned CHANGES REQUIRED. The blocking item and two overclaims are fixed in this
-commit; these remain:
+Reviewer returned CHANGES REQUIRED. The blocking item and two overclaims were fixed in the P8a
+commit. Status of the rest, as of P8b:
 
-- **`TaskRunner`'s caller-identity pass-through has no test** - deleting it leaves the suite green
-  (mutation M1). Nothing in `SchedulingFixtures` builds an engine with a listener.
-- **`TaskHooks.names`' live-view guarantee is untested** (M2).
-- **Hook placement outside the `use` block is unfalsifiable by this suite** (M3): no test
-  distinguishes it from hooks inside. The reviewer named a POSIX route (a listener plants an
-  undeletable path under the public `scratchRoot`); the SDET's KDoc claim that "none can currently
-  falsify it" is wrong and is the honest gap here.
-- **Two start times for one run**: `TaskRunner` still stamps `Instant.now()` while the engine uses
-  the injected clock. Inject the same `Clock` into `TaskRunner` in P8b, or record it.
-- Non-scratch `materialize`'s 0/0 is unasserted; `isolate`'s `Exception`-not-`Throwable` catch is
-  untested (M4).
+- **CLOSED by P8b** - `TaskHooks.names`' live view (M2), hook placement outside the `use` block
+  (M3, closed for free by P8b's merged ordering trace: hooks run after `metrics.scratchBytes`,
+  which is sampled inside the `use`, so the trace now falsifies "hooks moved inside"), non-scratch
+  `materialize`'s 0/0 and `isolate`'s `Exception`-not-`Throwable` catch (M4).
+- **STILL OPEN** - `TaskRunner`'s caller-identity pass-through has no test (M1): deleting the `by`
+  argument leaves the suite green, and nothing in `SchedulingFixtures` builds an engine with a
+  listener. Cut from P8b's scope rather than forgotten.
+- **STRUCK, do not do this** - the earlier instruction here was *"inject the same `Clock` into
+  `TaskRunner` in P8b"*. **That fix does not work and must not be attempted.** One `Clock` gives
+  one time *source*, not one time: `submit` reads it when the trigger arrives and the engine reads
+  it when the coroutine is dispatched, with a `limitedParallelism(1)` view queueing between them,
+  so the two still differ in production by exactly the queue delay. Equality holds only under a
+  frozen test clock, which would have made the test prove same-source while the defect stood.
+  Measured alongside: `TaskRunner` has **three** `Instant.now()` reads and the draft moved one,
+  which would have left a `RunStatus` able to report `finishedAt` before `startedAt` with no test
+  to catch it. The right answer: `RunStatus.startedAt` and `TaskContext.startedAt` measure
+  **different things** - submit time and run-start time - and the gap between them is the queue
+  delay, which is information. Name them distinctly; do not unify them.
 
 ---
 
@@ -1055,4 +1062,97 @@ that hangs looks like an infrastructure problem and is actually a finding about 
 the five P0 `*Spike` classes, one of which appends 6.2M rows ten times. Earlier phase reports that
 used it counted five spike classes as tests: **P8a's real figures are 280 -> 309, not 285 -> 314**.
 The correct exclusion is `-Dtest='!*OracleTest,!*Spike'`, now recorded in `SimpleEtl/CLAUDE.md`.
+
+---
+
+## P8b - Metrics, the Micrometer binding, and `ScratchDb.diskBytes()`  (2026-08-27)
+
+Team: engineer + sdet + reviewer. Contract confirmed by all three, who returned **CHANGES REQUIRED
+with four blocking items**; revision 2 struck three of the lead's own clauses rather than softening
+them. One review cycle after landing. Final: **324 tests, 0 failures** on a clean build. Production
+349 lines; tests 1,069. **~1,418 against a stated 1,000 ceiling - the fifth consecutive overrun**,
+and the second where the lead set a number two roles had already said was unreachable.
+
+### Delivered
+
+`task/TaskMetrics.kt` (the technology-free seam plus `NONE`), `micrometer/MicrometerTaskMetrics.kt`
+(the only class naming `io.micrometer`), `TaskEngine`'s four metric call sites and the `guard`
+hoist, `ScratchDb.diskBytes()`, `micrometer-core` at `provided`, and one KDoc `@param` correction
+in `Observability.kt`.
+
+Tests: `micrometer/MetricLabelContractTest.kt`, `task/TaskMetricsTest.kt`,
+`task/P8aCoverageTest.kt`, three ArchUnit rules including a canary, and additive fixture growth.
+
+### Deviations from the documents
+
+1. **`micrometer-core` is `provided`, not compile.** Spec 2.1 exists so Layer 1 ships to the
+   snapshot cache without Layer 2, and Maven has no layer granularity. Verified two ways:
+   `dependency:list -DincludeScope=runtime` shows no micrometer, and a throwaway two-module reactor
+   resolved zero micrometer artefacts into a consumer while all five jars stayed on the lib's own
+   test classpath. The host obligation this creates is in spec 8.6.
+2. **`TaskRunner` was removed from the phase mid-contract** - see the struck finding above.
+3. **Spec 11.2 amended**: `ScratchDb` gains a fourth method. **Spec 7.2 amended**: the gauge does
+   not carry 7.2's spill term. **Spec 8.6 amended**: two new host obligations, and its lede still
+   said "Two ... Neither" over a seven-row table.
+
+### Four traps closed by measurement rather than by reasoning
+
+- Micrometer holds a gauge's referent **weakly**: a locally-scoped `AtomicLong` read `NaN` after
+  GC, and re-registering an id is **ignored with a WARNING** while the first object stays live. The
+  gauge is a strongly held `AtomicLong` per task name, registered **inside** the `computeIfAbsent`
+  mapping lambda so no external "did I create it?" branch reopens the window.
+- **Timers take milliseconds in and report seconds out.** `record(durationMs, SECONDS)` is a 1000x
+  error that passes every name and tag assertion.
+- **`Meter.Id.getTags()` returns tags key-sorted** - `[direction, phase, step, task]`, measured.
+  An assertion in spec 9.3's table order fails against correct code.
+- After 500,000 appended rows the DuckDB file was **12,288 bytes** and its WAL held **10,416,115**,
+  so `diskBytes()` sums the directory. No `CHECKPOINT`: it folded the same state fourfold.
+
+### The review found two live mutations the phase shipped without
+
+Both confirmed by the lead - each passed all 324 tests before being closed:
+
+| Mutation | Why it survived |
+|---|---|
+| `taskEnded`'s timer records `SECONDS` | the unit was asserted on the *step* timer only; `taskEnded` uses a second, separate timer |
+| `read` counter fed `rowsWritten` | every fixture had `rowsRead == rowsWritten` (6/6 or 0/0), so a swap was invisible. P8a's own test uses a row-dropping `RowTransform` for exactly this reason **and says so in its KDoc**; P8b did not reuse it |
+
+The second is the one worth remembering: the hazard was documented, in this repo, by the same role,
+one phase earlier, and reappeared one layer down anyway.
+
+### The seventh confidently-wrong claim, and it was the lead's
+
+Contract §4 and the shipped KDoc said *"Micrometer never removes a meter."* **False** -
+`MeterRegistry.remove(Meter)` and `clear()` both exist and were measured to work. The operational
+consequence still holds (*this binding* never removes one, so a renamed task leaves a stale
+`etl_scratch_file_bytes{task=old}`), but as written it told a host that a cleanup path they
+actually have does not exist. Corrected.
+
+Three further KDoc claims were written as measured with no run on file - the checkpoint fold,
+`increment(0.0)` registering, and key-sorted `getTags`. The latter two were measured in the review
+round and now say so; the first is labelled as inherited from the P8a spike round.
+
+### A build-hygiene trap worth recording
+
+After reverting an ArchUnit falsification probe, an **incremental** `mvn test` still failed: Kotlin
+left a stale top-level facade class in `target/classes` holding the deleted function, and **ArchUnit
+reads bytecode, not source**. It reported a violation whose source no longer existed. Every
+falsification exercise in this module must run `clean` after reverting, or it chases a phantom.
+
+### Notes for later phases
+
+- **`CacheCopyStep` throws `NotImplementedError`, an `Error`**, which the step loop's
+  `catch (Exception)` misses. So under P8b a P9 cache-copy step produces `scratchBytes` and
+  `taskEnded(FAILED)` but **no `stepEnded` and no `stepError`**. Consistent with the documented
+  `Error` path, but P9 will meet it as "the metric is missing" unless it reads this first.
+- **Still open from P8a:** M1, the caller-identity pass-through (above).
+- **Not falsifiable by this suite, recorded rather than assumed covered:** §3.4's lambda-vs-value
+  distinction on the scratch sample (`RecordingMetrics` throws from the recorder, which both shapes
+  guard, and `diskBytes()` cannot throw); the `read`-then-`written` emission *order*; and
+  `ScratchDb.close()`'s share of the task duration (the injected clock only advances in the
+  sleeper, so `close()` contributes 0 either way).
+- **ArchUnit rule 2's two halves and the canary are unproven.** The interstitial's standard is that
+  every rule be demonstrated able to fail; only rule 1 has been. The canary in particular - moving
+  `MicrometerTaskMetrics` to `infra.etl.task` should turn the canary red while rules 1 and 2 stay
+  green - is the one exercise most worth running.
 

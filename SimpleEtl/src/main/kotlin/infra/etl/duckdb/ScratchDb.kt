@@ -97,7 +97,9 @@ class ScratchDb(
      * a live run by three orders of magnitude. Parquet materialisations (spec 5.6) land in the
      * same directory and are included for the same reason.
      *
-     * **No `CHECKPOINT` is taken first.** Measured on the same state, checkpointing folded
+     * **No `CHECKPOINT` is taken first.** Measured during the P8a spike round on the same 500,000
+     * row state - the numbers below are that run's, and are the one pair in this KDoc not
+     * re-measured in the P8b review: checkpointing folded
      * 10,428,403 bytes into 2,633,728 - a factor of four - so sampling after one would tell an
      * operator to size spec 7.2's volume at a quarter of what the run actually needed. It is also
      * a write against a database that is about to be deleted, on the failure path too.
@@ -107,13 +109,22 @@ class ScratchDb(
      * does **not** carry spec 7.2's spill term, and spec 7.2's own arithmetic makes spill 17.6 of
      * its 30.2 GB. Sizing a volume from this alone would size it for the smaller half.
      *
-     * **Never throws**, per file and overall: it is called from an observability path inside a
+     * **Never throws** - and note that the guards are `runCatching`, which catches `Throwable`, so
+     * this also swallows an `Error`. That is deliberate rather than sloppy: the caller is a
+     * `finally` inside `use`, a Kotlin `finally` that throws *replaces* the in-flight exception
+     * with no suppression, and the metrics guard around this call catches only `Exception`. This
+     * is the one place in the module where the `Exception`/`Throwable` distinction is deliberately
+     * widened, so it is stated rather than left to be discovered. Per file and overall: it is called from an observability path inside a
      * `finally`, and a `finally` that throws replaces the run's real failure. An unreadable path
      * contributes 0 rather than an exception. That branch is not covered by a test: this build
      * runs as root, so a permission-based case would be vacuous rather than green.
      *
-     * Takes no lock. It reads the filesystem, not this object's state, and a lock here would put
-     * a directory walk in front of every `connection()` a concurrently running task makes.
+     * Takes no lock. It reads the filesystem rather than this object's state, so there is nothing
+     * for a lock to protect. An earlier wording justified this by contention with concurrently
+     * running tasks, which cannot happen: one [ScratchDb] is constructed per run (spec 7.2), so no
+     * other task ever calls into this instance. The only concurrent caller is an intra-run
+     * [duplicate] reader, and racing [close] there degrades to a partial sum or 0 - never a throw,
+     * which is the property that matters here.
      */
     fun diskBytes(): Long = runCatching {
         if (!Files.isDirectory(directory)) return@runCatching 0L
