@@ -1032,20 +1032,54 @@ The existing in-house logging mechanism plugs in here. The framework supplies th
 and ships a no-op default.
 
 ```kotlin
-interface TaskRunListener {
-    fun onTaskStart(ctx: TaskContext)
-    fun onTaskEnd(ctx: TaskContext, outcome: Outcome)
-    fun onPhaseStart(ctx: PhaseContext)
-    fun onPhaseEnd(ctx: PhaseContext, outcome: Outcome)
-    fun onStepStart(ctx: StepContext)
-    fun onStepEnd(ctx: StepContext, result: StepResult)
-    fun onStepError(ctx: StepContext, attempt: Int, error: Throwable, willRetry: Boolean)
+sealed interface TaskEvent {
+    val task: TaskContext
+
+    data class TaskStart(override val task: TaskContext) : TaskEvent
+    data class TaskEnd(override val task: TaskContext, val outcome: Outcome) : TaskEvent
+    data class PhaseStart(val phase: PhaseContext) : TaskEvent
+    data class PhaseEnd(val phase: PhaseContext, val outcome: Outcome) : TaskEvent
+    data class StepStart(val step: StepContext) : TaskEvent
+    data class StepEnd(val step: StepContext, val result: StepResult) : TaskEvent
+    data class StepError(
+        val step: StepContext,
+        val attempt: Int,
+        val error: Throwable,
+        val willRetry: Boolean,
+    ) : TaskEvent
+}
+
+fun interface TaskRunListener {
+    fun on(event: TaskEvent)
 }
 ```
 
 `TaskContext` carries runId, taskName, triggerSource, triggeredBy, startedAt.
 `StepResult` carries rowsRead, rowsWritten, durationMs, attempt.
 `logging: false` suppresses listener invocation for that task.
+
+**One method over a closed event set, not one method per event.** The seven-method form this
+section carried until 2026-08-29 put no implementation behind any of its methods, so every
+implementation paid for the whole set whether it cared or not - the no-op, the fan-out, the
+engine's own dispatch and the two test doubles carried 39 bodies of pure mechanism between them,
+and an eighth event would have broken all of them. The change is behaviour-preserving: the same
+events fire in the same order carrying the same payloads, which is what `TaskListenerOrderTest`
+pins by asserting literal trace strings.
+
+Two properties are load-bearing and must survive any later revision:
+
+- **A listener wanting compile-time notice of a new event writes an exhaustive `when` with no
+  `else`.** That replaces the old guarantee, where seven abstract methods with no default bodies
+  meant a host could not miss an addition. It is now the implementation's choice rather than the
+  interface's obligation, and 9.3's `TaskMetrics`, which still declares four abstract methods and
+  no default bodies, is deliberately the stricter of the two seams.
+- **The call site name survives in logs.** An isolation warning names the event as `on` plus the
+  case's own name, so a listener that throws is still reported as `threw from onStepError` and an
+  operator's saved search is unaffected.
+
+A host implementing the seven-method form does not compile against this. That is a real migration
+and the only breaking change in the 2026-08-29 review; the mechanical fix is one `when` over the
+cases, one branch per method the host used to override.
 
 ### 9.3 Metrics
 
@@ -1437,7 +1471,10 @@ class TaskScheduler(cron: CronScheduler) {
     fun apply(definitions: List<TaskDefinition>)   // register / unregister / re-register
 }
 
-class TaskRunner {                            // one limitedParallelism(1) view per task
+/** One limitedParallelism(1) view per task. `submit` is the whole public surface: the run
+ *  records `TaskAdmin` reads (lastRun, outcome) and the confinement context its own tests read
+ *  are `internal`, narrowed to match this declaration by the 2026-08-29 review. */
+class TaskRunner {
     fun submit(definition: TaskDefinition, trigger: TriggerSource, by: String?): TriggerResult
 }
 
@@ -1467,7 +1504,7 @@ class ScratchDb : AutoCloseable {
 ### 11.3 Extension Points
 
 ```kotlin
-interface TaskRunListener {          // full signature in spec 9.2
+fun interface TaskRunListener {      // fun on(event: TaskEvent); TaskEvent's cases in spec 9.2
     companion object {
         val NONE: TaskRunListener                                  // the no-op default 9.2 ships
         fun of(vararg listeners: TaskRunListener): TaskRunListener // fan-out, isolated per listener

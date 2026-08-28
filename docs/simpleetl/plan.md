@@ -246,7 +246,9 @@ CLAUDE.md already fixes.
 - `durationMs` is exact under an injected clock the test sleeper advances. Without the clock the
   claim that a duration spans all attempts is unfalsifiable, because the test sleeper does not
   sleep.
-- An `Error` escaping the engine still propagates **and** still produces `onTaskEnd(FAILED)`.
+- An `Error` escaping the engine still propagates **and** still produces
+  `TaskEvent.TaskEnd(FAILED)` - written `onTaskEnd(FAILED)` when P8a ran, before the 2026-08-29
+  review closed the seven call sites into one sealed event (spec 9.2).
 
 **Not in scope:** metrics of any kind.
 
