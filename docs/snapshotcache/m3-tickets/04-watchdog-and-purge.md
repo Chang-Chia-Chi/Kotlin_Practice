@@ -6,7 +6,10 @@ stays inside a fixed retention window.
 
 The watchdog takes any PENDING row older than the timeout T, verifies its inventory against
 what is actually in MinIO, and conditionally flips it to COMPLETE or FAILED. T comes from
-the worst-case upload time measured in ticket 01. An uploader still working while the
+the worst-case upload time on the real MinIO link - which ticket 01 did NOT measure, since
+there was no MinIO link available to it. Spec 18.6 item 3 is still open and measuring it is
+this ticket's first task. Ticket 01 sized the payload (~14 MB per 1M-row table) and nothing
+more; deriving T from its export duration would be wrong by orders of magnitude. An uploader still working while the
 watchdog wakes up is not a hazard to design around: both go through the conditional
 transitions from ticket 02, so exactly one wins and the other learns it changed nothing.
 This is the single recovery path that both crashes and clean shutdowns feed into.

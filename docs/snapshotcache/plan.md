@@ -254,8 +254,15 @@ Started only after M1 is accepted against spec Sec 17.8. This is production wiri
 
 ## 3c. M3 - Archive & Diff Layer (spec Sec 18)
 
-Started only after M2 is accepted. Everything lives in `infra.snapshotarchive`
-(D30) and consumes the framework only through the public API. The Sec 2.4
+Started only after M2 is accepted, with one recorded carve-out: the spec 18.6
+item-1 export spike was run ahead of the gate on 2026-08-29 (user instruction).
+It needs nothing but DuckDB, it ships no production code, and its answer changes
+P12's design, so running it late would have meant designing P12 twice. Its test
+lives in `infra.snapshotcache.duckdb` because what it pins is an adapter
+capability; see the progress.md entry. P11-P14 themselves remain gated on M2.
+
+Everything else lives in `infra.snapshotarchive` (D30) and consumes the
+framework only through the public API. The Sec 2.4
 do-not-build list continues to govern the framework; for this layer the
 boundary rules are:
 

@@ -472,13 +472,22 @@ Measured on the pinned duckdb_jdbc 1.1.3, three runs: 1M rows -> 14,180,166 byte
 39/41/52 ms. Retention storage sizes off ~14 MB per million rows per table. The
 lease-vs-K question the spec flagged answers itself at 40 ms.
 
-Two smaller findings, both folded in: `executeUpdate` returns the COPY row count, so the
-inventory's `row_count` needs no second scan (guarded with a `check`, since a driver
-returning -1 would put a negative count into a manifest row the watchdog later verifies);
-and A3 survives the export, which is what lets the archiver run against the live serving
-instance at all, so it is asserted rather than assumed.
+Two smaller findings, both folded in. The inventory's `row_count` comes from a `COUNT(*)`,
+not from COPY's update count: 1.1.3 does report one, but an empty table and a driver that
+stopped classifying COPY as DML both yield 0 with nothing downstream able to tell them
+apart, and that value is committed into the PENDING manifest row the watchdog later
+verifies an object against. (An earlier draft of this entry and of spec 18.6 claimed the
+opposite - that COPY's count made the second scan unnecessary. It was corrected in both
+places once the code changed; the claim never matched a shipped test.) And A3 survives the
+export, which is what lets the archiver run against the live serving instance at all, so it
+is asserted rather than assumed.
 
 ### Deviations from the documents
+- **M3 work ran ahead of its gate.** Plan 3c says M3 is "started only after M2 is
+  accepted", and M2 is not implemented (no P9 wiring, no P10 Oracle source). The spike was
+  run anyway, on user instruction, because it is the one piece of M3 that needs nothing but
+  DuckDB and because its answer changes ticket 03's design. Plan 3c now records the
+  carve-out. Tickets 02-05 remain gated on M2 and none of their work was started.
 - **None on contracts.** No main source was modified at all; no frozen interface,
   invariant, equation, enum, or earlier test was touched. Full suite 138 tests, 0 failures
   (135 before, plus these 3; the 2 aborted are the pre-existing Unix-only skips).

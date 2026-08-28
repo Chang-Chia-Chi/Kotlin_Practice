@@ -1148,8 +1148,12 @@ purely operational; diffs stay correct (over-report only).
    snapshot connection. Export therefore streams from the serving instance; the
    `copyOut` staging fallback is not needed and is not built. Writing a file out
    of a READ_ONLY attached database is not a write into it, and the attach stays
-   read-only afterwards (A3 verified in the same spike). `COPY` also reports the
-   rows it wrote, so the inventory's `row_count` costs no second scan.
+   read-only afterwards (A3 verified in the same spike). The inventory's
+   `row_count` must come from a `COUNT(*)`, not from `COPY`'s own update count:
+   1.1.3 does report one, but an empty table and a driver that stopped
+   classifying `COPY` as DML both yield 0 and nothing downstream can tell them
+   apart - and that value is committed into the PENDING manifest row that the
+   watchdog later verifies a real object against.
 2. **CLOSED 2026-08-29 (spike, ticket 01).** 1M rows exported to 14.2 MB in
    ~40 ms on the pinned 1.1.3 (three runs, byte-identical). Size matches the
    "tens of MB" expectation; duration beats "seconds" by two orders of
