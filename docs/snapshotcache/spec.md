@@ -1143,11 +1143,19 @@ purely operational; diffs stay correct (over-report only).
 
 ### 18.6 Open items before M3 implementation
 
-1. Can DuckDB 1.1.3 run `COPY (SELECT ...) TO '<file>.parquet'` on a read-only
-   attached snapshot connection? If yes, export streams from the serving
-   instance; if no, stage via public `copyOut` into the shared consumer
-   instance (D16) and export from there. Spike first.
-2. Measure real checkpoint size and export duration at 1M rows (expected: tens
-   of MB, seconds) - confirms the lease-vs-K interaction is a non-issue and
-   sizes retention storage.
-3. Watchdog timeout T vs worst-case upload time on the real MinIO link.
+1. **CLOSED 2026-08-29 (spike, ticket 01).** DuckDB 1.1.3 runs
+   `COPY (SELECT ...) TO '<file>.parquet'` directly on a read-only attached
+   snapshot connection. Export therefore streams from the serving instance; the
+   `copyOut` staging fallback is not needed and is not built. Writing a file out
+   of a READ_ONLY attached database is not a write into it, and the attach stays
+   read-only afterwards (A3 verified in the same spike). `COPY` also reports the
+   rows it wrote, so the inventory's `row_count` costs no second scan.
+2. **CLOSED 2026-08-29 (spike, ticket 01).** 1M rows exported to 14.2 MB in
+   ~40 ms on the pinned 1.1.3 (three runs, byte-identical). Size matches the
+   "tens of MB" expectation; duration beats "seconds" by two orders of
+   magnitude, so a lease held across an export cannot interact with the K
+   ceiling in any way worth designing around.
+3. **OPEN.** Watchdog timeout T vs worst-case upload time on the real MinIO
+   link. The spike sizes the payload (~14 MB per 1M-row table) but cannot
+   measure the link; T must be set against a real upload before ticket 04
+   ships.

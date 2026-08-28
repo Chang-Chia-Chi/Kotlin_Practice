@@ -444,3 +444,64 @@ has a non-test justification - E2E's `coldGroup` is a group that never refreshes
   also make the guard above a single wrapper rather than a helper each call site must
   remember. Blocked: the signature is FIXED and pinned to spec 12.2 labels plus
   `MetricLabelContractTest`, so it needs a spec change first.
+
+## M3 ticket 01 - Parquet export spike  (2026-08-29)
+
+M3 was broken into five tickets under `docs/snapshotcache/m3-tickets/`, mapping onto
+plan P11-P14 with the spec 18.6 spike promoted ahead of them as its own ticket. This entry
+covers ticket 01 only.
+
+### Delivered
+- `infra/snapshotarchive/ParquetExport.kt` - `exportTable(connection, table, target): Long`.
+  One statement: `COPY (SELECT * FROM <table>) TO '<file>' (FORMAT PARQUET)`, returning the
+  row count `COPY` itself reports. ~20 lines of code.
+- `ParquetExportSpikeTest` (3 tests) - exports from the real store's READ_ONLY-attached
+  duplicate connection, asserts the attach is still read-only afterwards, and reads the file
+  back through a separate instance to prove it is portable Parquet. The third test carries
+  the 18.6 item-2 measurement with tripwire bounds.
+- Spec 18.6 items 1 and 2 closed in the spec; item 3 left open and re-scoped.
+
+### The answer
+`COPY ... TO '<f>.parquet'` works directly on a read-only attached snapshot connection.
+The `copyOut` staging fallback (D16) is not needed and was not built - that was the fork
+this ticket existed to resolve, and it collapses ticket 03's export step to one statement
+under the lease the archiver already holds.
+
+Measured on the pinned duckdb_jdbc 1.1.3, three runs: 1M rows -> 14,180,166 bytes in
+39/41/52 ms. Retention storage sizes off ~14 MB per million rows per table. The
+lease-vs-K question the spec flagged answers itself at 40 ms.
+
+Two smaller findings, both folded in: `executeUpdate` returns the COPY row count, so the
+inventory's `row_count` needs no second scan (guarded with a `check`, since a driver
+returning -1 would put a negative count into a manifest row the watchdog later verifies);
+and A3 survives the export, which is what lets the archiver run against the live serving
+instance at all, so it is asserted rather than assumed.
+
+### Deviations from the documents
+- **None on contracts.** No framework source was modified; no frozen interface, invariant,
+  equation, enum, or earlier test was touched. Full suite 138 tests, 0 failures (135 before,
+  plus these 3; the 2 aborted are the pre-existing Unix-only skips).
+- `ident`/`literal` are duplicated from `infra.snapshotcache.spi` rather than imported.
+  Deliberate: plan 3c fences `infra.snapshotarchive` off from `spi`, and two one-line
+  functions cost less than the dependency ticket 02's ArchUnit rule exists to forbid.
+
+### Notes for later tickets
+- **Row count comes from `COUNT(*)`, not from COPY's update count.** 1.1.3 does report it,
+  but an empty table and a driver that stopped classifying COPY as DML both return 0, and
+  nothing downstream could tell them apart - a 0 recorded for a 1M-row table would be
+  committed into the PENDING inventory and then "verified" against the real object. Probed
+  before deciding: `executeQuery` is rejected outright for COPY, so there is no third option.
+- **The `infra.snapshotarchive` fence is a convention, not a gate, until ticket 02.**
+  `ArchitectureTest` imports only `infra.snapshotcache`, so no rule currently sees the new
+  package: it could reach into `spi`, `core`, or `org.duckdb` today with a green build.
+  Ticket 02 owns closing this and it is that ticket's first task.
+- **Spec 18.6 item 3 is still open and is ticket 04's input.** The spike sizes the payload
+  (~14 MB) but there is no MinIO link on this machine, so the worst-case upload time behind
+  the watchdog timeout T was not measured. T must not be picked from the export number.
+- **M2 is not implemented.** No P9 wiring, no P10 Oracle source, and the module pom has no
+  JDBI, Oracle driver, or MinIO client. Tickets 02-05 need all of those; plan 3c gates M3 on
+  M2 being accepted. Ticket 01 was the only one that could run today - it needs DuckDB alone.
+- Maven is not on PATH in this environment. The suite was compiled and run directly against
+  the cached `.m2` jars (Kotlin 2.2.0 compiler, `-Xfriend-paths` for the `internal` test
+  access, main and test into `target/classes` / `target/test-classes` so ArchUnit's
+  DO_NOT_INCLUDE_TESTS still excludes tests). Anyone re-running should just use `mvn test`.
