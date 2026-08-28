@@ -519,3 +519,67 @@ is asserted rather than assumed.
   the cached `.m2` jars (Kotlin 2.2.0 compiler, `-Xfriend-paths` for the `internal` test
   access, main and test into `target/classes` / `target/test-classes` so ArchUnit's
   DO_NOT_INCLUDE_TESTS still excludes tests). Anyone re-running should just use `mvn test`.
+
+## M3 ticket 02 (P11) - Manifest DAO, version allocation, archive boundary  (2026-08-29)
+
+### Delivered
+- `infra/snapshotarchive/ManifestDao.kt` - `ArchiveStatus`, `ManifestEntry`,
+  `DataAsOfRegression`, `ManifestSchema` (DDL) and `ManifestDao`. Sequence-allocated
+  versions, insert-PENDING with the inventory CLOB, conditional PENDING->COMPLETE /
+  PENDING->FAILED, newest-COMPLETE lookup, the D35 watermark predicate, and the raw
+  expired-versions query. ~250 lines.
+- `ManifestDaoTest` - 15 contract tests against a real Oracle.
+- `ArchitectureTest` - the two plan 3c rules, plus `infra.snapshotarchive` added to
+  `importPackages` so they actually evaluate.
+- pom: `jdbi3-core` (compile), `testcontainers:oracle-free`, `testcontainers:junit-jupiter`
+  and `ojdbc11` (test), versions matched to SimpleEtl's.
+- Build: 155 tests, 0 failures, 2 pre-existing Unix-only skips. `mvn -pl snapshotcache -am
+  clean test` via the Maven bundled with IntelliJ.
+
+### The test-database decision (owed by the ticket)
+**Real Oracle via Testcontainers `gvenzl/oracle-free:slim-faststart`**, not an H2 subset.
+Three of P11's acceptance criteria are Oracle semantics rather than SQL: sequence
+allocation, the row count a conditional UPDATE reports when it matches nothing, and CLOB
+round-tripping. A green suite against a compatibility mode would prove the DAO works on H2.
+SimpleEtl's read seam already tests against real Oracle for the same reason. One container
+per class (~40 s including boot); each test uses its own group id, so nothing depends on
+another test's rows or on the shared sequence's absolute values.
+
+### Deviations from the documents
+- **DDL uses `TIMESTAMP WITH TIME ZONE`, where spec 18.2 writes bare `TIMESTAMP`.** The
+  manifest is read back by a different process than wrote it, and a bare TIMESTAMP
+  round-trips through whatever default zone each JVM happens to have - which would silently
+  shift every `data_as_of` comparison the D35 watermark predicate depends on. Bound and read
+  as UTC throughout. Spec 18.2's DDL is illustrative (it carries no column widths either),
+  so this is a tightening, not a contradiction.
+- **Added a `CHECK` constraint on `status` and an index on `(group_id, status, data_as_of)`,**
+  neither in spec 18.2. The check stops a typo inventing a fourth state that readers would
+  treat as "not COMPLETE" forever; the index serves the watermark query, which is the hot read.
+- **`expired()` ages rows by `data_as_of`, not `created_at`.** What makes a checkpoint useful
+  to an ETL is how stale its data is, and that is the same clock the watermark predicate
+  reads. Spec 18.5 does not say which.
+- **The monotonicity guard raises `DataAsOfRegression` rather than returning a value.** Spec
+  18.3 step 2 calls it "skip + alert"; an ignorable return would let a caller publish a
+  checkpoint that moves the diff baseline backwards, which is the one failure D31 exists to
+  prevent.
+- **M2 gate**: P11 ran with M2 still unimplemented, on user instruction, same carve-out as
+  ticket 01. Recorded in plan 3c. Nothing in P11 needs P9 or P10 - it touches Oracle and
+  nothing else.
+- No frozen interface, invariant, equation or enum changed; no earlier test modified.
+  `ArchitectureTest` was extended, never weakened.
+
+### Evidence the new ArchUnit rules are not vacuous
+A planted `infra.snapshotarchive` -> `infra.snapshotcache.duckdb` reference was compiled and
+the rule failed with 2 violations; the plant was then removed. Worth repeating for any future
+boundary rule - the first full run after deleting the plant still failed, because Kotlin's
+incremental compile left the stale `.class` in `target/classes` and ArchUnit reads compiled
+output, not sources. `clean` is required when removing a planted violation.
+
+### Notes for later tickets
+- **Tickets 03-05 are blocked on more than M2 now.** The MinIO Java client is not in the
+  local `.m2` and this environment has no network for Maven; the `minio/minio` Docker image
+  is present, so a Testcontainers MinIO is viable once the client artifact can be resolved.
+- `insertPending` guards and inserts in one transaction. Runs for one group are serialized by
+  the archiver (spec 18.2), so that window is closed twice over rather than relying on either.
+- The DAO holds no retention policy on purpose. D34's keep-newest-COMPLETE rule is ticket
+  04's and belongs where the purge decision is made, not hidden in a query.

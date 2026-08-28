@@ -25,16 +25,19 @@ never depend on the archive layer, and the archive layer reaches the framework o
 
 **Blocked by:** None (can start immediately; parallel with 01).
 
-**Status:** ready-for-agent
+**Status:** done (2026-08-29) - all criteria met
 
-- [ ] Manifest DDL matches spec 18.2, with `(group_id, version)` as the primary key and version allocated by an Oracle sequence
-- [ ] DAO supports insert-PENDING with inventory json, conditional PENDING to COMPLETE, conditional PENDING to FAILED, newest-COMPLETE lookup, watermark query, and expired-versions query
-- [ ] A conditional transition from any state other than PENDING affects zero rows and reports that to its caller rather than throwing or silently succeeding
-- [ ] Contract test: two concurrent writers attempt the same transition, exactly one wins
-- [ ] Contract test: the watermark predicate is exercised at its boundaries — `data_as_of` exactly equal to T, no COMPLETE rows at all, and every COMPLETE row newer than T
-- [ ] Contract test: the monotonicity guard rejects a `data_as_of` regression
-- [ ] `ArchitectureTest` imports `infra.snapshotarchive` as well as `infra.snapshotcache` — without this the two rules below are declared but never evaluated
-- [ ] ArchUnit: `infra.snapshotcache..` must not depend on `infra.snapshotarchive..`
-- [ ] ArchUnit: `infra.snapshotarchive..` must not depend on `infra.snapshotcache.{spi,core,duckdb}..`
-- [ ] The test database choice (testcontainer versus an H2-compatible subset) is decided in-phase and recorded in progress.md
-- [ ] No frozen interface, invariant, equation, or enum is changed
+- [x] Manifest DDL matches spec 18.2, with `(group_id, version)` as the primary key and version allocated by an Oracle sequence
+- [x] DAO supports insert-PENDING with inventory json, conditional PENDING to COMPLETE, conditional PENDING to FAILED, newest-COMPLETE lookup, watermark query, and expired-versions query
+- [x] A conditional transition from any state other than PENDING affects zero rows and reports that to its caller rather than throwing or silently succeeding
+- [x] Contract test: two concurrent writers attempt the same transition, exactly one wins
+- [x] Contract test: the watermark predicate is exercised at its boundaries — `data_as_of` exactly equal to T, no COMPLETE rows at all, and every COMPLETE row newer than T
+- [x] Contract test: the monotonicity guard rejects a `data_as_of` regression
+- [x] `ArchitectureTest` imports `infra.snapshotarchive` as well as `infra.snapshotcache` — without this the two rules below are declared but never evaluated
+      — verified non-vacuous: a planted archive→duckdb reference failed the rule with 2 violations.
+- [x] ArchUnit: `infra.snapshotcache..` must not depend on `infra.snapshotarchive..`
+- [x] ArchUnit: `infra.snapshotarchive..` must not depend on `infra.snapshotcache.{spi,core,duckdb}..`
+- [x] The test database choice (testcontainer versus an H2-compatible subset) is decided in-phase and recorded in progress.md
+      — real Oracle via Testcontainers `gvenzl/oracle-free:slim-faststart`; sequences, conditional-UPDATE
+      row counts and CLOB are Oracle semantics an H2 subset would only approximate.
+- [x] No frozen interface, invariant, equation, or enum is changed

@@ -7,14 +7,21 @@ import com.tngtech.archunit.lang.syntax.ArchRuleDefinition.noClasses
 import org.junit.jupiter.api.Test
 
 /**
- * The five boundary rules of plan 2.2. These are the module's static-analysis gate;
- * they run on every build from P0 onward rather than being retrofitted later.
+ * The five boundary rules of plan 2.2, plus the two archive-layer rules of plan 3c. These
+ * are the module's static-analysis gate; they run on every build from P0 onward rather than
+ * being retrofitted later.
  */
 class ArchitectureTest {
 
+    /**
+     * Both package trees, not just the framework's. `infra.snapshotarchive` has to be
+     * imported for the plan 3c rules below to see anything at all - a rule whose subject
+     * package was never imported passes vacuously, which is worse than no rule because it
+     * reads as enforcement.
+     */
     private val framework: JavaClasses = ClassFileImporter()
         .withImportOption(ImportOption.Predefined.DO_NOT_INCLUDE_TESTS)
-        .importPackages("infra.snapshotcache")
+        .importPackages("infra.snapshotcache", "infra.snapshotarchive")
 
     @Test
     fun `framework does not depend on business packages`() {
@@ -58,6 +65,37 @@ class ArchitectureTest {
         noClasses().that().resideInAPackage("infra.snapshotcache.core..")
             .should().dependOnClassesThat().resideInAPackage("java.sql..")
             .because("java.sql is permitted only in api signatures, spi and duckdb (plan 2.2)")
+            .check(framework)
+    }
+
+    /**
+     * Plan 3c, first archive rule. D30 puts the archive layer outside the framework
+     * precisely so the framework's five-interface budget and its D10/D22/D24 decisions stay
+     * untouched; a single edge in this direction would undo that silently.
+     */
+    @Test
+    fun `the framework does not depend on the archive layer`() {
+        noClasses().that().resideInAPackage("infra.snapshotcache..")
+            .should().dependOnClassesThat().resideInAPackage("infra.snapshotarchive..")
+            .because("the archive layer is a consumer of the framework, never part of it (D30, plan 3c)")
+            .check(framework)
+    }
+
+    /**
+     * Plan 3c, second archive rule. The archive layer is a consumer like any other, so it
+     * reaches the framework through `api` only. Without this, it could bind itself to
+     * internals that carry no compatibility promise - and the DuckDB adapter in particular
+     * is pinned to 1.1.3 for a CI constraint the archive layer does not share.
+     */
+    @Test
+    fun `the archive layer reaches the framework through api only`() {
+        noClasses().that().resideInAPackage("infra.snapshotarchive..")
+            .should().dependOnClassesThat().resideInAnyPackage(
+                "infra.snapshotcache.spi..",
+                "infra.snapshotcache.core..",
+                "infra.snapshotcache.duckdb..",
+            )
+            .because("the archive layer consumes the public API only (D30, plan 3c)")
             .check(framework)
     }
 
