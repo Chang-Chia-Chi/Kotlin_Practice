@@ -1754,3 +1754,70 @@ Nothing needed amending: no commit's claims turned out to be wrong. The caveat s
 commit message and in `SimpleEtl/CLAUDE.md`'s note about inherited Oracle claims are left as
 written - they were true when written, and rewriting a pushed message to look better afterwards is
 how a history stops being evidence.
+
+## Design review of `infra.etl.task` - the two shallow seams  (2026-08-29)
+
+Not a phase. A depth review of the whole `task` package - eleven files, 3,262 lines - asking of
+each module how much behaviour a caller gets per unit of interface it has to learn. Suite 362
+green before the work and 362 green after, without Docker; no test was edited to make a refactor
+pass, and the two test files that are touched are repointed at a renamed call, not at a changed
+assertion.
+
+Most of the cluster is deep and was left alone. `TaskEngine` puts 893 lines behind `run(...)`,
+`TaskFileLoader` 991 behind `load(directory)`, and both fail the deletion test in the right
+direction - remove either and retry classification, spec 5.5's attempt-suffix publishing, variable
+binding and the twenty-one validation rules reappear in every caller. `Events`, `LoadResult`,
+`PipeTarget` and `TriggerResult` are all the shapes they should be. Two places were not.
+
+### Landed
+
+- **`TaskRunner`'s public surface is now the one method spec 11.2 declares.** It shipped four.
+  `lastRun` and `outcome` have exactly one caller, `TaskAdmin`, in the same module; `context` has
+  no production caller at all and existed so `TaskRunnerCoroutineNameTest` could read the
+  `CoroutineName` - an internal seam exposed through the public interface because a test uses it.
+  All three are `internal`, which the same-module tests and `TaskAdmin` still reach. This one moves
+  *toward* the document rather than away from it: spec 11.2 line 1440 declares `TaskRunner` with
+  `submit` and nothing else, and until now the code was wider than the contract.
+- **`TaskRunListener` is one method over a sealed `TaskEvent`.** Seven abstract methods with no
+  implementation behind any of them meant every implementation paid for the whole set: the no-op,
+  the fan-out, the engine's dispatch and two test doubles carried **39 bodies** of pure mechanism
+  between them, and an eighth event would have broken all of them. Now 4. `NoOpTaskRunListener`
+  becomes `TaskRunListener {}`, `ForwardingListener` becomes one line, and
+  `CompositeTaskRunListener` and `TaskEngine.Events` each collapse to a single method.
+
+  Two properties were kept rather than traded. `TaskEvent.site()` renders `"on"` plus the case's
+  own name, so an isolation warning still reads `threw from onStepError` and an operator's saved
+  search survives. And the compile-time notice `TaskMetrics`' KDoc credits to having no default
+  bodies still holds: `RecordingListener`'s `when` is exhaustive with no `else`, so an eighth event
+  breaks the build - it is now the implementation's choice rather than the interface's obligation.
+
+  **The measurement, because the first estimate was wrong.** This was proposed as deleting "~21
+  bodies"; recounted against the real fixtures before writing, it deletes 35 method bodies and adds
+  **16 lines net**, since the sealed hierarchy costs more declaration than seven abstract methods
+  did. The win is structural - one call-site pattern, one file to touch when an event is added -
+  not size. `TaskListenerOrderTest` is the evidence nothing moved: eleven tests asserting literal
+  trace strings, untouched and green.
+
+### The deviation this creates, and the document debt it leaves
+
+**Spec 9.2 (line 1035) and spec 11.2 (line 1470) declare `TaskRunListener` with seven methods, and
+the code no longer matches.** That is a deliberate deviation, recorded here, and it is recorded the
+wrong way round: the house rule is to update the document first. It was not, because the review was
+run with the documents explicitly set aside for it. **Spec 9.2 and 11.2 are now stale and should be
+rewritten to the sealed form before the next phase reads them.** Until they are, a session that
+follows the rule "documents win" will reintroduce seven methods.
+
+### Declined - and already declined once
+
+The third finding was that `TaskAdmin` and `TaskScheduler` each hold a copy of the current
+definition map, with `TaskScheduler` carrying publish-before-register ordering and a rollback purely
+to protect its copy. Traced before proposing a fix: `TaskAdmin` *receives* the scheduler, so handing
+the scheduler a `(String) -> TaskDefinition?` is a construction cycle, and breaking it means either
+inverting ownership - at which point `TaskAdmin`'s documented "the constructor registers no cron"
+stops being true - or adding a module. The duplication has no observable defect: `reload` and
+`trigger` share one monitor, so no trigger can see the intermediate state.
+
+This is **L10 of review fix pass 3**, re-derived independently and reaching the same answer by a
+different route. Pass 3 declined it as needing the lead rather than a refactor pass, on the grounds
+that it is a second deviation from a signature the spec does declare. Both reasons still stand.
+Left as is, now twice.
