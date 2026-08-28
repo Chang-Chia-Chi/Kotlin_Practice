@@ -18,6 +18,13 @@
         <jdbi.version>3.45.4</jdbi.version>
         <testcontainers.version>1.20.4</testcontainers.version>
         <ojdbc.version>23.5.0.24.07</ojdbc.version>
+        <minio.version>8.5.17</minio.version>
+        <!-- The Testcontainers MinIO module is newer than the core the Oracle tests pin; its
+             own core is excluded below so both container types run on 1.20.4. -->
+        <testcontainers.minio.version>1.21.3</testcontainers.minio.version>
+        <!-- Already on the classpath transitively via MinIO; declared so the inventory CLOB's
+             codec does not silently depend on a transitive that MinIO could drop. -->
+        <jackson.version>2.18.0</jackson.version>
     </properties>
 
     <dependencies>
@@ -79,6 +86,36 @@
             <artifactId>ojdbc11</artifactId>
             <version>${ojdbc.version}</version>
             <scope>test</scope>
+        </dependency>
+        <!-- M3/P12: the archive layer's object store, behind the concrete ObjectStore wrapper.
+             Same fence as JDBI above - the ArchUnit rules keep it inside infra.snapshotarchive,
+             so the framework core still boots with neither MinIO nor a network. -->
+        <dependency>
+            <groupId>io.minio</groupId>
+            <artifactId>minio</artifactId>
+            <version>${minio.version}</version>
+        </dependency>
+        <!-- The inventory CLOB codec (spec 18.2). -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+            <version>${jackson.version}</version>
+        </dependency>
+        <!-- P12's protocol tests drive a fake object store so the crash matrix stays fast and
+             deterministic. This container exists for the one thing a fake cannot prove: that
+             ObjectStore's put/stat really do what the fake pretends. Its transitive
+             Testcontainers core is excluded so the Oracle tests' 1.20.4 core serves both. -->
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>minio</artifactId>
+            <version>${testcontainers.minio.version}</version>
+            <scope>test</scope>
+            <exclusions>
+                <exclusion>
+                    <groupId>org.testcontainers</groupId>
+                    <artifactId>testcontainers</artifactId>
+                </exclusion>
+            </exclusions>
         </dependency>
     </dependencies>
 </project>

@@ -583,3 +583,110 @@ output, not sources. `clean` is required when removing a planted violation.
   the archiver (spec 18.2), so that window is closed twice over rather than relying on either.
 - The DAO holds no retention policy on purpose. D34's keep-newest-COMPLETE rule is ticket
   04's and belongs where the purge decision is made, not hidden in a query.
+
+## M3 ticket 03 (P12) - Archiver run, scheduling, graceful shutdown  (2026-08-29)
+
+### Delivered
+- `infra/snapshotarchive/Archiver.kt` - `ArchivedObject`, `Inventory` (the spec 18.2 CLOB
+  codec), `ArchiveStep`, `RunOutcome` and `Archiver`. The spec 18.3 step order verbatim:
+  export every table under one lease (per-table tasks in parallel), inventory it, guard +
+  insert PENDING in the DAO's single transaction, upload, verify against the inventory,
+  conditional flip to COMPLETE, release, delete temp. Per-group skip-if-busy, cross-group
+  parallelism on a bounded pool, plain-JDK scheduling, and the shutdown of spec 18.3.
+  ~240 code lines.
+- `infra/snapshotarchive/ObjectStore.kt` - the MinIO seam. A concrete class with two `open`
+  methods (`put`, `sizeOf`), not a new interface; the spec 2.3 budget is untouched. ~23 lines.
+- `ArchiverTest` - 13 tests against real Oracle + real DuckDB + a fake store: happy path,
+  the no-object-before-the-row ordering, the D31 skip-and-alert, a five-case crash matrix,
+  per-group serialization, cross-group parallelism, per-table export parallelism, shutdown
+  mid-upload, and the scheduler. Zero sleeps.
+- `ObjectStoreTest` - 2 tests against a real MinIO container, covering exactly what the fake
+  cannot: that `put`/`sizeOf` do what the fake pretends, absence included.
+- pom: `io.minio:minio` and `com.fasterxml.jackson.core:jackson-databind` (compile),
+  `org.testcontainers:minio` (test).
+- Build: **170 tests, 0 failures, 2 pre-existing Unix-only skips** (155 before, plus these 15).
+
+### Where the export function landed, and why
+**In `infra.snapshotarchive`, as `Archiver.exportTable`** - the ticket's second option. The
+first would have put it beside `copyOut` in `infra.snapshotcache.duckdb`, which means a seam
+on the frozen `GenerationStore`/`OpenGeneration` spi and therefore a plan amendment before a
+line of it could be written. Nothing was bought for that: the statement runs on the
+connection the public `Snapshot` already hands out, and the public API already assumes its
+callers speak DuckDB - `CopyOutSpec` takes caller SQL and a caller connection. The archiver
+is that caller. Ticket 01's finding carried over unchanged, including the `COUNT(*)` for
+`row_count`.
+
+### Deviations from the documents
+- **M2 gate, again.** Plan 3c gates P12-P14 on M2 being accepted and on a resolvable MinIO
+  artifact. M2 is still unimplemented; the MinIO client and the Testcontainers MinIO module
+  turned out to be in the local `.m2`, so the second half of the gate lifted. Ran on user
+  instruction, same carve-out as tickets 01 and 02. No Quarkus, no CDI, no `@Scheduled`, no
+  Micrometer: scheduling is a plain `ScheduledExecutorService`, which is what P9 will later
+  wrap rather than replace.
+- **Size budget exceeded.** ~263 code lines of main and ~373 of test (982 including the doc
+  comments), against the 200-600 guidance. Reported rather than trimmed: eight acceptance
+  criteria, five of them separate interleavings, and the crash matrix is the deliverable.
+- **`ArchiveStep` is a new enum, not new `api.Hook` values.** `Hook` is frozen and belongs to
+  the framework; the archive layer is a consumer (D30). Same shape, same no-op default.
+- **The interleaving tests use latches and barriers directly, not the P5 `HookDriver` class.**
+  That class implements `HookRunner` and its `Gate` is keyed on `api.Hook`, so it cannot
+  express an archive step without changing the frozen enum. The style is the P5 style - armed
+  park points, bounded waits that throw rather than hang, zero sleeps - and where a test needs
+  two threads to be somewhere at once it uses a `CyclicBarrier`, which fails loudly if the
+  code serialized them instead of merely looking slow.
+- **`ident`/`literal` are duplicated as private one-liners.** The framework's copies are
+  `internal` in `infra.snapshotcache.spi`, which plan 3c puts off limits to this package.
+  Two lines duplicated is cheaper than widening the boundary rule that keeps them apart.
+- **The archive tests use a test-local `SnapshotCache`/`Snapshot` over a real DuckDB file
+  attached READ_ONLY**, rather than wiring `DuckDbGenerationStore` + `GenerationRegistry` +
+  `DefaultSnapshotCache`. ArchUnit excludes tests, so using them would have compiled - which
+  is exactly why it is worth not doing: D30 says this layer consumes the public API, and its
+  tests consume the same surface. The export still runs the real `COPY ... TO parquet` against
+  a real READ_ONLY attach; that the *serving* store's connection behaves identically is what
+  `ParquetExportSpikeTest` and the P8 e2e already prove.
+- **Jackson is declared explicitly** even though MinIO already drags it in. The inventory CLOB
+  is a durable format read back by ticket 04's watchdog and ticket 05's diff helper; leaning
+  on a transitive that MinIO is free to drop is not the place to save four lines of pom.
+- **The Testcontainers MinIO module is 1.21.3 with its own core excluded**, so the Oracle
+  tests' 1.20.4 core serves both container types - `oracle-free` has no 1.21.3 in the local
+  `.m2`, and two Testcontainers cores on one classpath resolve by declaration order. The image
+  is pinned to `RELEASE.2024-10-02T17-50-41Z`, the tag this machine has; the module's default
+  tag is not present and there is no network to fetch it.
+- **`ObjectStore` does not create its bucket.** Like the manifest table it is provisioned
+  ahead of the process. A bucket auto-created by whichever pod booted first is ambient
+  behaviour in a layer whose entire value is that nothing happens out of order.
+- **`Archiver.submit` is public.** It is the scheduler's own path, and it is the only way an
+  in-flight run can be interruptible by `close()` - a run started on a caller's thread is not
+  the archiver's to interrupt. The shutdown test needs exactly that.
+- No frozen interface, invariant, equation or enum changed; no earlier test modified;
+  `ManifestDao` untouched.
+
+### What shutdown actually interrupts
+`close()` stops scheduling, `shutdownNow()`s both pools, waits out the drain budget, then
+deletes the temp root. The interrupt lands at the archiver's own checkpoints (one before each
+upload) and at any interruptible blocking call. A run parked in a socket read inside the MinIO
+client is not interruptible and drains only when that client's own timeout fires - at which
+point the framework reports the still-outstanding lease exactly as spec 10.2 step 4 says. This
+is a real ceiling, not an oversight: forcing it would mean closing the HTTP client underneath a
+live request, and the PENDING row is designed to survive precisely this.
+
+The run's own PENDING row is deliberately left alone, and there is a test whose only job is to
+watch it not be cleaned up.
+
+### Notes for later tickets
+- **The inventory codec is `Inventory.encode`/`decode` in `Archiver.kt`.** `object_key` is
+  relative to the row's `uri_prefix`; the absolute layout lives in `ManifestDao.uriPrefix` and
+  is not duplicated. Ticket 04's watchdog and ticket 05's downloader should both go through
+  `Inventory.decode` rather than re-reading the JSON.
+- **Verification is presence + size, not checksum.** The checksum is recorded in the inventory
+  but confirming it needs a download, which is the wrong price for an upload-path check. If
+  ticket 04's watchdog wants a stronger verdict, the SHA-256 is already sitting in the row.
+- **`ObjectStore` has no `delete`.** Ticket 04's purge needs one; add it there, where the first
+  caller is, rather than shipping it now with none.
+- **Spec 18.6 item 3 is still open.** The watchdog timeout T versus real upload time was not
+  measured; `ObjectStoreTest` uploads 4 KB to a container on localhost, which sizes nothing.
+- **`tables` is explicit configuration, not catalog discovery.** D36 requires archived tables
+  to declare stable primary keys, which is a property of the schema contract rather than of
+  whatever happens to be attached. P9's wiring should feed this map from config.
+- The suite now boots two Oracle containers (one per class, sequentially) and one MinIO, so a
+  full `mvn test` is around four minutes on this machine.

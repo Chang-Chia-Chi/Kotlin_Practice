@@ -41,13 +41,14 @@ connection the store ATTACHes into.
 
 **Blocked by:** 01 (the export path must be decided before the run can be written), 02 (the run needs the DAO).
 
-**Status:** ready-for-agent
+**Status:** done (2026-08-29)
 
-- [ ] Happy path produces a COMPLETE version whose uploaded objects match the recorded inventory exactly
-- [ ] A run never writes an object to MinIO before its covering PENDING row is committed
-- [ ] A run whose `data_as_of` is not strictly greater than the newest COMPLETE version's skips and alerts
-- [ ] Crash injected between every adjacent step pair leaves either no row at all, or PENDING with partial objects — never a COMPLETE row that cannot be trusted
-- [ ] Per-group serialization and cross-group parallelism are asserted with the P5 hook-driver style; no `Thread.sleep` anywhere
-- [ ] Shutdown mid-upload releases the lease within the drain budget and leaves no temp files
-- [ ] Shutdown never resolves the run's own PENDING row
-- [ ] Per-table export tasks run in parallel within a run, on the path decided in ticket 01
+- [x] Happy path produces a COMPLETE version whose uploaded objects match the recorded inventory exactly
+- [x] A run never writes an object to MinIO before its covering PENDING row is committed
+- [x] A run whose `data_as_of` is not strictly greater than the newest COMPLETE version's skips and alerts
+- [x] Crash injected between every adjacent step pair leaves either no row at all, or PENDING with partial objects — never a COMPLETE row that cannot be trusted
+- [x] Per-group serialization and cross-group parallelism are asserted with the P5 hook-driver style; no `Thread.sleep` anywhere
+      (latch/barrier hook driving, not the P5 `HookDriver` class itself - its `Gate` is keyed on the frozen `api.Hook` enum, which this layer may not extend; see progress.md)
+- [x] Shutdown mid-upload releases the lease within the drain budget and leaves no temp files
+- [x] Shutdown never resolves the run's own PENDING row
+- [x] Per-table export tasks run in parallel within a run, on the path decided in ticket 01

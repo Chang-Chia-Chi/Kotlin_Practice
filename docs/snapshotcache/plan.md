@@ -261,8 +261,13 @@ P12's design, so running it late would have meant designing P12 twice. Its test
 lives in `infra.snapshotcache.duckdb` because what it pins is an adapter
 capability; see the progress.md entry. P11 was then pulled ahead on the same
 instruction and the same grounds - it touches Oracle and nothing else, so
-neither P9's wiring nor P10's source gates it. P12-P14 remain gated on M2,
-and additionally on a resolvable MinIO client artifact.
+neither P9's wiring nor P10's source gates it. P12 followed on 2026-08-29 under
+the same instruction, once the MinIO client and the Testcontainers MinIO module
+turned out to be resolvable from the local `.m2`: it consumes only the public
+API, the P11 DAO and an object store, and M2 supplies none of those. Its
+scheduling is therefore plain JDK - no Quarkus, no CDI, no `@Scheduled`, no
+Micrometer - which is what P9 will wrap rather than replace. P13-P14 remain
+gated on M2.
 
 Everything else lives in `infra.snapshotarchive` (D30) and consumes the
 framework only through the public API. The Sec 2.4
