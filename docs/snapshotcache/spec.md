@@ -782,6 +782,8 @@ This turns the current pointer into a globally consistent manifest version, solv
 
 Additional design needed: manifest storage and update atomicity, local cache and cleanup on the download side, retention period for old generations.
 
+Note: Sec 18 (archive & diff layer) is a **different, decided** extension that shares the "manifest + object storage" vocabulary but not the goal. Sec 18 persists Parquet checkpoints so in-process ETLs can diff across restarts; this section (14.2) is about distributing `.db` generation files for cross-process *serving*, and remains an open sketch. Sec 18 deliberately archives Parquet, not `.db` files, precisely so it neither depends on nor preempts this extension.
+
 ### 14.3 Multiple replicas
 
 Not supported. Replicas refreshing independently would mean:
@@ -839,6 +841,13 @@ Pinned to 1.1.3 (Linux component compatibility in the CI environment). Consequen
 | D28 | The `Snapshot` handle is constructed at the `spi` boundary, not in `core` | Sec 2.2 confines `java.sql` to api signatures, spi and duckdb. A handle implementation living in `core` would name `Connection` in its bytecode as a field, parameter and return type. `OpenGeneration` already owns the connection, so it produces the handle and `core` holds it only as the `api.Snapshot` type, keeping the rule verbatim and the lease bookkeeping unchanged |
 | D25 | Consumers are responsible for transactional or idempotent writes | Lease drain is bounded, so an interrupted consumer is possible by design. The cache guarantees snapshot stability, not consumer completion; the interruption risk lives on the consumer's output side |
 | D29 | `duckdb.serving.threads` knob added (nullable, null = engine default); runaway readers are accepted-and-observed, not enforced | DuckDB's thread default equals hardware concurrency, which throttles CPU-limited pods and lets one runaway reader starve the shared serving instance (1.1.3 has no statement timeout, Sec 14.5). The cap bounds the blast radius; detection stays with the D8 lease-deadline diagnostics. An admin kill switch (interrupting a lease's connections - the Sec 14.5-sanctioned path, made safe by D25 idempotency) is deferred to P9+, to be added only if lease-duration histograms show real abuse |
+| D30 | The archive & diff layer (Sec 18) is a consumer of the public API in a sibling package `infra.snapshotarchive`, never part of the framework | It needs only `withSnapshot`/`copyOut`/`currentInfo` plus Oracle and MinIO. Keeping it outside `infra.snapshotcache` leaves D10/D22/D24 and the five-interface budget untouched, and the one-way ArchUnit rule (framework never imports archive) makes the boundary mechanical. Plan 2.4's module rule still holds: same Maven module, packages are the fence |
+| D31 | Durable archive versions come from an Oracle sequence in the manifest; generation numbers never leave the process; `data_as_of` is the only ephemeral-to-durable join key | Generation numbering restarts at 1 on every boot (Sec 4.3), so it cannot identify anything durable, and most generations are never archived. The archiver enforces `data_as_of` monotonicity at publish (skip + alert on regression) - the same distrust of timestamps as Sec 4.3, applied at the one place time is load-bearing |
+| D32 | Checkpoints only - hourly full Parquet export per table; no precomputed delta files. An ETL's diff is always `checkpoint(watermark)` vs the live snapshot | At ~1M rows a checkpoint is tens of MB and the PK full-outer-join is seconds of local DuckDB; deltas would add a format, composition semantics and dual retention for no payoff. Diffing an older baseline can only over-report (safe: D25 idempotent consumers); under-reporting is impossible because a baseline is always a manifest-recorded checkpoint taken at or before the ETL's last processed moment. Revisit at ~50M rows: add deltas as an optimization on top, checkpoints stay the source of truth |
+| D33 | Publish protocol is intent-first: INSERT manifest row PENDING (with full file inventory + checksums) -> upload -> verify -> conditional UPDATE to COMPLETE; a watchdog resolves stale PENDING rows to COMPLETE or FAILED against the inventory | Every MinIO object is preceded by a covering manifest row, so ghost files are impossible and no LIST-based orphan sweep exists. All status transitions are conditional (`WHERE status='PENDING'`), so an uploader racing the watchdog resolves to exactly one winner. Readers trust only COMPLETE. Crash and graceful shutdown converge on the same watchdog recovery path |
+| D34 | Retention is a fixed window sized to the slowest ETL cadence plus margin, with an unconditional keep-newest-COMPLETE rule; full compare against the live snapshot is a first-class fallback, not an error | The fallback must exist anyway (new ETLs, FAILED gaps, watermark purged), which is what lets retention stay a dumb window instead of consumer registration/refcounting. Keep-newest guarantees a broken archiver can never purge the last good baseline |
+| D35 | The watermark is consumer state: each ETL records `max(version) WHERE status='COMPLETE' AND data_as_of <= snapshot.dataAsOf` transactionally with its own output | D24 again: the framework tracks no per-consumer state. The `data_as_of <= T` predicate closes the long-running-job race - a checkpoint published mid-run describes state the ETL did not process and must never become its baseline (under-report); the predicate can only err toward an older version, which merely over-reports |
+| D36 | Archived tables must declare stable primary keys; the archive format is Parquet, downloaded then read locally | Unkeyed tables have no update semantics and were cut from scope. Parquet decouples the archive from the pinned DuckDB 1.1.3 file format (a `.db` archive would be unreadable the day the pin moves), is per-table, and is natively diffable by DuckDB. No httpfs: download-then-read keeps the 1.1.3 surface minimal |
 
 ---
 
@@ -1024,3 +1033,121 @@ What this test proves: the full chain - build -> verify -> publish -> serve -> b
 - [ ] Sec 17.6 assumptions table reviewed: A3/A4/A7 and file-level A1 confirmed by the E2E; remaining items explicitly acknowledged as open risks
 
 A note on authorship of these tests: if the concurrency and accounting tests are delegated to an AI agent, the failure mode is tests that pass without testing anything - sleep-based interleavings go green, and leak tests without the accounting assertions go green. The invariant table (Sec 17.2), the equations (Sec 17.3), and the criteria in this section are therefore fixed by the spec; implementations may vary, assertions may not. Coverage percentage is not an acceptance signal here; invariant verification is.
+---
+
+## 18. Archive & Diff Layer (M3, decided 2026-08-28)
+
+### 18.1 Problem and goals
+
+Consuming ETLs mostly process **diffs** ("what changed since the version I last
+processed"). The framework persists nothing (D10), so a pod restart destroys all
+lineage and forces every ETL back to a full compare. This layer makes the diff
+baseline durable.
+
+Scope, confirmed in the design session:
+
+- **In scope:** diff-chain survival across restarts. Hourly cadence. Tables of
+  ~1M rows with typical hourly change volume ~100k. Oracle-side change tracking
+  (audit columns, CDC) is unavailable by DBA policy, so snapshot comparison is
+  the mechanism, not a workaround.
+- **Out of scope:** cold-start speed (the first refresh already starts
+  immediately, Sec 10.1), serving stale data when Oracle is down, cross-process
+  snapshot sharing (Sec 14.2, unaffected), unkeyed tables (D36), and any change
+  to startup/shutdown semantics of the framework itself (D10/D11 untouched).
+
+### 18.2 Components
+
+All in `infra.snapshotarchive` (D30), consuming only the public API + JDBI
+(caller-land) + a MinIO client:
+
+1. **Archiver** - hourly scheduled run per group (runs for different groups in
+   parallel on a bounded executor; runs for the same group serialized - a run
+   that finds its group busy skips and logs). Holds one lease for the run.
+2. **Manifest** - one Oracle table; versions allocated by an Oracle sequence:
+
+   ```sql
+   SNAPSHOT_ARCHIVE_MANIFEST (
+     group_id     VARCHAR,
+     version      NUMBER,       -- Oracle sequence; PK with group_id
+     data_as_of   TIMESTAMP,    -- from the archived snapshot's GenerationInfo
+     created_at   TIMESTAMP,
+     uri_prefix   VARCHAR,      -- <bucket>/snapshots/<group>/v<version>/
+     inventory    CLOB,         -- json: [{table, object_key, bytes, checksum, row_count}]
+     status       VARCHAR,      -- PENDING | COMPLETE | FAILED
+     generation   NUMBER,       -- diagnostic only, never a key (D31)
+     updated_at   TIMESTAMP
+   )
+   ```
+
+3. **Watchdog** - resolves PENDING rows older than a timeout T against their
+   inventory (D33).
+4. **Purge job** - deletes expired versions: mark, delete objects per
+   inventory, delete row (D34).
+5. **ETL diff helper** - manifest lookup, checkpoint download, PK diff vs the
+   live snapshot, fallback decision (D32/D35).
+
+### 18.3 Archiver run (publish protocol, D33)
+
+1. `acquire(group)`; export each table to a local temp dir as Parquet
+   (per-table tasks in parallel); compute the inventory (keys, checksums,
+   sizes, row counts).
+2. Refuse to publish (skip + alert) if `data_as_of` is not strictly greater
+   than the newest COMPLETE version's (D31 monotonicity guard).
+3. `INSERT` manifest row `status=PENDING` with the inventory; commit.
+4. Upload all objects under `v<version>/`; verify against the inventory.
+5. Conditional `UPDATE ... SET status='COMPLETE' WHERE status='PENDING'`;
+   commit. Release the lease; delete the temp dir.
+
+First run ever, or after a FAILED gap: identical - a version is
+self-contained; there is no chain to stitch.
+
+**Shutdown:** stop scheduling, interrupt in-flight runs, release the lease
+within the framework's bounded drain, delete temp files. A leftover PENDING
+row is deliberately NOT cleaned at shutdown - the watchdog resolves it, so
+crash and graceful shutdown converge on one recovery path (D33), mirroring the
+framework's own "no delicate cleanup" stance (Sec 10.2).
+
+### 18.4 ETL protocol (D32/D35)
+
+Per ETL run:
+
+1. Acquire the live snapshot; note `dataAsOf = T`.
+2. Look up `watermark` (the version this ETL recorded last run) in the
+   manifest. If COMPLETE: download that one checkpoint, `FULL OUTER JOIN` on
+   PK vs the live snapshot in local DuckDB, emitting
+   `(pk, op IN (I,U,D), changed_columns, current values)`; apply.
+3. Fallback (watermark absent / purged / FAILED): full compare against the
+   live snapshot - the same anti-join shape that answers "which snapshot rows
+   are missing from my tables", which needs nothing from this layer.
+4. Set `watermark = max(version) WHERE status='COMPLETE' AND data_as_of <= T`,
+   committed in the same transaction as the ETL's output.
+
+**The correctness rule that must never be weakened:** the baseline checkpoint
+must have been taken at or before the ETL's last processed moment. Hence the
+watermark is a recorded version, never "the latest checkpoint now" (taken
+after the last run; using it silently under-reports). Over-reporting is
+bounded by one archive interval and is safe (D25); under-reporting is
+impossible by construction.
+
+This is the standard single-baseline incremental sync with full-resync
+fallback (cf. ZFS incremental send: the common ancestor snapshot must exist,
+otherwise full send).
+
+### 18.5 Retention (D34)
+
+Fixed window >= slowest ETL cadence + margin (config; e.g. 24-48h), plus
+unconditional keep-newest-COMPLETE. Not "keep latest only": an ETL slower than
+the archive cadence would full-compare every run. Optional alert when the
+newest COMPLETE checkpoint's age exceeds a threshold (archiver broken) -
+purely operational; diffs stay correct (over-report only).
+
+### 18.6 Open items before M3 implementation
+
+1. Can DuckDB 1.1.3 run `COPY (SELECT ...) TO '<file>.parquet'` on a read-only
+   attached snapshot connection? If yes, export streams from the serving
+   instance; if no, stage via public `copyOut` into the shared consumer
+   instance (D16) and export from there. Spike first.
+2. Measure real checkpoint size and export duration at 1M rows (expected: tens
+   of MB, seconds) - confirms the lease-vs-K interaction is a non-issue and
+   sizes retention storage.
+3. Watchdog timeout T vs worst-case upload time on the real MinIO link.

@@ -1,7 +1,7 @@
 # DuckDB Generational Snapshot Cache - Implementation Plan
 
 Version: v1.0
-Companion to: `duckdb-snapshot-cache-spec.en.md` (v1.0, Sec 1-Sec 17)
+Companion to: `duckdb-snapshot-cache-spec.en.md` (v1.0, Sec 1-Sec 18)
 Purpose: break the framework into steps small enough for an AI agent to implement in one session each, with fixed contracts and fixed acceptance criteria so implementations may vary but assertions may not.
 
 ---
@@ -142,6 +142,12 @@ M1 (framework)
 M2 (integration)  -- starts only after M1 is accepted
 
   P9 --> P10                                   service wiring, then Oracle source
+
+M3 (archive & diff layer, spec Sec 18)  -- starts only after M2 is accepted
+
+  P11 --> P12 --> P13
+            |
+            +---> P14                          manifest, archiver, watchdog/purge, diff helper
 ```
 
 Three tracks run in parallel after P0: core logic (P1, P3-P6), test kit (P2), and the DuckDB adapter (P7).
@@ -242,6 +248,56 @@ Started only after M1 is accepted against spec Sec 17.8. This is production wiri
 - **Goal:** the production source implementation. Outside framework acceptance by design.
 - **Deliverables:** single read-only transaction per round with dataAsOf capture (Sec 7.1); fetch-size configuration (Sec 7.2); streaming ResultSet-to-Appender with full resource discipline (Sec 7.3); per-step timing emitted through `CacheEvents`.
 - **Acceptance:** the deferred data-correctness tests - notably mutating the source between table pulls and asserting the change is absent from the snapshot (Testcontainers Oracle, since H2's Oracle mode does not reproduce the isolation semantics); performance baselines (Sec 16.3); the deferred leak measurement of Sec 17.6 now that realistic data volumes exist.
+- **Size:** medium.
+
+---
+
+## 3c. M3 - Archive & Diff Layer (spec Sec 18)
+
+Started only after M2 is accepted. Everything lives in `infra.snapshotarchive`
+(D30) and consumes the framework only through the public API. The Sec 2.4
+do-not-build list continues to govern the framework; for this layer the
+boundary rules are:
+
+- New ArchUnit rules (land with P11): `infra.snapshotcache..` must not depend
+  on `infra.snapshotarchive..`; `infra.snapshotarchive..` must not depend on
+  `infra.snapshotcache.{spi,core,duckdb}..` (api only).
+- No change to any frozen interface, invariant, equation, or enum. If a phase
+  seems to need one, stop and report.
+- MinIO and Oracle are behind small internal seams (a client wrapper and a DAO)
+  for testability - concrete classes, not new public interfaces; the Sec 2.3
+  budget is a framework budget and this layer adds nothing to it.
+
+### P11 - Manifest DAO + version allocation
+
+- **Goal:** the durable half: Oracle sequence versioning, status protocol, monotonicity guard.
+- **Deliverables:** manifest table DDL (Sec 18.2); JDBI DAO with insert-PENDING (inventory json), conditional transitions PENDING->COMPLETE / PENDING->FAILED, newest-COMPLETE lookup, watermark query (`max(version) WHERE status='COMPLETE' AND data_as_of <= ?`), expired-versions query; `data_as_of` monotonicity check (Sec 18.3 step 2).
+- **Fixed contracts:** D31, D33 transition conditions (a transition from any state other than PENDING affects 0 rows and reports it); the watermark predicate verbatim (D35).
+- **Acceptance:** DAO contract tests (testcontainer or H2-compatible subset, decided in-phase and recorded): conditional-transition race (two writers, exactly one wins), watermark predicate boundary cases (`data_as_of == T`, no COMPLETE rows, all newer than T), monotonicity guard rejects a regression.
+- **Size:** small-medium.
+
+### P12 - Archiver run + graceful shutdown
+
+- **Goal:** the Sec 18.3 publish protocol end to end against a fake MinIO client and the P11 DAO.
+- **Deliverables:** per-group scheduled run (skip-if-busy per group, parallel across groups on a bounded executor); lease-scoped export to local temp Parquet (per-table tasks in parallel; export path per the Sec 18.6 item-1 spike, executed at the start of this phase and recorded in progress.md); inventory computation; upload + verify; COMPLETE flip; shutdown wiring (stop scheduling, interrupt, release lease within drain, delete temp, leave PENDING for the watchdog).
+- **Fixed contracts:** Sec 18.3 step order verbatim; a run never writes an object before its PENDING row exists; shutdown leaves no temp files and never resolves its own PENDING row.
+- **Acceptance:** happy path produces COMPLETE with matching inventory; crash injection between every adjacent step pair leaves either no row, or PENDING-with-partial-objects, never a trusted-but-broken COMPLETE; per-group serialization and cross-group parallelism asserted with the P5 hook-driver style (no sleeps); shutdown mid-upload releases the lease within budget.
+- **Size:** medium.
+
+### P13 - Watchdog + purge
+
+- **Goal:** convergence: every PENDING row eventually COMPLETE or FAILED; retention enforced.
+- **Deliverables:** watchdog pass (PENDING older than T -> verify inventory against MinIO -> conditional flip); purge pass (expired per Sec 18.5 window + keep-newest-COMPLETE -> mark -> delete objects per inventory -> delete row); FAILED cleanup (objects then row); staleness alert (newest COMPLETE age threshold).
+- **Fixed contracts:** D34 (keep-newest is unconditional); watchdog/uploader race resolved by the P11 conditional transitions; purge deletes objects before the row for FAILED/expired, and a dangling object without a row must be impossible by D33 (assert, don't sweep).
+- **Acceptance:** crash-matrix from P12 extended through watchdog/purge: every injected crash converges within two passes; keep-newest survives a window where everything is expired; no LIST-based sweep exists anywhere in the code.
+- **Size:** small-medium.
+
+### P14 - ETL diff helper + fallback
+
+- **Goal:** the consumer side of Sec 18.4, as a small library ETL jobs call.
+- **Deliverables:** manifest lookup + parallel per-table checkpoint download; PK `FULL OUTER JOIN` diff vs the live snapshot emitting `(pk, op, changed_columns, current values)`; fallback decision (absent/purged/FAILED watermark -> full-compare signal to the caller); watermark computation per D35 (the helper returns the value; the ETL commits it with its own output - the helper never writes ETL state).
+- **Fixed contracts:** D32's correctness rule (baseline <= last processed moment) and D35's predicate; the helper holds the snapshot lease for the whole diff and releases via `withSnapshot` scoping.
+- **Acceptance:** E2E against real DuckDB + fake MinIO: publish versions with known edits; diff yields exact I/U/D + changed_columns; property test - every injected change appears in at least one run's diff (never under-reports), and the one-interval over-report is observed, not treated as a bug; long-running-job race test - a checkpoint published mid-run is not selected as the new watermark.
 - **Size:** medium.
 
 ---

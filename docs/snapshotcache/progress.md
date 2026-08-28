@@ -333,3 +333,42 @@ Build: 134 tests, 0 failures, 2 Unix-only skips. No earlier-phase test file chan
 - M1 and M6 have no dedicated regression test: staging a `configure()` failure or a dead
   target connection needs a fault-injection seam neither the fake nor the adapter has.
   Both fixes are small and their surrounding paths are covered.
+## Design session - archive & diff layer  (2026-08-28, user-decided)
+
+Grill session on persisting snapshots for cross-restart diffing. Outcome: spec
+Sec 18 added, D30-D36 recorded, plan M3 (P11-P14) added. No code; docs only,
+per the docs-first rule. Framework itself untouched: D10/D11/D22/D24, the
+five-interface budget and all frozen contracts stand.
+
+Decisions (rationale in the decision log):
+
+1. **Consumer-land layer** in `infra.snapshotarchive`, one-way ArchUnit
+   boundary; same Maven module (D30). Explicitly NOT the Sec 14.2 extension -
+   cross-ref added there.
+2. **Durable identity = Oracle sequence** in a manifest table; generation
+   numbers stay in-process; `data_as_of` is the only join key, with an
+   archiver-enforced monotonicity guard (D31).
+3. **Checkpoints only, no delta files** (D32). Hourly full Parquet per table
+   (~1M rows => tens of MB). An ETL always diffs `checkpoint(watermark)` vs
+   the LIVE snapshot - one download per run, no checkpoint-to-checkpoint
+   diffs. Over-report safe (D25), under-report impossible; revisit at ~50M
+   rows by layering deltas on top.
+4. **Intent-first publish** (D33, user-specified): PENDING row with full
+   inventory before any upload; conditional transitions; watchdog converges
+   PENDING -> COMPLETE/FAILED; ghost files impossible, no LIST sweep. Crash
+   and graceful shutdown share the watchdog recovery path.
+5. **Retention = fixed window sized to slowest ETL + keep-newest-COMPLETE**
+   (D34); full compare vs live snapshot is the designed fallback.
+6. **Watermark is ETL-owned** (D35): `max(version) WHERE status='COMPLETE'
+   AND data_as_of <= snapshot.dataAsOf`, committed with the ETL's output; the
+   predicate closes the long-running-job under-report race.
+7. **PK-required tables only; Parquet, download-then-read** (D36). Unkeyed
+   tables cut. Parquet decouples the archive from the DuckDB 1.1.3 pin.
+
+Rejected in session: restore-and-serve at startup (driver is diff-chain
+survival only; D10 stands), per-refresh deltas, consumer registration for
+retention, archiving `.db` files, MVCC-style in-store history.
+
+Open before P11 (spec 18.6): COPY-TO-parquet-on-read-only-attach spike (else
+stage via public copyOut, D16 instance); checkpoint size/duration measurement
+at 1M rows; watchdog timeout vs real upload time.
