@@ -5,6 +5,7 @@ import infra.etl.task.PhaseContext
 import infra.etl.task.StepContext
 import infra.etl.task.StepResult
 import infra.etl.task.TaskContext
+import infra.etl.task.TaskEvent
 import infra.etl.task.TaskHook
 import infra.etl.task.TaskMetrics
 import infra.etl.task.TaskRunListener
@@ -180,42 +181,52 @@ class RecordingListener internal constructor(
         stepEnds.singleOrNull { it.ctx.step == step }?.result
             ?: error("no single onStepEnd for step '$step'; saw ${stepEnds.map { it.ctx.step }}")
 
-    override fun onTaskStart(ctx: TaskContext) {
-        taskStartsSeen += ctx
-        fired(ListenerCall.TASK_START, "onTaskStart(${ctx.taskName})")
-    }
+    /**
+     * Exhaustive on purpose: no `else`, so an eighth [TaskEvent] fails this fixture at compile time
+     * rather than being silently unrecorded by every test that reads [calls].
+     */
+    override fun on(event: TaskEvent) = when (event) {
+        is TaskEvent.TaskStart -> {
+            taskStartsSeen += event.task
+            fired(ListenerCall.TASK_START, "onTaskStart(${event.task.taskName})")
+        }
 
-    override fun onTaskEnd(ctx: TaskContext, outcome: Outcome) {
-        taskEndsSeen += ctx to outcome
-        fired(ListenerCall.TASK_END, "onTaskEnd(${ctx.taskName}, $outcome)")
-    }
+        is TaskEvent.TaskEnd -> {
+            taskEndsSeen += event.task to event.outcome
+            fired(ListenerCall.TASK_END, "onTaskEnd(${event.task.taskName}, ${event.outcome})")
+        }
 
-    override fun onPhaseStart(ctx: PhaseContext) {
-        phaseStartsSeen += ctx
-        fired(ListenerCall.PHASE_START, "onPhaseStart(${ctx.phase})")
-    }
+        is TaskEvent.PhaseStart -> {
+            phaseStartsSeen += event.phase
+            fired(ListenerCall.PHASE_START, "onPhaseStart(${event.phase.phase})")
+        }
 
-    override fun onPhaseEnd(ctx: PhaseContext, outcome: Outcome) {
-        phaseEndsSeen += ctx to outcome
-        fired(ListenerCall.PHASE_END, "onPhaseEnd(${ctx.phase}, $outcome)")
-    }
+        is TaskEvent.PhaseEnd -> {
+            phaseEndsSeen += event.phase to event.outcome
+            fired(ListenerCall.PHASE_END, "onPhaseEnd(${event.phase.phase}, ${event.outcome})")
+        }
 
-    override fun onStepStart(ctx: StepContext) {
-        stepStartsSeen += ctx
-        fired(ListenerCall.STEP_START, "onStepStart(${ctx.phase}/${ctx.step})")
-    }
+        is TaskEvent.StepStart -> {
+            stepStartsSeen += event.step
+            fired(ListenerCall.STEP_START, "onStepStart(${event.step.phase}/${event.step.step})")
+        }
 
-    override fun onStepEnd(ctx: StepContext, result: StepResult) {
-        stepEndsSeen += StepEnd(ctx, result)
-        fired(ListenerCall.STEP_END, "onStepEnd(${ctx.phase}/${ctx.step}, attempt=${result.attempt})")
-    }
+        is TaskEvent.StepEnd -> {
+            stepEndsSeen += StepEnd(event.step, event.result)
+            fired(
+                ListenerCall.STEP_END,
+                "onStepEnd(${event.step.phase}/${event.step.step}, attempt=${event.result.attempt})",
+            )
+        }
 
-    override fun onStepError(ctx: StepContext, attempt: Int, error: Throwable, willRetry: Boolean) {
-        stepErrorsSeen += StepError(ctx, attempt, error, willRetry)
-        fired(
-            ListenerCall.STEP_ERROR,
-            "onStepError(${ctx.phase}/${ctx.step}, attempt=$attempt, willRetry=$willRetry)",
-        )
+        is TaskEvent.StepError -> {
+            stepErrorsSeen += StepError(event.step, event.attempt, event.error, event.willRetry)
+            fired(
+                ListenerCall.STEP_ERROR,
+                "onStepError(${event.step.phase}/${event.step.step}, attempt=${event.attempt}, " +
+                    "willRetry=${event.willRetry})",
+            )
+        }
     }
 
     /** Records, then throws. Never the other way round - see the file KDoc. */
@@ -264,14 +275,7 @@ class RecordingHook internal constructor(
  * needs.
  */
 class ForwardingListener(private val target: () -> TaskRunListener) : TaskRunListener {
-    override fun onTaskStart(ctx: TaskContext) = target().onTaskStart(ctx)
-    override fun onTaskEnd(ctx: TaskContext, outcome: Outcome) = target().onTaskEnd(ctx, outcome)
-    override fun onPhaseStart(ctx: PhaseContext) = target().onPhaseStart(ctx)
-    override fun onPhaseEnd(ctx: PhaseContext, outcome: Outcome) = target().onPhaseEnd(ctx, outcome)
-    override fun onStepStart(ctx: StepContext) = target().onStepStart(ctx)
-    override fun onStepEnd(ctx: StepContext, result: StepResult) = target().onStepEnd(ctx, result)
-    override fun onStepError(ctx: StepContext, attempt: Int, error: Throwable, willRetry: Boolean) =
-        target().onStepError(ctx, attempt, error, willRetry)
+    override fun on(event: TaskEvent) = target().on(event)
 }
 
 /**

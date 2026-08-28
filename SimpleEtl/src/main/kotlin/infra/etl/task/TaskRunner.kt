@@ -120,7 +120,7 @@ class TaskRunner(private val engine: TaskEngine) {
     }
 
     /** The current or most recent run of [name], or null if it has never run in this process. */
-    fun lastRun(name: String): RunStatus? = tasks[name]?.last?.status()
+    internal fun lastRun(name: String): RunStatus? = tasks[name]?.last?.status()
 
     /**
      * The outcome of [runId], or null when that run is unknown **or has not finished yet**.
@@ -132,13 +132,15 @@ class TaskRunner(private val engine: TaskEngine) {
      * accumulating a record per firing. A bounded ring per task, if an operator ever needs to
      * look further back than one run.
      */
-    fun outcome(name: String, runId: String): TaskOutcome? =
+    internal fun outcome(name: String, runId: String): TaskOutcome? =
         tasks[name]?.last?.takeIf { it.runId == runId }?.outcome
 
     /**
      * The context task [name] is confined to: its own `limitedParallelism(1)` view of
-     * `Dispatchers.IO` plus its [CoroutineName]. Public because [submit] launches with exactly
-     * this value and the name is observable nowhere else:
+     * `Dispatchers.IO` plus its [CoroutineName]. Internal rather than private because [submit]
+     * launches with exactly this value; internal rather than public because spec 11.2 declares only
+     * `submit`, so this is an internal seam its own tests read and not surface a host is offered.
+     * The name is observable nowhere else:
      *
      * - not from the run, which is blocking code with no suspending frame to read
      *   `coroutineContext` from (spec 8.3);
@@ -151,7 +153,7 @@ class TaskRunner(private val engine: TaskEngine) {
      * Creates the task's view if it has none yet, which costs no thread: a limited view shares
      * the IO pool rather than owning one (spec 8.3).
      */
-    fun context(name: String): CoroutineContext = slot(name).context
+    internal fun context(name: String): CoroutineContext = slot(name).context
 
     private fun slot(name: String): TaskSlot = tasks.computeIfAbsent(name, ::TaskSlot)
 }

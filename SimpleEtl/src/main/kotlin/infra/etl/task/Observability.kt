@@ -54,56 +54,64 @@ data class StepContext(val task: TaskContext, val phase: String, val step: Strin
 data class StepResult(val rowsRead: Long, val rowsWritten: Long, val durationMs: Long, val attempt: Int)
 
 /**
- * The observation seam of spec 9.2: the host's own logging, plugged into the run.
+ * Everything a run tells a [TaskRunListener], as one closed set (spec 9.2).
  *
- * **Every method is called from N task threads at once.** One [TaskEngine] serves every task and
- * different tasks run concurrently, each on its own confined dispatcher (spec 8.4), so an
- * implementation holding state must be thread safe, and none of these methods may block - a
- * listener that waits parks an ETL run behind it.
+ * One sealed type rather than one method per event, because every implementation used to pay for
+ * the whole set whether it cared about it or not: the no-op, the fan-out, the engine's own
+ * dispatch and every test double each carried seven bodies of pure mechanism. An implementation
+ * now writes only the cases it wants, and one written as an exhaustive `when` still fails to
+ * compile when an eighth event is added - which is the compile-time notice the seven abstract
+ * methods existed to give.
  *
- * **A listener never fails a run.** Every call site catches, logs at WARN and continues, and
- * [of] applies the same isolation per listener. A logging plug-in that failed the task it was
- * logging would invert the point of the seam.
- *
- * `logging: false` on a task suppresses every method here for that task's runs (spec 9.2). Hooks
- * are unaffected.
+ * [task] is declared on the interface because every isolation warning names the run it came from,
+ * whatever the event was.
  */
-interface TaskRunListener {
+sealed interface TaskEvent {
 
-    fun onTaskStart(ctx: TaskContext)
+    val task: TaskContext
 
-    /** The run is over. Reached from a `finally`, so a run that started always ends. */
-    fun onTaskEnd(ctx: TaskContext, outcome: Outcome)
+    data class TaskStart(override val task: TaskContext) : TaskEvent
 
-    fun onPhaseStart(ctx: PhaseContext)
+    /** The run is over. Emitted from a `finally`, so a run that started always ends. */
+    data class TaskEnd(override val task: TaskContext, val outcome: Outcome) : TaskEvent
+
+    data class PhaseStart(val phase: PhaseContext) : TaskEvent {
+        override val task: TaskContext get() = phase.task
+    }
 
     /**
      * [Outcome.FAILED] when a step of the phase failed terminally; no later phase then starts.
      *
-     * Carries the same unpaired hazard as [onStepStart]: an `Error` escaping the engine skips
-     * this call, so [onPhaseStart] can be the last phase event a listener sees.
+     * Carries the same unpaired hazard as [StepStart]: an `Error` escaping the engine skips this
+     * event, so [PhaseStart] can be the last phase event a listener sees.
      */
-    fun onPhaseEnd(ctx: PhaseContext, outcome: Outcome)
+    data class PhaseEnd(val phase: PhaseContext, val outcome: Outcome) : TaskEvent {
+        override val task: TaskContext get() = phase.task
+    }
 
     /**
      * Once per step, before its first attempt and before any guard that can reject the step.
      *
-     * **Not always paired.** A step normally closes with [onStepEnd] or [onStepError], but an
-     * `Error` - not an `Exception` - escapes the engine uncaught, and then neither fires: the
-     * step, and its phase, end with no closing event at all. Only [onTaskEnd] is guaranteed,
-     * because it is reached from a `finally`. A listener holding per-step state - an MDC push, a
-     * log scope, a tracing span - must therefore be able to unwind that state at [onTaskEnd] as
-     * well, or it leaks on exactly the path a not-yet-implemented step takes.
+     * **Not always paired.** A step normally closes with [StepEnd] or [StepError], but an `Error` -
+     * not an `Exception` - escapes the engine uncaught, and then neither fires: the step, and its
+     * phase, end with no closing event at all. Only [TaskEnd] is guaranteed, because it is emitted
+     * from a `finally`. A listener holding per-step state - an MDC push, a log scope, a tracing
+     * span - must therefore be able to unwind that state at [TaskEnd] as well, or it leaks on
+     * exactly the path an `Error` takes.
      */
-    fun onStepStart(ctx: StepContext)
+    data class StepStart(val step: StepContext) : TaskEvent {
+        override val task: TaskContext get() = step.task
+    }
 
     /**
-     * Success only. A step that fails terminally ends with `onStepError(willRetry = false)` and no
-     * `onStepEnd`. A listener that pairs start with end - an MDC push/pop, a log scope, a tracing
-     * span - must close on either of those, **and** on [onTaskEnd] for the `Error` path where
-     * neither of them fires at all (see [onStepStart]).
+     * Success only. A step that fails terminally ends with `StepError(willRetry = false)` and no
+     * [StepEnd]. A listener that pairs start with end - an MDC push/pop, a log scope, a tracing
+     * span - must close on either of those, **and** on [TaskEnd] for the `Error` path where
+     * neither of them fires at all (see [StepStart]).
      */
-    fun onStepEnd(ctx: StepContext, result: StepResult)
+    data class StepEnd(val step: StepContext, val result: StepResult) : TaskEvent {
+        override val task: TaskContext get() = step.task
+    }
 
     /**
      * One failed attempt.
@@ -117,12 +125,46 @@ interface TaskRunListener {
      *   decision at the moment it is made rather than after the delay it causes. False both for a
      *   non-transient failure and for a transient one that has run out of attempts (spec 5.3).
      */
-    fun onStepError(ctx: StepContext, attempt: Int, error: Throwable, willRetry: Boolean)
+    data class StepError(
+        val step: StepContext,
+        val attempt: Int,
+        val error: Throwable,
+        val willRetry: Boolean,
+    ) : TaskEvent {
+        override val task: TaskContext get() = step.task
+    }
+}
+
+/**
+ * The call site an event came from, as the seven method names this seam used to have. Every
+ * isolation warning names one, and `on` + the case's own name is that name exactly - so a log line
+ * still reads `threw from onStepError` and an operator's saved search survives the change.
+ */
+internal fun TaskEvent.site(): String = "on${javaClass.simpleName}"
+
+/**
+ * The observation seam of spec 9.2: the host's own logging, plugged into the run.
+ *
+ * **[on] is called from N task threads at once.** One [TaskEngine] serves every task and different
+ * tasks run concurrently, each on its own confined dispatcher (spec 8.4), so an implementation
+ * holding state must be thread safe, and it may not block - a listener that waits parks an ETL run
+ * behind it.
+ *
+ * **A listener never fails a run.** Every call site catches, logs at WARN and continues, and [of]
+ * applies the same isolation per listener. A logging plug-in that failed the task it was logging
+ * would invert the point of the seam.
+ *
+ * `logging: false` on a task suppresses every event here for that task's runs (spec 9.2). Hooks
+ * are unaffected.
+ */
+fun interface TaskRunListener {
+
+    fun on(event: TaskEvent)
 
     companion object {
 
         /** Discards everything. What a [TaskEngine] built without a listener reports to. */
-        val NONE: TaskRunListener = NoOpTaskRunListener
+        val NONE: TaskRunListener = TaskRunListener {}
 
         /**
          * Fans out to [listeners] in argument order. `of()` returns [NONE]; `of(one)` returns its
@@ -144,49 +186,23 @@ interface TaskRunListener {
     }
 }
 
-private object NoOpTaskRunListener : TaskRunListener {
-    override fun onTaskStart(ctx: TaskContext) = Unit
-    override fun onTaskEnd(ctx: TaskContext, outcome: Outcome) = Unit
-    override fun onPhaseStart(ctx: PhaseContext) = Unit
-    override fun onPhaseEnd(ctx: PhaseContext, outcome: Outcome) = Unit
-    override fun onStepStart(ctx: StepContext) = Unit
-    override fun onStepEnd(ctx: StepContext, result: StepResult) = Unit
-    override fun onStepError(ctx: StepContext, attempt: Int, error: Throwable, willRetry: Boolean) = Unit
-}
-
-/** The fan-out behind [TaskRunListener.of]. Immutable, so it is as thread safe as its members. */
+/**
+ * The fan-out behind [TaskRunListener.of]. Immutable, so it is as thread safe as its members.
+ *
+ * Every member gets the event, whatever the ones before it did. Aborting on the first throw would
+ * let one broken plug-in silently blind every other.
+ */
 private class CompositeTaskRunListener(private val listeners: List<TaskRunListener>) : TaskRunListener {
 
-    override fun onTaskStart(ctx: TaskContext) = each("onTaskStart", ctx.describe()) { it.onTaskStart(ctx) }
-
-    override fun onTaskEnd(ctx: TaskContext, outcome: Outcome) =
-        each("onTaskEnd", ctx.describe()) { it.onTaskEnd(ctx, outcome) }
-
-    override fun onPhaseStart(ctx: PhaseContext) = each("onPhaseStart", ctx.task.describe()) { it.onPhaseStart(ctx) }
-
-    override fun onPhaseEnd(ctx: PhaseContext, outcome: Outcome) =
-        each("onPhaseEnd", ctx.task.describe()) { it.onPhaseEnd(ctx, outcome) }
-
-    override fun onStepStart(ctx: StepContext) = each("onStepStart", ctx.task.describe()) { it.onStepStart(ctx) }
-
-    override fun onStepEnd(ctx: StepContext, result: StepResult) =
-        each("onStepEnd", ctx.task.describe()) { it.onStepEnd(ctx, result) }
-
-    override fun onStepError(ctx: StepContext, attempt: Int, error: Throwable, willRetry: Boolean) =
-        each("onStepError", ctx.task.describe()) { it.onStepError(ctx, attempt, error, willRetry) }
-
-    /**
-     * Every member gets the event, whatever the ones before it did. Aborting on the first throw
-     * would let one broken plug-in silently blind every other.
-     */
-    private fun each(site: String, run: String, call: (TaskRunListener) -> Unit) {
+    override fun on(event: TaskEvent) {
         listeners.forEach { listener ->
             try {
-                call(listener)
+                listener.on(event)
             } catch (e: Exception) {
                 log.warn(
-                    "$run: listener ${listener.javaClass.name} threw from $site and was skipped. The " +
-                        "run is unaffected and the remaining listeners still received the event.",
+                    "${event.task.describe()}: listener ${listener.javaClass.name} threw from " +
+                        "${event.site()} and was skipped. The run is unaffected and the remaining " +
+                        "listeners still received the event.",
                     e,
                 )
             }

@@ -208,7 +208,7 @@ class TaskEngine(
         val events = Events(task, definition.logging)
         var outcome = Outcome.FAILED
         try {
-            events.taskStart()
+            events.emit(TaskEvent.TaskStart(task))
             val directory = scratchDirectory.resolve(runId)
             val memoryLimit = definition.scratchMemoryLimitMb ?: scratchMemoryLimitMb
             var failure: Throwable? = try {
@@ -252,7 +252,7 @@ class TaskEngine(
             // escapes this method and anything sequenced after it would be lost on exactly the
             // run an operator most needs counted.
             events.taskMetered(outcome, clock.millis() - task.startedAt.toEpochMilli())
-            events.taskEnd(outcome)
+            events.emit(TaskEvent.TaskEnd(task, outcome))
         }
     }
 
@@ -332,21 +332,15 @@ class TaskEngine(
 
         private val sink: TaskRunListener = if (logging) listener else TaskRunListener.NONE
 
-        fun taskStart() = isolate("onTaskStart") { sink.onTaskStart(task) }
+        /**
+         * The whole listener seam, since [TaskEvent] closed the seven call sites into one. The
+         * event is built even when [sink] is [TaskRunListener.NONE]: `logging: false` is a per-run
+         * decision made once, and branching on it per event would trade an allocation nobody has
+         * measured for a condition on every call.
+         */
+        fun emit(event: TaskEvent) = isolate(event.site()) { sink.on(event) }
 
-        fun taskEnd(outcome: Outcome) = isolate("onTaskEnd") { sink.onTaskEnd(task, outcome) }
-
-        fun phaseStart(phase: String) = isolate("onPhaseStart") { sink.onPhaseStart(PhaseContext(task, phase)) }
-
-        fun phaseEnd(phase: String, outcome: Outcome) =
-            isolate("onPhaseEnd") { sink.onPhaseEnd(PhaseContext(task, phase), outcome) }
-
-        fun stepStart(step: StepContext) = isolate("onStepStart") { sink.onStepStart(step) }
-
-        fun stepEnd(step: StepContext, result: StepResult) = isolate("onStepEnd") { sink.onStepEnd(step, result) }
-
-        fun stepError(step: StepContext, attempt: Int, error: Throwable, willRetry: Boolean) =
-            isolate("onStepError") { sink.onStepError(step, attempt, error, willRetry) }
+        fun phase(phase: String) = PhaseContext(task, phase)
 
         fun taskMetered(outcome: Outcome, durationMs: Long) =
             meter("taskEnded") { metrics.taskEnded(task, outcome, durationMs) }
@@ -414,14 +408,14 @@ class TaskEngine(
          */
         fun execute() {
             definition.phases.forEach { phase ->
-                events.phaseStart(phase.name)
+                events.emit(TaskEvent.PhaseStart(events.phase(phase.name)))
                 try {
                     phase.steps.forEach { execute(phase.name, it) }
                 } catch (e: Exception) {
-                    events.phaseEnd(phase.name, Outcome.FAILED)
+                    events.emit(TaskEvent.PhaseEnd(events.phase(phase.name), Outcome.FAILED))
                     throw e
                 }
-                events.phaseEnd(phase.name, Outcome.SUCCEEDED)
+                events.emit(TaskEvent.PhaseEnd(events.phase(phase.name), Outcome.SUCCEEDED))
             }
         }
 
@@ -448,7 +442,7 @@ class TaskEngine(
          */
         fun execute(phase: String, step: Step) {
             val ctx = events.step(phase, step.name)
-            events.stepStart(ctx)
+            events.emit(TaskEvent.StepStart(ctx))
             // durationMs spans the whole step - every attempt and every backoff between them -
             // read from the injected clock rather than from the wall or from nanoTime.
             val startedAt = clock.millis()
@@ -459,7 +453,7 @@ class TaskEngine(
                     val elapsed = clock.millis() - startedAt
                     val result = StepResult(rows.rowsRead, rows.rowsWritten, elapsed, attempt)
                     events.stepMetered(ctx, result)
-                    events.stepEnd(ctx, result)
+                    events.emit(TaskEvent.StepEnd(ctx, result))
                     return
                 } catch (failure: Exception) {
                     val willRetry = attempt <= step.retries && isTransient(failure)
@@ -470,7 +464,7 @@ class TaskEngine(
                     // happened to flush are not rows the step moved.
                     if (willRetry) events.retryMetered(ctx)
                     else events.stepMetered(ctx, StepResult(0, 0, clock.millis() - startedAt, attempt))
-                    events.stepError(ctx, attempt, failure, willRetry)
+                    events.emit(TaskEvent.StepError(ctx, attempt, failure, willRetry))
                     if (!willRetry) throw failure
                     sleeper(backoffMillis(attempt))
                     attempt++

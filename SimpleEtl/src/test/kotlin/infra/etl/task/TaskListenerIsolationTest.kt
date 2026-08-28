@@ -130,7 +130,7 @@ class TaskListenerIsolationTest {
         val second = trace.listener(label = "second")
         val third = trace.listener(label = "third")
 
-        TaskRunListener.of(first, second, third).onTaskStart(taskContext())
+        TaskRunListener.of(first, second, third).on(TaskEvent.TaskStart(taskContext()))
 
         assertAll(
             {
