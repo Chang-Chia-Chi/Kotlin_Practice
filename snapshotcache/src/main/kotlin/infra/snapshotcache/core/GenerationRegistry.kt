@@ -22,10 +22,10 @@ internal enum class Lifecycle { BUILDING, OPENING, LIVE, RECLAIMING, GONE }
 internal class RegistryLease(
     val generation: Long,
     val info: LeaseInfo,
-    /** Attached generation this lease pins; null only when published via the fileBytes-only overload. */
-    val opened: OpenGeneration? = null,
-    /** What the pinned generation contains; null only when published via the fileBytes-only overload. */
-    val generationInfo: GenerationInfo? = null,
+    /** Attached generation this lease pins; set at publish, so a LIVE record always has one. */
+    val opened: OpenGeneration,
+    /** What the pinned generation contains; set at publish alongside [opened]. */
+    val generationInfo: GenerationInfo,
 ) {
     /** Guarded by the owning registry's lock; makes [GenerationRegistry.release] idempotent. */
     var released = false
@@ -123,22 +123,16 @@ internal class GenerationRegistry(
         transition(gen, Lifecycle.BUILDING, Lifecycle.OPENING)
     }
 
-    /** OPENING -> LIVE; the generation becomes current and every [awaitCurrent] waiter is signalled. */
-    fun publish(gen: Long, fileBytes: Long) {
-        publishInternal(gen, fileBytes, opened = null, info = null)
-    }
-
     /**
      * OPENING -> LIVE with the attached [OpenGeneration] and its [GenerationInfo], which
-     * [tryAcquire] copies onto every lease of [gen] and [currentInfo] reports.
+     * [tryAcquire] copies onto every lease of [gen] and [currentInfo] reports. The
+     * generation becomes current and every [awaitCurrent] waiter is signalled.
+     *
      * [OpenGeneration.fileBytes] is captured before taking the lock - on the real adapter
      * it is a file stat, and no I/O runs under the lock (plan 2.5).
      */
     fun publish(gen: Long, opened: OpenGeneration, info: GenerationInfo) {
-        publishInternal(gen, opened.fileBytes(), opened, info)
-    }
-
-    private fun publishInternal(gen: Long, fileBytes: Long, opened: OpenGeneration?, info: GenerationInfo?) {
+        val fileBytes = opened.fileBytes()
         lock.withLock {
             val record = transition(gen, Lifecycle.OPENING, Lifecycle.LIVE)
             record.fileBytes = fileBytes
@@ -171,13 +165,16 @@ internal class GenerationRegistry(
             val gen = currentGen ?: return null
             val record = records.getValue(gen)
             check(record.state == Lifecycle.LIVE) { "current generation $gen is ${record.state}, not LIVE" }
+            // LIVE is reachable only through publish, which sets both.
+            val opened = checkNotNull(record.opened) { "LIVE generation $gen carries no OpenGeneration" }
+            val info = checkNotNull(record.info) { "LIVE generation $gen carries no GenerationInfo" }
             record.refCount++
             val acquiredAt = clock.instant()
             val lease = RegistryLease(
                 gen,
                 LeaseInfo(owner, acquiredAt, acquiredAt.plus(leaseDeadline)),
-                record.opened,
-                record.info,
+                opened,
+                info,
             )
             record.leases += lease
             lease

@@ -372,3 +372,75 @@ retention, archiving `.db` files, MVCC-style in-store history.
 Open before P11 (spec 18.6): COPY-TO-parquet-on-read-only-attach spike (else
 stage via public copyOut, D16 instance); checkpoint size/duration measurement
 at 1M rows; watchdog timeout vs real upload time.
+
+## Review fix pass 2 - deep-module pass on the core seams  (2026-08-29)
+
+Seam review of `api` / `core` / `spi` / `duckdb` (deep-module criteria: leverage per
+unit of interface, one adapter = hypothetical seam, the interface is the test surface).
+Verdicts: `api.SnapshotCache` deep and correct; `spi.GenerationStore` a real seam - two
+adapters, and it is what keeps the core suite DuckDB-free; `GenerationSource` /
+`GenerationCheck` correctly shaped. Two findings were acted on.
+
+### H2's guard extended to the consumer side, closing a permanent lease leak
+
+Pass 1 wrapped every `events.` call in `RefreshCycle` and stopped there. The five fires
+in `DefaultSnapshotCache` stayed unguarded, so the same contract - a caller-supplied sink
+must never break the path that fired it - held on the refresh side only, with nothing at
+the interface saying so.
+
+The gap at `acquireWaited` was a live defect, not just an asymmetry: `tryAcquire` has
+already incremented the refcount and registered the lease when the sink fires, so a
+throwing sink escaped before the lease reached the `SnapshotHandle` that owns its
+release. Nothing could ever release it - the generation was pinned for the process
+lifetime and refresh eventually wedged at the K guard (spec 6.1). `leaseOrphaned` /
+`leaseReleased` escaped `Snapshot.close()` and masked the block's own result;
+`acquireUnavailable` substituted the sink's exception for `NotReadyException`.
+
+Fix: `core/Internals.kt` (mirroring `spi/Internals.kt`) holds one `emit(group) { ... }`,
+used by both classes. `RefreshCycle`'s private `notify` is gone. The guard now lives in
+one place instead of at each call site's discretion.
+
+- `ReviewFixRegressionTest.throwingEventSink_onAWaitedAcquire_isIgnored_andTheLeaseIsNotLeaked`
+  proves it: with the `acquireWaited` guard removed the acquire returns the sink's
+  `RuntimeException` instead of a `Snapshot`, and the test fails. Verified by reverting
+  that one line.
+
+### L1's `publish(gen, fileBytes)` seam removed (the pass-2 ruling that was owed)
+
+Ruled: delete it. The overload existed only for two `GenerationRegistryTest` setup lines
+and forced `RegistryLease.opened` and `.generationInfo` nullable through production code,
+paid for by `openedOf` / `dataAsOfOf` `checkNotNull` helpers on the acquire path.
+
+- `GenerationRegistry`: one `publish(gen, opened, info)`; `publishInternal` folded into
+  it; both lease fields non-null. The LIVE-implies-both invariant is now checked once
+  inside `tryAcquire`, under the lock where it actually lives, instead of twice in the
+  facade.
+- `DefaultSnapshotCache`: both helpers deleted, call sites read `lease.opened` and
+  `lease.generationInfo.dataAsOf` directly.
+- No earlier-phase assertion or scenario line was touched. `GenerationRegistryTest` gains
+  a private `GenerationRegistry.publish(gen, bytes)` extension adapting to the real
+  overload with a stub `OpenGeneration`, so all 18 existing call sites are unchanged.
+
+Nullable `GroupRuntime.cycle` was deliberately left alone: unlike the publish overload it
+has a non-test justification - E2E's `coldGroup` is a group that never refreshes.
+
+135 tests green (2 pre-existing skips).
+
+### Still open
+
+- **`RefreshPhase.QUERY` / `FETCH` / `APPEND` are never emitted.** Only a
+  `GenerationSource` could time them and `BuildContext` hands it no events handle. Three
+  label values a binder must handle and will never see.
+- **`CacheEvents.leaseExpired` is never fired** and `GenerationRegistry.expiredLeases()`
+  has test callers only. Spec 6.2's lease-deadline diagnostic is declared at two seams and
+  wired at neither - P9 owes the poll, or both go.
+- **`GenerationRegistry.current()`** has no production caller; `currentInfo()` covers it.
+- **`tryBeginRound` / `endRound` could collapse** into one `inRound { }` that makes the
+  protocol unrepresentable rather than `check()`-enforced, without moving I/O under the
+  lock. Not done: it reshapes `runOnce`'s control flow.
+- **`Hook` / `HookRunner` sit in `api`**, widening the consumer seam with five test-only
+  constants. `spi` is the honest home; `core` may depend on it either way.
+- **`CacheEvents` is 11 methods where one `on(event: CacheEvent)` would do**, which would
+  also make the guard above a single wrapper rather than a helper each call site must
+  remember. Blocked: the signature is FIXED and pinned to spec 12.2 labels plus
+  `MetricLabelContractTest`, so it needs a spec change first.

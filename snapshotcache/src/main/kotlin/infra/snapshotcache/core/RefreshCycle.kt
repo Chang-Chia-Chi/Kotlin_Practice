@@ -118,7 +118,7 @@ internal class RefreshCycle(
             // that does throw classifies as a disk error rather than escaping the round.
             val checkpointStart = clock.instant()
             storeOp { candidate.close() }
-            notify { events.refreshPhase(group, RefreshPhase.CHECKPOINT, Duration.between(checkpointStart, clock.instant())) }
+            emit(group) { events.refreshPhase(group, RefreshPhase.CHECKPOINT, Duration.between(checkpointStart, clock.instant())) }
 
             if (registry.isShuttingDown()) {
                 throw RoundAbort(RefreshResult.SHUTDOWN_ABORTED, "shutdown observed before promote; candidate never promoted")
@@ -135,7 +135,7 @@ internal class RefreshCycle(
             // VERIFYING, on a connection from the attached generation.
             val verifyStart = clock.instant()
             val verdict = gate.verify(opened, registry.currentInfo())
-            notify { events.refreshPhase(group, RefreshPhase.VERIFY, Duration.between(verifyStart, clock.instant())) }
+            emit(group) { events.refreshPhase(group, RefreshPhase.VERIFY, Duration.between(verifyStart, clock.instant())) }
             hooks.at(Hook.AFTER_VERIFY)
 
             when (verdict) {
@@ -144,14 +144,14 @@ internal class RefreshCycle(
                         "Verify rejected candidate generation %d of group %s: rule=%s detail=%s",
                         gen, group, verdict.rule, verdict.detail,
                     )
-                    notify { events.verifyFailed(group, verdict.rule, verdict.detail) }
+                    emit(group) { events.verifyFailed(group, verdict.rule, verdict.detail) }
                     val failures = registry.recordVerifyFailure()
                     if (failures == config.verify.consecutiveFailureThreshold) {
                         log.errorf(
                             "Group %s has failed verification %d times in a row; escalating to critical (spec 8.5)",
                             group, failures,
                         )
-                        notify { events.verifyFailureEscalated(group, failures) }
+                        emit(group) { events.verifyFailureEscalated(group, failures) }
                     }
                     throw RoundAbort(RefreshResult.VERIFY_FAILED, "${verdict.rule}: ${verdict.detail}")
                 }
@@ -170,7 +170,7 @@ internal class RefreshCycle(
                     hooks.at(Hook.BEFORE_POINTER_SWAP)
                     val publishedAt = clock.instant()
                     registry.publish(gen, opened, GenerationInfo(gen, dataAsOf, publishedAt, verdict.rowCounts))
-                    notify {
+                    emit(group) {
                         events.refreshPhase(
                             group,
                             RefreshPhase.PUBLISH,
@@ -252,7 +252,7 @@ internal class RefreshCycle(
                 continue
             }
             registry.reclaimed(gen)
-            notify { events.generationReclaimed(group, gen) }
+            emit(group) { events.generationReclaimed(group, gen) }
             reclaimed += gen
         }
         return GcOutcome(reclaimed, deferred)
@@ -284,21 +284,8 @@ internal class RefreshCycle(
 
     /** Every round exit funnels through here: one refreshFinished event per round, [generation] only on success. */
     private fun finish(result: RefreshResult, generation: Long? = null, detail: String? = null): RefreshOutcome {
-        notify { events.refreshFinished(group, result, generation) }
+        emit(group) { events.refreshFinished(group, result, generation) }
         return RefreshOutcome(result, generation, detail)
-    }
-
-    /**
-     * The event sink is caller-supplied (a metrics binder, typically). A throwing one must
-     * never break the round: it would skip [abort] and leave a zombie generation record
-     * plus its file behind for the process lifetime. Reporting is best-effort by contract.
-     */
-    private inline fun notify(fire: () -> Unit) {
-        try {
-            fire()
-        } catch (failure: Exception) {
-            log.warnf("CacheEvents sink of group %s threw and was ignored: %s", group, failure.describe())
-        }
     }
 
     /** A [GenerationStore] operation throwing is a disk problem (spec 9.2 classification). */

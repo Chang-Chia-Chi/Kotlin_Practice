@@ -18,12 +18,10 @@ import infra.snapshotcache.api.Snapshot
 import infra.snapshotcache.api.SnapshotCache
 import infra.snapshotcache.api.SnapshotCacheConfig
 import infra.snapshotcache.spi.GenerationStore
-import infra.snapshotcache.spi.OpenGeneration
 import infra.snapshotcache.spi.SnapshotHandle
 import org.jboss.logging.Logger
 import java.time.Clock
 import java.time.Duration
-import java.time.Instant
 
 private val log = Logger.getLogger(DefaultSnapshotCache::class.java)
 
@@ -68,8 +66,8 @@ internal class DefaultSnapshotCache(
         val runtime = runtimeOf(group)
         val lease = acquireLease(runtime, group, waitBudget)
         try {
-            val rows = runtime.store.copyOut(openedOf(lease), spec)
-            return CopyOutResult(lease.generation, dataAsOfOf(lease), rows)
+            val rows = runtime.store.copyOut(lease.opened, spec)
+            return CopyOutResult(lease.generation, lease.generationInfo.dataAsOf, rows)
         } finally {
             release(runtime, group, lease, orphaned = false)
         }
@@ -80,7 +78,7 @@ internal class DefaultSnapshotCache(
         val lease = acquireLease(runtime, group, waitBudget)
         try {
             // Constructed at the spi boundary, held here only as api.Snapshot (D28).
-            return SnapshotHandle(openedOf(lease), dataAsOfOf(lease)) { orphaned ->
+            return SnapshotHandle(lease.opened, lease.generationInfo.dataAsOf) { orphaned ->
                 release(runtime, group, lease, orphaned)
             }
         } catch (failure: Throwable) {
@@ -161,7 +159,7 @@ internal class DefaultSnapshotCache(
         if (registry.isShuttingDown()) refuseShuttingDown(group)
         if (available) {
             registry.tryAcquire(owner)?.let { lease ->
-                events.acquireWaited(group, Duration.between(waitedFrom, clock.instant()))
+                emit(group) { events.acquireWaited(group, Duration.between(waitedFrom, clock.instant())) }
                 return lease
             }
         }
@@ -185,26 +183,19 @@ internal class DefaultSnapshotCache(
                 lease.info.owner,
                 heldFor,
             )
-            events.leaseOrphaned(group, lease.info)
+            emit(group) { events.leaseOrphaned(group, lease.info) }
         } else {
-            events.leaseReleased(group, lease.info, heldFor)
+            emit(group) { events.leaseReleased(group, lease.info, heldFor) }
         }
     }
 
     private fun refuseShuttingDown(group: GroupId): Nothing {
-        events.acquireUnavailable(group, AcquireUnavailableReason.SHUTTING_DOWN)
+        emit(group) { events.acquireUnavailable(group, AcquireUnavailableReason.SHUTTING_DOWN) }
         throw ShuttingDownException(group)
     }
 
     private fun refuseUnavailable(group: GroupId, reason: AcquireUnavailableReason): Nothing {
-        events.acquireUnavailable(group, reason)
+        emit(group) { events.acquireUnavailable(group, reason) }
         throw NotReadyException(group, reason)
     }
-
-    private fun openedOf(lease: RegistryLease): OpenGeneration =
-        checkNotNull(lease.opened) { "generation ${lease.generation} was published without its OpenGeneration" }
-
-    private fun dataAsOfOf(lease: RegistryLease): Instant =
-        checkNotNull(lease.generationInfo) { "generation ${lease.generation} was published without its GenerationInfo" }
-            .dataAsOf
 }

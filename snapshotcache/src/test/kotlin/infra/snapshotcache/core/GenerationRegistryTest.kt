@@ -1,8 +1,10 @@
 package infra.snapshotcache.core
 
+import infra.snapshotcache.api.GenerationInfo
 import infra.snapshotcache.api.Hook
 import infra.snapshotcache.api.HookRunner
 import infra.snapshotcache.api.NoOpHooks
+import infra.snapshotcache.spi.OpenGeneration
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatCode
 import org.junit.jupiter.api.Test
@@ -34,6 +36,21 @@ class GenerationRegistryTest {
         clock: Clock = Clock.fixed(t0, ZoneOffset.UTC),
         hooks: HookRunner = NoOpHooks,
     ) = GenerationRegistry(maxLive, leaseDeadline, clock, hooks)
+
+    /**
+     * Stands in for the registry's former fileBytes-only publish overload, which existed
+     * only for this suite and forced a nullable `RegistryLease.opened` through production
+     * code. The stub generation is never read from - these tests exercise the registry,
+     * not a store.
+     */
+    private fun GenerationRegistry.publish(gen: Long, bytes: Long) {
+        val opened = object : OpenGeneration {
+            override val generation = gen
+            override fun connection() = error("registry tests never read from a generation")
+            override fun fileBytes() = bytes
+        }
+        publish(gen, opened, GenerationInfo(gen, t0, t0, emptyMap()))
+    }
 
     /** Full happy build path: beginBuild -> beginPublish -> publish. Returns the generation. */
     private fun GenerationRegistry.publishGen(fileBytes: Long = 100): Long {

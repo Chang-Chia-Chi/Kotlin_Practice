@@ -7,10 +7,12 @@ import infra.snapshotcache.api.HookRunner
 import infra.snapshotcache.api.RefreshOutcome
 import infra.snapshotcache.api.RefreshPhase
 import infra.snapshotcache.api.RefreshResult
+import infra.snapshotcache.api.Snapshot
 import infra.snapshotcache.testkit.StoreOp
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.Test
 import java.time.Duration
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 
 /**
@@ -78,6 +80,59 @@ internal class ReviewFixRegressionTest : RefreshCycleTestBase() {
         assertThat(out.result).isEqualTo(RefreshResult.SUCCESS)
         assertThat(registry.current()).isEqualTo(1L)
         assertThat(registry.liveGenerations().map { it.generation }).containsExactly(1L)
+    }
+
+    @Test
+    fun throwingEventSink_onAWaitedAcquire_isIgnored_andTheLeaseIsNotLeaked() {
+        val boom = object : CacheEvents {
+            override fun acquireWaited(group: GroupId, waited: Duration) {
+                throw RuntimeException("metrics sink exploded")
+            }
+        }
+        val c = cycle()
+        val cache = DefaultSnapshotCache(config, mapOf(group to GroupRuntime(registry, stubStore, c)), boom, clock)
+
+        // Nothing is published yet, so the acquire parks on the registry condition - and
+        // the wait it is about to record is exactly what fires the throwing sink.
+        val outcome = AtomicReference<Any?>()
+        val waiter = Thread({
+            outcome.set(runCatching { cache.acquire(group, Duration.ofSeconds(30)) }.getOrElse { it })
+        }, "budget-waiter")
+        waiter.isDaemon = true
+        waiter.start()
+        awaitParked(waiter)
+
+        runSuccess(c) // publishes gen 1; the waiter wakes, takes the lease, fires the sink
+        joinOrFail(waiter)
+
+        // Before the fix the sink's exception escaped between the registry's refcount
+        // increment and the SnapshotHandle that owns the matching release: the caller got
+        // a RuntimeException instead of a Snapshot, and the lease it never received stayed
+        // outstanding for the process lifetime, eventually wedging refresh at the K guard.
+        val result = outcome.get()
+        assertThat(result)
+            .describedAs("a throwing sink must not break the acquire, got %s", result)
+            .isInstanceOf(Snapshot::class.java)
+        (result as Snapshot).close()
+        assertThat(registry.liveGenerations().single().refCount)
+            .describedAs("the lease reached a handle that released it; nothing is leaked")
+            .isEqualTo(0)
+    }
+
+    /** Bounded spin until the waiter is parked in the registry's condition wait. */
+    private fun awaitParked(thread: Thread) {
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
+        while (true) {
+            when (thread.state) {
+                Thread.State.WAITING, Thread.State.TIMED_WAITING -> return
+                Thread.State.TERMINATED ->
+                    throw AssertionError("waiter terminated before parking; acquire did not wait")
+                else -> {
+                    if (System.nanoTime() >= deadline) throw AssertionError("waiter never parked; state=${thread.state}")
+                    Thread.onSpinWait()
+                }
+            }
+        }
     }
 
     // ------------------------------------------------------------------ M2: no lease after shutdown begins
