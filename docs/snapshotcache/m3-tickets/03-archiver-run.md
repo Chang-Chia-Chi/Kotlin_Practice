@@ -30,6 +30,15 @@ The MinIO client lives behind a small concrete wrapper with a fake for tests. It
 testability seam, not a new public interface; the spec 2.3 five-interface budget is a
 framework budget and this layer adds nothing to it.
 
+This ticket also owns where the Parquet export function lands. Ticket 01 settled the
+statement and pinned it in `duckdb/ParquetExportSpikeTest`, but deliberately shipped no
+production code, since an export function would have had no caller until now. Decide its
+home against what the archiver actually needs: beside `copyOut` in
+`infra.snapshotcache.duckdb` (which would need a seam on a FIXED spi interface, so a plan
+amendment first), or in `infra.snapshotarchive` as a DuckDB-aware consumer, which the
+public API already assumes callers are - `CopyOutSpec` takes caller SQL and a caller
+connection the store ATTACHes into.
+
 **Blocked by:** 01 (the export path must be decided before the run can be written), 02 (the run needs the DAO).
 
 **Status:** ready-for-agent

@@ -33,6 +33,7 @@ never depend on the archive layer, and the archive layer reaches the framework o
 - [ ] Contract test: two concurrent writers attempt the same transition, exactly one wins
 - [ ] Contract test: the watermark predicate is exercised at its boundaries — `data_as_of` exactly equal to T, no COMPLETE rows at all, and every COMPLETE row newer than T
 - [ ] Contract test: the monotonicity guard rejects a `data_as_of` regression
+- [ ] `ArchitectureTest` imports `infra.snapshotarchive` as well as `infra.snapshotcache` — without this the two rules below are declared but never evaluated
 - [ ] ArchUnit: `infra.snapshotcache..` must not depend on `infra.snapshotarchive..`
 - [ ] ArchUnit: `infra.snapshotarchive..` must not depend on `infra.snapshotcache.{spi,core,duckdb}..`
 - [ ] The test database choice (testcontainer versus an H2-compatible subset) is decided in-phase and recorded in progress.md

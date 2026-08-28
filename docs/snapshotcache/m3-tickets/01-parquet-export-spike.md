@@ -15,15 +15,18 @@ That number sizes retention storage and confirms the lease-vs-K interaction is a
 rather than a risk carried forward. Third, characterise worst-case upload time on the real
 MinIO link, which is the input to the watchdog timeout T chosen in ticket 04.
 
-Delivered as a thin export function plus a progress.md entry recording the decision, the
-numbers, and the date. This ticket ships a decision; it does not ship the archiver.
+Delivered as a spike test pinning the answer plus a progress.md entry recording the
+decision, the numbers, and the date. This ticket ships a decision; it does not ship the
+archiver, and it deliberately ships no production code - a production export function
+would have no caller until ticket 03, which places it.
 
 **Blocked by:** None (can start immediately).
 
 **Status:** done (2026-08-29), except the MinIO upload measurement — see below
 
-- [x] The read-only-attached-connection question is answered empirically against DuckDB 1.1.3, not from documentation, and the chosen export path is implemented as one function
-      — `COPY ... TO parquet` works directly; the `copyOut` staging fallback is not needed.
+- [x] The read-only-attached-connection question is answered empirically against DuckDB 1.1.3, not from documentation
+      — `COPY ... TO parquet` works directly; the `copyOut` staging fallback is not needed and was not built.
+      The statement is pinned by `duckdb/ParquetExportSpikeTest`; ticket 03 owns the production function.
 - [x] Checkpoint size in bytes and export duration are measured at ~1M rows and recorded
       — 14,180,166 bytes in 39/41/52 ms across three runs.
 - [ ] Worst-case MinIO upload time for a checkpoint of that size is characterised
@@ -31,4 +34,4 @@ numbers, and the date. This ticket ships a decision; it does not ship the archiv
       ticket 04's input; the watchdog timeout T must not be derived from the export number.
 - [x] progress.md records the decision, the measurements, and which spec 18.6 items are now closed
 - [x] No framework source outside the export seam is modified
-      — zero framework files changed; full suite 138 tests, 0 failures.
+      — zero main-source files changed at all; full suite 138 tests, 0 failures.

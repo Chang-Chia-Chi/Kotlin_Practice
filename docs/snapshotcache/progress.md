@@ -452,14 +452,15 @@ plan P11-P14 with the spec 18.6 spike promoted ahead of them as its own ticket. 
 covers ticket 01 only.
 
 ### Delivered
-- `infra/snapshotarchive/ParquetExport.kt` - `exportTable(connection, table, target): Long`.
-  One statement: `COPY (SELECT * FROM <table>) TO '<file>' (FORMAT PARQUET)`, returning the
-  row count `COPY` itself reports. ~20 lines of code.
-- `ParquetExportSpikeTest` (3 tests) - exports from the real store's READ_ONLY-attached
-  duplicate connection, asserts the attach is still read-only afterwards, and reads the file
-  back through a separate instance to prove it is portable Parquet. The third test carries
-  the 18.6 item-2 measurement with tripwire bounds.
+- `duckdb/ParquetExportSpikeTest` (3 tests) - the whole deliverable. Exports from the real
+  store's READ_ONLY-attached duplicate connection, asserts the attach still rejects an
+  INSERT afterwards, and reads the file back through a separate instance to prove it is
+  portable Parquet. The third test carries the 18.6 item-2 measurement.
 - Spec 18.6 items 1 and 2 closed in the spec; item 3 left open and re-scoped.
+- **No main source.** The spike's deliverable is the answer, and the answer is the spec
+  entry plus this test. A production `exportTable` would have had one caller - a test -
+  until ticket 03 unblocks, so it was written, reviewed, then deleted rather than parked in
+  `infra.snapshotarchive` as scaffolding. Ticket 03 places it knowing what it needs.
 
 ### The answer
 `COPY ... TO '<f>.parquet'` works directly on a read-only attached snapshot connection.
@@ -478,12 +479,16 @@ and A3 survives the export, which is what lets the archiver run against the live
 instance at all, so it is asserted rather than assumed.
 
 ### Deviations from the documents
-- **None on contracts.** No framework source was modified; no frozen interface, invariant,
-  equation, enum, or earlier test was touched. Full suite 138 tests, 0 failures (135 before,
-  plus these 3; the 2 aborted are the pre-existing Unix-only skips).
-- `ident`/`literal` are duplicated from `infra.snapshotcache.spi` rather than imported.
-  Deliberate: plan 3c fences `infra.snapshotarchive` off from `spi`, and two one-line
-  functions cost less than the dependency ticket 02's ArchUnit rule exists to forbid.
+- **None on contracts.** No main source was modified at all; no frozen interface,
+  invariant, equation, enum, or earlier test was touched. Full suite 138 tests, 0 failures
+  (135 before, plus these 3; the 2 aborted are the pre-existing Unix-only skips).
+- **The test lives in `infra.snapshotcache.duckdb`, not `infra.snapshotarchive`** (user
+  ruling, 2026-08-29, after the first placement was committed). What it pins is a DuckDB
+  adapter capability - `COPY ... TO parquet` is the neighbour of `copyOut`, not archive
+  policy, which is manifests, versions, retention and watermarks. Siting it here also lets
+  it reuse `spi`'s `ident`/`literal` instead of duplicating them, and leaves
+  `infra.snapshotarchive` to be created cleanly by ticket 02 together with its ArchUnit
+  rules rather than existing unguarded in the meantime.
 
 ### Notes for later tickets
 - **Row count comes from `COUNT(*)`, not from COPY's update count.** 1.1.3 does report it,
@@ -491,10 +496,10 @@ instance at all, so it is asserted rather than assumed.
   nothing downstream could tell them apart - a 0 recorded for a 1M-row table would be
   committed into the PENDING inventory and then "verified" against the real object. Probed
   before deciding: `executeQuery` is rejected outright for COPY, so there is no third option.
-- **The `infra.snapshotarchive` fence is a convention, not a gate, until ticket 02.**
-  `ArchitectureTest` imports only `infra.snapshotcache`, so no rule currently sees the new
-  package: it could reach into `spi`, `core`, or `org.duckdb` today with a green build.
-  Ticket 02 owns closing this and it is that ticket's first task.
+- **`ArchitectureTest` imports only `infra.snapshotcache`.** When ticket 02 creates
+  `infra.snapshotarchive`, adding that package to `importPackages` is part of the same
+  change - otherwise its two new rules are declared but never evaluated, and the package
+  could reach into `spi`, `core`, or `org.duckdb` with a green build.
 - **Spec 18.6 item 3 is still open and is ticket 04's input.** The spike sizes the payload
   (~14 MB) but there is no MinIO link on this machine, so the worst-case upload time behind
   the watchdog timeout T was not measured. T must not be picked from the export number.

@@ -1,6 +1,7 @@
-package infra.snapshotarchive
+package infra.snapshotcache.duckdb
 
-import infra.snapshotcache.duckdb.DuckDbGenerationStore
+import infra.snapshotcache.spi.ident
+import infra.snapshotcache.spi.literal
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
@@ -10,15 +11,20 @@ import java.sql.Connection
 import java.sql.DriverManager
 
 /**
- * Ticket 01, spec 18.6 items 1-2: can DuckDB 1.1.3 run `COPY (SELECT ...) TO '<f>.parquet'`
- * on a connection whose current database is a READ_ONLY attached generation file?
+ * Spec 18.6 items 1-2, the M3 archive layer's opening spike: can DuckDB 1.1.3 run
+ * `COPY (SELECT ...) TO '<f>.parquet'` on a connection whose current database is a
+ * READ_ONLY attached generation file?
  *
- * The question is load-bearing rather than academic. If yes, the archiver exports straight
- * from the serving instance under the lease it already holds. If no, every export has to
- * stage through the public `copyOut` into the shared consumer instance (D16) first, which
- * doubles the I/O and lengthens the lease hold. Spec 18.3 could not be written until this
- * was settled, so it was settled empirically against the pinned version: it works, and the
- * staging fallback is not needed. These tests are what stop that answer going stale.
+ * The question gated the whole archiver design. If yes, an export streams straight from the
+ * serving instance under the lease it already holds. If no, every export has to stage
+ * through the public `copyOut` into the shared consumer instance (D16) first, doubling the
+ * I/O and lengthening the lease hold. It was settled empirically against the pinned
+ * version: it works, and the staging fallback is not needed.
+ *
+ * This test is the executable half of that answer - the prose half is spec 18.6. It lives
+ * beside the other DuckDB adapter tests because what it pins is a DuckDB capability, not
+ * archive policy; the archiver that consumes it is built in M3 ticket 03, which owns where
+ * the production export function lands.
  *
  * The connection under test is the real one: [DuckDbGenerationStore.open] duplicates its
  * in-memory serving connection and `USE`s the READ_ONLY attached generation, which is
@@ -65,15 +71,15 @@ class ParquetExportSpikeTest {
     }
 
     /**
-     * Spec 18.6 item 2: checkpoint bytes and export duration at ~1M rows, the numbers that
-     * size retention storage and settle whether a lease held across an export interacts
-     * badly with the K-generation ceiling.
+     * Spec 18.6 item 2: checkpoint bytes at ~1M rows, the number that sizes retention
+     * storage and settles whether a lease held across an export interacts badly with the
+     * K-generation ceiling.
      *
-     * Measured 2026-08-29 on the pinned 1.1.3: 1M rows produced 14.2 MB in ~40-50 ms, so
-     * the lease-hold question answers itself. Only the size is asserted: it is deterministic
-     * and it is the number ticket 04 sizes retention against. Duration is printed, never
-     * asserted - a wall-clock bound on a contended CI runner fails the build without
-     * telling anyone what regressed, and this suite takes no timing dependencies.
+     * Measured 2026-08-29 on the pinned 1.1.3: 1M rows produced 14.2 MB in ~40 ms, so the
+     * lease-hold question answers itself. Only the size is asserted: it is deterministic and
+     * it is what M3 ticket 04 sizes retention against. Duration is printed, never asserted -
+     * a wall-clock bound on a contended CI runner fails the build without telling anyone
+     * what regressed.
      */
     @Test
     fun `measures checkpoint size and export duration at one million rows`(@TempDir dir: Path) {
@@ -92,6 +98,25 @@ class ParquetExportSpikeTest {
             assertThat(bytes).isLessThan(64L * 1024 * 1024)
         }
     }
+
+    /**
+     * The statement under test, plus the row count an archiver would record in its inventory.
+     *
+     * The count comes from `COUNT(*)` rather than COPY's update count. 1.1.3 does report
+     * one, but an empty table and a driver that stopped classifying COPY as DML both return
+     * 0 and nothing downstream could tell them apart - and that value would be committed
+     * into a manifest row that the watchdog later verifies a real object against.
+     */
+    private fun exportTable(connection: Connection, table: String, target: Path): Long =
+        connection.createStatement().use { statement ->
+            statement.execute(
+                "COPY (SELECT * FROM ${ident(table)}) TO '${literal(duckDbPath(target))}' (FORMAT PARQUET)",
+            )
+            statement.executeQuery("SELECT COUNT(*) FROM ${ident(table)}").use { rows ->
+                check(rows.next()) { "row count query returned nothing for table $table" }
+                rows.getLong(1)
+            }
+        }
 
     /**
      * Builds one real generation of [rows] rows, promotes it, opens it, and hands [block]
@@ -125,13 +150,17 @@ class ParquetExportSpikeTest {
     private fun readBack(target: Path): Long =
         DriverManager.getConnection("jdbc:duckdb:").use { connection ->
             connection.createStatement().use { statement ->
-                val path = target.toAbsolutePath().toString().replace(java.io.File.separatorChar, '/')
-                statement.executeQuery("SELECT COUNT(*) FROM read_parquet('$path')").use { rows ->
-                    check(rows.next()) { "read_parquet returned no rows for $target" }
-                    rows.getLong(1)
-                }
+                statement.executeQuery("SELECT COUNT(*) FROM read_parquet('${literal(duckDbPath(target))}')")
+                    .use { rows ->
+                        check(rows.next()) { "read_parquet returned no rows for $target" }
+                        rows.getLong(1)
+                    }
             }
         }
+
+    /** DuckDB takes forward slashes on every platform; a Windows separator would otherwise escape. */
+    private fun duckDbPath(path: Path): String =
+        path.toAbsolutePath().toString().replace(java.io.File.separatorChar, '/')
 
     private companion object {
         const val GENERATION = 1L
