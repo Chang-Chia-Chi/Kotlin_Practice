@@ -127,8 +127,11 @@ class ArchiveMaintenance(
      * resolvable and never while an uploader might still be writing into it. FAILED rows are
      * reclaimed on their own clock rather than the retention window, since a broken uploader
      * would otherwise pile up a window's worth of garbage nothing can ever read - but only
-     * once they have been FAILED for longer than the watchdog timeout, which is by definition
-     * longer than an upload can take, so nothing is uploading into one when its objects go.
+     * once they have been FAILED for longer than the watchdog timeout T. That is a margin
+     * argument, not a definition: a row only reaches FAILED after sitting PENDING for T, so
+     * waiting a further T puts roughly 2T between an upload starting and its objects being
+     * deleted. T itself is a policy floor, not a measurement - spec 18.6 #3 is still open on
+     * the real link - so this is deliberately headroom rather than a proof.
      */
     fun purge(group: GroupId) {
         val now = clock.instant()
@@ -201,7 +204,7 @@ class ArchiveMaintenance(
     }
 
     private fun keyOf(entry: ManifestEntry, obj: ArchivedObject): String =
-        entry.uriPrefix.removePrefix("${objects.bucket}/") + obj.objectKey
+        objectKey(entry, obj.objectKey, objects.bucket)
 
     companion object {
 

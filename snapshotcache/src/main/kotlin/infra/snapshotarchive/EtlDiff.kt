@@ -302,12 +302,11 @@ class EtlDiff(
      * never a baseline.
      */
     private fun download(entry: ManifestEntry, temp: Path): Map<String, Path> {
-        val prefix = entry.uriPrefix.removePrefix("${objects.bucket}/")
         val futures = Inventory.decode(entry.inventory).map { obj ->
             downloads.submit(
                 Callable {
                     val file = temp.resolve(obj.objectKey)
-                    objects.get(prefix + obj.objectKey, file)
+                    objects.get(objectKey(entry, obj.objectKey, objects.bucket), file)
                     obj.table to file
                 },
             )
@@ -336,18 +335,5 @@ class EtlDiff(
 
         val log: Logger = Logger.getLogger(EtlDiff::class.java)
 
-        fun named(prefix: String): ThreadFactory {
-            val counter = AtomicLong()
-            return ThreadFactory { runnable -> Thread(runnable, "$prefix-${counter.incrementAndGet()}") }
-        }
     }
 }
-
-/**
- * The archive layer may not import `infra.snapshotcache.spi` (plan 3c), where the framework's
- * own copies live, so these stay duplicated rather than the boundary being widened for two
- * one-liners - the same trade [Archiver] made.
- */
-private fun ident(name: String): String = "\"${name.replace("\"", "\"\"")}\""
-
-private fun literal(value: String): String = value.replace("'", "''")

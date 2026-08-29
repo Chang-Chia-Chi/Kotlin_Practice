@@ -290,7 +290,13 @@ class ManifestDao(
                 .toEntries()
         }
 
-    /** Reads one row regardless of status. Diagnostics and tests; the protocol never needs it. */
+    /**
+     * Reads one row regardless of status - including PENDING and FAILED, which is the point.
+     *
+     * This is how the ETL diff helper resolves a recorded watermark: it must be able to see
+     * that the version it recorded is no longer COMPLETE, so it can fall back to a full
+     * compare rather than silently finding nothing (spec 18.4 step 3).
+     */
     fun find(group: String, version: Long): ManifestEntry? =
         jdbi.withHandle<ManifestEntry?, RuntimeException> { handle ->
             handle.createQuery("$SELECT_ALL WHERE group_id = :group AND version = :version")

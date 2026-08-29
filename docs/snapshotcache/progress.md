@@ -922,3 +922,69 @@ Also still owed, and not M3's: P9's wiring has to feed `Archiver.tables`, `EtlDi
 the retention window, the staleness threshold and T from configuration rather than leaving the
 defaults to stand for decisions nobody made. The whole layer is plain JDK scheduling waiting to
 be wrapped, never replaced.
+
+## M3 two-axis review pass  (2026-08-29)
+
+Standards + spec review of tickets 02-05 (`6236287..HEAD`, path-scoped to snapshotcache).
+Both axes confirmed the load-bearing things are right: 18.3's step order is exact including
+the crash paths, `watermark()` is D35 verbatim, the helper never writes consumer state,
+keep-newest-COMPLETE is unconditional, and the watchdog/uploader race resolves to one
+winner. What follows is what they found wrong, all fixed here.
+
+### Documents that had drifted from the code (the serious half)
+- **Spec 18.4 and D32 still said under-reporting was "impossible by construction"** while
+  18.6 #4 - added by the same ticket - records the case where it is not. The documents win
+  by CLAUDE.md, so a later session reading 18.4 would have built on a rule the code already
+  disproves. Both now say "impossible for monotone columns, not in general" and point at
+  18.6 #4. This is the second time this session that an absolute claim outlived the code it
+  described; the first was the spike's row count.
+- **Ticket 04's two purge rules existed only in KDoc and a progress deviation.** Spec 18.2
+  still described the old three-step purge and 18.5 said nothing. Both now carry: purge
+  never reclaims PENDING, and reclaims FAILED only after it has been FAILED longer than T.
+  These are protocol correctness rules, not implementation detail - "objects before the row"
+  is true without them and still not sufficient.
+- **Ticket 03's acceptance box claimed uploaded objects match the inventory "exactly".**
+  Verification is presence plus byte size; checksums are recorded and never compared. The
+  behaviour is defensible and documented, the word was not. Box reworded.
+- **`ManifestDao.find` was documented "the protocol never needs it"** - ticket 05 made it the
+  diff helper's baseline lookup. Rewritten to say what it is actually for.
+
+### One real bug
+`Archiver.close()` awaited its two pools with `&&`. A run pool that missed its budget
+short-circuited the export await entirely, and `tempRoot.deleteRecursively()` then ran
+without ever having waited on export threads still writing Parquet into that directory.
+`awaitTermination` also threw `InterruptedException` straight out of `close()`, skipping the
+delete and leaving the interrupt flag unrestored. Both fixed; the delete now always runs.
+
+### Duplication removed
+New `infra/snapshotarchive/Internals.kt` holds `ident`, `literal`, `named` and `objectKey`.
+`Archiver` and `EtlDiff` each carried their own `ident`/`literal`/`named`, justified by "the
+archive layer may not import `infra.snapshotcache.spi`". True, and beside the point: plan 3c
+says nothing about two files in the same package sharing a declaration. The object-key walk
+(`uriPrefix.removePrefix(bucket) + key`) was in all three of `Archiver`, `ArchiveMaintenance`
+and `EtlDiff`, undoing `ManifestDao`'s stated reason for deriving `uri_prefix` in one place.
+
+### Reasoning corrected
+The FAILED-after-T rule was justified as "the watchdog timeout, which is by definition
+longer than an upload can take". That leans on a quantity spec 18.6 #3 says is unmeasured.
+Restated as what it is: a row reaches FAILED only after sitting PENDING for T, so a further
+T puts roughly 2T between an upload starting and its objects going - headroom, not proof.
+
+### Accepted, not fixed
+- **Test fixtures are triplicated** (`FakeSnapshotCache`/`MaintenanceCache`/`DiffCache` and
+  siblings). Tickets 04 and 05 justified this as "hoisting would mean editing an earlier
+  phase's test", which is wrong - a new shared file edits nothing. Left alone here because
+  consolidating it touches three green test files for no behaviour change, and this pass had
+  already changed production code; it is real debt and it is named.
+- **`ObjectStore.delete` and `get` have no real-MinIO test**, only `put`/`sizeOf`. `delete`
+  is the destructive one and nobody had admitted the gap.
+- **Three parallelism knobs** (`exportParallelism`, `runParallelism`, `downloadParallelism`)
+  no caller sets. Speculative until P9 wiring exists.
+- **`(group: String, version: Long)` through all eight DAO methods** while `GroupId` exists
+  in `api`, forcing `.value` 13 times.
+- **Four consecutive tickets recorded "size budget exceeded" and none escalated.** The
+  overrun is roughly half narrative doc comment rather than logic, so it is structural - but
+  the plan's 200-600 line guidance is now describing something the work does not do, and
+  that is a plan defect, not four coincidences.
+
+197 tests, 0 failures, 2 pre-existing skips.

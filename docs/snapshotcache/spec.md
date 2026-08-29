@@ -843,7 +843,7 @@ Pinned to 1.1.3 (Linux component compatibility in the CI environment). Consequen
 | D29 | `duckdb.serving.threads` knob added (nullable, null = engine default); runaway readers are accepted-and-observed, not enforced | DuckDB's thread default equals hardware concurrency, which throttles CPU-limited pods and lets one runaway reader starve the shared serving instance (1.1.3 has no statement timeout, Sec 14.5). The cap bounds the blast radius; detection stays with the D8 lease-deadline diagnostics. An admin kill switch (interrupting a lease's connections - the Sec 14.5-sanctioned path, made safe by D25 idempotency) is deferred to P9+, to be added only if lease-duration histograms show real abuse |
 | D30 | The archive & diff layer (Sec 18) is a consumer of the public API in a sibling package `infra.snapshotarchive`, never part of the framework | It needs only `withSnapshot`/`copyOut`/`currentInfo` plus Oracle and MinIO. Keeping it outside `infra.snapshotcache` leaves D10/D22/D24 and the five-interface budget untouched, and the one-way ArchUnit rule (framework never imports archive) makes the boundary mechanical. Plan 2.4's module rule still holds: same Maven module, packages are the fence |
 | D31 | Durable archive versions come from an Oracle sequence in the manifest; generation numbers never leave the process; `data_as_of` is the only ephemeral-to-durable join key | Generation numbering restarts at 1 on every boot (Sec 4.3), so it cannot identify anything durable, and most generations are never archived. The archiver enforces `data_as_of` monotonicity at publish (skip + alert on regression) - the same distrust of timestamps as Sec 4.3, applied at the one place time is load-bearing |
-| D32 | Checkpoints only - hourly full Parquet export per table; no precomputed delta files. An ETL's diff is always `checkpoint(watermark)` vs the live snapshot | At ~1M rows a checkpoint is tens of MB and the PK full-outer-join is seconds of local DuckDB; deltas would add a format, composition semantics and dual retention for no payoff. Diffing an older baseline can only over-report (safe: D25 idempotent consumers); under-reporting is impossible because a baseline is always a manifest-recorded checkpoint taken at or before the ETL's last processed moment. Revisit at ~50M rows: add deltas as an optimization on top, checkpoints stay the source of truth |
+| D32 | Checkpoints only - hourly full Parquet export per table; no precomputed delta files. An ETL's diff is always `checkpoint(watermark)` vs the live snapshot | At ~1M rows a checkpoint is tens of MB and the PK full-outer-join is seconds of local DuckDB; deltas would add a format, composition semantics and dual retention for no payoff. Diffing an older baseline can only over-report (safe: D25 idempotent consumers); under-reporting is impossible for monotone columns, because a baseline is always a manifest-recorded checkpoint taken at or before the ETL's last processed moment - but NOT in general: a value returning to its baseline's exact value inside one archive interval is missed (open item 18.6 #4). Revisit at ~50M rows: add deltas as an optimization on top, checkpoints stay the source of truth |
 | D33 | Publish protocol is intent-first: INSERT manifest row PENDING (with full file inventory + checksums) -> upload -> verify -> conditional UPDATE to COMPLETE; a watchdog resolves stale PENDING rows to COMPLETE or FAILED against the inventory | Every MinIO object is preceded by a covering manifest row, so ghost files are impossible and no LIST-based orphan sweep exists. All status transitions are conditional (`WHERE status='PENDING'`), so an uploader racing the watchdog resolves to exactly one winner. Readers trust only COMPLETE. Crash and graceful shutdown converge on the same watchdog recovery path |
 | D34 | Retention is a fixed window sized to the slowest ETL cadence plus margin, with an unconditional keep-newest-COMPLETE rule; full compare against the live snapshot is a first-class fallback, not an error | The fallback must exist anyway (new ETLs, FAILED gaps, watermark purged), which is what lets retention stay a dumb window instead of consumer registration/refcounting. Keep-newest guarantees a broken archiver can never purge the last good baseline |
 | D35 | The watermark is consumer state: each ETL records `max(version) WHERE status='COMPLETE' AND data_as_of <= snapshot.dataAsOf` transactionally with its own output | D24 again: the framework tracks no per-consumer state. The `data_as_of <= T` predicate closes the long-running-job race - a checkpoint published mid-run describes state the ETL did not process and must never become its baseline (under-report); the predicate can only err toward an older version, which merely over-reports |
@@ -1082,7 +1082,14 @@ All in `infra.snapshotarchive` (D30), consuming only the public API + JDBI
 3. **Watchdog** - resolves PENDING rows older than a timeout T against their
    inventory (D33).
 4. **Purge job** - deletes expired versions: mark, delete objects per
-   inventory, delete row (D34).
+   inventory, delete row (D34). Two rules found while implementing P13 and
+   promoted here from its code: purge never reclaims a PENDING version, and
+   reclaims a FAILED one only once it has been FAILED for longer than the
+   watchdog timeout T. Both close the same hole - a version whose uploader may
+   still be running must keep its row, or that uploader's remaining `put` calls
+   land behind a row that no longer covers them, which is exactly the dangling
+   object D33 forbids. "Objects before the row" is true without these and still
+   not sufficient.
 5. **ETL diff helper** - manifest lookup, checkpoint download, PK diff vs the
    live snapshot, fallback decision (D32/D35).
 
@@ -1126,8 +1133,14 @@ Per ETL run:
 must have been taken at or before the ETL's last processed moment. Hence the
 watermark is a recorded version, never "the latest checkpoint now" (taken
 after the last run; using it silently under-reports). Over-reporting is
-bounded by one archive interval and is safe (D25); under-reporting is
-impossible by construction.
+bounded by one archive interval and is safe (D25).
+
+Under-reporting is impossible for any column that moves in one direction, which
+is what this rule buys. It is **not** impossible in general: a value that
+returns to the exact value its baseline holds, before a newer checkpoint is
+published, is not reported at all. That is a real hole, found while building the
+P14 property test, and it is stated in full as open item 18.6 #4 - read it
+before relying on this paragraph.
 
 This is the standard single-baseline incremental sync with full-resync
 fallback (cf. ZFS incremental send: the common ancestor snapshot must exist,
@@ -1136,7 +1149,11 @@ otherwise full send).
 ### 18.5 Retention (D34)
 
 Fixed window >= slowest ETL cadence + margin (config; e.g. 24-48h), plus
-unconditional keep-newest-COMPLETE. Not "keep latest only": an ETL slower than
+unconditional keep-newest-COMPLETE. A PENDING version is never reclaimed, and a
+FAILED one only after it has been FAILED for longer than the watchdog timeout T
+(see 18.2 item 4 for why); FAILED versions are reclaimed on that timeout rather
+than on the retention window, so a broken uploader cannot park a window's worth
+of unreadable objects. Not "keep latest only": an ETL slower than
 the archive cadence would full-compare every run. Optional alert when the
 newest COMPLETE checkpoint's age exceeds a threshold (archiver broken) -
 purely operational; diffs stay correct (over-report only).

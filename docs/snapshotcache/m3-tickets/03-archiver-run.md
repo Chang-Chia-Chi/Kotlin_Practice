@@ -43,7 +43,11 @@ connection the store ATTACHes into.
 
 **Status:** done (2026-08-29)
 
-- [x] Happy path produces a COMPLETE version whose uploaded objects match the recorded inventory exactly
+- [x] Happy path produces a COMPLETE version whose uploaded objects match the recorded inventory
+      — verified as presence and byte size per object, not checksum. Checksums are computed and
+      recorded in the inventory but never compared: re-verifying one means downloading the object
+      back, and an object store publishes a key whole or not at all. The word "exactly" originally
+      here overstated it.
 - [x] A run never writes an object to MinIO before its covering PENDING row is committed
 - [x] A run whose `data_as_of` is not strictly greater than the newest COMPLETE version's skips and alerts
 - [x] Crash injected between every adjacent step pair leaves either no row at all, or PENDING with partial objects — never a COMPLETE row that cannot be trusted

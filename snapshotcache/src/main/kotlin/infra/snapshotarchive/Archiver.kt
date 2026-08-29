@@ -296,19 +296,19 @@ class Archiver(
         exported: List<ArchivedObject>,
         temp: Path,
     ) {
-        val prefix = entry.uriPrefix.removePrefix("${objects.bucket}/")
         for (obj in exported) {
             if (Thread.interrupted()) {
                 throw InterruptedException("archive run for group '$group' interrupted before ${obj.objectKey}")
             }
             steps(group, ArchiveStep.BEFORE_EACH_UPLOAD)
-            objects.put(prefix + obj.objectKey, temp.resolve(obj.objectKey))
+            objects.put(objectKey(entry, obj.objectKey, objects.bucket), temp.resolve(obj.objectKey))
         }
         for (obj in exported) {
-            val stored = objects.sizeOf(prefix + obj.objectKey)
+            val key = objectKey(entry, obj.objectKey, objects.bucket)
+            val stored = objects.sizeOf(key)
             check(stored == obj.bytes) {
                 "archive version ${entry.version} for group '$group' does not match its inventory: " +
-                    "${prefix + obj.objectKey} is ${stored ?: "absent"}, inventory says ${obj.bytes} bytes"
+                    "$key is ${stored ?: "absent"}, inventory says ${obj.bytes} bytes"
             }
         }
     }
@@ -333,13 +333,22 @@ class Archiver(
         exports.shutdownNow()
         val budget = drainBudget.toMillis()
         val startedAt = System.nanoTime()
-        val drained = runs.awaitTermination(budget, TimeUnit.MILLISECONDS) &&
-            exports.awaitTermination(
-                (budget - (System.nanoTime() - startedAt) / 1_000_000).coerceAtLeast(0),
-                TimeUnit.MILLISECONDS,
-            )
+        // Both pools are awaited, and deliberately not with `&&`: short-circuiting on a
+        // run pool that misses its budget would skip the export await entirely, and the
+        // temp delete below would then race export threads still writing Parquet into it.
+        // An interrupt here must not skip that delete either - it is the only thing that
+        // removes this run's files, so the flag is restored and the cleanup still happens.
+        var drained = false
+        try {
+            val runsDrained = runs.awaitTermination(budget, TimeUnit.MILLISECONDS)
+            val left = (budget - (System.nanoTime() - startedAt) / 1_000_000).coerceAtLeast(0)
+            val exportsDrained = exports.awaitTermination(left, TimeUnit.MILLISECONDS)
+            drained = runsDrained && exportsDrained
+        } catch (interrupted: InterruptedException) {
+            Thread.currentThread().interrupt()
+        }
         if (!drained) {
-            log.warnf("archiver did not drain within %s; temp files may survive this shutdown", drainBudget)
+            log.warnf("archiver did not drain within %s; deleting temp files anyway", drainBudget)
         }
         tempRoot.toFile().deleteRecursively()
     }
@@ -348,19 +357,6 @@ class Archiver(
 
         val log: Logger = Logger.getLogger(Archiver::class.java)
 
-        fun named(prefix: String): ThreadFactory {
-            val counter = AtomicLong()
-            return ThreadFactory { runnable -> Thread(runnable, "$prefix-${counter.incrementAndGet()}") }
-        }
-
-        /**
-         * The archive layer may not import `infra.snapshotcache.spi` (plan 3c), where the
-         * framework's own copies live, so these two one-liners are duplicated rather than
-         * the boundary being widened for them.
-         */
-        fun ident(name: String): String = "\"${name.replace("\"", "\"\"")}\""
-
-        fun literal(value: String): String = value.replace("'", "''")
 
         fun sha256(file: Path): String {
             val digest = MessageDigest.getInstance("SHA-256")
