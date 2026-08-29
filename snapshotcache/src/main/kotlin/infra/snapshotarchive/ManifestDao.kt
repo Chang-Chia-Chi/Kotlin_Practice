@@ -1,5 +1,6 @@
 package infra.snapshotarchive
 
+import infra.snapshotcache.api.GroupId
 import org.jdbi.v3.core.Handle
 import org.jdbi.v3.core.Jdbi
 import org.jdbi.v3.core.statement.Query
@@ -21,7 +22,7 @@ enum class ArchiveStatus { PENDING, COMPLETE, FAILED }
 
 /** One manifest row. `inventory` is the json array described in spec 18.2. */
 data class ManifestEntry(
-    val group: String,
+    val group: GroupId,
     val version: Long,
     val dataAsOf: Instant,
     val createdAt: Instant,
@@ -41,7 +42,7 @@ data class ManifestEntry(
  * would instead publish a checkpoint that silently moves the diff baseline backwards.
  */
 class DataAsOfRegression(
-    val group: String,
+    val group: GroupId,
     val offered: Instant,
     val newestComplete: Instant,
 ) : RuntimeException(
@@ -119,7 +120,7 @@ class ManifestDao(
      * @throws DataAsOfRegression if [dataAsOf] is not strictly newer than the newest COMPLETE.
      */
     fun insertPending(
-        group: String,
+        group: GroupId,
         dataAsOf: Instant,
         inventory: String,
         generation: Long,
@@ -156,7 +157,7 @@ class ManifestDao(
               (:group, :version, :dataAsOf, :createdAt, :uriPrefix, :inventory, :status, :generation, :updatedAt)
             """.trimIndent(),
         )
-            .bind("group", entry.group)
+            .bind("group", entry.group.value)
             .bind("version", entry.version)
             .bind("dataAsOf", entry.dataAsOf.utc())
             .bind("createdAt", entry.createdAt.utc())
@@ -175,11 +176,11 @@ class ManifestDao(
      * was not PENDING - already resolved, or never existed. The caller learns it lost the
      * race instead of assuming it won.
      */
-    fun markComplete(group: String, version: Long): Boolean =
+    fun markComplete(group: GroupId, version: Long): Boolean =
         transition(group, version, ArchiveStatus.COMPLETE)
 
     /** PENDING -> FAILED, for the watchdog's verdict on a stale intent (D33). Same contract as [markComplete]. */
-    fun markFailed(group: String, version: Long): Boolean =
+    fun markFailed(group: GroupId, version: Long): Boolean =
         transition(group, version, ArchiveStatus.FAILED)
 
     /**
@@ -193,7 +194,7 @@ class ManifestDao(
      * longer honour. There is no fourth status to invent for it; the CHECK constraint says so
      * and readers would have to learn it.
      */
-    fun retire(group: String, version: Long): Boolean =
+    fun retire(group: GroupId, version: Long): Boolean =
         transition(group, version, ArchiveStatus.FAILED, from = ArchiveStatus.COMPLETE)
 
     /**
@@ -203,18 +204,18 @@ class ManifestDao(
      * object without a covering manifest row impossible, which is why this layer owns no
      * LIST-based orphan sweep (D33, D34).
      */
-    fun delete(group: String, version: Long): Boolean =
+    fun delete(group: GroupId, version: Long): Boolean =
         jdbi.withHandle<Boolean, RuntimeException> { handle ->
             handle.createUpdate(
                 "DELETE FROM ${ManifestSchema.TABLE} WHERE group_id = :group AND version = :version",
             )
-                .bind("group", group)
+                .bind("group", group.value)
                 .bind("version", version)
                 .execute() == 1
         }
 
     /** The newest COMPLETE version, or null when the group has never published one. */
-    fun newestComplete(group: String): ManifestEntry? =
+    fun newestComplete(group: GroupId): ManifestEntry? =
         jdbi.withHandle<ManifestEntry?, RuntimeException> { newestComplete(it, group) }
 
     /**
@@ -227,7 +228,7 @@ class ManifestDao(
      * only over-reports, which idempotent consumers absorb (D25), so the predicate is
      * allowed to be conservative and is.
      */
-    fun watermark(group: String, at: Instant): Long? =
+    fun watermark(group: GroupId, at: Instant): Long? =
         jdbi.withHandle<Long?, RuntimeException> { handle ->
             handle.createQuery(
                 """
@@ -235,7 +236,7 @@ class ManifestDao(
                  WHERE group_id = :group AND status = 'COMPLETE' AND data_as_of <= :at
                 """.trimIndent(),
             )
-                .bind("group", group)
+                .bind("group", group.value)
                 .bind("at", at.utc())
                 .mapTo(Long::class.javaObjectType)
                 .findOne()
@@ -252,7 +253,7 @@ class ManifestDao(
      * `data_as_of` rather than `created_at`: what makes a checkpoint useful to an ETL is how
      * stale its data is, and that is the same clock the watermark predicate reads.
      */
-    fun expired(group: String, olderThan: Instant): List<ManifestEntry> =
+    fun expired(group: GroupId, olderThan: Instant): List<ManifestEntry> =
         jdbi.withHandle<List<ManifestEntry>, RuntimeException> { handle ->
             handle.createQuery(
                 """
@@ -261,7 +262,7 @@ class ManifestDao(
                  ORDER BY version
                 """.trimIndent(),
             )
-                .bind("group", group)
+                .bind("group", group.value)
                 .bind("olderThan", olderThan.utc())
                 .toEntries()
         }
@@ -275,7 +276,7 @@ class ManifestDao(
      * the decision is made. Aged by `updated_at`, which an insert sets alongside `created_at`,
      * so the one column means "how long has this row been in this state" for every status.
      */
-    fun byStatus(group: String, status: ArchiveStatus, unchangedSince: Instant): List<ManifestEntry> =
+    fun byStatus(group: GroupId, status: ArchiveStatus, unchangedSince: Instant): List<ManifestEntry> =
         jdbi.withHandle<List<ManifestEntry>, RuntimeException> { handle ->
             handle.createQuery(
                 """
@@ -284,7 +285,7 @@ class ManifestDao(
                  ORDER BY version
                 """.trimIndent(),
             )
-                .bind("group", group)
+                .bind("group", group.value)
                 .bind("status", status.name)
                 .bind("unchangedSince", unchangedSince.utc())
                 .toEntries()
@@ -297,17 +298,17 @@ class ManifestDao(
      * that the version it recorded is no longer COMPLETE, so it can fall back to a full
      * compare rather than silently finding nothing (spec 18.4 step 3).
      */
-    fun find(group: String, version: Long): ManifestEntry? =
+    fun find(group: GroupId, version: Long): ManifestEntry? =
         jdbi.withHandle<ManifestEntry?, RuntimeException> { handle ->
             handle.createQuery("$SELECT_ALL WHERE group_id = :group AND version = :version")
-                .bind("group", group)
+                .bind("group", group.value)
                 .bind("version", version)
                 .toEntries()
                 .firstOrNull()
         }
 
     private fun transition(
-        group: String,
+        group: GroupId,
         version: Long,
         to: ArchiveStatus,
         from: ArchiveStatus = ArchiveStatus.PENDING,
@@ -323,13 +324,13 @@ class ManifestDao(
                 .bind("to", to.name)
                 .bind("from", from.name)
                 .bind("now", clock.instant().utc())
-                .bind("group", group)
+                .bind("group", group.value)
                 .bind("version", version)
                 .execute()
             moved == 1
         }
 
-    private fun newestComplete(handle: Handle, group: String): ManifestEntry? =
+    private fun newestComplete(handle: Handle, group: GroupId): ManifestEntry? =
         handle.createQuery(
             """
             $SELECT_ALL
@@ -338,11 +339,11 @@ class ManifestDao(
              FETCH FIRST 1 ROWS ONLY
             """.trimIndent(),
         )
-            .bind("group", group)
+            .bind("group", group.value)
             .toEntries()
             .firstOrNull()
 
-    private fun uriPrefix(group: String, version: Long): String =
+    private fun uriPrefix(group: GroupId, version: Long): String =
         "$bucket/snapshots/$group/v$version/"
 
     private companion object {
@@ -356,7 +357,7 @@ class ManifestDao(
 
         fun Query.toEntries(): List<ManifestEntry> = map { rs, _ ->
             ManifestEntry(
-                group = rs.getString("group_id"),
+                group = GroupId(rs.getString("group_id")),
                 version = rs.getLong("version"),
                 dataAsOf = rs.getObject("data_as_of", OffsetDateTime::class.java).toInstant(),
                 createdAt = rs.getObject("created_at", OffsetDateTime::class.java).toInstant(),

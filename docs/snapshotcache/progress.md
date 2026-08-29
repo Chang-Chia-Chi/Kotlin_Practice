@@ -988,3 +988,51 @@ T puts roughly 2T between an upload starting and its objects going - headroom, n
   that is a plan defect, not four coincidences.
 
 197 tests, 0 failures, 2 pre-existing skips.
+
+## M3 review findings - the accepted half, now fixed  (2026-08-29)
+
+The previous entry closed the review's hard findings and named five it accepted rather than
+fixed. All five are now done; nothing from that list is still outstanding.
+
+### Test fixtures consolidated
+New `ArchiveTestFakes.kt`: `FileBackedCache`, `FileBackedSnapshot`, `RecordingObjectStore`,
+`LogCapture`. Replaces nine near-identical private classes across three suites plus three
+byte-identical `unusedClient()` bodies. Each shared fake is a strict superset of the three it
+replaces - `RecordingObjectStore` carries all of `beforePut`, `beforeDelete` and `beforeGet`,
+and holds real bytes so the suite that only wanted sizes still reads them off the same map -
+so no suite lost a capability. The one fixture line that seeded sizes directly
+(`stored[key] = BYTES`) became `seed(key, BYTES)`; no assertion changed.
+
+The deviation this corrects was recorded twice, by tickets 04 and 05, as "hoisting would mean
+editing an earlier phase's test". A new file edits nothing, and by the third copy the
+duplication was the larger problem. CLAUDE.md's answer to a rule that blocks the right shape
+is stop and report, not duplicate around it.
+
+### Real-MinIO coverage for `get` and `delete`
+`ObjectStoreTest` gains three tests: a byte-identical download round trip, a delete that
+makes `sizeOf` null, and a delete of an absent key that does not throw (the purge retries a
+pass as one unit). `delete` is the destructive method and was the one nobody had admitted was
+untested against the real server - a delete that silently did nothing would leave storage
+growing without bound with every existing test still green.
+
+### Parallelism knobs removed
+`exportParallelism`, `runParallelism` and `downloadParallelism` were constructor parameters no
+caller ever set. Plan 2.4 forbids config for a value that never changes, so they are now
+named constants (the run pool stays derived from group count). P9's wiring can make them
+configurable again when it has a real caller.
+
+### `GroupId` replaces the primitive
+`ManifestDao` and `ManifestEntry` now carry `infra.snapshotcache.api.GroupId` rather than a
+bare `String`. The unwrapping moved from 13 call sites spread across `Archiver`,
+`ArchiveMaintenance` and `EtlDiff` to seven `.bind(...)` calls inside the DAO, which is the
+one place the value genuinely becomes a SQL parameter. `GroupId` is `api`, so the plan 3c
+boundary is untouched. The compiler found every call site.
+
+### Size budget escalated
+Recorded in plan 3c rather than fixed silently: four consecutive phases broke the
+200-600 line rule and none stopped to report, so the rule was not functioning as a gate.
+Measured, the overrun is about half narrative doc comment rather than logic. Whether the
+budget should count code lines instead is a CLAUDE.md change and therefore the user's call,
+so it is written down and left to them.
+
+200 tests, 0 failures, 2 pre-existing skips.

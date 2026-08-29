@@ -1,5 +1,6 @@
 package infra.snapshotarchive
 
+import infra.snapshotcache.api.GroupId
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.jdbi.v3.core.Jdbi
@@ -122,7 +123,7 @@ class ManifestDaoTest {
 
         assertThatThrownBy { dao.insertPending(group, T0.minusSeconds(60), "[]", generation = 2) }
             .isInstanceOf(DataAsOfRegression::class.java)
-            .hasMessageContaining(group)
+            .hasMessageContaining(group.value)
         // Equal is also a regression: spec 18.3 step 2 says strictly greater.
         assertThatThrownBy { dao.insertPending(group, T0, "[]", generation = 2) }
             .isInstanceOf(DataAsOfRegression::class.java)
@@ -217,7 +218,7 @@ class ManifestDaoTest {
         assertThat(expired.map { it.version }).doesNotContain(kept.version)
     }
 
-    private fun group(): String = "g${GROUPS.incrementAndGet()}"
+    private fun group(): GroupId = GroupId("g${GROUPS.incrementAndGet()}")
 
     companion object {
 

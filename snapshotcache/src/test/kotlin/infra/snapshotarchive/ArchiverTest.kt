@@ -56,10 +56,10 @@ import java.util.logging.SimpleFormatter
 class ArchiverTest {
 
     private val group = GroupId("g${GROUPS.incrementAndGet()}")
-    private val cache = FakeSnapshotCache(database)
-    private val store = FakeObjectStore()
+    private val cache = FileBackedCache(database)
+    private val store = RecordingObjectStore()
     private val tempRoot: Path = Files.createTempDirectory(scratch, "archiver-")
-    private val warnings = WarnCapture.install()
+    private val warnings = LogCapture.install()
 
     @AfterEach
     fun removeWarnCapture() {
@@ -292,7 +292,7 @@ class ArchiverTest {
         steps = steps,
     )
 
-    private fun rows(of: GroupId = group): List<ManifestEntry> = dao.expired(of.value, FAR_FUTURE)
+    private fun rows(of: GroupId = group): List<ManifestEntry> = dao.expired(of, FAR_FUTURE)
 
     private fun onlyRow(): ManifestEntry = rows().single()
 
@@ -355,126 +355,5 @@ class ArchiverTest {
                 }
             }
         }
-    }
-}
-
-/**
- * A [SnapshotCache] over one real DuckDB generation file, attached READ_ONLY exactly as the
- * serving store attaches it - so the export under test is the real statement against the real
- * shape, without the archive tests reaching into `infra.snapshotcache.core` or `.duckdb`.
- * That restraint is the point: the archive layer is a consumer of the public API (D30), and
- * its tests consume the same surface.
- *
- * The unimplemented methods are the correct placeholder for a seam nothing here uses.
- */
-private class FakeSnapshotCache(private val file: Path) : SnapshotCache {
-
-    override val defaultWaitBudget: Duration = Duration.ofSeconds(5)
-
-    @Volatile
-    var dataAsOf: Instant = Instant.parse("2026-08-29T10:00:00Z")
-
-    @Volatile
-    var generation: Long = 7
-
-    /** Runs on the thread that asks for a connection: the export tasks' observation point. */
-    @Volatile
-    var onConnection: (() -> Unit)? = null
-
-    val liveLeases = AtomicInteger()
-
-    override fun <T> withSnapshot(group: GroupId, waitBudget: Duration, block: (Snapshot) -> T): T {
-        liveLeases.incrementAndGet()
-        return FakeSnapshot(file, dataAsOf, generation, onConnection) { liveLeases.decrementAndGet() }
-            .use(block)
-    }
-
-    override fun copyOut(group: GroupId, spec: CopyOutSpec, waitBudget: Duration): CopyOutResult =
-        throw NotImplementedError("the archiver exports under its own lease; copyOut is ticket 05's if anyone's")
-
-    override fun acquire(group: GroupId, waitBudget: Duration): Snapshot =
-        throw NotImplementedError("the archiver uses withSnapshot so the lease cannot outlive the run")
-
-    override fun currentInfo(group: GroupId): GenerationInfo? =
-        throw NotImplementedError("the archiver reads generation and dataAsOf off the lease it holds")
-}
-
-private class FakeSnapshot(
-    private val file: Path,
-    override val dataAsOf: Instant,
-    override val generation: Long,
-    private val onConnection: (() -> Unit)?,
-    private val onRelease: () -> Unit,
-) : Snapshot {
-
-    private val issued = CopyOnWriteArrayList<Connection>()
-
-    override fun connection(): Connection {
-        onConnection?.invoke()
-        val connection = DriverManager.getConnection("jdbc:duckdb:")
-        connection.createStatement().use { statement ->
-            statement.execute("ATTACH '${file.toAbsolutePath()}' AS g (READ_ONLY)")
-            statement.execute("USE g")
-        }
-        issued += connection
-        return connection
-    }
-
-    override fun close() {
-        issued.forEach { runCatching { it.close() } }
-        onRelease()
-    }
-}
-
-/** In-memory object store. [beforePut] is where a test observes the world at upload time. */
-private class FakeObjectStore : ObjectStore(unusedClient(), "test-bucket") {
-
-    val stored = ConcurrentHashMap<String, ByteArray>()
-
-    @Volatile
-    var beforePut: ((String) -> Unit)? = null
-
-    override fun put(key: String, file: Path) {
-        beforePut?.invoke(key)
-        stored[key] = Files.readAllBytes(file)
-    }
-
-    override fun sizeOf(key: String): Long? = stored[key]?.size?.toLong()
-
-    private companion object {
-
-        /** Never dialled: both methods above are overridden. Building one opens no socket. */
-        fun unusedClient(): MinioClient = MinioClient.builder()
-            .endpoint("http://127.0.0.1:1")
-            .credentials("unused", "unused")
-            .build()
-    }
-}
-
-/**
- * Captures WARN records at the JUL root. jboss-logging has no other provider on this test
- * classpath, so it falls back to java.util.logging - the same route the D31 skip alert takes.
- */
-private class WarnCapture : Handler() {
-
-    private val formatter = SimpleFormatter()
-    val messages = CopyOnWriteArrayList<String>()
-
-    override fun publish(record: LogRecord) {
-        if (record.level.intValue() >= Level.WARNING.intValue()) {
-            messages += runCatching { formatter.formatMessage(record) }.getOrElse { record.message ?: "" }
-        }
-    }
-
-    override fun flush() = Unit
-
-    override fun close() = Unit
-
-    fun uninstall() {
-        java.util.logging.Logger.getLogger("").removeHandler(this)
-    }
-
-    companion object {
-        fun install(): WarnCapture = WarnCapture().also { java.util.logging.Logger.getLogger("").addHandler(it) }
     }
 }

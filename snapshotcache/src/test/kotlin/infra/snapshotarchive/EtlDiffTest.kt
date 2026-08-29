@@ -49,10 +49,10 @@ import kotlin.random.Random
 class EtlDiffTest {
 
     private val group = GroupId("d${GROUPS.incrementAndGet()}")
-    private val store = BytesObjectStore()
+    private val store = RecordingObjectStore()
     private val work: Path = Files.createTempDirectory(scratch, "diff-")
     private val database: Path = work.resolve("generation.db")
-    private val cache = DiffCache(database)
+    private val cache = FileBackedCache(database)
     private val archiver = Archiver(
         cache = cache,
         manifest = dao,
@@ -202,7 +202,7 @@ class EtlDiffTest {
             groups = listOf(group),
             clock = Clock.fixed(T0.plus(Duration.ofDays(30)), ZoneOffset.UTC),
         ).use { it.purge(group) }
-        assertThat(dao.find(group.value, v1)).isNull()
+        assertThat(dao.find(group, v1)).isNull()
 
         helper.withDiff(group, v1) { diff ->
             assertThat((diff as Diff.FullCompare).reason).isEqualTo(FallbackReason.PURGED)
@@ -218,7 +218,7 @@ class EtlDiffTest {
     fun `a watermark whose version is not COMPLETE returns a full-compare signal`() {
         write("INSERT INTO t_a VALUES (1, 'a', 10)")
         val v1 = publish()
-        assertThat(dao.retire(group.value, v1)).isTrue()
+        assertThat(dao.retire(group, v1)).isTrue()
 
         helper.withDiff(group, v1) { diff ->
             assertThat((diff as Diff.FullCompare).reason).isEqualTo(FallbackReason.NOT_COMPLETE)
@@ -266,7 +266,7 @@ class EtlDiffTest {
             cache.dataAsOf = leasedAt.plus(Duration.ofHours(1))
             val v2 = publish()
 
-            assertThat(dao.find(group.value, v2)?.status).isEqualTo(ArchiveStatus.COMPLETE)
+            assertThat(dao.find(group, v2)?.status).isEqualTo(ArchiveStatus.COMPLETE)
             assertThat(diff.nextWatermark()).isEqualTo(v1)
         }
     }
@@ -426,7 +426,7 @@ class EtlDiffTest {
 
     private fun publish(): Long {
         check(archiver.runOnce(group) == RunOutcome.PUBLISHED) { "the checkpoint was not published" }
-        return requireNotNull(dao.newestComplete(group.value)).version
+        return requireNotNull(dao.newestComplete(group)).version
     }
 
     /** The watermark a run leasing a snapshot stamped [at] would be handed. */
@@ -440,7 +440,7 @@ class EtlDiffTest {
         }
     }
 
-    private fun rows(): List<ManifestEntry> = dao.expired(group.value, FAR_FUTURE)
+    private fun rows(): List<ManifestEntry> = dao.expired(group, FAR_FUTURE)
 
     companion object {
 
@@ -466,98 +466,5 @@ class EtlDiffTest {
             dao = ManifestDao(jdbi, bucket = BUCKET, clock = Clock.fixed(T0, ZoneOffset.UTC))
             scratch = Files.createTempDirectory("etl-diff-test")
         }
-    }
-}
-
-/**
- * A [SnapshotCache] over one real DuckDB generation file, attached READ_ONLY as the serving
- * store attaches it. `dataAsOf` moves because the test moves it: the diff's whole correctness
- * argument is about which moment the lease was taken at.
- */
-private class DiffCache(private val file: Path) : SnapshotCache {
-
-    override val defaultWaitBudget: Duration = Duration.ofSeconds(5)
-
-    @Volatile
-    var dataAsOf: Instant = Instant.parse("2026-08-29T10:00:00Z")
-
-    @Volatile
-    var generation: Long = 1
-
-    val liveLeases = AtomicInteger()
-
-    override fun <T> withSnapshot(group: GroupId, waitBudget: Duration, block: (Snapshot) -> T): T {
-        liveLeases.incrementAndGet()
-        return DiffSnapshot(file, dataAsOf, generation) { liveLeases.decrementAndGet() }.use(block)
-    }
-
-    override fun copyOut(group: GroupId, spec: CopyOutSpec, waitBudget: Duration): CopyOutResult =
-        throw NotImplementedError("the diff joins on the lease's own connection; nothing is copied out")
-
-    override fun acquire(group: GroupId, waitBudget: Duration): Snapshot =
-        throw NotImplementedError("withDiff scopes the lease so it cannot outlive the diff")
-
-    override fun currentInfo(group: GroupId): GenerationInfo? =
-        throw NotImplementedError("the helper reads generation and dataAsOf off the lease it holds")
-}
-
-private class DiffSnapshot(
-    private val file: Path,
-    override val dataAsOf: Instant,
-    override val generation: Long,
-    private val onRelease: () -> Unit,
-) : Snapshot {
-
-    private val issued = CopyOnWriteArrayList<Connection>()
-
-    override fun connection(): Connection {
-        val connection = DriverManager.getConnection("jdbc:duckdb:")
-        connection.createStatement().use { statement ->
-            statement.execute("ATTACH '${file.toAbsolutePath()}' AS g (READ_ONLY)")
-            statement.execute("USE g")
-        }
-        issued += connection
-        return connection
-    }
-
-    override fun close() {
-        issued.forEach { runCatching { it.close() } }
-        onRelease()
-    }
-}
-
-/**
- * In-memory object store holding real bytes, because this suite round-trips real Parquet
- * through it. [beforeGet] is where a test observes downloads overlapping.
- */
-private class BytesObjectStore : ObjectStore(unusedClient(), "test-bucket") {
-
-    val stored = ConcurrentHashMap<String, ByteArray>()
-
-    @Volatile
-    var beforeGet: ((String) -> Unit)? = null
-
-    override fun put(key: String, file: Path) {
-        stored[key] = Files.readAllBytes(file)
-    }
-
-    override fun sizeOf(key: String): Long? = stored[key]?.size?.toLong()
-
-    override fun delete(key: String) {
-        stored.remove(key)
-    }
-
-    override fun get(key: String, file: Path) {
-        beforeGet?.invoke(key)
-        Files.write(file, requireNotNull(stored[key]) { "no object at '$key'" })
-    }
-
-    private companion object {
-
-        /** Never dialled: every method is overridden. Building one opens no socket. */
-        fun unusedClient(): MinioClient = MinioClient.builder()
-            .endpoint("http://127.0.0.1:1")
-            .credentials("unused", "unused")
-            .build()
     }
 }

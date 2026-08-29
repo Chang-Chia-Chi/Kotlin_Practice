@@ -284,6 +284,18 @@ boundary rules are:
   for testability - concrete classes, not new public interfaces; the Sec 2.3
   budget is a framework budget and this layer adds nothing to it.
 
+**Size budget, escalated after the fact (2026-08-29).** All four M3 phases recorded
+exceeding CLAUDE.md's "roughly 200-600 lines including tests" and none stopped to
+report it, which is the escalation that rule exists to trigger. Measured after the
+fact, the overrun is roughly half narrative doc comment rather than logic: P12 is
+380 file lines against ~263 of code, and the pattern repeats. Two things follow.
+The budget is a proxy for "is this phase too big to hold in one session", and
+counting doc lines makes it a bad proxy in a codebase whose house style is heavy
+rationale comments - it should count code lines, which is a change to CLAUDE.md and
+therefore the user's call, recorded here rather than made unilaterally. And a rule
+that four consecutive phases silently broke was not functioning as a gate; that is
+worth knowing independently of where the threshold lands.
+
 ### P11 - Manifest DAO + version allocation
 
 - **Goal:** the durable half: Oracle sequence versioning, status protocol, monotonicity guard.

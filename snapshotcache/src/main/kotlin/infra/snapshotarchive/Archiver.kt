@@ -112,14 +112,17 @@ class Archiver(
     private val tables: Map<GroupId, List<String>>,
     private val tempRoot: Path,
     private val drainBudget: Duration = Duration.ofSeconds(30),
-    exportParallelism: Int = 4,
-    runParallelism: Int = tables.size.coerceAtLeast(1),
     private val steps: (GroupId, ArchiveStep) -> Unit = { _, _ -> },
 ) : AutoCloseable {
 
     private val scheduler = Executors.newSingleThreadScheduledExecutor(named("archiver-scheduler"))
-    private val runs = Executors.newFixedThreadPool(runParallelism, named("archiver-run"))
-    private val exports = Executors.newFixedThreadPool(exportParallelism, named("archiver-export"))
+
+    // One run thread per group, since runs for one group are serialized anyway (spec 18.2),
+    // and a small fixed export pool. Both were constructor knobs no caller ever set - plan
+    // 2.4 forbids config for a value that never changes, so they are constants until P9's
+    // wiring has a real reason and a real caller to make them configurable again.
+    private val runs = Executors.newFixedThreadPool(tables.size.coerceAtLeast(1), named("archiver-run"))
+    private val exports = Executors.newFixedThreadPool(EXPORT_THREADS, named("archiver-export"))
 
     /** Presence means "a run for this group is in flight"; the skip-if-busy rule of spec 18.2. */
     private val busy = ConcurrentHashMap<GroupId, Boolean>()
@@ -177,7 +180,7 @@ class Archiver(
                 // transaction, so no concurrent publisher can slip a newer COMPLETE between them.
                 val entry = try {
                     manifest.insertPending(
-                        group = group.value,
+                        group = group,
                         dataAsOf = snapshot.dataAsOf,
                         inventory = Inventory.encode(exported),
                         generation = snapshot.generation,
@@ -198,7 +201,7 @@ class Archiver(
                 steps(group, ArchiveStep.AFTER_UPLOAD)
 
                 // 5. conditional flip, then the lease releases as withSnapshot returns.
-                val won = manifest.markComplete(group.value, entry.version)
+                val won = manifest.markComplete(group, entry.version)
                 steps(group, ArchiveStep.AFTER_COMPLETE)
                 if (won) {
                     log.infof(
@@ -354,6 +357,9 @@ class Archiver(
     }
 
     private companion object {
+
+        /** Per-table exports within one run; tens of tables at most, each a single COPY. */
+        const val EXPORT_THREADS = 4
 
         val log: Logger = Logger.getLogger(Archiver::class.java)
 

@@ -81,12 +81,12 @@ class ArchiveMaintenance(
      */
     fun watchdog(group: GroupId) {
         val cutoff = clock.instant().minus(watchdogTimeout)
-        for (entry in manifest.byStatus(group.value, ArchiveStatus.PENDING, cutoff)) {
+        for (entry in manifest.byStatus(group, ArchiveStatus.PENDING, cutoff)) {
             val inventory = Inventory.decode(entry.inventory)
             val missing = inventory.filter { objects.sizeOf(keyOf(entry, it)) != it.bytes }
             val moved =
-                if (missing.isEmpty()) manifest.markComplete(group.value, entry.version)
-                else manifest.markFailed(group.value, entry.version)
+                if (missing.isEmpty()) manifest.markComplete(group, entry.version)
+                else manifest.markFailed(group, entry.version)
 
             when {
                 !moved -> log.infof(
@@ -135,10 +135,10 @@ class ArchiveMaintenance(
      */
     fun purge(group: GroupId) {
         val now = clock.instant()
-        val newest = manifest.newestComplete(group.value)?.version
-        val expired = manifest.expired(group.value, now.minus(retention))
+        val newest = manifest.newestComplete(group)?.version
+        val expired = manifest.expired(group, now.minus(retention))
             .filter { it.status == ArchiveStatus.COMPLETE }
-        val failed = manifest.byStatus(group.value, ArchiveStatus.FAILED, now.minus(watchdogTimeout))
+        val failed = manifest.byStatus(group, ArchiveStatus.FAILED, now.minus(watchdogTimeout))
 
         (expired + failed)
             .distinctBy { it.version }
@@ -157,9 +157,9 @@ class ArchiveMaintenance(
      * whose inventory the bucket can no longer honour, and COMPLETE is what readers trust.
      */
     private fun reclaim(group: GroupId, entry: ManifestEntry) {
-        if (entry.status == ArchiveStatus.COMPLETE) manifest.retire(group.value, entry.version)
+        if (entry.status == ArchiveStatus.COMPLETE) manifest.retire(group, entry.version)
         Inventory.decode(entry.inventory).forEach { objects.delete(keyOf(entry, it)) }
-        manifest.delete(group.value, entry.version)
+        manifest.delete(group, entry.version)
         log.infof(
             "reclaimed archive version %d for group '%s' (was %s, data_as_of %s)",
             entry.version, group, entry.status, entry.dataAsOf,
@@ -177,7 +177,7 @@ class ArchiveMaintenance(
      * ETLs getting slower.
      */
     fun staleness(group: GroupId): Duration? {
-        val newest = manifest.newestComplete(group.value)
+        val newest = manifest.newestComplete(group)
         if (newest == null) {
             log.warnf(
                 "ALERT: group '%s' has no COMPLETE archive version at all; every consuming ETL " +

@@ -233,10 +233,11 @@ class EtlDiff(
     private val objects: ObjectStore,
     private val primaryKeys: Map<GroupId, Map<String, List<String>>>,
     private val downloadRoot: Path,
-    downloadParallelism: Int = 4,
 ) : AutoCloseable {
 
-    private val downloads = Executors.newFixedThreadPool(downloadParallelism, named("etl-diff-download"))
+    // A constructor knob no caller ever set; plan 2.4 forbids config for a value that never
+    // changes. P9's wiring can make it configurable again when it has a reason to.
+    private val downloads = Executors.newFixedThreadPool(DOWNLOAD_THREADS, named("etl-diff-download"))
 
     /**
      * Runs [block] against the diff of [watermark]'s checkpoint versus the live snapshot.
@@ -254,8 +255,8 @@ class EtlDiff(
         val temp = Files.createTempDirectory(downloadRoot, "$group-")
         try {
             return cache.withSnapshot(group) { snapshot ->
-                val next = { manifest.watermark(group.value, snapshot.dataAsOf) }
-                val found = watermark?.let { manifest.find(group.value, it) }
+                val next = { manifest.watermark(group, snapshot.dataAsOf) }
+                val found = watermark?.let { manifest.find(group, it) }
                 block(
                     if (found != null && found.status == ArchiveStatus.COMPLETE) {
                         log.debugf(
@@ -332,6 +333,9 @@ class EtlDiff(
     }
 
     private companion object {
+
+        /** Per-table checkpoint downloads within one diff. */
+        const val DOWNLOAD_THREADS = 4
 
         val log: Logger = Logger.getLogger(EtlDiff::class.java)
 

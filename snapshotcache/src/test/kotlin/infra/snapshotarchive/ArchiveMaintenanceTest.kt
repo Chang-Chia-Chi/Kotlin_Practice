@@ -55,10 +55,10 @@ import java.util.logging.SimpleFormatter
 class ArchiveMaintenanceTest {
 
     private val group = GroupId("m${GROUPS.incrementAndGet()}")
-    private val store = SizedObjectStore()
-    private val cache = MaintenanceCache(database)
+    private val store = RecordingObjectStore()
+    private val cache = FileBackedCache(database)
     private val tempRoot: Path = Files.createTempDirectory(scratch, "maintenance-")
-    private val warnings = AlertCapture.install()
+    private val warnings = LogCapture.install()
 
     @AfterEach
     fun removeAlertCapture() {
@@ -301,23 +301,23 @@ class ArchiveMaintenanceTest {
         upload: List<String> = tables,
     ): ManifestEntry {
         val inventory = tables.map { ArchivedObject(it, "$it.parquet", BYTES, CHECKSUM, 10) }
-        val entry = dao.insertPending(group.value, dataAsOf, Inventory.encode(inventory), generation = 1)
-        upload.forEach { store.stored[keyOf(entry, "$it.parquet")] = BYTES }
+        val entry = dao.insertPending(group, dataAsOf, Inventory.encode(inventory), generation = 1)
+        upload.forEach { store.seed(keyOf(entry, "$it.parquet"), BYTES) }
         return entry
     }
 
     private fun completed(dataAsOf: Instant): ManifestEntry =
-        pending(dataAsOf).also { dao.markComplete(group.value, it.version) }
+        pending(dataAsOf).also { dao.markComplete(group, it.version) }
 
     private fun failed(dataAsOf: Instant): ManifestEntry =
-        pending(dataAsOf).also { dao.markFailed(group.value, it.version) }
+        pending(dataAsOf).also { dao.markFailed(group, it.version) }
 
-    private fun rows(): List<ManifestEntry> = dao.expired(group.value, FAR_FUTURE)
+    private fun rows(): List<ManifestEntry> = dao.expired(group, FAR_FUTURE)
 
     private fun onlyRow(): ManifestEntry = rows().single()
 
     private fun find(entry: ManifestEntry): ManifestEntry =
-        requireNotNull(dao.find(group.value, entry.version)) { "version ${entry.version} was deleted" }
+        requireNotNull(dao.find(group, entry.version)) { "version ${entry.version} was deleted" }
 
     private fun keyOf(entry: ManifestEntry, objectKey: String): String =
         entry.uriPrefix.removePrefix("$BUCKET/") + objectKey
@@ -371,118 +371,5 @@ class ArchiveMaintenanceTest {
                 }
             }
         }
-    }
-}
-
-/**
- * Sized objects only: what the watchdog and the purge care about is which keys exist and how
- * big they are, and the bytes behind them are [ObjectStoreTest]'s business.
- */
-private class SizedObjectStore : ObjectStore(unusedClient(), "test-bucket") {
-
-    val stored = ConcurrentHashMap<String, Long>()
-
-    /** Where a test observes the manifest at the instant an object disappears. */
-    @Volatile
-    var beforeDelete: ((String) -> Unit)? = null
-
-    override fun put(key: String, file: Path) {
-        stored[key] = Files.size(file)
-    }
-
-    override fun sizeOf(key: String): Long? = stored[key]
-
-    override fun delete(key: String) {
-        beforeDelete?.invoke(key)
-        stored.remove(key)
-    }
-
-    private companion object {
-
-        /** Never dialled: every method is overridden. Building one opens no socket. */
-        fun unusedClient(): MinioClient = MinioClient.builder()
-            .endpoint("http://127.0.0.1:1")
-            .credentials("unused", "unused")
-            .build()
-    }
-}
-
-/**
- * A [SnapshotCache] over one real DuckDB generation file, attached READ_ONLY as the serving
- * store attaches it. Only the two tests that drive the real [Archiver] use it; the archive
- * layer is a consumer of the public API (D30) and its tests consume the same surface.
- */
-private class MaintenanceCache(private val file: Path) : SnapshotCache {
-
-    override val defaultWaitBudget: Duration = Duration.ofSeconds(5)
-
-    override fun <T> withSnapshot(group: GroupId, waitBudget: Duration, block: (Snapshot) -> T): T =
-        MaintenanceSnapshot(file).use(block)
-
-    override fun copyOut(group: GroupId, spec: CopyOutSpec, waitBudget: Duration): CopyOutResult =
-        throw NotImplementedError("the archiver exports under its own lease")
-
-    override fun acquire(group: GroupId, waitBudget: Duration): Snapshot =
-        throw NotImplementedError("the archiver uses withSnapshot so the lease cannot outlive the run")
-
-    override fun currentInfo(group: GroupId): GenerationInfo? =
-        throw NotImplementedError("the archiver reads generation and dataAsOf off the lease it holds")
-}
-
-private class MaintenanceSnapshot(private val file: Path) : Snapshot {
-
-    override val dataAsOf: Instant = Instant.parse("2026-08-29T10:00:00Z")
-
-    override val generation: Long = 7
-
-    private val issued = CopyOnWriteArrayList<Connection>()
-
-    override fun connection(): Connection {
-        val connection = DriverManager.getConnection("jdbc:duckdb:")
-        connection.createStatement().use { statement ->
-            statement.execute("ATTACH '${file.toAbsolutePath()}' AS g (READ_ONLY)")
-            statement.execute("USE g")
-        }
-        issued += connection
-        return connection
-    }
-
-    override fun close() {
-        issued.forEach { runCatching { it.close() } }
-    }
-}
-
-/**
- * Captures WARN records at the JUL root, the route jboss-logging falls back to on this test
- * classpath - which is how the watchdog's FAILED verdict and the staleness alert both surface.
- */
-private class AlertCapture : Handler() {
-
-    private val formatter = SimpleFormatter()
-    val messages = CopyOnWriteArrayList<String>()
-
-    /** SEVERE only. [ArchiveMaintenance.sweep] swallows a group's exception so the schedule
-     * survives it, so a test that drives `sweep` has to look here or it would pass on a pass
-     * that threw. */
-    val failures = CopyOnWriteArrayList<String>()
-
-    override fun publish(record: LogRecord) {
-        if (record.level.intValue() >= Level.WARNING.intValue()) {
-            val message = runCatching { formatter.formatMessage(record) }.getOrElse { record.message ?: "" }
-            messages += message
-            if (record.level.intValue() >= Level.SEVERE.intValue()) failures += message
-        }
-    }
-
-    override fun flush() = Unit
-
-    override fun close() = Unit
-
-    fun uninstall() {
-        java.util.logging.Logger.getLogger("").removeHandler(this)
-    }
-
-    companion object {
-        fun install(): AlertCapture = AlertCapture().also { java.util.logging.Logger.getLogger("").addHandler(it) }
     }
 }
