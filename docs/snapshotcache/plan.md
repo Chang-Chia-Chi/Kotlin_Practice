@@ -266,8 +266,9 @@ the same instruction, once the MinIO client and the Testcontainers MinIO module
 turned out to be resolvable from the local `.m2`: it consumes only the public
 API, the P11 DAO and an object store, and M2 supplies none of those. Its
 scheduling is therefore plain JDK - no Quarkus, no CDI, no `@Scheduled`, no
-Micrometer - which is what P9 will wrap rather than replace. P13-P14 remain
-gated on M2.
+Micrometer - which is what P9 will wrap rather than replace. P13 and P14
+followed on the same day under the same instruction and the same grounds, and
+with the same plain-JDK scheduling; M2 was still unimplemented when M3 closed.
 
 Everything else lives in `infra.snapshotarchive` (D30) and consumes the
 framework only through the public API. The Sec 2.4

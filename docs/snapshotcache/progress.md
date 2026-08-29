@@ -801,3 +801,124 @@ suite re-run with `clean` - required, as ticket 02 found, because ArchUnit reads
   feed both from config rather than leaving the defaults to stand for a decision nobody made.
 - The suite now boots three Oracle containers (one per class, sequentially) and one MinIO, so
   a full `mvn test` is around six minutes on this machine.
+
+## M3 ticket 05 (P14) - ETL diff helper, full-compare fallback  (2026-08-29) - M3 COMPLETE
+
+### Delivered
+- `infra/snapshotarchive/EtlDiff.kt` - `DiffOp`, `FallbackReason`, `ChangedRow`, the sealed
+  `Diff` (`FullCompare` / `Incremental`) and `EtlDiff` itself. `withDiff(group, watermark) { }`
+  leases the live snapshot for the whole diff, looks the recorded watermark up in the manifest,
+  downloads that one checkpoint's objects in parallel per its inventory, and hands the caller
+  either a full-compare signal or a per-table `FULL OUTER JOIN` on primary key emitting
+  `(pk, op, changed_columns, current values)`. ~150 code lines.
+- `ObjectStore.get`, added here because this is where its first caller is - ticket 03's
+  precedent for `delete`, followed again. Still a concrete class, now four `open` methods and
+  still no `list`.
+- `EtlDiffTest` - 12 tests against real Oracle + real DuckDB + a fake store, publishing through
+  the real `Archiver` and purging through the real `ArchiveMaintenance`. Zero sleeps; the one
+  concurrency claim is a `CyclicBarrier` that never trips if the downloads were serialized.
+- Build: **197 tests, 0 failures, 2 pre-existing Unix-only skips** (185 before, plus these 12).
+
+### The shape of the answer, and why it is a scoped block
+`withDiff` takes a block rather than returning rows, for two reasons that are the same reason.
+The lease has to be held for the whole diff or the live side of the comparison can move under
+it, and the fallback path needs that same lease - a full compare is an anti-join against the
+live snapshot, so handing back a "go full-compare" value after releasing the lease would hand
+back nothing usable. `Diff` is sealed rather than a nullable baseline so the fallback is a
+branch the compiler makes the caller handle: there is no `changes()` to call on `FullCompare`.
+
+`nextWatermark()` is a function, not a value, because spec 18.4 step 4 sets the watermark at
+commit time. Asking late is safe by construction - the predicate is evaluated against the
+leased snapshot's `dataAsOf`, so a checkpoint published mid-run can never be selected however
+long the run took - and it makes the long-running-job race testable without a hook: the test
+publishes a newer version from inside the block and still gets the old one back.
+
+`changes(table)` is computed per call rather than for every table up front, so an ETL can apply
+one table and let it go before asking for the next. At the ~1M rows and ~100k changes per table
+of spec 18.1 that is the difference in working set, for the same amount of code.
+
+### Spec 18.6 item 4: a new open item, found by the property test
+Writing "every injected change appears in at least one run's diff" forced the question of what
+the consumer's target actually holds, and the answer breaks the Sec 18.4 claim that
+under-reporting is impossible by construction. The consumer applies **live** values, so its
+target is newer than any baseline it can record (`data_as_of <= T` rarely lands on T exactly).
+The diff answers "baseline -> live" while the target sits between the two. For a column that
+moves in one direction that is a superset and over-reports, as documented. For a column that
+returns to the baseline's exact value before any newer checkpoint is published, the diff
+correctly reports nothing and the consumer keeps the intermediate value it applied - forever,
+because every later checkpoint reads the same value.
+
+The full worked example is in spec 18.6 item 4, which is **OPEN**: nothing in this helper can
+close it, since the helper reports exactly what separates the two states it is handed. Closing
+it means changing what the consumer records or what the archiver publishes. `EtlDiffTest`
+pins the behaviour in `a value that returns to its baseline inside one archive interval is not
+reported`, named for what it is, so it is a known boundary rather than a surprise.
+
+The property test's generator therefore never returns a column to a previous value - balances
+only increase, ids are never reused. That exclusion is stated in the test's own doc comment
+rather than left for someone to infer from the seed.
+
+### Deviations from the documents
+- **A table whose columns changed since its checkpoint fails loudly instead of comparing what
+  the two shapes share.** Not in the documents either way. Comparing the intersection would
+  silently miss every change in the columns the baseline does not have, which is precisely the
+  under-report the design exists to prevent; the fallback that already exists is the right
+  answer, so the check throws and says to reset the watermark. This is deliberately *not* a
+  `FallbackReason`: the fallback values are ordinary, expected states of a consumer, and
+  quietly absorbing a schema change into that set would hide a deployment error in a code path
+  nobody reads.
+- **`changed_columns` is computed by the engine, not the JVM.** The projection carries one
+  `IS DISTINCT FROM` flag per non-key column rather than comparing driver objects in Kotlin, so
+  it can never disagree with the `WHERE` clause that selected the row - a `BigDecimal` scale
+  difference would otherwise report a changed row with an empty change list.
+- **`changed_columns` is defined uniformly**: the non-key columns whose current value differs
+  from the baseline's. For an insert that is every column that is not null in the new row; for
+  a delete it is empty, and so is `values`, because there is no current row. Spec 18.4 names
+  the field and does not define its edges.
+- **The primary keys are explicit configuration** (`Map<GroupId, Map<String, List<String>>>`),
+  for the same reason `Archiver.tables` is: D36 makes a stable primary key a property of the
+  schema contract, not of whatever happens to be attached. P9's wiring should feed both maps
+  from the same config.
+- **`ObjectStore.get` throws on a missing key, unlike `sizeOf`.** Absence is a normal answer
+  when verifying an upload and a broken invariant when downloading a COMPLETE version's
+  inventory - the purge marks FAILED before deleting anything, so a baseline whose objects have
+  gone is unreachable rather than merely unlucky.
+- **No `ObjectStoreTest` case for `get`.** Ticket 04 set the precedent by adding `delete`
+  without one, and the fake stands in for the same wire. This is a real gap and worth naming:
+  the fake proves the diff joins real Parquet that survived a byte round-trip, but not that
+  MinIO's `downloadObject` writes the file where this wrapper says it does. The failure mode is
+  loud (a missing or unreadable Parquet file throws) rather than a silent short answer, which
+  is why it was accepted rather than paid for with a fourth container in the suite.
+- **The test's fakes duplicate `ArchiverTest`'s and `ArchiveMaintenanceTest`'s**, a third time:
+  `DiffCache`, `DiffSnapshot` and `BytesObjectStore` are near-copies. Hoisting them into a
+  shared fixture would mean editing tests earlier phases wrote, which the rules forbid. This one
+  differs where it matters - the generation file is per-test and gets written to between
+  publishes, because a diff needs two different states of the same tables.
+- **M2 gate, one last time.** Plan 3c gated P13-P14 on M2 being accepted; M2 is still
+  unimplemented and P14 ran on user instruction under the same carve-out as tickets 01-04. Plan
+  3c has been corrected to say so rather than still claiming P14 is gated. No Quarkus, CDI,
+  `@Scheduled` or Micrometer: the download pool is a plain `ExecutorService`.
+- **Size budget exceeded**, in the same shape as tickets 03 and 04: ~150 code lines of main
+  and ~330 of test (~570 including doc comments), against the 200-600 guidance.
+- No frozen interface, invariant, equation or enum changed; no earlier test modified;
+  `ManifestDao`, `Archiver` and `ArchiveMaintenance` were not touched at all.
+
+### M3 status
+Spec 18 is implemented end to end, all five components of 18.2: the archiver and its publish
+protocol (18.3) in `Archiver`, the durable manifest in `ManifestDao` + `ManifestSchema`, the
+watchdog and the retention purge (18.5) in `ArchiveMaintenance`, and the ETL protocol (18.4)
+in `EtlDiff`. The object store is `ObjectStore`. Every acceptance criterion of tickets 01-05 is
+ticked, and the suite is 197 tests with no sleeps.
+
+Two items remain open, both operational rather than structural:
+
+- **Spec 18.6 item 3** - the watchdog timeout T was never measured against a real network link,
+  because this machine has none. Ticket 04 ships 15 minutes as a recorded policy floor with a
+  one-sided cost argument, not as a derived value. Close it by measuring the deployment's link.
+- **Spec 18.6 item 4** - the round-trip under-report described above. Open by construction; it
+  needs a decision about what consumers record or what the archiver publishes, not a code fix.
+
+Also still owed, and not M3's: P9's wiring has to feed `Archiver.tables`, `EtlDiff.primaryKeys`,
+the retention window, the staleness threshold and T from configuration rather than leaving the
+defaults to stand for decisions nobody made. The whole layer is plain JDK scheduling waiting to
+be wrapped, never replaced.

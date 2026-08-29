@@ -1,5 +1,6 @@
 package infra.snapshotarchive
 
+import io.minio.DownloadObjectArgs
 import io.minio.MinioClient
 import io.minio.RemoveObjectArgs
 import io.minio.StatObjectArgs
@@ -10,9 +11,9 @@ import java.nio.file.Path
 /**
  * The archive layer's object store (spec 18.2), wrapping the MinIO client.
  *
- * This is a testability seam, not an abstraction: it is a concrete class with three methods,
+ * This is a testability seam, not an abstraction: it is a concrete class with four methods,
  * and the spec 2.3 five-interface budget is a framework budget this layer adds nothing to
- * (plan 3c). All three are `open` so the crash-matrix and interleaving tests can drive a
+ * (plan 3c). All four are `open` so the crash-matrix and interleaving tests can drive a
  * subclass instead of a container - the whole point is that those tests stay fast and
  * deterministic, while `ObjectStoreTest` proves against a real MinIO that the calls below
  * actually do what the fake pretends they do.
@@ -65,5 +66,25 @@ open class ObjectStore(private val client: MinioClient, val bucket: String) {
      */
     open fun delete(key: String) {
         client.removeObject(RemoveObjectArgs.builder().bucket(bucket).`object`(key).build())
+    }
+
+    /**
+     * Downloads [key] to [file], for the ticket-05 diff helper's baseline (spec 18.4 step 2).
+     *
+     * Download-then-read rather than reading the object in place: D36 keeps httpfs off the
+     * pinned DuckDB 1.1.3's surface, so the Parquet a diff joins against is always a local
+     * file. A missing key throws here, unlike [sizeOf] - the caller only ever downloads what
+     * a COMPLETE row's inventory names, and a version whose objects have gone is marked
+     * FAILED before the first one is deleted, so absence at this call is a broken invariant
+     * rather than a normal answer.
+     */
+    open fun get(key: String, file: Path) {
+        client.downloadObject(
+            DownloadObjectArgs.builder()
+                .bucket(bucket)
+                .`object`(key)
+                .filename(file.toAbsolutePath().toString())
+                .build(),
+        )
     }
 }

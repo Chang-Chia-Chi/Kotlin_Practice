@@ -1178,3 +1178,34 @@ purely operational; diffs stay correct (over-report only).
    number. Close this item by measuring the deployment's real link and setting
    T from it; until then it is the margin, not the estimate, that makes it
    safe.
+4. **NEW, OPEN 2026-08-29 (ticket 05).** The "under-reporting is impossible by
+   construction" claim in Sec 18.4 has one exception, found while building the
+   P14 property test, and it is recorded here rather than argued away.
+
+   A consumer applies the *live* snapshot's values, so its target is newer than
+   any baseline it can record: the watermark is `data_as_of <= T`, and only by
+   luck is there a checkpoint at exactly T. The diff therefore answers "how do I
+   get from the baseline to live", while the target sits somewhere between them.
+   For every column that moves in one direction that is a superset and only
+   over-reports, as claimed. For a column that returns to the exact value the
+   baseline holds, before any newer checkpoint is published, it is not:
+
+   - 10:00 checkpoint v1, `balance = 100`. ETL run applies it; watermark = v1.
+   - 10:20 `balance = 200`. ETL run diffs v1 vs live, applies 200. Still no newer
+     checkpoint, so the watermark stays v1.
+   - 10:30 `balance = 100` again. ETL run diffs v1 (100) vs live (100), finds
+     nothing, and leaves 200 in its target - permanently, since every later
+     checkpoint also reads 100.
+
+   The window is one archive interval, and the shape needed is a value that
+   returns to a previous value inside it - a status flag toggling back, not a
+   monotone counter or an audit timestamp. `EtlDiffTest` pins the behaviour in
+   `a value that returns to its baseline inside one archive interval is not
+   reported` so it is a known boundary rather than a surprise.
+
+   Nothing in the helper can close it: the helper reports exactly what separates
+   the two states it is given. Closing it means changing what a consumer records
+   or what the archiver publishes - e.g. publishing a checkpoint per refresh so a
+   baseline at exactly T always exists, or having consumers diff checkpoint to
+   checkpoint and accept the lag. Neither is in M3's scope; the item is open so
+   the choice is made deliberately rather than discovered in production.

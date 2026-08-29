@@ -36,14 +36,16 @@ watermark that can outlive a rolled-back run.
 
 **Blocked by:** 03 (needs published checkpoints), 04 (the purged-watermark fallback needs a real purge).
 
-**Status:** ready-for-agent
+**Status:** done 2026-08-29 (`EtlDiff.kt`, `EtlDiffTest`); see the ticket-05 progress entry
 
-- [ ] E2E against real DuckDB and a fake MinIO: publish versions with known edits, and the diff yields exactly the expected I/U/D rows with correct `changed_columns`
-- [ ] Per-table checkpoint downloads run in parallel
-- [ ] The snapshot lease is held for the whole diff and released via `withSnapshot` scoping on every exit path
-- [ ] Absent, purged, and FAILED watermarks each return a full-compare signal to the caller rather than throwing
-- [ ] The helper returns the computed watermark and never writes ETL state itself
-- [ ] The watermark is `max(version) WHERE status='COMPLETE' AND data_as_of <= snapshot.dataAsOf`, verbatim
-- [ ] Property test: every injected change appears in at least one run's diff — the helper never under-reports
-- [ ] The one-interval over-report is asserted as expected behaviour, not treated as a defect
-- [ ] Long-running-job race: a checkpoint published mid-run is never selected as the new watermark
+- [x] E2E against real DuckDB and a fake MinIO: publish versions with known edits, and the diff yields exactly the expected I/U/D rows with correct `changed_columns`
+- [x] Per-table checkpoint downloads run in parallel
+- [x] The snapshot lease is held for the whole diff and released via `withSnapshot` scoping on every exit path
+- [x] Absent, purged, and FAILED watermarks each return a full-compare signal to the caller rather than throwing
+- [x] The helper returns the computed watermark and never writes ETL state itself
+- [x] The watermark is `max(version) WHERE status='COMPLETE' AND data_as_of <= snapshot.dataAsOf`, verbatim
+- [x] Property test: every injected change appears in at least one run's diff — the helper never under-reports
+  (twelve rounds, fixed seed; the generator never returns a column to a previous value, which is
+  the one shape where the claim does not hold - recorded as spec 18.6 item 4 and pinned by its own test)
+- [x] The one-interval over-report is asserted as expected behaviour, not treated as a defect
+- [x] Long-running-job race: a checkpoint published mid-run is never selected as the new watermark
