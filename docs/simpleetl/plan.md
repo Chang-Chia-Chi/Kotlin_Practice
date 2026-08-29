@@ -359,6 +359,244 @@ subscriber, `replay = 0` discards everything while `tryEmit` still returns true.
 
 ---
 
+## M2 - Deepening pass (E10 to E13)
+
+Four phases from the 2026-08-29 architecture review. None of them adds a feature. Each takes one
+concept that is currently implemented twice, or owned by nobody, and gives it a single owner.
+
+**Why the prefix changes from `P` to `E` here.** M1 ran P0 to P9, and the numbering would naturally
+continue at P10 - but `docs/snapshotcache/plan.md` §3c names its own M3 phases **P11 to P14**, in
+the same repository, and the two are worked by different sessions. "Implement P11" would be
+ambiguous, and ambiguous in the worst way: both agents would read it as theirs. The number keeps
+counting from P9 so the sequence still reads in order; only the letter disambiguates. Snapshotcache
+phases are `P`, SimpleEtl phases from here are `E`.
+
+They are **ordered by dependency, not by size**: E10 creates the point at which a definition
+becomes runnable, and E13 is the only one that may be dropped without stranding anything.
+
+Two rulings hold across all four, and both came out of the review rather than being assumed:
+
+- **An earlier phase's test is the specification of the shape.** Three of them constrain this work
+  before a line is written - `TaskListenerOrderTest`'s guard-rejection trace (E10),
+  `TaskSchedulerApplyTest`'s restore branch (E11), and `DatasetNamerTest` (E12). Where a candidate
+  and a test disagreed, the test won and the candidate changed. That is the rule already in
+  `CLAUDE.md`; it is repeated here because the review found the collisions before the code did.
+- **Every module these phases add is internal** (spec 11.2). The deepening is inward: the same
+  public surface, fewer places that know how it works.
+
+---
+
+## E10 - One implementation of the task-shaped rules
+
+Spec 10's rules exist twice: over `TaskYaml` in `TaskFileLoader`, and over `TaskDefinition` in
+`TaskEngine`. Eight are enforced on both paths, worded independently - this entry said seven and
+missed rule 18, which the session found and folded in. Findings M10 and M11 already fixed two
+instances of the drift this produces; this phase removes the cause.
+
+**Two of the rules that move were never on the run path at all**, and moving them changes engine
+behaviour rather than only its wording: rule 12, and rule 7 as H3 amends it for a non-scratch
+`materialize`. Both were loader-only, so a definition built in code escaped them entirely, which is
+the spec 2.1 gap this phase exists to close - and the reason one earlier engine test had to state
+the `idempotent: true` rule 12 has always demanded. See **Done when**.
+
+**Public surface**
+- None. `TaskRules` is internal. `Step.retries` changes type - see below.
+
+**Contract**
+- `internal class TaskRules(parserFor)`, flat in `infra.etl.task`, with
+  `check(step: Step, defined: Set<String>): List<RuleViolation>` and `retries(step: Step): Int`.
+  Wiring is bound at construction so the per-call interface is two arguments, but the wiring is
+  **one lambda and not four collections**: the shipped entry read
+  `TaskRules(datasources, transforms, hooks, caches)`, mirroring `TaskFileLoader`, and not one of
+  the rules that moved consults any of the four. Rules 3, 4, 5 and 21 are the ones that would, and
+  they stay in the loader. What the module does need per call is a `:name` parser, which depends on
+  the step's datasource, so the bound wiring is `(String?) -> SqlParser` - see **Not in scope**.
+- `RuleViolation(step: String?, message: String)` is a new internal type, **not** `ValidationError`:
+  that carries a non-null `file`, which a definition built in code does not have. `TaskFileLoader`
+  maps violations to `ValidationError` by stamping `file` and the Jackson line; `TaskEngine` turns
+  one into the `IllegalArgumentException` it already raises.
+- Rules that move: 7, 8, 11, 12, 13's scratch-only half, **18**, 19, rule 6's positional-`?` half,
+  and spec 5.3's "`retries` may not be negative". Rules that stay in the loader: 1, 10, 13's
+  `format`-placement half, 16, 17, and rule 6's DuckDB syntax check - which boots an in-memory
+  DuckDB parser and must never be reachable from `run`.
+- **Rule 18 was not on this list and belongs on it.** It is a statement about a step, it was worded
+  twice - `TaskFileLoader.pipe` and `TaskEngine.pipe`, with different remedies in the two sentences
+  - and it reads the resolved `retries` this phase gives `TaskRules`, so leaving it out would have
+  made the engine ask the module for a number and then apply its own rule to it. Adding it costs
+  ten lines and one more parity case.
+- **The engine calls `check` per step, at the guard position each `require` occupies today.** Not
+  once at the top of `run`. `TaskListenerOrderTest.aGuardRejectedStepReportsAStepStartAndThenA-`
+  `TerminalStepError` pins the trace, and its own KDoc names the discriminating property: a guard
+  above the call site "would leave a trace with no `onStepStart` in it".
+- `Step.retries` becomes `Int?` (spec 5.3, 11.2), resolved in `TaskRules` on the run path.
+  `CacheCopyStep`'s declared 3 becomes null, which resolves to 0 on both paths and retires rule
+  20's asymmetry.
+- **`TaskFileLoader` keeps resolving as it builds the model.** Three assertions written by P6 and
+  P9 read the *resolved* value off a loaded definition - `TaskFileLoaderValidTest` twice,
+  `CacheCopyLoaderTest` once - and by this section's own ruling the test wins. Both paths resolve
+  through `defaultRetries`, so they cannot disagree about the value; what the phase does not buy is
+  one representation of an unstated one. Spec 5.3 records it.
+
+**Done when**
+- Every one of the rules above has exactly one `require`/error string in the module, and a test
+  proves the *same* rule fires on both paths - a task file for the loader, a definition built in
+  code for the engine - reaching the same wording.
+- `TaskEngineGuardTest`'s existing assertions pass untouched, including
+  `assertEquals(0, mes.attempts.get())`: rejection still happens before the source query runs.
+- `TaskListenerOrderTest`'s guard-rejection trace is byte-identical.
+- The loader's report is still in file-name order and then rule order, which
+  `TaskFileLoaderDirectoryTest` pins for the first half and `TaskFileLoader`'s KDoc promises for
+  the second.
+- A definition built in code that omits `retries` gets 3 inside scratch and 0 outside it, proved
+  without naming `defaultRetries` at the call site.
+- The six forked builders in `TaskFixtures` collapse to one constructor call each. This is the
+  observable half of the `Int?` change: "do not mention `retries`" stops needing an `if`.
+- **Two earlier-phase tests change, both because a rule they never met now applies to them.** Both
+  edits add what the rule asks for and leave every assertion alone; both are recorded in
+  progress.md. `CacheCopyStepTest`'s no-retry criterion states `retries = 3` where it used to lean
+  on the model default this phase removes, and `TaskEngineRetryTest`'s `oneStatementTask` states
+  `idempotent = true`, which rule 12 has always demanded of a retried step off scratch and which
+  only the loader used to enforce.
+
+**Not in scope:** the parser gap. `TaskRules` is called by the loader with `COLON_PREFIX` and by
+the engine with the handle's dialect parser, and a host that reconfigures its `Jdbi` can still make
+the two disagree. That is one module called twice with different inputs, which is the intended
+shape, not a rule enforced twice - spec 10 records it.
+
+---
+
+## E11 - One owner for the live definition set
+
+`TaskAdmin.definitions` and `TaskScheduler.current` are two copies of one map under two locks,
+swapped by a two-phase commit written across the seam between them.
+
+**This finding has now been raised three times and declined twice** - as L10 of review fix pass 3,
+and again in the 2026-08-29 design review, which recorded "left as is, now twice". Both declines
+are in `progress.md`, so this entry exists only if it answers them. It answers one and concedes
+the other:
+
+- **Conceded: there is no correctness gap.** The 2026-08-29 note says "`reload` and `trigger` share
+  one monitor, so no trigger can see the intermediate state", and that is correct - both are
+  `@Synchronized` on the same `TaskAdmin`. The 2026-08-29 architecture review claimed a window
+  where the scheduler fires the new definition while `list()` reports the old, and that claim was
+  **overstated**. The window exists - `list()` is not synchronized and `fire` reads
+  `TaskScheduler.current` from the cron thread under no lock - but what it costs is an operator
+  reading a stale task list for the duration of a cron swap. Nothing is corrupted: `TaskRunner`
+  `.submit` captures the definition by value. That is a reporting skew, not a defect, and this
+  phase should not be sold as fixing one.
+- **Answered: the construction cycle has a shape now.** Both declines rested on `TaskAdmin`
+  *receiving* the scheduler, which makes handing the scheduler a `(String) -> TaskDefinition?` a
+  cycle, breakable only by inverting ownership or adding a module. The answer is the module, and
+  the reason it is affordable now is that the registry drives registration: the scheduler is handed
+  the expressions it should hold and keeps **no back-reference at all**, so there is no cycle to
+  break rather than a cycle broken cleverly.
+
+So the case for this phase is maintenance, not correctness: one owner for one piece of state, and
+`TaskScheduler` stops carrying publish-before-register ordering and a rollback that exist purely to
+protect a copy it should not have. **If that is not worth a phase, decline it a third time and say
+so here** - that is a better outcome than a phase justified by a window nobody will ever see.
+
+**Public surface**
+- `TaskScheduler.apply(wanted: Map<String, String>): List<ValidationError>` replaces
+  `apply(definitions: List<TaskDefinition>)`. This also reconciles the `ValidationReport?` P7
+  shipped where spec 11.2 declared `Unit` - an unrecorded deviation until now.
+- `TaskAdmin`'s four methods are unchanged.
+
+**Contract**
+- `internal class TaskRegistry` owns the definition map and the whole reload: load, validate, swap
+  crons, publish - under one lock, with one rollback.
+- `TaskScheduler` narrows to the cron adapter. It keeps `registrations`, the cancel-then-register
+  ordering, the swallowed `close`, and the best-effort restore; it stops holding definitions, and
+  `fire(name)` asks the registry.
+- The registry is not public. Spec 8.6 makes the HTTP resource the host's and it talks to
+  `TaskAdmin`; a public registry would be a second door onto state just given one owner.
+
+**Done when**
+- A test observes the swap from both sides at once and finds no window where `fire` and `list`
+  disagree about which definition is live. It must fail on the pre-E11 code, or it is asserting
+  nothing - but note that it pins a *reporting* property, not a safety one, per the concession
+  above.
+- `TaskSchedulerApplyTest`'s restore branch passes unmodified. It was written to survive deleting
+  the restore line, so it is the discriminating test for the rollback, and the rollback stays in
+  the scheduler precisely so that this test does not move.
+- A reload rejected for a bad cron leaves definitions, registrations and `list()` exactly as they
+  were - asserted through `TaskAdmin`, not through the registry, so the test cannot reach past the
+  seam it is checking.
+- `TaskAdmin` no longer holds a definition map.
+
+---
+
+## E12 - The scratch write-then-publish protocol becomes a module
+
+`DatasetNamer` is shallow: four methods over about thirty lines, and its interface carries three
+invariants it does not enforce. Its KDoc hands the protocol to the caller, so `pipe`,
+`materialize` (twice) and `cacheCopy` each sequence it by hand and each grew a comment restating
+the same rule.
+
+**Public surface**
+- None. `ScratchDatasets` is internal.
+
+**Contract**
+- `internal class ScratchDatasets(scratch: ScratchDb, namer: DatasetNamer)` in `infra.etl.duckdb`,
+  with `attemptTable(dataset, attempt) { physical -> }` and
+  `attemptParquet(dataset, attempt) { path -> }`. Each publishes the stable view on normal return
+  and does nothing on a throw.
+- **`DatasetNamer` survives with its current interface.** `DatasetNamerTest` pins
+  `physical("wip_stg", 1)`, the rejection of `../../evil` and of attempt 0, and `parquetPath`'s
+  resolution inside the run directory. The new module wraps it; it does not replace it.
+- Two entry points rather than one plus a `format` argument, because `MaterializeFormat` lives in
+  `task` and an adapter in `duckdb` never depends on `task`.
+- `physicalDataset()` and the duplicate decision inside `writer()` both go: a step that produces no
+  scratch dataset never reaches the module.
+
+**Done when**
+- All four call sites go through the module, and none of them names `publishTable` or
+  `publishParquet` directly.
+- "A failed attempt does not publish" is a test against the module - a block that throws - rather
+  than a whole engine run with a probe file.
+- The existing end-to-end proof that a retry's view resolves to attempt 2 still passes, unchanged.
+
+**Not in scope:** dataset-name validation. Rule 9 and `datasetIdentifier`'s character check stay
+where they are; E10 explicitly did not move them.
+
+---
+
+## E13 - The attempt loop gets a seam
+
+The retry loop is about thirty lines and carries the module's subtlest ordering rules - metric
+before the listener describing the same moment, `willRetry` decided before the backoff, a terminal
+failure metered as a step that *ended* with rows 0/0. Reaching it from a test today means making
+real JDBC fail on schedule, so `TaskFixtures` builds `java.lang.reflect.Proxy` instances over
+`Connection`, `Statement` and `ResultSet`.
+
+**Public surface**
+- None. `TaskEngine.run` is unchanged, and spec 8.3 freezes it.
+
+**Contract**
+- An internal attempt policy taking `retries`, `sleeper`, `clock`, `onRetry: (Int) -> Unit`,
+  `onEnded: (StepResult, terminal: Boolean) -> Unit`, and a `(Int) -> PipeResult`. It owns the
+  *order* of those calls, because the order is the thing under test - returning a list of decisions
+  for the engine to emit would hand the ordering straight back.
+- **Transient classification does not move behind it.** `isTransient` walks the cause chain through
+  JDBI's `UnableToExecuteStatementException`, so its tests keep a real `SQLException` chain and a
+  real driver. Putting the one part that needs a real exception behind a fake is how a green test
+  covers a production failure.
+
+**Done when**
+- The ordering rules above are asserted against two recorders and a lambda that throws: no proxy,
+  no DuckDB file, no rows.
+- The fixture's `Proxy` machinery survives only for what needs it - the two `afterRows = 2`
+  mid-stream cases and the classification tests. Five of the seven current injections use
+  `afterRows = 0` and should stop needing a driver at all.
+- Every existing assertion in `TaskEngineRetryTest` still passes. This phase moves where the loop
+  is tested from, not what it does.
+
+**This is the droppable one.** If the ordering turns out to be assertable through the existing
+listener seam - which already sees every event in order - then E13 is not worth its own phase, and
+saying so is a better outcome than building it. Decide that before starting, not during.
+
+---
+
 ## Sequencing summary
 
 ```
@@ -384,8 +622,26 @@ P8b Metrics
   |
 P8c Event stream
   |
-P9 Cache read step
+P9 Cache read step ........... M1 done, the framework is feature complete
+  |
+E10 One rule module .......... M2 deepening pass begins
+  |
+E11 One definition owner
+  |
+E12 Scratch dataset protocol
+  |
+E13 Attempt loop seam ........ droppable; decide before starting
 ```
+
+**M2 is a chain for the same reason M1's tail was.** E10, E12 and E13 all edit `TaskEngine.kt`, so
+they cannot be parallelised however independent their subjects look. E11 is the exception - it
+touches `TaskAdmin` and `TaskScheduler` and not the engine - so it can be lifted out of the order,
+deferred, or declined a third time without disturbing anything either side of it. All four are
+maintenance phases; none of them fixes a defect, and E11's entry says plainly why the review's
+claim that it did was wrong.
+
+E10 comes first because it creates the single point at which a definition becomes runnable, which
+is what lets `Step.retries` be nullable at all.
 
 P8a, P8b and P9 all edit `TaskEngine.kt` and were a chain. P8c did **not** - it added a listener
 and no engine call site, which is the one thing that phase got right - and it was reverted anyway. The earlier claim that

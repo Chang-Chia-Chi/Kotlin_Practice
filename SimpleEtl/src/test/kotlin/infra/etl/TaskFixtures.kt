@@ -116,14 +116,15 @@ object Etl {
     fun literal(name: String, value: Any?): LiteralVar = LiteralVar(name = name, value = value)
 
     /**
-     * A `pipe` step (spec 3.2). [retries] null leaves the field at its declared default, which
-     * spec 5.3 makes 3 for a scratch target and 0 for any other; not stating one is the only way
-     * to observe that default.
-     */
-    /**
      * A `pipe` step whose target is a statement rather than a table (spec 4.4). Only the rejection
      * of the `scratch` case is reachable here: the happy path writes through `JdbcStatementWriter`,
      * which INSERTs, and the only non-DuckDB driver in the module is Oracle.
+     *
+     * [retries] is passed through as it arrives, null included - and that is the whole of E10's
+     * `Step.retries: Int?` as a test builder sees it. Every builder below used to fork on `retries
+     * == null` and call the constructor twice, because "do not mention retries" was the only way to
+     * reach a Kotlin default that could not be null; now not stating one *is* the value, and spec
+     * 5.3's datasource-dependent default is `TaskRules`'s to apply.
      */
     fun pipeToStatement(
         name: String,
@@ -132,13 +133,14 @@ object Etl {
         targetDatasource: String,
         targetSql: String,
         retries: Int? = null,
-    ): PipeStep {
-        val source = PipeSource(datasource = sourceDatasource, sql = sql)
-        val target = StatementTarget(datasource = targetDatasource, sql = targetSql)
-        return if (retries == null) PipeStep(name = name, source = source, target = target)
-        else PipeStep(name = name, source = source, target = target, retries = retries)
-    }
+    ): PipeStep = PipeStep(
+        name = name,
+        source = PipeSource(datasource = sourceDatasource, sql = sql),
+        target = StatementTarget(datasource = targetDatasource, sql = targetSql),
+        retries = retries,
+    )
 
+    /** A `pipe` step (spec 3.2), always into scratch. */
     fun pipe(
         name: String,
         sourceDatasource: String,
@@ -149,21 +151,15 @@ object Etl {
         chunkSize: Int? = null,
         transform: RowTransform? = null,
         addColumns: List<ColumnMeta> = emptyList(),
-    ): PipeStep {
-        val source = PipeSource(datasource = sourceDatasource, sql = sql)
-        val target = TableTarget(datasource = SCRATCH, table = table, createTable = createTable)
-        return if (retries == null) {
-            PipeStep(
-                name = name, source = source, target = target, transform = transform,
-                addColumns = addColumns, chunkSize = chunkSize,
-            )
-        } else {
-            PipeStep(
-                name = name, source = source, target = target, transform = transform,
-                addColumns = addColumns, chunkSize = chunkSize, retries = retries,
-            )
-        }
-    }
+    ): PipeStep = PipeStep(
+        name = name,
+        source = PipeSource(datasource = sourceDatasource, sql = sql),
+        target = TableTarget(datasource = SCRATCH, table = table, createTable = createTable),
+        transform = transform,
+        addColumns = addColumns,
+        chunkSize = chunkSize,
+        retries = retries,
+    )
 
     /** A `materialize` step (spec 3.3). */
     fun materialize(
@@ -173,48 +169,48 @@ object Etl {
         sql: String,
         format: MaterializeFormat = MaterializeFormat.TABLE,
         retries: Int? = null,
-    ): MaterializeStep =
-        if (retries == null) {
-            MaterializeStep(name = name, datasource = datasource, output = output, format = format, sql = sql)
-        } else {
-            MaterializeStep(
-                name = name, datasource = datasource, output = output, format = format, sql = sql,
-                retries = retries,
-            )
-        }
-
-    /** A `sql` step (spec 3.4). Side effects only, no dataset output. */
-    fun sql(name: String, datasource: String, vararg statements: String, retries: Int? = null): SqlStep =
-        if (retries == null) {
-            SqlStep(name = name, datasource = datasource, statements = statements.toList())
-        } else {
-            SqlStep(name = name, datasource = datasource, statements = statements.toList(), retries = retries)
-        }
-
-    /** An `export` step (spec 3.5). Each pair is a variable name and the query that produces it. */
-    fun export(name: String, datasource: String, vararg vars: Pair<String, String>, retries: Int? = null): ExportStep {
-        val exported = vars.map { (varName, varSql) -> ExportVar(name = varName, sql = varSql) }
-        return if (retries == null) {
-            ExportStep(name = name, datasource = datasource, vars = exported)
-        } else {
-            ExportStep(name = name, datasource = datasource, vars = exported, retries = retries)
-        }
-    }
+    ): MaterializeStep = MaterializeStep(
+        name = name, datasource = datasource, output = output, format = format, sql = sql, retries = retries,
+    )
 
     /**
-     * A `cacheCopy` step (spec 7.3).
+     * A `sql` step (spec 3.4). Side effects only, no dataset output.
      *
-     * P9 addition: [retries] null leaves the field at `CacheCopyStep`'s declared default of 3,
-     * which is the value the no-retry-on-`NotReadyException` criterion needs in play - asserting
-     * that nothing was retried is vacuous against a step that was never allowed a second attempt.
-     * The **YAML** default is 0 and is a different thing; validation rule 20 records why.
+     * [idempotent] is the author's assertion of spec 10 rule 12, which a step off `scratch` needs
+     * before it may state any retries at all. It became reachable from here in E10: until then rule
+     * 12 was enforced on the loader path only, so a definition built in code could ask for retries
+     * on an external datasource without ever saying a rerun converges.
+     */
+    fun sql(
+        name: String,
+        datasource: String,
+        vararg statements: String,
+        retries: Int? = null,
+        idempotent: Boolean = false,
+    ): SqlStep = SqlStep(
+        name = name,
+        datasource = datasource,
+        statements = statements.toList(),
+        retries = retries,
+        idempotent = idempotent,
+    )
+
+    /** An `export` step (spec 3.5). Each pair is a variable name and the query that produces it. */
+    fun export(name: String, datasource: String, vararg vars: Pair<String, String>, retries: Int? = null): ExportStep =
+        ExportStep(
+            name = name,
+            datasource = datasource,
+            vars = vars.map { (varName, varSql) -> ExportVar(name = varName, sql = varSql) },
+            retries = retries,
+        )
+
+    /**
+     * A `cacheCopy` step (spec 7.3). [retries] null resolves to 0 on both paths since E10 - the
+     * model no longer declares the 3 every other scratch-targeted step used to inherit, which is
+     * what retired rule 20's asymmetry. A test that needs retries in play states them.
      */
     fun cacheCopy(name: String, cache: String, sql: String, output: String, retries: Int? = null): CacheCopyStep =
-        if (retries == null) {
-            CacheCopyStep(name = name, cache = cache, sql = sql, output = output)
-        } else {
-            CacheCopyStep(name = name, cache = cache, sql = sql, output = output, retries = retries)
-        }
+        CacheCopyStep(name = name, cache = cache, sql = sql, output = output, retries = retries)
 
     // -------------------------------------------------------------------------------------
     // P8a additions (spec 9.2, 9.4). Additive only: every builder above keeps its name, its

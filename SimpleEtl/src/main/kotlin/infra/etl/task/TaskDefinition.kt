@@ -25,9 +25,11 @@ const val SCRATCH = "scratch"
  * applied to some of them would make validation judge a value the engine never runs, or make a
  * YAML-built definition differ from a code-built one for identical input (review finding M10).
  *
- * **`CacheCopyStep` deliberately does not use this** and neither does its loader branch: the model
- * declares 3 and the YAML default is 0, an asymmetry spec 10 rule 20 records and both sites
- * comment. A helper that "fixed" it would break every task file omitting `retries`.
+ * Since E10 a step that states no `retries` carries null, and `TaskRules.retries` is what turns
+ * that into a number on the run path (spec 5.3, 10). **`CacheCopyStep` still does not use this**:
+ * it resolves to 0, because no failure a cache copy can produce is transient under spec 5.3 and
+ * rule 20 rejects a stated non-zero value. Both paths now agree on that 0, which is what retired
+ * the model-versus-YAML asymmetry rule 20 used to record.
  */
 fun defaultRetries(datasource: String): Int = if (datasource == SCRATCH) 3 else 0
 
@@ -115,14 +117,15 @@ data class Phase(val name: String, val steps: List<Step>)
  * The unit of work, retry and logging (spec 2.2). Five executable types, [CacheCopyStep] included
  * since P9 built its executor.
  *
- * [retries] counts *additional* attempts after the first, and defaults to 3 when the step writes
- * into [SCRATCH] and 0 everywhere else (spec 5.3). Retrying anything else needs the author to say
- * `idempotent: true`, which is validation rule 12 and P6's to enforce; the field exists here so
- * that the assertion has somewhere to live.
+ * [retries] counts *additional* attempts after the first. **null means "not stated"** and takes
+ * spec 5.3's datasource-dependent default - 3 when the step writes into [SCRATCH], 0 everywhere
+ * else - resolved by `TaskRules` rather than by a constructor default, because the value depends on
+ * another field and a Kotlin default cannot (spec 5.3, 11.2). Retrying anything off scratch needs
+ * the author to say `idempotent: true`, which is validation rule 12.
  */
 sealed interface Step {
     val name: String
-    val retries: Int
+    val retries: Int?
 }
 
 /** Where a [PipeStep] reads from: one datasource, one query (spec 3.2). */
@@ -191,7 +194,7 @@ class PipeStep(
     val transform: RowTransform? = null,
     val addColumns: List<ColumnMeta> = emptyList(),
     val chunkSize: Int? = null,
-    override val retries: Int = defaultRetries(target.datasource),
+    override val retries: Int? = null,
 ) : Step
 
 /** How a [MaterializeStep] stores its output (spec 5.6). PARQUET is scratch-only. */
@@ -210,7 +213,7 @@ class MaterializeStep(
     val output: String,
     val sql: String,
     val format: MaterializeFormat = MaterializeFormat.TABLE,
-    override val retries: Int = defaultRetries(datasource),
+    override val retries: Int? = null,
 ) : Step
 
 /**
@@ -226,7 +229,7 @@ class SqlStep(
     override val name: String,
     val datasource: String,
     val statements: List<String>,
-    override val retries: Int = defaultRetries(datasource),
+    override val retries: Int? = null,
     val idempotent: Boolean = false,
 ) : Step
 
@@ -242,7 +245,7 @@ class ExportStep(
     override val name: String,
     val datasource: String,
     val vars: List<ExportVar>,
-    override val retries: Int = 0,
+    override val retries: Int? = null,
 ) : Step
 
 /**
@@ -256,18 +259,18 @@ class ExportStep(
  * for a task file, and by the executor for a definition built in code (spec 2.1). A task needing a
  * variable copies the wider subset and filters in the following `materialize`.
  *
- * [retries] keeps the 3 every scratch-targeted step declares, frozen since P5. It can never fire:
- * spec 5.3's retry classification is JDBC-shaped and a local DuckDB copy raises none of it. The
- * **YAML** default is 0 and a stated non-zero value is rejected by rule 20 - the asymmetry is
- * deliberate, because inheriting the 3 here would make every task file that omits `retries` fail
- * that rule on a value nobody wrote.
+ * [retries] resolves to **0** and not to the 3 a scratch output would otherwise earn. It can never
+ * fire: spec 5.3's retry classification is JDBC-shaped and a local DuckDB copy raises none of it,
+ * and rule 20 rejects a stated non-zero value. From P5 to P9 this field declared 3 while the loader
+ * resolved 0 for the same step type, an asymmetry rule 20 recorded and both sites commented; with
+ * null representable, both paths resolve the same and the asymmetry is gone.
  */
 class CacheCopyStep(
     override val name: String,
     val cache: String,
     val sql: String,
     val output: String,
-    override val retries: Int = 3,
+    override val retries: Int? = null,
 ) : Step
 
 /**

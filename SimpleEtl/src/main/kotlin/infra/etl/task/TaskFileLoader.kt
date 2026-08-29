@@ -278,8 +278,8 @@ class TaskFileLoader(
                 when (file) {
                     is ReadFile.Failed -> listOf(file.error)
                     is ReadFile.Parsed -> FileValidation(
-                        file.name, file.task, datasources, transforms.keys, hooks, caches,
-                        filesByTask, syntax,
+                        file.name, file.task, datasources, transforms, hooks, caches,
+                        filesByTask, syntax, TaskRules(),
                     ).validate()
                 }
             }
@@ -333,11 +333,12 @@ private class FileValidation(
     private val file: String,
     private val yaml: TaskYaml,
     private val datasources: Set<String>,
-    private val transforms: Set<String>,
+    private val transforms: Map<String, RowTransform>,
     private val hooks: Set<String>,
     private val caches: Set<String>,
     private val filesByTask: Map<String, List<String>>,
     private val syntax: DuckDbSyntax,
+    private val rules: TaskRules,
 ) {
 
     private val errors = mutableListOf<ValidationError>()
@@ -405,22 +406,35 @@ private class FileValidation(
         return errors
     }
 
+    /**
+     * The file-shaped rules over the YAML, then the task-shaped rules over the model.
+     *
+     * The model is built here rather than after the whole directory has validated, because
+     * [TaskRules] is the one implementation of spec 10's task-shaped rules and it speaks
+     * [TaskDefinition]. A conversion that throws is a step whose *file*-shaped rules already
+     * failed - rule 10 discharges `target.sql!!`, rule 4 `getValue`, rule 15 `canonicalOf(..)!!` -
+     * so those errors are already in the report and there is nothing well formed left to judge.
+     */
     private fun step(step: StepYaml) {
-        if ((step.retries ?: 0) < 0) {
-            err(step.name, "retries must not be negative, got ${step.retries} (spec 5.3).")
-        }
         when (step) {
             is PipeYaml -> pipe(step)
             is MaterializeYaml -> materialize(step)
             is SqlYaml -> {
                 datasource(step.name, step.datasource)
-                step.statements.forEach { sql(step.name, "statements", it, step.datasource, resolveNames = true) }
-                sqlRetries(step)
+                step.statements.forEach { sql(step.name, "statements", it, step.datasource) }
             }
 
             is ExportYaml -> export(step)
             is CacheCopyYaml -> cacheCopy(step)
         }
+        val violations = runCatching { step.toStep(transforms) }.getOrNull()
+            ?.let { rules.check(it, defined) }.orEmpty()
+        errors += violations.map { ValidationError(file, it.step, null, it.message) }
+        if (step is CacheCopyYaml && violations.isEmpty()) cacheSelectOnly(step)
+        // Rule 7's running scope. A step's exports resolve for *later* steps only (spec 6.2), so
+        // they are added once this step has been judged; rule 8 is [TaskRules]'s and was applied
+        // against the set as it stood above.
+        if (step is ExportYaml) defined += step.vars.map { it.name }
     }
 
     /**
@@ -447,8 +461,8 @@ private class FileValidation(
             )
         }
         cacheSql(step.name, step.sql)
-        // Rule 20, over the value the file *states*. `retries ?: 0` below is this step type's
-        // default and is not the author's word, so it is not what this rule reads.
+        // Rule 20, over the value the file *states*, which is why it reads the YAML rather than the
+        // model: the model carries 0 for an omitted value and 0 is not the author's word.
         val stated = step.retries
         if (stated != null && stated > 0) {
             err(
@@ -465,57 +479,44 @@ private class FileValidation(
     }
 
     /**
-     * Rule 19, and rule 6 for the same text.
+     * Rule 6 for a `cacheCopy`'s text. Rule 19 is [TaskRules]'s and fires over the same SQL.
      *
      * Rule 6's DuckDB parse applies here without the dialect caveat that limits it elsewhere: a
      * `cacheCopy` runs **inside the cache's own DuckDB instance** (spec 7.3), so DuckDB is not a
-     * guess about the datasource's dialect but the dialect itself.
+     * guess about the datasource's dialect but the dialect itself. It is the **raw text** that is
+     * parsed, never JDBI's `?`-substituted rewrite, because that text reaches the cache verbatim
+     * through `CopyOutSpec.sql`.
      *
-     * Rule 19 is not `!text.contains(":")`. That would reject `qty::varchar` and `'a:b'`, both
-     * legal DuckDB and both correctly skipped by JDBI's own parser, and would make every task file
-     * needing a cast unwritable. The parse is what tells a bound name from punctuation.
-     *
-     * **JDBI's parser is not the last word on what a bind name is here.** Its lexer reads a colon
-     * followed by digits as a parameter - measured on jdbi3-core 3.45.4, `select site_code[1:3]`
-     * yields the name `3` and the rewrite `select site_code[1?]`, and `{'k':1}` yields `1`. Both
-     * are ordinary DuckDB syntax, an array slice and a struct literal, and both parse clean as
-     * written (measured on duckdb_jdbc 1.1.3). A cacheCopy's text reaches the cache verbatim
-     * through `CopyOutSpec.sql` and never passes through JDBI, so an all-digit "name" is
-     * punctuation here rather than a binding - and it is the **raw text**, never JDBI's
-     * `?`-substituted rewrite, that DuckDB is asked to parse.
+     * The parse is skipped for text rule 19 has already rejected: a `:name` DuckDB never accepts
+     * would otherwise report a syntax error on top of the binding error that explains it.
      */
     private fun cacheSql(step: String, text: String) {
         if (text.isBlank()) {
             err(step, "sql is empty (rule 6).")
             return
         }
-        val parsed = try {
+        try {
             parseNamedParameters(text)
         } catch (e: RuntimeException) {
             err(step, "sql does not parse: ${e.message} (rule 6).")
-            return
         }
-        val parameters = parsed.parameters
-        if (parameters.isPositional) {
-            err(step, "sql uses positional '?' parameters, and a cacheCopy binds nothing at all (rule 19).")
-            return
-        }
-        val bound = parameters.parameterNames.filterNot { name -> name.all(Char::isDigit) }.distinct().sorted()
-        if (bound.isNotEmpty()) {
-            err(
-                step,
-                "sql binds ${bound.map { ":$it" }}, and a cacheCopy takes no variables at all (rule 19). It " +
-                    "runs inside the cache's own DuckDB instance through CopyOutSpec.sql, a plain string " +
-                    "with no binding channel (spec 3.6, 7.3), so this cannot be bound even if the variable " +
-                    "is defined. Copy the wider subset and filter it in the following materialize step.",
-            )
-            return
-        }
-        // selectOnly: the runtime splices this text into `CREATE TABLE <output> AS <sql>`, which is
-        // legal only for a SELECT. Without it a parsed non-SELECT - `copy (...) to ...`, a CTAS -
-        // comes back "not implemented", passes every rule, and then fails at run time on every
-        // firing, after the run has waited on the cache and taken a lease.
-        syntax.errorIn(text, selectOnly = true)?.let { err(step, "sql does not parse: $it (rule 6, 19).") }
+    }
+
+    /**
+     * The second half of rule 6 for a `cacheCopy`, run only over text nothing else has rejected.
+     *
+     * selectOnly: the runtime splices this text into `CREATE TABLE <output> AS <sql>`, which is
+     * legal only for a SELECT. Without it a parsed non-SELECT - `copy (...) to ...`, a CTAS - comes
+     * back "not implemented", passes every rule, and then fails at run time on every firing, after
+     * the run has waited on the cache and taken a lease.
+     *
+     * Skipped where rule 19 has already spoken: a `:name` DuckDB does not accept would otherwise
+     * report a syntax error on top of the binding error that explains it.
+     */
+    private fun cacheSelectOnly(step: CacheCopyYaml) {
+        if (step.sql.isBlank()) return
+        syntax.errorIn(step.sql, selectOnly = true)
+            ?.let { err(step.name, "sql does not parse: $it (rule 6, 19).") }
     }
 
     /**
@@ -550,7 +551,7 @@ private class FileValidation(
     private fun pipe(step: PipeYaml) {
         val name = step.name
         datasource(name, step.source.datasource)
-        sql(name, "source.sql", step.source.sql, step.source.datasource, resolveNames = true)
+        sql(name, "source.sql", step.source.sql, step.source.datasource)
         if (step.chunkSize != null && step.chunkSize <= 0) {
             err(name, "chunkSize must be positive, got ${step.chunkSize} (spec 5.2).")
         }
@@ -558,7 +559,6 @@ private class FileValidation(
         val target = step.target
         datasource(name, target.datasource)
         val scratch = target.datasource == SCRATCH
-        val retries = step.retries ?: defaultRetries(target.datasource)
 
         // Rule 10.
         if ((target.table == null) == (target.sql == null)) {
@@ -582,48 +582,22 @@ private class FileValidation(
                             "silently dropped (spec 9.1).",
                     )
                 }
-            } else if (scratch && retries > 0) {
-                // Rule 18.
-                err(
-                    name,
-                    "a scratch target with createTable REQUIRED cannot be retried (retries $retries, rule " +
-                        "18). Its table has no attempt-suffixed name, so a retry appends onto the rows the " +
-                        "failed attempt already flushed (spec 5.5). Use createTable AUTO, or retries: 0.",
-                )
             }
             if (scratch) dataset(name, target.table)
         } else {
-            // Rule 11.
-            if (scratch) {
-                err(
-                    name,
-                    "target.sql is not available on '$SCRATCH' (rule 11). DuckDB writes go through the " +
-                        "appender, which takes a table and not a statement (spec 4.4).",
-                )
-            }
-            // Rule 7 excepts target.sql: every ':name' there is a Row key, and Row keys are unknown
-            // until the source query runs, so they are checked against the first chunk at run time
-            // (spec 4.4, 6.3). The SQL is still parsed, which is rule 6.
-            sql(name, "target.sql", target.sql!!, datasource = null, resolveNames = false)
-        }
-
-        // Rule 12.
-        if (!scratch && retries > 0 && !target.idempotent) {
-            err(
-                name,
-                "retries $retries on the non-scratch target '${target.datasource}' requires idempotent: true " +
-                    "(rule 12). The framework cannot make a partially written external target safe on its " +
-                    "own, so the author states that a rerun converges (spec 5.3).",
-            )
+            // Rule 6 for the text. Rule 11 and rule 6's positional half are [TaskRules]'s, and rule
+            // 7 excepts this text entirely - every ':name' here is a Row key, unknown until the
+            // source query runs (spec 4.4, 6.3).
+            sql(name, "target.sql", target.sql!!, datasource = null)
         }
 
         // Rule 4.
         step.transform?.let { transform ->
-            if (transform.bean !in transforms) {
+            if (transform.bean !in transforms.keys) {
                 err(
                     name,
                     "transform.bean '${transform.bean}' is not a RowTransform bean (rule 4). Known beans are " +
-                        "${transforms.sorted()}.",
+                        "${transforms.keys.sorted()}.",
                 )
             }
             transform.addColumns.forEach { addColumn(name, it, duckDbTarget = scratch) }
@@ -678,123 +652,26 @@ private class FileValidation(
     }
 
     /**
-     * **Rule 12 on a `sql` step**, which spec 10 amends to enforce as the step-level rule it has
-     * always been worded as (review finding H2).
-     *
-     * Each statement is its own transaction (spec 5.2), so a retry re-runs the whole list: a
-     * transient drop between two committed statements re-executes the first, duplicating rows in
-     * an external table, and the run then reports SUCCEEDED. That is the same hazard rule 12
-     * covers on a pipe target, so it takes the same answer - the author states that a rerun
-     * converges, and the framework holds them to having said it.
-     */
-    private fun sqlRetries(step: SqlYaml) {
-        if (step.datasource == SCRATCH) return
-        // Off scratch spec 5.3 defaults retries to 0, so a stated value is the only way to have one
-        // - which is why this does not need the datasource-dependent default at all.
-        val retries = step.retries ?: 0
-        if (retries <= 0 || step.idempotent) return
-        err(
-            step.name,
-            "retries $retries on the non-scratch datasource '${step.datasource}' requires idempotent: true " +
-                "(rule 12). Each statement is its own transaction, so a retry re-runs all of them - a failure " +
-                "after the first statement committed would run it a second time (spec 5.2, 5.3).",
-        )
-    }
-
-    /**
-     * **Rule 12 on a `materialize` step.** A non-scratch materialize with retries is rejected
-     * outright rather than made conditional on an `idempotent` flag, because it runs
-     * `CREATE TABLE <output> AS <sql>`: a retry after the table was created fails deterministically
-     * on table-already-exists, so `idempotent: true` would be a promise no author could keep.
-     * Spec 10 rule 12 records the ruling, including why drop-and-recreate was refused.
-     */
-    private fun materializeRetries(step: MaterializeYaml) {
-        if (step.datasource == SCRATCH) return
-        val retries = step.retries ?: 0
-        if (retries <= 0) return
-        err(
-            step.name,
-            "retries $retries on the non-scratch datasource '${step.datasource}' is rejected for a " +
-                "materialize (rule 12). It runs as CREATE TABLE ${step.output} AS <sql>, so a retry after " +
-                "the table was created fails on table-already-exists every time - there is no idempotent: " +
-                "true that could make it converge. State retries: 0, or build the table with a sql step " +
-                "that can express its own recovery (spec 5.3, 5.4).",
-        )
-    }
-
-    /**
-     * Rule 13's scratch-only half, rule 12 as spec 10 amends it for a materialize, and **rule 7 as
-     * spec 10 amends it for a non-scratch materialize**: such a step may bind no variable at all.
-     *
-     * A non-scratch materialize runs `CREATE TABLE <output> AS <sql>` through `Handle.createUpdate`,
-     * which binds every `:name` it parses, and Oracle rejects a bind variable in DDL outright with
-     * ORA-01027. Rule 7 blessed the shape - it names `materialize` explicitly - so a file like
-     * `materialize {datasource: report_oracle, sql: "select ... where upd_ts > :lastTs"}` passed
-     * every startup rule and then failed on every firing, permanently, because ORA-01027 is not
-     * transient. The identical step on `scratch` works, which is why it could only surface in
-     * production: the engine's own measurement of "CTAS accepts bound parameters" was taken on
-     * duckdb_jdbc.
+     * Rule 3, rule 6 and rule 9 for a `materialize`. Rule 13's scratch-only half, rule 12 as spec 10
+     * amends it for this step type, and rule 7 in both its plain and its amended form are
+     * [TaskRules]'s - the last of those being the ORA-01027 shape of review finding H3, which no
+     * amount of file-shaped checking could have reached because it is a statement about a task.
      */
     private fun materialize(step: MaterializeYaml) {
         datasource(step.name, step.datasource)
-        sql(step.name, "sql", step.sql, step.datasource, resolveNames = true)
-        if (step.datasource != SCRATCH) externalMaterializeBinds(step)
-        materializeRetries(step)
+        sql(step.name, "sql", step.sql, step.datasource)
         dataset(step.name, step.output)
-        // Rule 13's other half: PARQUET is structurally impossible on any other step type, and
-        // spec 5.6 puts the file in the scratch directory, so it is scratch-only here too.
-        if (step.datasource != SCRATCH && step.format == MaterializeFormat.PARQUET) {
-            err(
-                step.name,
-                "format PARQUET writes a file into the scratch directory, so it is available only on the " +
-                    "'$SCRATCH' datasource, not '${step.datasource}' (spec 5.6, rule 13).",
-            )
-        }
     }
 
     /**
-     * Every `:name` the SQL of a non-scratch materialize binds. Nothing is filtered: unlike a
-     * `cacheCopy`, this text *does* go through JDBI at run time, so whatever JDBI's parser calls a
-     * parameter is a parameter here - including the all-digit name it reads out of a DuckDB array
-     * slice, which would be rewritten to `?` and broken anyway.
-     *
-     * A parse failure and a positional `?` are already reported by [sql] for the same text, so
-     * both are passed over here rather than reported twice.
-     */
-    private fun externalMaterializeBinds(step: MaterializeYaml) {
-        val parameters = runCatching { parseNamedParameters(step.sql).parameters }.getOrNull() ?: return
-        if (parameters.isPositional) return
-        val bound = parameters.parameterNames.distinct().sorted()
-        if (bound.isEmpty()) return
-        err(
-            step.name,
-            "sql binds ${bound.map { ":$it" }}, and a materialize on the non-scratch datasource " +
-                "'${step.datasource}' can bind nothing (rule 7). It runs as CREATE TABLE ${step.output} AS " +
-                "<sql>, and Oracle rejects a bind variable in DDL with ORA-01027 - so this step would fail " +
-                "on every run, not just some. Materialize the wider set here and filter it in a following " +
-                "step, where variables do bind (spec 6.3, 10 rule 7).",
-        )
-    }
-
-    /**
-     * A step's exports become available to *later* steps and never to its own queries: [TaskEngine]
-     * defines them only once the whole step has succeeded (spec 6.2), so they are added here after
-     * all of this step's SQL has been resolved.
+     * Rule 3 and rule 6 for an `export`. Rule 8 over the names it produces is [TaskRules]'s, and
+     * [step] adds them to [defined] once this step has been judged - a step's exports resolve for
+     * *later* steps only, because [TaskEngine] defines them once the whole step has succeeded
+     * (spec 6.2).
      */
     private fun export(step: ExportYaml) {
         datasource(step.name, step.datasource)
-        val declared = mutableSetOf<String>()
-        step.vars.forEach { variable ->
-            sql(step.name, "vars[${variable.name}].sql", variable.sql, step.datasource, resolveNames = true)
-            if (!declared.add(variable.name)) {
-                err(
-                    step.name,
-                    "variable '${variable.name}' is exported twice by this step. A variable may not be " +
-                        "redefined once set (spec 6.2, rule 8).",
-                )
-            }
-        }
-        declared.forEach { variable(step.name, it) }
+        step.vars.forEach { sql(step.name, "vars[${it.name}].sql", it.sql, step.datasource) }
     }
 
     /** Rule 3. [SCRATCH] is reserved rather than configured, so it is always valid (spec 7.1). */
@@ -819,7 +696,7 @@ private class FileValidation(
         }
     }
 
-    /** Rule 8's other half, and the running scope that rule 7 resolves against. */
+    /** Rule 8 over the task's literal vars, which are task-level and so have no step to name. */
     private fun variable(step: String?, name: String) {
         if (!defined.add(name)) {
             err(
@@ -848,21 +725,15 @@ private class FileValidation(
     }
 
     /**
-     * Rule 6 for every SQL text, and rule 7 for all of them but `target.sql`.
+     * Rule 6 for one SQL text: it is not empty, its `:name`s parse, and - on `scratch` alone -
+     * DuckDB itself accepts it. Rule 6's positional-`?` half and rule 7 are [TaskRules]'s.
      *
-     * **Rule 6 is honoured only as far as the named-parameter parse reaches.** Nothing on this
-     * module's classpath parses Oracle or DuckDB grammar, and a task file's SQL is written in
-     * whichever dialect its datasource speaks, so "every SQL text parses" cannot mean a grammar
-     * check at startup. What is reachable is an empty statement, a malformed `:name`, and a
-     * positional `?`; a genuine syntax error still surfaces where it always did, at execution.
+     * **The DuckDB half is honoured only where the dialect is known.** Nothing on this module's
+     * classpath parses Oracle, and a task file's SQL is written in whichever dialect its datasource
+     * speaks, so off scratch "every SQL text parses" reaches no further than the named-parameter
+     * parse; a genuine syntax error still surfaces where it always did, at execution.
      */
-    private fun sql(
-        step: String,
-        where: String,
-        text: String,
-        datasource: String?,
-        resolveNames: Boolean,
-    ) {
+    private fun sql(step: String, where: String, text: String, datasource: String?) {
         if (text.isBlank()) {
             err(step, "$where is empty (rule 6).")
             return
@@ -877,24 +748,6 @@ private class FileValidation(
         // DuckDB rather than a syntax error in a dialect that spells parameters differently.
         if (datasource == SCRATCH) {
             syntax.errorIn(parsed.sql)?.let { err(step, "$where does not parse: $it (rule 6).") }
-        }
-        val parameters = parsed.parameters
-        if (parameters.isPositional) {
-            err(
-                step,
-                "$where uses positional '?' parameters. Variables bind by name, so write ':name' (spec 6.3).",
-            )
-            return
-        }
-        if (!resolveNames) return
-        val undefined = parameters.parameterNames.filterNot { it in defined }.distinct().sorted()
-        if (undefined.isNotEmpty()) {
-            err(
-                step,
-                "$where binds ${undefined.map { ":$it" }}, which no built-in, literal var or earlier export " +
-                    "has defined (rule 7). Variables resolve in step order, so an export step must come " +
-                    "before its use (spec 6.2). Defined at this point: ${defined.sorted()}.",
-            )
         }
     }
 

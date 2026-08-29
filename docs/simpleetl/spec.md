@@ -546,6 +546,24 @@ For `materialize`, `sql`, and `export`, each statement is its own transaction.
 
 - Retry is per step. `retries` counts additional attempts after the first.
 - Defaults: 3 for a scratch target, 0 for any other target.
+- **`Step.retries` is `Int?`, and null means *not stated*** - what a caller writes to take the
+  default. It is deliberately not a constructor default: the value depends on another field,
+  `datasource`, and a Kotlin default cannot, so before E10 a caller who wanted the default had to
+  re-derive it. Review findings M10 and M11 fixed two instances of the drift that follows; E10
+  removed the cause.
+- **The default has one definition, and the run path has one resolution point.** The value is
+  `defaultRetries(datasource)`, declared next to `SCRATCH` since M10. `TaskRules.retries` is what
+  turns a null into a number for a definition about to run, whichever source built it, and it is the
+  only place the per-step-type mapping is written down - a `pipe` reads its *target's* datasource, a
+  `materialize` and a `sql` step read their own, and an `export` and a `cacheCopy` resolve to 0.
+- **`TaskFileLoader` still applies the default as it builds the model**, so a `TaskDefinition` that
+  came from YAML carries a resolved number while one built in code carries what its author stated.
+  That is not the single representation E10 set out to reach; it is the shape three assertions
+  written by P6 and P9 pin - `TaskFileLoaderValidTest` reads 3 off an omitted `retries` in a loaded
+  scratch `sql` step and 0 off a loaded `export`, and `CacheCopyLoaderTest` reads 0 off a loaded
+  `cacheCopy` - and the M2 ruling is that an earlier phase's test is the specification of the shape.
+  Both paths go through the same `defaultRetries`, so they cannot disagree about the value; what is
+  not bought is one representation of an unstated one. Recorded in progress.md.
 - Retry applies only to transient failures: `SQLTransientException`,
   `SQLRecoverableException`, `SQLTimeoutException`, and SQLState class `08`. Any other
   failure, including a type or constraint error, fails immediately. Retrying a
@@ -632,6 +650,16 @@ which is between zero and one chunk of rows (see 12). That is silent duplication
 combination is rejected rather than performed: a scratch `createTable: REQUIRED` target with
 `retries > 0` is an error naming the step, telling the author to use `AUTO` or to state
 `retries: 0`. Rejected at step start, before the source query runs.
+
+**Since E12 the protocol above is a module, not a rule four call sites each remember.**
+`ScratchDatasets` wraps `DatasetNamer` - which keeps the interface its own tests pin - and offers
+`attemptTable { physical -> ... }` and `attemptParquet { path -> ... }`. Each writes under the
+attempt-suffixed name, and publishes the stable view **on normal return only**, so "publish makes
+an attempt the live one, and only a succeeded attempt is published" is enforced by control flow
+rather than restated in a comment beside each of `pipe`, `materialize` and `cacheCopy`. Two entry
+points rather than one plus a format argument: the module cannot verify what the block wrote, so
+the least it can do is make the write and its matching publish one expression. It does not name
+`MaterializeFormat`, which lives in `task`; an adapter in `duckdb` never depends on `task`.
 
 ### 5.6 Parquet Materialisation
 
@@ -1186,6 +1214,39 @@ identical documents, config performs property expansion which would corrupt SQL 
 
 Any failure below prevents startup, or causes a reload to be rejected with no change.
 
+**Where each rule lives, since E10.** A rule is a statement about either a *file* or a *task*, and
+the two have different homes.
+
+- **File-shaped rules stay in `TaskFileLoader`**: 1 (parse, unknown fields), 10 (exactly one of
+  `target.table` and `target.sql` - the sealed `PipeTarget` makes it unrepresentable in the model,
+  so there is nothing left to check downstream), 13's `format`-placement half, 16 (cron shape), 17,
+  and rule 6's DuckDB syntax check. That last one runs an in-memory DuckDB parser, and it stays
+  here so that nothing on the run path ever boots one.
+- **Task-shaped rules live in `TaskRules`**, an internal module over `TaskDefinition`: 7, 8, 11,
+  12, 13's scratch-only half, 18, 19, rule 6's positional-`?` half, and 5.3's "`retries` may not be
+  negative". `TaskFileLoader` calls it and stamps `file` onto what comes back; `TaskEngine` calls it
+  **per step, at the guard position each check occupied before E10**, so a rejected step still
+  reports `onStepStart` and then a terminal `onStepError` (2.2, 9.2) and still reads no row from
+  its source.
+
+  **Rule 18 was added to that list during E10 rather than before it.** The phase brief named seven
+  rules and rule 18 was not one of them, which was an omission and not a boundary: it is a statement
+  about a step, it was worded twice - once in the loader and once in `TaskEngine.pipe` - and it reads
+  the same resolved `retries` this module now owns, so leaving it out would have left the phase's own
+  "one implementation per rule" claim false about the eighth rule. Recorded in progress.md.
+
+The point is 2.1: a `TaskDefinition` built in code is not validated by a loader it never went
+through, and until E10 the engine re-implemented seven of these rules to cover that - two
+implementations, over two models, worded twice. Findings M10 and M11 record what drift in either
+direction costs: a rule tightened only in the loader refuses valid files at boot, and one tightened
+only in the engine boots clean and then dies mid-run, which is the failure this section exists to
+prevent.
+
+**`TaskRules` is called twice with different SQL parsers, and that is not a duplicated rule.** The
+loader has no `Handle`, so it parses `:name` with the default `COLON_PREFIX`; the engine parses
+with `handle.getConfig(SqlStatements::class).sqlParser`. The two agree unless a host has
+reconfigured its `Jdbi`, which boot provably cannot see. Same module, same wording, two inputs.
+
 1. YAML parses and deserialises; unknown fields rejected.
 2. `name` unique across files and matching the allowed pattern.
 3. Every referenced datasource name exists as a configured Jdbi bean.
@@ -1281,13 +1342,13 @@ Any failure below prevents startup, or causes a reload to be rejected with no ch
     is transient under 5.3, so the knob can never fire (3.6). Same treatment as rules 12 and 18 -
     reject the combination rather than accept and ignore it.
 
-    **The YAML default for this step type is 0, not 3.** `CacheCopyStep.retries` defaults to 3 in
-    the programmatic model, frozen since P5, because every other scratch-targeted step does. If the
-    loader inherited that default, **every task file that omits `retries` would fail rule 20** -
-    caught while checking rule 18's precedent, which deliberately rejects the omitted-and-defaulted
-    case. So the loader resolves `retries ?: 0` for `cacheCopy` alone, and rule 20 tests the stated
-    value. The asymmetry between the YAML default and the model default is deliberate and is
-    recorded here because nothing else would explain it.
+    **Both defaults are 0, since E10.** From P5 to P9 `CacheCopyStep.retries` declared 3 in the
+    programmatic model - because every other scratch-targeted step does - while the loader resolved
+    `retries ?: 0` for this step type alone, so that a task file omitting `retries` would not fail
+    this rule on a value its author never wrote. That asymmetry existed only because a Kotlin
+    default had to be *some* number. With `retries: Int?` (5.3, 11.2) "not stated" is representable,
+    both paths resolve it to 0, and this rule tests the stated value on both. The two code comments
+    that defended the asymmetry go with it.
 21. **Every `cache` name exists in the host-supplied binding set**, the exact analogue of rule 3
     for datasources.
 
@@ -1418,7 +1479,10 @@ data class Phase(val name: String, val steps: List<Step>)
 
 sealed interface Step {
     val name: String
-    val retries: Int
+    // E10: null means "not stated", and takes 5.3's datasource-dependent default. Resolved
+    // in TaskRules - one place - because the default depends on `datasource` and a Kotlin
+    // default cannot, so a non-null field forced every construction site to re-derive it.
+    val retries: Int?
 }
 class PipeStep : Step         // source, transform?, target, chunkSize?
 class MaterializeStep : Step  // datasource, output, format, sql
@@ -1467,8 +1531,17 @@ fun interface CronScheduler {                 // host-implemented over Quarkus's
     fun schedule(taskName: String, cron: String, run: () -> Unit): AutoCloseable
 }
 
+/** E11: narrowed to what its name says - the adapter over CronScheduler. It holds
+ *  registrations and no definitions; the internal task registry owns the definition map and
+ *  hands this the expressions it wants live. Cancel-then-register ordering, the swallowed
+ *  close, and the best-effort restore on rejection all stay here.
+ *
+ *  Two reconciliations in one line. P7 shipped `ValidationReport?` where this section
+ *  declared `Unit`, an unrecorded deviation until now; it was always the error list below.
+ *  And the parameter was `List<TaskDefinition>` only because this class was the second owner
+ *  of the definition map, which is what E11 removes. */
 class TaskScheduler(cron: CronScheduler) {
-    fun apply(definitions: List<TaskDefinition>)   // register / unregister / re-register
+    fun apply(wanted: Map<String, String>): List<ValidationError>   // task name to cron
 }
 
 /** One limitedParallelism(1) view per task. `submit` is the whole public surface: the run
@@ -1500,6 +1573,22 @@ class ScratchDb : AutoCloseable {
     override fun close()                      // closes the instance and deletes the file
 }
 ```
+
+**Three modules E10 to E13 add are deliberately absent from this section**, and their absence is
+the design rather than an omission:
+
+- **`TaskRules`** (E10, section 10) - the one implementation of every task-shaped validation rule.
+  Internal, because both of its callers are in this module and a public rule checker would be a
+  third way to ask the same question.
+- **`TaskRegistry`** (E11) - the owner of the live definition map and of the reload transaction.
+  Internal, because 8.6 makes the HTTP resource the host's and it talks to `TaskAdmin`, whose four
+  methods are unchanged. A public registry would be a second door onto state that has just been
+  given one owner.
+- **`ScratchDatasets`** (E12, section 5.5) - the write-then-publish protocol for a scratch dataset,
+  wrapping `DatasetNamer`, which survives with the interface its own tests pin.
+
+A fourth, the attempt policy of E13, is internal to `TaskEngine` for the same reason: 8.3 freezes
+`TaskEngine.run` as the whole engine interface, and the retry loop is behind it.
 
 ### 11.3 Extension Points
 

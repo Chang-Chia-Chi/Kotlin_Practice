@@ -1821,3 +1821,198 @@ This is **L10 of review fix pass 3**, re-derived independently and reaching the 
 different route. Pass 3 declined it as needing the lead rather than a refactor pass, on the grounds
 that it is a second deviation from a signature the spec does declare. Both reasons still stand.
 Left as is, now twice.
+
+---
+
+## Architecture review of `SimpleEtl`, and the M2 plan it produced  (2026-08-29)
+
+A deepening review of the whole module - not a phase. It produced four plan entries (E10 to E13)
+and the spec amendments they need, and **no code**. Scope was taken from the commit history:
+`TaskEngine.kt` and `TaskFileLoader.kt` are the two most-touched files of the last sixty commits
+and carry three of the four findings.
+
+### What it found
+
+- **E10, spec 10's rules are implemented twice.** Seven rules - 7, 8, 11, 12, 13's scratch half,
+  19, and rule 6's positional-`?` half - are enforced over `TaskYaml` in the loader and again over
+  `TaskDefinition` in the engine, worded independently. M10 and M11 already fixed two instances of
+  the drift this causes and wrote down why it is dangerous; the mechanism was still there, seven
+  rules wide. `Step.retries: Int?` folds in, because the one thing E10 creates is a single point at
+  which a definition becomes runnable.
+- **E11, two owners for the live definition set.** See the correction below.
+- **E12, spec 5.5's write-then-publish protocol is copied into four executors.** `DatasetNamer`'s
+  own KDoc hands the protocol to the caller, so each of `pipe`, `materialize` (twice) and
+  `cacheCopy` sequences it by hand and each grew a comment restating the same rule.
+- **E13, the retry loop's test surface is JDBC.** Reaching thirty lines of ordering rules needs
+  `java.lang.reflect.Proxy` over `Connection`, `Statement` and `ResultSet`. Recorded as droppable.
+
+### Three earlier tests decided the design before any code was written
+
+Each of these was found while checking a proposal, and each killed or reshaped it:
+
+- `TaskListenerOrderTest.aGuardRejectedStepReportsAStepStartAndThenATerminalStepError` pins the
+  trace for a guard-rejected step, and its KDoc names the discriminating property outright. It
+  **kills** the obvious form of E10 - "validate once at the top of `run`" - which would leave a
+  trace with no `onStepStart` in it. `TaskRules` is therefore called *per step, at the guard
+  position each `require` occupies today*.
+- `DatasetNamerTest` pins `physical`, `parquetPath`, the `../../evil` rejection and attempt 0. So
+  E12 **wraps** `DatasetNamer` rather than replacing it.
+- `TaskSchedulerApplyTest`'s restore branch was written to survive deleting the restore line, so
+  E11 keeps the rollback in the scheduler, where that test does not have to move.
+
+### The correction, because the review's second finding was oversold
+
+The review's E11 card claimed a **correctness gap**: that during a reload the scheduler fires the
+new definition while `list()` reports the old. Checked against this file afterwards - too late,
+which is the process failure worth recording - the finding had already been declined twice, as L10
+of review fix pass 3 and again in the 2026-08-29 design review, on the grounds that "`reload` and
+`trigger` share one monitor, so no trigger can see the intermediate state".
+
+**That rebuttal is correct** - both are `@Synchronized` on the same `TaskAdmin`. The window the
+review found is real but narrower than claimed: `list()` is not synchronized and `TaskScheduler`
+`.fire` reads `current` under no lock, so the skew is `list` against `fire` and it costs an operator
+a stale task list for the duration of a cron swap. `TaskRunner.submit` captures the definition by
+value, so nothing is corrupted. It is a reporting skew, not a defect.
+
+What E11's entry does answer is the *other* half of both declines - the construction cycle. Making
+the registry drive registration leaves the scheduler holding no back-reference, so there is no
+cycle rather than a cycle broken cleverly. The entry now states the concession, states the answer,
+and says explicitly that declining it a third time is a legitimate outcome.
+
+**Read this before starting E11.** Two sessions have now reached "leave it"; the third proposal is
+only worth taking if single-ownership is worth a phase on its own merits.
+
+### Document debt this settles, and what it leaves
+
+Settled: spec 5.3 (`retries` nullable, one resolution point), spec 10 (which rules live where, and
+why `TaskRules` being called twice with different SQL parsers is one module and not two), spec 10
+rule 20 (the `cacheCopy` retries asymmetry retires with the `Int?` change), spec 5.5 (the publish
+protocol as a module), spec 11.2 (`Step.retries`, `TaskScheduler.apply`, and a note on the four
+internal modules M2 adds and why none of them is public).
+
+**Nothing left open.** The seven-method `TaskRunListener` debt the 2026-08-29 entry above records
+was closed by commit `ab685aa` before this session began: spec 9.2 and 11.2 now show
+`fun on(event: TaskEvent)` and the sealed `TaskEvent`. This paragraph first asserted that debt was
+still outstanding, copied from the older entry without opening the sections it named. Corrected
+rather than deleted, because a stale "the documents are stale" note is precisely the claim a later
+session inherits and acts on twice.
+
+
+---
+
+## E10 - One implementation of the task-shaped rules  (2026-08-29)
+
+`internal class TaskRules` in `infra.etl.task` now holds every rule of spec 10 that is a statement
+about a *task* rather than about a *file*, and both `TaskFileLoader` and `TaskEngine` call it.
+
+Eight were genuinely written twice and are now written once: rule 6's positional-`?` half, rule 7,
+rule 8, rule 11, rule 13's scratch-only half, rule 18, rule 19, and spec 5.3's "`retries` may not be
+negative".
+
+Two more moved *into* the module from the loader alone, and those change what the engine does rather
+than only how it words it - **rule 12** in all three of its step-type variants, and **rule 7 as H3
+amends it** for a non-scratch `materialize`. Neither had ever been on the run path, so a definition
+built in code escaped both: that is precisely the spec 2.1 gap this phase exists to close, and it
+is what made one earlier engine test fail until it stated the `idempotent: true` rule 12 has
+demanded since H2.
+
+`TaskRules.check(step, defined)` returns `List<RuleViolation>`; `TaskFileLoader` stamps the file
+name onto each and files it as a `ValidationError`, and `TaskEngine` throws the first as
+`IllegalArgumentException("step '<name>': <message>")`. The rule sentence itself never names the
+step, which is what lets the loader keep it in the structured `step` field a report groups by.
+
+`Step.retries` is `Int?`. `TaskRules.retries(step)` resolves an unstated one on the run path.
+
+`TaskRulesParityTest` is the phase's own test: ten cases, each breaking one rule twice - once in
+YAML through `TaskFileLoader.load`, once in Kotlin through `TaskEngine.run` - and comparing the two
+diagnostics **verbatim** rather than by a shared fragment. Fragment matching would have passed
+against the drift M10 and M11 were raised about, because both old wordings named the rule and named
+a remedy. Only equality fails when one copy is edited and the other is not.
+
+**373 tests pass** (`mvn -pl SimpleEtl test -Dtest='!*OracleTest,!*Spike'`), 362 of them
+pre-existing and unchanged in count, plus this phase's eleven.
+
+**The three Testcontainers Oracle classes were run and pass** - 20 tests, `WriterOracleTest`,
+`RowMapperOracleTest`, `RowPipeOracleTest`, about 2m20s. Docker was available on the machine this
+session ran on, which several earlier entries had assumed it would not be, so their claims about
+those classes were inherited from P5 rather than measured. These are measured.
+
+### Four deviations from the plan entry, all recorded in spec and plan
+
+**1. Rule 18 moved as well, making it eight rules and not seven.** The entry listed seven and rule
+18 was not among them. It is duplicated on exactly the same terms as the other eight - a statement
+about a step, worded twice, with two different remedy sentences - and it reads the resolved
+`retries` this phase hands to `TaskRules`, so leaving it out would have had the engine ask the
+module for a number and then apply its own copy of a rule to it. Ten lines and one parity case.
+
+**2. The constructor is `TaskRules(parserFor)` and not
+`TaskRules(datasources, transforms, hooks, caches)`.** The entry said the wiring should mirror
+`TaskFileLoader`'s, and none of the rules that moved consults any of those four collections: the
+rules that would are 3, 4, 5 and 21, and all four stay in the loader. `transforms` and `hooks` could
+not be used by a per-step interface at all - rule 4 needs the YAML bean *name*, which the model has
+already resolved to an object, and rule 5 is task-level. What the module genuinely needs bound at
+construction is the `:name` parser, which varies by datasource, so the wiring is
+`(String?) -> SqlParser`: `COLON_PREFIX` for the loader, the datasource's own
+`SqlStatements.sqlParser` for the engine. Four unused constructor parameters would have been the
+literal reading of the entry and a lie about what the module depends on.
+
+**3. `TaskFileLoader` still resolves `retries` as it builds the model.** Spec 5.3 as written said
+the default is resolved at exactly one point, which would leave a loaded `TaskDefinition` carrying
+null wherever the file omitted `retries`. Three assertions written by P6 and P9 read the resolved
+value off a loaded definition and would have failed: `TaskFileLoaderValidTest.theExportStepSurvives`
+(`assertEquals(0, step.retries)`), `...theMinimalFileLoadsAndOmittedFieldsTakeTheirDeclaredDefaults`
+(`assertEquals(3, step.retries)`), and `CacheCopyLoaderTest`'s cacheCopy default
+(`assertEquals(0, step.retries)`). By this phase-group's own ruling the test wins, so the loader
+keeps resolving through the same `defaultRetries` the module uses. The two paths therefore cannot
+disagree about the value - which is what M10 was about - but a `TaskDefinition` from YAML and one
+built in code still represent "unstated" differently. That is the residue; spec 5.3 now says so
+instead of promising otherwise.
+
+**4. Rule 20 stayed in the loader.** Spec 10 rule 20's E10 paragraph reads "this rule tests the
+stated value on both", which can be read as "on both paths". It is not enforced on the engine path,
+deliberately: `CacheCopyStepTest`'s no-retry criterion needs a `cacheCopy` step with `retries = 3`
+in play, and an engine that enforced rule 20 would reject the definition that criterion is built
+from. The rule is a startup rule about what an author *wrote* in a file, and a definition built in
+code has no author's file to read.
+
+### Two earlier-phase tests changed, and why neither is a weakening
+
+Both edits add what a rule asks for and leave every assertion untouched.
+
+- **`CacheCopyStepTest.aCacheWithNoGenerationFailsTheStepImmediatelyAndIsNeverRetried`** now builds
+  its step with `retries = 3` instead of leaning on `CacheCopyStep`'s declared default, which this
+  phase removes. `assertEquals(3, step.retries)` is unchanged and still guards the same thing: that
+  "nothing was retried" is not being asserted about a step that was never allowed a second attempt.
+- **`TaskEngineRetryTest.oneStatementTask`** now states `idempotent = true`. Rule 12 has demanded
+  that of any step retried off `scratch` since review finding H2, and until this phase only the
+  loader enforced it, so a definition built in code could ask for retries on an external datasource
+  without ever saying a rerun converges. `Etl.sql` gained an `idempotent` parameter to make it
+  sayable. The statement is `create or replace table touched as select 1 as ok`, which does
+  converge, so the assertion is true and not merely convenient.
+
+**The second edit is the visible half of what the phase is for.** Every engine test in the suite was
+written against an engine that did not enforce rule 12, and exactly one of them turned out to be
+running a definition no task file could have contained - a retried `sql` step on `report_oracle`
+with no `idempotent` flag. The loader would have refused that file at boot since P6; the engine ran
+it happily for four phases. Finding it took running the suite, which is what the phase changes.
+
+### What was measured rather than assumed
+
+- **The guard position.** `TaskRules.check` is called from `TaskEngine.Run.runOnce`, inside the
+  attempt loop and below `onStepStart`, which is where the `require(step.retries >= 0)` it replaces
+  sat. `TaskListenerOrderTest.aGuardRejectedStepReportsAStepStartAndThenATerminalStepError` passes
+  unmodified, so the six-entry trace is byte-identical, and `TaskEngineGuardTest`'s
+  `assertEquals(0, mes.attempts.get())` still holds: no rejected step opens a connection.
+- **The loader's DuckDB parser is still unreachable from `run`.** Rule 6's syntax check stays in
+  `TaskFileLoader`, and `TaskRules` imports nothing that boots one.
+- **Error ordering.** Task-shaped errors for a step now arrive after that step's file-shaped ones
+  rather than interleaved with them. No test pins an index into the report;
+  `TaskFileLoaderDirectoryTest` pins file-name order, which is untouched. The one place order
+  mattered semantically is the `cacheCopy` SELECT-only parse, which used to sit behind rule 19's
+  early return: it is now gated on the step having no rule violation at all, so a `:name` DuckDB
+  cannot parse still reports the binding error that explains it and not a syntax error on top.
+
+### Left for E11 to E13
+
+Unchanged from the M2 entry above. E11 remains the phase whose case is maintenance rather than
+correctness, and declining it a third time is still a legitimate outcome.

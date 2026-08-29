@@ -42,6 +42,11 @@ Read all three before writing code. Paths are relative to the repo root.
 When code and documents disagree, the documents win unless progress.md records a deliberate
 deviation.
 
+**Phases here are `P0`-`P9` and then `E10` onwards.** The repository holds a second plan,
+`docs/snapshotcache/plan.md`, whose own phases run to `P14`, so a bare "P11" names a phase in both
+documents. The letter is what disambiguates: `P` is snapshotcache's, `E` is this module's. A phase
+named without a document is not a phase name - ask which plan.
+
 ## Boundaries
 
 Package boundaries are a dependency contract enforced by ArchUnit in `ArchitectureTest.kt`, not a

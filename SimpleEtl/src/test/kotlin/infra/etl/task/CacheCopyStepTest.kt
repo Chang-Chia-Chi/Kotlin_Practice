@@ -315,10 +315,12 @@ class CacheCopyStepTest {
      * `copyOut`'s own `waitBudget` is the waiting mechanism, and retrying a cache that has nothing
      * to hand out only turns a fast failure into a slow one.
      *
-     * The step is left at `CacheCopyStep`'s declared `retries = 3`, and that is asserted rather
-     * than assumed: "nothing was retried" is worth nothing against a step that was never allowed a
-     * second attempt. `delaysMillis` is the harness's record of what the engine *asked* the sleeper
-     * for, so this assertion costs no wall time.
+     * The step states `retries = 3`, and that is asserted rather than assumed: "nothing was
+     * retried" is worth nothing against a step that was never allowed a second attempt. It was
+     * `CacheCopyStep`'s declared default until E10 made the field `Int?` and both paths resolve an
+     * unstated one to 0 (spec 5.3, rule 20), so the 3 this criterion needs is now written down.
+     * `delaysMillis` is the harness's record of what the engine *asked* the sleeper for, so this
+     * assertion costs no wall time.
      *
      * The message is checked for the **group**. `NotReadyException` names the group and not the
      * step - it is thrown by a cache that has never heard of this task - and asserting otherwise
@@ -330,7 +332,7 @@ class CacheCopyStepTest {
             val cache = seededCache()
             cache.failure = { group -> NotReadyException(group, AcquireUnavailableReason.NOT_READY) }
             harness.cache("wip_cache", cache, group = "wip")
-            val step = Etl.cacheCopy("copy-wip", "wip_cache", SUBSET_SQL, "wip_cache")
+            val step = Etl.cacheCopy("copy-wip", "wip_cache", SUBSET_SQL, "wip_cache", retries = 3)
 
             val outcome = harness.run(Etl.task("wip-cache-copy", Etl.phase("copy", step)))
 

@@ -97,11 +97,19 @@ class TaskEngineRetryTest {
      * One `sql` step on one datasource, with two retries allowed. One statement per step, so
      * [DuckFile.attempts] is the attempt count. `CREATE OR REPLACE` because a retry re-runs the
      * statement and must not fail for a second reason.
+     *
+     * `idempotent = true` is stated because spec 10 rule 12 requires it of any step retried off
+     * `scratch`, and since E10 the engine holds a definition built in code to that rule as the
+     * loader always held a task file (spec 2.1). It is also true of this statement, which is the
+     * only reason it may be said: `CREATE OR REPLACE` converges on a rerun.
      */
     private fun oneStatementTask(retries: Int, statement: String = "create or replace table touched as select 1 as ok") =
         Etl.task(
             "wip-retry",
-            Etl.phase("extract", Etl.sql("touch", "report_oracle", statement, retries = retries)),
+            Etl.phase(
+                "extract",
+                Etl.sql("touch", "report_oracle", statement, retries = retries, idempotent = true),
+            ),
         )
 
     @ParameterizedTest(name = "{0}")

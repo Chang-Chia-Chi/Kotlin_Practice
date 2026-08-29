@@ -173,6 +173,18 @@ class TaskEngine(
     }
 
     /**
+     * Spec 10's task-shaped rules, in the one implementation `TaskFileLoader` also calls. A
+     * definition built in code never passed a loader (spec 2.1), so this is where it meets them.
+     *
+     * The parser is the datasource's own, so run time cannot parse `:name` by one rule while
+     * startup parsed by another. `scratch` has no configured `Jdbi` and takes the colon-prefix
+     * default, which is what `Jdbi.create(connection)` carries anyway.
+     */
+    private val rules = TaskRules { datasource ->
+        datasources[datasource]?.getConfig(SqlStatements::class.java)?.sqlParser ?: COLON_PREFIX
+    }
+
+    /**
      * Runs every phase in order and returns the outcome rather than throwing: a failed task is a
      * result, not an exception, because P7's dispatcher and P8's listeners both need the run to
      * end normally.
@@ -456,7 +468,7 @@ class TaskEngine(
                     events.emit(TaskEvent.StepEnd(ctx, result))
                     return
                 } catch (failure: Exception) {
-                    val willRetry = attempt <= step.retries && isTransient(failure)
+                    val willRetry = attempt <= rules.retries(step) && isTransient(failure)
                     // The metric for this moment, before the listener call describing it. A
                     // terminal failure is metered as a step that *ended* - the timer carries no
                     // outcome tag, and a step that always fails would otherwise have no duration
@@ -472,8 +484,19 @@ class TaskEngine(
             }
         }
 
+        /**
+         * Spec 10's task-shaped rules, at the guard position every `require` they replaced occupied:
+         * inside the attempt, **below** `onStepStart` and above anything that opens a connection. A
+         * check hoisted to the top of [run] would leave a phase that failed with no step in it, and
+         * one pushed into a step executor would let the source query run first.
+         *
+         * The step name is stamped on here rather than carried in the rule's own wording, so that
+         * the loader can put it in `ValidationError.step` where a report can group by it.
+         */
         private fun runOnce(step: Step, attempt: Int): PipeResult {
-            require(step.retries >= 0) { "step '${step.name}': retries must not be negative, got ${step.retries}." }
+            rules.check(step, scope.names + ATTEMPT_VARIABLE).firstOrNull()?.let {
+                throw IllegalArgumentException("step '${step.name}': ${it.message}")
+            }
             return dispatch(step, attempt)
         }
 
@@ -541,29 +564,6 @@ class TaskEngine(
                 "step '${step.name}': cache '${step.cache}' is not configured. Known caches are " +
                     "${caches.keys.sorted()} (spec 3.6, 7.3).",
             )
-            // Rule 19's runtime guard, for a definition built in code (spec 2.1), which has no
-            // loader in front of it. Rejected rather than interpolated: CopyOutSpec.sql is a plain
-            // String with no binding channel, and substituting a value into the text would be the
-            // injection path every other statement in this engine avoids by binding.
-            // Parsed without a Handle, deliberately: the handle-based path variables() uses would
-            // open a connection - and on scratch that *creates the scratch file* - for a step about
-            // to be rejected.
-            //
-            // An all-digit "name" is not one: JDBI's lexer reads a colon followed by digits as a
-            // parameter, so DuckDB's own `site_code[1:3]` slice and `{'k':1}` struct literal arrive
-            // here as `:3` and `:1`. This text never passes through JDBI - copyOut executes it
-            // verbatim - so rejecting them would refuse SQL the cache runs perfectly well. The
-            // loader's rule 19 skips them for the same reason.
-            val parsed = parseNamedParameters(step.sql).parameters
-            val bound = parsed.parameterNames.filterNot { name -> name.all(Char::isDigit) }.distinct().sorted()
-            require(!parsed.isPositional && bound.isEmpty()) {
-                val what = if (parsed.isPositional) "positional '?' parameters" else "${bound.map { ":$it" }}"
-                "step '${step.name}': cache SQL binds $what, and a cacheCopy takes no variables at all. " +
-                    "It runs inside the cache's own DuckDB instance through CopyOutSpec.sql, a plain " +
-                    "string with no binding channel (spec 3.6, 7.3), so this cannot be bound even if the " +
-                    "variable is defined. Copy the wider subset and filter it in the following " +
-                    "materialize step (validation rule 19 says the same thing at startup)."
-            }
             val result = binding.cache.copyOut(
                 binding.group,
                 CopyOutSpec(
@@ -598,25 +598,9 @@ class TaskEngine(
          */
         private fun pipe(step: PipeStep, attempt: Int): PipeResult {
             val target = step.target
-            // Spec 5.5 is unconditional: every dataset produced inside scratch is written under an
-            // attempt-suffixed name. REQUIRED cannot be, because the author created the table under
-            // its stable name - so a retry would append on top of whatever the failed attempt
-            // flushed, which spec 12 measures as anything from nothing to one chunk short of the
-            // lot. Retries default to 3 for any scratch target, so that duplication would arrive on
-            // a default nobody wrote. Loud instead.
-            require(
-                target !is TableTarget || target.datasource != SCRATCH ||
-                    target.createTable != CreateTable.REQUIRED || step.retries == 0,
-            ) {
-                "step '${step.name}': a scratch target with createTable REQUIRED cannot be retried " +
-                    "(retries ${step.retries}). Its table has no attempt-suffixed name, so a retry " +
-                    "appends onto the rows the failed attempt already flushed. Use createTable AUTO, " +
-                    "which gets the attempt suffix and the stable view of spec 5.5, or state " +
-                    "retries: 0 to accept a single attempt."
-            }
             val physical = physicalDataset(target, attempt)
             val rows = readFrom(step.source.datasource) { handle ->
-                val parameters = variables(handle, step.source.sql, step.name, attempt)
+                val parameters = variables(handle, step.source.sql, attempt)
                 RowPipe(
                     source = JdbcSource(handle, step.source.sql, parameters),
                     target = writer(step, physical),
@@ -643,15 +627,11 @@ class TaskEngine(
          */
         private fun materialize(step: MaterializeStep, attempt: Int): PipeResult {
             if (step.datasource != SCRATCH) {
-                require(step.format == MaterializeFormat.TABLE) {
-                    "step '${step.name}': format PARQUET writes a file into the scratch directory, so it " +
-                        "is available only on the '$SCRATCH' datasource (spec 5.6)."
-                }
                 // Unquoted, so that Oracle folds it to its own storage case exactly as
                 // JdbcTableWriter's column names are folded.
                 onDatasource(step.datasource) { handle ->
                     val ctas = "create table ${datasetIdentifier(step.output)} as ${step.sql}"
-                    update(handle, ctas, step.name, attempt)
+                    update(handle, ctas, attempt)
                 }
                 return NO_ROWS
             }
@@ -663,7 +643,7 @@ class TaskEngine(
                     "copy (${step.sql}) to " +
                         "'${sqlLiteral(namer.parquetPath(step.output, attempt))}' (format parquet)"
             }
-            Jdbi.create(connection).open().use { update(it, statement, step.name, attempt) }
+            Jdbi.create(connection).open().use { update(it, statement, attempt) }
             when (step.format) {
                 MaterializeFormat.TABLE -> namer.publishTable(connection, step.output, attempt)
                 MaterializeFormat.PARQUET -> namer.publishParquet(connection, step.output, attempt)
@@ -674,7 +654,7 @@ class TaskEngine(
         /** Each statement is its own transaction (spec 5.2), so a retry re-runs all of them. */
         private fun sql(step: SqlStep, attempt: Int): PipeResult {
             onDatasource(step.datasource) { handle ->
-                step.statements.forEach { update(handle, it, step.name, attempt) }
+                step.statements.forEach { update(handle, it, attempt) }
             }
             return NO_ROWS
         }
@@ -683,19 +663,15 @@ class TaskEngine(
          * Every variable of the step is read first and defined only once all of them have
          * succeeded. Defining as we go would make a retry after a partial success fail on
          * "already defined" (spec 6.2) and bury the failure that caused the retry.
+         *
+         * The map cannot collide with itself: rule 8 rejects a step exporting one name twice, in
+         * [TaskRules], before this step was dispatched.
          */
         private fun export(step: ExportStep, attempt: Int): PipeResult {
             val exported = LinkedHashMap<String, Any?>()
             onDatasource(step.datasource) { handle ->
                 step.vars.forEach { variable ->
-                    // The scope is only reached once the whole step has succeeded, so without this
-                    // two vars of one name would collide in here and spec 6.2's redefinition check
-                    // would never see the first of them.
-                    require(!exported.containsKey(variable.name)) {
-                        "step '${step.name}': variable '${variable.name}' is exported twice by this " +
-                            "step. A variable may not be redefined once set (spec 6.2)."
-                    }
-                    val parameters = variables(handle, variable.sql, step.name, attempt)
+                    val parameters = variables(handle, variable.sql, attempt)
                     exported[variable.name] = handle.createQuery(variable.sql)
                         .bindMap(parameters)
                         .scanResultSet { rows, context ->
@@ -765,48 +741,30 @@ class TaskEngine(
                         JdbcTableWriter(jdbi(target.datasource), target.table, step.name)
                     }
 
-                is StatementTarget -> {
-                    require(target.datasource != SCRATCH) {
-                        "step '${step.name}': target.sql is not available on '$SCRATCH'. DuckDB writes go " +
-                            "through the appender, which takes a table and not a statement (spec 4.4, " +
-                            "validation rule 11)."
-                    }
-                    JdbcStatementWriter(jdbi(target.datasource), target.sql, step.name)
-                }
+                is StatementTarget -> JdbcStatementWriter(jdbi(target.datasource), target.sql, step.name)
             }
             return if (step.addColumns.isEmpty()) writer else DeclaredColumns(writer, step.addColumns, step.name)
         }
 
-        private fun update(handle: Handle, sql: String, step: String, attempt: Int) {
-            val parameters = variables(handle, sql, step, attempt)
+        private fun update(handle: Handle, sql: String, attempt: Int) {
+            val parameters = variables(handle, sql, attempt)
             // The row count is ignored: DuckDB answers -1 for DDL and for CREATE TABLE AS SELECT.
             handle.createUpdate(sql).bindMap(parameters).execute()
         }
 
         /**
-         * The variables [sql] actually binds, and the point at which spec 6.2's "a variable used
-         * before its export is an error" is detected.
+         * The variables [sql] actually binds. Every name here resolves: [TaskRules] settled rule 7
+         * and rule 6's positional half for this step before the step was dispatched.
          *
-         * JDBI's own parser is used so that the names checked here are exactly the names it will
-         * look for: it already skips a colon inside a string literal and a `::` cast, both of which
-         * appear in DuckDB SQL and in a Windows path literal. Only the parsed names are then bound -
-         * see the class KDoc for what JDBI's superfluous-binding check does and does not catch.
+         * JDBI's own parser is used so that the names bound here are exactly the names it will look
+         * for - it skips a colon inside a string literal and a `::` cast, both of which appear in
+         * DuckDB SQL and in a Windows path literal - and it is the parser [TaskRules] was handed for
+         * this datasource, so the two cannot disagree about what a parameter is. Only the parsed
+         * names are bound; see the class KDoc for what JDBI's superfluous-binding check catches.
          */
-        private fun variables(handle: Handle, sql: String, step: String, attempt: Int): Map<String, Any?> {
+        private fun variables(handle: Handle, sql: String, attempt: Int): Map<String, Any?> {
             val parsed = parseNamedParameters(sql, handle.getConfig(SqlStatements::class.java).sqlParser)
                 .parameters
-            require(!parsed.isPositional) {
-                "step '$step': the SQL uses positional '?' parameters. Variables bind by name, so write " +
-                    "':name' instead (spec 6.3)."
-            }
-            val undefined = parsed.parameterNames
-                .filterNot { it == ATTEMPT_VARIABLE || scope.contains(it) }.distinct().sorted()
-            require(undefined.isEmpty()) {
-                "step '$step': the SQL binds ${undefined.map { ":$it" }}, which no built-in, literal var " +
-                    "or earlier export has defined. Variables resolve in step order, so an export step " +
-                    "must come before its use (spec 6.2). Defined at this point: " +
-                    "${(scope.names + ATTEMPT_VARIABLE).sorted()}."
-            }
             return parsed.parameterNames.associateWith { if (it == ATTEMPT_VARIABLE) attempt else scope[it] }
         }
 
