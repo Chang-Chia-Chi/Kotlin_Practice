@@ -1111,13 +1111,11 @@ test-controlled generator, so the diff's answers can be asserted exactly):
 
 - a checkpoint of one real generation diffs exactly against the next - I/U/D and
   `changed_columns`, with the untouched row absent;
-- **an archiver's lease blocks reclaim, not publishing** - K=1, the archiver parked mid-run
-  holding a real lease, a refresh publishing anyway. Spec 18.6 item 2 concluded this was a
-  non-issue from a 40 ms measurement; it was an argument, and now it is a test. A lease that
-  blocked publishing would deadlock this rather than fail quietly;
+- `I4_a held lease pins its generation and stalls refresh one round later` - see the
+  correction below; the original version of this claim was wrong;
 - archiving the same generation twice is refused (D31 against real framework timestamps);
 - a consumer that has never run gets `FallbackReason.ABSENT`;
-- the returned watermark names the checkpoint the leased snapshot actually covers (D35).
+- a checkpoint published mid-run never becomes this run's watermark (D35).
 
 205 tests, 0 failures, 2 pre-existing skips.
 
@@ -1137,3 +1135,50 @@ test now takes its own group id.
 - **M2 remains out of scope for this module, deliberately.** What it still owes lives in the
   service: CDI producers, the scheduled trigger, the metrics binder, the admin endpoint, and
   an Oracle `GenerationSource`. None of it is framework code and none of it gates M1 or M3.
+
+## M1 + M3 integration test - review corrections  (2026-08-29)
+
+A two-axis review of `8f4b304`, run only because the user pushed back on my saying it was not
+needed. It was needed. The reasoning I gave - "it found a bug on the first run, so it earns
+its keep" - was backwards: the bug it found was in the *test*, which is evidence that the test
+file is where the errors were. A wrong test passes.
+
+### Two tests did not establish what they claimed
+
+**The K test stopped one round short.** `blockedByK` is evaluated before a generation is
+allocated and returns null while `live.size <= maxLive`. With one leased generation and K=1,
+`1 <= 1`, so the refresh published and the test called that proof. The ceiling actually bites
+on the *next* round, once the pinned generation makes live=2. The test now drives both rounds,
+asserts `BLOCKED_BY_K` explicitly, and asserts that releasing the lease unblocks it.
+
+Its framing was worse than its assertions. It claimed to test spec 18.6 item 2's conclusion -
+that a lease held across an export is a non-issue - while parking the archiver on a 30-second
+latch. Item 2 is true *because exports take ~40 ms*; parking the archiver removes precisely
+that property. So the test showed the opposite of what it said. It is now named for I4 and
+says plainly that item 2 is safe because of duration, not structure, and that a long-held
+lease genuinely would stall refresh. Item 2 remains closed on the spike, not on this test.
+
+**The D35 test was a tautology.** It created one COMPLETE version and asserted the watermark
+equalled it - which holds whether or not the `data_as_of <= T` predicate exists. It certified
+the one rule that prevents silent under-reporting without exercising it. It now publishes a
+second, newer checkpoint *inside* the diff block and asserts the watermark still names the
+first, which is the long-running-job race D35 is actually about.
+
+**Verified by planting, both times.** Removing the `data_as_of <= :at` predicate makes the new
+test fail with the newer version as the answer - the exact under-report - where the old test
+passed. Separately, suppressing the manifest COMPLETE flip fails 4 of the 5 tests.
+
+### Also corrected
+- "a lease that blocked publishing would deadlock this test" was false in the test KDoc and
+  repeated verbatim here: `RefreshCycle.round()` returns `BLOCKED_BY_K` with a null generation
+  and never blocks.
+- `hasSizeGreaterThanOrEqualTo(2)` under K=1 tolerated 3+, which is the I4 violation the test
+  was watching for. Now `hasSize(2)` plus an assertion on which generation is pinned.
+- `sumOf { it.refCount }.isZero()` passed vacuously on an empty list.
+- `@AfterEach` discarded `shutdown()`'s list of still-outstanding leases - the evidence the
+  lease tests exist to produce. Now asserted empty.
+- A 10-minute clock jump exceeded the default 5-minute `leaseDeadline`, silently aging open
+  leases past it. Reduced to 1 minute.
+- Dead `schema`/`SCHEMAS` and a `tempFor()` helper that created directories outside `@TempDir`.
+
+205 tests, 0 failures, 2 pre-existing skips.

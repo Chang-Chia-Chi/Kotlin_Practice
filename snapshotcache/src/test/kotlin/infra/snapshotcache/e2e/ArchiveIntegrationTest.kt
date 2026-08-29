@@ -13,6 +13,7 @@ import infra.snapshotarchive.RunOutcome
 import infra.snapshotcache.api.BuildContext
 import infra.snapshotcache.api.GenerationSource
 import infra.snapshotcache.api.GroupId
+import infra.snapshotcache.api.RefreshResult
 import infra.snapshotcache.api.SnapshotCacheConfig
 import infra.snapshotcache.core.DefaultSnapshotCache
 import infra.snapshotcache.core.GenerationRegistry
@@ -79,6 +80,7 @@ class ArchiveIntegrationTest {
     private lateinit var objects: ObjectStore
     private lateinit var archiver: Archiver
     private lateinit var diff: EtlDiff
+    private lateinit var tempRoot: Path
 
     @BeforeEach
     fun wireTheRealStack(@TempDir dir: Path) {
@@ -100,7 +102,7 @@ class ArchiveIntegrationTest {
         )
         cache = DefaultSnapshotCache(config, mapOf(group to GroupRuntime(registry, store, cycle)), clock = clock)
 
-        val schema = "s${SCHEMAS.incrementAndGet()}"
+        tempRoot = dir
         manifest = ManifestDao(jdbi, bucket = BUCKET, clock = clock)
         objects = ObjectStore(minioClient, BUCKET)
         archiver = Archiver(
@@ -108,14 +110,14 @@ class ArchiveIntegrationTest {
             manifest = manifest,
             objects = objects,
             tables = mapOf(group to listOf("t_a")),
-            tempRoot = dir.resolve("archive-$schema"),
+            tempRoot = dir.resolve("archive"),
         )
         diff = EtlDiff(
             cache = cache,
             manifest = manifest,
             objects = objects,
             primaryKeys = mapOf(group to mapOf("t_a" to listOf("id"))),
-            downloadRoot = dir.resolve("download-$schema"),
+            downloadRoot = dir.resolve("download"),
         )
     }
 
@@ -123,8 +125,12 @@ class ArchiveIntegrationTest {
     fun shutDown() {
         runCatching { diff.close() }
         runCatching { archiver.close() }
-        runCatching { cache.shutdown() }
+        // `shutdown()` returns the leases still outstanding at the drain deadline. Discarding
+        // it would throw away exactly the evidence the lease tests are about, so it is
+        // asserted: every test here is expected to leave nothing leaked.
+        val outstanding = runCatching { cache.shutdown() }.getOrDefault(emptyList())
         runCatching { store.close() }
+        assertThat(outstanding).describedAs("no lease may outlive the test that took it").isEmpty()
     }
 
     /**
@@ -141,7 +147,9 @@ class ArchiveIntegrationTest {
         source.rows[2] = "beta-changed"
         source.rows.remove(3)
         source.rows[4] = "delta"
-        clock.advance(Duration.ofMinutes(10))
+        // Under the default 5-minute leaseDeadline; a bigger jump would silently age any
+        // open lease past its deadline and stop testing the healthy path.
+        clock.advance(Duration.ofMinutes(1))
         refresh()
 
         val changes = diff.withDiff(group, v1) { d ->
@@ -154,19 +162,26 @@ class ArchiveIntegrationTest {
             3L to DiffOp.D,
             4L to DiffOp.I,
         )
-        // Row 1 never moved, so it must not appear at all - the whole point of a diff.
-        assertThat(changes.map { it.key.single() }).doesNotContain(1L)
         assertThat(changes.single { it.op == DiffOp.U }.changedColumns).containsExactly("name")
     }
 
     /**
-     * spec 18.6 item 2's conclusion, finally exercised rather than argued: the archiver holds
-     * a real lease for its whole run, and that lease pins its generation without stopping the
-     * refresh loop from publishing a new one. K is 1 here, so a lease that blocked publishing
-     * would deadlock this test rather than fail it quietly.
+     * I4 (spec 6.1): a held lease pins its generation, and the K ceiling bites one round
+     * later than is comfortable to assume.
+     *
+     * This is deliberately NOT "spec 18.6 item 2 is now tested". Item 2's conclusion - that a
+     * lease held across an export is a non-issue - rests entirely on exports taking ~40 ms.
+     * This test parks the archiver indefinitely, which removes exactly that property, so what
+     * it shows is the opposite and more useful thing: if an archiver ever did hold a lease for
+     * a long time, refresh WOULD stall. Item 2 is safe because of duration, not because of
+     * structure, and that distinction is worth a test rather than a sentence.
+     *
+     * `blockedByK` is evaluated before a generation is allocated and returns null while
+     * `live.size <= maxLive`, so the first refresh after the lease is taken still publishes.
+     * It is the round after that which is refused.
      */
     @Test
-    fun `an archiver's lease blocks reclaim, not publishing`() {
+    fun `I4_a held lease pins its generation and stalls refresh one round later`() {
         source.rows = mutableMapOf(1L to "alpha")
         refresh()
 
@@ -177,7 +192,7 @@ class ArchiveIntegrationTest {
             manifest = manifest,
             objects = objects,
             tables = mapOf(group to listOf("t_a")),
-            tempRoot = tempFor("parked"),
+            tempRoot = tempRoot.resolve("parked"),
             steps = { _, _ ->
                 if (parked.count > 0) {
                     parked.countDown()
@@ -189,15 +204,26 @@ class ArchiveIntegrationTest {
             val run = slowArchiver.submit(group)
             check(parked.await(30, TimeUnit.SECONDS)) { "the archiver never reached a step hook" }
 
-            // The archiver is mid-run holding a lease. A refresh must still publish.
-            clock.advance(Duration.ofMinutes(10))
+            // One LIVE generation, pinned by the archiver's lease. 1 <= K, so this publishes.
             source.rows[2] = "beta"
-            val outcome = cache.triggerRefresh(group)
-            assertThat(outcome.generation).isNotNull()
+            clock.advance(Duration.ofMinutes(1))
+            assertThat(cache.triggerRefresh(group).generation)
+                .describedAs("the first refresh after a lease is taken is not blocked")
+                .isNotNull()
 
-            // Its generation is pinned while the lease is open, so both are live at once -
-            // which is exactly the K interaction the spec reasoned about.
-            assertThat(registry.liveGenerations()).hasSizeGreaterThanOrEqualTo(2)
+            // Now two are live and the pinned one cannot be reclaimed, so K=1 is exceeded.
+            assertThat(registry.liveGenerations()).hasSize(2)
+            assertThat(registry.liveGenerations().count { it.refCount > 0 })
+                .describedAs("exactly the archiver's generation is pinned")
+                .isEqualTo(1)
+
+            source.rows[3] = "gamma"
+            clock.advance(Duration.ofMinutes(1))
+            val blocked = cache.triggerRefresh(group)
+            assertThat(blocked.result)
+                .describedAs("spec 6.1: refresh pauses rather than going stale silently")
+                .isEqualTo(RefreshResult.BLOCKED_BY_K)
+            assertThat(blocked.generation).isNull()
 
             released.countDown()
             run.get(60, TimeUnit.SECONDS)
@@ -206,9 +232,13 @@ class ArchiveIntegrationTest {
             slowArchiver.close()
         }
 
-        assertThat(manifest.newestComplete(group)).isNotNull()
-        // Lease released on every exit path, so the pinned generation is reclaimable again.
+        // Lease released, so the pin is gone and refresh recovers on its own.
         assertThat(registry.liveGenerations().sumOf { it.refCount }).isZero()
+        source.rows[4] = "delta"
+        clock.advance(Duration.ofMinutes(1))
+        assertThat(cache.triggerRefresh(group).generation)
+            .describedAs("releasing the lease unblocks the ceiling without intervention")
+            .isNotNull()
     }
 
     /**
@@ -244,29 +274,45 @@ class ArchiveIntegrationTest {
     }
 
     /**
-     * D35 against the real clock: the watermark the helper hands back is the newest COMPLETE
-     * version at or before the leased snapshot's moment, so a checkpoint of a generation the
-     * consumer has not read cannot become its baseline.
+     * D35's long-running-job race, which is the only shape that separates the recorded
+     * watermark from "the latest checkpoint now".
+     *
+     * A checkpoint published *while this run holds its lease* describes state the run never
+     * read. Spec 18.4: the watermark "is a recorded version, never 'the latest checkpoint
+     * now' (taken after the last run; using it silently under-reports)". So v2 is created
+     * inside the diff block, and the watermark handed back must still be v1.
+     *
+     * Asserted this way because the single-checkpoint version of this test passes under either
+     * rule - it cannot tell the `data_as_of <= T` predicate from its absence.
      */
     @Test
-    fun `the returned watermark names the checkpoint the leased snapshot actually covers`() {
+    fun `a checkpoint published mid-run never becomes this run's watermark`() {
         source.rows = mutableMapOf(1L to "alpha")
         refresh()
-        archiver.runOnce(group)
+        assertThat(archiver.runOnce(group)).isEqualTo(RunOutcome.PUBLISHED)
         val v1 = manifest.newestComplete(group)!!.version
 
-        val next = diff.withDiff(group, v1) { it.nextWatermark() }
+        val next = diff.withDiff(group, v1) { d ->
+            // Mid-run: a newer generation is published and archived. The lease is on the old one.
+            source.rows[2] = "beta"
+            clock.advance(Duration.ofMinutes(1))
+            refresh()
+            assertThat(archiver.runOnce(group)).isEqualTo(RunOutcome.PUBLISHED)
+            val v2 = manifest.newestComplete(group)!!.version
+            assertThat(v2).describedAs("a genuinely newer checkpoint exists").isGreaterThan(v1)
 
-        assertThat(next).isEqualTo(v1)
+            d.nextWatermark()
+        }
+
+        assertThat(next)
+            .describedAs("v2 describes data this run never read, so it must not become its baseline")
+            .isEqualTo(v1)
     }
 
     private fun refresh() {
         val outcome = cache.triggerRefresh(group)
         check(outcome.generation != null) { "refresh did not publish: $outcome" }
     }
-
-    private fun tempFor(name: String): Path =
-        java.nio.file.Files.createTempDirectory("archive-int-$name")
 
     /** Rows the next refresh will write. Mutating it is how a test creates a change to find. */
     private class MutableSource {
@@ -296,7 +342,6 @@ class ArchiveIntegrationTest {
         private const val K = 1
         private const val BUCKET = "snapshot-archive"
         private val FAR_FUTURE: Instant = Instant.parse("2099-01-01T00:00:00Z")
-        private val SCHEMAS = AtomicLong()
         private val GROUPS = AtomicLong()
 
         @Container
