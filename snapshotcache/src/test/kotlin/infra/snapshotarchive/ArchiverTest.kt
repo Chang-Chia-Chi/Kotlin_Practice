@@ -1,12 +1,6 @@
 package infra.snapshotarchive
 
-import infra.snapshotcache.api.CopyOutResult
-import infra.snapshotcache.api.CopyOutSpec
-import infra.snapshotcache.api.GenerationInfo
 import infra.snapshotcache.api.GroupId
-import infra.snapshotcache.api.Snapshot
-import infra.snapshotcache.api.SnapshotCache
-import io.minio.MinioClient
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.catchThrowable
 import org.jdbi.v3.core.Jdbi
@@ -20,7 +14,6 @@ import org.testcontainers.junit.jupiter.Testcontainers
 import org.testcontainers.oracle.OracleContainer
 import java.nio.file.Files
 import java.nio.file.Path
-import java.sql.Connection
 import java.sql.DriverManager
 import java.time.Clock
 import java.time.Duration
@@ -34,10 +27,6 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
-import java.util.logging.Handler
-import java.util.logging.Level
-import java.util.logging.LogRecord
-import java.util.logging.SimpleFormatter
 
 /**
  * P12 acceptance: the spec 18.3 publish protocol, end to end.

@@ -46,7 +46,7 @@ class DataAsOfRegression(
     val offered: Instant,
     val newestComplete: Instant,
 ) : RuntimeException(
-    "refusing to archive group '$group': data_as_of $offered is not newer than the " +
+    "refusing to archive group '${group.value}': data_as_of $offered is not newer than the " +
         "newest COMPLETE version's $newestComplete",
 )
 
@@ -343,8 +343,12 @@ class ManifestDao(
             .toEntries()
             .firstOrNull()
 
+    // `group.value`, never `$group`: the interpolation would read GroupId.toString(), and a
+    // durable storage path must not depend on a toString override that no test pins. Deleting
+    // that override would silently turn every uri_prefix into .../GroupId(value=g1)/... and
+    // move every object key in the bucket.
     private fun uriPrefix(group: GroupId, version: Long): String =
-        "$bucket/snapshots/$group/v$version/"
+        "$bucket/snapshots/${group.value}/v$version/"
 
     private companion object {
 

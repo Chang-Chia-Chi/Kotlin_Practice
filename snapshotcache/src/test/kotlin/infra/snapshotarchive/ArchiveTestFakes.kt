@@ -147,8 +147,8 @@ internal class RecordingObjectStore : ObjectStore(unusedClient(), "test-bucket")
     }
 
     /** Plants an object of [bytes] length without a source file, for size-only fixtures. */
-    fun seed(key: String, bytes: Long) {
-        stored[key] = ByteArray(bytes.toInt())
+    fun seed(key: String, bytes: Int) {
+        stored[key] = ByteArray(bytes)
     }
 
     private companion object {

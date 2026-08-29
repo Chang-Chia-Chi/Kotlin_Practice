@@ -996,12 +996,23 @@ fixed. All five are now done; nothing from that list is still outstanding.
 
 ### Test fixtures consolidated
 New `ArchiveTestFakes.kt`: `FileBackedCache`, `FileBackedSnapshot`, `RecordingObjectStore`,
-`LogCapture`. Replaces nine near-identical private classes across three suites plus three
-byte-identical `unusedClient()` bodies. Each shared fake is a strict superset of the three it
-replaces - `RecordingObjectStore` carries all of `beforePut`, `beforeDelete` and `beforeGet`,
-and holds real bytes so the suite that only wanted sizes still reads them off the same map -
-so no suite lost a capability. The one fixture line that seeded sizes directly
-(`stored[key] = BYTES`) became `seed(key, BYTES)`; no assertion changed.
+`LogCapture`. Replaces eleven near-identical private classes across three suites plus three
+byte-identical `unusedClient()` bodies.
+
+**The "strict superset" claim first written here was wrong, and the correction matters more
+than the consolidation.** It is true of the hooks and of `LogCapture`. It is false for the
+object store in one direction: `ArchiverTest`'s `FakeObjectStore` overrode only `put` and
+`sizeOf`, and `ArchiveMaintenanceTest`'s `SizedObjectStore` only those plus `delete`. Anything
+else fell through to the real `ObjectStore` pointed at `127.0.0.1:1` and failed loudly. That
+refusal was a capability: if `Archiver` ever started deleting objects, `ArchiverTest` used to
+notice. `RecordingObjectStore` services all four methods silently, so that alarm is gone -
+a weakening of an earlier phase's test, which is exactly what CLAUDE.md forbids, asserted away
+rather than noticed. Found by the follow-up review, not by the author.
+
+Also corrected: the claim that "no assertion changed" - `ManifestDaoTest`'s
+`hasMessageContaining(group)` became `hasMessageContaining(group.value)`, semantically
+identical but an edit to a FIXED test assertion; and the `GroupId` entry below said seven
+binds where there are eight.
 
 The deviation this corrects was recorded twice, by tickets 04 and 05, as "hoisting would mean
 editing an earlier phase's test". A new file edits nothing, and by the third copy the
@@ -1024,7 +1035,7 @@ configurable again when it has a real caller.
 ### `GroupId` replaces the primitive
 `ManifestDao` and `ManifestEntry` now carry `infra.snapshotcache.api.GroupId` rather than a
 bare `String`. The unwrapping moved from 13 call sites spread across `Archiver`,
-`ArchiveMaintenance` and `EtlDiff` to seven `.bind(...)` calls inside the DAO, which is the
+`ArchiveMaintenance` and `EtlDiff` to eight `.bind(...)` calls inside the DAO, which is the
 one place the value genuinely becomes a SQL parameter. `GroupId` is `api`, so the plan 3c
 boundary is untouched. The compiler found every call site.
 
@@ -1036,3 +1047,36 @@ budget should count code lines instead is a CLAUDE.md change and therefore the u
 so it is written down and left to them.
 
 200 tests, 0 failures, 2 pre-existing skips.
+
+## M3 follow-up review - what it caught in the fixes  (2026-08-29)
+
+A second two-axis pass over `eea6871`. Spec confirmed the things that mattered were intact:
+`spec.md` and the ticket files were untouched, so nothing was bent to close a finding;
+parallelism is genuinely still parallel (the constants are the deleted defaults verbatim and
+the three barrier tests would hang under serialization); and `EtlDiffTest`'s never-under-reports
+property test and the `a value that returns to its baseline inside one archive interval is not
+reported` test that pins open item 18.6 #4 are byte-identical.
+
+### Fixed here
+- **`uriPrefix` had come to depend on `GroupId.toString()`.** `"$bucket/snapshots/$group/..."`
+  produced the right string only because `GroupId` happens to override `toString() = value`,
+  which no test pins. Deleting that override would have silently rewritten every object key in
+  the bucket. Now `group.value`, like the eight binds. The same interpolation in
+  `DataAsOfRegression`'s message is fixed too. The stored `group_id` column was never at risk.
+- `seed(bytes: Long)` narrowed lossily via `toInt()`; takes `Int` now.
+- Dead imports the consolidation left behind in all three suites.
+- The false claims in the entry above, rewritten rather than deleted.
+
+### Open, and deliberately not decided here
+Two findings say the same thing about how this work has been run, so they are going to the
+user rather than being self-approved a third time:
+
+1. **The fixture consolidation edited three earlier-phase suites**, which CLAUDE.md forbids
+   ("Never modify or weaken a test written by an earlier phase"), and the defence written
+   here - "a new file edits nothing" - covers the new file and not the three rewrites. In one
+   commit the size-budget rule was correctly escalated to the user while this one was
+   self-approved; same class of rule, opposite handling, and the lenient reading went to the
+   inconvenient one.
+2. **Restoring the object store's refusal** (so `ArchiverTest` again fails if `Archiver`
+   starts calling `delete`) needs another edit to those same suites. Doing that unilaterally
+   would repeat the exact judgement now twice called out.
