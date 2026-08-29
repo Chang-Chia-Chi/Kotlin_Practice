@@ -1091,3 +1091,49 @@ is not yet a check.
 
 Net effect: the alarm is explicit, documented, safe-by-default for suites not yet written, and
 fails readably instead of as a socket error.
+
+## M1 + M3 integration test  (2026-08-29)
+
+Written after the user asked whether M2 belongs in this module at all. It does not - P9 is
+Quarkus host wiring and P10 is a caller-land `GenerationSource`, and plan 2.2 already puts
+both outside `infra/snapshotcache/`. But the question surfaced a real gap that needed neither
+Quarkus nor Oracle-as-source: **every test under `infra.snapshotarchive` fakes
+`SnapshotCache`**, so the real framework and the real archive layer had never met.
+
+`FileBackedCache` has no refcounts, no generation registry and no K ceiling, which means a
+whole class of assumption went unchecked - what the archive layer believes about a *real*
+lease.
+
+### Delivered
+`e2e/ArchiveIntegrationTest` (5 tests, real `DefaultSnapshotCache` + real
+`DuckDbGenerationStore` + real Oracle + real MinIO + real Parquet; only the row source is a
+test-controlled generator, so the diff's answers can be asserted exactly):
+
+- a checkpoint of one real generation diffs exactly against the next - I/U/D and
+  `changed_columns`, with the untouched row absent;
+- **an archiver's lease blocks reclaim, not publishing** - K=1, the archiver parked mid-run
+  holding a real lease, a refresh publishing anyway. Spec 18.6 item 2 concluded this was a
+  non-issue from a 40 ms measurement; it was an argument, and now it is a test. A lease that
+  blocked publishing would deadlock this rather than fail quietly;
+- archiving the same generation twice is refused (D31 against real framework timestamps);
+- a consumer that has never run gets `FallbackReason.ABSENT`;
+- the returned watermark names the checkpoint the leased snapshot actually covers (D35).
+
+205 tests, 0 failures, 2 pre-existing skips.
+
+### What the first run found
+`SKIPPED_NOT_NEWER` instead of `PUBLISHED` - because every test shared `GroupId("orders")`
+against one Oracle manifest that outlives the class, so an earlier test's checkpoint made a
+later test's `data_as_of` not newer. A test-isolation bug, not a product one, and the
+monotonicity guard behaving exactly as D31 specifies on data no unit test had given it. Each
+test now takes its own group id.
+
+### Notes
+- The suite reaches into `core` (`DefaultSnapshotCache`, `GenerationRegistry`, `RefreshCycle`,
+  `GroupRuntime` are `internal`). ArchUnit excludes tests, so this is permitted, and it is the
+  point: an integration test that used the public surface only could not assert on refcounts.
+  The archive layer's own suites still consume the public API exclusively.
+- Two containers per class, ~47 s. It earns that by being the only place the halves meet.
+- **M2 remains out of scope for this module, deliberately.** What it still owes lives in the
+  service: CDI producers, the scheduled trigger, the metrics binder, the admin endpoint, and
+  an Oracle `GenerationSource`. None of it is framework code and none of it gates M1 or M3.
