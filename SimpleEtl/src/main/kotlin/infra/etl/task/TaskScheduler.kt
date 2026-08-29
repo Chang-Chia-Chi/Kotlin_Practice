@@ -119,6 +119,24 @@ class TaskScheduler(private val cron: CronScheduler, private val runner: TaskRun
         return null
     }
 
+    /**
+     * The task names that currently hold a live cron registration, for [TaskAdmin.list] to report
+     * as [TaskStatus.scheduled] (E14).
+     *
+     * **Reads [registrations], never [current].** The definition map staying in two places is
+     * E11's finding, declined three times; a second *reader* of it here is that ruling's named
+     * tripwire for a fourth attempt. This answers a question only the registry can answer - "is
+     * this name actually wired to the host's scheduler" - which is precisely what a caller holding
+     * its own definitions cannot derive, and it is why the two maps disagreeing is now visible
+     * instead of permanent and silent (spec 8.6's `apply` row).
+     *
+     * `@Synchronized` because [registrations] is a plain `LinkedHashMap` published under this
+     * monitor by [apply] alone. `list()` is called from an HTTP worker thread, so an unsynchronised
+     * read of it is a data race, not merely a stale answer.
+     */
+    @Synchronized
+    internal fun registeredNames(): Set<String> = registrations.keys.toSet()
+
     private fun register(name: String, expression: String) {
         registrations[name] = Registration(expression, cron.schedule(name, expression) { fire(name) })
     }

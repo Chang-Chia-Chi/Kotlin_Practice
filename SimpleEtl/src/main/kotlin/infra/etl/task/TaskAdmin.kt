@@ -6,7 +6,12 @@ import org.jboss.logging.Logger
 /**
  * One row of spec 8.2's `GET /admin/etl/tasks`: the task, its schedule, and its last run outcome.
  *
- * @param cron null for a task that only ever runs from the API (spec 8.1).
+ * @param cron null for a task that only ever runs from the API (spec 8.1). What the *definition*
+ *   asks for, which is not evidence that anything was registered - see [scheduled].
+ * @param scheduled whether [TaskScheduler] currently holds a live registration for this name
+ *   (E14). A non-null [cron] with `scheduled = false` is the visible form of spec 8.6's
+ *   `TaskScheduler.apply` obligation being missed: the task is listed with a schedule and will
+ *   never fire. Always false for a `null` [cron], which is the normal API-only task.
  * @param lastRun null until the task has run at least once in this process. Run history does not
  *   survive a restart; nothing in spec 8 persists it.
  */
@@ -14,6 +19,7 @@ data class TaskStatus(
     val name: String,
     val enabled: Boolean,
     val cron: String?,
+    val scheduled: Boolean,
     val lastRun: RunStatus?,
 ) {
     /**
@@ -52,6 +58,13 @@ class TaskAdmin(
     @Volatile
     private var definitions: Map<String, TaskDefinition> = tasks.associateBy { it.name }
 
+    init {
+        // Spec 7.1 promises the pool minimum "at startup and on every reload". For the file-driven
+        // host, `reload` *is* startup, so its call covers both; a host using `tasks` never calls
+        // reload and would otherwise never see the number at all (E14).
+        if (tasks.isNotEmpty()) reportPoolMinimums(tasks)
+    }
+
     /**
      * `POST /admin/etl/tasks/{name}/runs`. Returns as soon as the run is submitted, never when it
      * finishes: a 30 minute run must not be held open behind an HTTP request (spec 8.2).
@@ -79,9 +92,34 @@ class TaskAdmin(
         return runner.submit(definition, TriggerSource.API, by)
     }
 
-    /** `GET /admin/etl/tasks`, in load order. */
-    fun list(): List<TaskStatus> = definitions.values.map {
-        TaskStatus(it.name, it.enabled, it.cron, runner.lastRun(it.name))
+    /**
+     * `GET /admin/etl/tasks`, in load order.
+     *
+     * **Cross-checks the two definition maps against each other** (E14). A host that builds
+     * definitions in code and forgets [TaskScheduler.apply] - or calls it and forgets `tasks` -
+     * leaves the two permanently disagreeing rather than briefly, and spec 8.6 can only state
+     * that as an obligation. Here it becomes observable in the direction each side can see: a
+     * definition nothing registered is reported as `scheduled = false` alongside its `cron`, and a
+     * registration with no definition is not listable at all, so it is logged instead.
+     *
+     * `definitions` is read once into a local. Re-reading the `@Volatile` per row would let a
+     * concurrent [reload] serve a listing assembled from two different definition sets.
+     */
+    fun list(): List<TaskStatus> {
+        val loaded = definitions
+        val registered = scheduler.registeredNames()
+        val orphaned = registered - loaded.keys
+        if (orphaned.isNotEmpty()) {
+            log.warnv(
+                "{0} cron registration(s) name a task this TaskAdmin has no definition for: {1}. They will " +
+                    "fire and be dropped, and they cannot appear in this listing. The host supplied " +
+                    "TaskScheduler.apply a set it did not supply here (spec 8.6).",
+                orphaned.size, orphaned.sorted(),
+            )
+        }
+        return loaded.values.map {
+            TaskStatus(it.name, it.enabled, it.cron, it.name in registered, runner.lastRun(it.name))
+        }
     }
 
     /**

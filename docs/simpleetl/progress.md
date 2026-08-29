@@ -2324,3 +2324,140 @@ for that today. If someone wants the five `afterRows = 0` tests cheaper, the sma
 step executor at the `dispatch` boundary, not a policy object owning the call order.
 
 **M2 is now complete: E10 built, E11 declined, E12 built, E13 dropped.**
+
+
+---
+
+## E14 - Adoption hardening  (2026-08-30)
+
+A fresh agent built a host module against the public documents alone and reported twelve findings.
+An adjudication pass rejected six of them against rulings already recorded here - an `etlHost(...)`
+factory (P7 deviation 1), a step timeout (spec 3.6 states its absence as the design), two new
+metrics (9.3's six are closed), a driver row count for `materialize`, and anything moving ownership
+of the definition map (E11, declined three times). **The rejections are the more useful half of this
+entry**: every one of them was a plausible-sounding fix that a reader of the code alone would have
+built, and each is already argued against above. Four findings survived, and this phase is those
+four and nothing else.
+
+Two are documentation, two are code. Together they are the smallest change that makes a host's
+first day match what the documents promise.
+
+### 1. Spec 11.2 gains the three missing constructors (documentation)
+
+11.2 calls itself "the frozen contract ... everything not listed is internal and free to change",
+and declared **no constructor** for `TaskEngine`, `TaskAdmin` or `TaskRunner` - while a host has to
+construct all three. P7 recorded this (deviation 3, above: "`TaskAdmin(runner, scheduler, loader,
+tasks)`, which 11.2 gives no constructor at all") and it stayed open through six phases. The E11
+ruling closed the `TaskScheduler` and `TaskFileLoader` half of it by writing down what ships; this
+closes the rest the same way.
+
+The three are now declared exactly as they compile today - `TaskEngine`'s nine parameters with
+their defaults and the reason `caches` is last, `TaskRunner(engine)`, and
+`TaskAdmin(runner, scheduler, loader, tasks = emptyList())`. **Writing down what exists, not
+changing it**: no signature moved, and no test needed to.
+
+**The P7 deviation is closed.** What remains open from P7 is deviation 4's defaulted `runId` on
+`TaskEngine.run`, deliberately left: 11.2 declares `run` as the two-parameter call a host makes,
+the third is internal to the runner, and declaring it would widen the frozen surface rather than
+record it.
+
+### 2. `reportPoolMinimums` now fires on the programmatic path too (code, 2 lines)
+
+Spec 7.1 promises the pool minimum is logged "at startup **and** on every reload". It was called
+only from `reload`. For the file-driven host that conforms exactly, because `reload` *is* the
+startup path (8.5, and `TaskAdmin`'s own KDoc). For a host using the `tasks =` constructor
+parameter - 2.1's programmatically built definitions, which have no directory to read - `reload` is
+never called and the number never appeared. A code-vs-document conformance gap, not a design
+change: `init` now calls `reportPoolMinimums(tasks)` when `tasks` is non-empty.
+
+**Left at INFO, deliberately.** Raising it to WARN was considered and rejected on the reasoning
+already in `TaskAdmin.reportPoolMinimums`: the framework knows the required minimum and cannot know
+the configured pool size, so a severity implying a fault would fire identically on a correctly
+sized configuration. A warning that is right half the time and unfixable the other half is how an
+operator learns to filter the channel.
+
+### 3. `TaskStatus.scheduled` (code, ~10 lines + `TaskAdminScheduledTest`)
+
+Spec 8.6 already carries the host obligation "call `TaskScheduler.apply` yourself when you build
+definitions in code", with the symptom "`list()` reports every task and not one of them ever fires,
+**with no error raised**". It was the only obligation in that table whose evidence is already inside
+this process and was still being stated as prose.
+
+- `TaskScheduler.registeredNames(): Set<String>`, `internal` and `@Synchronized`. The
+  synchronisation is not decorative: `registrations` is a plain `LinkedHashMap` published under
+  `apply`'s monitor alone, so an unsynchronised read from an HTTP worker thread is a data race and
+  not merely a stale answer.
+- `TaskStatus` gains `scheduled: Boolean`, populated in `list()`.
+- `list()` logs one WARN naming registrations no definition backs - the mirror direction, which no
+  `TaskStatus` field can carry because such a task cannot appear in the listing at all.
+- `list()` now reads the `@Volatile definitions` once into a local. Re-reading it per row let a
+  concurrent `reload` serve a listing assembled from two different definition sets.
+
+**This is not E11, and the difference is exact.** `registeredNames` reads `registrations` and never
+`current`. E11's fourth-session tripwire, written above, is "a second reader of the definition map
+appearing, at which point two copies becomes three" - and this reads the *registration* map, which
+answers a question the definition map cannot: whether a name is actually wired to the host's
+scheduler. Nothing here moves ownership, adds a copy, or changes a constructor. The obligation is
+unchanged; only its silence is.
+
+`TaskStatus` is **not named in 11.2's frozen list** - it never has been, and `TaskAdminReloadTest`'s
+KDoc says so in as many words ("`TaskStatus`'s shape is the engineer's"). Adding a field therefore
+changes no frozen contract. It is a `data class` with exactly one construction site in the module,
+so `scheduled` sits beside `cron`, where it reads, rather than being appended to protect positional
+callers that do not exist.
+
+The test's oracle is `cron` versus `scheduled` **on one row**, not `scheduled` against a constant:
+`aDefinitionWithACronThatWasNeverRegisteredIsListedAsNotScheduled` and
+`scheduledIsTrueOnceTheHostCallsApply` build the identical definition and differ only in whether
+`apply` was called, so neither passes for a hard-wired field. A third pins the API-only task
+(`cron == null`) as the normal false, which is why 8.6's symptom is stated as a *non-null* cron with
+`scheduled = false`. The fourth asserts the input the WARN is computed from and not the log line -
+installing an appender would be asserting on JBoss Logging, which is the same choice
+`sameDatasourcePipeUsers` was split out of `reportPoolMinimums` to avoid.
+
+### 4. Spec 8.6 gains four host rows (documentation)
+
+Each is an obligation a host can miss with no failure and no log line, found by actually wiring one:
+
+- **Pass a `TaskRunListener`.** 9.2 specifies the no-op default, and the table had a row for the
+  metrics binding and none for the listener. Unattached, a 30 minute run emits nothing at all -
+  every call site fires and every one of them calls the no-op.
+- **Pass `TaskFileLoader` all four name sets.** All four parameters default to empty, so bare
+  `TaskFileLoader()` compiles - it is what the fixtures use - and rules 3, 4, 5 and 21 then pass
+  vacuously for every name in every file. The hooks and caches rows already stated two instances of
+  this; the general form was missing.
+- **Configure a JDBC statement timeout per datasource.** The framework has none and that is the
+  design (3.6). A wedged driver call parks the task's confined dispatcher permanently, leaving it
+  `busy` forever with every later firing skipped as `AlreadyRunning` - the same silent stall 7.1
+  describes for the pool deadlock. `SQLTimeoutException` is already in 5.3's transient set, so a
+  host-side timeout retries rather than merely failing.
+- **Alert on the absence of a metric series, not on a zero counter.** 9.3's meters are registered
+  when a run first touches them, so a task that has never run in this process has no series at all
+  and `runs_total{outcome="succeeded"} == 0` never fires for the task that stopped being scheduled.
+  Normal after every deploy, not an edge case.
+
+The `TaskScheduler.apply` row is also amended to record that E14 made its disagreement observable.
+
+### Deviations from the documents
+
+None. All four items either write down what already ships (1, 4), make code match a sentence the
+spec already carried (2), or add to a type 11.2 does not freeze (3). Item 2 is the only behaviour
+change, and it is one INFO log line on a path that previously produced none.
+
+### Where a contract met reality
+
+**One, and it did not need changing.** Spec 7.1's "at startup and on every reload" reads as two call
+sites and there was one. The document turned out to be right and the code wrong - the rarer
+direction - so the code moved. Had the sentence been the wrong one, the fix would have been to
+narrow it to "on every reload" and record that the programmatic path is unserved; that alternative
+was rejected because the number is exactly as knowable on one path as the other, and 2.1 makes the
+programmatic path a first-class consumer rather than a convenience.
+
+### If a later session revisits this
+
+The remaining rows of 8.6 are still untested anywhere in this repository, which P7 recorded as a
+real gap and E14 does not close - it only shortens the list of obligations whose breach is
+invisible. The move that would close it is a host module in this repository, and P7 deviation 1
+explains why that has not been built here. `scheduled` is the pattern worth reusing if another
+obligation turns out to have in-process evidence: report the disagreement where the operator
+already looks, rather than adding a check the framework cannot honestly make.

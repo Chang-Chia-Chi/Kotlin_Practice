@@ -1012,13 +1012,17 @@ list has grown with each phase that discovered another one - it was two when P7 
 | expose `AdminResource`, mapping `TaskAdmin`'s sealed results to 202 / 409 / 404 / 400 | - |
 | put `@RolesAllowed("etl-admin")` on every endpoint | an unauthenticated caller can trigger any task |
 | make `CronScheduler.schedule` throw on an unparseable cron | 8.5's atomic reload silently accepts a bad cron |
-| call `TaskScheduler.apply` itself when it builds definitions in code and passes them to `TaskAdmin`'s `tasks` parameter - `reload` is the only path that calls it for you | `list()` reports every task and not one of them ever fires, with no error raised. `TaskAdmin` and `TaskScheduler` hold a definition map each (11.2), so supplying one without the other leaves them permanently disagreeing rather than briefly. E11 would have removed this obligation by giving the map one owner, and was declined - see progress.md |
+| call `TaskScheduler.apply` itself when it builds definitions in code and passes them to `TaskAdmin`'s `tasks` parameter - `reload` is the only path that calls it for you | `list()` reports every task and not one of them ever fires, with no error raised. `TaskAdmin` and `TaskScheduler` hold a definition map each (11.2), so supplying one without the other leaves them permanently disagreeing rather than briefly. E11 would have removed this obligation by giving the map one owner, and was declined - see progress.md. **E14 made the disagreement observable rather than silent**: `TaskStatus.scheduled` is false beside a non-null `cron` for a definition nothing registered, and `list()` logs a WARN naming a registration no definition backs. The obligation still stands; what changed is that missing it is now visible from `GET /admin/etl/tasks` |
 | construct `TaskFileLoader` with the name set of the **same** `TaskHookRegistry` it hands `TaskEngine` | validation rule 5 passes for every hook name, and a typo dies at the end of a 30 minute run - precisely the failure 9.4 exists to prevent |
 | register `MicrometerTaskMetrics` against the application's `MeterRegistry` | every metric in 9.3 is silently absent; nothing fails and no dashboard populates |
 | construct the `SnapshotCache`, and own the `cache` name -> `CacheBinding(cache, group)` map handed to `TaskEngine` | a `cacheCopy` step fails at run time naming the unknown cache |
 | construct `TaskFileLoader` with the **same** cache-name set it hands `TaskEngine` | rule 21 passes for every name, and a typo dies at the end of a 30 minute run - the same failure the hooks row above records |
 | **assert that a generation becomes reclaimable after a `cacheCopy` step.** Not testable in this repository: reclamation lives in `DefaultSnapshotCache`, which is `internal` to the cache module, so SimpleEtl's tests use a double implementing the public interface. Plan P9's "a test asserts the generation becomes reclaimable" is achievable only in a host that owns a real cache | a step that holds or references a generation stalls refreshing, and this repository's suite cannot see it |
 | put `io.micrometer:micrometer-core` (>= 1.14.x) on the application's **runtime** classpath - the framework declares it `provided` and does not ship it | `NoClassDefFoundError: io/micrometer/core/instrument/MeterRegistry` when the binding is constructed. Loud, at wiring time, which is the good failure mode |
+| **pass a `TaskRunListener` to `TaskEngine`.** The parameter defaults to `TaskRunListener.NONE`, which is a specified no-op (9.2) and not a default binding | a 30 minute run emits nothing at all - no start, no step, no failure. Every call site exists and every one of them calls the no-op, so nothing fails and no log line is missing from anywhere it was configured. 9.2 is the in-house logging seam; unattached, the framework is silent by design |
+| **pass `TaskFileLoader` all four name sets it can validate against.** All four parameters default to empty, so bare `TaskFileLoader()` compiles and is what the fixtures use | rules 3, 4, 5 and 21 pass **vacuously** for every datasource, transform, hook and cache name in every file. The hook and cache rows above are the two the framework can name a symptom for; the general form is that startup validation quietly checks nothing and every typo becomes a run-time failure |
+| **configure a statement or query timeout on each `DataSource` behind a `Jdbi`.** The framework has none, anywhere, and that is the design (see 3.6): `TaskEngine.run` is a non-suspending blocking call (8.3) with no `Statement` handle to cancel | a wedged driver call parks that task's `limitedParallelism(1)` dispatcher permanently. The task is `busy` forever, every later firing is skipped as `AlreadyRunning`, and the schedule stalls in silence - the same end state as the pool deadlock in 7.1. A host-side timeout surfaces as `SQLTimeoutException`, which 5.3 already classes transient, so it retries rather than merely failing |
+| **alert on the *absence* of a metric series, not on a zero counter.** 9.3's meters are registered when a run first touches them; a task that has never run in this process has no series at all | "no successful run in 24h" written as `etl_task_runs_total{outcome="succeeded"} == 0` never fires for the task that stopped being scheduled, because there is no such series to compare. The registry lives in the process, so this is the normal state after every deploy and not an edge case - the same non-persistence 8.2 records for run history |
 
 Two notes on the metric binding, measured on micrometer 1.14.2 rather than assumed:
 
@@ -1495,8 +1499,29 @@ class CacheCopyStep : Step    // cache, sql, output (spec 7.3)
 // many groups - copyOut(group, ...) takes the group - so a name alone cannot identify both.
 data class CacheBinding(val cache: SnapshotCache, val group: GroupId)
 
-// Engine
-class TaskEngine {
+/** Engine.
+ *
+ *  **The constructor is declared here from E14 onwards**, and this is written down rather than
+ *  changed: it is what has shipped since P5, widened by P8 and P9. This section calls itself the
+ *  frozen contract and says everything not listed is internal - yet a host must construct all
+ *  three of `TaskEngine`, `TaskAdmin` and `TaskRunner`, and until E14 none of them had a
+ *  constructor here at all. P7 recorded that as an open deviation and E11 closed only the
+ *  `TaskScheduler` and `TaskFileLoader` half of it. The same move E11 made, applied to the rest.
+ *
+ *  Every parameter after the first two is defaulted, so a host wires only the seams it uses.
+ *  `caches` is last because it was appended by P9 and two fixture call sites pass the earlier
+ *  arguments positionally - the same ordering constraint `TaskFileLoader` records. */
+class TaskEngine(
+    datasources: Map<String, Jdbi>,                      // by name; SCRATCH is reserved (7.1)
+    scratchDirectory: Path,                              // disk-backed, explicit sizeLimit (7.2)
+    scratchMemoryLimitMb: Int = 4096,                    // per-task override on TaskDefinition
+    sleeper: (Long) -> Unit = { Thread.sleep(it) },      // 5.3's backoff, injected for tests
+    listener: TaskRunListener = TaskRunListener.NONE,    // 9.2; compose several with .of
+    hooks: TaskHooks = TaskHooks(),                      // 9.4; same instance the loader validates against
+    metrics: TaskMetrics = TaskMetrics.NONE,             // 9.3; reached alongside the listener, not through it
+    clock: Clock = Clock.systemUTC(),                    // the only source of time in the engine
+    caches: Map<String, CacheBinding> = emptyMap(),      // 3.6, 7.3; same names the loader validates against
+) {
     fun run(definition: TaskDefinition, trigger: TriggerSource): TaskOutcome
 }
 
@@ -1553,8 +1578,11 @@ class TaskScheduler(cron: CronScheduler, runner: TaskRunner) {
 
 /** One limitedParallelism(1) view per task. `submit` is the whole public surface: the run
  *  records `TaskAdmin` reads (lastRun, outcome) and the confinement context its own tests read
- *  are `internal`, narrowed to match this declaration by the 2026-08-29 review. */
-class TaskRunner {
+ *  are `internal`, narrowed to match this declaration by the 2026-08-29 review.
+ *
+ *  E14 declares the constructor, which is P7's and unchanged. One engine serves every task: its
+ *  fields are configuration and every run builds its own scratch state. */
+class TaskRunner(engine: TaskEngine) {
     fun submit(definition: TaskDefinition, trigger: TriggerSource, by: String?): TriggerResult
 }
 
@@ -1565,7 +1593,20 @@ sealed interface TriggerResult {
     data object Disabled : TriggerResult
 }
 
-class TaskAdmin {                             // what AdminResource maps to HTTP
+/** What `AdminResource` maps to HTTP. Performs no authorisation of its own (8.2, 8.6).
+ *
+ *  E14 declares the constructor, which is P7's and unchanged - the second half of the P7
+ *  deviation E11 left open. `tasks` is for the caller that already holds a loaded set (2.1's
+ *  programmatically built definitions have no directory to read from); it defaults to nothing,
+ *  in which case `trigger` answers `Unknown` until the first `reload`. Supplying it registers no
+ *  cron - that is `TaskScheduler.apply`'s, and 8.6 makes calling it the host's obligation.
+ *  `TaskStatus.scheduled` is where a host that missed it can see so. */
+class TaskAdmin(
+    runner: TaskRunner,
+    scheduler: TaskScheduler,
+    loader: TaskFileLoader,
+    tasks: List<TaskDefinition> = emptyList(),
+) {
     fun trigger(name: String, by: String?): TriggerResult
     fun list(): List<TaskStatus>
     fun run(name: String, runId: String): TaskOutcome?
