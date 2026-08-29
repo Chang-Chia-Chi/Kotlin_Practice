@@ -289,12 +289,16 @@ exceeding CLAUDE.md's "roughly 200-600 lines including tests" and none stopped t
 report it, which is the escalation that rule exists to trigger. Measured after the
 fact, the overrun is roughly half narrative doc comment rather than logic: P12 is
 380 file lines against ~263 of code, and the pattern repeats. Two things follow.
-The budget is a proxy for "is this phase too big to hold in one session", and
-counting doc lines makes it a bad proxy in a codebase whose house style is heavy
-rationale comments - it should count code lines, which is a change to CLAUDE.md and
-therefore the user's call, recorded here rather than made unilaterally. And a rule
-that four consecutive phases silently broke was not functioning as a gate; that is
-worth knowing independently of where the threshold lands.
+**Ruled by the user, 2026-08-29: line count is not the metric.** What matters is
+whether the code is easy to maintain, simple, elegant, concise and efficient. A
+line budget is a weak proxy for "can one person hold this phase in their head",
+and it inverts in a codebase whose house style is heavy rationale comments -
+it penalises exactly the comments that make the thing maintainable. So
+"exceeded N lines" is not a finding on its own and should not be reported as one;
+the question to ask of a phase is whether it is comprehensible, duplicated, or
+doing too much. The four M3 phases are recorded here as breaches of the rule as
+written, not as defects. CLAUDE.md still states the old numeric rule; changing
+its wording is the user's edit to make.
 
 ### P11 - Manifest DAO + version allocation
 

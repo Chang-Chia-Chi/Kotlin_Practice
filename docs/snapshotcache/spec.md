@@ -1158,7 +1158,7 @@ the archive cadence would full-compare every run. Optional alert when the
 newest COMPLETE checkpoint's age exceeds a threshold (archiver broken) -
 purely operational; diffs stay correct (over-report only).
 
-### 18.6 Open items before M3 implementation
+### 18.6 Open items (originally: before M3 implementation)
 
 1. **CLOSED 2026-08-29 (spike, ticket 01).** DuckDB 1.1.3 runs
    `COPY (SELECT ...) TO '<file>.parquet'` directly on a read-only attached
@@ -1176,8 +1176,20 @@ purely operational; diffs stay correct (over-report only).
    "tens of MB" expectation; duration beats "seconds" by two orders of
    magnitude, so a lease held across an export cannot interact with the K
    ceiling in any way worth designing around.
-3. **STILL OPEN 2026-08-29 (ticket 04).** Watchdog timeout T vs worst-case
-   upload time on the real MinIO link. There is no such link on this machine,
+3. **CONFIG TO TUNE, not a gate** (re-scoped 2026-08-29 on the user's ruling;
+   originally filed as an open item). T is the watchdog timeout and is set per
+   deployment like any other operational value - no code waits on it, and a
+   wrong value cannot corrupt a version. Too high only delays a repair nothing
+   downstream can observe, since readers already ignore anything that is not
+   COMPLETE. Too low makes the watchdog inspect a row whose upload is still
+   running, find objects missing and mark it FAILED - and the uploader's
+   conditional `markComplete` then returns false, because the transitions
+   guarantee exactly one winner (D33). The cost is one wasted archive cycle,
+   which the next run replaces. That bounded, one-sided failure is what makes
+   this config rather than a blocker.
+
+   What remains genuinely unmeasured is the number itself: worst-case upload
+   time on the real MinIO link. There is no such link on this machine,
    only a MinIO container on loopback: 14,180,166 bytes uploaded in
    1170/840/502/546/217 ms over five runs, which measures a local socket and a
    container filesystem, not a network. That is a floor and nothing more, so
@@ -1192,9 +1204,8 @@ purely operational; diffs stay correct (over-report only).
    one-sided cost gets headroom rather than an estimate. 15 minutes is four
    times under the hourly cadence, so a stale row is always resolved before the
    next run for its group, and three orders of magnitude above the loopback
-   number. Close this item by measuring the deployment's real link and setting
-   T from it; until then it is the margin, not the estimate, that makes it
-   safe.
+   number. Tighten it by measuring the deployment's real link when there is one;
+   until then it is the margin, not the estimate, that makes it safe.
 4. **NEW, OPEN 2026-08-29 (ticket 05).** The "under-reporting is impossible by
    construction" claim in Sec 18.4 has one exception, found while building the
    P14 property test, and it is recorded here rather than argued away.
