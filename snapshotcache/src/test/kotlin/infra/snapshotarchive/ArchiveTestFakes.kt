@@ -115,8 +115,21 @@ internal class FileBackedSnapshot(
  *
  * The three hooks are each a single suite's observation point: [beforePut] at upload time,
  * [beforeDelete] at the instant an object disappears, [beforeGet] to watch downloads overlap.
+ *
+ * **[allows] is the important parameter.** Before these fakes were consolidated, each suite
+ * simply did not override the methods its production path had no business calling, so the
+ * call fell through to a real client pointed at a dead port and blew up. That accident was
+ * load-bearing: it is what would have told `ArchiverTest` that the archiver had started
+ * deleting objects. Merging the fakes serviced every method silently and lost the alarm, so
+ * it is declared here instead - deliberately, with a readable failure, and defaulting to the
+ * narrowest surface so a new suite is protected without having to think about it.
  */
-internal class RecordingObjectStore : ObjectStore(unusedClient(), "test-bucket") {
+internal class RecordingObjectStore(
+    private val allows: Set<Op> = setOf(Op.PUT, Op.SIZE_OF),
+) : ObjectStore(unusedClient(), "test-bucket") {
+
+    /** The four operations [ObjectStore] exposes; a suite opts in to the ones it expects. */
+    enum class Op { PUT, SIZE_OF, GET, DELETE }
 
     val stored = ConcurrentHashMap<String, ByteArray>()
 
@@ -130,20 +143,34 @@ internal class RecordingObjectStore : ObjectStore(unusedClient(), "test-bucket")
     var beforeGet: ((String) -> Unit)? = null
 
     override fun put(key: String, file: Path) {
+        guard(Op.PUT)
         beforePut?.invoke(key)
         stored[key] = Files.readAllBytes(file)
     }
 
-    override fun sizeOf(key: String): Long? = stored[key]?.size?.toLong()
+    override fun sizeOf(key: String): Long? {
+        guard(Op.SIZE_OF)
+        return stored[key]?.size?.toLong()
+    }
 
     override fun delete(key: String) {
+        guard(Op.DELETE)
         beforeDelete?.invoke(key)
         stored.remove(key)
     }
 
     override fun get(key: String, file: Path) {
+        guard(Op.GET)
         beforeGet?.invoke(key)
         Files.write(file, requireNotNull(stored[key]) { "no object at '$key'" })
+    }
+
+    private fun guard(op: Op) {
+        check(op in allows) {
+            "this suite's store does not expect $op - the code under test reached an object-store " +
+                "operation it was never supposed to use. If that is now intended, widen `allows`; " +
+                "if it is not, the production change that caused it is the bug."
+        }
     }
 
     /** Plants an object of [bytes] length without a source file, for size-only fixtures. */

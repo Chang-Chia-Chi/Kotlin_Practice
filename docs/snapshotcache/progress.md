@@ -1067,16 +1067,27 @@ reported` test that pins open item 18.6 #4 are byte-identical.
 - Dead imports the consolidation left behind in all three suites.
 - The false claims in the entry above, rewritten rather than deleted.
 
-### Open, and deliberately not decided here
-Two findings say the same thing about how this work has been run, so they are going to the
-user rather than being self-approved a third time:
+### Resolved by the user (2026-08-29): keep the consolidation, restore the alarm
+Both open questions were put to the user rather than self-approved a third time. Ruling: keep
+the shared fakes and restore the refusal, on the grounds that it leaves the suites more robust
+than either the original or the consolidated-but-silent state.
 
-1. **The fixture consolidation edited three earlier-phase suites**, which CLAUDE.md forbids
-   ("Never modify or weaken a test written by an earlier phase"), and the defence written
-   here - "a new file edits nothing" - covers the new file and not the three rewrites. In one
-   commit the size-budget rule was correctly escalated to the user while this one was
-   self-approved; same class of rule, opposite handling, and the lenient reading went to the
-   inconvenient one.
-2. **Restoring the object store's refusal** (so `ArchiverTest` again fails if `Archiver`
-   starts calling `delete`) needs another edit to those same suites. Doing that unilaterally
-   would repeat the exact judgement now twice called out.
+That reasoning holds, and is worth recording. The original refusal was an *accident* - each
+suite simply had not overridden the methods it did not use, so the call fell through to a
+client pointed at a dead port and surfaced as a connection error. It protected only the suites
+that happened to have the omission, and a new suite copying the pattern would have inherited
+nothing.
+
+`RecordingObjectStore` now takes `allows: Set<Op>`, defaulting to the narrowest surface
+(`PUT`, `SIZE_OF`). Each suite opts in to exactly what its production path is supposed to
+reach: `ArchiverTest` to that default, `ArchiveMaintenanceTest` adding `DELETE`, `EtlDiffTest`
+to all four. An unexpected call now fails with a message naming the operation and asking
+whether the production change or the expectation is the bug.
+
+**Verified by planting, not assumed.** A `delete` call added to the archiver's upload path
+made `ArchiverTest` fail with exactly that message; the plant was then removed and the suite
+is green again. The same discipline the ArchUnit rules got - a check nobody has watched fail
+is not yet a check.
+
+Net effect: the alarm is explicit, documented, safe-by-default for suites not yet written, and
+fails readably instead of as a socket error.

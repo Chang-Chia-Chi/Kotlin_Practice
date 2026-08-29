@@ -46,6 +46,8 @@ class ArchiverTest {
 
     private val group = GroupId("g${GROUPS.incrementAndGet()}")
     private val cache = FileBackedCache(database)
+    // put + sizeOf only, as this suite's own fake used to be: the archiver uploads and
+    // verifies, and must never reach get or delete. Reclaiming is ticket 04's.
     private val store = RecordingObjectStore()
     private val tempRoot: Path = Files.createTempDirectory(scratch, "archiver-")
     private val warnings = LogCapture.install()

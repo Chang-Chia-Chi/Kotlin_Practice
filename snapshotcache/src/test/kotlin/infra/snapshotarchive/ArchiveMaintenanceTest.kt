@@ -43,7 +43,11 @@ import java.util.concurrent.atomic.AtomicReference
 class ArchiveMaintenanceTest {
 
     private val group = GroupId("m${GROUPS.incrementAndGet()}")
-    private val store = RecordingObjectStore()
+    // The purge deletes; nothing here downloads. Matches the surface this suite's own fake
+    // overrode before consolidation.
+    private val store = RecordingObjectStore(
+        setOf(RecordingObjectStore.Op.PUT, RecordingObjectStore.Op.SIZE_OF, RecordingObjectStore.Op.DELETE),
+    )
     private val cache = FileBackedCache(database)
     private val tempRoot: Path = Files.createTempDirectory(scratch, "maintenance-")
     private val warnings = LogCapture.install()

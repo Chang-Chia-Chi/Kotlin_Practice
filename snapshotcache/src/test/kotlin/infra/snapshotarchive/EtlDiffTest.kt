@@ -40,7 +40,8 @@ import kotlin.random.Random
 class EtlDiffTest {
 
     private val group = GroupId("d${GROUPS.incrementAndGet()}")
-    private val store = RecordingObjectStore()
+    // The diff downloads checkpoints, so this is the one suite that legitimately uses all four.
+    private val store = RecordingObjectStore(RecordingObjectStore.Op.entries.toSet())
     private val work: Path = Files.createTempDirectory(scratch, "diff-")
     private val database: Path = work.resolve("generation.db")
     private val cache = FileBackedCache(database)
