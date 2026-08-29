@@ -690,3 +690,114 @@ watch it not be cleaned up.
   whatever happens to be attached. P9's wiring should feed this map from config.
 - The suite now boots two Oracle containers (one per class, sequentially) and one MinIO, so a
   full `mvn test` is around four minutes on this machine.
+
+## M3 ticket 04 (P13) - Watchdog, purge, staleness alert  (2026-08-29)
+
+### Delivered
+- `infra/snapshotarchive/ArchiveMaintenance.kt` - the whole ticket: `watchdog` (PENDING older
+  than T -> verify the inventory against the bucket -> conditional flip to COMPLETE or
+  FAILED), `purge` (expired per the spec 18.5 window + FAILED cleanup, both objects-then-row,
+  with D34 keep-newest-COMPLETE unconditional), `staleness` (spec 18.5's operational alert),
+  `sweep` over every group, and plain-JDK scheduling. ~120 code lines.
+- `ManifestDao` gains three dumb queries and nothing else: `byStatus` (rows in a status whose
+  last transition predates an instant - the watchdog's stale-PENDING list and the FAILED
+  cleanup list are the same query), `retire` (COMPLETE -> FAILED, the purge's mark step), and
+  `delete`. The private `transition` helper grew a `from` parameter; `markComplete` and
+  `markFailed` still pass PENDING and behave identically.
+- `ObjectStore.delete`, added here because this is where its first caller is (ticket 03's
+  note). Still a concrete class, now with three `open` methods and still no `list`.
+- `ArchiveMaintenanceTest` - 14 tests against real Oracle + a fake store, two of them driving
+  the real `Archiver` over a real DuckDB file. Zero sleeps and no test waits out a timeout:
+  the DAO stamps rows at a fixed instant and each pass runs at whatever later instant the
+  test needs.
+- `ArchitectureTest` - one new rule, `no LIST-based orphan sweep exists`. Extended, not
+  weakened.
+- Build: **185 tests, 0 failures, 2 pre-existing Unix-only skips** (170 before, plus these 15).
+
+### Spec 18.6 item 3: still open, and why
+The ticket made measuring T the first task. It was attempted and it did not close the item.
+There is no real MinIO link on this machine - only a container on loopback, where 14,180,166
+bytes (ticket 01's exact payload for a 1M-row table) uploaded in 1170/840/502/546/217 ms over
+five runs. That measures a local socket and a container filesystem, not a network, so putting
+T anywhere near it would be closing an open question on a meaningless number. The measurement
+ran as throwaway scaffolding and was deleted, on ticket 01's precedent: the answer is the
+record, not a test that re-measures loopback on every build.
+
+**T ships as 15 minutes, a policy floor with its rationale recorded** on
+`ArchiveMaintenance.DEFAULT_WATCHDOG_TIMEOUT` and in spec 18.6 item 3. The argument is D22's,
+not a measurement: the cost is one-sided. Too low throws away a checkpoint that was seconds
+from publishing - correct, because consumers fall back to a full compare (D34), but wasteful
+and invisible. Too high only delays a repair nothing downstream can observe, since readers
+already ignore anything that is not COMPLETE. A one-sided cost function gets headroom rather
+than an estimate. 15 minutes sits four times under the hourly cadence, so a stale row is
+always resolved before the next run for its group, and three orders of magnitude above the
+loopback figure. Spec 18.6 item 3 is left **OPEN**, re-scoped to "measure the deployment's
+real link and set T from it".
+
+### Deviations from the documents
+- **The purge's "mark" step reuses FAILED rather than introducing a fourth status.** Plan P13
+  says "mark -> delete objects per inventory -> delete row" without saying what to mark.
+  FAILED already means to every reader exactly what a version being reclaimed is - do not
+  trust this one - and inventing a PURGING state would mean a schema change, a wider CHECK
+  constraint, and a state every future reader has to learn. What the mark buys is real and is
+  why it was not skipped: without it, dying between the objects and the row leaves a COMPLETE
+  row whose inventory the bucket can no longer honour, and COMPLETE is the thing readers trust.
+- **`purge` never reclaims a PENDING row, and reclaims a FAILED one only after it has been
+  FAILED for longer than T.** Neither rule is in the documents; both close the same hole. A
+  version whose uploader may still be running must not have its objects deleted and its row
+  removed, because the uploader's remaining `put` calls would then land behind a row that no
+  longer exists - the dangling object D33 exists to make impossible. PENDING rows belong to
+  the watchdog, which reaches a verdict on them first; a FAILED row waits out one watchdog
+  timeout, which is by definition longer than an upload can take. Without this, "purge deletes
+  objects before the row" is true and still not sufficient.
+- **FAILED versions are reclaimed on the watchdog timeout, not on the retention window.** The
+  ticket says storage stays inside a fixed retention window, and holding failed versions for
+  the full 24-48h window would satisfy that literally. It was not done: a permanently broken
+  uploader would then park a window's worth of garbage that nothing can ever read, which is
+  precisely the failure D34 wants visible rather than absorbed.
+- **`expired()` rows are filtered to COMPLETE at the purge, not in the DAO.** Ticket 02 left
+  that query dumb on purpose and this keeps it that way; the status filter is one line where
+  the retention decision is made.
+- **The watchdog verifies presence and size, not checksums.** Ticket 03's note offered the
+  SHA-256 for a stronger verdict. It was not taken: an object store publishes an object whole
+  or not at all, so a truncated upload is a missing key rather than a short one, and
+  re-hashing means downloading every object - the repair path would cost more than the run it
+  repairs. The checksum is still in the inventory for anyone who later disagrees.
+- **`ArchiveMaintenance` schedules itself on its own single-thread executor** rather than
+  sharing the archiver's. M2 does not exist, so this is the same plain-JDK placeholder ticket
+  03 established, and P9 will wrap it. `sweep` swallows a group's exception deliberately: a
+  `scheduleAtFixedRate` task that escapes with one is silently never run again, which for a
+  self-healing pass would mean the healing stops at the first bad hour and nothing says so.
+  The convergence test asserts nothing was swallowed.
+- **The test's fakes duplicate `ArchiverTest`'s.** `SizedObjectStore`, `MaintenanceCache`,
+  `MaintenanceSnapshot` and `AlertCapture` are near-copies of private classes in
+  `ArchiverTest.kt`. Hoisting them into a shared fixture would have meant editing a test an
+  earlier phase wrote, which the rules forbid; they are also trimmed to what this suite needs
+  (the store records sizes, not bytes; the capture separates SEVERE from WARN).
+- **M2 gate, again.** Plan 3c gates P13 on M2 being accepted and M2 is still unimplemented.
+  Ran on user instruction, same carve-out as tickets 01-03. No Quarkus, CDI, `@Scheduled` or
+  Micrometer.
+- **Size budget exceeded**, in the same shape as ticket 03: ~170 code lines of main (~120 of
+  them the new class) and ~330 of test, against the 200-600 guidance including doc comments.
+- No frozen interface, invariant, equation or enum changed; no earlier test modified.
+  `ArchitectureTest` gained a rule and lost nothing; `Archiver.kt` was not touched at all.
+
+### Evidence the new ArchUnit rule is not vacuous
+A `plantedSweep()` calling `client.listObjects(ListObjectsArgs...)` was added to `ObjectStore`
+and the rule failed with 3 violations, naming the builder calls. The plant was removed and the
+suite re-run with `clean` - required, as ticket 02 found, because ArchUnit reads
+`target/classes` and Kotlin's incremental compile leaves the stale `.class` behind.
+
+### Notes for later tickets
+- **Ticket 05 reads only COMPLETE rows, and must treat a purged watermark as normal.** Purge
+  can delete the version an ETL recorded last run at any time; that is a first-class fallback
+  to a full compare (D34), not an error, and `ManifestDao.find` returning null is how it shows
+  up.
+- **Keep-newest-COMPLETE is evaluated per group at purge time**, from `newestComplete`. It is
+  the only version with a guarantee attached, so an ETL that has fallen further behind than
+  the retention window still has exactly one baseline it can rely on existing.
+- **Retention and staleness defaults are 48h and 3h**, both constructor parameters. Spec 18.5
+  says the window is config sized to the slowest ETL cadence plus margin; P9's wiring should
+  feed both from config rather than leaving the defaults to stand for a decision nobody made.
+- The suite now boots three Oracle containers (one per class, sequentially) and one MinIO, so
+  a full `mvn test` is around six minutes on this machine.

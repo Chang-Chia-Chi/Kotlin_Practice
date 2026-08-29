@@ -182,6 +182,37 @@ class ManifestDao(
     fun markFailed(group: String, version: Long): Boolean =
         transition(group, version, ArchiveStatus.FAILED)
 
+    /**
+     * COMPLETE -> FAILED: the purge's mark step (spec 18.5, plan P13), and the only
+     * transition that does not start from PENDING.
+     *
+     * A version being reclaimed is a version whose objects are about to stop existing, which
+     * is precisely what FAILED already means to every reader - "do not trust this one". The
+     * mark is what keeps that true across a crash: purge deletes objects before the row, so
+     * dying in between would otherwise leave a COMPLETE row whose inventory the bucket can no
+     * longer honour. There is no fourth status to invent for it; the CHECK constraint says so
+     * and readers would have to learn it.
+     */
+    fun retire(group: String, version: Long): Boolean =
+        transition(group, version, ArchiveStatus.FAILED, from = ArchiveStatus.COMPLETE)
+
+    /**
+     * Deletes one row, the last step of reclaiming a version. Returns whether it was there.
+     *
+     * Always called after its objects are gone, never before: the ordering is what makes an
+     * object without a covering manifest row impossible, which is why this layer owns no
+     * LIST-based orphan sweep (D33, D34).
+     */
+    fun delete(group: String, version: Long): Boolean =
+        jdbi.withHandle<Boolean, RuntimeException> { handle ->
+            handle.createUpdate(
+                "DELETE FROM ${ManifestSchema.TABLE} WHERE group_id = :group AND version = :version",
+            )
+                .bind("group", group)
+                .bind("version", version)
+                .execute() == 1
+        }
+
     /** The newest COMPLETE version, or null when the group has never published one. */
     fun newestComplete(group: String): ManifestEntry? =
         jdbi.withHandle<ManifestEntry?, RuntimeException> { newestComplete(it, group) }
@@ -235,6 +266,30 @@ class ManifestDao(
                 .toEntries()
         }
 
+    /**
+     * Versions in [status] whose last transition predates [unchangedSince], oldest first.
+     *
+     * As dumb as [expired], and for the same reason: it answers both of ticket 04's
+     * questions - PENDING rows older than the watchdog timeout, and FAILED rows that have
+     * settled long enough to reclaim - while the policy that picks those instants stays where
+     * the decision is made. Aged by `updated_at`, which an insert sets alongside `created_at`,
+     * so the one column means "how long has this row been in this state" for every status.
+     */
+    fun byStatus(group: String, status: ArchiveStatus, unchangedSince: Instant): List<ManifestEntry> =
+        jdbi.withHandle<List<ManifestEntry>, RuntimeException> { handle ->
+            handle.createQuery(
+                """
+                $SELECT_ALL
+                 WHERE group_id = :group AND status = :status AND updated_at < :unchangedSince
+                 ORDER BY version
+                """.trimIndent(),
+            )
+                .bind("group", group)
+                .bind("status", status.name)
+                .bind("unchangedSince", unchangedSince.utc())
+                .toEntries()
+        }
+
     /** Reads one row regardless of status. Diagnostics and tests; the protocol never needs it. */
     fun find(group: String, version: Long): ManifestEntry? =
         jdbi.withHandle<ManifestEntry?, RuntimeException> { handle ->
@@ -245,16 +300,22 @@ class ManifestDao(
                 .firstOrNull()
         }
 
-    private fun transition(group: String, version: Long, to: ArchiveStatus): Boolean =
+    private fun transition(
+        group: String,
+        version: Long,
+        to: ArchiveStatus,
+        from: ArchiveStatus = ArchiveStatus.PENDING,
+    ): Boolean =
         jdbi.withHandle<Boolean, RuntimeException> { handle ->
             val moved = handle.createUpdate(
                 """
                 UPDATE ${ManifestSchema.TABLE}
                    SET status = :to, updated_at = :now
-                 WHERE group_id = :group AND version = :version AND status = 'PENDING'
+                 WHERE group_id = :group AND version = :version AND status = :from
                 """.trimIndent(),
             )
                 .bind("to", to.name)
+                .bind("from", from.name)
                 .bind("now", clock.instant().utc())
                 .bind("group", group)
                 .bind("version", version)

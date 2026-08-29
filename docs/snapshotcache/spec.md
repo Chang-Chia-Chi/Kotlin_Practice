@@ -1159,7 +1159,22 @@ purely operational; diffs stay correct (over-report only).
    "tens of MB" expectation; duration beats "seconds" by two orders of
    magnitude, so a lease held across an export cannot interact with the K
    ceiling in any way worth designing around.
-3. **OPEN.** Watchdog timeout T vs worst-case upload time on the real MinIO
-   link. The spike sizes the payload (~14 MB per 1M-row table) but cannot
-   measure the link; T must be set against a real upload before ticket 04
-   ships.
+3. **STILL OPEN 2026-08-29 (ticket 04).** Watchdog timeout T vs worst-case
+   upload time on the real MinIO link. There is no such link on this machine,
+   only a MinIO container on loopback: 14,180,166 bytes uploaded in
+   1170/840/502/546/217 ms over five runs, which measures a local socket and a
+   container filesystem, not a network. That is a floor and nothing more, so
+   the item stays open.
+
+   Ticket 04 ships **T = 15 minutes as a policy floor, not a derived value**,
+   with the rationale on `ArchiveMaintenance.DEFAULT_WATCHDOG_TIMEOUT`. The
+   cost function is one-sided the way D22's `waitBudget` is: too low throws
+   away checkpoints that were seconds from publishing (correct, but wasteful
+   and invisible), too high only delays a repair that nothing downstream can
+   observe, since readers already ignore anything that is not COMPLETE. A
+   one-sided cost gets headroom rather than an estimate. 15 minutes is four
+   times under the hourly cadence, so a stale row is always resolved before the
+   next run for its group, and three orders of magnitude above the loopback
+   number. Close this item by measuring the deployment's real link and setting
+   T from it; until then it is the margin, not the estimate, that makes it
+   safe.

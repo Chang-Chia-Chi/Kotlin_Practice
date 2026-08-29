@@ -1,6 +1,7 @@
 package infra.snapshotarchive
 
 import io.minio.MinioClient
+import io.minio.RemoveObjectArgs
 import io.minio.StatObjectArgs
 import io.minio.UploadObjectArgs
 import io.minio.errors.ErrorResponseException
@@ -9,12 +10,18 @@ import java.nio.file.Path
 /**
  * The archive layer's object store (spec 18.2), wrapping the MinIO client.
  *
- * This is a testability seam, not an abstraction: it is a concrete class with two methods,
+ * This is a testability seam, not an abstraction: it is a concrete class with three methods,
  * and the spec 2.3 five-interface budget is a framework budget this layer adds nothing to
- * (plan 3c). Both methods are `open` so the crash-matrix and interleaving tests can drive a
+ * (plan 3c). All three are `open` so the crash-matrix and interleaving tests can drive a
  * subclass instead of a container - the whole point is that those tests stay fast and
- * deterministic, while `ObjectStoreTest` proves against a real MinIO that the two calls
- * below actually do what the fake pretends they do.
+ * deterministic, while `ObjectStoreTest` proves against a real MinIO that the calls below
+ * actually do what the fake pretends they do.
+ *
+ * There is deliberately no `list`. D33 puts a manifest row carrying the full inventory in
+ * front of every upload, so what a version contains is always readable without asking the
+ * bucket, and an object nothing points at cannot exist. A LIST method would be the first
+ * half of the orphan sweep this design exists to avoid; `ArchitectureTest` fails the build
+ * if one appears.
  *
  * Creating [bucket] is not this class's job. Like the manifest table it is provisioned
  * ahead of the process, and a bucket auto-created by whichever pod started first is exactly
@@ -48,4 +55,15 @@ open class ObjectStore(private val client: MinioClient, val bucket: String) {
         } catch (e: ErrorResponseException) {
             if (e.errorResponse().code() == "NoSuchKey") null else throw e
         }
+
+    /**
+     * Removes [key], for the purge's reclaim step (spec 18.5).
+     *
+     * Absence is success, because S3 delete is idempotent - which is exactly what lets a
+     * purge that died halfway through a version simply run again on the next pass instead of
+     * needing to remember where it stopped.
+     */
+    open fun delete(key: String) {
+        client.removeObject(RemoveObjectArgs.builder().bucket(bucket).`object`(key).build())
+    }
 }

@@ -32,12 +32,16 @@ object unreachable by construction, so the code asserts that rather than scannin
 
 **Blocked by:** 03.
 
-**Status:** ready-for-agent
+**Status:** done (2026-08-29)
 
-- [ ] A PENDING row older than T is resolved to COMPLETE when its inventory verifies, FAILED when it does not
+- [x] A PENDING row older than T is resolved to COMPLETE when its inventory verifies, FAILED when it does not
 - [ ] The watchdog timeout T is derived from ticket 01's measurement and its rationale is recorded
-- [ ] Every crash injected in ticket 03's matrix converges to a terminal status within two passes
-- [ ] Purge deletes objects before the row, for both expired and FAILED versions
-- [ ] Keep-newest-COMPLETE survives a retention window in which every version is expired
-- [ ] Staleness alert fires when the newest COMPLETE checkpoint exceeds its age threshold
-- [ ] No LIST-based orphan sweep exists anywhere in the codebase; the dangling-object case is asserted impossible, not scanned for
+      *Not met, and deliberately: this ticket's own opening says deriving T from ticket 01's
+      export duration would be wrong by orders of magnitude, and the only link available to
+      measure was a loopback container. T ships as a recorded policy floor (15 min) instead;
+      spec 18.6 item 3 stays open.*
+- [x] Every crash injected in ticket 03's matrix converges to a terminal status within two passes
+- [x] Purge deletes objects before the row, for both expired and FAILED versions
+- [x] Keep-newest-COMPLETE survives a retention window in which every version is expired
+- [x] Staleness alert fires when the newest COMPLETE checkpoint exceeds its age threshold
+- [x] No LIST-based orphan sweep exists anywhere in the codebase; the dangling-object case is asserted impossible, not scanned for

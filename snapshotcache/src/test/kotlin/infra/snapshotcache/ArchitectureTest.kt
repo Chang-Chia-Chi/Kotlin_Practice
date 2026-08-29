@@ -7,9 +7,9 @@ import com.tngtech.archunit.lang.syntax.ArchRuleDefinition.noClasses
 import org.junit.jupiter.api.Test
 
 /**
- * The five boundary rules of plan 2.2, plus the two archive-layer rules of plan 3c. These
- * are the module's static-analysis gate; they run on every build from P0 onward rather than
- * being retrofitted later.
+ * The five boundary rules of plan 2.2, the two archive-layer rules of plan 3c, and D33's
+ * ban on a bucket listing. These are the module's static-analysis gate; they run on every
+ * build from P0 onward rather than being retrofitted later.
  */
 class ArchitectureTest {
 
@@ -96,6 +96,29 @@ class ArchitectureTest {
                 "infra.snapshotcache.duckdb..",
             )
             .because("the archive layer consumes the public API only (D30, plan 3c)")
+            .check(framework)
+    }
+
+    /**
+     * D33's negative space, and the one rule here that guards an absence rather than a
+     * boundary.
+     *
+     * The publish protocol commits a manifest row carrying the complete inventory before the
+     * first object is uploaded, which makes an object without a covering row impossible to
+     * create. Everything downstream - the watchdog's verification, the purge's reclaim -
+     * therefore reads the inventory, never the bucket. A LIST call is how that guarantee
+     * rots: a sweep looks like defence in depth, but it is a second, weaker source of truth
+     * that the ordering would slowly be trusted to instead of itself, and it cannot tell a
+     * genuinely orphaned object from one whose upload is still in flight. Listing is
+     * unreachable without naming its argument type, so naming it fails the build.
+     */
+    @Test
+    fun `no LIST-based orphan sweep exists`() {
+        noClasses().should().dependOnClassesThat().haveNameMatching("io\\.minio\\.ListObjectsArgs.*")
+            .because(
+                "a dangling object is impossible by construction (D33), so it is asserted, never " +
+                    "scanned for; the inventory is the only list of what a version contains",
+            )
             .check(framework)
     }
 
