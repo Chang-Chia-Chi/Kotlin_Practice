@@ -2168,3 +2168,71 @@ correctness gap. Two things would change the answer: a host actually hitting the
 obligation now written into 8.6, or a second reader of the definition map appearing, at which point
 "two copies" becomes "three". Neither has happened. A fourth proposal should also close the `fire`
 hole in its contract before it is read, since that is what stopped this one.
+
+
+---
+
+## E12 - The scratch write-then-publish protocol becomes a module  (2026-08-29)
+
+`internal class ScratchDatasets` in `infra.etl.duckdb` owns spec 5.5's sequence - name this
+attempt, write into that name, publish the stable view only if the write returned. All four call
+sites go through it and none of them names `publishTable` or `publishParquet` any more.
+
+```kotlin
+fun <T> attemptTable(dataset: String, attempt: Int, write: (String) -> T): T
+fun <T> attemptParquet(dataset: String, attempt: Int, write: (Path) -> T): T
+```
+
+**379 tests pass.** `DatasetNamer` is untouched and `DatasetNamerTest` passes unmodified, as does
+the end-to-end proof in `TaskEngineRetryTest` that a retry's view resolves to attempt 2. No earlier
+phase's test was edited.
+
+### What the module bought, concretely
+
+**"A failed attempt does not publish" is now a test against four lines, not a whole engine run.**
+`ScratchDatasetsTest` passes a block that throws; before E12 the only way to reach that rule was to
+drive an engine, make real JDBC fail on schedule, and inspect a probe file. The new test also
+asserts the failed attempt's *table survives with its rows*, because "did not publish" must not be
+satisfied by cleaning up - DuckDB 1.1.3 reclaims nothing and the run directory is deleted whole.
+
+**The generic return earns its place.** Two callers need a value out of the block: `pipe` carries
+out the rows it moved and `cacheCopy` the generation it read, both reported after publishing. A
+`Unit` block would have forced a `var` beside each call and put the write and its publish back in
+two statements.
+
+**No `try`/`catch`.** "Publishes on normal return, does nothing on a throw" is the statement after
+the block being unreachable, not a caught-and-rethrown exception. Written down in the KDoc because
+the absence is the design.
+
+### The one judgement call
+
+The plan said "`physicalDataset()` and the duplicate decision inside `writer()` both go: a step
+that produces no scratch dataset never reaches the module." Half of that is exactly right and half
+needed a ruling.
+
+`physicalDataset` is gone. What replaces it, `scratchDataset(target)`, answers the **dataset** name
+rather than the physical one - naming an attempt is now the module's half - and returns null for
+the steps that produce none. That decision could not move into `ScratchDatasets`: it reads
+`TableTarget` and `PipeTarget`, which live in `infra.etl.task`, and an adapter in `infra.etl.duckdb`
+never depends on `task`. So the engine keeps "does this step produce a scratch dataset", the module
+keeps "what is it called this attempt, and when is it live". That is the seam the ArchUnit rule
+already draws, and it is why the module has two entry points instead of one and a `format` flag.
+
+`writer()` keeps its `physical: String?` parameter, and the `?: target.table` fallback with it. The
+plan expected both to go. They cannot: a non-scratch `TableTarget` and a `REQUIRED` scratch target
+both write under a name the module never sees, so `writer` still has to be told which name to use.
+What did go is the *duplication* - the physical name is computed once, by the module, and threaded
+in, rather than computed in `physicalDataset` and again defaulted inside `writer`.
+
+`pipe` split into `pipe` (which decides) and `pipeRows` (which moves rows), because the block form
+needs the rows half to be callable both inside and outside `attemptTable`.
+
+### Documents
+
+**None changed, and that is worth recording.** Spec 5.5's E12 paragraph and spec 11.2's
+`ScratchDatasets` note were both written by the 2026-08-29 architecture review ahead of the code,
+and the code now matches them - `attemptTable`/`attemptParquet`, publish on normal return only, two
+entry points because `MaterializeFormat` lives in `task`. That is the opposite outcome to E11,
+where the same review's anticipatory spec text described a shape that could not work; here it
+described one that did.
+

@@ -2,6 +2,7 @@ package infra.etl.task
 
 import infra.etl.duckdb.CreateTable
 import infra.etl.duckdb.DatasetNamer
+import infra.etl.duckdb.ScratchDatasets
 import infra.etl.duckdb.DuckDbTableWriter
 import infra.etl.duckdb.ScratchDb
 import infra.etl.duckdb.datasetIdentifier
@@ -233,7 +234,10 @@ class TaskEngine(
                     // `require(memoryLimitMb > 0)` is the reachable case - reports no sample at
                     // all, and that is deliberate: it is not "0 bytes", it is "never got there".
                     try {
-                        Run(definition, task, scratch, DatasetNamer(directory), events).execute()
+                        Run(
+                            definition, task, scratch,
+                            ScratchDatasets(scratch, DatasetNamer(directory)), events,
+                        ).execute()
                     } finally {
                         events.scratchSampled { scratch.diskBytes() }
                     }
@@ -401,7 +405,7 @@ class TaskEngine(
         private val definition: TaskDefinition,
         private val task: TaskContext,
         private val scratch: ScratchDb,
-        private val namer: DatasetNamer,
+        private val datasets: ScratchDatasets,
         private val events: Events,
     ) {
 
@@ -564,17 +568,18 @@ class TaskEngine(
                 "step '${step.name}': cache '${step.cache}' is not configured. Known caches are " +
                     "${caches.keys.sorted()} (spec 3.6, 7.3).",
             )
-            val result = binding.cache.copyOut(
-                binding.group,
-                CopyOutSpec(
-                    sql = step.sql,
-                    targetTable = namer.physical(step.output, attempt),
-                    targetConnection = scratch.connection(),
-                ),
-            )
-            // Only once the copy has succeeded, as `materialize` does: publishing is what makes an
-            // attempt the live one (spec 5.5).
-            namer.publishTable(scratch.connection(), step.output, attempt)
+            // Spec 5.5's write-then-publish, and the module owns the order: the view is pointed at
+            // this attempt only once `copyOut` has returned.
+            val result = datasets.attemptTable(step.output, attempt) { physical ->
+                binding.cache.copyOut(
+                    binding.group,
+                    CopyOutSpec(
+                        sql = step.sql,
+                        targetTable = physical,
+                        targetConnection = scratch.connection(),
+                    ),
+                )
+            }
             // The cache's spec 6.4 obliges a consumer to record which generation it read. Logged
             // rather than exported as a task variable: that would be public surface spec 11 does
             // not declare, and nothing in this framework consumes it.
@@ -597,23 +602,23 @@ class TaskEngine(
          * [cacheCopy] for why that count is lineage rather than throughput.
          */
         private fun pipe(step: PipeStep, attempt: Int): PipeResult {
-            val target = step.target
-            val physical = physicalDataset(target, attempt)
-            val rows = readFrom(step.source.datasource) { handle ->
+            val dataset = scratchDataset(step.target)
+            return if (dataset == null) pipeRows(step, attempt, into = null)
+            else datasets.attemptTable(dataset, attempt) { physical -> pipeRows(step, attempt, into = physical) }
+        }
+
+        /** The rows half of [pipe], with the name it writes into already decided. */
+        private fun pipeRows(step: PipeStep, attempt: Int, into: String?): PipeResult =
+            readFrom(step.source.datasource) { handle ->
                 val parameters = variables(handle, step.source.sql, attempt)
                 RowPipe(
                     source = JdbcSource(handle, step.source.sql, parameters),
-                    target = writer(step, physical),
+                    target = writer(step, into),
                     step = step.name,
                     chunkSize = step.chunkSize ?: definition.chunkSize,
                     transform = step.transform,
                 ).run()
             }
-            // Publishing is what makes an attempt the live one, so it happens only once the whole
-            // attempt has succeeded (spec 5.5). DatasetNamer deliberately does not decide this.
-            if (physical != null) namer.publishTable(scratch.connection(), (target as TableTarget).table, attempt)
-            return rows
-        }
 
         /**
          * Reports 0 / 0, like every step type but `pipe`: nothing here moves a row through the
@@ -635,18 +640,14 @@ class TaskEngine(
                 }
                 return NO_ROWS
             }
-            val connection = scratch.connection()
-            val statement = when (step.format) {
-                MaterializeFormat.TABLE ->
-                    "create table ${quoteIdentifier(namer.physical(step.output, attempt))} as ${step.sql}"
-                MaterializeFormat.PARQUET ->
-                    "copy (${step.sql}) to " +
-                        "'${sqlLiteral(namer.parquetPath(step.output, attempt))}' (format parquet)"
-            }
-            Jdbi.create(connection).open().use { update(it, statement, attempt) }
             when (step.format) {
-                MaterializeFormat.TABLE -> namer.publishTable(connection, step.output, attempt)
-                MaterializeFormat.PARQUET -> namer.publishParquet(connection, step.output, attempt)
+                MaterializeFormat.TABLE -> datasets.attemptTable(step.output, attempt) { physical ->
+                    scratchUpdate("create table ${quoteIdentifier(physical)} as ${step.sql}", attempt)
+                }
+
+                MaterializeFormat.PARQUET -> datasets.attemptParquet(step.output, attempt) { path ->
+                    scratchUpdate("copy (${step.sql}) to '${sqlLiteral(path)}' (format parquet)", attempt)
+                }
             }
             return NO_ROWS
         }
@@ -719,15 +720,28 @@ class TaskEngine(
         }
 
         /**
-         * The attempt-suffixed physical name a scratch dataset is written under, or null when the
-         * step does not produce one. Only `createTable: AUTO` gets a suffix: under `REQUIRED` the
-         * author created the table under its stable name with a `sql` step, and there is no
-         * suffixed table for the framework to write or view for it to repoint (spec 5.5).
+         * The scratch dataset this step produces, or null when it produces none - which is the whole
+         * of what the engine decides about spec 5.5 now that [ScratchDatasets] owns the protocol.
+         *
+         * Only `createTable: AUTO` produces one. Under `REQUIRED` the author created the table under
+         * its stable name with a `sql` step, so there is no framework-owned name to write and no view
+         * to repoint; off scratch there is no scratch dataset at all. Rule 18 rejects the one
+         * combination that would make the difference silent - a retried REQUIRED scratch target
+         * (spec 5.5, 10).
+         *
+         * It answers the *dataset* name and not the physical one, because naming an attempt is the
+         * module's half. That is the split: which steps have a scratch dataset is a question about
+         * the task model, which `infra.etl.duckdb` cannot see.
          */
-        private fun physicalDataset(target: PipeTarget, attempt: Int): String? =
+        private fun scratchDataset(target: PipeTarget): String? =
             (target as? TableTarget)
                 ?.takeIf { it.datasource == SCRATCH && it.createTable == CreateTable.AUTO }
-                ?.let { namer.physical(it.table, attempt) }
+                ?.table
+
+        /** One statement on scratch's write connection (spec 7.2). */
+        private fun scratchUpdate(statement: String, attempt: Int) {
+            Jdbi.create(scratch.connection()).open().use { update(it, statement, attempt) }
+        }
 
         private fun writer(step: PipeStep, physical: String?): RowWriter {
             val target = step.target
