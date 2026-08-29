@@ -43,6 +43,12 @@ import java.util.concurrent.atomic.AtomicLong
  * core; calls for different generations may overlap, hence the concurrent collections.
  */
 class DuckDbGenerationStore(
+    /**
+     * One directory per group, composed by the caller (P9). Generation numbering restarts
+     * at 1 for each group, so two groups pointed at one directory would collide on
+     * `gen_0000000001.db`. The store takes no group on any method by design - the
+     * directory *is* the group component.
+     */
     private val directory: Path,
     private val tempDirectory: Path,
     private val memoryLimit: String,

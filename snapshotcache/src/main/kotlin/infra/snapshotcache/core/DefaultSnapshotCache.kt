@@ -169,11 +169,27 @@ internal class DefaultSnapshotCache(
     /**
      * Single release path for copyOut and the handle callback. The registry makes the
      * refcount decrement idempotent (I6); the handle's cleanup runs at most once, so each
-     * lease produces exactly one leaseReleased or leaseOrphaned event, never both.
+     * lease produces exactly one leaseReleased or leaseOrphaned event, never both. A lease
+     * that outlived its deadline additionally produces one leaseExpired (spec 6.2).
      */
     private fun release(runtime: GroupRuntime, group: GroupId, lease: RegistryLease, orphaned: Boolean) {
         runtime.registry.release(lease)
-        val heldFor = Duration.between(lease.info.acquiredAt, clock.instant())
+        val releasedAt = clock.instant()
+        val heldFor = Duration.between(lease.info.acquiredAt, releasedAt)
+        // Diagnostic only - nothing was reclaimed early (spec 6.2, D8). This is the
+        // release-time half of the deadline signal; a lease still *open* past its deadline
+        // is caught by P9 polling GenerationRegistry.expiredLeases() on the schedule tick.
+        if (lease.info.deadline.isBefore(releasedAt)) {
+            log.warnf(
+                "Snapshot lease exceeded its diagnostic deadline. group=%s generation=%d owner=%s heldFor=%s deadline=%s (spec 6.2).",
+                group,
+                lease.generation,
+                lease.info.owner,
+                heldFor,
+                lease.info.deadline,
+            )
+            emit(group) { events.leaseExpired(group, lease.info, heldFor) }
+        }
         if (orphaned) {
             log.warnf(
                 "Snapshot lease orphaned - handle garbage-collected without close(); force-released. " +

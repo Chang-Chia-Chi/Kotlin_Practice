@@ -110,6 +110,16 @@ internal class RefreshCycle(
             } catch (interrupted: InterruptedException) {
                 throw interrupted
             } catch (failure: Exception) {
+                // An interrupted JDBC call surfaces as a driver exception (SQLException),
+                // not as InterruptedException, so shutdown has to be re-checked here or a
+                // correctly ordered shutdown - flag set, then interrupt - still counts
+                // source_error and the two stop being distinguishable (spec 9.2 last row, D26).
+                if (registry.isShuttingDown()) {
+                    throw RoundAbort(
+                        RefreshResult.SHUTDOWN_ABORTED,
+                        "shutdown observed while the source was running: ${failure.describe()}",
+                    )
+                }
                 throw RoundAbort(RefreshResult.SOURCE_ERROR, failure.describe())
             }
 

@@ -4,6 +4,7 @@ import infra.snapshotcache.api.CacheEvents
 import infra.snapshotcache.api.GroupId
 import infra.snapshotcache.api.Hook
 import infra.snapshotcache.api.HookRunner
+import infra.snapshotcache.api.LeaseInfo
 import infra.snapshotcache.api.RefreshOutcome
 import infra.snapshotcache.api.RefreshPhase
 import infra.snapshotcache.api.RefreshResult
@@ -11,14 +12,17 @@ import infra.snapshotcache.api.Snapshot
 import infra.snapshotcache.testkit.StoreOp
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.Test
+import java.sql.SQLException
 import java.time.Duration
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 
 /**
- * Regression tests for the 2026-08-28 code-review fix pass, one per finding whose defect
- * is observable at core level. Each asserts the behavior the pre-fix code got wrong, so a
- * revert of the fix fails the test rather than the reasoning.
+ * Regression tests for the 2026-08-28 code-review fix pass and for the 2026-08-30 adoption
+ * dry-run conformance fixes, one per finding whose defect is observable at core level. Each
+ * asserts the behavior the pre-fix code got wrong, so a revert of the fix fails the test
+ * rather than the reasoning.
  *
  * Zero sleeps: the one interleaving is driven by [HookDriver], with bounded joins as
  * bounds on a broken implementation (plan 1.5, spec 17.4).
@@ -172,5 +176,84 @@ internal class ReviewFixRegressionTest : RefreshCycleTestBase() {
         assertThat(registry.current()).describedAs("the pointer swap must not happen").isEqualTo(1L)
         assertThat(store.generationsOnDisk()).describedAs("the candidate is cleaned up").containsExactly(1L)
         assertThat(store.openedGenerations()).describedAs("the candidate is detached again").containsExactly(1L)
+    }
+
+    // ------------------------------------------------------------------ 2026-08-30: shutdown misclassified as source error
+
+    @Test
+    fun sourceFailingUnderShutdown_classifiesShutdownAborted_notSourceError() {
+        val c = cycle()
+        runSuccess(c) // gen 1 published and current
+
+        // The real shutdown ordering is "set the flag, then interrupt the build thread"
+        // (spec 10.2 steps 1-3). An interrupted Oracle call does not surface as
+        // InterruptedException - the driver reports a cancelled statement - so before the
+        // fix even a correctly ordered shutdown counted source_error, and D26's whole
+        // point, telling the two apart on a dashboard, was lost.
+        source.behavior = {
+            registry.beginShutdown()
+            throw SQLException("ORA-01013: user requested cancel of current operation")
+        }
+        val out = c.runOnce()
+
+        assertThat(out.result).isEqualTo(RefreshResult.SHUTDOWN_ABORTED)
+        assertThat(out.generation).isNull()
+        assertThat(out.detail).describedAs("detail still names the underlying failure").contains("ORA-01013")
+        assertThat(events.finished.last()).isEqualTo(RefreshResult.SHUTDOWN_ABORTED to null)
+        assertThat(registry.current()).describedAs("current pointer untouched").isEqualTo(1L)
+        assertThat(store.generationsOnDisk()).describedAs("candidate deleted").containsExactly(1L)
+    }
+
+    @Test
+    fun sourceFailingWithoutShutdown_stillClassifiesSourceError() {
+        val c = cycle()
+        runSuccess(c) // gen 1
+
+        // The fix is a re-check of the shutdown flag, not a widening of the abort case: an
+        // ordinary driver failure must stay source_error (spec 9.2 row 1).
+        source.behavior = { throw SQLException("ORA-12541: TNS:no listener") }
+
+        assertThat(c.runOnce().result).isEqualTo(RefreshResult.SOURCE_ERROR)
+    }
+
+    // ------------------------------------------------------------------ M5: leaseExpired is wired
+
+    @Test
+    fun leaseReleasedPastItsDeadline_firesLeaseExpired_alongsideLeaseReleased() {
+        runSuccess(cycle()) // gen 1 published and current
+
+        val sink = RecordingLeaseEvents()
+        val cache = DefaultSnapshotCache(config, mapOf(group to GroupRuntime(registry, stubStore)), sink, clock)
+
+        cache.acquire(group).close()
+        assertThat(sink.expired).describedAs("a lease released inside its deadline is not expired").isEmpty()
+        assertThat(sink.released).hasSize(1)
+
+        val slow = cache.acquire(group)
+        val deadline = registry.liveGenerations().single().leases.single().deadline
+        clock.advance(config.leaseDeadline.plusSeconds(1))
+        slow.close()
+
+        // Diagnostic only (spec 6.2, D8): nothing was reclaimed early, and leaseReleased
+        // still fires so snapshot_lease_duration_seconds keeps every sample.
+        assertThat(sink.expired).hasSize(1)
+        val (info, heldFor) = sink.expired.single()
+        assertThat(info.owner).isEqualTo(Thread.currentThread().name)
+        assertThat(info.deadline).isEqualTo(deadline)
+        assertThat(heldFor).isEqualTo(config.leaseDeadline.plusSeconds(1))
+        assertThat(sink.released).describedAs("leaseExpired is additional, not a replacement").hasSize(2)
+    }
+
+    private class RecordingLeaseEvents : CacheEvents {
+        val released = CopyOnWriteArrayList<Pair<LeaseInfo, Duration>>()
+        val expired = CopyOnWriteArrayList<Pair<LeaseInfo, Duration>>()
+
+        override fun leaseReleased(group: GroupId, lease: LeaseInfo, heldFor: Duration) {
+            released += lease to heldFor
+        }
+
+        override fun leaseExpired(group: GroupId, lease: LeaseInfo, heldFor: Duration) {
+            expired += lease to heldFor
+        }
     }
 }

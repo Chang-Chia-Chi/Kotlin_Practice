@@ -480,9 +480,15 @@ Verification runs **before** the swap. Any failing rule aborts the candidate; cu
 |---|---|---|
 | `non_empty` | Any table with zero rows fails | **On, cannot be disabled** |
 | `key_unique` | id is unique within its own table | On |
-| `required_non_null` | Designated critical columns must not be NULL | On, column list configurable |
+| `required_non_null` | Designated critical columns must not be NULL | On, column list configurable (grammar below) |
 | `row_count_delta` | Fail if row count differs from previous by more than a ratio | **Off by default** |
 | `readable` | Candidate file can be reopened and queried | On, cannot be disabled |
+
+Each `required_non_null` entry is either a qualified `table.column`, checked in that one
+table, or a bare `column`, checked in **every** table of the group. A bare name is therefore
+an all-tables assertion: if the column is absent from any one table the rule errors, the whole
+gate fails, and the group goes permanently stale - so qualify the name unless the column
+genuinely exists everywhere.
 
 ### 8.2 On `non_empty`
 
@@ -731,7 +737,7 @@ GET /internal/snapshot/{group}
 | `lease.deadline` | 5m | Diagnostic threshold (no forced reclamation) |
 | `verify.nonEmpty` | true | Cannot be disabled |
 | `verify.keyUnique` | true | |
-| `verify.requiredNonNull` | (column list) | |
+| `verify.requiredNonNull` | (column list) | Entries are `table.column` (that table only) or a bare `column` (every table); see Sec 8.1 |
 | `verify.rowCountDelta.enabled` | **false** | Observe before enabling |
 | `verify.rowCountDelta.maxDecreaseRatio` | 0.20 | Applies once enabled |
 | `verify.rowCountDelta.maxIncreaseRatio` | 1.00 | Applies once enabled |

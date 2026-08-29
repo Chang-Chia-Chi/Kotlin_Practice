@@ -430,10 +430,12 @@ has a non-test justification - E2E's `coldGroup` is a group that never refreshes
 
 - **`RefreshPhase.QUERY` / `FETCH` / `APPEND` are never emitted.** Only a
   `GenerationSource` could time them and `BuildContext` hands it no events handle. Three
-  label values a binder must handle and will never see.
+  label values a binder must handle and will never see. *(Resolved as a documentation gap
+  on 2026-08-30: the obligation is P10's, recorded in plan P10. See that entry.)*
 - **`CacheEvents.leaseExpired` is never fired** and `GenerationRegistry.expiredLeases()`
   has test callers only. Spec 6.2's lease-deadline diagnostic is declared at two seams and
-  wired at neither - P9 owes the poll, or both go.
+  wired at neither - P9 owes the poll, or both go. *(Half-answered 2026-08-30: the core now
+  fires it on the release path; the still-open-lease poll is assigned to P9. See that entry.)*
 - **`GenerationRegistry.current()`** has no production caller; `currentInfo()` covers it.
 - **`tryBeginRound` / `endRound` could collapse** into one `inRound { }` that makes the
   protocol unrepresentable rather than `check()`-enforced, without moving I/O under the
@@ -1182,3 +1184,117 @@ passed. Separately, suppressing the manifest COMPLETE flip fails 4 of the 5 test
 - Dead `schema`/`SCHEMAS` and a `tempFor()` helper that created directories outside `@TempDir`.
 
 205 tests, 0 failures, 2 pre-existing skips.
+
+---
+
+## Adoption dry-run conformance fixes  (2026-08-30)
+
+An adoption dry-run plus an adjudication pass against the recorded decisions. Most of the
+dry-run's findings were rejected on citation (list at the bottom); four survived. Two are
+code, two are documentation. No interface signature, invariant, accounting equation or test
+assertion moved.
+
+### 1. `SHUTDOWN_ABORTED` was unreachable through the source (`core/RefreshCycle.kt`)
+
+The source-failure catch classified everything but a literal `InterruptedException` as
+`SOURCE_ERROR`. An interrupted Oracle JDBC call does not surface as `InterruptedException` -
+the driver reports a cancelled statement, `ORA-01013`, as a `SQLException` - so even with the
+*correct* spec 10.2 shutdown ordering (flag first, then interrupt the build thread) the round
+counted `source_error`. Spec 9.2's last row requires `shutdown_aborted`, and D26 exists
+precisely so the two are distinguishable on a dashboard, so this was a conformance bug rather
+than a preference.
+
+Fix: the catch re-checks `registry.isShuttingDown()` and raises
+`RoundAbort(SHUTDOWN_ABORTED, ...)`, carrying the underlying exception's text in the detail.
+Body-only; no signature moved. The `InterruptedException` case is untouched - it still
+classifies as `SHUTDOWN_ABORTED` with or without the flag, which is what
+`interruptedSource_classifiedShutdownAborted_nextRunOnceSucceeds` pins.
+
+### 2. `CacheEvents.leaseExpired` is now fired - this is the ruling on M5
+
+M5 of the 2026-08-28 code review, restated in "Review fix pass 2 - Still open" as *"P9 owes
+the poll, or both go"*, has been owed since 2026-08-28. **The ruling is: fire it, keep both
+seams.** `DefaultSnapshotCache.release` now WARN-logs and emits `leaseExpired` when the lease's
+deadline is before the release instant. Nothing new was built: the deadline was already stamped
+on `LeaseInfo` by `tryAcquire`, the release path already computed `heldFor`, and `emit {}`
+already isolates a throwing sink. `leaseExpired` is *additional* to `leaseReleased`, not a
+replacement - `snapshot_lease_duration_seconds` keeps every sample.
+
+**What this does not cover, and who owns it.** It fires only when a lease *ends*. A lease still
+**held** past its deadline - the case spec 6.2 actually exists for, because that is the one
+where you want to know the owner while it is still stuck, before generations pile up to K -
+produces nothing until it is released, and produces nothing at all if it is never released.
+Catching that needs a periodic poll of `GenerationRegistry.expiredLeases()`, and the only
+periodic thing in the system is the schedule tick. **That poll is assigned to P9** and is now
+recorded in P9's deliverables in `plan.md`, so the assignment does not evaporate a third time.
+`expiredLeases()` keeps its test-only callers until then; it is not dead code awaiting deletion,
+it is P9's input.
+
+### 3. `requiredNonNull`'s grammar is now specified (spec 8.1, 13)
+
+`VerifyGate` accepts an entry as either a qualified `table.column` or a bare `column` applied to
+**every** table in the group. That was documented only in a code comment; spec 13 said
+"(column list)". A bare name present in one table and absent from another errors the rule, fails
+the gate, and the group goes permanently stale - a sharp edge worth a sentence.
+
+Written now rather than later on purpose: the trap is currently unreachable because the default
+is `emptyList()` and spec 16.2 lists the column list as an open item still unfilled. Whoever
+answers 16.2 makes it live, and they are exactly the person who needs to read this. Spec 8.1
+gains a paragraph; spec 13's row names both forms and points at it.
+
+`key_unique`'s hardcoded `id` column was **not** touched: spec 8.1 and 3.3 specify exactly that.
+
+### 4. Two documentation gaps closed
+
+- **plan P10:** `RefreshPhase.QUERY` / `FETCH` / `APPEND` emission is the **`GenerationSource`'s**
+  obligation, not the core's - only the source knows where its round divides. The source is
+  caller-built, so it closes over the host's `CacheEvents` sink at construction. `BuildContext`
+  is explicitly **not** widened to carry the sink: its five fields are FIXED by spec 5.2 and
+  closing over the sink needs no framework change. This closes the first "Still open" bullet of
+  the 2026-08-29 pass as a documentation gap rather than a code gap.
+- **`DuckDbGenerationStore.directory`:** one directory per group, composed by the caller (P9).
+  Generation numbering restarts at 1 per group, so two groups sharing a directory collide on
+  `gen_0000000001.db`. The store takes no group on any method by design - the directory *is* the
+  group component. The code was already correct; only the reason was unstated. No per-group
+  subdirectory was added inside `finalPath`.
+
+### Tests
+
+Both code fixes are pinned in `ReviewFixRegressionTest` (its stated job: one test per finding,
+asserting the behavior the pre-fix code got wrong, so a revert fails the test rather than the
+reasoning). Three added, all on the existing `RefreshCycleTestBase` fixture, zero sleeps:
+
+- `sourceFailingUnderShutdown_classifiesShutdownAborted_notSourceError` - the source sets the
+  shutdown flag and throws `SQLException("ORA-01013: ...")`, which is the production ordering
+  exactly. Pre-fix this returns `SOURCE_ERROR`.
+- `sourceFailingWithoutShutdown_stillClassifiesSourceError` - the guard is a flag re-check, not
+  a widening of the abort case.
+- `leaseReleasedPastItsDeadline_firesLeaseExpired_alongsideLeaseReleased` - one lease released
+  inside its deadline (no event), one released after `clock.advance(leaseDeadline + 1s)` (one
+  event, owner and deadline asserted), and `leaseReleased` still fires twice.
+
+No earlier test was modified or weakened. The only edits to existing test sources are that
+file's KDoc, three imports, and the appended tests.
+
+**Verified by planting.** Both guards were short-circuited to `false` and the class re-run: the
+shutdown test fails with `expected: SHUTDOWN_ABORTED but was: SOURCE_ERROR` and the lease test
+with `Expected size: 1 but was: 0`, which are the two pre-fix symptoms exactly. The guards were
+then restored.
+
+208 tests, 0 failures, 2 pre-existing skips (205 before).
+
+### Rejected by the adjudication pass, with citations - do not rebuild
+
+- **A public factory / construction entry point.** Breaks `ArchitectureTest.kt:52` (`api` must
+  not depend on `core`/`duckdb`) and `:126` (nothing outside `core` reaches into `core`), two of
+  plan 2.2's five FIXED boundary rules. A stop-and-report awaiting a plan amendment, not a code
+  change.
+- **A per-group subdirectory in `finalPath`.** One store per group is structural; item 4
+  documents it.
+- **Any lease watchdog, forced reclamation or admin kill switch.** D8 and D29.
+- **`ShuttingDownException` for an in-flight query.** Spec 10.2 step 5 and D25 make an
+  interrupted consumer possible by design; the exception is contracted for `acquire` only.
+- **Moving verify off the serving instance.** Recorded deviation plus D29's accepted contention.
+- **Changing when `dataAsOf` is stamped.** `BuildContext` is FIXED; D35 says the error direction
+  is the safe one.
+- **Removing unread config fields.** Every one is a knob spec 13 assigns to a component P9 builds.
