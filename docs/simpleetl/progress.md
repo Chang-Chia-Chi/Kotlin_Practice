@@ -2062,3 +2062,109 @@ parity case whenever a later phase takes it.
 
 Unchanged from the M2 entry above, plus rule 14 above. E11 remains the phase whose case is
 maintenance rather than correctness, and declining it a third time is still a legitimate outcome.
+
+**Superseded the same day:** E11 was ruled on and declined - see "E11 - the third decline" below.
+E12 and E13 stand.
+
+
+---
+
+## E11 - the third decline  (2026-08-29)
+
+Asked to rule on E11 before building it. **Declined.** No code was written. Spec 11.2, spec 8.6 and
+the plan entry are reconciled to what ships.
+
+The finding is that `TaskAdmin.definitions` and `TaskScheduler.current` are two copies of one map,
+written in sequence during a reload. It has now been raised three times and declined three times -
+as L10 of review fix pass 3, in the 2026-08-29 design review, and here.
+
+### What is actually true about the duplication
+
+Re-derived from the code rather than from the entry. Both fields are `@Volatile`. `trigger` and
+`reload` are `@Synchronized` on the same `TaskAdmin`, so they exclude each other. `list()` is not
+synchronized and `TaskScheduler.fire` reads `current` from the host's cron thread under no lock.
+
+So the window is real and is wider than "a few instructions": `apply` publishes `current` at its
+top and `TaskAdmin` assigns `definitions` only after `apply` returns, which spans every cancel and
+every registration - N calls into the host's scheduler. During it, a firing runs the **new**
+definition while `list()` reports the **old** one.
+
+What that costs is an operator reading a stale row for the length of a reload. Nothing is
+corrupted: `TaskRunner.submit` captures the definition by value, and the rejection path restores
+`current` before `TaskAdmin` has touched `definitions`. The entry concedes this, and the concession
+is correct. It is a reporting skew.
+
+### Why the entry does not carry the phase
+
+The entry knew it needed a new argument and offered one - that an internal module makes the
+construction cycle vanish. Three problems, the first of which is disqualifying:
+
+**1. The contract does not close.** Spec 11.2 declared `class TaskScheduler(cron: CronScheduler)`
+with `apply(wanted: Map<String, String>): List<ValidationError>`. That shape cannot fire a task:
+`fire(name)` needs a runner to submit to and a definition to submit, and it is handed neither. The
+ways to close it are the ways the entry rules out - give the scheduler a `(String) ->
+TaskDefinition?` and the registry a scheduler, which is the construction cycle both earlier
+declines named, or add constructor parameters spec 11.2 does not declare. The entry's own prose
+contradicts itself here: "keeps **no back-reference at all**" three paragraphs above "`fire(name)`
+asks the registry". Asking the registry *is* the back-reference.
+
+By the root CLAUDE.md's stop-and-report rule, a fixed contract that does not survive contact with
+reality goes back to the document before any code is written. That alone settles this session.
+
+**2. It does not deliver its headline.** "Under one lock, with one rollback" is contradicted by the
+same entry's next bullet, which keeps the best-effort restore in `TaskScheduler` deliberately, so
+`TaskSchedulerApplyTest` does not move. After E11 there are still two rollbacks in two classes;
+what changes is which class holds which.
+
+**3. Its lead "done when" pins the wrong kind of property.** It asks for a test that observes the
+swap from both sides and "must fail on the pre-E11 code" - for the reporting skew the entry itself
+says should not be sold as a defect. A test that pins a cosmetic property in the shape of a safety
+one is how a phase gets justified by a window nobody will ever see, which is the outcome the entry
+explicitly warns against.
+
+### What the FOR case really had, and where it went instead
+
+Steelmanned before ruling, because two of the three points above are about the entry's wording
+rather than about the finding.
+
+The strongest argument for E11 is one the entry does not make. `TaskAdmin`'s KDoc says "a caller
+that supplies `tasks` here calls it itself" - so a host using spec 2.1's programmatic path must
+call `TaskAdmin(..., tasks)` **and** `TaskScheduler.apply`, and a host that forgets the second gets
+a `list()` full of tasks that never fire, silently. That is not a race lasting a reload; it is a
+permanent disagreement, and it is the genuine cost of two copies. One owner would make it
+unrepresentable.
+
+It was missing from spec 8.6's host wiring table, which is where every other obligation a library
+cannot enforce is written down with its symptom. **It is now a row there.** Making the wrong thing
+unrepresentable would be better than documenting it, and that is the honest residual case for a
+future E11 - but it is one host obligation among twelve, and it does not on its own buy a public
+signature change for zero behaviour change in the module that is most conservative about its
+declared surface.
+
+### The document debt this closes
+
+The 2026-08-29 architecture review wrote spec 11.2's `TaskScheduler` block for the post-E11 world
+and shipped no code, so from that day until this ruling **the spec described a class that did not
+exist** - and, per finding 1, could not have. Declining without touching it would have left the
+worst of both: a phase nobody will build and a document a later session would build from.
+
+Reconciled:
+
+- **Spec 11.2** now declares `TaskScheduler(cron: CronScheduler, runner: TaskRunner)` and
+  `apply(definitions: List<TaskDefinition>): ValidationReport?`, which is what has shipped since
+  P7. That also settles the older `Unit` vs `ValidationReport?` disagreement P7 left unrecorded -
+  by writing down what exists, not by changing it.
+- **Spec 11.2's "three modules E10 to E13 add"** note is now two. `TaskRegistry` is recorded as not
+  being built.
+- **Spec 8.6** gains the host row above.
+- **The plan's E11 entry** is marked DECLINED with the two contract errors named, and the original
+  text kept below the marker as the record of what was proposed.
+
+### If a fourth session revisits this
+
+Do not re-derive the finding; it is correct and it is not the question. The question is whether one
+owner for the definition map is worth a public signature change and a new module, given no
+correctness gap. Two things would change the answer: a host actually hitting the missing-`apply`
+obligation now written into 8.6, or a second reader of the definition map appearing, at which point
+"two copies" becomes "three". Neither has happened. A fourth proposal should also close the `fire`
+hole in its contract before it is read, since that is what stopped this one.

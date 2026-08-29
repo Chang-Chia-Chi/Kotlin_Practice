@@ -465,7 +465,27 @@ shape, not a rule enforced twice - spec 10 records it.
 
 ---
 
-## E11 - One owner for the live definition set
+## E11 - One owner for the live definition set  (DECLINED, third time, 2026-08-29)
+
+**Do not build this entry as written.** It was ruled on and declined on 2026-08-29; the reasoning
+is in progress.md under "E11 - the third decline". Two things in the contract below are wrong and
+would mislead a session that started from it:
+
+- The declared `TaskScheduler(cron)` with `apply(wanted: Map<String, String>)` **cannot fire a
+  task**. `fire(name)` needs a runner to submit to and a definition to submit, and that shape has
+  neither. Closing the hole needs either the back-reference this entry disclaims - the construction
+  cycle both earlier declines named - or constructor parameters spec 11.2 does not declare.
+- "One lock, one rollback" is contradicted by this entry's own contract, which keeps the
+  best-effort restore in `TaskScheduler` so that `TaskSchedulerApplyTest` does not move. After E11
+  there would still be two rollbacks in two classes.
+
+Spec 11.2 and 8.6 have been reconciled to the shipped shape. The one real cost of the two copies -
+a host that supplies `tasks` to `TaskAdmin` must call `TaskScheduler.apply` itself - is now a row
+in spec 8.6's host wiring table, which is where an obligation a library cannot enforce belongs.
+
+The original entry follows, unedited, as the record of what was proposed.
+
+---
 
 `TaskAdmin.definitions` and `TaskScheduler.current` are two copies of one map under two locks,
 swapped by a two-phase commit written across the seam between them.

@@ -1012,6 +1012,7 @@ list has grown with each phase that discovered another one - it was two when P7 
 | expose `AdminResource`, mapping `TaskAdmin`'s sealed results to 202 / 409 / 404 / 400 | - |
 | put `@RolesAllowed("etl-admin")` on every endpoint | an unauthenticated caller can trigger any task |
 | make `CronScheduler.schedule` throw on an unparseable cron | 8.5's atomic reload silently accepts a bad cron |
+| call `TaskScheduler.apply` itself when it builds definitions in code and passes them to `TaskAdmin`'s `tasks` parameter - `reload` is the only path that calls it for you | `list()` reports every task and not one of them ever fires, with no error raised. `TaskAdmin` and `TaskScheduler` hold a definition map each (11.2), so supplying one without the other leaves them permanently disagreeing rather than briefly. E11 would have removed this obligation by giving the map one owner, and was declined - see progress.md |
 | construct `TaskFileLoader` with the name set of the **same** `TaskHookRegistry` it hands `TaskEngine` | validation rule 5 passes for every hook name, and a typo dies at the end of a 30 minute run - precisely the failure 9.4 exists to prevent |
 | register `MicrometerTaskMetrics` against the application's `MeterRegistry` | every metric in 9.3 is silently absent; nothing fails and no dashboard populates |
 | construct the `SnapshotCache`, and own the `cache` name -> `CacheBinding(cache, group)` map handed to `TaskEngine` | a `cacheCopy` step fails at run time naming the unknown cache |
@@ -1531,17 +1532,23 @@ fun interface CronScheduler {                 // host-implemented over Quarkus's
     fun schedule(taskName: String, cron: String, run: () -> Unit): AutoCloseable
 }
 
-/** E11: narrowed to what its name says - the adapter over CronScheduler. It holds
- *  registrations and no definitions; the internal task registry owns the definition map and
- *  hands this the expressions it wants live. Cancel-then-register ordering, the swallowed
- *  close, and the best-effort restore on rejection all stay here.
+/** The adapter over CronScheduler, and - knowingly - the second holder of the definition
+ *  map. It keeps `registrations`, the cancel-then-register ordering, the swallowed `close`,
+ *  and the best-effort restore on rejection.
  *
- *  Two reconciliations in one line. P7 shipped `ValidationReport?` where this section
- *  declared `Unit`, an unrecorded deviation until now; it was always the error list below.
- *  And the parameter was `List<TaskDefinition>` only because this class was the second owner
- *  of the definition map, which is what E11 removes. */
-class TaskScheduler(cron: CronScheduler) {
-    fun apply(wanted: Map<String, String>): List<ValidationError>   // task name to cron
+ *  **Two deviations, written down here rather than left to disagree.** `runner` is a second
+ *  constructor parameter this section did not declare, recorded at P7 and still shipping; and
+ *  `apply` answers `ValidationReport?`, null on success, where this section declared `Unit`.
+ *  That second one shipped at P7 unrecorded and is reconciled here by stating what exists.
+ *
+ *  **This block described an unbuilt shape from 2026-08-29 until the E11 ruling.** The
+ *  architecture review wrote `TaskScheduler(cron)` with
+ *  `apply(wanted: Map<String, String>): List<ValidationError>` ahead of the code, against an
+ *  E11 that was then declined a third time. That shape also could not have worked as declared:
+ *  with neither a runner nor a definition lookup, `fire(name)` has nothing to submit and
+ *  nothing to submit it to. See progress.md's E11 ruling. */
+class TaskScheduler(cron: CronScheduler, runner: TaskRunner) {
+    fun apply(definitions: List<TaskDefinition>): ValidationReport?   // null when every cron registered
 }
 
 /** One limitedParallelism(1) view per task. `submit` is the whole public surface: the run
@@ -1574,18 +1581,18 @@ class ScratchDb : AutoCloseable {
 }
 ```
 
-**Three modules E10 to E13 add are deliberately absent from this section**, and their absence is
+**Two modules E10 and E12 add are deliberately absent from this section**, and their absence is
 the design rather than an omission:
 
 - **`TaskRules`** (E10, section 10) - the one implementation of every task-shaped validation rule.
   Internal, because both of its callers are in this module and a public rule checker would be a
   third way to ask the same question.
-- **`TaskRegistry`** (E11) - the owner of the live definition map and of the reload transaction.
-  Internal, because 8.6 makes the HTTP resource the host's and it talks to `TaskAdmin`, whose four
-  methods are unchanged. A public registry would be a second door onto state that has just been
-  given one owner.
 - **`ScratchDatasets`** (E12, section 5.5) - the write-then-publish protocol for a scratch dataset,
   wrapping `DatasetNamer`, which survives with the interface its own tests pin.
+
+A third, **`TaskRegistry`** (E11), was listed here from 2026-08-29 and is not being built: E11 was
+declined a third time. `TaskAdmin` and `TaskScheduler` keep a copy of the definition map each, and
+the one cost that carries is a host obligation now stated in 8.6.
 
 A fourth, the attempt policy of E13, is internal to `TaskEngine` for the same reason: 8.3 freezes
 `TaskEngine.run` as the whole engine interface, and the retry loop is behind it.
