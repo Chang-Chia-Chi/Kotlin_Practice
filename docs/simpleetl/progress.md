@@ -2227,6 +2227,24 @@ in, rather than computed in `physicalDataset` and again defaulted inside `writer
 `pipe` split into `pipe` (which decides) and `pipeRows` (which moves rows), because the block form
 needs the rows half to be callable both inside and outside `attemptTable`.
 
+### Review pass
+
+`/code-review` over the working tree found **no correctness bug in the extraction** - it verified
+independently that all four call sites keep write-then-publish order, that a throw still skips the
+publish, that `datasetIdentifier`'s name check still fires before any connection work (because
+`physical`/`parquetPath` are evaluated before the block, as the old pre-computation did), and that
+`scratchDataset` selects the same steps the old `physicalDataset` did.
+
+One finding was mine and is fixed: `aFailedParquetAttemptPublishesNothing` promised "no view, and
+no half-published file name" in its KDoc but asserted only the view, so the parquet path had no
+equivalent of the table test's "the failed attempt's rows stay where they are". It now asserts
+`summary__a1.parquet` still exists, and is renamed for what it checks. Without it the test passed
+against an implementation that cleaned up on failure - which spec 5.5 forbids.
+
+The review's other two findings are in `snapshotarchive` test fixtures belonging to a parallel
+session, which were uncommitted in the working tree when the review ran. Not this phase's, and not
+touched.
+
 ### Documents
 
 **None changed, and that is worth recording.** Spec 5.5's E12 paragraph and spec 11.2's

@@ -77,9 +77,17 @@ class ScratchDatasetsTest {
         }
     }
 
-    /** The same guarantee for the parquet half: no view, and no half-published file name. */
+    /**
+     * The same guarantee for the parquet half, and the same pair of assertions: no view, and the
+     * file this attempt wrote still on disk.
+     *
+     * The second half is not decoration. "Did not publish" is satisfied trivially by an
+     * implementation that deleted the file, and spec 5.5 forbids exactly that - a failed attempt is
+     * left in place and the run directory is reclaimed whole. Without it this test would pass
+     * against a `finally` that cleaned up, which is the behaviour the protocol rules out.
+     */
     @Test
-    fun aFailedParquetAttemptPublishesNothing() {
+    fun aFailedParquetAttemptPublishesNothingAndLeavesItsFile() {
         withDatasets { datasets, connection ->
             assertThrows<IllegalStateException> {
                 datasets.attemptParquet("summary", 1) { path ->
@@ -91,9 +99,18 @@ class ScratchDatasetsTest {
                 }
             }
 
-            assertTrue(Scratchpad.viewDefinitions(connection).isEmpty()) {
-                "definitions were ${Scratchpad.viewDefinitions(connection)}"
-            }
+            assertAll(
+                {
+                    assertTrue(Scratchpad.viewDefinitions(connection).isEmpty()) {
+                        "definitions were ${Scratchpad.viewDefinitions(connection)}"
+                    }
+                },
+                {
+                    assertTrue(Files.exists(root.resolve("summary__a1.parquet"))) {
+                        "the failed attempt's file stays where it is - not publishing is not cleaning up"
+                    }
+                },
+            )
         }
     }
 
