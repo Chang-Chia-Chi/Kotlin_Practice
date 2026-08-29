@@ -2236,3 +2236,73 @@ entry points because `MaterializeFormat` lives in `task`. That is the opposite o
 where the same review's anticipatory spec text described a shape that could not work; here it
 described one that did.
 
+---
+
+## E13 - dropped  (2026-08-29)
+
+Asked to decide, before starting, whether the attempt loop's ordering rules are assertable through
+the existing listener seam. **They are, and two of the three are already asserted verbatim.** E13 is
+dropped. No code was written.
+
+The entry marked this phase droppable itself: "If the ordering turns out to be assertable through
+the existing listener seam - which already sees every event in order - then E13 is not worth its own
+phase, and saying so is a better outcome than building it."
+
+### The seam is not the listener alone, and that is why it works
+
+The entry's own framing understates what exists. Ordering rule 1 is "metric before the listener
+describing the same moment", and **no listener can see that** - it sees listener calls. What can see
+it is `EventTrace`, which the P8b fixture already feeds from the listener, the metrics recorder and
+the hooks into **one ordered list**. Its KDoc says why it was built that way, and it is the same
+reason E13 exists: "spec 9.3's ordering clauses are all *relative* ones ... Two separate recordings
+could express neither."
+
+Against E13's three rules:
+
+- **Metric before the listener for the same moment.** `TaskMetricsTest.everyMetricIsOrderedBefore-`
+  `TheListenerCallForTheSameMoment` asserts one exact 14-entry list, interleaving
+  `metric.stepRetried` / `onStepError(willRetry=true)` twice, then `metric.stepEnded` /
+  `onStepEnd`, then `metric.scratchBytes` / hook / `metric.taskEnded` / `onTaskEnd`. Any reordering
+  fails it.
+- **A terminal failure metered as a step that *ended*, rows 0/0.**
+  `aTerminalStepFailureIsMeteredWithNoRowsAndKeepsTheSameOrder` asserts a 12-entry list carrying
+  `metric.stepEnded(..., attempt=2, read=0, written=0)` *before* `onStepError(willRetry=false)`,
+  and separately `assertEquals(StepResult(0, 0, 2_000, 2), metrics.result("load-wip"))`. That is the
+  rule, exactly, including the whole-step duration.
+- **`willRetry` decided before the backoff.** The only one not in a single interleaved list, because
+  the harness sleeper records into `delaysMillis` rather than into the trace. It is still pinned
+  from two sides - `TaskEngineRetryTest` asserts the backoff schedule
+  (`[2000, 4000]`, and `[2000, 4000, 8000, 16000, 30000, 30000]`), and the injected clock the
+  sleeper advances is what makes the terminal test's `durationMs = 2_000` exact. Closing the last
+  gap costs **one fixture line** - have the sleeper write `sleep(n)` into the trace - and **no
+  production change at all**. A seam is not the cheapest way to buy a line.
+
+### What dropping it costs, stated plainly
+
+The entry's second argument was reach, not coverage: five of the seven failure injections use
+`afterRows = 0`, so they fail at execution rather than mid-stream and "should stop needing a driver
+at all". That is true, and those five tests stay slower and more indirect than they need to be.
+
+It is not worth a seam, for three reasons:
+
+1. **The `Proxy` machinery does not go away.** E13's own contract keeps it for the two mid-stream
+   cases and for classification, so the phase deletes nothing - it reduces how often the existing
+   fixture is used.
+2. **It adds a test layer rather than replacing one.** Testing the policy through two recorders and
+   a lambda proves the policy orders its calls correctly. It does not prove `TaskEngine` drives the
+   policy correctly, so the engine-level trace tests above still have to exist - E13's own done-when
+   says every existing `TaskEngineRetryTest` assertion must still pass. Net: one more place the same
+   guarantee is asserted.
+3. **It would put the loop's wiring behind a fake.** E13 correctly refuses to move `isTransient`
+   behind the seam, because "putting the one part that needs a real exception behind a fake is how a
+   green test covers a production failure". The ordering rules sit one line from `isTransient` in
+   the same loop; the argument does not stop being true for its neighbours.
+
+### If a later session revisits this
+
+The trigger would be the loop growing a rule the trace cannot express - something decided but never
+reported, or an ordering between two things neither seam observes. Nothing in spec 5.3 or 9.3 asks
+for that today. If someone wants the five `afterRows = 0` tests cheaper, the small move is a fake
+step executor at the `dispatch` boundary, not a policy object owning the call order.
+
+**M2 is now complete: E10 built, E11 declined, E12 built, E13 dropped.**

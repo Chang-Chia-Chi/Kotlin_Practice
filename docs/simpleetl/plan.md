@@ -581,7 +581,18 @@ where they are; E10 explicitly did not move them.
 
 ---
 
-## E13 - The attempt loop gets a seam
+## E13 - The attempt loop gets a seam  (DROPPED, 2026-08-29)
+
+**Do not build this.** Ruled on before starting, as this entry's last paragraph asks. The three
+ordering rules below are assertable through the existing seams, and two of them are already
+asserted verbatim - `TaskMetricsTest` interleaves the listener, the metrics recorder and the hooks
+into one ordered `EventTrace`, which is what "metric before the listener" needs and what a listener
+alone cannot give. The third costs one fixture line and no production change. Reasoning in
+progress.md under "E13 - dropped". The entry follows unedited.
+
+---
+
+## E13 - The attempt loop gets a seam (as proposed)
 
 The retry loop is about thirty lines and carries the module's subtlest ordering rules - metric
 before the listener describing the same moment, `willRetry` decided before the backoff, a terminal
@@ -644,14 +655,18 @@ P8c Event stream
   |
 P9 Cache read step ........... M1 done, the framework is feature complete
   |
-E10 One rule module .......... M2 deepening pass begins
+E10 One rule module .......... M2 deepening pass begins - BUILT
   |
-E11 One definition owner
+E11 One definition owner ..... DECLINED, third time
   |
-E12 Scratch dataset protocol
+E12 Scratch dataset protocol . BUILT
   |
-E13 Attempt loop seam ........ droppable; decide before starting
+E13 Attempt loop seam ........ DROPPED; the ordering is already asserted
 ```
+
+**M2 is complete as of 2026-08-29**: two of the four built, one declined and one dropped, each
+recorded in progress.md. The outcomes below were written while all four were open and are kept as
+the reasoning that produced them.
 
 **M2 is a chain for the same reason M1's tail was.** E10, E12 and E13 all edit `TaskEngine.kt`, so
 they cannot be parallelised however independent their subjects look. E11 is the exception - it
