@@ -1923,14 +1923,15 @@ step, which is what lets the loader keep it in the structured `step` field a rep
 
 `Step.retries` is `Int?`. `TaskRules.retries(step)` resolves an unstated one on the run path.
 
-`TaskRulesParityTest` is the phase's own test: ten cases, each breaking one rule twice - once in
+`TaskRulesParityTest` is the phase's own test: ten cases over eight rules, each breaking one twice - once in
 YAML through `TaskFileLoader.load`, once in Kotlin through `TaskEngine.run` - and comparing the two
 diagnostics **verbatim** rather than by a shared fragment. Fragment matching would have passed
 against the drift M10 and M11 were raised about, because both old wordings named the rule and named
 a remedy. Only equality fails when one copy is edited and the other is not.
 
-**373 tests pass** (`mvn -pl SimpleEtl test -Dtest='!*OracleTest,!*Spike'`), 362 of them
-pre-existing and unchanged in count, plus this phase's eleven.
+**375 tests pass** (`mvn -pl SimpleEtl test -Dtest='!*OracleTest,!*Spike'`), 362 of them
+pre-existing and unchanged in count, plus this phase's thirteen: ten parity cases, the defaults
+test beside them, and the two regression tests the review pass below added.
 
 **The three Testcontainers Oracle classes were run and pass** - 20 tests, `WriterOracleTest`,
 `RowMapperOracleTest`, `RowPipeOracleTest`, about 2m20s. Docker was available on the machine this
@@ -2012,7 +2013,52 @@ it happily for four phases. Finding it took running the suite, which is what the
   early return: it is now gated on the step having no rule violation at all, so a `:name` DuckDB
   cannot parse still reports the binding error that explains it and not a syntax error on top.
 
+### Review pass, and the regression it caught
+
+A `/code-review` over the commit raised six findings. One was a real regression this phase
+introduced, one a real narrowing of an existing check, and four were doc accuracy. All are fixed in
+the follow-up commit; the two behavioural ones have a test each, and each test was confirmed to fail
+against the defect it describes.
+
+**The regression: one broken file-shaped rule hid every task-shaped rule for the same step.** The
+loader converts each step to the model so `TaskRules` can judge it, and `toStep` threw at three
+points a file-shaped rule discharges *on the loading path* - an unresolved `transform.bean` (rule
+4), a target with neither `table` nor `sql` (rule 10), and an `addColumns` type naming no canonical
+type (rule 15). The `runCatching { ... }.getOrNull()` that absorbed the throw also dropped every
+task-shaped violation for that step, so a `pipe` with a mistyped bean *and* an undefined `:name`
+reported only the bean. The author fixes it, reboots, meets the next one. It also regressed the
+negative-`retries` check, which before this phase ran over the YAML unconditionally.
+
+`toStep` is total now, and each of the three takes the reading that adds no error of its own: no
+target becomes an empty `TableTarget` (a `StatementTarget` would trip rule 11 on scratch, reporting
+a `target.sql` the author never wrote), an unresolved bean becomes no transform, an unwritable
+column type is dropped. On the loading path none of the three is reachable, because `load` builds
+definitions only once the whole directory has validated.
+
+**The narrowing:** `cacheSelectOnly` was gated on the step having *no* violation, where the intent
+is "rule 19 did not already reject this same text". So a `cacheCopy` with `retries: -1` and a
+non-SELECT `sql` reported only the retries, deferring to the next boot exactly the failure that
+check exists to catch early - one that passes every other rule and then dies on every firing, after
+the run has waited on the cache and taken a lease. `RuleViolation` gained a `rule: Int?` and the
+gate is now `violations.none { it.rule == 19 }`. Matching on the sentence would have made rewording
+a diagnostic silently change which parse runs.
+
+### Rule 14 is task-shaped, loader-only, and knowingly left that way
+
+The review found that `TaskRules`'s "the split is not an omission" enumeration was not exhaustive.
+Rule 20 is absent on purpose and now says so - it reads what a file *stated*, and a definition built
+in code has no file. **Rule 14 is a genuine gap**: `createTable: AUTO` off scratch is a statement
+about a step, it is enforced at load only, and a code-built `TableTarget("report_oracle", ...,
+CreateTable.AUTO)` boots clean and then gets REQUIRED semantics, because `TaskEngine.writer` hands a
+non-scratch table target to `JdbcTableWriter` and never reads `createTable`. That is the
+boots-clean-dies-quietly shape `TaskRules` exists to prevent.
+
+It **predates E10** and moving it changes engine behaviour beyond this phase's brief, which named
+seven rules. Recorded here and in `TaskRules`'s KDoc rather than fixed in passing - the same
+stop-and-report the module CLAUDE.md asks for. It is a two-line addition to `TaskRules.pipe` plus a
+parity case whenever a later phase takes it.
+
 ### Left for E11 to E13
 
-Unchanged from the M2 entry above. E11 remains the phase whose case is maintenance rather than
-correctness, and declining it a third time is still a legitimate outcome.
+Unchanged from the M2 entry above, plus rule 14 above. E11 remains the phase whose case is
+maintenance rather than correctness, and declining it a third time is still a legitimate outcome.

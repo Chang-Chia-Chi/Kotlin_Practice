@@ -340,6 +340,103 @@ class TaskRulesParityTest {
     }
 
     /**
+     * **One broken file-shaped rule must not hide the step's task-shaped ones.**
+     *
+     * The loader converts each step to the model so that `TaskRules` can judge it, and `toStep` has
+     * three points that a file-shaped rule discharges on the loading path - an unresolved
+     * `transform.bean` (rule 4), a target with neither `table` nor `sql` (rule 10), and an
+     * `addColumns` type that names no canonical type (rule 15). While that conversion could throw,
+     * a step breaking any of the three lost every task-shaped rule it also broke, and the author
+     * fixed one mistake, rebooted, and met the next. `toStep` is total instead.
+     *
+     * This step breaks rule 4 *and* rule 7 at once, and the report has to carry both. The rule 4
+     * half is the discriminating part: it is the case that used to throw.
+     */
+    @Test
+    fun aStepThatBreaksAFileShapedRuleIsStillJudgedAgainstTheTaskShapedOnes() {
+        val yaml = """
+            name: parity
+            phases:
+              - name: only
+                steps:
+                  - name: load-wip
+                    type: pipe
+                    source:
+                      datasource: oracle_mes
+                      sql: "select lot_id from wip where site = :nosuchvar"
+                    transform:
+                      bean: noSuchBean
+                      addColumns:
+                        - name: row_hash
+                          type: VARCHAR
+                    target:
+                      datasource: scratch
+                      table: wip_stg
+                      createTable: AUTO
+        """.trimIndent()
+
+        val messages = TaskFiles.loadOne(root, yaml).errors.map { it.message }
+
+        assertAll(
+            {
+                assertTrue(messages.any { "noSuchBean" in it }) {
+                    "rule 4, the file-shaped half; messages were $messages"
+                }
+            },
+            {
+                assertTrue(messages.any { "nosuchvar" in it }) {
+                    "rule 7 is task-shaped and must survive rule 4 failing on the same step - it did " +
+                        "not while the model conversion could throw; messages were $messages"
+                }
+            },
+        )
+    }
+
+    /**
+     * **The `cacheCopy` select-only parse is gated on rule 19, not on the step being clean.**
+     *
+     * A non-SELECT reaching the cache is the expensive failure `TaskFileLoader.cacheSelectOnly`
+     * exists to catch: it passes every other rule, then fails on every firing, after the run has
+     * waited on the cache and taken a lease. It is skipped only when rule 19 already rejected the
+     * same text, because a `:name` DuckDB cannot parse would otherwise report a syntax error on
+     * top of the binding error that explains it.
+     *
+     * So an *unrelated* violation on the same step - a negative `retries` here - must not suppress
+     * it. Gating on "no violations at all" did, and deferred the non-SELECT to the next boot.
+     */
+    @Test
+    fun anUnrelatedViolationDoesNotSuppressTheCacheCopyNonSelectCheck() {
+        val yaml = """
+            name: parity
+            phases:
+              - name: only
+                steps:
+                  - name: copy-wip
+                    type: cacheCopy
+                    cache: wip_cache
+                    output: wip_copy
+                    sql: "copy (select lot_id from wip) to 'wip.parquet'"
+                    retries: -1
+        """.trimIndent()
+
+        val messages = TaskFiles.loadOneWithCaches(root, yaml, TaskFiles.CACHES).errors.map { it.message }
+
+        assertAll(
+            {
+                assertTrue(messages.any { "negative" in it }) {
+                    "the unrelated violation; messages were $messages"
+                }
+            },
+            {
+                assertTrue(messages.any { "SELECT" in it }) {
+                    "the non-SELECT must be reported in the same boot, not the next one; messages " +
+                        "were $messages"
+                }
+            },
+        )
+    }
+
+    /**
      * Spec 5.3's defaults, on the path that had no loader in front of it (spec 2.1): 3 for a step
      * writing into scratch, 0 for anywhere else, resolved from a stated `null`.
      *

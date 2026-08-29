@@ -159,11 +159,14 @@ internal data class ExportVarYaml(val name: String, val sql: String)
  * not a datasource, [sql] runs inside the cache's own DuckDB instance, and [output] is an ordinary
  * scratch dataset.
  *
- * [retries] is null for "not stated" like every other step type, but resolves to **0** rather than
- * to the 3 a scratch-targeted step normally gets - and a stated value above 0 is validation rule
- * 20's rejection. Had this inherited the 3, every file that omits `retries` would fail that rule
- * on a value its author never wrote. The asymmetry with `CacheCopyStep.retries`, which is still 3,
- * is deliberate and is recorded in spec 10's rule 20.
+ * [retries] is null for "not stated" like every other step type and resolves to **0** rather than
+ * to the 3 a scratch-targeted step normally gets; a stated value above 0 is validation rule 20's
+ * rejection. Had this inherited the 3, every file that omits `retries` would fail that rule on a
+ * value its author never wrote.
+ *
+ * **That was an asymmetry with `CacheCopyStep.retries` until E10**, which declared 3, and spec 10
+ * rule 20 recorded it. Both sides now resolve an unstated value to 0, so the two agree and only
+ * rule 20's own home differs: it reads what a file *stated*, so it stays a startup rule.
  */
 internal data class CacheCopyYaml(
     override val name: String,

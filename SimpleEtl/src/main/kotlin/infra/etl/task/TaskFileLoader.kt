@@ -411,9 +411,9 @@ private class FileValidation(
      *
      * The model is built here rather than after the whole directory has validated, because
      * [TaskRules] is the one implementation of spec 10's task-shaped rules and it speaks
-     * [TaskDefinition]. A conversion that throws is a step whose *file*-shaped rules already
-     * failed - rule 10 discharges `target.sql!!`, rule 4 `getValue`, rule 15 `canonicalOf(..)!!` -
-     * so those errors are already in the report and there is nothing well formed left to judge.
+     * [TaskDefinition]. [toStep] is **total** for exactly that reason: a step that breaks a
+     * file-shaped rule still has to be judged against the task-shaped ones, or one mistake would
+     * hide every other mistake in the same step and the author would fix a two-error step twice.
      */
     private fun step(step: StepYaml) {
         when (step) {
@@ -427,10 +427,12 @@ private class FileValidation(
             is ExportYaml -> export(step)
             is CacheCopyYaml -> cacheCopy(step)
         }
-        val violations = runCatching { step.toStep(transforms) }.getOrNull()
-            ?.let { rules.check(it, defined) }.orEmpty()
+        val violations = rules.check(step.toStep(transforms), defined)
         errors += violations.map { ValidationError(file, it.step, null, it.message) }
-        if (step is CacheCopyYaml && violations.isEmpty()) cacheSelectOnly(step)
+        // Rule 19 specifically, not "no violation at all": an unrelated failure on the same step -
+        // a negative `retries`, say - must not defer the non-SELECT check to the next boot, which
+        // is the whole hazard [cacheSelectOnly] documents.
+        if (step is CacheCopyYaml && violations.none { it.rule == 19 }) cacheSelectOnly(step)
         // Rule 7's running scope. A step's exports resolve for *later* steps only (spec 6.2), so
         // they are added once this step has been judged; rule 8 is [TaskRules]'s and was applied
         // against the set as it stood above.
@@ -765,10 +767,13 @@ private fun canonicalOf(duckDbType: String): CanonicalType? =
     CanonicalType.entries.firstOrNull { it.duckDbType.equals(duckDbType.trim(), ignoreCase = true) }
 
 /**
- * The YAML form to the definition model, run only once the whole directory has validated - so every
- * `!!` here is discharged by a rule above. The datasource-dependent defaults of spec 4.4 and 5.3
- * are applied explicitly rather than left to the constructor, because a Kotlin default cannot be
- * conditionally skipped.
+ * The YAML form to the definition model.
+ *
+ * The datasource-dependent defaults of spec 4.4 and 5.3 are applied explicitly rather than left to
+ * the constructor, because a Kotlin default cannot be conditionally skipped. E10 kept that here
+ * rather than leaving `retries` null for `TaskRules` to resolve, because three assertions written
+ * by P6 and P9 read the resolved value off a *loaded* definition; both paths resolve through the
+ * same `defaultRetries`, so they cannot disagree (spec 5.3, and progress.md's E10 entry).
  */
 private fun TaskYaml.toDefinition(transforms: Map<String, RowTransform>) = TaskDefinition(
     name = name,
@@ -783,24 +788,43 @@ private fun TaskYaml.toDefinition(transforms: Map<String, RowTransform>) = TaskD
     phases = phases.map { phase -> Phase(phase.name, phase.steps.map { it.toStep(transforms) }) },
 )
 
+/**
+ * **Total, deliberately.** [FileValidation.step] converts every step - including one whose
+ * file-shaped rules have already failed - so that [TaskRules] can still judge it, and a conversion
+ * that threw would take every task-shaped rule for that step down with it. The three places that
+ * could throw are the three a file-shaped rule discharges on the path that *loads*, and each one
+ * takes the reading that adds no error of its own:
+ *
+ * - **No target at all** (rule 10, the neither-`table`-nor-`sql` half) becomes a [TableTarget] with
+ *   an empty name. A [StatementTarget] would have been the other choice and is worse: on `scratch`
+ *   it trips rule 11, reporting a `target.sql` the author never wrote.
+ * - **An unresolved `transform.bean`** (rule 4) becomes no transform. Nothing in [TaskRules] reads
+ *   it; rule 14's "AUTO with a transform needs addColumns" is the loader's and reads the YAML.
+ * - **An unwritable `addColumns` type** (rule 15) drops that column.
+ *
+ * On the loading path none of the three is reachable: `load` builds definitions only once the whole
+ * directory has validated, so every one of them has been rejected by name already.
+ */
 private fun StepYaml.toStep(transforms: Map<String, RowTransform>): Step = when (this) {
     is PipeYaml -> {
         PipeStep(
             name = name,
             source = PipeSource(source.datasource, source.sql),
-            target = if (target.table != null) {
+            target = if (target.sql != null && target.table == null) {
+                StatementTarget(target.datasource, target.sql, target.idempotent)
+            } else {
                 TableTarget(
                     datasource = target.datasource,
-                    table = target.table,
+                    table = target.table.orEmpty(),
                     createTable = target.createTable ?: defaultCreateTable(target.datasource),
                     idempotent = target.idempotent,
                 )
-            } else {
-                StatementTarget(target.datasource, target.sql!!, target.idempotent)
             },
-            transform = transform?.let { transforms.getValue(it.bean) },
-            addColumns = transform?.addColumns.orEmpty().map {
-                ColumnMeta(it.name, canonicalOf(it.type)!!, it.nullable, it.precision, it.scale)
+            transform = transform?.let { transforms[it.bean] },
+            addColumns = transform?.addColumns.orEmpty().mapNotNull {
+                canonicalOf(it.type)?.let { type ->
+                    ColumnMeta(it.name, type, it.nullable, it.precision, it.scale)
+                }
             },
             chunkSize = chunkSize,
             retries = retries ?: defaultRetries(target.datasource),
@@ -831,9 +855,9 @@ private fun StepYaml.toStep(transforms: Map<String, RowTransform>): Step = when 
         retries = retries ?: 0,
     )
 
-    // `?: 0`, and not the 3 CacheCopyStep declares. Rule 20 rejects a stated non-zero value, so
-    // inheriting the model's default would fail every file that omits the field on a value its
-    // author never wrote. Spec 10 rule 20 records the asymmetry.
+    // `?: 0`. Since E10 the model resolves an unstated `retries` to 0 for this step type too, so
+    // this is no longer the asymmetry spec 10 rule 20 used to record - it is the same answer
+    // written on the path that has to write it explicitly.
     is CacheCopyYaml -> CacheCopyStep(
         name = name,
         cache = cache,

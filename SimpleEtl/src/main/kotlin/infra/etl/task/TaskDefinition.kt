@@ -259,11 +259,16 @@ class ExportStep(
  * for a task file, and by the executor for a definition built in code (spec 2.1). A task needing a
  * variable copies the wider subset and filters in the following `materialize`.
  *
- * [retries] resolves to **0** and not to the 3 a scratch output would otherwise earn. It can never
- * fire: spec 5.3's retry classification is JDBC-shaped and a local DuckDB copy raises none of it,
- * and rule 20 rejects a stated non-zero value. From P5 to P9 this field declared 3 while the loader
- * resolved 0 for the same step type, an asymmetry rule 20 recorded and both sites commented; with
- * null representable, both paths resolve the same and the asymmetry is gone.
+ * [retries] resolves to **0** and not to the 3 a scratch output would otherwise earn, because it
+ * could never fire anyway: spec 5.3's retry classification is JDBC-shaped and a local DuckDB copy
+ * raises none of it. From P5 to P9 this field declared 3 while the loader resolved 0 for the same
+ * step type, an asymmetry rule 20 recorded and both sites commented; with null representable, both
+ * paths resolve the same and the asymmetry is gone.
+ *
+ * **Rule 20 itself is a startup rule and does not run here.** It rejects a *stated* non-zero value
+ * in a task file, and a definition built in code has no file and no author's word to read - so a
+ * caller may still write `retries = 3` and this engine will honour it, harmlessly, since nothing a
+ * cache copy raises is transient. `TaskRules` records the split.
  */
 class CacheCopyStep(
     override val name: String,

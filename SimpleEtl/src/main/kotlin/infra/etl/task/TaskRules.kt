@@ -18,8 +18,15 @@ internal val COLON_PREFIX: SqlParser = ColonPrefixSqlParser()
  *
  * [step] is nullable to match `ValidationError.step`, so the loader's mapping is a field copy.
  * Every violation [TaskRules.check] produces names a step, because the whole interface is per step.
+ *
+ * @param rule the spec 10 rule number, or null for a check spec 10 does not number - spec 5.3's
+ *   "`retries` may not be negative" is the only one. The [message] names its rule too, in prose an
+ *   author reads; this field is for a caller that has to *act* on which rule fired, and there is
+ *   exactly one - `TaskFileLoader` runs its DuckDB select-only parse over a `cacheCopy`'s SQL only
+ *   when rule 19 did not already reject that same text. Matching on the sentence would have made
+ *   rewording a diagnostic silently change which parse runs.
  */
-internal data class RuleViolation(val step: String?, val message: String)
+internal data class RuleViolation(val step: String?, val rule: Int?, val message: String)
 
 /**
  * The rules of spec 10 that are statements about a **task** rather than about a file, over the one
@@ -36,7 +43,22 @@ internal data class RuleViolation(val step: String?, val message: String)
  * 10 (the sealed [PipeTarget] makes it unrepresentable downstream, so there is nothing left to
  * check), rule 13's `format`-placement half, 16, 17 and rule 6's DuckDB syntax check stay in the
  * loader. The last of those boots an in-memory DuckDB parser, and it stays there so that nothing
- * on the run path ever does.
+ * on the run path ever does. Rules 2, 3, 4, 5, 9 and 21 are absent for a different reason: each
+ * needs something no per-step interface is handed - a sibling file, the configured datasource
+ * names, the CDI bean names, the hook registry, the task's other datasets, the cache bindings.
+ *
+ * **Two rules are task-shaped and are still loader-only, knowingly**, so this split is not yet
+ * exhaustive and E10 did not make it so:
+ *
+ * - **Rule 14** (`createTable: AUTO` is scratch-only) belongs here on the same terms as rule 18,
+ *   and moving it is a behaviour change to the engine that E10's brief did not name: a code-built
+ *   `TableTarget` off scratch with AUTO boots clean today and `TaskEngine.writer` then ignores
+ *   `createTable` entirely, giving it REQUIRED semantics. That is the boots-clean-dies-quietly
+ *   shape this class exists to prevent, it predates E10, and it is recorded in progress.md for a
+ *   later phase rather than fixed in passing.
+ * - **Rule 20** (a *stated* `cacheCopy` `retries > 0`) is a rule about what an author wrote in a
+ *   file, and a definition built in code has no file. It stays a startup rule on purpose; spec 10
+ *   rule 20 records it.
  *
  * @param parserFor the `:name` parser for a step's datasource. The loader has no `Handle` and takes
  *   the colon-prefix default; the engine hands over the datasource's own configured parser, so run
@@ -51,6 +73,12 @@ internal class TaskRules(private val parserFor: (String?) -> SqlParser = { COLON
      * step that did not state one. **This is the only place that resolution happens on the run
      * path**, which is what `Step.retries` being `Int?` buys - a Kotlin constructor default cannot
      * depend on another field, so before E10 every construction site re-derived it.
+     *
+     * `TaskFileLoader.toStep` resolves it too, as it builds the model, and that is not a second
+     * implementation: the value in both places is [defaultRetries], declared once. What the loader
+     * keeps is the *timing*, because three assertions written by P6 and P9 read a resolved number
+     * off a loaded definition. So a `TaskDefinition` from YAML never carries null and one built in
+     * code carries what its author stated - spec 5.3 records the residue.
      *
      * An `export` step has no target, and a `cacheCopy` resolves to 0 rather than to the 3 its
      * scratch output would otherwise earn: no failure a cache copy can produce is transient under
@@ -74,11 +102,13 @@ internal class TaskRules(private val parserFor: (String?) -> SqlParser = { COLON
      *   in it: they become available to later steps only once this one has succeeded.
      */
     fun check(step: Step, defined: Set<String>): List<RuleViolation> {
-        val found = mutableListOf<String>()
-        val err: (String) -> Unit = { found += it }
+        val found = mutableListOf<RuleViolation>()
+        val err: (Int?, String) -> Unit = { rule, message -> found += RuleViolation(step.name, rule, message) }
 
         val stated = step.retries
-        if (stated != null && stated < 0) err("retries must not be negative, got $stated (spec 5.3).")
+        if (stated != null && stated < 0) {
+            err(null, "retries must not be negative, got $stated (spec 5.3).")
+        }
         val retries = retries(step)
 
         when (step) {
@@ -90,6 +120,7 @@ internal class TaskRules(private val parserFor: (String?) -> SqlParser = { COLON
                 // is its own transaction (spec 5.2), so a retry re-runs the whole list.
                 if (step.datasource != SCRATCH && retries > 0 && !step.idempotent) {
                     err(
+                        12,
                         "retries $retries on the non-scratch datasource '${step.datasource}' requires " +
                             "idempotent: true (rule 12). Each statement is its own transaction, so a retry " +
                             "re-runs all of them - a failure after the first statement committed would run " +
@@ -101,16 +132,17 @@ internal class TaskRules(private val parserFor: (String?) -> SqlParser = { COLON
             is ExportStep -> export(step, defined, err)
             is CacheCopyStep -> cacheCopy(step, err)
         }
-        return found.map { RuleViolation(step.name, it) }
+        return found
     }
 
-    private fun pipe(step: PipeStep, retries: Int, defined: Set<String>, err: (String) -> Unit) {
+    private fun pipe(step: PipeStep, retries: Int, defined: Set<String>, err: (Int?, String) -> Unit) {
         sql(step.source.sql, "source.sql", step.source.datasource, defined, err)
         val target = step.target
         if (target is StatementTarget) {
             // Rule 11.
             if (target.datasource == SCRATCH) {
                 err(
+                    11,
                     "target.sql is not available on '$SCRATCH' (rule 11). DuckDB writes go through the " +
                         "appender, which takes a table and not a statement (spec 4.4).",
                 )
@@ -130,6 +162,7 @@ internal class TaskRules(private val parserFor: (String?) -> SqlParser = { COLON
             target.createTable == CreateTable.REQUIRED && retries > 0
         ) {
             err(
+                18,
                 "a scratch target with createTable REQUIRED cannot be retried (retries $retries, rule " +
                     "18). Its table has no attempt-suffixed name, so a retry appends onto the rows the " +
                     "failed attempt already flushed (spec 5.5). Use createTable AUTO, or retries: 0.",
@@ -138,6 +171,7 @@ internal class TaskRules(private val parserFor: (String?) -> SqlParser = { COLON
         // Rule 12.
         if (target.datasource != SCRATCH && retries > 0 && !target.idempotent) {
             err(
+                12,
                 "retries $retries on the non-scratch target '${target.datasource}' requires idempotent: " +
                     "true (rule 12). The framework cannot make a partially written external target safe " +
                     "on its own, so the author states that a rerun converges (spec 5.3).",
@@ -154,7 +188,7 @@ internal class TaskRules(private val parserFor: (String?) -> SqlParser = { COLON
      * unamended rule 7 blessed a step shape that could never run (review finding H3). The identical
      * step on scratch works, which is why it could only surface against a real Oracle.
      */
-    private fun materialize(step: MaterializeStep, retries: Int, defined: Set<String>, err: (String) -> Unit) {
+    private fun materialize(step: MaterializeStep, retries: Int, defined: Set<String>, err: (Int?, String) -> Unit) {
         sql(step.sql, "sql", step.datasource, defined, err)
         if (step.datasource == SCRATCH) return
         // Nothing is filtered: unlike a cacheCopy this text does go through JDBI at run time, so
@@ -166,6 +200,7 @@ internal class TaskRules(private val parserFor: (String?) -> SqlParser = { COLON
         else parsed.parameterNames.distinct().sorted()
         if (bound.isNotEmpty()) {
             err(
+                7,
                 "sql binds ${bound.map { ":$it" }}, and a materialize on the non-scratch datasource " +
                     "'${step.datasource}' can bind nothing (rule 7). It runs as CREATE TABLE " +
                     "${step.output} AS <sql>, and Oracle rejects a bind variable in DDL with ORA-01027 - " +
@@ -178,6 +213,7 @@ internal class TaskRules(private val parserFor: (String?) -> SqlParser = { COLON
         // a promise no author could keep. Spec 10 rule 12 records why drop-and-recreate was refused.
         if (retries > 0) {
             err(
+                12,
                 "retries $retries on the non-scratch datasource '${step.datasource}' is rejected for a " +
                     "materialize (rule 12). It runs as CREATE TABLE ${step.output} AS <sql>, so a retry " +
                     "after the table was created fails on table-already-exists every time - there is no " +
@@ -189,6 +225,7 @@ internal class TaskRules(private val parserFor: (String?) -> SqlParser = { COLON
         // and spec 5.6 puts the file in the scratch directory, so it is scratch-only here too.
         if (step.format == MaterializeFormat.PARQUET) {
             err(
+                13,
                 "format PARQUET writes a file into the scratch directory, so it is available only on the " +
                     "'$SCRATCH' datasource, not '${step.datasource}' (spec 5.6, rule 13).",
             )
@@ -202,12 +239,13 @@ internal class TaskRules(private val parserFor: (String?) -> SqlParser = { COLON
      * running set below feeds rule 8 alone. Without it two vars of one name inside a single step
      * would collide silently and the redefinition check would never see the first of them.
      */
-    private fun export(step: ExportStep, defined: Set<String>, err: (String) -> Unit) {
+    private fun export(step: ExportStep, defined: Set<String>, err: (Int?, String) -> Unit) {
         val running = defined.toMutableSet()
         step.vars.forEach { variable ->
             sql(variable.sql, "vars[${variable.name}].sql", step.datasource, defined, err)
             if (!running.add(variable.name)) {
                 err(
+                    8,
                     "variable '${variable.name}' is defined more than once (rule 8). A variable may not " +
                         "be redefined once set (spec 6.2). Defined at this point: ${defined.sorted()}.",
                 )
@@ -225,15 +263,16 @@ internal class TaskRules(private val parserFor: (String?) -> SqlParser = { COLON
      * text never passes through JDBI - the cache executes it verbatim - so rejecting them would
      * refuse SQL the cache runs perfectly well.
      */
-    private fun cacheCopy(step: CacheCopyStep, err: (String) -> Unit) {
+    private fun cacheCopy(step: CacheCopyStep, err: (Int?, String) -> Unit) {
         val parsed = names(step.sql, datasource = null) ?: return
         if (parsed.isPositional) {
-            err("sql uses positional '?' parameters, and a cacheCopy binds nothing at all (rule 19).")
+            err(19, "sql uses positional '?' parameters, and a cacheCopy binds nothing at all (rule 19).")
             return
         }
         val bound = parsed.parameterNames.filterNot { name -> name.all(Char::isDigit) }.distinct().sorted()
         if (bound.isNotEmpty()) {
             err(
+                19,
                 "sql binds ${bound.map { ":$it" }}, and a cacheCopy takes no variables at all (rule 19). " +
                     "It runs inside the cache's own DuckDB instance through CopyOutSpec.sql, a plain " +
                     "string with no binding channel (spec 3.6, 7.3), so this cannot be bound even if the " +
@@ -249,13 +288,14 @@ internal class TaskRules(private val parserFor: (String?) -> SqlParser = { COLON
         where: String,
         datasource: String?,
         defined: Set<String>,
-        err: (String) -> Unit,
+        err: (Int?, String) -> Unit,
     ) {
         if (positional(text, where, datasource, err)) return
         val parsed = names(text, datasource) ?: return
         val undefined = parsed.parameterNames.filterNot { it in defined }.distinct().sorted()
         if (undefined.isNotEmpty()) {
             err(
+                7,
                 "$where binds ${undefined.map { ":$it" }}, which no built-in, literal var or earlier " +
                     "export has defined (rule 7). Variables resolve in step order, so an export step must " +
                     "come before its use (spec 6.2). Defined at this point: ${defined.sorted()}.",
@@ -264,9 +304,9 @@ internal class TaskRules(private val parserFor: (String?) -> SqlParser = { COLON
     }
 
     /** Rule 6's positional half alone, for the one text rule 7 excepts. True when it fired. */
-    private fun positional(text: String, where: String, datasource: String?, err: (String) -> Unit): Boolean {
+    private fun positional(text: String, where: String, datasource: String?, err: (Int?, String) -> Unit): Boolean {
         if (names(text, datasource)?.isPositional != true) return false
-        err("$where uses positional '?' parameters. Variables bind by name, so write ':name' (spec 6.3).")
+        err(6, "$where uses positional '?' parameters. Variables bind by name, so write ':name' (spec 6.3).")
         return true
     }
 
