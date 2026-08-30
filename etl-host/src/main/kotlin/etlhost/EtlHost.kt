@@ -120,11 +120,25 @@ class EtlHost(
      */
     fun reload(directory: Path = config.taskDirectory): ValidationReport? = admin.reload(directory)
 
-    /** What `AdminResource` answers, given only the sealed result and this host's own flag (M3). */
-    fun classify(result: TriggerResult): Int = when {
-        result !is TriggerResult.AlreadyRunning -> 202
-        shuttingDown -> 503
-        else -> 409
+    /**
+     * SimpleEtl spec 8.2's status codes, given only the sealed result and this host's own flag.
+     *
+     * An exhaustive `when` over the sealed type rather than a chain of `if`s, which is what the
+     * type is sealed *for*: a fifth `TriggerResult` becomes a compile error here rather than a
+     * silent 202. Written the other way once, and `Unknown` and `Disabled` both answered 202
+     * because they are "not AlreadyRunning" - a host that accepts a trigger for a task it does not
+     * have, with a run id it never allocated.
+     *
+     * `AlreadyRunning` is the only line with a condition, and it is `composed-host-example`'s M3:
+     * the framework reuses that case for "busy" and for "closed", spec 11.2 declined a fifth case
+     * on the argument that the host can tell them apart because the host raised [shuttingDown]
+     * itself, and this is that argument executed.
+     */
+    fun classify(result: TriggerResult): Int = when (result) {
+        is TriggerResult.Accepted -> 202
+        TriggerResult.Unknown -> 404
+        TriggerResult.Disabled -> 400
+        TriggerResult.AlreadyRunning -> if (shuttingDown) 503 else 409
     }
 
     private companion object {

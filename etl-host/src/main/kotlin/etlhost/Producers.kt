@@ -3,11 +3,13 @@ package etlhost
 import infra.etl.micrometer.MicrometerTaskMetrics
 import infra.etl.task.CacheBinding
 import infra.etl.task.EtlWiring
+import infra.etl.task.TaskRunListener
 import infra.snapshotcache.api.GroupId
 import infra.snapshotcache.api.SnapshotCacheConfig
 import infra.snapshotcache.bootstrap.ManagedSnapshotCache
 import infra.snapshotcache.bootstrap.openSnapshotCache
 import io.micrometer.core.instrument.MeterRegistry
+import jakarta.enterprise.inject.Instance
 import jakarta.enterprise.inject.Produces
 import jakarta.inject.Named
 import jakarta.inject.Singleton
@@ -134,7 +136,7 @@ class Producers(private val config: HostConfig) {
     fun etlWiring(
         cache: ManagedSnapshotCache,
         cron: QuarkusCronScheduler,
-        listener: LoggingRunListener,
+        listeners: Instance<TaskRunListener>,
         metrics: MicrometerTaskMetrics,
         @Named(TARGET) target: Jdbi,
     ): EtlWiring = EtlWiring(
@@ -143,7 +145,10 @@ class Producers(private val config: HostConfig) {
         datasources = mapOf(config.targetName to target),
         caches = config.groupSql.keys.associateWith { CacheBinding(cache.cache, GroupId(it)) },
         scratchMemoryLimitMb = config.scratchMemoryLimitMb,
-        listener = listener,
+        // Every TaskRunListener bean, composed. `TaskEngine` takes one listener, so spec 9.2's
+        // "the host's existing in-house logging mechanism" plus anything else has nowhere to meet
+        // except `of`, which also isolates them from each other exactly as the engine does.
+        listener = TaskRunListener.of(*listeners.stream().toList().toTypedArray()),
         metrics = metrics,
         onTasksLoaded = metrics::seed,
     )
