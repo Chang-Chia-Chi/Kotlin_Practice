@@ -1,6 +1,7 @@
 package infra.etl.spike
 
 import org.duckdb.DuckDBAppender
+import org.junit.jupiter.api.Tag
 import org.junit.jupiter.api.Test
 import java.math.BigDecimal
 import java.nio.file.Files
@@ -15,6 +16,7 @@ import java.time.LocalDateTime
  *
  * Each case gets its own database file so an appender failure cannot poison the next case.
  */
+@Tag("spike")
 class S3ImplicitCastSpike {
 
     private class Case(val label: String, val colType: String, val append: (DuckDBAppender) -> Unit)

@@ -18,6 +18,7 @@ import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeAll
+import org.junit.jupiter.api.Tag
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertAll
 import org.testcontainers.junit.jupiter.Container
@@ -36,6 +37,7 @@ import org.testcontainers.oracle.OracleContainer
  * read with `Row.decimal`, never `Row.long`.
  */
 @Testcontainers
+@Tag("oracle")
 class RowPipeOracleTest {
 
     companion object {

@@ -20,6 +20,7 @@ import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeAll
 import org.junit.jupiter.api.BeforeEach
+import org.junit.jupiter.api.Tag
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertAll
 import org.junit.jupiter.api.assertThrows
@@ -38,6 +39,7 @@ import org.testcontainers.oracle.OracleContainer
  * DECIMAL in the generated DDL silently truncates to DECIMAL(18,3).
  */
 @Testcontainers
+@Tag("oracle")
 class WriterOracleTest {
 
     companion object {

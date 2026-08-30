@@ -19,6 +19,7 @@ import org.junit.jupiter.api.Assertions.assertNotEquals
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeAll
+import org.junit.jupiter.api.Tag
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertAll
 import org.junit.jupiter.api.assertThrows
@@ -38,6 +39,7 @@ import org.testcontainers.oracle.OracleContainer
  * nullable.
  */
 @Testcontainers
+@Tag("oracle")
 class RowMapperOracleTest {
 
     companion object {

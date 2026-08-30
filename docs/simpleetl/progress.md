@@ -2461,3 +2461,67 @@ invisible. The move that would close it is a host module in this repository, and
 explains why that has not been built here. `scheduled` is the pattern worth reusing if another
 obligation turns out to have in-process evidence: report the disagreement where the operator
 already looks, rather than adding a check the framework cannot honestly make.
+
+
+---
+
+## E15a - Build hygiene  (2026-08-30)
+
+Four fixes to how the module builds and tests, from the maintainer review of adoption findings.
+The patch was authored by a build agent and reviewed at maintainer depth; two defects were found
+in review and fixed before merge - both recorded below, because a review that finds nothing is
+indistinguishable from a review that looked at nothing.
+
+### 1. The JDK 17 test-JVM trap
+
+`pom.xml` targets Java 17 as a consumer-compatibility promise, but surefire injected
+`-XX:+EnableDynamicAgentLoading` unconditionally - a flag that exists only from JDK 21, so a
+developer on the advertised JDK 17 got "Unrecognized VM option" the moment tests started. The
+parent pom targets 21, which is why no CI run ever saw it. The argLine now lives in a
+`dynamic-agent-loading` profile keyed on `<jdk>[21,)</jdk>`; `help:active-profiles` confirms it
+activates here. Maven merges profile plugin config with the base, so `excludedGroups` (base) and
+`argLine` (profile) both apply - verified, not assumed.
+
+### 2. `provided` -> `optional` for micrometer-core
+
+`provided` claimed a container supplies the jar at runtime; nothing does. `<optional>true</optional>`
+buys the identical non-transitivity - P8b's two-module-reactor measurement still stands and the
+comment still cites it - with honest semantics. Spec 8.6's micrometer row updated in the same
+commit, because documents and code must agree.
+
+### 3. Tags replace the naming-convention exclusion
+
+Spikes dodged execution only because `*Spike` misses surefire's default include pattern, and any
+`-Dtest=` destroyed that - CLAUDE.md documented a 6.2M-rows-times-ten spike as a hazard to step
+around rather than defusing it. Now: `@Tag("spike")` on the five spikes, `@Tag("oracle")` on the
+three Testcontainers classes, `<excludedGroups>spike,oracle</excludedGroups>` as the default.
+Plain `mvn test` runs 385 with zero spikes and zero containers; `-Dgroups=oracle` /
+`-Dgroups=spike` opt back in deliberately and survive any `-Dtest=` filter. The annotations add
+no assertion and change no body - the only edits to earlier phases' test files are one import and
+one annotation line each, recorded here per the never-touch-earlier-tests rule. CLAUDE.md's
+Commands section rewritten: a warning about a defused hazard is future confusion.
+
+### 4. The non-suspend invariant is now enforced, not narrated
+
+CLAUDE.md's concurrency idiom records that no frame in `run -> execute -> pipe ->
+ScratchDb.connection()` is `suspend` - the fact that makes a single DuckDB connection safe under
+`synchronized` (spec 7.2: two threads on one connection crash the JVM) and makes `Mutex`
+unreachable. That constraint lived in prose and was enforced by nothing. Two ArchUnit rules now
+ban any dependency on `kotlin.coroutines.Continuation` - how `suspend fun` compiles - in
+`infra.etl.duckdb..` and in `TaskEngine` and its nested classes.
+
+**The review caught a real hole in the submitted rule.** As authored it matched
+`haveSimpleName("TaskEngine")` - but the crash path runs through the *inner* class
+(`TaskEngine$Run.execute -> pipe`), whose simple name is `Run`. Mutation-tested: a
+`suspend fun` planted on `Run` sailed through the submitted rule and fails the merged one
+(`haveNameMatching` on the FQN with a `$`-suffix alternative). Both rules were then proven by
+mutation - a suspend fun planted in `ScratchDb` and in `Run` each fails exactly its rule, and
+both probes were removed. A guard nothing has ever seen fire is indistinguishable from a guard
+that does not work, which is this module's own P3 lesson applied to its own tests.
+
+### Suite
+
+385 green (383 + the two ArchUnit rules) via plain `mvn test` - the exclusion incantation is
+gone. The Oracle tag path was exercised by the authoring agent against live Docker; the spike tag
+path is excluded by the same mechanism and was verified by selection, not by running the 62M-row
+spike.

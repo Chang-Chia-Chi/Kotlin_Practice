@@ -1,5 +1,6 @@
 package infra.etl.spike
 
+import org.junit.jupiter.api.Tag
 import org.junit.jupiter.api.Test
 import java.nio.file.Files
 import java.nio.file.Path
@@ -19,6 +20,7 @@ import kotlin.io.path.fileSize
  *
  * -Dspike.s2.runs=N  -Dspike.s2.rows=N  -Dspike.s2.datasets=N  -Dspike.s2.memMb=N
  */
+@Tag("spike")
 class S2ScratchGrowthSpike {
 
     @Test

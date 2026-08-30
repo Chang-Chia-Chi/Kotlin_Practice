@@ -15,8 +15,9 @@ retrying, observable task. Layer 2 depends on Layer 1; nothing depends on Layer 
 ## Commands
 
 ```bash
-mvn -pl SimpleEtl -am test -Dtest='!*OracleTest,!*Spike' -Dsurefire.failIfNoSpecifiedTests=false
-mvn -pl SimpleEtl -am test          # everything, including the three Testcontainers Oracle classes
+mvn -pl SimpleEtl -am test          # the default: excludes spike and oracle groups
+mvn -pl SimpleEtl -am test -Dgroups=oracle   # the three Testcontainers Oracle classes; needs Docker
+mvn -pl SimpleEtl -am test -Dgroups=spike    # spikes; one appends 6.2M rows ten times - run deliberately
 
 # First check when reviewing any phase - did it touch earlier tests?
 git diff --stat <prev-phase-tag>..HEAD -- '**/test/**'
@@ -26,10 +27,11 @@ git diff --stat <prev-phase-tag>..HEAD -- '**/test/**'
 Docker; where Docker is absent they cannot run and any claim about them is inherited from an
 earlier phase rather than re-measured.
 
-`!*Spike` has to be written out. Spikes are named `*Spike` so that surefire's **default** include
-pattern skips them - but any `-Dtest=` replaces that default, so `-Dtest='!*OracleTest'` alone
-*runs* them, one of which appends 6.2M rows ten times. Run one deliberately with
-`-Dtest=<name> -Dsurefire.failIfNoSpecifiedTests=false`.
+Spikes carry `@Tag("spike")` and the three `*OracleTest` classes carry `@Tag("oracle")`; surefire's
+`excludedGroups` in `SimpleEtl/pom.xml` excludes both by default. This replaced a naming-convention
+trick (spikes named `*Spike` to dodge surefire's default include pattern) that any `-Dtest=`
+silently defeated - `-Dgroups=` opts back into either group deliberately and survives a `-Dtest=`
+alongside it.
 
 ## Documents
 

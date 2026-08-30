@@ -1,5 +1,6 @@
 package infra.etl.spike
 
+import org.junit.jupiter.api.Tag
 import org.junit.jupiter.api.Test
 import java.nio.file.Files
 import java.nio.file.Path
@@ -12,6 +13,7 @@ import kotlin.io.path.deleteRecursively
  *
  * -Dspike.s1.rows=N   -Dspike.s1.iters=N   -Dspike.s1.memMb=N
  */
+@Tag("spike")
 class S1AppenderFlushCostSpike {
 
     @OptIn(kotlin.io.path.ExperimentalPathApi::class)

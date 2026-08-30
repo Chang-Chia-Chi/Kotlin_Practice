@@ -26,18 +26,47 @@
 
     <!-- testcontainers pulls byte-buddy 1.14.18, mockito 5.14.2 wants 1.15.4. On Java 22 the
          skew fails mock creation at runtime, not at resolve time. Pin the newer one. -->
+
+    <!-- Spikes (`@Tag("spike")`) and the Testcontainers Oracle classes (`@Tag("oracle")`) are
+         excluded from the default run. This replaces the old naming-convention trick (spikes
+         named `*Spike` to dodge surefire's default include pattern) which any `-Dtest=` silently
+         defeated - one spike appends 6.2M rows ten times. `-Dgroups=oracle` or `-Dgroups=spike`
+         opts back in deliberately. -->
     <build>
         <plugins>
             <plugin>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <configuration>
-                    <!-- Mockito 5 self-attaches its inline mock maker; Java 22 warns, and a
-                         future JDK will refuse. ponytail: flag now, -javaagent when it breaks. -->
-                    <argLine>-XX:+EnableDynamicAgentLoading</argLine>
+                    <excludedGroups>spike,oracle</excludedGroups>
                 </configuration>
             </plugin>
         </plugins>
     </build>
+
+    <!-- -XX:+EnableDynamicAgentLoading exists only from JDK 21 - target=17 above is a real
+         consumer-compatibility promise, so a developer on the advertised JDK 17 must not get
+         "Unrecognized VM option" at test startup. Confined to a profile keyed on the running
+         JDK rather than the compiler target. -->
+    <profiles>
+        <profile>
+            <id>dynamic-agent-loading</id>
+            <activation>
+                <jdk>[21,)</jdk>
+            </activation>
+            <build>
+                <plugins>
+                    <plugin>
+                        <artifactId>maven-surefire-plugin</artifactId>
+                        <configuration>
+                            <!-- Mockito 5 self-attaches its inline mock maker; Java 22 warns, and a
+                                 future JDK will refuse. ponytail: flag now, -javaagent when it breaks. -->
+                            <argLine>-XX:+EnableDynamicAgentLoading</argLine>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
 
     <dependencyManagement>
         <dependencies>
@@ -111,20 +140,21 @@
             <version>3.6.1.Final</version>
         </dependency>
         <!-- P8b: spec 9.3's six meters, bound in infra.etl.micrometer and named nowhere else.
-             `provided` and not compile, and that is load-bearing: spec 2.1's whole reason for
-             existing is that Layer 1 ships to the snapshot cache without Layer 2, and Maven has
-             no layer granularity - at compile scope every Layer 1 consumer would inherit
-             Micrometer. `provided` is on this module's compile AND test classpath, so
-             SimpleMeterRegistry is available to the label contract test, and it is not
-             transitive. Measured on a throwaway two-module reactor: a consumer of a
-             `provided`-scoped library resolved zero micrometer artefacts while all five were on
-             the library's own test classpath. A host wiring MicrometerTaskMetrics necessarily
-             already has a MeterRegistry. -->
+             `optional`, and that is load-bearing: spec 2.1's whole reason for existing is that
+             Layer 1 ships to the snapshot cache without Layer 2, and Maven has no layer
+             granularity - inherited transitively, every Layer 1 consumer would get Micrometer.
+             `optional` keeps compile scope (so SimpleMeterRegistry is on this module's own
+             compile and test classpath for the label contract test) while consumers resolve
+             nothing transitively. This replaced `provided`, which achieved the same
+             non-transitivity - measured on a throwaway two-module reactor at P8b, a consumer
+             resolved zero micrometer artefacts - but claimed a container supplies the jar at
+             runtime, and nothing does. Same effect, honest semantics. A host wiring
+             MicrometerTaskMetrics necessarily already has a MeterRegistry. -->
         <dependency>
             <groupId>io.micrometer</groupId>
             <artifactId>micrometer-core</artifactId>
             <version>1.14.2</version>
-            <scope>provided</scope>
+            <optional>true</optional>
         </dependency>
         <dependency>
             <groupId>org.junit.jupiter</groupId>

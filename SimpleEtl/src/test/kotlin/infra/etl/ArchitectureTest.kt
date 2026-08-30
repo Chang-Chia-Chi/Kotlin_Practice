@@ -179,4 +179,45 @@ class ArchitectureTest {
             .because("a cycle makes the split unenforceable: every package would depend on every other")
             .check(classes)
     }
+
+    // ------------------------------------------------------------------------------------
+    // The non-suspend invariant CLAUDE.md's Concurrency idiom section records: no frame in
+    // `run -> execute -> pipe -> ScratchDb.connection()` is `suspend`. That is what makes a
+    // single DuckDB Connection safe under `synchronized` rather than `Mutex` - DuckDB's hazard
+    // is a *thread* constraint (spec 7.2), and a suspend fun can resume its continuation on a
+    // different thread. A `suspend fun` compiles to an extra `kotlin.coroutines.Continuation`
+    // parameter, so banning that parameter type bans `suspend` without needing bytecode-level
+    // coroutine inspection. Both the duckdb leaf and the task-layer entry point are checked:
+    // banning only the leaf would let a suspend `TaskEngine.execute` shuffle threads above it
+    // and still reach `ScratchDb.connection()` from something other than the calling thread.
+    // ------------------------------------------------------------------------------------
+
+    @Test
+    fun `no method in duckdb is suspend`() {
+        noClasses()
+            .that().resideInAPackage("infra.etl.duckdb..")
+            .should().dependOnClassesThat().haveFullyQualifiedName("kotlin.coroutines.Continuation")
+            .because(
+                "a single DuckDB Connection used from two threads crashes the JVM (spec 7.2); a " +
+                    "suspend fun's continuation can resume on another thread, so ScratchDb's " +
+                    "synchronized guard is only sound if nothing in this package is suspend",
+            )
+            .check(classes)
+    }
+
+    @Test
+    fun `TaskEngine is not suspend`() {
+        // Matched by FQN prefix, not simple name: the crash path runs through the *inner* class
+        // (`TaskEngine${'$'}Run.execute -> pipe -> ScratchDb.connection()`), whose simple name is
+        // `Run`. A simple-name match would guard the shell and miss the executor.
+        noClasses()
+            .that().haveNameMatching("""infra\.etl\.task\.TaskEngine(\$.*)?""")
+            .should().dependOnClassesThat().haveFullyQualifiedName("kotlin.coroutines.Continuation")
+            .because(
+                "TaskEngine.run is frozen as an ordinary function (spec 11.2); the crash path to " +
+                    "ScratchDb.connection() runs through the engine, so a suspend TaskEngine could " +
+                    "reach it from a different thread even with the duckdb package itself clean",
+            )
+            .check(classes)
+    }
 }
