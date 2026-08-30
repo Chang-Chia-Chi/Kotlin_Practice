@@ -1005,6 +1005,13 @@ enumerated here with the symptom of missing each. **None of them is tested in th
 because no host module exists in it; that is a real gap, recorded rather than papered over. The
 list has grown with each phase that discovered another one - it was two when P7 wrote it.
 
+**Four of these rows are the same shape - "pass the same thing to two constructors" - and E15b's
+`EtlWiring` (11.2) discharges them for a host that uses it.** Each such row says so in place rather
+than being deleted: a host may still wire the four classes itself, in which case the obligation is
+exactly what it always was. The rows carrying no such note are the ones no in-module code can
+absorb, and `EtlWiring`'s own KDoc names them, so that its green tests are never read as covering
+them.
+
 | The host must | Symptom if missed |
 |---|---|
 | set `quarkus.scheduler.start-mode=forced` in the **application's** `application.properties` | no task ever fires, and no error is raised |
@@ -1012,17 +1019,18 @@ list has grown with each phase that discovered another one - it was two when P7 
 | expose `AdminResource`, mapping `TaskAdmin`'s sealed results to 202 / 409 / 404 / 400 | - |
 | put `@RolesAllowed("etl-admin")` on every endpoint | an unauthenticated caller can trigger any task |
 | make `CronScheduler.schedule` throw on an unparseable cron | 8.5's atomic reload silently accepts a bad cron |
-| call `TaskScheduler.apply` itself when it builds definitions in code and passes them to `TaskAdmin`'s `tasks` parameter - `reload` is the only path that calls it for you | `list()` reports every task and not one of them ever fires, with no error raised. `TaskAdmin` and `TaskScheduler` hold a definition map each (11.2), so supplying one without the other leaves them permanently disagreeing rather than briefly. E11 would have removed this obligation by giving the map one owner, and was declined - see progress.md. **E14 made the disagreement observable rather than silent**: `TaskStatus.scheduled` is false beside a non-null `cron` for a definition nothing registered, and `list()` logs a WARN naming a registration no definition backs. The obligation still stands; what changed is that missing it is now visible from `GET /admin/etl/tasks` |
-| construct `TaskFileLoader` with the name set of the **same** `TaskHookRegistry` it hands `TaskEngine` | validation rule 5 passes for every hook name, and a typo dies at the end of a 30 minute run - precisely the failure 9.4 exists to prevent |
-| register `MicrometerTaskMetrics` against the application's `MeterRegistry` | every metric in 9.3 is silently absent; nothing fails and no dashboard populates |
+| call `TaskScheduler.apply` itself when it builds definitions in code and passes them to `TaskAdmin`'s `tasks` parameter - `reload` is the only path that calls it for you | `list()` reports every task and not one of them ever fires, with no error raised. `TaskAdmin` and `TaskScheduler` hold a definition map each (11.2), so supplying one without the other leaves them permanently disagreeing rather than briefly. E11 would have removed this obligation by giving the map one owner, and was declined - see progress.md. **E14 made the disagreement observable rather than silent**: `TaskStatus.scheduled` is false beside a non-null `cron` for a definition nothing registered, and `list()` logs a WARN naming a registration no definition backs. The obligation still stands; what changed is that missing it is now visible from `GET /admin/etl/tasks`. **E15b: discharged by `EtlWiring.start(definitions)`, which calls `apply` before it builds the `TaskAdmin` and reports a rejected batch as `WiringResult.Invalid`** |
+| construct `TaskFileLoader` with the name set of the **same** `TaskHookRegistry` it hands `TaskEngine` | validation rule 5 passes for every hook name, and a typo dies at the end of a 30 minute run - precisely the failure 9.4 exists to prevent. **E15b: discharged by `EtlWiring`, which takes one `TaskHooks` and derives the loader's set from it** |
+| register `MicrometerTaskMetrics` against the application's `MeterRegistry`, and hand that binding to `TaskEngine` | every metric in 9.3 is silently absent; nothing fails and no dashboard populates. **E15b: `EtlWiring` discharges the second half - it takes one `TaskMetrics` and passes it on. Constructing the binding over the application's registry stays the host's, because `infra.etl.task` may not name `io.micrometer`** |
 | construct the `SnapshotCache`, and own the `cache` name -> `CacheBinding(cache, group)` map handed to `TaskEngine` | a `cacheCopy` step fails at run time naming the unknown cache |
-| construct `TaskFileLoader` with the **same** cache-name set it hands `TaskEngine` | rule 21 passes for every name, and a typo dies at the end of a 30 minute run - the same failure the hooks row above records |
+| construct `TaskFileLoader` with the **same** cache-name set it hands `TaskEngine` | rule 21 passes for every name, and a typo dies at the end of a 30 minute run - the same failure the hooks row above records. **E15b: discharged by `EtlWiring`, which takes one `Map<String, CacheBinding>` and derives the loader's set from its keys** |
 | **assert that a generation becomes reclaimable after a `cacheCopy` step.** Not testable in this repository: reclamation lives in `DefaultSnapshotCache`, which is `internal` to the cache module, so SimpleEtl's tests use a double implementing the public interface. Plan P9's "a test asserts the generation becomes reclaimable" is achievable only in a host that owns a real cache | a step that holds or references a generation stalls refreshing, and this repository's suite cannot see it |
 | put `io.micrometer:micrometer-core` (>= 1.14.x) on the application's **runtime** classpath - the framework declares it `optional` and does not ship it | `NoClassDefFoundError: io/micrometer/core/instrument/MeterRegistry` when the binding is constructed. Loud, at wiring time, which is the good failure mode |
 | **pass a `TaskRunListener` to `TaskEngine`.** The parameter defaults to `TaskRunListener.NONE`, which is a specified no-op (9.2) and not a default binding | a 30 minute run emits nothing at all - no start, no step, no failure. Every call site exists and every one of them calls the no-op, so nothing fails and no log line is missing from anywhere it was configured. 9.2 is the in-house logging seam; unattached, the framework is silent by design |
-| **pass `TaskFileLoader` all four name sets it can validate against.** All four parameters default to empty, so bare `TaskFileLoader()` compiles and is what the fixtures use | rules 3, 4, 5 and 21 pass **vacuously** for every datasource, transform, hook and cache name in every file. The hook and cache rows above are the two the framework can name a symptom for; the general form is that startup validation quietly checks nothing and every typo becomes a run-time failure |
+| **pass `TaskFileLoader` all four name sets it can validate against.** All four parameters default to empty, so bare `TaskFileLoader()` compiles and is what the fixtures use | rules 3, 4, 5 and 21 pass **vacuously** for every datasource, transform, hook and cache name in every file. The hook and cache rows above are the two the framework can name a symptom for; the general form is that startup validation quietly checks nothing and every typo becomes a run-time failure. **E15b: discharged by `EtlWiring`, which derives all four sets from the same values it hands `TaskEngine` - a loader and an engine wired through it cannot disagree** |
 | **configure a statement or query timeout on each `DataSource` behind a `Jdbi`.** The framework has none, anywhere, and that is the design (see 3.6): `TaskEngine.run` is a non-suspending blocking call (8.3) with no `Statement` handle to cancel | a wedged driver call parks that task's `limitedParallelism(1)` dispatcher permanently. The task is `busy` forever, every later firing is skipped as `AlreadyRunning`, and the schedule stalls in silence - the same end state as the pool deadlock in 7.1. A host-side timeout surfaces as `SQLTimeoutException`, which 5.3 already classes transient, so it retries rather than merely failing |
-| **alert on the *absence* of a metric series, not on a zero counter.** 9.3's meters are registered when a run first touches them; a task that has never run in this process has no series at all | "no successful run in 24h" written as `etl_task_runs_total{outcome="succeeded"} == 0` never fires for the task that stopped being scheduled, because there is no such series to compare. The registry lives in the process, so this is the normal state after every deploy and not an edge case - the same non-persistence 8.2 records for run history |
+| **call `MicrometerTaskMetrics.seed(names)` after the initial load and after every reload**, with the whole task-name set each time (E15b) | a task that has never run emits no `etl_task_runs_total` series at all, so a counter-based staleness alert silently matches nothing - it does not fire, and it does not error either. This is the normal state of every task after every deploy. `EtlWiring` cannot absorb this row: `infra.etl.task` may not name `io.micrometer`, so only the host holds the binding `seed` lives on. Seeding is idempotent (9.3), so the reload call is a plain repeat of the startup one |
+| **alert on the *absence* of a metric series, not on a zero counter**, for anything the row above does not seed. 9.3's meters are registered when a run first touches them; a task that has never run in this process has no series at all | "no successful run in 24h" written as `etl_task_runs_total{outcome="succeeded"} == 0` never fires for the task that stopped being scheduled, because there is no such series to compare. The registry lives in the process, so this is the normal state after every deploy and not an edge case - the same non-persistence 8.2 records for run history. **E15b narrows this row rather than removing it**: `seed` closes the gap for `etl_task_runs_total`, which is the meter alerts are actually written against, and 9.3 says why the other five stay absence-only |
 
 Two notes on the metric binding, measured on micrometer 1.14.2 rather than assumed:
 
@@ -1126,6 +1134,32 @@ etl_step_rows_total{task, phase, step, direction}   # direction = read | written
 etl_step_retries_total{task, phase, step}
 etl_scratch_file_bytes{task}                        # sampled at run end
 ```
+
+**Seeding (E15b).** Every meter above is registered when a run first touches it, so a task that
+has never run in this process emits no series at all - and the natural staleness alert,
+`etl_task_runs_total{outcome="succeeded"} == 0`, then matches nothing and never fires. 8.6 states
+the workaround (alert on absence), which is a real answer and a bad one: absence queries are
+harder to write, harder to review, and fire on every deploy. `MicrometerTaskMetrics.seed(taskNames)`
+is the other half - it pre-registers the zero-value series so the ordinary comparison works.
+
+**Exactly one of the six is seeded, and the other five are excluded for reasons, not for brevity:**
+
+| Meter | Seeded | Why |
+|---|---|---|
+| `etl_task_runs_total{task, trigger, outcome}` | **yes** | The only one whose full label set is derivable from a task name: `TriggerSource` and `Outcome` are closed two-valued enums, so a name yields exactly four series. It is also the one an alert is written against, and the one where absence and zero mean different things to an operator |
+| `etl_task_duration_seconds{task}` | no | A `Timer`, not a counter. Seeded it exports `_count 0` and `_sum 0`, over which a rate, an average and a quantile are all undefined; nothing is alerted on its absence, because `runs_total` already answers "has this task run" |
+| `etl_step_duration_seconds{task, phase, step}` | no | The label set is not derivable from a task name - it needs the definition's phases and steps. Seeding from a loaded definition would then strand a zero series on every step a later reload renames, and this binding removes no meter (9.3's second operational note) |
+| `etl_step_rows_total{task, phase, step, direction}` | no | Same, and it is already emitted at 0 on both directions by every step that ends, so within a task that has run there is no absence-versus-zero gap to close |
+| `etl_step_retries_total{task, phase, step}` | no | Same label-set argument. A never-retried step is legitimately absent, and a fleet-wide `sum(rate(...))` is unaffected by which steps happen to have a series |
+| `etl_scratch_file_bytes{task}` | no | A gauge. A gauge at 0 asserts a *measured* footprint of zero bytes for a task that has never opened a scratch file, which is a false reading rather than a missing one. Absent is the honest answer |
+
+**Seeding is idempotent, and must stay so.** Re-seeding after a reload has to leave a running
+system's counts alone. `MeterRegistry.counter(name, tags)` is get-or-create on the meter id:
+measured on micrometer 1.14.2, a second call for a seeded-then-incremented series returns the same
+`Counter` with its value intact, and never a fresh zero. Seeding therefore takes the whole task
+name set every time, additions and survivors alike, rather than trying to seed only what is new.
+It does not un-seed: a task removed by a reload keeps its four zero series, the same way 9.3's
+second operational note describes for a renamed task's gauge.
 
 ### 9.4 Task Hooks
 
@@ -1613,6 +1647,72 @@ class TaskAdmin(
     fun reload(directory: Path): ValidationReport?    // null when the reload succeeded
 }
 
+/** E15b. **The one place a host states each of its parts once.**
+ *
+ *  The four classes above have to be constructed in a particular order with several arguments
+ *  passed to more than one of them, and 8.6 has four rows that are all the same shape - "give
+ *  the same thing to two constructors". An adoption dry-run had a fresh reader build a host from
+ *  this section alone and get three of the four constructors wrong on the first compile. This
+ *  class is the wiring written once, in the module that owns the types, so that those four rows
+ *  are discharged by construction rather than by an operator reading a table.
+ *
+ *  **Named `EtlWiring`, not `SimpleEtlBuilder`, and the name is the design.** It is not a
+ *  builder: there is no mutable accumulation, no `withX()` chain and no `build()`. Kotlin's named
+ *  and defaulted parameters already *are* the builder pattern for a ten-argument constructor, and
+ *  a builder class over them would be re-implementing a language feature. What this holds is the
+ *  set of things the host supplies - its wiring - stated once, with the two entry paths of 2.1 as
+ *  two overloads over it rather than as two ten-argument functions.
+ *
+ *  **It knows nothing of Quarkus, and that is what lets it exist at all.** P7 deviation 1
+ *  rejected an in-module factory, and the decisive measurement was that Quarkus does not read
+ *  `application.properties` from a dependency jar, so shipping `quarkus.scheduler.start-mode`
+ *  here would have been a green test for a production failure. Every parameter below is a JDK
+ *  type, a Layer 1 type or a seam this section already declares; nothing here reads
+ *  configuration, scans a classpath or names a framework. The rejection's premise - that a
+ *  factory would have to own host configuration - is not true of this shape.
+ *
+ *  **What it cannot absorb, it must name.** The KDoc of the shipped class carries the list
+ *  verbatim, so a green test here is never mistaken for coverage of an obligation that is still
+ *  the host's:
+ *
+ *  - `quarkus.scheduler.start-mode=forced` in the *application's* own properties
+ *  - `@RolesAllowed("etl-admin")` on every endpoint of `AdminResource`
+ *  - the `AdminResource` HTTP mapping itself - 202 / 409 / 404 / 400
+ *  - `CronScheduler.schedule` throwing on an unparseable expression
+ *  - `io.micrometer:micrometer-core` on the application's *runtime* classpath
+ *  - `MicrometerTaskMetrics.seed`, after the initial load and after every reload
+ *  - a statement or query timeout on each `DataSource` behind a `Jdbi`
+ *
+ *  `sleeper` is deliberately not a parameter: 11.2 declares it as 5.3's backoff injected for
+ *  tests, and a host has no reason to replace it. */
+class EtlWiring(
+    scratchDirectory: Path,                              // 7.2; required, as on TaskEngine
+    cron: CronScheduler,                                 // 8.6; host-implemented, no default
+    datasources: Map<String, Jdbi> = emptyMap(),         // handed to TaskEngine; keys to the loader
+    transforms: Map<String, RowTransform> = emptyMap(),  // 9.1; loader-only, rule 4
+    hooks: TaskHooks = TaskHooks(),                      // 9.4; the instance AND its name set
+    caches: Map<String, CacheBinding> = emptyMap(),      // 7.3; the map AND its name set
+    scratchMemoryLimitMb: Int = 4096,
+    listener: TaskRunListener = TaskRunListener.NONE,    // 9.2
+    metrics: TaskMetrics = TaskMetrics.NONE,             // 9.3
+    clock: Clock = Clock.systemUTC(),
+) {
+    /** 2.1's file-driven path. Loads, validates, applies the crons, and returns the admin. */
+    fun start(taskDirectory: Path): WiringResult
+
+    /** 2.1's programmatic path. Applies the crons, and returns the admin over `definitions`. */
+    fun start(definitions: List<TaskDefinition>): WiringResult
+}
+
+/** Sealed for the reason `LoadResult` is: a wiring that failed has no `TaskAdmin`, and a nullable
+ *  admin beside a nullable report leaves three unrepresentable states representable. `Invalid`
+ *  carries exactly what `TaskAdmin.reload` and `TaskScheduler.apply` answer with, so a host maps
+ *  one report shape at startup and at reload. */
+sealed interface WiringResult {
+    data class Wired(val admin: TaskAdmin) : WiringResult
+    data class Invalid(val report: ValidationReport) : WiringResult
+}
+
 // Scratch (spec 7.2)
 class ScratchDb : AutoCloseable {
     fun connection(): Connection
@@ -1681,6 +1781,15 @@ interface TaskMetrics {
     fun stepRetried(ctx: StepContext)
     fun scratchBytes(ctx: TaskContext, bytes: Long)
     companion object { val NONE: TaskMetrics }
+}
+
+/** The shipped binding. E15b adds `seed`, and it is declared **on the binding, not on
+ *  `TaskMetrics`**: seeding pre-registers series of a metric 9.3 already lists, so it is not a
+ *  seventh metric and the interface above stays closed - no implementation breaks, and the
+ *  compile-time notice that adding a metric costs every implementor is preserved. See 9.3 for
+ *  which meters are seeded and why the other five are not. */
+class MicrometerTaskMetrics(registry: MeterRegistry) : TaskMetrics {
+    fun seed(taskNames: Collection<String>)
 }
 ```
 
