@@ -16,8 +16,8 @@ retrying, observable task. Layer 2 depends on Layer 1; nothing depends on Layer 
 
 ```bash
 mvn -pl SimpleEtl -am test          # the default: excludes spike and oracle groups
-mvn -pl SimpleEtl -am test -Dgroups=oracle   # the three Testcontainers Oracle classes; needs Docker
-mvn -pl SimpleEtl -am test -Dgroups=spike    # spikes; one appends 6.2M rows ten times - run deliberately
+mvn -pl SimpleEtl -am test -DexcludedGroups=none -Dtest=*OracleTest -Dsurefire.failIfNoSpecifiedTests=false   # the three Testcontainers Oracle classes; needs Docker
+mvn -pl SimpleEtl -am test -DexcludedGroups=none -Dtest=*Spike -Dsurefire.failIfNoSpecifiedTests=false    # spikes; one appends 6.2M rows ten times - run deliberately
 
 # First check when reviewing any phase - did it touch earlier tests?
 git diff --stat <prev-phase-tag>..HEAD -- '**/test/**'

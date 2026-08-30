@@ -19,6 +19,10 @@
          and is kept in the reactor so those measurements stay measured. -->
 
     <properties>
+        <!-- A property, not a <configuration> literal: a literal beats the user property of the same
+             name, so the documented opt-in would silently run zero tests and report SUCCESS - measured
+             by the P9 round, 2026-08-30. Opt in with -DexcludedGroups=none. -->
+        <excludedGroups>measurement</excludedGroups>
         <kotlin.compiler.jvmTarget>21</kotlin.compiler.jvmTarget>
         <extraArgs></extraArgs>
     </properties>
@@ -56,7 +60,6 @@
                          the same landmine class the *Spike naming convention once hid in SimpleEtl,
                          defused the same way: excluded by default, run deliberately with
                          -Dgroups=measurement. -->
-                    <excludedGroups>measurement</excludedGroups>
                     <!-- ${extraArgs} lets the owner-attribution measurement be re-run without
                          assertions (`-DextraArgs=-da`), which is how the production JVM's bare
                          `DefaultDispatcher-worker-N` owner was measured. Surefire's default -ea

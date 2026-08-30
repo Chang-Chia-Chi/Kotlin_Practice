@@ -131,7 +131,7 @@ a trigger while the probe still says "retry later".
 
 ```bash
 mvn -pl composed-host-example -am test          # the 11 scenarios; measurements are opt-in
-mvn -pl composed-host-example test -Dgroups=measurement   # the 3 measurements (forks JVMs, writes GBs of spill)
+mvn -pl composed-host-example test -DexcludedGroups=none   # the 3 measurements (forks JVMs, writes GBs of spill)
 
 # the production-JVM owner measurement (scenario 4)
 mvn -pl composed-host-example test -DextraArgs=-da
@@ -139,13 +139,13 @@ mvn -pl composed-host-example test -DextraArgs=-da
 # M1's A/B. -da on BOTH sides: surefire's default -ea turns the coroutines flag on by itself,
 # so a plain run and a -da run differ in two variables rather than one.
 mvn -pl composed-host-example surefire:test -Dtest='MeasurementsTest#M1*' \
-    -Dgroups=measurement -Dsurefire.failIfNoSpecifiedTests=false -DextraArgs='-da -Dkotlinx.coroutines.debug=off'
+    -DexcludedGroups=none -Dsurefire.failIfNoSpecifiedTests=false -DextraArgs='-da -Dkotlinx.coroutines.debug=off'
 mvn -pl composed-host-example surefire:test -Dtest='MeasurementsTest#M1*' \
-    -Dgroups=measurement -Dsurefire.failIfNoSpecifiedTests=false -DextraArgs='-da -Dkotlinx.coroutines.debug=on'
+    -DexcludedGroups=none -Dsurefire.failIfNoSpecifiedTests=false -DextraArgs='-da -Dkotlinx.coroutines.debug=on'
 
 # M2's spill sweep
 mvn -pl composed-host-example surefire:test -Dtest='MeasurementsTest#M2 - a small*' \
-    -Dgroups=measurement -Dsurefire.failIfNoSpecifiedTests=false -Dm2.limitMb=256 -Dm2.groups=10000000
+    -DexcludedGroups=none -Dsurefire.failIfNoSpecifiedTests=false -Dm2.limitMb=256 -Dm2.groups=10000000
 ```
 
 Knobs: `-Dm1.warmup -Dm1.n -Dm1.rounds`, `-Dm2.limitMb -Dm2.groups -Dm2.burn`. The M2 enforcement

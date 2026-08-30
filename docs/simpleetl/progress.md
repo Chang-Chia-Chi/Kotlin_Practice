@@ -3068,3 +3068,19 @@ have run it and the series exist only because the framework seeded them.
 builds, from config - and **not tested**. Nothing here wedges a driver, so the row is exercised as
 configuration and its verdict says so. A reader who wants that symptom covered needs a source that
 hangs, which is a fixture this phase did not build.
+
+
+---
+
+## The -Dgroups opt-in was a silent no-op, fixed the day P9 measured it  (2026-08-30)
+
+E15a documented `-Dgroups=oracle` / `-Dgroups=spike` as the deliberate opt-ins, and the P9 round
+measured that both **ran zero tests and reported BUILD SUCCESS**: a literal `<excludedGroups>` in
+surefire's `<configuration>` beats the user property of the same name, and with the excludes still
+active the include-tag intersection is empty anyway. The maintainer's own composed-host-example
+merge fix carried the identical trap for `-Dgroups=measurement`. Both poms now declare
+`excludedGroups` as a `<properties>` entry - etl-host's pattern - so `-DexcludedGroups=none`
+genuinely overrides; CLAUDE.md and the example README document that form. Verified in both
+directions against live Docker: default run 400 with exclusions holding, opt-in runs all 20
+Oracle tests. The lesson for the ledger: E15a's "verified the oracle direction" was a claim about
+an invocation that no longer exists, and a green filtered run is evidence about the filter.

@@ -13,6 +13,10 @@
     <name>YAML-Driven ETL Framework</name>
 
     <properties>
+        <!-- A property, not a <configuration> literal: a literal beats the user property of the same
+             name, so the documented opt-in would silently run zero tests and report SUCCESS - measured
+             by the P9 round, 2026-08-30. Opt in with -DexcludedGroups=none. -->
+        <excludedGroups>spike,oracle</excludedGroups>
         <maven.compiler.source>17</maven.compiler.source>
         <maven.compiler.target>17</maven.compiler.target>
         <kotlin.compiler.jvmTarget>17</kotlin.compiler.jvmTarget>
@@ -37,7 +41,6 @@
             <plugin>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <configuration>
-                    <excludedGroups>spike,oracle</excludedGroups>
                 </configuration>
             </plugin>
         </plugins>
