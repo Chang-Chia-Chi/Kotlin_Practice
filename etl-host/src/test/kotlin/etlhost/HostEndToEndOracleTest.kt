@@ -22,7 +22,9 @@ import org.testcontainers.oracle.OracleContainer
  * The same host, with its DuckDB source swapped for a real Oracle. Nothing else changes - not the
  * SQL behind the group, not `JdbcGenerationSource`, not the task file, not a single producer.
  */
-class OracleSource : HostFixture() {
+// `open` for the same reason `HostFixture` is: the archive end-to-end test needs this exact Oracle
+// and adds a bucket and a manifest table to it. No assertion here changes.
+open class OracleSource : HostFixture() {
 
     private lateinit var container: OracleContainer
 

@@ -30,6 +30,7 @@
              would silently run zero tests - measured, not assumed. -->
         <excludedGroups>oracle</excludedGroups>
         <testcontainers.version>1.20.4</testcontainers.version>
+        <testcontainers.minio.version>1.21.3</testcontainers.minio.version>
         <ojdbc.version>23.5.0.24.07</ojdbc.version>
     </properties>
 
@@ -115,6 +116,17 @@
         <dependency>
             <groupId>com.oracle.database.jdbc</groupId><artifactId>ojdbc11</artifactId>
             <version>${ojdbc.version}</version><scope>test</scope>
+        </dependency>
+        <!-- The archive end-to-end test's object store. Newer than the core the Oracle module
+             pins, so its own Testcontainers core is excluded and 1.20.4 serves both container
+             types - the same arrangement, and the same reason, as snapshotcache/pom.xml.
+             `io.minio:minio` itself is compile-scope there and arrives transitively. -->
+        <dependency>
+            <groupId>org.testcontainers</groupId><artifactId>minio</artifactId>
+            <version>${testcontainers.minio.version}</version><scope>test</scope>
+            <exclusions>
+                <exclusion><groupId>org.testcontainers</groupId><artifactId>testcontainers</artifactId></exclusion>
+            </exclusions>
         </dependency>
     </dependencies>
 

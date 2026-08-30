@@ -100,4 +100,73 @@ class HostConfig {
 
     @ConfigProperty(name = "etl-host.etl.target-name")
     lateinit var targetName: String
+
+    // ---- the archive layer (snapshotcache spec 18) ----
+
+    /**
+     * Off by default, and that is a statement about prerequisites rather than about taste.
+     *
+     * The archive layer needs two things provisioned *ahead of the process* and creates neither:
+     * a bucket ([ObjectStore][infra.snapshotarchive.ObjectStore]'s KDoc declines to auto-create
+     * one, since a bucket made by whichever pod started first is exactly the ambient side effect
+     * the layer's ordering guarantees exist to avoid) and the manifest table
+     * (`ManifestSchema.DDL`, applied by the DBA). A host that flipped this on by default would
+     * boot fine and then fail one run per hour against a bucket nobody made.
+     */
+    @ConfigProperty(name = "etl-host.archive.enabled")
+    var archiveEnabled: Boolean = false
+
+    @ConfigProperty(name = "etl-host.archive.endpoint")
+    lateinit var archiveEndpoint: String
+
+    /**
+     * The bucket, which is one string used twice on purpose.
+     *
+     * `ObjectStore` writes into it and `ManifestDao` derives every row's `uri_prefix` from it, and
+     * the two **must** be the same value: the DAO stores `"$bucket/snapshots/..."` and strips
+     * exactly `"$bucket/"` back off to recover an object key. Two settings here would be two ways
+     * to spell one fact, and a mismatch would surface as a key that resolves to nothing.
+     */
+    @ConfigProperty(name = "etl-host.archive.bucket")
+    lateinit var archiveBucket: String
+
+    @ConfigProperty(name = "etl-host.archive.access-key")
+    lateinit var archiveAccessKey: String
+
+    @ConfigProperty(name = "etl-host.archive.secret-key")
+    lateinit var archiveSecretKey: String
+
+    /**
+     * Which tables each group archives, comma-separated - explicit, never discovered from the
+     * snapshot's catalog, because D36 requires archived tables to have stable primary keys and
+     * that is a property of the schema contract rather than of whatever happens to be attached.
+     *
+     * The keys must be group names `etl-host.cache.sql` also declares; a key that is not a group
+     * is rejected at boot rather than failing one run an hour later.
+     */
+    @ConfigProperty(name = "etl-host.archive.tables")
+    lateinit var archiveTables: Map<String, String>
+
+    @ConfigProperty(name = "etl-host.archive.temp-directory")
+    lateinit var archiveTempDirectory: Path
+
+    /** How often a group is offered for archiving, and how often maintenance sweeps. */
+    @ConfigProperty(name = "etl-host.archive.interval")
+    lateinit var archiveInterval: Duration
+
+    /** Spec 18.5's retention window. The newest COMPLETE version is never reclaimed, whatever this says. */
+    @ConfigProperty(name = "etl-host.archive.retention")
+    lateinit var archiveRetention: Duration
+
+    /**
+     * The MinIO client's own read timeout, and the reason it is configurable at all.
+     *
+     * `Archiver.close()` interrupts in-flight runs so the snapshot lease comes back inside the
+     * cache's drain. A thread parked in a socket read is not interruptible, so a run stuck on a
+     * slow link drains only when *this* timeout fires - which means a value above
+     * `etl-host.cache.lease-drain-timeout` turns a graceful shutdown into an outstanding lease the
+     * framework then warns about. Keep it below the drain timeout.
+     */
+    @ConfigProperty(name = "etl-host.archive.http-timeout")
+    lateinit var archiveHttpTimeout: Duration
 }

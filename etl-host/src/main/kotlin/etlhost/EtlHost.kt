@@ -60,6 +60,7 @@ class EtlHost(
     private val managed: ManagedSnapshotCache,
     private val wiring: EtlWiring,
     private val cacheMetrics: CacheMetrics,
+    private val archive: ArchiveWiring,
 ) {
 
     val groups: List<GroupId> = config.groupSql.keys.map(::GroupId)
@@ -147,6 +148,11 @@ class EtlHost(
     fun onStop(@Observes event: ShutdownEvent) {
         shuttingDown = true
         if (this::wired.isInitialized) runCatching { wired.close() }.onFailure { log.warn("wired.close failed", it) }
+        // Before `managed.close()`, and for the same reason `wired.close()` is: an archive run
+        // holds a snapshot lease for its whole export-upload-commit sequence, so a cache told to
+        // drain first would be draining a lease whose holder nothing had told to stop. Both
+        // lease-takers are stopped, then the cache drains.
+        runCatching { archive.close() }.onFailure { log.warn("archive close failed", it) }
         runCatching { managed.close() }.onFailure { log.warn("cache close failed", it) }
     }
 

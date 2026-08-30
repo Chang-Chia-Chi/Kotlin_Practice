@@ -22,6 +22,7 @@ Nothing may depend on this module. It publishes no API; copying from it is its i
 | The Quarkus `Scheduler` binding for task crons | A second wait, retry or backoff mechanism |
 | The refresh tick, and the lease/pinning poll spec 5.4 assigns to the host | Deployment manifests, dashboards, alert rules |
 | `AdminResource`, readiness, the metric bindings | The operating point (below) |
+| The archive layer's wiring, config and shutdown slot | The bucket and the manifest table (below) |
 | The startup and shutdown sequences (snapshotcache spec 10.1, 10.2) | |
 
 ## What stays deployment configuration
@@ -70,7 +71,7 @@ refresh tick succeeds, without a restart. That was not true until the readiness 
 computed state: it used to be written once, at the end of startup, so a host whose first refresh
 failed was not-ready forever while every subsequent tick published perfectly.
 
-**Three things a deployment must supply that this module deliberately does not, and that nothing
+**Four things a deployment must supply that this module deliberately does not, and that nothing
 fails loudly about if you forget:**
 
 1. **The source tables.** `etl-host.cache.sql`'s keys are the group list and each statement must
@@ -93,6 +94,30 @@ curl -u etl-admin:placeholder-change-me localhost:8080/admin/etl/tasks     # 200
 curl -u etl-admin:wrong               localhost:8080/admin/etl/tasks       # 401
 curl -u etl-reader:placeholder-change-me localhost:8080/admin/etl/tasks    # 403
 ```
+
+4. **The archive layer's two prerequisites, if you turn it on.** `ArchiveWiring` hosts
+   snapshotcache spec 18 - `ObjectStore`, `ManifestDao`, `Archiver`, `ArchiveMaintenance` - and
+   is **off by default**, because the layer deliberately creates neither of the things it
+   needs: the **bucket** (`ObjectStore` declines to auto-create one; a bucket made by whichever
+   pod started first is the ambient side effect its ordering guarantees exist to avoid) and the
+   **manifest table** (`ManifestSchema.DDL`, applied by the DBA). Provision both, then set
+   `etl-host.archive.enabled=true`. `docker-compose.staging.yml` provisions both, which is what
+   that stack is for.
+
+   Three things about it worth knowing before reading the code:
+
+   - **Neither archive class's own scheduler is ever started.** `Archiver.start` and
+     `ArchiveMaintenance.start` would give this process three scheduling models, each with its
+     own idea of what shutdown means. Both classes also expose a synchronous tick, so
+     `ArchiveWiring` drives `submit` and `sweep` from a `@Scheduled` method on the *same*
+     Quarkus scheduler `CacheTick` uses. It is a second method, not a second mechanism, and it
+     is separate from `CacheTick` only because the cadences differ - ten minutes versus an hour.
+   - **`ArchiveWiring.close()` runs before `managed.close()`**, from the same shutdown observer.
+     An archive run holds a snapshot lease for its whole export-upload-commit sequence, so a
+     cache told to drain first would be draining a lease whose holder nothing had told to stop.
+   - **`etl-host.archive.http-timeout` belongs below `etl-host.cache.lease-drain-timeout`.** A
+     socket read is not interruptible, so a run parked inside the MinIO client drains when that
+     timeout fires and not when `close()` asks.
 
 **Readiness answers at both `/q/health/ready` and `/health/ready`.** The first is SmallRye's
 conventional path, served by a `@Readiness` bean, and is what a deployment manifest should probe;
