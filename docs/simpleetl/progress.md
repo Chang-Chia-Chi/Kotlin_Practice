@@ -2872,3 +2872,121 @@ one branch plus a parity case - with the loader's duplicate branch removed so th
 and one wording. The loader's other rule-14 halves (transform-needs-addColumns, the DECIMAL clause)
 stay put: both read YAML-side fields the model resolves away. Mutation-checked: disabling the
 branch fails the new parity case on the engine side. 398 tests green (397 + 1).
+
+
+---
+
+## Three deferred questions become three measured answers  (2026-08-30)
+
+`composed-host-example/` gains `MeasurementsTest` (M1, M2) and scenario 11 (M3). Only
+`composed-host-example/**` and the two progress files were touched; framework sources are
+unchanged. Suite **14 green** in the module (11 + 3), SimpleEtl's own 398 untouched and re-run.
+
+**All absolute numbers below are machine-relative** - one Windows 11 laptop, Java 21,
+duckdb_jdbc 1.1.3, kotlinx-coroutines 1.10.1. Medians over repeated rounds in repeated JVMs, never
+single runs. The ratios and the yes/no answers are what travel.
+
+### M1 - `-Dkotlinx.coroutines.debug=on` is under 3% of a task run, so recommend it unconditionally
+
+**Method.** A shape-A task (one `sql` step on a non-scratch datasource) through the real
+`EtlWiring` -> `TaskRunner` -> `TaskEngine` path, timed from the accepted trigger to `TaskEnd`.
+Shape A on purpose: a step touching `scratch` opens a fresh DuckDB file per run and would bury a
+microsecond effect under tens of milliseconds. 3,000 warm-up runs, then 7 rounds x 1,000 timed
+runs; three separate JVMs per state. The property is read at kotlinx-coroutines' class-init, so
+the two states cannot share a JVM - they are set through the pom's existing `${extraArgs}` surefire
+property. **`-da` is passed on both sides**: surefire's default `-ea` turns the coroutines DEBUG
+default (`AUTO`) on by itself, so `mvn test` versus `-DextraArgs=-da` differs in two variables.
+
+| state | median of round medians | pooled median | pooled min |
+|---|---|---|---|
+| `debug=off` | 298.5 / 301.7 / 302.1 -> **301.7 us/task** | 302.9 | 209.2 |
+| `debug=on` | 314.3 / 304.5 / 308.1 -> **308.1 us/task** | 307.1 | 206.6 |
+
+**+6.4 us/task, +2.1% - an upper bound, not a reading.** Within one JVM the seven round medians
+spread about 90 us (258 -> 348); the JVM-to-JVM spread of a single state is ~4 us; the pooled
+*minimum* moves the other way (-2.6 us). The effect is at or below this harness's resolution.
+Re-run rather than believed: three JVMs a side, interleaved off/on/off/on, and the ordering of the
+round-median statistic was stable while the minimum's was not. What the repetitions do establish is
+a bound: **under 10 us and under 3% of a task run.**
+
+The mechanism predicts exactly that shape. The flag is charged per dispatch and per resume - a
+`CoroutineId` context element and a `Thread.setName` - and this framework dispatches roughly twice
+per run (`scope.launch`, then `invokeOnCompletion`). At spec 8.1's one run per ten minutes there is
+no throughput at which two thread renames become visible.
+
+**Conclusion: unconditional.** The condition worth writing down is not cost. It is that `-ea` also
+turns the flag on, so the single configuration in which `LeaseInfo.owner` silently degrades to a
+bare `DefaultDispatcher-worker-N` is a JVM with neither - which is what production is. The flag is
+not a debugging aid to enable when attribution matters; it is what makes attribution exist at all,
+and it is free.
+
+### M2 - both premises of the pod-budget formula hold; the formula is missing a disk term
+
+`N x EtlWiring.scratchMemoryLimitMb + servingMemoryLimit` (the D16 reconciliation) assumed
+enforcement and additivity. Both are now measured through a real task file, not a probe.
+
+**Enforcement - yes, by spilling.** One hash aggregate over N distinct keys inside a scratch
+instance whose `memory_limit` came from the task file's `scratch.memoryLimitMb`. Peak spill is
+*sampled* while the query runs (technique read off `S4bSpillFactorSpike`, which was not run):
+DuckDB frees spill the instant a query ends, so an end-of-run reading is always zero.
+
+| memory_limit | distinct keys | outcome | peak spill |
+|---|---|---|---|
+| 64 MB | 10,000,000 | ok, spilled | 3,717 MB (58x the limit) |
+| 256 MB | 10,000,000 | ok, spilled | 737 MB (2.9x) |
+| 1024 MB | 10,000,000 | ok, in memory | 0 |
+| 64 MB | 40,000,000 | ok, spilled | 14,874 MB (232x) |
+
+DuckDB 1.1.3 honours the setting and answers an over-limit query by spilling into `ScratchDb`'s
+wired temp directory. It neither raised nor grew: no run failed. The memory term is a real bound.
+
+**The surprise, re-run before being believed:** shrinking the limit does not shrink the run, it
+converts RAM into scratch-volume bytes at a poor exchange rate. 256 MB -> 64 MB saves 192 MB of pod
+memory and costs **3 GB of extra spill** on the same query, because an external aggregate
+re-partitions more times the less memory it has. A host tuning `scratchMemoryLimitMb` *down* to fit
+more tasks per pod is trading against a term the budget formula does not contain. Spec 7.2 already
+sizes the scratch volume as file plus spill; this is the exchange rate between the two budgets.
+(Peak is an apparent size and DuckDB's temp block file may be sparse. Two facts say it is real
+work: it scales 4x with a 4x input at a fixed limit, and it *falls* 5x when the limit rises 4x at a
+fixed input. Neither is how preallocation behaves.)
+
+**Additivity - yes, per instance.** Two concurrent tasks at 256 MB and 512 MB read back
+`244.1 MiB` and `488.2 MiB` from their own scratch connections (DuckDB reads `MB` as 10^6 and
+echoes binary units, so those are the requested values honoured). Overlap is proven twice: the test
+samples two live scratch run directories at one instant, and each task materialises
+`epoch_ms(current_timestamp)` at readback, asserted to fall inside both runs' windows. Each task
+publishes to its **own** report database - one JDBC `Connection` written from two task threads is
+spec 7.2's JVM-crash hazard, not a test flake.
+
+**What remains unmeasured, and what kind of thing it is.** The operating point: what N, at what
+limits, fits a given pod. That is a statement about a memory request, a page cache, a JVM heap and
+a real concurrency level - **configuration, not framework fact**. No test in this repository is
+evidence about it, and this entry is not evidence that any particular N is safe. What is measured
+is only that the formula's two terms are real and do not interfere, plus M2's second finding that
+choosing them has a second axis nobody had written down.
+
+### M3 - the readiness-probe demonstration: the deferral holds, no reopen trigger fired
+
+Scenario 11. `ReadinessProbe` in the example host - one `@Volatile shuttingDown`, a
+`beginShutdown()`, and a `classify(TriggerResult)` that maps the framework's answer to `409 busy`
+or `503 gone`. The test drives a trigger during a genuinely in-flight run (lease observed held) and
+a trigger after `ComposedHost.shutdownEtl()`, asserts **both receive
+`TriggerResult.AlreadyRunning`**, asserts the two values equal each other, and asserts the host's
+two different answers. `classify` sees only the sealed result and its own flag, which is exactly
+what a real `AdminResource` has.
+
+It was neither impossible nor ugly - nine lines of host code, no framework internal read, no seam
+added. The `ShuttingDown` case stays deferred and spec 11.2's reuse argument stands: 409 and 503
+are the host's distinction to draw, and it draws it from state it necessarily owns, because it is
+the caller of `close()`.
+
+**One thing the demonstration does pin down, and it is the whole content of the obligation:**
+ordering. The flag is raised *before* `Wired.close()`. Raised after, there is a window in which an
+already-cancelled runner answers `AlreadyRunning` while the probe still says "busy, retry later" -
+the one wrong answer of the four, and the one a load balancer acts on. `shutdownEtl()` exists so
+that order cannot be written wrong, and its KDoc says why.
+
+`ComposedHost.close()` deliberately still does *not* call `shutdownEtl()`: the ten earlier
+scenarios assert against a host whose ETL side is live at teardown, and scenario 11 is the one that
+needs the halves separable. A real host closes in the documented order; this example keeps that
+order in `shutdownEtl` and in the README diagram rather than folded into `close`.

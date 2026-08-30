@@ -342,6 +342,53 @@ class ComposedHostTest {
             assertThat(host.cacheEvents.leases).isNotEmpty()
         }
     }
+
+    // ------ 11. M3: busy vs dying, both answered AlreadyRunning, told apart by host state alone
+
+    /**
+     * **M3.** The demonstration behind SimpleEtl spec 11.2's `ShuttingDown`-vs-`AlreadyRunning`
+     * deferral. Two triggers get the *same* `TriggerResult.AlreadyRunning` from the framework -
+     * one while a run is genuinely in flight, one after `WiringResult.Wired.close()` - and the
+     * host separates them with one `@Volatile` boolean it set itself.
+     *
+     * Nothing here reads a framework internal. [ReadinessProbe.classify] sees only the sealed
+     * result and its own flag, which is exactly the information a real `AdminResource` has.
+     */
+    @Test
+    fun `a host tells busy from dying with its own flag, not a fifth TriggerResult`(@TempDir root: Path) {
+        ComposedHost(root, source = LotSource(2000)).use { host ->
+            writeShapeD(host.taskDirectory, copySql = SLOW_COPY)
+            host.wired()
+            host.managed.admin.triggerRefresh(host.group)
+
+            listenerReset(host)
+            val accepted = host.admin.trigger("wip-summary", "tester") as TriggerResult.Accepted
+            assertThat(host.awaitLease()).isNotNull()   // the run is genuinely in flight
+
+            val whileBusy = host.admin.trigger("wip-summary", "tester")
+            println("[READINESS] busy  : framework said " + whileBusy + " -> host answers " + host.readiness.classify(whileBusy))
+            assertThat(whileBusy).isEqualTo(TriggerResult.AlreadyRunning)
+            assertThat(host.readiness.shuttingDown).isFalse()
+            assertThat(host.readiness.classify(whileBusy)).startsWith("409 busy")
+
+            assertThat(host.await("wip-summary", accepted.runId).outcome).isEqualTo(Outcome.SUCCEEDED)
+
+            // Nothing is running now, so an ordinary trigger would be accepted...
+            host.shutdownEtl()
+            // ...but the host closed the wiring, having raised its own flag first.
+            val whileDying = host.admin.trigger("wip-summary", "tester")
+            println("[READINESS] dying : framework said " + whileDying + " -> host answers " + host.readiness.classify(whileDying))
+            assertThat(whileDying).isEqualTo(TriggerResult.AlreadyRunning)
+            assertThat(host.readiness.shuttingDown).isTrue()
+            assertThat(host.readiness.classify(whileDying)).startsWith("503 gone")
+
+            // The same value from the framework in both cases - the deferral's premise holding.
+            assertThat(whileBusy).isEqualTo(whileDying)
+            // ...and the task is still listable, so this is not `Unknown` wearing a disguise.
+            assertThat(host.admin.list().map { it.name }).containsExactly("wip-summary")
+            assertThat(host.cron.names()).isEmpty()   // close() cancelled the registrations
+        }
+    }
 }
 
 private const val SLOW_COPY =

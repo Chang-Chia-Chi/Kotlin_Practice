@@ -6,6 +6,7 @@ import infra.etl.task.EtlWiring
 import infra.etl.task.TaskAdmin
 import infra.etl.task.TaskEvent
 import infra.etl.task.TaskRunListener
+import infra.etl.task.TriggerResult
 import infra.etl.task.WiringResult
 import infra.snapshotcache.api.AcquireUnavailableReason
 import infra.snapshotcache.api.BuildContext
@@ -75,6 +76,41 @@ class ThreadRecordingListener : TaskRunListener {
             is TaskEvent.TaskEnd -> ended.countDown()
             else -> Unit
         }
+    }
+}
+
+/**
+ * **M3 / scenario 11: how a host tells "busy" from "dying".**
+ *
+ * `TriggerResult.AlreadyRunning` is deliberately reused for both (SimpleEtl spec 11.2, and
+ * `TaskRunner`'s KDoc): after `WiringResult.Wired.close()` the three words the case is *named* for
+ * are untrue, but the three it is *defined* by - rejected, not queued, will not run later - are
+ * exactly true, so no fifth sealed case was added. That deferral rests on a claim: **the host does
+ * not need the framework to tell the two apart, because the host is the one that called `close()`.**
+ *
+ * This class is that claim, in nine lines of host code. The flag is raised *before* `close()`,
+ * never after, which is the only ordering that cannot lie: in between, a probe that flipped
+ * afterwards would answer "busy, retry later" to a caller that will never be served.
+ *
+ * A real host also serves [shuttingDown] from its readiness endpoint, so the load balancer stops
+ * sending work before the 503s start - which is the whole reason the distinction is worth making.
+ */
+class ReadinessProbe {
+
+    @Volatile
+    var shuttingDown = false
+        private set
+
+    /** Called before `WiringResult.Wired.close()`, and only by the host that is closing it. */
+    fun beginShutdown() {
+        shuttingDown = true
+    }
+
+    /** What the host's `AdminResource` answers. The framework decides [result]; the rest is ours. */
+    fun classify(result: TriggerResult): String = when {
+        result !is TriggerResult.AlreadyRunning -> "202 accepted"
+        shuttingDown -> "503 gone - this instance is shutting down, retry elsewhere"
+        else -> "409 busy - that task is already running, retry later"
     }
 }
 
@@ -154,8 +190,30 @@ class ComposedHost(
     lateinit var admin: TaskAdmin
         private set
 
+    private var wired: WiringResult.Wired? = null
+
+    /** Scenario 11's host state. Public: a readiness endpoint is the host's job, not the framework's. */
+    val readiness = ReadinessProbe()
+
     fun start(): WiringResult = wiring.start(taskDirectory).also {
-        if (it is WiringResult.Wired) admin = it.admin
+        if (it is WiringResult.Wired) {
+            admin = it.admin
+            wired = it
+        }
+    }
+
+    /**
+     * Spec 10.2 steps 2-3 - stop scheduling, stop starting new work - with the readiness flag
+     * raised **first**. Raised after `close()` instead, there is a window in which a trigger is
+     * refused by an already-cancelled runner while the probe still says "busy, retry later", which
+     * is the one wrong answer of the four.
+     *
+     * Not folded into [close]: the existing scenarios assert on a host whose ETL side is still
+     * live at teardown, and scenario 11 is the one that needs the two halves separable.
+     */
+    fun shutdownEtl() {
+        readiness.beginShutdown()
+        wired?.close()
     }
 
     fun reportRows(): List<Triple<String, Long, String>> =

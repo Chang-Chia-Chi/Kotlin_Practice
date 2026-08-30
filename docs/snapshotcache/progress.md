@@ -1750,3 +1750,91 @@ Remaining open, all with named triggers: P9 (the real host) owns the archive con
 `expiredLeases()` poll, the refresh tick, and the 18.6 #4 ruling above; the `TriggerResult`
 `ShuttingDown` case waits for a host that needs to distinguish busy from dying; the composed pod
 budget formula waits for a deployment to validate it.
+
+
+---
+
+## Two of the loop's open items get numbers  (2026-08-30)
+
+The previous entry left the composed pod budget "waiting for a deployment to validate it" and the
+`-Dkotlinx.coroutines.debug=on` remedy costed at nothing at all. `composed-host-example/` now
+measures both. Nothing in `infra/snapshotcache/` changed; the module's own suite was re-run whole
+and is unchanged. Both measurements are recorded in full in `docs/simpleetl/progress.md` under the
+same date - this entry records what they mean for *this* framework's claims.
+
+**Machine-relative**: one Windows 11 laptop, Java 21, duckdb_jdbc 1.1.3, kotlinx-coroutines
+1.10.1. Medians over repeated rounds in repeated JVMs, never single runs.
+
+### M1 - the owner-attribution flag costs under 3% of a task run
+
+Round 3's biggest finding was that `LeaseInfo.owner` names the leasing task only under `-ea`, and
+that a production JVM sees a bare `DefaultDispatcher-worker-N`. Spec 5.4 gained
+`-Dkotlinx.coroutines.debug=on` as the remedy without anyone knowing its price.
+
+Measured through the consumer path a lease is actually taken on - a task run through
+`EtlWiring` -> `TaskRunner` - with 3,000 warm-up runs, 7 x 1,000 timed runs, three JVMs per state,
+and `-da` on both sides so the property is the only variable (surefire's default `-ea` turns the
+coroutines DEBUG default on by itself):
+
+| state | median of round medians | pooled median | pooled min |
+|---|---|---|---|
+| `debug=off` | **301.7 us/task** | 302.9 | 209.2 |
+| `debug=on` | **308.1 us/task** | 307.1 | 206.6 |
+
+**+6.4 us/task, +2.1%, and that is an upper bound rather than a reading** - the within-JVM spread
+of round medians is ~90 us and the pooled minimum moves the other way. Re-run interleaved
+off/on/off/on before being believed. The defensible statement is a bound: under 10 us, under 3% of
+a run.
+
+**Recommendation stands, unconditionally.** The consumer dispatches roughly twice per lease-taking
+run and the flag is charged per dispatch, so there is no acquire rate at which two thread renames
+matter. Spec 5.4's remedy is not a cost/benefit call the host has to make; it is free, and the only
+thing worth saying about it is the trap in round 3's finding - `-ea` turns it on too, so the one
+configuration in which owner attribution silently degrades is the one with neither, which is
+production.
+
+### M2 - the D16 composed budget's two premises hold, and it is missing a term
+
+`N x EtlWiring.scratchMemoryLimitMb + servingMemoryLimit` rested on two unmeasured premises.
+
+**Enforcement.** A scratch instance's `memory_limit` really bounds it: on 1.1.3 an over-limit query
+spills into the wired temp directory rather than raising or growing. Not one run failed across
+64/256/1024 MB at 10-40M distinct aggregate keys.
+
+**Additivity.** Two concurrent tasks configured 256 MB and 512 MB read back `244.1 MiB` and
+`488.2 MiB` from their own scratch connections while both were provably live. `memory_limit` is a
+database-level setting and every run gets its own instance, so the terms add and do not interfere.
+This is the same arithmetic `SnapshotCacheConfig.consumerMemoryLimit` sits beside: the serving term
+is one shared consumer instance (spec 6.5), the scratch terms are N per-run instances, and nothing
+observed here suggests the two interact.
+
+**The finding that changes how the formula should be read.** Spill is a function of *how tight the
+limit is*, not only of the query:
+
+| memory_limit | distinct keys | peak spill |
+|---|---|---|
+| 64 MB | 10 M | 3,717 MB |
+| 256 MB | 10 M | 737 MB |
+| 1024 MB | 10 M | 0 (fits) |
+| 64 MB | 40 M | 14,874 MB |
+
+Saving 192 MB of pod memory cost 3 GB of extra spill on the same query. So the composed budget has
+a second axis the formula does not name: **tightening the memory term inflates the disk term**, and
+the disk term lands on the scratch volume spec 7.2 sizes as file plus spill. A reviewer reading the
+formula alone would conclude that lowering `scratchMemoryLimitMb` is how you fit more tasks in a
+pod. It is, for memory, and it is expensive elsewhere.
+
+**Still unmeasured, and deliberately so: the operating point.** What N, at what limits, fits a given
+pod remains a statement about a memory request, a page cache, a JVM heap and a real concurrency
+level - **configuration, not framework fact**, exactly as the 18.6 #4 ruling says of its own
+tradeoff. This entry is not evidence that any particular N is safe. It closes only the question of
+whether the formula's terms are real: they are.
+
+### What is still open
+
+Unchanged, with their triggers intact: P9's real-Oracle items (archive config, `expiredLeases()`
+poll, refresh tick, the 18.6 #4 ruling). The `TriggerResult` `ShuttingDown` case is **no longer
+waiting** - SimpleEtl's scenario 11 demonstrates a host distinguishing busy from dying with its own
+readiness flag, and the deferral is confirmed rather than reopened; see `docs/simpleetl/progress.md`.
+The pod budget is no longer waiting on a deployment for its *premises*, only for its operating
+point.
