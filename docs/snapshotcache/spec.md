@@ -336,6 +336,48 @@ data class LeaseInfo(
 )
 ```
 
+### 5.4 Construction (added 2026-08-30)
+
+Sec 5.1-5.3 describe what a host *uses*; this is how a host *obtains* it. Everything implementing
+those interfaces is `internal`, so without an entry point the API is unreachable from another
+module. The entry point lives in `infra.snapshotcache.bootstrap`, the composition root added by the
+plan 2.2 amendment - not in `api`, which would have to depend on `core` and `duckdb` and would break
+two FIXED boundary rules.
+
+```
+fun openSnapshotCache(
+    config: SnapshotCacheConfig,
+    sources: Map<GroupId, GenerationSource>,
+    events: CacheEvents = NoOpCacheEvents,
+    checks: List<GenerationCheck> = emptyList(),
+    clock: Clock = Clock.systemUTC()
+): ManagedSnapshotCache
+
+interface ManagedSnapshotCache : AutoCloseable {
+    val cache: SnapshotCache
+    val admin: CacheAdmin
+    override fun close()        // Sec 10.2 steps 1 and 4, then the stores
+}
+```
+
+- **One store per group, derived.** The store directory for a group is
+  `config.storagePath.resolve(group.value)`, which is Sec 3.1's `/data/cache/<group>/` layout. It is
+  derived rather than configured because generation numbering restarts at 1 per group: two groups
+  aimed at one directory collide on `gen_0000000001.db`, and a derived path makes that
+  misconfiguration unrepresentable.
+- **Sec 10.1 startup, steps 1 and 2** happen here: the stale-file wipe when
+  `startup.clearStaleFiles` is true, and the serving instance's `memory_limit`, `temp_directory` and
+  thread cap. Steps 3-5 (readiness, the first refresh, the readiness flip) are the host's - readiness
+  is the host's health surface and the framework has no scheduler.
+- **What stays the host's**, unchanged by this entry point: refresh scheduling (Sec 4.4 - the host's
+  tick calls `CacheAdmin.triggerRefresh`), the `expiredLeases()` poll on that same tick (Sec 6.2,
+  12.3), the metrics binder (Sec 12), thread naming for lease attribution (Sec 5.3 `LeaseInfo.owner`
+  is the calling thread's name), and Sec 10.2 steps 2 and 3 - stop scheduling, interrupt the in-flight
+  build - because only the host owns the scheduler and the build thread.
+- `jdbc.fetchSize` is read by the caller's `GenerationSource` (Sec 7.2) and `refresh.interval` by the
+  host's scheduler (Sec 4.4). They remain in `SnapshotCacheConfig` as one manifest of Sec 13, but the
+  entry point does not act on them and says so.
+
 ---
 
 ## 6. Concurrency and Lifecycle

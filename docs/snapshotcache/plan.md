@@ -46,7 +46,10 @@ The framework lives **inside the existing service project**, not as a separate l
 |       |             DefaultSnapshotCache. All Kotlin `internal`.
 |       |             Depends on: api, spi.
 |       +-- duckdb/   DuckDbGenerationStore, copy-out mechanics, DuckDB config plumbing.
-|                     Depends on: spi (+ api value types), duckdb_jdbc.
+|       |             Depends on: spi (+ api value types), duckdb_jdbc.
+|       +-- bootstrap/ The composition root: it constructs what the host cannot reach and
+|                     owns nothing at runtime.
+|                     Depends on: api, spi, core, duckdb. Nothing depends on it.
 +-- etl/              Business: consumer jobs
 +-- source/           Business: Oracle extraction (implements GenerationSource)
 +-- ...               Other existing business packages
@@ -79,6 +82,33 @@ ArchUnit rules (enforced from P0):
   host service is Quarkus, so `quarkus.log.*` configuration governs the output either way.
   See D27.
 - Nothing outside `core` reaches into `core` internals (Kotlin `internal` plus an ArchUnit rule).
+- **Named exception, `bootstrap` (amended 2026-08-30, maintainer ruling).** `infra.snapshotcache.bootstrap`
+  may depend on `api`, `spi`, `core` and `duckdb`, and is the only package outside `core` permitted to
+  name `core`. Nothing may depend on `bootstrap`: it is a leaf, and the ArchUnit rule set states that
+  positively rather than leaving it implied.
+
+  **Why the exception exists.** Everything in `core` is Kotlin `internal` and `api` holds only
+  interfaces, data classes and exceptions, so a downstream Maven module could hold a `SnapshotCache`
+  and never construct one. The obvious repair - a factory in `api` - was correctly rejected: it makes
+  `api` depend on `core` and `duckdb`, breaking two of the FIXED rules above. A composition root is
+  the standard answer and is a different thing from a layer: it is the one place the object graph is
+  assembled, it is depended on by nobody, and removing it removes no behavior. The dependency arrow
+  it adds points *inward from outside the onion*, which is what a composition root is for; the arrow
+  the rejected factory added pointed outward from the innermost layer, which is what the rules forbid.
+
+  **What does not change**, stated explicitly so a later session does not read this as a general
+  relaxation:
+
+  - `api` remains the innermost layer and gains no dependency. The `api` rule is untouched.
+  - `core` stays Kotlin `internal`. `bootstrap` reaches it as same-module `internal`, not by widening
+    a visibility.
+  - The five-interface budget of 2.3 is untouched: the entry point is a function, and a function is
+    not an interface. `ManagedSnapshotCache`, the handle it returns, is a `close()`-bearing holder of
+    two already-budgeted interfaces, not a sixth seam - and 2.4's ban on single-implementation
+    interfaces still applies to anything a later session is tempted to add here.
+  - The 2.4 do-not-build list is untouched. In particular `bootstrap` is not a DI container, not a
+    plugin registry and not a place to put policy: policy that belongs to the host stays with the
+    host, and the entry point's KDoc names each such obligation and why it is the host's.
 
 ### 2.3 Public surface budget
 

@@ -1288,7 +1288,9 @@ then restored.
 - **A public factory / construction entry point.** Breaks `ArchitectureTest.kt:52` (`api` must
   not depend on `core`/`duckdb`) and `:126` (nothing outside `core` reaches into `core`), two of
   plan 2.2's five FIXED boundary rules. A stop-and-report awaiting a plan amendment, not a code
-  change.
+  change. **Resolved 2026-08-30** by the plan 2.2 `bootstrap` amendment and spec 5.4 - see the
+  2026-08-30 entry at the end of this file. A factory *in `api`* stays rejected for the reason
+  above; the entry point lives in a composition root that nothing depends on.
 - **A per-group subdirectory in `finalPath`.** One store per group is structural; item 4
   documents it.
 - **Any lease watchdog, forced reclamation or admin kill switch.** D8 and D29.
