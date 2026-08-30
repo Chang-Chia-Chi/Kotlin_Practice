@@ -2841,3 +2841,21 @@ window is left open - closing it needs a lock on the submit path that exists for
 
 SimpleEtl **397 green** (396 after the phase, 392 before it). `snapshotcache` untouched and re-run
 whole at **215 / 0 / 2**. No earlier test modified.
+
+
+---
+
+## The composed host becomes a reactor module  (2026-08-30)
+
+`composed-host-example/` — the adoption dry-run's host, promoted verbatim into the reactor as the
+executable form of spec 8.6's obligations table and snapshotcache spec 5.4's. Ten scenarios, no
+doubles on any seam: the full shape-D path, the reclaimability row this spec called "not testable
+in this repository" (it is now, and it holds), the cross-boundary failure seams, and the
+owner-attribution measurement kept re-runnable (`-DextraArgs=-da` reproduces the production JVM's
+bare worker name).
+
+**It is an example and a regression net, not a library.** Nothing may depend on it, it publishes
+no API, and copying from it is its intended use — it is the template P9 starts from. This is F5
+of the first adoption review landing in its honest form: not a factory inside the framework
+(rejected, P7 deviation 1), but a consumer beside it, where the seven obligations no library can
+absorb are really carried and really checked.

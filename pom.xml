@@ -31,6 +31,7 @@
         <module>dynacache-server</module>
         <module>snapshotcache</module>
         <module>SimpleEtl</module>
+        <module>composed-host-example</module>
     </modules>
 
     <dependencyManagement>

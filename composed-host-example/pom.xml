@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+    <modelVersion>4.0.0</modelVersion>
+    <parent>
+        <groupId>dynacache</groupId>
+        <artifactId>dynacache-parent</artifactId>
+        <version>0.1.0-SNAPSHOT</version>
+    </parent>
+    <artifactId>composed-host-example</artifactId>
+
+    <!-- The example host: both frameworks composed through their two public front doors,
+         `openSnapshotCache` (snapshotcache spec 5.4) and `EtlWiring` (SimpleEtl spec 11.2).
+
+         This module is the executable form of the two specs' host-obligation tables. It is an
+         EXAMPLE and a regression net, not a library: nothing may depend on it, it publishes no
+         API, and copying from it is its intended use. It began as the composed-host adoption
+         dry-run of 2026-08-30 - the run that measured the owner-attribution trap, validated the
+         reclaimability row SimpleEtl spec 8.6 called untestable, and exposed the shutdown seam -
+         and is kept in the reactor so those measurements stay measured. -->
+
+    <properties>
+        <kotlin.compiler.jvmTarget>21</kotlin.compiler.jvmTarget>
+        <extraArgs></extraArgs>
+    </properties>
+
+    <dependencies>
+        <dependency><groupId>org.jetbrains.kotlin</groupId><artifactId>kotlin-stdlib</artifactId></dependency>
+        <dependency><groupId>dynacache</groupId><artifactId>snapshotcache</artifactId><version>${project.version}</version></dependency>
+        <dependency><groupId>dynacache</groupId><artifactId>SimpleEtl</artifactId><version>${project.version}</version></dependency>
+        <dependency><groupId>org.duckdb</groupId><artifactId>duckdb_jdbc</artifactId><version>1.1.3</version></dependency>
+        <dependency><groupId>org.jdbi</groupId><artifactId>jdbi3-core</artifactId><version>3.45.4</version></dependency>
+        <dependency><groupId>org.jetbrains.kotlinx</groupId><artifactId>kotlinx-coroutines-core</artifactId></dependency>
+        <dependency><groupId>org.jboss.logging</groupId><artifactId>jboss-logging</artifactId><version>3.6.1.Final</version></dependency>
+        <!-- SimpleEtl declares micrometer `optional`, so a host that wants the binding opts in
+             explicitly - which is spec 8.6's row 12 doing its job. This host does not. -->
+        <dependency><groupId>org.junit.jupiter</groupId><artifactId>junit-jupiter</artifactId><scope>test</scope></dependency>
+        <dependency><groupId>org.assertj</groupId><artifactId>assertj-core</artifactId><scope>test</scope></dependency>
+    </dependencies>
+
+    <build>
+        <sourceDirectory>src/main/kotlin</sourceDirectory>
+        <testSourceDirectory>src/test/kotlin</testSourceDirectory>
+        <plugins>
+            <plugin>
+                <groupId>org.jetbrains.kotlin</groupId>
+                <artifactId>kotlin-maven-plugin</artifactId>
+                <executions>
+                    <execution><id>compile</id><phase>compile</phase><goals><goal>compile</goal></goals></execution>
+                    <execution><id>test-compile</id><phase>test-compile</phase><goals><goal>test-compile</goal></goals></execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <!-- ${extraArgs} lets the owner-attribution measurement be re-run without
+                         assertions (`-DextraArgs=-da`), which is how the production JVM's bare
+                         `DefaultDispatcher-worker-N` owner was measured. Surefire's default -ea
+                         turns kotlinx-coroutines debug AUTO on, which is the test-only
+                         attribution both specs now warn about. -->
+                    <argLine>${extraArgs}</argLine>
+                    <trimStackTrace>false</trimStackTrace>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>
