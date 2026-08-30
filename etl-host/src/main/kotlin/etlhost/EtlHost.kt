@@ -1,0 +1,137 @@
+package etlhost
+
+import infra.etl.task.EtlWiring
+import infra.etl.task.TaskAdmin
+import infra.etl.task.TriggerResult
+import infra.etl.task.ValidationReport
+import infra.etl.task.WiringResult
+import infra.snapshotcache.api.GroupId
+import infra.snapshotcache.api.RefreshResult
+import infra.snapshotcache.bootstrap.ManagedSnapshotCache
+import io.quarkus.runtime.ShutdownEvent
+import io.quarkus.runtime.StartupEvent
+import jakarta.enterprise.event.Observes
+import jakarta.inject.Singleton
+import java.nio.file.Path
+import org.jboss.logging.Logger
+
+/**
+ * The host's own lifecycle: snapshotcache spec 10.1 steps 3-5 on the way up, spec 10.2 steps 2-3
+ * plus the readiness flag on the way down, and the two things nothing else can hold in between -
+ * the live [WiringResult.Wired] and the readiness state.
+ *
+ * ### Startup, in the order spec 10.1 fixes
+ *
+ * 1-2. The stale-file wipe and the serving instance's limits happen inside `openSnapshotCache`,
+ *      which the container has already run by the time this observer fires.
+ * 3.   `ready = false`, which is this class's initial state and not an assignment.
+ * 4.   **The first refresh runs immediately, not on the schedule.** The tick's first firing is one
+ *      whole interval away, and spec 10.1's reason for not waiting is that consumers waiting is far
+ *      better than consumers reading an empty table.
+ * 5.   `ready = true` once a generation has published.
+ *
+ * The ETL side is wired between 4 and 5, and that ordering is deliberate in both directions. After
+ * the first refresh, because a task fired before the cache's first publish spends the whole
+ * `defaultWaitBudget` in `cacheCopy` and then fails with `TIMEOUT` - SimpleEtl spec 8.6's note on
+ * 3.6 - and every task whose cron lands inside the startup window is that task. Before readiness,
+ * because readiness is a promise that this instance can serve, and an instance whose admin endpoint
+ * has no task list cannot.
+ *
+ * A failed first refresh is not a failed startup. The app boots, the admin endpoint answers, and
+ * readiness stays false until a later tick publishes - which is exactly what a readiness probe is
+ * for, and is why this observer does not throw.
+ *
+ * ### Shutdown, and the one ordering that cannot lie
+ *
+ * `shuttingDown = true` **before** `wired.close()`, then `managed.close()`. `composed-host-example`
+ * M3 is where that order was settled: `TriggerResult.AlreadyRunning` answers both "busy" and "this
+ * instance is gone", and the host can tell them apart only because the host is the one that called
+ * `close()`. Raise the flag afterwards and there is a window in which a cancelled runner refuses a
+ * trigger while the probe still says "409, retry later" - the one wrong answer of the four.
+ *
+ * `wired.close()` before `managed.close()` is `composed-host-example`'s recipe step 3 and the
+ * cache's spec 10.2 steps 2 and 3: stop scheduling and stop starting new work, *then* drain the
+ * leases. Reversed, a `cacheCopy` step can take a lease on a cache that is already draining and be
+ * answered `ShuttingDownException` mid-run.
+ */
+@Singleton
+class EtlHost(
+    private val config: HostConfig,
+    private val managed: ManagedSnapshotCache,
+    private val wiring: EtlWiring,
+    private val cacheMetrics: CacheMetrics,
+) {
+
+    val groups: List<GroupId> = config.groupSql.keys.map(::GroupId)
+
+    // `final` because the all-open compiler plugin opens every @Singleton class for CDI, and
+    // Kotlin forbids a private setter on an open property. Nothing subclasses this.
+    @Volatile
+    final var ready: Boolean = false
+        private set
+
+    /** Raised before `close()`, and only by the shutdown sequence below. */
+    @Volatile
+    final var shuttingDown: Boolean = false
+        private set
+
+    private lateinit var wired: WiringResult.Wired
+
+    val admin: TaskAdmin get() = wired.admin
+
+    fun onStart(@Observes event: StartupEvent) {
+        Producers.mkdirs(config.taskDirectory)
+        cacheMetrics.bind(groups, managed.cache, managed.admin)
+
+        val published = groups.map { group ->
+            val outcome = managed.admin.triggerRefresh(group)
+            log.infov("startup refresh of group {0}: {1} {2}", group, outcome.result, outcome.detail ?: "")
+            outcome.result == RefreshResult.SUCCESS
+        }
+
+        // Fail fast and loudly. A host whose task files do not validate has nothing to serve, and
+        // booting anyway would leave `GET /admin/etl/tasks` answering an empty list as though that
+        // were the deployment's intent.
+        when (val result = wiring.start(config.taskDirectory)) {
+            is WiringResult.Wired -> wired = result
+            is WiringResult.Invalid -> throw IllegalStateException(
+                "task directory ${config.taskDirectory} did not validate: " + render(result.report),
+            )
+        }
+
+        ready = published.isNotEmpty() && published.all { it }
+        log.infov("startup complete, readiness = {0}", ready)
+    }
+
+    fun onStop(@Observes event: ShutdownEvent) {
+        shuttingDown = true
+        if (this::wired.isInitialized) runCatching { wired.close() }.onFailure { log.warn("wired.close failed", it) }
+        runCatching { managed.close() }.onFailure { log.warn("cache close failed", it) }
+    }
+
+    /**
+     * `POST /admin/etl/reload`.
+     *
+     * Nothing else happens here, and the emptiness is the point. Until 2026-08-30 spec 8.6 made
+     * re-seeding the metrics the host's job at exactly this call - a pairing every host
+     * re-implements for a moment `TaskAdmin` already owns. `EtlWiring` now takes `onTasksLoaded`
+     * and the framework invokes it at both load moments, so a host that writes this method as a
+     * one-line delegate has not forgotten anything.
+     */
+    fun reload(directory: Path = config.taskDirectory): ValidationReport? = admin.reload(directory)
+
+    /** What `AdminResource` answers, given only the sealed result and this host's own flag (M3). */
+    fun classify(result: TriggerResult): Int = when {
+        result !is TriggerResult.AlreadyRunning -> 202
+        shuttingDown -> 503
+        else -> 409
+    }
+
+    private companion object {
+        val log: Logger = Logger.getLogger(EtlHost::class.java)
+
+        fun render(report: ValidationReport) = report.errors.joinToString("; ") {
+            "${it.file}${it.step?.let { s -> "/$s" } ?: ""}: ${it.message}"
+        }
+    }
+}
