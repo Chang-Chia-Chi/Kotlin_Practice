@@ -28,7 +28,6 @@ open class HostFixture : QuarkusTestResourceLifecycleManager {
         root = Files.createTempDirectory("etl-host-test")
         val tasks = Files.createDirectories(root.resolve("tasks"))
         writeTaskFiles(tasks)
-        seedSource(url(root, "source.db"))
         createTarget(url(root, "report.db"))
         return buildMap {
             put("etl-host.cache.storage-path", root.resolve("cache").toString())
@@ -40,15 +39,21 @@ open class HostFixture : QuarkusTestResourceLifecycleManager {
             // directly where it is under test; that Quarkus fires an @Scheduled method is
             // Quarkus's property, not this host's.
             put("etl-host.cache.refresh-interval", "PT30M")
-            putAll(sourceOverrides(root))
+            putAll(startSource(root))
         }
     }
 
-    /** Overridden by the Oracle fixture, which points the same host at a container instead. */
-    protected open fun sourceOverrides(root: Path): Map<String, String> =
-        mapOf("etl-host.source.url" to url(root, "source.db"))
+    /**
+     * Brings the source up and says how to reach it. The one seam the Oracle fixture overrides -
+     * everything else about the host, including the SQL behind the group, stays identical, which is
+     * what makes "the same host, against a real Oracle" a claim rather than a hope.
+     */
+    protected open fun startSource(root: Path): Map<String, String> {
+        seedDuckDb(url(root, "source.db"))
+        return mapOf("etl-host.source.url" to url(root, "source.db"))
+    }
 
-    protected open fun seedSource(url: String) {
+    private fun seedDuckDb(url: String) {
         connect(url).use { source ->
             source.createStatement().use { st ->
                 st.execute("CREATE TABLE lot (id BIGINT, lot_id VARCHAR, qty DECIMAL(18,3), site VARCHAR)")

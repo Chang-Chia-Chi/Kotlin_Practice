@@ -128,7 +128,7 @@ class Producers(private val config: HostConfig) {
      * `io.micrometer`. A depth review refuted the justification the day this module was written:
      * *invoking a `(Set<String>) -> Unit` names nothing*, and the load/reload pairing is
      * `TaskAdmin`'s own moment, not a host's. So there is no `seed` call site anywhere below, and
-     * `NeverRunTaskTest` would still pass if this host forgot one - because there is nothing left
+     * `MetricsTest` would still pass if this host forgot one - because there is nothing left
      * for it to forget. That is what the row shrinking from a pairing to an argument bought.
      */
     @Produces

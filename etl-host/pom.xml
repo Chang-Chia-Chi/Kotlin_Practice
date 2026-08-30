@@ -24,6 +24,11 @@
              micrometer-registry-prometheus, junit5, arc - is already resolved, which keeps the
              offline builds this repository runs on actually offline. Java 21, Jakarta EE 10. -->
         <quarkus.version>3.17.5</quarkus.version>
+        <!-- The Oracle end-to-end class is excluded by default and opted into with
+             `-DexcludedGroups=none`. It is a property rather than a literal because a literal in
+             <configuration> beats the user property of the same name, so the documented opt-in
+             would silently run zero tests - measured, not assumed. -->
+        <excludedGroups>oracle</excludedGroups>
         <testcontainers.version>1.20.4</testcontainers.version>
         <ojdbc.version>23.5.0.24.07</ojdbc.version>
     </properties>
@@ -154,7 +159,7 @@
                 <artifactId>maven-surefire-plugin</artifactId>
                 <configuration>
                     <!-- Same convention as SimpleEtl: the Testcontainers Oracle class is opt-in. -->
-                    <excludedGroups>oracle</excludedGroups>
+                    <excludedGroups>${excludedGroups}</excludedGroups>
                     <!-- The flag spec 5.4 and 8.6 both require of a deployment, set here so the
                          suite runs the shape production runs. It is NOT evidence: surefire's
                          default -ea turns kotlinx-coroutines' AUTO debug mode on by itself, so

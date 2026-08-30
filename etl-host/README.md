@@ -46,6 +46,17 @@ reason this file says so out loud:
 ## Run
 
 ```bash
-mvn -pl etl-host -am test                  # the default suite; the Oracle test is excluded
-mvn -pl etl-host test -Dgroups=oracle      # the end-to-end test, real Oracle via Testcontainers
+# The module's own suite. `-am` is required (the reactor builds snapshotcache and SimpleEtl
+# first), and the -Dtest filter is what stops -am from also running THEIR suites - which is
+# fourteen minutes of Testcontainers before this module compiles.
+mvn -pl etl-host -am test -Dtest='etlhost.*Test' -Dsurefire.failIfNoSpecifiedTests=false
+
+# The end-to-end test against a real Oracle (Testcontainers, minutes).
+mvn -pl etl-host -am test -Dtest=HostEndToEndOracleTest -DexcludedGroups=none -Dsurefire.failIfNoSpecifiedTests=false
 ```
+
+`-DexcludedGroups=none` rather than `-Dgroups=oracle`, and the difference is worth knowing before
+you trust a green run: a literal `<excludedGroups>` in a plugin's `<configuration>` **beats** the
+user property of the same name, so `-Dgroups=oracle` against such a pom runs zero tests and reports
+BUILD SUCCESS. This module's `excludedGroups` is a `<properties>` entry for that reason, and
+overriding it is what actually opts in.
