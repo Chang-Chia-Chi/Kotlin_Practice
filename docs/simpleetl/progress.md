@@ -3228,3 +3228,61 @@ earlier phases' tests pin the messages. The first sweep at this over-reached int
 pinned messages and was reverted whole before anything ran - the filter matched the error-string
 continuation-line style - and redone line-by-line; the lesson is the session's recurring one, that
 a mechanical sweep over strings needs the same review a mechanical agent does.
+
+---
+
+## The host becomes deployable: 8.6's last two rows are discharged  (2026-08-30)
+
+The two rows the operator round added to 8.6 - *configure an authentication mechanism* and *decide
+the readiness path* - were written as measurements of a cold `java -jar` boot and left as open
+obligations with an empty third column. `etl-host` now discharges both, and both rows gained their
+"In `etl-host`" cell.
+
+**Auth.** `quarkus-elytron-security-properties-file` with two embedded identities: `etl-admin`
+carrying the role and `etl-reader` carrying a different one. The passwords are placeholders, are
+public, and are overridden per deployment by `ETL_ADMIN_PASSWORD` / `ETL_READER_PASSWORD` - which is
+the whole seam between the shipped defaults and a real secret store. The row's symptom column now
+carries the sentence that keeps it discharged: **the reference host wires properties-file identity;
+replace it, don't remove it.** Deleting the block restores the 403-forever boot exactly.
+
+`RealCredentialTest` asserts the three answers over real HTTP **with no `@TestSecurity` anywhere in
+it**, and that absence is the point. Every security assertion in this module carried it, which is
+precisely why eight phases of green suite sat on top of a host that configured no identity provider:
+`@TestSecurity` synthesises an identity and never reaches a provider, so no test using it can fail
+for this reason. The existing `@TestSecurity` tests stay - they pin the sealed-result mapping, which
+is a different job. Mutation-checked: with the `etl-admin` identity removed from configuration, the
+accepted trigger comes back 401 rather than 202.
+
+**Readiness.** `quarkus-smallrye-health` and a `@Readiness` bean, so `/q/health/ready` answers where
+a stock manifest probes. The JAX-RS `/health/ready` stays for compatibility. The check computes
+nothing: it renders `EtlHost.readinessState`, and so does the resource, so two paths cannot become
+two answers.
+
+**A defect found while making that one state, recorded because it is not a refactor.** Readiness was
+a flag written once at the end of `onStart` and never again. A host whose startup refresh failed was
+therefore not-ready **forever**, through every later tick that published perfectly well, and the only
+recovery was a restart - while `EtlHost`'s own KDoc and `etl-host/README.md` both said the opposite
+("readiness stays false until a later tick publishes"). The state is now computed from the cache on
+each read, at one in-memory lookup per group per probe. `ReadinessPathTest` is DOWN, then UP, then
+DOWN, in one instance; with the health check hardwired UP, its two DOWN probes come back 200.
+
+### What a real boot found that no suite could
+
+`etl-host/docker-compose.staging.yml` is the first thing in this repository to run the host against
+Oracle end to end outside a test. Three defects, all the same shape - a value every test supplies by
+accident:
+
+1. **`example-tasks/wip-summary.yaml` did not validate.** The operator round promoted it out of the
+   test fixture verbatim, which turned out to mean promoted *with the Kotlin string template it was
+   written as*: `$TASK`, `$GROUP`, and the leading indentation of a `trimIndent()` literal. The one
+   file in the module that exists to be copied was uncopyable, and nothing referenced it, so nothing
+   failed.
+2. **The pipe target had no credential settings at all.** `targetJdbi` was `Jdbi.create(url)` with
+   no user - correct for the DuckDB file every test in this repository points `report` at, and
+   `ORA-01017` against anything real. `etl-host.etl.target-username` / `-password` now exist and
+   mirror the source's.
+3. **`ojdbc11` was test-scoped**, so the image answered "No suitable driver found" - a message that
+   names the URL and not the missing jar.
+
+None of the three is a framework defect and none changed a framework file. All three are the reason
+this round exists: a green suite is evidence about the suite.

@@ -1971,3 +1971,66 @@ condition drift. The log line is still the operational output.
 - **The metrics smoke test scrapes an in-process registry**, not an HTTP endpoint. The names and
   labels are asserted verbatim off `PrometheusMeterRegistry.scrape()`, which is the same text
   `/q/metrics` serves.
+
+---
+
+## M3's archive layer gets a caller  (2026-08-30)
+
+Spec 18's four classes - `ObjectStore`, `ManifestDao`, `Archiver`, `ArchiveMaintenance` - were built
+across P11-P13, tested against fakes, an Oracle container and a MinIO container, and then run by
+nothing. `etl-host` now hosts them in `etlhost.ArchiveWiring`, which supplies every value the layer
+declines to decide for itself: endpoint, bucket, credentials, the per-group table lists, retention,
+and the HTTP timeout.
+
+**Three scheduling decisions, and one of them was the whole question.**
+
+1. **Neither `start(interval)` is ever called.** Both classes own a `ScheduledExecutorService`, so
+   using them would leave the process with three scheduling models - Quarkus's, the archiver's and
+   maintenance's - each with its own idea of what shutdown means. Both also expose a synchronous
+   tick (`submit`, `sweep`), so declining `start()` costs two idle threads and buys one scheduler.
+   The idle threads are the deliberate trade; the alternative was a diff inside the framework to
+   make `start()` optional, for no behaviour a host can observe.
+2. **The tick is a second `@Scheduled` method, not a second mechanism** - the same Quarkus scheduler
+   `CacheTick` already runs on. It is separate from `CacheTick` only because the cadences genuinely
+   differ, ten minutes against an hour; folding them together would mean hand-rolled "every sixth
+   tick" bookkeeping to save three lines.
+3. **`submit`, never `runOnce`.** `submit` queues onto the archiver's own bounded run pool, which is
+   the only path `Archiver.close()` can interrupt. `runOnce` on the scheduler thread would hold a
+   snapshot lease somewhere shutdown cannot reach it.
+
+**Shutdown ordering.** `ArchiveWiring.close()` runs from `EtlHost.onStop` between `wired.close()`
+and `managed.close()`, never from `@PreDestroy`: CDI does not promise a destruction order and this
+one is load-bearing. An archive run holds a lease for its whole export-upload-commit sequence, so a
+cache told to drain first would be draining a lease whose holder nothing had told to stop. The
+corollary is `etl-host.archive.http-timeout`, which must stay **below** `lease-drain-timeout` - a
+socket read is not interruptible, so a run parked inside the MinIO client drains when that timeout
+fires and not when `close()` asks.
+
+**Off by default**, and that is about prerequisites rather than taste: the layer creates neither the
+bucket (`ObjectStore` declines, so no pod auto-creates one) nor the manifest table
+(`ManifestSchema.DDL`, the DBA's). Enabled by default, the host would boot green and fail one run an
+hour against a bucket nobody made. `docker-compose.staging.yml` provisions both and turns it on,
+which is what that stack is for.
+
+**Evidence.** `ArchiveEndToEndTest` (`@Tag("oracle")`, one Oracle container and one MinIO) archives
+a published generation, finds the COMPLETE row and its object at the size the inventory promised,
+archives a second generation as a strictly newer version, and sweeps: the aged version's row **and
+its objects** go, and the newest COMPLETE stays, which is D34's keep-newest rule holding. Mutation-
+checked by hardcoding retention past the configured value - "v1 survived a zero retention window".
+`ArchiveTablesConfigTest` covers the one host-side validation without a container, because a
+mistyped group name otherwise costs one silent archive run an hour rather than a boot failure.
+
+And on the real stack: `archived group 'wip' as version 1 (1 objects, ...)`, the Parquet objects
+under `snapshot-archive/snapshots/wip/v1/`, and - unprompted - `CacheTick`'s pinned-generation WARN
+naming `archiver-run-2` as the lease holder. The lease diagnostics work against the newly hosted
+layer, which is the first time anything has held a lease in that host other than an ETL run.
+
+### What hosting it did not cover
+
+- **`EtlDiff` has no caller.** It is the consumer half of spec 18.4 and belongs to whatever ETL
+  wants an incremental compare; nothing in this repository is that consumer, and a producer for an
+  object nothing reads would be worse than the gap. Recorded rather than built.
+- **No crash-recovery drill.** The watchdog resolving a PENDING row left by a killed pod is covered
+  by `ArchiveMaintenanceTest` inside the framework; the host does not kill itself mid-upload.
+- **`etl-host.archive.http-timeout < lease-drain-timeout` is configuration, not a guard.** Nothing
+  validates the relation, and no test wedges a socket to observe it being wrong.
