@@ -61,5 +61,14 @@ architecture all three share.
 | `etl-host/` | full Quarkus host: auth, health, archive layer, Docker staging stack, validated `example-tasks/` |
 | `soak/README.md` | the 93-minute soak harness and its measurements, repeatable |
 
+**Vendoring into a project repo**: put both frameworks under one parent directory
+(`frameworks/`) so the layout-law boundary is a directory boundary, carry the CONTEXT files and
+each module's ArchitectureTest with them, and copy `etl-host/` into your services tree as the
+host template. Vendoring is the free moment for the two cosmetic renames (module casing
+`SimpleEtl` -> `simple-etl`; package root `infra.etl` if desired) and, optionally, splitting
+`snapshotarchive` into its own module - each churns every path, so do them when paths churn
+anyway, never before. Your project code follows your conventions; the frameworks keep theirs
+behind the fence.
+
 Process, tiers of authority, and commands: root `CLAUDE.md`. Every past decision and decline:
 `docs/*/progress.md` — search before proposing.
