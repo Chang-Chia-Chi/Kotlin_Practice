@@ -83,10 +83,21 @@ class EtlHost(
         Producers.mkdirs(config.taskDirectory)
         cacheMetrics.bind(groups, managed.cache, managed.admin)
 
-        val published = groups.map { group ->
+        groups.forEach { group ->
             val outcome = managed.admin.triggerRefresh(group)
-            log.infov("startup refresh of group {0}: {1} {2}", group, outcome.result, outcome.detail ?: "")
-            outcome.result == RefreshResult.SUCCESS
+            // WARN, not INFO. This is the line that carries the verify gate's failing rule and its
+            // detail - "Referenced column \"id\" not found" - and it is the whole answer to "why is
+            // this pod not ready". At INFO it sits below the level a production deployment keeps,
+            // and the first ERROR anything logs is spec 8.5's escalation at the *third* consecutive
+            // failure: two refresh intervals, twenty minutes at the shipped default, after the fact.
+            if (outcome.result == RefreshResult.SUCCESS) {
+                log.infov("startup refresh of group {0}: SUCCESS", group)
+            } else {
+                log.warnv(
+                    "startup refresh of group {0}: {1} {2}",
+                    group, outcome.result, outcome.detail ?: "",
+                )
+            }
         }
 
         // Fail fast and loudly. A host whose task files do not validate has nothing to serve, and
@@ -99,7 +110,13 @@ class EtlHost(
             )
         }
 
-        ready = published.isNotEmpty() && published.all { it }
+        // Spec 10.1 step 5 asks whether a generation has PUBLISHED, and that is the question asked
+        // here - of the cache, not of the refresh round this method happened to start. The two are
+        // not the same answer: a round that comes back SKIPPED_OVERLAP published nothing itself
+        // while another round published everything, and reading the result instead of the cache
+        // reported "not ready" over a live, serving generation. `delayed` on CacheTick removed the
+        // overlap that produced it at boot; this removes the class of wrong answer.
+        ready = groups.isNotEmpty() && groups.all { managed.cache.currentInfo(it) != null }
         log.infov("startup complete, readiness = {0}", ready)
     }
 

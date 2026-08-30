@@ -53,8 +53,25 @@ class CacheTick @Inject constructor(
     private val clock: Clock,
 ) {
 
+    /**
+     * **`delayed` is not decoration, and its absence was a boot-time defect.** Quarkus fires an
+     * `every` trigger for the first time when the *scheduler* starts, not one interval later - so
+     * without this the tick raced [EtlHost.onStart]'s spec 10.1 step 4 refresh on every single
+     * boot, whatever the interval said. Measured, both outcomes, on this module's own fixture:
+     *
+     * - the startup refresh won: two full generations built seconds apart, the first one garbage
+     *   the moment it published;
+     * - the tick won: the startup refresh came back `SKIPPED_OVERLAP`, which is not `SUCCESS`, so
+     *   the host declared itself **not ready while serving a published generation** - for a whole
+     *   refresh interval, or until a readiness probe's failureThreshold killed the pod.
+     *
+     * One interval is what [EtlHost]'s own KDoc always claimed ("the tick's first firing is one
+     * whole interval away") and what spec 4.4 means by a gap measured from the end of the previous
+     * round - the previous round being the startup refresh.
+     */
     @Scheduled(
         every = "{etl-host.cache.refresh-interval}",
+        delayed = "{etl-host.cache.refresh-interval}",
         concurrentExecution = Scheduled.ConcurrentExecution.SKIP,
     )
     fun tick() {
