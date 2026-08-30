@@ -7,9 +7,10 @@ import com.tngtech.archunit.lang.syntax.ArchRuleDefinition.noClasses
 import org.junit.jupiter.api.Test
 
 /**
- * The five boundary rules of plan 2.2, the two archive-layer rules of plan 3c, and D33's
- * ban on a bucket listing. These are the module's static-analysis gate; they run on every
- * build from P0 onward rather than being retrofitted later.
+ * The boundary rules of plan 2.2 - its original five plus the bootstrap leaf rule its
+ * 2026-08-30 amendment added - the two archive-layer rules of plan 3c, and D33's ban on a
+ * bucket listing. These are the module's static-analysis gate; they run on every build from
+ * P0 onward rather than being retrofitted later.
  */
 class ArchitectureTest {
 
@@ -122,11 +123,39 @@ class ArchitectureTest {
             .check(framework)
     }
 
+    /**
+     * Plan 2.2's rule, with the one named exception the 2026-08-30 amendment added.
+     * `bootstrap` is the composition root: it is the single place the object graph is
+     * assembled, and assembling it means naming the `internal` classes that implement the
+     * `api` interfaces. Everything else still reaches `core` only through `api` and `spi`.
+     */
     @Test
-    fun `nothing outside core reaches into core`() {
+    fun `nothing outside core reaches into core, except the bootstrap composition root`() {
         noClasses().that().resideOutsideOfPackage("infra.snapshotcache.core..")
+            .and().resideOutsideOfPackage("infra.snapshotcache.bootstrap..")
             .should().dependOnClassesThat().resideInAPackage("infra.snapshotcache.core..")
-            .because("core internals are reached only through api and spi (plan 2.2)")
+            .because(
+                "core internals are reached only through api and spi, and only the bootstrap " +
+                    "composition root is excepted (plan 2.2, amended 2026-08-30)",
+            )
+            .check(framework)
+    }
+
+    /**
+     * The other half of the amendment, and the reason the exception above costs nothing.
+     * A composition root that something depends on is no longer a composition root - it has
+     * become a layer, and the inward dependency it is allowed to carry would then be a path
+     * from anywhere to `core`. Stating the leaf property positively is what keeps the
+     * exception one edge wide instead of a hole.
+     */
+    @Test
+    fun `nothing depends on the bootstrap composition root`() {
+        noClasses().that().resideOutsideOfPackage("infra.snapshotcache.bootstrap..")
+            .should().dependOnClassesThat().resideInAPackage("infra.snapshotcache.bootstrap..")
+            .because(
+                "bootstrap assembles the object graph and nothing assembles it; it is a leaf, " +
+                    "so its permission to reach core and duckdb reaches no further (plan 2.2, amended 2026-08-30)",
+            )
             .check(framework)
     }
 }

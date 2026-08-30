@@ -278,7 +278,7 @@ internal class RefreshCycle(
         val now = clock.instant()
         log.warnf(
             "Refresh of group %s is blocked: live generations exceed K=%d; pausing until leases release (spec 6.1)",
-            group, config.maxLiveGenerations,
+            group, registry.maxLive,
         )
         for (lease in holders) {
             log.warnf(
@@ -288,7 +288,7 @@ internal class RefreshCycle(
         }
         return finish(
             RefreshResult.BLOCKED_BY_K,
-            detail = "live generations exceed K=${config.maxLiveGenerations}; ${holders.size} lease(s) outstanding",
+            detail = "live generations exceed K=${registry.maxLive}; ${holders.size} lease(s) outstanding",
         )
     }
 

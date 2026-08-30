@@ -244,6 +244,39 @@ internal class ReviewFixRegressionTest : RefreshCycleTestBase() {
         assertThat(sink.released).describedAs("leaseExpired is additional, not a replacement").hasSize(2)
     }
 
+    // ------------------------------------------------------------------ K has one source of truth
+
+    /**
+     * K was enforced by [GenerationRegistry.maxLive] but *reported* from
+     * `config.maxLiveGenerations` - two sources for one number. Wire them differently and
+     * the operator's alert says one K while the registry blocks at another, with nothing
+     * in the log to reveal the disagreement. The reported number now comes from the
+     * component that enforces it.
+     *
+     * The two are deliberately wired apart here: through the composition root that
+     * divergence is unrepresentable, so the only way to pin the fix is to build the
+     * divergence by hand. Pre-fix the detail reads `K=99`.
+     */
+    @Test
+    fun blockedByK_reportsTheKTheRegistryEnforces_notTheConfigsCopy() {
+        val enforcing = GenerationRegistry(1, Duration.ofMinutes(5), clock, hooks)
+        trackedRegistry = enforcing
+        val c = cycle(cfg = config.copy(maxLiveGenerations = 99), reg = enforcing)
+
+        runSuccess(c)
+        // Held to the end of the test on purpose: gen 1 stays leased, which is what keeps
+        // the fixture's equation 3 satisfied without a reclaim pass this test does not need.
+        checkNotNull(enforcing.tryAcquire("stuck-consumer"))
+        runSuccess(c) // live = 2 > the registry's K of 1
+
+        val blocked = c.runOnce()
+        assertThat(blocked.result).isEqualTo(RefreshResult.BLOCKED_BY_K)
+        assertThat(blocked.detail)
+            .describedAs("the reported K must be the enforced one, got %s", blocked.detail)
+            .contains("K=1")
+            .doesNotContain("K=99")
+    }
+
     private class RecordingLeaseEvents : CacheEvents {
         val released = CopyOnWriteArrayList<Pair<LeaseInfo, Duration>>()
         val expired = CopyOnWriteArrayList<Pair<LeaseInfo, Duration>>()

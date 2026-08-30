@@ -42,7 +42,12 @@ internal class RegistryLease(
  * and a latch under the lock would deadlock the suite.
  */
 internal class GenerationRegistry(
-    private val maxLive: Int,
+    /**
+     * K. Public on purpose: [RefreshCycle] reports the number it was blocked by, and
+     * reading `config.maxLiveGenerations` there made two sources of truth for one value -
+     * wire them differently and the alert says K=3 while the registry blocks at 5.
+     */
+    val maxLive: Int,
     private val leaseDeadline: Duration,
     private val clock: Clock,
     private val hooks: HookRunner = NoOpHooks,

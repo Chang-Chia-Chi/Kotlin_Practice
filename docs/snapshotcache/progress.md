@@ -1382,3 +1382,135 @@ superseding an earlier one is how it is meant to read.
 
 **59 tests, 0 failures, 0 errors, 0 skips**, per-class identical to the baseline above. No test
 outside `infra/snapshotarchive/**` was touched, and no earlier assertion was modified or weakened.
+---
+
+## The public construction seam - plan 2.2 amended, `bootstrap` built  (2026-08-30)
+
+Ruled on by the maintainer and executed document-first: the plan amendment landed as its own
+commit before any code.
+
+### 1. The amendment (plan 2.2, spec 5.4)
+
+The framework had no public construction path. `api` holds only interfaces, data classes and
+exceptions; `DefaultSnapshotCache`, `GenerationRegistry` and `RefreshCycle` are all `internal`.
+A downstream Maven module - SimpleEtl already depends on this one - could hold a `SnapshotCache`
+and never obtain one. The 2026-08-29 adjudication pass recorded the obvious repair, a factory in
+`api`, as **rejected**: it makes the innermost layer depend on `core` and `duckdb`, breaking two
+of plan 2.2's FIXED boundary rules. That entry was a stop-and-report awaiting a plan amendment,
+and it now points here.
+
+Plan 2.2 gains `infra.snapshotcache.bootstrap` with a named exception: it may reach `core` and
+`duckdb`, and **nothing may reach it**. The second half is what makes the first half cheap - a
+composition root something depends on has stopped being a composition root and become a layer,
+at which point its inward permission is a path from anywhere to `core`. The dependency arrow a
+composition root adds points inward from outside the onion; the arrow the rejected factory added
+pointed outward from the innermost layer, which is the thing the rules forbid.
+
+Stated explicitly in the amendment, because a later session will read this as precedent:
+`api` gains no dependency and its rule is untouched; `core` stays `internal` (bootstrap reaches
+it as same-module `internal`, not by widening a visibility); the plan 2.3 five-interface budget
+is untouched because the entry point is a **function** and `ManagedSnapshotCache` is a holder
+class, not a seam; the 2.4 do-not-build list is untouched, and bootstrap is explicitly not a DI
+container, a plugin registry, or a place to put policy.
+
+Spec 5.4 declares the entry point at spec level, alongside 5.1-5.3.
+
+### 2. What became real
+
+`openSnapshotCache(config, sources, events, checks, clock): ManagedSnapshotCache`, ~60 lines of
+wiring under ~90 lines of KDoc. `ManagedSnapshotCache` exposes `cache: SnapshotCache`,
+`admin: CacheAdmin` and `close()`.
+
+- **One store per group, derived**: `config.storagePath.resolve(group.value)`. This finally
+  implements spec 3.1's own `/data/cache/<group>/` diagram - until now it was a diagram with no
+  code behind it and a P9 obligation recorded in a KDoc. Derived rather than configured because
+  generation numbering restarts at 1 per group: two groups aimed at one directory both write
+  `gen_0000000001.db`. The misconfiguration is now unrepresentable rather than documented.
+- **Spec 10.1 step 1**, the startup wipe, gated on `clearStaleFilesOnStartup` and performed as
+  `listOnDisk` + `delete` per group. Step 2's serving knobs (`tempDirectory`,
+  `servingMemoryLimit`, `servingThreads`) reach the store here too.
+- **Spec 10.2 steps 1 and 4** run from `close()`, followed by closing the stores. Idempotent, and
+  the store close runs in a `finally` - a half-closed cache still holding file handles is what
+  makes the *next* startup's wipe fail as well.
+- A store opened before a later group's construction throws is closed on the failure path; without
+  it, every failed startup attempt leaks a DuckDB instance.
+
+`checks: List<GenerationCheck>` was added to the shape the ruling sketched. Without it the caller
+extension point of spec 5.2 is unreachable through the only public construction path, which would
+have reproduced in a new place the exact defect this seam exists to fix.
+
+### 3. What stays the host's, named in the KDoc
+
+The list is load-bearing, on the model of spec 8.6's table on the SimpleEtl side: refresh
+scheduling (4.4), the `expiredLeases()` poll (6.2/12.3), thread naming for lease attribution,
+metrics binders (12), readiness and the first refresh (10.1 steps 3-5), and 10.2 steps 2 and 3.
+All of it needs a thread, a schedule or a health surface the framework has no business owning.
+
+Three config fields stay dormant **and the KDoc says why**, so the config stops reading as a
+manifest that silently diverges from behavior: `jdbcFetchSize` is the caller's `GenerationSource`'s
+(7.2), `refreshInterval` is the host scheduler's (4.4), `consumerMemoryLimit` belongs to the host's
+second DuckDB instance (6.5).
+
+### 4. K has one source of truth
+
+`GenerationRegistry` enforced K from its own `maxLive` while `RefreshCycle` *reported* it from
+`config.maxLiveGenerations`. Wire them differently and the operator's alert says K=3 while the
+registry blocks at 5, with nothing in the log revealing the disagreement. `maxLive` became a
+public property of the registry and `RefreshCycle` reads it; the constructor signature did not
+change, so no call site moved and `e2e/ArchiveIntegrationTest` was not touched.
+
+### 5. ArchUnit
+
+One existing rule needed the exception, not two: `nothing outside core reaches into core`.
+The `api` rule's subject is `api` alone and the core-layers rule's subject is `api`/`spi`/`core`,
+so neither sees `bootstrap` at all - checked by running them, not by reading them. One rule added:
+`nothing depends on the bootstrap composition root`.
+
+### Verified by planting
+
+Four mutations, each restored after the run:
+
+| Planted | Failure |
+|---|---|
+| `duckdb` names `bootstrap.ManagedSnapshotCache` | only `nothing depends on the bootstrap composition root` fails, 2 violations |
+| `duckdb` names `core.GenerationRegistry` | only the amended core rule fails - the exception is one package wide, not a hole |
+| `RefreshCycle` reads `config.maxLiveGenerations` again | `blockedByK_reportsTheKTheRegistryEnforces_notTheConfigsCopy` fails with `K=99` against a registry enforcing 1 |
+| startup wipe made unconditional | the `clearStaleFiles = false` half of the wipe test fails |
+| per-group `resolve(group.value)` dropped | the two-directory assertion fails, and the wipe test with it |
+
+### Tests
+
+`bootstrap/OpenSnapshotCacheTest`, two tests, real DuckDB (P7/P8 precedent - the thing under test
+is the wiring, and a fake store wires something that is not the production graph). It names no
+`core` type anywhere: if the seam needs an internal type to be usable it has not closed the gap it
+exists for.
+
+- two groups, two subdirectories, `withSnapshot` on each proving they are served from their own
+  files by content; live generations and refcounts back to zero on the P8 end-of-test model;
+  post-`close()` a clean recursive delete of the whole tree (an undetached generation or unclosed
+  serving instance leaves a Windows file lock, so this is the leak evidence), then
+  `ShuttingDownException` on a later acquire, then an idempotent second `close()`.
+- the startup wipe, both branches - collected when the config says so, kept when it does not.
+
+One test appended to `ReviewFixRegressionTest` for the K fix, wiring registry and config apart by
+hand because through the composition root the divergence is unrepresentable.
+
+One earlier test **was** narrowed, and it is the only one: `nothing outside core reaches into core`
+now excludes `bootstrap`. That is the amendment itself rather than an implementation convenience -
+it is the change the maintainer ruled on, it landed in plan 2.2 before the code, and the new leaf
+rule plus its mutation check are what keep the narrowing one package wide. No other existing
+assertion was touched; the remaining edits to existing test sources are the new arch rule and the
+appended `ReviewFixRegressionTest` case.
+
+**212 tests, 0 failures, 2 pre-existing skips (208 before, same run scope - no exclusions were
+needed; the Testcontainers archive tests were green in both the baseline and the final run).**
+
+### One trap worth recording
+
+The first full run after the mutation checks failed the amended core rule, naming a
+`DuckDbGenerationStoreKt.plantedCoreEdge` that no longer existed in any source file. Kotlin's
+incremental compilation does not delete a **file-facade class** when its last top-level
+declaration is removed, so `target/classes` kept the ghost - and ArchUnit reads `target/classes`,
+not the source. Every rule in `ArchitectureTest` is therefore only as current as the last compile:
+**after planting and restoring a top-level declaration, measure with `clean`.** The green run
+below is `mvn -o -pl snapshotcache -am clean test`.
