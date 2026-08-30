@@ -45,6 +45,14 @@ layered; `SimpleEtl` splits into `pipe`/`task` (two units) with flat insides; `s
 the silhouette. One watched threshold: `task` sits at 13 files, held flat because spec 11.2 +
 `internal` + ArchUnit already do `api`'s job — if it grows further, the layering rule fires.
 
+**Why snapshotcache is ports-and-adapters and the others are not**: inversion follows variation,
+not style. A seam is built only where two adapters exist — `GenerationStore` (DuckDb + the
+testkit's InMemory: what keeps core tests database-free) and `RowWriter`/`TaskMetrics` in
+SimpleEtl are real seams and are inverted; scratch-is-DuckDB is a pinned domain commitment whose
+semantics derive from that engine, so a port over it would fake a substitutability that does not
+exist. One adapter = hypothetical seam = not built. That rule, not the folder shape, is the
+architecture all three share.
+
 ## Copy from, in order of ceremony
 
 | | |
