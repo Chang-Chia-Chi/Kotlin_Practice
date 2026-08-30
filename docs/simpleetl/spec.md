@@ -1032,7 +1032,7 @@ them.
 | **call `MicrometerTaskMetrics.seed(names)` after the initial load and after every reload**, with the whole task-name set each time (E15b) | a task that has never run emits no `etl_task_runs_total` series at all, so a counter-based staleness alert silently matches nothing - it does not fire, and it does not error either. This is the normal state of every task after every deploy. `EtlWiring` cannot absorb this row: `infra.etl.task` may not name `io.micrometer`, so only the host holds the binding `seed` lives on. Seeding is idempotent (9.3), so the reload call is a plain repeat of the startup one |
 | **alert on the *absence* of a metric series, not on a zero counter**, for anything the row above does not seed. 9.3's meters are registered when a run first touches them; a task that has never run in this process has no series at all | "no successful run in 24h" written as `etl_task_runs_total{outcome="succeeded"} == 0` never fires for the task that stopped being scheduled, because there is no such series to compare. The registry lives in the process, so this is the normal state after every deploy and not an edge case - the same non-persistence 8.2 records for run history. **E15b narrows this row rather than removing it**: `seed` closes the gap for `etl_task_runs_total`, which is the meter alerts are actually written against, and 9.3 says why the other five stay absence-only |
 | **set `-Dkotlinx.coroutines.debug=on` on the JVM** when the host reads a snapshot cache (E16) | `LeaseInfo.owner` is the *acquiring thread's* name, and every run acquires on `Dispatchers.IO.limitedParallelism(1)` - a view over the shared IO pool, with no `ThreadFactory` to name (8.3). Without the flag the cache's expired-lease WARN and `liveGenerations` both say `DefaultDispatcher-worker-1` and name no task, so "which job is stalling refresh" is unanswerable in exactly the incident it exists for. **No test can catch this being missed**: kotlinx-coroutines' debug mode is `AUTO` and turns itself on whenever assertions are enabled, which surefire does - so every test JVM in this repository shows `DefaultDispatcher-worker-1 @task-name#5` while production shows the bare name. Measured, both forms, on the first composed host. Verify by reading a running pod's command line |
-| **stop the schedule at shutdown.** Until E16 the only way was `admin.reload(<an empty directory>)`, which cancels every cron registration - as a *side effect* of replacing the task list with nothing | The workaround costs the task list: `list()` then reports no tasks at all, so the admin endpoint goes blank at exactly the moment an operator is watching a shutdown, and a shutdown that is aborted has to reload the real directory to get back. It also cannot stop the runner, so a cron firing that had already been dispatched still submits. **Superseded by `WiringResult.Wired.close()` (11.2)**, which cancels the registrations and the runner's scope and leaves the definitions where they are. A host that keeps the reload workaround still needs the empty directory to exist |
+| **stop the schedule at shutdown.** Until E16 the only way was `admin.reload(<an empty directory>)`, which cancels every cron registration - as a *side effect* of replacing the task list with nothing | The workaround costs the task list: `list()` then reports no tasks at all, so the admin endpoint goes blank at exactly the moment an operator is watching a shutdown, and a shutdown that is aborted has to reload the real directory to get back. It also cannot stop the runner, so a cron firing that had already been dispatched still submits. **Superseded by `WiringResult.Wired.close()` (11.2)**, which cancels the registrations and the runner's scope and leaves the definitions where they are - so `GET /admin/etl/tasks` still answers, with every task showing `scheduled = false` beside its `cron`. That is the same rendering E14 gave a host that forgot `apply`, and `TaskStatus.scheduled` names both causes. `close` is terminal: a reload afterwards is rejected rather than re-registering crons the cancelled runner would discard, and recovery is a new `EtlWiring.start`. A host that keeps the reload workaround still needs the empty directory to exist |
 
 Two notes on the metric binding, measured on micrometer 1.14.2 rather than assumed:
 
@@ -1732,7 +1732,11 @@ sealed interface WiringResult {
      *  and the scheduler as well as the admin so that `close` can reach them, and a generated
      *  `equals` over those is meaningless. `admin` is unchanged; `copy`/`componentN` were used
      *  nowhere. */
-    class Wired(val admin: TaskAdmin) : WiringResult, AutoCloseable {
+    class Wired internal constructor(
+        val admin: TaskAdmin,
+        runner: TaskRunner,          // held so close() can reach them; neither is exposed
+        scheduler: TaskScheduler,
+    ) : WiringResult, AutoCloseable {
 
         /** E16. **The shutdown seam** - 8.6's "stop the schedule" row, which until now a host
          *  could only reach by reloading an empty directory and losing its task list as a side
@@ -1758,9 +1762,23 @@ sealed interface WiringResult {
          *  "already running" when nothing is; it is documented here and on `TriggerResult`.
          *
          *  `admin` keeps its definitions and `list()` keeps answering, which is the whole
-         *  difference from the reload-an-empty-directory workaround.
+         *  difference from the reload-an-empty-directory workaround. Every task then lists with
+         *  `scheduled = false` beside its `cron` - the same rendering E14 gave a host that forgot
+         *  `TaskScheduler.apply`, and `TaskStatus.scheduled` names both causes.
          *
-         *  Idempotent.
+         *  **One trigger can still be `Accepted`**, so "for every task" above holds only after
+         *  this call has landed. `TaskRunner.submit` checks the scope before it claims the task,
+         *  so a trigger that passed that check in the instant before `close` goes on to launch
+         *  into a cancelled scope: its block never runs and the run is recorded FAILED by the
+         *  existing completion handler - an accepted runId with a failed outcome, which is the
+         *  honest record for a run shutdown killed. The window is one dispatch wide, and closing
+         *  it would need a lock on the submit path that exists for nothing else.
+         *
+         *  Idempotent, and **terminal**. An aborted shutdown does not recover by reloading:
+         *  `TaskScheduler.apply` after this call - which `TaskAdmin.reload` is - answers a
+         *  `ValidationReport` naming the closed wiring instead of re-registering crons whose
+         *  firings the cancelled runner would discard, which would be a permanently stalled
+         *  schedule reporting itself healthy. Recovery is a new `EtlWiring.start`.
          *
          *  **Composition order.** A host that also owns a snapshot cache calls this *before*
          *  `ManagedSnapshotCache.close()`. That gives the cache's own spec 10.2 steps 2 and 3 -

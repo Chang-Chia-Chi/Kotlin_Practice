@@ -11,6 +11,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import org.jdbi.v3.core.Jdbi
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
@@ -152,6 +153,54 @@ class EtlWiringShutdownTest {
             "close() interrupted a run it cannot interrupt, or recorded the scope's cancellation " +
                 "over the run's own outcome: ${outcome.failure}"
         }
+    }
+
+    /**
+     * The review's blocking finding: `close()` is terminal for `TaskRunner`, and `TaskScheduler`
+     * has to know it.
+     *
+     * The scenario is an *aborted* shutdown - `close()`, then an operator reloads the real
+     * directory. Without the terminal flag, `apply` finds an empty registry, re-registers every
+     * cron and answers success; `list()` then reports `scheduled = true` while every firing dies
+     * on the cancelled scope and is discarded by `TaskScheduler.fire`, which has no one to tell.
+     * A permanently stalled schedule reporting itself healthy - the failure E14 spent a phase
+     * making visible, reintroduced by the shutdown seam.
+     */
+    @Test
+    fun reloadAfterCloseIsRejectedRatherThanRegisteringEveryCronAgain() {
+        val directory = P7Tasks.directory(
+            root.resolve("tasks"),
+            "nightly.yaml" to P7Tasks.yaml("nightly-roll", cron = "0 0 2 * * ?"),
+        )
+        val handle = wired(P7Tasks.scheduled("nightly-roll", cron = "0 0 2 * * ?"))
+        handle.close()
+
+        val report = handle.admin.reload(directory)
+
+        assertAll(
+            {
+                assertNotNull(report) {
+                    "reload after close reported success; every cron is registered again and every " +
+                        "firing will be dropped by the cancelled runner, in silence"
+                }
+            },
+            {
+                assertTrue(report != null && report.errors.single().message.contains("closed")) {
+                    "the report must name the terminal state, not merely be non-null: " +
+                        report?.errors
+                }
+            },
+            {
+                assertTrue(report != null && report.errors.single().message.contains("EtlWiring.start")) {
+                    "the report must name the recovery - a new wiring: ${report?.errors}"
+                }
+            },
+            {
+                assertTrue(cron.live.isEmpty()) {
+                    "a rejected reload registers nothing (spec 8.5); still live: ${cron.live}"
+                }
+            },
+        )
     }
 
     /** Seam (d). A host with both a shutdown hook and an explicit stop calls this twice. */

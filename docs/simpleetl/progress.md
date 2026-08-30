@@ -2776,9 +2776,68 @@ test modified: `git diff --stat 216c6cb..HEAD -- '**/test/**'` shows one new fil
 
 ### Deviations from the documents
 
-None. 11.2 was amended in its own commit before any code was written.
+**One, and the first write-up of this phase called it none, which was wrong.** 11.2 was amended in
+its own commit before any code was written, and the amendment declared
+`class Wired(val admin: TaskAdmin)`. What shipped is
+`class Wired internal constructor(val admin, runner, scheduler)` - the constructor had to take the
+two objects `close` acts on, and no reader of 11.2 would have derived that from the block. The
+signature block in 11.2 now shows what ships. Recorded here rather than left as a spec block that
+quietly disagrees with the code, which is the failure mode this file exists to prevent.
+
+The `data class` becoming a plain class was recorded from the start and stands.
 
 ### Where a contract met reality
 
-Nothing broke. The one thing that had to give was the `data class` on `WiringResult.Wired`, and
-that is recorded in 11.2 in place rather than left for a reader to notice the shape changed.
+Nothing broke. The two shapes that had to give - the `data class`, and the constructor above - are
+both in 11.2 in place rather than left for a reader to notice.
+
+---
+
+## E16 review round - four fixes  (2026-08-30)
+
+Independent review: merge-with-fixes. The four races were verified safe on trace
+(cancel-then-cancel ordering load-bearing; double-close idempotent by monitor construction). Four
+fixes, in their own commit rather than amended into the phase.
+
+### 1. Blocking: `close()` was terminal for the runner and the scheduler did not know it
+
+The scenario is an **aborted shutdown**: `close()`, the operator changes their mind, the host calls
+`admin.reload(realDirectory)`. `TaskScheduler.apply` found an empty registry, re-registered every
+cron and returned null - success - so `list()` reported `scheduled = true` for every task while
+every firing thereafter hit the cancelled scope, was answered `AlreadyRunning`, and was discarded
+by `fire`, which takes a `() -> Unit` and has no one to tell. **A permanently stalled schedule
+reporting itself healthy** - which is exactly the failure E14 spent a phase making visible, walked
+back in by the shutdown seam.
+
+Fix: a `@Volatile closed` flag set by `cancelAll` and never cleared; `apply` while closed answers a
+`ValidationReport` naming the terminal state and the recovery ("build a new one via
+`EtlWiring.start`") rather than a false success. `TaskAdmin.reload` already returns whatever `apply`
+returns, so the host sees it on the path it actually uses. 11.2 gained the sentence.
+
+`reloadAfterCloseIsRejectedRatherThanRegisteringEveryCronAgain` drives it through
+`admin.reload(directory)`, not through `apply` - the seam a host reaches. Mutation-checked by
+deleting the flag and its guard: the test goes red on the false-success assertion, which is the
+path the finding is about, and not on a weaker one.
+
+### 2. 11.2's `Wired` block disagreed with what ships
+
+See the corrected deviations note above.
+
+### 3. `TaskStatus.scheduled` named one cause of cron-set-but-unscheduled
+
+E14 wrote it as "the host forgot `TaskScheduler.apply`". After `close()` every task renders
+identically, and that rendering is *deliberate* - it is what keeping the admin view alive costs.
+Both causes are now named on the KDoc and in the 8.6 row that sells the admin view staying alive.
+
+### 4. 11.2 overstated the trigger answer
+
+It said, unqualified, that after `close` `trigger` answers `AlreadyRunning` for every task. In the
+one-dispatch window between `submit`'s `isActive` check and its CAS, a straddling trigger is
+`Accepted` and its run is recorded FAILED by the completion handler. progress.md disclosed this
+from the start and the spec did not; 11.2 now carries the same qualification, including why the
+window is left open - closing it needs a lock on the submit path that exists for nothing else.
+
+### Suites
+
+SimpleEtl **397 green** (396 after the phase, 392 before it). `snapshotcache` untouched and re-run
+whole at **215 / 0 / 2**. No earlier test modified.

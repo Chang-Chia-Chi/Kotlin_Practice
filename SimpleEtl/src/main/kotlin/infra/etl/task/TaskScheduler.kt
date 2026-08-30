@@ -52,6 +52,17 @@ class TaskScheduler(private val cron: CronScheduler, private val runner: TaskRun
     private var current: Map<String, TaskDefinition> = emptyMap()
 
     /**
+     * Set by [cancelAll] and never cleared: [WiringResult.Wired.close] is **terminal** for this
+     * wiring (E16 review). Without it, a shutdown that is aborted - `close()`, then an operator's
+     * `reload` - finds an empty registry, re-registers every cron, and answers success: `list()`
+     * then shows `scheduled = true` for tasks whose every firing dies on the runner's cancelled
+     * scope and is discarded by [fire]. A permanently stalled schedule presenting as a healthy
+     * one, which is the exact failure mode E14 spent a phase making visible.
+     */
+    @Volatile
+    private var closed = false
+
+    /**
      * Registers exactly the enabled tasks that carry a cron, unregisters the ones that no longer
      * qualify, and re-registers **only** those whose expression changed. A task whose definition
      * changed but whose cron did not keeps its registration and simply fires the new definition.
@@ -74,6 +85,7 @@ class TaskScheduler(private val cron: CronScheduler, private val runner: TaskRun
      */
     @Synchronized
     fun apply(definitions: List<TaskDefinition>): ValidationReport? {
+        if (closed) return ValidationReport(listOf(CLOSED))
         val wanted = definitions.filter { it.enabled && it.cron != null }.associate { it.name to it.cron!! }
         val previous = current
         current = definitions.associateBy { it.name }
@@ -150,9 +162,14 @@ class TaskScheduler(private val cron: CronScheduler, private val runner: TaskRun
      * nothing, it leaves the registry able to accept a later batch, and in a host it is paired
      * with a `TaskAdmin.reload` that empties the task listing too. Idempotent - a second call
      * finds an empty registry.
+     *
+     * **Terminal.** [closed] stays set, so a later [apply] - which a host reaches through
+     * `TaskAdmin.reload` - is rejected rather than quietly rebuilding a registry whose firings
+     * the cancelled runner throws away.
      */
     @Synchronized
     internal fun cancelAll() {
+        closed = true
         registrations.values.forEach { close(it.handle) }
         registrations.clear()
         current = emptyMap()
@@ -181,4 +198,15 @@ class TaskScheduler(private val cron: CronScheduler, private val runner: TaskRun
     }
 
     private class Registration(val cron: String, val handle: AutoCloseable)
+
+    private companion object {
+        val CLOSED = ValidationError(
+            file = "<wiring>",
+            step = null,
+            line = null,
+            message = "this wiring was closed (WiringResult.Wired.close); its TaskRunner scope is " +
+                "cancelled, so any cron registered now would fire into a runner that refuses every " +
+                "submit. Build a new one via EtlWiring.start (spec 8.6, 11.2).",
+        )
+    }
 }

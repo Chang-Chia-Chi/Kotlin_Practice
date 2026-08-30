@@ -9,9 +9,12 @@ import org.jboss.logging.Logger
  * @param cron null for a task that only ever runs from the API (spec 8.1). What the *definition*
  *   asks for, which is not evidence that anything was registered - see [scheduled].
  * @param scheduled whether [TaskScheduler] currently holds a live registration for this name
- *   (E14). A non-null [cron] with `scheduled = false` is the visible form of spec 8.6's
- *   `TaskScheduler.apply` obligation being missed: the task is listed with a schedule and will
- *   never fire. Always false for a `null` [cron], which is the normal API-only task.
+ *   (E14). A non-null [cron] with `scheduled = false` has **two** causes, and they read
+ *   identically here: spec 8.6's `TaskScheduler.apply` obligation was missed, or
+ *   [WiringResult.Wired.close] has run and every task now renders this way, which is the shape a
+ *   host's admin view keeps *because* `close` deliberately leaves the definitions in place (E16).
+ *   Either way the task is listed with a schedule and will never fire. Always false for a `null`
+ *   [cron], which is the normal API-only task.
  * @param lastRun null until the task has run at least once in this process. Run history does not
  *   survive a restart; nothing in spec 8 persists it.
  */
