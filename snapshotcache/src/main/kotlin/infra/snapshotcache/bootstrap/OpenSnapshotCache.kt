@@ -73,7 +73,12 @@ private val GENERATION_FILE = Regex("gen_\\d{10}\\.db(\\.tmp)?(\\.wal)?")
  *   ships no scheduler, and one here would be the async orchestration plan 2.4 forbids.
  * - [SnapshotCacheConfig.consumerMemoryLimit] belongs to the host's second, consumer-side
  *   DuckDB instance (spec 6.5), which the host owns because it is the host's jobs that
- *   pass its connection as `CopyOutSpec.targetConnection`.
+ *   pass its connection as `CopyOutSpec.targetConnection`. **With SimpleEtl as the consumer
+ *   it is inert**: a `cacheCopy` step passes its own per-run scratch instance's write
+ *   connection, whose `memory_limit` came from `EtlWiring.scratchMemoryLimitMb` (4096 MB by
+ *   default). The field stays because a host that does own one shared consumer instance
+ *   reads it; a SimpleEtl host sizes its pod off `scratchMemoryLimitMb` times the number of
+ *   tasks whose schedules can overlap, which is the amended D16 arithmetic in spec 11.1.
  * - [SnapshotCacheConfig.allowOverlap] can never be true: spec 4.4 forbids overlapping
  *   rounds and the refresh cycle refuses one unconditionally, without consulting the flag.
  *   It is a spec 13 row with no reachable `true` branch, not a knob this seam declined.
@@ -85,14 +90,43 @@ private val GENERATION_FILE = Regex("gen_\\d{10}\\.db(\\.tmp)?(\\.wal)?")
  * - **Refresh scheduling** (spec 4.4). The host's tick calls [CacheAdmin.triggerRefresh].
  * - **The `expiredLeases()` poll** (spec 6.2, 12.3). A lease still *held* past its deadline
  *   is visible only to something periodic, and the host's tick is the only periodic thing.
- * - **Thread naming.** `LeaseInfo.owner` is the acquiring thread's name; useful attribution
- *   is the host naming its pools.
+ * - **Reading [CacheAdmin.liveGenerations] on that same tick.** [CacheAdmin.gc] answers
+ *   `GcOutcome(reclaimed = [], deferred = [])` both when there was nothing to reclaim and
+ *   when a consumer is pinning a non-current generation, and the outcome cannot tell those
+ *   apart. `GenerationState.refCount` and its lease list can. Unpolled, "a job is holding a
+ *   generation open" stays invisible until the live count reaches K and spec 6.1 pauses
+ *   refresh - an alert one stage downstream of the fact it is about.
+ * - **Lease attribution, which on a coroutine-dispatched host is a JVM flag rather than a
+ *   thread name.** `LeaseInfo.owner` is the acquiring thread's name. "Name your pools" is no
+ *   remedy for the primary consumer: SimpleEtl runs on `Dispatchers.IO.limitedParallelism(1)`,
+ *   a view over the shared IO pool with no `ThreadFactory` to name. What attributes a lease
+ *   there is **`-Dkotlinx.coroutines.debug=on`**, which appends the coroutine name and id to
+ *   the worker thread's name for each dispatch. Measured on the first composed host: with
+ *   assertions on, `DefaultDispatcher-worker-1 @wip-summary#5`; on a production JVM, bare
+ *   `DefaultDispatcher-worker-1`. The flag is JVM-global and costs a small per-dispatch
+ *   rename.
+ *
+ *   **No test can catch its absence.** kotlinx-coroutines' debug mode is `AUTO`, which turns
+ *   itself on whenever assertions are enabled - and surefire enables them - so every test JVM
+ *   shows attribution working while production silently has none. This is a deployment flag to
+ *   read off a running pod, not a suite to keep green.
  * - **Metrics binders** (spec 12). Gauges are polled from [SnapshotCache.currentInfo] and
  *   [CacheAdmin.liveGenerations]; occurrences arrive through the [CacheEvents] passed in.
  * - **Readiness, and the first refresh** (spec 10.1 steps 3-5). Readiness is the host's
  *   health surface.
  * - **Spec 10.2 steps 2 and 3** - stop scheduling, interrupt the in-flight build. [close]
  *   runs steps 1 and 4; the host owns the scheduler and the build thread.
+ *
+ * ### The default verify gate assumes an `id` column, and fails two systems away
+ *
+ * `VerifyConfig.keyUnique` defaults to true, so the gate runs `COUNT(id), COUNT(DISTINCT id)`
+ * over **every** table of a candidate (spec 8.1). A group whose source tables have no `id`
+ * column therefore fails its very first refresh, and the failure is loud only here: nothing is
+ * published, so a consumer sees `NotReadyException` from `acquire`/`copyOut` - in SimpleEtl, a
+ * failed `cacheCopy` step - with the actual cause in a different system's verify log. Either
+ * give the group an `id` per spec 3.3, or set `verify = VerifyConfig(keyUnique = false)`
+ * deliberately. This is the one gate default that turns a schema mismatch into a symptom two
+ * systems from its cause, which is why it is named at the surface adopters read.
  *
  * @param sources one [GenerationSource] per group; the map's keys are the groups this cache
  *   serves, and a group absent from it is unknown to every method on the returned surfaces.
@@ -219,6 +253,14 @@ class ManagedSnapshotCache internal constructor(
      * A clean drain proves no consumer holds a connection, so the full close runs and the
      * process keeps no file handles. If the drain itself throws, the sweep is skipped for
      * the same reason - an unknown drain state is not a proven-clean one.
+     *
+     * **After a dirty drain the outstanding leases stay readable through [admin].**
+     * `liveGenerations` still reports the pinned generations and their `LeaseInfo` owners, so
+     * the WARN this logs is a summary and not the only record - a host with a shutdown hook can
+     * name what is holding it up. Measured on Windows: a dirty drain also leaves the generation
+     * files undeletable until the process exits, because the store connections were left open on
+     * purpose and Windows will not unlink an open file. That is spec 10.2 step 5 working as
+     * written, not a leak; the next startup's wipe clears them.
      *
      * Idempotent.
      */

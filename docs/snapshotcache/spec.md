@@ -380,9 +380,40 @@ class ManagedSnapshotCache : AutoCloseable {   // a holder, not a seam - plan 2.
   5, "connections die with the process", which the next startup's wipe then clears.
 - **What stays the host's**, unchanged by this entry point: refresh scheduling (Sec 4.4 - the host's
   tick calls `CacheAdmin.triggerRefresh`), the `expiredLeases()` poll on that same tick (Sec 6.2,
-  12.3), the metrics binder (Sec 12), thread naming for lease attribution (Sec 5.3 `LeaseInfo.owner`
-  is the calling thread's name), and Sec 10.2 steps 2 and 3 - stop scheduling, interrupt the in-flight
-  build - because only the host owns the scheduler and the build thread.
+  12.3), the metrics binder (Sec 12), lease attribution (below), and Sec 10.2 steps 2 and 3 - stop
+  scheduling, interrupt the in-flight build - because only the host owns the scheduler and the build
+  thread.
+- **The host's tick reads `liveGenerations` as well as `expiredLeases()`.** `gc()` answers
+  `GcOutcome(reclaimed = [], deferred = [])` for two different worlds - there was nothing to
+  reclaim, and a consumer is pinning a generation that is not current - and the outcome alone
+  cannot tell them apart. The refCount and lease list on each `GenerationState` can, so the same
+  tick that polls `expiredLeases()` reads `liveGenerations(group)` and reports the non-current
+  generations whose refCount is above zero. Without it, "a job is holding a generation open" is
+  invisible until the live count reaches K and Sec 6.1 pauses refresh - which is the alert firing
+  one stage after the fact it describes.
+- **Lease attribution needs a JVM flag on a coroutine-dispatched host.** `LeaseInfo.owner` is the
+  acquiring thread's name (Sec 5.3), and the remedy this section carried until 2026-08-30 - "the
+  host names its pools" - is not available to the primary consumer. SimpleEtl dispatches every run
+  on `Dispatchers.IO.limitedParallelism(1)`, a *view* over kotlinx-coroutines' shared IO pool: there
+  is no `ThreadFactory` to hand a name to, and renaming a shared worker would misattribute every
+  other coroutine on it. What supplies the attribution instead is
+  **`-Dkotlinx.coroutines.debug=on`**, which appends the coroutine's name and id to the worker's
+  thread name for the duration of each dispatch. Measured on the first composed host:
+
+  | JVM | `LeaseInfo.owner` |
+  |---|---|
+  | assertions on (`-ea`) | `DefaultDispatcher-worker-1 @wip-summary#5` |
+  | production defaults | `DefaultDispatcher-worker-1` |
+
+  The flag is JVM-global and costs a small per-dispatch thread rename, which is the price of the
+  only attribution a coroutine-dispatched host can get.
+
+  **The trap is that no test can catch its absence.** kotlinx-coroutines' debug mode is `AUTO`,
+  which switches itself *on* whenever assertions are enabled - and surefire enables them. So every
+  test JVM in this repository shows the attributed form above while a production JVM silently shows
+  the bare worker name, and a test asserting on `owner` is evidence only about the flag surefire
+  happens to set. The flag has to be set in the deployment, and the check is reading it off a
+  running pod's command line, not a green suite.
 - `jdbc.fetchSize` is read by the caller's `GenerationSource` (Sec 7.2) and `refresh.interval` by the
   host's scheduler (Sec 4.4). They remain in `SnapshotCacheConfig` as one manifest of Sec 13, but the
   entry point does not act on them and says so.
@@ -441,9 +472,25 @@ Consumers may copy a subset into another DuckDB instance for processing. This ha
 
 But it must be managed by the framework, not left to each job:
 
-- **Share a single consumer instance.** Don't open one per job - several unbounded instances will add up and eat the pod's memory budget.
+- **Share a single consumer instance where the consumer can share one.** Don't open one per job -
+  several unbounded instances will add up and eat the pod's memory budget.
 - That instance also needs a `memory_limit`, counted in the overall budget (Sec 11.1).
 - For cross-instance copies, attach the other file directly and read from it; don't serialize through the application.
+
+**The primary consumer cannot share one, and D16 is amended rather than enforced.** SimpleEtl's own
+spec 5.5 and 7.2 require a per-run scratch DuckDB in its own run directory - DuckDB 1.1.3 has no
+vacuum and `DROP TABLE` does not shrink a file, so the run directory is deleted whole at the end of
+the run, and a shared instance has no such end. Measured on the first composed host: two concurrent
+tasks are two DuckDB instances, each at SimpleEtl's `EtlWiring.scratchMemoryLimitMb` default of
+4096 MB. Both reasonings survive contact - D16's arithmetic is right about what unbounded instances
+cost, and SimpleEtl's file-per-run is right about reclaiming disk on 1.1.3 - so neither is
+overturned and the budget below is what changes.
+
+**`duckdb.consumer.memoryLimit` is inert when the consumer is SimpleEtl.** A `cacheCopy` step
+passes *scratch's own write connection* as `CopyOutSpec.targetConnection`, so the copy lands in an
+instance whose `memory_limit` was set by `EtlWiring.scratchMemoryLimitMb`. The config field remains
+in Sec 13 as the knob for a host that does own a shared consumer instance; for a SimpleEtl host it
+is a number nothing reads, and the live knob is `scratchMemoryLimitMb`.
 
 ---
 
@@ -666,8 +713,24 @@ Every step is bounded. The ordering matters: releasing waiters first is what mak
 |---|---|
 | JVM heap (`-Xmx`) | 2 GB |
 | Serving DuckDB `memory_limit` | 3 GB |
-| Shared consumer instance `memory_limit` | 1 GB |
+| Consumer instances - `N_concurrent x` each instance's `memory_limit` | 1 GB for one shared instance |
 | OS page cache, JDBC buffers, JVM non-heap, allocator fragmentation | remaining ~2 GB |
+
+**The consumer row is a product, not a constant** (2026-08-30, first composed host). A consumer
+that opens one DuckDB instance per unit of work contributes one term per *concurrently running*
+unit, so the composed budget is
+
+```
+servingMemoryLimit + N_concurrent x <the consumer's per-instance memory_limit>
+```
+
+With SimpleEtl as the consumer that reads
+`servingMemoryLimit + N_concurrent x EtlWiring.scratchMemoryLimitMb`, and
+`scratchMemoryLimitMb` defaults to **4096 MB** - so two concurrent tasks alone are 8 GB of
+consumer-side limit against a 3 GB serving instance in an 8 GB pod. `N_concurrent` is the number of
+SimpleEtl tasks whose crons can overlap, which is the host's to bound; the framework caps nothing
+(Sec 6.5, D16). Sizing a composed pod off the one-shared-instance row is the arithmetic that gets
+it OOMKilled.
 
 **`memory_limit` must not approach the pod limit.** DuckDB only accounts for its own buffers; JVM heap, JDBC staging, and glibc allocator fragmentation are all outside its view. Setting it too high means DuckDB thinks it's healthy right up until the pod is OOMKilled.
 
@@ -795,7 +858,7 @@ GET /internal/snapshot/{group}
 | `verify.consecutiveFailureThreshold` | 3 | Failures before escalating to critical |
 | `jdbc.fetchSize` | 2000 | |
 | `duckdb.serving.memoryLimit` | 3GB | |
-| `duckdb.consumer.memoryLimit` | 1GB | |
+| `duckdb.consumer.memoryLimit` | 1GB | The host's shared consumer instance (Sec 6.5). **Inert when the consumer is SimpleEtl**, whose `cacheCopy` hands scratch's own connection as `CopyOutSpec.targetConnection`; the live knob there is `EtlWiring.scratchMemoryLimitMb`. Kept as a Sec 13 row rather than removed - a host that does own a shared instance reads it |
 | `duckdb.serving.threads` | (null = engine default) | Optional cap on the serving instance's DuckDB thread pool. The engine default equals hardware concurrency, which oversubscribes CPU-limited pods; a cap also bounds how much of the pod a runaway reader can occupy (D29) |
 | `duckdb.tempDirectory` | (required) | |
 | `storage.path` | (required) | Generation file directory |
@@ -884,7 +947,7 @@ Pinned to 1.1.3 (Linux component compatibility in the CI environment). Consequen
 | D13 | `non_empty` is a non-disableable gate | Zero rows is almost always a fault, and publishing it makes every downstream quietly compute an empty result |
 | D14 | `row_count_delta` off by default, collect metrics first | Volume may legitimately spike; there's no basis yet for a sensible threshold |
 | D15 | Escalate to critical after 3 consecutive verify failures, configurable | Tolerate a single failure; sustained failure indicates a systemic problem |
-| D16 | Consumers share one DuckDB instance | Multiple unbounded instances would add up and consume the pod's memory budget |
+| D16 | Consumers share one DuckDB instance **where the consumer can share one**; where it cannot, the pod budget is sized as `N_concurrent x <per-instance limit> + servingMemoryLimit` (amended 2026-08-30) | Multiple unbounded instances would add up and consume the pod's memory budget - which is why the amendment is arithmetic and not permission. SimpleEtl cannot share one: its spec 5.5/7.2 need a per-run file so the run directory can be deleted whole, DuckDB 1.1.3 having no vacuum. Both reasonings hold, neither is overturned, and Sec 11.1 carries the product |
 | D17 | `data_as_of` metric stores an absolute timestamp | Alert thresholds become adjustable without code changes |
 | D18 | `generation` is never a metric label | Monotonic growth would blow up time series cardinality |
 | D19 | DuckDB behavioral assumptions (A1-A8) documented but empirical leak/GC measurement deferred | No time budget for a pre-implementation spike; assumptions and pass criteria are recorded in Sec 17.6 so measurement can run later without redesigning the tests |

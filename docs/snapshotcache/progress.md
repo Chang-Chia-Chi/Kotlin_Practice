@@ -1608,3 +1608,101 @@ connection would also report open.
 
 No earlier test was modified. **215 tests, 0 failures, 2 pre-existing skips** (212 before this
 round), full clean run.
+
+---
+
+## First composed host - what running SimpleEtl on top of the cache measured  (2026-08-30)
+
+Documents only; no code behaviour changed. Round E16's snapshotcache half. Until now every
+statement in this repository about "the host" was written by a session that had no host: the
+composed host is the first time SimpleEtl was wired to a real `openSnapshotCache` and the two
+specs were made to agree with each other rather than each with itself.
+
+### 1. The owner-attribution remedy was falsified, and replaced
+
+Spec 5.4 and `OpenSnapshotCache`'s KDoc both said `LeaseInfo.owner` becomes useful attribution
+when "the host names its pools". **That remedy does not exist for the primary consumer.**
+SimpleEtl dispatches every run on `Dispatchers.IO.limitedParallelism(1)` - a *view* over
+kotlinx-coroutines' shared IO pool. There is no `ThreadFactory` to hand a name to, and renaming a
+shared worker would misattribute every other coroutine that lands on it.
+
+Measured:
+
+| JVM | `LeaseInfo.owner` |
+|---|---|
+| assertions on (`-ea`) | `DefaultDispatcher-worker-1 @wip-summary#5` |
+| production defaults | `DefaultDispatcher-worker-1` |
+
+The remedy that does work is `-Dkotlinx.coroutines.debug=on`: JVM-global, a small per-dispatch
+thread rename, and the only attribution a coroutine-dispatched host can get.
+
+**The trap is worth more than the fix.** kotlinx-coroutines' debug mode is `AUTO`, which enables
+itself whenever assertions are enabled, and surefire enables them - so **every test JVM in this
+repository shows attribution working while a production JVM silently has none**, and no test can
+be written that catches the omission. Both documents now say so in place; the check is reading a
+running pod's command line.
+
+### 2. D16 reconciled, not overturned - the pod budget is a product
+
+D16 says consumers share one DuckDB instance. SimpleEtl's spec 5.5/7.2 require **one scratch
+instance per run**: DuckDB 1.1.3 has no vacuum and `DROP TABLE` does not shrink a file, so the
+whole run directory is deleted at the end of a run, and a shared instance has no such end.
+
+Both reasonings were engaged and neither was overturned - D16's arithmetic is right about what
+unbounded instances cost, and SimpleEtl's file-per-run is right about reclaiming disk on 1.1.3.
+What changed is the arithmetic. Measured: two concurrent tasks are two instances at
+`EtlWiring.scratchMemoryLimitMb`'s 4096 MB default each, so the composed budget is
+
+```
+N_concurrent x EtlWiring.scratchMemoryLimitMb + servingMemoryLimit
+```
+
+which for two overlapping tasks is 8 GB of consumer-side limit beside a 3 GB serving instance in
+an 8 GB pod. Sizing a composed pod off spec 11.1's old one-shared-instance row is the arithmetic
+that gets it OOMKilled. D16, spec 6.5, spec 11.1 and the spec 13 row are amended together.
+
+`SnapshotCacheConfig.consumerMemoryLimit` is **inert when the consumer is SimpleEtl** - a
+`cacheCopy` step passes scratch's own write connection as `CopyOutSpec.targetConnection` - and its
+KDoc and spec row now say so. Removing the field was rejected earlier and stays rejected: a host
+that does own a shared consumer instance still reads it.
+
+### 3. Pinning is invisible in `GcOutcome`, and the host's tick now reads for it
+
+`GcOutcome(reclaimed = [], deferred = [])` is the answer both for "nothing to reclaim" and for "a
+task is pinning a non-current generation", and no field distinguishes them. `GenerationState`'s
+refCount and lease list do. The host-obligation bullet in spec 5.4 and the KDoc now say the tick
+that polls `expiredLeases()` also reads `liveGenerations`. No API changed - the information was
+already there and nothing was reading it. Unpolled, a pinning consumer is invisible until the live
+count reaches K and spec 6.1 pauses refresh, which is an alert one stage downstream of its cause.
+
+### 4. Two smaller KDoc corrections
+
+- `ManagedSnapshotCache.close()`: after a dirty drain the outstanding leases stay readable through
+  `admin.liveGenerations()`, so the WARN is a summary rather than the only record. Measured on
+  Windows: a dirty drain also leaves the generation files undeletable until process exit, because
+  the store connections are deliberately left open and Windows will not unlink an open file. Spec
+  10.2 step 5 working as written, now written down.
+- `openSnapshotCache`: the default `VerifyConfig().keyUnique = true` runs
+  `COUNT(id), COUNT(DISTINCT id)` on **every** table, so a group whose sources have no `id` column
+  fails its first refresh - and the symptom an adopter sees is `NotReadyException` in the ETL, two
+  systems from the cause. Spec 8.1's rule, restated at the surface adopters actually read.
+
+### 5. SimpleEtl spec 8.6's untestable row was exercised, and it holds
+
+That row reads "**assert that a generation becomes reclaimable after a `cacheCopy` step** - not
+testable in this repository", because reclamation lives in the `internal` `DefaultSnapshotCache`
+and SimpleEtl's tests use a double. The composed host is the first place it could be run at all,
+and the behaviour is as specified:
+
+- mid-copy, the generation is pinned - refCount 1, one `LeaseInfo`;
+- refCount is back to 0 the instant `copyOut` returns, not at the end of the run;
+- after a successor generation publishes, the pinned-then-released file is gone from disk.
+
+Short-lease `copyOut` (spec 6.4) is therefore doing exactly what SimpleEtl spec 7.3 declined
+`withSnapshot()` in order to get. The row stays in 8.6 as an obligation - nothing in *this*
+repository tests it - but it is no longer an untested assumption.
+
+### Deviations
+
+None. No code changed, so no test changed. Suite re-run to confirm: **215 tests, 0 failures, 2
+pre-existing skips**.

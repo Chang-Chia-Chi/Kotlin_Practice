@@ -27,7 +27,16 @@ data class SnapshotCacheConfig(
     val jdbcFetchSize: Int = 2000,
     /** `duckdb.serving.memoryLimit` - must stay well under the pod limit (spec 11.1). */
     val servingMemoryLimit: String = "3GB",
-    /** `duckdb.consumer.memoryLimit` - the one shared consumer instance (spec 6.5, 11.1). */
+    /**
+     * `duckdb.consumer.memoryLimit` - the host's one shared consumer instance (spec 6.5, 11.1).
+     *
+     * **Inert when the consumer is SimpleEtl** (D16 as amended 2026-08-30). A `cacheCopy` step
+     * passes its own per-run scratch instance's write connection as `CopyOutSpec.targetConnection`,
+     * so the copy is bounded by `EtlWiring.scratchMemoryLimitMb` and never by this. Kept rather
+     * than removed: a host that really does own one shared consumer instance reads it, and the
+     * pod budget for a consumer that cannot share one is
+     * `N_concurrent x <per-instance limit> + servingMemoryLimit` (spec 11.1).
+     */
     val consumerMemoryLimit: String = "1GB",
     /**
      * `duckdb.serving.threads` - caps the serving instance's DuckDB thread pool; null =
