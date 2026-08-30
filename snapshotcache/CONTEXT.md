@@ -59,4 +59,4 @@ managed.close() // drains leases; call it LAST at shutdown
 | Boundary rules, do-not-build list §2.4 | `../docs/snapshotcache/plan.md`, `ArchitectureTest.kt` |
 | Why anything is this way; every decline/deviation — search before proposing | `../docs/snapshotcache/progress.md` |
 | Process, tiers of authority, commands | `../CLAUDE.md` |
-| Archive layer (M3, parquet checkpoints to MinIO) | `infra/snapshotarchive/` KDoc + `../etl-host/` wiring |
+| Archive layer (M3, parquet checkpoints to MinIO) | `infra/snapshotarchive/` - a **consumer** of the cache, never part of it (D30; ArchUnit-enforced both ways, `api`-only access). Flat, not layered: six files, and layering is earned at ~a dozen. Wiring: `../etl-host/` |
