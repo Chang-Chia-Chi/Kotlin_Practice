@@ -71,7 +71,8 @@ class Producers(private val config: HostConfig) {
     @Produces
     @Singleton
     @Named(TARGET)
-    fun targetJdbi(): Jdbi = jdbi(config.targetUrl, null, null)
+    fun targetJdbi(): Jdbi =
+        jdbi(config.targetUrl, config.targetUsername.orElse(null), config.targetPassword.orElse(null))
 
     @Produces
     @Singleton

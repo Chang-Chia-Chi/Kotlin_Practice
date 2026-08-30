@@ -101,6 +101,22 @@ class HostConfig {
     @ConfigProperty(name = "etl-host.etl.target-name")
     lateinit var targetName: String
 
+    /**
+     * The target's credentials, which existed nowhere until a real deployment needed them.
+     *
+     * The shipped demo target is a DuckDB file and DuckDB authenticates nobody, so `targetJdbi`
+     * was written as `Jdbi.create(url)` with no user at all - and every test in this module and
+     * the two before it points `report` at DuckDB, so nothing could notice. The staging stack
+     * points it at Oracle, which is when the `pipe` step of the one worked task file failed with
+     * `ORA-01017: invalid credential or not authorized`. Nullable, so a target that wants no
+     * credentials keeps the `Jdbi.create(url)` it had.
+     */
+    @ConfigProperty(name = "etl-host.etl.target-username")
+    lateinit var targetUsername: java.util.Optional<String>
+
+    @ConfigProperty(name = "etl-host.etl.target-password")
+    lateinit var targetPassword: java.util.Optional<String>
+
     // ---- the archive layer (snapshotcache spec 18) ----
 
     /**

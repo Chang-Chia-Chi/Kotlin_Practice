@@ -125,6 +125,32 @@ the second is this module's own JAX-RS resource, kept because something may alre
 it. Both render the same `EtlHost.readinessState`, so they cannot disagree. Metrics are at the
 Quarkus default `/q/metrics`.
 
+## Deploy it
+
+```bash
+mvn -pl etl-host -am package -DskipTests
+docker compose -f etl-host/docker-compose.staging.yml up --build
+```
+
+`src/main/docker/Dockerfile.jvm` is the standard Quarkus fast-jar image, built from the repository
+root because it copies `etl-host/target/quarkus-app`. `docker-compose.staging.yml` adds the three
+things this module deliberately does not create - an Oracle carrying the source tables, the pipe
+target and the manifest; a MinIO carrying the archive bucket; and the task directory, mounted from
+`example-tasks/`. Its healthcheck probes `/q/health/ready`, and its `stop_grace_period` is the
+lease-drain arithmetic written out beside it.
+
+`staging/README.md` is the walkthrough: what to watch, in the order it happens, and what each of the
+interesting log lines means when it is wrong. Read it before the first boot.
+
+Two things that boot found, both now fixed here and both invisible to the suite:
+
+- `example-tasks/wip-summary.yaml` had been promoted from the test fixture **with the Kotlin string
+  template it was written as** - `$TASK`, `$GROUP`, and a `trimIndent()` literal's indentation. The
+  one file that exists to be copied did not validate.
+- The pipe target had no credential settings at all, because every test in this repository points
+  `report` at DuckDB and DuckDB authenticates nobody. Against Oracle the `pipe` step failed with
+  `ORA-01017`.
+
 ## Run the tests
 
 ```bash

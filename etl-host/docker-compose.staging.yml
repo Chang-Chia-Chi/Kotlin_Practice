@@ -1,0 +1,143 @@
+# etl-host staging: the reference host with every prerequisite it deliberately does not create.
+#
+# Run from the REPOSITORY ROOT (the image build context has to contain etl-host/target):
+#
+#   mvn -pl etl-host -am package -DskipTests
+#   docker compose -f etl-host/docker-compose.staging.yml up --build
+#
+# See etl-host/staging/README.md for what to watch and what "working" looks like.
+
+services:
+
+  # The source behind both groups, the pipe target, AND the archive manifest - one database
+  # because this is a reference stack, not because the layers require it. ManifestDao takes any
+  # Jdbi; its SQL is Oracle (NEXTVAL, FETCH FIRST), so a deployment that keeps its manifest
+  # elsewhere points etl-host at that instead.
+  oracle:
+    image: gvenzl/oracle-free:slim-faststart
+    environment:
+      ORACLE_PASSWORD: staging
+      APP_USER: etl
+      APP_USER_PASSWORD: staging
+    volumes:
+      # Run once, after the database is up: the two source tables, the pipe target, and the
+      # manifest table + sequence from ManifestSchema.DDL. A .sh, not a .sql - a bare .sql in
+      # this directory runs as SYS in CDB$ROOT rather than as the app user in the PDB, which
+      # this stack found out by booting with tables that existed in the wrong place and an
+      # application reporting ORA-00942 against them. The script says which user and which PDB.
+      - ./staging/init-oracle.sh:/container-entrypoint-initdb.d/init.sh:ro
+    healthcheck:
+      test: ["CMD", "healthcheck.sh"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+
+  # The archive layer's object store. ObjectStore declines to create its own bucket - a bucket
+  # made by whichever pod started first is exactly the ambient side effect the layer's ordering
+  # guarantees exist to avoid - so the bucket is made here, before the server starts. MinIO
+  # adopts a directory under its data root as a bucket, which is one line instead of an `mc`
+  # sidecar.
+  minio:
+    image: minio/minio:RELEASE.2024-10-02T17-50-41Z
+    entrypoint: ["sh", "-c", "mkdir -p /data/snapshot-archive && exec minio server /data --console-address :9001"]
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    healthcheck:
+      # The endpoint Testcontainers' MinIOContainer waits on, rather than `mc ready local`:
+      # this service overrides the image's entrypoint to create the bucket, and `mc`'s `local`
+      # alias is set up by the entrypoint it replaces.
+      test: ["CMD", "curl", "-fsS", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  etl-host:
+    build:
+      # The repository root, because the Dockerfile copies etl-host/target/quarkus-app.
+      context: ..
+      dockerfile: etl-host/src/main/docker/Dockerfile.jvm
+    depends_on:
+      oracle:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    ports:
+      # 18080 on the host, deliberately not 8080. 8080 is the single most contested port on a
+      # developer machine, and losing it is silent in the worst way: Docker still reports
+      # `0.0.0.0:8080->8080/tcp`, the container is healthy (its own probe is in-container), and
+      # `curl localhost:8080/q/health/ready` answers 404 from somebody else's service. That
+      # happened on the machine this was written on. The container port stays 8080.
+      - "18080:8080"
+    volumes:
+      # The host creates this directory if absent and an EMPTY one validates fine, so without
+      # this mount the stack boots happily serving zero tasks and GET /admin/etl/tasks answers
+      # []. Nothing under src/main/resources ships a task file; example-tasks/ is the one.
+      - ./example-tasks:/deployments/tasks:ro
+    environment:
+      # ---- the source, the pipe target and the manifest, all one Oracle -------------------
+      ETL_HOST_SOURCE_URL: jdbc:oracle:thin:@oracle:1521/FREEPDB1
+      ETL_HOST_SOURCE_USERNAME: etl
+      ETL_HOST_SOURCE_PASSWORD: staging
+      ETL_HOST_ETL_TARGET_URL: jdbc:oracle:thin:@oracle:1521/FREEPDB1
+      ETL_HOST_ETL_TARGET_USERNAME: etl
+      ETL_HOST_ETL_TARGET_PASSWORD: staging
+      # ---- the task files, mounted above --------------------------------------------------
+      ETL_HOST_ETL_TASK_DIRECTORY: /deployments/tasks
+      # ---- the archive layer, on because this stack provisions both prerequisites ----------
+      ETL_HOST_ARCHIVE_ENABLED: "true"
+      ETL_HOST_ARCHIVE_ENDPOINT: http://minio:9000
+      ARCHIVE_ACCESS_KEY: minioadmin
+      ARCHIVE_SECRET_KEY: minioadmin
+      # ---- the credentials the placeholders exist to be replaced by -----------------------
+      # Placeholders too, and that is the point of naming them here: these two variables are
+      # the whole seam between application.properties' public defaults and a real deployment's
+      # secret store.
+      ETL_ADMIN_PASSWORD: staging-admin
+      ETL_READER_PASSWORD: staging-reader
+      # Short enough to watch. Production's default is PT10M.
+      ETL_HOST_CACHE_REFRESH_INTERVAL: PT2M
+      ETL_HOST_ARCHIVE_INTERVAL: PT3M
+    healthcheck:
+      # /q/health/ready, NOT /health/ready. The conventional path is the whole point of wiring
+      # quarkus-smallrye-health: before it, this line would have probed a 404 forever while the
+      # service ran perfectly. Both paths answer; a manifest should use this one.
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/q/health/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      # The host is deliberately NOT ready until a generation publishes, and the first refresh
+      # runs during startup - so this has to cover boot plus one refresh of both groups.
+      start_period: 90s
+
+    # ---- the arithmetic, stated because getting it wrong has no symptom until it matters ----
+    #
+    # Shutdown runs in a fixed order inside one observer (EtlHost.onStop), and each step has a
+    # bound that comes from configuration rather than from taste:
+    #
+    #   1. readiness flips to shutting-down                          ~0s
+    #   2. wired.close()   - cancel crons, cancel the runner          ~0s
+    #   3. archive.close() - interrupt in-flight archive runs and
+    #                        await both pools, bounded by the
+    #                        archiver's drainBudget, which this host
+    #                        sets to etl-host.cache.lease-drain-timeout   30s
+    #      A run parked in a MinIO socket read is not interruptible and
+    #      drains only when etl-host.archive.http-timeout fires (20s),
+    #      which is inside that 30s and therefore not additional.
+    #   4. managed.close() - drain the snapshot leases, bounded by
+    #                        etl-host.cache.lease-drain-timeout            30s
+    #   5. Quarkus/JVM teardown                                            ~5s
+    #                                                              ---------
+    #                                                             worst case 65s
+    #
+    # 75s is that plus headroom. Below it, Docker SIGKILLs mid-drain and the whole shutdown
+    # design has no effect: leases are abandoned rather than released, and a PENDING manifest
+    # row is left for the watchdog instead of never existing. Kubernetes' equivalent is
+    # terminationGracePeriodSeconds, and snapshotcache spec 11.3 makes it the same sum.
+    #
+    # Change lease-drain-timeout or archive.http-timeout and this number moves with them.
+    stop_grace_period: 75s

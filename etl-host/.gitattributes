@@ -1,0 +1,6 @@
+# core.autocrlf is true on the machine this was written on, so a checkout would hand
+# staging/init-oracle.sh CRLF line endings - and a bash script with CRLF endings, bind-mounted
+# into a Linux container, fails on the shebang with "bad interpreter: /bin/bash^M". The Oracle
+# container would report a failed init script and the application would then fail every refresh
+# against tables nobody created. LF is not a preference here; it is the file working.
+*.sh text eol=lf

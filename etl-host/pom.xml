@@ -113,9 +113,14 @@
             <groupId>org.testcontainers</groupId><artifactId>oracle-free</artifactId>
             <version>${testcontainers.version}</version><scope>test</scope>
         </dependency>
+        <!-- RUNTIME, not test, and the change is what makes the staging stack boot at all.
+             `etl-host.source.url` is a jdbc: URL a deployment supplies, and every deployment
+             this host was written for supplies an Oracle one - with the driver test-scoped the
+             image resolves "No suitable driver found", which names the URL and not the missing
+             jar. The DuckDB driver next to it is already compile-scope for the same reason. -->
         <dependency>
             <groupId>com.oracle.database.jdbc</groupId><artifactId>ojdbc11</artifactId>
-            <version>${ojdbc.version}</version><scope>test</scope>
+            <version>${ojdbc.version}</version>
         </dependency>
         <!-- The archive end-to-end test's object store. Newer than the core the Oracle module
              pins, so its own Testcontainers core is excluded and 1.20.4 serves both container

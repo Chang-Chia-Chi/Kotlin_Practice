@@ -1,0 +1,39 @@
+# etl-host, JVM mode, standard Quarkus fast-jar layout.
+#
+# Build from the REPOSITORY ROOT, not from this directory - the build context has to contain
+# etl-host/target/quarkus-app, and `mvn package` has to have run first:
+#
+#   mvn -pl etl-host -am package -DskipTests
+#   docker build -f etl-host/src/main/docker/Dockerfile.jvm -t etl-host:staging .
+#
+# The four COPY lines are in the order Quarkus intends and the order is a cache decision, not a
+# style: lib/ holds the dependencies and changes on a pom edit, app/ holds this module's own
+# classes and changes on every commit. Reversed, every code change re-uploads every jar.
+FROM registry.access.redhat.com/ubi9/openjdk-21-runtime:1.21
+
+ENV LANGUAGE='en_US:en'
+
+COPY --chown=185 etl-host/target/quarkus-app/lib/ /deployments/lib/
+COPY --chown=185 etl-host/target/quarkus-app/*.jar /deployments/
+COPY --chown=185 etl-host/target/quarkus-app/app/ /deployments/app/
+COPY --chown=185 etl-host/target/quarkus-app/quarkus/ /deployments/quarkus/
+
+EXPOSE 8080
+USER 185
+
+# -Dkotlinx.coroutines.debug=on is NOT optional and NO test can catch its absence.
+#
+# Without it `LeaseInfo.owner` is the acquiring thread's name, and every run acquires on
+# Dispatchers.IO.limitedParallelism(1) - a view over the shared IO pool with no ThreadFactory to
+# name it. The cache's expired-lease WARN and its liveGenerations then both read
+# "DefaultDispatcher-worker-1" and name no task, so "which job is stalling refresh" is
+# unanswerable in exactly the incident the diagnostics exist for.
+#
+# kotlinx-coroutines' debug mode is AUTO and turns itself on whenever assertions are enabled,
+# which surefire does - so every test JVM in this repository shows attribution working while a
+# production JVM silently has none. This line, and reading a running container's command line,
+# is the only place it is real. Measured at under 10us and under 3% of a task run.
+ENV JAVA_OPTS_APPEND="-Dkotlinx.coroutines.debug=on"
+ENV JAVA_APP_JAR="/deployments/quarkus-run.jar"
+
+ENTRYPOINT [ "/opt/jboss/container/java/run/run-java.sh" ]
