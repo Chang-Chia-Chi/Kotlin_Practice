@@ -1867,3 +1867,107 @@ shrank to one constructor argument. Also from the sweep: `ManagedSnapshotCache`'
 it "a holder", which stopped being true when `close()` gained the drain guard - corrected; and the
 suspend ArchUnit rule's FQN-regex selection gained the non-emptiness canary the P8b block already
 modelled, so a rename cannot vacuously green it.
+
+---
+
+## P9 - Service wiring: `etl-host`, the reference host  (2026-08-30)
+
+**What was built.** A new reactor module, `etl-host`: a real Quarkus application composing both
+frameworks through their public front doors, `openSnapshotCache` (spec 5.4) and `EtlWiring`
+(SimpleEtl spec 11.2). Quarkus 3.17.5, Java 21, Kotlin 2.2.0. Nine main sources, eight test classes,
+23 green in the default suite plus one `@Tag("oracle")` end-to-end class.
+
+**Where P9 lives, and why the plan entry needed amending.** The entry was written before either
+framework had a composition root, and assumed P9 would be a diff inside a service repository nobody
+here can see. That assumption is what left SimpleEtl spec 8.6 opening with "none of them is tested
+in this repository, because no host module exists in it" for eight phases - nineteen obligations
+true because nobody had run them. `composed-host-example` had already set the precedent of putting a
+consumer beside the frameworks; this is the next step along it, and the plan entry now says so.
+Nothing depends on the module.
+
+### What `etl-host` does that `composed-host-example` cannot
+
+The example composes the same two doors with hand-rolled stand-ins - a `ManualCron` a test fires by
+hand, a `ReadinessProbe` nothing serves, no registry, no security. That is right for measuring
+cross-boundary behaviour and wrong for the obligations that are *about* a framework. Each stand-in
+is replaced here by the real thing, and each replacement discharged a row nothing had ever run:
+
+| Deliverable | How it landed |
+|---|---|
+| CDI producers | `Producers.kt`. **"Cache first" is a dependency, not a sequence**: `etlWiring` takes `ManagedSnapshotCache` as a parameter, so the container cannot order them wrongly. All `@Singleton` - not a normal scope, so no client proxy, and Kotlin finality stops mattering. |
+| `@Scheduled` refresh tick | `CacheTick`, `concurrentExecution = SKIP`. The annotated method is a one-line delegate; the logic is a plain method a test calls, because asserting that Quarkus fires an annotation is asserting something about Quarkus. |
+| Metrics binder | `CacheMetrics` - spec 12's names and label sets verbatim, occurrences through `CacheEvents`, gauges polled from `currentInfo` / `liveGenerations` and registered through Micrometer's **strong**-reference `Supplier` builder. Asserted off a real Prometheus scrape, because a name is only real once something renders it. |
+| Admin endpoint (12.7) | `GET /admin/etl/snapshot/{group}`, beside SimpleEtl 8.2's four. |
+| Startup per 10.1 | `EtlHost.onStart`: the wipe and the serving limits happen inside `openSnapshotCache`; this runs the immediate first refresh, wires the ETL side, then flips readiness. |
+| Shutdown per 10.2 | `EtlHost.onStop`: flag, then `wired.close()` (steps 2-3), then `managed.close()` (steps 1 and 4). |
+
+### The `expiredLeases()` poll: assigned to P9, and reachable from the public surface
+
+The plan entry names `GenerationRegistry.expiredLeases()`. **That method is `internal` to
+`infra.snapshotcache.core` and unreachable from a host**, and the frameworks were read-only for this
+phase. It needed no change: `CacheAdmin.liveGenerations` carries the same `LeaseInfo` objects with
+the same deadlines, so `CacheTick.poll` computes the identical set - `liveGenerations(group)`,
+flatten the leases, keep those whose `deadline` precedes `clock.instant()` - and fires
+`CacheEvents.leaseExpired` for each. `CachePollTest` moves an injected `Clock` ten minutes forward
+to make a **held** lease expired, which is the case the release path structurally cannot see.
+
+`poll` **returns** the pinned non-current generations rather than only logging them, for the reason
+`TaskAdmin` factors `sameDatasourcePipeUsers` out of its own logging: a test that read a log
+appender would be testing the logging framework, and one that asserted nothing would let the
+condition drift. The log line is still the operational output.
+
+### Deviations, and things that did not survive contact
+
+1. **`micrometer-bom` pinned to 1.14.2 ahead of the platform BOM.** Quarkus 3.17.5 ships Micrometer
+   1.13.7; SimpleEtl spec 8.6's classpath row states a floor of >= 1.14.x, which is the version
+   every measurement in that section was taken on. The whole BOM is raised rather than
+   `micrometer-core` alone, because a split between core and the Prometheus registry is the mixture
+   that actually breaks. Quarkus 3.17's registry is still the `-simpleclient` variant, so the tests
+   inject `io.micrometer.prometheus.PrometheusMeterRegistry` and eat a deprecation warning.
+2. **The `-Dgroups=oracle` opt-in this repository documents does not work**, and finding that out
+   cost two green runs of zero tests. A literal `<excludedGroups>` inside a plugin's
+   `<configuration>` **beats** the user property of the same name, so surefire excludes the tag
+   however `-Dgroups` is set, and reports BUILD SUCCESS. `etl-host` makes `excludedGroups` a
+   `<properties>` entry and opts in with `-DexcludedGroups=none`. The same trap applies to
+   `SimpleEtl/pom.xml` and to `snapshotcache`, whose CLAUDE.md and README document the form that
+   silently runs nothing - left alone because those modules were out of scope for this phase, and
+   recorded here so the next reader does not re-measure it.
+3. **The all-open Kotlin compiler plugin is required, and it forbids `private set` on an open
+   property.** `@Volatile var ready ... private set` stops compiling once `@Singleton` classes are
+   opened for CDI; `final var` restores it. Named because the error points at the property and not
+   at the plugin that changed its meaning.
+4. **A `*/` inside a KDoc closes the comment.** A quartz expression containing one, written into a
+   doc comment, produced forty "Expecting a top level declaration" errors on the lines after it.
+   Recorded because a cron expression is exactly the thing one wants to quote in the KDoc of a cron
+   binding.
+5. **A `QuarkusTestResourceLifecycleManager` runs before the application classloader exists**, so
+   `DriverManager` has no DuckDB driver registered and answers "No suitable driver found" rather
+   than anything naming the cause. `Class.forName` in the fixture.
+6. **`@QuarkusTestResource` is GLOBAL by default**, and the filtered command hid it. The older
+   annotation defaults to `restrictToAnnotatedClass = false`, so the Oracle fixture declared on the
+   tag-excluded end-to-end class started a container for **every** test class in the module and
+   errored all seven of them. It never appeared under `-Dtest='etlhost.*Test'` - a filtered run does
+   not scan the excluded class - only under a plain `mvn test`, which is why the whole-reactor run is
+   the one that counts. Fixed by `@WithTestResource`, whose default scope shares a resource across
+   the classes declaring the same set and confines the Oracle one to its own. **The lesson is about
+   the verification, not the annotation**: a green filtered suite is evidence about the filter.
+7. **`@Named` on a Kotlin property needs `@field:`.** Without it the qualifier does not reach where
+   ArC looks, the injection point resolves as `@Default`, and both `Jdbi` producers match. It fails
+   at augmentation rather than at run time, which is the good failure mode, but the message names
+   the field and not the missing use-site target.
+
+### What P9 still does not cover
+
+- **The shared consumer DuckDB instance of spec 6.5** is not built. With SimpleEtl as the consumer
+  `consumerMemoryLimit` is inert (D16 as amended): a `cacheCopy` step passes its own per-run scratch
+  connection as `CopyOutSpec.targetConnection`, bounded by `EtlWiring.scratchMemoryLimitMb`. An
+  `@ApplicationScoped` instance nothing passes to anything would be a producer for an unused object,
+  so the deliverable is recorded as not applicable to a SimpleEtl host rather than as done.
+- **`terminationGracePeriodSeconds` alignment** is a deployment manifest. `application.properties`
+  states the arithmetic (45-60s for the 30s default drain) in a comment; there is no manifest in
+  this repository to align.
+- **A SIGTERM-during-refresh acceptance run.** `ShutdownSequenceTest` drives the observer directly
+  and asserts the ordering and all four answers; it does not signal a running pod.
+- **The metrics smoke test scrapes an in-process registry**, not an HTTP endpoint. The names and
+  labels are asserted verbatim off `PrometheusMeterRegistry.scrape()`, which is the same text
+  `/q/metrics` serves.

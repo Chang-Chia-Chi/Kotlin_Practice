@@ -3,7 +3,7 @@ package etlhost
 import infra.snapshotcache.api.GroupId
 import infra.snapshotcache.bootstrap.ManagedSnapshotCache
 import io.micrometer.prometheus.PrometheusMeterRegistry
-import io.quarkus.test.common.QuarkusTestResource
+import io.quarkus.test.common.WithTestResource
 import io.quarkus.test.junit.QuarkusTest
 import jakarta.inject.Inject
 import java.time.Clock
@@ -33,7 +33,7 @@ import org.junit.jupiter.api.Test
  * apart either; `refCount` can.
  */
 @QuarkusTest
-@QuarkusTestResource(HostFixture::class)
+@WithTestResource(HostFixture::class)
 class CachePollTest {
 
     @Inject

@@ -46,9 +46,15 @@ reason this file says so out loud:
 ## Run
 
 ```bash
-# The module's own suite. `-am` is required (the reactor builds snapshotcache and SimpleEtl
-# first), and the -Dtest filter is what stops -am from also running THEIR suites - which is
-# fourteen minutes of Testcontainers before this module compiles.
+# The module's own suite. `-am` is required: the reactor builds snapshotcache and SimpleEtl
+# first, and without it Maven resolves a STALE SimpleEtl from the local repository - which
+# surfaces as "No parameter with name 'onTasksLoaded' found", not as anything about staleness.
+mvn -pl etl-host -am test
+
+# The same, faster, by not also running the upstream modules' suites (~5 minutes of
+# Testcontainers). Use it while iterating - but the run that counts is the one above, because a
+# -Dtest filter does not scan the classes it excludes, and a test RESOURCE on an excluded class
+# can still be global. That is exactly the bug this filter hid once.
 mvn -pl etl-host -am test -Dtest='etlhost.*Test' -Dsurefire.failIfNoSpecifiedTests=false
 
 # The end-to-end test against a real Oracle (Testcontainers, minutes).

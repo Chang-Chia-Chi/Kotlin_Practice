@@ -1,6 +1,6 @@
 package etlhost
 
-import io.quarkus.test.common.QuarkusTestResource
+import io.quarkus.test.common.WithTestResource
 import io.quarkus.test.junit.QuarkusTest
 import io.quarkus.test.security.TestSecurity
 import io.restassured.RestAssured.given
@@ -22,7 +22,7 @@ import org.junit.jupiter.api.Test
  * check exists only if the host wrote it - which is why the deny half matters as much as the allow.
  */
 @QuarkusTest
-@QuarkusTestResource(HostFixture::class)
+@WithTestResource(HostFixture::class)
 class AdminResourceTest {
 
     @Inject

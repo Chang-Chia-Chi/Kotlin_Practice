@@ -2,7 +2,7 @@ package etlhost
 
 import infra.snapshotcache.api.GroupId
 import infra.snapshotcache.bootstrap.ManagedSnapshotCache
-import io.quarkus.test.common.QuarkusTestResource
+import io.quarkus.test.common.WithTestResource
 import io.quarkus.test.junit.QuarkusTest
 import io.quarkus.test.junit.QuarkusTestProfile
 import io.quarkus.test.junit.TestProfile
@@ -29,6 +29,9 @@ class OracleSource : HostFixture() {
     override fun startSource(root: Path): Map<String, String> {
         container = OracleContainer("gvenzl/oracle-free:slim-faststart")
         container.start()
+        // Same reason as the DuckDB one in HostFixture: a test resource runs before the
+        // application classloader exists, so nothing has registered the driver yet.
+        Class.forName("oracle.jdbc.OracleDriver")
         DriverManager.getConnection(container.jdbcUrl, container.username, container.password).use { oracle ->
             oracle.createStatement().use { st ->
                 // NUMBER(18) declared rather than left to an expression: an uncast expression
@@ -79,7 +82,7 @@ class OracleProfile : QuarkusTestProfile {
  * their Testcontainers classes. `mvn -pl etl-host test -Dgroups=oracle`.
  */
 @QuarkusTest
-@QuarkusTestResource(OracleSource::class)
+@WithTestResource(OracleSource::class)
 @TestProfile(OracleProfile::class)
 @Tag("oracle")
 class HostEndToEndOracleTest {

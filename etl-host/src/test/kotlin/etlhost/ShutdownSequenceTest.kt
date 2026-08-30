@@ -1,7 +1,7 @@
 package etlhost
 
 import io.quarkus.runtime.ShutdownEvent
-import io.quarkus.test.common.QuarkusTestResource
+import io.quarkus.test.common.WithTestResource
 import io.quarkus.test.junit.QuarkusTest
 import io.quarkus.test.junit.QuarkusTestProfile
 import io.quarkus.test.junit.TestProfile
@@ -38,7 +38,7 @@ class IsolatedShutdown : QuarkusTestProfile {
  * promise method order.
  */
 @QuarkusTest
-@QuarkusTestResource(HostFixture::class)
+@WithTestResource(HostFixture::class)
 @TestProfile(IsolatedShutdown::class)
 class ShutdownSequenceTest {
 

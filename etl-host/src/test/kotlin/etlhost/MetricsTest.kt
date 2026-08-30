@@ -1,7 +1,7 @@
 package etlhost
 
 import io.micrometer.prometheus.PrometheusMeterRegistry
-import io.quarkus.test.common.QuarkusTestResource
+import io.quarkus.test.common.WithTestResource
 import io.quarkus.test.junit.QuarkusTest
 import jakarta.inject.Inject
 import org.assertj.core.api.Assertions.assertThat
@@ -14,7 +14,7 @@ import org.junit.jupiter.api.Test
  * contract - both specs fix the metric *names*, and a name is only real once something renders it.
  */
 @QuarkusTest
-@QuarkusTestResource(HostFixture::class)
+@WithTestResource(HostFixture::class)
 class MetricsTest {
 
     @Inject

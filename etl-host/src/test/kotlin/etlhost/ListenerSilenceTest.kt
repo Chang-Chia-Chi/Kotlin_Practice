@@ -12,7 +12,7 @@ import infra.etl.task.WiringResult
 import infra.snapshotcache.api.GroupId
 import infra.snapshotcache.bootstrap.ManagedSnapshotCache
 import infra.etl.task.CacheBinding
-import io.quarkus.test.common.QuarkusTestResource
+import io.quarkus.test.common.WithTestResource
 import io.quarkus.test.junit.QuarkusTest
 import jakarta.inject.Inject
 import jakarta.inject.Named
@@ -39,7 +39,7 @@ import org.junit.jupiter.api.Test
  * the listener's emptiness is a fact about the listener and not about a run that never started.
  */
 @QuarkusTest
-@QuarkusTestResource(HostFixture::class)
+@WithTestResource(HostFixture::class)
 class ListenerSilenceTest {
 
     @Inject

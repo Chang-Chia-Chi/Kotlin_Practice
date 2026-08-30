@@ -1,6 +1,6 @@
 package etlhost
 
-import io.quarkus.test.common.QuarkusTestResource
+import io.quarkus.test.common.WithTestResource
 import io.quarkus.test.junit.QuarkusTest
 import io.quarkus.test.junit.QuarkusTestProfile
 import io.quarkus.test.junit.TestProfile
@@ -27,7 +27,7 @@ private const val EVERY_SECOND = "0/1 * * * * ?"
  * host's own [QuarkusCronScheduler], on a real Quarkus scheduler, **runs**.
  */
 @QuarkusTest
-@QuarkusTestResource(HostFixture::class)
+@WithTestResource(HostFixture::class)
 class CronFiresTest {
 
     @Inject
@@ -97,7 +97,7 @@ class HaltedScheduler : QuarkusTestProfile {
  * the claim the row actually makes.
  */
 @QuarkusTest
-@QuarkusTestResource(HostFixture::class)
+@WithTestResource(HostFixture::class)
 @TestProfile(HaltedScheduler::class)
 class CronDoesNotFireWhenTheSchedulerIsHaltedTest {
 

@@ -2990,3 +2990,81 @@ that order cannot be written wrong, and its KDoc says why.
 scenarios assert against a host whose ETL side is live at teardown, and scenario 11 is the one that
 needs the halves separable. A real host closes in the documented order; this example keeps that
 order in `shutdownEtl` and in the README diagram rather than folded into `close`.
+
+---
+
+## `etl-host`: spec 8.6 stops being a list  (2026-08-30)
+
+Built in the snapshotcache plan's P9 slot, and recorded here too because the module that discharges
+those obligations is not a SimpleEtl module and this document is where a SimpleEtl reader looks for
+what happened to them. The full entry - deliverables, deviations, what is still uncovered - is in
+`docs/snapshotcache/progress.md` under "P9 - Service wiring". This entry is the SimpleEtl half.
+
+**Spec 8.6 has a third column now.** For eight phases it opened with "**none of them is tested in
+this repository**, because no host module exists in it", and the honesty of that sentence was doing
+a lot of work: nineteen host obligations, each with a stated symptom, none of them ever run. The
+reactor now holds `etl-host` - a real Quarkus application composing `openSnapshotCache` and
+`EtlWiring` - so every row says whether it is exercised, and the rows that are not say why.
+
+Three kinds of answer, and the difference between them is the content:
+
+- **Yes** (9 rows) - a test fails if the obligation is dropped.
+- **By construction** (4 rows) - `EtlWiring` made the mistake unrepresentable; there is nothing left
+  to forget. One row is now `n/a for this host`: `etl-host` takes the *file* path, so it holds no
+  code-built definition set for `TaskScheduler.apply` to miss.
+- **No** (3 rows) - the obligation is real and lives outside this repository: an alert rule in
+  Prometheus, a JVM flag on a pod, a wedged driver nothing here can wedge. Saying so is the only
+  honest thing a table can do about them.
+
+### The rows worth reading, because each was tested by its symptom rather than its happy path
+
+- **`quarkus.scheduler.start-mode=forced`** (row 1) - the row P7 proved a library cannot test,
+  because Quarkus does not read `application.properties` out of a dependency jar. `CronFiresTest`
+  asserts a cron registered through the host's binding runs; its pair, on a profile with
+  `start-mode=halted`, asserts the symptom - registers cleanly, logs nothing, raises nothing, never
+  runs. The pair is what makes the first test evidence about the property rather than about
+  scheduling in general.
+- **The hand-off** (row 2) - a task *file's* cron, loaded by `EtlWiring.start`, registered by
+  `TaskScheduler`, fired by Quarkus, run by `TaskRunner`, asserted to have executed on
+  `DefaultDispatcher` and not on Quarkus's `executor-thread`. Measured:
+  `DefaultDispatcher-worker-1 @heartbeat#1`.
+- **The status codes** (row 3) - and the bug the test caught. `classify` was first written as
+  "anything that is not `AlreadyRunning` is 202", copied from `composed-host-example`'s
+  `ReadinessProbe`, which only ever had to tell busy from dying. That answers **202 to `Unknown` and
+  to `Disabled`**: a host accepting a trigger for a task it does not have, with a run id it never
+  allocated. An exhaustive `when` over the sealed type fixes it and makes a fifth case a compile
+  error. This is what `TriggerResult` being sealed is *for*, and it took a real 404 assertion to
+  collect on it.
+- **The role check** (row 4) - `@RolesAllowed("etl-admin")` at class level, so "on every endpoint"
+  is true by construction. The **deny** half is the half that matters: without an anonymous-401
+  assertion every other test in the class would pass just as green on a resource carrying no
+  annotation at all, which is precisely the row's symptom.
+- **The listener** (row 13) - `ListenerSilenceTest` runs the same task through a second `EtlWiring`
+  identical to the host's *but for the missing `listener` argument*, and asserts the silence. The
+  run's completion is observed through the **metrics** seam and its outcome asserted `SUCCEEDED`, so
+  the emptiness is a fact about the listener rather than about a run that never happened.
+- **Reclaimability** (row 11) - the row this section called **"not testable in this repository"**,
+  and it was right about why: reclamation lives in `DefaultSnapshotCache`, which is `internal` to
+  the cache module, so SimpleEtl's tests use a double and a double cannot leak a generation. The
+  claim was never about difficulty; it was that no module owned a real cache *and* ran a real task.
+  `HostEndToEndOracleTest` does: real Oracle -> generation -> `cacheCopy` -> rows in the target ->
+  `refCount` 0 the moment the run ends -> the file gone from disk after a successor publishes.
+
+### The seed row, one day after it was deepened
+
+Row 16 was rewritten this morning by the depth sweep - from "call `seed` after the initial load and
+after every reload" to "pass `metrics::seed` as `onTasksLoaded`". `etl-host` is the first host built
+against the new shape and it is a fair test of the change: **there is no `seed` call site anywhere
+in the module**, and `MetricsTest` asserts a never-run task already carries its four zero series in
+a real Prometheus scrape. The test would pass if this host forgot to call anything, because there is
+nothing left for it to forget. That is the difference between an obligation and an argument.
+
+`archive-old` - the `enabled: false` task - is what the assertion uses, so no test in the module can
+have run it and the series exist only because the framework seeded them.
+
+### The one row `etl-host` weakens rather than discharges
+
+**The statement timeout** (row 15) is set - `SqlStatements.queryTimeout` on every `Jdbi` the host
+builds, from config - and **not tested**. Nothing here wedges a driver, so the row is exercised as
+configuration and its verdict says so. A reader who wants that symptom covered needs a source that
+hangs, which is a fixture this phase did not build.

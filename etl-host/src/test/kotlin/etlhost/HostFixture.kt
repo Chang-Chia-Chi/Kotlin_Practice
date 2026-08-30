@@ -15,6 +15,12 @@ import java.sql.DriverManager
  * would have failed the first generation. `start()` returns the config overrides, which is the one
  * hook that is guaranteed to run first.
  *
+ * Declared with `@WithTestResource`, never `@QuarkusTestResource`. The older annotation defaults to
+ * `restrictToAnnotatedClass = false`, which makes a resource **global to the module**: the Oracle
+ * fixture next door, on a class excluded by tag, started a container for every test class in the
+ * suite and failed all seven of them. Measured, and only under a full `mvn test` - a `-Dtest` filter
+ * hides it, because the excluded class is never scanned.
+ *
  * The source is a DuckDB file rather than Oracle on purpose. It exercises the identical production
  * path - `JdbcGenerationSource`, `RowPipe`, `DuckDbTableWriter` - in a second rather than in two and
  * a half minutes, and [HostEndToEndOracleTest] runs the same host against a real Oracle so the

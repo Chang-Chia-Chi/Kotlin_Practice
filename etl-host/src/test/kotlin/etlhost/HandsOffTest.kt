@@ -1,6 +1,6 @@
 package etlhost
 
-import io.quarkus.test.common.QuarkusTestResource
+import io.quarkus.test.common.WithTestResource
 import io.quarkus.test.junit.QuarkusTest
 import io.quarkus.test.junit.QuarkusTestProfile
 import io.quarkus.test.junit.TestProfile
@@ -54,7 +54,7 @@ class FastCronTasks : QuarkusTestProfile {
  * Quarkus, and run by `TaskRunner` - the whole chain the deployment actually uses.
  */
 @QuarkusTest
-@QuarkusTestResource(HostFixture::class)
+@WithTestResource(HostFixture::class)
 @TestProfile(FastCronTasks::class)
 class HandsOffTest {
 
