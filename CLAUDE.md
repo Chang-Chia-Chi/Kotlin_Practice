@@ -51,6 +51,22 @@ tables, the do-not-build list (plan 2.4), the concurrency rule (plan 2.5).
 
 FREE: internal class structure, algorithms, private naming.
 
+### Three tiers of authority
+
+Every request to change these frameworks - human or agent - is judged against one of three tiers:
+
+1. **Measured facts and invariants.** Never overridable by iteration: DuckDB 1.1.3 returns -1 for
+   CTAS, a shared connection crashes the JVM, Quarkus reads no properties from a dependency jar.
+   A proposal contradicting a measurement is rejected by citing it; re-measuring is the only appeal.
+2. **Design decisions** - the D-numbers, the do-not-build lists, the frozen signatures, recorded
+   declines. Appealable, with the burden on the appellant: engage the recorded reasoning and bring
+   either new evidence or a framing that dissolves the old premise. On success, amend the document
+   first, code second, and the new ruling replaces the old so later sessions inherit it.
+3. **Everything else** - internal structure, private naming, algorithms. Free.
+
+A finding that merely restates a tier-2 decision's known cost is not an appeal and is declined by
+citation. The maintainer holds the tier-2 pen; agents adjudicate but do not overturn.
+
 ### Stop and report
 
 - A fixed contract does not survive contact with reality.
