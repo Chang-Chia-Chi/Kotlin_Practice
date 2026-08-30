@@ -5,6 +5,7 @@ import infra.etl.task.StepContext
 import infra.etl.task.StepResult
 import infra.etl.task.TaskContext
 import infra.etl.task.TaskMetrics
+import infra.etl.task.TriggerSource
 import io.micrometer.core.instrument.Gauge
 import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.Tag
@@ -49,7 +50,9 @@ private const val SCRATCH = "etl_scratch_file_bytes"
  * ### Two operational consequences worth knowing before an alert is written against these
  *
  * A task's meters are registered on its **first run**, so a newly deployed task has no series at
- * all until it fires - an alert on the absence of a series will fire on deployment. And **this
+ * all until it fires - an alert on the absence of a series will fire on deployment. [seed] closes
+ * that for `etl_task_runs_total`, which is the meter staleness alerts are written against, and for
+ * that one only; spec 9.3 states why each of the other five stays absence-only. And **this
  * binding** never removes one - `MeterRegistry.remove` and `clear` do exist and were measured to
  * work; nothing here calls them - so a task renamed across a reload leaves a stale
  * `etl_scratch_file_bytes{task=old}` behind forever, reading whatever its last run reported.
@@ -76,14 +79,51 @@ class MicrometerTaskMetrics(private val registry: MeterRegistry) : TaskMetrics {
     private val scratchGauges = ConcurrentHashMap<String, AtomicLong>()
 
     override fun taskEnded(ctx: TaskContext, outcome: Outcome, durationMs: Long) {
-        registry.counter(
-            RUNS,
-            "task", ctx.taskName,
-            "trigger", ctx.triggerSource.name.lowercase(),
-            "outcome", outcome.name.lowercase(),
-        ).increment()
+        runs(ctx.taskName, ctx.triggerSource, outcome).increment()
         registry.timer(TASK_DURATION, "task", ctx.taskName).record(durationMs, TimeUnit.MILLISECONDS)
     }
+
+    /**
+     * Pre-registers the zero-value [RUNS] series for every task in [taskNames], so a staleness
+     * alert can be written as `etl_task_runs_total{outcome="succeeded"} == 0` rather than as an
+     * absence query (spec 9.3, 8.6).
+     *
+     * Four series per name: [TriggerSource] and [Outcome] are closed two-valued enums, which is
+     * what makes this meter the only one of spec 9.3's six whose full label set follows from a
+     * task name. The other five need a phase and a step, or are a gauge whose zero would be a
+     * measurement rather than a placeholder - 9.3 states the exclusion per meter.
+     *
+     * **The host calls this, after the initial load and after every reload** (spec 8.6). It cannot
+     * be called from `infra.etl.task`, which may not name `io.micrometer`, and it is deliberately
+     * not on the [TaskMetrics] interface: seeding series of a metric 9.3 already lists is not a
+     * seventh metric, so nothing that implements that interface breaks.
+     *
+     * **Idempotent.** `MeterRegistry.counter` is get-or-create on the meter id, so re-seeding a
+     * series that has since been incremented returns the same [io.micrometer.core.instrument.Counter]
+     * with its value intact - it does not re-register and it does not reset. That is what lets the
+     * reload call pass the whole name set, survivors and additions alike, instead of computing a
+     * delta. It goes with the class's standing behaviour of never removing a meter: a task dropped
+     * by a reload keeps the four zero series it was seeded with.
+     *
+     * Registers through the same [runs] helper [taskEnded] uses, so a seeded series and the series
+     * a run increments cannot drift apart into two meter ids that differ by a tag.
+     */
+    fun seed(taskNames: Collection<String>) {
+        for (task in taskNames) {
+            for (trigger in TriggerSource.entries) {
+                for (outcome in Outcome.entries) {
+                    runs(task, trigger, outcome)
+                }
+            }
+        }
+    }
+
+    private fun runs(task: String, trigger: TriggerSource, outcome: Outcome) = registry.counter(
+        RUNS,
+        "task", task,
+        "trigger", trigger.name.lowercase(),
+        "outcome", outcome.name.lowercase(),
+    )
 
     /**
      * **Both** row directions are registered on every step that ends, including at 0 - measured,
