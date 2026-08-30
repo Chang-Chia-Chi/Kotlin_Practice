@@ -15,8 +15,52 @@ import org.jdbi.v3.core.Jdbi
  */
 sealed interface WiringResult {
 
-    /** Everything is wired, the crons are registered, and this is what `AdminResource` serves. */
-    data class Wired(val admin: TaskAdmin) : WiringResult
+    /**
+     * Everything is wired, the crons are registered, and this is what `AdminResource` serves.
+     *
+     * A plain class rather than a `data class` since E16: it holds the runner and the scheduler
+     * as well, so that [close] can reach them, and a generated `equals` over those two would be
+     * meaningless. [admin] is unchanged, and `copy`/`componentN` were used nowhere.
+     */
+    class Wired internal constructor(
+        val admin: TaskAdmin,
+        private val runner: TaskRunner,
+        private val scheduler: TaskScheduler,
+    ) : WiringResult, AutoCloseable {
+
+        /**
+         * **The shutdown seam** (E16; spec 8.6, 11.2). Until this existed a host could stop its
+         * schedule only by reloading an empty directory - which cancels the registrations as a
+         * *side effect* of throwing the task list away, blanking `GET /admin/etl/tasks` at exactly
+         * the moment an operator is watching a shutdown, and which cannot stop the runner at all.
+         *
+         * Registrations first, then the runner's scope. The order is what makes the second half
+         * meaningful: a firing the host's scheduler had already dispatched is past the point where
+         * cancelling its registration can help, and is stopped by the scope instead. After this,
+         * [TaskAdmin.trigger] answers [TriggerResult.AlreadyRunning] for every task - 409,
+         * "rejected, not queued, it will not run later", which is what a shutting-down server
+         * owes; spec 11.2 records why that is a reuse and not a fifth sealed case.
+         *
+         * **A run already in flight is not interrupted, and cannot be.** Spec 8.3 makes
+         * `TaskEngine.run` an ordinary blocking function, so nothing under it suspends and a
+         * cancelled `Job` has no cancellation point to act on. Such a run reaches its natural end
+         * and records its real outcome, which [admin] still answers for afterwards. A host that
+         * needs shutdown *bounded* owns that bound: spec 8.6's per-`DataSource` statement timeout
+         * is the only lever on a wedged call, here as everywhere else.
+         *
+         * [admin] keeps its definitions and `list()` keeps answering. Idempotent.
+         *
+         * **A composed host calls this before `ManagedSnapshotCache.close()`**, which is the
+         * cache's own spec 10.2 steps 2 and 3 - stop scheduling, stop starting new work - and
+         * which no host previously had a way to perform. Reversed, a `cacheCopy` step can take a
+         * lease on a cache that is already draining and be answered `ShuttingDownException`
+         * mid-run.
+         */
+        override fun close() {
+            scheduler.cancelAll()
+            runner.close()
+        }
+    }
 
     /**
      * Nothing was started. The task files did not validate, or the [CronScheduler] rejected an
@@ -121,9 +165,14 @@ class EtlWiring(
      */
     fun start(taskDirectory: Path): WiringResult {
         val runner = runner()
-        val admin = TaskAdmin(runner, TaskScheduler(cron, runner), loader())
+        val scheduler = TaskScheduler(cron, runner)
+        val admin = TaskAdmin(runner, scheduler, loader())
         val report = admin.reload(taskDirectory)
-        return if (report == null) WiringResult.Wired(admin) else WiringResult.Invalid(report)
+        return if (report == null) {
+            WiringResult.Wired(admin, runner, scheduler)
+        } else {
+            WiringResult.Invalid(report)
+        }
     }
 
     /**
@@ -147,7 +196,7 @@ class EtlWiring(
         return if (rejected != null) {
             WiringResult.Invalid(rejected)
         } else {
-            WiringResult.Wired(TaskAdmin(runner, scheduler, loader(), definitions))
+            WiringResult.Wired(TaskAdmin(runner, scheduler, loader(), definitions), runner, scheduler)
         }
     }
 

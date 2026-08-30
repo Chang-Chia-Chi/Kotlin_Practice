@@ -2682,3 +2682,103 @@ If a third overturn of a recorded rejection comes up, the pattern both of these 
 reusing: state the rejection's **premise**, show the new shape does not have it, and name what the
 new shape still cannot do. An overturn that only says "on reflection, this seems fine" leaves the
 next session with two contradictory rulings and no way to tell which is live.
+
+---
+
+## E16 - The shutdown seam, from the first composed host  (2026-08-30)
+
+The first time SimpleEtl was wired to a real `openSnapshotCache` rather than to a double. Three
+commits: the cache's documents, this module's documents, and the code the second commit declared.
+
+### What the composition exposed
+
+**A host had no way to stop scheduling.** Spec 8.6 has always listed obligations a library cannot
+meet, and this was a gap of a different kind - the framework held the registrations and the runner
+and offered no way to stop either. The route a host actually had was
+`admin.reload(<an empty directory>)`, which cancels every cron registration *as a side effect* of
+replacing the task list with nothing: `GET /admin/etl/tasks` then goes blank at exactly the moment
+an operator is watching a shutdown, an aborted shutdown has to reload the real directory to get
+back, and the runner is untouched, so a firing already dispatched still submits. Both the row and
+its cost are now in 8.6, with a superseded-by note.
+
+Two more rows the composition added, neither of which any code here can discharge:
+
+- **`-Dkotlinx.coroutines.debug=on`.** The cache's `LeaseInfo.owner` is the acquiring thread's
+  name, and every run of ours acquires on `Dispatchers.IO.limitedParallelism(1)` - a view over the
+  shared IO pool, with no `ThreadFactory` to name (8.3). Without the flag the cache's expired-lease
+  WARN says `DefaultDispatcher-worker-1` and names no task, so "which job is stalling refresh" is
+  unanswerable in the one incident it exists for. Measured: `DefaultDispatcher-worker-1
+  @wip-summary#5` under `-ea`, bare `DefaultDispatcher-worker-1` in production. **No test can catch
+  the omission** - kotlinx-coroutines' debug mode is `AUTO` and enables itself with assertions,
+  which surefire sets, so every test JVM here shows attribution working while production has none.
+- **3.6's wait cost, made concrete.** A task fired before the cache's first generation publishes
+  pins its `limitedParallelism(1)` slot for the whole `defaultWaitBudget` - 30 s by production
+  default - and then fails with `NotReadyException` reason **`TIMEOUT`, not `NOT_READY`**;
+  `NOT_READY` is what a *zero* budget produces and this framework never passes zero. A runbook
+  written against `NOT_READY` never matches.
+
+### `WiringResult.Wired.close()`
+
+Declared in 11.2 in commit 2 and implemented in commit 3, in that order. Cancels every cron
+registration, then cancels `TaskRunner`'s scope. `admin` keeps its definitions and `list()` keeps
+answering, which is the whole difference from the workaround.
+
+Three decisions worth recording:
+
+1. **`Wired` stops being a `data class`.** It now holds the runner and the scheduler as well as the
+   admin, so `close` can reach them, and a generated `equals` over those two is meaningless.
+   `admin` is unchanged; `copy` and `componentN` were used nowhere in the module or its tests.
+2. **`trigger` after `close` answers `TriggerResult.AlreadyRunning`, and no fifth case was added.**
+   The name is untrue - nothing is running - and the documented contract is exactly true:
+   *rejected, not queued, it will not run later*, which maps to the 409 a shutting-down server
+   owes. `TriggerResult` is a public sealed interface a host `when`s over exhaustively to pick a
+   status code, so a fifth case breaks every host's compile in order to name a state 409 already
+   describes on the wire. Recorded in 11.2, in `TriggerResult`'s own KDoc and in the test, so a
+   later session that disagrees changes one assertion rather than reverse-engineering the reason.
+3. **The scope check goes *before* the claim in `submit`.** Launching into a cancelled scope
+   produces a job whose block never runs; claiming first would leave a `Run` recorded with no way
+   to end. There is still a one-instruction race - a `close` landing between the check and the
+   `launch` - and that run is recorded FAILED by the existing `release(cause)` path, which is the
+   honest answer for a run shutdown killed.
+
+**In-flight runs are not interrupted, and cannot be.** 8.3 makes `TaskEngine.run` an ordinary
+blocking function, so nothing under it suspends and a cancelled `Job` has no cancellation point to
+act on. The run reaches its natural end and `TaskSlot.release` does not overwrite an outcome
+already written, so the real outcome survives. A host wanting shutdown *bounded* owns the bound;
+8.6's per-`DataSource` statement timeout is the only lever, here as everywhere.
+
+**Composition order** is in 11.2 and in the KDoc: `Wired.close()` before
+`ManagedSnapshotCache.close()`. That is the cache's own spec 10.2 steps 2 and 3 - stop scheduling,
+stop starting new work - which its spec has always assigned to the host and which no host
+previously had a way to perform.
+
+### Tests
+
+`EtlWiringShutdownTest`, four, one per seam, and the two halves of `close` are pinned
+independently rather than by one assertion:
+
+| Planted | Failed |
+|---|---|
+| `scheduler.cancelAll()` removed | `aCancelledRegistrationCannotFire` - `close() left a live cron registration ... [nightly-roll]` |
+| `runner.close()` removed | `aTriggerAfterCloseDoesNotLaunch` - the trigger was `Accepted` and recorded a run |
+
+`closeIsIdempotent` failed under both, which is what an oracle counting handle closes should do.
+
+The cron double is **local to this file** rather than P7's `RecordingCron`: `RecordingCron.fire`
+looks its callback up in the *live* map and errors once the registration is closed, and the case
+this file must reach is a firing the host's scheduler had already dispatched, whose callback has
+to survive its own cancellation. No P7 fixture was modified. Nothing sleeps - `Trig`'s bounded
+waits and P7's `Probe` do every wait, and the in-flight test parks *inside* the run so "close
+happened mid-run" is a fact rather than a window.
+
+Suite: **396 green** in SimpleEtl (392 before). `snapshotcache` re-run whole at 215/0/2. No earlier
+test modified: `git diff --stat 216c6cb..HEAD -- '**/test/**'` shows one new file.
+
+### Deviations from the documents
+
+None. 11.2 was amended in its own commit before any code was written.
+
+### Where a contract met reality
+
+Nothing broke. The one thing that had to give was the `data class` on `WiringResult.Wired`, and
+that is recorded in 11.2 in place rather than left for a reader to notice the shape changed.

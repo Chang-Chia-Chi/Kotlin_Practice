@@ -4,6 +4,8 @@ import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.time.Instant
 import java.util.UUID
@@ -28,6 +30,13 @@ sealed interface TriggerResult {
     /**
      * The task is already running and this trigger was **rejected, not queued** (spec 8.4), so a
      * slow run cannot accumulate a backlog. It will not run later.
+     *
+     * **Also the answer after [WiringResult.Wired.close]**, when nothing is running and nothing
+     * ever will be again (E16). The three words the case is named for are then untrue and the
+     * three the paragraph above is written in - rejected, not queued, will not run later - are
+     * exactly true, which is why this is a reuse and not a fifth case. A fifth case would be the
+     * more precise name and would break the exhaustive `when` in every host that maps this sealed
+     * type to a status code, to describe a state 409 already describes on the wire.
      */
     data object AlreadyRunning : TriggerResult
 
@@ -94,9 +103,13 @@ data class RunStatus(
 class TaskRunner(private val engine: TaskEngine) {
 
     /**
-     * `SupervisorJob` so one failed run does not cancel the others. Nothing cancels this scope:
-     * the engine is blocking JDBC with nothing to yield to (spec 8.3), so cancellation would not
-     * interrupt a run anyway, and spec 8 asks for no shutdown drain.
+     * `SupervisorJob` so one failed run does not cancel the others.
+     *
+     * [close] cancels it, and cancelling is worth exactly one thing: **no new run starts**. It
+     * does not stop a run already under way, because the engine is blocking JDBC with no
+     * suspension point to cancel at (spec 8.3) - such a run reaches its natural end and records
+     * its own outcome, which is what [TaskSlot.release] not overwriting a written outcome
+     * preserves.
      */
     private val scope = CoroutineScope(SupervisorJob())
 
@@ -110,6 +123,9 @@ class TaskRunner(private val engine: TaskEngine) {
      *   firing. No authorisation happens here, or anywhere in this module (spec 8.6).
      */
     fun submit(definition: TaskDefinition, trigger: TriggerSource, by: String?): TriggerResult {
+        // Before the claim, not after: a submit into a cancelled scope launches a job that never
+        // runs its block, and claiming first would record a run that has no way to end (E16).
+        if (!scope.isActive) return TriggerResult.AlreadyRunning
         val slot = slot(definition.name)
         if (!slot.claim()) return TriggerResult.AlreadyRunning
         val runId = UUID.randomUUID().toString()
@@ -154,6 +170,16 @@ class TaskRunner(private val engine: TaskEngine) {
      * the IO pool rather than owning one (spec 8.3).
      */
     internal fun context(name: String): CoroutineContext = slot(name).context
+
+    /**
+     * Spec 8.6's shutdown row, the runner's half (E16): after this, [submit] launches nothing and
+     * answers [TriggerResult.AlreadyRunning]. Runs already in flight are left alone - see [scope].
+     *
+     * Internal, not public and not `AutoCloseable`: spec 11.2 declares `submit` as this class's
+     * whole surface, and the seam a host is offered is [WiringResult.Wired.close], which owns the
+     * ordering this is one step of. Idempotent, because `Job.cancel` is.
+     */
+    internal fun close() = scope.cancel()
 
     private fun slot(name: String): TaskSlot = tasks.computeIfAbsent(name, ::TaskSlot)
 }

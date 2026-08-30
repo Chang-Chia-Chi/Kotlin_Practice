@@ -137,6 +137,27 @@ class TaskScheduler(private val cron: CronScheduler, private val runner: TaskRun
     @Synchronized
     internal fun registeredNames(): Set<String> = registrations.keys.toSet()
 
+    /**
+     * Spec 8.6's shutdown row, the scheduler's half (E16): cancel every registration, and forget
+     * the definitions a firing would look up.
+     *
+     * Both halves are needed and they cover different firings. Cancelling stops the host's
+     * scheduler from starting new ones; clearing [current] stops one it had *already* dispatched,
+     * whose callback is running on a host worker and cannot be recalled - [fire] then finds no
+     * definition and returns, which is the answer it already gives for a task a reload removed.
+     *
+     * Not `apply(emptyList())`, which is the workaround this replaces: that is a *reload* to
+     * nothing, it leaves the registry able to accept a later batch, and in a host it is paired
+     * with a `TaskAdmin.reload` that empties the task listing too. Idempotent - a second call
+     * finds an empty registry.
+     */
+    @Synchronized
+    internal fun cancelAll() {
+        registrations.values.forEach { close(it.handle) }
+        registrations.clear()
+        current = emptyMap()
+    }
+
     private fun register(name: String, expression: String) {
         registrations[name] = Registration(expression, cron.schedule(name, expression) { fire(name) })
     }
