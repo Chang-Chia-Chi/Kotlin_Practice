@@ -1706,3 +1706,47 @@ repository tests it - but it is no longer an untested assumption.
 
 None. No code changed, so no test changed. Suite re-run to confirm: **215 tests, 0 failures, 2
 pre-existing skips**.
+
+
+---
+
+## Convergence: the adoption-review loop closes  (2026-08-30)
+
+Four rounds — cold adoption, build files, composition, and the shutdown seam it exposed — each
+adjudicated under the three tiers, each implemented behind an independent review. This entry
+records the two rulings that close the books.
+
+### Spec 18.6 #4 (checkpoint round-trip under-report) - RULED: deferred to P9, deliberately
+
+The finding is real and `EtlDiffTest` pins it as a known boundary. Two candidate fixes were sized
+by the successor session: checkpoint-per-refresh (small code, a real storage/retention change) and
+consumers diffing checkpoint-to-checkpoint (~150-250 lines plus a D32/D35 amendment). **Neither is
+buildable honestly today**, because the tradeoff they price - storage growth against staleness
+tolerance - belongs to a deployment, and no host exists. Deciding it now would be inventing the
+operating point P9 will actually measure. Tier 2, ruling recorded here; the trigger to reopen is
+P9 running against a real Oracle with a real retention budget.
+
+### Consolidated tier-3 depth verdict
+
+The loop's internal changes - the K single-source read, the `seed` narrowing removal, the
+`closed` flag, the drain-guarded sweep, disk-aware numbering - were each reviewed at merge; none
+added interface, all deepened existing modules (more behaviour behind the same seams). The two
+additions that DID add interface (`EtlWiring`, `openSnapshotCache` + `Wired.close()` /
+`ManagedSnapshotCache.close()`) each passed the deletion test at merge: removing either scatters
+measured, adopter-paid complexity across every host. No shallow module shipped; no rework ordered.
+
+### What the loop measured about itself
+
+Round 1 found adoption blockers, round 2 found build lies, round 3 found composition truths, and
+round 4 fixed what round 3 exposed - each rotation of the surface yielded what the previous
+surface could not express, and round 3's biggest finding (owner attribution works only under
+`-ea`) falsified a remedy recorded in round 1. The independent-review stage caught a
+would-have-shipped defect in every round it ran: a guard matching the wrong class, a close() that
+could SIGSEGV a documented state, a reload that resurrects a dead schedule into a silent stall.
+The pattern across all three: the defect lived in the seam between individually-correct parts,
+which is where no author's unit test looks.
+
+Remaining open, all with named triggers: P9 (the real host) owns the archive config, the
+`expiredLeases()` poll, the refresh tick, and the 18.6 #4 ruling above; the `TriggerResult`
+`ShuttingDown` case waits for a host that needs to distinguish busy from dying; the composed pod
+budget formula waits for a deployment to validate it.
