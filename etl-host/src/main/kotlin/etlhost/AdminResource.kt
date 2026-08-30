@@ -109,19 +109,29 @@ class AdminResource(
      *
      * **400 is not the answer to every rejected reload**, and the exception is the one a naive
      * mapping gets wrong in the worst place. `WiringResult.Wired.close()` is terminal, so a reload
-     * after shutdown has begun comes back as a `ValidationReport` too - one error, `file` reading
-     * `<wiring>` rather than a task file. Rendered as 400 that tells an operator, in the middle of a
-     * shutdown, that their task files are badly authored: they go and look at YAML that is fine
-     * while the pod goes away underneath them. It is the same shape as M3's busy-versus-dying, one
-     * layer up - the framework answers the state and the *host* is the one that knows why - so it
-     * gets the same answer 503 and the same readiness state the probe is serving.
+     * after shutdown has begun comes back as a `ValidationReport` too. Rendered as 400 that tells an
+     * operator, in the middle of a shutdown, that their task files are badly authored: they go and
+     * look at YAML that is fine while the pod goes away underneath them. It is the same shape as
+     * M3's busy-versus-dying, one layer up - the framework answers the state and the *host* is the
+     * one that knows why - so it gets the same answer 503 and the same readiness the probe serves.
+     *
+     * **The discriminator is [EtlHost.shuttingDown], not the report's contents**, and that is this
+     * host's answer to the reopen trigger spec 11.2 left on `TriggerResult.ShuttingDown`. Until now
+     * this branch matched `error.file == "<wiring>"` - an untyped framework sentinel, copied into a
+     * host constant, in a field otherwise holding file names. Nothing would have failed to compile
+     * had the framework renamed it; the branch would simply have stopped matching, and an operator
+     * mid-shutdown would have been handed 400 "your YAML is bad" - the precise wrong answer this
+     * KDoc exists to prevent. The flag is the same state the trigger mapping and the probe already
+     * read, it is owned by the host because the host is the one that calls `close()`, and using it
+     * here makes all three answers come from one place. Host state suffices; nothing needed a
+     * fifth sealed case, and one string match fewer is the evidence.
      */
     @POST
     @Path("/reload")
     fun reload(): Response {
         val report = host.reload()
             ?: return Response.ok(mapOf("tasks" to host.admin.list().size)).build()
-        if (report.errors.any { it.file == CLOSED_WIRING }) {
+        if (host.shuttingDown) {
             return Response.status(503).entity(
                 mapOf(
                     "state" to "shutting-down",
@@ -136,11 +146,6 @@ class AdminResource(
                 },
             ),
         ).build()
-    }
-
-    private companion object {
-        /** `TaskScheduler.CLOSED`'s `file`, which is the only non-file value the framework emits. */
-        const val CLOSED_WIRING = "<wiring>"
     }
 
     /** snapshotcache spec 12.7: full live state for manual investigation, generation detail and all. */

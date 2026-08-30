@@ -43,7 +43,51 @@ reason this file says so out loud:
   of the task, and *no test can catch it*, because surefire's `-ea` turns the flag on by itself.
   Verify by reading a running pod's command line.
 
-## Run
+## Run the application
+
+Everything below this heading was measured on a cold `java -jar` boot, because until then this
+section held only `mvn test` invocations - three ways to run the *suite*, and no way to run the
+*host*. What a suite proves and what a deployment needs are different lists.
+
+```bash
+mvn -o -pl etl-host -am package -DskipTests
+java -Dkotlinx.coroutines.debug=on -jar etl-host/target/quarkus-app/quarkus-run.jar
+```
+
+It boots in about 1.4 s and is immediately **not ready**, which is correct and is the first thing
+to understand about it:
+
+```
+WARN  [etl.EtlHost] startup refresh of group wip: SOURCE_ERROR ... Table with name lot does not exist!
+INFO  [etl.EtlHost] startup complete, readiness = false
+$ curl localhost:8080/health/ready
+{"state":"awaiting-first-generation"}          # HTTP 503
+```
+
+**Three things a deployment must supply that this module deliberately does not, and that nothing
+fails loudly about if you forget:**
+
+1. **The source tables.** `etl-host.cache.sql`'s keys are the group list and each statement must
+   project an `id` column (see the property's comment). No table, no generation, no readiness -
+   as WARN, per group, at startup.
+2. **The task files.** `etl-host.etl.task-directory` is created if absent and an empty directory
+   validates fine, so the host boots happily serving **zero tasks** and `GET /admin/etl/tasks`
+   answers `[]`. The worked shape-D example lives in `HostFixture.writeTaskFiles`; copy from
+   there, since nothing under `src/main/resources` ships one.
+3. **An authentication mechanism.** Every admin endpoint carries
+   `@RolesAllowed("etl-admin")` (spec 8.6 row 4) and this module configures **no identity
+   provider**, so as shipped every admin call answers **403 forever** and there is no way to
+   obtain the role. Spec 8.6 has no row for this; the table's rows are about handing the
+   framework something, and this one is about the container. Note also that the suite asserts
+   **401** for an anonymous caller - true under `quarkus-test-security`, and *not* what a
+   production boot returns, which is 403.
+
+**The readiness path is `/health/ready`, not `/q/health/ready`.** It is a plain JAX-RS resource;
+this module does not depend on `quarkus-smallrye-health`, so the path a Quarkus deployment
+manifest conventionally probes returns **404** and the pod never becomes ready. Probe
+`/health/ready`. Metrics are at the Quarkus default `/q/metrics`.
+
+## Run the tests
 
 ```bash
 # The module's own suite. `-am` is required: the reactor builds snapshotcache and SimpleEtl
