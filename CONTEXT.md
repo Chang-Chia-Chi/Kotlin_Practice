@@ -32,6 +32,19 @@ Oracle ──GenerationSource──▶ snapshotcache ──CacheBinding──▶
   shared-pool dispatcher defeats thread naming, and every test JVM masks the gap (`-ea`
   auto-enables the flag).
 
+## How code is structured (one procedure, three silhouettes)
+
+The shared layout law (stated in full in `SimpleEtl/CLAUDE.md`, enforced by each module's
+`ArchitectureTest`): split by independently consumable **unit** first; apply `api`/`spi`/`core`
+within a unit only once it outgrows **roughly a dozen files**; every technology adapter is its
+own package named for the technology; every boundary is an ArchUnit dependency sentence.
+
+So the three trees differ because their inputs do: `snapshotcache` (17 files, one unit) is
+layered; `SimpleEtl` splits into `pipe`/`task` (two units) with flat insides; `snapshotarchive`
+(6 files, a *consumer* of the cache per D30) is flat. Consistency lives in the procedure, not
+the silhouette. One watched threshold: `task` sits at 13 files, held flat because spec 11.2 +
+`internal` + ArchUnit already do `api`'s job — if it grows further, the layering rule fires.
+
 ## Copy from, in order of ceremony
 
 | | |
