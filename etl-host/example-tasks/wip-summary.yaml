@@ -28,8 +28,12 @@ phases:
         datasource: scratch
         output: summary
         sql: select site, count(*) as lots, sum(qty) as total_qty from wip_cache group by site
-      # Outside scratch a pipe step defaults to createTable: REQUIRED, so `wip_summary` must
-      # already exist in the `report` datasource. staging/init-oracle.sql creates it.
+      # `wip_summary` must already exist in the `report` datasource - staging/init-oracle.sh
+      # creates it. The target is a MERGE statement, not a table: a plain table target appends
+      # a fresh copy of the whole summary on every firing, which the 93-minute soak measured
+      # growing without bound (744 rows and climbing, linear in run count). A statement target
+      # replaces per key instead, and `idempotent: true` is the author's promise that a rerun
+      # converges - which is also what lets this step ever be retried.
       - name: publish
         type: pipe
         source:
@@ -37,4 +41,10 @@ phases:
           sql: select site, lots, total_qty from summary
         target:
           datasource: report
-          table: wip_summary
+          sql: >-
+            merge into wip_summary t
+            using (select :site as site, :lots as lots, :total_qty as total_qty from dual) s
+            on (t.site = s.site)
+            when matched then update set t.lots = s.lots, t.total_qty = s.total_qty
+            when not matched then insert (site, lots, total_qty) values (s.site, s.lots, s.total_qty)
+          idempotent: true

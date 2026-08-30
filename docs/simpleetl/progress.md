@@ -3286,3 +3286,29 @@ accident:
 
 None of the three is a framework defect and none changed a framework file. All three are the reason
 this round exists: a green suite is evidence about the suite.
+
+
+---
+
+## The soak: 93 minutes, ~270 cycles, every framework metric stable  (2026-08-31)
+
+The first run of either framework longer than a test, on WSL2 Linux against real Oracle with
+compressed intervals (~270 refresh cycles per group, ~1100 task runs, 188 samples). Verdicts:
+RSS **stable** (-2.7 percent over the run), open FDs **stable**, WAL bytes **zero throughout**,
+one generation file per group at every sample, scratch directories collected every run, meter
+count plateauing exactly as series-materialisation predicts. A 3-minute Oracle partition
+(`docker pause`) stalled and resumed cleanly; an unplanned checkpoint ENOMEM at T+46 was absorbed
+by the verify gate with zero residue; a real SIGTERM shut down in 0.337s and the restart's wipe
+log named the leftover file exactly. Harness, samples and scripts live under `soak/` and the run
+is repeatable. Not captured, recorded honestly: the SIGTERM exit code, and the main run's full
+app.log (deleted before archiving; live excerpts preserved).
+
+**The one new defect was in the copy-me file**: the example task's publish step was a plain pipe
+into a REQUIRED table, appending a fresh copy of the summary every firing - measured growing
+without bound, linear in run count. It is now the MERGE statement-target with `idempotent: true`
+that the canonical shape-D fixture always used, and `ExampleTasksValidateTest` runs every file in
+`example-tasks/` through the real loader against the staging name sets - the file has now shipped
+broken twice (the unrendered template, the unbounded append), each time because nothing loaded it.
+
+The soak also independently confirmed the staging round's two fixes: running on the pre-fix base,
+it hit both the missing production driver and the absent identity provider live.
