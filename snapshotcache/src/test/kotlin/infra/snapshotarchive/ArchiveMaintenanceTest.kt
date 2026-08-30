@@ -292,9 +292,9 @@ class ArchiveMaintenanceTest {
         tables: List<String> = listOf("t_a", "t_b"),
         upload: List<String> = tables,
     ): ManifestEntry {
-        val inventory = tables.map { ArchivedObject(it, "$it.parquet", BYTES, CHECKSUM, 10) }
+        val inventory = tables.map { ArchivedObject(it, "$it.parquet", BYTES.toLong(), CHECKSUM, 10) }
         val entry = dao.insertPending(group, dataAsOf, Inventory.encode(inventory), generation = 1)
-        upload.forEach { store.seed(keyOf(entry, "$it.parquet"), BYTES.toInt()) }
+        upload.forEach { store.seed(keyOf(entry, "$it.parquet"), BYTES) }
         return entry
     }
 
@@ -333,7 +333,9 @@ class ArchiveMaintenanceTest {
     companion object {
 
         private const val BUCKET = "test-bucket"
-        private const val BYTES = 4_096L
+        // Int, because the only two consumers are an Int (`RecordingObjectStore.seed`) and a
+        // Long (`ArchivedObject.bytes`), and only one of those conversions is lossless.
+        private const val BYTES = 4_096
         private val CHECKSUM = "0".repeat(64)
         private val T0: Instant = Instant.parse("2026-08-29T10:00:00Z")
         private val FAR_FUTURE: Instant = Instant.parse("2999-01-01T00:00:00Z")

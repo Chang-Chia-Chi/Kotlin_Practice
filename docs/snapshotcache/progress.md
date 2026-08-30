@@ -1298,3 +1298,85 @@ then restored.
 - **Changing when `dataAsOf` is stamped.** `BuildContext` is FIXED; D35 says the error direction
   is the safe one.
 - **Removing unread config fields.** Every one is a knob spec 13 assigns to a component P9 builds.
+
+## Archive-layer handover sweep  (2026-08-30)
+
+Picked up the snapshot-archive layer from a session that went idle. Scope was
+`infra/snapshotarchive/**` plus the M3/archive sections of the documents; `infra/snapshotcache/**`
+and `e2e/**` belong to another agent this round and were not touched.
+
+### Baseline
+
+`-Dtest=Archiver*,ArchiveMaintenance*,ManifestDao*,ObjectStore*,EtlDiff*` before any edit:
+**59 tests, 0 failures, 0 errors, 0 skips** (ArchiveMaintenance 14, Archiver 13, EtlDiff 12,
+ManifestDao 15, ObjectStore 5). The Oracle and MinIO containers started cleanly on all five
+classes - no flake, so nothing had to be excluded and the same five-class selector is the bar
+the closing run was held to.
+
+### What the departed session had actually left
+
+Two of the three items the handover brief named as open were already closed in the tree at
+`a5da45f`, which is worth recording because the brief and the repository disagreed:
+
+- **The ObjectStore tripwire was already restored** by `92ee72a`, on the user's ruling recorded
+  in "M3 follow-up review". `RecordingObjectStore` takes `allows: Set<Op>` defaulting to
+  `PUT`/`SIZE_OF`, and each suite opts in to its own surface.
+- **`seed` already took `Int`** (`e86b22a`). What survived was the narrowing itself, relocated
+  rather than removed - see below.
+
+So the only code left open from the brief was the second half of the `seed` item. The genuinely
+open items are the two operational ones M3 closed with, both unchanged.
+
+### Re-verified, not inherited: the tripwire mutation check
+
+`92ee72a` claims a plant-and-watch verification. A check nobody in *this* session has watched
+fail is not yet a check, so it was run again rather than taken on trust. `objects.delete(...)`
+planted in `Archiver.uploadAndVerify`'s upload loop; `ArchiverTest` fails with
+
+    this suite's store does not expect DELETE - the code under test reached an object-store
+    operation it was never supposed to use. If that is now intended, widen `allows`; if it is
+    not, the production change that caused it is the bug.
+
+from `RecordingObjectStore.guard`, naming `Archiver.kt:308`. Plant removed, tree clean
+(`git status` empty before the next edit). The alarm is real and it names the operation.
+
+### Closed here: the `seed` narrowing
+
+`ArchiveMaintenanceTest.BYTES` was `4_096L`, so making the fake take `Int` had moved the lossy
+`toInt()` to the call site instead of removing it. `BYTES` is now `Int`; the one consumer that
+needs a `Long` (`ArchivedObject.bytes`) widens with `toLong()`, which cannot lose anything.
+No `require` was added because with the constant typed correctly no `Long` reaches `seed` at all
+- the guard would have had no reachable failure path, which is the wrong kind of check to write.
+
+Six lines changed in one test file. No assertion, scenario table or test name moved; the value
+is the same 4096 and `sizeOf`'s comparison against `obj.bytes` still runs, which is what makes
+the suite itself the check on this edit.
+
+### Still open, with sizes - nothing started
+
+- **Spec 18.6 #3 - T unmeasured.** Not closable anywhere but a real deployment: there is no
+  network link on this machine, only loopback, and the spec already re-scoped this to
+  "CONFIG TO TUNE, not a gate" on the user's ruling. 15 minutes stands as a policy floor.
+  Size: one measurement against the real link, no code.
+- **Spec 18.6 #4 - the round-trip under-report.** Tier 2. Nothing in `EtlDiff` can close it;
+  it needs a ruling on what consumers record or what the archiver publishes, and the document
+  has to move first. Rough sizes if it is taken up: "publish a checkpoint per refresh" is small
+  code in the archiver's schedule but a real storage and retention change; "consumers diff
+  checkpoint to checkpoint and accept the lag" is a medium `EtlDiff` change (~150-250 lines with
+  tests) plus a D32/D35 amendment. Deliberately not begun - a half-built answer here is worse
+  than the documented boundary, which `EtlDiffTest` already pins.
+- **P9 still owes the archive layer its configuration** - `Archiver.tables`, `EtlDiff.primaryKeys`,
+  the retention window, the staleness threshold and T are all constructor defaults standing in
+  for decisions nobody made. Outside this round's scope; named, not touched.
+- **CLAUDE.md still states the numeric size budget** that plan 3c records the user overturning.
+  The plan carries the ruling, the root document does not. The user's edit to make.
+
+Two earlier deviation notes are now stale rather than wrong: ticket 05's "No `ObjectStoreTest`
+case for `get`" and its fixture-duplication note were both superseded by the later
+"M3 review findings" entry. Left as written - this file is a chronological log and a later entry
+superseding an earlier one is how it is meant to read.
+
+### Tests
+
+**59 tests, 0 failures, 0 errors, 0 skips**, per-class identical to the baseline above. No test
+outside `infra/snapshotarchive/**` was touched, and no earlier assertion was modified or weakened.
