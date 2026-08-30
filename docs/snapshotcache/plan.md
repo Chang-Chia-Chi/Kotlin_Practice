@@ -268,6 +268,22 @@ Started only after M1 is accepted against spec Sec 17.8. This is production wiri
 ### P9 - Service wiring
 
 - **Goal:** connect the framework inside the real ETL service. This work has to happen once regardless; it is not a sample.
+- **Where it lives (decided 2026-08-30): a new reactor module `etl-host/`.** This entry was written
+  before either framework had a public front door and assumed P9 would be a diff inside a service
+  repository nobody here can see. That assumption is what left SimpleEtl spec 8.6 saying "**none of
+  them is tested in this repository**, because no host module exists in it" through eight phases -
+  a table of twelve host obligations with no executable form, which is a list of things that are
+  true because nobody has run them. An obligation is discharged by a running host or it is
+  discharged by an assertion in a document; only the first kind survives a refactor. So P9 is built
+  here, as a real Quarkus application composing `openSnapshotCache` (spec 5.4) and `EtlWiring`
+  (SimpleEtl spec 11.2), and each 8.6 row now names whether `etl-host` exercises it.
+- **Precedent:** `composed-host-example` already put a consumer beside the frameworks in this
+  reactor, for the same reason - measurements and cross-boundary behaviour that no framework module
+  can see. `etl-host` is the next step along that line: the example composes the two front doors
+  with hand-rolled stand-ins (`ManualCron`, a `ReadinessProbe` nothing serves), and `etl-host`
+  replaces each stand-in with the real thing (Quarkus `Scheduler`, an HTTP readiness endpoint,
+  `@RolesAllowed`, a `MeterRegistry`). Like the example, **nothing may depend on it**: it publishes
+  no API, it is a leaf of the reactor, and copying from it is its intended use.
 - **Deliverables:** CDI producers for cache/cycle/config AND the shared consumer DuckDB instance of spec 6.5 (one `@ApplicationScoped` instance with `consumerMemoryLimit` + threads applied; jobs inject it and pass its connection as `CopyOutSpec.targetConnection` - the DI container is the "framework" of spec 6.5's "managed by the framework", decided in the 2026-08-26 design session); `@Scheduled` adapter with non-concurrent execution calling the manual trigger; Micrometer binder mapping `CacheEvents` occurrences plus polled gauges to the Sec 12 metric names exactly; admin endpoint per Sec 12.7; startup sequence per Sec 10.1 (wipe, refresh, readiness flip); shutdown hook per Sec 10.2 - the hook wires the JVM/Quarkus lifecycle to the framework-core `DefaultSnapshotCache.shutdown()` (built in P8 by the 2026-08-26 user decision) and owns steps 2 (stop scheduling) and 3 (interrupting the in-flight build thread), with `terminationGracePeriodSeconds` aligned per Sec 11.3; per-job `waitBudget` selection (0-30s for the 10-minute jobs, minutes for anything daily); **a poll of `GenerationRegistry.expiredLeases()` on the schedule tick, firing `CacheEvents.leaseExpired` for each still-open lease past its deadline (spec 6.2, 12.3). Assigned here on 2026-08-30: the core fires `leaseExpired` on the release path, which covers only leases that have already ended - a lease still *held* past its deadline, the case the metric exists to catch, is visible only to a periodic poll, and the schedule tick is the only periodic thing in the system.**
 - **Fixed contracts:** Sec 12 metric names and label sets verbatim; Sec 12.5 cardinality rule (no generation label); grace period must exceed the drain bound.
 - **Acceptance:** service boots against the `SyntheticSource`; smoke test scrapes metrics asserting names and labels; readiness flips only after first publish; a SIGTERM during a refresh completes the Sec 10.2 sequence within the grace period.
