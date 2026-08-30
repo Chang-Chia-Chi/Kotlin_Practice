@@ -1,5 +1,6 @@
 package etlhost
 
+import infra.snapshotcache.api.GenerationState
 import infra.snapshotcache.api.GroupId
 import infra.snapshotcache.api.LeaseInfo
 import infra.snapshotcache.bootstrap.ManagedSnapshotCache
@@ -70,8 +71,13 @@ class CacheTick @Inject constructor(
      * Quarkus fires an `@Scheduled` method is asserting something about Quarkus; asserting that a
      * lease held past its deadline produces exactly one `leaseExpired` is asserting something about
      * this host.
+     *
+     * Returns the pinned generations it warned about, for the same reason `TaskAdmin` factors
+     * `sameDatasourcePipeUsers` out of its own logging: a test that had to read a log appender would
+     * be testing the logging framework, and one that asserted nothing would let the condition drift
+     * unnoticed. The log line is still the operational output; the return value is what is checked.
      */
-    fun poll(group: GroupId) {
+    fun poll(group: GroupId): List<GenerationState> {
         val now = clock.instant()
         val live = managed.admin.liveGenerations(group)
 
@@ -89,6 +95,7 @@ class CacheTick @Inject constructor(
                 pinned.joinToString { "gen ${it.generation} refCount=${it.refCount} ${owners(it.leases)}" },
             )
         }
+        return pinned
     }
 
     private companion object {

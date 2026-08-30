@@ -45,6 +45,18 @@
                 <artifactId>kotlin-reflect</artifactId>
                 <version>${kotlin.version}</version>
             </dependency>
+            <!-- Also ahead of the platform BOM. Quarkus 3.17.5 ships Micrometer 1.13.7, and spec
+                 8.6's classpath row states a floor of >= 1.14.x - the version every measurement in
+                 that section and in `MicrometerTaskMetrics`' KDoc was taken on. Raising the whole
+                 Micrometer BOM (rather than `micrometer-core` alone) keeps core and the Prometheus
+                 registry on one version, which is the mixture that actually breaks. -->
+            <dependency>
+                <groupId>io.micrometer</groupId>
+                <artifactId>micrometer-bom</artifactId>
+                <version>1.14.2</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
             <dependency>
                 <groupId>io.quarkus.platform</groupId>
                 <artifactId>quarkus-bom</artifactId>
