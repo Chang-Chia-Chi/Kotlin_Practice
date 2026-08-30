@@ -64,16 +64,40 @@ class EtlHost(
 
     val groups: List<GroupId> = config.groupSql.keys.map(::GroupId)
 
+    /** Raised before `close()`, and only by the shutdown sequence below. */
     // `final` because the all-open compiler plugin opens every @Singleton class for CDI, and
     // Kotlin forbids a private setter on an open property. Nothing subclasses this.
     @Volatile
-    final var ready: Boolean = false
-        private set
-
-    /** Raised before `close()`, and only by the shutdown sequence below. */
-    @Volatile
     final var shuttingDown: Boolean = false
         private set
+
+    /** Raised once [onStart] has finished, so readiness cannot be true mid-boot. */
+    @Volatile
+    private var started: Boolean = false
+
+    /**
+     * **The one readiness answer, computed rather than stored, and the only source there is.**
+     *
+     * The JAX-RS `/health/ready` resource renders this string; [CacheReadinessCheck] serves the
+     * same value at SmallRye's conventional `/q/health/ready`. Two probes cannot disagree because
+     * there is nothing for them to disagree about.
+     *
+     * It is computed on every read because the alternative was a flag written once, at the end of
+     * startup, and never again - which made this class's own KDoc and README.md ("readiness stays
+     * false until a later tick publishes") describe behaviour no code had. A host whose startup
+     * refresh failed stayed not-ready **forever**, through every later tick that published
+     * perfectly well, and the only recovery was a restart. Asking the cache costs one in-memory
+     * read per group per probe.
+     *
+     * Three states, and the middle one is `composed-host-example`'s M3: shutting down is reported
+     * before `close()` runs, so a load balancer stops sending work before the 409s and 503s start.
+     */
+    val readinessState: String
+        get() = when {
+            shuttingDown -> "shutting-down"
+            started && groups.isNotEmpty() && groups.all { managed.cache.currentInfo(it) != null } -> READY
+            else -> "awaiting-first-generation"
+        }
 
     private lateinit var wired: WiringResult.Wired
 
@@ -116,8 +140,8 @@ class EtlHost(
         // while another round published everything, and reading the result instead of the cache
         // reported "not ready" over a live, serving generation. `delayed` on CacheTick removed the
         // overlap that produced it at boot; this removes the class of wrong answer.
-        ready = groups.isNotEmpty() && groups.all { managed.cache.currentInfo(it) != null }
-        log.infov("startup complete, readiness = {0}", ready)
+        started = true
+        log.infov("startup complete, readiness = {0}", readinessState)
     }
 
     fun onStop(@Observes event: ShutdownEvent) {
@@ -158,10 +182,14 @@ class EtlHost(
         TriggerResult.AlreadyRunning -> if (shuttingDown) 503 else 409
     }
 
-    private companion object {
-        val log: Logger = Logger.getLogger(EtlHost::class.java)
+    companion object {
 
-        fun render(report: ValidationReport) = report.errors.joinToString("; ") {
+        /** The one state string that means "serving". Everything else is a 503. */
+        const val READY: String = "ready"
+
+        private val log: Logger = Logger.getLogger(EtlHost::class.java)
+
+        private fun render(report: ValidationReport) = report.errors.joinToString("; ") {
             "${it.file}${it.step?.let { s -> "/$s" } ?: ""}: ${it.message}"
         }
     }

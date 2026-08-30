@@ -59,10 +59,16 @@ to understand about it:
 
 ```
 WARN  [etl.EtlHost] startup refresh of group wip: SOURCE_ERROR ... Table with name lot does not exist!
-INFO  [etl.EtlHost] startup complete, readiness = false
-$ curl localhost:8080/health/ready
-{"state":"awaiting-first-generation"}          # HTTP 503
+INFO  [etl.EtlHost] startup complete, readiness = awaiting-first-generation
+$ curl localhost:8080/q/health/ready
+{"status":"DOWN","checks":[{"name":"snapshot-cache","status":"DOWN",
+                            "data":{"state":"awaiting-first-generation"}}]}   # HTTP 503
 ```
+
+It stays that way until a generation publishes - and it recovers **on its own** when a later
+refresh tick succeeds, without a restart. That was not true until the readiness flag became a
+computed state: it used to be written once, at the end of startup, so a host whose first refresh
+failed was not-ready forever while every subsequent tick published perfectly.
 
 **Three things a deployment must supply that this module deliberately does not, and that nothing
 fails loudly about if you forget:**
@@ -74,18 +80,25 @@ fails loudly about if you forget:**
    validates fine, so the host boots happily serving **zero tasks** and `GET /admin/etl/tasks`
    answers `[]`. The worked shape-D example lives in `HostFixture.writeTaskFiles`; copy from
    there, since nothing under `src/main/resources` ships one.
-3. **An authentication mechanism.** Every admin endpoint carries
-   `@RolesAllowed("etl-admin")` (spec 8.6 row 4) and this module configures **no identity
-   provider**, so as shipped every admin call answers **403 forever** and there is no way to
-   obtain the role. Spec 8.6 has no row for this; the table's rows are about handing the
-   framework something, and this one is about the container. Note also that the suite asserts
-   **401** for an anonymous caller - true under `quarkus-test-security`, and *not* what a
-   production boot returns, which is 403.
+3. **Real credentials.** The host now ships an identity provider - `quarkus-elytron-security-properties-file`
+   with two embedded users - so a cold boot no longer answers **403 forever** to every admin
+   call. What it ships are **placeholders**: `etl-admin` and `etl-reader`, both with the
+   password `placeholder-change-me`, both overridable by environment variable
+   (`ETL_ADMIN_PASSWORD`, `ETL_READER_PASSWORD`). A deployment either sets those or replaces
+   the whole `quarkus.security.users.embedded.*` block with its own mechanism. **Replace it,
+   do not remove it** - deleting the block restores the 403-forever boot exactly.
 
-**The readiness path is `/health/ready`, not `/q/health/ready`.** It is a plain JAX-RS resource;
-this module does not depend on `quarkus-smallrye-health`, so the path a Quarkus deployment
-manifest conventionally probes returns **404** and the pod never becomes ready. Probe
-`/health/ready`. Metrics are at the Quarkus default `/q/metrics`.
+```bash
+curl -u etl-admin:placeholder-change-me localhost:8080/admin/etl/tasks     # 200
+curl -u etl-admin:wrong               localhost:8080/admin/etl/tasks       # 401
+curl -u etl-reader:placeholder-change-me localhost:8080/admin/etl/tasks    # 403
+```
+
+**Readiness answers at both `/q/health/ready` and `/health/ready`.** The first is SmallRye's
+conventional path, served by a `@Readiness` bean, and is what a deployment manifest should probe;
+the second is this module's own JAX-RS resource, kept because something may already be pointed at
+it. Both render the same `EtlHost.readinessState`, so they cannot disagree. Metrics are at the
+Quarkus default `/q/metrics`.
 
 ## Run the tests
 

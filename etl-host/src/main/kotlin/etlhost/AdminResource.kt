@@ -187,7 +187,13 @@ class AdminResource(
 }
 
 /**
- * The readiness probe, and the only unauthenticated endpoint this host has.
+ * The readiness probe this host shipped before it depended on `quarkus-smallrye-health`, kept
+ * because a deployment may already be probing it and because its body says *which* not-ready state
+ * this is in one word an operator can read off a `curl`.
+ *
+ * **The conventional path is `/q/health/ready`** ([CacheReadinessCheck]); this one is the
+ * compatibility path. Both render [EtlHost.readinessState], so there is one answer and two spellings
+ * of it - which is the whole reason the state moved onto [EtlHost] rather than being computed here.
  *
  * Kubernetes does not carry a bearer token, so a readiness endpoint behind `@RolesAllowed` never
  * answers 200 and the pod never joins the service. `@PermitAll` is stated rather than left implicit
@@ -205,11 +211,7 @@ class ReadinessResource(private val host: EtlHost) {
     @GET
     @PermitAll
     fun ready(): Response {
-        val state = when {
-            host.shuttingDown -> "shutting-down"
-            host.ready -> "ready"
-            else -> "awaiting-first-generation"
-        }
-        return Response.status(if (state == "ready") 200 else 503).entity(mapOf("state" to state)).build()
+        val state = host.readinessState
+        return Response.status(if (state == EtlHost.READY) 200 else 503).entity(mapOf("state" to state)).build()
     }
 }

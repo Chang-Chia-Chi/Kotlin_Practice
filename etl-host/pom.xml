@@ -85,6 +85,17 @@
         <dependency><groupId>io.quarkus</groupId><artifactId>quarkus-rest-jackson</artifactId></dependency>
         <dependency><groupId>io.quarkus</groupId><artifactId>quarkus-scheduler</artifactId></dependency>
         <dependency><groupId>io.quarkus</groupId><artifactId>quarkus-security</artifactId></dependency>
+        <!-- `quarkus-security` enforces @RolesAllowed; it does not tell Quarkus who anybody is.
+             Without an identity provider there is no way to obtain the role, so every admin
+             endpoint answers 403 to everyone forever - measured on a cold `java -jar` boot, and
+             invisible to a suite whose every test synthesises an identity with @TestSecurity.
+             This extension is the smallest real provider: users and roles from configuration.
+             Replace it with OIDC or LDAP in a deployment; do not remove it and ship nothing. -->
+        <dependency><groupId>io.quarkus</groupId><artifactId>quarkus-elytron-security-properties-file</artifactId></dependency>
+        <!-- A hand-rolled JAX-RS readiness resource does not appear at SmallRye's conventional
+             /q/health/ready, so a stock Quarkus manifest probes a 404 and the pod never becomes
+             ready while the service runs perfectly. Same cold-boot measurement. -->
+        <dependency><groupId>io.quarkus</groupId><artifactId>quarkus-smallrye-health</artifactId></dependency>
         <!-- quarkus-micrometer alone binds a composite registry with no children, on which every
              counter and gauge is a silent no-op - which would make the seeding test below green
              against nothing. The prometheus registry is what makes a series real and scrapable. -->
