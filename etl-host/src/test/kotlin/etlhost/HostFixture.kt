@@ -67,13 +67,25 @@ open class HostFixture : QuarkusTestResourceLifecycleManager {
                     "INSERT INTO lot SELECT i, 'L' || i, i * 1.5, " +
                         "CASE WHEN i % 2 = 0 THEN 'F12' ELSE 'F11' END FROM range(1, $ROWS) t(i)",
                 )
+                st.execute("CREATE TABLE equipment (id BIGINT, tool_id VARCHAR, state VARCHAR)")
+                st.execute(
+                    "INSERT INTO equipment SELECT i, 'T' || i, " +
+                        "CASE WHEN i % 2 = 0 THEN 'UP' ELSE 'DOWN' END FROM range(1, $TOOLS) t(i)",
+                )
             }
         }
     }
 
+    /**
+     * Both targets, and both are hand-written DDL because they have to be: outside scratch a `pipe`
+     * step defaults to `createTable: REQUIRED` (SimpleEtl spec 4.4), so the table must already
+     * exist. The framework then fills it **by column name** from catalog metadata, which is why
+     * neither of these declares a column order that has to match the YAML.
+     */
     private fun createTarget(url: String) = connect(url).use {
         it.createStatement().use { st ->
             st.execute("CREATE TABLE wip_summary (site VARCHAR, lots BIGINT, total_qty DECIMAL(38,3))")
+            st.execute("CREATE TABLE equipment_state (state VARCHAR, tools BIGINT)")
         }
     }
 
@@ -84,8 +96,15 @@ open class HostFixture : QuarkusTestResourceLifecycleManager {
         const val TASK = "wip-summary"
         const val DISABLED_TASK = "archive-old"
 
+        /** The second group and the task that consumes it - one group is not a multi-group host. */
+        const val GROUP_2 = "equipment"
+        const val TASK_2 = "equipment-uptime"
+
         /** 500 rows, split across two sites, so the summary has two rows to assert on. */
         const val ROWS = 501
+
+        /** 40 tools, split UP/DOWN, so the second task's output is two rows as well. */
+        const val TOOLS = 41
 
         /**
          * The explicit `Class.forName` is not superstition. A test resource runs before the

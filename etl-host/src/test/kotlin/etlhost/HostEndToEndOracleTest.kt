@@ -44,6 +44,15 @@ class OracleSource : HostFixture() {
                         "case when mod(level, 2) = 0 then 'F12' else 'F11' end " +
                         "from dual connect by level <= ${ROWS - 1}",
                 )
+                // The second group's source. Not optional: `etl-host.cache.sql`'s keys ARE the
+                // group list, so a group in application.properties with no table behind it fails
+                // its first refresh and readiness never flips - which is step 1 of the test below.
+                st.execute("create table equipment (id number(18), tool_id varchar2(40), state varchar2(8))")
+                st.execute(
+                    "insert into equipment select level, 'T' || level, " +
+                        "case when mod(level, 2) = 0 then 'UP' else 'DOWN' end " +
+                        "from dual connect by level <= ${TOOLS - 1}",
+                )
                 // No explicit commit: DriverManager hands back an auto-commit connection and
                 // Oracle's driver throws rather than no-ops if you commit one.
             }
@@ -79,7 +88,15 @@ class OracleProfile : QuarkusTestProfile {
  * count reached K and spec 6.1 paused it, and no green suite anywhere would have said so.
  *
  * Excluded by default (`@Tag("oracle")`), the same convention SimpleEtl and snapshotcache use for
- * their Testcontainers classes. `mvn -pl etl-host test -Dgroups=oracle`.
+ * their Testcontainers classes. Opt in with **`-DexcludedGroups=none`**, never `-Dgroups=oracle`:
+ * this module's `excludedGroups` is a `<properties>` entry precisely because a literal in a
+ * plugin's `<configuration>` beats the user property of the same name, so `-Dgroups=oracle` runs
+ * zero tests and reports BUILD SUCCESS. Measured; see the pom and README.
+ *
+ * ```
+ * mvn -pl etl-host -am test -Dtest=HostEndToEndOracleTest -DexcludedGroups=none \
+ *     -Dsurefire.failIfNoSpecifiedTests=false
+ * ```
  */
 @QuarkusTest
 @WithTestResource(OracleSource::class)
