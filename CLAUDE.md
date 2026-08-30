@@ -67,6 +67,12 @@ Every request to change these frameworks - human or agent - is judged against on
 A finding that merely restates a tier-2 decision's known cost is not an appeal and is declined by
 citation. The maintainer holds the tier-2 pen; agents adjudicate but do not overturn.
 
+**Citations are for maintainers, never for runtime output.** Log lines, exceptions and HTTP
+responses state their reason in their own words - "(spec 10.1)" tells an operator nothing. Spec
+and plan citations live in KDoc, comments and the docs, where the next maintainer reads. The one
+exception: validation error messages' rule numbers ("rule 12") are the validation contract's own
+public numbering, searchable by task authors and pinned by earlier phases' tests - they stay.
+
 ### Stop and report
 
 - A fixed contract does not survive contact with reality.

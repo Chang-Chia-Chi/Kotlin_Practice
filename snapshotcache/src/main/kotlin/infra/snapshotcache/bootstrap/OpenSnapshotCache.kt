@@ -212,6 +212,15 @@ private fun wipeStaleFiles(storagePath: Path) {
             entries.filter { GENERATION_FILE.matches(it.fileName.toString()) }.toList()
         }
         stale.forEach { Files.deleteIfExists(it) }
+        // Named per directory: the P9 operator round found the wipe correct and invisible - a
+        // restart that collected a crashed predecessor's leftovers looked identical to one that
+        // found a clean directory, so "did the wipe run?" was unanswerable from the log.
+        if (stale.isNotEmpty()) {
+            log.infof(
+                "startup wipe: removed %d stale generation file(s) left by a previous process from %s: %s",
+                stale.size, directory, stale.map { it.fileName.toString() },
+            )
+        }
     }
 }
 
@@ -275,7 +284,7 @@ class ManagedSnapshotCache internal constructor(
         } else {
             log.warnf(
                 "Lease drain timed out with %d lease(s) outstanding; leaving the DuckDB stores open " +
-                    "rather than closing connections a consumer may still be querying (spec 10.2 steps 4-5).",
+                    "rather than closing connections a consumer may still be querying; they die with the process, and the next startup wipe collects the files.",
                 outstanding.size,
             )
         }

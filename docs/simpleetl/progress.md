@@ -3207,3 +3207,24 @@ added one and ran it. What a cold boot shows, none of which a green suite does:
 
 All three are now in `etl-host/README.md`. The first two are host-obligation shaped and are
 offered to spec 8.6 as candidate rows; this round did not edit the spec.
+
+
+---
+
+## Operator-round close-out, and runtime output stops citing the documents  (2026-08-30)
+
+The three accepted proposals from the P9 operator round landed: the startup wipe now names what it
+removed and from where (it was correct and invisible - drill 4), spec 8.6 gained the two rows a
+cold `java -jar` boot measured (an authentication mechanism, or 403-to-everyone in production only;
+the readiness path, or a conventional probe 404s forever), and the worked shape-D task YAML moved
+out of test code into `etl-host/example-tasks/`. The NaN-gauge observation stays open as
+*unverified* - it was a code read, not a measurement, and does not enter the record as fact.
+
+**A maintainer ruling, now in root CLAUDE.md:** runtime output - logs, exceptions, HTTP - states
+its reason in its own words and cites no spec or plan section; citations are maintainer
+infrastructure and live in KDoc and the docs. Five log sites were de-cited. Validation error
+messages keep their rule numbers: those are the validation contract's public numbering, and the
+earlier phases' tests pin the messages. The first sweep at this over-reached into exactly those
+pinned messages and was reverted whole before anything ran - the filter matched the error-string
+continuation-line style - and redone line-by-line; the lesson is the session's recurring one, that
+a mechanical sweep over strings needs the same review a mechanical agent does.

@@ -117,7 +117,7 @@ internal class DefaultSnapshotCache(
         for ((group, lease) in outstanding) {
             log.warnf(
                 "Shutdown lease drain timed out with a lease still outstanding. " +
-                    "group=%s owner=%s heldFor=%s (spec 10.2 step 4).",
+                    "group=%s owner=%s heldFor=%s.",
                 group,
                 lease.owner,
                 Duration.between(lease.acquiredAt, now),
@@ -181,7 +181,7 @@ internal class DefaultSnapshotCache(
         // is caught by P9 polling GenerationRegistry.expiredLeases() on the schedule tick.
         if (lease.info.deadline.isBefore(releasedAt)) {
             log.warnf(
-                "Snapshot lease exceeded its diagnostic deadline. group=%s generation=%d owner=%s heldFor=%s deadline=%s (spec 6.2).",
+                "Snapshot lease exceeded its diagnostic deadline. group=%s generation=%d owner=%s heldFor=%s deadline=%s.",
                 group,
                 lease.generation,
                 lease.info.owner,
@@ -193,7 +193,7 @@ internal class DefaultSnapshotCache(
         if (orphaned) {
             log.warnf(
                 "Snapshot lease orphaned - handle garbage-collected without close(); force-released. " +
-                    "group=%s generation=%d owner=%s heldFor=%s. This is a consumer bug (spec 6.3).",
+                    "group=%s generation=%d owner=%s heldFor=%s. This is a consumer bug: hold a Snapshot in try/finally or use withSnapshot.",
                 group,
                 lease.generation,
                 lease.info.owner,

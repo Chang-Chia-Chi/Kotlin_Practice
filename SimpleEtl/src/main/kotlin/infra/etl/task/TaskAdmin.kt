@@ -192,7 +192,7 @@ class TaskAdmin(
             log.infov(
                 "datasource {0} needs a connection pool of at least {1}: {2} task(s) {3} run a pipe step " +
                     "whose source and target are both {0}, and each such step holds two connections at " +
-                    "once. A smaller pool deadlocks the runs against each other (spec 7.1).",
+                    "once. A smaller pool deadlocks the runs against each other.",
                 datasource, users.size * 2, users.size, users,
             )
         }

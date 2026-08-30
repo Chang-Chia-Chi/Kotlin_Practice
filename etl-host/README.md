@@ -110,3 +110,5 @@ you trust a green run: a literal `<excludedGroups>` in a plugin's `<configuratio
 user property of the same name, so `-Dgroups=oracle` against such a pom runs zero tests and reports
 BUILD SUCCESS. This module's `excludedGroups` is a `<properties>` entry for that reason, and
 overriding it is what actually opts in.
+
+A worked task file lives in `example-tasks/` - the same shape-D YAML the test fixture runs, outside test code so copying it needs no source dive.

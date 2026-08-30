@@ -217,7 +217,7 @@ internal class RefreshCycle(
             .onFailure { log.warnf("Close of aborted candidate %d of group %s failed: %s", gen, group, it.message) }
         registry.discardBuild(gen)
         if (result == RefreshResult.DISK_ERROR) {
-            log.warnf("Disk error while building generation %d of group %s; running emergency GC (spec 9.2): %s", gen, group, detail)
+            log.warnf("Disk error while building generation %d of group %s; running emergency GC: %s", gen, group, detail)
             reclaimPass()
         }
         // Same protocol as reclaimPass: detach first, delete only once detached. Deleting a

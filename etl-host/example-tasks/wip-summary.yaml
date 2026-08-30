@@ -1,0 +1,29 @@
+# The worked shape-D task (SimpleEtl spec 2.4): cacheCopy out of a generation into scratch,
+# materialize over it, pipe out. Promoted verbatim from the test fixture by the P9 operator
+# round's finding: 'copying from it is its intended use' sent readers to a module whose only
+# worked YAML lived inside test code. Point etl-host.tasks.directory at a directory shaped
+# like this one.
+        name: $TASK
+        schedule:
+          cron: "0 0 * * * ?"
+        phases:
+          - name: load
+            steps:
+              - name: copy-wip
+                type: cacheCopy
+                cache: $GROUP
+                sql: select id, lot_id, qty, site from $GROUP
+                output: wip_cache
+              - name: summarise
+                type: materialize
+                datasource: scratch
+                output: summary
+                sql: select site, count(*) as lots, sum(qty) as total_qty from wip_cache group by site
+              - name: publish
+                type: pipe
+                source:
+                  datasource: scratch
+                  sql: select site, lots, total_qty from summary
+                target:
+                  datasource: report
+                  table: wip_summary
