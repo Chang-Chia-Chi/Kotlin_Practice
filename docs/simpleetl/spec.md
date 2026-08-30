@@ -1031,6 +1031,8 @@ them.
 | **configure a statement or query timeout on each `DataSource` behind a `Jdbi`.** The framework has none, anywhere, and that is the design (see 3.6): `TaskEngine.run` is a non-suspending blocking call (8.3) with no `Statement` handle to cancel | a wedged driver call parks that task's `limitedParallelism(1)` dispatcher permanently. The task is `busy` forever, every later firing is skipped as `AlreadyRunning`, and the schedule stalls in silence - the same end state as the pool deadlock in 7.1. A host-side timeout surfaces as `SQLTimeoutException`, which 5.3 already classes transient, so it retries rather than merely failing |
 | **call `MicrometerTaskMetrics.seed(names)` after the initial load and after every reload**, with the whole task-name set each time (E15b) | a task that has never run emits no `etl_task_runs_total` series at all, so a counter-based staleness alert silently matches nothing - it does not fire, and it does not error either. This is the normal state of every task after every deploy. `EtlWiring` cannot absorb this row: `infra.etl.task` may not name `io.micrometer`, so only the host holds the binding `seed` lives on. Seeding is idempotent (9.3), so the reload call is a plain repeat of the startup one |
 | **alert on the *absence* of a metric series, not on a zero counter**, for anything the row above does not seed. 9.3's meters are registered when a run first touches them; a task that has never run in this process has no series at all | "no successful run in 24h" written as `etl_task_runs_total{outcome="succeeded"} == 0` never fires for the task that stopped being scheduled, because there is no such series to compare. The registry lives in the process, so this is the normal state after every deploy and not an edge case - the same non-persistence 8.2 records for run history. **E15b narrows this row rather than removing it**: `seed` closes the gap for `etl_task_runs_total`, which is the meter alerts are actually written against, and 9.3 says why the other five stay absence-only |
+| **set `-Dkotlinx.coroutines.debug=on` on the JVM** when the host reads a snapshot cache (E16) | `LeaseInfo.owner` is the *acquiring thread's* name, and every run acquires on `Dispatchers.IO.limitedParallelism(1)` - a view over the shared IO pool, with no `ThreadFactory` to name (8.3). Without the flag the cache's expired-lease WARN and `liveGenerations` both say `DefaultDispatcher-worker-1` and name no task, so "which job is stalling refresh" is unanswerable in exactly the incident it exists for. **No test can catch this being missed**: kotlinx-coroutines' debug mode is `AUTO` and turns itself on whenever assertions are enabled, which surefire does - so every test JVM in this repository shows `DefaultDispatcher-worker-1 @task-name#5` while production shows the bare name. Measured, both forms, on the first composed host. Verify by reading a running pod's command line |
+| **stop the schedule at shutdown.** Until E16 the only way was `admin.reload(<an empty directory>)`, which cancels every cron registration - as a *side effect* of replacing the task list with nothing | The workaround costs the task list: `list()` then reports no tasks at all, so the admin endpoint goes blank at exactly the moment an operator is watching a shutdown, and a shutdown that is aborted has to reload the real directory to get back. It also cannot stop the runner, so a cron firing that had already been dispatched still submits. **Superseded by `WiringResult.Wired.close()` (11.2)**, which cancels the registrations and the runner's scope and leaves the definitions where they are. A host that keeps the reload workaround still needs the empty directory to exist |
 
 Two notes on the metric binding, measured on micrometer 1.14.2 rather than assumed:
 
@@ -1040,6 +1042,22 @@ Two notes on the metric binding, measured on micrometer 1.14.2 rather than assum
 - A Micrometer `Timer` exports as `_count` + `_sum` plus a separate `_max` gauge, so
   `etl_task_duration_seconds` is three Prometheus series, not one. That is standard Timer
   behaviour and is the host's to know when writing a dashboard.
+
+**A note on 3.6's wait cost, measured on the first composed host (E16).** 3.6 already says a
+`cacheCopy` step blocks for the cache's `defaultWaitBudget` while no generation is available. What
+the composed host makes concrete is *when* that happens and *what it looks like*: a task fired
+before the cache's first refresh publishes - which is every task whose cron lands inside the
+startup window, and the cache's own spec 10.1 puts the first refresh at minutes - **pins its
+`limitedParallelism(1)` dispatcher slot for the full budget**, 30 seconds by production default,
+before failing. Two consequences a host has to size for:
+
+- The step's failure is `NotReadyException` with reason **`TIMEOUT`, not `NOT_READY`**. `NOT_READY`
+  is only what a *zero* budget produces, and the framework never passes zero. An alert or runbook
+  written against `NOT_READY` therefore never matches the case it was written for.
+- 3.6 forbids `retries` on this step type, so the budget is spent once and the run fails. That is
+  the intended shape - the cache's `waitBudget` is the waiting mechanism and this framework does
+  not layer a second one on top - but it means the host's remedy is the cache's readiness gate
+  (its spec 10.1 step 5), not a task-level retry.
 
 ---
 
@@ -1709,7 +1727,50 @@ class EtlWiring(
  *  carries exactly what `TaskAdmin.reload` and `TaskScheduler.apply` answer with, so a host maps
  *  one report shape at startup and at reload. */
 sealed interface WiringResult {
-    data class Wired(val admin: TaskAdmin) : WiringResult
+
+    /** E16: `Wired` is a plain class rather than a `data class`, because it now holds the runner
+     *  and the scheduler as well as the admin so that `close` can reach them, and a generated
+     *  `equals` over those is meaningless. `admin` is unchanged; `copy`/`componentN` were used
+     *  nowhere. */
+    class Wired(val admin: TaskAdmin) : WiringResult, AutoCloseable {
+
+        /** E16. **The shutdown seam** - 8.6's "stop the schedule" row, which until now a host
+         *  could only reach by reloading an empty directory and losing its task list as a side
+         *  effect.
+         *
+         *  In order: every cron registration is cancelled, so the host's scheduler holds nothing
+         *  that could fire; then `TaskRunner`'s scope is cancelled, so no new run is launched. A
+         *  firing already dispatched by the host's scheduler and a `trigger` racing this call are
+         *  both covered by the second half, not the first.
+         *
+         *  **In-flight runs are not interrupted, and cannot be.** 8.3 makes `TaskEngine.run` an
+         *  ordinary blocking function - there is no `suspend` frame anywhere under it, so there
+         *  is no cancellation point for a cancelled `Job` to act on. An in-flight run therefore
+         *  runs to its natural end and records its real outcome; `admin.run(name, runId)` answers
+         *  it afterwards exactly as it would have. What a host wanting a bounded shutdown owns is
+         *  the timeout, and 8.6's statement-timeout row is the only lever on a wedged one.
+         *
+         *  **After this call `trigger` answers `TriggerResult.AlreadyRunning`** for every task -
+         *  409, "rejected, not queued, it will not run later", which is the answer a shutting-down
+         *  server owes. No new sealed case is added: `TriggerResult` is public and hosts `when`
+         *  over it exhaustively, so a fifth case would break every host's compile to name a state
+         *  the existing 409 already describes on the wire. The imprecision is that the name says
+         *  "already running" when nothing is; it is documented here and on `TriggerResult`.
+         *
+         *  `admin` keeps its definitions and `list()` keeps answering, which is the whole
+         *  difference from the reload-an-empty-directory workaround.
+         *
+         *  Idempotent.
+         *
+         *  **Composition order.** A host that also owns a snapshot cache calls this *before*
+         *  `ManagedSnapshotCache.close()`. That gives the cache's own spec 10.2 steps 2 and 3 -
+         *  stop scheduling, and stop anything that would start new work against the cache - which
+         *  its spec has always left to the host and which no host previously had a way to perform.
+         *  Reversed, a task can take a lease on a cache that is already draining and is answered
+         *  `ShuttingDownException` mid-run. */
+        override fun close()
+    }
+
     data class Invalid(val report: ValidationReport) : WiringResult
 }
 
