@@ -52,6 +52,11 @@
             <plugin>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <configuration>
+                    <!-- The three measurements fork JVMs and write gigabytes of spill by design -
+                         the same landmine class the *Spike naming convention once hid in SimpleEtl,
+                         defused the same way: excluded by default, run deliberately with
+                         -Dgroups=measurement. -->
+                    <excludedGroups>measurement</excludedGroups>
                     <!-- ${extraArgs} lets the owner-attribution measurement be re-run without
                          assertions (`-DextraArgs=-da`), which is how the production JVM's bare
                          `DefaultDispatcher-worker-N` owner was measured. Surefire's default -ea

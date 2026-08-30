@@ -734,6 +734,14 @@ it OOMKilled.
 
 **`memory_limit` must not approach the pod limit.** DuckDB only accounts for its own buffers; JVM heap, JDBC staging, and glibc allocator fragmentation are all outside its view. Setting it too high means DuckDB thinks it's healthy right up until the pod is OOMKilled.
 
+**And it must not be tuned down without pricing the disk term** (measured, composed-host-example
+M2, 2026-08-30): shrinking a scratch instance's limit does not shrink the run, it converts RAM into
+spill on the very volume 7.2 sizes as file-plus-spill, at a poor exchange rate - on one 10M-key
+aggregate, saving 192 MB of pod memory (256 -> 64 MB) cost 3 GB of extra peak spill (737 MB ->
+3,717 MB). The budget formula above has a memory term and, implicitly, a disk term, and they trade
+against each other; fitting more tasks per pod by tightening `scratchMemoryLimitMb` is spending the
+scratch volume to buy the memory request.
+
 **`temp_directory` must be set** and pointed at a volume with real space. Without it there's nowhere to spill and you go straight to OOM.
 
 In practice the data is only a few hundred MB, so it will sit entirely in the buffer pool - query performance equals in-memory mode.

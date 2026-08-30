@@ -9,6 +9,7 @@ import infra.etl.task.TriggerResult
 import infra.etl.task.WiringResult
 import org.assertj.core.api.Assertions.assertThat
 import org.jdbi.v3.core.Jdbi
+import org.junit.jupiter.api.Tag
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.nio.file.Files
@@ -30,6 +31,7 @@ import java.util.concurrent.TimeUnit
  * Java 21, duckdb_jdbc 1.1.3. What travels to another machine is the *shape* of the answer - the
  * ratio in M1, the enforcement/additivity facts in M2 - not the milliseconds.
  */
+@Tag("measurement")
 class MeasurementsTest {
 
     // ------------------------------------------------------------------ M1: coroutine debug cost
