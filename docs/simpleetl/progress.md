@@ -2525,3 +2525,160 @@ that does not work, which is this module's own P3 lesson applied to its own test
 gone. The Oracle tag path was exercised by the authoring agent against live Docker; the spike tag
 path is excluded by the same mechanism and was verified by selection, not by running the 62M-row
 spike.
+---
+
+## E15b - The wiring builder and series seeding  (2026-08-30)
+
+Two consumer-facing additions, both of which had been **rejected once and were overturned by the
+maintainer**. Neither overturn is a change of mind about the original reasoning; each rests on a
+framing that dissolves the reasoning's premise, and both are recorded here with the citation, so a
+later session reading only the rejection does not re-litigate a settled question - or, worse, re-do
+the rejected thing on the rejected grounds.
+
+Both spec amendments landed as their own commit **before** any code, because 11.2 calls itself the
+frozen contract and this phase widens it.
+
+### 1. `EtlWiring` - the overturn of P7 deviation 1
+
+**What was rejected.** progress.md:804-815, P7 deviation 1: an in-module factory. The decisive
+measurement was that **Quarkus does not read `application.properties` from a dependency jar**, so
+shipping `quarkus.scheduler.start-mode=forced` here would have put it in a file only this module's
+own tests read while the real deployment fired nothing - "a green test for a production failure".
+Spec 8.6 was written in that ruling's place, and every phase since has added a row to it.
+
+**Why the new framing survives it.** The rejection turns on a factory having to own host
+*configuration*. `EtlWiring` owns none. Every parameter is a JDK type (`Path`, `Clock`), a Layer 1
+type (`Jdbi`, `RowTransform`) or a seam 11.2 already declares (`CronScheduler`, `TaskHooks`,
+`TaskRunListener`, `TaskMetrics`, `CacheBinding`); nothing in it reads a property, scans a
+classpath, or names a framework. It is a pure-Kotlin composition of five classes this module
+already ships. `infra.etl.task` still compiles and tests with no Quarkus on the classpath, and the
+ArchUnit rules that say so are unchanged. The premise - "a factory here must own configuration" -
+is simply not true of this shape, so the conclusion does not follow.
+
+**The clause that makes the overturn safe, and it is load-bearing rather than boilerplate.** The
+class's KDoc *names the obligations it cannot absorb*: `start-mode=forced`, `@RolesAllowed`, the
+`AdminResource` HTTP mapping, `CronScheduler` throwing on a bad cron, micrometer on the runtime
+classpath, `MicrometerTaskMetrics.seed`, and a per-`DataSource` statement timeout. Without that
+list the exact failure P7 feared returns in a new costume: a green `EtlWiringTest` read as evidence
+that a host wired through this class is correctly deployed. `EtlWiringTest`'s own KDoc repeats the
+list and says it is evidence about none of it.
+
+**What prompted it.** An adoption dry-run had a fresh agent build a host from the public documents
+and get **three of the four constructors wrong on the first compile**, and four of spec 8.6's rows
+turned out to be one shape - *pass the same thing to two constructors*. That is a documentation
+problem only until you notice the framework can make those four unrepresentable instead.
+
+**Named `EtlWiring`, not `SimpleEtlBuilder`.** It is not a builder: no mutable accumulation, no
+`withX()` chain, no `build()`, and no half-built state. Kotlin's named and defaulted parameters
+already *are* the builder pattern for a ten-argument constructor, and a builder class over them
+would re-implement a language feature and add a state that cannot otherwise occur. What the class
+holds is the host's wiring, stated once, with spec 2.1's two entry paths as two small overloads
+over it rather than as two ten-argument functions.
+
+- `start(taskDirectory)` delegates to `TaskAdmin.reload`, which *is* the startup path (8.5), so
+  there stays one load path and one place `TaskScheduler.apply` is called from.
+- `start(definitions)` calls `apply` **before** the `TaskAdmin` exists. That ordering is the point:
+  it discharges 8.6's longest row, and on rejection there is no half-wired admin holding
+  definitions that nothing will ever fire.
+- Failure is `WiringResult.Invalid(report)`, sealed for the reason `LoadResult` is - a wiring that
+  failed has no `TaskAdmin`, so a nullable admin beside a nullable report would leave three
+  impossible states representable and two of them silent.
+- `sleeper` is deliberately not a parameter. 11.2 declares it as 5.3's backoff injected for tests;
+  a host replacing it would be turning off retry backoff in production.
+
+### 2. `MicrometerTaskMetrics.seed` - the overturn of the frozen six
+
+**What was rejected.** 9.3's six-metric set is frozen, and `TaskMetrics.kt:21-24` closes the
+interface deliberately - no default bodies, "because it means a seventh metric cannot be added here
+without every implementation noticing at compile time".
+
+**Why the new framing survives it.** Seeding pre-registers series of `etl_task_runs_total`, a
+metric 9.3 already lists. It is not a seventh metric, and it is declared **on the binding, not on
+the interface**, so `TaskMetrics` stays exactly as closed as it was and no implementation breaks.
+The compile-time notice the rejection was protecting is untouched.
+
+**The defect.** `etl_task_runs_total` materialises on a task's **first run**. A task that has never
+succeeded emits no series at all, so `etl_task_runs_total{outcome="succeeded"} == 0` matches
+nothing: the staleness alert does not fire and does not error either. 8.6 already carried the
+workaround - alert on absence - which is a real answer and a bad one: absence queries are harder to
+write, harder to review, and fire on every deploy. That row is now narrowed rather than removed,
+because five of the six meters still need it.
+
+**One of six is seeded, and 9.3 now states the exclusion per meter rather than in passing.**
+`etl_task_runs_total` is the only meter whose full label set follows from a task name -
+`TriggerSource` and `Outcome` are closed two-valued enums, so a name yields exactly four series.
+The three `{task, phase, step}` meters need the definition's phases and steps, and seeding from a
+definition would strand a zero series on every step a later reload renames, since this binding
+removes no meter. `etl_task_duration_seconds` is a Timer whose seeded `_count 0` / `_sum 0`
+supports no rate, average or quantile. `etl_scratch_file_bytes` is a **gauge**, and a gauge at 0
+asserts a *measured* footprint of zero bytes for a task that has never opened a file - a false
+reading rather than a missing one.
+
+**Idempotence is a requirement, not an implementation note**, and 9.3 says so. A host calls `seed`
+after every reload, by which time the process has been up for weeks; a `seed` that re-registered
+would zero every counter in the fleet on a routine operator action, with no error and no log line.
+`MeterRegistry.counter` is get-or-create on the meter id, so re-seeding an incremented series
+returns the live `Counter`. That is what lets the reload call pass the whole name set rather than a
+delta. Seeding registers through the same private helper `taskEnded` increments, so a seeded series
+and the series a run increments cannot drift into two ids differing by a tag.
+
+### Tests
+
+Seven, and none of them asserts that an object was constructed.
+
+- `EtlWiringTest` (4). The hook pair is the discriminating case **and it takes both halves**,
+  because `TaskFileLoader`'s four name sets all default to empty and there are two ways to be
+  wrong: `aHookTheHostRegisteredValidatesAndThenActuallyRuns` fails if the loader got an empty set
+  (startup rejects a name the engine can resolve), and `aHookNobodyRegisteredIsRejectedAtStartup`
+  fails if the loader got no set at all (the typo loads cleanly and dies at the end of the run -
+  the failure 9.4 exists to prevent). The two files differ only in one hook name, so neither is
+  satisfiable by a constant. `theProgrammaticPathAppliesTheCronsItWasGiven` reads E14's
+  `TaskStatus.scheduled`, which is exactly the in-process evidence for the obligation being
+  discharged. `aRejectedCronLeavesNothingWiredOrRegistered` pins the `Invalid` branch and 8.5's
+  whole-batch rollback.
+- `MetricSeedTest` (3). The oracle is series **identity**, not a count: the runs-counter total
+  stays at four across the run, so a run that landed on a fifth series because a tag value differed
+  - `SCHEDULE` against `schedule`, and Prometheus label values are case sensitive - shows up as
+  five counters rather than as a wrong number on one. `reSeedingDoesNotResetACountAlreadyRecorded`
+  increments first and re-seeds after. `seedingRegistersTheRunsCounterAndNothingElse` asserts 9.3's
+  exclusion table, which is what stops a later session "completing" the work with a zero gauge.
+
+**Mutation-checked, not merely green.** Replacing `hooks.names` with `emptySet()` in
+`EtlWiring.loader()` turns `aHookTheHostRegisteredValidatesAndThenActuallyRuns` red; the change was
+reverted.
+
+Suite: **390 green** in SimpleEtl, 383 before. No earlier test moved -
+`git diff --stat 747a1ea..HEAD -- '**/test/**'` shows two new files and nothing else. The
+`snapshotcache` reactor module has one environmental failure in `ArchiveIntegrationTest` on this
+machine, unrelated to and untouched by this phase.
+
+### Deviations from the documents
+
+None. Both additions were written into 11.2, 11.3, 9.3 and 8.6 first, in their own commit, and the
+code was then measured against them. The two overturns are recorded above rather than left as
+silent contradictions of a ruling still on the page.
+
+### Where a contract met reality
+
+**Nothing broke, and one thing was checked rather than assumed.** `EtlWiring` lives in
+`infra.etl.task`, which was the only placement the ArchUnit rules allow - and `seed` therefore
+cannot be called from it, because `only the micrometer adapter depends on io micrometer` forbids
+`task` from naming the binding. That is *why* the seed row in 8.6 is a host obligation rather than
+something the wiring absorbs, and the KDoc says so in place. Adding a
+`seed: (Collection<String>) -> Unit` lambda parameter to route around the rule was considered and
+dropped: the host must still call `seed` after every reload, so it holds the binding regardless,
+and the parameter would have bought one saved line at startup in exchange for a second way to
+express the same obligation.
+
+### If a later session revisits this
+
+The rest of 8.6 is still untested anywhere in this repository - P7 recorded that gap and E14 and
+E15b only shorten the list. `EtlWiring` does not shorten it in the way it might look: it discharges
+four rows *by construction*, which is stronger than a test, but the seven rows named in its KDoc
+are exactly as uncovered as they were. The move that would close them is still a host module in
+this repository.
+
+If a third overturn of a recorded rejection comes up, the pattern both of these followed is worth
+reusing: state the rejection's **premise**, show the new shape does not have it, and name what the
+new shape still cannot do. An overturn that only says "on reflection, this seems fine" leaves the
+next session with two contradictory rulings and no way to tell which is live.
