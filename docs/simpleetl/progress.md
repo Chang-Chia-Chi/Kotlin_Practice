@@ -3084,3 +3084,126 @@ genuinely overrides; CLAUDE.md and the example README document that form. Verifi
 directions against live Docker: default run 400 with exclusions holding, opt-in runs all 20
 Oracle tests. The lesson for the ledger: E15a's "verified the oracle direction" was a claim about
 an invocation that no longer exists, and a green filtered run is evidence about the filter.
+
+---
+
+## Adoption round: operating `etl-host` cold found a boot-time readiness defect  (2026-08-30)
+
+An adoption pass over `etl-host` only - the frameworks and their specs read-only, every change and
+all three commits confined to `etl-host/**`. Reactor green throughout: SimpleEtl 400, etl-host
+36 (23 prior + 13 added), plus the Oracle e2e at 54 s with both groups.
+
+### The defect: boot raced its own first refresh
+
+**Quarkus fires an `@Scheduled(every = ...)` trigger when the *scheduler* starts, not one interval
+later.** `CacheTick` carried no `delayed`, so its first firing raced `EtlHost.onStart`'s spec 10.1
+step 4 refresh on **every boot**, with `refresh-interval` at PT30M. Measured, both outcomes
+reachable in the same suite run:
+
+- **Startup refresh wins**: two full generations built seconds apart, the first garbage the moment
+  it published. Against Oracle a refresh is spec 10.1's "minutes", so this is a doubled startup.
+- **Tick wins**: the startup refresh returns `SKIPPED_OVERLAP`. Readiness was derived from that
+  result (`outcome.result == SUCCESS`), so the host answered **503 `awaiting-first-generation`
+  over a live, published, serving generation** - for a whole refresh interval, or until a readiness
+  probe's `failureThreshold` killed the pod. The only clue was one INFO line reading
+  `SKIPPED_OVERLAP`.
+
+Both `EtlHost`'s KDoc ("the tick's first firing is one whole interval away") and `HostFixture`'s
+comment ("long enough that the tick never fires inside a test") asserted the behaviour that was not
+happening. **A documented claim contradicted by the code it documents, for eight phases, in the
+module whose purpose is to be copied.**
+
+Fixed in three lines of behaviour: `delayed` on the tick; readiness derived from
+`cache.currentInfo(group) != null` - spec 10.1 step 5's actual question, asked of the cache rather
+than of the round this method happened to start; and a non-SUCCESS startup refresh logged **WARN
+rather than INFO**, because that line carries the verify gate's failing rule and the next louder
+signal is spec 8.5's escalation at the *third* consecutive failure, two intervals later.
+
+### What the day-2 drills confirmed working
+
+- **A broken task file** reports all three defects at once, each naming file, step and rule -
+  `cache 'no-such-group' is not bound (rule 21). Bound caches are [wip]`. Actionable in one pass.
+  A rejected reload leaves the previous list serving (spec 8.5).
+- **Reload after shutdown** answers 503, not 400, end to end.
+- **The missing-`id` verify gate** is *not* two systems apart any more. The startup line now
+  carries `key_unique: ... Referenced column "id" not found in FROM clause!` verbatim, and
+  `snapshot_verify_failed_total{rule="key_unique"}` carries the rule. P9's wiring closed that gap;
+  what it had not closed was the level it was logged at.
+- **The stale-file wipe** deletes every `gen_*` under the tree - served group, dropped group, the
+  flat pre-subdirectory layout, `.tmp` and `.wal` - and touches nothing else. It logs **nothing**,
+  so an operator restarting after an OOMKill has no record that N files were removed.
+- **A task fired before the first generation** spends the full 30 s budget (30,585 ms measured) and
+  fails `TIMEOUT`, visible verbatim in `GET /admin/etl/tasks/{name}/runs/{id}` and as
+  `snapshot_acquire_unavailable_total{reason="timeout"}`. Spec 8.6's note on 3.6 holds exactly.
+
+### `ShuttingDown` vs `AlreadyRunning`: the reopen trigger does not fire
+
+Spec 11.2's decline stands, and this round tested it by removing the one place the host was *not*
+relying on host state. `AdminResource.reload` discriminated on `error.file == "<wiring>"`: an
+untyped framework sentinel copied into a host constant, in a field otherwise holding file names,
+which would have stopped matching silently on a rename and handed an operator 400 "your YAML is
+bad" mid-shutdown - the precise wrong answer its own KDoc exists to prevent. Replaced with
+`EtlHost.shuttingDown`, the flag the trigger mapping and the probe already read.
+`ShutdownSequenceTest`, unmodified, still passes. No probe or LB flow here needs the framework
+distinction.
+
+### Spec 18.6 #4 stays open: `etl-host` wires no archive layer at all
+
+Nothing in `etl-host` names `infra.snapshotarchive` - the only match for "archive" is a task file
+called `archive-old`, which is a coincidence and a small trap for anyone grepping. So this round is
+no evidence about #4 either way and the pricing stays open. Wiring it would need: a MinIO client
+and `io.minio` on the runtime classpath; `ManifestSchema` applied to a relational store and a
+`ManifestDao` over it; `ObjectStore`, `Archiver(cache, manifest, objects, tables, tempRoot)` and
+`ArchiveMaintenance`, both `AutoCloseable` and both needing a slot in `EtlHost.onStop`'s fixed
+order *before* `managed.close()`, since the archiver takes leases; per-group table lists (D36
+wants stable primary keys, so this is config, not discovery); config for bucket, endpoint,
+credentials, archive and sweep intervals, retention and the watchdog T; a staleness gauge polled
+the way `CacheTick` polls the cache's. Call it 150-250 lines of host code plus a Testcontainers
+MinIO fixture. **None of it closes #4**, which is a consumer-side semantic gap - a value that
+returns to its baseline inside one archive interval - closable only by changing what a consumer
+records or what the archiver publishes.
+
+One shape note for whoever wires it: `Archiver` and `ArchiveMaintenance` each own a
+`ScheduledExecutorService` and expose `start(interval)`. The cache deliberately ships no scheduler
+- which is the whole reason `CacheTick` exists - so a host that wires both ends up with the archive
+layer scheduling itself and the cache scheduled by Quarkus, two scheduling models in one process.
+
+### Extension measurement: a second group and a second task
+
+Second cache group plus a task consuming it, end to end, rows asserted in the target. **Files
+touched: 4** - one line of `application.properties` for the group, both fixtures for the source
+table it needs, one new test file carrying the task YAML. Green first try, including the Oracle
+e2e. Adding the group really is one line: the store directory, the `CacheBinding` and the cache
+name a task file may reference all derive from that one map, which is spec 8.6's two "by
+construction" rows doing exactly what they claim.
+
+Two facts that were needed and are worth stating where an adopter meets them: a group in
+`etl-host.cache.sql` with **no source table behind it** fails its first refresh and readiness never
+flips, so adding a group is always a two-place change; and a `pipe` target outside scratch defaults
+to `createTable: REQUIRED`, so its table must be created by hand - documented in spec 4.4, and
+discoverable from the fixture only by noticing the DDL.
+
+The one thing that did not fit: putting the second task file in `HostFixture` makes the shared
+instance report three tasks, and two earlier tests assert a count of two. The rule against
+modifying an earlier phase's tests is what put the task file in its own fixture. Worth noting that
+a **task-count assertion** is the thing a third task collides with.
+
+### Cold boot, measured on `java -jar` rather than on the suite
+
+The README's `## Run` held three `mvn test` invocations and no way to run the host, so this round
+added one and ran it. What a cold boot shows, none of which a green suite does:
+
+- **`/q/health/ready` returns 404.** Readiness is a plain JAX-RS resource at `/health/ready`;
+  there is no `quarkus-smallrye-health` here. A deployment manifest probing the Quarkus
+  convention never sees the pod become ready.
+- **Every admin endpoint answers 403 forever.** `@RolesAllowed("etl-admin")` is on all of them and
+  the module configures no identity provider, so the role cannot be obtained. **Spec 8.6 has no row
+  for "configure an authentication mechanism"** - its rows are about handing the framework
+  something, and this one is about the container. It fails as silently as the rows that do have
+  one. Related: the suite asserts **401** for an anonymous caller, which is `quarkus-test-security`
+  talking; a production boot returns 403.
+- The host boots task-less and source-less by design, and the only worked task file in the module
+  is in `HostFixture`, which is not where "copying from it is its intended use" sends a reader.
+
+All three are now in `etl-host/README.md`. The first two are host-obligation shaped and are
+offered to spec 8.6 as candidate rows; this round did not edit the spec.
