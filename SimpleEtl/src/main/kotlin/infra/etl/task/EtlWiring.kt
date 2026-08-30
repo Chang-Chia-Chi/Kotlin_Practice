@@ -81,7 +81,7 @@ sealed interface WiringResult {
  *   that accepts a bad one silently makes spec 8.5's atomic reload a lie, and `start` inherits
  *   that: it can only report what the scheduler rejects.
  * - **`io.micrometer:micrometer-core` on the application's runtime classpath.** The framework
- *   declares it `provided`.
+ *   declares it `optional` - compiled against, never inherited transitively.
  * - **`MicrometerTaskMetrics.seed(names)`, after this call and after every reload.** [metrics] is
  *   a [TaskMetrics] here and `seed` lives on the binding, which this package may not name; a task
  *   that has never run therefore emits no `etl_task_runs_total` series and a counter-based
