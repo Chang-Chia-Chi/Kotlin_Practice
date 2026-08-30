@@ -51,12 +51,20 @@ internal class GenerationRegistry(
     private val leaseDeadline: Duration,
     private val clock: Clock,
     private val hooks: HookRunner = NoOpHooks,
+    /**
+     * Highest generation number already spoken for on disk; the first build allocates the
+     * one after it. Zero - the default, and what the startup wipe earns - means the disk is
+     * empty and numbering starts at 1. Non-zero only when the host disabled the wipe, where
+     * restarting at 1 would let promote's ATOMIC_MOVE overwrite a surviving file. Last
+     * parameter with a default so no existing construction site changes.
+     */
+    startAfterGeneration: Long = 0L,
 ) {
     private val lock = ReentrantLock()
     private val published = lock.newCondition()
 
     private val records = sortedMapOf<Long, GenRecord>()
-    private var nextGeneration = 0L
+    private var nextGeneration = startAfterGeneration
     private var currentGen: Long? = null
     private var shuttingDown = false
     private var roundInProgress = false

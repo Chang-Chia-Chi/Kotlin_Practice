@@ -1468,7 +1468,7 @@ so neither sees `bootstrap` at all - checked by running them, not by reading the
 
 ### Verified by planting
 
-Four mutations, each restored after the run:
+Five mutations, each restored after the run:
 
 | Planted | Failure |
 |---|---|
@@ -1514,3 +1514,97 @@ declaration is removed, so `target/classes` kept the ghost - and ArchUnit reads 
 not the source. Every rule in `ArchitectureTest` is therefore only as current as the last compile:
 **after planting and restoring a top-level declaration, measure with `clean`.** The green run
 below is `mvn -o -pl snapshotcache -am clean test`.
+
+---
+
+## Bootstrap seam - independent review round  (2026-08-30)
+
+Merge-with-fixes. Three code findings and two documentation ones, landed as a third commit
+rather than an amend so the review round stays legible in history.
+
+### 1. BLOCKING - `close()` closed connections a consumer could still be querying
+
+`close()` ran `stores.forEach { it.close() }` in a `finally`, so it ran **after a timed-out
+drain too**. `DuckDbGenerationStore.close()` closes every connection it issued; an outstanding
+lease means a consumer thread may be mid-query on one of them, and a DuckDB connection touched
+from two threads **crashes the JVM rather than raising** - a tier-1 measured fact, and one
+`runCatching` is powerless against because a SIGSEGV is not an exception. The `finally` was
+written for handle hygiene and bought a process crash on the exact path where a consumer was
+slow.
+
+The sweep is now conditional on the drain coming back clean. A dirty drain logs and leaves the
+stores open, deferring to spec 10.2 step 5 - "connections die with the process" - which the next
+startup's wipe then clears. If `shutdown()` itself throws, the sweep is skipped for the same
+reason: an unknown drain state is not a proven-clean one. The clean path is unchanged, so the
+Windows-lock hygiene the first bootstrap test asserts still holds.
+
+Spec 5.4 gained the `close()` clause describing the split.
+
+### 2. BLOCKING - `clearStaleFilesOnStartup = false` left numbering disk-blind
+
+With the wipe off, numbering still restarted at 1 while files survived on disk. Two failures
+from one cause: a leftover `gen_0000000015.db` is orphaned forever - no record ever names it, so
+no reclaim pass can ever see it - and a leftover *below* the new numbering is silently
+overwritten by `promote`'s ATOMIC_MOVE, which is a destructive write to a file the framework
+never accounted for.
+
+`GenerationRegistry` gained `startAfterGeneration: Long = 0L` as its **last** parameter with a
+default, so none of the 14 existing construction sites changed and no e2e call site rippled.
+The composition root passes `listOnDisk().maxOrNull()` when the wipe is off, and 0 when it is
+on - where the wipe has earned an empty disk.
+
+### 3. Wipe scope - spec 10.1 says "every `gen_*` file under the cache directory"
+
+The per-group `listOnDisk` + `delete` pass could only ever see directories named in `sources`.
+Two shapes escaped it: the flat layout that predates per-group directories, and a group **dropped
+from the config**, which is precisely the directory nothing would ever revisit again.
+
+The wipe is now one pass over the tree before any store is constructed - the directory itself
+plus every first-level subdirectory - filtered by a filename pattern covering all four forms
+(`.db`, `.db.tmp`, and the `.wal` sibling of either). **Pattern strictness is the safety, not
+group membership**: it is what makes deleting inside a caller-supplied directory defensible, and
+the test plants a `notes.txt` next to the leftovers to hold that line.
+
+### 4. Documentation
+
+- The KDoc said "Two fields stay dormant" over three bullets, and `allowOverlap` was missing
+  entirely. Now four, with `allowOverlap`'s actual truth recorded: it can never be true, because
+  spec 4.4 forbids overlapping rounds and `RefreshCycle` refuses one unconditionally without ever
+  consulting the flag. It is a spec 13 row with no reachable `true` branch, not a knob this seam
+  declined to wire.
+- Spec 5.4 declared `interface ManagedSnapshotCache` where the code correctly ships a **class**,
+  per plan 2.4's ban on single-implementation interfaces. The spec block now says `class`, with
+  the reason inline so the next reader does not "fix" it back.
+- This file said "Four mutations" over a five-row table.
+
+### One bug the review did not catch, found while testing
+
+The first cut of the wipe wrote `for (directory in subdirectories + storagePath)`. `Path`
+implements `Iterable<Path>`, so `List<Path> + Path` resolves to the `Iterable` overload and
+appends the path's **name elements** - "Users", "maxch", "AppData" - instead of the path itself,
+failing with `NoSuchFileException: Users`. Fixed with `plusElement`, and the comment naming the
+trap stays in the source: it is invisible at the call site and reads as correct.
+
+### Verified by planting
+
+Three more mutations, each restored:
+
+| Planted | Failure |
+|---|---|
+| store sweep made unconditional again | the dirty-drain test fails - the consumer's reader connection comes back **closed**, which is the crash precondition itself |
+| `startAfter` pinned to 0 | numbering test fails: `expected 16L but was 1L`, on top of a surviving `gen_0000000015.db` |
+| wipe narrowed back to subdirectories | the flat leftover survives: `Expecting empty but was ["gen_0000000042.db", "gen_0000000042.db.wal"]` |
+
+The clean-drain half stayed green under the first mutation, which is what shows the two halves of
+the `close()` split are pinned independently rather than by one assertion.
+
+### Tests
+
+`OpenSnapshotCacheTest` goes from 2 to 5. The dirty-drain test manages its own temp directory
+rather than using `@TempDir`: it deliberately ends with the DuckDB instances still open, so
+per-test cleanup would fail on the Windows locks - the same reason the P8 E2E test manages its
+own. It asserts more than "not closed": the connection still answers a query, since a wrecked
+connection would also report open.
+
+No earlier test was modified. **215 tests, 0 failures, 2 pre-existing skips** (212 before this
+round), full clean run.

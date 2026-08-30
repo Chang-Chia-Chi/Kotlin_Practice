@@ -13,8 +13,21 @@ import infra.snapshotcache.core.GenerationRegistry
 import infra.snapshotcache.core.GroupRuntime
 import infra.snapshotcache.core.RefreshCycle
 import infra.snapshotcache.duckdb.DuckDbGenerationStore
+import org.jboss.logging.Logger
+import java.nio.file.Files
+import java.nio.file.Path
 import java.time.Clock
 import java.util.concurrent.atomic.AtomicBoolean
+
+private val log = Logger.getLogger("infra.snapshotcache.bootstrap")
+
+/**
+ * Every form a generation file takes on disk: promoted, candidate, and the WAL sibling of
+ * either. Strictness is the safety of the spec 10.1 wipe - the pattern is what makes
+ * deleting inside a caller-supplied directory tree defensible, so nothing that does not
+ * look exactly like a generation file is ever touched.
+ */
+private val GENERATION_FILE = Regex("gen_\\d{10}\\.db(\\.tmp)?(\\.wal)?")
 
 /**
  * The composition root (plan 2.2, amended 2026-08-30; spec 5.4).
@@ -51,7 +64,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  *   [SnapshotCacheConfig.verify] - already honored by the registry, the facade and the
  *   verify gate; this is the path that wires them consistently.
  *
- * Two fields stay dormant on purpose, and naming them is the point - a config whose unread
+ * Four fields stay dormant on purpose, and naming them is the point - a config whose unread
  * fields are unexplained is a manifest that silently diverges from behavior:
  *
  * - [SnapshotCacheConfig.jdbcFetchSize] is the caller's [GenerationSource]'s to apply
@@ -61,6 +74,9 @@ import java.util.concurrent.atomic.AtomicBoolean
  * - [SnapshotCacheConfig.consumerMemoryLimit] belongs to the host's second, consumer-side
  *   DuckDB instance (spec 6.5), which the host owns because it is the host's jobs that
  *   pass its connection as `CopyOutSpec.targetConnection`.
+ * - [SnapshotCacheConfig.allowOverlap] can never be true: spec 4.4 forbids overlapping
+ *   rounds and the refresh cycle refuses one unconditionally, without consulting the flag.
+ *   It is a spec 13 row with no reachable `true` branch, not a knob this seam declined.
  *
  * ### What this seam deliberately does not absorb
  *
@@ -90,6 +106,10 @@ fun openSnapshotCache(
     clock: Clock = Clock.systemUTC(),
 ): ManagedSnapshotCache {
     require(sources.isNotEmpty()) { "at least one group is required; a cache serving no group serves nothing" }
+    // Spec 10.1 step 1, before any store exists: "every gen_* file under the cache
+    // directory" is the whole tree, not the directories this call happens to name. A group
+    // dropped from [sources] between deploys leaves a directory nothing would revisit.
+    if (config.clearStaleFilesOnStartup) wipeStaleFiles(config.storagePath)
     val stores = mutableListOf<DuckDbGenerationStore>()
     try {
         val runtimes = sources.mapValues { (group, source) ->
@@ -100,9 +120,17 @@ fun openSnapshotCache(
                 servingThreads = config.servingThreads,
             )
             stores += store
-            // Spec 10.1 step 1, before anything is attached: nothing on disk is owned yet.
-            if (config.clearStaleFilesOnStartup) store.listOnDisk().forEach(store::delete)
-            val registry = GenerationRegistry(config.maxLiveGenerations, config.leaseDeadline, clock)
+            // With the wipe off, whatever survived is unowned but NOT unreachable: numbering
+            // restarts at 1, so promote's ATOMIC_MOVE would silently overwrite a lower
+            // leftover, and a higher one would never be reclaimed because no record names
+            // it. Starting above the highest file on disk makes both impossible.
+            val startAfter = if (config.clearStaleFilesOnStartup) 0L else store.listOnDisk().maxOrNull() ?: 0L
+            val registry = GenerationRegistry(
+                config.maxLiveGenerations,
+                config.leaseDeadline,
+                clock,
+                startAfterGeneration = startAfter,
+            )
             GroupRuntime(
                 registry = registry,
                 store = store,
@@ -128,6 +156,32 @@ fun openSnapshotCache(
 }
 
 /**
+ * Spec 10.1 step 1: delete every generation file under [storagePath] - directly in it (the
+ * flat layout that predates the per-group directories) and in each first-level
+ * subdirectory, whether or not a group by that name is still being served. The current
+ * pointer is never persisted (D10), so every one of them is unowned by construction.
+ *
+ * Membership in `sources` is deliberately not the filter; [GENERATION_FILE] is. A group
+ * removed from the config is exactly the case where files rot forever, and it is the case a
+ * membership filter would skip. Entries are collected before deleting: on Windows, removing
+ * a file while its directory stream is open can fail.
+ */
+private fun wipeStaleFiles(storagePath: Path) {
+    if (!Files.isDirectory(storagePath)) return
+    val subdirectories = Files.list(storagePath).use { entries ->
+        entries.filter { Files.isDirectory(it) }.toList()
+    }
+    // plusElement, not `+`: Path is Iterable<Path>, so `list + path` appends the path's NAME
+    // ELEMENTS ("Users", "maxch", ...) instead of the path itself.
+    for (directory in subdirectories.plusElement(storagePath)) {
+        val stale = Files.list(directory).use { entries ->
+            entries.filter { GENERATION_FILE.matches(it.fileName.toString()) }.toList()
+        }
+        stale.forEach { Files.deleteIfExists(it) }
+    }
+}
+
+/**
  * What [openSnapshotCache] hands back: the two public surfaces of spec 5.1 and 5.3, plus
  * the [close] the host owes them.
  *
@@ -148,22 +202,37 @@ class ManagedSnapshotCache internal constructor(
     private val closed = AtomicBoolean(false)
 
     /**
-     * Spec 10.2 in the order the spec fixes: mark shutting down and release every waiter
-     * at once (step 1), drain leases under one [SnapshotCacheConfig.leaseDrainTimeout] and
-     * WARN-log whatever is still outstanding (step 4), then close the stores - detaching
-     * every generation and releasing the DuckDB instances. Steps 2 and 3 are the host's,
-     * and the host runs them before calling this.
+     * Spec 10.2 in the order the spec fixes: mark shutting down and release every waiter at
+     * once (step 1), then drain leases under one [SnapshotCacheConfig.leaseDrainTimeout]
+     * (step 4). Steps 2 and 3 are the host's, and the host runs them before calling this.
      *
-     * Idempotent, and the store close runs even if the drain throws: a half-closed cache
-     * that still holds file handles is the failure mode that makes the next startup's wipe
-     * fail too.
+     * **The store sweep runs only after a clean drain, and that split is a safety
+     * requirement rather than tidiness.** `DuckDbGenerationStore.close()` closes every
+     * connection it issued. An outstanding lease means a consumer thread may be mid-query on
+     * one of them, and a DuckDB connection touched from two threads crashes the JVM instead
+     * of raising - so the sweep would turn a slow consumer into a SIGSEGV, which no
+     * `runCatching` can catch. When the drain times out, the leases are WARN-logged by
+     * [infra.snapshotcache.core.DefaultSnapshotCache.shutdown] and the files are left to
+     * spec 10.2 step 5: "connections die with the process". The next startup's wipe removes
+     * what is left, which is what step 5 relies on.
+     *
+     * A clean drain proves no consumer holds a connection, so the full close runs and the
+     * process keeps no file handles. If the drain itself throws, the sweep is skipped for
+     * the same reason - an unknown drain state is not a proven-clean one.
+     *
+     * Idempotent.
      */
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
-        try {
-            delegate.shutdown()
-        } finally {
+        val outstanding = delegate.shutdown()
+        if (outstanding.isEmpty()) {
             stores.forEach { runCatching { it.close() } }
+        } else {
+            log.warnf(
+                "Lease drain timed out with %d lease(s) outstanding; leaving the DuckDB stores open " +
+                    "rather than closing connections a consumer may still be querying (spec 10.2 steps 4-5).",
+                outstanding.size,
+            )
         }
     }
 }

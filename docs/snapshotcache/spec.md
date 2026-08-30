@@ -353,10 +353,10 @@ fun openSnapshotCache(
     clock: Clock = Clock.systemUTC()
 ): ManagedSnapshotCache
 
-interface ManagedSnapshotCache : AutoCloseable {
-    val cache: SnapshotCache
-    val admin: CacheAdmin
-    override fun close()        // Sec 10.2 steps 1 and 4, then the stores
+class ManagedSnapshotCache : AutoCloseable {   // a holder, not a seam - plan 2.4 bans
+    val cache: SnapshotCache                  // single-implementation interfaces, and the
+    val admin: CacheAdmin                     // 2.3 budget counts interfaces, not types
+    override fun close()        // Sec 10.2 step 1, then 4; the stores only on a clean drain
 }
 ```
 
@@ -366,9 +366,18 @@ interface ManagedSnapshotCache : AutoCloseable {
   aimed at one directory collide on `gen_0000000001.db`, and a derived path makes that
   misconfiguration unrepresentable.
 - **Sec 10.1 startup, steps 1 and 2** happen here: the stale-file wipe when
-  `startup.clearStaleFiles` is true, and the serving instance's `memory_limit`, `temp_directory` and
-  thread cap. Steps 3-5 (readiness, the first refresh, the readiness flip) are the host's - readiness
-  is the host's health surface and the framework has no scheduler.
+  `startup.clearStaleFiles` is true - every `gen_*` file under `storage.path`, in that directory
+  itself and in every first-level subdirectory, whether or not a group of that name is still served
+  - and the serving instance's `memory_limit`, `temp_directory` and thread cap. With the wipe
+  disabled, generation numbering instead starts above the highest number found on disk, so a
+  survivor is neither overwritten by `promote` nor stranded outside the registry forever. Steps 3-5
+  (readiness, the first refresh, the readiness flip) are the host's - readiness is the host's health
+  surface and the framework has no scheduler.
+- **`close()` splits on the drain.** After Sec 10.2 step 4 the store connections are closed only if
+  the drain came back clean. An outstanding lease means a consumer thread may be mid-query on a
+  connection the store issued, and a DuckDB connection used from two threads crashes the process
+  rather than raising - so on a dirty drain the stores are left open and the files are left to step
+  5, "connections die with the process", which the next startup's wipe then clears.
 - **What stays the host's**, unchanged by this entry point: refresh scheduling (Sec 4.4 - the host's
   tick calls `CacheAdmin.triggerRefresh`), the `expiredLeases()` poll on that same tick (Sec 6.2,
   12.3), the metrics binder (Sec 12), thread naming for lease attribution (Sec 5.3 `LeaseInfo.owner`

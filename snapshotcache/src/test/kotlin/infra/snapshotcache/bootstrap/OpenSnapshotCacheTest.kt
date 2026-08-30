@@ -116,6 +116,102 @@ internal class OpenSnapshotCacheTest {
         }
     }
 
+    /**
+     * The review's blocking finding. `DuckDbGenerationStore.close()` closes every connection
+     * it issued; a lease still outstanding after the drain means a consumer thread may be
+     * mid-query on one, and a DuckDB connection used from two threads crashes the JVM rather
+     * than raising - so the sweep would turn a slow consumer into a SIGSEGV that no
+     * `runCatching` can catch. A dirty drain must therefore leave the stores alone.
+     *
+     * Self-managed temp directory rather than `@TempDir`: this test ends with the DuckDB
+     * instances deliberately still open, so per-test cleanup would fail on the Windows file
+     * locks. Best-effort teardown, on the P8 end-to-end precedent.
+     *
+     * The clean-drain half of the split is asserted by the first test in this class, whose
+     * post-`close()` recursive delete only succeeds if every handle was released.
+     */
+    @Test
+    fun `a timed-out drain leaves reader connections open instead of closing them under a live query`() {
+        val root = Files.createTempDirectory("snapshotcache-bootstrap-dirty-drain")
+        try {
+            val cfg = config(root)
+            val managed = openSnapshotCache(cfg, mapOf(orders to source("orders")))
+            assertThat(managed.admin.triggerRefresh(orders).result).isEqualTo(RefreshResult.SUCCESS)
+
+            // Never closed: this is the consumer that outlives the drain budget.
+            val leaked = managed.cache.acquire(orders, Duration.ZERO)
+            val reader = leaked.connection()
+            assertThat(reader.isClosed).isFalse()
+
+            managed.close()
+
+            assertThat(reader.isClosed)
+                .describedAs("a connection the consumer may still be querying must survive a dirty drain")
+                .isFalse()
+            // Still usable, which is the actual guarantee - "not closed" would also be true
+            // of a connection the store had wrecked some other way.
+            assertThat(nameOfRowOne(reader)).isEqualTo("orders-g1-1")
+
+            leaked.close()
+        } finally {
+            runCatching {
+                Files.walk(root).use { paths ->
+                    paths.sorted(Comparator.reverseOrder()).forEach { runCatching { Files.delete(it) } }
+                }
+            }
+        }
+    }
+
+    /**
+     * With the wipe off, a leftover is unowned but not unreachable. Numbering restarted at 1,
+     * so `promote`'s ATOMIC_MOVE would have overwritten a lower-numbered leftover, and a
+     * higher-numbered one would never be reclaimed because no registry record ever names it.
+     */
+    @Test
+    fun `numbering starts above the highest file on disk when the wipe is off`(@TempDir root: Path) {
+        val cfg = config(root, clearStale = false)
+        val dir = Files.createDirectories(cfg.storagePath.resolve("orders"))
+        Files.write(dir.resolve("gen_0000000015.db"), byteArrayOf(1, 2, 3))
+
+        openSnapshotCache(cfg, mapOf(orders to source("orders"))).use { managed ->
+            val outcome = managed.admin.triggerRefresh(orders)
+            assertThat(outcome.result).isEqualTo(RefreshResult.SUCCESS)
+            assertThat(outcome.generation)
+                .describedAs("the first build must land above the leftover, not on top of it")
+                .isEqualTo(16L)
+            assertThat(generationFiles(dir))
+                .describedAs("the leftover must survive intact, not be overwritten by promote")
+                .contains("gen_0000000015.db", "gen_0000000016.db")
+        }
+    }
+
+    /**
+     * Spec 10.1 step 1 says every `gen_*` file under the cache directory. Two shapes the
+     * per-group pass missed: the flat layout that predates per-group directories, and a group
+     * dropped from the config - precisely the directory nothing would ever revisit. The
+     * filename pattern is the safety here, not group membership.
+     */
+    @Test
+    fun `the wipe collects the flat layout and directories of groups no longer served`(@TempDir root: Path) {
+        val cfg = config(root)
+        val flat = Files.createDirectories(cfg.storagePath)
+        Files.write(flat.resolve("gen_0000000042.db"), byteArrayOf(1))
+        Files.write(flat.resolve("gen_0000000042.db.wal"), byteArrayOf(2))
+        val orphan = Files.createDirectories(cfg.storagePath.resolve("group-we-stopped-serving"))
+        Files.write(orphan.resolve("gen_0000000007.db.tmp"), byteArrayOf(3))
+        Files.write(orphan.resolve("gen_0000000007.db.tmp.wal"), byteArrayOf(4))
+        // Not a generation file: the pattern is what makes deleting inside a caller's
+        // directory defensible, so anything else must be left exactly where it is.
+        Files.write(orphan.resolve("notes.txt"), byteArrayOf(5))
+
+        openSnapshotCache(cfg, mapOf(orders to source("orders"))).use {
+            assertThat(generationFiles(flat).filter { name -> name.startsWith("gen_") })
+                .describedAs("the flat layout is under the cache directory too")
+                .isEmpty()
+            assertThat(generationFiles(orphan)).containsExactly("notes.txt")
+        }
+    }
+
     private fun generationFiles(dir: Path): List<String> =
         Files.list(dir).use { entries -> entries.map { it.fileName.toString() }.sorted().toList() }
 
