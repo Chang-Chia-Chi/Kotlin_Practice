@@ -2859,3 +2859,16 @@ no API, and copying from it is its intended use — it is the template P9 starts
 of the first adoption review landing in its honest form: not a factory inside the framework
 (rejected, P7 deviation 1), but a consumer beside it, where the seven obligations no library can
 absorb are really carried and really checked.
+
+
+---
+
+## Rule 14's recorded gap closes  (2026-08-30)
+
+The E10 review recorded that rule 14's scratch-only half was task-shaped but loader-only: a
+code-built `TableTarget` off scratch with `createTable: AUTO` booted clean and `TaskEngine.writer`
+silently gave it REQUIRED semantics. Moved into `TaskRules.pipe` exactly as the deferral sized it -
+one branch plus a parity case - with the loader's duplicate branch removed so the rule has one home
+and one wording. The loader's other rule-14 halves (transform-needs-addColumns, the DECIMAL clause)
+stay put: both read YAML-side fields the model resolves away. Mutation-checked: disabling the
+branch fails the new parity case on the engine side. 398 tests green (397 + 1).

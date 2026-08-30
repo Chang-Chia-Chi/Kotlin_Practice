@@ -47,18 +47,16 @@ internal data class RuleViolation(val step: String?, val rule: Int?, val message
  * needs something no per-step interface is handed - a sibling file, the configured datasource
  * names, the CDI bean names, the hook registry, the task's other datasets, the cache bindings.
  *
- * **Two rules are task-shaped and are still loader-only, knowingly**, so this split is not yet
- * exhaustive and E10 did not make it so:
+ * **One rule is task-shaped and still loader-only, knowingly**:
  *
- * - **Rule 14** (`createTable: AUTO` is scratch-only) belongs here on the same terms as rule 18,
- *   and moving it is a behaviour change to the engine that E10's brief did not name: a code-built
- *   `TableTarget` off scratch with AUTO boots clean today and `TaskEngine.writer` then ignores
- *   `createTable` entirely, giving it REQUIRED semantics. That is the boots-clean-dies-quietly
- *   shape this class exists to prevent, it predates E10, and it is recorded in progress.md for a
- *   later phase rather than fixed in passing.
  * - **Rule 20** (a *stated* `cacheCopy` `retries > 0`) is a rule about what an author wrote in a
  *   file, and a definition built in code has no file. It stays a startup rule on purpose; spec 10
  *   rule 20 records it.
+ *
+ * Rule 14's scratch-only half moved here on 2026-08-30, closing the gap the E10 review recorded:
+ * until then a code-built `TableTarget` off scratch with AUTO boots clean and `TaskEngine.writer`
+ * silently gave it REQUIRED semantics. Its other halves (transform-needs-addColumns, the DECIMAL
+ * clause) stay in the loader, which reads the YAML-side fields the model resolves away.
  *
  * @param parserFor the `:name` parser for a step's datasource. The loader has no `Handle` and takes
  *   the colon-prefix default; the engine hands over the datasource's own configured parser, so run
@@ -151,6 +149,23 @@ internal class TaskRules(private val parserFor: (String?) -> SqlParser = { COLON
             // query runs, so the names are checked against the first chunk at run time (spec 4.4,
             // 6.3). Rule 6's positional half still applies.
             positional(target.sql, "target.sql", target.datasource, err)
+        }
+        // Rule 14's scratch-only half. AUTO generates DuckDB DDL from source metadata, which is
+        // only meaningful where the target is DuckDB; off scratch, TaskEngine.writer ignores
+        // createTable entirely and hands the target to JdbcTableWriter - so before this check a
+        // definition built in code asked for AUTO and silently got REQUIRED semantics, the
+        // boots-clean-dies-quietly shape this module exists to prevent. The E10 review recorded
+        // the gap; this closes it. Rule 14's other halves (AUTO + transform needs addColumns, the
+        // DECIMAL clause) stay in the loader: both read YAML-side fields the model has already
+        // resolved away.
+        if (target is TableTarget && target.datasource != SCRATCH &&
+            target.createTable == CreateTable.AUTO
+        ) {
+            err(
+                14,
+                "createTable AUTO generates DuckDB DDL from source metadata, so it is available only " +
+                    "on the '$SCRATCH' datasource, not '${target.datasource}' (spec 4.4, rule 14).",
+            )
         }
         // Rule 18. Spec 5.5 is unconditional - every dataset produced inside scratch is written
         // under an attempt-suffixed name - and REQUIRED cannot be, because the author created the

@@ -568,14 +568,9 @@ private class FileValidation(
         } else if (target.table != null) {
             val createTable = target.createTable ?: defaultCreateTable(target.datasource)
             if (createTable == CreateTable.AUTO) {
-                // Rule 14.
-                if (!scratch) {
-                    err(
-                        name,
-                        "createTable AUTO generates DuckDB DDL from source metadata, so it is available only " +
-                            "on the '$SCRATCH' datasource, not '${target.datasource}' (spec 4.4, rule 14).",
-                    )
-                }
+                // Rule 14's scratch-only half is [TaskRules]'s since the E10-review gap closed;
+                // this half stays because it reads the YAML-side transform declaration, which the
+                // model resolves into a bean reference and a column list.
                 if (step.transform != null && step.transform.addColumns.isEmpty()) {
                     err(
                         name,

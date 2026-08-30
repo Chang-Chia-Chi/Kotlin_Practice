@@ -236,6 +236,34 @@ class TaskRulesParityTest {
                     retries = 2,
                 ),
             ),
+            // Rule 14's scratch-only half: AUTO generates DuckDB DDL, so off scratch it is
+            // rejected - where before the E10-review gap closed, a code-built step asked for AUTO
+            // and silently got REQUIRED semantics from writer(). Built directly rather than via
+            // Etl.pipe, which hardcodes a scratch target on purpose.
+            Case(
+                label = "rule 14 - createTable AUTO off scratch",
+                step = "load-report",
+                yaml = """
+                    name: parity
+                    phases:
+                      - name: only
+                        steps:
+                          - name: load-report
+                            type: pipe
+                            source:
+                              datasource: oracle_mes
+                              sql: "select lot_id from wip"
+                            target:
+                              datasource: report_oracle
+                              table: wip_report
+                              createTable: AUTO
+                """.trimIndent(),
+                built = PipeStep(
+                    name = "load-report",
+                    source = PipeSource("oracle_mes", "select lot_id from wip"),
+                    target = TableTarget("report_oracle", "wip_report", CreateTable.AUTO),
+                ),
+            ),
             // Rule 19: CopyOutSpec.sql is a plain string with no binding channel.
             Case(
                 label = "rule 19 - a cacheCopy that binds",
