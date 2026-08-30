@@ -46,8 +46,13 @@ class DuckDbGenerationStore(
     /**
      * One directory per group, composed by the caller (P9). Generation numbering restarts
      * at 1 for each group, so two groups pointed at one directory would collide on
-     * `gen_0000000001.db`. The store takes no group on any method by design - the
-     * directory *is* the group component.
+     * `gen_0000000001.db` - and on Linux, the deployment target, that collision is *silent*:
+     * `ATOMIC_MOVE` is `rename(2)` and replaces an existing file without error (measured,
+     * WSL2 Ubuntu 22.04, 2026-08-30), the serving group's open connection keeping the old
+     * inode while the path quietly serves the other group's data. The store takes no group
+     * on any method by design - the directory *is* the group component, and
+     * `openSnapshotCache` deriving it per group is what makes the misconfiguration
+     * unreachable through the public path.
      */
     private val directory: Path,
     private val tempDirectory: Path,

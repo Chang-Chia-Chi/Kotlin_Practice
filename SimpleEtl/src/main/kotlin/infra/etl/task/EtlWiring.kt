@@ -126,10 +126,12 @@ sealed interface WiringResult {
  *   that: it can only report what the scheduler rejects.
  * - **`io.micrometer:micrometer-core` on the application's runtime classpath.** The framework
  *   declares it `optional` - compiled against, never inherited transitively.
- * - **`MicrometerTaskMetrics.seed(names)`, after this call and after every reload.** [metrics] is
- *   a [TaskMetrics] here and `seed` lives on the binding, which this package may not name; a task
- *   that has never run therefore emits no `etl_task_runs_total` series and a counter-based
- *   staleness alert matches nothing (spec 9.3).
+ * - **Passing `metrics::seed` as [onTasksLoaded]** - the framework then invokes it after the
+ *   initial load and after every reload, which absorbed what this list used to state as a
+ *   call-site obligation. The old entry claimed this package could not absorb it because it may
+ *   not name the binding; a depth review (2026-08-30) refuted that - invoking a
+ *   `(Set<String>) -> Unit` names nothing. What stays the host's is only supplying the reference:
+ *   forget it and a never-run task emits no `etl_task_runs_total` series (spec 8.6, 9.3).
  * - **A statement or query timeout on each `DataSource` behind a [Jdbi].** The framework has none
  *   anywhere and that is the design (spec 3.6, 8.6).
  *
@@ -151,6 +153,10 @@ class EtlWiring(
     private val listener: TaskRunListener = TaskRunListener.NONE,
     private val metrics: TaskMetrics = TaskMetrics.NONE,
     private val clock: Clock = Clock.systemUTC(),
+    // The host's metric-series seeding (or any other reaction to a live task-name set),
+    // invoked by TaskAdmin after the initial load and after every successful reload. Pass the
+    // binding's `seed`; see spec 8.6's seed row and 9.3's idempotence contract.
+    private val onTasksLoaded: (Set<String>) -> Unit = {},
 ) {
 
     /**
@@ -166,7 +172,7 @@ class EtlWiring(
     fun start(taskDirectory: Path): WiringResult {
         val runner = runner()
         val scheduler = TaskScheduler(cron, runner)
-        val admin = TaskAdmin(runner, scheduler, loader())
+        val admin = TaskAdmin(runner, scheduler, loader(), onTasksLoaded = onTasksLoaded)
         val report = admin.reload(taskDirectory)
         return if (report == null) {
             WiringResult.Wired(admin, runner, scheduler)
@@ -196,7 +202,7 @@ class EtlWiring(
         return if (rejected != null) {
             WiringResult.Invalid(rejected)
         } else {
-            WiringResult.Wired(TaskAdmin(runner, scheduler, loader(), definitions), runner, scheduler)
+            WiringResult.Wired(TaskAdmin(runner, scheduler, loader(), definitions, onTasksLoaded), runner, scheduler)
         }
     }
 

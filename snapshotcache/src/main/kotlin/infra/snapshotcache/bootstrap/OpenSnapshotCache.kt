@@ -220,7 +220,7 @@ private fun wipeStaleFiles(storagePath: Path) {
  * the [close] the host owes them.
  *
  * A class rather than an interface - plan 2.3's five-interface budget is a budget, and
- * plan 2.4 bans single-implementation interfaces. It is a holder, not a seam.
+ * plan 2.4 bans single-implementation interfaces. Not a seam - one implementation, no variation, per plan 2.4 - and since the drain guard, not a mere holder either: `close()` owns the one conditional whose wrong answer is a SIGSEGV, not an exception.
  */
 class ManagedSnapshotCache internal constructor(
     private val delegate: DefaultSnapshotCache,
@@ -260,7 +260,10 @@ class ManagedSnapshotCache internal constructor(
      * name what is holding it up. Measured on Windows: a dirty drain also leaves the generation
      * files undeletable until the process exits, because the store connections were left open on
      * purpose and Windows will not unlink an open file. That is spec 10.2 step 5 working as
-     * written, not a leak; the next startup's wipe clears them.
+     * written, not a leak; the next startup's wipe clears them. On Linux - the deployment
+     * target - the same state is benign twice over (measured, WSL2 Ubuntu 22.04, 2026-08-30):
+     * unlink succeeds immediately, the open connection keeps its inode, and the disk space
+     * frees at last close, byte-exact. The undeletable-file artifact is Windows-only.
      *
      * Idempotent.
      */

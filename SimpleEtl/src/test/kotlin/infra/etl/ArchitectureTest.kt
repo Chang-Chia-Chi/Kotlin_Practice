@@ -205,6 +205,23 @@ class ArchitectureTest {
             .check(classes)
     }
 
+    /**
+     * The canary the rule below needs, on the P8b micrometer block's own precedent: its
+     * `noClasses().that().haveNameMatching(...)` selects by FQN regex, so a rename empties the
+     * selection and the rule passes vacuously - held off today only by ArchUnit's
+     * failOnEmptyShould default, which this repo pins nowhere. A plain assertion that the
+     * selection is non-empty fails loudly on the rename instead (depth review, 2026-08-30).
+     */
+    @Test
+    fun `the TaskEngine classes the suspend rule constrains actually exist`() {
+        val matched = classes.filter { it.name.matches(Regex("""infra\.etl\.task\.TaskEngine(\$.*)?""")) }
+        org.junit.jupiter.api.Assertions.assertTrue(matched.size >= 2) {
+            "the non-suspend rule's FQN regex matched ${matched.size} classes - a rename has " +
+                "emptied its selection and the rule is constraining nothing; matched: " +
+                matched.map { it.name }
+        }
+    }
+
     @Test
     fun `TaskEngine is not suspend`() {
         // Matched by FQN prefix, not simple name: the crash path runs through the *inner* class

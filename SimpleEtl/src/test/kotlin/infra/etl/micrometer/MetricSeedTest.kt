@@ -2,6 +2,8 @@ package infra.etl.micrometer
 
 import infra.etl.Etl
 import infra.etl.TaskHarness
+import infra.etl.task.CronScheduler
+import infra.etl.task.EtlWiring
 import infra.etl.task.Outcome
 import infra.etl.task.TriggerSource
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
@@ -161,5 +163,32 @@ class MetricSeedTest {
             "seed must touch exactly one of spec 9.3's six meters - a seeded gauge would assert a " +
                 "measured zero, and the step meters need a phase and a step no task name carries"
         }
+    }
+
+    /**
+     * The depth-review deepening (2026-08-30): seeding is no longer a call-site obligation the
+     * host pairs with load and reload by hand - the host passes `metrics::seed` once, as
+     * `EtlWiring(onTasksLoaded = ...)`, and **the framework invokes it at both moments**.
+     *
+     * The discriminating property is the absence: this test contains **no call to `seed`**. If
+     * the series exists at zero anyway, the framework made it exist - which is exactly what the
+     * old spec 8.6 row claimed was impossible ("`infra.etl.task` may not name `io.micrometer`")
+     * and what refuted it: invoking a `(Set<String>) -> Unit` names nothing.
+     */
+    @Test
+    fun theFrameworkSeedsThroughOnTasksLoadedWithNoHostCallSite() {
+        val metrics = MicrometerTaskMetrics(registry)
+        val wired = EtlWiring(
+            scratchDirectory = root.resolve("wiring-scratch"),
+            cron = CronScheduler { _, _, _ -> AutoCloseable { } },
+            metrics = metrics,
+            onTasksLoaded = metrics::seed,
+        ).start(listOf(task("wired-seeded")))
+
+        assertEquals(
+            0.0,
+            runsCount("wired-seeded", "schedule", "succeeded"),
+        ) { "the framework, not this test, must have seeded the series - no seed call exists here" }
+        (wired as infra.etl.task.WiringResult.Wired).close()
     }
 }

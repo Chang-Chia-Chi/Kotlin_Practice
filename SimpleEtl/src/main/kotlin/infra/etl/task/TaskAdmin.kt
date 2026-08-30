@@ -56,6 +56,7 @@ class TaskAdmin(
     private val scheduler: TaskScheduler,
     private val loader: TaskFileLoader,
     tasks: List<TaskDefinition> = emptyList(),
+    private val onTasksLoaded: (Set<String>) -> Unit = {},
 ) {
 
     @Volatile
@@ -66,6 +67,12 @@ class TaskAdmin(
         // host, `reload` *is* startup, so its call covers both; a host using `tasks` never calls
         // reload and would otherwise never see the number at all (E14).
         if (tasks.isNotEmpty()) reportPoolMinimums(tasks)
+        // Fires beside reportPoolMinimums at both of the two moments a task-name set becomes
+        // live - here and in reload - because the pairing is this class's own concern, not a
+        // call-site discipline every host re-implements (spec 8.6's seed row, deepened
+        // 2026-08-30). Invoking a (Set<String>) -> Unit names no metrics type, which is what
+        // refuted the old row's claim that the adapter boundary forced the obligation outward.
+        if (tasks.isNotEmpty()) onTasksLoaded(tasks.map { it.name }.toSet())
     }
 
     /**
@@ -155,6 +162,7 @@ class TaskAdmin(
         if (rejected != null) return rejected
         definitions = loaded.associateBy { it.name }
         reportPoolMinimums(loaded)
+        onTasksLoaded(loaded.map { it.name }.toSet())
         return null
     }
 

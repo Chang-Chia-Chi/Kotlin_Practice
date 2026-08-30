@@ -1733,7 +1733,7 @@ The loop's internal changes - the K single-source read, the `seed` narrowing rem
 added interface, all deepened existing modules (more behaviour behind the same seams). The two
 additions that DID add interface (`EtlWiring`, `openSnapshotCache` + `Wired.close()` /
 `ManagedSnapshotCache.close()`) each passed the deletion test at merge: removing either scatters
-measured, adopter-paid complexity across every host. No shallow module shipped; no rework ordered.
+measured, adopter-paid complexity across every host. No shallow module shipped **in this loop**; no rework ordered. (A systematic depth sweep on 2026-08-30 confirmed this entry's own items and found the one exception it never covered: E15b's `MicrometerTaskMetrics.seed` was a seam in the wrong place - a host call-site pairing for a moment `TaskAdmin` already owns - deepened the same day into `onTasksLoaded`.)
 
 ### What the loop measured about itself
 
@@ -1838,3 +1838,32 @@ waiting** - SimpleEtl's scenario 11 demonstrates a host distinguishing busy from
 readiness flag, and the deferral is confirmed rather than reopened; see `docs/simpleetl/progress.md`.
 The pod budget is no longer waiting on a deployment for its *premises*, only for its operating
 point.
+
+
+---
+
+## Linux measurements, and the depth sweep's one refutation  (2026-08-30)
+
+**The platform forks are now measured on both sides.** A probe on WSL2 Ubuntu 22.04 (JDK 21,
+glibc 2.35) closed the three claims this repository had only reasoned or only measured on Windows:
+
+- `Files.move(..., ATOMIC_MOVE)` onto an existing file **silently replaces** via rename(2); a
+  reader holding the old file keeps its inode, a fresh open sees the new content. The composed-host
+  round's collision analysis is now measured, not reasoned.
+- `unlink` on an open generation file **succeeds immediately** - directory entry gone, open
+  connection fully functional, disk space freed at last close (verified byte-exact with a 50 MiB
+  probe). The dirty-drain "files undeletable until process exit" behaviour is a **Windows-only
+  artifact**; on the deployment target the space frees when the connection closes.
+- The pinned `duckdb_jdbc 1.1.3` native library loads cleanly and **the full snapshotcache suite
+  is green on Linux** - the pin's first validation on its actual target platform.
+
+**The depth sweep** (mattpocock codebase-design vocabulary over every class this loop added) found
+one SHALLOW verdict and confirmed the rest: `MicrometerTaskMetrics.seed` was a seam in the wrong
+place - a call-site pairing every host re-implements for a moment `TaskAdmin` already owns, its
+stated justification ("`infra.etl.task` may not name `io.micrometer`") refuted because invoking a
+`(Set<String>) -> Unit` names nothing. Deepened the same day: `TaskAdmin`/`EtlWiring` gained
+`onTasksLoaded`, the framework now invokes seeding at both load moments, and the host obligation
+shrank to one constructor argument. Also from the sweep: `ManagedSnapshotCache`'s own KDoc called
+it "a holder", which stopped being true when `close()` gained the drain guard - corrected; and the
+suspend ArchUnit rule's FQN-regex selection gained the non-emptiness canary the P8b block already
+modelled, so a rename cannot vacuously green it.
