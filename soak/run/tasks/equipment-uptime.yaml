@@ -1,0 +1,26 @@
+# Second group's task, same shape as wip-summary, so the concurrent-trigger injection
+# (T+60min) has two independently-triggerable tasks rather than one run against itself.
+name: equipment-uptime
+schedule:
+  cron: "0/17 * * * * ?"
+phases:
+  - name: load
+    steps:
+      - name: copy-equipment
+        type: cacheCopy
+        cache: equipment
+        sql: select id, tool_id, state from equipment
+        output: equipment_cache
+      - name: summarise
+        type: materialize
+        datasource: scratch
+        output: summary
+        sql: select state, count(*) as tools from equipment_cache group by state
+      - name: publish
+        type: pipe
+        source:
+          datasource: scratch
+          sql: select state, tools from summary
+        target:
+          datasource: report
+          table: equipment_state

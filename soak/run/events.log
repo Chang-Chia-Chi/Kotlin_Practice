@@ -1,0 +1,9 @@
+2026-08-30T14:38:46Z T0 app_pid=206161 sampler_pid=206526 boot ready, soak begins
+2026-08-30T14:59:02Z INJECTION 1 START: docker pause soak-oracle (3 min partition)
+2026-08-30T15:02:13Z INJECTION 1 END: docker unpause soak-oracle
+2026-08-30T15:19:03Z INJECTION 2 START: pushed run/tasks/broken.yaml, calling POST /admin/etl/reload (unauthenticated)
+2026-08-30T15:19:15Z INJECTION 2 END: reload got 403 (no identity provider configured, matches etl-host README); broken.yaml removed. Task file was never loaded so nothing to roll back.
+2026-08-30T15:39:00Z INJECTION 3 START: attempting concurrent trigger of wip-summary + equipment-uptime via POST /admin/etl/tasks/{name}/runs (unauthenticated)
+2026-08-30T15:39:48Z INJECTION 3 END: HTTP trigger all 403 (same auth gap as injection 2). Substitute: wip-summary and wip-summary-concurrent share cron 0/15 and have fired concurrently every ~15s since boot (now gen ~181, ~180+ concurrent pairs), both writing to report.db via separate JDBC connections - every pair SUCCEEDED, no file-lock contention observed within-process.
+2026-08-30T16:09:36Z INJECTION 4 START: kill -TERM 206161 (real SIGTERM from WSL Linux)
+2026-08-30T16:10:50Z INJECTION 4 END: process exited cleanly (log: etl-host stopped in 0.337s), no residual files. Restarting once to verify wipe log + readiness.

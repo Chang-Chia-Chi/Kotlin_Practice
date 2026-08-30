@@ -1,0 +1,33 @@
+# A third task, same cron second-offset as wip-summary ("0/15"), so it fires in the SAME
+# scheduler tick every time. AdminResource's HTTP trigger (POST /admin/etl/tasks/{name}/runs)
+# is behind @RolesAllowed("etl-admin") with no identity provider configured (etl-host's own
+# README says every admin call is 403 forever in production) - so "trigger several tasks
+# concurrently" cannot be done through the admin API in this deployment. This task file is the
+# soak's substitute: real concurrent execution, produced by the scheduler rather than by an
+# operator's POST, hitting the same report.db target Producers.kt's KDoc calls out as a
+# same-datasource contention risk ("a deployment that points two overlapping tasks at one
+# DuckDB file gets a file-lock failure, not a deadlock"). See soak/README.md.
+name: wip-summary-concurrent
+schedule:
+  cron: "0/15 * * * * ?"
+phases:
+  - name: load
+    steps:
+      - name: copy-wip
+        type: cacheCopy
+        cache: wip
+        sql: select id, lot_id, qty, site from wip
+        output: wip_cache
+      - name: summarise
+        type: materialize
+        datasource: scratch
+        output: summary
+        sql: select site, count(*) as lots, sum(qty) as total_qty from wip_cache group by site
+      - name: publish
+        type: pipe
+        source:
+          datasource: scratch
+          sql: select site, lots, total_qty from summary
+        target:
+          datasource: report
+          table: wip_summary_concurrent

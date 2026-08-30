@@ -1,0 +1,83 @@
+# Verbatim excerpts from the main 90+ minute soak run's app.log (PID 206161, boot ~2026-08-30
+# 22:36:40 local / 14:36:40 UTC).
+#
+# NOTE - operator error: the full raw app.log for this run (~4900 lines) was deleted by
+# `rm -f run/logs/app.log` immediately before the post-SIGTERM restart, before it was archived.
+# That was a mistake - it should have been renamed, not removed. samples.csv and events.log
+# were never touched and are complete for the whole run. The excerpts below are exact copies
+# captured directly from the live log during the run, before the deletion, while investigating
+# each injection; they are not reconstructed or paraphrased. Timestamps in the log are in the
+# process's local timezone (UTC+8); events.log and samples.csv use UTC.
+
+## Injection 1 - Oracle partition (docker pause 14:59:02Z .. unpause 15:02:13Z UTC)
+# The refresh that was in flight when Oracle was paused blocked for the full pause duration
+# (no error, no SOURCE_ERROR - the 3-minute pause never reached the 300s query-timeout-seconds
+# ceiling) and completed the moment Oracle came back:
+2026-08-30 23:02:12,955 INFO  [etl.JdbcGenerationSource] (executor-thread-22) group equipment generation 69: 40 row(s) read into equipment, dataAsOf 2026-08-30T14:59:16.930869914Z
+2026-08-30 23:02:13,168 INFO  [etl.JdbcGenerationSource] (executor-thread-22) group wip generation 69: 500 row(s) read into wip, dataAsOf 2026-08-30T15:02:13.052187316Z
+# (dataAsOf for equipment gen 69 is 14:59:16 - the query STARTED right as the pause began, and
+# the log line for its completion is timestamped 15:02:12/13, ~3 minutes later, i.e. it landed
+# the instant the container was unpaused. samples.csv shows the matching signature: current
+# generation frozen at 68 and live_generations at 2.0 (a stuck in-flight candidate) for the
+# entire pause window, snapping to 70 and back to live=1.0 within one sample after unpause.)
+
+## Injection 2 - broken task file + unauthenticated reload (15:19:03Z UTC)
+# curl -s -w '\nHTTP_STATUS:%{http_code}\n' -X POST localhost:8080/admin/etl/reload
+HTTP_STATUS:403
+# curl -s -w '\nHTTP_STATUS:%{http_code}\n' localhost:8080/admin/etl/tasks
+HTTP_STATUS:403
+# curl -s -w '\nHTTP_STATUS:%{http_code}\n' localhost:8080/health/ready
+{"state":"ready"}
+HTTP_STATUS:200
+# Confirms etl-host's own README: "every admin call answers 403 forever" with no identity
+# provider configured. Readiness (the one @PermitAll endpoint) is unaffected.
+
+## Injection 3 - concurrent task trigger (15:39:00Z .. 15:39:48Z UTC)
+# curl -X POST .../admin/etl/tasks/wip-summary/runs, /equipment-uptime/runs, /wip-summary-concurrent/runs
+wip:403 equipment:403 wip2:403
+# Same auth gap. The soak's cron-native substitute - wip-summary and wip-summary-concurrent
+# share cron "0/15 * * * * ?" and have fired in the same scheduler tick on every cycle since
+# boot, both against the same report.db target via independent JDBC connections:
+2026-08-30 23:39:15,905 INFO  [inf.etl.tas.TaskEngine] (DefaultDispatcher-worker-5 @wip-summary#752) run 0ea2a3af-52cf-4edb-a178-26032190a4b7 task wip-summary step copy-wip: copied 500 rows from cache wip group wip, generation 180 as of 2026-08-30T15:38:56.998039396Z into scratch dataset wip_cache
+2026-08-30 23:39:15,902 INFO  [etl.run] (DefaultDispatcher-worker-4 @wip-summary-concurrent#751) run 8d8eed34-63bb-4e4a-8604-c7000a7845eb step load/summarise ok: 0 read, 0 written, 13 ms, attempt 1
+2026-08-30 23:39:15,974 INFO  [etl.run] (DefaultDispatcher-worker-5 @wip-summary#752) run 0ea2a3af-52cf-4edb-a178-26032190a4b7 step load/publish ok: 2 read, 2 written, 55 ms, attempt 1
+2026-08-30 23:39:16,001 INFO  [etl.run] (DefaultDispatcher-worker-4 @wip-summary-concurrent#751) run 8d8eed34-63bb-4e4a-8604-c7000a7845eb step load/publish ok: 2 read, 2 written, 99 ms, attempt 1
+2026-08-30 23:39:16,049 INFO  [etl.run] (DefaultDispatcher-worker-5 @wip-summary#752) run 0ea2a3af-52cf-4edb-a178-26032190a4b7 task wip-summary ended SUCCEEDED
+2026-08-30 23:39:16,076 INFO  [etl.run] (DefaultDispatcher-worker-4 @wip-summary-concurrent#751) run 8d8eed34-63bb-4e4a-8604-c7000a7845eb task wip-summary-concurrent ended SUCCEEDED
+# Every one of ~180+ such concurrent pairs over the run SUCCEEDED - no DuckDB file-lock
+# contention observed (Producers.kt's KDoc warns about *cross-process* contention on one
+# DuckDB file; two connections from within the same JVM process share the embedded instance
+# and did not collide).
+
+## Unplanned finding - one checkpoint I/O failure, self-healed (~15:24:57Z UTC, T+46min,
+## unrelated to any scheduled injection - found only because the soak ran long enough)
+2026-08-30 23:24:57,338 WARN  [inf.sna.duc.DuckDbGenerationStore] (executor-thread-49) CHECKPOINT of candidate 138 failed: FATAL Error: Failed to create checkpoint because of error: Could not write file "/mnt/c/Users/maxch/OneDrive/.../soak/run/state/cache/wip/gen_0000000138.db.tmp": Cannot allocate memory
+2026-08-30 23:24:57,546 WARN  [inf.sna.cor.RefreshCycle] (executor-thread-49) Verify rejected candidate generation 138 of group wip: rule=key_unique detail=counting ids of table wip: IO Error: Corrupt database file: computed checksum 5381 does not match stored checksum 0 in block at location 274432
+# Occurred exactly once in ~270 refresh cycles x 2 groups (~540 checkpoint attempts). The next
+# refresh cycle (generation 139) succeeded normally, readiness never dropped (samples.csv shows
+# ready/200 continuously through this window), and no gen_0000000138.db / .tmp / .wal file was
+# left on disk afterward - the framework's verify gate rejected the corrupt candidate rather
+# than publishing it, exactly the safety property spec 10.1's verify step exists for.
+
+## Injection 4 - SIGTERM (16:09:36Z UTC)
+2026-08-30 23:09:34,959 INFO  [etl.run] (DefaultDispatcher-worker-5 @equipment-uptime#1116) run f7301477-c748-4ab4-8514-afe3a56ac31b task equipment-uptime ended SUCCEEDED
+2026-08-30 23:09:36,635 INFO  [io.quarkus] (Shutdown thread) etl-host stopped in 0.337s
+# Process (PID 206161) disappeared from /proc within the ~1s polling granularity used; no
+# WARN/ERROR logged during shutdown (EtlHost.onStop only logs on wired.close()/managed.close()
+# *failure*, so silence here is the expected clean-shutdown signature). Exact process exit code
+# was not captured: the process was started via nohup+disown for durability across tool calls,
+# so it was reparented to WSL's init and was not a child of the shell that sent the SIGTERM or
+# polled for exit - its exit status is therefore only visible to that init process, which this
+# soak did not instrument. Reported as not-captured rather than guessed.
+
+## Restart after SIGTERM - startup wipe names what it collected, readiness returns
+2026-08-31 00:10:56,146 INFO  [inf.sna.bootstrap] (main) startup wipe: removed 1 stale generation file(s) left by a previous process from soak/run/state/cache/equipment: [gen_0000000271.db]
+2026-08-31 00:10:56,156 INFO  [inf.sna.bootstrap] (main) startup wipe: removed 1 stale generation file(s) left by a previous process from soak/run/state/cache/wip: [gen_0000000271.db]
+2026-08-31 00:10:58,727 INFO  [etl.EtlHost] (main) startup refresh of group wip: SUCCESS
+2026-08-31 00:11:00,319 INFO  [etl.EtlHost] (main) startup complete, readiness = true
+2026-08-31 00:11:00,521 INFO  [io.quarkus] (main) etl-host 0.1.0-SNAPSHOT on JVM (powered by Quarkus 3.17.5) started in 7.719s. Listening on: http://0.0.0.0:8080
+# curl -s localhost:8080/health/ready
+{"state":"ready"}
+# The wipe unconditionally deletes every gen_* file, including the one left by a *clean* prior
+# shutdown (spec 10.1 step 1 applies regardless of how the previous process ended) - numbering
+# restarts at generation 1, matching DrillStaleGenerationFilesTest's documented behavior.

@@ -1,0 +1,27 @@
+# Soak variant of etl-host/example-tasks/wip-summary.yaml: same shape-D pipeline
+# (cacheCopy -> materialize -> pipe), cron compressed to every 15s instead of hourly
+# so the soak accumulates thousands of task cycles instead of dozens.
+name: wip-summary
+schedule:
+  cron: "0/15 * * * * ?"
+phases:
+  - name: load
+    steps:
+      - name: copy-wip
+        type: cacheCopy
+        cache: wip
+        sql: select id, lot_id, qty, site from wip
+        output: wip_cache
+      - name: summarise
+        type: materialize
+        datasource: scratch
+        output: summary
+        sql: select site, count(*) as lots, sum(qty) as total_qty from wip_cache group by site
+      - name: publish
+        type: pipe
+        source:
+          datasource: scratch
+          sql: select site, lots, total_qty from summary
+        target:
+          datasource: report
+          table: wip_summary
