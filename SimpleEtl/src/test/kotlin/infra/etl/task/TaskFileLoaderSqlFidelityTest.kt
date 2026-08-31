@@ -14,7 +14,7 @@ import org.junit.jupiter.api.io.TempDir
  * Done-when: "SQL containing `${...}` and multi-line SQL survive loading unchanged, proving the
  * Quarkus-config path was correctly avoided."
  *
- * Spec 10 gives three reasons task files are not read through Quarkus configuration, and the
+ * There are three reasons task files are not read through Quarkus configuration, and the
  * one with teeth is that config performs property expansion. A `${SITE}` inside a SQL string
  * literal would either be substituted with something else or fail the build outright, and the
  * author would find out at 03:00 with a query that no longer says what the file says.

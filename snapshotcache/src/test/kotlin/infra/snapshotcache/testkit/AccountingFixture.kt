@@ -4,11 +4,11 @@ import org.junit.jupiter.api.extension.AfterEachCallback
 import org.junit.jupiter.api.extension.ExtensionContext
 
 /**
- * Shared fixture asserting the four spec 17.3 accounting equations, plus the spec 17.6
- * unclosed-connection check, automatically at the end of every test. Register with
+ * Shared fixture asserting the four accounting equations, plus the unclosed-connection
+ * check, automatically at the end of every test. Register with
  * `@RegisterExtension`, or call [verify] directly.
  *
- * The equations, FIXED verbatim from spec 17.3:
+ * The equations, FIXED verbatim:
  *
  *     count(createCandidate) == count(promote) + count(delete of candidates)
  *     per generation: count(open) == count(close)      // except still-live ones
@@ -82,7 +82,7 @@ class AccountingFixture(
                 missing.ifNotEmpty { "; generations $it opened but their file is gone (deleted while opened)" }
         }
 
-        // Spec 17.6 JVM-side detector: every issued connection must have been closed.
+        // The JVM-side leak detector: every issued connection must have been closed.
         for (leak in store.tracker.unclosed()) {
             failures += "unclosed connection [${leak.label}], created at:\n" +
                 leak.creationStack.stackTraceToString().trimEnd()

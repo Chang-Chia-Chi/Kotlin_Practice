@@ -14,14 +14,14 @@ import org.junit.jupiter.api.assertAll
 import org.junit.jupiter.api.io.TempDir
 
 /**
- * E14: `TaskStatus.scheduled`, the observable form of spec 8.6's row "call `TaskScheduler.apply`
- * yourself when you build definitions in code".
+ * E14: `TaskStatus.scheduled`, the observable form of the host obligation "call
+ * `TaskScheduler.apply` yourself when you build definitions in code".
  *
- * That obligation exists because `TaskAdmin` and `TaskScheduler` hold a definition map each
- * (11.2), which E11 declined to unify. Its stated symptom is `list()` reporting every task and
- * not one of them ever firing, *with no error raised* - a permanent silent disagreement, and the
- * only host obligation in 8.6 whose evidence is already inside this process. `scheduled` is that
- * evidence, and this file is the pair of tests that would fail if it were hard-wired either way.
+ * That obligation exists because `TaskAdmin` and `TaskScheduler` hold a definition map each, which
+ * E11 declined to unify. Its stated symptom is `list()` reporting every task and not one of them
+ * ever firing, *with no error raised* - a permanent silent disagreement, and the only host
+ * obligation whose evidence is already inside this process. `scheduled` is that evidence, and this
+ * file is the pair of tests that would fail if it were hard-wired either way.
  *
  * **The oracle is deliberately `cron` versus `scheduled` on one row.** Asserting `scheduled` alone
  * against a fixed expectation is satisfied by a constant; asserting the *disagreement* is not,
@@ -88,8 +88,8 @@ class TaskAdminScheduledTest {
     /**
      * An API-only task is the normal case of `cron == null`, and must not read as the failure
      * above. Nothing registers a task with no expression, so `scheduled` is false here for a
-     * reason that is not a host mistake - which is why 8.6's symptom is stated as a *non-null*
-     * cron with `scheduled = false`.
+     * reason that is not a host mistake - which is why the obligation's symptom is stated as a
+     * *non-null* cron with `scheduled = false`.
      */
     @Test
     fun aTaskWithNoCronIsNotScheduledAndThatIsNotADisagreement() {

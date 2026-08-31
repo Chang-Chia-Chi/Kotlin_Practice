@@ -197,8 +197,8 @@ class RowPipeTest {
 
     /**
      * Done-when item 4, second half. The target is `REQUIRED` and already declares `row_hash`,
-     * because `RowPipe`'s frozen constructor has no `transform.addColumns` channel (spec 9.1
-     * puts that in the YAML layer) and source metadata cannot describe a column the transform
+     * because `RowPipe`'s frozen constructor has no `transform.addColumns` channel (that channel
+     * belongs to the YAML layer) and source metadata cannot describe a column the transform
      * invents. Under AUTO the generated DDL comes from source metadata, so the added column
      * would have nowhere to land.
      *

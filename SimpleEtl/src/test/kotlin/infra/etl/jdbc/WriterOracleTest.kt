@@ -264,9 +264,9 @@ class WriterOracleTest {
 
     /**
      * Done-when 6. Every missing name must be listed, not just the first one found: an author
-     * fixing a MERGE one name per 30-minute run is the failure mode this rules out. Spec 4.4
-     * allows the check no earlier than the first chunk, so the assertion is on what is reported,
-     * not on which call reports it.
+     * fixing a MERGE one name per 30-minute run is the failure mode this rules out. The check is
+     * allowed no earlier than the first chunk, so the assertion is on what is reported, not on
+     * which call reports it.
      */
     @Test
     fun `JdbcStatementWriter lists every missing bind name and writes nothing`() {

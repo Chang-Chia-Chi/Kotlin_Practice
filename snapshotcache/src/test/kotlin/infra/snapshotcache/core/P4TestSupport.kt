@@ -33,12 +33,13 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
 /*
- * P4 shared test support (SDET-owned; plan P4, spec 4 / 8 / 9.2).
+ * P4 shared test support (SDET-owned): the refresh state machine, the verify gate and the
+ * failure taxonomy.
  *
  * The P2 fake issues close/isClosed-only connections; the verify gate needs query
  * answers. Per the P2 progress note that stubbing lives here, at the spi boundary:
- * QueryStubGenerationStore delegates every call to the recording fake (so the spec
- * 17.3 equations stay honest) and wraps open() so served connections answer queries.
+ * QueryStubGenerationStore delegates every call to the recording fake (so the accounting
+ * equations stay honest) and wraps open() so served connections answer queries.
  *
  * Queries are answered by QUEUE, then PATTERN, then shape heuristics over a small
  * dataset model - never by exact SQL string equality: the SQL text is engineer-FREE.
@@ -142,7 +143,7 @@ class QueryScript {
  * Delegating [GenerationStore]: every call goes through to the recording
  * [InMemoryGenerationStore] (accounting equations stay exact); only [open] wraps the
  * returned [OpenGeneration] so its connections answer queries via [script]. close and
- * isClosed still reach the tracked delegate connection, so the spec 17.6 leak detector
+ * isClosed still reach the tracked delegate connection, so the JVM-side leak detector
  * keeps seeing every connection.
  */
 class QueryStubGenerationStore(
@@ -333,7 +334,7 @@ class RecordingHooks : HookRunner {
     }
 }
 
-/** Deterministic advancing clock; no real waiting (spec 17.1). */
+/** Deterministic advancing clock; no real waiting. */
 class MutableTestClock(@Volatile private var now: Instant) : Clock() {
     override fun getZone(): ZoneId = ZoneOffset.UTC
     override fun withZone(zone: ZoneId): Clock = this
@@ -349,7 +350,8 @@ class MutableTestClock(@Volatile private var now: Instant) : Clock() {
 /**
  * Shared P4 fixture: healthy two-table dataset, recording fake store wrapped with the
  * query stub, recording events and hooks, [AccountingFixture] registered with its
- * suppliers wired to the registry (P2 checklist item; spec 17.3 / 17.8).
+ * suppliers wired to the registry, so every subclass gets the accounting equations for free
+ * (P2 checklist item).
  */
 internal abstract class RefreshCycleTestBase {
 

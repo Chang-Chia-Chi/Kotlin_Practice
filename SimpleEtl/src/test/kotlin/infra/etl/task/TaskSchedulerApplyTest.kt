@@ -17,15 +17,16 @@ import org.junit.jupiter.api.assertAll
 import org.junit.jupiter.api.io.TempDir
 
 /**
- * Spec 8.1 and 8.5, and P7's first done-when item: `apply` registers exactly the enabled tasks
+ * P7's first done-when item: `apply` registers exactly the enabled tasks
  * carrying a cron, unregisters removed ones, and re-registers only those whose cron changed.
  *
  * **All three directions are here on purpose.** An implementation that cancels every registration
  * and re-creates it on every `apply` produces exactly the right final state, so it satisfies both
- * "registers the right set" and "unregisters removed ones" while being the thing spec 8.5's
- * wording exists to forbid. Only [anUnchangedCronIsNeitherCancelledNorReRegistered] can tell them
- * apart, and it asserts on [RecordingCron.events] rather than on [RecordingCron.registered]
- * because the state is identical either way.
+ * "registers the right set" and "unregisters removed ones" while being exactly what "re-registers
+ * only those whose cron changed" exists to forbid. Only
+ * [anUnchangedCronIsNeitherCancelledNorReRegistered] can tell them apart, and it asserts on
+ * [RecordingCron.events] rather than on [RecordingCron.registered] because the state is identical
+ * either way.
  *
  * The bad-cron pair is the same shape as P6's eighteen rule tests: the rejection
  * ([anUnparseableCronLeavesTheRegistryUnchangedAndYieldsAReport]) would pass against a
@@ -156,7 +157,7 @@ class TaskSchedulerApplyTest {
     }
 
     /**
-     * Spec 8.5: a bad cron is rejected atomically rather than taking the scheduler down. The
+     * A bad cron is rejected atomically rather than taking the scheduler down. The
      * assertion that bites is not the report - it is that `sibling`, which is perfectly valid and
      * sits in the same batch, is **not** registered afterwards. A `TaskScheduler` that registered
      * as it went and let the throw escape would leave it live and the previous registration dead.

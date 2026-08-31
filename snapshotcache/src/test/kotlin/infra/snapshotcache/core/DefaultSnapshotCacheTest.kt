@@ -35,8 +35,8 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 
 /**
- * P3 tests for [DefaultSnapshotCache] (plan P3; spec 5.1 waitBudget and acquire atomicity,
- * spec 6.3 orphan safety net, spec 9.2/9.3 acquire-before-readiness rows, spec 10.2 step 1).
+ * P3 tests for [DefaultSnapshotCache]: waitBudget and acquire atomicity, the orphan safety
+ * net, the acquire-before-readiness rows, and the refusal of new calls after shutdown.
  *
  * Tests run against the frozen api plus the pinned P3 construction surface only; the fake
  * store fakes at the spi boundary. Acquire atomicity itself is proven at the registry level
@@ -175,11 +175,11 @@ class DefaultSnapshotCacheTest {
         assertThat(lease.deadline).isEqualTo(t0.plus(leaseDeadline))
     }
 
-    // ------------------------------------------------------------------ waitBudget (spec 5.1, 9.3, D21/D22)
+    // ------------------------------------------------------------------ waitBudget
 
     @Test
     fun waitBudgetZero_failsFastWithoutBlocking_underTwoThreadPool_thenUsableAfterPublish() {
-        // Spec 17.8 scenario: two zero-budget acquires on a 2-thread scheduler pool must
+        // The recovery scenario: two zero-budget acquires on a 2-thread scheduler pool must
         // both fail fast; the pool must not be exhausted by blocked acquires.
         val pool = Executors.newFixedThreadPool(2)
         try {
@@ -206,7 +206,7 @@ class DefaultSnapshotCacheTest {
             AcquireUnavailableReason.NOT_READY,
         )
 
-        // Spec 9.2 "No generation yet, waitBudget == 0": back to a usable state after publish.
+        // "No generation yet, waitBudget == 0": back to a usable state after publish.
         val gen = publishGen()
         cache.acquire(group, Duration.ZERO).use { assertThat(it.generation).isEqualTo(gen) }
     }
@@ -263,7 +263,7 @@ class DefaultSnapshotCacheTest {
             .isEqualTo(AcquireUnavailableReason.TIMEOUT)
         assertThat(events.unavailable).containsExactly(AcquireUnavailableReason.TIMEOUT)
 
-        // Spec 9.2 "No generation yet, waitBudget > 0": back to a usable state after publish.
+        // "No generation yet, waitBudget > 0": back to a usable state after publish.
         val gen = publishGen()
         cache.acquire(group).use { assertThat(it.generation).isEqualTo(gen) }
     }
@@ -282,7 +282,7 @@ class DefaultSnapshotCacheTest {
 
         waiter.interrupt() // registry NOT shutting down: the not-shutting-down branch
 
-        waiter.join(5_000) // bound: an uninterruptible wait would serve out the 30s budget (spec 9.3)
+        waiter.join(5_000) // bound: an uninterruptible wait would serve out the 30s budget
         assertThat(waiter.isAlive).describedAs("interrupt must release the waiter promptly").isFalse()
         val thrown = outcome.get()
         assertThat(thrown).isInstanceOf(NotReadyException::class.java)
@@ -291,7 +291,7 @@ class DefaultSnapshotCacheTest {
             .describedAs("the interrupt flag must be re-set inside the waiter before it exits").isTrue()
     }
 
-    // ------------------------------------------------------------------ shutdown (spec 10.2 step 1)
+    // ------------------------------------------------------------------ shutdown
 
     @Test
     fun shutdown_releasesParkedWaiterImmediately_withShuttingDownException() {
@@ -313,7 +313,7 @@ class DefaultSnapshotCacheTest {
 
     @Test
     fun shutdown_refusesNewCallsOnEveryEntryPoint() {
-        publishGen() // a published generation does not soften the refusal (spec 10.2 step 1)
+        publishGen() // a published generation does not soften the refusal
         registry.beginShutdown()
 
         val spec = CopyOutSpec("select 1", "tgt", ConnectionTracker().issue("caller target").connection)
@@ -328,7 +328,7 @@ class DefaultSnapshotCacheTest {
         )
     }
 
-    // ------------------------------------------------------------------ withSnapshot (spec 5.1, D9)
+    // ------------------------------------------------------------------ withSnapshot
 
     @Test
     fun withSnapshot_returnsBlockResult_releasesLeaseAndConnections() {
@@ -363,7 +363,7 @@ class DefaultSnapshotCacheTest {
         // fixture verifies the accounting equations at test end
     }
 
-    // ------------------------------------------------------------------ copyOut (spec 5.1, 6.4)
+    // ------------------------------------------------------------------ copyOut
 
     @Test
     fun copyOut_isAcquireCopyRelease_carriesGenerationDataAsOfAndRows() {
@@ -397,7 +397,7 @@ class DefaultSnapshotCacheTest {
         assertThat(refCountOf(gen)).isEqualTo(0)
     }
 
-    // ------------------------------------------------------------------ orphan safety net (spec 6.3)
+    // ------------------------------------------------------------------ orphan safety net
 
     @Test
     fun orphanedHandle_cleanerForceReleasesExactlyOnce_neverForClosedHandles() {
@@ -457,7 +457,7 @@ class DefaultSnapshotCacheTest {
         }
     }
 
-    /** Deterministic advancing clock; no real waiting (spec 17.1). */
+    /** Deterministic advancing clock; no real waiting. */
     private class MutableClock(@Volatile private var now: Instant) : Clock() {
         override fun getZone(): ZoneId = ZoneOffset.UTC
         override fun withZone(zone: ZoneId): Clock = this

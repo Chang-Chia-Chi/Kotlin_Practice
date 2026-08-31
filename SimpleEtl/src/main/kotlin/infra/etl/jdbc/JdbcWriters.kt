@@ -17,8 +17,7 @@ import org.jdbi.v3.core.statement.PreparedBatch
 import org.jdbi.v3.core.statement.SqlStatements
 
 /**
- * Writes Rows into a table on a non-DuckDB datasource with one JDBI prepared batch per chunk
- * (spec 4.4, declarative target).
+ * Writes Rows into a table on a non-DuckDB datasource with one JDBI prepared batch per chunk.
  *
  * The column list comes from the target's catalog, not from YAML and not from the source query,
  * and the generated INSERT names every column it binds. Reordering the target table's columns
@@ -29,17 +28,17 @@ import org.jdbi.v3.core.statement.SqlStatements
  * A target column the source does not produce is left out of the INSERT, so the database's own
  * default applies and its own NOT NULL constraint reports the violation. The framework does not
  * duplicate that check, because it does not read `COLUMN_DEF` and so cannot tell "no default"
- * from "has a default" - a deviation from spec 4.4's framework error naming the row ordinal.
+ * from "has a default" - a deviation from the framework error that would name the row ordinal.
  *
  * Identifiers are emitted unquoted, so a target created as a quoted lower-case identifier on
  * Oracle - `create table "wip"("lot_id" number)` - is unreachable: Oracle folds the unquoted name
  * to upper case and reports ORA-00904. Such a table needs a `target.sql` step instead.
  *
  * DuckDB is not a valid target here: DuckDB writes go through `DuckDbTableWriter` and its
- * appender (spec 4.6).
+ * appender.
  *
  * @param table the target table, optionally `schema.table`.
- * @param step the step name, so that every error names it (spec 4.4).
+ * @param step the step name, so that every error names it.
  */
 class JdbcTableWriter(
     private val jdbi: Jdbi,
@@ -65,7 +64,7 @@ class JdbcTableWriter(
             }
             // Identifiers are emitted unquoted so that Oracle folds them to its own storage case,
             // as it already does for the names the author writes in YAML. Quoting them would make
-            // the lower-cased names of spec 4.5 case-sensitive and unresolvable on Oracle.
+            // the framework's lower-cased column names case-sensitive and unresolvable on Oracle.
             sql = "insert into $table (${binds.joinToString { it.name }}) " +
                 "values (${binds.joinToString { ":${it.name}" }})"
         }
@@ -76,8 +75,8 @@ class JdbcTableWriter(
         if (chunk.isEmpty()) return 0
         // The INSERT is fixed at open from the columns the source declared, so a key that first
         // appears on a Row - a transform's addition that `transform.addColumns` did not declare -
-        // is bound nowhere and the column silently takes its database default. Spec 4.4 promises a
-        // runtime error for a Row key with no matching column; this is where it is raised. Checked
+        // is bound nowhere and the column silently takes its database default. A Row key with no
+        // matching column is promised a runtime error; this is where it is raised. Checked
         // against the first chunk, like JdbcStatementWriter's bind names, because a set difference
         // per row is work in the innermost loop.
         if (!checked) {
@@ -109,7 +108,7 @@ class JdbcTableWriter(
 
 /**
  * Runs the author's own statement as a JDBI prepared batch, once per chunk, with Row values bound
- * by name: `:lot_id` binds the Row key `lot_id` (spec 4.4, statement target). This is how MERGE
+ * by name: `:lot_id` binds the Row key `lot_id`. This is how MERGE
  * and conditional INSERT are expressed, and it is what makes a step idempotent.
  *
  * Bind names cannot be validated at startup, because the Row key set is only known once the
@@ -122,9 +121,9 @@ class JdbcTableWriter(
  * the column list does not describe - which a transform can produce - binds untyped.
  *
  * DuckDB is not a valid target here: the appender takes a table and not a statement, so a
- * statement target on a DuckDB datasource is rejected at startup (spec 4.4, validation rule 11).
+ * statement target on a DuckDB datasource is rejected at startup (validation rule 11).
  *
- * @param step the step name, so that every error names it (spec 4.4).
+ * @param step the step name, so that every error names it.
  */
 class JdbcStatementWriter(
     private val jdbi: Jdbi,
@@ -140,7 +139,7 @@ class JdbcStatementWriter(
      * transform's addition, which binds untyped.
      *
      * Paired once at [open] rather than looked up per bind per row: the name has to be lower-cased
-     * to meet the column list's keys (spec 4.5) and the statement's own casing has to be preserved
+     * to meet the column list's keys and the statement's own casing has to be preserved
      * for JDBI, and doing both in the innermost loop was review finding L7. The remaining per-row
      * lowercase is [Row]'s own, on the value lookup, and is load-bearing: this is the caller that
      * passes it raw SQL bind names.
@@ -197,8 +196,8 @@ class JdbcStatementWriter(
 /**
  * Opens a handle and prepares it with [configure], releasing it if [configure] throws.
  *
- * Both writers own their handle from [RowWriter.open] onward, and spec 7.4 makes releasing it on
- * that failure path theirs too: a caller whose `open` threw never entered the `use` block that
+ * Both writers own their handle from [RowWriter.open] onward, and releasing it on
+ * that failure path is theirs too: a caller whose `open` threw never entered the `use` block that
  * would have closed it. Each had its own copy of the eight-line catch that does this, including
  * the `addSuppressed` that keeps a failing release from hiding the failure that caused it - a
  * protocol two implementations had to get right separately, with no test pinning either (review

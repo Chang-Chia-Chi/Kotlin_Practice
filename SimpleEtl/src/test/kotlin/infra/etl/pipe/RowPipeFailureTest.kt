@@ -47,8 +47,8 @@ class RowPipeFailureTest {
 
     /**
      * The headline case. The target takes chunk 1 whole, then takes half of chunk 2 and throws -
-     * so the failure lands with rows of the failing chunk already flushed, which is the shape
-     * spec 12 measured as retaining every completed row.
+     * so the failure lands with rows of the failing chunk already flushed, which was measured to
+     * retain every completed row.
      *
      * Three things are asserted, and the resource assertions are the point: an exception test
      * that only catches the exception would pass against a pipe that leaked the source result
@@ -75,7 +75,7 @@ class RowPipeFailureTest {
                     "the pipe stopped at the failing chunk"
                 }
             },
-            // The 50 rows of chunk 1 and the 25 the failing chunk flushed before it threw. Spec 12:
+            // The 50 rows of chunk 1 and the 25 the failing chunk flushed before it threw:
             // a flushed row survives, and a chunk left part-appended does not.
             { assertEquals(75L, Pipe.rowCount(targetDb, "wip_stg")) },
         )
@@ -149,7 +149,7 @@ class RowPipeFailureTest {
     }
 
     /**
-     * A target that throws at `open` - which is where spec 4.6 rejects a BLOB column, a nullable
+     * A target that throws at `open` - which is where the writer rejects a BLOB column, a nullable
      * DOUBLE, or an undeclarable DECIMAL width, so this is the common failure in practice. The
      * source query has already run by then, because `open` takes the source column list, so
      * there is a live statement and result set to leak.
@@ -168,7 +168,7 @@ class RowPipeFailureTest {
     }
 
     /**
-     * A transform is caller code running inside the pipe (spec 9.1), so it is the third place a
+     * A transform is caller code running inside the pipe, so it is the third place a
      * failure can start. Nothing catches it - retry is P5 - but the resources still close.
      */
     @Test

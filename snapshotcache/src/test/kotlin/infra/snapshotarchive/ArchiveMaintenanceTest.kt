@@ -73,7 +73,7 @@ class ArchiveMaintenanceTest {
     /**
      * The crashed-mid-upload case. One object of two is missing, so the version can never be
      * honoured and saying so is the only useful answer: consumers fall back to a full compare
-     * (D34), which is why FAILED is a normal outcome rather than an error.
+     * against the live snapshot, which is why FAILED is a normal outcome rather than an error.
      */
     @Test
     fun `a PENDING row past the timeout with a missing object is failed, loudly`() {
@@ -138,9 +138,9 @@ class ArchiveMaintenanceTest {
      * has to reach a terminal state - resolved, or reclaimed and gone - and the pass has to be
      * idempotent, so the second one is asserted to change nothing.
      *
-     * The invariant checked after every pass is D33's, extended over the purge: nothing in the
-     * bucket that no manifest row covers. That is the case the design calls impossible, and
-     * this is where it is asserted rather than swept for.
+     * The invariant checked after every pass is the publish protocol's, extended over the purge:
+     * nothing in the bucket that no manifest row covers. That is the case the design calls
+     * impossible, and this is where it is asserted rather than swept for.
      */
     @ParameterizedTest
     @EnumSource(ArchiveStep::class)
@@ -194,10 +194,10 @@ class ArchiveMaintenanceTest {
     }
 
     /**
-     * D34, unconditionally. Every version in the window has expired - which is exactly what a
-     * broken archiver looks like from here - and the newest COMPLETE one still survives with
-     * its objects, because the alternative is that the last good baseline evaporates at the
-     * moment nobody is publishing a replacement.
+     * Keep-newest-COMPLETE, unconditionally. Every version in the window has expired - which is
+     * exactly what a broken archiver looks like from here - and the newest COMPLETE one still
+     * survives with its objects, because the alternative is that the last good baseline
+     * evaporates at the moment nobody is publishing a replacement.
      */
     @Test
     fun `keep-newest-COMPLETE survives a window in which every version is expired`() {
@@ -234,7 +234,7 @@ class ArchiveMaintenanceTest {
 
     // --- staleness ----------------------------------------------------------------------
 
-    /** Spec 18.5's operational alert. Nothing is wrong with the diffs; something is wrong with us. */
+    /** The staleness alert is operational. Nothing is wrong with the diffs; something is wrong with us. */
     @Test
     fun `the staleness alert fires when the newest COMPLETE checkpoint is too old`() {
         val maintenance = maintenance(now = T0)
@@ -318,9 +318,9 @@ class ArchiveMaintenanceTest {
         Inventory.decode(entry.inventory).map { keyOf(entry, it.objectKey) }
 
     /**
-     * D33's guarantee, asserted rather than swept for: every object in the bucket is covered
-     * by a manifest row that names it, and a COMPLETE row's inventory is one the bucket can
-     * still honour.
+     * The publish protocol's guarantee, asserted rather than swept for: every object in the
+     * bucket is covered by a manifest row that names it, and a COMPLETE row's inventory is one
+     * the bucket can still honour.
      */
     private fun assertNoDanglingObjects() {
         val rows = rows()

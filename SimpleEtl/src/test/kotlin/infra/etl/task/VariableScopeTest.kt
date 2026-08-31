@@ -14,15 +14,15 @@ import org.junit.jupiter.api.assertThrows
  * `VariableScope` on its own, because the plan names it as P5 public surface and a public type
  * that no test touches is how P3 shipped a real defect behind 134 green tests.
  *
- * What this type promises is narrower than spec 6 as a whole. It holds names and values and
- * refuses a second definition; it does not know what a built-in is, does not read a database,
- * and does **not** reject an unknown name on read - [get] answers null, and [contains] is how a
- * caller tells "defined as null" from "never defined". Enforcing spec 6.2's use-before-export
+ * What this type promises is narrower than the variable rules as a whole. It holds names and
+ * values and refuses a second definition; it does not know what a built-in is, does not read a
+ * database, and does **not** reject an unknown name on read - [get] answers null, and [contains]
+ * is how a caller tells "defined as null" from "never defined". Enforcing the use-before-export
  * rule is therefore the engine's job at bind time, not this class's, and it is asserted there in
  * [TaskEngineVariableTest].
  *
  * That split is worth pinning down, because the tempting simplification - make `get` throw - is
- * what would break the zero-row export of spec 6.3, where null is a legitimate value.
+ * what would break a zero-row export, where null is a legitimate value.
  */
 class VariableScopeTest {
 
@@ -40,8 +40,8 @@ class VariableScopeTest {
     }
 
     /**
-     * Any canonical value, not only strings: spec 6.1's `triggerTime` is an `Instant` and an
-     * export of a numeric watermark is a `BigDecimal` or a `Long` (spec 4.1).
+     * Any canonical value, not only strings: the `triggerTime` built-in is an `Instant` and an
+     * export of a numeric watermark is a `BigDecimal` or a `Long`.
      */
     @Test
     fun aValueKeepsItsType() {
@@ -58,7 +58,7 @@ class VariableScopeTest {
     }
 
     /**
-     * Spec 6.3's zero-row export yields null, so null is a value the scope must be able to hold -
+     * A zero-row export yields null, so null is a value the scope must be able to hold -
      * and it must stay distinguishable from a name that was never defined, or the redefinition
      * rule cannot be enforced for exactly the variable most likely to be null on a first run.
      */
@@ -89,7 +89,7 @@ class VariableScopeTest {
     }
 
     /**
-     * Spec 6.2: a variable may not be redefined once set. The scope has one namespace, so this
+     * A variable may not be redefined once set. The scope has one namespace, so this
      * covers an export overwriting an earlier export, a literal var, or a built-in alike - and
      * the original value has to survive the rejection, or a failed task file would leave a run
      * reading a half-applied scope.

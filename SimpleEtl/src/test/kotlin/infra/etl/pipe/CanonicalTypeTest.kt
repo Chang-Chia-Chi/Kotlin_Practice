@@ -15,7 +15,7 @@ import org.junit.jupiter.params.provider.EnumSource
 import org.junit.jupiter.params.provider.MethodSource
 
 /**
- * Spec 4.3 as a unit table, plus the DuckDB side of the enum.
+ * The JDBC-to-canonical type mapping as a unit table, plus the DuckDB side of the enum.
  *
  * The (sqlType, typeName) pairs below are not invented: every one was observed on a real
  * result set from ojdbc11 23.5 against oracle-free 23, or from duckdb_jdbc 1.1.3. The
@@ -106,7 +106,7 @@ class CanonicalTypeTest {
     /**
      * duckDbType is asserted against DuckDB itself rather than against a hard-coded string:
      * the natural mapping is what a real DuckDB column of that type reads back as. This is
-     * the property P2's AUTO DDL depends on - one mapping table in both directions (4.4).
+     * the property P2's AUTO DDL depends on - one mapping table, read in both directions.
      */
     @ParameterizedTest
     @EnumSource(CanonicalType::class)

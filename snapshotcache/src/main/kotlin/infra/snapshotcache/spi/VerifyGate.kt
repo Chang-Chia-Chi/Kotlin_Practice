@@ -13,16 +13,16 @@ import java.sql.Connection
 internal sealed interface GateOutcome {
     data class Passed(val rowCounts: Map<String, Long>) : GateOutcome
 
-    /** [rule] is the `snapshot_verify_failed_total{rule}` label value (spec 12.2). */
+    /** [rule] is the `snapshot_verify_failed_total{rule}` label value. */
     data class Failed(val rule: String, val detail: String) : GateOutcome
 }
 
 /**
- * The verify gate of spec 8: the built-in rules as a hardcoded list (plan 2.4) followed by
- * the caller's [GenerationCheck]s in list order. The first failure aborts the gate.
+ * The verify gate: the built-in rules as a hardcoded list, followed by the caller's
+ * [GenerationCheck]s in list order. The first failure aborts the gate.
  *
- * Lives at the spi boundary for the same reason as [SnapshotHandle] (D28): executing SQL
- * means calling `java.sql` methods, which plan 2.2 rule 4 forbids in `core` - verified
+ * Lives at the spi boundary for the same reason as [SnapshotHandle]: executing SQL means
+ * calling `java.sql` methods, which the package rules forbid in `core` - verified
  * empirically, a `Statement.executeQuery` call from `core` is an ArchUnit violation.
  * `core` decides *when* to verify; this class owns *how*, including the connection's
  * lifecycle: the verify connection is opened here and closed on every path.
@@ -39,7 +39,7 @@ internal class VerifyGate(
     private val config: VerifyConfig,
     private val checks: List<GenerationCheck>,
 ) {
-    /** A rule whose query threw fails that rule, not the whole round (spec 9.2: verify failure). */
+    /** A rule whose query threw fails that rule - the round ends as a verify failure, not a source error. */
     private class RuleFailed(val rule: String, val detail: String) : RuntimeException(detail)
 
     /** Runs the whole gate against a fresh connection into [opened]; never throws except [InterruptedException]. */
@@ -61,13 +61,13 @@ internal class VerifyGate(
     }
 
     private fun run(connection: Connection, previous: GenerationInfo?): GateOutcome {
-        // readable (spec 8.1, non-disableable): the candidate was reopened by the store;
+        // readable (non-disableable): the candidate was reopened by the store;
         // this discovery query proves it can actually be queried.
         val tables = rule(RULE_READABLE, "candidate is not queryable") {
             connection.queryStrings("SELECT table_name FROM information_schema.tables WHERE table_type = 'BASE TABLE' AND table_catalog = current_database()")
         }
 
-        // non_empty (spec 8.2, non-disableable). Zero tables is the same fault as zero rows.
+        // non_empty (non-disableable). Zero tables is the same fault as zero rows.
         if (tables.isEmpty()) return GateOutcome.Failed(RULE_NON_EMPTY, "candidate contains no tables")
         val rowCounts = LinkedHashMap<String, Long>()
         for (table in tables) {
@@ -78,9 +78,9 @@ internal class VerifyGate(
             rowCounts[table] = count
         }
 
-        // key_unique (spec 8.1): id unique within its own table, one table at a time
-        // (spec 3.3). Both counts come from a single scan - the candidate is attached but
-        // not yet published, so every table pass widens that window.
+        // key_unique: id unique within its own table, one table at a time. Both counts come
+        // from a single scan - the candidate is attached but not yet published, so every
+        // table pass widens that window.
         if (config.keyUnique) {
             for (table in tables) {
                 val (total, distinct) = rule(RULE_KEY_UNIQUE, "counting ids of table $table") {
@@ -92,7 +92,7 @@ internal class VerifyGate(
             }
         }
 
-        // required_non_null (spec 8.1): entries are either `table.column` or a bare column
+        // required_non_null: entries are either `table.column` or a bare column
         // name, in which case the column is checked in every table.
         for (entry in config.requiredNonNull) {
             val tablesToCheck = if ('.' in entry) listOf(entry.substringBefore('.')) else tables
@@ -107,7 +107,7 @@ internal class VerifyGate(
             }
         }
 
-        // row_count_delta (spec 8.3, D14): off by default; compares against the previous
+        // row_count_delta: off by default; compares against the previous
         // generation's counts, table by table, with separate decrease/increase limits.
         val delta = config.rowCountDelta
         if (delta.enabled && previous != null) {
@@ -124,7 +124,7 @@ internal class VerifyGate(
             }
         }
 
-        // Caller extensions (spec 5.2), in list order; a throwing check is a failing check.
+        // Caller extensions, in list order; a throwing check is a failing check.
         for (check in checks) {
             val result = rule(RULE_CALLER_CHECK, "${check.javaClass.name} threw") {
                 check.verify(connection, previous)
@@ -157,7 +157,7 @@ internal class VerifyGate(
     }
 
     private companion object {
-        // Rule label values, verbatim from spec 8.1.
+        // Rule label values, as they appear in `snapshot_verify_failed_total{rule}`.
         const val RULE_READABLE = "readable"
         const val RULE_NON_EMPTY = "non_empty"
         const val RULE_KEY_UNIQUE = "key_unique"

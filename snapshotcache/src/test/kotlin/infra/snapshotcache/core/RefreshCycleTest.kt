@@ -13,12 +13,12 @@ import org.junit.jupiter.api.Test
 import java.time.Duration
 
 /**
- * P4 tests for [RefreshCycle]: the spec 4.1 state machine on the happy path, the pinned
+ * P4 tests for [RefreshCycle]: the refresh state machine on the happy path, the pinned
  * round sequence, admin wiring through [DefaultSnapshotCache], generation lineage
- * (spec 5.1 GenerationInfo), and invariants I1 / I5 (spec 17.2).
+ * (the published GenerationInfo), and invariants I1 / I5.
  *
  * Failure taxonomy rows live in RefreshCycleFailureTest; the verify gate rules in
- * VerifyGateTest. No sleeps anywhere (plan 1.5).
+ * VerifyGateTest. No sleeps anywhere.
  */
 internal class RefreshCycleTest : RefreshCycleTestBase() {
 
@@ -113,7 +113,7 @@ internal class RefreshCycleTest : RefreshCycleTestBase() {
         assertThatThrownBy { cache.gc(group) }.isInstanceOf(IllegalStateException::class.java)
     }
 
-    // ------------------------------------------------------------------ invariants (spec 17.2; P4 owns I1, I5)
+    // ------------------------------------------------------------------ invariants (P4 owns I1, I5)
 
     @Test
     fun I1_currentOnlyEverPointsToAVerifiedGeneration() {
@@ -146,7 +146,7 @@ internal class RefreshCycleTest : RefreshCycleTestBase() {
         runSuccess(c) // returns to a usable state
     }
 
-    // ------------------------------------------------------------------ verify_failed row (spec 9.2) + escalation (spec 8.5)
+    // ------------------------------------------------------------------ verify_failed row + escalation
 
     @Test
     fun verifyFailure_abortsRound_cleansCandidate_nextRunOnceSucceeds() {
@@ -167,7 +167,7 @@ internal class RefreshCycleTest : RefreshCycleTestBase() {
         assertThat(store.tracker.unclosed()).isEmpty()
         assertThat(registry.current()).isNull()
 
-        // Spec 17.8: return to a usable state, not merely an error surfaced.
+        // Return to a usable state, not merely an error surfaced.
         failVerify = false
         assertThat(runSuccess(c)).isEqualTo(2L)
         assertThat(events.escalations).describedAs("one failure, threshold 3").isEmpty()

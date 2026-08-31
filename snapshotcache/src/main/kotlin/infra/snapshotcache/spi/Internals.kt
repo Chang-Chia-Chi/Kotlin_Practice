@@ -5,9 +5,8 @@ import java.sql.Statement
 
 /*
  * Shared internal helpers at the spi boundary. They live here rather than in each file
- * because `core` may depend on `spi` but not the reverse and not on `java.sql` at all
- * (plan 2.2 rule 4), so this is the innermost package both the gate and the DuckDB
- * adapter can reach.
+ * because `core` may depend on `spi` but not the reverse and not on `java.sql` at all,
+ * so this is the innermost package both the gate and the DuckDB adapter can reach.
  */
 
 /**
@@ -39,5 +38,5 @@ internal fun Statement.queryStrings(sql: String): List<String> = query(sql) { rs
     values
 }
 
-/** Failure detail that is never blank, for the spec 8.5 "never just 'it failed'" rule. */
+/** Failure detail that is never blank, so a report never says just "it failed". */
 internal fun Throwable.describe(): String = message ?: toString()

@@ -7,8 +7,8 @@ import com.tngtech.archunit.lang.syntax.ArchRuleDefinition.noClasses
 import org.junit.jupiter.api.Test
 
 /**
- * The boundary rules of plan 2.2 - its original five plus the bootstrap leaf rule its
- * 2026-08-30 amendment added - the two archive-layer rules of plan 3c, and D33's ban on a
+ * The module's package-boundary rules - the original five plus the bootstrap leaf rule the
+ * 2026-08-30 amendment added - the two archive-layer rules, and the ban on a
  * bucket listing. These are the module's static-analysis gate; they run on every build from
  * P0 onward rather than being retrofitted later.
  */
@@ -16,7 +16,7 @@ class ArchitectureTest {
 
     /**
      * Both package trees, not just the framework's. `infra.snapshotarchive` has to be
-     * imported for the plan 3c rules below to see anything at all - a rule whose subject
+     * imported for the archive-layer rules below to see anything at all - a rule whose subject
      * package was never imported passes vacuously, which is worse than no rule because it
      * reads as enforcement.
      */
@@ -70,9 +70,9 @@ class ArchitectureTest {
     }
 
     /**
-     * Plan 3c, first archive rule. D30 puts the archive layer outside the framework
-     * precisely so the framework's five-interface budget and its D10/D22/D24 decisions stay
-     * untouched; a single edge in this direction would undo that silently.
+     * The first archive rule. The archive layer sits outside the framework precisely so the
+     * framework's five-interface budget and the decisions behind it stay untouched; a single
+     * edge in this direction would undo that silently.
      */
     @Test
     fun `the framework does not depend on the archive layer`() {
@@ -83,7 +83,7 @@ class ArchitectureTest {
     }
 
     /**
-     * Plan 3c, second archive rule. The archive layer is a consumer like any other, so it
+     * The second archive rule. The archive layer is a consumer like any other, so it
      * reaches the framework through `api` only. Without this, it could bind itself to
      * internals that carry no compatibility promise - and the DuckDB adapter in particular
      * is pinned to 1.1.3 for a CI constraint the archive layer does not share.
@@ -101,8 +101,7 @@ class ArchitectureTest {
     }
 
     /**
-     * D33's negative space, and the one rule here that guards an absence rather than a
-     * boundary.
+     * The one rule here that guards an absence rather than a boundary.
      *
      * The publish protocol commits a manifest row carrying the complete inventory before the
      * first object is uploaded, which makes an object without a covering row impossible to
@@ -124,7 +123,7 @@ class ArchitectureTest {
     }
 
     /**
-     * Plan 2.2's rule, with the one named exception the 2026-08-30 amendment added.
+     * The core-encapsulation rule, with the one named exception the 2026-08-30 amendment added.
      * `bootstrap` is the composition root: it is the single place the object graph is
      * assembled, and assembling it means naming the `internal` classes that implement the
      * `api` interfaces. Everything else still reaches `core` only through `api` and `spi`.

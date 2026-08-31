@@ -11,13 +11,13 @@ import org.junit.jupiter.api.assertAll
 /**
  * Review finding M3: **which rows a chunk counts.**
  *
- * Spec 5.2 and [RowPipe]'s own KDoc both fix the loop as accumulate up to `chunkSize` rows, apply
- * the transform, write. `pump` applied the transform first, so a chunk filled with `chunkSize`
- * *surviving* rows instead - and a selective transform then stretched one commit across far more
- * source rows than the author asked for. At the documented ratio in the class KDoc of `RowPipe`'s
- * caller, a transform keeping one row in a thousand turns a chunk size of 5000 into a single
- * commit spanning five million source rows: a transient failure four million rows in commits
- * nothing, and the retry re-reads the whole span.
+ * The execution contract and [RowPipe]'s own KDoc both fix the loop as accumulate up to
+ * `chunkSize` rows, apply the transform, write. `pump` applied the transform first, so a chunk
+ * filled with `chunkSize` *surviving* rows instead - and a selective transform then stretched one
+ * commit across far more source rows than the author asked for. At the documented ratio in the
+ * class KDoc of `RowPipe`'s caller, a transform keeping one row in a thousand turns a chunk size
+ * of 5000 into a single commit spanning five million source rows: a transient failure four
+ * million rows in commits nothing, and the retry re-reads the whole span.
  *
  * No test pinned either order, which is why the deviation survived four phases. This one pins it
  * from the source side, where the difference is visible.

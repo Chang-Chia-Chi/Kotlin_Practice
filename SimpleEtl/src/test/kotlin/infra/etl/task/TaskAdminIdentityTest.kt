@@ -11,8 +11,8 @@ import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 
 /**
- * Spec 8.2: "`TaskAdmin.trigger` takes the caller identity as a parameter, for
- * `TaskContext.triggeredBy`, and performs no authorisation of its own."
+ * The admin contract: `TaskAdmin.trigger` takes the caller identity as a parameter, for
+ * `TaskContext.triggeredBy`, and performs no authorisation of its own.
  *
  * ### Why this is a separate file
  *
@@ -23,8 +23,8 @@ import org.junit.jupiter.api.io.TempDir
  *
  * - `TaskOutcome` is frozen as `(runId, outcome, failure)`. No identity.
  * - `TaskEngine.run(definition, trigger)` is frozen with no identity parameter at all, so the
- *   value cannot reach the run through the seam spec 11.2 declares.
- * - `TaskContext.triggeredBy`, which spec 8.2 names as the destination, is spec 11.3 and P8's.
+ *   value cannot reach the run through the declared seam.
+ * - `TaskContext.triggeredBy`, the destination the contract names, does not exist yet - it is P8's.
  * - `TaskStatus`'s shape is explicitly the engineer's to choose.
  *
  * So this file assumes one, in [triggeredBy] and nowhere else, and is kept apart so a different

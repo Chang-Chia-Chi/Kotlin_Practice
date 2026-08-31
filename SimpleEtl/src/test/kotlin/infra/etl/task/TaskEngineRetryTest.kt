@@ -24,13 +24,13 @@ import org.junit.jupiter.params.provider.Arguments
 import org.junit.jupiter.params.provider.MethodSource
 
 /**
- * P5, done-when items 2 and 3: **retry follows spec 5.3** - transient classification, exponential
- * backoff, scratch defaults and the attempt-suffix cleanup from P4 - and **a non-transient
- * failure fails immediately with no retry.**
+ * P5, done-when items 2 and 3: **retry follows the retry contract** - transient classification,
+ * exponential backoff, scratch defaults and the attempt-suffix cleanup from P4 - and **a
+ * non-transient failure fails immediately with no retry.**
  *
  * ### Nothing here sleeps
  *
- * Spec 5.3's backoff doubles from 2s and caps at 30s, so the cap case alone would cost 90
+ * The backoff doubles from 2s and caps at 30s, so the cap case alone would cost 90
  * seconds of real waiting and would still only be asserting a stopwatch. The engine takes an
  * injected sleeper and [TaskHarness.delaysMillis] records what it *asked for*, which is both
  * faster and a stronger assertion: elapsed wall time cannot tell 30s-capped from 32s-doubled,
@@ -39,7 +39,7 @@ import org.junit.jupiter.params.provider.MethodSource
  * ### Classification is asserted in both directions
  *
  * A suite that only proved transient failures retry would pass against an engine that retried
- * everything, which is the failure spec 5.3 names outright: retrying a deterministic failure
+ * everything, which is the failure the contract names outright: retrying a deterministic failure
  * three times turns a ten minute failure into a thirty minute one. So the non-transient half
  * counts attempts and demands exactly one.
  *
@@ -51,7 +51,7 @@ import org.junit.jupiter.params.provider.MethodSource
  * Measured on JDBI 3.45.4 and duckdb_jdbc 1.1.3 (P5 scratchpad probe): a `SQLTransientException`
  * raised by the driver arrives as `org.jdbi.v3.core.result.ResultSetException` with the
  * SQLException as its cause, and one raised while connecting arrives inside a
- * `ConnectionException`. Every JDBC failure reaches Layer 2 wrapped, so spec 5.3's set can only
+ * `ConnectionException`. Every JDBC failure reaches Layer 2 wrapped, so the transient set can only
  * be recognised through the cause chain. These tests inject at the driver, which is where a real
  * transient failure comes from, so they assert that behaviour rather than a convenient one.
  */
@@ -62,7 +62,7 @@ class TaskEngineRetryTest {
 
     companion object {
 
-        /** Spec 5.3's transient set, exactly. */
+        /** The transient set, exactly. */
         @JvmStatic
         fun transientFailures(): List<Arguments> = listOf(
             Arguments.of("SQLTransientException", Supplier<Throwable> { SQLTransientException("probe: transient") }),
@@ -98,9 +98,9 @@ class TaskEngineRetryTest {
      * [DuckFile.attempts] is the attempt count. `CREATE OR REPLACE` because a retry re-runs the
      * statement and must not fail for a second reason.
      *
-     * `idempotent = true` is stated because spec 10 rule 12 requires it of any step retried off
+     * `idempotent = true` is stated because rule 12 requires it of any step retried off
      * `scratch`, and since E10 the engine holds a definition built in code to that rule as the
-     * loader always held a task file (spec 2.1). It is also true of this statement, which is the
+     * loader always held a task file. It is also true of this statement, which is the
      * only reason it may be said: `CREATE OR REPLACE` converges on a rerun.
      */
     private fun oneStatementTask(retries: Int, statement: String = "create or replace table touched as select 1 as ok") =
@@ -219,7 +219,7 @@ class TaskEngineRetryTest {
     }
 
     /**
-     * Spec 5.3: exponential from 2s, doubling, capped at 30s. Six retries is the first count that
+     * Exponential from 2s, doubling, capped at 30s. Six retries is the first count that
      * reaches the cap twice, which is what separates "capped" from "still doubling".
      */
     @Test
@@ -244,7 +244,7 @@ class TaskEngineRetryTest {
     }
 
     /**
-     * Spec 5.3's defaults: 3 for a scratch target. Observed by not stating `retries` at all and
+     * The retry defaults: 3 for a scratch target. Observed by not stating `retries` at all and
      * failing twice - an engine defaulting to 0, or to 1, cannot reach a third attempt.
      *
      * The failure is raised part way through the source result set, which is also what makes the
@@ -278,7 +278,7 @@ class TaskEngineRetryTest {
     /**
      * The other half of the same default: 0 for any other target. A `sql` step on an external
      * datasource with `retries` unstated must not retry even a transient failure, because the
-     * framework cannot make a partially written external target safe on its own (spec 5.3).
+     * framework cannot make a partially written external target safe on its own.
      */
     @Test
     fun aNonScratchTargetDefaultsToNoRetries() {
@@ -313,9 +313,9 @@ class TaskEngineRetryTest {
     }
 
     /**
-     * Spec 5.5 driven by the engine, which is the half P4 could not prove. `DatasetNamerTest`
-     * showed the names are right; this shows the engine chooses the attempt, publishes only after
-     * the attempt succeeded, and leaves the failed attempt alone.
+     * The attempt-suffixed naming driven by the engine, which is the half P4 could not prove.
+     * `DatasetNamerTest` showed the names are right; this shows the engine chooses the attempt,
+     * publishes only after the attempt succeeded, and leaves the failed attempt alone.
      *
      * Three things are asserted and one deliberately is not:
      *
@@ -323,8 +323,8 @@ class TaskEngineRetryTest {
      * - `wip_stg__a1` still exists, because nothing is ever dropped on DuckDB 1.1.3,
      * - the stable view points at `__a2` and not at `__a1`, which is what "unreferenced" means,
      * - **nothing about how many rows `wip_stg__a1` holds.** A failed attempt retains between
-     *   zero and one chunk of rows depending on where the failure landed (spec 12, three measured
-     *   shapes), so an assertion either way would be pinning down something the framework does
+     *   zero and one chunk of rows depending on where the failure landed - three shapes were
+     *   measured - so an assertion either way would be pinning down something the framework does
      *   not control.
      */
     @Test

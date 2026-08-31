@@ -32,9 +32,9 @@ import org.testcontainers.oracle.OracleContainer
  *
  * Rows are generated with `connect by level <= :rows` rather than inserted, so a million-row
  * source costs one statement and no fixture INSERT loop. `lot_id` is CAST to a declared
- * `NUMBER(18)`: an uncast expression reports precision 0, which AUTO DDL rejects at writer open
- * (spec 4.4), and Oracle folds every integer type into NUMBER, so it arrives as DECIMAL and is
- * read with `Row.decimal`, never `Row.long`.
+ * `NUMBER(18)`: an uncast expression reports precision 0, which AUTO DDL rejects at writer open,
+ * and Oracle folds every integer type into NUMBER, so it arrives as DECIMAL and is read with
+ * `Row.decimal`, never `Row.long`.
  */
 @Testcontainers
 @Tag("oracle")
@@ -78,10 +78,10 @@ class RowPipeOracleTest {
     private val jdbi: Jdbi = Jdbi.create(recording)
 
     /**
-     * Done-when item 2. Oracle's default fetch size is 10, which is unusable at this row count
-     * (spec 5.2 step 1), and this is the driver that actually reports what was set - duckdb_jdbc
-     * 1.1.3 accepts `setFetchSize` and keeps reporting 2048, which is why [RowPipeTest] asserts
-     * the request and this asserts the reading.
+     * Done-when item 2. Oracle's default fetch size is 10, which is unusable at this row count,
+     * and this is the driver that actually reports what was set - duckdb_jdbc 1.1.3 accepts
+     * `setFetchSize` and keeps reporting 2048, which is why [RowPipeTest] asserts the request and
+     * this asserts the reading.
      *
      * The default is measured here rather than hard-coded into the assertion alone, so that the
      * test still means something if a future ojdbc changes it: the pipe's fetch size must equal

@@ -21,22 +21,22 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
 /**
- * The only DuckDB-touching code in the framework (plan P7). One generation is one
- * standalone file under [directory] (spec 3.1):
+ * The only DuckDB-touching code in the framework (P7). One generation is one standalone
+ * file under [directory]:
  *
  *     gen_0000000123.db        promoted
  *     gen_0000000124.db.tmp    being built
  *
  * Serving uses one in-memory DuckDB instance owned by this store; [open] ATTACHes the
- * generation file onto it READ_ONLY (D3), consumer connections are duplicates of the
- * serving connection with the generation as their default database, and [close] DETACHes.
- * Reclaim is DETACH + file delete - DuckDB 1.1.3 has no file-shrinking vacuum (spec 14.5,
- * D2), so deleting the file is the only way disk is genuinely returned.
+ * generation file onto it READ_ONLY so a consumer cannot write to it, consumer connections
+ * are duplicates of the serving connection with the generation as their default database,
+ * and [close] DETACHes. Reclaim is DETACH + file delete - DuckDB 1.1.3 has no
+ * file-shrinking vacuum, so deleting the file is the only way disk is genuinely returned.
  *
  * Every connection this store issues is tracked. [close] refuses to DETACH while an issued
  * connection into that generation is still open: DuckDB 1.1.3 does not reliably fail the
  * DETACH itself, and detaching under a live reader would break the A4 defer-to-next-GC
- * safeguard of spec 9.2, so the store enforces the contract that its own bookkeeping can
+ * safeguard, so the store enforces the contract that its own bookkeeping can
  * prove. The core treats the throw as "defer reclamation" either way.
  *
  * Thread-safety follows the SPI contract: calls for one generation are sequenced by the
@@ -123,7 +123,7 @@ class DuckDbGenerationStore(
 
     override fun delete(gen: Long) {
         // Both forms plus their WAL siblings, so P9's startup wipe removes a crashed
-        // build completely (spec 10.1, D10). A promoted, checkpointed file has no WAL.
+        // build completely. A promoted, checkpointed file has no WAL.
         for (path in listOf(finalPath(gen), tmpPath(gen))) {
             Files.deleteIfExists(path)
             Files.deleteIfExists(path.resolveSibling("${path.fileName}.wal"))
@@ -146,7 +146,7 @@ class DuckDbGenerationStore(
     }
 
     /**
-     * File-to-file copy (spec 6.5, A7): the caller's target instance ATTACHes the
+     * File-to-file copy (A7): the caller's target instance ATTACHes the
      * generation file directly and CTASes the subset; no row passes through the
      * application. The target connection's default database is restored afterwards.
      */
@@ -207,8 +207,8 @@ class DuckDbGenerationStore(
         override fun connection(): Connection = write
 
         /**
-         * Folds the WAL via CHECKPOINT, then closes the write connection (spec 4.2
-         * BUILDING). Idempotent and never throws: close runs inside the abort path's
+         * Folds the WAL via CHECKPOINT, then closes the write connection, ending the
+         * build stage. Idempotent and never throws: close runs inside the abort path's
          * `use {}`, and throwing there would mask the exception that aborted the round
          * (P0 progress note). A failed CHECKPOINT is only logged - closing the
          * connection folds the WAL anyway, and the verify gate reopens the file.
@@ -271,7 +271,7 @@ class DuckDbGenerationStore(
     private fun Long.padded(): String = toString().padStart(10, '0')
 
     private companion object {
-        /** spec 3.1 layout: zero-padded final files, `.tmp` while building; both count as on-disk leftovers. */
+        /** The file-name layout: zero-padded final files, `.tmp` while building; both count as leftovers. */
         val FILE_NAME = Regex("gen_(\\d{10})\\.db(\\.tmp)?")
     }
 }

@@ -6,7 +6,7 @@ import java.util.Collections
 
 /**
  * Issues minimal fake [Connection]s and tracks each one's closed state together with its
- * creation stack (spec 17.6 JVM-side leak detector, test profile only). Unclosed
+ * creation stack (the JVM-side leak detector, test profile only). Unclosed
  * connections at test end are reported by [AccountingFixture] with the stack that
  * created them, pinpointing the leaking line.
  */

@@ -6,28 +6,28 @@ import java.nio.file.Path
 import java.sql.Connection
 import java.sql.DriverManager
 
-/** The database file inside the run directory. File mode, never in-memory (spec 7.2). */
+/** The database file inside the run directory. File mode, never in-memory. */
 private const val DB_FILE = "scratch.duckdb"
 
 /**
- * The per-run DuckDB working area of spec 7.2: one instance and one file per task run, created on
+ * The per-run DuckDB working area: one instance and one file per task run, created on
  * first reference and closed and deleted at run end, on success and failure alike.
  *
  * **Lazy.** Construction touches no filesystem. A task shape that never references `scratch`
- * (spec 2.4 shape A) never calls [connection], so no database file exists. Measured on
+ * never calls [connection], so no database file exists. Measured on
  * duckdb_jdbc 1.1.3 (Windows, Java 22, P4 scratchpad probe): the file appears the moment
  * `DriverManager.getConnection` returns, before any statement runs. Opening the connection is
  * therefore the only thing that can be deferred, and deferring it is enough.
  *
  * **Emptied on every path.** Nothing inside the file is ever reclaimed - `TRUNCATE` is an alias
  * for unqualified `DELETE`, `VACUUM` does not trigger deletion vacuuming, `VACUUM FULL` is
- * unimplemented, and `DROP TABLE` does not shrink the file (spec 5.5). Closing the instance and
+ * unimplemented, and `DROP TABLE` does not shrink the file. Closing the instance and
  * deleting the file is the only reclamation point there is, which is why callers reach [close]
  * through `use { }`: success, failure, and a throw from inside the run block all arrive there.
  *
  * [close] removes everything *under* [directory] and leaves the directory itself, because the
  * database file is not the only artefact a run leaves there. Parquet materialisations land beside
- * it (spec 5.6), and DuckDB writes a `<file>.wal` that was measured present mid-run and gone
+ * it, and DuckDB writes a `<file>.wal` that was measured present mid-run and gone
  * after a clean close - the recursive sweep covers the unclean case too. Give this object a
  * directory of its own: for the duration of the run it owns the contents.
  *
@@ -47,9 +47,9 @@ private const val DB_FILE = "scratch.duckdb"
  * @param directory the run's scratch directory. Created if absent, emptied at [close], never
  *   itself deleted.
  * @param memoryLimitMb the DuckDB `memory_limit`, a database-level setting and therefore not
- *   multiplied by the number of connections (spec 7.2).
+ *   multiplied by the number of connections.
  * @param tempDirectory where DuckDB spills. Defaults to a directory inside [directory], where spill
- *   is reclaimed with the run and counted against the one volume whose `sizeLimit` spec 7.2 derives
+ *   is reclaimed with the run and counted against the one volume whose `sizeLimit` is derived
  *   from file plus spill; a caller-supplied one outside [directory] is neither, and is the caller's
  *   to size and clean. Left unset, DuckDB 1.1.3 spills into `<dbfile>.tmp/` anyway -
  *   nothing fails that would otherwise succeed - but a gigabyte of it then sits somewhere nobody
@@ -72,7 +72,7 @@ class ScratchDb(
     private var closed = false
 
     /**
-     * The single write connection of spec 7.2, opening the instance on first call and returning
+     * The single write connection, opening the instance on first call and returning
      * the same connection afterwards. Writes are sequential; a `Connection` used from two threads
      * at once crashes the JVM rather than raising an error, so a concurrent reader takes a
      * [duplicate] instead.
@@ -94,20 +94,20 @@ class ScratchDb(
      * **The whole directory is summed, not the database file**, and that is measured rather than
      * reasoned: after 500,000 appended rows the database file held **12,288 bytes** while
      * `scratch.duckdb.wal` beside it held **10,416,115**. `Files.size(dbFile)` would under-report
-     * a live run by three orders of magnitude. Parquet materialisations (spec 5.6) land in the
+     * a live run by three orders of magnitude. Parquet materialisations land in the
      * same directory and are included for the same reason.
      *
      * **No `CHECKPOINT` is taken first.** Measured during the P8a spike round on the same 500,000
      * row state - the numbers below are that run's, and are the one pair in this KDoc not
      * re-measured in the P8b review: checkpointing folded
      * 10,428,403 bytes into 2,633,728 - a factor of four - so sampling after one would tell an
-     * operator to size spec 7.2's volume at a quarter of what the run actually needed. It is also
+     * operator to size the scratch volume at a quarter of what the run actually needed. It is also
      * a write against a database that is about to be deleted, on the failure path too.
      *
      * **Spill is included only if it is still live**, which at the point this is sampled it
      * usually is not - DuckDB reclaims it as the query that needed it finishes. So this number
-     * does **not** carry spec 7.2's spill term, and spec 7.2's own arithmetic makes spill 17.6 of
-     * its 30.2 GB. Sizing a volume from this alone would size it for the smaller half.
+     * does **not** carry the spill term of the volume-sizing model, whose own arithmetic makes
+     * spill 17.6 of its 30.2 GB. Sizing a volume from this alone covers the smaller half only.
      *
      * **Never throws** - and note that the guards are `runCatching`, which catches `Throwable`, so
      * this also swallows an `Error`. That is deliberate rather than sloppy: the caller is a
@@ -121,7 +121,7 @@ class ScratchDb(
      *
      * Takes no lock. It reads the filesystem rather than this object's state, so there is nothing
      * for a lock to protect. An earlier wording justified this by contention with concurrently
-     * running tasks, which cannot happen: one [ScratchDb] is constructed per run (spec 7.2), so no
+     * running tasks, which cannot happen: one [ScratchDb] is constructed per run, so no
      * other task ever calls into this instance. The only concurrent caller is an intra-run
      * [duplicate] reader, and racing [close] there degrades to a partial sum or 0 - never a throw,
      * which is the property that matters here.
@@ -184,7 +184,7 @@ class ScratchDb(
     }
 
     /**
-     * Spec 7.2 bans the temporary table outright, because `CHECKPOINT` has no effect on one and so
+     * The temporary table is banned outright, because `CHECKPOINT` has no effect on one and so
      * it removes even the theoretical reclamation path. This is where that ban is enforced against
      * SQL no source scan can read: the statements of a `sql` step arrive from a task file at run
      * time, not from a Kotlin literal, and ArchUnit reads bytecode rather than SQL either way. The

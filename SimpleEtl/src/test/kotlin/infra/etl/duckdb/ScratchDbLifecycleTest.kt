@@ -11,8 +11,8 @@ import org.junit.jupiter.api.assertAll
 import org.junit.jupiter.api.io.TempDir
 
 /**
- * P4, done-when items 1 and 2: lazy file creation, and the two settings spec 7.2 requires at
- * open.
+ * P4, done-when items 1 and 2: lazy file creation, and the two settings a scratch database
+ * requires at open - `memory_limit` and `temp_directory`.
  *
  * Everything here runs against a real DuckDB 1.1.3 file-mode database. Nothing is asserted from
  * an internal flag: laziness is read off the filesystem and the settings are read back out of
@@ -84,9 +84,9 @@ class ScratchDbLifecycleTest {
     /**
      * Done-when 2, second half. The configured directory is a sibling of the database file, so
      * this fails against an implementation that leaves `temp_directory` unset: DuckDB 1.1.3 then
-     * reports `<dbfile>.tmp` instead. Spec 7.2 records that an unset value does not make a join
-     * fail - it puts spill somewhere uncounted - which is why the assertion is on the value and
-     * not on a query outcome.
+     * reports `<dbfile>.tmp` instead. An unset value does not make a join fail - it puts spill
+     * somewhere uncounted - which is why the assertion is on the value and not on a query
+     * outcome.
      */
     @Test
     fun tempDirectoryIsAppliedAtOpen_readBackFromCurrentSetting() {
@@ -103,7 +103,7 @@ class ScratchDbLifecycleTest {
     }
 
     /**
-     * Spec 7.2: additional connections come from `duplicate()`, which shares the instance, and
+     * Additional connections come from `duplicate()`, which shares the instance, and
      * `memory_limit` is database level so it is not multiplied per connection. Both halves are
      * asserted - the duplicate sees a table the write connection created, and reports the same
      * two settings - because a `duplicate()` that quietly opened a second instance would satisfy

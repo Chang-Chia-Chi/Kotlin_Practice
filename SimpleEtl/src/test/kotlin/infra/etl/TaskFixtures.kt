@@ -52,18 +52,18 @@ import org.jdbi.v3.core.Jdbi
  *
  * **This file is the phase's reconciliation seam.** The engineer built `TaskEngine`,
  * `TaskDefinition`, the `Step` subtypes and `VariableScope` in parallel with these tests, and
- * neither side saw the other. Every place where the production shape is not frozen by spec 11.2
- * is funnelled through a builder here and marked `INTEGRATE:`. No test names a production
+ * neither side saw the other. Every place where the production shape is not frozen by the public
+ * surface is funnelled through a builder here and marked `INTEGRATE:`. No test names a production
  * constructor, so a shape that came out differently is a one-line fix in this file rather than a
  * rewrite of six test classes.
  *
  * Nothing here INSERTs into DuckDB (non-negotiable rule 1), DELETEs, TRUNCATEs or DROPs a
- * dataset (spec 5.5), or creates a temporary table (spec 7.2). Datasets are built with
+ * dataset, or creates a temporary table. Datasets are built with
  * `CREATE TABLE AS SELECT ... FROM range(n)`.
  *
  * ### How a run is observed
  *
- * Scratch is deleted at run end (spec 7.2), so nothing inside it can be inspected afterwards -
+ * Scratch is deleted at run end, so nothing inside it can be inspected afterwards -
  * and because `ScratchDb.close()` empties the directory whether or not opening it was justified,
  * an after-the-fact "no scratch file exists" assertion cannot tell a lazy engine from one that
  * opened scratch speculatively. Both observations therefore happen *during* the run, through
@@ -73,7 +73,7 @@ import org.jdbi.v3.core.Jdbi
  *   DuckDB file and copies the stable views, the catalog and the view definitions into it with
  *   `CREATE TABLE AS SELECT`. Measured on duckdb_jdbc 1.1.3: attach, cross-catalog CTAS and
  *   detach all work, and the file is readable from a fresh connection afterwards. This is the
- *   shape spec 5.4 already uses for a publish step - author SQL with side effects.
+ *   shape a publish step already uses - author SQL with side effects.
  * - [globCount] is an ordinary `sql` step on an *external* datasource that records how many
  *   files exist under a directory at the moment it runs. Measured: DuckDB's `glob` over a
  *   missing directory returns no rows rather than failing.
@@ -86,7 +86,7 @@ object Etl {
     /** Matches P4's choice: far enough from DuckDB's default that a readback is unambiguous. */
     const val MEMORY_LIMIT_MB = 512
 
-    /** The reserved datasource name of spec 7.1. */
+    /** The reserved datasource name: no configured datasource may claim it. */
     const val SCRATCH = "scratch"
 
     // -------------------------------------------------------------------------------------
@@ -112,19 +112,19 @@ object Etl {
 
     fun phase(name: String, vararg steps: Step): Phase = Phase(name = name, steps = steps.toList())
 
-    /** [value] is `Any?` so that the rejection of a null literal is expressible (spec 1.3, 6.1). */
+    /** [value] is `Any?` so that the rejection of a null literal is expressible. */
     fun literal(name: String, value: Any?): LiteralVar = LiteralVar(name = name, value = value)
 
     /**
-     * A `pipe` step whose target is a statement rather than a table (spec 4.4). Only the rejection
+     * A `pipe` step whose target is a statement rather than a table. Only the rejection
      * of the `scratch` case is reachable here: the happy path writes through `JdbcStatementWriter`,
      * which INSERTs, and the only non-DuckDB driver in the module is Oracle.
      *
      * [retries] is passed through as it arrives, null included - and that is the whole of E10's
      * `Step.retries: Int?` as a test builder sees it. Every builder below used to fork on `retries
      * == null` and call the constructor twice, because "do not mention retries" was the only way to
-     * reach a Kotlin default that could not be null; now not stating one *is* the value, and spec
-     * 5.3's datasource-dependent default is `TaskRules`'s to apply.
+     * reach a Kotlin default that could not be null; now not stating one *is* the value, and the
+     * datasource-dependent default is `TaskRules`'s to apply.
      */
     fun pipeToStatement(
         name: String,
@@ -140,7 +140,7 @@ object Etl {
         retries = retries,
     )
 
-    /** A `pipe` step (spec 3.2), always into scratch. */
+    /** A `pipe` step, always into scratch. */
     fun pipe(
         name: String,
         sourceDatasource: String,
@@ -161,7 +161,7 @@ object Etl {
         retries = retries,
     )
 
-    /** A `materialize` step (spec 3.3). */
+    /** A `materialize` step: one query, one named dataset in scratch. */
     fun materialize(
         name: String,
         datasource: String = SCRATCH,
@@ -174,9 +174,9 @@ object Etl {
     )
 
     /**
-     * A `sql` step (spec 3.4). Side effects only, no dataset output.
+     * A `sql` step. Side effects only, no dataset output.
      *
-     * [idempotent] is the author's assertion of spec 10 rule 12, which a step off `scratch` needs
+     * [idempotent] is the author's assertion of validation rule 12, which a step off `scratch` needs
      * before it may state any retries at all. It became reachable from here in E10: until then rule
      * 12 was enforced on the loader path only, so a definition built in code could ask for retries
      * on an external datasource without ever saying a rerun converges.
@@ -195,7 +195,7 @@ object Etl {
         idempotent = idempotent,
     )
 
-    /** An `export` step (spec 3.5). Each pair is a variable name and the query that produces it. */
+    /** An `export` step. Each pair is a variable name and the query that produces it. */
     fun export(name: String, datasource: String, vararg vars: Pair<String, String>, retries: Int? = null): ExportStep =
         ExportStep(
             name = name,
@@ -205,7 +205,7 @@ object Etl {
         )
 
     /**
-     * A `cacheCopy` step (spec 7.3). [retries] null resolves to 0 on both paths since E10 - the
+     * A `cacheCopy` step. [retries] null resolves to 0 on both paths since E10 - the
      * model no longer declares the 3 every other scratch-targeted step used to inherit, which is
      * what retired rule 20's asymmetry. A test that needs retries in play states them.
      */
@@ -213,19 +213,19 @@ object Etl {
         CacheCopyStep(name = name, cache = cache, sql = sql, output = output, retries = retries)
 
     // -------------------------------------------------------------------------------------
-    // P8a additions (spec 9.2, 9.4). Additive only: every builder above keeps its name, its
+    // P8a additions. Additive only: every builder above keeps its name, its
     // signature, its defaults and its behaviour. These three are `copy` calls rather than new
     // parameters on [task] precisely so that they can be, and because the three fields they set
     // are carried by P5's model and acted on for the first time by P8a - so a P5 test that never
     // mentions them still means what it meant.
     // -------------------------------------------------------------------------------------
 
-    /** Spec 9.2's per-task switch: `false` suppresses every listener call for that run. */
+    /** The per-task listener switch: `false` suppresses every listener call for that run. */
     fun withLogging(definition: TaskDefinition, logging: Boolean): TaskDefinition =
         definition.copy(logging = logging)
 
     /**
-     * Spec 9.4's two hook names. A null name means *the task names no hook*, which is a different
+     * The task's two hook names. A null name means *the task names no hook*, which is a different
      * thing from a name that is not in the registry - and telling those two apart is the whole of
      * contract 2.3's resolution rule.
      */
@@ -236,7 +236,7 @@ object Etl {
     ): TaskDefinition = definition.copy(onSuccess = onSuccess, onFailure = onFailure)
 
     /**
-     * The per-task DuckDB `memory_limit` (spec 7.2). Its only use here is 0, which `ScratchDb`'s
+     * The per-task DuckDB `memory_limit`. Its only use here is 0, which `ScratchDb`'s
      * own `init` refuses - the one way a test can kill a run *before* scratch exists and still ask
      * what the listener saw.
      */
@@ -251,7 +251,7 @@ object Etl {
      * A `sql` step on `scratch` that copies what scratch holds *right now* into [probeFile],
      * which the test reads once the run has returned and the scratch file is gone.
      *
-     * [relations] are copied by name, so passing `wip_stg` reads the stable view of spec 5.5 and
+     * [relations] are copied by name, so passing `wip_stg` reads the stable view and
      * therefore sees whichever attempt was published. Two catalogs come along unasked:
      * `probe_tables` names every physical relation scratch holds, which is where a failed
      * attempt's `wip_stg__a1` shows up, and `probe_views` carries each stable view's definition,
@@ -322,7 +322,7 @@ object Etl {
  * The engine under test plus the world it runs in: named datasources, a scratch root, and the
  * recorded backoff.
  *
- * **The delay seam.** Spec 5.3's backoff doubles from 2s to a 30s cap, so a retry test that
+ * **The delay seam.** The retry backoff doubles from 2s to a 30s cap, so a retry test that
  * actually waited would take a minute per case and be timing-flaky besides. The engine takes an
  * injected sleeper, and [delaysMillis] records what it asked for - which is the assertion this
  * phase calls for: the *requested* delays, never elapsed wall time. Nothing in this suite sleeps.
@@ -343,8 +343,8 @@ object Etl {
  * the shape the paired `logging: true` / `logging: false` assertion needs.
  *
  * [hooks] is one registry, created eagerly and mutated in place, so the instance the engine
- * resolves names in is the same instance whose `.names` a test hands to `TaskFileLoader`. Spec
- * 9.4's startup validation only means something when both sides read the same registry.
+ * resolves names in is the same instance whose `.names` a test hands to `TaskFileLoader`. The
+ * startup validation of hook names only means something when both sides read the same registry.
  */
 class TaskHarness(private val root: Path) : AutoCloseable {
 
@@ -365,7 +365,7 @@ class TaskHarness(private val root: Path) : AutoCloseable {
     val hooks: TaskHooks = TaskHooks()
 
     /**
-     * P8b. Spec 9.3's metrics seam, read at every call site through a [ForwardingMetrics] for the
+     * P8b. The metrics seam, read at every call site through a [ForwardingMetrics] for the
      * same `by lazy` reason [listener] is.
      *
      * **The default is [TaskMetrics.NONE] and must stay that way.** Every P8a ordering test
@@ -380,13 +380,13 @@ class TaskHarness(private val root: Path) : AutoCloseable {
     private val files = ArrayList<DuckFile>()
 
     /**
-     * P9. Spec 7.3's `cache:` names, resolved to the `(SnapshotCache, GroupId)` pair of contract
+     * P9. A task file's `cache:` names, resolved to the `(SnapshotCache, GroupId)` pair of contract
      * 1.2. Mutated in place and handed to the engine below, so a binding registered after the
      * harness's first run still arrives - the same reason [hooks] is one eagerly created registry.
      */
     private val caches = LinkedHashMap<String, CacheBinding>()
 
-    // INTEGRATE: spec 11.2 freezes only `run`, so TaskEngine's constructor is the engineer's.
+    // INTEGRATE: only `run` is frozen, so TaskEngine's constructor is the engineer's.
     private val engine: TaskEngine by lazy {
         TaskEngine(
             datasources = datasources,
@@ -416,7 +416,7 @@ class TaskHarness(private val root: Path) : AutoCloseable {
         engine.run(definition, trigger)
 
     /**
-     * P8a. A run carrying the caller identity of spec 8.2, which the two-argument [run] leaves
+     * P8a. A run carrying an API trigger's caller identity, which the two-argument [run] leaves
      * null. Separate rather than a defaulted parameter on [run], because [run] belongs to P5 and
      * its signature may not change.
      */
@@ -433,9 +433,9 @@ class TaskHarness(private val root: Path) : AutoCloseable {
     }
 
     /**
-     * A DuckDB file registered as an ordinary, non-scratch datasource: the "external" target of
-     * spec 5.4 whose writes must survive a later phase's failure. The harness owns the file, so a
-     * test can read it after the run.
+     * A DuckDB file registered as an ordinary, non-scratch datasource: an "external" target whose
+     * writes must survive a later phase's failure. The harness owns the file, so a test can read
+     * it after the run.
      */
     fun datasource(name: String): DuckFile =
         DuckFile(root.resolve("$name.duckdb")).also {
@@ -478,7 +478,7 @@ class TaskHarness(private val root: Path) : AutoCloseable {
  * One DuckDB file behind a JDBI [ConnectionFactory], with optional failure injection.
  *
  * Every handle JDBI opens gets a `duplicate()` of one connection rather than its own instance,
- * which is how spec 7.2 says extra DuckDB connections are obtained. [connection] is the primary
+ * which is how extra DuckDB connections have to be obtained. [connection] is the primary
  * and is never handed to JDBI, so a test can read the file outside a run without racing a step.
  *
  * ### Failure injection
@@ -487,7 +487,7 @@ class TaskHarness(private val root: Path) : AutoCloseable {
  * [failAfterRows] decides whether it is raised at execution or part way through the result set.
  * Mid-stream is the shape the attempt-suffix item needs: the target writer has already opened and
  * created `wip_stg__a1` by the time the source throws, so the failed attempt leaves a table
- * behind exactly as spec 5.5 describes. Failing at execution would leave no table at all, and the
+ * behind under its attempt suffix. Failing at execution would leave no table at all, and the
  * test would be asserting something the engine never had the chance to do.
  *
  * ### Counting attempts
@@ -505,7 +505,7 @@ class TaskHarness(private val root: Path) : AutoCloseable {
  * Measured on JDBI 3.45.4 and duckdb_jdbc 1.1.3: an exception thrown from `ResultSet.next()`
  * reaches the caller as `org.jdbi.v3.core.result.ResultSetException` **with the SQLException as
  * its cause**, and one raised while connecting arrives wrapped in `ConnectionException` the same
- * way. Spec 5.3's classification therefore only ever meets a transient exception through a cause
+ * way. The retry classification therefore only ever meets a transient exception through a cause
  * chain; a classifier that looked only at the exception it caught would retry nothing at all.
  */
 class DuckFile(val file: Path) : ConnectionFactory, AutoCloseable {
@@ -538,7 +538,7 @@ class DuckFile(val file: Path) : ConnectionFactory, AutoCloseable {
      * A source table of [rows] rows, with [marker] woven into `lot_code` so that "the view
      * resolves to attempt 2" is answered by the data and not by a row count two attempts share.
      * DuckDB reports every column nullable, so an AUTO target creates all of them as
-     * null-accepting types (spec 4.6) and no column needs a CAST.
+     * null-accepting types and no column needs a CAST.
      */
     fun createSourceTable(table: String, rows: Int, marker: String = "m") = exec(
         """

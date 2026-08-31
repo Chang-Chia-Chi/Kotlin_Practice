@@ -19,7 +19,7 @@ import org.junit.jupiter.api.assertAll
 import org.junit.jupiter.api.io.TempDir
 
 /**
- * Spec 8.3: the `CoroutineName` `TaskRunner` hands into the run body is the task name, and each
+ * The `CoroutineName` `TaskRunner` hands into the run body is the task name, and each
  * task is confined to its own serialised view rather than to a bare `Dispatchers.IO`.
  *
  * ### Why the name is asserted from the context and from nowhere else
@@ -27,10 +27,10 @@ import org.junit.jupiter.api.io.TempDir
  * Three measured facts, each closing a route that looks obvious until it is run:
  *
  * 1. **Not readable from inside the run.** The engine is ordinary blocking code with no suspending
- *    frame, so `coroutineContext` is unreachable from it; spec 8.3 records a probe reading null.
+ *    frame, so `coroutineContext` is unreachable from it; a probe was measured reading null.
  * 2. **Must not be read from the thread name.** The `@wip-summary#1` tag exists only under `-ea` -
  *    measured, `DefaultDispatcher-worker-1 @wip-summary#1` with assertions on and
- *    `DefaultDispatcher-worker-2` with them off (spec 8.3). Surefire sets `-ea`; production does
+ *    `DefaultDispatcher-worker-2` with them off. Surefire sets `-ea`; production does
  *    not. Asserting it that way would take the test's discriminating power from a JVM flag, which
  *    is P4's Windows-file-lock finding in a new costume.
  * 3. **Not readable from underneath the limited view.** Read in kotlinx-coroutines-core-jvm
@@ -70,9 +70,9 @@ class TaskRunnerCoroutineNameTest {
     }
 
     /**
-     * Spec 8.3 rejects a bare `Dispatchers.IO` by name - it does not serialise per task, so two
+     * A bare `Dispatchers.IO` is rejected by name - it does not serialise per task, so two
      * firings of one task could overlap. A *shared* limited view would fail in the other
-     * direction, serialising every task against every other and breaking spec 8.4.
+     * direction, serialising every task against every other so that no two could run at once.
      */
     @Test
     fun eachTaskIsConfinedToItsOwnViewAndNotToTheBareIoDispatcher() {
@@ -123,7 +123,7 @@ class TaskRunnerCoroutineNameTest {
                 }
             },
             // "not Dispatchers.IO" and "not the same object" are both satisfied by a per-task
-            // newSingleThreadContext, which spec 8.3 rejects by name for keeping an idle thread alive
+            // newSingleThreadContext, which is rejected by name for keeping an idle thread alive
             // per task. The pool's thread-name *prefix* is what separates them, and unlike the
             // `@taskName#1` suffix it does not depend on `-ea`.
             {

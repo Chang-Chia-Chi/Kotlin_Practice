@@ -14,7 +14,7 @@ import org.junit.jupiter.api.io.TempDir
 
 /**
  * P5, done-when item 4: **variables resolve in step order; a variable used before its export is
- * an error; an export returning two rows is an error.** Spec 6.
+ * an error; an export returning two rows is an error.**
  *
  * Variable values are not on `TaskOutcome`, so every assertion here reads what a *later step*
  * did with the value: a `sql` step on an external datasource writes the binding into a table the
@@ -22,11 +22,11 @@ import org.junit.jupiter.api.io.TempDir
  * usefully, asserts the thing that matters - not that the scope holds a value, but that the value
  * reached the SQL of a step in a later phase.
  *
- * The two error cases assert `FAILED` rather than a message, because spec 6 fixes the rule and
- * not the wording. Both are cases an implementation could plausibly get wrong by *succeeding* -
- * binding an unset name as null, or silently taking the first of two rows - so the outcome
- * assertion is the discriminating one and the message check only confirms the diagnostic names
- * something the author can act on.
+ * The two error cases assert `FAILED` rather than a message, because the contract fixes the rule
+ * and not the wording. Both are cases an implementation could plausibly get wrong by
+ * *succeeding* - binding an unset name as null, or silently taking the first of two rows - so the
+ * outcome assertion is the discriminating one and the message check only confirms the diagnostic
+ * names something the author can act on.
  */
 class TaskEngineVariableTest {
 
@@ -34,8 +34,8 @@ class TaskEngineVariableTest {
     lateinit var root: Path
 
     /**
-     * All three sources of spec 6.1 at once - built-in, literal, exported - crossing a phase
-     * boundary, which is spec 6.2's "task scope, evaluated in step order".
+     * All three sources of a variable at once - built-in, literal, exported - crossing a phase
+     * boundary: the scope is the task, and evaluation is in step order.
      *
      * `runId` is cross-checked against `TaskOutcome.runId`: the built-in a task binds and the
      * identifier the caller is handed must be the same string, or log correlation is a fiction.
@@ -92,7 +92,7 @@ class TaskEngineVariableTest {
     }
 
     /**
-     * Spec 6.2: evaluation is in step order, so a name exported later is not available earlier.
+     * Evaluation is in step order, so a name exported later is not available earlier.
      *
      * The wrong behaviour here is not a crash, it is a *success*: an engine that bound an unknown
      * name as null would write a null row and report SUCCEEDED, and the task would silently
@@ -138,7 +138,7 @@ class TaskEngineVariableTest {
     }
 
     /**
-     * Spec 6.3: an `export` query returns exactly one row and one column; more than one row is an
+     * An `export` query returns exactly one row and one column; more than one row is an
      * error.
      *
      * The failure mode this guards is again a success - taking the first row and carrying on -
@@ -183,9 +183,9 @@ class TaskEngineVariableTest {
     }
 
     /**
-     * The other half of spec 6.3, and the reason the two-row case cannot simply be "any row count
-     * other than one is an error": **zero rows yields null.** A watermark table that is empty on
-     * the first ever run is the case this exists for.
+     * The other half of the export rule, and the reason the two-row case cannot simply be "any row
+     * count other than one is an error": **zero rows yields null.** A watermark table that is empty
+     * on the first ever run is the case this exists for.
      *
      * Measured on duckdb_jdbc 1.1.3: a null bound through `setObject` reaches a
      * `CREATE TABLE AS SELECT ?` as a real SQL NULL, so the readback below distinguishes null
@@ -202,7 +202,7 @@ class TaskEngineVariableTest {
                 Etl.phase(
                     "extract",
                     // Not an aggregate: `select max(x) from <empty>` returns one row holding
-                    // null, which is a different case from the zero rows spec 6.3 names.
+                    // null, which is a different case from an export returning zero rows.
                     Etl.export("read-watermark", "report_oracle", "lastTs" to "select processed_ts from watermark"),
                 ),
                 Etl.phase(
@@ -219,7 +219,7 @@ class TaskEngineVariableTest {
         }
     }
 
-    /** Spec 6.2: a variable may not be redefined once set. */
+    /** A variable may not be redefined once set. */
     @Test
     fun aVariableMayNotBeRedefinedOnceSet() {
         TaskHarness(root).use { harness ->
@@ -249,7 +249,7 @@ class TaskEngineVariableTest {
     }
 
     /**
-     * Spec 1.3 and 6.1: a literal `vars` entry may not be null.
+     * A literal `vars` entry may not be null.
      *
      * A null carries no type, and the framework never guesses one. An exported null is different -
      * it takes the canonical type of the column its export query selected - but a literal written
@@ -296,8 +296,8 @@ class TaskEngineVariableTest {
     }
 
     /**
-     * The remedy for a task variable a `target.sql` statement needs, now that spec 6.3 binds Row
-     * keys only there: project the variable into the source select list, where
+     * The remedy for a task variable a `target.sql` statement needs, now that only Row keys bind
+     * there: project the variable into the source select list, where
      * `JdbcSource.parameters` binds it and it arrives at the target as an ordinary, lower-cased
      * Row key.
      *
@@ -359,7 +359,7 @@ class TaskEngineVariableTest {
                 "wip-watermark",
                 Etl.phase(
                     "extract",
-                    // Zero rows, so `lastTs` is defined and null (spec 6.3), typed from the
+                    // Zero rows, so `lastTs` is defined and null, typed from the
                     // export query's own column rather than bound as an untyped null.
                     Etl.export("read-watermark", "oracle_mes", "lastTs" to "select lot_code from wip where 1 = 0"),
                     Etl.pipe(
@@ -398,7 +398,7 @@ class TaskEngineVariableTest {
     }
 
     /**
-     * Spec 6.3: variables bind into a `pipe` step's source SQL too, not only into statements.
+     * Variables bind into a `pipe` step's source SQL too, not only into statements.
      * That is the binding the framework exists for - `where upd_ts > :lastTs` is the whole point
      * of an `export` step - and it is a different code path from a `sql` step's statements.
      */

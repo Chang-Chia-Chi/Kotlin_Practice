@@ -25,7 +25,7 @@ import java.util.concurrent.atomic.AtomicLong
 import kotlin.random.Random
 
 /**
- * P14 acceptance: the spec 18.4 ETL protocol.
+ * P14 acceptance: the ETL diff protocol.
  *
  * Real Oracle for the manifest, because the watermark predicate and the purged-baseline
  * fallback are the DAO's SQL and ticket 04's purge, not a mock's opinion of them. Real DuckDB
@@ -220,7 +220,7 @@ class EtlDiffTest {
     // --- the watermark ------------------------------------------------------------------
 
     /**
-     * D35's predicate, at its boundaries: equal `data_as_of` counts, later does not, and a
+     * The watermark predicate, at its boundaries: equal `data_as_of` counts, later does not, and a
      * group with nothing COMPLETE at or before the snapshot's moment yields null - which the
      * next run reads back as [FallbackReason.ABSENT] and full-compares.
      */
@@ -243,8 +243,8 @@ class EtlDiffTest {
      * A checkpoint lands while this run is still working. It describes state the run never
      * read, so adopting it would silently drop everything that changed in the gap on the next
      * run. The predicate is evaluated against the leased snapshot's moment, so it cannot be
-     * selected however late the ETL asks - and asking late is exactly what spec 18.4 step 4
-     * says it does, at commit time.
+     * selected however late the ETL asks - and asking late is exactly what an ETL does, when it
+     * records the watermark at commit time.
      */
     @Test
     fun `a checkpoint published mid-run is never selected as the new watermark`() {
@@ -264,9 +264,9 @@ class EtlDiffTest {
     }
 
     /**
-     * D24/D35: the helper computes the watermark and hands it back, and the ETL commits it
-     * with its own output. A watermark this layer wrote would be one that could outlive a
-     * rolled-back run, so the manifest has to come out of a diff exactly as it went in.
+     * The watermark is consumer state: the helper computes it and hands it back, and the ETL
+     * commits it with its own output. A watermark this layer wrote would be one that could
+     * outlive a rolled-back run, so the manifest has to come out of a diff exactly as it went in.
      */
     @Test
     fun `the helper returns the computed watermark and writes nothing itself`() {
@@ -292,7 +292,7 @@ class EtlDiffTest {
      * The model is what the consumer's target holds: everything it applied on its last run.
      * After every diff the assertion is that every key whose live value differs from that
      * target was reported - never a subset. What the run additionally reports is counted, not
-     * failed: an older baseline over-reports by design (D25, D32), and a run that reported
+     * failed: an older baseline over-reports by design, and a run that reported
      * nothing extra across twelve rounds would mean the baseline was tracking the live
      * snapshot rather than the recorded watermark.
      *
@@ -358,7 +358,7 @@ class EtlDiffTest {
      * nothing to say, and the consumer's target keeps 200. Recovering needs a checkpoint
      * taken while the value was 200, which the archive cadence does not promise.
      *
-     * Recorded as an open item in spec 18.6; see the ticket-05 progress entry.
+     * Recorded as a known open item in the spec; see the ticket-05 progress entry.
      */
     @Test
     fun `a value that returns to its baseline inside one archive interval is not reported`() {

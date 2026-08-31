@@ -18,7 +18,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  *
  * Every await is a throwing proceed-check with a 10-second bound: a broken interleaving
  * fails loudly in whichever thread is stuck instead of hanging the suite. The bounds are
- * bounds on broken implementations, never sequencing (spec 17.4 - zero sleeps).
+ * bounds on broken implementations, never sequencing - the suite sleeps nowhere.
  */
 internal class HookDriver : HookRunner {
 

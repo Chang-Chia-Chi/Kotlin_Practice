@@ -67,11 +67,17 @@ Every request to change these frameworks - human or agent - is judged against on
 A finding that merely restates a tier-2 decision's known cost is not an appeal and is declined by
 citation. The maintainer holds the tier-2 pen; agents adjudicate but do not overturn.
 
-**Citations are for maintainers, never for runtime output.** Log lines, exceptions and HTTP
-responses state their reason in their own words - "(spec 10.1)" tells an operator nothing. Spec
-and plan citations live in KDoc, comments and the docs, where the next maintainer reads. The one
-exception: validation error messages' rule numbers ("rule 12") are the validation contract's own
-public numbering, searchable by task authors and pinned by earlier phases' tests - they stay.
+**Citations live in the documents alone.** Spec and plan section numbers belong in
+`docs/**`, and nowhere else. Log lines, exceptions and HTTP responses state their reason in
+their own words, because "(spec 10.1)" tells an operator nothing - and so do comments and
+KDoc, because a reader who has to open the spec to learn why a line exists has been handed a
+pointer instead of a reason. Write the reason. A comment must read as a complete thought with
+no document open. Two things that look like citations but are not: phase and finding names
+(P7, E10, M3, H2) point at `progress.md` history, and invariant names (I3, I7) are the
+invariants' own identifiers - both stay. The one real exception: validation error messages'
+rule numbers ("rule 12") are the validation contract's own public numbering, searchable by
+task authors and pinned by earlier phases' tests - they stay, in the messages and in the
+comments that explain them.
 
 ### Stop and report
 

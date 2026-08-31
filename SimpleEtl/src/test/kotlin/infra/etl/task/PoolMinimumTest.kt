@@ -12,9 +12,9 @@ import org.junit.jupiter.api.assertAll
  *
  * Two runs that each hold one such connection and wait for a second are in a circular wait, and
  * no acquisition order can break it because both come from one pool. Undersized, both runs hang
- * with `busy = true` and every later firing of either task is skipped as AlreadyRunning. Spec 7.1
- * now states the minimum; this is the arithmetic behind the number logged at every startup and
- * reload.
+ * with `busy = true` and every later firing of either task is skipped as AlreadyRunning. The
+ * required pool minimum is two connections per such task; this is the arithmetic behind the
+ * number logged at every startup and reload.
  *
  * The configured pool size is deliberately not read. `Jdbi` exposes neither its `ConnectionFactory`
  * nor its `DataSource` - verified against jdbi3-core 3.45.4 - so the only way to it is reflection
@@ -51,7 +51,7 @@ class PoolMinimumTest {
     /**
      * Scratch is excluded even though its source and target names match, because it is not a pool
      * at all: a scratch read takes a `ScratchDb.duplicate()` and a scratch write the single write
-     * connection (spec 7.2). Counting it would report a requirement against a datasource no
+     * connection. Counting it would report a requirement against a datasource no
      * operator can size.
      */
     @Test
@@ -62,9 +62,9 @@ class PoolMinimumTest {
     }
 
     /**
-     * The multiplier is tasks, not steps. `TaskRunner` admits one run per task at a time (spec
-     * 8.4), so a task's two same-datasource pipes cannot overlap and must not double the
-     * requirement - while two *tasks* genuinely can, and do.
+     * The multiplier is tasks, not steps. `TaskRunner` admits one run per task at a time, so a
+     * task's two same-datasource pipes cannot overlap and must not double the requirement -
+     * while two *tasks* genuinely can, and do.
      */
     @Test
     fun `a task counts once per datasource however many such steps it has`() {

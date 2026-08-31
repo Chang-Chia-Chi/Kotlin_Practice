@@ -5,18 +5,18 @@ import infra.etl.pipe.ColumnMeta
 import infra.etl.pipe.RowTransform
 
 /**
- * The one reserved datasource name (spec 7.1): the per-run DuckDB working file, not a configured
- * Jdbi bean. It is also what decides three defaults, because "is this step writing into scratch"
- * is the same question in all three cases: `createTable` (spec 4.4), `retries` (spec 5.3), and
- * whether a dataset gets the attempt-suffixed name and stable view of spec 5.5.
+ * The one reserved datasource name: the per-run DuckDB working file, not a configured Jdbi bean.
+ * It is also what decides three defaults, because "is this step writing into scratch" is the same
+ * question in all three cases: `createTable`, `retries`, and whether a dataset gets the
+ * attempt-suffixed name and the stable view published over it.
  */
 const val SCRATCH = "scratch"
 
 /**
- * Spec 5.3's `retries` default: 3 for a step writing into scratch, 0 for anywhere else.
+ * The `retries` default: 3 for a step writing into scratch, 0 for anywhere else.
  *
- * Scratch may be retried freely because spec 5.5 gives each attempt its own suffixed dataset name,
- * so a failed attempt's rows are unreferenced rather than mixed into the next one's. An external
+ * Scratch may be retried freely because each attempt gets its own suffixed dataset name, so a
+ * failed attempt's rows are unreferenced rather than mixed into the next one's. An external
  * datasource has no such protection, so the default is not to retry and rule 12 makes an author who
  * wants one say that a rerun converges.
  *
@@ -26,15 +26,15 @@ const val SCRATCH = "scratch"
  * YAML-built definition differ from a code-built one for identical input (review finding M10).
  *
  * Since E10 a step that states no `retries` carries null, and `TaskRules.retries` is what turns
- * that into a number on the run path (spec 5.3, 10). **`CacheCopyStep` still does not use this**:
- * it resolves to 0, because no failure a cache copy can produce is transient under spec 5.3 and
- * rule 20 rejects a stated non-zero value. Both paths now agree on that 0, which is what retired
- * the model-versus-YAML asymmetry rule 20 used to record.
+ * that into a number on the run path. **`CacheCopyStep` still does not use this**: it resolves to
+ * 0, because no failure a cache copy can produce is classified as transient and rule 20 rejects a
+ * stated non-zero value. Both paths now agree on that 0, which is what retired the
+ * model-versus-YAML asymmetry rule 20 used to record.
  */
 fun defaultRetries(datasource: String): Int = if (datasource == SCRATCH) 3 else 0
 
 /**
- * Spec 4.4's `createTable` default: AUTO for a scratch target, REQUIRED for anywhere else.
+ * The `createTable` default: AUTO for a scratch target, REQUIRED for anywhere else.
  *
  * AUTO generates DuckDB DDL from source metadata, which is only meaningful where the target is
  * DuckDB; off scratch the author owns the table and the framework requires it to exist. Shared for
@@ -45,19 +45,20 @@ fun defaultCreateTable(datasource: String): CreateTable =
 
 /**
  * The built-in that changes between attempts of the same step, so it never lives in a
- * [VariableScope]: the engine supplies its value per attempt (spec 6.1).
+ * [VariableScope]: the engine supplies its value per attempt.
  */
 const val ATTEMPT_VARIABLE = "attempt"
 
 /**
- * The four built-in variables of spec 6.1. Always defined, never redefinable.
+ * The four built-in task variables. Always defined, never redefinable.
  *
  * One declaration, because there were two: validation rule 7 seeded its resolvable-name set from a
  * private copy in `TaskFileLoader` while the engine defined the same names imperatively and kept
  * `attempt` in a private constant of its own (review finding M11). Drift in either direction was
  * silent and asymmetric - a built-in added to the engine alone makes rule 7 reject valid files at
  * boot, and one added to the rule alone boots clean and then dies mid-run on "no built-in ... has
- * defined", which is exactly the mid-run failure spec 10 exists to convert into a boot failure.
+ * defined", which is exactly the mid-run failure startup validation exists to convert into a boot
+ * failure.
  *
  * [defineRunBuiltIns] holds the values, next to the names, and checks the two agree.
  */
@@ -84,11 +85,11 @@ internal fun VariableScope.defineRunBuiltIns(runId: String, taskName: String, tr
 }
 
 /**
- * One ETL task (spec 3.1). YAML is one source of these and not the only one, so every field is
- * constructible in code and P6's loader is just another caller (spec 2.1).
+ * One ETL task. YAML is one source of these and not the only one, so every field is constructible
+ * in code and P6's loader is just another caller.
  *
  * @param chunkSize the task-level default. A step may lower or raise it; the resolution order is
- *   step, then task, then 5000 (spec 5.2).
+ *   step, then task, then 5000.
  * @param scratchMemoryLimitMb null takes the application-wide default the engine was built with.
  * @param logging, onSuccess, onFailure, cron, enabled carried but not acted on here: listeners and
  *   hooks are P8, scheduling and the API are P7.
@@ -108,27 +109,27 @@ data class TaskDefinition(
 
 /**
  * An ordered, named group of steps. It has no transactional and no concurrency meaning: a failure
- * in phase 2 leaves phase 1's external writes committed (spec 2.2, 5.4). Its purpose is grouping
- * in logs and metrics.
+ * in phase 2 leaves phase 1's external writes committed. Its purpose is grouping in logs and
+ * metrics.
  */
 data class Phase(val name: String, val steps: List<Step>)
 
 /**
- * The unit of work, retry and logging (spec 2.2). Five executable types, [CacheCopyStep] included
- * since P9 built its executor.
+ * The unit of work, retry and logging. Five executable types, [CacheCopyStep] included since P9
+ * built its executor.
  *
- * [retries] counts *additional* attempts after the first. **null means "not stated"** and takes
- * spec 5.3's datasource-dependent default - 3 when the step writes into [SCRATCH], 0 everywhere
- * else - resolved by `TaskRules` rather than by a constructor default, because the value depends on
- * another field and a Kotlin default cannot (spec 5.3, 11.2). Retrying anything off scratch needs
- * the author to say `idempotent: true`, which is validation rule 12.
+ * [retries] counts *additional* attempts after the first. **null means "not stated"** and takes the
+ * datasource-dependent default - 3 when the step writes into [SCRATCH], 0 everywhere else -
+ * resolved by `TaskRules` rather than by a constructor default, because the value depends on
+ * another field and a Kotlin default cannot. Retrying anything off scratch needs the author to say
+ * `idempotent: true`, which is validation rule 12.
  */
 sealed interface Step {
     val name: String
     val retries: Int?
 }
 
-/** Where a [PipeStep] reads from: one datasource, one query (spec 3.2). */
+/** Where a [PipeStep] reads from: one datasource, one query. */
 data class PipeSource(val datasource: String, val sql: String)
 
 /**
@@ -137,7 +138,7 @@ data class PipeSource(val datasource: String, val sql: String)
  * makes the rule unrepresentable rather than merely checked.
  *
  * @param idempotent the author's assertion that a rerun converges, required by validation rule 12
- *   whenever a non-scratch target is retried. The framework cannot verify it (spec 5.3).
+ *   whenever a non-scratch target is retried. The framework cannot verify it.
  */
 sealed interface PipeTarget {
     val datasource: String
@@ -148,9 +149,9 @@ sealed interface PipeTarget {
  * The declarative form: a table, filled by column name against the target's catalog metadata.
  *
  * `createTable` defaults to [CreateTable.AUTO] inside scratch and [CreateTable.REQUIRED] outside
- * it (spec 4.4). Only an AUTO scratch table gets the attempt-suffix treatment of spec 5.5: under
- * REQUIRED the author created the table under its stable name with a `sql` step, so there is no
- * suffixed name for the framework to write and no view for it to repoint.
+ * it. Only an AUTO scratch table gets the attempt-suffix treatment: under REQUIRED the author
+ * created the table under its stable name with a `sql` step, so there is no suffixed name for the
+ * framework to write and no view for it to repoint.
  */
 class TableTarget(
     override val datasource: String,
@@ -161,11 +162,11 @@ class TableTarget(
 
 /**
  * The statement form: the author's own MERGE or conditional INSERT, run as a prepared batch once
- * per chunk with Row values bound by name (spec 4.4). Not available on a DuckDB datasource, which
- * validation rule 11 rejects at startup and [TaskEngine] rejects at run time.
+ * per chunk with Row values bound by name. Not available on a DuckDB datasource, which validation
+ * rule 11 rejects at startup and [TaskEngine] rejects at run time.
  *
- * **Every `:name` here is a Row key. Task variables are not available** (spec 6.3): a statement
- * target runs once per row, so a task variable the statement needs is projected into the source
+ * **Every `:name` here is a Row key. Task variables are not available**: a statement target runs
+ * once per row, so a task variable the statement needs is projected into the source
  * query's select list - `select lot_id, qty, :siteCode as site_code from wip` - where
  * [JdbcSource] binds it and it arrives as an ordinary lower-cased Row key. One namespace, so a
  * `:name` has exactly one meaning and a name the source does not produce is the runtime error
@@ -178,14 +179,14 @@ class StatementTarget(
 ) : PipeTarget
 
 /**
- * The only step where rows pass through the JVM (spec 2.3). Implemented by constructing a
- * [RowPipe], so chunking, per-chunk commit and type mapping are Layer 1's.
+ * The only step where rows pass through the JVM. Implemented by constructing a [RowPipe], so
+ * chunking, per-chunk commit and type mapping are Layer 1's.
  *
  * @param addColumns the columns [transform] adds, which source metadata cannot describe
- *   (spec 9.1, validation rule 14). They are appended to the column list the target is opened
- *   with, so `createTable: AUTO` generates DDL for them and a declarative target binds them.
+ *   (validation rule 14). They are appended to the column list the target is opened with, so
+ *   `createTable: AUTO` generates DDL for them and a declarative target binds them.
  *   Without the declaration the value is silently dropped under AUTO and by [JdbcTableWriter].
- * @param chunkSize overrides the task-level default for this step alone (spec 5.2).
+ * @param chunkSize overrides the task-level default for this step alone.
  */
 class PipeStep(
     override val name: String,
@@ -197,15 +198,15 @@ class PipeStep(
     override val retries: Int? = null,
 ) : Step
 
-/** How a [MaterializeStep] stores its output (spec 5.6). PARQUET is scratch-only. */
+/** How a [MaterializeStep] stores its output. PARQUET is scratch-only. */
 enum class MaterializeFormat { TABLE, PARQUET }
 
 /**
  * Computes a derived dataset inside one datasource, entirely in the engine: `CREATE TABLE ... AS
- * SELECT`, or `COPY (...) TO ... (FORMAT PARQUET)` (spec 3.3, 5.6). No row passes through the JVM.
+ * SELECT`, or `COPY (...) TO ... (FORMAT PARQUET)`. No row passes through the JVM.
  *
  * Inside scratch the output is written under an attempt-suffixed name and published as the stable
- * view [output], so `format` can change without touching any other step (spec 5.5).
+ * view [output], so `format` can change without touching any other step.
  */
 class MaterializeStep(
     override val name: String,
@@ -217,10 +218,10 @@ class MaterializeStep(
 ) : Step
 
 /**
- * Statements with no dataset output: an index, a publish procedure, a bookkeeping update
- * (spec 3.4). Each statement is its own transaction (spec 5.2), so a retry re-runs all of them.
+ * Statements with no dataset output: an index, a publish procedure, a bookkeeping update. Each
+ * statement is its own transaction, so a retry re-runs all of them.
  *
- * @param idempotent the author's statement that re-running the whole list converges - spec 10's
+ * @param idempotent the author's statement that re-running the whole list converges - validation
  *   rule 12, which reads "a step with a non-scratch target and retries > 0" and until review
  *   finding H2 was enforced only on a pipe. Nothing here can check it; what it buys is that the
  *   duplicate rows a retry can leave in an external table are a consequence someone chose.
@@ -233,13 +234,13 @@ class SqlStep(
     val idempotent: Boolean = false,
 ) : Step
 
-/** One exported task variable: a query returning exactly one row and one column (spec 6.3). */
+/** One exported task variable: a query returning exactly one row and one column. */
 data class ExportVar(val name: String, val sql: String)
 
 /**
- * Produces task variables (spec 3.5). Every variable of one step is defined only once all of that
- * step's queries have succeeded, so a retry after a partial success does not trip spec 6.2's
- * "a variable may not be redefined once set" and mask the real failure.
+ * Produces task variables. Every variable of one step is defined only once all of that step's
+ * queries have succeeded, so a retry after a partial success does not trip the "a variable may not
+ * be redefined once set" rule and mask the real failure.
  */
 class ExportStep(
     override val name: String,
@@ -249,20 +250,19 @@ class ExportStep(
 ) : Step
 
 /**
- * The file-to-file copy out of a snapshot cache generation into scratch (spec 3.6, 7.3). [cache]
- * is a name the host binds to a `(SnapshotCache, GroupId)` pair - see [CacheBinding] - and
- * [output] is an ordinary scratch dataset, so it gets spec 5.5's attempt-suffixed table and stable
- * view like any other.
+ * The file-to-file copy out of a snapshot cache generation into scratch. [cache] is a name the host
+ * binds to a `(SnapshotCache, GroupId)` pair - see [CacheBinding] - and [output] is an ordinary
+ * scratch dataset, so it gets the attempt-suffixed table and stable view like any other.
  *
  * [sql] runs inside the cache's own DuckDB instance and binds **no** variable: `CopyOutSpec.sql`
  * is a plain string with no binding channel, so a `:name` here is rejected - by validation rule 19
- * for a task file, and by the executor for a definition built in code (spec 2.1). A task needing a
- * variable copies the wider subset and filters in the following `materialize`.
+ * for a task file, and by the executor for a definition built in code. A task needing a variable
+ * copies the wider subset and filters in the following `materialize`.
  *
  * [retries] resolves to **0** and not to the 3 a scratch output would otherwise earn, because it
- * could never fire anyway: spec 5.3's retry classification is JDBC-shaped and a local DuckDB copy
- * raises none of it. From P5 to P9 this field declared 3 while the loader resolved 0 for the same
- * step type, an asymmetry rule 20 recorded and both sites commented; with null representable, both
+ * could never fire anyway: the retry classification is JDBC-shaped and a local DuckDB copy raises
+ * none of it. From P5 to P9 this field declared 3 while the loader resolved 0 for the same step
+ * type, an asymmetry rule 20 recorded and both sites commented; with null representable, both
  * paths resolve the same and the asymmetry is gone.
  *
  * **Rule 20 itself is a startup rule and does not run here.** It rejects a *stated* non-zero value
@@ -279,9 +279,9 @@ class CacheCopyStep(
 ) : Step
 
 /**
- * A task-level literal variable (spec 6.1). The value is whatever the YAML scalar was, and it may
- * not be null: null carries no type, and spec 1.3 makes an untyped value an error rather than a
- * guess. An author who wants SQL NULL writes `null` in the query. Validation rule 8 says the same
+ * A task-level literal variable. The value is whatever the YAML scalar was, and it may not be
+ * null: null carries no type, and an untyped value is an error rather than a guess. An author who
+ * wants SQL NULL writes `null` in the query. Validation rule 8 says the same
  * thing at startup; this is the same rule where a definition built in code also meets it.
  */
 data class LiteralVar(val name: String, val value: Any?) {
@@ -293,10 +293,10 @@ data class LiteralVar(val name: String, val value: Any?) {
     }
 }
 
-/** What started a run. Carried into logs and metrics from P7 onwards (spec 8.2). */
+/** What started a run. Carried into logs and metrics from P7 onwards. */
 enum class TriggerSource { SCHEDULE, API }
 
-/** The result of a run (spec 9.2). */
+/** The result of a run. */
 enum class Outcome { SUCCEEDED, FAILED }
 
 /** What one [TaskEngine.run] did. [failure] is the exception that failed the run, if any. */

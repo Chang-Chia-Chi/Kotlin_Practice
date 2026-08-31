@@ -12,7 +12,7 @@ import org.junit.jupiter.api.assertThrows
 import org.junit.jupiter.api.io.TempDir
 
 /**
- * E12: spec 5.5's write-then-publish protocol, tested where it now lives.
+ * E12: the write-then-publish protocol for scratch datasets, tested where it now lives.
  *
  * `DatasetNamerTest` already proves the naming scheme and that a published view resolves to the
  * attempt that succeeded. What it could not prove is the *protocol* - that a failed attempt
@@ -42,7 +42,7 @@ class ScratchDatasetsTest {
      *
      * The written table is asserted to survive, because "did not publish" must not be achieved by
      * cleaning up. DuckDB 1.1.3 reclaims nothing, so a failed attempt is left in place and the run
-     * directory is deleted whole (spec 5.5).
+     * directory is deleted whole.
      */
     @Test
     fun aFailedAttemptWritesItsTableAndPublishesNothing() {
@@ -82,7 +82,7 @@ class ScratchDatasetsTest {
      * file this attempt wrote still on disk.
      *
      * The second half is not decoration. "Did not publish" is satisfied trivially by an
-     * implementation that deleted the file, and spec 5.5 forbids exactly that - a failed attempt is
+     * implementation that deleted the file, and the protocol forbids that - a failed attempt is
      * left in place and the run directory is reclaimed whole. Without it this test would pass
      * against a `finally` that cleaned up, which is the behaviour the protocol rules out.
      */

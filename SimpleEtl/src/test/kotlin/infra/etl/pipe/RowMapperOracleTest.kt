@@ -28,8 +28,8 @@ import org.testcontainers.junit.jupiter.Testcontainers
 import org.testcontainers.oracle.OracleContainer
 
 /**
- * Spec 4.3 against a real Oracle result set. One container for the whole class: the image is
- * multi-GB and the first pull dominates the run.
+ * The JDBC-to-canonical type mapping against a real Oracle result set. One container for the
+ * whole class: the image is multi-GB and the first pull dominates the run.
  *
  * What this file establishes that DuckDB cannot: Oracle's own type quirks. INTEGER, SMALLINT
  * and FLOAT are synonyms for NUMBER and arrive as Types.NUMERIC, BINARY_DOUBLE and
@@ -205,7 +205,7 @@ class RowMapperOracleTest {
     }
 
     /**
-     * P0's finding, and the reason DATE is rejected as a DuckDB write target (4.6): an Oracle
+     * P0's finding, and the reason DATE is rejected as a DuckDB write target: an Oracle
      * DATE is not a calendar date. If the time component is lost here, every downstream rule
      * that depends on it is arguing about nothing.
      */

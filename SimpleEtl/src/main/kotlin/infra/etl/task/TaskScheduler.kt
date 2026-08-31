@@ -2,15 +2,15 @@ package infra.etl.task
 
 /**
  * The cron binding, implemented by the **host** over Quarkus's programmatic `Scheduler`
- * (spec 8.1, 8.6). It is an interface here for the same reason spec 7.1's datasources arrive as a
- * `Map<String, Jdbi>` and spec 9.1's transforms as a `Map<String, RowTransform>`: the framework
- * names what it needs and the host supplies it, so this module boots no framework to test itself.
+ * It is an interface here for the same reason datasources arrive as a `Map<String, Jdbi>` and
+ * transforms as a `Map<String, RowTransform>`: the framework names what it needs and the host
+ * supplies it, so this module boots no framework to test itself.
  *
- * Two obligations the host carries, both stated in spec 8.6 and neither testable here:
+ * Two obligations the host carries, neither testable here:
  *
  * - [schedule] **must throw on an unparseable expression**. [TaskScheduler.apply] converts that
  *   throw into a [ValidationError] and rejects the whole batch; a host that silently accepts a bad
- *   cron makes spec 8.5's atomic reload a lie. Validation rule 16 is only structural - field count
+ *   cron makes an atomic reload a lie. Validation rule 16 is only structural - field count
  *   and legal characters - so this is where an expression is really parsed.
  * - [run] **must not execute inline on the scheduler's own thread**. It hands off to [TaskRunner]
  *   and returns immediately, so the Vert.x worker Quarkus fires on is free long before its
@@ -24,14 +24,14 @@ fun interface CronScheduler {
 }
 
 /**
- * Keeps the [CronScheduler]'s registrations in step with the loaded task definitions (spec 8.1,
- * 8.5). It owns no threads and executes nothing: a firing is handed straight to [TaskRunner],
- * which confines and guards it.
+ * Keeps the [CronScheduler]'s registrations in step with the loaded task definitions. It owns no
+ * threads and executes nothing: a firing is handed straight to [TaskRunner], which confines and
+ * guards it.
  *
  * **A batch either applies whole or not at all.** If the host rejects any expression, every
  * registration this call made is closed and every one it cancelled is restored, so the throw is
- * reported as a [ValidationReport] and the live registry is exactly what it was. That is spec
- * 8.5's "a bad edit cannot take the scheduler down", and it is why [apply] answers rather than
+ * reported as a [ValidationReport] and the live registry is exactly what it was. That is what makes
+ * "a bad edit cannot take the scheduler down" true, and it is why [apply] answers rather than
  * throws.
  *
  * **A firing looks the current definition up by name.** Capturing it in the callback would pin a
@@ -41,7 +41,7 @@ fun interface CronScheduler {
  *
  * @param cron the host's binding.
  * @param runner where a firing goes. Its self-concurrency guard is what turns a scheduled firing
- *   during a run into a skip rather than a backlog (spec 8.4), which is why the [TriggerResult] is
+ *   during a run into a skip rather than a backlog, which is why the [TriggerResult] is
  *   discarded here: `CronScheduler.schedule` takes a `() -> Unit`, so there is no one to tell.
  */
 class TaskScheduler(private val cron: CronScheduler, private val runner: TaskRunner) {
@@ -140,7 +140,7 @@ class TaskScheduler(private val cron: CronScheduler, private val runner: TaskRun
      * tripwire for a fourth attempt. This answers a question only the registry can answer - "is
      * this name actually wired to the host's scheduler" - which is precisely what a caller holding
      * its own definitions cannot derive, and it is why the two maps disagreeing is now visible
-     * instead of permanent and silent (spec 8.6's `apply` row).
+     * instead of permanent and silent.
      *
      * `@Synchronized` because [registrations] is a plain `LinkedHashMap` published under this
      * monitor by [apply] alone. `list()` is called from an HTTP worker thread, so an unsynchronised
@@ -150,8 +150,8 @@ class TaskScheduler(private val cron: CronScheduler, private val runner: TaskRun
     internal fun registeredNames(): Set<String> = registrations.keys.toSet()
 
     /**
-     * Spec 8.6's shutdown row, the scheduler's half (E16): cancel every registration, and forget
-     * the definitions a firing would look up.
+     * The host's shutdown obligation, the scheduler's half (E16): cancel every registration, and
+     * forget the definitions a firing would look up.
      *
      * Both halves are needed and they cover different firings. Cancelling stops the host's
      * scheduler from starting new ones; clearing [current] stops one it had *already* dispatched,

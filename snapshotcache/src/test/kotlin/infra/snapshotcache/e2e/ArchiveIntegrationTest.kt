@@ -56,15 +56,15 @@ import java.util.concurrent.atomic.AtomicLong
  * source of rows, which is a test-controlled generator precisely so the diff's answers can be
  * asserted exactly rather than approximately.
  *
- * The most valuable assertion is `an archiver's lease blocks reclaim, not publishing`: spec
- * 18.6 item 2 concluded a lease held across an export is a non-issue against the spec 6.1
+ * The most valuable assertion is `an archiver's lease blocks reclaim, not publishing`: the
+ * export spike concluded a lease held across an export is a non-issue against the
  * K ceiling, and that conclusion was an argument from a 40 ms measurement, never a test.
  */
 @Testcontainers
 class ArchiveIntegrationTest {
 
     /**
-     * One group per test. The Oracle manifest outlives the class, and D31's monotonicity
+     * One group per test. The Oracle manifest outlives the class, and the monotonicity
      * guard is keyed on `(group, data_as_of)` - so tests sharing a group id would have the
      * guard refuse a later test's checkpoint because an earlier test had already published a
      * newer one. Found by exactly that failure on the first run, which is the guard working.
@@ -166,15 +166,15 @@ class ArchiveIntegrationTest {
     }
 
     /**
-     * I4 (spec 6.1): a held lease pins its generation, and the K ceiling bites one round
+     * I4: a held lease pins its generation, and the K ceiling bites one round
      * later than is comfortable to assume.
      *
-     * This is deliberately NOT "spec 18.6 item 2 is now tested". Item 2's conclusion - that a
-     * lease held across an export is a non-issue - rests entirely on exports taking ~40 ms.
-     * This test parks the archiver indefinitely, which removes exactly that property, so what
-     * it shows is the opposite and more useful thing: if an archiver ever did hold a lease for
-     * a long time, refresh WOULD stall. Item 2 is safe because of duration, not because of
-     * structure, and that distinction is worth a test rather than a sentence.
+     * This is deliberately NOT "the export spike's conclusion is now tested". That conclusion -
+     * that a lease held across an export is a non-issue - rests entirely on exports taking
+     * ~40 ms. This test parks the archiver indefinitely, which removes exactly that property, so
+     * what it shows is the opposite and more useful thing: if an archiver ever did hold a lease
+     * for a long time, refresh WOULD stall. The conclusion is safe because of duration, not
+     * because of structure, and that distinction is worth a test rather than a sentence.
      *
      * `blockedByK` is evaluated before a generation is allocated and returns null while
      * `live.size <= maxLive`, so the first refresh after the lease is taken still publishes.
@@ -242,9 +242,9 @@ class ArchiveIntegrationTest {
     }
 
     /**
-     * D31's monotonicity guard against real timestamps. `data_as_of` comes from the framework's
+     * The monotonicity guard against real timestamps. `data_as_of` comes from the framework's
      * injected clock via the generation it leased, so archiving twice without an intervening
-     * refresh offers the same instant - which spec 18.3 step 2 requires be refused.
+     * refresh offers the same instant - which the publish protocol requires be refused.
      */
     @Test
     fun `archiving the same generation twice is refused rather than published`() {
@@ -274,13 +274,13 @@ class ArchiveIntegrationTest {
     }
 
     /**
-     * D35's long-running-job race, which is the only shape that separates the recorded
+     * The long-running-job race, which is the only shape that separates the recorded
      * watermark from "the latest checkpoint now".
      *
      * A checkpoint published *while this run holds its lease* describes state the run never
-     * read. Spec 18.4: the watermark "is a recorded version, never 'the latest checkpoint
-     * now' (taken after the last run; using it silently under-reports)". So v2 is created
-     * inside the diff block, and the watermark handed back must still be v1.
+     * read. The watermark is a recorded version, never "the latest checkpoint now" - one taken
+     * after the last run silently under-reports. So v2 is created inside the diff block, and
+     * the watermark handed back must still be v1.
      *
      * Asserted this way because the single-checkpoint version of this test passes under either
      * rule - it cannot tell the `data_as_of <= T` predicate from its absence.

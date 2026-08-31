@@ -25,7 +25,7 @@ import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.CsvSource
 
 /**
- * The eighteen validation rules of spec 10, one deliberately broken file each.
+ * The eighteen numbered validation rules, one deliberately broken file each.
  *
  * Every file here is a baseline from `TaskFiles` with a single edit, and every baseline is
  * asserted to load in `TaskFileLoaderValidTest`. That pairing is the whole design: on its own,
@@ -341,7 +341,7 @@ class TaskFileLoaderRulesTest {
      * author writes the type in the YAML, so nothing has to be discovered to check it.
      *
      * DATE, BLOB and TIMESTAMP WITH TIME ZONE are rejected whether nullable or not - the DATE
-     * truncation of 4.6 is silent and does not depend on nullability, and neither has an
+     * truncation is silent and does not depend on nullability, and neither has an
      * appender path at all. BOOLEAN and DOUBLE are rejected only when nullable: their only
      * `append` overloads are primitive.
      */
@@ -431,7 +431,7 @@ class TaskFileLoaderRulesTest {
     }
 
     /**
-     * The shape that actually reaches production. Spec 5.3 defaults `retries` to 3 for any
+     * The shape that actually reaches production. `retries` defaults to 3 for any
      * scratch target, REQUIRED included, so the hazard arrives on a default the author never
      * wrote - which is how it survived until P5's review found it.
      */

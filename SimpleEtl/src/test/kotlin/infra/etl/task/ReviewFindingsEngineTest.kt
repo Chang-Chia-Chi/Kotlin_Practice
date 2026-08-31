@@ -22,11 +22,11 @@ import org.junit.jupiter.api.io.TempDir
  * - **M6**: [infra.etl.duckdb.ScratchDb] empties the directory it is handed and leaves the
  *   directory itself, which is right for a directory its caller owns. The engine resolves a fresh
  *   one per runId, so nothing ever reused it and every run left an empty directory behind - some
- *   52,000 a year at spec 8.1's ten-minute cadence, on the volume spec 7.2 sizes.
+ *   52,000 a year at a ten-minute schedule, on the volume this framework is sized for.
  * - **M1**: a transform may add a Row key, and `JdbcTableWriter` binds only the columns it was
  *   opened with. An added column that `transform.addColumns` does not declare was therefore bound
- *   nowhere and silently took the target's database default, against spec 4.4's promise of a
- *   runtime error for a Row key with no matching column.
+ *   nowhere and silently took the target's database default, against the promised runtime error
+ *   for a Row key with no matching column.
  */
 class ReviewFindingsEngineTest {
 

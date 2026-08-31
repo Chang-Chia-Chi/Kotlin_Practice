@@ -12,7 +12,7 @@ import java.time.Duration
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
-/** Lifecycle of one generation (plan 2.5). GONE is terminal; the registry drops the record. */
+/** Lifecycle of one generation. GONE is terminal; the registry drops the record. */
 internal enum class Lifecycle { BUILDING, OPENING, LIVE, RECLAIMING, GONE }
 
 /**
@@ -36,7 +36,7 @@ internal class RegistryLease(
  * leases, shutting-down flag - behind one lock. It never performs I/O and never calls
  * [infra.snapshotcache.spi.GenerationStore]; storage effects are decided here and
  * executed by the orchestrator outside the lock, with the [Lifecycle] transitional
- * states carrying invariants across the gap (plan 2.5).
+ * states carrying invariants across the gap.
  *
  * [HookRunner] calls always happen outside the lock: tests park on latches there,
  * and a latch under the lock would deadlock the suite.
@@ -82,9 +82,9 @@ internal class GenerationRegistry(
     // ---- build path (RefreshCycle, P4) ----
 
     /**
-     * Overlap guard (spec 4.4): true begins the round; false means one is already running
-     * and this trigger must be skipped. Registry state per plan 2.5 - the flag is mutable
-     * state, so it lives under the one monitor.
+     * Overlap guard: true begins the round; false means one is already running and this
+     * trigger must be skipped. The flag is mutable registry state, so like everything else
+     * it lives under the one monitor.
      */
     fun tryBeginRound(): Boolean = lock.withLock {
         if (roundInProgress) {
@@ -100,12 +100,12 @@ internal class GenerationRegistry(
         roundInProgress = false
     }
 
-    /** Increments the consecutive verify-failure counter and returns the new count (spec 8.5). */
+    /** Increments the consecutive verify-failure counter and returns the new count. */
     fun recordVerifyFailure(): Int = lock.withLock {
         ++consecutiveVerifyFailures
     }
 
-    /** Resets the consecutive verify-failure counter on a successful publish (spec 8.5). */
+    /** Resets the consecutive verify-failure counter on a successful publish. */
     fun resetVerifyFailures(): Unit = lock.withLock {
         consecutiveVerifyFailures = 0
     }
@@ -120,7 +120,7 @@ internal class GenerationRegistry(
     /**
      * BUILDING or OPENING -> GONE. Candidate file deletion happens outside, after this
      * call. OPENING is legal because a round can fail after [beginPublish] - promote,
-     * attach or verify - and its cleanup uses the same edge (spec 9.2).
+     * attach or verify - and its cleanup uses the same edge.
      */
     fun discardBuild(gen: Long): Unit = lock.withLock {
         val record = records.getValue(gen)
@@ -142,7 +142,7 @@ internal class GenerationRegistry(
      * generation becomes current and every [awaitCurrent] waiter is signalled.
      *
      * [OpenGeneration.fileBytes] is captured before taking the lock - on the real adapter
-     * it is a file stat, and no I/O runs under the lock (plan 2.5).
+     * it is a file stat, and no I/O runs under the lock.
      */
     fun publish(gen: Long, opened: OpenGeneration, info: GenerationInfo) {
         val fileBytes = opened.fileBytes()
@@ -161,14 +161,14 @@ internal class GenerationRegistry(
 
     /**
      * Returns a lease on the current generation, or null if none exists. Reading the
-     * pointer and incrementing the refcount happen in one critical section (spec 5.1):
+     * pointer and incrementing the refcount happen in one critical section:
      * the pointer read before [Hook.AFTER_READ_CURRENT] is re-taken afterwards, so a
      * full publish + reclaim cycle interleaved at the hook still yields a LIVE
      * generation whose refcount is counted before any detach can be decided (I2).
      *
      * Also null once shutdown has begun, decided in the same critical section: a caller
      * that checked the flag and was then preempted must not still be granted a lease over
-     * a store the drain has already reported clean (spec 10.2 step 1).
+     * a store the drain has already reported clean.
      */
     fun tryAcquire(owner: String): RegistryLease? {
         lock.withLock { currentGen }
@@ -197,7 +197,7 @@ internal class GenerationRegistry(
     /**
      * Idempotent per lease instance: the refcount is decremented exactly once (I6).
      * Every effective release signals the condition so [awaitQuiescence] re-checks;
-     * orphan releases route through here too, so they signal as well (spec 10.2 step 4).
+     * orphan releases route through here too, so they signal as well.
      */
     fun release(lease: RegistryLease): Unit = lock.withLock {
         if (lease.released) return
@@ -211,8 +211,8 @@ internal class GenerationRegistry(
 
     /**
      * Waits interruptibly, bounded by [budget], until a current generation exists or
-     * shutdown begins - signalled by [publish] and [beginShutdown], never polled
-     * (spec 9.3). Returns true iff a current generation exists on exit.
+     * shutdown begins - signalled by [publish] and [beginShutdown], never polled.
+     * Returns true iff a current generation exists on exit.
      */
     fun awaitCurrent(budget: Duration): Boolean {
         lock.withLock {
@@ -227,7 +227,7 @@ internal class GenerationRegistry(
     // ---- K enforcement / GC ----
 
     /**
-     * Non-null means live generations exceed K and refresh must pause (spec 6.1, I4):
+     * Non-null means live generations exceed K and refresh must pause (I4):
      * the returned leases are the ones holding non-current generations alive. Never
      * throws - being over K is an explicit, reported state.
      */
@@ -256,7 +256,7 @@ internal class GenerationRegistry(
         remove(gen, Lifecycle.RECLAIMING)
     }
 
-    /** RECLAIMING -> LIVE: DETACH failed (spec 9.2); the generation is retried next pass. */
+    /** RECLAIMING -> LIVE: DETACH failed; the generation is retried next pass. */
     fun deferReclaim(gen: Long): Unit = lock.withLock {
         transition(gen, Lifecycle.RECLAIMING, Lifecycle.LIVE)
     }
@@ -265,12 +265,12 @@ internal class GenerationRegistry(
 
     fun current(): Long? = lock.withLock { currentGen }
 
-    /** [GenerationInfo] of the current generation; null before the first publish (spec 5.1, D24). */
+    /** [GenerationInfo] of the current generation; null before the first publish. */
     fun currentInfo(): GenerationInfo? = lock.withLock {
         currentGen?.let { records.getValue(it).info }
     }
 
-    /** Snapshot of every registered generation, for the admin view (spec 5.3, 12.7). */
+    /** Snapshot of every registered generation, for the admin view. */
     fun liveGenerations(): List<GenerationState> = lock.withLock {
         records.values.map { record ->
             GenerationState(
@@ -283,13 +283,13 @@ internal class GenerationRegistry(
         }
     }
 
-    /** Leases past their deadline at `clock.instant()`. Diagnostic only - nothing is reclaimed (spec 6.2, D8). */
+    /** Leases past their deadline at `clock.instant()`. Diagnostic only - nothing is reclaimed. */
     fun expiredLeases(): List<LeaseInfo> = lock.withLock {
         val now = clock.instant()
         records.values.flatMap { record -> record.leases.map { it.info } }.filter { it.deadline.isBefore(now) }
     }
 
-    /** Sets the flag and releases every [awaitCurrent] waiter at once (spec 10.2 step 1). */
+    /** Sets the flag and releases every [awaitCurrent] waiter at once. */
     fun beginShutdown(): Unit = lock.withLock {
         shuttingDown = true
         published.signalAll()
@@ -299,8 +299,8 @@ internal class GenerationRegistry(
 
     /**
      * Waits interruptibly, bounded by [budget], until zero leases are outstanding across
-     * all generations - signalled by [release], never polled (spec 10.2 step 4). Returns
-     * the leases still outstanding on exit: empty iff drained. A zero or negative budget
+     * all generations - signalled by [release], never polled. Returns the leases still
+     * outstanding on exit: empty iff drained. A zero or negative budget
      * returns the current outstanding snapshot immediately.
      */
     fun awaitQuiescence(budget: Duration): List<LeaseInfo> = lock.withLock {

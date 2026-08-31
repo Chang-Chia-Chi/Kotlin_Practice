@@ -5,24 +5,23 @@ import com.fasterxml.jackson.annotation.JsonTypeInfo
 import infra.etl.duckdb.CreateTable
 
 /**
- * The YAML schema of spec 3, one class per document node. It is deliberately a separate tree from
+ * The YAML task-file schema, one class per document node. It is deliberately a separate tree from
  * [TaskDefinition] rather than an annotated view of it, for three reasons:
  *
  * - **Validation rule 17 comes free.** Each step type is its own class with its own field set, so
  *   `statements:` on a `pipe` step is an unknown field, which is validation rule 1's error. A
  *   single step class with every field nullable could not tell the two rules apart.
  * - **Defaults that depend on another field cannot be Kotlin defaults.** `createTable` is AUTO
- *   inside scratch and REQUIRED outside it, and `retries` is 3 inside and 0 outside (spec 4.4,
- *   5.3). Both are resolved in `TaskFileLoader`'s conversion, so the YAML form carries null for
- *   "not stated".
+ *   inside scratch and REQUIRED outside it, and `retries` is 3 inside and 0 outside. Both are
+ *   resolved in `TaskFileLoader`'s conversion, so the YAML form carries null for "not stated".
  * - **A DTO may hold a value the domain type forbids.** [LiteralVar] throws on a null value
  *   (validation rule 8), and [TaskFileLoader] must report that as an error rather than as an
  *   exception out of the loader - so the null has to survive parsing to be reported.
  *
- * Everything here is `internal`: spec 11.2's public surface is `TaskFileLoader`,
- * `ValidationReport` and `ValidationError`, not the file format's Kotlin shadow.
+ * Everything here is `internal`: the loader's public surface is `TaskFileLoader`, `ValidationReport`
+ * and `ValidationError`, not the file format's Kotlin shadow.
  *
- * **Nothing in this file expands anything.** Spec 10 keeps task files off the Quarkus config path
+ * **Nothing in this file expands anything.** Task files are kept off the Quarkus config path
  * precisely because config performs property expansion, which would corrupt SQL containing
  * `${...}`. Measured on jackson-dataformat-yaml 2.18.2 (P6 scratchpad `Probe.kt`): a `${env.FOO}`
  * inside a folded or literal block scalar arrives byte for byte, and a `|` block keeps its
@@ -55,8 +54,8 @@ internal data class PhaseYaml(val name: String, val steps: List<StepYaml> = empt
  * Measured on jackson-databind 2.18.2: `As.PROPERTY` consumes `type` and does not then report it
  * as an unknown field, an unknown value gives `InvalidTypeIdException` listing the known ids, and
  * a missing one says so - all three carrying a line number. `cacheCopy` joined the four in P9,
- * which is when spec 3 gained 3.6 and the step type gained an executor; until then it was
- * deliberately absent and arrived as an unknown type id.
+ * which is when the file format gained the node and the step type gained an executor; until then
+ * it was deliberately absent and arrived as an unknown type id.
  */
 @JsonTypeInfo(use = JsonTypeInfo.Id.NAME, include = JsonTypeInfo.As.PROPERTY, property = "type")
 @JsonSubTypes(
@@ -69,7 +68,7 @@ internal data class PhaseYaml(val name: String, val steps: List<StepYaml> = empt
 internal sealed interface StepYaml {
     val name: String
 
-    /** Null means "not stated", so the datasource-dependent default of spec 5.3 can be applied. */
+    /** Null means "not stated", so the datasource-dependent default can be applied. */
     val retries: Int?
 }
 
@@ -99,20 +98,19 @@ internal data class PipeTargetYaml(
 
 /**
  * [addColumns] is required when the transform adds columns and the target uses `createTable: AUTO`
- * (spec 9.1, validation rule 14), because source metadata cannot describe a column the transform
- * invents.
+ * (validation rule 14), because source metadata cannot describe a column the transform invents.
  */
 internal data class TransformYaml(val bean: String, val addColumns: List<AddColumnYaml> = emptyList())
 
 /**
- * [type] is the **DuckDB type keyword** of spec 3.2's example - `VARCHAR`, `BIGINT`, `TIMESTAMP` -
- * matched case-insensitively against [CanonicalType.duckDbType], not the canonical enum constant.
- * AUTO is scratch-only (validation rule 14), so the only target an added column can reach is
- * DuckDB and the author writes the type they would have written in DDL.
+ * [type] is the **DuckDB type keyword** as written in a task file - `VARCHAR`, `BIGINT`,
+ * `TIMESTAMP` - matched case-insensitively against [CanonicalType.duckDbType], not the canonical
+ * enum constant. AUTO is scratch-only (validation rule 14), so the only target an added column can
+ * reach is DuckDB and the author writes the type they would have written in DDL.
  *
- * [nullable] defaults to true because that is the safe direction (spec 1.3): a nullable column is
- * created as a type with a null-accepting append path (spec 4.6). [precision] and [scale] exist
- * for DECIMAL only, where AUTO emits `DECIMAL(p,s)` and rejects an unusable pair at writer open.
+ * [nullable] defaults to true because that is the safe direction: a nullable column is created as
+ * a type with a null-accepting append path. [precision] and [scale] exist for DECIMAL only, where
+ * AUTO emits `DECIMAL(p,s)` and rejects an unusable pair at writer open.
  */
 internal data class AddColumnYaml(
     val name: String,
@@ -132,10 +130,10 @@ internal data class MaterializeYaml(
 ) : StepYaml
 
 /**
- * `idempotent` is spec 3.4's field, added by review finding H2 so that rule 12 can be enforced on
- * a `sql` step the way it always read - as a rule about a step, not about a pipe target. It
- * defaults to false, so an author who says nothing is refused a non-scratch retry rather than
- * given one on a promise nobody made.
+ * `idempotent` is the `sql` step's own field, added by review finding H2 so that rule 12 can be
+ * enforced on a `sql` step the way it always read - as a rule about a step, not about a pipe
+ * target. It defaults to false, so an author who says nothing is refused a non-scratch retry
+ * rather than given one on a promise nobody made.
  */
 internal data class SqlYaml(
     override val name: String,
@@ -155,7 +153,7 @@ internal data class ExportYaml(
 internal data class ExportVarYaml(val name: String, val sql: String)
 
 /**
- * Spec 3.6's `cacheCopy`, added in P9. Four fields and no more: [cache] is a host-bound name and
+ * The `cacheCopy` step node, added in P9. Four fields and no more: [cache] is a host-bound name and
  * not a datasource, [sql] runs inside the cache's own DuckDB instance, and [output] is an ordinary
  * scratch dataset.
  *
@@ -164,9 +162,9 @@ internal data class ExportVarYaml(val name: String, val sql: String)
  * rejection. Had this inherited the 3, every file that omits `retries` would fail that rule on a
  * value its author never wrote.
  *
- * **That was an asymmetry with `CacheCopyStep.retries` until E10**, which declared 3, and spec 10
- * rule 20 recorded it. Both sides now resolve an unstated value to 0, so the two agree and only
- * rule 20's own home differs: it reads what a file *stated*, so it stays a startup rule.
+ * **That was an asymmetry with `CacheCopyStep.retries` until E10**, which declared 3, and
+ * validation rule 20 recorded it. Both sides now resolve an unstated value to 0, so the two agree
+ * and only rule 20's own home differs: it reads what a file *stated*, so it stays a startup rule.
  */
 internal data class CacheCopyYaml(
     override val name: String,

@@ -14,8 +14,8 @@ import org.junit.jupiter.api.assertThrows
 import org.junit.jupiter.api.io.TempDir
 
 /**
- * P4, done-when items 4 and 5: the attempt-suffix scheme of spec 5.5 and the stable view of
- * specs 5.5 and 5.6.
+ * P4, done-when items 4 and 5: the attempt-suffix scheme for datasets written inside scratch, and
+ * the stable view that resolves to the winning attempt, table or parquet file alike.
  *
  * This is the phase's core. DuckDB 1.1.3 cannot reclaim space - TRUNCATE is unqualified DELETE,
  * VACUUM does not vacuum deletions, VACUUM FULL is unimplemented, DROP TABLE does not shrink the
@@ -25,14 +25,14 @@ import org.junit.jupiter.api.io.TempDir
  * the whole file, which [ScratchDbDeletionTest] covers.
  *
  * Both halves of item 4 are asserted. A test that only queried the view would pass against an
- * implementation that dropped the old table on retry, which is exactly what spec 5.5 forbids.
+ * implementation that dropped the old table on retry, which is exactly what the scheme forbids.
  */
 class DatasetNamerTest {
 
     @TempDir
     lateinit var root: Path
 
-    /** Spec 5.5 spells the physical names out: `wip_stg__a1`, `wip_stg__a2`. */
+    /** The attempt-suffixed physical names, spelled out: `wip_stg__a1`, `wip_stg__a2`. */
     @Test
     fun physicalNamesAreAttemptSuffixed() {
         val namer = DatasetNamer(root)
@@ -75,13 +75,13 @@ class DatasetNamerTest {
         )
     }
 
-    /** Attempts are the built-in `attempt` variable of spec 6.1, which starts at 1. */
+    /** Attempts are the built-in `attempt` variable, which starts at 1. */
     @Test
     fun anAttemptBelowOneIsRejected() {
         assertThrows<IllegalArgumentException> { DatasetNamer(root).physical("wip_stg", 0) }
     }
 
-    /** Spec 5.6: `COPY (<sql>) TO '<scratchDir>/<output>__a<n>.parquet'`. */
+    /** A parquet dataset is written as `COPY (<sql>) TO '<scratchDir>/<output>__a<n>.parquet'`. */
     @Test
     fun parquetPathIsTheAttemptSuffixedFileInTheScratchDirectory() {
         val namer = DatasetNamer(root)
@@ -158,7 +158,7 @@ class DatasetNamerTest {
     /**
      * Publishing twice must repoint the stable name rather than fail or accumulate. This is what
      * makes `retries: 3` cost four copies of a dataset and one view, which is the arithmetic
-     * spec 7.2's `sizeLimit` is derived from.
+     * the scratch database's `sizeLimit` is derived from.
      */
     @Test
     fun republishingTheStableNameRepointsItAndLeavesOneView() {
@@ -199,7 +199,7 @@ class DatasetNamerTest {
      * the same dataset name. The two results are compared as a whole: column names, driver type
      * names and every value.
      *
-     * Two databases rather than two dataset names in one, because spec 5.6's claim is that
+     * Two databases rather than two dataset names in one, because the claim under test is that
      * `format` can change without touching any other step - the downstream SQL cannot even see
      * which form it got, and giving the two forms different names would hide that.
      */

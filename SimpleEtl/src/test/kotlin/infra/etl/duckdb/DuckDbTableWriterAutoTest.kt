@@ -24,7 +24,7 @@ import org.junit.jupiter.params.provider.MethodSource
 import org.junit.jupiter.params.provider.ValueSource
 
 /**
- * `createTable: AUTO` against a DuckDB source (spec 4.6, plan P2 done-when 1, 2 and 4).
+ * `createTable: AUTO` against a DuckDB source (P2 done-when 1, 2 and 4).
  *
  * Everything a DuckDB result set reports is nullable - duckdb_jdbc 1.1.3 says columnNullable for
  * NOT NULL columns too - so this file can only exercise the nullable half of the DDL rule. The
@@ -39,7 +39,7 @@ class DuckDbTableWriterAutoTest {
     @AfterEach
     fun closeConnection() = connection.close()
 
-    /** One column per canonical type that has a null-accepting appender method (4.6). */
+    /** One column per canonical type that has a null-accepting appender method. */
     private val values = """
         select CAST('L1'  AS VARCHAR)          as lot_code,
                CAST(7     AS BIGINT)           as lot_id,
@@ -101,7 +101,7 @@ class DuckDbTableWriterAutoTest {
      * rejecting every width. Both ends of `1 <= p <= 38` and `0 <= s <= p` must survive: (1,0) is
      * the narrowest declarable column and (38,38) the widest scale DuckDB accepts.
      *
-     * ColumnMeta is public with precision and scale defaulting to 0 (spec 11.1), so a width is
+     * ColumnMeta is public with precision and scale defaulting to 0, so a width is
      * fed straight into open. No source query can produce these boundaries on demand, and going
      * through one would test the driver rather than the guard.
      */
@@ -246,17 +246,17 @@ class DuckDbTableWriterAutoTest {
 
     /**
      * The gap this phase found. A nullable column must be created as a type a null can reach,
-     * and the writer sources the value with the accessor matching that type (4.6's dispatch).
-     * For BOOLEAN, DOUBLE, DATE and INSTANT no such pair exists: BOOLEAN and DOUBLE have only
-     * primitive append overloads, DATE truncates silently and is rejected outright by rule 15,
-     * INSTANT has no branch in 4.6 at all, and routing any of them through VARCHAR, DECIMAL or
+     * and the writer sources the value with the accessor matching that type. For BOOLEAN,
+     * DOUBLE, DATE and INSTANT no such pair exists: BOOLEAN and DOUBLE have only primitive
+     * append overloads, DATE truncates silently and is rejected outright by rule 15, INSTANT
+     * has no appender branch at all, and routing any of them through VARCHAR, DECIMAL or
      * TIMESTAMP would make Row.string / Row.decimal / Row.dateTime throw on the value's real
      * type. Since duckdb_jdbc calls every column nullable, all four are reachable from any
      * scratch-to-scratch pipe.
      *
      * Rejecting at open is the only outcome consistent with the rest of the spec - the framework
-     * never guesses, and 4.6 refuses encoding tricks - but the spec does not say so, so this
-     * test is the lead's to adjudicate.
+     * never guesses, and the write contract refuses encoding tricks - but the spec does not say
+     * so, so this test is the lead's to adjudicate.
      */
     @ParameterizedTest
     @ValueSource(

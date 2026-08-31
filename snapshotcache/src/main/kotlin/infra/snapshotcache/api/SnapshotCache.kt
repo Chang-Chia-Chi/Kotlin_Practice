@@ -4,14 +4,14 @@ import java.sql.Connection
 import java.time.Duration
 import java.time.Instant
 
-/** Identifies a set of tables that must stay mutually consistent (spec 2, 3.2). */
+/** Identifies a set of tables that must stay mutually consistent. */
 @JvmInline
 value class GroupId(val value: String) {
     override fun toString(): String = value
 }
 
 /**
- * Consumer-facing surface of the snapshot cache (spec 5.1).
+ * Consumer-facing surface of the snapshot cache.
  *
  * Every method hands out data from a single, internally consistent generation.
  * Prefer [withSnapshot] and [copyOut]: they own the lease lifecycle, so a caller
@@ -24,10 +24,10 @@ interface SnapshotCache {
 
     /**
      * Runs [block] against the current generation, releasing the lease on every exit path.
-     * The preferred entry point (spec 5.1, D9).
+     * The preferred entry point.
      *
      * @throws NotReadyException nothing published yet and [waitBudget] elapsed (or was zero).
-     * @throws ShuttingDownException shutdown has begun (spec 10.2 step 1).
+     * @throws ShuttingDownException shutdown has begun.
      */
     fun <T> withSnapshot(
         group: GroupId,
@@ -39,7 +39,7 @@ interface SnapshotCache {
      * Copies a subset out into the caller's own connection, then releases the lease immediately.
      *
      * Successive calls may observe different generations, so the returned
-     * `(generation, dataAsOf)` must be recorded as lineage (spec 6.4).
+     * `(generation, dataAsOf)` must be recorded as lineage.
      */
     fun copyOut(
         group: GroupId,
@@ -51,11 +51,11 @@ interface SnapshotCache {
      * Long lease; the caller owns [Snapshot.close]. Advanced path - wrap it in try/finally.
      *
      * Reading the current pointer and incrementing its refcount happen in one critical
-     * section, so a publish plus reclaim cannot slip in between (spec 5.1 atomicity).
+     * section, so a publish plus reclaim cannot slip in between.
      */
     fun acquire(group: GroupId, waitBudget: Duration = defaultWaitBudget): Snapshot
 
-    /** Current generation status without taking a lease; null before the first publish (spec 5.1, D24). */
+    /** Current generation status without taking a lease; null before the first publish. */
     fun currentInfo(group: GroupId): GenerationInfo?
 }
 
@@ -67,7 +67,7 @@ interface Snapshot : AutoCloseable {
     val generation: Long
     val dataAsOf: Instant
 
-    /** Read-only connection bound to this generation; writes are rejected (spec 3.1, A3). */
+    /** Read-only connection bound to this generation; writes are rejected. */
     fun connection(): Connection
 
     /** Idempotent: repeated calls release the lease once and never drive refcount negative (invariant I6). */
@@ -78,14 +78,14 @@ interface Snapshot : AutoCloseable {
  * No generation is available to hand out.
  *
  * [reason] is [AcquireUnavailableReason.NOT_READY] when the wait budget was zero and
- * [AcquireUnavailableReason.TIMEOUT] when a positive budget expired (spec 9.2, 9.3).
+ * [AcquireUnavailableReason.TIMEOUT] when a positive budget expired.
  */
 class NotReadyException(
     val group: GroupId,
     val reason: AcquireUnavailableReason,
 ) : RuntimeException("no generation available for group '$group' (${reason.name.lowercase()})")
 
-/** Shutdown has begun; acquires fail at once and existing waiters are released (spec 10.2 step 1). */
+/** Shutdown has begun; acquires fail at once and existing waiters are released. */
 class ShuttingDownException(
     val group: GroupId,
 ) : RuntimeException("snapshot cache is shutting down; group '$group' is no longer served")

@@ -21,8 +21,8 @@ import org.junit.jupiter.params.provider.Arguments
 import org.junit.jupiter.params.provider.MethodSource
 
 /**
- * `createTable: REQUIRED` against a pre-existing DuckDB table (spec 4.4, 4.6, validation rule 15,
- * plan P2 done-when 3, 5 and 7).
+ * `createTable: REQUIRED` against a pre-existing DuckDB table (validation rule 15, P2 done-when 3,
+ * 5 and 7).
  *
  * The append is positional; the column order comes from the catalog and never from the caller.
  * Everything here exists to make a misalignment loud.
@@ -126,9 +126,10 @@ class DuckDbTableWriterRequiredTest {
 
     /**
      * Rule 15 rejects a nullable column outside VARCHAR, DECIMAL, TIMESTAMP, BIGINT, and rejects
-     * DATE whether nullable or not because 4.6's truncation does not depend on nullability. BLOB
-     * has no byte[] overload at all. The check is on the target's declared nullability, not the
-     * source's - the source columns here are always reported nullable by duckdb_jdbc.
+     * DATE whether nullable or not because the silent truncation does not depend on
+     * nullability. BLOB has no byte[] overload at all. The check is on the target's declared
+     * nullability, not the source's - the source columns here are always reported nullable by
+     * duckdb_jdbc.
      */
     @ParameterizedTest
     @MethodSource("rejectedTargetColumns")
@@ -222,7 +223,7 @@ class DuckDbTableWriterRequiredTest {
         )
     }
 
-    /** Spec 4.4: a Row key with no matching target column is an error, not a silently dropped value. */
+    /** A Row key with no matching target column is an error, not a silently dropped value. */
     @Test
     fun `a source column with no matching target column is an error and nothing is written`() {
         Scratch.exec(connection, "create table wip_stg (lot_code VARCHAR)")
@@ -249,7 +250,7 @@ class DuckDbTableWriterRequiredTest {
         )
     }
 
-    /** Spec 4.4: a NOT NULL target column with no matching Row key is an error naming that column. */
+    /** A NOT NULL target column with no matching Row key is an error naming that column. */
     @Test
     fun `a NOT NULL target column with no matching source column is an error and nothing is written`() {
         Scratch.exec(connection, "create table wip_stg (lot_code VARCHAR, lot_id BIGINT NOT NULL)")
@@ -290,7 +291,7 @@ class DuckDbTableWriterRequiredTest {
             failed.write(good.rows + bad.rows)
         }
 
-        // 4.6: a null reaching a NOT NULL column is reported, never appended as a placeholder.
+        // A null reaching a NOT NULL column is reported, never appended as a placeholder.
         assertAll(
             { assertFalse(thrown is NullPointerException) { "expected a diagnostic, not: $thrown" } },
             { assertTrue(thrown.message?.contains(STEP) == true) { "message was: ${thrown.message}" } },

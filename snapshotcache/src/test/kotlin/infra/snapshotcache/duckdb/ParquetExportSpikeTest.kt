@@ -11,20 +11,20 @@ import java.sql.Connection
 import java.sql.DriverManager
 
 /**
- * Spec 18.6 items 1-2, the M3 archive layer's opening spike: can DuckDB 1.1.3 run
+ * The M3 archive layer's opening spike: can DuckDB 1.1.3 run
  * `COPY (SELECT ...) TO '<f>.parquet'` on a connection whose current database is a
  * READ_ONLY attached generation file?
  *
  * The question gated the whole archiver design. If yes, an export streams straight from the
  * serving instance under the lease it already holds. If no, every export has to stage
- * through the public `copyOut` into the shared consumer instance (D16) first, doubling the
+ * through the public `copyOut` into the shared consumer instance first, doubling the
  * I/O and lengthening the lease hold. It was settled empirically against the pinned
  * version: it works, and the staging fallback is not needed.
  *
- * This test is the executable half of that answer - the prose half is spec 18.6. It lives
- * beside the other DuckDB adapter tests because what it pins is a DuckDB capability, not
- * archive policy; the archiver that consumes it is built in M3 ticket 03, which owns where
- * the production export function lands.
+ * This test is the executable half of that answer - the prose half is recorded in the spec's
+ * archive-feasibility findings. It lives beside the other DuckDB adapter tests because what it
+ * pins is a DuckDB capability, not archive policy; the archiver that consumes it is built in M3
+ * ticket 03, which owns where the production export function lands.
  *
  * The connection under test is the real one: [DuckDbGenerationStore.open] duplicates its
  * in-memory serving connection and `USE`s the READ_ONLY attached generation, which is
@@ -62,8 +62,8 @@ class ParquetExportSpikeTest {
 
             // Asserted on the rejection itself, not merely on failure: "something threw"
             // would stay green if the connection were closed, the table renamed, or the
-            // column types drifted - and this test is the whole evidence behind spec 18.6
-            // item 1's claim that the archiver may run against the live serving instance.
+            // column types drifted - and this test is the whole evidence behind the claim
+            // that the archiver may run against the live serving instance.
             assertThat(write.exceptionOrNull())
                 .hasMessageContaining("read-only")
                 .hasMessageContaining("INSERT")
@@ -71,7 +71,7 @@ class ParquetExportSpikeTest {
     }
 
     /**
-     * Spec 18.6 item 2: checkpoint bytes at ~1M rows, the number that sizes retention
+     * Checkpoint bytes at ~1M rows, the number that sizes retention
      * storage and settles whether a lease held across an export interacts badly with the
      * K-generation ceiling.
      *

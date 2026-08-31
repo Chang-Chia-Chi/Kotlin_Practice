@@ -13,7 +13,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 
-/** Spec 9.3's six meter names, used verbatim - no sanitising, no prefix, no registry convention. */
+/** The six meter names, used verbatim - no sanitising, no prefix, no registry convention. */
 private const val RUNS = "etl_task_runs_total"
 private const val TASK_DURATION = "etl_task_duration_seconds"
 private const val STEP_DURATION = "etl_step_duration_seconds"
@@ -22,12 +22,12 @@ private const val RETRIES = "etl_step_retries_total"
 private const val SCRATCH = "etl_scratch_file_bytes"
 
 /**
- * Spec 9.3's six meters, bound to Micrometer. The only class in `infra.etl` that names
+ * The six meters above, bound to Micrometer. The only class in `infra.etl` that names
  * `io.micrometer`, and ArchUnit keeps it that way.
  *
- * `micrometer-core` is a **`provided`** dependency, not a compile one, because spec 2.1's whole
- * reason for existing is that Layer 1 ships to the snapshot cache without Layer 2 and Maven has no
- * layer granularity: at compile scope every Layer 1 consumer would inherit Micrometer. Measured on
+ * `micrometer-core` is a **`provided`** dependency, not a compile one, because the whole reason
+ * the two layers are separate is that Layer 1 ships to the snapshot cache without Layer 2, and
+ * Maven has no layer granularity: at compile scope every Layer 1 consumer would inherit Micrometer. Measured on
  * a throwaway two-module reactor - a consumer of a `provided`-scoped library resolved **zero**
  * micrometer artefacts, while all five were on the library's own test classpath. A host wiring
  * this class necessarily already has a [MeterRegistry], so it necessarily already has the jar.
@@ -43,7 +43,7 @@ private const val SCRATCH = "etl_scratch_file_bytes"
  * - **Timers take milliseconds in and report seconds out.** Every duration this class is handed is
  *   a `durationMs`, so every `record` states [TimeUnit.MILLISECONDS]. Recording it as SECONDS is
  *   off by a factor of 1000 and passes every name and tag assertion ever written.
- * - `Meter.Id.getTags()` returns tags sorted by **key**, not in spec 9.3's table order (measured
+ * - `Meter.Id.getTags()` returns tags sorted by **key**, not in the order declared (measured
  *   on 1.14.2 in the P8b review round, `SimpleMeterRegistry`, printed verbatim):
  *   `etl_step_rows_total` reads back `[direction, phase, step, task]`.
  *
@@ -52,7 +52,7 @@ private const val SCRATCH = "etl_scratch_file_bytes"
  * A task's meters are registered on its **first run**, so a newly deployed task has no series at
  * all until it fires - an alert on the absence of a series will fire on deployment. [seed] closes
  * that for `etl_task_runs_total`, which is the meter staleness alerts are written against, and for
- * that one only; spec 9.3 states why each of the other five stays absence-only. And **this
+ * that one only; each of the other five has its own reason to stay absence-only. And **this
  * binding** never removes one - `MeterRegistry.remove` and `clear` do exist and were measured to
  * work; nothing here calls them - so a task renamed across a reload leaves a stale
  * `etl_scratch_file_bytes{task=old}` behind forever, reading whatever its last run reported.
@@ -86,16 +86,16 @@ class MicrometerTaskMetrics(private val registry: MeterRegistry) : TaskMetrics {
     /**
      * Pre-registers the zero-value [RUNS] series for every task in [taskNames], so a staleness
      * alert can be written as `etl_task_runs_total{outcome="succeeded"} == 0` rather than as an
-     * absence query (spec 9.3, 8.6).
+     * absence query.
      *
      * Four series per name: [TriggerSource] and [Outcome] are closed two-valued enums, which is
-     * what makes this meter the only one of spec 9.3's six whose full label set follows from a
+     * what makes this meter the only one of the six whose full label set follows from a
      * task name. The other five need a phase and a step, or are a gauge whose zero would be a
-     * measurement rather than a placeholder - 9.3 states the exclusion per meter.
+     * measurement rather than a placeholder.
      *
-     * **The host calls this, after the initial load and after every reload** (spec 8.6). It cannot
+     * **The host calls this, after the initial load and after every reload.** It cannot
      * be called from `infra.etl.task`, which may not name `io.micrometer`, and it is deliberately
-     * not on the [TaskMetrics] interface: seeding series of a metric 9.3 already lists is not a
+     * not on the [TaskMetrics] interface: seeding series of a metric already listed above is not a
      * seventh metric, so nothing that implements that interface breaks.
      *
      * **Idempotent.** `MeterRegistry.counter` is get-or-create on the meter id, so re-seeding a

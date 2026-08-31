@@ -17,11 +17,11 @@ import org.junit.jupiter.api.assertAll
 import org.junit.jupiter.api.io.TempDir
 
 /**
- * Spec 8.5: reload is atomic, and a running task keeps the definition it started with.
+ * Reload is atomic, and a running task keeps the definition it started with.
  *
  * The reload oracle is [RecordingCron.registered] rather than `TaskAdmin.list()`, because the
- * schedule registry is the one observable spec 11.2 actually pins - `TaskStatus`'s shape is the
- * engineer's. It is also the stronger oracle for the atomicity item: it changes only if the new
+ * schedule registry is the one observable the frozen public surface pins - `TaskStatus`'s shape is
+ * the engineer's. It is also the stronger oracle for the atomicity item: it changes only if the new
  * definitions were committed, so "nothing changed" and "everything changed" are the same
  * assertion read two ways.
  *
@@ -114,8 +114,8 @@ class TaskAdminReloadTest {
     /**
      * The other half of "atomic". Every file here loads cleanly, so the loader passes it; the
      * *scheduler* is what refuses, because one cron is shaped legally but is unparseable - which
-     * is exactly the split spec 8.6 names, "make `CronScheduler.schedule` throw on an unparseable
-     * cron, or 8.5's atomic reload silently accepts a bad cron".
+     * is exactly the host obligation: `CronScheduler.schedule` must throw on an unparseable cron,
+     * or the atomic reload silently accepts a bad one.
      *
      * The third assertion is the one the loader-rejection test cannot make: the definition set
      * must not be swapped either. Dropping `reload`'s `if (rejected != null) return rejected`
@@ -194,7 +194,7 @@ class TaskAdminReloadTest {
     }
 
     /**
-     * Spec 8.5: the definition is captured at run start and never swapped mid-run.
+     * The definition is captured at run start and never swapped mid-run.
      *
      * The reload replaces `wip-summary` with a version that has a different cron and does not
      * mention the probe datasource at all. The parked run is sitting inside the probe, which only

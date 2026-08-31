@@ -7,8 +7,8 @@ import java.time.LocalDateTime
 import java.util.Collections
 
 /**
- * One immutable row of canonical values (spec 4.2). Keys are lower case and in source order
- * (spec 4.5), so an Oracle result set and a DuckDB result set over the same columns produce the
+ * One immutable row of canonical values. Keys are lower case and in source order, so an Oracle
+ * result set and a DuckDB result set over the same columns produce the
  * same keys. Column names are lower-cased on the way in and on every lookup, so a transform
  * cannot introduce an upper-case key by accident.
  *

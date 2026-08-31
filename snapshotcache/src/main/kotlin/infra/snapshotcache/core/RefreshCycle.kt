@@ -29,27 +29,27 @@ import java.time.Duration
 private val log = Logger.getLogger(RefreshCycle::class.java)
 
 /**
- * One refresh round, end to end: the spec 4.1 state machine over the seams. The registry
- * decides - every mutable-state question is answered under its single lock - and this
- * class sequences the I/O outside it (plan 2.5). Failure at any stage leaves the current
- * pointer untouched, deletes the candidate, and puts the registry record in GONE, so the
- * next round starts from a clean slate (spec 4.1, 9.2 - "return to a usable state").
+ * One refresh round, end to end: the refresh state machine driven over the seams. The
+ * registry decides - every mutable-state question is answered under its single lock - and
+ * this class sequences the I/O outside it. Failure at any stage leaves the current pointer
+ * untouched, deletes the candidate, and puts the registry record in GONE, so the cache
+ * returns to a usable state and the next round starts from a clean slate.
  *
- * Failure classification (spec 9.2):
+ * Failure classification:
  * - [GenerationStore] operations throwing  -> [RefreshResult.DISK_ERROR], plus an emergency GC
  * - [GenerationSource.refresh] throwing    -> [RefreshResult.SOURCE_ERROR]
  * - [InterruptedException] anywhere, or the registry's shutting-down flag observed at a
- *   stage boundary                          -> [RefreshResult.SHUTDOWN_ABORTED] (spec 10.2 step 3, D23)
+ *   stage boundary                          -> [RefreshResult.SHUTDOWN_ABORTED]
  * - a failing verify rule                   -> [RefreshResult.VERIFY_FAILED]
  *
  * Shutdown abort is cooperative: the source may throw [InterruptedException], or the flag
  * is observed between stages. Delivering an actual thread interrupt is P9 wiring.
  *
  * Verify runs after promote+open, on a connection from the attached generation: the frozen
- * [GenerationStore] has no reopen-candidate-read-only seam, and spec 8.1's `readable`
+ * [GenerationStore] has no reopen-candidate-read-only seam, and the `readable` verify rule
  * ("reopened and queried") is exactly what [GenerationStore.open] does. I1 is unaffected -
  * the pointer swap still happens only after the gate passes - and a crash in the window
- * leaves an unattached, unverified file that the startup wipe removes (D10).
+ * leaves an unattached, unverified file that the startup wipe removes.
  */
 internal class RefreshCycle(
     private val group: GroupId,
@@ -68,9 +68,9 @@ internal class RefreshCycle(
     private class RoundAbort(val result: RefreshResult, val reason: String) : RuntimeException(reason)
 
     /**
-     * One full round including the overlap guard, the K guard, and GC after publish
-     * (spec 4.1). Overlapping rounds are forbidden (spec 4.4): if one is already running,
-     * this trigger is skipped and counted, nothing else.
+     * One full round including the overlap guard, the K guard, and GC after publish.
+     * Overlapping rounds are forbidden: if one is already running, this trigger is skipped
+     * and counted, nothing else.
      */
     fun runOnce(): RefreshOutcome {
         if (!registry.tryBeginRound()) {
@@ -87,7 +87,7 @@ internal class RefreshCycle(
         if (registry.blockedByK() != null) {
             // Generations already eligible for reclaim (non-current, refcount 0) must not
             // keep refresh paused: reclaim them first, then re-evaluate the guard, so a
-            // released lease auto-resumes the next round (spec 6.1, 17.4 row 2).
+            // released lease auto-resumes the next round.
             reclaimPass()
             registry.blockedByK()?.let { holders -> return blockedByK(holders) }
         }
@@ -113,7 +113,7 @@ internal class RefreshCycle(
                 // An interrupted JDBC call surfaces as a driver exception (SQLException),
                 // not as InterruptedException, so shutdown has to be re-checked here or a
                 // correctly ordered shutdown - flag set, then interrupt - still counts
-                // source_error and the two stop being distinguishable (spec 9.2 last row, D26).
+                // source_error and the two stop being distinguishable.
                 if (registry.isShuttingDown()) {
                     throw RoundAbort(
                         RefreshResult.SHUTDOWN_ABORTED,
@@ -168,8 +168,8 @@ internal class RefreshCycle(
                 is GateOutcome.Passed -> {
                     registry.resetVerifyFailures()
                     // Verify runs full-table scans and takes seconds; a shutdown that began
-                    // meanwhile must not still swap the pointer and reclaim mid-drain
-                    // (spec 10.2 step 3, 9.2 - current pointer untouched).
+                    // meanwhile must not still swap the pointer and reclaim mid-drain; the
+                    // current pointer stays untouched instead.
                     if (registry.isShuttingDown()) {
                         throw RoundAbort(
                             RefreshResult.SHUTDOWN_ABORTED,
@@ -202,7 +202,7 @@ internal class RefreshCycle(
     }
 
     /**
-     * Failure epilogue, identical for every spec 9.2 row that reaches a candidate: record
+     * Failure epilogue, identical for every classified failure that reaches a candidate: record
      * GONE first (the generation can never be handed out), then best-effort I/O cleanup so
      * a failing delete cannot mask the original failure. Current is untouched throughout (I7).
      */
@@ -222,7 +222,7 @@ internal class RefreshCycle(
         }
         // Same protocol as reclaimPass: detach first, delete only once detached. Deleting a
         // file still attached to the serving instance would leave a dangling alias, so a
-        // failed detach leaves the file for the startup wipe (D10) instead. The delete runs
+        // failed detach leaves the file for the startup wipe instead. The delete runs
         // even when no candidate object exists - createCandidate creates the .tmp file
         // before it can fail, and delete is deleteIfExists-safe on both paths.
         val detached = opened == null || runCatching { store.close(gen) }
@@ -236,10 +236,10 @@ internal class RefreshCycle(
     }
 
     /**
-     * One reclaim pass (spec 4.2 GC): the registry marks eligible generations RECLAIMING
-     * under its lock, detach + delete run out here. A generation whose detach fails - a
-     * connection still in use (A4) - or whose delete fails is deferred to the next pass
-     * with a warning, never blocking the rest of the pass (spec 9.2). The retry re-runs
+     * One reclaim pass, the round's GC stage: the registry marks eligible generations
+     * RECLAIMING under its lock, detach + delete run out here. A generation whose detach
+     * fails - a connection still in use (A4) - or whose delete fails is deferred to the
+     * next pass with a warning, never blocking the rest of the pass. The retry re-runs
      * both calls, which is why [GenerationStore.close] is contractually idempotent: a
      * close-succeeded-then-delete-failed generation must not wedge in a permanent defer.
      */
@@ -269,9 +269,9 @@ internal class RefreshCycle(
     }
 
     /**
-     * Blocked-by-K (spec 6.1, 9.2): refresh pauses without allocating a generation number,
-     * and every holding lease is logged with its owner and hold duration so the stuck job
-     * is identifiable (D7, D27). Auto-resume needs no machinery - the next round proceeds
+     * Blocked-by-K: refresh pauses without allocating a generation number, and every
+     * holding lease is logged with its owner and hold duration so the stuck job is
+     * identifiable. Auto-resume needs no machinery - the next round proceeds
      * once the leases release.
      */
     private fun blockedByK(holders: List<LeaseInfo>): RefreshOutcome {
@@ -298,7 +298,7 @@ internal class RefreshCycle(
         return RefreshOutcome(result, generation, detail)
     }
 
-    /** A [GenerationStore] operation throwing is a disk problem (spec 9.2 classification). */
+    /** A [GenerationStore] operation throwing classifies as a disk problem, not a source one. */
     private inline fun <T> storeOp(op: () -> T): T = try {
         op()
     } catch (interrupted: InterruptedException) {

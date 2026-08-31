@@ -22,7 +22,7 @@ import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertAll
 import org.junit.jupiter.api.io.TempDir
 
-/** Spec 9.3's row counter, named once so a typo in the test cannot agree with a typo in the code. */
+/** The row counter series, named once so a typo in the test cannot agree with a typo in the code. */
 private const val ROWS = "etl_step_rows_total"
 
 /**
@@ -32,29 +32,30 @@ private const val ROWS = "etl_step_rows_total"
  * they carry the whole of "a *subset* was copied": with 9 and 7 apart, an implementation that
  * copied the table wholesale, or one that copied nothing and let a later step read the generation
  * directly, fails. `where lot_id < 7` is a filter the generation itself must evaluate, because
- * spec 7.3's copy runs **inside the cache's own DuckDB instance** and no row crosses the JVM.
+ * the copy runs **inside the cache's own DuckDB instance** and no row crosses the JVM.
  */
 private const val GENERATION_ROWS = 9
 private const val SUBSET_SQL = "select lot_id, qty from wip where lot_id < 7"
 private const val SUBSET_ROWS = 7L
 
 /**
- * P9: **the `cacheCopy` executor of spec 7.3**, the fifth step type and the reason this framework
+ * P9: **the `cacheCopy` executor**, the fifth step type and the reason this framework
  * depends on `snapshotcache` at all.
  *
  * Every run here goes through a [FakeSnapshotCache], which performs the real ATTACH / USE / CTAS /
  * USE / DETACH against a genuine second DuckDB file. `DefaultSnapshotCache` is `internal` to its
  * own module, so a real cache is out of reach from here by construction; the integration belongs
- * in spec 8.6's host table and is recorded there rather than faked here.
+ * to the host's own wiring obligations and is recorded there rather than faked here.
  *
  * ### What each of these tests is really guarding against
  *
  * The wrong implementations are specific and none of them is exotic:
  *
- * - **A `Snapshot` held across steps.** `copyOut` owns the lease lifecycle, which is why spec 7.3
- *   names it and not `acquire`; a task holding a lease for thirty minutes stalls every refresh of
- *   the cache, with the cause in a different system from the symptom. The double throws an `Error`
- *   from `acquire` and `withSnapshot`, so a run that took a lease dies rather than passing.
+ * - **A `Snapshot` held across steps.** `copyOut` owns the lease lifecycle, which is why the step
+ *   type is defined over it and not `acquire`; a task holding a lease for thirty minutes stalls
+ *   every refresh of the cache, with the cause in a different system from the symptom. The double
+ *   throws an `Error` from `acquire` and `withSnapshot`, so a run that took a lease dies rather
+ *   than passing.
  * - **A view over the attached generation** instead of a materialised copy. The double deletes the
  *   generation file inside `copyOut`'s own `finally`, and a later step then reads the dataset.
  * - **A row count that means "rows the database touched".** `StepResult` is 0 / 0 like every
@@ -82,7 +83,7 @@ class CacheCopyStepTest {
             .also { it.seed("wip", rows = GENERATION_ROWS) }
 
     /**
-     * Criteria 1 and 5. **A subset copies out of a generation into scratch**, under spec 5.5's
+     * Criteria 1 and 5. **A subset copies out of a generation into scratch**, under the
      * attempt-suffixed physical name with a stable view over it, and the engine reaches the
      * generation through `copyOut` and nothing else.
      *
@@ -311,14 +312,14 @@ class CacheCopyStepTest {
      *
      * `NotReadyException` is a plain `RuntimeException`, so the step loop sees it and the run ends
      * as an ordinary failure - which is also what makes the listener and metric call sites fire on
-     * this path. It is deliberately **not** transient under spec 5.3, whose list is JDBC-shaped:
+     * this path. It is deliberately **not** transient, because that classification is JDBC-shaped:
      * `copyOut`'s own `waitBudget` is the waiting mechanism, and retrying a cache that has nothing
      * to hand out only turns a fast failure into a slow one.
      *
      * The step states `retries = 3`, and that is asserted rather than assumed: "nothing was
      * retried" is worth nothing against a step that was never allowed a second attempt. It was
      * `CacheCopyStep`'s declared default until E10 made the field `Int?` and both paths resolve an
-     * unstated one to 0 (spec 5.3, rule 20), so the 3 this criterion needs is now written down.
+     * unstated one to 0 (rule 20), so the 3 this criterion needs is now written down.
      * `delaysMillis` is the harness's record of what the engine *asked* the sleeper for, so this
      * assertion costs no wall time.
      *
@@ -378,7 +379,7 @@ class CacheCopyStepTest {
      * `require(!sql.contains(":"))`, which would then reject `qty::varchar` and `'a:b'` - both
      * legal DuckDB, both skipped correctly by JDBI's own parser, and both silently unusable in
      * every task file that needs a cast. `siteCode` is a **defined** task variable here, so the
-     * rejection cannot be spec 6.2's "used before its export" wearing a different hat, and the
+     * rejection cannot be the "used before its export" error wearing a different hat, and the
      * cache name is a **registered** one, so the step reaches the check under test rather than
      * dying on an unknown cache first.
      */

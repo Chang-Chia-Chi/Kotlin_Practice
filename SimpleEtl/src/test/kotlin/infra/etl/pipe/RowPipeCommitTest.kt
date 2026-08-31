@@ -18,12 +18,12 @@ import org.junit.jupiter.api.assertAll
  * Done-when item 3: the commit happens once per chunk, verified by counting rows visible from a
  * second connection *while the pipe is still running*.
  *
- * For a DuckDB target the appender's `flush()` is that commit (spec 4.6): measured on the pinned
+ * For a DuckDB target the appender's `flush()` is that commit: measured on the pinned
  * 1.1.3, appended rows are invisible even to the appending connection until flush, and visible
  * to a `duplicate()` connection immediately after it. `autoCommit` is true by default, so there
  * is no `commit()` to observe and nothing else to look at.
  *
- * The observer is a `duplicate()` of the target connection, which shares the instance (spec 7.2),
+ * The observer is a `duplicate()` of the target connection, which shares the instance,
  * and it is read from inside a [RowTransform] - which runs on the pipe's own thread, once per
  * row, at a point the test controls. One thread throughout: no sleeps, no second thread, and no
  * DuckDB connection used from two threads at once.

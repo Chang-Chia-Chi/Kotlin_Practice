@@ -15,12 +15,12 @@ import org.junit.jupiter.api.assertAll
 import org.junit.jupiter.api.io.TempDir
 
 /**
- * E15b: `MicrometerTaskMetrics.seed`, read out of a real `SimpleMeterRegistry` (spec 9.3).
+ * E15b: `MicrometerTaskMetrics.seed`, read out of a real `SimpleMeterRegistry`.
  *
  * The defect is that `etl_task_runs_total` materialises on a task's **first run**, so a task that
  * has never succeeded emits no series and `etl_task_runs_total{outcome="succeeded"} == 0` matches
- * nothing - it does not fire and it does not error. Spec 8.6 states the workaround (alert on
- * absence); `seed` is the other half.
+ * nothing - it does not fire and it does not error. The standing workaround is to alert on
+ * absence; `seed` is the other half.
  *
  * ### The oracle is series *identity*, not series count
  *
@@ -32,10 +32,11 @@ import org.junit.jupiter.api.io.TempDir
  *
  * ### Why the exclusion test is here
  *
- * Spec 9.3 excludes the other five meters per meter, and four of those exclusions are the reason
- * `seed` takes only task names. [seedingRegistersTheRunsCounterAndNothingElse] is what stops a
- * later session "completing" the seeding by adding a zero gauge for `etl_scratch_file_bytes`,
- * which would assert a measured footprint of zero bytes for a task that has never opened a file.
+ * The other five meters are excluded from seeding one at a time, and four of those exclusions are
+ * the reason `seed` takes only task names. [seedingRegistersTheRunsCounterAndNothingElse] is what
+ * stops a later session "completing" the seeding by adding a zero gauge for
+ * `etl_scratch_file_bytes`, which would assert a measured footprint of zero bytes for a task that
+ * has never opened a file.
  */
 class MetricSeedTest {
 
@@ -116,7 +117,7 @@ class MetricSeedTest {
     }
 
     /**
-     * Re-seeding is what a host does after every reload (spec 8.6), by which time the process has
+     * Re-seeding is what a host does after every reload, by which time the process has
      * been running for weeks. A `seed` that re-registered would zero every counter in the fleet on
      * an operator's routine reload - a data loss with no error and no log line.
      */
@@ -151,9 +152,9 @@ class MetricSeedTest {
     }
 
     /**
-     * Spec 9.3's exclusion table, asserted rather than left as prose. Seeding registers series of a
-     * metric 9.3 already lists and adds no meter of its own, which is the argument that it is not a
-     * seventh metric and that `TaskMetrics` stays closed.
+     * The exclusion table, asserted rather than left as prose. Seeding registers series of a metric
+     * the six-meter set already lists and adds no meter of its own, which is the argument that it
+     * is not a seventh metric and that `TaskMetrics` stays closed.
      */
     @Test
     fun seedingRegistersTheRunsCounterAndNothingElse() {
@@ -172,8 +173,8 @@ class MetricSeedTest {
      *
      * The discriminating property is the absence: this test contains **no call to `seed`**. If
      * the series exists at zero anyway, the framework made it exist - which is exactly what the
-     * old spec 8.6 row claimed was impossible ("`infra.etl.task` may not name `io.micrometer`")
-     * and what refuted it: invoking a `(Set<String>) -> Unit` names nothing.
+     * old host-obligation row claimed was impossible ("`infra.etl.task` may not name
+     * `io.micrometer`") and what refuted it: invoking a `(Set<String>) -> Unit` names nothing.
      */
     @Test
     fun theFrameworkSeedsThroughOnTasksLoadedWithNoHostCallSite() {

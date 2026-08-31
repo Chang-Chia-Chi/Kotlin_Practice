@@ -6,7 +6,7 @@ import org.junit.jupiter.api.Test
 import java.nio.file.Path
 import java.time.Duration
 
-/** Spec 13's table, asserted verbatim. A default that drifts from the spec fails here. */
+/** The documented configuration defaults, asserted verbatim. A drifting default fails here. */
 class SnapshotCacheConfigDefaultsTest {
 
     private val config = SnapshotCacheConfig(

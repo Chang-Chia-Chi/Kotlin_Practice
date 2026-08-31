@@ -184,7 +184,7 @@ class ArchitectureTest {
     // The non-suspend invariant CLAUDE.md's Concurrency idiom section records: no frame in
     // `run -> execute -> pipe -> ScratchDb.connection()` is `suspend`. That is what makes a
     // single DuckDB Connection safe under `synchronized` rather than `Mutex` - DuckDB's hazard
-    // is a *thread* constraint (spec 7.2), and a suspend fun can resume its continuation on a
+    // is a *thread* constraint, and a suspend fun can resume its continuation on a
     // different thread. A `suspend fun` compiles to an extra `kotlin.coroutines.Continuation`
     // parameter, so banning that parameter type bans `suspend` without needing bytecode-level
     // coroutine inspection. Both the duckdb leaf and the task-layer entry point are checked:

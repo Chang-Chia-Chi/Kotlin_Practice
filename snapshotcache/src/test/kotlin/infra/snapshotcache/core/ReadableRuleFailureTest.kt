@@ -10,14 +10,15 @@ import java.sql.Connection
 
 /**
  * P5 rider (assigned by the P4b progress note): the `readable` rule's failure path - the
- * one spec 8.1 row previously unasserted. Spec 8.1's observable: "a candidate that cannot
+ * one verify-rule row previously unasserted. The rule's observable: "a candidate that cannot
  * be reopened and queried never publishes."
  *
  * What production actually does (pinned here): [infra.snapshotcache.spi.VerifyGate]
  * catches both failure shapes - the verify connection failing to open, and the opened
  * connection failing its first query - and classifies them as a `readable` rule failure,
  * so the round ends [RefreshResult.VERIFY_FAILED], NOT `disk_error`. That is consistent
- * with spec 8.1 (`readable` = "candidate file can be reopened and queried"). A store-level
+ * with the rule's own definition (`readable` = "candidate file can be reopened and queried").
+ * A store-level
  * open() failure, by contrast, classifies as disk_error before the gate runs (P4b note).
  */
 internal class ReadableRuleFailureTest : RefreshCycleTestBase() {
@@ -56,7 +57,7 @@ internal class ReadableRuleFailureTest : RefreshCycleTestBase() {
             .containsExactly(gen1)
 
         refusingStore.mode = VerifyConnectionRefusingStore.Mode.NONE
-        runSuccess(riderCycle) // return to a usable state (spec 9.2)
+        runSuccess(riderCycle) // return to a usable state
     }
 
     @Test
@@ -87,7 +88,7 @@ internal class ReadableRuleFailureTest : RefreshCycleTestBase() {
  * succeeds (a store-level open failure is disk_error territory, out of the readable rule's
  * scope), but the returned [OpenGeneration.connection] either throws or yields a connection
  * that fails every query. close/isClosed still reach the tracked delegate connection, so the
- * spec 17.6 leak detector keeps seeing every connection.
+ * JVM-side leak detector keeps seeing every connection.
  */
 internal class VerifyConnectionRefusingStore(
     private val delegate: GenerationStore,

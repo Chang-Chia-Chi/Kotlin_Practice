@@ -29,7 +29,7 @@ import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 
 /**
- * P12 acceptance: the spec 18.3 publish protocol, end to end.
+ * P12 acceptance: the intent-first publish protocol, end to end.
  *
  * Real Oracle for the manifest, because every safety property here is about what survives a
  * crash and the conditional transitions that decide it - a compatibility mode would prove
@@ -39,7 +39,7 @@ import java.util.concurrent.atomic.AtomicReference
  * waiting on a container; [ObjectStoreTest] covers what the fake stands in for.
  *
  * Zero sleeps. Every wait is a latch, a barrier, or a bounded join, and every bound is a
- * bound on a broken implementation rather than on sequencing (spec 17.4).
+ * bound on a broken implementation rather than on sequencing.
  */
 @Testcontainers
 class ArchiverTest {
@@ -84,9 +84,9 @@ class ArchiverTest {
     }
 
     /**
-     * D33's ordering, asserted where it actually matters. The store reports, at the instant
-     * of each upload, what the manifest said about this group - so a reordering that put an
-     * object in the bucket first would be caught even though the finished state looks the same.
+     * The row-before-object ordering, asserted where it matters. The store reports, at the instant
+     * of each upload, what the manifest said about this group - so a reordering that put an object
+     * in the bucket first would be caught even though the finished state looks the same.
      */
     @Test
     fun `no object is uploaded before its covering PENDING row is committed`() {
@@ -101,7 +101,7 @@ class ArchiverTest {
         assertThat(statusAtUpload.map { it.first }).containsExactlyInAnyOrderElementsOf(keysOf(row))
     }
 
-    /** Spec 18.3 step 2 / D31: equal is a regression too, and the skip is loud. */
+    /** `data_as_of` must be strictly newer: equal is a regression too, and the skip is loud. */
     @Test
     fun `a run whose data_as_of is not newer than the newest COMPLETE skips and alerts`() {
         archiver().use { archiver ->
@@ -118,7 +118,7 @@ class ArchiverTest {
     }
 
     /**
-     * The crash matrix. One injected failure at every step boundary of spec 18.3, each
+     * The crash matrix. One injected failure at every step boundary of the publish protocol, each
      * checked against the one property the whole ordering exists to buy: whatever is in the
      * bucket is covered by a manifest row, and a COMPLETE row is one a reader can trust.
      *
@@ -150,7 +150,7 @@ class ArchiverTest {
         assertThat(tempRoot).doesNotExist()
     }
 
-    /** Spec 18.2: a run that finds its group busy skips and logs; it never queues. */
+    /** A run that finds its group busy skips and logs; it never queues. */
     @Test
     fun `the same group never runs twice at once`() {
         val parked = CountDownLatch(1)
@@ -217,7 +217,7 @@ class ArchiverTest {
     }
 
     /**
-     * Spec 18.3's shutdown clause, all of it. The run is parked mid-upload on the archiver's
+     * The protocol's shutdown clause, all of it. The run is parked mid-upload on the archiver's
      * own pool, so `close` interrupts it for real; what has to come back is the lease, an
      * empty temp root, and - deliberately - a PENDING row nobody touched.
      */
@@ -254,9 +254,9 @@ class ArchiverTest {
 
         archiver(
             groups = listOf(group, other),
-            // Counted once per group: a group's later scheduled runs are refused by the D31
-            // guard anyway, but a latch that any two passages could satisfy would not be
-            // asserting what the test claims.
+            // Counted once per group: a group's later scheduled runs are refused by the
+            // monotonicity guard anyway, but a latch that any two passages could satisfy
+            // would not be asserting what the test claims.
             steps = { runGroup, step ->
                 if (step == ArchiveStep.AFTER_COMPLETE && seen.add(runGroup)) ran.countDown()
             },
@@ -294,7 +294,7 @@ class ArchiverTest {
         Inventory.decode(row.inventory).map { keyOf(row, it) }
 
     /**
-     * The invariant behind every row of the crash matrix (D33): no object without a covering
+     * The invariant behind every row of the crash matrix: no object without a covering
      * manifest row, and no COMPLETE row whose inventory the bucket cannot honour.
      */
     private fun assertConverged() {

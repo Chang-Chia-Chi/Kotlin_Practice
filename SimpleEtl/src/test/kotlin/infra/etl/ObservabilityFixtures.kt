@@ -19,7 +19,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
 /**
- * P8a test support: the observation apparatus for spec 9.2's listener and spec 9.4's hooks.
+ * P8a test support: the observation apparatus for the run listener and the task hooks.
  *
  * **One trace, two kinds of assertion.** Everything a run reports - every listener call site and
  * every hook invocation - lands as a line in a single [EventTrace], in the order it happened, and
@@ -35,7 +35,7 @@ import java.util.concurrent.atomic.AtomicLong
  *   rendered into a string.
  *
  * Hooks write into the same trace as listener calls because the two interleave by contract:
- * spec 9.4's `onSuccess` runs after the last `onPhaseEnd` and before `onTaskEnd`, and a
+ * the `onSuccess` hook runs after the last `onPhaseEnd` and before `onTaskEnd`, and a
  * throwing `onSuccess` is followed by `onFailure` and *then* by `onTaskEnd(FAILED)`. Two separate
  * recordings could not express that, and asserting it is the point.
  *
@@ -113,10 +113,10 @@ class EventTrace {
 
     /**
      * P8b. A [infra.etl.task.TaskMetrics] writing into this trace, alongside the listener and the
-     * hooks, because spec 9.3's ordering clauses are all *relative* ones - `stepRetried` before
-     * `onStepError(willRetry = true)`, `scratchBytes` before the `onSuccess` hook. Two separate
-     * recordings could express neither, and those two orderings are the ones that carry a failure
-     * mode.
+     * hooks, because the metrics seam's ordering clauses are all *relative* ones - `stepRetried`
+     * before `onStepError(willRetry = true)`, `scratchBytes` before the `onSuccess` hook. Two
+     * separate recordings could express neither, and those two orderings are the ones that carry
+     * a failure mode.
      *
      * @param failAt the call sites this recorder throws from, *after* recording them - the same
      *   discipline [listener] follows and for the same reason: "a throwing `TaskMetrics` did not
@@ -129,13 +129,13 @@ class EventTrace {
     ): RecordingMetrics = RecordingMetrics(this, failAt, failure)
 }
 
-/** The seven call sites of spec 9.2, as a value a parameterized test can enumerate. */
+/** The seven call sites of the run listener, as a value a parameterized test can enumerate. */
 enum class ListenerCall { TASK_START, TASK_END, PHASE_START, PHASE_END, STEP_START, STEP_END, STEP_ERROR }
 
 /**
  * A [TaskRunListener] that records what it was told, and optionally throws from chosen call sites.
  *
- * Thread safe, because spec 9.2 says a listener is called from N task threads at once. Nothing in
+ * Thread safe, because a listener is called from N task threads at once. Nothing in
  * this phase runs two tasks concurrently, but a fixture that would corrupt under the contract it
  * is testing is not a fixture worth having.
  */
@@ -254,7 +254,7 @@ class RecordingHook internal constructor(
     /** Every invocation's context, in order. */
     val contexts: List<TaskContext> get() = synchronized(seen) { ArrayList(seen) }
 
-    /** Spec 9.4 says `onSuccess` runs *once*, so this is asserted rather than assumed non-zero. */
+    /** `onSuccess` runs *once* per run, so this is asserted rather than assumed non-zero. */
     val runs: Int get() = contexts.size
 
     override fun run(ctx: TaskContext) {
@@ -351,14 +351,14 @@ fun taskContext(
     startedAt = startedAt,
 )
 
-/** The four call sites of spec 9.3's metrics seam, as a value a parameterized test can enumerate. */
+/** The four call sites of the metrics seam, as a value a parameterized test can enumerate. */
 enum class MetricsCall { TASK_ENDED, STEP_ENDED, STEP_RETRIED, SCRATCH_BYTES }
 
 /**
  * P8b. A [TaskMetrics] that records what it was told, and optionally throws from chosen call sites.
  *
- * Thread safe for the same reason [RecordingListener] is: spec 8.4 runs N tasks through one engine
- * and every method here is reached from all of them.
+ * Thread safe for the same reason [RecordingListener] is: N tasks run through one engine and
+ * every method here is reached from all of them.
  *
  * **`scratchBytes`'s byte count is deliberately absent from the trace line.** It is the size of a
  * DuckDB file this suite does not control to the byte, so a whole-trace `assertEquals` carrying it
@@ -396,7 +396,7 @@ class RecordingMetrics internal constructor(
     val taskEndings: List<TaskEnded> get() = copyOf(taskEndsSeen)
     val stepEndings: List<StepEnded> get() = copyOf(stepEndsSeen)
 
-    /** One entry per *retried attempt*, not per retried step (spec 9.3, contract 3.2). */
+    /** One entry per *retried attempt*, not per retried step (contract 3.2). */
     val retries: List<StepContext> get() = copyOf(retriesSeen)
 
     val scratchSamples: List<ScratchSample> get() = copyOf(scratchSeen)

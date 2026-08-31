@@ -20,11 +20,11 @@ import org.junit.jupiter.api.io.TempDir
  *
  * Every definition here is assembled from constructors through [Etl]. Nothing in this file parses
  * a string into a task, which is the point of the item: `TaskDefinition` is a public,
- * programmatically constructible type and YAML is only one source of one (spec 2.1). P6 owns
+ * programmatically constructible type and YAML is only one source of one. P6 owns
  * loading, and a test here that reached for a file would have failed the item rather than proved
  * it.
  *
- * The shape under test is spec 2.4's shape B - land in scratch, derive inside scratch, publish
+ * The shape under test is shape B - land in scratch, derive inside scratch, publish
  * outward - because it is the only shape that exercises all four types at once and it is the one
  * the framework exists for.
  *
@@ -85,7 +85,7 @@ class TaskEngineStepTypesTest {
 
             harness.runExpectingSuccess(definition)
 
-            // pipe: every source row landed under the stable name of spec 5.5
+            // pipe: every source row landed under the dataset's stable name
             harness.readProbe(probe) { probeDb ->
                 assertEquals(
                     listOf("w-0", "w-1", "w-2", "w-3", "w-4", "w-5"),
@@ -98,7 +98,7 @@ class TaskEngineStepTypesTest {
                     Etl.strings(probeDb, "select lot_code from summary order by lot_code"),
                 ) { "the materialize step's output" }
 
-                // both datasets are reached through a stable view, not a bare table (spec 5.5)
+                // both datasets are reached through a stable view, not a bare table
                 val views = Etl.strings(probeDb, "select view_name from probe_views")
                 assertTrue(views.containsAll(listOf("wip_stg", "summary"))) {
                     "both datasets are reached through a stable view; views were $views"
@@ -113,7 +113,7 @@ class TaskEngineStepTypesTest {
     }
 
     /**
-     * Spec 5.6: `format: PARQUET` puts the dataset in a file instead of a table, and the stable
+     * `format: PARQUET` puts the dataset in a file instead of a table, and the stable
      * name resolves over `read_parquet` so that no other step changes.
      *
      * Asserting the rows alone would pass against an engine that quietly ignored `format`, so the
@@ -167,9 +167,9 @@ class TaskEngineStepTypesTest {
     }
 
     /**
-     * Spec 9.1 through Layer 2: a `pipe` step's transform is wired to the pipe. P3 proved
-     * `RowPipe` applies a transform; this proves the step carries one to it, which is a different
-     * claim and is the seam that has no test otherwise.
+     * The transform contract through Layer 2: a `pipe` step's transform is wired to the pipe. P3
+     * proved `RowPipe` applies a transform; this proves the step carries one to it, which is a
+     * different claim and is the seam that has no test otherwise.
      *
      * The transform drops rows rather than adding a column, deliberately: under
      * `createTable: AUTO` an added column is silently dropped, because AUTO's DDL comes from
@@ -212,7 +212,7 @@ class TaskEngineStepTypesTest {
     }
 
     /**
-     * Spec 9.1 and validation rule 14: a column a transform *adds* is not in the source metadata,
+     * Validation rule 14: a column a transform *adds* is not in the source metadata,
      * so under `createTable: AUTO` the generated DDL cannot describe it and the value is silently
      * dropped - measured in P3, and recorded there as Layer 2's to carry. `addColumns` is how
      * Layer 2 carries it.

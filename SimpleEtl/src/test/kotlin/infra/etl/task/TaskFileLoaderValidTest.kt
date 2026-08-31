@@ -38,7 +38,7 @@ import org.junit.jupiter.api.io.TempDir
  *
  * [theBaselineLoadsAndEveryFieldSurvives] does more than assert a clean load. A loader that
  * returned an empty list, or a `TaskDefinition` at every default, would satisfy "it loaded"
- * while carrying none of the file's content - so every field spec 3.1 to 3.5 can express is
+ * while carrying none of the file's content - so every field the task schema can express is
  * read back. That also covers six fields P5 recorded as "carried and unused": `enabled`,
  * `cron`, `logging`, `onSuccess`, `onFailure` and `PipeTarget.idempotent` have no other test in
  * the module, and loading is where they are populated.
@@ -205,7 +205,7 @@ class TaskFileLoaderValidTest {
 
     /**
      * The minimal file is what fills the ten-file directory, and it is also the only place an
-     * *omitted* `retries` is observed. Spec 5.3 makes the default 3 for a scratch target, and
+     * *omitted* `retries` is observed. The default is 3 for a scratch target, and
      * that default is the hazard rule 18 exists to close.
      */
     @Test
@@ -240,7 +240,7 @@ class TaskFileLoaderValidTest {
     }
 
     /**
-     * Spec 3.1 lists `description` as an optional task field and `TaskDefinition` has nowhere to
+     * The schema lists `description` as an optional task field and `TaskDefinition` has nowhere to
      * put it, so rule 1's "unknown fields rejected" and the schema disagree on this one key.
      *
      * Isolated deliberately. The baseline above does not carry a `description`, so whichever way

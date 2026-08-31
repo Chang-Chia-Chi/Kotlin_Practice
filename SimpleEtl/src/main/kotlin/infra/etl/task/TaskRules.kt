@@ -5,39 +5,39 @@ import infra.etl.pipe.parseNamedParameters
 import org.jdbi.v3.core.statement.ColonPrefixSqlParser
 import org.jdbi.v3.core.statement.SqlParser
 
-/** What a caller with no [org.jdbi.v3.core.Handle] parses `:name` with (spec 10). */
+/** What a caller with no [org.jdbi.v3.core.Handle] parses `:name` with. */
 internal val COLON_PREFIX: SqlParser = ColonPrefixSqlParser()
 
 /**
  * One broken rule, for a caller to file where its own report files things.
  *
  * Deliberately **not** [ValidationError]: that carries a non-null `file`, and a [TaskDefinition]
- * built in code did not come from one (spec 2.1). [TaskFileLoader] maps a violation to a
+ * built in code did not come from one. [TaskFileLoader] maps a violation to a
  * `ValidationError` by stamping the file name onto it; [TaskEngine] turns one into the
  * `IllegalArgumentException` it already raised, prefixed with the step name.
  *
  * [step] is nullable to match `ValidationError.step`, so the loader's mapping is a field copy.
  * Every violation [TaskRules.check] produces names a step, because the whole interface is per step.
  *
- * @param rule the spec 10 rule number, or null for a check spec 10 does not number - spec 5.3's
- *   "`retries` may not be negative" is the only one. The [message] names its rule too, in prose an
- *   author reads; this field is for a caller that has to *act* on which rule fired, and there is
- *   exactly one - `TaskFileLoader` runs its DuckDB select-only parse over a `cacheCopy`'s SQL only
- *   when rule 19 did not already reject that same text. Matching on the sentence would have made
- *   rewording a diagnostic silently change which parse runs.
+ * @param rule the validation rule number, or null for a check the numbered rules do not cover - the
+ *   "`retries` may not be negative" check is the only one. The [message] names its rule too, in
+ *   prose an author reads; this field is for a caller that has to *act* on which rule fired, and
+ *   there is exactly one - `TaskFileLoader` runs its DuckDB select-only parse over a `cacheCopy`'s
+ *   SQL only when rule 19 did not already reject that same text. Matching on the sentence would
+ *   have made rewording a diagnostic silently change which parse runs.
  */
 internal data class RuleViolation(val step: String?, val rule: Int?, val message: String)
 
 /**
- * The rules of spec 10 that are statements about a **task** rather than about a file, over the one
- * model both sources of a task produce.
+ * The numbered validation rules that are statements about a **task** rather than about a file, over
+ * the one model both sources of a task produce.
  *
  * Rules 7, 8, 11, 12, 13's scratch-only half, 18, 19 and rule 6's positional-`?` half used to
  * exist twice - once over `TaskYaml` in [TaskFileLoader], once over [TaskDefinition] in [TaskEngine] -
  * worded independently. Review findings M10 and M11 each fixed one instance of the drift that
  * produces; this class removes the cause. A rule tightened in the loader alone refuses valid files
  * at boot; one tightened in the engine alone boots clean and dies mid-run, which is the failure
- * spec 10 exists to convert into a boot failure.
+ * startup validation exists to convert into a boot failure.
  *
  * **File-shaped rules are not here**, and that is the split rather than an omission: rule 1, rule
  * 10 (the sealed [PipeTarget] makes it unrepresentable downstream, so there is nothing left to
@@ -50,8 +50,7 @@ internal data class RuleViolation(val step: String?, val rule: Int?, val message
  * **One rule is task-shaped and still loader-only, knowingly**:
  *
  * - **Rule 20** (a *stated* `cacheCopy` `retries > 0`) is a rule about what an author wrote in a
- *   file, and a definition built in code has no file. It stays a startup rule on purpose; spec 10
- *   rule 20 records it.
+ *   file, and a definition built in code has no file. It stays a startup rule on purpose.
  *
  * Rule 14's scratch-only half moved here on 2026-08-30, closing the gap the E10 review recorded:
  * until then a code-built `TableTarget` off scratch with AUTO boots clean and `TaskEngine.writer`
@@ -62,12 +61,12 @@ internal data class RuleViolation(val step: String?, val rule: Int?, val message
  *   the colon-prefix default; the engine hands over the datasource's own configured parser, so run
  *   time cannot parse by one rule while startup parsed by another. A host that reconfigures its
  *   `Jdbi` can still make the two disagree - that is one module called twice with different inputs,
- *   which spec 10 records, and not a rule enforced twice.
+ *   and not a rule enforced twice.
  */
 internal class TaskRules(private val parserFor: (String?) -> SqlParser = { COLON_PREFIX }) {
 
     /**
-     * Spec 5.3's `retries`, resolved: the stated value, or the datasource-dependent default for a
+     * A step's `retries`, resolved: the stated value, or the datasource-dependent default for a
      * step that did not state one. **This is the only place that resolution happens on the run
      * path**, which is what `Step.retries` being `Int?` buys - a Kotlin constructor default cannot
      * depend on another field, so before E10 every construction site re-derived it.
@@ -76,12 +75,13 @@ internal class TaskRules(private val parserFor: (String?) -> SqlParser = { COLON
      * implementation: the value in both places is [defaultRetries], declared once. What the loader
      * keeps is the *timing*, because three assertions written by P6 and P9 read a resolved number
      * off a loaded definition. So a `TaskDefinition` from YAML never carries null and one built in
-     * code carries what its author stated - spec 5.3 records the residue.
+     * code carries what its author stated.
      *
      * An `export` step has no target, and a `cacheCopy` resolves to 0 rather than to the 3 its
      * scratch output would otherwise earn: no failure a cache copy can produce is transient under
-     * spec 5.3, so the knob can never fire, and rule 20 rejects a stated one. Both paths resolve it
-     * the same way, which is what retires that rule's old model-versus-YAML asymmetry.
+     * the retry classification, so the knob can never fire, and rule 20 rejects a stated one. Both
+     * paths resolve it the same way, which is what retires that rule's old model-versus-YAML
+     * asymmetry.
      */
     fun retries(step: Step): Int = step.retries ?: when (step) {
         is PipeStep -> defaultRetries(step.target.datasource)
@@ -96,7 +96,7 @@ internal class TaskRules(private val parserFor: (String?) -> SqlParser = { COLON
      * ten-error file ten times.
      *
      * @param defined the variables resolvable at this point in step order - the built-ins, the task
-     *   literals, and the exports of every *earlier* step (spec 6.2). A step's own exports are not
+     *   literals, and the exports of every *earlier* step. A step's own exports are not
      *   in it: they become available to later steps only once this one has succeeded.
      */
     fun check(step: Step, defined: Set<String>): List<RuleViolation> {
@@ -114,8 +114,8 @@ internal class TaskRules(private val parserFor: (String?) -> SqlParser = { COLON
             is MaterializeStep -> materialize(step, retries, defined, err)
             is SqlStep -> {
                 step.statements.forEach { sql(it, "statements", step.datasource, defined, err) }
-                // Rule 12 as spec 10 amends it for a sql step (review finding H2). Each statement
-                // is its own transaction (spec 5.2), so a retry re-runs the whole list.
+                // Rule 12 as amended for a sql step (review finding H2). Each statement is its own
+                // transaction, so a retry re-runs the whole list.
                 if (step.datasource != SCRATCH && retries > 0 && !step.idempotent) {
                     err(
                         12,
@@ -137,7 +137,7 @@ internal class TaskRules(private val parserFor: (String?) -> SqlParser = { COLON
         sql(step.source.sql, "source.sql", step.source.datasource, defined, err)
         val target = step.target
         if (target is StatementTarget) {
-            // Rule 11.
+            // Rule 11: no target.sql on the scratch DuckDB datasource.
             if (target.datasource == SCRATCH) {
                 err(
                     11,
@@ -146,8 +146,8 @@ internal class TaskRules(private val parserFor: (String?) -> SqlParser = { COLON
                 )
             }
             // Rule 7 excepts target.sql: every ':name' there is a Row key, unknown until the source
-            // query runs, so the names are checked against the first chunk at run time (spec 4.4,
-            // 6.3). Rule 6's positional half still applies.
+            // query runs, so the names are checked against the first chunk at run time. Rule 6's
+            // positional half still applies.
             positional(target.sql, "target.sql", target.datasource, err)
         }
         // Rule 14's scratch-only half. AUTO generates DuckDB DDL from source metadata, which is
@@ -167,12 +167,11 @@ internal class TaskRules(private val parserFor: (String?) -> SqlParser = { COLON
                     "on the '$SCRATCH' datasource, not '${target.datasource}' (spec 4.4, rule 14).",
             )
         }
-        // Rule 18. Spec 5.5 is unconditional - every dataset produced inside scratch is written
-        // under an attempt-suffixed name - and REQUIRED cannot be, because the author created the
-        // table under its stable name. So a retry appends on top of whatever the failed attempt
-        // flushed, which spec 12 measures as anything from nothing to one chunk short of the lot,
-        // and retries default to 3 for any scratch target, so that duplication would arrive on a
-        // default nobody wrote.
+        // Rule 18. Attempt-suffixed naming is unconditional - every dataset produced inside scratch
+        // is written under one - and REQUIRED cannot be, because the author created the table under
+        // its stable name. So a retry appends on top of whatever the failed attempt flushed, which
+        // is measured as anything from nothing to one chunk short of the lot, and retries default
+        // to 3 for any scratch target, so that duplication would arrive on a default nobody wrote.
         if (target is TableTarget && target.datasource == SCRATCH &&
             target.createTable == CreateTable.REQUIRED && retries > 0
         ) {
@@ -183,7 +182,7 @@ internal class TaskRules(private val parserFor: (String?) -> SqlParser = { COLON
                     "failed attempt already flushed (spec 5.5). Use createTable AUTO, or retries: 0.",
             )
         }
-        // Rule 12.
+        // Rule 12: retrying a non-scratch target requires the author's idempotent: true.
         if (target.datasource != SCRATCH && retries > 0 && !target.idempotent) {
             err(
                 12,
@@ -195,8 +194,8 @@ internal class TaskRules(private val parserFor: (String?) -> SqlParser = { COLON
     }
 
     /**
-     * Rule 13's scratch-only half, rule 12 as spec 10 amends it for a materialize, and **rule 7 as
-     * spec 10 amends it for a non-scratch materialize**: such a step may bind no variable at all.
+     * Rule 13's scratch-only half, rule 12 as amended for a materialize, and **rule 7 as amended
+     * for a non-scratch materialize**: such a step may bind no variable at all.
      *
      * It runs `CREATE TABLE <output> AS <sql>` through `Handle.createUpdate`, which binds every
      * `:name` it parses, and Oracle rejects a bind variable in DDL outright with ORA-01027 - so the
@@ -225,7 +224,9 @@ internal class TaskRules(private val parserFor: (String?) -> SqlParser = { COLON
         }
         // Rule 12, refused outright rather than made conditional on an idempotent flag: a retry
         // after the table was created fails on table-already-exists every time, so the flag would be
-        // a promise no author could keep. Spec 10 rule 12 records why drop-and-recreate was refused.
+        // a promise no author could keep. Drop-and-recreate would work and was refused for
+        // authority rather than mechanism: this framework has no licence to destroy data outside
+        // scratch.
         if (retries > 0) {
             err(
                 12,
@@ -237,7 +238,7 @@ internal class TaskRules(private val parserFor: (String?) -> SqlParser = { COLON
             )
         }
         // Rule 13's scratch-only half. PARQUET is structurally impossible on any other step type,
-        // and spec 5.6 puts the file in the scratch directory, so it is scratch-only here too.
+        // and the file is written into the scratch directory, so it is scratch-only here too.
         if (step.format == MaterializeFormat.PARQUET) {
             err(
                 13,
@@ -250,7 +251,7 @@ internal class TaskRules(private val parserFor: (String?) -> SqlParser = { COLON
     /**
      * Rule 7 over each export query, and rule 8 over the names the step produces.
      *
-     * A step's exports resolve for *later* steps and never for its own queries (spec 6.2), so the
+     * A step's exports resolve for *later* steps and never for its own queries, so the
      * running set below feeds rule 8 alone. Without it two vars of one name inside a single step
      * would collide silently and the redefinition check would never see the first of them.
      */
@@ -269,7 +270,7 @@ internal class TaskRules(private val parserFor: (String?) -> SqlParser = { COLON
     }
 
     /**
-     * Rule 19. `CopyOutSpec.sql` is a plain string with no binding channel (spec 3.6, 7.3), so a
+     * Rule 19. `CopyOutSpec.sql` is a plain string with no binding channel, so a
      * `:name` here cannot be bound even where the variable is defined - and interpolating one would
      * be the injection path every other statement in this engine avoids by binding.
      *

@@ -21,7 +21,7 @@ import org.junit.jupiter.params.provider.EnumSource
 /**
  * P8a, contract 4 items 11 and 12: **a listener that throws is the listener's problem.**
  *
- * Spec 9.2's seam exists so the host's own logging can plug in. A logging plug-in that fails an
+ * The listener seam exists so the host's own logging can plug in. A logging plug-in that fails an
  * ETL run inverts the point of it, so every one of the seven call sites catches, logs and
  * continues - and `TaskRunListener.of` applies the same isolation *per listener*, so a thrower at
  * position 1 does not rob positions 2..n of the event.
@@ -84,7 +84,7 @@ class TaskListenerIsolationTest {
             }
         }
 
-    /** Contract 4.11, once per call site of spec 9.2. */
+    /** Contract 4.11, once per listener call site. */
     @ParameterizedTest(name = "{0}")
     @EnumSource(ListenerCall::class)
     fun aThrowingListenerNeverChangesTheOutcomeAtAnyCallSite(site: ListenerCall) {

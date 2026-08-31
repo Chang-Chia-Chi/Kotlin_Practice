@@ -21,9 +21,9 @@ import org.junit.jupiter.api.io.TempDir
  * Three tests rather than one, because the three paths are three different pieces of production
  * control flow: the normal end of a run, a step that failed and was handled, and a throw that
  * unwinds past the run block. An implementation that deletes only in the first case passes a
- * single happy-path test and loses a scratch file per failed run in production - and spec 7.2
- * names close-and-delete as the *only* reliable reclamation point in DuckDB 1.1.3, so a leaked
- * file is not tidiness, it is disk that never comes back.
+ * single happy-path test and loses a scratch file per failed run in production - and closing the
+ * instance and deleting the file is the *only* reliable reclamation point in DuckDB 1.1.3, so a
+ * leaked file is not tidiness, it is disk that never comes back.
  *
  * Each test asserts the file existed mid-run before asserting it is gone. Without that, all
  * three would pass against a ScratchDb that never created a file.
@@ -96,8 +96,8 @@ class ScratchDbDeletionTest {
     }
 
     /**
-     * A duplicate the run forgot to close must not keep the file alive. Spec 7.2 hands out
-     * duplicates for concurrent reads, and on Windows a file cannot be deleted while any handle
+     * A duplicate the run forgot to close must not keep the file alive. Duplicates are what a
+     * concurrent read takes, and on Windows a file cannot be deleted while any handle
      * into it is open - so "close the write connection and delete" is not enough, and the failure
      * would be a scratch file per run surviving on the volume with nothing pointing at it.
      *

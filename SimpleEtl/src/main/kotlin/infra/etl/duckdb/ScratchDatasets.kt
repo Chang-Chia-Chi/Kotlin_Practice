@@ -3,7 +3,7 @@ package infra.etl.duckdb
 import java.nio.file.Path
 
 /**
- * Spec 5.5's write-then-publish protocol for one scratch dataset, as a module rather than as a
+ * The write-then-publish protocol for one scratch dataset, as a module rather than as a
  * rule each caller remembers.
  *
  * [DatasetNamer] names things and points a view at them; it deliberately does not decide *when* to
@@ -28,7 +28,7 @@ import java.nio.file.Path
  * holds that, and a `format` parameter here would be the one thing that broke it.
  *
  * Nothing is dropped, deleted or truncated to make room: DuckDB 1.1.3 reclaims nothing, and
- * [ScratchDb.close] emptying the run directory is the only reclamation point (spec 5.5).
+ * [ScratchDb.close] emptying the run directory is the only reclamation point.
  */
 internal class ScratchDatasets(private val scratch: ScratchDb, private val namer: DatasetNamer) {
 
@@ -51,7 +51,7 @@ internal class ScratchDatasets(private val scratch: ScratchDb, private val namer
      * Downstream the result is indistinguishable from [attemptTable]: a view over `read_parquet`
      * and a view over the equivalent table report the same column names and driver types on
      * duckdb_jdbc 1.1.3, which is what lets a `materialize` change `format` without any other step
-     * changing (spec 5.6).
+     * changing.
      *
      * @param write given the absolute path of this attempt's file. A retry overwrites its own
      *   attempt's file rather than adding a table to the database.

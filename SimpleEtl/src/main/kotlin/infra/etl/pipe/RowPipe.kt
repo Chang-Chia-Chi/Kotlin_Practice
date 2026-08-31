@@ -8,7 +8,7 @@ import org.jdbi.v3.core.statement.SqlParser
 import java.sql.ResultSet
 
 /**
- * The source half of a pipe: one query on one JDBC datasource (spec 11.1). It comes in two forms,
+ * The source half of a pipe: one query on one JDBC datasource. It comes in two forms,
  * which differ only in **who owns the connection and how far the read transaction reaches**:
  *
  * | Built from | The pipe opens | The pipe closes | Read transaction |
@@ -20,7 +20,7 @@ import java.sql.ResultSet
  * form exists because **several pipes must be able to read inside one transaction**: N pipes over
  * N fresh connections read N tables at N different points in time, and the union of those tables
  * can show duplicates or gaps that no later inspection can reproduce. A caller loading a group of
- * tables that must agree with each other - the snapshot cache building one generation, spec 9.5 -
+ * tables that must agree with each other - the snapshot cache building one generation -
  * opens one handle, begins one transaction, and gives that handle to every pipe:
  *
  * ```kotlin
@@ -41,9 +41,9 @@ import java.sql.ResultSet
  * connection.
  *
  * @param parameters bound by name through JDBI, so `:lastTs` takes the value of the entry
- *   `lastTs` (spec 6.3). Every entry is bound, so a name the SQL does not use is an error rather
+ *   `lastTs`. Every entry is bound, so a name the SQL does not use is an error rather
  *   than a silent no-op. Identifiers cannot be bound: `select * from :table` is not valid SQL and
- *   the framework offers no substitute (spec 6.3).
+ *   the framework offers no substitute.
  *
  *   A null needs no separate type channel, and this map is not the untyped hole it looks like:
  *   JDBI binds an `org.jdbi.v3.core.argument.Argument` value **directly**, so a caller with a type
@@ -51,7 +51,7 @@ import java.sql.ResultSet
  *   `Types.OTHER`. Measured on JDBI 3.45.4 through a recording `PreparedStatement` (P5 scratchpad
  *   `P5Probe4`): a plain null records `setNull[1, 1111]`, a `NullArgument(Types.TIMESTAMP)` records
  *   `setNull[1, 93]`. That is how a null task variable from a zero-row `export` reaches Oracle
- *   typed (spec 6.3), with this signature unchanged.
+ *   typed, with this signature unchanged.
  */
 class JdbcSource private constructor(
     private val openHandle: () -> Handle,
@@ -111,7 +111,7 @@ internal fun parseNamedParameters(sql: String, parser: SqlParser = COLON_PREFIX)
     parser.parse(sql, null)
 
 /**
- * Caller-supplied per-row code (spec 9.1). Returning null drops the row, which is why
+ * Caller-supplied per-row code. Returning null drops the row, which is why
  * [PipeResult] reports rows read and rows written separately.
  *
  * Contractually stateless, database-free and side-effect-free; the framework cannot enforce any
@@ -125,13 +125,13 @@ fun interface RowTransform {
 data class PipeResult(val rowsRead: Long, val rowsWritten: Long)
 
 /**
- * Layer 1 (spec 2.1): rows from a JDBC query into a [RowWriter], chunked and typed. It knows
+ * Layer 1: rows from a JDBC query into a [RowWriter], chunked and typed. It knows
  * nothing about YAML, phases, retry, or generations, so the snapshot cache can use it without
- * the task model (spec 9.5).
+ * the task model.
  *
- * The loop is spec 5.2: open the source with `fetchSize = chunkSize`, accumulate up to
+ * The loop is fixed: open the source with `fetchSize = chunkSize`, accumulate up to
  * [chunkSize] Rows, apply [transform] to the chunk, write what survives, repeat. The order
- * matters and is the spec's: a chunk boundary falls every [chunkSize] **source** rows, so a
+ * matters: a chunk boundary falls every [chunkSize] **source** rows, so a
  * selective transform shortens the chunks it writes rather than stretching the span of source
  * rows one commit covers.
  *
@@ -146,7 +146,7 @@ data class PipeResult(val rowsRead: Long, val rowsWritten: Long)
  * - `DuckDbTableWriter` flushes the appender once per chunk. Measured on duckdb_jdbc 1.1.3:
  *   appended-but-unflushed rows are invisible even to the appending connection, and after
  *   `flush()` they are immediately visible to a `duplicate()` connection. `autoCommit` is true by
- *   default, so flush *is* the chunk's commit (spec 4.6).
+ *   default, so flush *is* the chunk's commit.
  * - `JdbcTableWriter` and `JdbcStatementWriter` execute one prepared batch per chunk on a handle
  *   whose `autoCommit` is left as the datasource supplies it - on, for ojdbc - so each batch
  *   commits itself. Calling `commit()` on such a connection raises ORA-17273 instead, which P1
@@ -154,30 +154,30 @@ data class PipeResult(val rowsRead: Long, val rowsWritten: Long)
  *   committed to an Oracle target at its chunk boundary` watches the target row count from a
  *   second Oracle session and sees the same chunk timeline as the DuckDB case.
  *
- * Nothing therefore spans two chunks, which is spec 1.2 and 5.4: a failure part way through
- * leaves earlier chunks committed, and Layer 2 makes that safe with `idempotent: true` or a
- * work-table swap.
+ * Nothing therefore spans two chunks, and that is the durability contract: a failure part way
+ * through leaves earlier chunks committed, and Layer 2 makes that safe with `idempotent: true`
+ * or a work-table swap.
  *
  * **Resources.** [run] closes the source statement and result set always, and the source handle
  * only when [JdbcSource] opened it - a borrowed handle or connection is the caller's and survives
  * the run. It owns [target]'s lifecycle: [RowWriter.open] before the first chunk and
- * [RowWriter.close] on every path including a throw from inside a chunk (spec 7.4). The target is
+ * [RowWriter.close] on every path including a throw from inside a chunk. The target is
  * closed first, then the source, so a writer that fails while flushing still reports its own
  * failure. Consequently a [RowWriter] is single-use and must not be handed to a second pipe. A
- * connection the caller passed into a writer - the generation file's write connection, in spec
- * 9.5 - stays the caller's, is not closed, and is usable again the moment [run] returns.
+ * connection the caller passed into a writer - the snapshot cache's generation file, for one -
+ * stays the caller's, is not closed, and is usable again the moment [run] returns.
  *
  * **A transform that adds a column needs a target that already has it.** [RowWriter.open] is
  * given the source's columns, which is all that exists before the first Row, so under
  * `createTable: AUTO` the generated DDL cannot describe an added column and its value is
  * **silently dropped**. Under `createTable: REQUIRED` it lands. Closing that gap is Layer 2's
- * `transform.addColumns` (spec 9.1, validation rule 14), which has no channel into this
+ * `transform.addColumns` (validation rule 14), which has no channel into this
  * constructor.
  *
  * A failure propagates unchanged. Retry belongs to Layer 2 and is not in this class.
  *
- * @param step the step name, so that a bad column type or a wrong typed accessor names it
- *   (spec 4.2, 4.3). The writers carry their own for the same reason.
+ * @param step the step name, so that a bad column type or a wrong typed accessor names it. The
+ *   writers carry their own for the same reason.
  */
 class RowPipe(
     private val source: JdbcSource,
@@ -194,7 +194,7 @@ class RowPipe(
     fun run(): PipeResult = source.withHandle { handle ->
         handle.createQuery(source.sql)
             .bindMap(source.parameters)
-            // Spec 5.2 step 1. Applied to the PreparedStatement at execution.
+            // The source is read one chunk at a time. Applied to the PreparedStatement at execution.
             .setFetchSize(chunkSize)
             // Everything happens inside the scanner, because that is the only place the raw
             // ResultSet exists. Both the result set and the statement context are closed here
@@ -204,7 +204,7 @@ class RowPipe(
 
     private fun pump(rows: ResultSet): PipeResult = target.use { writer ->
         // Metadata is read once, before any row, so the target can reject a column it cannot
-        // write before the first chunk exists (spec 4.4). An empty source still opens the target,
+        // write before the first chunk exists. An empty source still opens the target,
         // and so still raises those errors.
         val mapper = RowMapper(rows.metaData, step)
         writer.open(mapper.columns)
@@ -225,9 +225,8 @@ class RowPipe(
     }
 
     /**
-     * Spec 5.2's steps 3 and 4: the transform runs over an accumulated chunk, not over each row as
-     * it is read, so a chunk boundary falls every [chunkSize] **source** rows whatever the
-     * transform drops.
+     * The transform runs over an accumulated chunk, not over each row as it is read, so a chunk
+     * boundary falls every [chunkSize] **source** rows whatever the transform drops.
      *
      * A chunk the transform empties is not written. `write(emptyList())` is legal on every writer
      * but `DuckDbTableWriter` flushes its appender on every call, so an empty write would add a

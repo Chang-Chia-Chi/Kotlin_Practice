@@ -4,7 +4,7 @@ import infra.snapshotcache.api.CopyOutSpec
 import java.sql.Connection
 
 /**
- * The only component that touches generation files (spec 17.1).
+ * The only component that touches generation files.
  *
  * Production attaches and detaches DuckDB files; tests use an in-memory fake that records
  * every call and can be scripted to fail. Keeping this the sole file-touching seam is what
@@ -12,8 +12,8 @@ import java.sql.Connection
  *
  * No DuckDB type may appear in this interface.
  *
- * Threading: the core decides under its lock and calls these methods outside it (plan 2.5),
- * so implementations may block. Calls for one generation are sequenced by the core; calls
+ * Threading: the core decides under its lock and calls these methods outside it, so
+ * implementations may block. Calls for one generation are sequenced by the core; calls
  * for different generations may overlap.
  */
 interface GenerationStore {
@@ -21,15 +21,15 @@ interface GenerationStore {
     /** Creates the `.tmp` file for [gen] and opens a write connection to it. */
     fun createCandidate(gen: Long): Candidate
 
-    /** Renames [gen] from `.tmp` to its final name. Atomic within one filesystem (spec 4.2). */
+    /** Renames [gen] from `.tmp` to its final name. Atomic within one filesystem. */
     fun promote(gen: Long)
 
-    /** Attaches [gen] read-only for serving (spec 3.1, D3). */
+    /** Attaches [gen] read-only for serving, so a consumer cannot write to it by accident. */
     fun open(gen: Long): OpenGeneration
 
     /**
      * Detaches [gen]. Throws if a connection is still using it, in which case the core
-     * defers reclamation to the next pass (spec 9.2, A4).
+     * defers reclamation to the next pass.
      *
      * Idempotent: detaching a generation that is not attached is a no-op. Reclaim retries
      * close + delete as one unit, so a close that already succeeded before a transient
@@ -38,21 +38,21 @@ interface GenerationStore {
      */
     fun close(gen: Long)
 
-    /** Deletes the file for [gen], whether candidate or promoted. Reclaims real disk (spec 3.1). */
+    /** Deletes the file for [gen], whether candidate or promoted. Reclaims real disk. */
     fun delete(gen: Long)
 
-    /** Generation numbers whose files exist on disk, including leftovers from a crashed run (spec 10.1). */
+    /** Generation numbers whose files exist on disk, including leftovers from a crashed run. */
     fun listOnDisk(): List<Long>
 
     /**
      * Runs [CopyOutSpec.sql] against [opened] and writes the rows into the caller's target,
      * returning the row count. The copy goes file-to-file rather than through the
-     * application (spec 6.5, A7).
+     * application.
      */
     fun copyOut(opened: OpenGeneration, spec: CopyOutSpec): Long
 }
 
-/** A generation being built. Closing folds the WAL into the file and releases the write connection (spec 4.2 BUILDING). */
+/** A generation being built. Closing folds the WAL into the file and releases the write connection. */
 interface Candidate : AutoCloseable {
     val generation: Long
 
@@ -73,6 +73,6 @@ interface OpenGeneration {
     /** Fresh read-only connection into this generation. The caller closes it. */
     fun connection(): Connection
 
-    /** Size of the generation file, for `snapshot_db_file_bytes` and the admin endpoint (spec 12.4, 12.7). */
+    /** Size of the generation file, for `snapshot_db_file_bytes` and the admin endpoint. */
     fun fileBytes(): Long
 }

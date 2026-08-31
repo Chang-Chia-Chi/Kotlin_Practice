@@ -20,8 +20,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
 /**
- * P1 tests for [GenerationRegistry] (plan P1; spec 17.2 registry half: I2, I3, I4, I6, I8;
- * spec 5.1 acquire atomicity; plan 2.5 lifecycle).
+ * P1 tests for [GenerationRegistry]: the registry half of the invariants - I2, I3, I4, I6, I8 -
+ * plus acquire atomicity and the generation lifecycle.
  *
  * No sleeps. Interleavings are driven by [Hook] latches only; join/await timeouts below are
  * bounds on broken implementations, never sequencing.
@@ -156,7 +156,7 @@ class GenerationRegistryTest {
         assertThat(reg.refCountOf(g1)).describedAs("g1 must remain live-readable while leased").isEqualTo(1)
     }
 
-    // ------------------------------------------------------------------ acquire atomicity (spec 5.1)
+    // ------------------------------------------------------------------ acquire atomicity
 
     @Test
     fun acquireDuringSwap_afterReadCurrentHook_leaseRemainsLiveReadable() {
@@ -283,7 +283,7 @@ class GenerationRegistryTest {
         }
     }
 
-    // ------------------------------------------------------------------ lease deadline (diagnostic, spec 6.2)
+    // ------------------------------------------------------------------ lease deadline (diagnostic)
 
     @Test
     fun expiredLeases_reportedOnlyPastDeadline_viaInjectedClock() {
@@ -301,7 +301,7 @@ class GenerationRegistryTest {
         assertThat(reg.expiredLeases().map { it.owner })
             .describedAs("only the still-held, past-deadline lease is reported").containsExactly("slow-job")
 
-        // Diagnostic only (D8): expiry must not have revoked anything.
+        // Diagnostic only: expiry must not have revoked anything.
         assertThat(reg.refCountOf(held.generation)).isEqualTo(1)
         reg.release(held)
     }
@@ -362,7 +362,7 @@ class GenerationRegistryTest {
 
         reg.beginShutdown()
 
-        waiter.join(5_000) // bound: shutdown releases at once, never serving out the budget (spec 10.2 step 1)
+        waiter.join(5_000) // bound: shutdown releases at once, never serving out the budget
         assertThat(waiter.isAlive).describedAs("shutdown must release the waiter at once").isFalse()
         assertThat(result.get()).isFalse()
         assertThat(reg.isShuttingDown()).isTrue()
@@ -399,7 +399,7 @@ class GenerationRegistryTest {
 
     // ------------------------------------------------------------------ test helpers
 
-    /** Deterministic advancing clock; no real waiting (spec 17.1). */
+    /** Deterministic advancing clock; no real waiting. */
     private class MutableClock(@Volatile private var now: Instant) : Clock() {
         override fun getZone(): ZoneId = ZoneOffset.UTC
         override fun withZone(zone: ZoneId): Clock = this

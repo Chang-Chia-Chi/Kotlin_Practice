@@ -14,7 +14,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.CoroutineContext
 
 /**
- * What a trigger did (spec 8.2). Sealed rather than a boolean or a nullable runId, because the
+ * What a trigger did. Sealed rather than a boolean or a nullable runId, because the
  * host's `AdminResource` has four distinct answers to give - 202, 409, 404, 400 - and a caller
  * that forgets one should not compile.
  *
@@ -24,11 +24,11 @@ import kotlin.coroutines.CoroutineContext
  */
 sealed interface TriggerResult {
 
-    /** The run was submitted. It has a runId now and an outcome later (spec 8.2). */
+    /** The run was submitted. It has a runId now and an outcome later. */
     data class Accepted(val runId: String) : TriggerResult
 
     /**
-     * The task is already running and this trigger was **rejected, not queued** (spec 8.4), so a
+     * The task is already running and this trigger was **rejected, not queued**, so a
      * slow run cannot accumulate a backlog. It will not run later.
      *
      * **Also the answer after [WiringResult.Wired.close]**, when nothing is running and nothing
@@ -54,7 +54,7 @@ sealed interface TriggerResult {
  * has ended; that pair is what [TaskStatus.running] reads.
  *
  * @param triggeredBy the caller identity [TaskAdmin.trigger] was given, null for a scheduled
- *   firing. The framework records it and authorises nothing (spec 8.2, 8.6).
+ *   firing. The framework records it and authorises nothing.
  */
 data class RunStatus(
     val runId: String,
@@ -66,19 +66,19 @@ data class RunStatus(
 )
 
 /**
- * The confinement layer between a trigger and [TaskEngine] (spec 8.3, 8.4). Each task gets one
+ * The confinement layer between a trigger and [TaskEngine]. Each task gets one
  * `Dispatchers.IO.limitedParallelism(1)` view tagged with a [CoroutineName]; both the scheduled
  * callback and the API trigger submit to it, and neither waits for the run.
  *
  * **The guard sits in front of the submit, not behind it.** A `limitedParallelism(1)` view
  * *serialises* - measured in the P7 scratchpad (`p7probe/Probe.kt`): two coroutines launched into
- * one view both ran, the second after the first, which is exactly the queueing spec 8.4 forbids.
+ * one view both ran, the second after the first, which is exactly the queueing this class forbids.
  * So a task is claimed with a compare-and-set **before** anything is launched, and a losing
  * trigger is answered [TriggerResult.AlreadyRunning] and dropped. The dispatcher is what confines;
  * the flag is what rejects.
  *
  * **The definition is captured here, at submit time**, and travels into the coroutine by value.
- * That is what makes spec 8.5's reload safe: a reload replaces what [TaskScheduler] and
+ * That is what makes a reload safe: a reload replaces what [TaskScheduler] and
  * [TaskAdmin] hand to the *next* trigger and cannot reach a run already in flight.
  *
  * Measured on kotlinx-coroutines 1.10.1 / Kotlin 2.2.0 (P7 scratchpad `p7probe/Probe.kt` and
@@ -90,7 +90,7 @@ data class RunStatus(
  *   triggering thread (`main`) was not it.
  * - Two tasks on two views met inside a `CyclicBarrier`, so different tasks genuinely run at the
  *   same instant - each therefore reaching [TaskEngine] with its own [ScratchDb] and its own
- *   DuckDB connection, never a shared one (spec 7.2, 8.4).
+ *   DuckDB connection, never a shared one.
  * - `coroutineContext[CoroutineName]` reads the task name inside the launched block, and the
  *   blocking engine body has no suspending frame to read it from at all, which is why [context]
  *   exists.
@@ -107,7 +107,7 @@ class TaskRunner(private val engine: TaskEngine) {
      *
      * [close] cancels it, and cancelling is worth exactly one thing: **no new run starts**. It
      * does not stop a run already under way, because the engine is blocking JDBC with no
-     * suspension point to cancel at (spec 8.3) - such a run reaches its natural end and records
+     * suspension point to cancel at - such a run reaches its natural end and records
      * its own outcome, which is what [TaskSlot.release] not overwriting a written outcome
      * preserves.
      */
@@ -117,10 +117,10 @@ class TaskRunner(private val engine: TaskEngine) {
 
     /**
      * Claims the task, allocates the runId, and returns **while the run is still parked** - so a
-     * 30 minute run never holds an HTTP request open (spec 8.2). Nothing here blocks.
+     * 30 minute run never holds an HTTP request open. Nothing here blocks.
      *
      * @param by the caller identity, recorded into [RunStatus.triggeredBy]. Null for a scheduled
-     *   firing. No authorisation happens here, or anywhere in this module (spec 8.6).
+     *   firing. No authorisation happens here, or anywhere in this module.
      */
     fun submit(definition: TaskDefinition, trigger: TriggerSource, by: String?): TriggerResult {
         // Before the claim, not after: a submit into a cancelled scope launches a job that never
@@ -140,10 +140,10 @@ class TaskRunner(private val engine: TaskEngine) {
 
     /**
      * The outcome of [runId], or null when that run is unknown **or has not finished yet**.
-     * [TaskOutcome] has no in-progress state and its signature is frozen (spec 11.2), so
+     * [TaskOutcome] has no in-progress state and its signature is frozen, so
      * "is it still running" is read from [TaskStatus.running] instead.
      *
-     * ponytail: only the current-or-last run per task is retained, which is what spec 8.2's
+     * ponytail: only the current-or-last run per task is retained, which is what the admin API's
      * "poll the runId you were just handed" needs and what stops a long-lived process
      * accumulating a record per firing. A bounded ring per task, if an operator ever needs to
      * look further back than one run.
@@ -154,29 +154,31 @@ class TaskRunner(private val engine: TaskEngine) {
     /**
      * The context task [name] is confined to: its own `limitedParallelism(1)` view of
      * `Dispatchers.IO` plus its [CoroutineName]. Internal rather than private because [submit]
-     * launches with exactly this value; internal rather than public because spec 11.2 declares only
-     * `submit`, so this is an internal seam its own tests read and not surface a host is offered.
+     * launches with exactly this value; internal rather than public because `submit` is this
+     * class's whole declared surface, so this is an internal seam its own tests read and not
+     * surface a host is offered.
      * The name is observable nowhere else:
      *
      * - not from the run, which is blocking code with no suspending frame to read
-     *   `coroutineContext` from (spec 8.3);
-     * - not from the worker's thread name, whose `@name` tag exists only under `-ea` (spec 8.3),
+     *   `coroutineContext` from;
+     * - not from the worker's thread name, whose `@name` tag exists only under `-ea`,
      *   so an assertion on it would mean nothing in production;
      * - not from underneath the view either - read in kotlinx-coroutines-core-jvm 1.10.1,
      *   `LimitedDispatcher.dispatch` hands *itself* to the underlying dispatcher as the context
      *   and never the coroutine's, so a wrapper below it sees no name at all.
      *
      * Creates the task's view if it has none yet, which costs no thread: a limited view shares
-     * the IO pool rather than owning one (spec 8.3).
+     * the IO pool rather than owning one.
      */
     internal fun context(name: String): CoroutineContext = slot(name).context
 
     /**
-     * Spec 8.6's shutdown row, the runner's half (E16): after this, [submit] launches nothing and
-     * answers [TriggerResult.AlreadyRunning]. Runs already in flight are left alone - see [scope].
+     * The host's shutdown obligation, the runner's half (E16): after this, [submit] launches
+     * nothing and answers [TriggerResult.AlreadyRunning]. Runs already in flight are left alone -
+     * see [scope].
      *
-     * Internal, not public and not `AutoCloseable`: spec 11.2 declares `submit` as this class's
-     * whole surface, and the seam a host is offered is [WiringResult.Wired.close], which owns the
+     * Internal, not public and not `AutoCloseable`: `submit` is this class's whole declared
+     * surface, and the seam a host is offered is [WiringResult.Wired.close], which owns the
      * ordering this is one step of. Idempotent, because `Job.cancel` is.
      */
     internal fun close() = scope.cancel()

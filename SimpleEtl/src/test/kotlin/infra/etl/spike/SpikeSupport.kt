@@ -88,7 +88,7 @@ fun <T> sampledPeak(intervalMs: Long, probe: () -> Long, block: () -> T): Pair<T
 }
 
 /**
- * Opens a file-mode DuckDB with the settings spec 7.2 applies at open.
+ * Opens a file-mode DuckDB with the settings a scratch database applies at open.
  * A null [tempDir] deliberately leaves temp_directory unset, which is what S4b tests.
  */
 fun openScratch(dbFile: Path, memoryLimitMb: Int, tempDir: Path?): DuckDBConnection {

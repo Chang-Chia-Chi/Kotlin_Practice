@@ -3312,3 +3312,46 @@ broken twice (the unrendered template, the unbounded append), each time because 
 
 The soak also independently confirmed the staging round's two fixes: running on the pre-fix base,
 it hit both the missing production driver and the absent identity provider live.
+
+
+---
+
+## Comments state their reasons, not their sources  (2026-08-31)
+
+A ruling, then a sweep. The ruling widens the one that already de-cited log lines and exception
+messages: **spec and plan section numbers live in the documents alone**. A comment that says
+"(spec 5.5)" after its reason is harmless noise; a comment that says only "Spec 18.3, in its fixed
+order" has handed the reader a pointer instead of a reason, and the reader without the documents
+open - which is every reader six months from now, and every agent - learns nothing. Root
+`CLAUDE.md`'s "Citations are for maintainers" paragraph now says this, and names the two things
+that look like citations and are not: phase and finding names (P7, E10, M3, H2) point at this
+file, and invariant names (I3, I7) are the invariants' own identifiers. Both stay.
+
+The sweep covered every `.kt` file in `snapshotcache/` and `SimpleEtl/`, main and test:
+**1066 comment sites across 139 files**, plus roughly 40 more that the inventory grep missed
+because the citation wrapped across a KDoc line break or had lost the word "spec" and survived as
+a bare `(4.6)`. Most sites were a parenthetical after a reason that already stood on its own and
+were simply deleted. The interesting minority were the ones where the number *was* the sentence:
+`DuckDbGenerationStore`'s "attached READ_ONLY (D3)" became "attached read-only so a consumer
+cannot write to it by accident", and `TaskEngine`'s "a `Connection` used from two places is spec
+7.2's crash" became the measured fact itself, that a DuckDB connection used from two threads
+crashes the JVM rather than raising an error. Those rewrites are the point of the ruling: the
+reason was always available, and the citation was standing where it should have been.
+
+**Two things were deliberately not swept.** Validation error messages keep their rule numbers -
+that exception stands, and it now covers the comments that explain those messages too. And the
+`(spec N.N)` fragments inside *string literals* were left byte-identical: roughly 90 of them, in
+`err(...)` messages, `describedAs(...)` assertions, ArchUnit `.because(...)` descriptions and a
+handful of `log.warnf` format strings. Tests pin that text verbatim. This is a real remaining
+inconsistency - a log line reading "pausing until leases release (spec 6.1)" still tells an
+operator nothing - and closing it means editing the tests that pin it, which is its own task
+rather than a rider on this one.
+
+The safety protocol was the interesting part of the method. An earlier mechanical sweep at this
+had to be reverted whole because it matched continuation lines of multi-line error strings, which
+begin with `"` or `+` exactly as KDoc lines begin with `*`. So this round proved the negative
+instead of promising it: a Kotlin comment-stripper compared every modified file against its
+committed blob with comments removed, and the two had to be byte-identical. 139 files, code
+unchanged in all of them. All four suites are green at unchanged counts - snapshotcache 215/0/2,
+SimpleEtl 400, composed-host-example 11, etl-host 45 - which is the second proof that no string
+moved.

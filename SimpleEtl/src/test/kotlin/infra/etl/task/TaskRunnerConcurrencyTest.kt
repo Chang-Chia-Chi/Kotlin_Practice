@@ -16,10 +16,10 @@ import org.junit.jupiter.api.assertAll
 import org.junit.jupiter.api.io.TempDir
 
 /**
- * Spec 8.3 and 8.4: confinement to one worker per task, rejection rather than queueing, and
+ * Confinement to one worker per task, rejection rather than queueing, and
  * different tasks running at the same time.
  *
- * **Nothing here reads a thread name.** Spec 8.3 measured `DefaultDispatcher-worker-1
+ * **Nothing here reads a thread name.** The measurement was `DefaultDispatcher-worker-1
  * @wip-summary#1` with assertions on and `DefaultDispatcher-worker-2` with them off; surefire
  * enables `-ea` and production does not, so an assertion on the `@name` suffix would derive its
  * discriminating power from a JVM flag - which is P4's Windows-file-lock finding wearing a
@@ -113,7 +113,7 @@ class TaskRunnerConcurrencyTest {
 
     /**
      * The same rejection from the other direction: the `CronScheduler` callback. Its `run: () ->
-     * Unit` signature hands the result nowhere, so "skipped, not queued" (spec 8.4) is only
+     * Unit` signature hands the result nowhere, so "skipped, not queued" is only
      * visible as the run that never happened.
      */
     @Test
@@ -145,7 +145,7 @@ class TaskRunnerConcurrencyTest {
     }
 
     /**
-     * Spec 8.4: different tasks may run concurrently, each with its own dispatcher and its own
+     * Different tasks may run concurrently, each with its own dispatcher and its own
      * scratch file. This is the first point in the project at which two `ScratchDb` files are
      * open at the same time, which is why both tasks materialise into scratch before they park.
      */

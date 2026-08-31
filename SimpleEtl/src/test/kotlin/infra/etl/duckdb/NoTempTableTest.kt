@@ -12,7 +12,7 @@ import org.junit.jupiter.api.assertThrows
 import org.junit.jupiter.api.io.TempDir
 
 /**
- * P4, done-when item 6: the ban on DuckDB temporary tables, spec 7.2.
+ * P4, done-when item 6: the ban on DuckDB temporary tables.
  *
  * ArchUnit is not on the classpath and the phase rules forbid adding it, so this is the
  * "equivalent check": a scan of Kotlin source for the statement, plus a catalog check on a real
@@ -107,7 +107,7 @@ class NoTempTableTest {
      * still passes over this file, exactly as the detector proofs above are.
      *
      * Cleanup must come *before* the throw. Otherwise a run rejected for a temp table also leaks
-     * its scratch file, and on DuckDB 1.1.3 that file is space nothing ever gets back (spec 5.5).
+     * its scratch file, and on DuckDB 1.1.3 that file is space nothing ever gets back.
      */
     @Test
     fun closeRaisesWhenTheRunLeftATemporaryTableOnTheWriteConnection() {
@@ -155,7 +155,7 @@ class NoTempTableTest {
     }
 
     /**
-     * The run-time half. A scratch database exercised the way spec 5.5 says a task uses it -
+     * The run-time half. A scratch database exercised the way a task uses it -
      * attempt tables plus a stable view - must contain no temporary relation afterwards.
      *
      * This is the part that would catch a `CREATE ` + kind + ` TABLE` assembled from pieces,

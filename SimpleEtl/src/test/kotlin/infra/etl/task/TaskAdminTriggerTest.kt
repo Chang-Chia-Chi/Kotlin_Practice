@@ -21,8 +21,9 @@ import org.junit.jupiter.api.assertAll
 import org.junit.jupiter.api.io.TempDir
 
 /**
- * Spec 8.2's framework surface: the sealed result the host's `AdminResource` maps to
- * 202 / 409 / 404 / 400, and the asynchrony that keeps a 30 minute run out of an HTTP request.
+ * The framework surface behind an admin trigger: the sealed result the host's `AdminResource`
+ * maps to 202 / 409 / 404 / 400, and the asynchrony that keeps a 30 minute run out of an HTTP
+ * request.
  * No HTTP is involved, and none is simulated.
  *
  * Each of the three rejections is paired with an acceptance in the same test. A `TaskAdmin` that
@@ -31,8 +32,8 @@ import org.junit.jupiter.api.io.TempDir
  * partner assertion two lines below - the same pairing discipline P6 needed for its eighteen
  * deliberately broken files.
  *
- * The `etl-admin` role check is deliberately absent: spec 8.6 makes it the host's obligation and
- * records that it is not tested in this repository.
+ * The `etl-admin` role check is deliberately absent: it is the host's obligation, and is recorded
+ * as untested in this repository.
  */
 class TaskAdminTriggerTest {
 
@@ -146,7 +147,7 @@ class TaskAdminTriggerTest {
     }
 
     /**
-     * Spec 8.2's listing - "tasks, schedules, last run outcome". Not a done-when item, but it is
+     * The admin listing - "tasks, schedules, last run outcome". Not a done-when item, but it is
      * public surface, and P3's lesson was that a public form with no test ships a real defect
      * while everything else is green. `running` is the field that carries weight: `TaskOutcome`
      * has only SUCCEEDED and FAILED, so it is the only way the listing can say "in flight".
@@ -223,7 +224,7 @@ class TaskAdminTriggerTest {
     }
 
     /**
-     * Spec 8.2: `TaskAdmin.trigger` takes the caller identity as a parameter and performs no
+     * `TaskAdmin.trigger` takes the caller identity as a parameter and performs no
      * authorisation of its own. Three identities that any authorising implementation would have
      * to discriminate between - absent, named, and empty - and all three are accepted.
      */

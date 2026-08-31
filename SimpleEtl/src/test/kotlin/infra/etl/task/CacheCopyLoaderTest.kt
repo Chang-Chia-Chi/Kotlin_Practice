@@ -16,8 +16,8 @@ import org.junit.jupiter.api.io.TempDir
 
 /**
  * P9, criterion 9: **the `cacheCopy` YAML form** - the step type P6 deliberately left out of the
- * schema ("no YAML schema by design; P9's") - and the three validation rules spec 10 gained with
- * it: 19, 20 and 21.
+ * schema ("no YAML schema by design; P9's") - and the three validation rules added with it: 19, 20
+ * and 21.
  *
  * Every file here is [VALID_CACHE_COPY] with a single [edit], and that baseline is asserted to load
  * in the first test. The pairing is P6's rule and it is what makes each rejection attributable:
@@ -27,12 +27,12 @@ import org.junit.jupiter.api.io.TempDir
  * ### Why rules 19 and 20 are startup rules rather than runtime ones
  *
  * Both could have been runtime `require`s in the executor, and both would then boot green and kill
- * a task thirty minutes in - the exact failure spec 10 exists to prevent. A `:name` in cache SQL
- * cannot be bound at all (`CopyOutSpec.sql` is a plain `String`), and a `retries` above zero can
- * never fire (spec 5.3's classification is JDBC-shaped and a local DuckDB copy raises none of it),
- * so neither is a condition that might come good on the day. The runtime guard stays for
- * definitions built in code, which is spec 2.1's other entry point and has no loader in front of
- * it; that half is `CacheCopyStepTest`'s.
+ * a task thirty minutes in - the exact failure startup validation exists to prevent. A `:name` in
+ * cache SQL cannot be bound at all (`CopyOutSpec.sql` is a plain `String`), and a `retries` above
+ * zero can never fire (the transient classification is JDBC-shaped and a local DuckDB copy raises
+ * none of it), so neither is a condition that might come good on the day. The runtime guard stays
+ * for definitions built in code, which is the other entry point to a definition and has no loader
+ * in front of it; that half is `CacheCopyStepTest`'s.
  *
  * ### The asymmetry rule 20 is written around
  *
@@ -53,7 +53,7 @@ class CacheCopyLoaderTest {
         loaded.single().phases.first().steps.single() as CacheCopyStep
 
     /**
-     * The baseline loads, and its `cacheCopy` step arrives with the four fields of spec 3.6 intact
+     * The baseline loads, and its `cacheCopy` step arrives with its four declared fields intact
      * and `retries` resolved to 0.
      *
      * The `sql` is asserted **verbatim**. It is the one string in a task file that reaches a
@@ -170,7 +170,7 @@ class CacheCopyLoaderTest {
         assertRejects(loadOne(root, yaml), file = "task.yaml", step = "copy-wip", "retries")
     }
 
-    // --- rule 9 and spec 5.5: the output is an ordinary scratch dataset name ------------------
+    // --- rule 9: the output is an ordinary scratch dataset name -------------------------------
 
     /**
      * Rule 9. A `cacheCopy` `output` shares one namespace with every other dataset the task
@@ -188,8 +188,8 @@ class CacheCopyLoaderTest {
     }
 
     /**
-     * Spec 5.5's character check, which `datasetIdentifier` exists for and which is not one of
-     * spec 10's numbered rules.
+     * The dataset-name character check, which `datasetIdentifier` exists for and which is not one
+     * of the numbered validation rules.
      *
      * A dataset name arrives from a file and becomes a SQL identifier that no prepared statement
      * can parameterise, and for `cacheCopy` it also becomes the `targetTable` a *foreign* DuckDB

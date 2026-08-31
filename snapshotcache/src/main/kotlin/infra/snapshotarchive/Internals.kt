@@ -5,7 +5,7 @@ import java.util.concurrent.atomic.AtomicLong
 
 /*
  * Shared internals of the archive layer. `infra.snapshotcache.spi` has its own `ident` and
- * `literal`, but plan 3c fences this package off from `spi`, so the archive layer carries
+ * `literal`, but this package is fenced off from `spi`, so the archive layer carries
  * its own pair. Carrying it ONCE is the point of this file: the fence explains why the
  * framework's copies cannot be imported, and explains nothing about why two files in this
  * package should each have their own.
@@ -28,8 +28,8 @@ internal fun named(prefix: String): ThreadFactory {
 
 /**
  * The object-store key for one archived file: the manifest's `uri_prefix` is
- * `<bucket>/snapshots/<group>/v<version>/` (spec 18.2) while [ObjectStore] addresses within a
- * bucket, so the bucket segment comes off.
+ * `<bucket>/snapshots/<group>/v<version>/` while [ObjectStore] addresses within a bucket, so
+ * the bucket segment comes off.
  *
  * `ManifestDao` derives `uri_prefix` in one place so the layout is defined once; this is the
  * matching one place that reads it back. Three separate copies of the walk - the archiver's

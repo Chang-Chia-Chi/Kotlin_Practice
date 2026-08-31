@@ -102,7 +102,7 @@ class DuckDbGenerationStoreTest {
         assertThatThrownBy { store.close(1) }
             .isInstanceOf(IllegalStateException::class.java)
             .hasMessageContaining("still has")
-        // The deferred DETACH left the reader untouched (spec 9.2: defer to next GC pass).
+        // The deferred DETACH left the reader untouched - it waits for the next GC pass.
         assertThat(count(connection, "t_a")).isEqualTo(3)
 
         connection.close()
@@ -228,7 +228,7 @@ class DuckDbGenerationStoreTest {
         assumeTrue(os is UnixOperatingSystemMXBean, "FD counting requires the Unix MXBean; skipped on Windows")
         os as UnixOperatingSystemMXBean
 
-        // Warmup absorbs driver loading, JIT and buffer-pool growth (spec 17.6 methodology).
+        // Warmup absorbs driver loading, JIT and buffer-pool growth before the count is judged.
         rotate(1)
         rotate(2)
         val baseline = os.openFileDescriptorCount

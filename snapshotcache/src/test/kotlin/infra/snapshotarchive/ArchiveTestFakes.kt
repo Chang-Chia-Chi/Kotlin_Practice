@@ -37,7 +37,7 @@ import java.util.logging.SimpleFormatter
  * A [SnapshotCache] over one real DuckDB generation file, attached READ_ONLY exactly as the
  * serving store attaches it.
  *
- * The archive layer is a consumer of the public API (D30) and its tests consume the same
+ * The archive layer is a consumer of the public API and its tests consume the same
  * surface - hence a hand-written fake rather than reaching into `core`, which ArchUnit would
  * have permitted in tests but which would have made these suites depend on framework
  * internals they have no business knowing.
@@ -190,8 +190,8 @@ internal class RecordingObjectStore(
 
 /**
  * Captures WARN and SEVERE records at the JUL root. jboss-logging has no other provider on
- * this test classpath, so it falls back to java.util.logging - the same route the D31 skip
- * alert, the watchdog's FAILED verdict and the staleness alert all take.
+ * this test classpath, so it falls back to java.util.logging - the same route the not-newer
+ * skip alert, the watchdog's FAILED verdict and the staleness alert all take.
  */
 internal class LogCapture : Handler() {
 

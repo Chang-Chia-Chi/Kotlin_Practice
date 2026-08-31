@@ -17,7 +17,7 @@ import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.EnumSource
 
 /**
- * P8b, acceptance criteria 2, 6, 7 and 8: **what the engine tells spec 9.3's metrics seam, and
+ * P8b, acceptance criteria 2, 6, 7 and 8: **what the engine tells the metrics seam, and
  * when.** Nothing here knows what Micrometer is; that binding is asserted in
  * `infra.etl.micrometer.MetricLabelContractTest`, and the split is the same one the package
  * boundary makes - the engine talks to `TaskMetrics`, and only a host names a `MeterRegistry`.
@@ -35,7 +35,7 @@ import org.junit.jupiter.params.provider.EnumSource
  *
  * - **`scratchBytes` before `ScratchDb.close()`**, hence before any hook and before `taskEnded`.
  *   Sampling after the close reads an emptied directory, so the gauge is 0 on every run forever,
- *   silently, and an operator sizing spec 7.2's volume sees a flat zero. The `bytes > 0`
+ *   silently, and an operator sizing the scratch volume sees a flat zero. The `bytes > 0`
  *   assertion on the successful run is what catches it; "a run with no scratch reports 0" is the
  *   *symptom* of that bug and would pass while it stood.
  * - **`stepRetried` before `onStepError(willRetry = true)`**, and every metric before the
@@ -96,7 +96,7 @@ class TaskMetricsTest {
     // ------------------------------------------------------------------------------------
 
     /**
-     * Spec 9.3 is explicit that `logging: false` does not suppress metrics, and P8a implements
+     * The contract is explicit that `logging: false` does not suppress metrics, and P8a implements
      * the flag by binding the run's listener `sink` to `TaskRunListener.NONE` inside `Events` -
      * so the whole clause reduces to "metrics must not travel through that sink".
      *

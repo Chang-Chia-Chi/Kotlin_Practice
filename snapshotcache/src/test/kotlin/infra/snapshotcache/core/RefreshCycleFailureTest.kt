@@ -14,17 +14,17 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 
 /**
- * The spec 9.2 failure taxonomy, P4 scope: source error, disk error (+ emergency GC),
+ * The refresh failure taxonomy, P4 scope: source error, disk error (+ emergency GC),
  * blocked-by-K (pause + auto-resume), DETACH-fails (defer, no blocking), in-flight
  * shutdown abort, overlap skip - every row asserting RETURN TO A USABLE STATE (the next
- * runOnce succeeds / current keeps serving), never merely that an error surfaced
- * (spec 17.8). Plus I7 (spec 17.2). The verify_failed row lives in RefreshCycleTest.
+ * runOnce succeeds / current keeps serving), never merely that an error surfaced.
+ * Plus I7. The verify_failed row lives in RefreshCycleTest.
  *
- * Interleavings are latch-parked sources with bounded joins; zero sleeps (plan 1.5).
+ * Interleavings are latch-parked sources with bounded joins; zero sleeps.
  */
 internal class RefreshCycleFailureTest : RefreshCycleTestBase() {
 
-    // ------------------------------------------------------------------ source error (spec 9.2 row 1)
+    // ------------------------------------------------------------------ source error
 
     @Test
     fun sourceError_abortsRound_deletesCandidate_nextRunOnceSucceeds() {
@@ -47,7 +47,7 @@ internal class RefreshCycleFailureTest : RefreshCycleTestBase() {
         assertThat(runSuccess(c)).isEqualTo(3L) // gen 2 was allocated and discarded by the failed round
     }
 
-    // ------------------------------------------------------------------ disk error (spec 9.2 row 3)
+    // ------------------------------------------------------------------ disk error
 
     @Test
     fun diskError_onCreateCandidate_runsEmergencyGc_nextRunOnceSucceeds() {
@@ -94,7 +94,7 @@ internal class RefreshCycleFailureTest : RefreshCycleTestBase() {
         assertThat(runSuccess(c)).isEqualTo(3L)
     }
 
-    // ------------------------------------------------------------------ blocked by K (spec 9.2 row 4, spec 6.1)
+    // ------------------------------------------------------------------ blocked by K
 
     @Test
     fun blockedByK_pausesWithoutAllocating_autoResumesAfterLeaseRelease() {
@@ -128,7 +128,7 @@ internal class RefreshCycleFailureTest : RefreshCycleTestBase() {
         assertThat(events.reclaimedGens).contains(1L)
     }
 
-    // ------------------------------------------------------------------ DETACH fails (spec 9.2 row 5, A4)
+    // ------------------------------------------------------------------ DETACH fails
 
     @Test
     fun detachFailure_defersReclaim_withoutBlockingTheRound_nextPassReclaims() {
@@ -148,7 +148,7 @@ internal class RefreshCycleFailureTest : RefreshCycleTestBase() {
         assertThat(deferred.reclaimed).isEmpty()
         assertThat(events.reclaimedGens).isEmpty()
 
-        // Next pass reclaims (spec 9.2: "leave the generation for the next GC pass").
+        // Next pass reclaims: a failed DETACH leaves the generation for the next GC pass.
         val reclaimed = c.reclaimPass()
         assertThat(reclaimed.reclaimed).containsExactly(1L)
         assertThat(reclaimed.deferred).isEmpty()
@@ -156,7 +156,7 @@ internal class RefreshCycleFailureTest : RefreshCycleTestBase() {
         assertThat(store.generationsOnDisk()).containsExactly(2L)
     }
 
-    // ------------------------------------------------------------------ overlap (spec 9.2 via 4.4)
+    // ------------------------------------------------------------------ overlap
 
     @Test
     fun overlappingRunOnce_skipped_neverTwoCandidates_nextRunOnceSucceeds() {
@@ -198,7 +198,7 @@ internal class RefreshCycleFailureTest : RefreshCycleTestBase() {
         )
     }
 
-    // ------------------------------------------------------------------ in-flight shutdown abort (spec 9.2, 10.2 step 3, D23)
+    // ------------------------------------------------------------------ in-flight shutdown abort
 
     @Test
     fun shutdownMidBuild_abortsRound_noTmpNoPromotion_currentUntouched() {
@@ -219,7 +219,7 @@ internal class RefreshCycleFailureTest : RefreshCycleTestBase() {
         try {
             await(entered)
             registry.beginShutdown()
-            round.interrupt() // spec 10.2 step 3: interrupt the source
+            round.interrupt() // shutdown interrupts the in-flight source
             joinOrFail(round)
         } finally {
             proceed.countDown()
@@ -254,7 +254,7 @@ internal class RefreshCycleFailureTest : RefreshCycleTestBase() {
         assertThat(runSuccess(c)).isEqualTo(3L)
     }
 
-    // ------------------------------------------------------------------ I7 (spec 17.2)
+    // ------------------------------------------------------------------ I7
 
     @Test
     fun I7_afterFailedRefresh_currentUnchangedAndNoCandidateResourcesRemain() {

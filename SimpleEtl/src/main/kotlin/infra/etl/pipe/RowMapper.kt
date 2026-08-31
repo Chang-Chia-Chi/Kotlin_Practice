@@ -9,7 +9,7 @@ import java.time.OffsetDateTime
 /**
  * One column of a result set or of a target table.
  *
- * @param name lower case, per spec 4.5.
+ * @param name lower case, always.
  * @param nullable false only when the source states the column is NOT NULL. A source that does
  *   not report nullability at all - DuckDB 1.1.3's `ResultSetMetaData` reports every column as
  *   nullable, including NOT NULL ones - yields true, which is the safe direction. Its
@@ -19,7 +19,7 @@ import java.time.OffsetDateTime
  * @param precision and @param scale as the source declares them. Only DECIMAL uses them, and
  *   only `createTable: AUTO`, which emits `DECIMAL(precision,scale)`: bare `DECIMAL` resolves to
  *   `DECIMAL(18,3)`, which rounds past three decimals and cannot hold a 16-digit key at all
- *   (spec 4.4). Both construction sites populate them from the same catalog read that supplies
+ *   Both construction sites populate them from the same catalog read that supplies
  *   the type, so the pair is never a fabricated zero. A pair outside `1 <= p <= 38` and
  *   `0 <= s <= p` is what the source reports for an unconstrained `NUMBER`, a `FLOAT`, a
  *   negative scale, or any computed expression; the writer rejects it at open rather than
@@ -34,15 +34,15 @@ class ColumnMeta(
 )
 
 /**
- * Turns the current row of a [ResultSet] into a [Row], applying the type mapping of spec 4.3 and
- * lower-casing keys per spec 4.5.
+ * Turns the current row of a [ResultSet] into a [Row], applying [CanonicalType.fromJdbc] to each
+ * column type and lower-casing keys.
  *
  * The metadata is read once, here, not per row. [map] reads the row the result set is already
  * positioned on and never calls [ResultSet.next].
  *
  * @param step the step name, used to make an unsupported column type and a wrong typed accessor
  *   diagnostic rather than generic.
- * @throws IllegalArgumentException if a column's type is outside spec 4.3, naming step and
+ * @throws IllegalArgumentException if a column's type has no canonical type, naming step and
  *   column.
  */
 class RowMapper(metaData: ResultSetMetaData, private val step: String) {
@@ -60,8 +60,8 @@ class RowMapper(metaData: ResultSetMetaData, private val step: String) {
 
     init {
         // A Row is keyed by name, so two columns of the same name would silently collapse into
-        // one slot and leave the Row a column short of what `columns` advertises. Spec 1.3: the
-        // framework does not guess.
+        // one slot and leave the Row a column short of what `columns` advertises. The framework
+        // does not guess.
         val duplicate = columns.map { it.name }.groupingBy { it }.eachCount().entries
             .firstOrNull { it.value > 1 }
         require(duplicate == null) {
@@ -104,7 +104,7 @@ class RowMapper(metaData: ResultSetMetaData, private val step: String) {
             CanonicalType.BYTES -> when (val value = rs.getObject(i)) {
                 null -> null
                 is ByteArray -> value
-                // 7.4: released here, not left to GC, and from a finally so a throwing read
+                // Released here, not left to GC, and from a finally so a throwing read
                 // releases it too. A 2M-row pipe would otherwise hold two million server-side
                 // locators open for the length of the step.
                 is Blob -> try {

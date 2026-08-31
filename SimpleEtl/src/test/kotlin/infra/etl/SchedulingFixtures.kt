@@ -39,10 +39,10 @@ import org.junit.jupiter.api.Assertions.assertInstanceOf
  *
  * **This file is the phase's reconciliation seam.** `TaskScheduler`, `TaskRunner`, `TaskAdmin` and
  * `TriggerResult` were written by the engineer in parallel with these tests, and neither side saw
- * the other. Spec 11.2 freezes the *methods* and not the constructors - the seventh phase running
- * in which the plan names public surface spec 11 never fully declared - so every constructor call
- * in this phase lives in [P7World] and every result unwrapping lives in [Trig], each marked
- * `INTEGRATE:`. No test class names a production constructor.
+ * the other. The frozen public surface covers the *methods* and not the constructors - the seventh
+ * phase running in which the plan names public surface the spec never fully declared - so every
+ * constructor call in this phase lives in [P7World] and every result unwrapping lives in [Trig],
+ * each marked `INTEGRATE:`. No test class names a production constructor.
  *
  * ### Why nothing here sleeps
  *
@@ -59,11 +59,11 @@ import org.junit.jupiter.api.Assertions.assertInstanceOf
  *
  * ### Nothing here touches a DuckDB connection from two threads
  *
- * This is the first phase where two runs are live at once, so two scratch files exist at once
- * (spec 7.2, 8.4). [ProbeDatasource] therefore opens a **fresh in-memory DuckDB instance per
- * `openConnection`** rather than handing out duplicates of one shared connection: two parked runs
- * never meet on one `Connection`. In-memory is legitimate here because a probe datasource is an
- * ordinary external datasource, not the scratch working file that spec 7.2 requires to be a file.
+ * This is the first phase where two runs are live at once, so two scratch files exist at once.
+ * [ProbeDatasource] therefore opens a **fresh in-memory DuckDB instance per `openConnection`**
+ * rather than handing out duplicates of one shared connection: two parked runs never meet on one
+ * `Connection`. In-memory is legitimate here because a probe datasource is an ordinary external
+ * datasource, not the scratch working file, which has to be a real file on disk.
  *
  * No fixture DELETEs, TRUNCATEs or DROPs a dataset, and none creates a temporary table - P4's
  * `NoTempTableTest` scans this file like any other.
@@ -77,7 +77,7 @@ const val TIMEOUT_SECONDS = 30L
 // ---------------------------------------------------------------------------------------------
 
 /**
- * The host's `CronScheduler` (spec 8.6) as a recording double: what was registered, what was
+ * The host's `CronScheduler` as a recording double: what was registered, what was
  * unregistered, and a way to fire a registered callback on demand.
  *
  * [registered] is the *state* - what the host's scheduler would fire from now on - and [events] is
@@ -86,8 +86,8 @@ const val TIMEOUT_SECONDS = 30L
  * the churn: an implementation that cancels and re-registers everything on every `apply` produces
  * an identical state and a completely different event list.
  *
- * [rejectCron] makes this the "`CronScheduler` that throws on a bad cron" of spec 8.6's last row.
- * Throwing is the host's contractual obligation, so the double owes it too.
+ * [rejectCron] makes this the "`CronScheduler` that throws on a bad cron" case. Throwing is the
+ * host's contractual obligation, so the double owes it too.
  */
 class RecordingCron(@Volatile var rejectCron: (String) -> Boolean = { false }) : CronScheduler {
 
@@ -143,7 +143,7 @@ class RecordingCron(@Volatile var rejectCron: (String) -> Boolean = { false }) :
  * A place a run stops so that the test thread can assert while it is still in progress.
  *
  * [enter] is called on the run's own thread, from inside an ordinary `sql` step, which is what
- * makes the thread identity assertions of spec 8.3 possible **without reading a thread name**.
+ * makes the thread identity assertions possible **without reading a thread name**.
  * The `@taskName#1` suffix on a worker thread's name exists only under `-ea`, so a test asserting
  * the coroutine name through it would derive its discriminating power from a JVM flag surefire
  * happens to set - P4's Windows-file-lock finding in a new costume.
@@ -190,7 +190,8 @@ class Probe(private val name: String) {
  * there if the test asked it to.
  *
  * A fresh in-memory DuckDB instance per connection, so two concurrent runs never share a
- * `Connection` (spec 7.2's crash-not-error rule) and the parked run holds no lock on anything.
+ * `Connection` - sharing one crashes the JVM rather than raising - and the parked run holds no
+ * lock on anything.
  */
 class ProbeDatasource(val probe: Probe) : ConnectionFactory, AutoCloseable {
 
@@ -216,7 +217,7 @@ object P7Tasks {
      *
      * @param touchScratch prefixes a `materialize` into scratch, which is what forces the run to
      *   open a `ScratchDb` before it parks - the only way to observe two scratch files live at
-     *   once (spec 8.4).
+     *   once.
      */
     fun parking(
         name: String,
@@ -267,7 +268,7 @@ object P7Tasks {
 
     /**
      * One task file. `scratch` is the only datasource it names, so a loader configured with no
-     * datasources at all still finds it valid (spec 7.1 reserves the name).
+     * datasources at all still finds it valid: the name is reserved rather than configured.
      *
      * @param datasource swapped for an unconfigured name to build the one-rule-away invalid file
      *   of validation rule 3. Everything else about the file stays valid, so a rejection cannot
@@ -310,9 +311,9 @@ object P7Tasks {
  * The engine, the runner, the scheduler and the admin, plus the probe datasources they run
  * against and the scratch root they write into.
  *
- * INTEGRATE: spec 11.2 declares `TaskScheduler(cron)`, and bare `TaskRunner`, `TaskAdmin` and
- * `TaskEngine` types with no constructor at all. Every assumption about how they are wired lives
- * in the four `by lazy` blocks below and nowhere else.
+ * INTEGRATE: the frozen public surface declares `TaskScheduler(cron)`, and bare `TaskRunner`,
+ * `TaskAdmin` and `TaskEngine` types with no constructor at all. Every assumption about how they
+ * are wired lives in the four `by lazy` blocks below and nowhere else.
  */
 class P7World(private val root: Path) : AutoCloseable {
 
@@ -332,7 +333,7 @@ class P7World(private val root: Path) : AutoCloseable {
     }
 
     /**
-     * P9, additive. Spec 9.2's listener, read at every call through a [ForwardingListener] because
+     * P9, additive. The run listener, read at every call through a [ForwardingListener] because
      * the engine below is built `by lazy` and a listener passed straight into that constructor
      * would be captured before any test could set one - `TaskHarness` carries the same seam for
      * the same reason.
@@ -358,11 +359,11 @@ class P7World(private val root: Path) : AutoCloseable {
         )
     }
 
-    // INTEGRATE: the runner has to reach the engine somehow; spec 11.2 does not say how.
+    // INTEGRATE: the runner has to reach the engine somehow; the frozen surface does not say how.
     val runner: TaskRunner by lazy { TaskRunner(engine) }
 
-    // INTEGRATE: spec 11.2 shows `TaskScheduler(cron)`, but the callback it registers must submit
-    // to the runner, so the runner has to arrive here too.
+    // INTEGRATE: the frozen surface shows `TaskScheduler(cron)`, but the callback it registers
+    // must submit to the runner, so the runner has to arrive here too.
     val scheduler: TaskScheduler by lazy { TaskScheduler(cron, runner) }
 
     // INTEGRATE: the loader has no datasources, so only `scratch` is a valid name in a task file.
@@ -399,10 +400,10 @@ class P7World(private val root: Path) : AutoCloseable {
 object Trig {
 
     /**
-     * INTEGRATE: spec 11.2 writes `fun apply(definitions: List<TaskDefinition>)`, which returns
-     * Unit, while the plan's own done-when says a bad cron "yields a `ValidationReport`". Assumed
-     * to be `ValidationReport?` - null on success - mirroring the frozen `TaskAdmin.reload`. If it
-     * came out as Unit-and-throws, this becomes a `runCatching` and no test class changes.
+     * INTEGRATE: the frozen surface writes `fun apply(definitions: List<TaskDefinition>)`, which
+     * returns Unit, while the plan's own done-when says a bad cron "yields a `ValidationReport`".
+     * Assumed to be `ValidationReport?` - null on success - mirroring the frozen `TaskAdmin.reload`.
+     * If it came out as Unit-and-throws, this becomes a `runCatching` and no test class changes.
      */
     fun apply(scheduler: TaskScheduler, definitions: List<TaskDefinition>): ValidationReport? =
         scheduler.apply(definitions)

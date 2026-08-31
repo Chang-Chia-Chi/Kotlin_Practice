@@ -7,7 +7,7 @@ import java.sql.Connection
 private val DATASET_NAME = Regex("[A-Za-z_][A-Za-z0-9_]{0,63}")
 
 /**
- * The attempt-suffix scheme of spec 5.5: every dataset a run produces inside scratch is written
+ * The attempt-suffix scheme: every dataset a run produces inside scratch is written
  * under a physical name carrying its attempt number, and the name later steps use is a view over
  * whichever attempt succeeded.
  *
@@ -18,17 +18,17 @@ private val DATASET_NAME = Regex("[A-Za-z_][A-Za-z0-9_]{0,63}")
  * ```
  *
  * Nothing is ever dropped, deleted or truncated to make room, because on DuckDB 1.1.3 none of
- * those reclaim any space (spec 5.5). The reclamation point is [ScratchDb.close] emptying the
+ * those reclaim any space. The reclamation point is [ScratchDb.close] emptying the
  * directory, once per run. The cost is that a repeatedly failing dataset occupies up to
  * `1 + retries` copies - and how much of an attempt survives depends on where its failure landed,
- * between nothing and one chunk short of everything written (spec 12, S4).
+ * between nothing and one chunk short of everything written.
  *
  * **The stable name resolves identically over a table and over a parquet file.** A `materialize`
  * step may switch `format` without any other step changing, so [publishParquet] wraps
- * `read_parquet` in the same `create or replace view` (spec 5.6). Verified on duckdb_jdbc 1.1.3
+ * `read_parquet` in the same `create or replace view`. Verified on duckdb_jdbc 1.1.3
  * (P4 scratchpad probe): a view over `read_parquet` and a view over the equivalent table report
  * the same column names and the same driver types - `BIGINT`, `VARCHAR`, `DECIMAL(18,3)` - so
- * neither downstream SQL nor the read seam of spec 4.3 can tell them apart.
+ * neither downstream SQL nor the type mapping that reads them can tell them apart.
  *
  * Which attempt to publish, and when, is the step's decision and not this class's: publishing is
  * what makes an attempt the live one, so it happens only after the attempt has succeeded.
@@ -44,7 +44,7 @@ class DatasetNamer(private val directory: Path) {
     /**
      * The physical parquet file one attempt writes into, absolute so that it does not depend on the
      * process working directory. A retry overwrites its own attempt's file rather than adding a
-     * table to the database, which is what parquet buys (spec 5.6).
+     * table to the database, which is what parquet buys.
      */
     fun parquetPath(dataset: String, attempt: Int): Path =
         directory.toAbsolutePath().resolve("${physical(dataset, attempt)}.parquet")
@@ -62,7 +62,7 @@ class DatasetNamer(private val directory: Path) {
         connection.createStatement().use { it.execute("create or replace view $view as select * from $relation") }
     }
 
-    /** Attempts are the built-in `attempt` variable of spec 6.1, so the first attempt is 1. */
+    /** Attempts follow the built-in `attempt` task variable, so the first attempt is 1. */
     private fun validAttempt(attempt: Int): Int {
         require(attempt >= 1) { "attempt must be 1 or greater, was $attempt" }
         return attempt

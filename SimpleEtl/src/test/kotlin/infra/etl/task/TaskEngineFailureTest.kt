@@ -15,25 +15,25 @@ import org.junit.jupiter.api.io.TempDir
 
 /**
  * P5, done-when item 6: **a failure in phase 2 leaves phase 1's external writes committed, and
- * the test asserts this rather than pretending otherwise** - plus the scratch laziness of spec
- * 2.4 shape A, driven through the engine.
+ * the test asserts this rather than pretending otherwise** - plus the scratch laziness of a task
+ * that never names `scratch`, driven through the engine.
  *
  * ### Asserting the absence of rollback
  *
- * Spec 5.4 is explicit: there is no rollback across chunks, steps or phases, and the framework
+ * The contract is explicit: there is no rollback across chunks, steps or phases, and the framework
  * does not attempt cross-phase atomicity because it cannot - the targets may live in different
  * instances. So the assertion below is that the phase 1 table is **still there** after the run
  * failed. That is not a weak test standing in for a stronger one; a test that wished for
  * rollback would be asserting a property the framework has never claimed and cannot deliver, and
  * it would send whoever read it looking for a bug that is a design decision. The mitigation
- * spec 5.4 does offer - `idempotent: true`, or a work table and a swap - is the author's, not
+ * the framework does offer - `idempotent: true`, or a work table and a swap - is the author's, not
  * the engine's.
  *
  * The external datasource here is a second DuckDB file rather than an Oracle container. A `sql`
- * step's statements are author SQL with side effects (spec 3.4), which is exactly how spec 5.4's
- * own worked example publishes, and `CREATE TABLE AS SELECT` keeps the fixture clear of INSERT
- * into DuckDB. What is being asserted is the absence of a rollback the framework never performs,
- * and that is not a property of the target vendor.
+ * step's statements are author SQL with side effects, which is exactly how the documented publish
+ * example works, and `CREATE TABLE AS SELECT` keeps the fixture clear of INSERT into DuckDB. What
+ * is being asserted is the absence of a rollback the framework never performs, and that is not a
+ * property of the target vendor.
  *
  * ### Asserting laziness where it can actually fail
  *
@@ -139,7 +139,7 @@ class TaskEngineFailureTest {
     }
 
     /**
-     * Spec 2.4 shape A: a task that never references `scratch` pays nothing. P4 proved `ScratchDb`
+     * A task that never references `scratch` pays nothing. P4 proved `ScratchDb`
      * is lazy when nobody calls `connection()`; this proves the engine is the nobody - that it
      * does not open the instance speculatively at run start.
      */

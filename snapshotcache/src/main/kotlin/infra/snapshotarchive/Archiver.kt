@@ -22,7 +22,7 @@ import java.util.concurrent.ThreadFactory
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 
-/** One row of the spec 18.2 inventory: what was exported, and how a reader recognises it again. */
+/** One row of the archive inventory: what was exported, and how a reader recognises it again. */
 data class ArchivedObject @JsonCreator constructor(
     @param:JsonProperty("table") @get:JsonProperty("table") val table: String,
     @param:JsonProperty("object_key") @get:JsonProperty("object_key") val objectKey: String,
@@ -32,9 +32,9 @@ data class ArchivedObject @JsonCreator constructor(
 )
 
 /**
- * The inventory CLOB of spec 18.2, which is the manifest row's whole reason for being
- * written before the first upload: it is the complete list of what a version must contain,
- * so nothing downstream ever has to LIST the bucket to find out (D33).
+ * The inventory CLOB, which is the manifest row's whole reason for being written before the
+ * first upload: it is the complete list of what a version must contain, so nothing downstream
+ * ever has to LIST the bucket to find out.
  *
  * `object_key` is relative to the row's `uri_prefix`; the absolute layout lives in
  * [ManifestSchema]/[ManifestDao] and is not duplicated here.
@@ -50,13 +50,13 @@ object Inventory {
 }
 
 /**
- * Interleaving points between the spec 18.3 steps, for the crash-matrix and serialization
- * tests. Production passes the no-op, so these cost one virtual call - the same bargain the
- * framework's own [infra.snapshotcache.api.Hook] makes (spec 17.4).
+ * Interleaving points between the steps of the publish protocol, for the crash-matrix and
+ * serialization tests. Production passes the no-op, so these cost one virtual call - the same
+ * bargain the framework's own [infra.snapshotcache.api.Hook] makes.
  *
  * These are deliberately a separate enum rather than new [infra.snapshotcache.api.Hook]
- * values: that enum is frozen, and the archive layer is a consumer, not part of the
- * framework (D30).
+ * values: that enum is frozen, and the archive layer is a consumer of the public API, not
+ * part of the framework.
  */
 enum class ArchiveStep {
     /** Every table exported and the inventory computed; no manifest row exists yet. */
@@ -79,27 +79,28 @@ enum class ArchiveStep {
 enum class RunOutcome {
     PUBLISHED,
 
-    /** The group was already running. Runs are not queued (spec 18.2). */
+    /** The group was already running. Runs are not queued. */
     SKIPPED_BUSY,
 
-    /** The D31 monotonicity guard refused the publish; skipped and alerted (spec 18.3 step 2). */
+    /** The `data_as_of` monotonicity guard refused the publish; skipped and alerted. */
     SKIPPED_NOT_NEWER,
 
-    /** The conditional flip moved nothing - the ticket-04 watchdog resolved the row first (D33). */
+    /** The conditional flip moved nothing - the ticket-04 watchdog resolved the row first. */
     LOST_RACE,
 }
 
 /**
- * The hourly archiver of spec 18.2/18.3.
+ * The hourly archiver: one full Parquet checkpoint per group, exported under a lease and
+ * published to the object store.
  *
  * The step order in [publish] is the entire safety argument and is fixed: the PENDING row,
  * carrying the complete inventory, is committed before the first object is uploaded, so an
  * object without a covering manifest row is impossible and this layer owns no LIST-based
- * orphan sweep (D33). Nothing here is clever; everything here is ordered.
+ * orphan sweep. Nothing here is clever; everything here is ordered.
  *
  * [tables] declares which tables each group archives. It is explicit rather than discovered
- * from the snapshot's catalog because D36 requires archived tables to have stable primary
- * keys, which is a property of the schema contract, not of whatever happens to be attached.
+ * from the snapshot's catalog because an archived table must declare a stable primary key,
+ * which is a property of the schema contract, not of whatever happens to be attached.
  *
  * Scheduling is dull on purpose: different groups run in parallel on a bounded pool, the
  * same group never runs twice at once, and a run that finds its group busy skips and logs
@@ -117,14 +118,14 @@ class Archiver(
 
     private val scheduler = Executors.newSingleThreadScheduledExecutor(named("archiver-scheduler"))
 
-    // One run thread per group, since runs for one group are serialized anyway (spec 18.2),
-    // and a small fixed export pool. Both were constructor knobs no caller ever set - plan
-    // 2.4 forbids config for a value that never changes, so they are constants until P9's
-    // wiring has a real reason and a real caller to make them configurable again.
+    // One run thread per group, since runs for one group are serialized anyway, and a small
+    // fixed export pool. Both were constructor knobs no caller ever set - config for a value
+    // that never changes is not config, so they are constants until P9's wiring has a real
+    // reason and a real caller to make them configurable again.
     private val runs = Executors.newFixedThreadPool(tables.size.coerceAtLeast(1), named("archiver-run"))
     private val exports = Executors.newFixedThreadPool(EXPORT_THREADS, named("archiver-export"))
 
-    /** Presence means "a run for this group is in flight"; the skip-if-busy rule of spec 18.2. */
+    /** Presence means "a run for this group is in flight"; a run that finds one skips. */
     private val busy = ConcurrentHashMap<GroupId, Boolean>()
 
     /** Schedules every configured group at [interval]. Scheduling stops in [close]. */
@@ -165,7 +166,7 @@ class Archiver(
         }
     }
 
-    /** Spec 18.3, in its fixed order. */
+    /** The publish protocol, in its fixed order. */
     private fun publish(group: GroupId): RunOutcome {
         val groupTables = requireNotNull(tables[group]) { "no tables configured for group '$group'" }
         Files.createDirectories(tempRoot)
@@ -224,8 +225,8 @@ class Archiver(
     }
 
     /**
-     * Per-table export tasks in parallel on the bounded export pool (plan P12). Each task
-     * takes its own connection off the snapshot, so they do not contend on one.
+     * Per-table export tasks in parallel on the bounded export pool. Each task takes its own
+     * connection off the snapshot, so they do not contend on one.
      *
      * A failure cancels the siblings rather than letting them finish writing files into a
      * temp dir nothing will ever read.
@@ -254,11 +255,10 @@ class Archiver(
      * The export statement settled by the ticket-01 spike, in its production home.
      *
      * It runs directly on the READ_ONLY-attached snapshot connection, so no `copyOut`
-     * staging step is needed (spec 18.6 item 1). The row count comes from a separate
-     * `COUNT(*)` and never from COPY's own update count: an empty table and a driver that
-     * stopped classifying COPY as DML both report 0, nothing downstream could tell them
-     * apart, and this number is committed into the PENDING row the watchdog later verifies a
-     * real object against.
+     * staging step is needed. The row count comes from a separate `COUNT(*)` and never from
+     * COPY's own update count: an empty table and a driver that stopped classifying COPY as
+     * DML both report 0, nothing downstream could tell them apart, and this number is
+     * committed into the PENDING row the watchdog later verifies a real object against.
      *
      * It lives here, not beside `copyOut`, because reaching it from `infra.snapshotcache`
      * would mean a seam on a frozen spi interface, while the public API already assumes its
@@ -288,10 +288,10 @@ class Archiver(
     }
 
     /**
-     * Spec 18.3 step 4. Verification asks the store what actually landed rather than
-     * trusting the upload call's return: the inventory is the contract the ticket-04 watchdog
-     * will later re-check with the same question, so a version that would fail that check
-     * must never reach COMPLETE here.
+     * Uploads every exported object, then verifies. Verification asks the store what actually
+     * landed rather than trusting the upload call's return: the inventory is the contract the
+     * ticket-04 watchdog will later re-check with the same question, so a version that would
+     * fail that check must never reach COMPLETE here.
      */
     private fun uploadAndVerify(
         group: GroupId,
@@ -317,18 +317,19 @@ class Archiver(
     }
 
     /**
-     * Spec 18.3 shutdown: stop scheduling, interrupt in-flight runs, let the lease release
-     * inside the framework's drain, delete the temp directory.
+     * Shutdown: stop scheduling, interrupt in-flight runs, let the lease release inside the
+     * framework's drain, delete the temp directory.
      *
      * A leftover PENDING row is deliberately left alone. Resolving it here would create a
      * second recovery path that only graceful exits exercise and only crashes need; instead
      * the ticket-04 watchdog resolves it, so a crash and a clean shutdown converge on one
-     * path that is tested every time either happens (D33, mirroring spec 10.2).
+     * path that is tested every time either happens - the same choice the framework makes at
+     * its own shutdown.
      *
      * The interrupt lands at this class's own checkpoints and at any interruptible blocking
      * call. A run parked in a socket read inside the MinIO client drains only when that
-     * client's own timeout fires, and the framework then reports the still-outstanding lease
-     * exactly as spec 10.2 step 4 says it does.
+     * client's own timeout fires, and the framework's bounded lease drain then logs the
+     * still-outstanding lease and its hold duration, exactly as it says it will.
      */
     override fun close() {
         scheduler.shutdownNow()

@@ -11,12 +11,12 @@ import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 
 /**
- * P5, done-when item 5: **`chunkSize` resolves step, then task, then default** (spec 5.2).
+ * P5, done-when item 5: **`chunkSize` resolves step, then task, then default**.
  *
- * The observable is what reaches the pipe. Spec 5.2 step 1 makes the resolved chunk size the
- * source statement's `fetchSize`, so the number is visible at the JDBC boundary without asking
- * the engine to report on itself - and P3's own suite already asserts `RowPipe` pushes it there,
- * so a reading here is a reading of the resolved value and nothing else.
+ * The observable is what reaches the pipe. The resolved chunk size becomes the source statement's
+ * `fetchSize`, so the number is visible at the JDBC boundary without asking the engine to report
+ * on itself - and P3's own suite already asserts `RowPipe` pushes it there, so a reading here is a
+ * reading of the resolved value and nothing else.
  *
  * The recorder is P3's [RecordingConnections], reused rather than reimplemented: its handover
  * note asks the next phase to extend it rather than write a third counter, and nothing in that
@@ -89,9 +89,9 @@ class TaskEngineChunkSizeTest {
     }
 
     /**
-     * Neither level states one, so `TaskDefinition`'s own default of 5000 applies (spec 5.2,
-     * spec 11.2). This is why the fixture omits the argument rather than passing 5000: passing it
-     * would test that an explicit 5000 arrives, which is the first case again.
+     * Neither level states one, so `TaskDefinition`'s own default of 5000 applies. This is why the
+     * fixture omits the argument rather than passing 5000: passing it would test that an explicit
+     * 5000 arrives, which is the first case again.
      */
     @Test
     fun theFrameworkDefaultAppliesWhenNeitherLevelStatesOne() {

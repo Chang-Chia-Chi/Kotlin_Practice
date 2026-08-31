@@ -3,7 +3,7 @@ package infra.etl.pipe
 import java.sql.Types
 
 /**
- * The canonical value types of spec 4.1. Every [Row] value is an instance of the Kotlin type
+ * The canonical value types. Every [Row] value is an instance of the Kotlin type
  * named below, or null.
  *
  * | Constant   | Kotlin type     | DuckDB type ([duckDbType])   |
@@ -19,7 +19,7 @@ import java.sql.Types
  * | [BYTES]    | `ByteArray`     | `BLOB`                       |
  *
  * @property duckDbType the natural DuckDB type for this canonical type. It is the mapping of
- *   spec 4.3 read backwards and nothing more: the nullable-column rule of spec 4.6, which
+ *   [fromJdbc] read backwards and nothing more: the nullable-column rule, which
  *   forces a nullable column to VARCHAR, DECIMAL, or TIMESTAMP, belongs to DDL generation and
  *   overrides this value there.
  */
@@ -37,7 +37,7 @@ enum class CanonicalType(val duckDbType: String) {
     companion object {
 
         /**
-         * The read seam of spec 4.3: a JDBC column type becomes a canonical type, or nothing.
+         * The read seam: a JDBC column type becomes a canonical type, or nothing.
          *
          * | JDBC / Oracle type          | Canonical type |
          * |-----------------------------|----------------|

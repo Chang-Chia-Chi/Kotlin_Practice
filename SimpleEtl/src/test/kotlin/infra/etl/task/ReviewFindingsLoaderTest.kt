@@ -15,11 +15,11 @@ import org.junit.jupiter.api.assertAll
 import org.junit.jupiter.api.io.TempDir
 
 /**
- * The review findings that spec 10's rules either missed or over-reached on. Every file here is
- * one edit away from a sibling that loads, which is P6's pairing rule: standing alone, "this file
- * was rejected" is satisfied by a loader that rejects everything.
+ * The review findings that the numbered validation rules either missed or over-reached on. Every
+ * file here is one edit away from a sibling that loads, which is P6's pairing rule: standing alone,
+ * "this file was rejected" is satisfied by a loader that rejects everything.
  *
- * - **M7**: `phases` carries no `# optional` annotation in spec 3.1, but the DTO defaulted it to
+ * - **M7**: `phases` carries no `# optional` annotation in the schema, but the DTO defaulted it to
  *   the empty list and no rule rejected one. A task with no step scheduled, ran, and reported
  *   SUCCEEDED every ten minutes while its table quietly stopped updating.
  * - **M9**: `chunkSize` and `retries` are checked at boot precisely so a bad value is not a
@@ -133,7 +133,7 @@ class ReviewFindingsLoaderTest {
      * never run at all.
      *
      * Without the scratch half this test would pass against a loader that banned variables in every
-     * materialize, which would break spec 3.3's own example.
+     * materialize - and the schema's own materialize example binds one.
      */
     @Test
     fun aMaterializeBindingAVariableLoadsOnScratchAndIsRejectedOnAnExternalDatasource() {
@@ -204,7 +204,7 @@ class ReviewFindingsLoaderTest {
     /**
      * The pair rule 12 turns on for a `sql` step. Without `idempotent` the file is refused; with
      * it, the identical file loads and the flag reaches the model. A transient drop between those
-     * two committed statements re-runs the insert, and spec 5.2 makes each statement its own
+     * two committed statements re-runs the insert, and each statement is its own
      * transaction, so nothing in the framework can undo it - the author says the rerun converges
      * or does not get the retry.
      */
@@ -223,7 +223,7 @@ class ReviewFindingsLoaderTest {
         )
     }
 
-    /** A scratch sql step keeps its default retries: spec 5.5's attempt suffix is what makes it safe. */
+    /** A scratch sql step keeps its default retries: the attempt suffix is what makes it safe. */
     @Test
     fun aScratchSqlStepWithRetriesNeedsNoPromise() {
         val yaml = edit(externalSqlStep(), "datasource: report_oracle", "datasource: scratch")

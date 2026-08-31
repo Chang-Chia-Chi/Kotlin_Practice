@@ -18,8 +18,8 @@ import java.nio.file.Path
  *
  * Everything about the publish protocol is asserted against the fake, because a crash matrix
  * and a set of latch-driven interleavings have no business waiting on a container. What is
- * left over is exactly this - upload, size-of-an-object-that-exists, the null that spec 18.3
- * step 4 and the ticket-04 watchdog both read as "it did not land", the download the diff
+ * left over is exactly this - upload, size-of-an-object-that-exists, the null that the publish
+ * protocol and the ticket-04 watchdog both read as "it did not land", the download the diff
  * helper joins on, and the delete the purge reclaims with - and that part is only worth
  * anything against the real server.
  */
@@ -67,7 +67,7 @@ class ObjectStoreTest {
 
     /**
      * The destructive one, and the only method whose fake had never been checked against the
-     * real server. The purge deletes objects before their manifest row (D33 ordering), so a
+     * real server. The purge deletes objects before their manifest row, so a
      * delete that silently did nothing would leave storage growing without bound while every
      * test still passed.
      */

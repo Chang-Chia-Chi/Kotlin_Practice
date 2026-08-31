@@ -15,24 +15,24 @@ import org.junit.jupiter.api.assertAll
 import org.junit.jupiter.api.io.TempDir
 
 /**
- * E15b: `EtlWiring`, the wiring stated once (spec 11.2).
+ * E15b: `EtlWiring`, the wiring stated once.
  *
- * Four rows of spec 8.6 are the same shape - *pass the same thing to two constructors* - and this
- * class exists so a host cannot get one of them wrong. What is asserted here is therefore never
- * "the object was constructed": it is the **consequence** of the two constructors agreeing, taken
- * from the far end of the machine.
+ * Four of the host's wiring obligations are the same shape - *pass the same thing to two
+ * constructors* - and this class exists so a host cannot get one of them wrong. What is asserted
+ * here is therefore never "the object was constructed": it is the **consequence** of the two
+ * constructors agreeing, taken from the far end of the machine.
  *
  * ### The hook pair is the discriminating case, and it takes both tests
  *
  * `TaskFileLoader`'s four name sets all default to empty, so a bare `TaskFileLoader()` compiles and
- * validation rule 5 then passes vacuously for every hook name in every file (spec 8.6). That gives
+ * validation rule 5 then passes vacuously for every hook name in every file. That gives
  * two ways to be wrong and each test only catches one:
  *
  * - [aHookTheHostRegisteredValidatesAndThenActuallyRuns] fails if the wiring passed the *engine's*
  *   registry and an empty set to the loader - startup would reject a name the engine can resolve.
  * - [aHookNobodyRegisteredIsRejectedAtStartup] fails if the loader got no set at all - the typo
- *   would load cleanly and die at the end of the run, which is the failure spec 9.4 exists to
- *   prevent.
+ *   would load cleanly and die at the end of the run, which is the failure hook validation exists
+ *   to prevent.
  *
  * Neither is satisfiable by a constant, because the two files differ only in one hook name.
  *
@@ -40,7 +40,7 @@ import org.junit.jupiter.api.io.TempDir
  *
  * `start-mode=forced`, `@RolesAllowed`, the `AdminResource` mapping, a `CronScheduler` that throws
  * on a bad cron, micrometer on the runtime classpath and `MicrometerTaskMetrics.seed` are all
- * still the host's (spec 8.6), and this file is evidence about none of them. That list is in the
+ * still the host's, and this file is evidence about none of them. That list is in the
  * class's own KDoc so a green run here is not read as covering it. [RecordingCron] does honour the
  * throw-on-bad-cron obligation, which is what makes [aRejectedCronLeavesNothingWiredOrRegistered]
  * a test of `EtlWiring`'s reporting rather than of the host's parsing.
@@ -63,7 +63,7 @@ class EtlWiringTest {
 
     /**
      * One task file whose only datasource is `scratch`, so a wiring with no `Jdbi` at all is still
-     * a valid host (spec 7.1 reserves the name).
+     * a valid host - `scratch` is a reserved name rather than a configured datasource.
      */
     private fun taskDirectory(hookName: String): Path {
         val directory = root.resolve("tasks").also { it.createDirectories() }
@@ -95,7 +95,7 @@ class EtlWiringTest {
     }
 
     /**
-     * Spec 8.6's hook row, end to end: the name the host registered survives validation *and*
+     * The hook obligation, end to end: the name the host registered survives validation *and*
      * resolves at run time, which is only true if the loader and the engine were handed the same
      * registry.
      */
@@ -133,7 +133,7 @@ class EtlWiringTest {
     }
 
     /**
-     * Spec 8.6's longest row: a host that builds definitions in code must call
+     * The longest of the host's obligations: a host that builds definitions in code must call
      * `TaskScheduler.apply` itself, and missing it leaves `list()` reporting a task that will never
      * fire, with no error raised. `start(definitions)` calls it, so `TaskStatus.scheduled` - E14's
      * observable form of that disagreement - is true.

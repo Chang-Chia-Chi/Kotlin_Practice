@@ -25,7 +25,7 @@ import java.util.concurrent.atomic.AtomicReference
  * rather than the reasoning.
  *
  * Zero sleeps: the one interleaving is driven by [HookDriver], with bounded joins as
- * bounds on a broken implementation (plan 1.5, spec 17.4).
+ * bounds on a broken implementation.
  */
 internal class ReviewFixRegressionTest : RefreshCycleTestBase() {
 
@@ -185,11 +185,11 @@ internal class ReviewFixRegressionTest : RefreshCycleTestBase() {
         val c = cycle()
         runSuccess(c) // gen 1 published and current
 
-        // The real shutdown ordering is "set the flag, then interrupt the build thread"
-        // (spec 10.2 steps 1-3). An interrupted Oracle call does not surface as
-        // InterruptedException - the driver reports a cancelled statement - so before the
-        // fix even a correctly ordered shutdown counted source_error, and D26's whole
-        // point, telling the two apart on a dashboard, was lost.
+        // The real shutdown ordering is "set the flag, then interrupt the build thread". An
+        // interrupted Oracle call does not surface as InterruptedException - the driver
+        // reports a cancelled statement - so before the fix even a correctly ordered
+        // shutdown counted source_error, and the whole point of a separate shutdown_aborted
+        // result, telling the two apart on a dashboard, was lost.
         source.behavior = {
             registry.beginShutdown()
             throw SQLException("ORA-01013: user requested cancel of current operation")
@@ -210,7 +210,7 @@ internal class ReviewFixRegressionTest : RefreshCycleTestBase() {
         runSuccess(c) // gen 1
 
         // The fix is a re-check of the shutdown flag, not a widening of the abort case: an
-        // ordinary driver failure must stay source_error (spec 9.2 row 1).
+        // ordinary driver failure must stay source_error.
         source.behavior = { throw SQLException("ORA-12541: TNS:no listener") }
 
         assertThat(c.runOnce().result).isEqualTo(RefreshResult.SOURCE_ERROR)
@@ -234,7 +234,7 @@ internal class ReviewFixRegressionTest : RefreshCycleTestBase() {
         clock.advance(config.leaseDeadline.plusSeconds(1))
         slow.close()
 
-        // Diagnostic only (spec 6.2, D8): nothing was reclaimed early, and leaseReleased
+        // Diagnostic only: nothing was reclaimed early, and leaseReleased
         // still fires so snapshot_lease_duration_seconds keeps every sample.
         assertThat(sink.expired).hasSize(1)
         val (info, heldFor) = sink.expired.single()

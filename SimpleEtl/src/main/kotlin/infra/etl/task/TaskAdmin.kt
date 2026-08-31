@@ -4,19 +4,19 @@ import java.nio.file.Path
 import org.jboss.logging.Logger
 
 /**
- * One row of spec 8.2's `GET /admin/etl/tasks`: the task, its schedule, and its last run outcome.
+ * One row of `GET /admin/etl/tasks`: the task, its schedule, and its last run outcome.
  *
- * @param cron null for a task that only ever runs from the API (spec 8.1). What the *definition*
+ * @param cron null for a task that only ever runs from the API. What the *definition*
  *   asks for, which is not evidence that anything was registered - see [scheduled].
  * @param scheduled whether [TaskScheduler] currently holds a live registration for this name
  *   (E14). A non-null [cron] with `scheduled = false` has **two** causes, and they read
- *   identically here: spec 8.6's `TaskScheduler.apply` obligation was missed, or
+ *   identically here: the host's `TaskScheduler.apply` obligation was missed, or
  *   [WiringResult.Wired.close] has run and every task now renders this way, which is the shape a
  *   host's admin view keeps *because* `close` deliberately leaves the definitions in place (E16).
  *   Either way the task is listed with a schedule and will never fire. Always false for a `null`
  *   [cron], which is the normal API-only task.
  * @param lastRun null until the task has run at least once in this process. Run history does not
- *   survive a restart; nothing in spec 8 persists it.
+ *   survive a restart; nothing in this framework persists it.
  */
 data class TaskStatus(
     val name: String,
@@ -28,19 +28,19 @@ data class TaskStatus(
     /**
      * True while a run is in flight. Derived rather than stored so it cannot disagree with
      * [lastRun], and needed because [TaskAdmin.run] answers with a [TaskOutcome], which has only
-     * SUCCEEDED and FAILED (spec 11.2) and so cannot say "still running".
+     * SUCCEEDED and FAILED and so cannot say "still running".
      */
     val running: Boolean get() = lastRun != null && lastRun.outcome == null
 }
 
 /**
- * The framework surface behind spec 8.2's four endpoints. The host's `AdminResource` maps these
- * results to 202 / 409 / 404 / 400 and carries `@RolesAllowed("etl-admin")`; **this class performs
- * no authorisation of its own** and only records the caller identity it is handed (spec 8.2, 8.6).
+ * The framework surface behind the admin API's four endpoints. The host's `AdminResource` maps
+ * these results to 202 / 409 / 404 / 400 and carries `@RolesAllowed("etl-admin")`; **this class
+ * performs no authorisation of its own** and only records the caller identity it is handed.
  *
  * **[reload] is also the startup path.** Startup runs the same call as the reload endpoint, so
- * there is one load path and one set of validation rules (spec 8.5). The `tasks` parameter exists
- * for the caller that already holds a loaded set - spec 2.1's programmatically built definitions
+ * there is one load path and one set of validation rules. The `tasks` parameter exists
+ * for the caller that already holds a loaded set - programmatically built definitions
  * have no directory to be read from - and defaults to nothing, in which case [trigger] answers
  * [TriggerResult.Unknown] until the first reload.
  *
@@ -49,7 +49,7 @@ data class TaskStatus(
  *
  * @param runner where a trigger goes, and where the run records live.
  * @param scheduler what registers the crons. [reload] rejects if it rejects.
- * @param loader spec 10's validation, already wired with the datasource, transform and hook names.
+ * @param loader the validation rules, already wired with the datasource, transform and hook names.
  */
 class TaskAdmin(
     private val runner: TaskRunner,
@@ -63,28 +63,28 @@ class TaskAdmin(
     private var definitions: Map<String, TaskDefinition> = tasks.associateBy { it.name }
 
     init {
-        // Spec 7.1 promises the pool minimum "at startup and on every reload". For the file-driven
+        // The pool minimum is promised "at startup and on every reload". For the file-driven
         // host, `reload` *is* startup, so its call covers both; a host using `tasks` never calls
         // reload and would otherwise never see the number at all (E14).
         if (tasks.isNotEmpty()) reportPoolMinimums(tasks)
         // Fires beside reportPoolMinimums at both of the two moments a task-name set becomes
         // live - here and in reload - because the pairing is this class's own concern, not a
-        // call-site discipline every host re-implements (spec 8.6's seed row, deepened
+        // call-site discipline every host re-implements (the host's seed obligation, deepened
         // 2026-08-30). Invoking a (Set<String>) -> Unit names no metrics type, which is what
-        // refuted the old row's claim that the adapter boundary forced the obligation outward.
+        // refuted the old claim that the adapter boundary forced the obligation outward.
         if (tasks.isNotEmpty()) onTasksLoaded(tasks.map { it.name }.toSet())
     }
 
     /**
      * `POST /admin/etl/tasks/{name}/runs`. Returns as soon as the run is submitted, never when it
-     * finishes: a 30 minute run must not be held open behind an HTTP request (spec 8.2).
+     * finishes: a 30 minute run must not be held open behind an HTTP request.
      *
      * Synchronised against [reload] because the lookup, the enabled check and the submit are one
      * admission decision. Left unsynchronised they are a check-then-act over a map another thread
      * replaces: an operator who disables a task, reloads, and is told the reload succeeded could
      * still watch a trigger that read the map a moment earlier launch a half-hour run of the old
      * enabled definition - the very thing the disable was meant to stop - while [list] reports the
-     * task disabled. Spec 8.5's "a task currently running keeps the definition it started with"
+     * task disabled. The rule that "a task currently running keeps the definition it started with"
      * covers runs already under way, not which runs are allowed to start.
      *
      * The cost is that a trigger waits out a concurrent reload's file read. A reload is an operator
@@ -107,10 +107,11 @@ class TaskAdmin(
      *
      * **Cross-checks the two definition maps against each other** (E14). A host that builds
      * definitions in code and forgets [TaskScheduler.apply] - or calls it and forgets `tasks` -
-     * leaves the two permanently disagreeing rather than briefly, and spec 8.6 can only state
-     * that as an obligation. Here it becomes observable in the direction each side can see: a
-     * definition nothing registered is reported as `scheduled = false` alongside its `cron`, and a
-     * registration with no definition is not listable at all, so it is logged instead.
+     * leaves the two permanently disagreeing rather than briefly, and keeping them in step can
+     * only be stated as a host obligation. Here it becomes observable in the direction each side
+     * can see: a definition nothing registered is reported as `scheduled = false` alongside its
+     * `cron`, and a registration with no definition is not listable at all, so it is logged
+     * instead.
      *
      * `definitions` is read once into a local. Re-reading the `@Volatile` per row would let a
      * concurrent [reload] serve a listing assembled from two different definition sets.
@@ -140,7 +141,7 @@ class TaskAdmin(
     fun run(name: String, runId: String): TaskOutcome? = runner.outcome(name, runId)
 
     /**
-     * `POST /admin/etl/reload`, and the same call a host makes at startup (spec 8.5).
+     * `POST /admin/etl/reload`, and the same call a host makes at startup.
      *
      * Atomic in both halves. Every file is parsed and validated before anything changes, and a
      * batch of crons the host rejects is rolled back whole, so an invalid file or an unparseable
@@ -167,7 +168,7 @@ class TaskAdmin(
     }
 
     /**
-     * Spec 7.1's pool-sizing contract, as the half of it this framework can actually answer
+     * The pool-sizing contract, as the half of it this framework can actually answer
      * (review finding H4).
      *
      * A pipe whose source and target name the same datasource holds two connections from that
@@ -184,7 +185,7 @@ class TaskAdmin(
      * party's private fields, which is a worse thing to own than the problem. Emitting the number
      * an operator has to compare against is the honest half.
      *
-     * Counted per *task*, not per step: `TaskRunner` admits one run per task at a time (spec 8.4),
+     * Counted per *task*, not per step: `TaskRunner` admits one run per task at a time,
      * so two same-datasource pipes in one task cannot overlap and must not be counted twice.
      */
     private fun reportPoolMinimums(tasks: List<TaskDefinition>) {
@@ -201,14 +202,14 @@ class TaskAdmin(
 
 /**
  * The tasks that run a same-datasource pipe step, by datasource, in load order - the left-hand
- * side of spec 7.1's pool minimum, which is `2 × users.size`.
+ * side of the pool minimum, which is `2 × users.size`.
  *
  * Separate from the logging so it can be asserted on directly: a test that had to read a log
  * appender would be testing the logging framework, and one that asserted nothing would let the
  * arithmetic drift unnoticed.
  *
  * A task appears once per datasource however many such steps it has, because [TaskRunner] admits
- * one run per task at a time (spec 8.4) and two steps of one task therefore cannot overlap.
+ * one run per task at a time and two steps of one task therefore cannot overlap.
  */
 internal fun sameDatasourcePipeUsers(tasks: List<TaskDefinition>): Map<String, List<String>> {
     val users = LinkedHashMap<String, MutableList<String>>()

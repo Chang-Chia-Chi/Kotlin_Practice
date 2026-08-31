@@ -17,19 +17,19 @@ import org.junit.jupiter.api.assertAll
  * reconciliation seams.
  *
  * **This file is the phase's reconciliation seam.** The engineer built `TaskFileLoader` in
- * parallel with these tests and neither side saw the other, so every assumption about a shape
- * spec 11.2 does not actually pin is funnelled through this file and marked `INTEGRATE:`. No
- * test class names a production constructor or unwraps a load result, so a shape that came out
- * differently is a small edit here rather than a rewrite of four test classes.
+ * parallel with these tests and neither side saw the other, so every assumption about a shape the
+ * frozen public surface does not actually pin is funnelled through this file and marked
+ * `INTEGRATE:`. No test class names a production constructor or unwraps a load result, so a shape
+ * that came out differently is a small edit here rather than a rewrite of four test classes.
  *
  * ### The two unsettled shapes
  *
- * 1. **What `load` returns.** Spec 11.2 declares
+ * 1. **What `load` returns.** The frozen public surface declares
  *    `Result<List<TaskDefinition>, ValidationReport>`, which cannot exist: `kotlin.Result` takes
  *    one type parameter. [load] below is the only function that assumes a replacement.
  * 2. **How the loader learns what exists.** Rules 3, 4 and 5 check names against things that
  *    live outside the task file - configured Jdbi beans, `RowTransform` CDI beans, and the
- *    `TaskHookRegistry`. Spec 11.2 shows `TaskFileLoader` with no constructor at all, so
+ *    `TaskHookRegistry`. The frozen surface shows `TaskFileLoader` with no constructor at all, so
  *    [newLoader] is the only function that assumes one.
  *
  * ### How a broken file is built
@@ -42,15 +42,15 @@ import org.junit.jupiter.api.assertAll
  * makes the eighteen rule tests mean anything - without a valid sibling that loads, every one
  * of them would pass against a loader that rejects every file it is handed.
  *
- * Nothing here creates a temporary table (spec 7.2, and P4's `NoTempTableTest` scans this file
- * like any other), and no fixture DELETEs, TRUNCATEs or DROPs anything: the only SQL in these
+ * Nothing here creates a temporary table (P4's `NoTempTableTest` scans this file like any
+ * other), and no fixture DELETEs, TRUNCATEs or DROPs anything: the only SQL in these
  * files is text that a loader parses and never executes.
  */
 object TaskFiles {
 
     // -----------------------------------------------------------------------------------
     // What the surrounding application is assumed to provide (validation rules 3, 4, 5).
-    // `scratch` is deliberately absent: spec 7.1 reserves it, and it is not a Jdbi bean.
+    // `scratch` is deliberately absent: it is a reserved name, not a Jdbi bean.
     // -----------------------------------------------------------------------------------
 
     val DATASOURCES: Set<String> = setOf("oracle_mes", "report_oracle", "other_oracle")
@@ -62,7 +62,7 @@ object TaskFiles {
     val HOOKS: Set<String> = setOf("notify-downstream", "page-oncall")
 
     /**
-     * P9. The `cache:` names the host binds (spec 10 rule 21, contract 1.4).
+     * P9. The `cache:` names the host binds (validation rule 21, contract 1.4).
      *
      * Two of them, and only one appears in [VALID_CACHE_COPY]: rule 21's test has to reject a
      * name while a *sibling* name is registered and accepted, or an empty set rejects everything
@@ -150,7 +150,7 @@ object TaskFiles {
     /**
      * [VALID] with its one `transform.addColumns` entry restated. That entry is the only column
      * type a task file *states* rather than discovers, which after the rule 15 ruling is exactly
-     * the half of the rule startup can reach (spec 10 rule 15, 4.6).
+     * the half of the rule startup can reach (validation rule 15).
      *
      * `nullable` is always written out. It defaults to true, and a test that relied on the
      * default could not tell "BOOLEAN is rejected because it is nullable" from "BOOLEAN is
@@ -231,10 +231,10 @@ object TaskFiles {
     // -----------------------------------------------------------------------------------
 
     /**
-     * The main baseline: every field of spec 3.1 to 3.5 that P5's model can carry, arranged so
-     * that most of the eighteen rules of spec 10 are one edit away from firing.
+     * The main baseline: every task and step field that P5's model can carry, arranged so that
+     * most of the eighteen validation rules are one edit away from firing.
      *
-     * `description` is deliberately absent even though spec 3.1 lists it: `TaskDefinition` has
+     * `description` is deliberately absent even though the schema lists it: `TaskDefinition` has
      * no field for it, so accepting it is a judgement call of its own and it gets its own
      * isolated test. Putting it here would make every other test in the phase depend on that
      * call going one particular way.
@@ -311,9 +311,9 @@ object TaskFiles {
      * The second baseline, for rules 15 and 18: an author-owned scratch table created by a
      * `sql` step and filled under `createTable: REQUIRED`.
      *
-     * `retries: 0` is stated rather than omitted because it has to be. Spec 5.3 defaults
-     * `retries` to 3 for any scratch target, REQUIRED included, so an omitted value is itself
-     * the rule 18 violation - which is what
+     * `retries: 0` is stated rather than omitted because it has to be. `retries` defaults to 3
+     * for any scratch target, REQUIRED included, so an omitted value is itself the rule 18
+     * violation - which is what
      * `rule18OmittedRetriesOnARequiredScratchTargetIsStillRejected` exists to pin.
      */
     val VALID_REQUIRED: String = """
@@ -340,10 +340,10 @@ object TaskFiles {
     """.trimIndent()
 
     /**
-     * P9's baseline: spec 2.4's task **shape D** - `cacheCopy` into scratch, `materialize` over
+     * P9's baseline: the task **shape D** - `cacheCopy` into scratch, `materialize` over
      * what landed, `pipe` out - which is the shape the framework depends on `snapshotcache` for.
      *
-     * Arranged so each of rules 19, 20, 21, 9 and spec 5.5's dataset-name check is one [edit]
+     * Arranged so each of rules 19, 20, 21, 9 and the dataset-name check is one [edit]
      * away, and asserted to load in `CacheCopyLoaderTest` so that none of those rejections is the
      * reading of a loader that rejects everything.
      *

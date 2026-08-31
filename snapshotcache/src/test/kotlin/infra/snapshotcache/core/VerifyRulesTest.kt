@@ -11,10 +11,10 @@ import org.junit.jupiter.api.Test
 import java.sql.Connection
 
 /**
- * P4b: the deferred second half of P4 (plan P4's pre-authorized split).
+ * P4b: the deferred second half of P4 (its pre-authorized split).
  *
- * Built-in verify-rule behavior (spec 8.1 / 8.2 / 8.3), each failing rule asserted to
- * carry its exact spec 8.1 label and a non-generic detail (spec 8.5), abort the round
+ * Built-in verify-rule behavior, each failing rule asserted to
+ * carry its exact published label and a non-generic detail, abort the round
  * with current untouched and the candidate cleaned, and stay recoverable. Plus the two
  * RefreshCycle follow-ups: candidate-connection()-throws -> DISK_ERROR + emergency GC,
  * and the round-entry shutdown short-circuit.
@@ -23,8 +23,8 @@ import java.sql.Connection
  * config test pins that), so their "cannot be disabled" flag needs no runtime case here.
  *
  * SQL is answered by QueryScript heuristics/patterns, never exact strings: the
- * engineer's formulations are FREE. No sleeps (plan 1.5). AccountingFixture is
- * registered by the shared base with suppliers wired (spec 17.3 / 17.8).
+ * engineer's formulations are FREE. No sleeps. AccountingFixture is
+ * registered by the shared base with its suppliers wired to the registry.
  */
 internal class VerifyRulesTest : RefreshCycleTestBase() {
 
@@ -56,7 +56,7 @@ internal class VerifyRulesTest : RefreshCycleTestBase() {
         assertThat(store.tracker.unclosed()).describedAs("no leaked connections").isEmpty()
     }
 
-    // ------------------------------------------------------------------ non_empty (spec 8.1 / 8.2)
+    // ------------------------------------------------------------------ non_empty
 
     @Test
     fun nonEmpty_zeroRowTable_failsNamingTheTable_currentUntouched_nextRoundSucceeds() {
@@ -82,7 +82,7 @@ internal class VerifyRulesTest : RefreshCycleTestBase() {
         assertThat(runSuccess(cycle())).isEqualTo(2L)
     }
 
-    // ------------------------------------------------------------------ key_unique (spec 8.1, D5)
+    // ------------------------------------------------------------------ key_unique
 
     @Test
     fun keyUnique_duplicateIds_failNamingTheTable_disablingTheKnobLetsTheSameDataPublish() {
@@ -99,7 +99,7 @@ internal class VerifyRulesTest : RefreshCycleTestBase() {
         assertThat(registry.currentInfo()!!.rowCounts).isEqualTo(mapOf("t_a" to 10L, "t_b" to 20L))
     }
 
-    // ------------------------------------------------------------------ required_non_null (spec 8.1)
+    // ------------------------------------------------------------------ required_non_null
 
     @Test
     fun requiredNonNull_tableQualifiedEntry_checksOnlyThatTable() {
@@ -136,14 +136,14 @@ internal class VerifyRulesTest : RefreshCycleTestBase() {
 
     @Test
     fun requiredNonNull_defaultEmptyColumnList_nullsPublish() {
-        // Config gating: the column list defaults to empty (spec 16.2 fills it later),
+        // Config gating: the column list defaults to empty (deployment config fills it later),
         // so NULLs anywhere pass the default gate.
         script.nullCounts["t_a"] = 5L
         script.nullCounts["t_b"] = 5L
         runSuccess(cycle())
     }
 
-    // ------------------------------------------------------------------ row_count_delta (spec 8.3, D14)
+    // ------------------------------------------------------------------ row_count_delta
 
     @Test
     fun rowCountDelta_defaultOff_wildDeltasPublish_rowCountsFromVerifyLandInCurrentInfo() {
@@ -195,7 +195,7 @@ internal class VerifyRulesTest : RefreshCycleTestBase() {
         assertThat(runSuccess(c)).isEqualTo(3L)
     }
 
-    // ------------------------------------------------------------------ discovery (spec 3.3 / 8.1)
+    // ------------------------------------------------------------------ discovery
 
     @Test
     fun discovery_listsBaseTablesOnly_unionViewWithDuplicateIdsIsExemptFromKeyUnique() {
@@ -224,7 +224,7 @@ internal class VerifyRulesTest : RefreshCycleTestBase() {
             .isEqualTo(mapOf("t_a" to 10L, "t_b" to 20L))
     }
 
-    // ------------------------------------------------------------------ candidate connection() throws (spec 9.2 disk row; lead ruling 5)
+    // ------------------------------------------------------------------ candidate connection() throws (disk row; lead ruling 5)
 
     /**
      * [InMemoryGenerationStore.failOnGen] cannot script this seam - the store call
@@ -292,7 +292,7 @@ internal class VerifyRulesTest : RefreshCycleTestBase() {
         assertThat(runSuccess(c)).describedAs("return to a usable state (spec 17.8)").isEqualTo(4L)
     }
 
-    // ------------------------------------------------------------------ round-entry shutdown short-circuit (spec 10.2 step 2/3, D23)
+    // ------------------------------------------------------------------ round-entry shutdown short-circuit
 
     @Test
     fun shutdownBeforeRoundEntry_returnsShutdownAborted_withZeroStoreCalls() {

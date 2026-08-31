@@ -31,11 +31,11 @@ import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 
 /**
- * P5: the deterministic concurrency suite (spec 17.4; plan P5), at the integration level -
+ * P5: the deterministic concurrency suite, at the integration level -
  * [DefaultSnapshotCache] + [RefreshCycle] + [GenerationRegistry] + fake storage wired
  * together as production would be, driven through the facade and triggerRefresh.
  *
- * The six spec 17.4 interleavings, the two plan-P5 shutdown interleavings, and the
+ * The six specified interleavings, the two P5 shutdown interleavings, and the
  * N=20 / M=100 stress test with invariants checked after every round.
  *
  * Zero sleeps. Every interleaving is driven by [Hook] latches ([HookDriver]) or latch-parked
@@ -92,7 +92,7 @@ internal class ConcurrencySuiteTest {
         refCounts = { (trackedRegistry ?: registry).liveGenerations().associate { it.generation to it.refCount } }
     }
 
-    // ------------------------------------------------------------- 17.4 case 1: publish + GC mid-acquire
+    // ------------------------------------------------------------- case 1: publish + GC mid-acquire
 
     @Test
     fun midAcquire_fullPublishAndGcCycleAtAfterReadCurrent_handleValidAndQueryable_I2Holds() {
@@ -105,7 +105,7 @@ internal class ConcurrencySuiteTest {
         acquirer.start()
         driver.awaitParked(gate)
 
-        // The spec 5.1 atomicity seam: a COMPLETE publish + GC cycle runs while acquire
+        // The acquire atomicity seam: a COMPLETE publish + GC cycle runs while acquire
         // sits between reading the pointer and refcount++. gen1's refcount is still 0,
         // so GC detaches and deletes it before the acquirer resumes.
         val gen2 = triggerSuccess()
@@ -142,7 +142,7 @@ internal class ConcurrencySuiteTest {
         assertThat(refCountOf(gen2)).isEqualTo(0)
     }
 
-    // ------------------------------------------------------------- 17.4 case 2: lease held while refreshing up to K
+    // ------------------------------------------------------------- case 2: lease held while refreshing up to K
 
     @Test
     fun leaseHeldOnOldGenWhileRefreshingUpToK_refreshBlocksWithExplicitState_autoResumesAfterRelease() {
@@ -197,7 +197,7 @@ internal class ConcurrencySuiteTest {
             .doesNotContain(gen1)
     }
 
-    // ------------------------------------------------------------- 17.4 case 3: close() called twice
+    // ------------------------------------------------------------- case 3: close() called twice
 
     @Test
     fun closeCalledTwice_refcountDecrementedOnce_I6Holds() {
@@ -221,7 +221,7 @@ internal class ConcurrencySuiteTest {
         }
     }
 
-    // ------------------------------------------------------------- 17.4 case 4: handle GC'd without close
+    // ------------------------------------------------------------- case 4: handle GC'd without close
 
     @Test
     fun handleGarbageCollectedWithoutClose_cleanerForceReleases_orphanCounterPlusOne() {
@@ -246,7 +246,7 @@ internal class ConcurrencySuiteTest {
         cache.acquire(group)
     }
 
-    // ------------------------------------------------------------- 17.4 case 5: overlapping schedule trigger
+    // ------------------------------------------------------------- case 5: overlapping schedule trigger
 
     @Test
     fun overlappingScheduleTrigger_secondRunSkipped_neverTwoCandidatesAtOnce() {
@@ -280,7 +280,7 @@ internal class ConcurrencySuiteTest {
         assertThat(events.finished.count { it.first == RefreshResult.SKIPPED_OVERLAP }).isEqualTo(1)
     }
 
-    // ------------------------------------------------------------- 17.4 case 6: one handle spans two publishes
+    // ------------------------------------------------------------- case 6: one handle spans two publishes
 
     @Test
     fun oneHandleSpansTwoPublishes_generationNumberUnchanged_I8Holds() {
@@ -377,7 +377,7 @@ internal class ConcurrencySuiteTest {
         assertThat(cache.currentInfo(group)).isEqualTo(infoBefore)
     }
 
-    // ------------------------------------------------------------- stress (spec 17.4)
+    // ------------------------------------------------------------- stress
 
     @Test
     fun stress_twentyConsumers_hundredRounds_invariantsHoldAfterEveryRound() {
@@ -452,7 +452,7 @@ internal class ConcurrencySuiteTest {
         assertThat(remaining).describedAs("only the current generation survives the final GC").hasSize(1)
         assertThat(remaining.single().isCurrent).isTrue()
         assertThat(remaining.single().refCount).isEqualTo(0)
-        // The AccountingFixture asserts the spec 17.3 equations at test end.
+        // The AccountingFixture asserts the accounting equations at test end.
     }
 
     /**

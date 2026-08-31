@@ -43,7 +43,7 @@ import java.util.concurrent.atomic.AtomicInteger
  *
  * [currentInfo] is counted rather than thrown from: it takes no lease, so calling it is not a
  * contract breach, but the engine has no reason to and a call would mean it is deciding something
- * for itself that spec 7.3 gives to `copyOut`.
+ * for itself that belongs to `copyOut`.
  *
  * ### The generation file is closed between uses
  *

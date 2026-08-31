@@ -16,7 +16,7 @@ import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertAll
 import org.junit.jupiter.api.io.TempDir
 
-/** Spec 9.3's six meters, named here once so a typo in the test cannot agree with a typo in the code. */
+/** The six meters, named here once so a typo in the test cannot agree with a typo in the code. */
 private const val RUNS = "etl_task_runs_total"
 private const val TASK_DURATION = "etl_task_duration_seconds"
 private const val STEP_DURATION = "etl_step_duration_seconds"
@@ -57,7 +57,7 @@ private const val SCRATCH = "etl_scratch_file_bytes"
  *
  * ### Two measured facts this file is written around
  *
- * - **`Meter.Id.getTags()` returns tags sorted by key**, not in spec 9.3's table order:
+ * - **`Meter.Id.getTags()` returns tags sorted by key**, not in the order the tags are declared:
  *   `etl_step_rows_total` reads back `[direction, phase, step, task]`. Every assertion here is
  *   over a **set**; an assertion in table order would fail against correct code.
  * - **A `Timer` takes milliseconds in and reports seconds out.** `record(durationMs, SECONDS)` is
@@ -232,9 +232,10 @@ class MetricLabelContractTest {
      * fails this either way - run 1's value if the referent is still live, `NaN` if it is not -
      * without the test depending on when a GC happens.
      *
-     * The first run's `> 0` is also the assertion that catches the severe ordering bug of contract
-     * 3.2: sample after `ScratchDb.close()` and the directory is already empty, so the gauge reads
-     * 0 on every run forever and an operator sizing spec 7.2's volume sees a flat zero. The second
+     * The first run's `> 0` is also the assertion that catches the severe ordering bug the
+     * sampling point invites: sample after `ScratchDb.close()` and the directory is already empty,
+     * so the gauge reads 0 on every run forever and an operator sizing the scratch volume sees a
+     * flat zero. The second
      * run's exact `0.0` is criterion 5, and on its own it is the *symptom* of that bug rather than
      * a guard against it - which is why the two are one test.
      */

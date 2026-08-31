@@ -19,7 +19,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 
 /**
- * P11 acceptance (plan 3c): the manifest is a durable contract, so it is tested against a
+ * P11 acceptance: the manifest is a durable contract, so it is tested against a
  * real Oracle rather than a stand-in.
  *
  * That choice is load-bearing for three of the assertions below. Sequence allocation, the
@@ -50,7 +50,7 @@ class ManifestDaoTest {
         assertThat(stored.generation).isEqualTo(7)
     }
 
-    /** D31: the sequence is the only source of versions, and it never hands the same one twice. */
+    /** The Oracle sequence is the only source of versions, and it never hands the same one twice. */
     @Test
     fun `versions are unique across groups`() {
         val a = dao.insertPending(group(), T0, "[]", generation = 1)
@@ -71,7 +71,7 @@ class ManifestDaoTest {
     }
 
     /**
-     * The uploader-versus-watchdog race of D33, which has no second line of defence: both
+     * The uploader-versus-watchdog race, which has no second line of defence: both
      * paths issue the same conditional UPDATE, so the loser must learn it changed nothing
      * rather than assume it won.
      */
@@ -124,7 +124,7 @@ class ManifestDaoTest {
         assertThatThrownBy { dao.insertPending(group, T0.minusSeconds(60), "[]", generation = 2) }
             .isInstanceOf(DataAsOfRegression::class.java)
             .hasMessageContaining(group.value)
-        // Equal is also a regression: spec 18.3 step 2 says strictly greater.
+        // Equal is also a regression: the guard demands a strictly greater `data_as_of`.
         assertThatThrownBy { dao.insertPending(group, T0, "[]", generation = 2) }
             .isInstanceOf(DataAsOfRegression::class.java)
     }
@@ -144,7 +144,7 @@ class ManifestDaoTest {
         val entry = dao.insertPending(group, T0, "[]", generation = 1)
         dao.markComplete(group, entry.version)
 
-        // `data_as_of <= T` (D35), so an equal instant is eligible - the ETL did process it.
+        // The predicate is `data_as_of <= T`, so an equal instant is eligible - the ETL read it.
         assertThat(dao.watermark(group, T0)).isEqualTo(entry.version)
     }
 
@@ -157,7 +157,7 @@ class ManifestDaoTest {
     }
 
     /**
-     * The long-running-job race of D35: every COMPLETE checkpoint is newer than the moment
+     * The long-running-job race: every COMPLETE checkpoint is newer than the moment
      * the ETL actually read, so none of them may become its baseline.
      */
     @Test
@@ -201,7 +201,7 @@ class ManifestDaoTest {
 
     /**
      * The raw retention query: aged by `data_as_of`, every status, no keep-newest rule.
-     * Applying D34's policy is ticket 04's job and deliberately does not live here.
+     * Applying the retention policy is ticket 04's job and deliberately does not live here.
      */
     @Test
     fun `expired returns versions older than the cutoff, oldest first, whatever their status`() {

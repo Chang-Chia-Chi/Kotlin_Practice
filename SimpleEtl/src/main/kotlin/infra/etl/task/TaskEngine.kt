@@ -37,15 +37,15 @@ import org.jdbi.v3.core.statement.SqlStatements
 
 private val log = Logger.getLogger(TaskEngine::class.java)
 
-/** What a step type that moves no row through the JVM reports to [StepResult] (spec 2.3). */
+/** What a step type that moves no row through the JVM reports to [StepResult]. */
 private val NO_ROWS = PipeResult(0, 0)
 
 /**
- * The task variables of spec 6: built-ins, task literals, and whatever `export` steps have
+ * The task variables: built-ins, task literals, and whatever `export` steps have
  * produced *so far*. Task scope, evaluated in step order, so a variable exported in phase 1 is
- * available in phase 2 and one used before its export is simply not here yet (spec 6.2).
+ * available in phase 2 and one used before its export is simply not here yet.
  *
- * Names are case sensitive and are **not** normalised the way Row keys are (spec 4.5). `:lastTs`
+ * Names are case sensitive and are **not** normalised the way Row keys are. `:lastTs`
  * in a source query binds the variable written `lastTs` in the task file; lower-casing it would
  * make the YAML and the SQL disagree.
  *
@@ -66,7 +66,7 @@ class VariableScope {
 
     /**
      * @throws IllegalArgumentException if [name] is already defined. A variable may not be
-     *   redefined once set (spec 6.2), which is also what stops an export colliding with a
+     *   redefined once set, which is also what stops an export colliding with a
      *   built-in or with a task literal.
      */
     fun define(name: String, value: Any?) {
@@ -84,21 +84,21 @@ class VariableScope {
 }
 
 /**
- * Layer 2 (spec 2.1): runs the phases and steps of one [TaskDefinition] in order, on one thread,
+ * Layer 2: runs the phases and steps of one [TaskDefinition] in order, on one thread,
  * with per-step retry, task variables, and the per-run scratch file. Scheduling, the admin API,
  * listeners, metrics and YAML loading are later phases; this class is the part that executes.
  *
- * **No transaction spans chunks, steps or phases** (spec 5.4). A failure in phase 2 leaves phase
+ * **No transaction spans chunks, steps or phases.** A failure in phase 2 leaves phase
  * 1's external writes committed, and nothing here attempts to undo them - the mitigations are the
  * author's: `idempotent: true` with a MERGE target, or a work table swapped in by a `sql` step.
  * Scratch is different only because the whole file is deleted at run end.
  *
  * **Scratch is lazy.** The [ScratchDb] is constructed for every run but touches no filesystem
- * until a step asks for a connection, so task shape A of spec 2.4 - Oracle straight to Oracle -
- * leaves no file behind. Each run gets its own directory under [scratchDirectory], named by
- * its runId.
+ * until a step asks for a connection, so a task that never uses scratch - Oracle straight to
+ * Oracle - leaves no file behind. Each run gets its own directory under [scratchDirectory], named
+ * by its runId.
  *
- * **Datasources are resolved by name** (spec 7.1). [SCRATCH] is reserved and must not appear in
+ * **Datasources are resolved by name.** [SCRATCH] is reserved and must not appear in
  * [datasources]; every other name must, or the step fails naming the datasource.
  *
  * Measured on duckdb_jdbc 1.1.3 and JDBI 3.45.4 (Windows, Java 22, P5 scratchpad probe
@@ -114,7 +114,7 @@ class VariableScope {
  *
  *   **This does not generalise, and reading it as though it did was review finding H3.** Oracle
  *   rejects a bind variable in DDL outright (ORA-01027), so a non-scratch `materialize` - which
- *   is a CTAS through the same `update` path - can bind nothing. Spec 10 rule 7 is amended to say
+ *   is a CTAS through the same `update` path - can bind nothing. Validation rule 7 says
  *   so and the loader rejects such a file at startup, which is why `materialize` below still
  *   binds unconditionally: by the time it runs, the only bound CTAS left is a scratch one.
  * - A `create or replace view` executed on the write connection is visible from a `duplicate()`
@@ -123,24 +123,24 @@ class VariableScope {
  *   what forces that: measured, `Superfluous named parameters provided` is raised only when the
  *   statement declares no parameters at all, and a statement with at least one named parameter
  *   accepts extra bindings silently, on `createQuery` and `prepareBatch` alike. The parse is done
- *   because it is the only place "a variable used before its export" (spec 6.2) can be caught with
+ *   because it is the only place "a variable used before its export" can be caught with
  *   a message, and because a task with no parameters in one statement would otherwise fail on the
  *   one check JDBI does make.
  *
- * @param datasources the configured Jdbi beans by name (spec 7.1).
+ * @param datasources the configured Jdbi beans by name.
  * @param scratchDirectory the directory runs create their scratch directories under. Must be a
- *   disk-backed volume with an explicit `sizeLimit` (spec 7.2).
+ *   disk-backed volume with an explicit `sizeLimit`.
  * @param scratchMemoryLimitMb the application-wide default DuckDB `memory_limit`, overridden per
- *   task by [TaskDefinition.scratchMemoryLimitMb]. 4096 is spec 7.2's indicative budget at 8 GB
+ *   task by [TaskDefinition.scratchMemoryLimitMb]. 4096 is the indicative budget at 8 GB
  *   of pod memory.
- * @param sleeper the retry backoff, injected so a test does not spend spec 5.3's 2, 4, 8 seconds
+ * @param sleeper the retry backoff, injected so a test does not spend the 2, 4, 8 seconds
  *   actually waiting.
- * @param listener the host's observation seam (spec 9.2). One listener; a host with several
+ * @param listener the host's observation seam. One listener; a host with several
  *   composes them with [TaskRunListener.of]. Never allowed to fail a run - see [Events].
- * @param hooks the registry `onSuccess` and `onFailure` names resolve in (spec 9.4). The same
+ * @param hooks the registry `onSuccess` and `onFailure` names resolve in. The same
  *   instance whose [TaskHooks.names] the host hands `TaskFileLoader`, or validation rule 5 checks
  *   names against a set the engine does not read.
- * @param metrics the host's metrics seam (spec 9.3), reached alongside the listener and never
+ * @param metrics the host's metrics seam, reached alongside the listener and never
  *   through it: `logging: false` suppresses the listener and leaves metrics untouched. Never
  *   allowed to fail a run either - see [Events].
  * @param clock the only source of time in this file. `TaskContext.startedAt`, the `triggerTime`
@@ -148,8 +148,8 @@ class VariableScope {
  *   no `System.nanoTime()` left here. A cost worth recording rather than hiding: a wall-clock
  *   `Clock` is not monotonic, so an NTP step mid-run can skew a `durationMs`. What it buys is that
  *   a duration is assertable exactly, by a test that never sleeps.
- * @param caches the snapshot caches a `cacheCopy` step's `cache:` name resolves in (spec 3.6,
- *   7.3), each bound to the group `copyOut` is asked for - see [CacheBinding]. Appended last and
+ * @param caches the snapshot caches a `cacheCopy` step's `cache:` name resolves in, each bound to
+ *   the group `copyOut` is asked for - see [CacheBinding]. Appended last and
  *   defaulted, so every existing construction site is untouched. The same names the host hands
  *   `TaskFileLoader` as validation rule 21's set, or a name this engine cannot resolve passes
  *   startup and fails mid-run.
@@ -174,8 +174,8 @@ class TaskEngine(
     }
 
     /**
-     * Spec 10's task-shaped rules, in the one implementation `TaskFileLoader` also calls. A
-     * definition built in code never passed a loader (spec 2.1), so this is where it meets them.
+     * The task-shaped validation rules, in the one implementation `TaskFileLoader` also calls. A
+     * definition built in code never passed a loader, so this is where it meets them.
      *
      * The parser is the datasource's own, so run time cannot parse `:name` by one rule while
      * startup parsed by another. `scratch` has no configured `Jdbi` and takes the colon-prefix
@@ -206,9 +206,10 @@ class TaskEngine(
      *
      * @param runId defaulted so a direct caller need not invent one, and passed in by
      *   [TaskRunner], which has to answer `Accepted(runId)` the instant a run is submitted and
-     *   long before this method returns (spec 8.2). One id, so the scratch directory, the `runId`
+     *   long before this method returns. One id, so the scratch directory, the `runId`
      *   task variable and the admin API all name the same run.
-     * @param triggeredBy the caller identity of spec 8.2, null for a scheduled firing. Carried
+     * @param triggeredBy the identity of the caller that triggered the run, null for a scheduled
+     *   firing. Carried
      *   into [TaskContext] and nowhere else: this module records it and authorises nothing.
      */
     fun run(
@@ -228,8 +229,8 @@ class TaskEngine(
                 ScratchDb(directory, memoryLimit).use { scratch ->
                     // The scratch footprint is sampled from a `finally` *inside* the `use`, which
                     // is the only place the directory still holds anything: close() empties it on
-                    // every path (spec 7.2). Sampled after the close, the gauge would read 0 on every
-                    // run forever, silently, and an operator sizing spec 7.2's volume would see a
+                    // every path. Sampled after the close, the gauge would read 0 on every
+                    // run forever, silently, and an operator sizing the scratch volume would see a
                     // flat zero. A run that never entered this block - ScratchDb's own
                     // `require(memoryLimitMb > 0)` is the reachable case - reports no sample at
                     // all, and that is deliberate: it is not "0 bytes", it is "never got there".
@@ -247,9 +248,9 @@ class TaskEngine(
                 e
             }
             // ScratchDb empties this directory but leaves it standing, because a caller-supplied
-            // directory belongs to its caller (spec 7.2). This one is the run's own - resolved per
+            // directory belongs to its caller. This one is the run's own - resolved per
             // runId, so nothing ever reuses it - and a ten-minute task would otherwise leave some
-            // 52,000 empty directories a year on the very volume spec 7.2 sizes. deleteIfExists
+            // 52,000 empty directories a year on the very volume an operator sizes. deleteIfExists
             // rather than a sweep: anything that survived inside has already made close() throw,
             // and that is the failure worth reporting.
             runCatching { Files.deleteIfExists(directory) }
@@ -273,7 +274,7 @@ class TaskEngine(
     }
 
     /**
-     * Spec 9.4's success hook, or the failure that stands in for it.
+     * The task's success hook, or the failure that stands in for it.
      *
      * A name is resolved **at invocation**, so a name absent from the registry is reported exactly
      * as a hook that threw would be: the run fails, and `onFailure` then runs. Deferring the
@@ -296,7 +297,7 @@ class TaskEngine(
     }
 
     /**
-     * Spec 9.4's failure hook. Both ways it can go wrong - unregistered, or throwing - are logged
+     * The task's failure hook. Both ways it can go wrong - unregistered, or throwing - are logged
      * and swallowed, and neither touches the outcome or replaces the failure being reported.
      *
      * That asymmetry with [onSuccess] is the point: the failure-reporting path may never change
@@ -325,7 +326,7 @@ class TaskEngine(
     }
 
     /**
-     * The seven listener call sites of spec 9.2 and the four metrics call sites of spec 9.3, each
+     * The seven listener call sites and the four metrics call sites, each
      * of which catches, logs at WARN and continues.
      *
      * Neither seam ever changes a run's outcome - a logging plug-in that failed the ETL run it was
@@ -335,7 +336,7 @@ class TaskEngine(
      *
      * `logging: false` is implemented by binding [sink] to [TaskRunListener.NONE] for the whole
      * run rather than by an `if` at each site: one decision, taken once, that no later call site
-     * can forget. **Metrics do not travel through [sink]**, which is the whole of spec 9.3's
+     * can forget. **Metrics do not travel through [sink]**, which is the whole of the rule that
      * "`logging: false` does not suppress metrics" - they read [TaskEngine.metrics] directly.
      * Hooks are reached elsewhere and are unaffected either way.
      *
@@ -418,7 +419,7 @@ class TaskEngine(
          * Every phase in order, each reported started and ended.
          *
          * A terminal step failure ends its phase FAILED and rethrows, so no later step and no
-         * later phase starts (spec 2.2). The catch is on `Exception` and not `Throwable` for the
+         * later phase starts. The catch is on `Exception` and not `Throwable` for the
          * same reason [run]'s is: an `Error` is not a task failure and has no business being
          * dressed up as one on its way out.
          */
@@ -436,13 +437,13 @@ class TaskEngine(
         }
 
         /**
-         * One step, with the retry policy of spec 5.3: `retries` additional attempts, only for a
+         * One step, with the retry policy: `retries` additional attempts, only for a
          * transient failure, backing off 2s, 4s, 8s, 16s, 30s, 30s.
          *
          * Each attempt writes its scratch datasets under its own attempt-suffixed name, so a
-         * failed attempt's rows - between nothing and one chunk short of everything it wrote
-         * (spec 12) - stay where they are, unreferenced, and cost only space in a file that is
-         * deleted at run end (spec 5.5).
+         * failed attempt's rows - between nothing and one chunk short of everything it wrote -
+         * stay where they are, unreferenced, and cost only space in a file that is deleted at run
+         * end.
          *
          * `onStepStart` fires once, before attempt 1 and **before the guard below**, so a step
          * rejected out of hand still reports a start and then a terminal `onStepError` like any
@@ -450,7 +451,7 @@ class TaskEngine(
          * no step in it. `onStepEnd` fires only on success; a terminal failure ends with
          * `onStepError(willRetry = false)` and nothing else. The **metrics** seam is deliberately
          * not symmetric with that: `stepEnded` fires on both, and `stepRetried` fires once per
-         * retried attempt (spec 9.3).
+         * retried attempt.
          *
          * `willRetry` is decided and reported before [sleeper] is asked for anything, so a
          * listener sees the decision when it is made and not after the delay it causes. It is not
@@ -489,7 +490,8 @@ class TaskEngine(
         }
 
         /**
-         * Spec 10's task-shaped rules, at the guard position every `require` they replaced occupied:
+         * The task-shaped validation rules, at the guard position every `require` they replaced
+         * occupied:
          * inside the attempt, **below** `onStepStart` and above anything that opens a connection. A
          * check hoisted to the top of [run] would leave a phase that failed with no step in it, and
          * one pushed into a step executor would let the source query run first.
@@ -513,7 +515,7 @@ class TaskEngine(
         }
 
         /**
-         * Spec 7.3's file-to-file copy out of a snapshot cache generation and into scratch: the
+         * The file-to-file copy out of a snapshot cache generation and into scratch: the
          * one step type whose SQL this engine never executes itself.
          *
          * **No row passes through the JVM.** `copyOut` attaches the generation to the scratch
@@ -524,15 +526,15 @@ class TaskEngine(
          * number nobody could aggregate, and `etl_step_rows_total{direction}` is one series across
          * all five types (see `materialize`, which discards a real count for the same reason).
          *
-         * **The lease is the cache's.** `copyOut` acquires and releases it, which is why spec 7.3
-         * names it rather than `acquire`; this framework never holds a `Snapshot`, and never
+         * **The lease is the cache's.** `copyOut` acquires and releases it, which is why the cache
+         * offers it rather than `acquire`; this framework never holds a `Snapshot`, and never
          * across steps. A task holding a lease for thirty minutes stalls every refresh of the
          * cache, with the cause in a different system from the symptom. Each `cacheCopy` therefore
-         * takes its own lease and may read its own generation - spec 3.6 records that, and
-         * declines `withSnapshot` as the remedy for exactly the reason above.
+         * takes its own lease and may read its own generation - a recorded consequence, and
+         * `withSnapshot` is declined as the remedy for exactly the reason above.
          *
          * **No `waitBudget` is passed.** The cache's own `defaultWaitBudget` is the waiting
-         * policy; overriding it here would invent one spec 7.3 does not give this framework, and
+         * policy; overriding it here would invent one the cache does not give this framework, and
          * that budget is the task's whole latency floor while no generation is available.
          *
          * `targetTable` goes over **unquoted**: `DuckDbGenerationStore.copyOut` quotes it itself,
@@ -559,16 +561,16 @@ class TaskEngine(
          *
          * Failure needs no special handling. `NotReadyException` and `ShuttingDownException` are
          * plain `RuntimeException`s, so the step loop sees them, the listener and metric call
-         * sites fire, and neither is transient under spec 5.3 - whose list is JDBC-shaped and is
-         * deliberately not extended - so the step fails on its first attempt however many retries
-         * the definition carries.
+         * sites fire, and neither is transient under [isTransient] - whose list is JDBC-shaped
+         * and deliberately not extended - so the step fails on its first attempt however many
+         * retries the definition carries.
          */
         private fun cacheCopy(step: CacheCopyStep, attempt: Int): PipeResult {
             val binding = caches[step.cache] ?: throw IllegalArgumentException(
                 "step '${step.name}': cache '${step.cache}' is not configured. Known caches are " +
                     "${caches.keys.sorted()} (spec 3.6, 7.3).",
             )
-            // Spec 5.5's write-then-publish, and the module owns the order: the view is pointed at
+            // Write-then-publish, and the module owns the order: the view is pointed at
             // this attempt only once `copyOut` has returned.
             val result = datasets.attemptTable(step.output, attempt) { physical ->
                 binding.cache.copyOut(
@@ -580,9 +582,9 @@ class TaskEngine(
                     ),
                 )
             }
-            // The cache's spec 6.4 obliges a consumer to record which generation it read. Logged
-            // rather than exported as a task variable: that would be public surface spec 11 does
-            // not declare, and nothing in this framework consumes it.
+            // The cache obliges a consumer to record which generation it read. Logged
+            // rather than exported as a task variable: that would be public surface this framework
+            // does not declare, and nothing in it consumes the value.
             log.infov(
                 "run {0} task {1} step {2}: copied {3} rows from cache {4} group {5}, generation {6} " +
                     "as of {7} into scratch dataset {8}",
@@ -593,7 +595,7 @@ class TaskEngine(
         }
 
         /**
-         * The one step type where rows pass through the JVM (spec 2.3), so the one type whose
+         * The one step type where rows pass through the JVM, so the one type whose
          * [StepResult] carries a real pair. [RowPipe.run] already answers it; before P8a the
          * result was discarded only because the publish `if` was the last statement.
          *
@@ -652,7 +654,7 @@ class TaskEngine(
             return NO_ROWS
         }
 
-        /** Each statement is its own transaction (spec 5.2), so a retry re-runs all of them. */
+        /** Each statement is its own transaction, so a retry re-runs all of them. */
         private fun sql(step: SqlStep, attempt: Int): PipeResult {
             onDatasource(step.datasource) { handle ->
                 step.statements.forEach { update(handle, it, attempt) }
@@ -663,7 +665,7 @@ class TaskEngine(
         /**
          * Every variable of the step is read first and defined only once all of them have
          * succeeded. Defining as we go would make a retry after a partial success fail on
-         * "already defined" (spec 6.2) and bury the failure that caused the retry.
+         * "already defined" and bury the failure that caused the retry.
          *
          * The map cannot collide with itself: rule 8 rejects a step exporting one name twice, in
          * [TaskRules], before this step was dispatched.
@@ -685,7 +687,8 @@ class TaskEngine(
         }
 
         /**
-         * Spec 6.3: exactly one row and one column; more than one row is an error, zero yields null.
+         * The export query's contract: exactly one row and one column; more than one row is an
+         * error, zero yields null.
          *
          * **A null carries the export column's type.** Bound as a bare null it reaches the driver
          * as `setNull(pos, Types.OTHER)`, which Oracle rejects on some typed columns - measured on
@@ -694,7 +697,7 @@ class TaskEngine(
          * [org.jdbi.v3.core.argument.NullArgument] records `setNull[1, 93]`, because JDBI binds an
          * `Argument` value **directly** rather than looking up an argument factory for its type.
          * That is what lets the type travel inside `JdbcSource`'s frozen `Map<String, Any?>`
-         * without any signature change (spec 11.1, spec 12).
+         * without any signature change.
          *
          * The type comes from the result set metadata, which exists whether or not a row came back.
          * Both null shapes are wrapped: no row at all, and one row holding SQL NULL, which is what
@@ -721,13 +724,13 @@ class TaskEngine(
 
         /**
          * The scratch dataset this step produces, or null when it produces none - which is the whole
-         * of what the engine decides about spec 5.5 now that [ScratchDatasets] owns the protocol.
+         * of what the engine decides about scratch dataset naming now that [ScratchDatasets] owns
+         * the protocol.
          *
          * Only `createTable: AUTO` produces one. Under `REQUIRED` the author created the table under
          * its stable name with a `sql` step, so there is no framework-owned name to write and no view
          * to repoint; off scratch there is no scratch dataset at all. Rule 18 rejects the one
-         * combination that would make the difference silent - a retried REQUIRED scratch target
-         * (spec 5.5, 10).
+         * combination that would make the difference silent - a retried REQUIRED scratch target.
          *
          * It answers the *dataset* name and not the physical one, because naming an attempt is the
          * module's half. That is the split: which steps have a scratch dataset is a question about
@@ -738,7 +741,7 @@ class TaskEngine(
                 ?.takeIf { it.datasource == SCRATCH && it.createTable == CreateTable.AUTO }
                 ?.table
 
-        /** One statement on scratch's write connection (spec 7.2). */
+        /** One statement on scratch's write connection. */
         private fun scratchUpdate(statement: String, attempt: Int) {
             Jdbi.create(scratch.connection()).open().use { update(it, statement, attempt) }
         }
@@ -785,14 +788,15 @@ class TaskEngine(
         /**
          * A handle for a read. A scratch read takes a [ScratchDb.duplicate] rather than the write
          * connection, because a single DuckDB connection must never carry a streaming read and an
-         * appender at once - and a `Connection` used from two places is spec 7.2's crash, not an
-         * error. The duplicate is closed here rather than left for the run to reclaim.
+         * appender at once - and a DuckDB `Connection` used from two threads crashes the JVM
+         * rather than raising an error. The duplicate is closed here rather than left for the run
+         * to reclaim.
          */
         private fun <T> readFrom(datasource: String, block: (Handle) -> T): T =
             if (datasource == SCRATCH) scratch.duplicate().use { Jdbi.create(it).open().use(block) }
             else jdbi(datasource).open().use(block)
 
-        /** A handle for a statement. Scratch statements run on the single write connection (spec 7.2). */
+        /** A handle for a statement. Scratch statements run on the single write connection. */
         private fun <T> onDatasource(datasource: String, block: (Handle) -> T): T =
             if (datasource == SCRATCH) Jdbi.create(scratch.connection()).open().use(block)
             else jdbi(datasource).open().use(block)
@@ -805,7 +809,7 @@ class TaskEngine(
 }
 
 /**
- * Retry applies only to the four transient shapes of spec 5.3, and the cause chain is walked
+ * Retry applies only to the four transient JDBC shapes tested below, and the cause chain is walked
  * because JDBI wraps every `SQLException` in an `UnableToExecuteStatementException`.
  *
  * Everything else - a type error, a constraint violation, a missing column - fails immediately.
@@ -819,12 +823,12 @@ private fun isTransient(failure: Throwable): Boolean =
                 (it is SQLException && it.sqlState?.startsWith("08") == true)
         }
 
-/** Spec 5.3: exponential from 2s, doubling, capped at 30s. [attempt] is 1 for the first failure. */
+/** Exponential backoff from 2s, doubling, capped at 30s. [attempt] is 1 for the first failure. */
 private fun backoffMillis(attempt: Int): Long = minOf(30_000L, 2_000L shl minOf(attempt - 1, 20))
 
 /**
  * Adds the columns a transform declares in `transform.addColumns` to the list the target is
- * opened with (spec 9.1, validation rule 14).
+ * opened with (validation rule 14).
  *
  * [RowPipe] opens its target with the source result set's columns, which is all that exists
  * before the first Row, so a column the transform adds is invisible to the target: under
@@ -840,7 +844,7 @@ private class DeclaredColumns(
 ) : RowWriter {
 
     // Lower cased for the same reason Row keys are: the target is mapped by name and every name
-    // it is mapped against is lower case (spec 4.5).
+    // it is mapped against is lower case.
     private val added = added.map { ColumnMeta(it.name.lowercase(), it.type, it.nullable, it.precision, it.scale) }
 
     override fun open(columns: List<ColumnMeta>) {

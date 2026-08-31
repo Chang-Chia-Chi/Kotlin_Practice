@@ -1,12 +1,12 @@
 package infra.etl.task
 
 /**
- * The metrics seam of spec 9.3: four calls the engine makes, out of which a host publishes six
+ * The metrics seam: four calls the engine makes, out of which a host publishes six
  * meters. The engine names no metrics library - `infra.etl.micrometer.MicrometerTaskMetrics` is
  * the binding this project ships, and it is the only class in the module allowed to name one.
  *
  * **Every method is called from N task threads at once.** One [TaskEngine] serves every task and
- * different tasks run concurrently, each on its own confined dispatcher (spec 8.4), so an
+ * different tasks run concurrently, each on its own confined dispatcher, so an
  * implementation holding state must be thread safe, and none of these methods may block - a
  * recorder that waits parks an ETL run behind it. That is the same obligation [TaskRunListener]
  * carries, for the same reason.
@@ -14,7 +14,7 @@ package infra.etl.task
  * **A metrics recorder never fails a run.** Every call site catches [Exception], logs at WARN
  * naming the seam and the site, and continues, exactly as the listener's sites do.
  *
- * **`logging: false` does not suppress metrics** (spec 9.3). That flag binds the run's *listener*
+ * **`logging: false` does not suppress metrics.** That flag binds the run's *listener*
  * to [TaskRunListener.NONE]; a task whose logging is turned off is still counted, still timed and
  * still gauged, because an operator's dashboard is not the task author's to switch off.
  *
@@ -57,7 +57,7 @@ interface TaskMetrics {
 
     /**
      * The run's scratch footprint, sampled after the last step and **before `ScratchDb.close()`**,
-     * which is the only moment the directory still exists (spec 7.2 deletes it on every path).
+     * which is the only moment the directory still exists (the engine deletes it on every path).
      *
      * Not once per run. A run that dies before the scratch object is constructed - a
      * non-positive `memory_limit` is the reachable case - reports [taskEnded] and no

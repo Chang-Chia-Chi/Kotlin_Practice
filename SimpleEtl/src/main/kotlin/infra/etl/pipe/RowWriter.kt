@@ -4,25 +4,25 @@ import java.sql.Connection
 import java.sql.DatabaseMetaData
 
 /**
- * The write seam of spec 4.4. A writer is used exactly once, in this order:
+ * The write seam a pipe sends its chunks through. A writer is used exactly once, in this order:
  *
  * 1. [open] - the source column list arrives, the target is resolved and validated, and every
  *    error that can be detected without a Row is raised here. Nothing is written.
  * 2. [write] - zero or more chunks.
  * 3. [close] - always, on the failure path as well. Callers use `use { }`; an implementation
  *    that allocates a resource inside [open] releases it itself if [open] then throws, so a
- *    caller that never reaches its `use` block cannot leak (spec 7.4).
+ *    caller that never reaches its `use` block cannot leak.
  *
  * A writer holds a connection or a handle and is confined to one thread, like the DuckDB
- * connection it may be built on (spec 7.2).
+ * connection it may be built on.
  */
 interface RowWriter : AutoCloseable {
 
     /**
      * Resolves the target against the columns the source will produce, in source order.
      *
-     * @param columns the source result set's columns (spec 4.3), plus any column a transform
-     *   declares in `transform.addColumns` (spec 9.1).
+     * @param columns the source result set's columns, plus any column a transform
+     *   declares in `transform.addColumns`.
      * @throws IllegalArgumentException naming the step and the column, for anything the target
      *   cannot accept: a type DuckDB cannot append, a nullable column outside validation rule
      *   15's set, a Row key the target table does not have, or a NOT NULL target column the
@@ -52,12 +52,11 @@ internal class CatalogColumn(
 
 /**
  * The target table's columns, in catalog ordinal order, read through [DatabaseMetaData]. This is
- * the only source of target column order and target nullability; YAML never carries either
- * (spec 4.4, 4.6).
+ * the only source of target column order and target nullability; YAML never carries either.
  *
  * [table] may be `schema.name`. Identifiers are folded to whatever case the driver says it
  * stores - Oracle stores unquoted names upper case, DuckDB stores them as written - and the
- * returned names are lower-cased per spec 4.5.
+ * returned names are lower-cased.
  *
  * `getColumns` takes patterns, not names, so `_` in a table name is a single-character wildcard
  * and `wip_stg` also matches `wipXstg` - measured on duckdb_jdbc 1.1.3. Over-matched rows are
@@ -129,7 +128,7 @@ internal fun catalogColumns(connection: Connection, table: String, step: String)
  * [catalogColumns], because it is the same question about the same two lists whichever writer is
  * asking, and a message that drifted between them would describe the same mistake two ways.
  *
- * @param source the columns the source query produces, plus any a transform declares (spec 9.1).
+ * @param source the columns the source query produces, plus any a transform declares.
  * @param target the target table's column names, from [catalogColumns] and never from YAML.
  */
 internal fun requireSourceSubset(source: Set<String>, target: Set<String>, table: String, step: String) {

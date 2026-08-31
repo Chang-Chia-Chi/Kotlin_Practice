@@ -16,14 +16,14 @@ data class StoreCall(
     val failed: Boolean = false,
 )
 
-/** Thrown by a matching failure script (spec 17.3: "the 3rd close throws"). */
+/** Thrown by a matching failure script, e.g. "the 3rd close throws". */
 class ScriptedFailureException(message: String) : RuntimeException(message)
 
 /**
- * In-memory [GenerationStore] fake (spec 17.1): records every call with arguments and
+ * In-memory [GenerationStore] fake: records every call with arguments and
  * order, models the on-disk candidate/promoted/opened states with strict transition
- * guards, and supports directly-scripted one-shot failures (plan P2; plan 2.4 forbids
- * anything fancier).
+ * guards, and supports directly-scripted one-shot failures - a general-purpose mocking
+ * layer is on the do-not-build list.
  *
  * Recording is thread-safe under one monitor for the P5 stress suite; determinism comes
  * from the callers' interleaving control, never from timing here.

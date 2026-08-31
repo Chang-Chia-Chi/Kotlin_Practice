@@ -24,15 +24,15 @@ import org.junit.jupiter.api.assertThrows
 import org.junit.jupiter.api.io.TempDir
 
 /**
- * P8a, contract 4 items 6 to 10 and 13: **spec 9.4's hooks** - when they run, what a throwing one
+ * P8a, contract 4 items 6 to 10 and 13: **the task hooks** - when they run, what a throwing one
  * does to the outcome, and what an unregistered name means.
  *
  * ### Hooks and listener calls share one trace
  *
  * Every assertion about a hook here is an assertion about *where* it ran relative to the listener
- * calls around it, because that is what spec 9.4 actually says: `onSuccess` after every phase has
- * succeeded, `onFailure` after it if it throws, and `onTaskEnd` after both. Recording hooks in
- * their own list would leave the ordering unstated and the interesting failures invisible.
+ * calls around it, because that is what the hook contract actually says: `onSuccess` after every
+ * phase has succeeded, `onFailure` after it if it throws, and `onTaskEnd` after both. Recording
+ * hooks in their own list would leave the ordering unstated and the interesting failures invisible.
  *
  * ### Identity, not equality
  *

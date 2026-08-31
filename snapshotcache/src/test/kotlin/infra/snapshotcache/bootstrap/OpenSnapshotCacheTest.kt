@@ -14,7 +14,7 @@ import java.nio.file.Path
 import java.time.Duration
 
 /**
- * The composition root of plan 2.2's 2026-08-30 amendment, exercised only through what a
+ * The composition root the 2026-08-30 boundary amendment added, exercised only through what a
  * downstream module can actually see: [openSnapshotCache] and the two `api` surfaces the
  * returned [ManagedSnapshotCache] exposes. Nothing here names `core`, which is the point -
  * if the seam needs an internal type to be usable, it has not closed the gap it exists for.
@@ -54,7 +54,7 @@ internal class OpenSnapshotCacheTest {
             assertThat(managed.admin.triggerRefresh(orders).result).isEqualTo(RefreshResult.SUCCESS)
             assertThat(managed.admin.triggerRefresh(customers).result).isEqualTo(RefreshResult.SUCCESS)
 
-            // Spec 3.1's /data/cache/<group>/ layout, derived from GroupId - two groups can
+            // The /data/cache/<group>/ layout, derived from GroupId - two groups can
             // no longer be pointed at one directory and collide on gen_0000000001.db.
             assertThat(generationFiles(cfg.storagePath.resolve("orders"))).containsExactly("gen_0000000001.db")
             assertThat(generationFiles(cfg.storagePath.resolve("customers"))).containsExactly("gen_0000000001.db")
@@ -83,7 +83,7 @@ internal class OpenSnapshotCacheTest {
 
         // Post-close leak evidence: an undetached generation or an unclosed serving
         // instance leaves a Windows file lock, so a clean recursive delete is proof there
-        // is neither. Spec 10.2 step 1 is checked by the refusal that follows.
+        // is neither. That a closed cache refuses new acquires is checked by what follows.
         deleteRecursively(cfg.storagePath)
         assertThat(Files.exists(cfg.storagePath)).isFalse()
         assertThatThrownBy { managed.cache.acquire(orders, Duration.ZERO) }
@@ -186,7 +186,7 @@ internal class OpenSnapshotCacheTest {
     }
 
     /**
-     * Spec 10.1 step 1 says every `gen_*` file under the cache directory. Two shapes the
+     * The startup wipe covers every `gen_*` file under the cache directory. Two shapes the
      * per-group pass missed: the flat layout that predates per-group directories, and a group
      * dropped from the config - precisely the directory nothing would ever revisit. The
      * filename pattern is the safety here, not group membership.

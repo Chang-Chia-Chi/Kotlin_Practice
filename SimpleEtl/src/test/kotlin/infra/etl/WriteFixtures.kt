@@ -28,14 +28,14 @@ import org.junit.jupiter.api.assertAll
  * types is exactly the failure this phase exists to catch, and a hand-built Row would hide it.
  *
  * Every DuckDB fixture uses its own connection, so a test cleans up by closing it. Nothing here
- * DELETEs, TRUNCATEs, or DROPs a DuckDB dataset (spec 5.5), and nothing creates a TEMP table.
+ * DELETEs, TRUNCATEs, or DROPs a DuckDB dataset, and nothing creates a TEMP table.
  */
 object Scratch {
 
     /** The step name every P2 test writes with, so an error message can be asserted to name it. */
     const val STEP = "load-wip"
 
-    /** File mode is a run-lifecycle concern (spec 7.2); a writer test only needs a real engine. */
+    /** File mode is a run-lifecycle concern; a writer test only needs a real engine. */
     fun open(): Connection = DriverManager.getConnection("jdbc:duckdb:")
 
     fun exec(connection: Connection, vararg sql: String) =
@@ -95,9 +95,9 @@ object Scratch {
 /**
  * The leak-counting double for the JDBC writers: a [ConnectionFactory] that hands Jdbi proxied
  * connections, statements, metadata and result sets, and counts opens against closes. All three
- * resources that non-negotiable rule 6 and spec 7.4 name on the JDBC side are counted; the result
- * set arrives through [Connection.getMetaData], which is where a target catalog read opens the
- * only result set P2 production code creates.
+ * resources that non-negotiable rule 6 and the closing rules name on the JDBC side are counted,
+ * none of them left to GC; the result set arrives through [Connection.getMetaData], which is
+ * where a target catalog read opens the only result set P2 production code creates.
  *
  * [assertBalanced] fails when nothing was opened, so the fixture cannot pass by asserting
  * nothing. The failure-path tests are what give it teeth: a writer that only closes on the happy

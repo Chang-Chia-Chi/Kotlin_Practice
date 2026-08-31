@@ -1,7 +1,7 @@
 package infra.snapshotcache.api
 
 /**
- * Test-only interleaving points (spec 17.4). Production runs [NoOpHooks], so these cost
+ * Test-only interleaving points. Production runs [NoOpHooks], so these cost
  * one virtual call and nothing else.
  */
 enum class Hook {

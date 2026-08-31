@@ -50,27 +50,27 @@ import java.util.logging.LogRecord
 import java.util.logging.SimpleFormatter
 
 /**
- * P8: the spec 17.7 E2E feasibility test - the mandatory whole-chain proof on real
- * DuckDB 1.1.3 (D20). The full production stack - [DuckDbGenerationStore] (wrapped in a
+ * P8: the E2E feasibility test - the mandatory whole-chain proof on real
+ * DuckDB 1.1.3. The full production stack - [DuckDbGenerationStore] (wrapped in a
  * thin recording spy for the step 8 accounting clause) + [GenerationRegistry] +
  * [RefreshCycle] + [DefaultSnapshotCache] - built over real files, real ATTACH, with a
  * [SyntheticSource] in place of the Oracle-backed one.
  *
- * One ordered scenario, shared state, the seven spec 17.7 steps plus the step 8
+ * One ordered scenario, shared state, the seven mandated steps plus the step 8
  * end-of-test resource assertions. Zero sleeps: every wait is a latch, a thread-state
  * poll, or a bounded join - bounds on broken implementations, never sequencing (the one
  * real-time bound is the deliberately short leaseDrainTimeout in step 7, whose held
  * lease is never released, so the outcome is deterministic).
  *
  * K is configured to 1: with a single held lease, steady live = held + current = 2, so
- * the blocked state of spec 6.1 is reachable at K=1 and unreachable at the default K=3
+ * the blocked-by-K state is reachable at K=1 and unreachable at the default K=3
  * (GC reclaims every intermediate generation, so live never exceeds 2). The P5 suite
- * used K=1 for the same spec 17.4 row; spec 6.1 semantics are identical at any K.
+ * used K=1 for the same reason; the blocking semantics are identical at any K.
  *
  * What this proves: build -> verify -> publish -> serve -> block-at-K -> GC -> delete on
  * real DuckDB 1.1.3, plus A3, A4 (adapter guard, per the P7 finding), A7 and file-level
- * A1. What it deliberately does not prove: absence of slow memory leaks (spec 17.6,
- * deferred) and performance at production scale (spec 16.3, deferred).
+ * A1. What it deliberately does not prove: absence of slow memory leaks (deferred) and
+ * performance at production scale (deferred).
  */
 @Tag("e2e")
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
@@ -95,7 +95,7 @@ internal class EndToEndFeasibilityTest {
     /**
      * Never published: the primary group always has a current generation after step 1,
      * so its acquires never wait - a second, never-published group is what makes the
-     * "waiter already inside waitBudget" clause of spec 17.7 step 7 reachable.
+     * "waiter already inside waitBudget" clause of the shutdown step reachable.
      */
     private val coldGroup = GroupId("e2e-cold")
 
@@ -132,7 +132,7 @@ internal class EndToEndFeasibilityTest {
         }
     }
 
-    // ------------------------------------------------------------------ step 1 (spec 17.7)
+    // ------------------------------------------------------------------------------ step 1
 
     @Test
     @Order(10)
@@ -146,7 +146,7 @@ internal class EndToEndFeasibilityTest {
         buildStack()
 
         // Startup wipe via the store primitives - listOnDisk + delete (P9 owns the
-        // orchestration; the E2E performs the wipe itself; spec 10.1, D10).
+        // orchestration; the E2E performs the wipe itself).
         assertThat(store.listOnDisk()).containsExactly(7L, 42L)
         store.listOnDisk().forEach { store.delete(it) }
         assertThat(store.listOnDisk()).isEmpty()
@@ -154,8 +154,8 @@ internal class EndToEndFeasibilityTest {
             .describedAs("the wipe must remove WAL siblings too")
             .isEmpty()
 
-        // Nothing published yet: currentInfo is null (readiness seam, D24) and a zero
-        // budget throws NotReadyException immediately (spec 9.3).
+        // Nothing published yet: currentInfo is null - it is the readiness seam - and a
+        // zero budget throws NotReadyException immediately.
         assertThat(cache.currentInfo(group)).isNull()
         val zeroBudget = catchThrowable { cache.acquire(group, Duration.ZERO) }
         assertThat(zeroBudget).isInstanceOf(NotReadyException::class.java)
@@ -184,7 +184,7 @@ internal class EndToEndFeasibilityTest {
             .isNotEmpty()
     }
 
-    // ------------------------------------------------------------------ step 2 (spec 17.7)
+    // ------------------------------------------------------------------------------ step 2
 
     @Test
     @Order(20)
@@ -203,7 +203,7 @@ internal class EndToEndFeasibilityTest {
             assertThat(snap.dataAsOf).isEqualTo(info.dataAsOf)
             val connection = snap.connection()
             assertThat(queryLong(connection, "SELECT COUNT(*) FROM t_unified")).isEqualTo(5_000L)
-            // spec 3.3 shape: the source column distinguishes the two aligned tables.
+            // The union view's shape: the source column distinguishes the two aligned tables.
             connection.createStatement().use { st ->
                 st.executeQuery("SELECT source, COUNT(*) FROM t_unified GROUP BY source ORDER BY source").use { rs ->
                     assertThat(rs.next()).isTrue()
@@ -226,7 +226,7 @@ internal class EndToEndFeasibilityTest {
         }
     }
 
-    // ------------------------------------------------------------------ step 3 (spec 17.7)
+    // ------------------------------------------------------------------------------ step 3
 
     @Test
     @Order(30)
@@ -240,7 +240,7 @@ internal class EndToEndFeasibilityTest {
         assertThat(checkNotNull(cache.currentInfo(group)).generation).isEqualTo(2L)
         assertThat(store.listOnDisk()).containsExactly(1L, 2L)
 
-        // The next refresh records BLOCKED_BY_K while current keeps serving (spec 6.1, I4).
+        // The next refresh records BLOCKED_BY_K while current keeps serving (I4).
         val blocked = cache.triggerRefresh(group)
         assertThat(blocked.result).isEqualTo(RefreshResult.BLOCKED_BY_K)
         assertThat(events.finished).contains(RefreshResult.BLOCKED_BY_K to null)
@@ -269,7 +269,7 @@ internal class EndToEndFeasibilityTest {
         assertThat(store.listOnDisk()).containsExactly(3L)
     }
 
-    // ------------------------------------------------------------------ step 4 (spec 17.7)
+    // ------------------------------------------------------------------------------ step 4
 
     @Test
     @Order(40)
@@ -292,7 +292,7 @@ internal class EndToEndFeasibilityTest {
             .containsExactly(old)
         assertThat(deferredPass.reclaimed).isEmpty()
         assertThat(store.listOnDisk()).contains(old)
-        // The deferred detach left the reader untouched (spec 9.2 defer semantics).
+        // The deferred detach left the reader untouched.
         assertThat(queryLong(raw, "SELECT COUNT(*) FROM t_unified")).isEqualTo(5_000L)
 
         // Close the connection, GC again: detached AND the file is gone (file-level A1).
@@ -305,7 +305,7 @@ internal class EndToEndFeasibilityTest {
         assertThat(store.listOnDisk()).containsExactly(old + 1)
     }
 
-    // -------------------------------------------- steady-state rotations (spec 17.7 target)
+    // -------------------------------------------------------------- steady-state rotations
 
     @Test
     @Order(45)
@@ -319,13 +319,13 @@ internal class EndToEndFeasibilityTest {
         // 22 full build->publish->reclaim rotations so far (steps 1-4 plus these 18).
         assertThat(checkNotNull(cache.currentInfo(group)).generation).isEqualTo(22L)
 
-        // Post-warmup FD baseline (spec 17.6 methodology: judge only after warmup;
-        // Unix MXBean, P7 precedent - stays null and step 8 skips on Windows).
+        // Post-warmup FD baseline: growth is judged only after warmup has absorbed driver
+        // loading and JIT (Unix MXBean, P7 precedent - stays null and step 8 skips on Windows).
         fdBaseline = (ManagementFactory.getOperatingSystemMXBean() as? UnixOperatingSystemMXBean)
             ?.openFileDescriptorCount
     }
 
-    // ------------------------------------------------------------------ step 5 (spec 17.7)
+    // ------------------------------------------------------------------------------ step 5
 
     @Test
     @Order(50)
@@ -349,7 +349,7 @@ internal class EndToEndFeasibilityTest {
             .isEqualTo(current.generation)
         assertThat(store.listOnDisk()).containsExactly(current.generation)
 
-        // Round 2: zero rows - the non-disableable non_empty gate rejects (spec 8.2, D13).
+        // Round 2: zero rows - the non-disableable non_empty gate rejects.
         sourceBehavior = SyntheticSource(rowsA = 0, rowsB = 0)
         val rejected = cache.triggerRefresh(group)
         assertThat(rejected.result).isEqualTo(RefreshResult.VERIFY_FAILED)
@@ -362,14 +362,14 @@ internal class EndToEndFeasibilityTest {
         assertThat(checkNotNull(cache.currentInfo(group)).generation).isEqualTo(current.generation)
         assertThat(store.listOnDisk()).containsExactly(current.generation)
 
-        // Return to a usable state (spec 9.2): the old generation still serves.
+        // Return to a usable state: the old generation still serves.
         cache.withSnapshot(group) { snap ->
             assertThat(queryLong(snap.connection(), "SELECT COUNT(*) FROM t_unified")).isEqualTo(5_000L)
         }
         sourceBehavior = defaultSource
     }
 
-    // ------------------------------------------------------------------ step 6 (spec 17.7)
+    // ------------------------------------------------------------------------------ step 6
 
     @Test
     @Order(60)
@@ -379,7 +379,7 @@ internal class EndToEndFeasibilityTest {
 
         DriverManager.getConnection("jdbc:duckdb:").use { target ->
             val result = cache.copyOut(group, CopyOutSpec("SELECT id, name FROM t_a WHERE id <= 10", "copied_subset", target))
-            // The result carries the correct lineage (spec 6.4).
+            // The result carries the correct lineage.
             assertThat(result.generation).isEqualTo(info.generation)
             assertThat(result.dataAsOf).isEqualTo(info.dataAsOf)
             assertThat(result.rowsCopied).isEqualTo(10L)
@@ -393,12 +393,12 @@ internal class EndToEndFeasibilityTest {
             }
         }
 
-        // The lease is released immediately after the copy (spec 6.5).
+        // The lease is released immediately after the copy.
         assertThat(events.released.size).isEqualTo(releasesBefore + 1)
         assertThat(registry.liveGenerations().map { it.refCount }).allMatch { it == 0 }
     }
 
-    // ------------------------------------------------------------------ step 7 (spec 17.7)
+    // ------------------------------------------------------------------------------ step 7
 
     @Test
     @Order(70)
@@ -448,8 +448,8 @@ internal class EndToEndFeasibilityTest {
         }
 
         // shutdown() returns the still-outstanding lease naming its owner, after the
-        // short drain timeout (spec 10.2 step 4; the held lease is never released, so
-        // the timeout outcome is deterministic - a bound, not sequencing).
+        // short drain timeout (the held lease is never released, so the timeout outcome
+        // is deterministic - a bound, not sequencing).
         assertThat(outstanding).hasSize(1)
         assertThat(outstanding.single().owner).isEqualTo(ownerName)
         assertThat(drainElapsed)
@@ -463,14 +463,14 @@ internal class EndToEndFeasibilityTest {
             .anyMatch { ownerName in it }
 
         // The thread already inside waitBudget is released immediately, not after its
-        // 30s budget (spec 10.2 step 1; the 5s join bound proves it).
+        // 30s budget (the 5s join bound proves it).
         joinOrFail(waiter)
         assertThat(waiterOutcome.get()).isInstanceOf(ShuttingDownException::class.java)
 
         // An acquire issued during shutdown throws ShuttingDownException at once.
         assertThat(catchThrowable { cache.acquire(group) }).isInstanceOf(ShuttingDownException::class.java)
 
-        // The aborted build: candidate .tmp deleted, never promoted, current unchanged (D23, I7).
+        // The aborted build: candidate .tmp deleted, never promoted, current unchanged (I7).
         joinOrFail(refresher)
         assertThat(refreshOutcome.get().result).isEqualTo(RefreshResult.SHUTDOWN_ABORTED)
         assertNoTmpFiles()
@@ -478,7 +478,7 @@ internal class EndToEndFeasibilityTest {
         assertThat(store.listOnDisk()).containsExactly(currentBefore)
     }
 
-    // ------------------------------------------------------------------ step 8 (spec 17.7)
+    // ------------------------------------------------------------------------------ step 8
 
     @Test
     @Order(80)
@@ -497,8 +497,8 @@ internal class EndToEndFeasibilityTest {
         assertNoTmpFiles()
         assertThat(coldStore.listOnDisk()).isEmpty()
 
-        // spec 17.7 step 8's "if wrapped" clause: the real store IS wrapped with a
-        // recording spy, so the spec 17.3 accounting equations are asserted.
+        // Step 8's "if wrapped" clause: the real store IS wrapped with a recording spy,
+        // so the accounting equations are asserted.
         store.verifyAccountingEquations(current, live.associate { it.generation to it.refCount })
     }
 
@@ -521,7 +521,7 @@ internal class EndToEndFeasibilityTest {
         config = SnapshotCacheConfig(
             storagePath = groupDir,
             tempDirectory = spillDir,
-            // K=1 makes the spec 6.1 blocked state reachable with one held lease (see class doc).
+            // K=1 makes the blocked-by-K state reachable with one held lease (see class doc).
             maxLiveGenerations = 1,
             // Deliberately short: step 7's held lease is never released, so the drain
             // always times out - deterministic outcome, bound not sequencing.
@@ -603,7 +603,7 @@ internal class EndToEndFeasibilityTest {
 
 // ---------------------------------------------------------------------- support types
 
-/** Records the events this scenario asserts on (the spec 12 metric seams). */
+/** Records the events this scenario asserts on (the metric seams). */
 private class RecordingEvents : CacheEvents {
     val finished = CopyOnWriteArrayList<Pair<RefreshResult, Long?>>()
     val waited = CopyOnWriteArrayList<Duration>()
@@ -638,8 +638,8 @@ private class RecordingEvents : CacheEvents {
 }
 
 /**
- * spec 17.7 step 8's optional clause: "if the real storage is wrapped with a recording
- * spy, the 17.3 accounting equations hold". A thin effect-recording decorator over the
+ * Step 8's optional clause: if the real storage is wrapped with a recording spy, the
+ * accounting equations hold. A thin effect-recording decorator over the
  * real store. Effects, not attempts (P2 precedent): an operation that threw mutated
  * nothing and is not counted - which is exactly what keeps the equations honest across
  * step 4's deferred DETACH and step 5/7's abort paths.
@@ -674,7 +674,7 @@ private class RecordingStoreSpy(private val real: GenerationStore) : GenerationS
 
     override fun copyOut(opened: OpenGeneration, spec: CopyOutSpec) = real.copyOut(opened, spec)
 
-    /** The four spec 17.3 equations, verbatim, against the registry's end-of-test facts. */
+    /** The four accounting equations, verbatim, against the registry's end-of-test facts. */
     fun verifyAccountingEquations(current: Long?, refCounts: Map<Long, Int>) {
         // Equation 1: count(createCandidate) == count(promote) + count(delete of candidates).
         // "Delete of candidates" = deletes of generations created but never promoted; the
@@ -715,8 +715,8 @@ private class RecordingStoreSpy(private val real: GenerationStore) : GenerationS
 /**
  * Captures WARN-level log records at the JUL root. jboss-logging has no other provider
  * on this test classpath (no jboss-logmanager, log4j or slf4j binding), so it falls back
- * to java.util.logging - the same records the drain-timeout WARN of spec 10.2 step 4
- * travels through.
+ * to java.util.logging - the same records the shutdown drain-timeout WARN travels
+ * through.
  */
 private class WarnCapture : Handler() {
     private val formatter = SimpleFormatter()

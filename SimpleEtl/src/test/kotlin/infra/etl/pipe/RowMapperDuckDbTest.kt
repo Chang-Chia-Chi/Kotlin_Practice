@@ -19,9 +19,10 @@ import org.junit.jupiter.api.assertAll
 import org.junit.jupiter.api.assertThrows
 
 /**
- * Spec 4.3 against a real duckdb_jdbc 1.1.3 result set - the half of the mapping table that
- * Oracle DDL cannot produce (INTEGER / BIGINT / SMALLINT, DuckDB DATE, BOOLEAN) plus every
- * other row, so the DuckDB read seam stands on its own for P3's scratch-to-Oracle pipes.
+ * The JDBC-to-canonical type mapping against a real duckdb_jdbc 1.1.3 result set - the half of
+ * the table that Oracle DDL cannot produce (INTEGER / BIGINT / SMALLINT, DuckDB DATE, BOOLEAN)
+ * plus every other row, so the DuckDB read seam stands on its own for P3's scratch-to-Oracle
+ * pipes.
  *
  * Fixtures are SELECT-only: nothing is written, per P1's "not in scope".
  */

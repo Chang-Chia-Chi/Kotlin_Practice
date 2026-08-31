@@ -8,16 +8,17 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
 /**
- * The archive layer's maintenance pass (spec 18.3 watchdog, 18.5 retention; plan P13).
+ * The archive layer's maintenance pass: the PENDING watchdog and the retention purge.
  *
  * Two jobs, one thread, no state. The watchdog drags every PENDING row to a terminal status,
  * so a crashed or interrupted run is repaired without anyone intervening; the purge holds
  * storage inside a fixed window. Both are idempotent, which is the whole design: a pass that
  * dies halfway is repaired by the next one rather than by remembering where it stopped.
  *
- * What is deliberately absent is an orphan sweep. D33 commits a manifest row carrying the
- * complete inventory before the first object is uploaded, so an object without a covering row
- * cannot come into being, and everything here reads the inventory rather than the bucket.
+ * What is deliberately absent is an orphan sweep. The publish protocol commits a manifest row
+ * carrying the complete inventory before the first object is uploaded, so an object without a
+ * covering row cannot come into being, and everything here reads the inventory rather than
+ * the bucket.
  * Scanning for a state that is impossible by construction would be worse than useless - it
  * would quietly become the thing the ordering is trusted to instead of the ordering itself.
  * [ObjectStore] therefore has no `list` and `ArchitectureTest` fails the build if MinIO's
@@ -64,9 +65,9 @@ class ArchiveMaintenance(
     }
 
     /**
-     * Resolves every PENDING row older than the watchdog timeout against its own inventory
-     * (spec 18.3, D33): COMPLETE when the bucket holds every object at the recorded size,
-     * FAILED when it does not.
+     * Resolves every PENDING row older than the watchdog timeout against its own inventory:
+     * COMPLETE when the bucket holds every object at the recorded size, FAILED when it does
+     * not.
      *
      * An uploader still working while this runs is not a hazard to design around. Both sides
      * go through the ticket-02 conditional transitions, so exactly one moves the row and the
@@ -112,8 +113,8 @@ class ArchiveMaintenance(
     }
 
     /**
-     * Enforces retention (spec 18.5, D34): everything past the window goes, except the newest
-     * COMPLETE version, which never does.
+     * Enforces retention: everything past the window goes, except the newest COMPLETE
+     * version, which never does.
      *
      * Keep-newest is unconditional and is the point of the rule. An archiver that has stopped
      * publishing would otherwise have its last good baseline aged out from under the
@@ -130,8 +131,8 @@ class ArchiveMaintenance(
      * once they have been FAILED for longer than the watchdog timeout T. That is a margin
      * argument, not a definition: a row only reaches FAILED after sitting PENDING for T, so
      * waiting a further T puts roughly 2T between an upload starting and its objects being
-     * deleted. T itself is a policy floor, not a measurement - spec 18.6 #3 is still open on
-     * the real link - so this is deliberately headroom rather than a proof.
+     * deleted. T itself is a policy floor, not a measurement - nothing has yet measured the
+     * real link - so this is deliberately headroom rather than a proof.
      */
     fun purge(group: GroupId) {
         val now = clock.instant()
@@ -152,9 +153,10 @@ class ArchiveMaintenance(
      * The order is the contract. Objects go before the row so that a crash in the middle
      * leaves objects a row still covers - recoverable by simply running again - rather than
      * objects nothing points at, which no amount of later bookkeeping could find without the
-     * bucket scan D33 exists to make unnecessary. The mark protects the same property one
-     * level up: without it, dying between the objects and the row would leave a COMPLETE row
-     * whose inventory the bucket can no longer honour, and COMPLETE is what readers trust.
+     * bucket scan that committing the inventory first exists to make unnecessary. The mark
+     * protects the same property one level up: without it, dying between the objects and the
+     * row would leave a COMPLETE row whose inventory the bucket can no longer honour, and
+     * COMPLETE is what readers trust.
      */
     private fun reclaim(group: GroupId, entry: ManifestEntry) {
         if (entry.status == ArchiveStatus.COMPLETE) manifest.retire(group, entry.version)
@@ -167,12 +169,12 @@ class ArchiveMaintenance(
     }
 
     /**
-     * Spec 18.5's staleness alert: how old the newest COMPLETE checkpoint's data is, and a
+     * The staleness alert: how old the newest COMPLETE checkpoint's data is, and a
      * warning when that exceeds the threshold. Null when the group has never published one,
      * which alerts too - never having published is the stalest state there is.
      *
      * Purely operational. A stale baseline does not make a diff wrong; it makes it
-     * over-report, which idempotent consumers absorb by design (D25). What it does mean is
+     * over-report, which idempotent consumers absorb by design. What it does mean is
      * that the archiver has quietly stopped doing its job, and the only symptom otherwise is
      * ETLs getting slower.
      */
@@ -211,15 +213,16 @@ class ArchiveMaintenance(
         /**
          * How long a PENDING row is left alone before the watchdog rules on it.
          *
-         * **Spec 18.6 item 3 is still open and this number does not close it.** T is supposed
-         * to come from the worst-case upload time on the real MinIO link, and there is no such
-         * link on this machine - only a container on loopback, which sizes nothing. What the
+         * **This number is not measured and does not claim to be.** T is supposed to come
+         * from the worst-case upload time on the real MinIO link, and there is no such link
+         * on this machine - only a container on loopback, which sizes nothing. What the
          * value is derived from instead is the shape of the cost function, the same argument
-         * D22 makes for `waitBudget`:
+         * the framework makes for its `waitBudget`:
          *
          * - Too low costs real work. A version failed while its uploader was still running is
          *   a checkpoint thrown away, and every ETL that would have used it as a baseline does
-         *   a full compare instead. Correct (D34), but wasteful, and invisible.
+         *   a full compare instead. Correct - the fallback is first-class - but wasteful, and
+         *   invisible.
          * - Too high costs only latency of repair. A crashed run's row sits PENDING a while
          *   longer; readers already ignore anything that is not COMPLETE, so nothing downstream
          *   can tell the difference except that the repair is late.

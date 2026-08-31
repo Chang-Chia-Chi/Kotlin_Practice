@@ -27,8 +27,8 @@ import org.junit.jupiter.api.assertAll
  *
  * Source datasets are built with `CREATE TABLE AS SELECT ... FROM range(n)`: no INSERT into
  * DuckDB (non-negotiable rule 1), no appender inside a fixture, and a million rows cost one
- * statement. Nothing here DELETEs, TRUNCATEs or DROPs a DuckDB dataset (spec 5.5), and nothing
- * creates a TEMP table (spec 7.2).
+ * statement. Nothing here DELETEs, TRUNCATEs or DROPs a DuckDB dataset, and nothing creates a
+ * TEMP table.
  */
 object Pipe {
 
@@ -44,7 +44,7 @@ object Pipe {
     /**
      * A source table of [rows] rows: `lot_id` BIGINT, `lot_code` VARCHAR, `qty` DECIMAL(18,3),
      * `site` VARCHAR. DuckDB reports every column nullable, so an AUTO target creates all four
-     * as null-accepting types (spec 4.6) and no column needs a CAST at the target.
+     * as null-accepting types and no column needs a CAST at the target.
      */
     fun createSourceTable(connection: Connection, table: String, rows: Int, site: String = "F12") =
         exec(

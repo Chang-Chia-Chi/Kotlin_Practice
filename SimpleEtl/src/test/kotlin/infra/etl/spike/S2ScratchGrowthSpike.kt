@@ -10,9 +10,9 @@ import kotlin.io.path.fileSize
 /**
  * P0 / S2 - scratch growth and process RSS.
  *
- * One "run" models one task run under spec 7.2: one DuckDB file, five sequential
+ * One "run" models one task run: one DuckDB file, five sequential
  * one-million-row writes, one of which fails twice before succeeding. Failures follow the
- * attempt-suffix scheme of spec 5.5: each attempt writes ds__aN, a successful attempt
+ * attempt-suffix scheme: each attempt writes ds__aN, a successful attempt
  * repoints the stable view, and a failed attempt's table is left in place. Nothing is
  * dropped, deleted, or truncated. At run end the instance closes and the file is deleted.
  *
@@ -81,7 +81,7 @@ class S2ScratchGrowthSpike {
                         try {
                             appendRows(conn, physical, rows, flushEvery = 5000, failAtRow = failAt, entropy = entropy)
                         } catch (injected: SQLException) {
-                            // spec 5.5: leave the failed attempt in place, no DROP / DELETE / TRUNCATE
+                            // leave the failed attempt in place, no DROP / DELETE / TRUNCATE
                             attempt++
                             continue
                         }
@@ -91,7 +91,7 @@ class S2ScratchGrowthSpike {
                     check(conn.scalar("select count(*) from $dataset") == rows.toLong())
                 }
                 if (run == 1) {
-                    // evidence that spec 5.5 held: failed attempts survive, the view points at the last one
+                    // evidence the scheme held: failed attempts survive, the view points at the last one
                     println("  run 1 catalog: " + conn.scalar(
                         "select string_agg(table_name || '=' || estimated_size, ' ' order by table_name) " +
                             "from duckdb_tables()"))
@@ -106,7 +106,7 @@ class S2ScratchGrowthSpike {
             // instance closed; the file is the only thing left, this is the size the volume must hold
             return maxOf(dbSize, db.fileSize()) to maxOf(dirSize, dirBytes(dir))
         } finally {
-            dir.toFile().deleteRecursively()   // spec 7.2: close the instance and delete the file
+            dir.toFile().deleteRecursively()   // close the instance and delete the file
         }
     }
 

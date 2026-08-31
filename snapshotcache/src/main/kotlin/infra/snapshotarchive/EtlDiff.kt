@@ -14,14 +14,14 @@ import java.util.concurrent.Executors
 import java.util.concurrent.ThreadFactory
 import java.util.concurrent.atomic.AtomicLong
 
-/** What happened to one row between the baseline checkpoint and the live snapshot (spec 18.4). */
+/** What happened to one row between the baseline checkpoint and the live snapshot. */
 enum class DiffOp { I, U, D }
 
 /**
- * Why a run has no usable baseline and must full-compare (spec 18.4 step 3).
+ * Why a run has no usable baseline and must full-compare.
  *
  * All three are ordinary, expected answers rather than errors - which is precisely what lets
- * retention stay a dumb fixed window (D34) instead of a consumer registration scheme. The
+ * retention stay a dumb fixed window instead of a consumer registration scheme. The
  * reason is carried only so an operator can tell "this ETL is new" from "this ETL fell
  * further behind than retention", which are the same code path and very different problems.
  */
@@ -37,7 +37,7 @@ enum class FallbackReason {
 }
 
 /**
- * One changed row: the spec 18.4 emission, `(pk, op, changed_columns, current values)`.
+ * One changed row, as a diff emits it: `(pk, op, changed_columns, current values)`.
  *
  * [changedColumns] is the uniform rule with no special cases - the non-key columns whose
  * current value differs from the baseline's, by SQL `IS DISTINCT FROM` rather than by JVM
@@ -66,17 +66,17 @@ sealed class Diff(
 ) {
 
     /**
-     * The value the ETL must record as its watermark, per D35: `max(version) WHERE
+     * The value the ETL must record as its watermark: `max(version) WHERE
      * status='COMPLETE' AND data_as_of <= snapshot.dataAsOf`. Null when the group has no
      * COMPLETE version at or before this snapshot's moment, which the next run reads back as
      * [FallbackReason.ABSENT].
      *
      * The helper computes it and hands it back; it never writes it. Per-consumer state
-     * belongs to the consumer, committed in the same transaction as the ETL's own output
-     * (D24, D35) - a watermark committed separately from the output it describes is one that
-     * can outlive a rolled-back run.
+     * belongs to the consumer, committed in the same transaction as the ETL's own output - a
+     * watermark committed separately from the output it describes is one that can outlive a
+     * rolled-back run.
      *
-     * It is a function, not a value, because spec 18.4 step 4 sets it at commit time. Asking
+     * It is a function, not a value, because the ETL records it at commit time. Asking
      * late is safe: the `data_as_of <= T` half of the predicate is evaluated against the
      * leased snapshot's moment, so a checkpoint published while this run was working - which
      * describes state this run never saw - can never be selected however long the run took.
@@ -103,12 +103,12 @@ sealed class Diff(
     ) : Diff(snapshot, watermark) {
 
         /**
-         * The spec 18.4 `FULL OUTER JOIN` on primary key: the downloaded checkpoint against
-         * the live snapshot, in the caller's local DuckDB.
+         * The `FULL OUTER JOIN` on primary key: the downloaded checkpoint against the live
+         * snapshot, in the caller's local DuckDB.
          *
          * Computed per call rather than for every table up front, so an ETL can apply one
          * table's changes and let them go before asking for the next - at ~1M rows and ~100k
-         * changes a table (spec 18.1) the difference is the whole working set.
+         * changes a table, the difference is the whole working set.
          *
          * A table whose columns have changed since the checkpoint fails loudly here. It is
          * the one case this helper refuses rather than answers: comparing the columns the two
@@ -176,7 +176,7 @@ sealed class Diff(
             while (rows.next()) {
                 val current = live.withIndex().associate { (i, c) -> c to rows.getObject(i + 1) }
                 val baselineKey = key.indices.map { rows.getObject(live.size + it + 1) }
-                // A key column is NOT NULL by D36, so a null one means that side had no row.
+                // Archived tables declare NOT NULL keys, so a null one means that side had no row.
                 val op = when {
                     baselineKey[0] == null -> DiffOp.I
                     current[key[0]] == null -> DiffOp.D
@@ -207,8 +207,7 @@ sealed class Diff(
 }
 
 /**
- * The consumer side of spec 18.4 (plan P14): what changed since the version this ETL last
- * processed.
+ * The consumer side of the archive: what changed since the version this ETL last processed.
  *
  * **The correctness rule that carries this class:** the baseline checkpoint must have been
  * taken at or before the ETL's last processed moment. Everything else follows. [withDiff]
@@ -216,16 +215,16 @@ sealed class Diff(
  * published after the last run describes state that run never processed, and diffing against
  * it silently drops every change in the gap. Under-reporting is impossible by construction
  * here; over-reporting is bounded by one archive interval and is safe against idempotent
- * consumers (D25, D32), so the D35 predicate is allowed to err old and does.
+ * consumers, so the watermark predicate is allowed to err old and does.
  *
  * The lease is held for the whole diff by [SnapshotCache.withSnapshot] scoping, so the live
  * side of the comparison cannot shift underneath it and no exit path can leak it. The cost is
  * that [Diff.snapshot] and [Diff.Incremental.changes] are valid only inside the block; a
  * `Diff` that escapes it holds a released lease and is nobody's to use.
  *
- * [primaryKeys] is explicit configuration for the same reason [Archiver.tables] is: D36 makes
- * a stable primary key a property of the schema contract, not of whatever the snapshot
- * happens to have attached.
+ * [primaryKeys] is explicit configuration for the same reason [Archiver.tables] is: a stable
+ * primary key is a property of the schema contract every archived table signs up to, not of
+ * whatever the snapshot happens to have attached.
  */
 class EtlDiff(
     private val cache: SnapshotCache,
@@ -235,8 +234,8 @@ class EtlDiff(
     private val downloadRoot: Path,
 ) : AutoCloseable {
 
-    // A constructor knob no caller ever set; plan 2.4 forbids config for a value that never
-    // changes. P9's wiring can make it configurable again when it has a reason to.
+    // A constructor knob no caller ever set; config for a value that never changes is not
+    // config. P9's wiring can make it configurable again when it has a reason to.
     private val downloads = Executors.newFixedThreadPool(DOWNLOAD_THREADS, named("etl-diff-download"))
 
     /**
@@ -294,11 +293,11 @@ class EtlDiff(
     }
 
     /**
-     * Downloads one version's objects in parallel, per its inventory (plan P14).
+     * Downloads one version's objects in parallel, per its inventory.
      *
-     * The inventory is the list of what the version contains - the bucket is never asked
-     * (D33) - so a COMPLETE row whose objects a purge has since removed surfaces as a
-     * download failure rather than as a short answer. That ordering makes it unreachable:
+     * The inventory is the list of what the version contains - the bucket is never asked - so
+     * a COMPLETE row whose objects a purge has since removed surfaces as a download failure
+     * rather than as a short answer. That ordering makes it unreachable:
      * the purge marks a version FAILED before deleting anything, and a FAILED version is
      * never a baseline.
      */

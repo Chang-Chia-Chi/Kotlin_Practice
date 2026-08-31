@@ -11,7 +11,7 @@ import java.time.LocalDateTime
  * P0 / S3 - implicit cast on append.
  *
  * Answers whether DuckDB 1.1.3's object-typed appender methods (the only null-accepting
- * ones, spec 4.6) can target a column type they are not named for, and whether the value
+ * ones) can target a column type they are not named for, and whether the value
  * round-trips exactly. This decides whether validation rule 15 can be relaxed.
  *
  * Each case gets its own database file so an appender failure cannot poison the next case.
@@ -42,7 +42,7 @@ class S3ImplicitCastSpike {
             Case("append(String null)", "DATE") { appendString(it, null) },
             Case("append(String 'true')", "BOOLEAN") { appendString(it, "true") },
             Case("append(String null)", "BOOLEAN") { appendString(it, null) },
-            // controls: the three types spec 4.6 already allows
+            // controls: the three types the appender already allows
             Case("append(String null)", "VARCHAR") { appendString(it, null) },
             Case("appendBigDecimal(null)", "DECIMAL(18,3)") { it.appendBigDecimal(null) },
             Case("appendBigDecimal(42.750)", "DECIMAL(18,3)") { it.appendBigDecimal(BigDecimal("42.750")) },

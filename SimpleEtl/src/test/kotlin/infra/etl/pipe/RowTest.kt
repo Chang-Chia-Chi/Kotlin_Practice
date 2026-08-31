@@ -17,12 +17,12 @@ import org.junit.jupiter.api.assertDoesNotThrow
 import org.junit.jupiter.api.assertThrows
 
 /**
- * Row semantics of spec 4.2 and 4.5, exercised through Rows produced by RowMapper
+ * Row's accessor and key-normalisation semantics, exercised through Rows produced by RowMapper
  * (Row's constructor is internal, so it is not part of the P1 surface).
  */
 class RowTest {
 
-    /** Deliberately mixed-case labels: 4.5 normalises every key to lower case on read. */
+    /** Deliberately mixed-case labels: Row normalises every key to lower case on read. */
     private val fixture = """
         select CAST(7 AS BIGINT)                as LOT_ID,
                'L1'                             as Lot_Code,

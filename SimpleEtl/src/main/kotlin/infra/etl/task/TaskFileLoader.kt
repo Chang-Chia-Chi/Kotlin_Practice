@@ -21,11 +21,11 @@ import java.sql.Connection
 import java.sql.DriverManager
 import java.sql.PreparedStatement
 
-/** Spec 3.1: `[a-z0-9-]{1,64}`. */
+/** A task name: `[a-z0-9-]{1,64}`. */
 private val TASK_NAME = Regex("[a-z0-9-]{1,64}")
 
 /**
- * One field of a Quartz cron expression, of which spec 8.1's schedule has six or seven.
+ * One field of a Quartz cron expression, of which a task's schedule has six or seven.
  *
  * ponytail: structural only - it rejects an empty expression, a five-field Unix cron, and a field
  * holding characters no cron field can hold, but it does not range-check `0 99 * * * ?`. There is
@@ -88,10 +88,10 @@ private val JSON = ObjectMapper()
  * that never touch scratch does not load the native library to validate, and it is closed before
  * `load` returns.
  *
- * **In-memory here does not contradict spec 7.2's "file mode, never in-memory".** That rule is
- * about the scratch working file, which holds data and has to reclaim space; this database holds no
- * table, no row and no temporary object, and exists only to own a parser for the length of one
- * `load` call.
+ * **In-memory here does not contradict the "file mode, never in-memory" rule for scratch.** That
+ * rule is about the scratch working file, which holds data and has to reclaim space; this database
+ * holds no table, no row and no temporary object, and exists only to own a parser for the length of
+ * one `load` call.
  */
 private class DuckDbSyntax : AutoCloseable {
 
@@ -160,15 +160,15 @@ private sealed interface ReadFile {
 /**
  * What [TaskFileLoader.load] returns.
  *
- * Spec 11.2 writes `Result<List<TaskDefinition>, ValidationReport>`, which does not exist: Kotlin's
- * `kotlin.Result` takes one type parameter. This sealed pair is the smallest replacement that keeps
- * both halves of the declared contract, and follows the precedent set for [PipeTarget] in P5 - two
- * cases, so "tasks and errors at the same time" is unrepresentable rather than merely documented.
- * Spec 10 makes any error fatal, so there is no third case to model.
+ * The declared public API writes `Result<List<TaskDefinition>, ValidationReport>`, which does not
+ * exist: Kotlin's `kotlin.Result` takes one type parameter. This sealed pair is the smallest
+ * replacement that keeps both halves of that contract, and follows the precedent set for
+ * [PipeTarget] in P5 - two cases, so "tasks and errors at the same time" is unrepresentable rather
+ * than merely documented. Any validation error is fatal, so there is no third case to model.
  */
 sealed interface LoadResult {
 
-    /** Every file parsed and passed spec 10, in file-name order. */
+    /** Every file parsed and passed validation, in file-name order. */
     data class Loaded(val tasks: List<TaskDefinition>) : LoadResult
 
     /** At least one file failed. Nothing is loaded: one bad file out of ten prevents startup. */
@@ -193,13 +193,13 @@ data class ValidationError(val file: String, val step: String?, val line: Int?, 
 
 /**
  * Reads a directory of task files and returns either every [TaskDefinition] in it or every error
- * in it (spec 10).
+ * in it.
  *
  * **All files are read before anything is decided.** One bad file out of ten prevents startup, and
  * the report lists that file's errors and no phantom errors for the other nine. That is also what
  * makes P7's reload atomic: parse and validate everything, then swap or reject.
  *
- * **Task files are not read through Quarkus configuration**, deliberately (spec 10). Config
+ * **Task files are not read through Quarkus configuration**, deliberately. Config
  * performs property expansion, which would corrupt SQL containing `${...}`; nothing here expands,
  * interpolates or substitutes anything, and a `|` block scalar reaches [TaskDefinition] with its
  * newlines intact.
@@ -217,7 +217,7 @@ data class ValidationError(val file: String, val step: String?, val line: Int?, 
  * @param hooks the names registered in the `TaskHookRegistry` (validation rule 5). Names only: the
  *   loader never runs a hook, and building the registry is P8's.
  * @param caches the `cache:` names the host bound to a `(SnapshotCache, GroupId)` pair (validation
- *   rule 21, spec 3.6). Names only, for the same reason as [hooks]: the loader never reads a
+ *   rule 21). Names only, for the same reason as [hooks]: the loader never reads a
  *   cache, and the pairs themselves go to [TaskEngine]. **Fourth and last**, and defaulted: two
  *   fixture call sites pass the earlier three positionally, so a parameter inserted anywhere else
  *   would silently rebind `transforms`.
@@ -320,7 +320,7 @@ private fun stepNameAt(text: String, pointer: String): String? {
 }
 
 /**
- * Rules 2 to 21 of spec 10 for one file, accumulating rather than stopping - a report naming one
+ * Validation rules 2 to 21 for one file, accumulating rather than stopping - a report naming one
  * error per file makes an author fix a ten-error file ten times.
  *
  * Four of the twenty-one are not checked here because [TaskYaml]'s schema already makes them
@@ -354,7 +354,7 @@ private class FileValidation(
         if (alsoIn.isNotEmpty()) {
             err(null, "task name '${yaml.name}' is also used by $alsoIn; names are unique across files (rule 2).")
         }
-        // Rule 16.
+        // Rule 16: a stated schedule is a cron expression.
         yaml.schedule?.cron?.let { cron ->
             val fields = cron.trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
             if (fields.size !in 6..7 || fields.any { !CRON_FIELD.matches(it) }) {
@@ -365,7 +365,7 @@ private class FileValidation(
                 )
             }
         }
-        // Rule 5.
+        // Rule 5: each named hook is one the host registered.
         hook("onSuccess", yaml.onSuccess)
         hook("onFailure", yaml.onFailure)
         // Rule 8, the literal half.
@@ -379,9 +379,9 @@ private class FileValidation(
             }
             variable(null, literal.name)
         }
-        // Not a rule of spec 10: RowPipe requires a positive chunk size and ScratchDb a positive
-        // memory limit. Catching them here turns a failure five minutes into a run - or, for the
-        // memory limit, at the first line of every run forever - into a failure at boot.
+        // Not a numbered validation rule: RowPipe requires a positive chunk size and ScratchDb a
+        // positive memory limit. Catching them here turns a failure five minutes into a run - or,
+        // for the memory limit, at the first line of every run forever - into a failure at boot.
         if (yaml.chunkSize <= 0) err(null, "chunkSize must be positive, got ${yaml.chunkSize} (spec 5.2).")
         yaml.scratch?.memoryLimitMb?.let {
             if (it <= 0) {
@@ -392,9 +392,10 @@ private class FileValidation(
                 )
             }
         }
-        // Also not a rule of spec 10, and here for the same reason: a task with no step at all runs,
-        // reports SUCCEEDED and updates nothing, which is spec 1.1's 03:00 failure exactly. Spec 3.1
-        // annotates every optional field '# optional' and `phases` carries no such annotation.
+        // Also not a numbered validation rule, and here for the same reason: a task with no step at
+        // all runs, reports SUCCEEDED and updates nothing, which is the silent overnight no-op this
+        // framework exists to prevent. The schema annotates every optional field '# optional' and
+        // `phases` carries no such annotation.
         if (yaml.phases.isEmpty()) {
             err(null, "the task declares no phases, so every run would succeed having done nothing (spec 3.1).")
         }
@@ -410,7 +411,7 @@ private class FileValidation(
      * The file-shaped rules over the YAML, then the task-shaped rules over the model.
      *
      * The model is built here rather than after the whole directory has validated, because
-     * [TaskRules] is the one implementation of spec 10's task-shaped rules and it speaks
+     * [TaskRules] is the one implementation of the task-shaped rules and it speaks
      * [TaskDefinition]. [toStep] is **total** for exactly that reason: a step that breaks a
      * file-shaped rule still has to be judged against the task-shaped ones, or one mistake would
      * hide every other mistake in the same step and the author would fix a two-error step twice.
@@ -433,23 +434,23 @@ private class FileValidation(
         // a negative `retries`, say - must not defer the non-SELECT check to the next boot, which
         // is the whole hazard [cacheSelectOnly] documents.
         if (step is CacheCopyYaml && violations.none { it.rule == 19 }) cacheSelectOnly(step)
-        // Rule 7's running scope. A step's exports resolve for *later* steps only (spec 6.2), so
+        // Rule 7's running scope. A step's exports resolve for *later* steps only, so
         // they are added once this step has been judged; rule 8 is [TaskRules]'s and was applied
         // against the set as it stood above.
         if (step is ExportYaml) defined += step.vars.map { it.name }
     }
 
     /**
-     * Spec 3.6's `cacheCopy`: rules 21, 19, 20 and 9, in the order an author is best served by.
+     * A `cacheCopy` step: rules 21, 19, 20 and 9, in the order an author is best served by.
      *
      * **Rules 19 and 20 are startup rules and not runtime ones**, deliberately. Both could have
      * been a `require` in the executor - and both would then let a file boot green and kill a task
-     * thirty minutes in, which is the failure spec 10 exists to prevent. Neither is a condition
-     * that might come good on the day: a `:name` in cache SQL cannot be bound at all, because
-     * `CopyOutSpec.sql` is a plain string with no binding channel, and a `retries` above zero can
-     * never fire, because spec 5.3's retry classification is JDBC-shaped and a local DuckDB
-     * file-to-file copy raises none of it. The executor keeps its own guard for the definitions
-     * spec 2.1 lets a host build in code, which have no loader in front of them.
+     * thirty minutes in, which is the failure startup validation exists to prevent. Neither is a
+     * condition that might come good on the day: a `:name` in cache SQL cannot be bound at all,
+     * because `CopyOutSpec.sql` is a plain string with no binding channel, and a `retries` above
+     * zero can never fire, because the retry classification is JDBC-shaped and a local DuckDB
+     * file-to-file copy raises none of it. The executor keeps its own guard for the definitions a
+     * host builds in code, which have no loader in front of them.
      */
     private fun cacheCopy(step: CacheCopyYaml) {
         // Rule 21, the exact analogue of rule 3 for datasources. First, so that a file with a
@@ -475,7 +476,7 @@ private class FileValidation(
                     "retries or state 0.",
             )
         }
-        // Rule 9 and spec 5.5's character check: `output` is an ordinary scratch dataset and
+        // Rule 9 and the dataset-name character check: `output` is an ordinary scratch dataset and
         // shares one namespace with every other dataset the task produces.
         dataset(step.name, step.output)
     }
@@ -484,7 +485,7 @@ private class FileValidation(
      * Rule 6 for a `cacheCopy`'s text. Rule 19 is [TaskRules]'s and fires over the same SQL.
      *
      * Rule 6's DuckDB parse applies here without the dialect caveat that limits it elsewhere: a
-     * `cacheCopy` runs **inside the cache's own DuckDB instance** (spec 7.3), so DuckDB is not a
+     * `cacheCopy` runs **inside the cache's own DuckDB instance**, so DuckDB is not a
      * guess about the datasource's dialect but the dialect itself. It is the **raw text** that is
      * parsed, never JDBI's `?`-substituted rewrite, because that text reaches the cache verbatim
      * through `CopyOutSpec.sql`.
@@ -522,7 +523,7 @@ private class FileValidation(
     }
 
     /**
-     * **Rule 15 splits in two, and only one half is reachable here** (spec 10 rule 15, 4.6).
+     * **Rule 15 splits in two, and only one half is reachable here.**
      *
      * The half a task file *states* - every `transform.addColumns` entry - is enforced, in
      * [addColumn], through the same [unwritableToDuckDb] predicate the writer uses. The half a
@@ -539,7 +540,7 @@ private class FileValidation(
      * work either, and the reason is the task files themselves rather than the sandbox. Measured
      * (P6 scratchpad `Sandbox.kt`, in-memory 1.1.3 with `set enable_external_access=false`): the
      * sandbox holds - `read_parquet`, `COPY TO` and `ATTACH` are all refused with a Permission or
-     * IO error - but **spec 3.4's own example fails inside it**, because
+     * IO error - but **the documented `sql` step example fails inside it**, because
      * `create index idx_wip_lot on wip_stg (lot_id)` needs a table a `pipe` step creates and no
      * pipe can run at boot: "Catalog Error: Table with name wip_stg does not exist". A CTAS
      * `materialize` fails the same way. So a boot sandbox either ignores those failures, which
@@ -562,7 +563,7 @@ private class FileValidation(
         datasource(name, target.datasource)
         val scratch = target.datasource == SCRATCH
 
-        // Rule 10.
+        // Rule 10: exactly one of target.table and target.sql, never both and never neither.
         if ((target.table == null) == (target.sql == null)) {
             err(name, "exactly one of target.table and target.sql must be present (spec 3.2, rule 10).")
         } else if (target.table != null) {
@@ -584,11 +585,11 @@ private class FileValidation(
         } else {
             // Rule 6 for the text. Rule 11 and rule 6's positional half are [TaskRules]'s, and rule
             // 7 excepts this text entirely - every ':name' here is a Row key, unknown until the
-            // source query runs (spec 4.4, 6.3).
+            // source query runs.
             sql(name, "target.sql", target.sql!!, datasource = null)
         }
 
-        // Rule 4.
+        // Rule 4: a named transform resolves to a RowTransform bean the container supplied.
         step.transform?.let { transform ->
             if (transform.bean !in transforms.keys) {
                 err(
@@ -603,14 +604,14 @@ private class FileValidation(
 
     /**
      * One `transform.addColumns` entry: rule 15 over a column type the task file states outright,
-     * which is the half of the rule startup can reach (spec 10 rule 15, 4.6). The same predicate
-     * runs again at writer open over the *table's* types, which no file states.
+     * which is the half of the rule startup can reach. The same predicate runs again at writer open
+     * over the *table's* types, which no file states.
      *
-     * `nullable` defaults to true (spec 3.2), so `type: BOOLEAN` with nothing else written is a
+     * `nullable` defaults to true, so `type: BOOLEAN` with nothing else written is a
      * rejection - hence the message naming `nullable: false` as one of the two fixes.
      *
      * @param duckDbTarget whether the pipe's target is the scratch DuckDB. Rule 15's own scope is
-     *   "DuckDB target column types (4.6)" and the whole predicate is about what the 1.1.3 appender
+     *   "DuckDB target column types" and the whole predicate is about what the 1.1.3 appender
      *   can express, so it is asked only of a step that reaches that appender. An added column on a
      *   REQUIRED Oracle target - legal, and wired into `JdbcTableWriter` in P5 - is bound by
      *   `JdbcWriters.javaType`, which takes a nullable DOUBLE, a DATE, an INSTANT and a BYTES
@@ -637,7 +638,7 @@ private class FileValidation(
         // Rule 14's DECIMAL clause. AUTO cannot check a *source* column's precision at startup, but
         // an added column states its own, so the pair DuckDbTableWriter.ddlType demands is knowable
         // here. Default precision 0 is rejected: the bare keyword resolves to DECIMAL(18,3), which
-        // rounds past three decimals and cannot hold a 16-digit key (spec 4.4).
+        // rounds past three decimals and cannot hold a 16-digit key.
         if (type == CanonicalType.DECIMAL && !isDuckDbDecimalPair(column.precision, column.scale)) {
             err(
                 step,
@@ -649,8 +650,8 @@ private class FileValidation(
     }
 
     /**
-     * Rule 3, rule 6 and rule 9 for a `materialize`. Rule 13's scratch-only half, rule 12 as spec 10
-     * amends it for this step type, and rule 7 in both its plain and its amended form are
+     * Rule 3, rule 6 and rule 9 for a `materialize`. Rule 13's scratch-only half, rule 12 in the
+     * form amended for this step type, and rule 7 in both its plain and its amended form are
      * [TaskRules]'s - the last of those being the ORA-01027 shape of review finding H3, which no
      * amount of file-shaped checking could have reached because it is a statement about a task.
      */
@@ -663,15 +664,14 @@ private class FileValidation(
     /**
      * Rule 3 and rule 6 for an `export`. Rule 8 over the names it produces is [TaskRules]'s, and
      * [step] adds them to [defined] once this step has been judged - a step's exports resolve for
-     * *later* steps only, because [TaskEngine] defines them once the whole step has succeeded
-     * (spec 6.2).
+     * *later* steps only, because [TaskEngine] defines them once the whole step has succeeded.
      */
     private fun export(step: ExportYaml) {
         datasource(step.name, step.datasource)
         step.vars.forEach { sql(step.name, "vars[${it.name}].sql", it.sql, step.datasource) }
     }
 
-    /** Rule 3. [SCRATCH] is reserved rather than configured, so it is always valid (spec 7.1). */
+    /** Rule 3. [SCRATCH] is reserved rather than configured, so it is always valid. */
     private fun datasource(step: String, name: String) {
         if (name != SCRATCH && name !in datasources) {
             err(
@@ -682,7 +682,7 @@ private class FileValidation(
         }
     }
 
-    /** Rule 5. */
+    /** Rule 5: one `onSuccess` or `onFailure` name, which must be a registered hook. */
     private fun hook(field: String, name: String?) {
         if (name != null && name !in hooks) {
             err(
@@ -705,10 +705,10 @@ private class FileValidation(
     }
 
     /**
-     * Rule 9, plus the character check `datasetIdentifier` exists for. That check is not a rule of
-     * spec 10, but a dataset name arrives from a file and becomes both a SQL identifier no prepared
-     * statement can parameterise and a parquet file name, so it belongs at the trust boundary
-     * rather than mid-run.
+     * Rule 9, plus the character check `datasetIdentifier` exists for. That check is not one of the
+     * numbered rules, but a dataset name arrives from a file and becomes both a SQL identifier no
+     * prepared statement can parameterise and a parquet file name, so it belongs at the trust
+     * boundary rather than mid-run.
      */
     private fun dataset(step: String, name: String) {
         runCatching { datasetIdentifier(name) }.onFailure { err(step, "${it.message} (spec 5.5).") }
@@ -754,7 +754,7 @@ private class FileValidation(
 }
 
 /**
- * Spec 3.2 writes an added column's type as the DuckDB keyword an author would put in DDL -
+ * A task file writes an added column's type as the DuckDB keyword an author would put in DDL -
  * `VARCHAR`, not the canonical constant `STRING`. Matched case-insensitively; null means no match,
  * which the caller reports rather than throws.
  */
@@ -764,11 +764,11 @@ private fun canonicalOf(duckDbType: String): CanonicalType? =
 /**
  * The YAML form to the definition model.
  *
- * The datasource-dependent defaults of spec 4.4 and 5.3 are applied explicitly rather than left to
- * the constructor, because a Kotlin default cannot be conditionally skipped. E10 kept that here
- * rather than leaving `retries` null for `TaskRules` to resolve, because three assertions written
- * by P6 and P9 read the resolved value off a *loaded* definition; both paths resolve through the
- * same `defaultRetries`, so they cannot disagree (spec 5.3, and progress.md's E10 entry).
+ * The datasource-dependent defaults for `createTable` and `retries` are applied explicitly rather
+ * than left to the constructor, because a Kotlin default cannot be conditionally skipped. E10 kept
+ * that here rather than leaving `retries` null for `TaskRules` to resolve, because three assertions
+ * written by P6 and P9 read the resolved value off a *loaded* definition; both paths resolve through
+ * the same `defaultRetries`, so they cannot disagree (progress.md's E10 entry records it).
  */
 private fun TaskYaml.toDefinition(transforms: Map<String, RowTransform>) = TaskDefinition(
     name = name,
@@ -851,7 +851,7 @@ private fun StepYaml.toStep(transforms: Map<String, RowTransform>): Step = when 
     )
 
     // `?: 0`. Since E10 the model resolves an unstated `retries` to 0 for this step type too, so
-    // this is no longer the asymmetry spec 10 rule 20 used to record - it is the same answer
+    // this is no longer the asymmetry rule 20 used to record - it is the same answer
     // written on the path that has to write it explicitly.
     is CacheCopyYaml -> CacheCopyStep(
         name = name,

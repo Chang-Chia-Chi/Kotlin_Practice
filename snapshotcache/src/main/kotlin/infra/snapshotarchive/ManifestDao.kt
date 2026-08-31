@@ -10,17 +10,17 @@ import java.time.OffsetDateTime
 import java.time.ZoneOffset
 
 /**
- * Durable state for the archive & diff layer (spec 18.2, D31).
+ * Durable state for the archive & diff layer.
  *
- * The framework itself persists nothing and renumbers generations from 1 on every boot
- * (D10, spec 4.3), so a pod restart destroys every in-process notion of "which snapshot was
- * that". This table is the only thing that survives it, and `data_as_of` is the sole join
- * key between the ephemeral world and the durable one - generation numbers are recorded for
- * diagnostics and are never a key.
+ * The framework itself persists nothing and renumbers generations from 1 on every boot, so a
+ * pod restart destroys every in-process notion of "which snapshot was that". This table is
+ * the only thing that survives it, and `data_as_of` is the sole join key between the
+ * ephemeral world and the durable one - generation numbers are recorded for diagnostics and
+ * are never a key.
  */
 enum class ArchiveStatus { PENDING, COMPLETE, FAILED }
 
-/** One manifest row. `inventory` is the json array described in spec 18.2. */
+/** One manifest row. `inventory` is the json array [Inventory] encodes. */
 data class ManifestEntry(
     val group: GroupId,
     val version: Long,
@@ -35,7 +35,7 @@ data class ManifestEntry(
 
 /**
  * Thrown by [ManifestDao.insertPending] when `data_as_of` is not strictly greater than the
- * newest COMPLETE version's (spec 18.3 step 2, D31).
+ * newest COMPLETE version's.
  *
  * This is the one place a timestamp is load-bearing, so the regression is raised rather
  * than returned: the archiver must skip and alert, and a caller that ignores a return value
@@ -54,7 +54,7 @@ class DataAsOfRegression(
  * DDL for the manifest. Applied by the DBA in production; the contract tests apply it to a
  * throwaway container.
  *
- * Two deliberate departures from the illustrative DDL in spec 18.2, both recorded in
+ * Two deliberate departures from the design document's illustrative DDL, both recorded in
  * progress.md. Timestamps are `TIMESTAMP WITH TIME ZONE` rather than bare `TIMESTAMP`: the
  * column is read back by a different process than wrote it, and a bare TIMESTAMP round-trips
  * through whatever zone each JVM happens to have, which would silently shift every
@@ -94,7 +94,7 @@ object ManifestSchema {
 }
 
 /**
- * The durable half of the archive layer (plan P11).
+ * The durable half of the archive layer.
  *
  * Every status transition is conditional on the row still being PENDING, and reports whether
  * it actually moved. That is not defensiveness: it is the entire mechanism by which an
@@ -102,7 +102,7 @@ object ManifestSchema {
  * second line of defence behind it.
  *
  * [bucket] is the object-store bucket the archiver writes into; the DAO derives `uri_prefix`
- * from it so the layout in spec 18.2 is defined in one place rather than at each call site.
+ * from it so the object-store layout is defined in one place rather than at each call site.
  */
 class ManifestDao(
     private val jdbi: Jdbi,
@@ -111,11 +111,11 @@ class ManifestDao(
 ) {
 
     /**
-     * Allocates a version and records the intent to publish it (spec 18.3 step 3).
+     * Allocates a version and records the intent to publish it.
      *
      * The row lands before a single object is uploaded, carrying the complete inventory. That
      * ordering is what makes a ghost object impossible and is why this layer owns no
-     * LIST-based orphan sweep (D33).
+     * LIST-based orphan sweep.
      *
      * @throws DataAsOfRegression if [dataAsOf] is not strictly newer than the newest COMPLETE.
      */
@@ -126,8 +126,8 @@ class ManifestDao(
         generation: Long,
     ): ManifestEntry = jdbi.inTransaction<ManifestEntry, RuntimeException> { handle ->
         // Guard and insert share one transaction so a concurrent publisher cannot slip a
-        // newer COMPLETE row in between. Runs for one group are serialized anyway (spec
-        // 18.2), so this closes the window rather than being the only thing holding it shut.
+        // newer COMPLETE row in between. Runs for one group are serialized anyway, so this
+        // closes the window rather than being the only thing holding it shut.
         val newest = newestComplete(handle, group)
         if (newest != null && !dataAsOf.isAfter(newest.dataAsOf)) {
             throw DataAsOfRegression(group, dataAsOf, newest.dataAsOf)
@@ -172,20 +172,20 @@ class ManifestDao(
     }
 
     /**
-     * PENDING -> COMPLETE (spec 18.3 step 5). Returns false, without throwing, when the row
-     * was not PENDING - already resolved, or never existed. The caller learns it lost the
-     * race instead of assuming it won.
+     * PENDING -> COMPLETE, the publish protocol's last step. Returns false, without throwing,
+     * when the row was not PENDING - already resolved, or never existed. The caller learns it
+     * lost the race instead of assuming it won.
      */
     fun markComplete(group: GroupId, version: Long): Boolean =
         transition(group, version, ArchiveStatus.COMPLETE)
 
-    /** PENDING -> FAILED, for the watchdog's verdict on a stale intent (D33). Same contract as [markComplete]. */
+    /** PENDING -> FAILED, for the watchdog's verdict on a stale intent. Same contract as [markComplete]. */
     fun markFailed(group: GroupId, version: Long): Boolean =
         transition(group, version, ArchiveStatus.FAILED)
 
     /**
-     * COMPLETE -> FAILED: the purge's mark step (spec 18.5, plan P13), and the only
-     * transition that does not start from PENDING.
+     * COMPLETE -> FAILED: the purge's mark step, and the only transition that does not start
+     * from PENDING.
      *
      * A version being reclaimed is a version whose objects are about to stop existing, which
      * is precisely what FAILED already means to every reader - "do not trust this one". The
@@ -202,7 +202,7 @@ class ManifestDao(
      *
      * Always called after its objects are gone, never before: the ordering is what makes an
      * object without a covering manifest row impossible, which is why this layer owns no
-     * LIST-based orphan sweep (D33, D34).
+     * LIST-based orphan sweep.
      */
     fun delete(group: GroupId, version: Long): Boolean =
         jdbi.withHandle<Boolean, RuntimeException> { handle ->
@@ -219,13 +219,13 @@ class ManifestDao(
         jdbi.withHandle<ManifestEntry?, RuntimeException> { newestComplete(it, group) }
 
     /**
-     * The watermark predicate of D35, verbatim: `max(version) WHERE status='COMPLETE' AND
-     * data_as_of <= at`.
+     * The watermark predicate a consumer records, verbatim: `max(version) WHERE
+     * status='COMPLETE' AND data_as_of <= at`.
      *
      * The `<= at` half is the whole correctness argument. A checkpoint published while an
      * ETL was running describes state that ETL never processed; adopting it as the next
      * baseline would silently drop every change in the gap. Erring toward an older version
-     * only over-reports, which idempotent consumers absorb (D25), so the predicate is
+     * only over-reports, which idempotent consumers absorb, so the predicate is
      * allowed to be conservative and is.
      */
     fun watermark(group: GroupId, at: Instant): Long? =
@@ -249,7 +249,7 @@ class ManifestDao(
      *
      * Deliberately dumb: it applies no keep-newest-COMPLETE rule and no status filter,
      * because retention policy is ticket 04's and mixing it in here would put the one rule
-     * that protects the last good baseline (D34) somewhere nobody looks for it. Aged by
+     * that protects the last good baseline somewhere nobody looks for it. Aged by
      * `data_as_of` rather than `created_at`: what makes a checkpoint useful to an ETL is how
      * stale its data is, and that is the same clock the watermark predicate reads.
      */
@@ -296,7 +296,7 @@ class ManifestDao(
      *
      * This is how the ETL diff helper resolves a recorded watermark: it must be able to see
      * that the version it recorded is no longer COMPLETE, so it can fall back to a full
-     * compare rather than silently finding nothing (spec 18.4 step 3).
+     * compare rather than silently finding nothing.
      */
     fun find(group: GroupId, version: Long): ManifestEntry? =
         jdbi.withHandle<ManifestEntry?, RuntimeException> { handle ->

@@ -52,7 +52,7 @@ class TaskEngineGuardTest {
             ?: error("expected the task to be rejected, but it succeeded")
 
     /**
-     * Validation rule 11 and spec 4.4: `target.sql` is not available on a DuckDB datasource,
+     * Validation rule 11: `target.sql` is not available on a DuckDB datasource,
      * because DuckDB writes go through the appender, which takes a table and not a statement.
      */
     @Test
@@ -98,9 +98,9 @@ class TaskEngineGuardTest {
      * A scratch target with `createTable: REQUIRED` cannot be retried.
      *
      * `retries` defaults to 3 for any scratch target, but only AUTO gets the attempt-suffixed name
-     * and the stable view of spec 5.5. A REQUIRED target writes into one fixed table, so a
-     * transient failure part way through leaves whatever the failed attempt already flushed -
-     * between zero and one chunk, spec 12 - and the retry appends the whole source on top of it.
+     * and its stable view. A REQUIRED target writes into one fixed table, so a transient failure
+     * part way through leaves whatever the failed attempt already flushed - between zero and one
+     * chunk, as measured - and the retry appends the whole source on top of it.
      * Silent duplication, behind a run that reports SUCCEEDED.
      *
      * The rejection has to name the way out, or an author who hits it at 03:00 has a refusal and
@@ -153,12 +153,12 @@ class TaskEngineGuardTest {
     }
 
     /**
-     * Spec 9.1: `transform.addColumns` declares the columns the transform *adds*, so declaring one
+     * `transform.addColumns` declares the columns the transform *adds*, so declaring one
      * the source query already produces is an author error. Left unchecked it hands the target
      * writer the same column twice.
      *
      * Declared in upper case against a lower-case source column, because Row keys are normalised
-     * to lower case on read (spec 4.5) and a clash check comparing raw names would miss this.
+     * to lower case on read, and a clash check comparing raw names would miss this.
      */
     @Test
     fun addColumnsDeclaringAColumnTheSourceAlreadyProducesIsRejected() {
@@ -201,7 +201,7 @@ class TaskEngineGuardTest {
         }
     }
 
-    /** Spec 6.2: one step may not export the same name twice. */
+    /** One step may not export the same name twice. */
     @Test
     fun twoExportVarsWithTheSameNameInOneStepAreRejected() {
         TaskHarness(root).use { harness ->
@@ -231,7 +231,7 @@ class TaskEngineGuardTest {
     }
 
     /**
-     * Spec 6.1's `attempt` is a built-in whose value changes per attempt, so it is bound from the
+     * `attempt` is a built-in whose value changes per attempt, so it is bound from the
      * retry loop rather than from the scope. An export defining it would be shadowed silently.
      */
     @Test
@@ -254,7 +254,7 @@ class TaskEngineGuardTest {
         }
     }
 
-    /** Spec 7.1: `scratch` is reserved and cannot also name a configured datasource. */
+    /** `scratch` is reserved and cannot also name a configured datasource. */
     @Test
     fun scratchCannotAlsoBeAConfiguredDatasource() {
         TaskHarness(root).use { harness ->

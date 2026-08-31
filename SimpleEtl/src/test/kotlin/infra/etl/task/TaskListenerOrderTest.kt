@@ -23,7 +23,7 @@ import org.junit.jupiter.params.provider.Arguments
 import org.junit.jupiter.params.provider.MethodSource
 
 /**
- * P8a, contract 4 items 1 to 5 and 14: **what the engine tells spec 9.2's listener, and when.**
+ * P8a, contract 4 items 1 to 5 and 14: **what the engine tells the run listener, and when.**
  *
  * ### Whole traces, never subsequences
  *
@@ -303,7 +303,7 @@ class TaskListenerOrderTest {
     // ------------------------------------------------------------------------------------
 
     /**
-     * Spec 9.2's `logging: false`, and contract 2.7's "hooks are unaffected".
+     * The `logging: false` flag, and contract 2.7's "hooks are unaffected".
      *
      * The same task runs three times on one harness. "No events under `logging: false`" alone
      * would pass against an engine with no call sites at all, so the run before it asserts the
@@ -417,7 +417,7 @@ class TaskListenerOrderTest {
 
     /**
      * Contract 2.6's rows ruling: a pipe reports the real pair, every other step type reports
-     * 0 / 0 because only `pipe` moves rows through the JVM (spec 2.3).
+     * 0 / 0 because only `pipe` moves rows through the JVM.
      *
      * The transform drops one row, so `rowsRead` and `rowsWritten` are two different numbers.
      * Without that they would be one number twice, and an engine reporting `rowsRead` for both
@@ -470,9 +470,9 @@ class TaskListenerOrderTest {
     // ------------------------------------------------------------------------------------
 
     /**
-     * `TaskContext` carries what spec 9.2 says it carries, and `startedAt` comes from the injected
-     * clock (contract 1.3). An engine calling `Instant.now()` reports today's date, which is not
-     * this clock's instant - that is the assertion the injected clock makes possible.
+     * `TaskContext` carries what the listener contract says it carries, and `startedAt` comes from
+     * the injected clock (contract 1.3). An engine calling `Instant.now()` reports today's date,
+     * which is not this clock's instant - that is the assertion the injected clock makes possible.
      */
     @Test
     fun theTaskContextCarriesTheRunTheTriggerAndTheClocksInstant() {

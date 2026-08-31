@@ -17,7 +17,7 @@ internal val eventLog: Logger = Logger.getLogger("infra.snapshotcache.core.event
  *   record and its file behind for the process lifetime;
  * - on the acquire side it would escape between the registry's refcount increment and the
  *   [infra.snapshotcache.spi.SnapshotHandle] that owns the matching release, leaking the
- *   lease permanently and eventually wedging refresh at the K guard (spec 6.1).
+ *   lease permanently and eventually wedging refresh at the K guard.
  */
 internal fun emit(group: GroupId, fire: () -> Unit) {
     try {

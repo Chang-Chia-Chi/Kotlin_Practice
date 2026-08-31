@@ -13,7 +13,7 @@ import kotlin.io.path.fileSize
  * temp_directory while they run. Spill space is released the instant a query ends, so only
  * a sampled peak is meaningful; an end-of-query reading is always zero.
  *
- * Also tests spec 7.2's claim that "without it a large join fails outright instead of
+ * Also tests the claim that "without it a large join fails outright instead of
  * spilling" by running the same query with temp_directory left unset.
  *
  * -Dspike.s4b.rows=N  -Dspike.s4b.limitLow=MB  -Dspike.s4b.limitHigh=MB

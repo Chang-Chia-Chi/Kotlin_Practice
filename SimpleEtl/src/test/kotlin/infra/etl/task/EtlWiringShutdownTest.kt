@@ -19,8 +19,8 @@ import org.junit.jupiter.api.assertAll
 import org.junit.jupiter.api.io.TempDir
 
 /**
- * E16: `WiringResult.Wired.close()`, spec 8.6's "stop the schedule at shutdown" row and spec
- * 11.2's declaration of the seam that discharges it.
+ * E16: `WiringResult.Wired.close()` - the host's "stop the schedule at shutdown" obligation and
+ * the framework seam that discharges it.
  *
  * Before this, a host could only stop its schedule by reloading an empty directory - which cancels
  * the registrations as a *side effect* of throwing the task list away, and cannot stop the runner
@@ -105,9 +105,10 @@ class EtlWiringShutdownTest {
      * Seam (b). The API path, which no registration covers.
      *
      * `AlreadyRunning` is the answer, and it is a deliberate reuse rather than a fifth sealed case:
-     * spec 11.2 records why. What the test pins is the *behaviour* either way - nothing was
-     * launched - so a later session that decides the naming differently changes one assertion and
-     * not the shape of this file.
+     * `TriggerResult` is frozen public surface, and a new case breaks every host's exhaustive
+     * `when`. What the test pins is the *behaviour* either way - nothing was launched - so a later
+     * session that decides the naming differently changes one assertion and not the shape of this
+     * file.
      */
     @Test
     fun aTriggerAfterCloseDoesNotLaunch() {
@@ -134,7 +135,7 @@ class EtlWiringShutdownTest {
     }
 
     /**
-     * Seam (c). Spec 8.3's engine is ordinary blocking code with no cancellation point, so a
+     * Seam (c). The engine is ordinary blocking code with no cancellation point, so a
      * cancelled scope cannot interrupt a run already inside one. The run finishes and its real
      * outcome is recorded - not the cancellation, which would otherwise reach `TaskRunner`'s
      * completion handler and be written as a failure.

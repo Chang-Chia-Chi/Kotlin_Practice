@@ -7,8 +7,8 @@ import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.Test
 
 /**
- * `name.lowercase()` on these enums is the spec 12 metric label verbatim, which is what
- * every alert rule in spec 12.6 is written against. Whole-set equality, so adding,
+ * `name.lowercase()` on these enums is the published metric label verbatim, which is what
+ * every alert rule is written against. Whole-set equality, so adding,
  * removing or renaming a constant fails here rather than silently in an alert.
  */
 class MetricLabelContractTest {

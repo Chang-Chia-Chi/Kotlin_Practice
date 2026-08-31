@@ -14,7 +14,7 @@ import org.junit.jupiter.api.assertThrows
  * Review finding H1: under `createTable: REQUIRED` the writer compared only the canonical type of
  * a DECIMAL pair and never its scale, so a source wider than the target was accepted at [open] and
  * rounded away by `appendBigDecimal` on every row - the silent-rounding class the AUTO path's
- * `ddlType` is written to refuse (spec 4.4, spike S3).
+ * `ddlType` is written to refuse (spike S3).
  *
  * The accepted cases are what stop this being a test that a stricter writer passes by rejecting
  * everything: an equal scale and a *wider* target both still load, and a computed expression -

@@ -25,7 +25,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * P6: the randomized model test (spec 17.5; plan P6).
+ * P6: the randomized model test.
  *
  * Each sequence drives the REAL integration stack - facade + cycle + registry + query-stub
  * over the recording fake (the P5 wiring pattern) - with randomly generated operations
@@ -34,7 +34,7 @@ import java.util.concurrent.atomic.AtomicInteger
  * per-generation refcounts) is updated per op, and ALL of I1-I8 are checked in their
  * observable forms after EVERY step.
  *
- * Single-threaded by design: spec 17.5 sequences operations; interleaving coverage was
+ * Single-threaded by design: the model test sequences operations; interleaving coverage was
  * P5's job. Zero sleeps - the only bounded waits are the orphan-Cleaner await (the one
  * permitted nondeterminism, same as P5 case 4).
  *
@@ -47,7 +47,7 @@ import java.util.concurrent.atomic.AtomicInteger
  * it with at least one guaranteed orphan per sequence. The op appears and is model-checked;
  * the bulk run stays within CI budget.
  *
- * Accounting (spec 17.3 / 17.8): the store/registry pair lives per sequence, so a
+ * Accounting: the store/registry pair lives per sequence, so a
  * class-level `@RegisterExtension` cannot reach it. Instead [endOfSequence] calls
  * [AccountingFixture.verify] explicitly at the end of EVERY sequence - the fixture's
  * documented alternative to extension registration, and strictly more frequent than
@@ -214,9 +214,9 @@ internal class RandomizedModelTest {
     }
 
     /**
-     * Drops a handle without close and awaits the Cleaner's forced release (spec 6.3):
+     * Drops a handle without close and awaits the Cleaner's forced release:
      * bounded await on the orphan event while forcing GC - the one permitted
-     * nondeterminism (plan P3/P5 precedent). Net model change: released +1 orphan,
+     * nondeterminism (the P3/P5 precedent). Net model change: released +1 orphan,
      * refcounts unchanged.
      */
     private fun opOrphan(world: World, model: Model) {
@@ -357,7 +357,7 @@ internal class RandomizedModelTest {
 
     // ------------------------------------------------------------------ model + world
 
-    /** Spec 17.5 model state: current pointer, live set with per-generation refcounts. */
+    /** The model state: current pointer, live set with per-generation refcounts. */
     private class Model {
         var current: Long? = null
         var lastPublished = 0L

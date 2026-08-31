@@ -15,7 +15,7 @@ import kotlin.io.path.readText
  *
  * Datasets are built with `CREATE TABLE AS SELECT ... FROM range(n)`: no INSERT into DuckDB
  * (non-negotiable rule 1), no appender inside a fixture. Nothing here DELETEs, TRUNCATEs or
- * DROPs a DuckDB dataset (spec 5.5), and nothing creates a DuckDB temporary table (spec 7.2) -
+ * DROPs a DuckDB dataset, and nothing creates a DuckDB temporary table -
  * which matters more here than in earlier phases, because one of this phase's own checks bans
  * exactly that and a fixture that used one would make the check a lie.
  *
@@ -81,7 +81,7 @@ object Scratchpad {
     fun createAttemptTable(connection: Connection, table: String, marker: String, rows: Int) =
         exec(connection, "create table $table as ${attemptSelect(marker, rows)}")
 
-    /** The projection [createAttemptTable] lands, reused verbatim by the parquet half of spec 5.6. */
+    /** The projection [createAttemptTable] lands, reused verbatim by the parquet parity check. */
     fun attemptSelect(marker: String, rows: Int): String =
         """
         select cast(i as bigint)                            as lot_id,

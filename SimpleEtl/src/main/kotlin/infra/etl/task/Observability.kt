@@ -6,16 +6,16 @@ import org.jboss.logging.Logger
 private val log = Logger.getLogger(TaskRunListener::class.java)
 
 /**
- * What one run is, as every listener call site and every hook is told about it (spec 9.2, 9.4).
+ * What one run is, as every listener call site and every hook is told about it.
  *
  * The same instance is handed to every call of one run, so a listener that keys a log scope or a
  * tracing span off it can compare by identity and does not have to reassemble the run from four
  * separate fields.
  *
  * @param runId the one id that names this run everywhere: the scratch directory, the `runId` task
- *   variable, [TaskOutcome.runId] and the admin API (spec 8.2).
- * @param triggeredBy the caller identity of spec 8.2, null for a scheduled firing. Recorded, never
- *   authorised against - authorisation is the host's (spec 8.6).
+ *   variable, [TaskOutcome.runId] and the admin API.
+ * @param triggeredBy the identity of the caller that triggered the run, null for a scheduled
+ *   firing. Recorded, never authorised against - authorisation is the host's.
  * @param startedAt read from the engine's injected `Clock` at the top of the run, before scratch
  *   exists.
  */
@@ -27,7 +27,7 @@ data class TaskContext(
     val startedAt: Instant,
 )
 
-/** One phase of [task]. Phases group steps for logs and metrics and nothing else (spec 2.2). */
+/** One phase of [task]. Phases group steps for logs and metrics and nothing else. */
 data class PhaseContext(val task: TaskContext, val phase: String)
 
 /**
@@ -38,11 +38,11 @@ data class PhaseContext(val task: TaskContext, val phase: String)
 data class StepContext(val task: TaskContext, val phase: String, val step: String)
 
 /**
- * What a step did, reported once, on success (spec 9.2).
+ * What a step did, reported once, on success.
  *
  * @param rowsRead rows the source produced, and [rowsWritten] rows the target accepted. They are
- *   two numbers because a `transform` returning null drops a row (spec 9.1). Both are 0 for every
- *   step type except `pipe`: only `pipe` moves rows through the JVM (spec 2.3), and a `sql` or
+ *   two numbers because a `transform` returning null drops a row. Both are 0 for every
+ *   step type except `pipe`: only `pipe` moves rows through the JVM, and a `sql` or
  *   `materialize` affected-row count would make one field mean a different thing per step type.
  * @param durationMs the whole step, from its first attempt to the attempt that succeeded,
  *   including the retry backoff in between, measured on the engine's injected `Clock`.
@@ -54,7 +54,7 @@ data class StepContext(val task: TaskContext, val phase: String, val step: Strin
 data class StepResult(val rowsRead: Long, val rowsWritten: Long, val durationMs: Long, val attempt: Int)
 
 /**
- * Everything a run tells a [TaskRunListener], as one closed set (spec 9.2).
+ * Everything a run tells a [TaskRunListener], as one closed set.
  *
  * One sealed type rather than one method per event, because every implementation used to pay for
  * the whole set whether it cared about it or not: the no-op, the fan-out, the engine's own
@@ -120,10 +120,10 @@ sealed interface TaskEvent {
      * @param error the failure as the step threw it - the engine adds no wrapper of its own, but
      *   removes none either. On every JDBI path this is an `UnableToExecuteStatementException`
      *   around the `SQLException`, so a listener classifying a failure walks the cause chain
-     *   rather than testing the top-level type (spec 5.3 does the same).
+     *   rather than testing the top-level type (the engine's own transient test does the same).
      * @param willRetry decided and reported **before** the backoff sleep, so a listener sees the
      *   decision at the moment it is made rather than after the delay it causes. False both for a
-     *   non-transient failure and for a transient one that has run out of attempts (spec 5.3).
+     *   non-transient failure and for a transient one that has run out of attempts.
      */
     data class StepError(
         val step: StepContext,
@@ -143,10 +143,10 @@ sealed interface TaskEvent {
 internal fun TaskEvent.site(): String = "on${javaClass.simpleName}"
 
 /**
- * The observation seam of spec 9.2: the host's own logging, plugged into the run.
+ * The observation seam: the host's own logging, plugged into the run.
  *
  * **[on] is called from N task threads at once.** One [TaskEngine] serves every task and different
- * tasks run concurrently, each on its own confined dispatcher (spec 8.4), so an implementation
+ * tasks run concurrently, each on its own confined dispatcher, so an implementation
  * holding state must be thread safe, and it may not block - a listener that waits parks an ETL run
  * behind it.
  *
@@ -154,7 +154,7 @@ internal fun TaskEvent.site(): String = "on${javaClass.simpleName}"
  * applies the same isolation per listener. A logging plug-in that failed the task it was logging
  * would invert the point of the seam.
  *
- * `logging: false` on a task suppresses every event here for that task's runs (spec 9.2). Hooks
+ * `logging: false` on a task suppresses every event here for that task's runs. Hooks
  * are unaffected.
  */
 fun interface TaskRunListener {
@@ -172,7 +172,7 @@ fun interface TaskRunListener {
          *
          * Each listener is isolated from the others exactly as it is from the engine: one that
          * throws is logged and the event still reaches the listeners after it. That is why this
-         * exists at all - [TaskEngine] takes one listener, so a host wanting spec 9.2's "existing
+         * exists at all - [TaskEngine] takes one listener, so a host wanting its own "existing
          * in-house logging mechanism" *and* anything else has nowhere else to compose them.
          *
          * The engine's own catch is not made redundant by this: a host may attach a bare listener,

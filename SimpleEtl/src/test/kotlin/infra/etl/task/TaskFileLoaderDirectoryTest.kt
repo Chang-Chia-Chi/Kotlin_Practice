@@ -102,7 +102,7 @@ class TaskFileLoaderDirectoryTest {
     /**
      * What a Kubernetes ConfigMap volume actually looks like. The task directory is not a clean
      * set of task files: the kubelet keeps `..data` and a timestamped `..2026_08_27_...`
-     * directory beside them and swings a symlink to make an update atomic (spec 8.5). A scanner
+     * directory beside them and swings a symlink to make an update atomic. A scanner
      * that read everything it found would fail startup on the platform's own bookkeeping, and it
      * would do so only once deployed - never in a test that lays out a tidy directory.
      */
@@ -129,7 +129,7 @@ class TaskFileLoaderDirectoryTest {
      * The split is not arbitrary and it is not a guess about the implementation. Jackson knows a
      * source position for every deserialisation failure, so rule 1 can carry one for free; the
      * semantic rules work on the deserialised object tree, which holds no positions, so they
-     * report null. The field is nullable in spec 11.2 for exactly this reason. What this test
+     * report null. The field is declared nullable for exactly this reason. What this test
      * pins is that the free half stays free - it is the half that regresses silently, because
      * dropping it breaks no other assertion.
      */
@@ -180,8 +180,8 @@ class TaskFileLoaderDirectoryTest {
     }
 
     /**
-     * The loader's own constructor precondition, which no rule in spec 10 covers: `scratch` is
-     * the reserved per-run working file (spec 7.1), so a deployment that also configured a Jdbi
+     * The loader's own constructor precondition, which no numbered rule covers: `scratch` is
+     * the reserved per-run working file, so a deployment that also configured a Jdbi
      * bean called `scratch` would make rule 3 accept a name that means two different things.
      * P3's lesson - a public member with no test shipped a real defect while 134 tests were
      * green - is why it gets one line here rather than a mention in a report.

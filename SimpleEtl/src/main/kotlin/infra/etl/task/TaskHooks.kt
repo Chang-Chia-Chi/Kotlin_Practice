@@ -4,7 +4,7 @@ import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * Host code the framework runs at the end of a task (spec 9.4): invalidate a cache, notify a
+ * Host code the framework runs at the end of a task: invalidate a cache, notify a
  * downstream system, page someone.
  *
  * A hook receives only the [TaskContext] and holds nothing of the run - by the time it runs the
@@ -15,7 +15,7 @@ fun interface TaskHook {
 }
 
 /**
- * Where a host publishes its hooks (spec 9.4). Names, not classes, because a task file names its
+ * Where a host publishes its hooks. Names, not classes, because a task file names its
  * `onSuccess` and `onFailure` as strings and validation rule 5 checks those strings at startup.
  */
 interface TaskHookRegistry {
@@ -28,7 +28,7 @@ interface TaskHookRegistry {
  *
  * Backed by a [ConcurrentHashMap] because the two sides run on different threads with no
  * happens-before between them - `register` from the host's startup beans, [get] from the N task
- * threads of spec 8.4.
+ * threads running tasks concurrently.
  *
  * **[names] is a live view, not a snapshot.** The set a caller holds reflects registrations made
  * after it was taken, which is what lets `TaskFileLoader(hooks = registry.names)` be constructed

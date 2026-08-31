@@ -15,7 +15,7 @@ import org.junit.jupiter.params.provider.Arguments
 import org.junit.jupiter.params.provider.MethodSource
 
 /**
- * E10's whole claim, asserted: the task-shaped rules of spec 10 have **one** implementation,
+ * E10's whole claim, asserted: the task-shaped validation rules have **one** implementation,
  * and a task file and a definition built in code reach it and come back with the same sentence.
  *
  * Each case below is one rule, broken twice - once in YAML for `TaskFileLoader`, once in Kotlin for
@@ -83,7 +83,7 @@ class TaskRulesParityTest {
                     sql = "select 1 as x where 1 = :nosuchvar",
                 ),
             ),
-            // Rule 7 as spec 10 amends it (review finding H3): a non-scratch materialize binds
+            // Rule 7 as amended (review finding H3): a non-scratch materialize binds
             // nothing at all, because Oracle rejects a bind variable in DDL with ORA-01027.
             Case(
                 label = "rule 7 amended - a non-scratch materialize that binds",
@@ -160,7 +160,7 @@ class TaskRulesParityTest {
                     targetSql = "merge into wip_summary using (select 1) s on (1 = 1)",
                 ),
             ),
-            // Rule 12 as spec 10 amends it (review finding H2): a retried sql step off scratch.
+            // Rule 12 as amended (review finding H2): a retried sql step off scratch.
             Case(
                 label = "rule 12 - a retried sql step off scratch",
                 step = "bookkeeping",
@@ -182,7 +182,7 @@ class TaskRulesParityTest {
                     retries = 2,
                 ),
             ),
-            // Rule 13's scratch-only half: spec 5.6 puts the parquet file in the scratch directory.
+            // Rule 13's scratch-only half: the parquet file goes in the scratch directory.
             Case(
                 label = "rule 13 - PARQUET off scratch",
                 step = "build-summary",
@@ -206,7 +206,7 @@ class TaskRulesParityTest {
                     format = MaterializeFormat.PARQUET,
                 ),
             ),
-            // Rule 18: only createTable AUTO gets spec 5.5's attempt-suffixed name, so a retried
+            // Rule 18: only createTable AUTO gets an attempt-suffixed name, so a retried
             // REQUIRED scratch target would append onto the failed attempt's flushed rows.
             Case(
                 label = "rule 18 - a retried REQUIRED scratch target",
@@ -465,7 +465,7 @@ class TaskRulesParityTest {
     }
 
     /**
-     * Spec 5.3's defaults, on the path that had no loader in front of it (spec 2.1): 3 for a step
+     * The retry defaults, on the path that had no loader in front of it: 3 for a step
      * writing into scratch, 0 for anywhere else, resolved from a stated `null`.
      *
      * No call site here names `defaultRetries`, which is the point. Until E10 `retries` was a

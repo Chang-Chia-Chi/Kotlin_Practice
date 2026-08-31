@@ -25,7 +25,7 @@ import java.time.Duration
 
 private val log = Logger.getLogger(DefaultSnapshotCache::class.java)
 
-/** Everything the facade needs to serve one group (plan 2.4: a map and a per-group loop). */
+/** Everything the facade needs to serve one group: a map of these and a per-group loop. */
 internal class GroupRuntime(
     val registry: GenerationRegistry,
     val store: GenerationStore,
@@ -34,14 +34,13 @@ internal class GroupRuntime(
 )
 
 /**
- * Consumer-facing surface over [GenerationRegistry] (spec 5.1). One class implements both
- * interfaces on purpose (plan 2.3): callers that should not see the admin surface are
- * handed the [SnapshotCache] type, not a second object.
+ * Consumer-facing surface over [GenerationRegistry]. One class implements both interfaces
+ * on purpose: callers that should not see the admin surface are handed the [SnapshotCache]
+ * type, not a second object.
  *
- * The facade owns no mutable state and holds no lock: atomicity lives in the registry
- * (spec 5.1), and events fire from here, always outside the registry lock. It also holds
- * no schedule state (D24) - `waitBudget` is per call and [currentInfo] is the caller's
- * freshness seam.
+ * The facade owns no mutable state and holds no lock: atomicity lives in the registry, and
+ * events fire from here, always outside the registry lock. It also holds no schedule state -
+ * `waitBudget` is per call and [currentInfo] is the caller's freshness seam.
  */
 internal class DefaultSnapshotCache(
     config: SnapshotCacheConfig,
@@ -77,7 +76,8 @@ internal class DefaultSnapshotCache(
         val runtime = runtimeOf(group)
         val lease = acquireLease(runtime, group, waitBudget)
         try {
-            // Constructed at the spi boundary, held here only as api.Snapshot (D28).
+            // Constructed at the spi boundary, held here only as api.Snapshot, so no core
+            // type names java.sql.Connection in its bytecode.
             return SnapshotHandle(lease.opened, lease.generationInfo.dataAsOf) { orphaned ->
                 release(runtime, group, lease, orphaned)
             }
@@ -96,15 +96,15 @@ internal class DefaultSnapshotCache(
     override fun liveGenerations(group: GroupId): List<GenerationState> = runtimeOf(group).registry.liveGenerations()
 
     /**
-     * Spec 10.2 steps 1 + 4. Step 1: every group is marked shutting down first, so new
-     * acquires are refused everywhere and all budget-waiters release at once. Step 4:
+     * The refusal and drain halves of shutdown. First every group is marked shutting down,
+     * so new acquires are refused everywhere and all budget-waiters release at once. Then
      * leases drain under ONE total [leaseDrainTimeout] deadline across all groups
      * (nanoTime-based like the waits themselves, since an injected [Clock] cannot drive
      * `awaitNanos`). Every lease still outstanding at the deadline is WARN-logged with
      * owner and hold duration - the only way to identify what is delaying shutdown - and
-     * returned. Logging runs outside the registry lock (plan 2.5). Steps 2 (stop
-     * scheduling) and 3 (interrupting an in-flight build) are P9 wiring. Idempotent: a
-     * repeated call re-checks and returns the current outstanding list without error.
+     * returned. Logging runs outside the registry lock. Stopping the schedule and
+     * interrupting an in-flight build are P9 wiring. Idempotent: a repeated call re-checks
+     * and returns the current outstanding list without error.
      */
     fun shutdown(): List<LeaseInfo> {
         groups.values.forEach { it.registry.beginShutdown() }
@@ -135,10 +135,10 @@ internal class DefaultSnapshotCache(
         checkNotNull(runtimeOf(group).cycle) { "group '$group' was wired without a RefreshCycle" }
 
     /**
-     * The `waitBudget` path (spec 5.1, 9.3, D21/D22). Shutdown is checked first; a zero
-     * budget never enters a wait; a positive budget waits on the registry condition -
-     * signalled by publish and shutdown, never polled - and a shutdown signal during the
-     * wait wins over the remaining budget (spec 10.2 step 1).
+     * The `waitBudget` path. Shutdown is checked first; a zero budget never enters a wait;
+     * a positive budget waits on the registry condition - signalled by publish and
+     * shutdown, never polled - and a shutdown signal during the wait wins over the
+     * remaining budget.
      */
     private fun acquireLease(runtime: GroupRuntime, group: GroupId, waitBudget: Duration): RegistryLease {
         val registry = runtime.registry
@@ -170,13 +170,13 @@ internal class DefaultSnapshotCache(
      * Single release path for copyOut and the handle callback. The registry makes the
      * refcount decrement idempotent (I6); the handle's cleanup runs at most once, so each
      * lease produces exactly one leaseReleased or leaseOrphaned event, never both. A lease
-     * that outlived its deadline additionally produces one leaseExpired (spec 6.2).
+     * that outlived its deadline additionally produces one leaseExpired.
      */
     private fun release(runtime: GroupRuntime, group: GroupId, lease: RegistryLease, orphaned: Boolean) {
         runtime.registry.release(lease)
         val releasedAt = clock.instant()
         val heldFor = Duration.between(lease.info.acquiredAt, releasedAt)
-        // Diagnostic only - nothing was reclaimed early (spec 6.2, D8). This is the
+        // Diagnostic only - nothing was reclaimed early. This is the
         // release-time half of the deadline signal; a lease still *open* past its deadline
         // is caught by P9 polling GenerationRegistry.expiredLeases() on the schedule tick.
         if (lease.info.deadline.isBefore(releasedAt)) {

@@ -11,13 +11,12 @@ import java.sql.Connection
 import org.duckdb.DuckDBAppender
 import org.duckdb.DuckDBConnection
 
-/** Whether the framework generates the target table's DDL, or requires it to exist (spec 4.4). */
+/** Whether the framework generates the target table's DDL, or requires it to exist. */
 enum class CreateTable { AUTO, REQUIRED }
 
 /**
  * Writes Rows into a DuckDB table through [DuckDBAppender]. Row-by-row and multi-row INSERT are
- * both too slow at this row count, so a DuckDB target is always a table and never a statement
- * (spec 4.6).
+ * both too slow at this row count, so a DuckDB target is always a table and never a statement.
  *
  * **Append is positional.** Every column of the target gets exactly one value per row, in
  * catalog ordinal order. The order comes from [catalogColumns] and never from YAML or from the
@@ -50,13 +49,13 @@ enum class CreateTable { AUTO, REQUIRED }
  * and any nullable column outside VARCHAR / DECIMAL / TIMESTAMP / BIGINT.
  *
  * A framework-created table carries no PRIMARY KEY, UNIQUE, or index: such a violation fails the
- * whole append batch and inserts nothing (spec 4.6). NOT NULL is emitted, because it is what
+ * whole append batch and inserts nothing. NOT NULL is emitted, because it is what
  * keeps a NOT NULL source column on the faster primitive path when the table is read back.
  *
- * The [connection] belongs to the caller and is never closed here; the appender is (spec 7.4).
+ * The [connection] belongs to the caller and is never closed here; the appender is.
  *
  * @param table the target table, optionally `schema.table`; defaults to DuckDB's `main` schema.
- * @param step the step name, so that every error names it (spec 4.4).
+ * @param step the step name, so that every error names it.
  */
 class DuckDbTableWriter(
     private val connection: Connection,
@@ -89,7 +88,7 @@ class DuckDbTableWriter(
             open.endRow()
         }
         // Not a memory bound - S1 measured the same peak RSS with and without it. It is called
-        // once per chunk so that a chunk boundary is an observable event (spec 4.6).
+        // once per chunk so that a chunk boundary is an observable event.
         open.flush()
         return chunk.size
     }
@@ -105,7 +104,7 @@ class DuckDbTableWriter(
      * `CREATE TABLE` from the source metadata. Every accepted column keeps its natural
      * [CanonicalType.duckDbType]: the four types that accept null - VARCHAR, DECIMAL, TIMESTAMP,
      * BIGINT - are already the natural mapping of the four canonical types that may be nullable,
-     * so one mapping table both creates the table and drives the appender (spec 4.4).
+     * so one mapping table both creates the table and drives the appender.
      *
      * DECIMAL is the one type that does not use [CanonicalType.duckDbType] verbatim: see [ddlType].
      */
@@ -124,7 +123,7 @@ class DuckDbTableWriter(
      * DECIMAL takes the source's own precision and scale, because the bare keyword resolves to
      * `DECIMAL(18,3)` - three decimal places and fifteen integer digits. That silently rounds a
      * `NUMBER(38,10)`, and an ordinary `NUMBER(18)` key at or above 1e15 fails the append outright,
-     * mid-write, after earlier chunks have committed (spec 4.4, 5.4).
+     * mid-write, after earlier chunks have committed.
      *
      * An unusable pair is rejected here rather than guessed at. A source reports one for an
      * unconstrained `NUMBER` (p=0, s=-127), a `FLOAT` (p=126, s=-127), a negative scale, and every
@@ -157,7 +156,7 @@ class DuckDbTableWriter(
             }
             // The dispatch reads the value with the accessor matching the target type, so a mismatch
             // makes Row.string / Row.decimal / Row.dateTime throw on row 1. Detectable without a Row,
-            // so it is detected here (spec 4.4).
+            // so it is detected here.
             require(sourceColumn == null || sourceColumn.type == column.type) {
                 "step '$step', column '${column.name}': the source produces ${sourceColumn?.type} and " +
                     "table '$table' declares ${column.type} (${column.type.duckDbType}). CAST the column " +
@@ -198,7 +197,7 @@ class DuckDbTableWriter(
                 if (column.nullable) appender.appendBigDecimal(row.long(column.name)?.toBigDecimal())
                 else appender.append(row.long(column.name) ?: missing(column))
             // The elvis branches below are defensive: open() rejects a nullable DOUBLE or BOOLEAN,
-            // so a null can only mean the Row is missing the column (spec 4.4, 4.6).
+            // so a null can only mean the Row is missing the column.
             CanonicalType.DOUBLE -> appender.append(row.double(column.name) ?: missing(column))
             CanonicalType.BOOLEAN -> appender.append(row.bool(column.name) ?: missing(column))
             CanonicalType.DATE, CanonicalType.INSTANT, CanonicalType.BYTES -> throw IllegalStateException(
@@ -267,13 +266,13 @@ private val NULL_CAPABLE = setOf(
 
 /**
  * Validation rule 15 as a predicate: the reason [column] cannot be written to DuckDB, or null when
- * it can. Spec 4.6's table, in one place.
+ * it can. The type-and-nullability table from [DuckDbTableWriter]'s KDoc, in one place.
  *
  * Lifted out of [DuckDbTableWriter] in P6 so that startup and writer open decide with the same
  * code, the way P4 lifted `quote` to `quoteIdentifier`. The two reach it with column types from
  * different places and neither can stand in for the other: `TaskFileLoader` applies it to every
- * `transform.addColumns` entry, because a task file states those types outright (rule 15, spec
- * 3.2), while a *table's* declared types live in a catalog the run creates or in result set
+ * `transform.addColumns` entry, because a task file states those types outright (rule 15),
+ * while a *table's* declared types live in a catalog the run creates or in result set
  * metadata that exists only once the source query runs, so the writer applies it at open.
  */
 internal fun unwritableToDuckDb(column: ColumnMeta): String? = when (column.type) {
