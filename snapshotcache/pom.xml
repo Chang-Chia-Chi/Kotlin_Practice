@@ -94,6 +94,11 @@
             <groupId>io.minio</groupId>
             <artifactId>minio</artifactId>
             <version>${minio.version}</version>
+            <!-- optional, the micrometer precedent: the archive layer is a consumer living in
+                 this module, and its object-store client must not ride transitively into every
+                 cache consumer - the reference host ships archiving disabled. A host that
+                 archives declares minio itself, as etl-host does. -->
+            <optional>true</optional>
         </dependency>
         <!-- The inventory CLOB codec (spec 18.2). -->
         <dependency>

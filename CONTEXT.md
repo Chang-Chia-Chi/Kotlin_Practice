@@ -65,14 +65,14 @@ architecture all three share.
 (`frameworks/`) so the layout-law boundary is a directory boundary, carry the CONTEXT files and
 each module's ArchitectureTest with them, and copy `etl-host/` into your services tree as the
 host template. Vendoring is the free moment for the two cosmetic renames (module casing
-`SimpleEtl` -> `simple-etl`; package root `infra.etl` if desired) and for splitting
-`snapshotarchive` into its own `frameworks/snapshot-archive/` module. The archive split is a
-ruling, not an option: `io.minio` is compile-scoped in the shared pom, so today every cache
-consumer inherits an object-store client most deployments never use, and the reason for
-cohabitation - tests needing `internal` construction - dissolved when `openSnapshotCache` made
-the front door public (the split module tests through it, as `etl-host` already wires it; the
-internals-reaching e2e stays in the cache's own test tree). Each rename/split churns every
-path, so do them when paths churn anyway, never before. Your project code follows your conventions; the frameworks keep theirs
+`SimpleEtl` -> `simple-etl`; package root `infra.etl` if desired). Splitting
+`snapshotarchive` into its own `frameworks/snapshot-archive/` module is a legibility
+preference, not a necessity: its one hard cost - `io.minio` riding transitively into every
+cache consumer - was fixed in place by marking it `optional` (the micrometer precedent; an
+archiving host declares the client itself, as `etl-host` does). What stays ruled out is only
+making the archive part of the cache's *unit* (D30: a consumer, never part of it - the cache
+boots with neither MinIO nor a network). Keep one module or split at vendoring; either is
+sound, and each rename/split churns every path, so do them when paths churn anyway. Your project code follows your conventions; the frameworks keep theirs
 behind the fence.
 
 Process, tiers of authority, and commands: root `CLAUDE.md`. Every past decision and decline:

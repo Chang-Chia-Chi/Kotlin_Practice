@@ -125,7 +125,12 @@
         <!-- The archive end-to-end test's object store. Newer than the core the Oracle module
              pins, so its own Testcontainers core is excluded and 1.20.4 serves both container
              types - the same arrangement, and the same reason, as snapshotcache/pom.xml.
-             `io.minio:minio` itself is compile-scope there and arrives transitively. -->
+             `io.minio:minio` itself is `optional` there - the archive layer is a consumer inside the
+             cache's module, and its client must not ride into every cache consumer - so an
+             archiving host declares it explicitly, here. -->
+        <dependency>
+            <groupId>io.minio</groupId><artifactId>minio</artifactId><version>8.5.17</version>
+        </dependency>
         <dependency>
             <groupId>org.testcontainers</groupId><artifactId>minio</artifactId>
             <version>${testcontainers.minio.version}</version><scope>test</scope>
