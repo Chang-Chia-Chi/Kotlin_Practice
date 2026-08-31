@@ -158,7 +158,7 @@ internal class RefreshCycle(
                     val failures = registry.recordVerifyFailure()
                     if (failures == config.verify.consecutiveFailureThreshold) {
                         log.errorf(
-                            "Group %s has failed verification %d times in a row; escalating to critical (spec 8.5)",
+                            "Group %s has failed verification %d times in a row; escalating to critical",
                             group, failures,
                         )
                         emit(group) { events.verifyFailureEscalated(group, failures) }
@@ -254,7 +254,7 @@ internal class RefreshCycle(
                 store.delete(gen)
             } catch (failure: Exception) {
                 log.warnf(
-                    "Reclaim of generation %d of group %s failed (%s); deferred to the next pass (spec 9.2)",
+                    "Reclaim of generation %d of group %s failed (%s); deferred to the next pass",
                     gen, group, failure.message,
                 )
                 registry.deferReclaim(gen)
@@ -277,7 +277,7 @@ internal class RefreshCycle(
     private fun blockedByK(holders: List<LeaseInfo>): RefreshOutcome {
         val now = clock.instant()
         log.warnf(
-            "Refresh of group %s is blocked: live generations exceed K=%d; pausing until leases release (spec 6.1)",
+            "Refresh of group %s is blocked: live generations exceed K=%d; pausing until leases release",
             group, registry.maxLive,
         )
         for (lease in holders) {
