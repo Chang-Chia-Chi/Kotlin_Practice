@@ -219,11 +219,25 @@ destroys the session (D9).
 | Tier | Mechanism | Effect on the session |
 |---|---|---|
 | Cooperative | Transfers run with a `SftpProgressMonitor` whose `count` returns `false` once the coroutine is cancelled; listings run with an `LsEntrySelector` that returns `BREAK`. JSch closes the remote handle cleanly. | Usable, returned to the pool after validation |
-| Socket timeout | `socketTimeout` on the session unblocks a stalled read with an exception. | Poisoned, evicted |
+| Keepalive ladder | The server-alive probes fail one after another and unblock the stalled read with an exception, after `keepAlive x (serverAliveCountMax + 1)`. | Poisoned, evicted |
 | Forced | If neither tier has unblocked the call within `cancelGrace` (default 5 s), the cancellation handler calls `abort()`, which disconnects the session from another thread. | Poisoned, evicted |
 
 Resilience4j's `TimeLimiter` on a suspend function is `withTimeout`, which enters this ladder at
-the cooperative tier. The socket timeout is what actually bounds a hung server.
+the cooperative tier. The keepalive ladder is what actually bounds a hung server.
+
+**The middle tier is `keepAlive`, not `socketTimeout`** (D26, measured against mwiede JSch
+2.28.7). JSch implements `serverAliveInterval` *by* setting the socket read timeout, so it
+overwrites `session.timeout` whenever it is set, and the DSL requires `keepAlive` to be
+positive, so it is always set. With `socketTimeout = 500 ms` and the default
+`keepAlive = 30 s`, a stalled tunnel took 60 s to fail; with `socketTimeout = 5 s` and
+`keepAlive = 300 ms` the same stall failed in 1.2 s. `socketTimeout` therefore bounds
+nothing at present. The knob stays in the DSL because it is what a reader reaches for, but
+until it is made to mean something the bound on a hung server is
+`keepAlive x (serverAliveCountMax + 1)`, and that is the number to size against an SLA.
+
+The same value bounds the key exchange, which is a trap for any test that shortens it: a
+`keepAlive` below the handshake time fails `connect()` with `timeout in waiting for rekeying
+process.` rather than failing the read.
 
 ### 5.4 Error mapping
 
@@ -614,6 +628,8 @@ transport in the testkit is a genuine second implementation.
 | D21 | `maxSize` follows the infra team's five; `maxConcurrentTransfers` defaults to four | Leaves one session for the lister and a human |
 | D22 | The connector computes a digest during staging; the application compares it | The digest is free while bytes stream through; the expected value's origin is application knowledge. Checksum is integrity, not completeness, and cannot replace the readiness check because it needs the download first |
 | D23 | Unmapped JSch errors are `Unknown`, recoverable, poisoned, logged raw and counted | JSch error text is not an API; a wording change must surface as a metric and a log line, never as a silent misclassification or a dead connector |
+| D26 | The middle cancellation tier is the keepalive ladder, not `socketTimeout` | Measured against mwiede 2.28.7 (Sec 5.3): JSch implements `serverAliveInterval` by setting the socket read timeout, so a positive `keepAlive` always overwrites `session.timeout`. A hung server is bounded by `keepAlive x (serverAliveCountMax + 1)` and not at all by `socketTimeout` |
+| D27 | `ServerFailure` does not poison the session | A well-formed `SSH_FX_FAILURE` proves the channel parsed the request and answered, so the session is healthy and a per-request refusal is no reason to throw it away. Sec 8.2 expects exactly that status from a server without `posix-rename`, which would otherwise evict a session on every overwrite rename. Real transport breakage arrives with an `IOException` cause and is classified `SessionLost` before this rule is reached |
 
 ---
 
@@ -627,12 +643,14 @@ transport in the testkit is a genuine second implementation.
    stalled uploader can fool.
 2. **Temp folder ownership** - `autoCreate` creates it; if the account cannot `mkdir`, ask the
    upstream to create it and the probe will verify it.
-3. **JSch error wording** - an implementation task, not a question for the maintainer. JSch
-   reports many failures as a `JSchException` whose only content is free text such as
-   `Auth fail` or `session is down`, so classification (Sec 5.4) must match on those strings,
-   and a library upgrade can change them silently. The adapter phase assembles the table
-   against the pinned mwiede version and adds an embedded-server test per row, so a wording
-   change fails a test instead of misclassifying an error in production.
+3. ~~**JSch error wording**~~ - **closed by T2.** The table was assembled by staging each real
+   condition against mwiede 2.28.7 and reading what came out; every row has an
+   embedded-server test, so a wording change fails a test instead of misclassifying an error.
+   Two findings worth carrying: the host key and proxy failures have exception types of their
+   own in this fork and are matched by type rather than wording, and both transport breakages
+   arrive as `SftpException` with the generic `SSH_FX_FAILURE` code and an `IOException`
+   cause - the same type and code the server uses for its own refusals - so the mapper must
+   check the cause before the status code. The measured table is in the T2 progress entry.
 
 Resolved during review: the proxy imposes no connection cap, so `maxSize` is bounded only by
 the infra team's five sessions (D21).

@@ -53,6 +53,39 @@ another project's. Spec Sec 3.2 (D3) fixes `org.slf4j` for this connector, which
 routes into its log manager without configuration, and which keeps `core` free of any
 framework. Use slf4j; do not reintroduce a framework logger in `core`.
 
+### C4: `ServerFailure` does not poison (ruling on T2's open question)
+
+T2 read spec Sec 10.1's silence as poisoning and asked for confirmation. Its own argument
+against is the right one and is now the ruling: a well-formed `SSH_FX_FAILURE` proves the
+channel parsed the request and answered, so the session is demonstrably healthy. Poisoning
+there throws away a good session for a per-request refusal - and spec Sec 8.2 expects exactly
+that status from a server without `posix-rename`, so an overwrite rename would evict a session
+on every call. Real transport breakage carries an `IOException` cause and is classified
+`SessionLost` before this rule is reached. Set `ServerFailure.poisons = false`. Spec D27
+records it. `ConnectFailed`, `SessionLost` and `OperationTimeout` keep poisoning.
+
+### C5: T2's change to a T1 test assertion is approved
+
+The standing rule is that no ticket modifies an earlier ticket's test. T2 changed
+`JschTransportTest.a strict host key policy refuses a server whose key it has never seen` from
+asserting `JSchUnknownHostKeyException` to asserting `HostKeyRejected`, and flagged it. The
+change is approved because it strengthens the test rather than weakening it: T1 pinned the
+JSch type only until a mapping existed, and after T2 a JSch type arriving there would mean the
+transport seam had leaked. This is the shape of exception the rule allows - an earlier
+assertion that a later ticket makes stricter, declared in the progress entry. An assertion
+that gets loosened, deleted or retargeted to make new code pass is still a stop-and-report.
+
+### C6: spec Sec 5.3 amended - the middle cancellation tier is `keepAlive`
+
+T2 measured that `socketTimeout` bounds nothing: JSch implements `serverAliveInterval` by
+setting the socket read timeout, so a positive `keepAlive` always overwrites `session.timeout`.
+A stall took 60 s under `socketTimeout = 500 ms` with the default `keepAlive = 30 s`, and 1.2 s
+under `socketTimeout = 5 s` with `keepAlive = 300 ms`. This is a measurement, so it outranks
+the document: spec Sec 5.3 and D26 were rewritten before ticket 08 could build a ladder on the
+false premise. `socketTimeout` stays in the DSL as the knob a reader reaches for, but the real
+bound on a hung server is `keepAlive x (serverAliveCountMax + 1)`. Ticket 08 owns deciding
+whether to make `socketTimeout` mean something or to remove it.
+
 ---
 
 ## T1: Walking skeleton: one session through the transport seam

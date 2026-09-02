@@ -66,6 +66,11 @@ without a version in the modules, the way the existing modules do.
   by the line count alone - but a ticket that has clearly outgrown its slice is a stop-and-report.
 - **No `Thread.sleep` in tests.** Determinism comes from injected `java.time.Clock`,
   `kotlinx-coroutines-test` virtual time, and declared hook points.
+- **Write `@Test fun x() = runBlocking<Unit> { ... }`, never bare `runBlocking`.** A test
+  function whose last expression is not `Unit` is silently not run, and JUnit 5.11 reports
+  nothing - the class just shows fewer tests than it has. T2 lost four of nine tests this way
+  and found them only by counting. Count the tests your class reports against the tests you
+  wrote, every time.
 - Invariant tests are named `I<n>_<description>`; scenario tests are named by their `S<n>` ID.
 - Every new configuration knob lands in the DSL block for its area, with build-time validation.
 - Every new meter uses the exact name from spec Sec 13. No new metric names.
