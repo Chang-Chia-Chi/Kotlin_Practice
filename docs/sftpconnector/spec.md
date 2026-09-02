@@ -309,10 +309,14 @@ The ack model gives backpressure, post-processing and redelivery in one mechanis
   `redeliver` is true, allows the file to be emitted on a later tick. `redeliver = false`
   excludes it until restart.
 - Cancellation of the collector with unacked files is treated as nack with redelivery.
-- Ack and nack are valid in any state of the event, including before any download. A
-  consumer whose ledger already knows the file calls `ack()` and never downloads. This follows
-  the messaging model (Kafka offset commit, NATS ack and term) rather than Camel or Spring
-  Integration, which filter before emitting and therefore never move an already-seen file.
+- Ack is always the consumer's call, after its own work on the file is complete. The
+  connector never acks on its own; the `consume` helper below acks only when the consumer's
+  block returns normally. The connector also does not require a download to precede an ack:
+  a consumer whose ledger shows the file was fully processed in an earlier run, and only the
+  server-side move is missing, may call `ack()` directly. That is a permission for crash
+  recovery, not a behavior; a pipeline that always downloads first loses nothing. This follows
+  the messaging model (Kafka offset commit, NATS ack) rather than Camel or Spring Integration,
+  which filter before emitting and therefore never move an already-seen file.
 - Each of ack and nack is accepted once; the second call is logged and ignored.
 - `ackWait` (optional) makes an unacked file eligible again after the duration, like NATS.
   Off by default: with a single consumer, a stuck file is a consumer bug to surface, not to
@@ -601,14 +605,23 @@ transport in the testkit is a genuine second implementation.
 
 ## 16. Open Items Before Implementation
 
-1. **Proxy connection limit** - unknown; connect failures through the proxy classify as
-   `ConnectFailed` and the breaker handles them, but a known cap would set `maxSize` directly.
-2. **Producer-side completeness convention** - ask the upstream for a marker file or
-   temp-name-then-rename; until then the default readiness check is heuristic.
-3. **Temp folder ownership** - `autoCreate` creates it; if the account cannot `mkdir`, ask the
+1. **Producer-side completeness convention** - the uploader decides whether a listed file
+   can be trusted as complete. Two conventions make it certain: upload under a temporary name
+   and rename when finished (rename is atomic, so a half-written file never carries the final
+   name), or write a marker file next to the finished file. Ask the upstream team how they
+   upload. Until they answer, the default readiness check (Sec 7.5) is a heuristic that a
+   stalled uploader can fool.
+2. **Temp folder ownership** - `autoCreate` creates it; if the account cannot `mkdir`, ask the
    upstream to create it and the probe will verify it.
-4. **Error-message table for JSch** - to be assembled against the mwiede version pinned in the
-   build, with a test that fails when a mapped message disappears from the library.
+3. **JSch error wording** - an implementation task, not a question for the maintainer. JSch
+   reports many failures as a `JSchException` whose only content is free text such as
+   `Auth fail` or `session is down`, so classification (Sec 5.4) must match on those strings,
+   and a library upgrade can change them silently. The adapter phase assembles the table
+   against the pinned mwiede version and adds an embedded-server test per row, so a wording
+   change fails a test instead of misclassifying an error in production.
+
+Resolved during review: the proxy imposes no connection cap, so `maxSize` is bounded only by
+the infra team's five sessions (D21).
 
 ---
 
