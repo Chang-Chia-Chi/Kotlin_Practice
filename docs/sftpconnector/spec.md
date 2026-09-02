@@ -230,9 +230,12 @@ the cooperative tier. The socket timeout is what actually bounds a hung server.
 All JSch errors are mapped in one class into the hierarchy of Sec 10. `SftpException` carries an
 SSH_FX status code and maps by code. `JSchException` carries only a message and maps by a
 maintained table of message prefixes (`Auth fail`, `timeout`, `session is down`,
-`ProxyHTTP`, `UnknownHostKey`, `channel is not opened`). Unmapped messages classify as
-recoverable and poisoned, never as fatal, so a new message wording degrades to a retry rather
-than to a dead connector.
+`ProxyHTTP`, `UnknownHostKey`, `channel is not opened`). Unmapped messages become
+`Unknown(rawMessage, cause)`, a recoverable and poisoned error, never fatal, so a new message
+wording degrades to a retry rather than to a dead connector. `Unknown` keeps the original JSch
+message and exception verbatim, logs at WARN with the raw text so the wording can be added to
+the table, and increments `sftp_error_unmapped_total`. An unmapped error is therefore visible
+in production the first time it occurs, not silently absorbed.
 
 ---
 
@@ -268,7 +271,14 @@ lease, such as working-directory affinity; it is not needed by the source.
 
 Download writes `<stagingDir>/<name>.part`, verifies the byte count against the listed size,
 then renames atomically to `<name>`. An abort deletes the `.part` file, so no partial file
-survives a run. The staging directory must be local disk; on NFS the rename and delete semantics
+survives a run. While writing, the client computes a digest of the bytes (algorithm from
+`staging.digest`, default SHA-256, MD5 selectable) and returns it on `LocalFile.digest`. The
+digest costs nothing extra because the bytes are already streaming through, and it is the
+connector's whole contribution to integrity. Comparing it against an expected value is the
+application's job, because only the application knows where the expected value comes from
+(a sidecar file, a manifest, a database row). Completeness (Sec 7.5) asks whether the uploader
+has finished writing; integrity asks whether the bytes arrived intact. They are answered at
+different times, before and after the download, and by different parties (D22). The staging directory must be local disk; on NFS the rename and delete semantics
 your migration notes describe would apply (D11).
 
 ---
@@ -431,6 +441,7 @@ SftpException (sealed)
     SessionLost          socket timeout, "session is down", connection lost
     OperationTimeout
     ServerFailure        SSH_FX_FAILURE and other generic codes
+    Unknown              unmapped JSch message, raw text preserved; poisons
     PermissionDenied     poisons = false; no fast retry
     NoSuchFile           poisons = false; per-operation meaning (Sec 6.1)
   Fatal
@@ -513,7 +524,7 @@ sftpConnector("vendor-drop") {
         overlap = OverlapPolicy.SKIP
         maxFilesPerPoll = 1000; maxInFlight = 16
         readiness = sizeStable(checks = 2, interval = 10.seconds) + minAge(1.minutes)
-        staging { dir = Path("/var/etl/stage") }
+        staging { dir = Path("/var/etl/stage"); digest = Digest.SHA256 }
         onAck = move("temp/", overwrite = true); onNack = noop()
         autoCreate = true; startupProbe = true
     }
@@ -540,6 +551,7 @@ Tag `endpoint` on everything; never tag by file name or tick number.
 | `sftp_pool_leak_total` | counter | |
 | `sftp_op_seconds{op, result}` | timer | result: ok, recoverable, fatal, cancelled |
 | `sftp_retry_total{op}` | counter | |
+| `sftp_error_unmapped_total` | counter | any non-zero value is a table entry to add |
 | `sftp_breaker_state` | gauge | 0 closed, 1 half-open, 2 open |
 | `sftp_poll_seconds{result}` | timer | |
 | `sftp_poll_files{state}` | counter | state: seen, emitted, notReady, gone |
@@ -600,6 +612,8 @@ transport in the testkit is a genuine second implementation.
 | D19 | Startup probe with marker rename, disableable | Cross-filesystem rename fails with a generic code; finding that at the first ack an hour later is worse than at startup |
 | D20 | `PermissionDenied` is recoverable but waits a full tick | Ops can fix it without a restart; fast retries would only trip the breaker |
 | D21 | `maxSize` follows the infra team's five; `maxConcurrentTransfers` defaults to four | Leaves one session for the lister and a human |
+| D22 | The connector computes a digest during staging; the application compares it | The digest is free while bytes stream through; the expected value's origin is application knowledge. Checksum is integrity, not completeness, and cannot replace the readiness check because it needs the download first |
+| D23 | Unmapped JSch errors are `Unknown`, recoverable, poisoned, logged raw and counted | JSch error text is not an API; a wording change must surface as a metric and a log line, never as a silent misclassification or a dead connector |
 
 ---
 
