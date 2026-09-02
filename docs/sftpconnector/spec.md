@@ -488,7 +488,7 @@ path and attempt number in its message.
 1. Build and validate configuration (Sec 12). Invalid configuration is `ConfigurationError`
    and the connector does not start.
 2. Open one session and run the probe: `realpath` of each watched directory, `mkdir` of each
-   action target when `autoCreate` is on, and a rename of a zero-byte marker into each action
+   action target when `createActionTargets` is on, and a rename of a zero-byte marker into each action
    target and back. A failed probe is fatal at startup. `startupProbe = false` disables the
    marker rename for servers where writing a marker is unwelcome.
 3. Fill to `minIdle` in the background; readiness does not wait for it.
@@ -540,7 +540,7 @@ sftpConnector("vendor-drop") {
         readiness = sizeStable(checks = 2, interval = 10.seconds) + minAge(1.minutes)
         staging { dir = Path("/var/etl/stage"); digest = Digest.SHA256 }
         onAck = move("temp/", overwrite = true); onNack = noop()
-        autoCreate = true; startupProbe = true
+        createActionTargets = true; startupProbe = true
     }
 }
 ```
@@ -641,8 +641,8 @@ transport in the testkit is a genuine second implementation.
    name), or write a marker file next to the finished file. Ask the upstream team how they
    upload. Until they answer, the default readiness check (Sec 7.5) is a heuristic that a
    stalled uploader can fool.
-2. **Temp folder ownership** - `autoCreate` creates it; if the account cannot `mkdir`, ask the
-   upstream to create it and the probe will verify it.
+2. **Temp folder ownership** - `createActionTargets` creates it; if the account cannot `mkdir`,
+   ask the upstream to create it and the probe will verify it.
 3. ~~**JSch error wording**~~ - **closed by T2.** The table was assembled by staging each real
    condition against mwiede 2.28.7 and reading what came out; every row has an
    embedded-server test, so a wording change fails a test instead of misclassifying an error.
