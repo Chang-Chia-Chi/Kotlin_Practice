@@ -1,5 +1,6 @@
 package sftp.connector.transport
 
+import java.io.InputStream
 import java.io.OutputStream
 
 /**
@@ -22,12 +23,17 @@ interface SftpTransport {
 }
 
 /**
- * One live session carrying exactly one SFTP channel.
+ * Everything one session can be asked to do, and nothing about how long it lives.
  *
- * The channel serializes whatever is asked of it, so a connection belongs to one caller at a
- * time. That is the pool's job to arrange.
+ * The split is what lets a borrowed session be handed to somebody who did not open it. A caller
+ * that got its session from the pool must not end it - the pool lends the same session out again
+ * afterwards, and a caller that hung up on it would break the next caller's work rather than its
+ * own. So it is given this, which offers the operations and does not offer the hang-up.
+ *
+ * The channel underneath serializes whatever is asked of it, so a session belongs to one caller
+ * at a time. That is the pool's job to arrange.
  */
-interface SftpConnection {
+interface SftpSession {
 
     /**
      * Resolves [path] to the absolute path the server knows it by, following symbolic links.
@@ -74,6 +80,59 @@ interface SftpConnection {
      * to happen to it.
      */
     suspend fun readTo(path: String, sink: OutputStream)
+
+    /**
+     * Writes the whole of [source] to [path], replacing whatever was there, and returns when the
+     * last byte has been acknowledged.
+     *
+     * The mirror of [readTo], and one call for the same reason: every byte crosses a blocking
+     * socket write, and handing back a stream for the caller to pump would put those writes on
+     * whatever thread the caller happened to be on. [source] is left open, because whoever
+     * supplied it knows what else has to happen to it.
+     *
+     * A path that already holds a file is truncated. Refusing to disturb one is a policy, and it
+     * is decided above this seam because the decision is the caller's rather than the server's.
+     */
+    suspend fun writeFrom(path: String, source: InputStream)
+
+    /**
+     * Moves [from] to [to] in one request.
+     *
+     * What happens to a file already at [to] is the server's answer and not this one's, and the
+     * two possible answers are opposites. A server offering the POSIX rename extension replaces it
+     * with no moment in between, whether or not that was wanted; one without the extension refuses
+     * outright, and a caller that wanted the replacement has to clear the way itself and accept the
+     * gap that opens while it does. So a caller that cares either way decides above this seam
+     * rather than sending the request and reading the answer.
+     *
+     * @throws sftp.connector.error.NoSuchFile when [from] is not there - which is the answer a
+     *   retry needs, because it means either that nothing was ever there or that an earlier
+     *   attempt at this same rename already landed.
+     */
+    suspend fun rename(from: String, to: String)
+
+    /**
+     * Removes the file at [path].
+     *
+     * @throws sftp.connector.error.NoSuchFile when there is nothing there. Whether that is a
+     *   failure or the outcome already achieved is the caller's to say.
+     */
+    suspend fun delete(path: String)
+
+    /**
+     * Creates the directory [path], and only that one: a missing parent is a failure here rather
+     * than something to fill in, because inventing intermediate directories is a decision and the
+     * server was not asked to take it.
+     */
+    suspend fun mkdir(path: String)
+}
+
+/**
+ * One live session, from the point of view of whoever opened it and will therefore close it.
+ *
+ * The pool holds these. Everyone it lends to holds an [SftpSession] instead.
+ */
+interface SftpConnection : SftpSession {
 
     /**
      * Ends the session and releases the thread and socket behind it. Calling it more than once

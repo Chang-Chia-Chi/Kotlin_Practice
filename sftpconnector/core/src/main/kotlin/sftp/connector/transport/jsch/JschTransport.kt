@@ -20,6 +20,7 @@ import sftp.connector.transport.Listing
 import sftp.connector.transport.RemoteFile
 import sftp.connector.transport.SftpConnection
 import sftp.connector.transport.SftpTransport
+import java.io.InputStream
 import java.io.OutputStream
 import java.time.Instant
 import kotlin.time.Duration
@@ -142,6 +143,32 @@ private class JschConnection(
 
     override suspend fun readTo(path: String, sink: OutputStream): Unit = withContext(io) {
         errors.translating(Attempt(endpoint, "read", path)) { channel.get(path, sink) }
+    }
+
+    override suspend fun writeFrom(path: String, source: InputStream): Unit = withContext(io) {
+        errors.translating(Attempt(endpoint, "write", path)) {
+            channel.put(source, path, ChannelSftp.OVERWRITE)
+        }
+    }
+
+    /**
+     * JSch sends this as the POSIX rename extension when the server advertised it during the
+     * handshake and as a plain rename request otherwise, which is the whole of what the connector
+     * has to do to get an atomic replacement where one is available. What the caller above sees is
+     * the difference in the answer: a server without the extension refuses when the target is
+     * occupied, and it refuses with the same generic status it uses for everything else it will
+     * not do.
+     */
+    override suspend fun rename(from: String, to: String): Unit = withContext(io) {
+        errors.translating(Attempt(endpoint, "rename", from)) { channel.rename(from, to) }
+    }
+
+    override suspend fun delete(path: String): Unit = withContext(io) {
+        errors.translating(Attempt(endpoint, "delete", path)) { channel.rm(path) }
+    }
+
+    override suspend fun mkdir(path: String): Unit = withContext(io) {
+        errors.translating(Attempt(endpoint, "mkdir", path)) { channel.mkdir(path) }
     }
 
     /**

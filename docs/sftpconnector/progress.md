@@ -117,7 +117,9 @@ because each was correctly deferred by the ticket that found it.
 | `Retirement.SHUTDOWN` has no producer | T5 | T13 | `sftp_pool_evicted_total{reason=shutdown}` never appears |
 | `OperationTimeout` has no producer | T2 | T11's time limiter | A failure class in the hierarchy that nothing raises |
 | `MutableStateFlow.value` can resume an undispatched collector under the registry lock | flagged by the maintainer | Any ticket that collects `PoolEntry.state`/`Lease.state` | Foreign code runs inside a critical section. Still theoretical: T5 confirmed nothing collects either, both read `state.value` |
-| A download whose byte count does not match the listed size raises `SessionLost`, which poisons | T6 | The maintainer, who holds the pen on spec 10.1's hierarchy | A file that grew between the listing and the download costs a handshake on every attempt. The hierarchy has no class for the connector's own consistency check failing, and the two that fit either poison a healthy session or need a wire status code the server never sent. A `TransferIncomplete` - recoverable, does not poison - is the change that ends the trade |
+| ~~A download whose byte count does not match the listed size raises `SessionLost`, which poisons~~ | T6 | ~~The maintainer~~ | **Closed by C7 and applied by T7.** The class is `IncompleteTransfer`, recoverable and poisoning, spec D28 |
+| A refusal the connector decides itself - `Overwrite.REFUSE` over an occupied path - is raised as `ServerFailure`, which spec 10.2 retries and counts against the breaker | T7 | The maintainer, who holds the pen on spec 10.1's hierarchy | Nothing retries today, so nothing is wrong yet. From T11 onward a deterministic policy refusal burns three attempts and a breaker failure per call, and a `Move(overwrite = false)` onto a target that keeps being occupied can open the breaker on a server that is answering perfectly. The disposition needed already exists - `FAIL_THE_ATTEMPT`, which is what `PoolExhausted` uses - and no class carries it for this. **T11 is the ticket that meets the harm and should not start without a ruling** |
+| `writeFrom` and the `SftpSession`/`SftpConnection` split are in the code and not in spec 5.1 or 6.1 | T7 | The maintainer; T7's scope boundary allowed `progress.md` but not `spec.md` | Spec 5.1 still names `openWrite` and spec 6.1 still declares `withSession(block: suspend Connection.() -> T)`. A later ticket reading the spec builds against names that are not there. Spec 5.1 already carries the `readTo` note that makes exactly this argument for the read side; the write side needs the same sentence |
 | The bounded IO dispatcher is as wide as the pool, and everything on it already holds a pool place | T6 | Every later ticket | This is what stops a listing blocked on its consumer from starving a download: threads wanted can never exceed threads available. An operation that runs on that dispatcher without first holding a pool place turns a slow path into a deadlock, and no test would catch it until concurrency was high |
 
 ### C6: spec Sec 5.3 amended - the middle cancellation tier is `keepAlive`
@@ -1082,3 +1084,198 @@ noise. The number is recorded here rather than asserted in a test because it is 
 - **The S11 test creates 100,000 files and takes about 50 seconds**, which is most of the connector
   suite's wall time. It is the one slow test here, and the cost is creating the directory rather than
   listing it.
+
+---
+
+## T7: Client write path: upload, rename with overwrite, delete, mkdir, withSession
+
+**Built:** the connector can now write. A caller sends a local file to a remote path, moves a file
+with a policy for what to do about anything already at the target, removes a file, makes sure a
+directory exists with its parents, and runs a sequence of operations on one held session. The
+transport grew the four operations those need - `writeFrom`, `rename`, `delete`, `mkdir` - and
+nothing else; `abort()` is still absent rather than stubbed, following T1, and belongs to T8.
+
+A separate first commit applied coordinator decision C7: a byte count that disagrees with the
+listed size is now `IncompleteTransfer` rather than `SessionLost`, with its row added to T2's
+`FailureModelTest` and T6's staging check and its test retargeted. T6's open question is closed and
+its seam is struck through above.
+
+**Concepts named:**
+
+- **`Overwrite`** (`client`) is where most of this ticket's design went, and the point of it is that
+  it reads like a flag and is not one. SFTP version 3 has no way to say "put this here and replace
+  whatever is there"; the POSIX rename extension adds one, and a server without it can only be told
+  to clear the path and aim at it again. So `REPLACE` is not a bit on a request, it is a short
+  sequence of requests with a gap in the middle, and the gap is the part a caller has to know
+  about. Each operation's own documentation says what its gap looks like, because they are not the
+  same gap: a rename's is the moment between the delete and the second rename when the target path
+  holds nothing, and an upload's is the length of the transfer, during which the target holds a
+  partial file.
+- **`SftpSession`** (`transport`) is everything one session can be asked to do, and `SftpConnection`
+  is now that plus `close()`. The split is the answer to what a `withSession` caller may do with the
+  session it is handed: the pool lends the same session out again afterwards, so a caller that hung
+  up on it would break the *next* caller's work rather than its own. Splitting the interface means
+  the block is handed something with no hang-up on it, rather than being asked not to use one.
+  Every existing implementor was unaffected - `SftpConnection` still names the whole set.
+- **`BorrowedSession`** is the other half of that answer: the loan ends when the block does. A
+  reference stashed past the block is a second caller on a session the pool has already lent to
+  somebody else, which is I2 broken from outside the pool, and it cannot be prevented by asking. So
+  the session is made to stop working instead, loudly, at the point of misuse.
+- **`moveOnto`** is the rename sequence, and `clearTheWay` and `ensureDirectory` are the two places
+  a failure means "the state you wanted is already the state that exists". Both swallow exactly one
+  class and re-raise everything else after looking.
+
+**What the server actually does about an occupied rename target, measured rather than assumed.**
+Spec 5.2 says rename "uses the `posix-rename@openssh.com` extension when the server advertises it",
+which reads as something the adapter arranges. It is not: **JSch sends the extension by itself**
+whenever the server advertised it, and the embedded MINA SSHD advertises it. So a rename onto an
+occupied path against that server **succeeds and destroys the old file**, and reports success.
+
+That makes `Overwrite.REFUSE` unenforceable at the server, and it is the finding this ticket turned
+on. Refusing is therefore the connector's own decision, taken before the request goes out, on both
+operations: a look and then the request. A writer arriving between the two still wins, and on a
+server without the extension the request itself is refused as well, which closes the race there and
+only there. The first draft left refusing to the server and passed against the fake, which is a
+server without the extension; only the embedded-server test caught it.
+
+**Acceptance:**
+
+- *upload streams a local file to the remote path with overwrite flag* -
+  `SftpWritePathTest.an upload puts the local file where it was told to`, `.an upload told to
+  replace writes over what was there`, and `.an upload that was told not to replace sends nothing at
+  an occupied path`, which asserts no write was sent at all rather than only that the call failed.
+  Against a real server: `WritePathAgainstServerTest.a real upload puts the bytes on the server and
+  a download brings them back` and `.a real upload told not to replace leaves the file that is
+  already there`.
+- *rename with overwrite = true tries the rename, and on failure deletes the target then renames
+  again; embedded-server test covers a pre-existing target* - `SftpWritePathTest.a rename told to
+  replace clears the target and sends the rename again` pins the sequence request by request
+  (`Rename`, `Delete`, `Rename`), which is the only place it can be pinned, because the embedded
+  server has the extension and does it in one. The pre-existing target is covered against the real
+  server twice: `.a real rename told to replace lands on a target that was already there` and
+  `.a real rename told not to replace leaves the target that was already there`, the second being
+  the measurement above written as a test.
+- *delete, mkdir with parents, exists round-trip against the embedded server* -
+  `WritePathAgainstServerTest.delete, mkdir with parents and exists round trip against a real
+  server`, plus `.mkdir under a parent that is not there is refused rather than invented`. Against
+  the fake: `.a delete removes the file, and says so when there was nothing to remove`, `.mkdir with
+  parents creates the whole path, and a second run is content with what it finds`, `.mkdir creates
+  one directory unless it is asked to fill in the path above it`, and `.mkdir over a file is refused
+  rather than treated as already done`.
+- *withSession runs the block on one lease and releases it on every exit path* -
+  `SftpWritePathTest.withSession keeps one session for the whole block`, which asks the pool from
+  *inside* the block how many sessions are out and gets one, and `.withSession gives the session
+  back whether the block returns, throws or is cancelled`, which runs all three and asks the pool
+  after each. `.a session kept past the block it was given to refuses to work` covers the other half
+  of the contract. Against a real server: `.withSession runs a whole sequence against a real server
+  on one session`.
+- *Progress entry appended* - this.
+
+Two more things the write path gives the tickets after it, each with its own test: a rename whose
+source is gone reports the *source* as missing and touches nothing (`.a rename whose source is gone
+reports the source and touches nothing`, and the same against a real server), and a rename refused
+while nothing is at the target is passed on rather than met with a delete.
+
+**What T11 can rely on to tell a landed rename from an absent target.** The failure classes a
+`rename` can raise are disjoint on exactly the question I11 asks:
+
+- **`NoSuchFile`, naming the source.** The source is not there. Either it never was, or an earlier
+  attempt at this same rename already landed. That is the signal to go and stat the target, and I11
+  is the rule for reading the answer.
+- **`ServerFailure`.** The server refused the request, or the connector refused it on the caller's
+  behalf. The source is still where it was.
+
+The discrimination holds because of one deliberate choice: **a missing path reported by `rename` is
+always the source, never the target.** The delete inside the replace sequence swallows `NoSuchFile`,
+because a target that was already gone is the state the replacement wanted, and letting it out would
+hand T11 a "the source may have landed" signal about a path that was never the source. The expected
+size I11 compares against is not this layer's to know - the source layer holds the `RemoteFile` it
+listed - so `rename` takes no size parameter and T11 supplies one.
+
+**Deviations:**
+
+1. **The transport's write operation is `writeFrom(path, source)` where spec 5.1 names `openWrite`,
+   and this ticket could not amend the spec.** It is the same argument spec 5.1 already makes for
+   `readTo`: a stream the caller pumps puts every blocking socket write on whatever thread the
+   caller happens to be on, and spec 3.3 requires them all on the bounded dispatcher. Handing the
+   transport a source keeps the whole transfer inside one call on that dispatcher. Spec 5.1 was
+   amended for the read side and needs the same sentence for the write side; T7's scope boundary
+   allowed `progress.md` and not `spec.md`, so it is recorded here and listed as an open seam.
+2. **`SftpConnection` is split into `SftpSession` plus `close()`, and `withSession` takes
+   `suspend SftpSession.() -> T` where spec 6.1 abridges it as `suspend Connection.() -> T`.** Same
+   scope note as above. The reason is in the concepts section: handing a pooled session's `close()`
+   to a caller is a foot-gun the pool cannot survive, and the split removes it rather than
+   documenting it. Additive for every existing implementor.
+3. **`Overwrite` is an enum where spec 8.2 and spec 12 both spell it as a boolean
+   (`move("temp/", overwrite = true)`).** A boolean cannot carry what the concepts section says the
+   value means, and a reader of `rename(from, to, true)` learns nothing about the gap. Ticket 10
+   builds `Move(target, overwrite)` and should take this type rather than a boolean.
+4. **The replace sequence looks at the target before deleting it, where spec 8.2 says "on failure
+   delete the target then rename again".** A server refuses a rename it cannot do at all - across
+   filesystems, which is spec 8.2's own next paragraph and scenario S6 - with the same generic
+   status it refuses an occupied target with. Looking first means a refusal that was never about the
+   target is passed on as the server gave it, instead of being met with a pointless delete and a
+   second rename whose failure is the one the caller would then see. It does not prevent the loss in
+   the case where the target *is* occupied and the rename still cannot be done; nothing on this
+   protocol does, which is what the startup probe exists for.
+5. **`Overwrite.REFUSE` over an occupied path raises `ServerFailure` with SSH_FX_FAILURE, and this
+   is the reading in this ticket I would most like ruled on.** The class is right about the session
+   and about the message, and it is the same class and code a server without the extension answers
+   with itself, so a caller handles one and handles both. It is wrong about the disposition: spec
+   10.2 retries every recoverable failure and counts it against the breaker, and a deterministic
+   policy refusal should be neither. Nothing retries yet so nothing misbehaves today, but from T11
+   this costs three attempts and a breaker failure per call. The disposition that fits already
+   exists - `FAIL_THE_ATTEMPT` - and no class carries it for this. Adding one is the maintainer's
+   pen, which is why this is recorded and raised rather than done: it is C7's shape exactly, and
+   it is on the open-seams table against T11.
+6. **`mkdir` is idempotent whatever `parents` says.** Spec 6.1 puts "AlreadyExists counts as
+   success" in the *retry* column, which is T11's. It is here as well because `parents = true`
+   cannot work otherwise - every ancestor of a path is normally already there - and because a
+   startup that creates the folders it needs has to be able to run twice. `parents` therefore
+   controls only whether missing *ancestors* are created, not what an existing directory means.
+   A file found where a directory was wanted is still a failure.
+7. **`upload` writes straight to the target rather than through a temporary name.** Writing to a
+   temporary name and renaming it into place would make an upload atomic at the target and would
+   match spec 16.1's own recommended convention - but it would put a rename *inside* the upload,
+   and a retry after a lost reply on that rename would rewrite the temporary file and then be
+   refused by a target that its own first attempt had already created. That is exactly the phantom
+   failure D10 exists to avoid, and it is why spec 6.1's retry note for upload says "Restart; remote
+   partial is overwritten". A caller that wants the atomic version composes it from `upload` and
+   `rename`, which is what `WritePathAgainstServerTest.withSession runs a whole sequence` does.
+8. **No new configuration knob**, so the standing rule about knobs landing in the DSL with
+   build-time validation has nothing to apply to.
+9. **Two review findings were declined.** `BorrowedSession` being eight delegating one-liners was
+   called a middle man; the delegation is the price of the revocation, and the revocation is the
+   answer to the question this ticket was asked about `withSession`. And `FakeSftpTransport`
+   spelling status code 4 and its refusal message itself, rather than sharing the client's, stays
+   separate on T6's precedent: sharing means making something public across a module boundary to
+   serve a fake, and a fake that agreed with the code under test by construction would prove less.
+10. **Size.** About 573 lines that are neither blank nor comment, roughly 390 of them tests, inside
+    the 200-600 budget on the measure the earlier entries used. Four checkboxes, one new domain
+    type, four new transport operations and twenty-five tests.
+
+**For the next ticket:**
+
+- **Refusing an overwrite is the connector's decision and cannot be given back to the server.** JSch
+  uses `posix-rename@openssh.com` on its own whenever the server advertised it, and such a server
+  replaces an occupied target and reports success. Any later code that sends a bare rename and reads
+  the answer is trusting a behaviour that half of the servers in scope do not have.
+- **Read deviation 5 before starting T11.** A policy refusal currently arrives as a retryable,
+  breaker-counted failure. It needs a ruling, not a workaround.
+- **`abort()` is still absent from `SftpSession`**, and is T8's with the rest of the cancellation
+  ladder. Note that it belongs on `SftpConnection` rather than on `SftpSession`: it destroys the
+  session, so it is the pool's to call and not a borrower's.
+- **Nothing retries yet.** `upload`, `rename`, `delete` and `mkdir` each make one attempt on one
+  lease and `Attempt.number` stays 1. Each is shaped so a retry wraps the whole operation: an upload
+  restarts from zero over the top of what it left, a mkdir finds its directories already there, and
+  a rename reports a missing *source* when its own earlier attempt landed.
+- **`withSession` holds a session for the length of the block**, and there are only ever `maxSize`
+  of them. Anything that reaches for it to run a long sequence is taking a session out of a pool of
+  five for the duration; the single-operation methods are the default for a reason.
+- **`FakeSftpTransport` now writes, renames, deletes and creates directories**, and it is a server
+  *without* the POSIX rename extension: a rename onto an occupied path is refused with status 4.
+  That is the harder server and the one whose sequence is worth staging. A test that needs the
+  extension's behaviour wants the embedded server.
+- **An `InputStream` handed to `writeFrom` is left open**, like the sink `readTo` writes to. On
+  Windows a stream left open on a `@TempDir` file fails the whole test class at teardown with
+  "Failed to delete temp directory", not at the test that leaked it.

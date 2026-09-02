@@ -2,10 +2,12 @@ package sftp.connector.testkit
 
 import sftp.connector.error.Attempt
 import sftp.connector.error.NoSuchFile
+import sftp.connector.error.ServerFailure
 import sftp.connector.transport.Listing
 import sftp.connector.transport.RemoteFile
 import sftp.connector.transport.SftpConnection
 import sftp.connector.transport.SftpTransport
+import java.io.InputStream
 import java.io.OutputStream
 import java.time.Instant
 import java.util.Collections
@@ -45,7 +47,7 @@ class FakeSftpTransport(
      */
     data class Call(val operation: Operation, val session: Int, val path: String? = null)
 
-    enum class Operation { Connect, Realpath, List, Stat, Read, Close }
+    enum class Operation { Connect, Realpath, List, Stat, Read, Write, Rename, Delete, Mkdir, Close }
 
     val calls: MutableList<Call> = CopyOnWriteArrayList()
 
@@ -88,15 +90,23 @@ class FakeSftpTransport(
 
         private var closed = false
 
-        override suspend fun realpath(path: String): String {
-            record(Call(Operation.Realpath, id, path))
+        /**
+         * Everything that happens before an operation does its own work: the call goes on the
+         * record, the test's hook gets its chance to make the server slow or make it fail, and a
+         * session somebody kept past its hang-up is caught here rather than quietly answering.
+         */
+        private suspend fun asked(operation: Operation, path: String? = null) {
+            record(Call(operation, id, path))
             check(!closed) { "session $id was used after it was closed" }
+        }
+
+        override suspend fun realpath(path: String): String {
+            asked(Operation.Realpath, path)
             return if (path == ".") "/home/etl" else path
         }
 
         override suspend fun list(dir: String, onEntry: (RemoteFile) -> Listing) {
-            record(Call(Operation.List, id, dir))
-            check(!closed) { "session $id was used after it was closed" }
+            asked(Operation.List, dir)
             val prefix = if (dir.endsWith("/")) dir else "$dir/"
             // Copied under the map's own lock before anything is reported, because the callback is
             // free to change the server underneath a listing and a real server would not notice.
@@ -108,17 +118,45 @@ class FakeSftpTransport(
         }
 
         override suspend fun stat(path: String): RemoteFile {
-            record(Call(Operation.Stat, id, path))
-            check(!closed) { "session $id was used after it was closed" }
+            asked(Operation.Stat, path)
             if (!contents.containsKey(path)) throw missing(path, "stat")
             return describe(path, contents[path]?.size)
         }
 
         override suspend fun readTo(path: String, sink: OutputStream) {
-            record(Call(Operation.Read, id, path))
-            check(!closed) { "session $id was used after it was closed" }
+            asked(Operation.Read, path)
             val bytes = contents[path] ?: throw missing(path, "read")
             sink.write(bytes)
+        }
+
+        override suspend fun writeFrom(path: String, source: InputStream) {
+            asked(Operation.Write, path)
+            contents[path] = source.readBytes()
+        }
+
+        override suspend fun rename(from: String, to: String) {
+            asked(Operation.Rename, from)
+            synchronized(contents) {
+                if (!contents.containsKey(from)) throw missing(from, "rename")
+                if (contents.containsKey(to)) throw occupied(to, "rename")
+                contents[to] = contents.remove(from)
+            }
+        }
+
+        override suspend fun delete(path: String) {
+            asked(Operation.Delete, path)
+            synchronized(contents) {
+                if (!contents.containsKey(path)) throw missing(path, "delete")
+                contents.remove(path)
+            }
+        }
+
+        override suspend fun mkdir(path: String) {
+            asked(Operation.Mkdir, path)
+            synchronized(contents) {
+                if (contents.containsKey(path)) throw occupied(path, "mkdir")
+                contents[path] = null
+            }
         }
 
         override suspend fun close() {
@@ -134,6 +172,19 @@ class FakeSftpTransport(
 
     private fun missing(path: String, operation: String) =
         NoSuchFile(Attempt(ENDPOINT, operation, path), "the server has no such path: $path")
+
+    /**
+     * What a version 3 server without the POSIX rename extension answers when the path it was
+     * asked to take is already occupied, which is the same generic status it answers with for
+     * everything else it will not do. This fake is always that server: the atomic replacement an
+     * extension would give is the easy case, and the sequence a caller has to fall back on is the
+     * one worth being able to stage.
+     */
+    private fun occupied(path: String, operation: String) = ServerFailure(
+        Attempt(ENDPOINT, operation, path),
+        statusCode = 4,
+        detail = "there is already something at $path",
+    )
 
     private companion object {
         private const val ENDPOINT = "fake:22"

@@ -6,12 +6,18 @@ import kotlinx.coroutines.channels.SendChannel
 import kotlinx.coroutines.channels.trySendBlocking
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.channelFlow
+import org.slf4j.LoggerFactory
 import sftp.connector.config.SftpConnectorConfig
 import sftp.connector.error.Attempt
 import sftp.connector.error.NoSuchFile
+import sftp.connector.error.ServerFailure
 import sftp.connector.pool.SftpPool
 import sftp.connector.transport.Listing
 import sftp.connector.transport.RemoteFile
+import sftp.connector.transport.SftpSession
+import java.io.InputStream
+import java.io.OutputStream
+import java.nio.file.Files
 import java.nio.file.Path
 
 /**
@@ -128,7 +134,216 @@ class SftpClient(
             ) { sink -> lease.connection.readTo(remote.path, sink) }
         }
     }
+
+    /**
+     * Sends [local] to [remote].
+     *
+     * The bytes go straight to the path they are meant for, which means a reader of that path sees
+     * a partial file for the length of the transfer. That is the arrangement spec-level retries
+     * are built on - an upload that broke restarts from zero over the top of what it left - and it
+     * is why an uploader whose files are being watched by something else should write under a name
+     * nobody is watching and rename it into place afterwards. This client can do both halves of
+     * that; it does not do them on its own, because where the temporary name should live is the
+     * caller's knowledge and not this method's.
+     *
+     * @param overwrite [Overwrite.REFUSE] asks first and refuses if anything is at [remote], so a
+     *   writer arriving between the question and the write still wins. Nothing on this protocol
+     *   closes that race for an upload: there is no way to ask a version 3 server to create a file
+     *   only if it is not already there.
+     */
+    suspend fun upload(local: Path, remote: String, overwrite: Overwrite = Overwrite.REFUSE): Unit =
+        meters.timing("upload") {
+            pool.withLease { lease ->
+                val session = lease.connection
+                if (overwrite == Overwrite.REFUSE && session.entryAt(remote) != null) refuse("upload", remote)
+                Files.newInputStream(local).use { session.writeFrom(remote, it) }
+            }
+        }
+
+    /**
+     * Moves [from] to [to] on the server.
+     *
+     * @param overwrite what to do about a file already at [to]. See [Overwrite]: replacing one is
+     *   a single atomic request against a server offering the POSIX rename extension, and a delete
+     *   followed by a second rename against a server without it - during which [to] holds nothing,
+     *   and after which a failure has left [to] empty rather than holding either file.
+     * @throws sftp.connector.error.NoSuchFile when [from] is not there. It is the answer worth
+     *   telling apart from the rest: a retry that gets it after a reply went missing is being told
+     *   its own earlier attempt may already have landed, and can settle the question by looking at
+     *   [to]. No other path's absence is ever reported this way - a target that was already gone
+     *   is what a replacement wanted in the first place, and is not passed on as a failure.
+     */
+    suspend fun rename(from: String, to: String, overwrite: Overwrite = Overwrite.REFUSE): Unit =
+        meters.timing("rename") {
+            pool.withLease { lease -> lease.connection.moveOnto(from, to, overwrite) }
+        }
+
+    /** Removes [remote]. A path that is not there is reported, because only the caller knows whether that is a failure. */
+    suspend fun delete(remote: String): Unit = meters.timing("delete") {
+        pool.withLease { lease -> lease.connection.delete(remote) }
+    }
+
+    /**
+     * Makes sure there is a directory at [remote].
+     *
+     * About the directory existing afterwards rather than about who created it: a directory that
+     * was already there is the outcome asked for, not a collision, which is what lets a startup
+     * that creates the folders it needs run twice without special-casing the second time.
+     *
+     * @param parents create the missing directories above [remote] as well. Off by default,
+     *   because filling in a path nobody asked for turns a typo into a directory tree.
+     */
+    suspend fun mkdir(remote: String, parents: Boolean = false): Unit = meters.timing("mkdir") {
+        pool.withLease { lease ->
+            val session = lease.connection
+            if (parents) ancestorsOf(remote).forEach { session.ensureDirectory(it) }
+            session.ensureDirectory(remote)
+        }
+    }
+
+    /**
+     * Runs [block] with one session held for the whole of it, and gives that session back however
+     * [block] ends.
+     *
+     * For work where the operations belong together: a sequence that would be wrong if another
+     * caller's request landed in the middle of it, or anything that depends on state the channel
+     * carries, such as its working directory. Everything else should use the operations above,
+     * which take a session for one call and hand it straight back - a session held across several
+     * round trips is one the rest of the connector cannot use, and there are only ever a handful.
+     *
+     * The block is handed the session's operations and not the session's life. It cannot close it,
+     * because the pool lends the same session out again afterwards and a caller that hung up on it
+     * would break the next caller's work rather than its own; and the session it was handed stops
+     * working the moment [block] returns, so a reference kept past the block fails loudly here
+     * instead of quietly using a session that now belongs to somebody else.
+     *
+     * Nothing here retries. The connector cannot know which part of a caller's sequence is safe to
+     * send twice, so a caller that wants a second go says so itself.
+     */
+    suspend fun <T> withSession(block: suspend SftpSession.() -> T): T = meters.timing("session") {
+        pool.withLease { lease ->
+            val borrowed = BorrowedSession(lease.connection)
+            try {
+                borrowed.block()
+            } finally {
+                borrowed.handItBack()
+            }
+        }
+    }
+
+    /**
+     * Carries out a rename under an overwrite policy, which on this protocol is a sequence rather
+     * than a request, and a different sequence depending on the policy.
+     *
+     * **Refusing is the connector's own doing, not the server's.** A server offering the POSIX
+     * rename extension replaces the target without being asked to and reports success, so a rename
+     * sent to such a server is a replacement whatever the caller wanted - which was measured
+     * against this connector's own SSH library and embedded server, not assumed. So a refusal has
+     * to be decided before the request goes out. That is a look and then a rename, and a writer
+     * arriving between the two still wins; on a server without the extension the request itself is
+     * refused as well, which closes the race there but nowhere else.
+     *
+     * **Replacing is a sequence with a gap.** Against a server with the extension the first rename
+     * is the whole story. Without it the server refuses - with the one generic status it uses for
+     * everything it will not do, so the refusal alone does not say the target is what is in the
+     * way. Looking before clearing keeps a replacement from deleting and retrying its way through a
+     * refusal that was never about the target, and gets the caller the refusal the server actually
+     * gave rather than the one a pointless second attempt would have produced. What no care closes
+     * is the gap in the middle: between the delete and the second rename the target path holds
+     * nothing, so anything watching it can find it empty, and a failure in the gap leaves it empty
+     * with the source still where it started. A caller that cannot afford that needs a server with
+     * the extension, which the startup probe is the place to find out about.
+     */
+    private suspend fun SftpSession.moveOnto(from: String, to: String, overwrite: Overwrite) {
+        if (overwrite == Overwrite.REFUSE) {
+            if (entryAt(to) != null) refuse("rename", to)
+            rename(from, to)
+            return
+        }
+        try {
+            rename(from, to)
+        } catch (refused: ServerFailure) {
+            if (entryAt(to) == null) throw refused
+            clearTheWay(to)
+            rename(from, to)
+        }
+    }
+
+    /**
+     * Says no on the caller's own instruction, before anything is sent.
+     *
+     * It is reported as the server's generic failure because that is what the refusal is - the
+     * operation was not carried out, for a reason to do with this one request and not with the
+     * session - and because a server that refuses the same thing itself answers with exactly that.
+     * A caller handling one of them therefore handles both.
+     */
+    private fun refuse(operation: String, path: String): Nothing = throw ServerFailure(
+        Attempt(endpoint, operation, path),
+        statusCode = SSH_FX_FAILURE,
+        detail = "there is already something at $path and this $operation was told not to replace it",
+    )
+
+    private companion object {
+        /**
+         * The one status an SFTP version 3 server has for everything it will not do. The connector
+         * uses it when it refuses on the caller's behalf before sending anything, because "the
+         * operation failed" is exactly as much as the server would have said.
+         */
+        private const val SSH_FX_FAILURE = 4
+    }
 }
+
+/**
+ * Takes whatever is at [path] away so that a rename can land there.
+ *
+ * A path that has gone in the meantime is the state this was trying to reach, so it is not passed
+ * on. That also keeps the one failure a rename retry reads as a signal unambiguous: a missing path
+ * reported by a rename is always the source, never the target.
+ */
+private suspend fun SftpSession.clearTheWay(path: String) {
+    try {
+        delete(path)
+    } catch (alreadyGone: NoSuchFile) {
+        LOG.debug("{} was already gone when it was cleared for a rename: {}", path, alreadyGone.message)
+    }
+}
+
+/**
+ * Creates [path] unless a directory is there already.
+ *
+ * The server has one status for "there is something there" and for everything else it refuses, so
+ * telling those apart means looking. A directory found where one was wanted is the outcome; a file
+ * found there, or nothing found there at all, means the refusal was about something else and is
+ * passed on.
+ */
+private suspend fun SftpSession.ensureDirectory(path: String) {
+    try {
+        mkdir(path)
+    } catch (refused: ServerFailure) {
+        if (entryAt(path)?.isDirectory != true) throw refused
+    }
+}
+
+/** What the server says is at [path], or null if there is nothing there. */
+private suspend fun SftpSession.entryAt(path: String): RemoteFile? =
+    try {
+        stat(path)
+    } catch (absent: NoSuchFile) {
+        null
+    }
+
+/**
+ * The directories [path] sits under, shallowest first. The root is not one of them: it is there on
+ * every server there has ever been, and asking to create it would fail on all of them.
+ */
+private fun ancestorsOf(path: String): List<String> =
+    path.trimEnd('/')
+        .split('/')
+        .runningReduce { above, name -> "$above/$name" }
+        .dropLast(1)
+        .filter { it.isNotEmpty() }
+
+private val LOG = LoggerFactory.getLogger(SftpClient::class.java)
 
 /**
  * Hands one entry to the consumer, answering whether there is any point in the next.
