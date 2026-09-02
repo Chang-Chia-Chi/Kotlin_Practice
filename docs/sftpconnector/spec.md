@@ -217,7 +217,7 @@ so nothing above the seam can call a method that does not yet work.
 - One `Session`, one `ChannelSftp`. OpenSSH caps channels per session at ten and channel state
   such as the working directory is per channel; sharing a session across operations serializes
   them anyway.
-- `Session.setTimeout(socketTimeout)`, `setServerAliveInterval(keepAlive)`, `ProxyHTTP` for
+- `setServerAliveInterval(keepAlive)`, `setServerAliveCountMax(1)`, `ProxyHTTP` for
   the CONNECT proxy.
 - Host key policy is an explicit enum: `Strict(knownHosts)`, `Fingerprint(sha256)`,
   `AcceptAll`. `AcceptAll` is never the DSL default and logs a warning at startup (D8).
@@ -249,10 +249,21 @@ the cooperative tier. The keepalive ladder is what actually bounds a hung server
 overwrites `session.timeout` whenever it is set, and the DSL requires `keepAlive` to be
 positive, so it is always set. With `socketTimeout = 500 ms` and the default
 `keepAlive = 30 s`, a stalled tunnel took 60 s to fail; with `socketTimeout = 5 s` and
-`keepAlive = 300 ms` the same stall failed in 1.2 s. `socketTimeout` therefore bounds
-nothing at present. The knob stays in the DSL because it is what a reader reaches for, but
-until it is made to mean something the bound on a hung server is
-`keepAlive x (serverAliveCountMax + 1)`, and that is the number to size against an SLA.
+`keepAlive = 300 ms` the same stall failed in 1.2 s.
+
+**`socketTimeout` was therefore removed from the DSL** (D31). An earlier draft of this section
+kept it on the grounds that it is what a reader reaches for, and the way to honour that would
+have been to spend it as `serverAliveCountMax`, deriving the probe count from
+`socketTimeout / keepAlive`. That was built and reverted. The library gives up after a whole
+number of unanswered probes, so any bound is a multiple of `keepAlive`, and a duration knob
+silently rounded to a multiple of a different knob is not one knob but half of two. Worse, the
+name is a lie in this library - `serverAliveInterval` *is* the socket read timeout - so keeping
+the name while giving it another job preserves exactly the misreading D26 exists to end.
+
+What a reader reaches for is `keepAlive`. The adapter pins `serverAliveCountMax = 1` rather than
+inheriting the library's default, so the bound on a hung server is twice `keepAlive`, and that
+is the number to size against an SLA. A deployment that ever needs that bound tuned
+independently of how often a session speaks should get a count of probes spelled as a count.
 
 The same value bounds the key exchange, which is a trap for any test that shortens it: a
 `keepAlive` below the handshake time fails `connect()` with `timeout in waiting for rekeying
@@ -555,7 +566,7 @@ sftpConnector("vendor-drop") {
         maxLifetime = 30.minutes; maxLifetimeJitter = 0.1
         idleTimeout = 4.minutes; keepAlive = 30.seconds; idleCutoff = 5.minutes
         validationBypass = 500.milliseconds
-        connectTimeout = 10.seconds; socketTimeout = 60.seconds; cancelGrace = 5.seconds
+        connectTimeout = 10.seconds; cancelGrace = 5.seconds
         leakDetectionThreshold = 10.minutes
     }
     resilience {
@@ -658,6 +669,7 @@ transport in the testkit is a genuine second implementation.
 | D22 | The connector computes a digest during staging; the application compares it | The digest is free while bytes stream through; the expected value's origin is application knowledge. Checksum is integrity, not completeness, and cannot replace the readiness check because it needs the download first |
 | D23 | Unmapped JSch errors are `Unknown`, recoverable, poisoned, logged raw and counted | JSch error text is not an API; a wording change must surface as a metric and a log line, never as a silent misclassification or a dead connector |
 | D26 | The middle cancellation tier is the keepalive ladder, not `socketTimeout` | Measured against mwiede 2.28.7 (Sec 5.3): JSch implements `serverAliveInterval` by setting the socket read timeout, so a positive `keepAlive` always overwrites `session.timeout`. A hung server is bounded by `keepAlive x (serverAliveCountMax + 1)` and not at all by `socketTimeout` |
+| D31 | `socketTimeout` is removed rather than repurposed; `serverAliveCountMax` is pinned to 1 | Spending it as a probe count would round a duration to a multiple of `keepAlive`, making it half of two knobs; and keeping the name while changing the job preserves the misreading D26 exists to end. Pinning the count makes twice `keepAlive` a promise this connector makes rather than one inherited from a dependency's next release (Sec 5.3) |
 | D29 | Refusing an overwrite is the connector's decision, never the server's | Measured (Sec 5.2): JSch sends `posix-rename@openssh.com` on its own whenever the server advertised it, so on such a server a rename onto an occupied target destroys the old file and reports success. `Overwrite.REFUSE` is unenforceable at the server and must be a look-then-request in the connector. A writer arriving between the two still wins; on a server without the extension the request itself is refused as well, which closes the race there and only there |
 | D30 | A refused overwrite is `OverwriteRefused`, its own class beside `PoolExhausted` and `CircuitOpen` | It is a deterministic policy decision, so retrying it can never succeed and counting it against the breaker charges the connector for doing what it was told. `ServerFailure` is right about the session and the message but wrong about both of those, and from Sec 9 onward would cost three attempts and a breaker failure per call. The session is untouched - under `REFUSE` nothing was even sent - so the lease is returned and the watch continues |
 | D28 | A byte count that disagrees with the listed size is `IncompleteTransfer`, not `SessionLost` | Every other `Recoverable` class describes a fault the wire reported; this one is the connector's own integrity check failing, and it had no class. Reporting it as `SessionLost` sends an operator to look at the network when the actual evidence is that a file changed size under them - which is precisely the signal open item 1 is waiting on, and the one a stalled uploader produces. It poisons, because a short read and a half-dead session are indistinguishable from here and the safe reading costs one handshake on a rare event |
@@ -728,7 +740,7 @@ Tests are named `I<n>_<description>`.
 | ID | Scenario | Expected |
 |---|---|---|
 | S1 | Server kills the session during download | Download retried on a new lease, old entry evicted, consumer sees one `FileSeen` and one successful download |
-| S2 | Server stalls past `socketTimeout` | `SessionLost`, poisoned, retried; breaker counts one failure |
+| S2 | Server stalls past the keepalive ladder | `SessionLost`, poisoned, retried; breaker counts one failure |
 | S3 | Breaker opens | `PollSkipped(BreakerOpen)` each tick until half-open probe succeeds |
 | S4 | Pool exhausted with slow consumer | Acquire waits `acquireTimeout` then `PoolExhausted`; `watch` continues |
 | S5 | File removed between list and download | `FileGone`, no error, no retry |
