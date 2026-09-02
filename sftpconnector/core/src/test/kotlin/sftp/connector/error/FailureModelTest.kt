@@ -93,10 +93,10 @@ class FailureModelTest {
      * Naming the row it belongs to is what proves the decision was actually made.
      */
     private fun rowOf(failure: SftpException): Disposition = when (failure) {
-        is ConnectFailed, is SessionLost, is OperationTimeout, is ServerFailure, is Unknown ->
+        is ConnectFailed, is SessionLost, is OperationTimeout, is Unknown ->
             Disposition.RETRY_ON_A_FRESH_SESSION
 
-        is NoSuchFile -> Disposition.RETRY_ON_THIS_SESSION
+        is NoSuchFile, is ServerFailure -> Disposition.RETRY_ON_THIS_SESSION
         is PermissionDenied -> Disposition.RETRY_ON_THE_NEXT_TICK
         is AuthenticationFailed, is HostKeyRejected, is ConfigurationError -> Disposition.STOP_THE_CONNECTOR
         is PoolExhausted -> Disposition.FAIL_THE_ATTEMPT

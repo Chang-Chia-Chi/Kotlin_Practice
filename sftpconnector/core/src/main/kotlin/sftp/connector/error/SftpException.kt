@@ -79,11 +79,17 @@ class OperationTimeout(attempt: Attempt, detail: String, cause: Throwable? = nul
     Recoverable(attempt, detail, cause, poisons = true)
 
 /**
- * The server answered with a failure of its own. Poisoning is the cautious reading of a status
- * code that means only "no": the server has not said what state it left the channel in.
+ * The server answered with a failure of its own.
+ *
+ * The session survives it. A well-formed status reply proves the channel parsed the request and
+ * answered, which is the definition of a healthy channel; the refusal was of this one request. It
+ * is also the ordinary answer from a server without the POSIX rename extension, so discarding the
+ * session here would cost a handshake on every overwrite rename against such a server. Breakage
+ * that only looks like this arrives carrying an IO error and is classified as a lost session
+ * before it ever reaches this class.
  */
 class ServerFailure(attempt: Attempt, val statusCode: Int, detail: String, cause: Throwable? = null) :
-    Recoverable(attempt, detail, cause, poisons = true)
+    Recoverable(attempt, detail, cause, poisons = false)
 
 /**
  * A failure whose wording the connector does not recognise.

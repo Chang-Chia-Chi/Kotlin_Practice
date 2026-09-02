@@ -51,12 +51,17 @@ class JschErrorMapperTest {
         assertThat((failure as PermissionDenied).poisons).isFalse()
     }
 
+    /**
+     * A status reply is proof the channel parsed the request and answered, so the refusal is of
+     * the request and not evidence against the session carrying it.
+     */
     @Test
-    fun `any other status code is the server refusing, and the code is kept`() {
+    fun `any other status code is the server refusing, the code is kept, and the session survives`() {
         val failure = mapping(JschStatusException(ChannelSftp.SSH_FX_FAILURE, "Failure"))
 
         assertThat(failure).isInstanceOf(ServerFailure::class.java)
         assertThat((failure as ServerFailure).statusCode).isEqualTo(ChannelSftp.SSH_FX_FAILURE)
+        assertThat(failure.poisons).isFalse()
     }
 
     /**
