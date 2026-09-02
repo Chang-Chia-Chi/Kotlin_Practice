@@ -101,6 +101,37 @@ Adding a class is safe by construction: T2's `FailureModelTest.rowOf` is a `when
 type, so a class added without a decided behaviour fails compilation rather than reaching
 production undecided. Ticket 07 applies this as a separate first commit.
 
+### C8: a refused overwrite gets its own class (ruling on T7's open question)
+
+T7 raised `Overwrite.REFUSE` over an occupied path as `ServerFailure` and flagged the
+disposition as wrong. It is: spec Sec 10.2 retries every recoverable failure and counts it
+against the breaker, so from T11 onward a deterministic policy refusal would cost three attempts
+and a breaker failure per call. Retrying can never help - the target will still be there - and
+charging the breaker for the connector doing exactly what it was configured to do is how a
+correctly-behaving pipeline opens its own circuit.
+
+The hierarchy gains **`OverwriteRefused`**, a top-level class beside `PoolExhausted` and
+`CircuitOpen` rather than under `Recoverable`, because those two are precisely the existing
+cases of "a real failure that is nobody's session's fault and no reason to try again". No retry,
+breaker untouched, lease returned - under `REFUSE` nothing was even sent, so the session is
+demonstrably fine - and `watch` emits `PollFailed` and continues, because one file's move
+failing is not a reason to stop a pipeline. Spec Sec 10.1, Sec 10.2 and D30 record it.
+
+T7's own argument for `ServerFailure` - that it is the same class and code a server without the
+extension answers with, so a caller handling one handles both - is real and is the cost of this
+ruling. It is outweighed because that symmetry only helps a caller that wants to treat the two
+identically, while the disposition harms every caller that does not.
+
+### C9: spec amendments T7 could not make itself
+
+T7's scope allowed `progress.md` and not `spec.md`, so three findings were recorded there and are
+now in the spec: Sec 5.1 names `writeFrom` alongside `readTo` with the same dispatcher reasoning;
+Sec 5.1 and Sec 6.1 record the `SftpSession`/`SftpConnection` split and why `withSession` hands
+over a session with no `close()` on it; and Sec 5.2 carries the measured `posix-rename` finding as
+D29. **Widening a ticket's scope to `spec.md` was considered and declined** - a spec edited by
+fifteen sessions in parallel with their own code is a spec nobody reviewed. Recording the finding
+and raising it is the right protocol, and it worked here.
+
 ### Open seams - things deferred, and who picks them up
 
 Coordinator-maintained. A ticket that closes one strikes it through in its own entry; a ticket

@@ -193,17 +193,20 @@ Defaults: keepalive 30 s, idle timeout 4 min, max lifetime 30 min.
 ### 5.1 Interface
 
 `SftpTransport` opens a `Connection`; a `Connection` offers `list(path, selector)`, `stat`,
-`readTo(path, sink)`, `openWrite`, `rename`, `delete`, `mkdir`, `realpath`, `abort()` and
-`close()`. The JSch adapter is the only implementation in production; the testkit provides a
-scripted fake for pool and source tests that never open a socket.
+`readTo(path, sink)`, `writeFrom(path, source)`, `rename`, `delete`, `mkdir`, `realpath`,
+`abort()` and `close()`. The JSch adapter is the only implementation in production; the testkit
+provides a scripted fake for pool and source tests that never open a socket.
 
-The read operation is `readTo(path, sink)` rather than the `openRead` earlier drafts named.
-Returning a stream would put every blocking socket read on whatever thread the caller happened
-to be on, and Sec 3.3 requires them all on the bounded dispatcher; handing the transport a sink
+The transfer operations are `readTo(path, sink)` and `writeFrom(path, source)` rather than the
+`openRead` and `openWrite` earlier drafts named. Returning a stream for the caller to pump would
+put every blocking socket read or write on whatever thread the caller happened to be on, and
+Sec 3.3 requires them all on the bounded dispatcher; handing the transport a sink or a source
 keeps the whole transfer inside one call on that dispatcher, which is also where the progress
-monitor of Sec 5.3 hangs. `openRead` is not this operation renamed - it is the streaming
-download of Sec 14.1, deferred out of v1 by Sec 1.3, and whichever release builds it adds it
-beside `readTo`.
+monitor of Sec 5.3 hangs. `openRead` is not `readTo` renamed - it is the streaming download of
+Sec 14.1, deferred out of v1 by Sec 1.3, and whichever release builds it adds it alongside.
+
+`SftpConnection` is `SftpSession` plus `close()`. See Sec 6.1 on `withSession` for why the
+split exists.
 
 Operations join this interface as the ticket needing them arrives, absent rather than stubbed,
 so nothing above the seam can call a method that does not yet work.
@@ -219,7 +222,12 @@ so nothing above the seam can call a method that does not yet work.
 - Host key policy is an explicit enum: `Strict(knownHosts)`, `Fingerprint(sha256)`,
   `AcceptAll`. `AcceptAll` is never the DSL default and logs a warning at startup (D8).
 - Rename uses the `posix-rename@openssh.com` extension when the server advertises it; the
-  overwrite policy (Sec 8.2) accounts for servers that do not.
+  overwrite policy (Sec 8.2) accounts for servers that do not. **This is not something the
+  adapter arranges** (D29, measured): JSch sends the extension by itself whenever the server
+  advertised it, and such a server replaces an occupied target and reports success. Refusing an
+  overwrite is therefore the connector's own decision, taken before the request goes out, and
+  cannot be delegated to the server. Any code that sends a bare rename and reads the answer is
+  trusting a behaviour half the servers in scope do not have.
 
 ### 5.3 Cancellation: three tiers
 
@@ -278,7 +286,14 @@ in production the first time it occurs, not silently absorbed.
 | `delete` | `(path)` | `NoSuchFile` after a retry counts as success |
 | `mkdir` | `(path, parents)` | `AlreadyExists` counts as success |
 | `exists` | `(path): Boolean` | Blind retry |
-| `withSession` | `(block: suspend Connection.() -> T): T` | No retry; the caller owns semantics |
+| `withSession` | `(block: suspend SftpSession.() -> T): T` | No retry; the caller owns semantics |
+
+`withSession` hands the block an `SftpSession`, not an `SftpConnection`. The difference is
+`close()`: the pool lends the same session out again after the block ends, so a caller that hung
+up on it would break the *next* caller's work rather than its own. The block is therefore handed
+something with no hang-up on it, and the loan is revoked when the block returns - a reference
+stashed past the block fails loudly instead of quietly using a session the pool has re-lent.
+`abort()` is likewise the pool's, never a borrower's, because it destroys the session.
 
 "Transparent reconnect" means: an operation that fails with a poisoned session is retried on a
 new lease within the retry budget of Sec 9, using the row above, so a session that dies mid-call
@@ -476,6 +491,7 @@ SftpException (sealed)
     ConfigurationError
   PoolExhausted
   CircuitOpen
+  OverwriteRefused     the target is occupied and the policy said not to replace (D30)
 ```
 
 `CancellationException` is never caught or wrapped. Every exception carries endpoint, operation,
@@ -490,6 +506,7 @@ path and attempt number in its message.
 | Fatal | No | Not counted | Evicted | Terminates with the error |
 | PoolExhausted | No | Not counted | n/a | Emits `PollFailed`, continues |
 | CircuitOpen | No | n/a | n/a | Emits `PollSkipped`, continues |
+| OverwriteRefused | No | Not counted | Returned | Emits `PollFailed`, continues |
 
 ---
 
@@ -641,6 +658,8 @@ transport in the testkit is a genuine second implementation.
 | D22 | The connector computes a digest during staging; the application compares it | The digest is free while bytes stream through; the expected value's origin is application knowledge. Checksum is integrity, not completeness, and cannot replace the readiness check because it needs the download first |
 | D23 | Unmapped JSch errors are `Unknown`, recoverable, poisoned, logged raw and counted | JSch error text is not an API; a wording change must surface as a metric and a log line, never as a silent misclassification or a dead connector |
 | D26 | The middle cancellation tier is the keepalive ladder, not `socketTimeout` | Measured against mwiede 2.28.7 (Sec 5.3): JSch implements `serverAliveInterval` by setting the socket read timeout, so a positive `keepAlive` always overwrites `session.timeout`. A hung server is bounded by `keepAlive x (serverAliveCountMax + 1)` and not at all by `socketTimeout` |
+| D29 | Refusing an overwrite is the connector's decision, never the server's | Measured (Sec 5.2): JSch sends `posix-rename@openssh.com` on its own whenever the server advertised it, so on such a server a rename onto an occupied target destroys the old file and reports success. `Overwrite.REFUSE` is unenforceable at the server and must be a look-then-request in the connector. A writer arriving between the two still wins; on a server without the extension the request itself is refused as well, which closes the race there and only there |
+| D30 | A refused overwrite is `OverwriteRefused`, its own class beside `PoolExhausted` and `CircuitOpen` | It is a deterministic policy decision, so retrying it can never succeed and counting it against the breaker charges the connector for doing what it was told. `ServerFailure` is right about the session and the message but wrong about both of those, and from Sec 9 onward would cost three attempts and a breaker failure per call. The session is untouched - under `REFUSE` nothing was even sent - so the lease is returned and the watch continues |
 | D28 | A byte count that disagrees with the listed size is `IncompleteTransfer`, not `SessionLost` | Every other `Recoverable` class describes a fault the wire reported; this one is the connector's own integrity check failing, and it had no class. Reporting it as `SessionLost` sends an operator to look at the network when the actual evidence is that a file changed size under them - which is precisely the signal open item 1 is waiting on, and the one a stalled uploader produces. It poisons, because a short read and a half-dead session are indistinguishable from here and the safe reading costs one handshake on a rare event |
 | D27 | `ServerFailure` does not poison the session | A well-formed `SSH_FX_FAILURE` proves the channel parsed the request and answered, so the session is healthy and a per-request refusal is no reason to throw it away. Sec 8.2 expects exactly that status from a server without `posix-rename`, which would otherwise evict a session on every overwrite rename. Real transport breakage arrives with an `IOException` cause and is classified `SessionLost` before this rule is reached |
 
