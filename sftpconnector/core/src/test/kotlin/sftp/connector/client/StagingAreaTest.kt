@@ -12,7 +12,7 @@ import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import sftp.connector.config.Digest
 import sftp.connector.error.Attempt
-import sftp.connector.error.SessionLost
+import sftp.connector.error.IncompleteTransfer
 import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Path
@@ -68,7 +68,7 @@ class StagingAreaTest {
                     }
                 }
             }
-                .isInstanceOf(SessionLost::class.java)
+                .isInstanceOf(IncompleteTransfer::class.java)
                 .hasMessageContaining("ended after ${CONTENT.size} bytes")
                 .hasMessageContaining("listing said the file had ${CONTENT.size + 10}")
                 .hasMessageContaining("path=/drop/ledger.csv")

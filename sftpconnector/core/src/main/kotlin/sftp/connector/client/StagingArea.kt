@@ -2,7 +2,7 @@ package sftp.connector.client
 
 import sftp.connector.config.Digest
 import sftp.connector.error.Attempt
-import sftp.connector.error.SessionLost
+import sftp.connector.error.IncompleteTransfer
 import java.io.OutputStream
 import java.nio.file.Files
 import java.nio.file.Path
@@ -32,7 +32,7 @@ internal class StagingArea(private val algorithm: Digest) {
      * arrive, moves it onto [target] and reports what landed there.
      *
      * @param attempt what to blame if the transfer comes up short.
-     * @throws SessionLost when the byte count does not match, which means the stream ended
+     * @throws IncompleteTransfer when the byte count does not match, which means the stream ended
      *   somewhere other than the end of the file.
      */
     suspend fun receive(
@@ -55,7 +55,7 @@ internal class StagingArea(private val algorithm: Digest) {
             tally.use { transfer(it) }
 
             if (tally.count != expectedSize) {
-                throw SessionLost(
+                throw IncompleteTransfer(
                     attempt,
                     "the transfer ended after ${tally.count} bytes where the listing said the file " +
                         "had $expectedSize, so what arrived is not the whole file",

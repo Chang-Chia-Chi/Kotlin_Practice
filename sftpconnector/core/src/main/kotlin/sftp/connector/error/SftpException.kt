@@ -95,6 +95,22 @@ class ServerFailure(attempt: Attempt, val statusCode: Int, detail: String, cause
     Recoverable(attempt, detail, cause, poisons = false)
 
 /**
+ * The bytes that arrived do not add up to the file the server said was there.
+ *
+ * Every other recoverable failure repeats something the wire reported. This one is the connector
+ * checking its own work, and it is worth its own name because of what an operator does next:
+ * calling it a lost session sends them to the network and the proxy, when the evidence in hand is
+ * that a file changed size underneath a transfer - which is what a stalled or still-writing
+ * uploader produces, and the one observation that would tell a maintainer their readiness
+ * convention is not holding.
+ *
+ * It poisons all the same. A short read and a half-dead session look identical from where the
+ * count is taken, and the safe reading costs one handshake on an event that should be rare.
+ */
+class IncompleteTransfer(attempt: Attempt, detail: String, cause: Throwable? = null) :
+    Recoverable(attempt, detail, cause, poisons = true)
+
+/**
  * A failure whose wording the connector does not recognise.
  *
  * It is deliberately the mildest thing an unrecognised message can become: recoverable, so a

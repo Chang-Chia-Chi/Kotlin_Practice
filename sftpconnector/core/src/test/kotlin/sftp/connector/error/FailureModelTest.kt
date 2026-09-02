@@ -93,7 +93,7 @@ class FailureModelTest {
      * Naming the row it belongs to is what proves the decision was actually made.
      */
     private fun rowOf(failure: SftpException): Disposition = when (failure) {
-        is ConnectFailed, is SessionLost, is OperationTimeout, is Unknown ->
+        is ConnectFailed, is SessionLost, is OperationTimeout, is IncompleteTransfer, is Unknown ->
             Disposition.RETRY_ON_A_FRESH_SESSION
 
         is NoSuchFile, is ServerFailure -> Disposition.RETRY_ON_THIS_SESSION
@@ -117,6 +117,7 @@ class FailureModelTest {
             ConnectFailed(ATTEMPT, "no session"),
             SessionLost(ATTEMPT, "the connection broke"),
             OperationTimeout(ATTEMPT, "took too long"),
+            IncompleteTransfer(ATTEMPT, "fewer bytes arrived than the listing promised"),
             ServerFailure(ATTEMPT, statusCode = 4, detail = "the server refused"),
             Unknown(ATTEMPT, "a wording nobody has read"),
             PermissionDenied(ATTEMPT, "refused on permissions"),
