@@ -20,7 +20,14 @@ import sftp.connector.transport.SftpConnection
  * "retire this particular session" and "how many are there", and a queue answers neither. Expiry
  * is a state change on an entry, not a drain-and-refill.
  */
-internal class SessionRegistry {
+internal class SessionRegistry(
+    /**
+     * How many callers are queued for a session right now. The registry cannot see them - they
+     * hold nothing it is keeping track of - but a count of what the pool holds that left them out
+     * would describe a full pool and a busy one identically.
+     */
+    private val pendingWaiters: () -> Int,
+) {
 
     private val mutex = Mutex()
 
@@ -35,6 +42,20 @@ internal class SessionRegistry {
 
     private var sessionsCreated = 0L
 
+    @Volatile
+    private var published = PoolStats(idle = 0, inUse = 0, connecting = 0)
+
+    /**
+     * The last count taken, answered without waiting for the lock.
+     *
+     * A metrics gauge is sampled from a thread that cannot suspend and must not be made to wait
+     * on the pool, so it reads this instead of asking. Nothing here goes stale between two of the
+     * methods below, because nothing else changes what they count: the reading is not out of
+     * date, it is simply still true. Only the waiters move on their own, so they are counted
+     * fresh on every read.
+     */
+    val lastCount: PoolStats get() = published.copy(pending = pendingWaiters())
+
     /**
      * Claims a session for one caller and says what has to happen before it can be used.
      *
@@ -43,7 +64,7 @@ internal class SessionRegistry {
      */
     suspend fun checkOut(): Checkout = mutex.withLock {
         val warm = idle.removeLastOrNull()
-        if (warm == null) {
+        val checkout = if (warm == null) {
             val fresh = PoolEntry(++sessionsCreated)
             entries += fresh
             Checkout.Dial(fresh)
@@ -51,12 +72,15 @@ internal class SessionRegistry {
             warm.moveTo(EntryState.InUse)
             Checkout.Reuse(warm)
         }
+        recount()
+        checkout
     }
 
     /** The session opened. */
     suspend fun filled(entry: PoolEntry, connection: SftpConnection) = mutex.withLock {
         entry.connection = connection
         entry.moveTo(EntryState.InUse)
+        recount()
     }
 
     /**
@@ -65,28 +89,37 @@ internal class SessionRegistry {
      * handback can imply and the reason this returns anything at all.
      */
     suspend fun handBack(entry: PoolEntry, healthy: Boolean): SftpConnection? = mutex.withLock {
-        if (healthy) {
+        val toClose = if (healthy) {
             entry.moveTo(EntryState.Idle)
             idle.addLast(entry)
             null
         } else {
+            // Evicting and leaving the deque happen together, under this lock, so there is no
+            // instant in which a session the pool has given up on is available to anybody. That
+            // is I3, and it holds because there is no other way back onto the shelf.
             entry.moveTo(EntryState.Evicting)
             entries -= entry
             idle.remove(entry)
             entry.connection.also { entry.connection = null }
         }
+        recount()
+        toClose
     }
 
     /** The connection is closed and the entry is finished. */
     suspend fun closed(entry: PoolEntry) = mutex.withLock {
         entry.moveTo(EntryState.Closed)
+        recount()
     }
 
     /**
      * One consistent count of everything. Taken under the lock, so the numbers describe a moment
      * that really existed rather than three reads of a moving target.
      */
-    suspend fun stats(): PoolStats = mutex.withLock {
+    suspend fun stats(): PoolStats = mutex.withLock { recount() }
+
+    /** Counts what is here and publishes it. Called only with the lock held. */
+    private fun recount(): PoolStats {
         var inUse = 0
         var connecting = 0
         entries.forEach {
@@ -97,7 +130,8 @@ internal class SessionRegistry {
                 else -> Unit
             }
         }
-        PoolStats(idle = idle.size, inUse = inUse, connecting = connecting)
+        published = PoolStats(idle = idle.size, inUse = inUse, connecting = connecting)
+        return published.copy(pending = pendingWaiters())
     }
 }
 

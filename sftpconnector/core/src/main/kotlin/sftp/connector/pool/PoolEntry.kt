@@ -68,9 +68,15 @@ data class PoolStats(
     val idle: Int,
     val inUse: Int,
     val connecting: Int,
+    /**
+     * Callers queued at the door, holding no session. They are not part of [total] - the pool is
+     * not responsible for them, it is what they are waiting on - but they are the difference
+     * between a pool that is merely full and one that is short.
+     */
+    val pending: Int = 0,
 ) {
     /** Every session the pool is responsible for. Bounded by `maxSize`; that bound is I1. */
     val total: Int get() = idle + inUse + connecting
 
-    override fun toString(): String = "idle=$idle, inUse=$inUse, connecting=$connecting"
+    override fun toString(): String = "idle=$idle, inUse=$inUse, connecting=$connecting, pending=$pending"
 }

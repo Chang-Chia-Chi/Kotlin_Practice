@@ -478,3 +478,181 @@ and confirming that its own test - and, for I5, only its own test - went red.
   Virtual time is how a test proves something did *not* happen without waiting for it.
 - **The `autoCreate` to `createActionTargets` rename landed while this ticket was being written** and
   is not part of it. Nothing in the pool reads that knob, so the two changes do not touch.
+
+---
+
+## T4: Lease contract, acquire timeout and poison eviction
+
+**Built:** Waiting for a session now ends. `acquire` takes its permit within `pool.acquireTimeout` or
+raises `PoolExhausted` carrying what the pool looked like at that moment and, in words, which of three
+different faults those numbers describe. The pool publishes the six meters spec Sec 13 names for it,
+through a `MeterRegistry` seam that defaults to a private `SimpleMeterRegistry`, following the
+transport's precedent. I3 and I4 have tests. One real leak was found and closed on the way: a session
+that finished opening into a coroutine cancelled a moment earlier was left open and unowned.
+
+**Concepts named:**
+
+- **Admission** (`SftpPool.admit`) is the door, and the design work went into what it says when it
+  refuses. "The pool was full" is the class, not the message; full because the server has stopped
+  completing handshakes, full because the work already holding the sessions is not finishing, and full
+  because there are not enough sessions for the load are three faults with three different remedies,
+  and an operator woken at three in the morning has to be able to tell them apart from one line. The
+  first is visible in `connecting` against `inUse`; the other two are separated by **whether room came
+  free at all during the wait**, which is the one fact the three counts alone cannot supply. So the
+  pool keeps a monotonic count of rooms freed, a waiter reads it at both ends of its wait, and
+  `explainExhaustion` turns the four numbers into the sentence naming which fault they are. The
+  statistics are the message; `PoolExhausted` carries them as fields as well, but no operator should
+  have to reach for them.
+- **`freeRoom()`** is the single place a permit goes back. Two paths let a caller go - a handback and
+  a failed acquire - and having them share one method is what stops the count of rooms freed from
+  drifting from the permits that were actually freed. The first draft had the count on one path only,
+  which made a waiter that had queued behind failing connects report the wrong one of the three faults.
+- **Pending is contention, not traffic.** `admit` tries for the permit without queueing first and only
+  joins the waiters if that fails, so `sftp_pool_pending` sits at zero on a pool that is keeping up. A
+  gauge that ticks whenever anything happens is one nobody can alert on.
+- **`SessionRegistry.lastCount`** is the reading a gauge takes. `stats()` still suspends and still
+  takes the lock, because I5's test is built on the fact that only an unlocked pool can answer it -
+  but a Micrometer gauge is sampled from a thread that cannot suspend and must never be made to wait
+  on the pool, so the registry republishes its count under the lock after every change and the gauges
+  read that. Between two changes the published reading is not stale, it is still true, because nothing
+  else can alter what it counts. Only the waiters move on their own, and they are counted fresh.
+- **`PoolMeters`** owns the names, the endpoint tag and the gauge wiring, and exposes four
+  intention-named methods rather than its meters. It lives in `pool` rather than in a `metrics`
+  package because it is one pool's private instrumentation; the later layers' meters belong beside
+  their own layers for the same reason, and a `metrics` package would be a bag of unrelated counters.
+
+**The ruling on `LeaseFate.NONE_HELD`, which T3 left open: it keeps the session.**
+
+T3 read the unreachable case as evicting and asked for confirmation. The reading is now the other one.
+Two reasons. `NONE_HELD` is the failure's own statement that what went wrong was not about any session,
+which is exactly what spec Sec 10.2 means by "n/a" in the lease column for `PoolExhausted` and
+`CircuitOpen` - it is an answer, not silence to be filled in. And the one way such a failure can reach
+a lease holder is a second acquire failing inside the first: destroying a healthy session at the moment
+the pool has just told somebody it has none would feed the shortage that caused the failure. Anything
+the connector never classified at all - an application error, a cancellation, an `Error` - still
+evicts, because that is a session nobody has vouched for, which is a different case entirely.
+`I3_a poisoned entry never returns to the idle deque` pins the ruling: putting `NONE_HELD` back with
+`EVICTED` fails it at `PoolExhausted`.
+
+**Acceptance:**
+
+- *acquire waits at most acquireTimeout then throws PoolExhausted with pool statistics* -
+  `LeaseSemanticsTest.a caller that cannot be served is turned away rather than left queueing`. It
+  asserts the wait against the scheduler's own clock rather than against the exception's account of
+  itself, because a bound that was never applied would report the configured timeout just as happily
+  as one that was. `.the exhaustion message names which of the three reasons the pool was full` stages
+  all three: a pool stuck dialling, a pool whose holder is not finishing, and one session wanted by
+  two callers.
+- *use-block releases in finally; a second release is logged and ignored* - **built by T3, verified
+  here, not rebuilt.** T3's `a lease given back twice is ignored the second time` and `what a failure
+  says about the session is what happens to it` still pass unchanged, and the double release is
+  exercised again as one of the exit paths in `I4_`.
+- *A poisoned lease's entry transitions to Evicting on release and is closed outside the lock* -
+  **built by T3, verified here, not rebuilt.** T3's `an entry publishes the states it passes through`
+  and `I5_no transport call executes while the registry lock is held` still pass unchanged. `I3_` adds
+  the assertion that the entry reaches `Closed` and that its session is never handed to anyone again.
+- *Cancellation during Connecting releases the permit and closes the half-open entry* - T3's `a connect
+  cancelled halfway leaves the pool all of its capacity` **already covers the case where cancellation
+  lands while the dial is in flight**, and it does still pass. It does not cover the other half, and
+  that half was broken: cancellation arriving in the gap between `connect()` returning and the entry
+  being told about it left a live session that no entry owned, so nothing ever closed it. `a session
+  that opens into a cancelled caller is closed rather than left running` stages it with the transport
+  hook cancelling its own caller, and it fails without the fix.
+- *I3 and I4* - `I3_a poisoned entry never returns to the idle deque` and `I4_every permit is released
+  exactly once on every exit path`. See below.
+- *The six meters* - `the pool publishes what a dashboard needs to watch it fill up` reads every one of
+  them off a `SimpleMeterRegistry`, asserts the registry holds those six and no others, and asserts
+  every one carries the endpoint tag.
+- *Demo against the embedded server* - `PoolAgainstServerTest.two callers hold two sessions at once and
+  the third is told why there is no more`. Two real JSch sessions to a real MINA SSHD, both answering
+  `realpath` at the same time, a third caller refused after a real 300 ms wait, and the pool still
+  serving the moment one comes back. It is the one test here whose wait is not virtual, because the
+  wait is the subject.
+- *Progress entry appended* - this.
+
+**How I3 and I4 are enforced, not merely asserted.** Both were checked by breaking the pool and
+watching the right test go red.
+
+- **I3** is `handBack`: eviction moves the entry to `Evicting`, drops it from the registry and takes it
+  out of the deque, all under one lock, and a handback is the only way back onto the shelf. The test
+  proves it by asking for the session again, which is the only thing "never returns to the deque"
+  actually means to a caller: an evicted one is gone for good and a kept one comes straight back.
+  Changing `idle.remove(entry)` to `idle.addLast(entry)` fails I3 at `ConnectFailed`. The loop walks
+  every failure class and asks each one what it wants rather than hard-coding a table, and it first
+  asserts that the classes between them ask for all three fates - otherwise it would be checking one
+  branch twelve times.
+- **I4** is the two release sites, both now going through `freeRoom()`, plus the lease's release-once
+  guard. The test runs ten exit paths - success, a returning failure, a poisoning failure, an
+  unclassified error, a hand-released lease, a double release, a failed connect, cancellation during
+  the dial, cancellation after it, and a wait that ran out - and then asks the pool what it can still
+  lend. Filling to `maxSize` proves nothing was lost; being refused at `maxSize + 1` proves nothing was
+  invented. Removing `ensureActive()` fails it, and so does the deque change above.
+
+**Deviations:**
+
+1. **`sftp.connector.error` now imports `sftp.connector.pool.PoolStats`**, so the two packages know
+   about each other. Accepted deliberately. `PoolStats` is the type for "what the pool holds", and the
+   alternative to importing it was a second stats-shaped type in `error` holding the same four numbers,
+   or four loose ints in the exception's signature - both worse than one import inside one module. Note
+   that `error` already carries pool vocabulary in the other direction: `LeaseFate` exists only to tell
+   the pool what to do with a session. Appealable, and the appeal would have to say what the second
+   type buys.
+2. **`sftp_pool_active` counts `inUse + connecting`.** Spec Sec 13 fixes the six names and the ground
+   rules forbid inventing a seventh, so there is no gauge for half-open sessions. Lumping them in with
+   the lent-out ones is what makes `active + idle` equal everything the pool holds, so no session can
+   go missing from a dashboard by sitting in a state no gauge was given. The distinction the gauges
+   cannot show is in `PoolStats` and in the exhaustion message, which is where an operator looks once
+   a gauge has told them something is wrong.
+3. **`sftp_pool_acquire_seconds` records only the waits that ended in a session.** A wait that timed
+   out lasted exactly `acquireTimeout` by construction, and mixing that constant into the distribution
+   would drag every percentile toward a number the configuration already fixes. The refusals are
+   counted separately, which is what `sftp_pool_acquire_timeout_total` is for.
+4. **`PoolExhausted`'s three new parameters have defaults**, so `PoolExhausted(attempt)` still compiles
+   and still produces its old fixed sentence. That is what keeps T1 and T2's `FailureModelTest`
+   untouched, which the standing rule requires. `PoolStats.pending` has a default for the same reason:
+   T3's tests compare against three-argument `PoolStats` values. Both defaults are honest rather than
+   merely convenient - the fallback message claims nothing it does not know.
+5. **The pool builds its own `Attempt`, with the operation `acquire`.** Nothing tells it what the
+   caller was going to do with the session. The endpoint and the operation are both true - the pool was
+   acquiring - but a log line would read better naming the caller's own operation, and that needs a
+   parameter on `acquire()` that no caller exists to pass yet. Debt, repaid by the ticket that first
+   has a caller with an operation to name.
+6. **One test method was added to T1's `ConnectorDslTest`** rather than a second DSL test class, for
+   the new knob's build-time validation. Additive only; no existing test in that file was touched, and
+   no assertion anywhere was weakened.
+7. **`explainExhaustion`'s third reading can be too generous.** "Room came free and other callers took
+   it" is also what a pool churning through poisoned sessions looks like, and the remedy there is not a
+   bigger pool. It is the residual branch after the two the numbers can identify, and it states what it
+   observed before drawing its conclusion, so the counts beside it still tell the truth.
+   `sftp_pool_created_total` is the meter that separates the two, and a later ticket wanting the third
+   branch sharper should read it here rather than add a fourth count.
+8. **Size.** About 380 lines that are neither blank nor comment across three new files and seven
+   modified ones, inside the 200-600 budget. Two of the six checkboxes were already green, which is
+   most of why.
+
+**For the next ticket:**
+
+- **`SessionRegistry` now takes a `pendingWaiters: () -> Int`.** It counts what the pool holds; the
+  waiters are not something it holds, so it is told that number rather than guessing zero. Ticket 05's
+  `Validating` producer changes nothing here - `stats` already counts a validating entry as in use.
+- **`stats()` and `lastCount` answer the same question two ways, on purpose.** `stats()` suspends and
+  takes the lock, and I5's test depends on exactly that. `lastCount` does not suspend, because a
+  metrics gauge cannot. Add a new meter by reading `lastCount`; add a new assertion by reading
+  `stats()`.
+- **Anything that releases a permit must go through `freeRoom()`.** The count it keeps is what a waiter
+  reads to decide which fault to report, and a release that skips it makes the pool tell an operator to
+  look in the wrong place. Ticket 13's shutdown will have permits to release.
+- **`acquire()` now ends with `coroutineContext.ensureActive()`**, so a cancelled caller is never
+  handed a lease it will not release. Ticket 05's validation loop goes between `filled` and that line,
+  and a failed validation that loops back to `checkOut` must keep the permit, per spec Sec 4.2 step 3.
+- **The three-way reading in `explainExhaustion` is a contract two tests assert on by wording.** If a
+  later ticket rewords it, `LeaseSemanticsTest.the exhaustion message names which of the three reasons
+  the pool was full` and `PoolAgainstServerTest` both need the new words. The wording is the
+  deliverable, so that is the right place for it to be pinned.
+- **`FakeSftpTransport`'s single hook took every staging this ticket needed**, including a hook that
+  cancels its own caller (`onCall = { afterConnect.cancel() }`) to land cancellation inside a
+  one-statement window. A mutable `var onCall` reassigned between phases is how one pool exercises ten
+  exit paths.
+- **A pool with something idle does not dial.** `I4_`'s first draft failed because a bare release left
+  a session on the shelf and the next three phases reused it instead of taking the dialling paths they
+  were written for. A test about connecting has to empty the shelf first, and assert that it did.

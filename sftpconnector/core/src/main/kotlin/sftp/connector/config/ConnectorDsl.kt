@@ -79,6 +79,9 @@ class SftpConnectorBuilder internal constructor(private val name: String) {
         }
 
         if (pool.maxSize < 1) faults += "pool maxSize ${pool.maxSize} leaves the connector no session to work with"
+        // Zero would refuse every caller that did not find a session already free, and a negative
+        // one would refuse all of them, which reads as a pool that is broken rather than busy.
+        if (pool.acquireTimeout <= Duration.ZERO) faults += "pool acquireTimeout must be positive, not ${pool.acquireTimeout}"
         if (pool.connectTimeout <= Duration.ZERO) faults += "pool connectTimeout must be positive, not ${pool.connectTimeout}"
         if (pool.socketTimeout <= Duration.ZERO) faults += "pool socketTimeout must be positive, not ${pool.socketTimeout}"
         if (pool.keepAlive <= Duration.ZERO) faults += "pool keepAlive must be positive, not ${pool.keepAlive}"
@@ -114,6 +117,7 @@ class SftpConnectorBuilder internal constructor(private val name: String) {
             hostKey = policy,
             pool = PoolConfig(
                 maxSize = pool.maxSize,
+                acquireTimeout = pool.acquireTimeout,
                 connectTimeout = pool.connectTimeout,
                 socketTimeout = pool.socketTimeout,
                 keepAlive = pool.keepAlive,
@@ -172,6 +176,7 @@ class AuthBuilder internal constructor() {
 @SftpDsl
 class PoolBuilder internal constructor() {
     var maxSize: Int = 5
+    var acquireTimeout: Duration = 30.seconds
     var connectTimeout: Duration = 10.seconds
     var socketTimeout: Duration = 60.seconds
     var keepAlive: Duration = 30.seconds

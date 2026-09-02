@@ -1,5 +1,8 @@
 package sftp.connector.error
 
+import sftp.connector.pool.PoolStats
+import kotlin.time.Duration
+
 /**
  * One try at one operation against one server.
  *
@@ -155,12 +158,48 @@ class ConfigurationError(message: String) : Fatal(message, null)
 /**
  * No session came free in time. Nothing was asked of the server, so there is nothing to retry and
  * nothing to hold against it; the next poll starts over.
+ *
+ * What an operator needs from this at three in the morning is not that the pool was full - that is
+ * implied by the class - but which of three quite different things made it full, because the three
+ * have three different remedies. So the numbers are the message, and [explainExhaustion] states
+ * out loud which of the three they describe.
  */
-class PoolExhausted(val attempt: Attempt) : SftpException(
-    attempt.describe("no session became free before the acquire timeout ran out"),
-    null,
-) {
+class PoolExhausted(
+    val attempt: Attempt,
+    /** What the pool looked like the instant the wait ran out. Absent when no pool raised this. */
+    val stats: PoolStats? = null,
+    /** The acquire timeout that ran out, which is the whole time this caller queued for. */
+    val waited: Duration = Duration.ZERO,
+    /** How often room came free while this caller queued. Zero means nothing moved at all. */
+    val roomFreedWhileWaiting: Long = 0,
+) : SftpException(attempt.describe(explainExhaustion(stats, waited, roomFreedWhileWaiting)), null) {
     override val disposition: Disposition get() = Disposition.FAIL_THE_ATTEMPT
+}
+
+/**
+ * Turns the pool's counts into the sentence an operator can act on.
+ *
+ * Sessions stuck opening mean the handshake is not completing, which is a server or a network
+ * fault that no amount of extra pool size will help. Nothing coming free in the whole wait means
+ * the work already holding the sessions is not finishing, so the thing to look at is that work.
+ * Room coming free and being taken by somebody else means this caller lost races it kept
+ * entering, which is a pool short of what its load asks of it.
+ */
+private fun explainExhaustion(stats: PoolStats?, waited: Duration, freed: Long): String {
+    if (stats == null) return "no session became free before the acquire timeout ran out"
+    val reading = when {
+        stats.connecting > 0 && stats.connecting >= stats.inUse ->
+            "most of the pool is stuck opening sessions, so look at the server and the network rather than at maxSize"
+
+        freed == 0L ->
+            "nothing came free at all, so the work already holding the sessions is not finishing"
+
+        else ->
+            "room came free and other callers took it, so the pool is short of what this load asks of it"
+    }
+    return "no session came free in $waited. ${stats.inUse} in use, ${stats.connecting} still opening, " +
+        "${stats.idle} idle, ${stats.pending} waiting including this one, " +
+        "room came free $freed times while it waited; $reading"
 }
 
 /** The breaker is open, so the connector deliberately sent nothing. */

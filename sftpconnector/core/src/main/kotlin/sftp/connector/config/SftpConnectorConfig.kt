@@ -57,6 +57,12 @@ sealed interface HostKeyPolicy {
  */
 data class PoolConfig(
     val maxSize: Int,
+    /**
+     * How long a caller waits at the door before being told the pool is full. It bounds the
+     * caller, not the server: a poll that would otherwise queue behind work that is not
+     * finishing gives up, reports why, and lets the next tick start over.
+     */
+    val acquireTimeout: Duration,
     val connectTimeout: Duration,
     val socketTimeout: Duration,
     val keepAlive: Duration,

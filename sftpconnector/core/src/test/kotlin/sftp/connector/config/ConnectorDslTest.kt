@@ -7,6 +7,7 @@ import sftp.connector.error.ConfigurationError
 import java.io.ByteArrayOutputStream
 import java.io.PrintStream
 import java.nio.file.Path
+import kotlin.time.Duration
 import kotlin.time.Duration.Companion.minutes
 import kotlin.time.Duration.Companion.seconds
 
@@ -110,6 +111,19 @@ class ConnectorDslTest {
                 "maxSize 0",
                 "keepAlive must be positive",
             )
+    }
+
+    /**
+     * Zero would turn every caller that did not find a session already free straight away into a
+     * failure, which reads in the log as a pool that is broken rather than one that is busy.
+     */
+    @Test
+    fun `an acquire timeout that admits nobody is refused, and has a default that admits somebody`() {
+        assertThatThrownBy { minimalConnector { pool { acquireTimeout = Duration.ZERO } } }
+            .isInstanceOf(ConfigurationError::class.java)
+            .hasMessageContaining("acquireTimeout must be positive")
+
+        assertThat(minimalConnector { }.pool.acquireTimeout).isEqualTo(30.seconds)
     }
 
     private fun minimalConnector(extra: SftpConnectorBuilder.() -> Unit): SftpConnectorConfig =

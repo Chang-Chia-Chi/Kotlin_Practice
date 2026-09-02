@@ -1,17 +1,26 @@
 package sftp.connector.pool
 
+import io.micrometer.core.instrument.MeterRegistry
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.slf4j.LoggerFactory
 import sftp.connector.config.SftpConnectorConfig
+import sftp.connector.error.Attempt
 import sftp.connector.error.LeaseFate
+import sftp.connector.error.PoolExhausted
 import sftp.connector.error.SftpException
 import sftp.connector.transport.SftpConnection
 import sftp.connector.transport.SftpTransport
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
+import kotlin.coroutines.coroutineContext
 
 /**
  * A bounded set of sessions to one server, lent out one caller at a time.
@@ -29,9 +38,21 @@ import java.util.concurrent.atomic.AtomicBoolean
 class SftpPool(
     private val transport: SftpTransport,
     config: SftpConnectorConfig,
+    /** Whatever the host supplies; a private one when the connector is used on its own. */
+    meterRegistry: MeterRegistry = SimpleMeterRegistry(),
 ) {
 
-    private val registry = SessionRegistry()
+    /**
+     * Callers that found the pool full and are queued for room. A caller served straight away is
+     * never one of these, so the count is a measure of contention rather than of traffic.
+     */
+    private val waiting = AtomicInteger()
+
+    private val registry = SessionRegistry { waiting.get() }
+
+    private val endpoint = "${config.endpoint.host}:${config.endpoint.port}"
+
+    private val meters = PoolMeters(meterRegistry, endpoint) { registry.lastCount }
 
     /**
      * The bound on everything. Held from before an entry exists until after it is handed back, so
@@ -39,6 +60,15 @@ class SftpPool(
      * stops a burst of callers from all deciding at once that the pool looks empty.
      */
     private val capacity = Semaphore(config.pool.maxSize)
+
+    private val acquireTimeout = config.pool.acquireTimeout
+
+    /**
+     * Every time room came free over the pool's life, whether a session was given back or one
+     * that never opened stopped taking up space. A waiter reads it twice and reports the
+     * difference, which is what separates a pool that is short from one that is stuck.
+     */
+    private val roomFreed = AtomicLong()
 
     /** What the pool holds right now. One consistent reading, not three separate ones. */
     suspend fun stats(): PoolStats = registry.stats()
@@ -61,20 +91,31 @@ class SftpPool(
     }
 
     /**
-     * Borrows a session, waiting for one to come free if the pool is at its limit.
+     * Borrows a session, waiting up to the acquire timeout for one to come free.
      *
      * For callers that cannot express their work as one block - a lease held across a handover, or
      * released by something other than the code that took it. Everyone else wants [withLease].
+     *
+     * @throws PoolExhausted when the wait runs out, carrying what the pool looked like at that
+     *   moment and what that means.
      */
     suspend fun acquire(): Lease {
-        capacity.acquire()
+        admit()
         var claimed: PoolEntry? = null
         try {
             val checkout = registry.checkOut()
             claimed = checkout.entry
             if (checkout is Checkout.Dial) {
-                registry.filled(checkout.entry, transport.connect())
+                val opened = transport.connect()
+                meters.sessionOpened()
+                // Once the session exists the entry has to be told about it whether this caller
+                // is still around or not. A connection the pool never recorded is a socket and a
+                // reader thread that nothing will ever close.
+                withContext(NonCancellable) { registry.filled(checkout.entry, opened) }
             }
+            // A caller that has already been cancelled will not release what it is handed, so it
+            // is turned away here instead - while the pool can still put the session back itself.
+            coroutineContext.ensureActive()
             return Lease(
                 this,
                 checkout.entry,
@@ -86,10 +127,52 @@ class SftpPool(
             // registry's lock, and a cancelled coroutine cannot wait for a lock.
             withContext(NonCancellable) {
                 claimed?.let { discard(it) }
-                capacity.release()
+                freeRoom()
             }
             throw failure
         }
+    }
+
+    /**
+     * Waits for room, or explains why there was none.
+     *
+     * A caller that queues forever is worse than one that fails: the poll it belongs to never
+     * ends, the next tick piles up behind it, and the log says nothing at all. So the wait is
+     * bounded, and what it cost is measured - both how long the successful ones took, and how
+     * the pool looked to the one that gave up.
+     */
+    private suspend fun admit() {
+        val queued = meters.startWaiting()
+        // Taken without queueing, which is what happens on a pool that is not full. Counting such
+        // a caller among the waiters would leave the pending gauge ticking on a healthy pool, and
+        // a gauge that moves when nothing is wrong is one nobody can alert on.
+        if (!capacity.tryAcquire()) {
+            val freedBefore = roomFreed.get()
+            waiting.incrementAndGet()
+            try {
+                if (withTimeoutOrNull(acquireTimeout) { capacity.acquire() } == null) {
+                    meters.turnedAway()
+                    throw PoolExhausted(
+                        attempt = Attempt(endpoint, "acquire"),
+                        stats = stats(),
+                        waited = acquireTimeout,
+                        roomFreedWhileWaiting = roomFreed.get() - freedBefore,
+                    )
+                }
+            } finally {
+                waiting.decrementAndGet()
+            }
+        }
+        meters.admitted(queued)
+    }
+
+    /**
+     * Gives back the room one caller was occupying. Both paths that let a caller go run through
+     * here, so the count of rooms that came free cannot drift from the permits that did.
+     */
+    private fun freeRoom() {
+        roomFreed.incrementAndGet()
+        capacity.release()
     }
 
     /** Takes an entry out of the pool for good and closes whatever it was holding. */
@@ -104,7 +187,7 @@ class SftpPool(
         } finally {
             // Last, on both paths. A waiter woken before the session is back on the shelf would
             // find a pool that says it has room and does not.
-            capacity.release()
+            freeRoom()
         }
     }
 
@@ -156,9 +239,18 @@ class Lease internal constructor(
      * session itself is still sound. Anything the connector did not classify - an application
      * error, a cancellation, an `Error` - leaves a session nobody has vouched for, and the pool
      * would rather pay for a handshake than hand that on.
+     *
+     * A failure that says it held no session at all keeps this one. It is saying that whatever
+     * went wrong was not about a session, and the way such a failure reaches a lease holder is a
+     * second acquire failing inside the first - the exact moment when destroying a healthy
+     * session would make the shortage that caused it worse.
      */
-    suspend fun releaseAfter(failure: Throwable): Unit =
-        giveBack(healthy = failure is SftpException && failure.disposition.lease == LeaseFate.RETURNED)
+    suspend fun releaseAfter(failure: Throwable): Unit = giveBack(
+        healthy = when ((failure as? SftpException)?.disposition?.lease) {
+            LeaseFate.RETURNED, LeaseFate.NONE_HELD -> true
+            LeaseFate.EVICTED, null -> false
+        },
+    )
 
     private suspend fun giveBack(healthy: Boolean) {
         if (!handedBack.compareAndSet(false, true)) {
