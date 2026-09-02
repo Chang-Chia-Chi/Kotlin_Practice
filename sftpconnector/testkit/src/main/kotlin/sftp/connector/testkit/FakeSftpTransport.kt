@@ -47,7 +47,7 @@ class FakeSftpTransport(
      */
     data class Call(val operation: Operation, val session: Int, val path: String? = null)
 
-    enum class Operation { Connect, Realpath, List, Stat, Read, Write, Rename, Delete, Mkdir, Close }
+    enum class Operation { Connect, Realpath, List, Stat, Read, Write, Rename, Delete, Mkdir, Close, Abort }
 
     val calls: MutableList<Call> = CopyOnWriteArrayList()
 
@@ -161,6 +161,20 @@ class FakeSftpTransport(
 
         override suspend fun close() {
             record(Call(Operation.Close, id))
+            hangUp()
+        }
+
+        /**
+         * Recorded rather than run through [answer], because the hook suspends and this one does
+         * not: the whole reason a real transport has an abort is that it is called while another
+         * thread is stuck, so it cannot be given anything to wait for.
+         */
+        override fun abort() {
+            calls += Call(Operation.Abort, id)
+            hangUp()
+        }
+
+        private fun hangUp() {
             if (!closed) {
                 closed = true
                 sessionsClosed.incrementAndGet()

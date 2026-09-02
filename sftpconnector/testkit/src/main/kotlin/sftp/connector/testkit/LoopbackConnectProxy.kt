@@ -6,6 +6,8 @@ import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * The smallest HTTP proxy an SSH client will tunnel through: it reads the CONNECT request,
@@ -27,6 +29,17 @@ class LoopbackConnectProxy private constructor(private val server: ServerSocket)
     @Volatile
     private var relaying = true
 
+    private val deliveredToClient = AtomicLong()
+
+    @Volatile
+    private var holdAfter = Long.MAX_VALUE
+
+    @Volatile
+    private var held: CountDownLatch? = null
+
+    @Volatile
+    private var whenHeld: () -> Unit = {}
+
     /**
      * Stops moving bytes in either direction while leaving both sockets open, which is the
      * failure a read timeout exists for: the peer has neither answered nor hung up, so nothing
@@ -36,7 +49,55 @@ class LoopbackConnectProxy private constructor(private val server: ServerSocket)
         relaying = false
     }
 
+    /**
+     * Delivers [bytes] more bytes to the client and then holds the tunnel still until [resume],
+     * calling [whenHeld] the moment it stops.
+     *
+     * Not the same fault as [stall], and the difference is the bytes behind it: a stall throws
+     * them away, so the conversation can never carry on, while a hold leaves them queued in the
+     * tunnel where they were. That is what lets a test stop a transfer at a point of its own
+     * choosing, act, and then let the same transfer continue - rather than guessing at a moment
+     * with a timer and hoping.
+     */
+    fun holdAfter(bytes: Long, whenHeld: () -> Unit) {
+        this.whenHeld = whenHeld
+        held = CountDownLatch(1)
+        deliveredToClient.set(0)
+        holdAfter = bytes
+    }
+
+    /** Lets a held tunnel carry on from exactly where it stopped. */
+    fun resume() {
+        holdAfter = Long.MAX_VALUE
+        held?.countDown()
+    }
+
+    /**
+     * How many bytes have reached the client since the last [holdAfter] armed. It is what the
+     * server was actually made to send, which is the only place a transfer that stopped early and
+     * one that ran to the end of the file look different from outside.
+     */
+    val bytesDelivered: Long get() = deliveredToClient.get()
+
+    /**
+     * Runs [action] once, the next time the client sends anything at all.
+     *
+     * On a stalled tunnel that moment is the only one a test can act on with any confidence: the
+     * request is on the wire, so the thread that sent it is committed to waiting for an answer
+     * that is never coming. Anything a test does before then may land on a call that has not
+     * started, which is a different thing entirely and not the thing under test.
+     */
+    fun onNextClientRequest(action: () -> Unit) {
+        whenClientSpeaks = action
+    }
+
+    @Volatile
+    private var whenClientSpeaks: () -> Unit = {}
+
     override fun close() {
+        // Released first, so a relay thread parked on a hold is not left waiting on a latch
+        // nothing will ever count down.
+        resume()
         server.close()
         sockets.forEach { runCatching { it.close() } }
     }
@@ -64,8 +125,8 @@ class LoopbackConnectProxy private constructor(private val server: ServerSocket)
         sockets += target
         client.getOutputStream().write(ESTABLISHED)
         client.getOutputStream().flush()
-        daemon("connect-proxy-upstream") { copy(client, target) }
-        copy(target, client)
+        daemon("connect-proxy-upstream") { copy(client, target, toClient = false) }
+        copy(target, client, toClient = true)
     }
 
     /**
@@ -88,17 +149,26 @@ class LoopbackConnectProxy private constructor(private val server: ServerSocket)
         return authority.substring(0, separator) to port
     }
 
-    private fun copy(from: Socket, to: Socket) {
+    private fun copy(from: Socket, to: Socket, toClient: Boolean) {
         try {
             val buffer = ByteArray(BUFFER_BYTES)
             while (true) {
                 val read = from.getInputStream().read(buffer)
                 if (read < 0) break
+                if (!toClient) whenClientSpeaks.also { whenClientSpeaks = {} }()
                 // A stalled tunnel keeps reading, so the sender's own buffers never fill and it
                 // never learns that nothing is arriving at the other end.
                 if (!relaying) continue
                 to.getOutputStream().write(buffer, 0, read)
                 to.getOutputStream().flush()
+                if (toClient && deliveredToClient.addAndGet(read.toLong()) >= holdAfter) {
+                    // Once only: the count is not reset, so the next chunk does not stop again.
+                    holdAfter = Long.MAX_VALUE
+                    whenHeld()
+                    // Everything the server sends from here waits in its own socket buffer, which
+                    // is what makes resuming pick up the same conversation rather than a broken one.
+                    held?.await()
+                }
             }
         } catch (endOfTunnel: IOException) {
             // Either end closing is how a tunnel ends; there is nothing to report.

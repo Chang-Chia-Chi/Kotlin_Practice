@@ -95,8 +95,8 @@ class SftpConnectorBuilder internal constructor(private val name: String) {
         listOf(
             "acquireTimeout" to pool.acquireTimeout,
             "connectTimeout" to pool.connectTimeout,
-            "socketTimeout" to pool.socketTimeout,
             "keepAlive" to pool.keepAlive,
+            "cancelGrace" to pool.cancelGrace,
             "idleTimeout" to pool.idleTimeout,
             "idleCutoff" to pool.idleCutoff,
             "maxLifetime" to pool.maxLifetime,
@@ -177,8 +177,8 @@ class SftpConnectorBuilder internal constructor(private val name: String) {
                 minIdle = pool.minIdle,
                 acquireTimeout = pool.acquireTimeout,
                 connectTimeout = pool.connectTimeout,
-                socketTimeout = pool.socketTimeout,
                 keepAlive = pool.keepAlive,
+                cancelGrace = pool.cancelGrace,
                 idleTimeout = pool.idleTimeout,
                 idleCutoff = pool.idleCutoff,
                 maxLifetime = pool.maxLifetime,
@@ -247,8 +247,8 @@ class PoolBuilder internal constructor() {
     var minIdle: Int = 0
     var acquireTimeout: Duration = 30.seconds
     var connectTimeout: Duration = 10.seconds
-    var socketTimeout: Duration = 60.seconds
     var keepAlive: Duration = 30.seconds
+    var cancelGrace: Duration = 5.seconds
     var idleTimeout: Duration = 4.minutes
     var idleCutoff: Duration = 5.minutes
     var maxLifetime: Duration = 30.minutes

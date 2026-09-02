@@ -141,7 +141,7 @@ because each was correctly deferred by the ticket that found it.
 | Seam | Left by | Owner | What happens if it is forgotten |
 |---|---|---|---|
 | `SftpPool.housekeep()` has no production caller | T5 | Whichever ticket builds the connector's `CoroutineScope` - T9 startup is the natural home, T13 owns cancelling it | The housekeeper never runs: no lifetime eviction, no idle eviction, no leak reports, and `minIdle` is a knob with no effect. The most consequential open seam on this list |
-| `socketTimeout` is dead configuration | T2 measurement, spec D26 | T8 | A knob that reads as the bound on a hung server and bounds nothing. T8 either makes it mean something or removes it |
+| ~~`socketTimeout` is dead configuration~~ | T2 measurement, spec D26 | ~~T8~~ | **Closed by T8, which removed it.** The bound on a hung server is `keepAlive x 2`, the adapter pins `serverAliveCountMax = 1` rather than inheriting it, and `keepAlive`'s own documentation names the bound. Spec 5.2, 5.3, 12 and S2 still mention the knob and are the maintainer's to reconcile - see T8's deviation 1 |
 | `HostKeyPolicy.Fingerprint(sha256)` unimplemented | T1 | The first ticket needing fingerprint pinning | Two of spec 5.2's three policies ship. Kotlin's exhaustive `when` names every site when it is added, so this cannot rot silently |
 | `sftp_pool_leak_total` registers on first use | T5 | The ticket that next revisits T4's exact-meters assertion | No series on a dashboard until the first leak, so an alert must treat absent as zero |
 | `Attempt.number` is always 1; the pool names its own operation `acquire` | T2, T4 | T11, which owns retries and is the layer that knows which try it is | Log lines and metrics attribute a caller's failure to the pool rather than to the operation that failed |
@@ -149,8 +149,11 @@ because each was correctly deferred by the ticket that found it.
 | `OperationTimeout` has no producer | T2 | T11's time limiter | A failure class in the hierarchy that nothing raises |
 | `MutableStateFlow.value` can resume an undispatched collector under the registry lock | flagged by the maintainer | Any ticket that collects `PoolEntry.state`/`Lease.state` | Foreign code runs inside a critical section. Still theoretical: T5 confirmed nothing collects either, both read `state.value` |
 | ~~A download whose byte count does not match the listed size raises `SessionLost`, which poisons~~ | T6 | ~~The maintainer~~ | **Closed by C7 and applied by T7.** The class is `IncompleteTransfer`, recoverable and poisoning, spec D28 |
-| A refusal the connector decides itself - `Overwrite.REFUSE` over an occupied path - is raised as `ServerFailure`, which spec 10.2 retries and counts against the breaker | T7 | The maintainer, who holds the pen on spec 10.1's hierarchy | Nothing retries today, so nothing is wrong yet. From T11 onward a deterministic policy refusal burns three attempts and a breaker failure per call, and a `Move(overwrite = false)` onto a target that keeps being occupied can open the breaker on a server that is answering perfectly. The disposition needed already exists - `FAIL_THE_ATTEMPT`, which is what `PoolExhausted` uses - and no class carries it for this. **T11 is the ticket that meets the harm and should not start without a ruling** |
+| ~~A refusal the connector decides itself - `Overwrite.REFUSE` over an occupied path - is raised as `ServerFailure`, which spec 10.2 retries and counts against the breaker~~ | T7 | ~~The maintainer~~ | **Closed by C8 and applied by T8.** The class is `OverwriteRefused`, top-level beside `PoolExhausted` and `CircuitOpen`, spec D30. It needed a seventh `Disposition`, `ACCEPT_THE_REFUSAL`: no retry, breaker untouched, watch continues, and the lease *returned* rather than `NONE_HELD`, which would have claimed there was no session when there was one. T11 can start |
 | `writeFrom` and the `SftpSession`/`SftpConnection` split are in the code and not in spec 5.1 or 6.1 | T7 | The maintainer; T7's scope boundary allowed `progress.md` but not `spec.md` | Spec 5.1 still names `openWrite` and spec 6.1 still declares `withSession(block: suspend Connection.() -> T)`. A later ticket reading the spec builds against names that are not there. Spec 5.1 already carries the `readTo` note that makes exactly this argument for the read side; the write side needs the same sentence |
+| A borrower can call `abort()` on the session it was lent | T8 | The ticket that next has cause to narrow the lease | `Lease.connection` is a full `SftpConnection`, so `close()` and now `abort()` are both reachable by a `withLease` caller - and T7 established that destroying a session is the pool's alone. `withSession` is safe, because `BorrowedSession` hands over an `SftpSession` with neither on it; a direct `withLease` caller is not. Nothing does it today |
+| Only a blocking call made *inside* `withLease` is on the cancellation ladder | T8 | Every later ticket | `dial()` is bounded by `connectTimeout` and `proves()` is wrapped, so both existing paths are covered. A third blocking transport call added outside a lease would be bounded on a hung server only by the keepalive floor, whatever `cancelGrace` said, and no test would notice |
+| A session cut loose by the ladder is counted `sftp_pool_evicted_total{reason=poisoned}` | T8 | Whichever ticket revisits spec 13's five eviction labels | A dashboard cannot tell a session the server poisoned from one the connector destroyed to rescue a thread. The two have different remedies; only the WARN line separates them |
 | The bounded IO dispatcher is as wide as the pool, and everything on it already holds a pool place | T6 | Every later ticket | This is what stops a listing blocked on its consumer from starving a download: threads wanted can never exceed threads available. An operation that runs on that dispatcher without first holding a pool place turns a slow path into a deadlock, and no test would catch it until concurrency was high |
 
 ### C6: spec Sec 5.3 amended - the middle cancellation tier is `keepAlive`
@@ -1310,3 +1313,224 @@ listed - so `rename` takes no size parameter and T11 supplies one.
 - **An `InputStream` handed to `writeFrom` is left open**, like the sink `readTo` writes to. On
   Windows a stream left open on a `@TempDir` file fails the whole test class at teardown with
   "Failed to delete temp directory", not at the test that leaked it.
+
+---
+
+## T8: Cancellation ladder: cooperative abort, keepalive floor, forced disconnect
+
+**Built:** cancelling a coroutine now reaches the thread it left behind. A download or a listing
+whose caller has gone away stops itself within a chunk of bytes and its session is handed straight
+to the next caller; a call nothing gentler will unblock is cut apart after `cancelGrace` and its
+entry ends `Closed`. `abort()` joined the transport seam, `cancelGrace` joined the DSL, and
+`socketTimeout` left it.
+
+A separate first commit applied coordinator decision C8: a refused overwrite is `OverwriteRefused`
+rather than `ServerFailure`, with its row added to T2's `FailureModelTest` and T7's two refusal
+assertions retargeted. T7's open question is closed and its seam is struck through above.
+
+**Concepts named:**
+
+- **`CancellationLadder`** (`pool`) is where the ticket's design went, and the thing it is named
+  after is not a mechanism but a *question*: a call that has stopped stopped in one of several
+  ways, and only one of them cost the session its life. Nobody at a call site can answer that -
+  a client operation knows it was cancelled and nothing else - so the answer is worked out in one
+  place and the session's fate follows from it. Its whole surface is `carry(entry) { ... }`, and
+  what is behind it is the waiting, the cutting, and the reading of what the stopped call died of.
+- **The rungs, and which of them the connector actually climbs.** Spec 5.3 lists three tiers, and
+  writing them down as three things this class does turned out to be wrong twice over. The
+  cooperative rung needs *nothing* from the ladder: the monitor and the selector both watch the
+  same cancellation that summoned it, so it is already armed by the time anything here runs. The
+  keepalive rung is not a rung at all but a **floor** - it ends a blocked read whether or not
+  anybody cancelled anything, which is why it also answers the ticket's third checkbox with no
+  cancellation anywhere in the test. Only the third is something the connector does. So the class
+  waits, and then cuts, and its documentation is most of it.
+- **`StopWhenNobodyIsWaiting`** (`transport.jsch`) is the cooperative rung, and it is a
+  `SftpProgressMonitor` that reads the caller's `Job` rather than a flag somebody has to set.
+  There is nothing to arm and nothing to remember to disarm: the cancellation arrives on a
+  different thread from the transfer, and a job is already the thing both threads agree on.
+- **`PoolEntry.cutLoose()`** puts the destroying and the recording of it in one method, because
+  they are one decision. A session cut apart and not recorded goes back on the shelf and is handed
+  to somebody, and the record is the only trace the cutting leaves - a cancellation says a caller
+  stopped waiting and nothing whatever about a session.
+- **`abort()` on `SftpConnection`, not `SftpSession`**, following T7. It is not `close()` in a
+  hurry: `close()` is the orderly hang-up on an idle session by whoever owns it, and this is called
+  from a different thread while a call is in flight, leaves the session unusable on purpose, and
+  must never touch the bounded IO dispatcher - the moment it is worth aborting anything is the
+  moment every thread there may already be blocked.
+- **`Disposition.ACCEPT_THE_REFUSAL`** is the seventh disposition, added by the C8 pre-task.
+  `FAIL_THE_ATTEMPT` would have kept the session too, but by way of `LeaseFate.NONE_HELD`, which
+  claims there was no session - and there was.
+- **Two testkit fault hooks.** `LoopbackConnectProxy.holdAfter(bytes) { }` stops a transfer at a
+  byte count of the test's choosing and `resume()` lets the *same* transfer carry on, which is a
+  different fault from `stall()` and differs in exactly the bytes behind it: a stall throws them
+  away, a hold leaves them queued where they were. `onNextClientRequest { }` fires when the client
+  has put a request on the wire, which on a stalled tunnel is the only moment a test can act on
+  with confidence - the thread that sent it is committed to waiting for an answer that is never
+  coming.
+
+**What was decided about `socketTimeout`, and why it was removed.**
+
+The seam left by T2's measurement and spec D26 was: make it mean something, or take it out. It is
+out, and the DSL is one knob shorter.
+
+The case for keeping it was in spec 5.3 itself - "the knob stays in the DSL because it is what a
+reader reaches for" - and the way to honour that would have been to spend it as
+`serverAliveCountMax`, deriving the number of unanswered probes from
+`socketTimeout / keepAlive`. That was written and then reverted, for three reasons.
+
+1. **It cannot be honoured as written.** The library gives up after a whole number of unanswered
+   probes at the keepalive interval, so any bound is a multiple of `keepAlive`. A duration knob
+   whose value is silently rounded to a multiple of a *different* knob is not one knob but half of
+   two, and changing `keepAlive` would then quietly change how many probes a deployment gets.
+2. **Its name is a lie in this library, and that is the exact lie D26 exists to end.** There is no
+   separately settable socket read timeout, because `serverAliveInterval` *is* the socket read
+   timeout. Keeping the name while giving it a different job preserves the misreading rather than
+   ending it - the next reader still believes there is a socket timeout, and is still wrong.
+3. **It would have overturned an earlier ticket's premise.** T2's `S2_` test shortens `keepAlive`
+   alone because `keepAlive` is the bound; under the derivation the same test would have taken
+   sixty seconds instead of four, and fixing that means editing a test whose whole subject is the
+   measurement this ticket is built on.
+
+What a reader reaches for now is `keepAlive`, whose documentation says outright that twice its
+value is the bound on a hung server and the number to size against an SLA. The adapter pins
+`serverAliveCountMax = 1` rather than inheriting the library's default, because that bound is a
+promise this connector makes and not one it should inherit from a dependency's next release. If a
+deployment ever needs the bound tuned independently of how often a session speaks, the honest knob
+is a count of probes spelled as a count, and nothing needs it today.
+
+**Acceptance:**
+
+- *Cancelling a download mid-transfer returns within cancelGrace, the session is validated and
+  returned to the pool, no partial file remains* - `CancellationLadderTest.a download cancelled in
+  mid transfer stops itself, leaves nothing behind, and keeps its session`. The transfer is held
+  mid-file by the tunnel, cancelled, and let go again so the next chunk of bytes carries the news;
+  the join is asserted inside one second against a three-second grace, which is what proves nothing
+  was cut apart. `validationBypass` is zero for that test, so the session is not merely on the shelf
+  afterwards - it has answered the server since.
+- *Cancelling a listing stops the selector; the session is reused for the next operation* -
+  `.a listing its consumer walked away from leaves the session fit for the next operation`, which
+  asserts `sftp_pool_created_total` is still 1 after the listing and a later `exists` on the same
+  pool.
+- *A server-side stall raises SessionLost, poisons the lease, evicts the entry* - `.a server that
+  goes quiet ends the call itself, and the session goes with it`. **Read against the keepalive, not
+  `socketTimeout`**, which is spec 5.3 as amended by D26 and is the ticket checkbox this entry
+  deviates from in wording only.
+- *A call stuck past cancelGrace is force-disconnected; the blocked thread returns and the entry is
+  Closed* - `.a call nothing else unblocks is cut loose after the grace, and its entry ends closed`,
+  which reads the entry's own state flow and asserts `EntryState.Closed`.
+- *Progress entry appended* - this.
+
+Three tests beyond the four checkboxes, each closing something the checkboxes did not name:
+`I13_no partial file survives a transfer the pool had to cut apart` is the arm of I13 T6 could not
+prove because there was no abort yet to prove it with; `.a cancelled call the keepalive ends inside
+the grace still costs the session` is deviation 3's case; and `.a borrow cancelled while the pool is
+proving a session is cut loose as well` covers the validation round trip, which is a blocking call
+made before any lease exists and was outside the ladder in the first draft.
+
+**How each rung is enforced, not merely asserted.** Six breaks were staged, and each turned exactly
+the right test - and only that test - red.
+
+- **The cooperative rung** is the monitor answering `caller.isActive`. Making `count()` return
+  `true` always fails the download test on the bytes the server was made to send: that count is the
+  only place a transfer that stopped early and one that ran to the end of an eight-megabyte file
+  differ from outside, which is why the test asserts on it rather than on the download returning.
+- **The forced rung** is `entry.cutLoose()`. Removing the `abort()` inside it does not fail the
+  forced test, it hangs it for the full fifteen seconds the test allows - which is the honest
+  symptom, because without the cut nothing ends that call until the keepalive does a minute later.
+- **The record of the cut** is the other half of `cutLoose()`. Aborting without setting the flag
+  fails the forced test at the entry's state: a session cut apart and unrecorded goes back on the
+  shelf as `Idle`.
+- **The cancellation branch in `releaseAfter`** is what stops a cancelled operation costing a
+  handshake. Reverting it to poison every cancellation fails both cooperative tests, which see a
+  second session dialled.
+- **The keepalive-inside-the-grace branch** is what stops a *dead* session going back. Removing it
+  fails only its own test.
+- **The ladder around the validation round trip** likewise: unwrapping it hangs only the borrow
+  test, for the full fifteen seconds.
+
+**What the forced tier measures.** Against the embedded server through a stalled tunnel, with a
+300 ms grace, the blocked thread comes back in well under a second from the cancellation - the
+assertion band is 300 ms to 6 s and four consecutive runs sat at the bottom of it. Closing the
+socket is what does it: `Session.disconnect()` returned promptly rather than blocking on the
+stalled socket it was hanging up on, which was the risk worth measuring before relying on it. The
+keepalive floor, measured with a 400 ms interval, ends a stalled read in under two seconds, which
+is the two intervals `serverAliveCountMax = 1` buys.
+
+**Deviations:**
+
+1. **`socketTimeout` is removed from the DSL, and spec 5.2, 5.3, 12 and 17.2's S2 still name it.**
+   The removal is inside the grant C6 gave this ticket; the four passages are not this ticket's to
+   edit. **For the maintainer:** 5.2's `Session.setTimeout(socketTimeout)` is now
+   `setServerAliveCountMax(1)`; 5.3's "the knob stays in the DSL because it is what a reader
+   reaches for" is the sentence this ticket appeals against, with the three reasons above; 12's
+   pool block loses `socketTimeout` and gains nothing, since `cancelGrace` was already listed
+   there; and S2's "Server stalls past `socketTimeout`" should read "past the keepalive ladder",
+   which is what 5.3 already says in prose.
+2. **Two earlier tickets' test files were edited, both mechanically forced by the removal.**
+   T1's `ConnectorDslTest` used `socketTimeout = 45.seconds` as its example of a pool knob reaching
+   the built configuration; it now uses `cancelGrace = 45.seconds`, which is the same assertion
+   about a different knob and the substitution the coordinator's brief anticipated. T2's
+   `JschErrorMappingTest` config helper set `socketTimeout = BRIEF` alongside `connectTimeout` and
+   `keepAlive`; that line is deleted. Nothing was weakened: no assertion changed meaning and
+   `keepAlive = BRIEF`, which is what actually bounds anything there, is untouched. T2's KDoc at
+   that test still says "the clock is `keepAlive`, not `socketTimeout`" - still true, and now naming
+   a knob that no longer exists. Left alone rather than reworded, because it explains a measurement
+   and is not this ticket's prose to change.
+3. **`withLease` runs its block in a child coroutine, under a `supervisorScope`.** It has to run
+   it as a child: a caller blocked inside JSch cannot observe its own cancellation, so somebody has
+   to be watching from outside, and there is nowhere else that holds both the lease and the grace.
+   The supervisor part is load-bearing rather than incidental - a cut session raises a lost
+   connection, and under a plain `coroutineScope` that failure wins the race against the
+   cancellation, so a caller that merely changed its mind is told the network broke and
+   `CancellationException` is effectively swallowed. It was found by a test, not by reading.
+4. **`readTo` and `writeFrom` end with `ensureActive()`, and no test covers it directly.** A
+   transfer the monitor stopped has delivered less than the file holds, so without it the staging
+   area reports `IncompleteTransfer` - "a file changed size underneath you" - for what was a
+   cancellation. It is not separately observable from above because the ladder drops a cancelled
+   call's outcome by design, so the two look identical to a caller. It stays because the transport
+   is the layer that knows which of the two happened, and reporting the wrong one is a landmine for
+   the first caller that reaches `readTo` outside a lease.
+5. **The ladder does not wrap `dial()`.** A cancelled caller waiting on a connect is bounded by
+   `connectTimeout`, which the library applies itself, and an entry mid-dial has no session to
+   abort. `proves()` is wrapped, because it has both.
+6. **`sftp_pool_evicted_total{reason=poisoned}` is what a cut session is counted as.** Spec 13
+   fixes five labels and the ground rules forbid a sixth, so a session destroyed to rescue a thread
+   shares a label with one that failed. The eviction is honest - the session really is unusable -
+   but a dashboard cannot tell "the server poisoned it" from "we cut it loose", and the WARN line
+   is the only place that distinction lives.
+7. **Size.** 379 lines that are neither blank nor comment, 236 of them the one test file. Inside
+   the budget, but the seven tests are most of it, and three of them were added after review found
+   that the four checkboxes covered neither I13's own wording, nor the keepalive-during-grace case,
+   nor the validation round trip.
+
+**For the next ticket:**
+
+- **T13 inherits the ladder for its forced phase.** Spec 11.2 step 4 is "remaining leases are
+  aborted, which unblocks their threads", and that is `entry.cutLoose()` - it marks and aborts
+  together, so a lease released afterwards is evicted without shutdown having to say so. What T13
+  still owns is the *reason*: `Retirement.SHUTDOWN` has no producer, and a session cut during a
+  drain is currently counted as `poisoned` like any other.
+- **I9 is `drainTimeout + cancelGrace`, and the second half now exists.** The grace is the only
+  thing bounding a blocked call, so a drain is bounded by `drainTimeout` plus one grace per lease
+  that has to be cut - not one grace overall, if the cuts are sequential. T13 should cut them in
+  parallel or say why not.
+- **Anything that adds a blocking transport call to a path outside `withLease` is outside the
+  ladder.** Two such paths exist and both are handled - `dial()` by `connectTimeout`, `proves()` by
+  being wrapped. A third would be unbounded on a hung server except by the keepalive floor, and
+  nothing would fail to say so.
+- **`Lease.entry` is now `internal`**, so the ladder can be handed the entry rather than the lease.
+  A borrower still receives a full `SftpConnection` from `Lease.connection` and can therefore call
+  `abort()` on it, which T7 said should be the pool's alone. `withSession` is protected by
+  `BorrowedSession`; a direct `withLease` caller is not. Worth closing when something needs it.
+- **`cancelGrace` defaults to five seconds and is the only new knob.** It is what a cancelled
+  caller waits before its session is destroyed, so shortening it trades handshakes for
+  responsiveness; the tests use 300 ms.
+- **The keepalive interval bounds the key exchange, and a warm-up connection must use the *shipped*
+  interval.** T5's note says to warm the JVM's first key exchange with a throwaway connection; what
+  it does not say, and what cost an hour here, is that the throwaway must not itself use the
+  shortened interval - otherwise the warm-up is the cold handshake it exists to absorb, and fails
+  with `timeout in waiting for rekeying process.` The failure is intermittent and looks like a
+  connect bug.
+- **`FakeSftpTransport` now records an `Abort`** and hangs up on the session without going through
+  the `answer` hook, because a real abort is called while another thread is stuck and so cannot be
+  given anything to wait for.

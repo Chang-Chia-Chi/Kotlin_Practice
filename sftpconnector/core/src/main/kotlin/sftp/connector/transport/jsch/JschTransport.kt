@@ -5,13 +5,18 @@ import com.jcraft.jsch.JSch
 import com.jcraft.jsch.ProxyHTTP
 import com.jcraft.jsch.Session
 import com.jcraft.jsch.SftpATTRS
+import com.jcraft.jsch.SftpProgressMonitor
 import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.job
 import kotlinx.coroutines.withContext
+import org.slf4j.LoggerFactory
 import sftp.connector.config.AuthMethod
 import sftp.connector.config.HostKeyPolicy
 import sftp.connector.config.SftpConnectorConfig
@@ -73,6 +78,16 @@ class JschTransport(
         }
     }
 
+    private companion object {
+        /**
+         * How many keepalive probes may go unanswered before the session carrying them is given
+         * up on. One, so that a server which has gone quiet is noticed after two intervals: the
+         * shortest bound this mechanism can express, and the one every configuration gets, since
+         * the interval is the knob and this is not.
+         */
+        private const val UNANSWERED_KEEPALIVES = 1
+    }
+
     private fun openSession(): Session {
         val jsch = JSch()
         val endpoint = config.endpoint
@@ -95,12 +110,17 @@ class JschTransport(
 
         endpoint.proxy?.let { session.setProxy(ProxyHTTP(it.host, it.port)) }
 
-        // Set before connecting, because that is when JSch reads it. It becomes the socket's
-        // read timeout, and so the only thing that ever unblocks a server which accepts a
-        // request and then goes quiet: a blocked socket read notices neither an interrupted
-        // thread nor a cancelled coroutine.
-        session.timeout = config.pool.socketTimeout.toTimeoutMillis()
+        // Set before connecting, because that is when JSch reads them, and together because they
+        // are one setting in two halves. JSch implements the keepalive interval *by* making it the
+        // socket's read timeout, so a session has no separately settable read timeout at all: this
+        // and the number of probes allowed to go unanswered are between them the only thing that
+        // ever ends a call against a server which accepted a request and then went quiet. A
+        // blocked socket read notices neither an interrupted thread nor a cancelled coroutine, so
+        // the bound they set - one interval to send a probe, one more to give up on it - is the
+        // number to size against an SLA. The count is pinned rather than left to the library,
+        // because that bound is a promise this connector makes and not one it inherits.
         session.serverAliveInterval = config.pool.keepAlive.toTimeoutMillis()
+        session.serverAliveCountMax = UNANSWERED_KEEPALIVES
         session.connect(config.pool.connectTimeout.toTimeoutMillis())
         return session
     }
@@ -141,14 +161,29 @@ private class JschConnection(
         errors.translating(Attempt(endpoint, "stat", path)) { channel.stat(path).describe(path) }
     }
 
-    override suspend fun readTo(path: String, sink: OutputStream): Unit = withContext(io) {
-        errors.translating(Attempt(endpoint, "read", path)) { channel.get(path, sink) }
-    }
+    override suspend fun readTo(path: String, sink: OutputStream): Unit =
+        transferring(Attempt(endpoint, "read", path)) { channel.get(path, sink, it) }
 
-    override suspend fun writeFrom(path: String, source: InputStream): Unit = withContext(io) {
-        errors.translating(Attempt(endpoint, "write", path)) {
-            channel.put(source, path, ChannelSftp.OVERWRITE)
-        }
+    override suspend fun writeFrom(path: String, source: InputStream): Unit =
+        transferring(Attempt(endpoint, "write", path)) { channel.put(source, path, it, ChannelSftp.OVERWRITE) }
+
+    /**
+     * Moves the bytes of one file, under a monitor that stops as soon as nobody is waiting for
+     * them any more.
+     *
+     * The monitor is the cheap way out of a transfer that has lost its caller. JSch asks it
+     * between chunks, so the news travels within one chunk of bytes rather than at the end of the
+     * file, and answering no closes the remote handle cleanly - the session is as good afterwards
+     * as it was before, which is the whole difference between this and hanging up on it.
+     *
+     * A transfer stopped that way has delivered less than the file holds, so it says outright
+     * that it was cancelled. Left to return normally it would reach the caller above as a short
+     * file, which is a different fault with a different remedy - and this is the layer that knows
+     * which of the two it was.
+     */
+    private suspend fun transferring(attempt: Attempt, move: (SftpProgressMonitor) -> Unit): Unit = withContext(io) {
+        errors.translating(attempt) { move(StopWhenNobodyIsWaiting(coroutineContext.job)) }
+        coroutineContext.ensureActive()
     }
 
     /**
@@ -188,6 +223,40 @@ private class JschConnection(
             }
         }
     }
+
+    /**
+     * Closing the socket is what gets the blocked thread back, because that is the one thing a
+     * blocking read reacts to. It runs on the caller's own thread rather than on the IO
+     * dispatcher: every thread there may be the ones waiting to be rescued.
+     */
+    override fun abort() {
+        try {
+            session.disconnect()
+        } catch (failure: Exception) {
+            // Nobody is going to try again, and the session is being written off either way.
+            LOG.warn("Cutting {} loose failed, and it is being written off regardless: {}", endpoint, failure.message)
+        }
+    }
+
+    private companion object {
+        private val LOG = LoggerFactory.getLogger(JschTransport::class.java)
+    }
+}
+
+/**
+ * Tells JSch to stop a transfer as soon as the coroutine that asked for it has been cancelled.
+ *
+ * It reads the job rather than being told to stop, because the cancellation it is watching for
+ * arrives on a different thread than the one running the transfer, and a job is already the thing
+ * both threads agree on. There is nothing to arm and nothing to remember to disarm.
+ */
+private class StopWhenNobodyIsWaiting(private val caller: Job) : SftpProgressMonitor {
+
+    override fun init(op: Int, src: String?, dest: String?, max: Long) = Unit
+
+    override fun count(count: Long): Boolean = caller.isActive
+
+    override fun end() = Unit
 }
 
 /** JSch counts timeouts in milliseconds as an `Int`, and treats a negative one as an error. */

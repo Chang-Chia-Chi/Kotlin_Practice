@@ -10,7 +10,7 @@ package sftp.connector.error
  * every one of those callers would be a place to remember. So the failure answers, and the
  * caller obeys.
  *
- * The constants are the ways a failure can end. Read one to learn everything.
+ * Each constant is one whole way a failure can end. Read one to learn everything.
  */
 enum class Disposition(
     val retry: Retry,

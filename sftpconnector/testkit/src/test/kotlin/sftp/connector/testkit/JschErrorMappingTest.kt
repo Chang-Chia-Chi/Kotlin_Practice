@@ -240,7 +240,6 @@ class JschErrorMappingTest {
         hostKey = HostKeyPolicy.AcceptAll
         pool {
             connectTimeout = BRIEF
-            socketTimeout = BRIEF
             keepAlive = BRIEF
         }
         extra()

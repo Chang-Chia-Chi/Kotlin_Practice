@@ -80,17 +80,24 @@ class SftpPool(
     /** What the pool holds right now. One consistent reading, not three separate ones. */
     suspend fun stats(): PoolStats = registry.stats()
 
+    private val ladder = CancellationLadder(settings.cancelGrace)
+
     /**
      * Borrows a session, and gives it back however [block] ends.
      *
      * This is the way to use the pool. A lease released by hand is released on one path and
      * forgotten on another, and a session that is never handed back is capacity the pool has lost
      * for the life of the process.
+     *
+     * It is also the only way to be cancelled safely. A cancelled caller leaves behind whatever
+     * blocking call it was in the middle of, and that call keeps the session until it stops; the
+     * ladder is what makes it stop, within a bound, and what knows whether stopping it cost the
+     * session its life.
      */
     suspend fun <T> withLease(block: suspend (Lease) -> T): T {
         val lease = acquire()
         return try {
-            block(lease).also { lease.release() }
+            ladder.carry(lease.entry) { block(lease) }.also { lease.release() }
         } catch (failure: Throwable) {
             lease.releaseAfter(failure)
             throw failure
@@ -169,11 +176,15 @@ class SftpPool(
      * on a server that starts refusing connections when too many are half-open: proving a session
      * is the cheap answer and opening one is the expensive one, so the pool proves first and opens
      * only when the answer is no.
+     *
+     * The round trip goes up the ladder like any other, because it is one: a caller that gives up
+     * while the pool is asking a dead server whether a session is still there is a caller waiting
+     * on a blocked socket read, and it has no more idea than any other that it is doing so.
      */
     private suspend fun proves(entry: PoolEntry): Boolean {
         val connection = checkNotNull(entry.connection) { "$entry was parked without a session to prove" }
         try {
-            connection.realpath(".")
+            ladder.carry(entry) { connection.realpath(".") }
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (failure: Exception) {
@@ -358,7 +369,7 @@ class SftpPool(
  */
 class Lease internal constructor(
     private val pool: SftpPool,
-    private val entry: PoolEntry,
+    internal val entry: PoolEntry,
     val connection: SftpConnection,
 ) {
 
@@ -387,11 +398,19 @@ class Lease internal constructor(
      * went wrong was not about a session, and the way such a failure reaches a lease holder is a
      * second acquire failing inside the first - the exact moment when destroying a healthy
      * session would make the shortage that caused it worse.
+     *
+     * A cancellation is the one thing that is not a failure at all: it says a caller stopped
+     * waiting and nothing whatever about the session. What says something is whether getting the
+     * caller's thread back cost the session its life, and the pool records that when it does it.
      */
     suspend fun releaseAfter(failure: Throwable): Unit = giveBack(
-        retire = when ((failure as? SftpException)?.disposition?.lease) {
-            LeaseFate.RETURNED, LeaseFate.NONE_HELD -> null
-            LeaseFate.EVICTED, null -> Retirement.POISONED
+        retire = if (failure is CancellationException) {
+            Retirement.POISONED.takeIf { entry.unfitAfterCancelling }
+        } else {
+            when ((failure as? SftpException)?.disposition?.lease) {
+                LeaseFate.RETURNED, LeaseFate.NONE_HELD -> null
+                LeaseFate.EVICTED, null -> Retirement.POISONED
+            }
         },
     )
 

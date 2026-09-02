@@ -75,13 +75,24 @@ data class PoolConfig(
      */
     val acquireTimeout: Duration,
     val connectTimeout: Duration,
-    val socketTimeout: Duration,
     /**
      * How often a session with nothing to say speaks anyway. It has to be short enough that the
-     * proxy and the server never see the tunnel go quiet for as long as they are willing to
-     * wait, and it is also what unblocks a read the server has stopped answering.
+     * proxy and the server never see the tunnel go quiet for as long as they are willing to wait.
+     *
+     * It is also, and less obviously, **the number an SLA has to be sized against**. The SSH
+     * library implements the keepalive by making it the socket's read timeout and giving up once
+     * one probe has gone unanswered, so a call against a server that accepted a request and then
+     * went quiet ends after twice this - and nothing else ever ends it, since a blocked socket
+     * read notices neither an interrupted thread nor a cancelled coroutine.
      */
     val keepAlive: Duration,
+    /**
+     * How long a caller that has been cancelled waits for the call it left behind to stop by
+     * itself, before the session carrying it is destroyed to get the thread back. It is the price
+     * of a cancellation that nothing gentler reaches: one handshake, paid to put a bound on
+     * something that otherwise has none.
+     */
+    val cancelGrace: Duration,
     /** How long a session may sit unused before the pool hangs up on it, down to [minIdle]. */
     val idleTimeout: Duration,
     /**

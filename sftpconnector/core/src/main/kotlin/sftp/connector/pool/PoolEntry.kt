@@ -106,6 +106,31 @@ class PoolEntry internal constructor(
     /** A leak is worth saying once. Said every housekeeping round, it would bury the log. */
     internal var leakReported = false
 
+    /**
+     * Set while letting go of a caller that was cancelled, when what it left behind is not a
+     * session the next caller should be handed.
+     *
+     * A cancellation on its own says nothing whatever about a session - only that somebody
+     * stopped waiting - so without this every cancelled operation would either cost a handshake
+     * it did not need or hand on a session that had died, and there is no telling which from the
+     * cancellation alone. Written outside the registry's lock, unlike everything else here,
+     * because the whole point is that it is decided while no lock is held.
+     */
+    @Volatile
+    internal var unfitAfterCancelling = false
+
+    /**
+     * Destroys the session to get back the thread a call is blocked on, and records that it did.
+     *
+     * The two halves are one method because they are one decision: a session that has been cut
+     * apart and not marked would go back on the shelf and be handed to somebody, and the marking
+     * is the only trace the cutting leaves.
+     */
+    internal fun cutLoose() {
+        unfitAfterCancelling = true
+        connection?.abort()
+    }
+
     internal fun claimedBy(borrower: Throwable, now: Long) {
         this.borrower = borrower
         borrowedAt = now

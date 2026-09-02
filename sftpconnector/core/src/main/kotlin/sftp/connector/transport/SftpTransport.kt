@@ -139,4 +139,22 @@ interface SftpConnection : SftpSession {
      * is harmless.
      */
     suspend fun close()
+
+    /**
+     * Destroys the session from underneath whatever is using it, so that a call blocked on a
+     * socket nobody is answering gets its thread back.
+     *
+     * This is the violent one, and it is not [close] in a hurry. [close] is the orderly hang-up on
+     * a session nobody is using; this one is called from a *different* thread than the one it is
+     * rescuing, while a call is still in flight on the session, and the session is unusable
+     * afterwards by design. Whoever calls it is choosing to pay for a new handshake in exchange
+     * for a bound on something that has none.
+     *
+     * It does not suspend, and implementations must not put it on the connector's IO dispatcher:
+     * that dispatcher is exactly as wide as the pool, so the moment it is worth aborting anything
+     * is the moment every thread on it may already be blocked. It must not throw either - there is
+     * nothing a caller could usefully do about an abort that failed, and it is already the last
+     * resort.
+     */
+    fun abort()
 }

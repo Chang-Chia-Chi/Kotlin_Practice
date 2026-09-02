@@ -25,13 +25,13 @@ class ConnectorDslTest {
             }
             auth { password("etl", "s3cret") }
             hostKey = HostKeyPolicy.Strict(KNOWN_HOSTS)
-            pool { socketTimeout = 45.seconds }
+            pool { cancelGrace = 45.seconds }
         }
 
         assertThat(config.name).isEqualTo("vendor-drop")
         assertThat(config.endpoint).isEqualTo(Endpoint("sftp.example", 2222, HttpConnectProxy("proxy.internal", 3128)))
         assertThat(config.hostKey).isEqualTo(HostKeyPolicy.Strict(KNOWN_HOSTS))
-        assertThat(config.pool.socketTimeout).isEqualTo(45.seconds)
+        assertThat(config.pool.cancelGrace).isEqualTo(45.seconds)
         assertThat(config.pool.connectTimeout).isEqualTo(10.seconds)
         assertThat(config.pool.keepAlive).isEqualTo(30.seconds)
         assertThat(config.pool.maxSize).isEqualTo(5)
