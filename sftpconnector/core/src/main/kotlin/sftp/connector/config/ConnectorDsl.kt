@@ -2,6 +2,8 @@ package sftp.connector.config
 
 import org.slf4j.LoggerFactory
 import sftp.connector.error.ConfigurationError
+import java.nio.file.Files
+import java.nio.file.Path
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.minutes
@@ -33,6 +35,7 @@ class SftpConnectorBuilder internal constructor(private val name: String) {
     private var endpoint: EndpointBuilder? = null
     private var auth: AuthBuilder? = null
     private val pool = PoolBuilder()
+    private val polling = PollingBuilder()
 
     /** Required. There is deliberately no default; see [HostKeyPolicy]. */
     var hostKey: HostKeyPolicy? = null
@@ -47,6 +50,10 @@ class SftpConnectorBuilder internal constructor(private val name: String) {
 
     fun pool(configure: PoolBuilder.() -> Unit) {
         pool.apply(configure)
+    }
+
+    fun polling(configure: PollingBuilder.() -> Unit) {
+        polling.apply(configure)
     }
 
     internal fun build(): SftpConnectorConfig {
@@ -126,6 +133,16 @@ class SftpConnectorBuilder internal constructor(private val name: String) {
                 "the pool would keep parked sessions the path had already dropped"
         }
 
+        // Checked here rather than at the first download, because a staging directory that is
+        // missing or read-only makes every download fail and the fault is the same one every time.
+        // Finding that at deployment costs a restart; finding it an hour into a run costs the run.
+        val stagingDir = polling.staging.dir
+        if (!Files.isDirectory(stagingDir)) {
+            faults += "staging dir $stagingDir is not a directory that exists, so downloads would have nowhere to land"
+        } else if (!Files.isWritable(stagingDir)) {
+            faults += "staging dir $stagingDir cannot be written to by this process, so no download could be staged in it"
+        }
+
         if (faults.isNotEmpty()) {
             throw ConfigurationError("connector \"$name\" cannot start: ${faults.joinToString("; ")}")
         }
@@ -169,6 +186,9 @@ class SftpConnectorBuilder internal constructor(private val name: String) {
                 validationBypass = pool.validationBypass,
                 leakDetectionThreshold = pool.leakDetectionThreshold,
                 housekeepingInterval = pool.housekeepingInterval,
+            ),
+            polling = PollingConfig(
+                staging = StagingConfig(dir = polling.staging.dir, digest = polling.staging.digest),
             ),
         )
     }
@@ -236,4 +256,26 @@ class PoolBuilder internal constructor() {
     var validationBypass: Duration = 500.milliseconds
     var leakDetectionThreshold: Duration = 10.minutes
     var housekeepingInterval: Duration = 30.seconds
+}
+
+@SftpDsl
+class PollingBuilder internal constructor() {
+
+    internal val staging = StagingBuilder()
+
+    fun staging(configure: StagingBuilder.() -> Unit) {
+        staging.apply(configure)
+    }
+}
+
+@SftpDsl
+class StagingBuilder internal constructor() {
+    /**
+     * The default is the JVM's temp directory, because it is the one local directory that exists
+     * and is writable everywhere the connector can run, so a connector nobody has finished
+     * configuring still works. A deployment names its own, on a filesystem sized for the files it
+     * pulls and cleaned by someone who knows they are there.
+     */
+    var dir: Path = Path.of(System.getProperty("java.io.tmpdir"))
+    var digest: Digest = Digest.SHA256
 }

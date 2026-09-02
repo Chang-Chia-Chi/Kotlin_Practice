@@ -3,9 +3,11 @@ package sftp.connector.config
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.io.TempDir
 import sftp.connector.error.ConfigurationError
 import java.io.ByteArrayOutputStream
 import java.io.PrintStream
+import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.minutes
@@ -159,6 +161,37 @@ class ConnectorDslTest {
             .hasMessageContaining("maxLifetimeJitter 1.5 is outside 0.0..1.0")
 
         assertThat(minimalConnector { }.pool.minIdle).isZero()
+    }
+
+    /**
+     * A staging directory that is missing or read-only makes every download fail, and it fails the
+     * same way every time. Found at deployment it costs a restart; found an hour into a run, after
+     * a listing and a lease and most of a transfer, it costs the run.
+     */
+    @Test
+    fun `a staging directory the connector cannot write a download into is refused`(@TempDir usable: Path) {
+        assertThatThrownBy { minimalConnector { polling { staging { dir = usable.resolve("not-created-yet") } } } }
+            .isInstanceOf(ConfigurationError::class.java)
+            .hasMessageContaining("is not a directory that exists")
+
+        assertThatThrownBy { minimalConnector { polling { staging { dir = Files.createFile(usable.resolve("a-file")) } } } }
+            .isInstanceOf(ConfigurationError::class.java)
+            .hasMessageContaining("is not a directory that exists")
+
+        val configured = minimalConnector { polling { staging { dir = usable; digest = Digest.MD5 } } }
+        assertThat(configured.polling.staging.dir).isEqualTo(usable)
+        assertThat(configured.polling.staging.digest).isEqualTo(Digest.MD5)
+    }
+
+    @Test
+    fun `a connector nobody configured for staging still has somewhere to put a download`() {
+        val defaults = minimalConnector { }.polling.staging
+
+        // Whatever the JVM was given as its temp directory: it exists and is writable wherever the
+        // connector runs, which is what makes the rule above pass without anyone setting anything.
+        assertThat(Files.isDirectory(defaults.dir)).isTrue()
+        assertThat(Files.isWritable(defaults.dir)).isTrue()
+        assertThat(defaults.digest).isEqualTo(Digest.SHA256)
     }
 
     private fun minimalConnector(extra: SftpConnectorBuilder.() -> Unit): SftpConnectorConfig =

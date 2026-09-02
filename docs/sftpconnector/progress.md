@@ -91,6 +91,8 @@ because each was correctly deferred by the ticket that found it.
 | `Retirement.SHUTDOWN` has no producer | T5 | T13 | `sftp_pool_evicted_total{reason=shutdown}` never appears |
 | `OperationTimeout` has no producer | T2 | T11's time limiter | A failure class in the hierarchy that nothing raises |
 | `MutableStateFlow.value` can resume an undispatched collector under the registry lock | flagged by the maintainer | Any ticket that collects `PoolEntry.state`/`Lease.state` | Foreign code runs inside a critical section. Still theoretical: T5 confirmed nothing collects either, both read `state.value` |
+| A download whose byte count does not match the listed size raises `SessionLost`, which poisons | T6 | The maintainer, who holds the pen on spec 10.1's hierarchy | A file that grew between the listing and the download costs a handshake on every attempt. The hierarchy has no class for the connector's own consistency check failing, and the two that fit either poison a healthy session or need a wire status code the server never sent. A `TransferIncomplete` - recoverable, does not poison - is the change that ends the trade |
+| The bounded IO dispatcher is as wide as the pool, and everything on it already holds a pool place | T6 | Every later ticket | This is what stops a listing blocked on its consumer from starving a download: threads wanted can never exceed threads available. An operation that runs on that dispatcher without first holding a pool place turns a slow path into a deadlock, and no test would catch it until concurrency was high |
 
 ### C6: spec Sec 5.3 amended - the middle cancellation tier is `keepAlive`
 
@@ -843,3 +845,214 @@ next one's attention.
   `maxLifetime` and none survives the jitter window, over two independent draws. Proving that two
   entries drew *different* lifetimes is either probabilistic or needs the entry's expiry made public,
   and neither was worth it. If a later ticket exposes `PoolEntry.expiresAt`, that test becomes exact.
+
+---
+
+## T6: Client read path: list, stat, exists, download with staging and digest
+
+**Built:** `sftp.connector.client` exists, and the connector can now read. A caller streams a
+directory without the directory ever being held in memory, asks what the server says about a path,
+and fetches a file onto local disk where it arrives complete, under its final name, with the digest
+of the bytes that came over the wire. Every one of those borrows a session from the pool and gives
+it back however it ends. The transport grew the three operations they need - `list`, `stat` and
+`readTo` - and nothing else; `openWrite`, `rename`, `delete`, `mkdir` and `abort()` are still absent
+rather than stubbed, following T1.
+
+**Concepts named:**
+
+- **`RemoteFile`** (`transport`) and **`LocalFile`** (`client`) are two things, not one thing at two
+  moments, and separating them is where most of this ticket's design went. A `RemoteFile` is the
+  server's *claim* about a path when it was asked: it can be stale before it is read, and nothing
+  built on it may assume otherwise. A `LocalFile` is a *fact* about a file this connector wrote and
+  counted - a path, a byte count and a digest - and it cannot exist for a file that is half there.
+  The download is the only thing that turns one into the other, and it is the only place the
+  server's claim is checked against what actually arrived.
+- **`StagingArea`** is the deep module. Its whole surface is one call: hand it a place to put a
+  file, a promise about the size, and something that writes bytes, and it either gives back a
+  `LocalFile` or leaves the directory exactly as it found it. A caller is never told the partial
+  file exists, and so cannot forget to clean it up - that is what makes I13 structural rather than
+  remembered. Counting and digesting are the same pass as writing, because the bytes are going past
+  anyway: reading the file back to digest it would double the I/O, and asking the filesystem for the
+  size afterwards would answer about the disk rather than about the transfer.
+- **`Listing`** (`CONTINUE` / `STOP`) is the answer the transport's listing callback gives, and it
+  is the reason a hundred-thousand-entry directory costs what a thousand-entry one does. The seam
+  had to be a callback rather than a returned collection: a returned collection is a materialised
+  directory however the caller then filters it.
+- **`ClientMeters`** owns `sftp_op_seconds`, the endpoint tag and the four result labels, and
+  exposes a timing block rather than its timer - a caller that had to stop the timer itself would be
+  the caller deciding what "recoverable" means. It does not sort failures into buckets of its own:
+  every failure already answers what is to be done about it, and this reads that answer. It lives
+  beside the client for the reason `PoolMeters` lives beside the pool.
+- **`Endpoint.address`** is the one spelling of `host:port`. Three classes were building it by hand,
+  and two spellings of it would split one server's numbers across two series on a dashboard.
+
+**How the push callback became a cold flow, which was the hard half.** The SSH library reports
+entries to a selector on the thread reading the socket, and that thread cannot suspend. So the
+selector hands each entry to `channelFlow`'s bounded channel with `trySendBlocking`, the library's
+own primitive for exactly this - a blocking callback feeding a channel - which answers with a result
+instead of throwing. Blocking that thread *is* the backpressure: the server is not asked for the
+next batch while this one has nowhere to go. A consumer that has stopped collecting closes the
+channel, `trySendBlocking` reports failure, and the selector answers `STOP`, which closes the remote
+handle cleanly and leaves the session healthy - the cooperative tier of the cancellation ladder,
+arrived at from the listing side. Nothing in this path catches a cancellation.
+
+That thread is one of the connector's bounded few, and the reason holding it cannot starve the rest
+of the connector is an accounting one worth writing down, because a later ticket could take it away
+without noticing: **the bounded dispatcher is exactly as wide as the pool, and everything that runs
+on it is already holding a place in the pool** - a listing, a download, a dial, a hang-up. So the
+number of threads wanted can never exceed the number there are. An operation added later that runs
+on that dispatcher without first holding a place turns a slow path into a deadlock.
+
+**Acceptance:**
+
+- *list returns a cold Flow fed by the transport's per-entry callback through a bounded channel;
+  maxEntries stops the listing early; directories are skipped by default* -
+  `SftpClientTest.a listing hands on the files of a directory and leaves the directories out`,
+  `.a listing stops after the entries the caller asked for` (which asserts what the *server* was
+  asked to report, not merely what the consumer received), `.a filter keeps entries away from the
+  consumer without ending the listing`, `.nothing is listed until somebody collects` for coldness,
+  and `.a consumer that stops collecting stops the listing and gives the session back`.
+- *download writes name.part in the staging directory, verifies byte count against the listed size,
+  renames atomically, returns LocalFile with digest (SHA-256 default, MD5 selectable)* -
+  `StagingAreaTest`, seven tests, and `SftpClientTest.a download lands under its final name with the
+  digest of the bytes that arrived`. The expected digests are read off `sha256sum` and `md5sum`, not
+  computed by the code under test.
+- *Abort or failure during download deletes the partial file (I13)* - three `I13_` tests in
+  `StagingAreaTest` and one in `SftpClientTest`. See below.
+- *Listing 100k entries with maxEntries 1000 stops after 1000 with flat memory (S11, against the
+  embedded server)* - `ReadPathAgainstServerTest.S11_a hundred thousand entries with a limit of a
+  thousand stops after a thousand`. See below.
+- *Meters sftp_op_seconds{op,result}* - `SftpClientTest.the client publishes how long each operation
+  took and how it went`, which reads the timers off a `SimpleMeterRegistry` and asserts the op and
+  result tags of every one, including a failing download tagged `recoverable`.
+- *Progress entry appended* - this.
+
+Four more tests prove the seam against a real server rather than a script:
+`ReadPathAgainstServerTest` lists a real directory, downloads real bytes and checks their digest
+against `sha256sum`, answers `stat` and `exists` about a path that is there and one that never was,
+and stages a file deleted between the listing and the download.
+
+**How I13 is enforced, not merely asserted.** There is one method that creates a partial file, and
+exactly two ways out of it: the atomic move, which takes the partial file away itself, and
+everything else. The `finally` deletes it, so the successful path finds nothing to delete and every
+other path - a transfer that threw, a coroutine that was cancelled, a byte count that did not add
+up, an error nobody expected - is cleaned by the same line. Replacing that line with a no-op fails
+all three `I13_` tests in `StagingAreaTest` and nothing else. The tests assert the directory is
+*empty* rather than merely that the partial file is gone, because the failure that matters most is a
+final name left over half a file: whatever finds the final name takes what is under it for a whole
+one.
+
+The one arm of I13 not proved here is the word "abort": `abort()` is ticket 08's third cancellation
+tier and does not exist yet. What is proved is that cancelling the coroutine running the transfer
+already leaves nothing behind, which is the tier below it, so 08 inherits a cleanup that is correct
+rather than one it has to add.
+
+**What S11's memory measurement actually showed.** The assertion is not on heap. It is on the number
+of entries that reached the connector at all, counted inside the callback the server's own batches
+drive: **exactly 1000 of the 100,000**. That is both the stronger statement and the deterministic
+one - a listing that read the whole directory and handed on the first thousand would pass a heap
+check on a good day and fail it on a bad one, but it could never report 1000. Memory is bounded
+because the work is, and the count is the work.
+
+The heap was measured anyway, on a real run: **1.5 MB** of live heap between a settled reading
+before the listing and a settled reading after (6.5 MB to 8.0 MB), while collecting 1000 entries out
+of the 100,000-entry directory. That 1.5 MB is essentially the thousand `RemoteFile` objects the
+test itself keeps in its own list. No assertion was written on it, deliberately: a gc-based delta
+loose enough not to flake is too loose to catch what it is supposed to catch, since 100,000 of these
+entries would only be about twelve megabytes and the bound would have to sit above the measurement
+noise. The number is recorded here rather than asserted in a test because it is an observation.
+
+**Deviations:**
+
+1. **The transport's read operation is `readTo(path, sink)`, where spec 5.1 names `openRead`.** Not
+   a rename for its own sake: `openRead` returning a stream would put every blocking socket read on
+   whatever thread the caller happened to be on, and spec 3.3 requires them all on the bounded
+   dispatcher. Handing the transport a sink keeps the whole transfer inside one call on that
+   dispatcher, which is also where ticket 08 hangs its progress monitor. Spec 14.1 keeps `openRead`
+   for a *streaming* download that pins a lease for the consumer's read, and spec 1.3 defers that
+   out of v1 - so `openRead` is not this operation renamed, it is a different operation with no
+   caller yet. Whichever ticket builds streaming adds it beside this one.
+2. **A byte count that does not match the listed size is raised as `SessionLost`, and it is the one
+   reading in this ticket I would most like ruled on.** The failure hierarchy is fixed by spec 10.1
+   and holds no class for the connector's own consistency check failing, so the choice was between
+   the classes that exist. `SessionLost` fabricates nothing and its message says exactly what
+   happened, but it poisons - so a file that grew between the listing and the download costs a
+   handshake, and C4's own reasoning (a channel that answered is demonstrably healthy) argues the
+   session should be kept. The alternative inside the hierarchy is `ServerFailure`, whose disposition
+   is right in every respect, but it carries a wire status code and the server sent none: inventing
+   one would put a fabricated number in a field an operator may one day read. So the choice was no
+   fabricated data, at the price of a handshake on a rare event, and an open seam below for the
+   class that would end the trade. From a dashboard this looks like
+   `sftp_pool_evicted_total{reason=poisoned}` rising alongside
+   `sftp_op_seconds{op=download,result=recoverable}`.
+3. **`list` never reports directories, where spec 7.4 says they are "skipped by default".** Read as
+   the sentence's other half - "`recursive` descends" - the default that can change is `recursive`,
+   which is ticket 10's, and not the filter. A `filter` default that excluded directories would
+   silently put them back the moment a caller passed a filter of its own, which is a foot-gun rather
+   than a default.
+4. **`sftp_op_seconds{op=list}` spans the consumer's work, not the server's.** The listing blocks on
+   the consumer by design, so there is no separable server time to measure. What it reports is how
+   long the operation held a session, which is the number that matters to a pool of five - but it is
+   not the server's latency and must not be read as one.
+5. **`PoolExhausted` and `CircuitOpen` are tagged `result=recoverable`.** Spec 13 fixes four labels
+   and neither failure is any of them: both are recoverable in the sense that the next tick tries
+   again, and calling them `fatal` would say the connector should stop, which is the one thing they
+   do not mean. The discriminator is the failure's own `WatchReaction.STOP`, so a class whose
+   behaviour changes moves label without this file being edited.
+6. **`polling { staging { } }` arrives before the poller.** Spec 12 puts the staging knobs inside
+   `polling`, so they went where they belong rather than somewhere ticket 10 would have to move them
+   from; the block holds nothing else yet. `staging.dir` defaults to the JVM's temp directory rather
+   than being required, because a required knob with no default would have made every configuration
+   in every earlier ticket's tests fail to build, and a default that exists and is writable wherever
+   the connector runs keeps the new validation rule honest without that.
+7. **A caller-supplied `localTarget` puts the partial file beside it, not in the staging directory.**
+   The move has to be atomic, so the partial file has to be on the same filesystem as the final one;
+   staging elsewhere and copying would give up the one guarantee this exists for. Spec 6.3's
+   `<stagingDir>/<name>.part` is what the default target produces, and a caller naming its own target
+   has taken responsibility for where it points.
+8. **Two test methods were added to T1's `ConnectorDslTest`** for the new knobs' build-time
+   validation. Additive only; no existing test in that file was touched and no assertion anywhere was
+   weakened.
+9. **Three review findings were declined.** The duplicated content and its digest across three test
+   files stay duplicated on purpose: each test states the digest it expects, read from `sha256sum`,
+   and a shared constant would let one test's change move another test's expectation without anyone
+   noticing. The directory-prefix join in the JSch adapter and the same rule inside
+   `FakeSftpTransport` stay separate, because sharing them means making a private helper public
+   across a module boundary to serve a fake. And `ClientMeters` reading `failure.disposition.watch`
+   is not envy: reading the failure's own answer instead of sorting failures a second time is the
+   whole point of T2's disposition.
+10. **Size.** About 700 lines that are neither blank nor comment, roughly 400 of them tests, against
+    a 200-600 budget. Over the top of it. Six checkboxes, two new domain types, three new transport
+    operations and twenty-six tests; the honest reading is that the read path is a large slice, not
+    that anything here would be simpler for being smaller. The next ticket should not read this as
+    slack.
+
+**For the next ticket:**
+
+- **A file that has gone comes back as `NoSuchFile` from `download`, carrying the remote path.** That
+  is the seam ticket 10 needs for S5: it can catch that one class before the retry ladder and turn it
+  into `FileGone` without guessing, because every other download failure is a different class. Proved
+  both against the fake and against a real server whose file was deleted between the listing and the
+  fetch.
+- **The bounded dispatcher is exactly as wide as the pool, and everything running on it holds a pool
+  place first.** That is what stops a listing blocked on its consumer from starving a download. An
+  operation added later that touches the io dispatcher without holding a place breaks it, and the
+  symptom is a deadlock rather than a slow path.
+- **`trySendBlocking` is the right way to feed a channel from a blocking callback**, and it is why no
+  cancellation is caught anywhere in the listing path. Anything else pushing into a flow from a
+  library's own thread should reach for it rather than for `runBlocking` and a catch.
+- **`FakeSftpTransport` now holds contents.** `file(path, bytes)`, `directory(path)` and
+  `remove(path)` stage what a listing reports and what a download delivers, in insertion order, and
+  calling `remove` while a listing is in flight is how a file that vanishes underneath a consumer is
+  staged. Its single `answer` hook still does everything else.
+- **Nothing retries yet.** `list`, `stat`, `exists` and `download` each make one attempt on one lease.
+  Spec 6.1's per-operation retry semantics and `Attempt.number` staying at 1 are ticket 11's, and the
+  read path is shaped so a retry wraps a whole operation rather than reaching inside one: a download
+  that fails restarts from an empty partial file, because the staging area deleted the old one on the
+  way out.
+- **`withSession` is absent, not stubbed.** Spec 6.1 lists it and no caller needs it yet; T1's rule is
+  that an operation nothing calls should not be reachable. The ticket that needs several operations on
+  one lease adds it.
+- **The S11 test creates 100,000 files and takes about 50 seconds**, which is most of the connector
+  suite's wall time. It is the one slow test here, and the cost is creating the directory rather than
+  listing it.

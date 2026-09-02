@@ -4,6 +4,7 @@ import com.jcraft.jsch.ChannelSftp
 import com.jcraft.jsch.JSch
 import com.jcraft.jsch.ProxyHTTP
 import com.jcraft.jsch.Session
+import com.jcraft.jsch.SftpATTRS
 import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import kotlinx.coroutines.CoroutineDispatcher
@@ -15,8 +16,12 @@ import sftp.connector.config.AuthMethod
 import sftp.connector.config.HostKeyPolicy
 import sftp.connector.config.SftpConnectorConfig
 import sftp.connector.error.Attempt
+import sftp.connector.transport.Listing
+import sftp.connector.transport.RemoteFile
 import sftp.connector.transport.SftpConnection
 import sftp.connector.transport.SftpTransport
+import java.io.OutputStream
+import java.time.Instant
 import kotlin.time.Duration
 
 /**
@@ -36,7 +41,7 @@ class JschTransport(
 
     private val errors = JschErrorMapper(meters)
 
-    private val endpointLabel = "${config.endpoint.host}:${config.endpoint.port}"
+    private val endpointLabel = config.endpoint.address
 
     /**
      * JSch blocks, so its calls run here instead of on the caller's thread. The width matches
@@ -113,6 +118,33 @@ private class JschConnection(
     }
 
     /**
+     * JSch hands each entry to a selector as the server's batches arrive, which is what makes a
+     * hundred-thousand-entry directory cost the same memory as a ten-entry one. Answering BREAK
+     * closes the remote handle cleanly, so the session is still good afterwards.
+     */
+    override suspend fun list(dir: String, onEntry: (RemoteFile) -> Listing): Unit = withContext(io) {
+        errors.translating(Attempt(endpoint, "list", dir)) {
+            channel.ls(dir) { entry ->
+                when {
+                    entry.filename == "." || entry.filename == ".." -> ChannelSftp.LsEntrySelector.CONTINUE
+                    onEntry(entry.attrs.describe(dir.asDirectoryOf(entry.filename))) == Listing.CONTINUE ->
+                        ChannelSftp.LsEntrySelector.CONTINUE
+
+                    else -> ChannelSftp.LsEntrySelector.BREAK
+                }
+            }
+        }
+    }
+
+    override suspend fun stat(path: String): RemoteFile = withContext(io) {
+        errors.translating(Attempt(endpoint, "stat", path)) { channel.stat(path).describe(path) }
+    }
+
+    override suspend fun readTo(path: String, sink: OutputStream): Unit = withContext(io) {
+        errors.translating(Attempt(endpoint, "read", path)) { channel.get(path, sink) }
+    }
+
+    /**
      * Uncancellable on purpose. A session left half-closed keeps its socket and its reader
      * thread until the process ends, and a caller being cancelled is exactly the moment that is
      * most likely to happen.
@@ -134,3 +166,17 @@ private class JschConnection(
 /** JSch counts timeouts in milliseconds as an `Int`, and treats a negative one as an error. */
 private fun Duration.toTimeoutMillis(): Int =
     inWholeMilliseconds.coerceIn(0L, Int.MAX_VALUE.toLong()).toInt()
+
+/** Joins a directory to a name in it without doubling the separator a root path already ends with. */
+private fun String.asDirectoryOf(name: String): String = if (endsWith("/")) "$this$name" else "$this/$name"
+
+/**
+ * SFTP version 3 counts modification times in whole seconds since the epoch, so a file written
+ * twice within one second reports one time. Anything comparing mtimes has to allow for that.
+ */
+private fun SftpATTRS.describe(path: String) = RemoteFile(
+    path = path,
+    size = size,
+    modifiedAt = Instant.ofEpochSecond(mTime.toLong()),
+    isDirectory = isDir,
+)

@@ -57,7 +57,7 @@ class SftpPool(
 
     private val registry = SessionRegistry(settings, clock) { waiting.get() }
 
-    private val endpoint = "${config.endpoint.host}:${config.endpoint.port}"
+    private val endpoint = config.endpoint.address
 
     private val meters = PoolMeters(meterRegistry, endpoint) { registry.lastCount }
 

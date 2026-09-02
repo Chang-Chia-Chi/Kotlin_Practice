@@ -14,6 +14,7 @@ data class SftpConnectorConfig(
     val auth: AuthMethod,
     val hostKey: HostKeyPolicy,
     val pool: PoolConfig,
+    val polling: PollingConfig,
 )
 
 /** Where the server is, and how the connector gets onto its network. */
@@ -21,7 +22,14 @@ data class Endpoint(
     val host: String,
     val port: Int,
     val proxy: HttpConnectProxy? = null,
-)
+) {
+    /**
+     * How this server is named in a log line, a failure and a metric tag. Spelled once, because a
+     * service with two connectors tells them apart by this string, and two spellings of it would
+     * split one server's numbers across two series on a dashboard.
+     */
+    val address: String get() = "$host:$port"
+}
 
 /** An HTTP proxy that tunnels the SSH connection with a CONNECT request. */
 data class HttpConnectProxy(val host: String, val port: Int)
@@ -107,3 +115,33 @@ data class PoolConfig(
     /** How often the pool looks over what it holds and retires, reports and refills. */
     val housekeepingInterval: Duration,
 )
+
+/** What the connector does with a watched directory, and where the files it takes from one go. */
+data class PollingConfig(
+    val staging: StagingConfig,
+)
+
+/** Where downloads land, and how their bytes are summed up. */
+data class StagingConfig(
+    /**
+     * Local disk, and the connector's own. It has to be a real filesystem: the download is
+     * finished by moving a partial file onto its final name in one step, and a network filesystem
+     * is where the meaning of moving and deleting a file stops being obvious.
+     */
+    val dir: Path,
+    val digest: Digest,
+)
+
+/**
+ * How the bytes of a downloaded file are summed up so the application can tell whether they
+ * arrived intact.
+ *
+ * The choice exists because an upstream that publishes checksums has already picked one, and a
+ * digest computed with a different algorithm than the expected value cannot be compared with it.
+ */
+enum class Digest(internal val algorithmName: String) {
+    SHA256("SHA-256"),
+
+    /** Weak against a forger, and still the only thing many upstreams publish. */
+    MD5("MD5"),
+}
