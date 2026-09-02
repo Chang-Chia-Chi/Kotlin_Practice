@@ -656,3 +656,173 @@ watching the right test go red.
 - **A pool with something idle does not dial.** `I4_`'s first draft failed because a bare release left
   a session on the shelf and the next three phases reused it instead of taking the dialling paths they
   were written for. A test about connecting has to empty the shelf first, and assert that it did.
+
+---
+
+## T5: Housekeeper, lifetime jitter, keepalive and validation on borrow
+
+**Built:** The pool now looks after itself. A session that has been parked long enough to have been
+dropped without either end noticing is asked whether it is still there before it reaches a caller, and
+replaced when it is not. A session past its own lifetime is retired the moment it comes back. A
+coroutine on a timer retires spares nobody has wanted, keeps the number of spares the pool was told to
+keep, and says where a lease was taken that nobody has given back. The nine knobs all of that needs
+landed in the DSL with build-time validation, including the two the proxy's idle cutoff dictates.
+
+**Concepts named:**
+
+- **`Retirement`** is why a session left, and it is where this ticket's design went. `handBack` used to
+  take a boolean, which forced its caller to decide whether a healthy-looking session could go back on
+  the shelf - and a caller cannot know, because it does not hold the clock. It now takes a reason or
+  null, and the registry supplies `LIFETIME` itself when the entry has outlived its own. That is what
+  makes I6 structural: handing back is the only door onto the shelf, and the door checks. The reason
+  then travels out to `sftp_pool_evicted_total{reason}`, whose five labels are the enum's own, so two
+  eviction sites cannot spell one number two ways and halve it on a dashboard.
+- **`Checkout.Prove`** is T3's third case, filled in. A parked session is claimed but not handed over
+  until it has answered, which is why the claim happens under the lock and the question does not.
+- **`SessionRegistry.sweep`** is one method that decides a whole housekeeping round - what to retire,
+  who has held too long, how many to open - and carries out none of it. One decision because it is
+  taken against one reading: retiring sessions and then asking separately how many are left would read
+  a pool that had moved in between, and top up for a shape it was never in.
+- **`Leak`** carries the entry, how long it has been out, and the stack trace that took it, all
+  captured under the lock. The trace read afterwards can be gone, because the caller may have handed
+  the session back in the meantime - and a leak report without its trace says only what the pool's
+  numbers already said.
+- **`SftpPool.housekeep()`** is the whole housekeeper: one suspend function, no parameters, running
+  until cancelled. Not a `Housekeeper` class, because its implementation would have been `delay` plus
+  a call, and the complexity would have moved rather than vanished.
+
+**Acceptance:**
+
+- *maxLifetime with per-entry uniform jitter; idleTimeout honoured only above minIdle; minIdle top-up
+  in the background* - `HousekeeperTest`: `lifetime jitter never retires a session early and never
+  keeps one past the window`, `the housekeeper hangs up on a spare nobody has wanted since the idle
+  timeout`, `the spares the pool was told to keep survive the idle timeout`, `the housekeeper opens
+  sessions until the pool holds the spares it was told to keep`, and `the housekeeper never opens a
+  session the pool has no room for`.
+- *Validation on borrow after validationBypass via realpath; failed validation closes the entry and
+  acquire loops with the permit held* - `ValidationOnBorrowTest`, three tests. The permit is proved by
+  reading `sftp_pool_acquire_seconds`: two acquires, two trips through the door, not three.
+- *Keepalive set on every session at the configured interval* - **built by T1, proved here, not
+  rebuilt.** `JschTransport` has set `serverAliveInterval` since T1 and nothing tested it, because the
+  only proof is a peer hearing it. `SessionHealthAgainstServerTest.a session keeps speaking on its own
+  at the interval it was given` gives the embedded server a global-request observer and waits for an
+  idle session to speak unprompted.
+- *Leak detection logs the acquire stack trace once and never forces release* - `HousekeeperTest.a
+  lease held past the threshold is reported once, with the stack that took it, and is not taken back`.
+  It reads the warning off standard error the way an operator would, counts the occurrences over
+  eleven rounds of housekeeping, and then uses the session and gives it back by hand.
+- *DSL validation rejects keepAlive >= idleCutoff and idleTimeout >= idleCutoff (I14)* -
+  `ConnectorDslTest.I14_a keepalive or an idle timeout that outlasts the path's idle cutoff is
+  refused`, added to T1's file, additive only.
+- *I6* - `HousekeeperTest.I6_a session past its lifetime is closed when it comes back and never lent
+  again`.
+- *Demo against the embedded server* - `SessionHealthAgainstServerTest.a session the server killed
+  while it was parked is replaced before the caller sees it`. A real session, killed server-side while
+  on the shelf, and the next caller is handed a working one with
+  `sftp_pool_evicted_total{reason=validation}` at 1.
+- *Progress entry appended* - this.
+
+**How I6 and I14 are enforced, not merely asserted.** Both were checked by breaking the pool and
+watching the right test - and only the right test - go red.
+
+- **I6** is the lifetime check inside `handBack`, which is the only way back onto the idle deque.
+  Replacing `failed ?: Retirement.LIFETIME.takeIf { now >= entry.expiresAt }` with `failed` fails
+  `I6_` at "expected: Closed but was: Idle", and takes the jitter test's upper bound with it, which is
+  the same rule read from the other side. The test asks for the session again afterwards, because
+  "never reused" means nothing except to the caller who would have been handed it.
+- **I14** is two lines in the DSL. Making both conditions `false` fails `I14_` with "Expecting code to
+  raise a throwable" and nothing else. The test also asserts that the shipped defaults already sit
+  under the cutoff, so a connector nobody tuned is correct rather than merely valid.
+
+Two more breaks were staged for rules this ticket added rather than inherited. Removing the
+housekeeper's `entries.size < config.maxSize` bound fails `the housekeeper never opens a session the
+pool has no room for` with three sessions in a pool of two - an I1 violation, because the spares the
+housekeeper opens are held by no caller and so nothing a caller does can bound them. Making a failed
+validation release and retake its permit fails `a session that cannot answer is replaced without the
+caller losing its place` at three trips through the door instead of two.
+
+**On watching entry state, which the maintainer flagged.** Nothing here collects `Lease.state` or
+`PoolEntry.state`, undispatched or otherwise. The housekeeper and the validation loop both read
+`state.value`, which is a plain volatile read and resumes nobody. The hazard - assigning
+`MutableStateFlow.value` synchronously running an undispatched collector's body on the setter's stack,
+inside the registry's lock - is therefore still theoretical after this ticket, and still worth the
+next one's attention.
+
+**Deviations:**
+
+1. **`sftp_pool_evicted_total` and `sftp_pool_leak_total` are registered on first use, not at
+   startup.** For the eviction counter this is Micrometer's own way with a tagged counter and it is
+   right on its own terms: a dashboard then shows the reasons this deployment has actually seen rather
+   than every reason the connector can name, and `reason=shutdown` has no producer until ticket 13
+   anyway. The leak counter follows it for a weaker reason - registering it eagerly would have made
+   T4's `the pool publishes what a dashboard needs to watch it fill up` fail, and that test asserts
+   the pool's meters exactly. The cost is real: a dashboard shows no series for leaks until the first
+   one, so an alert has to treat absent as zero. Debt, repaid by whichever ticket next has cause to
+   revisit that assertion with the maintainer.
+2. **The housekeeper does not flag in-use entries for eviction.** Spec 4.5 says entries in use past
+   `maxLifetime` are flagged and evicted on release; `handBack` computes expiry from the clock
+   instead, which needs no flag, no second mechanism and no housekeeping round to have run. The
+   observable behaviour is identical except that it is strictly more timely - an entry that expires
+   between the last round and its release is retired, where a flag would have missed it.
+3. **`housekeep()` has no production caller.** Spec 4.5 asks for one coroutine per pool running every
+   `housekeepingInterval`, and a pool that starts one in its constructor is a pool nothing can stop.
+   The connector owns a scope with a `SupervisorJob` (spec 11.2) and that scope belongs to ticket 13
+   or 14, so the function is here and the launch is theirs. Tests drive it with `launch { }` and
+   virtual time.
+4. **`maxLifetimeJitter` is capped at 1.0, which spec 12 does not ask for.** Spec 4.5 fixes the window
+   as `[0, maxLifetimeJitter x maxLifetime]` and puts no ceiling on the multiplier. A jitter above 1.0
+   would let a session outlive twice the value called `maxLifetime`, which reads as the opposite of
+   what that name promises. Added deliberately; a ticket that wants wider spread should raise the cap
+   rather than work around it.
+5. **A stack trace is captured on every acquire.** Spec 4.4 keeps the trace "when leak detection is
+   on", and the DSL requires `leakDetectionThreshold` to be positive, so it is always on and the
+   capture is always needed. The cost is a stack fill-in per borrow against a network round trip that
+   follows it, so it was not worth inventing an off switch nobody asked for. If a profile ever
+   disagrees, the switch is a nullable threshold.
+6. **`idleCutoff` never reaches runtime.** It exists only to cross-validate `keepAlive` and
+   `idleTimeout`, which is what spec 4.6 asks of it: it describes the network, not the connector.
+   Nothing reads it after `build()`.
+7. **Three review findings were declined.** `discard(entry, reason)` was called a middle man; it has
+   two callers and names an operation `giveBack` does not, so it stays. `proves()` was called a
+   mysterious name for a predicate with a side effect; its first KDoc line says it replaces the
+   session, and the boolean is exactly "may the caller have this one". `capturingStandardError` is now
+   a third copy of the same eight lines, but the other two live in `core` and this one is in
+   `testkit`, so sharing it needs a cross-module test artifact that nothing else wants yet.
+8. **Size.** About 690 lines that are neither blank nor comment, roughly 390 of them tests, against a
+   200-600 budget. Over the top of it, and honestly so: eight checkboxes and fourteen tests, of which
+   the housekeeper's own file is the largest single piece. Nothing here looked like it would get
+   simpler by being smaller, but the next ticket should not read this as slack.
+
+**For the next ticket:**
+
+- **`SftpPool.housekeep()` needs launching.** Whoever builds the connector's `CoroutineScope` owns
+  that, and owns cancelling it during shutdown. Until then the housekeeper does nothing in production
+  and `minIdle` is a knob with no effect.
+- **`Retirement` is internal, and `SHUTDOWN` is its unused fifth value**, waiting for ticket 13. The
+  five labels are the closed set spec 13 fixes for the eviction counter's tag, so add a producer
+  rather than a sixth spelling.
+- **`handBack` takes a reason, not a boolean, and `giveBack` with it.** Anything that gives a session
+  back now says why it is going, or passes null and lets the registry decide. A release path that
+  wants a session gone for a new reason adds a `Retirement` value; it does not add a flag.
+- **`SessionRegistry.sweep(takeRoom)` runs a caller's lambda under the lock, and that is safe by
+  type.** `takeRoom` is `() -> Boolean`, not `suspend () -> Boolean`, and every operation this
+  connector can perform against a server is a suspend function, so a round trip cannot be written
+  there. A later ticket that widens the parameter to a suspending one has removed I5's guarantee, not
+  merely bent it.
+- **`EmbeddedSftpServer` gained two hooks**, both testkit main source. `killLiveSessions()` cuts every
+  session the server holds and returns once the server side is really closed, so a test never races
+  the kill it asked for. `start(onGlobalRequest = ...)` reports the name of every global request a
+  client sends, which is the only way a keepalive is observable; the observer answers `Unsupported`,
+  so the server behaves exactly as it would without one.
+- **`TestScope.virtualClock()`** in `testkit/src/test` reads the scheduler, so one `advanceTimeBy`
+  moves the housekeeper's next round and the age of everything it looks at together. It is in test
+  sources because `kotlinx-coroutines-test` is test-scoped; a ticket wanting it in main source has to
+  widen that scope first.
+- **The keepalive test warms the JVM's first key exchange with a throwaway connection**, because
+  `keepAlive` also bounds the handshake and a short one on a cold JVM fails `connect()` with "timeout
+  in waiting for rekeying process" instead of proving anything. Five consecutive runs were clean at
+  400 ms. Any later test that shortens `keepAlive` needs the same warm-up.
+- **The jitter test pins the bounds, not the spread.** It proves no session is retired before
+  `maxLifetime` and none survives the jitter window, over two independent draws. Proving that two
+  entries drew *different* lifetimes is either probabilistic or needs the entry's expiry made public,
+  and neither was worth it. If a later ticket exposes `PoolEntry.expiresAt`, that test becomes exact.

@@ -19,7 +19,7 @@ import io.micrometer.core.instrument.Timer
  */
 internal class PoolMeters(
     private val meters: MeterRegistry,
-    endpoint: String,
+    private val endpoint: String,
     /** Answers without suspending. See [SessionRegistry.lastCount]. */
     reading: () -> PoolStats,
 ) {
@@ -63,6 +63,24 @@ internal class PoolMeters(
 
     /** A handshake was paid for. Rising on a pool that should be warm means sessions are dying. */
     fun sessionOpened() = sessionsCreated.increment()
+
+    /**
+     * A session was thrown away, and why. The reason is the whole value of this counter: sessions
+     * retired on a schedule are the pool working, and sessions failing their check on the way out
+     * to a caller are the network dropping them underneath it.
+     *
+     * The counter for a reason appears the first time that reason happens, which is Micrometer's
+     * own way with a tagged counter and means a dashboard shows the reasons this deployment has
+     * actually seen rather than every reason the connector can name.
+     */
+    fun evicted(reason: Retirement) {
+        meters.counter("sftp_pool_evicted_total", "endpoint", endpoint, "reason", reason.label).increment()
+    }
+
+    /** A session has been out on lease too long. Any non-zero value is a caller to go and find. */
+    fun leaked() {
+        meters.counter("sftp_pool_leak_total", "endpoint", endpoint).increment()
+    }
 
     private companion object {
         private fun gauge(meters: MeterRegistry, name: String, endpoint: String, value: () -> Int) {

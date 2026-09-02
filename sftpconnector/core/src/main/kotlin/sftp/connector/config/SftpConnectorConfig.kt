@@ -51,12 +51,15 @@ sealed interface HostKeyPolicy {
     data object AcceptAll : HostKeyPolicy
 }
 
-/**
- * The session settings. Sizes and lifetimes join this as the pool that uses them is built;
- * what is here is what opening and holding a single session already needs.
- */
+/** How the pool is sized, how long its sessions live, and how it keeps them alive. */
 data class PoolConfig(
     val maxSize: Int,
+    /**
+     * How many open sessions the pool keeps ready even when nobody is asking. Sessions cost a
+     * handshake, so a job that polls on a timer pays for one every tick unless something holds
+     * them open between ticks. Zero means the pool opens only what callers ask for.
+     */
+    val minIdle: Int,
     /**
      * How long a caller waits at the door before being told the pool is full. It bounds the
      * caller, not the server: a poll that would otherwise queue behind work that is not
@@ -65,5 +68,42 @@ data class PoolConfig(
     val acquireTimeout: Duration,
     val connectTimeout: Duration,
     val socketTimeout: Duration,
+    /**
+     * How often a session with nothing to say speaks anyway. It has to be short enough that the
+     * proxy and the server never see the tunnel go quiet for as long as they are willing to
+     * wait, and it is also what unblocks a read the server has stopped answering.
+     */
     val keepAlive: Duration,
+    /** How long a session may sit unused before the pool hangs up on it, down to [minIdle]. */
+    val idleTimeout: Duration,
+    /**
+     * The shortest time anything on the network path tolerates a silent connection: the proxy
+     * here, five minutes. Everything the connector does on an idle session has to happen inside
+     * it, which is why it is a configured fact rather than a knob to tune.
+     */
+    val idleCutoff: Duration,
+    /**
+     * How long a session is used before it is retired healthy. Long-lived sessions accumulate
+     * everything nobody thought about - a server rotating keys, a proxy restarting, a firewall
+     * forgetting the flow - and a session replaced on a schedule fails at a moment of the
+     * pool's choosing rather than in the middle of a caller's work.
+     */
+    val maxLifetime: Duration,
+    /**
+     * Spreads the retirements. Each session gets its own lifetime, uniformly somewhere in
+     * `[maxLifetime, maxLifetime x (1 + this)]`, so a pool that filled in one burst at startup
+     * does not empty in one burst half an hour later.
+     */
+    val maxLifetimeJitter: Double,
+    /**
+     * How long a session may have been sitting before the pool asks the server whether it is
+     * still there. A session handed straight back to the next caller was proved good moments
+     * ago; one that has been parked may have been dropped by anything on the path without
+     * either end noticing. Zero asks every time.
+     */
+    val validationBypass: Duration,
+    /** How long a caller may hold a session before the pool reports where it was taken. */
+    val leakDetectionThreshold: Duration,
+    /** How often the pool looks over what it holds and retires, reports and refills. */
+    val housekeepingInterval: Duration,
 )

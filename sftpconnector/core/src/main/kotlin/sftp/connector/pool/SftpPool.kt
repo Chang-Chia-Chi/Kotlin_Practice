@@ -4,6 +4,7 @@ import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.sync.Semaphore
@@ -17,10 +18,12 @@ import sftp.connector.error.PoolExhausted
 import sftp.connector.error.SftpException
 import sftp.connector.transport.SftpConnection
 import sftp.connector.transport.SftpTransport
+import java.time.Clock
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.coroutines.coroutineContext
+import kotlin.time.Duration.Companion.milliseconds
 
 /**
  * A bounded set of sessions to one server, lent out one caller at a time.
@@ -40,6 +43,8 @@ class SftpPool(
     config: SftpConnectorConfig,
     /** Whatever the host supplies; a private one when the connector is used on its own. */
     meterRegistry: MeterRegistry = SimpleMeterRegistry(),
+    /** Injected so a test can age a session without the suite waiting half an hour for it. */
+    clock: Clock = Clock.systemUTC(),
 ) {
 
     /**
@@ -48,7 +53,9 @@ class SftpPool(
      */
     private val waiting = AtomicInteger()
 
-    private val registry = SessionRegistry { waiting.get() }
+    private val settings = config.pool
+
+    private val registry = SessionRegistry(settings, clock) { waiting.get() }
 
     private val endpoint = "${config.endpoint.host}:${config.endpoint.port}"
 
@@ -59,9 +66,9 @@ class SftpPool(
      * a session being opened occupies capacity just as much as one being used - which is what
      * stops a burst of callers from all deciding at once that the pool looks empty.
      */
-    private val capacity = Semaphore(config.pool.maxSize)
+    private val capacity = Semaphore(settings.maxSize)
 
-    private val acquireTimeout = config.pool.acquireTimeout
+    private val acquireTimeout = settings.acquireTimeout
 
     /**
      * Every time room came free over the pool's life, whether a session was given back or one
@@ -101,36 +108,81 @@ class SftpPool(
      */
     suspend fun acquire(): Lease {
         admit()
+        val borrower = Throwable("this is where the session was taken, not a failure")
         var claimed: PoolEntry? = null
         try {
-            val checkout = registry.checkOut()
-            claimed = checkout.entry
-            if (checkout is Checkout.Dial) {
-                val opened = transport.connect()
-                meters.sessionOpened()
-                // Once the session exists the entry has to be told about it whether this caller
-                // is still around or not. A connection the pool never recorded is a socket and a
-                // reader thread that nothing will ever close.
-                withContext(NonCancellable) { registry.filled(checkout.entry, opened) }
+            while (true) {
+                val checkout = registry.checkOut(borrower)
+                claimed = checkout.entry
+                when (checkout) {
+                    is Checkout.Dial -> dial(checkout.entry)
+
+                    is Checkout.Prove -> if (!proves(checkout.entry)) {
+                        // The room this caller was given stays with it. Losing it here because a
+                        // session turned out to be dead would shrink the pool every time the
+                        // network dropped one, which is exactly when it is needed most.
+                        claimed = null
+                        continue
+                    }
+
+                    is Checkout.Reuse -> Unit
+                }
+                // A caller that has already been cancelled will not release what it is handed, so
+                // it is turned away here instead - while the pool can still put the session back
+                // itself.
+                coroutineContext.ensureActive()
+                return Lease(
+                    this,
+                    checkout.entry,
+                    checkNotNull(checkout.entry.connection) { "${checkout.entry} was lent out without a connection" },
+                )
             }
-            // A caller that has already been cancelled will not release what it is handed, so it
-            // is turned away here instead - while the pool can still put the session back itself.
-            coroutineContext.ensureActive()
-            return Lease(
-                this,
-                checkout.entry,
-                checkNotNull(checkout.entry.connection) { "${checkout.entry} was lent out without a connection" },
-            )
         } catch (failure: Throwable) {
             // Cancellation lands here too, and the permit has to go back on that path as much as
             // on any other. Under NonCancellable because giving it back means taking the
             // registry's lock, and a cancelled coroutine cannot wait for a lock.
             withContext(NonCancellable) {
-                claimed?.let { discard(it) }
+                claimed?.let { discard(it, Retirement.POISONED) }
                 freeRoom()
             }
             throw failure
         }
+    }
+
+    /**
+     * Opens the session an empty-handed entry is waiting for.
+     *
+     * Once the session exists the entry has to be told about it whether the caller that asked for
+     * it is still around or not. A connection the pool never recorded is a socket and a reader
+     * thread that nothing will ever close.
+     */
+    private suspend fun dial(entry: PoolEntry) {
+        val opened = transport.connect()
+        meters.sessionOpened()
+        withContext(NonCancellable) { registry.filled(entry, opened) }
+    }
+
+    /**
+     * Asks a parked session whether it is still there, and replaces it when it is not.
+     *
+     * One round trip against a handshake, a key exchange, an authentication and a forked process
+     * on a server that starts refusing connections when too many are half-open: proving a session
+     * is the cheap answer and opening one is the expensive one, so the pool proves first and opens
+     * only when the answer is no.
+     */
+    private suspend fun proves(entry: PoolEntry): Boolean {
+        val connection = checkNotNull(entry.connection) { "$entry was parked without a session to prove" }
+        try {
+            connection.realpath(".")
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Exception) {
+            LOG.debug("{} no longer answers and is being replaced before the caller sees it: {}", entry, failure.message)
+            withContext(NonCancellable) { discard(entry, Retirement.VALIDATION) }
+            return false
+        }
+        registry.proved(entry)
+        return true
     }
 
     /**
@@ -175,15 +227,102 @@ class SftpPool(
         capacity.release()
     }
 
-    /** Takes an entry out of the pool for good and closes whatever it was holding. */
-    private suspend fun discard(entry: PoolEntry) {
-        registry.handBack(entry, healthy = false)?.let { close(it, entry) }
-        registry.closed(entry)
+    /**
+     * Keeps the pool in the shape its configuration describes, for as long as the coroutine
+     * running it lives. Cancel it to stop.
+     *
+     * A pool nobody is asking anything of still drifts: sessions age past the lifetime they were
+     * given, spares sit until the proxy quietly drops them, and a caller that took a session and
+     * never gave it back leaves the pool one smaller with nothing in the log to say so. This is
+     * what notices. It belongs to whoever owns the connector's scope, because a coroutine started
+     * by a constructor is one nothing can stop.
+     */
+    suspend fun housekeep(): Nothing {
+        while (true) {
+            delay(settings.housekeepingInterval)
+            try {
+                sweep()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                // One bad round is not a reason to stop looking after the pool for the rest of
+                // the process's life, which is what letting this out would mean.
+                LOG.warn("A housekeeping round failed and the next one will run as usual: {}", failure.message, failure)
+            }
+        }
     }
 
-    internal suspend fun giveBack(entry: PoolEntry, healthy: Boolean): Unit = withContext(NonCancellable) {
+    /**
+     * One round: retire what has aged out, report what has been held too long, and open whatever
+     * the pool is short of. Every decision is taken in one pass under the lock and carried out
+     * here, where nothing is holding it.
+     */
+    private suspend fun sweep() {
+        val round = registry.sweep(capacity::tryAcquire)
+        round.leaking.forEach { report(it) }
+        round.retired.forEach { finish(it) }
+        round.toOpen.forEach { openForTheShelf(it) }
+    }
+
+    /**
+     * Opens a session the pool decided it wanted, and parks it for whoever asks next. It holds
+     * the room it reserved until it is on the shelf or given up on.
+     */
+    private suspend fun openForTheShelf(entry: PoolEntry) {
         try {
-            if (healthy) registry.handBack(entry, healthy = true) else discard(entry)
+            dial(entry)
+            giveBack(entry, null)
+        } catch (failure: Throwable) {
+            withContext(NonCancellable) { giveBack(entry, Retirement.POISONED) }
+            if (failure is CancellationException) throw failure
+            LOG.warn(
+                "Opening a spare session failed, so the pool is below the {} it keeps ready and will " +
+                    "try again next round: {}",
+                settings.minIdle,
+                failure.message,
+            )
+        }
+    }
+
+    /**
+     * Says where a session was taken that nobody has given back. It is a report and not a repair:
+     * a call in flight cannot be interrupted from outside without destroying the session under
+     * whoever is using it, so taking the lease back would turn a caller that is merely slow into
+     * one that fails.
+     */
+    private fun report(leak: Leak) {
+        meters.leaked()
+        LOG.warn(
+            "{} has been held longer than {}, for {} so far, and is not being taken back - the pool " +
+                "is one session smaller until whoever took it gives it back. The stack trace is " +
+                "where it was taken.",
+            leak.entry,
+            settings.leakDetectionThreshold,
+            leak.heldForMillis.milliseconds,
+            leak.borrower,
+        )
+    }
+
+    /** Takes an entry out of the pool for good and closes whatever it was holding. */
+    private suspend fun discard(entry: PoolEntry, reason: Retirement) {
+        registry.handBack(entry, reason)?.let { finish(it) }
+    }
+
+    /** Hangs up on a retired session and records why it went. */
+    private suspend fun finish(retired: Retired) {
+        retired.connection?.let {
+            close(it, retired.entry)
+            // Counted only where there was a session to lose. An entry whose dial never landed
+            // was never a session, and counting it as one would make a server refusing
+            // connections look like a pool throwing away good sessions.
+            meters.evicted(retired.reason)
+        }
+        registry.closed(retired.entry)
+    }
+
+    internal suspend fun giveBack(entry: PoolEntry, retire: Retirement?): Unit = withContext(NonCancellable) {
+        try {
+            registry.handBack(entry, retire)?.let { finish(it) }
         } finally {
             // Last, on both paths. A waiter woken before the session is back on the shelf would
             // find a pool that says it has room and does not.
@@ -231,8 +370,12 @@ class Lease internal constructor(
      */
     val state: StateFlow<EntryState> get() = entry.state
 
-    /** Gives the session back for the next caller. */
-    suspend fun release(): Unit = giveBack(healthy = true)
+    /**
+     * Gives the session back for the next caller, or for retirement if the pool has finished with
+     * it. A session that outlived its lifetime while this caller held it goes no further: the pool
+     * decides that, because the holder has no way of knowing.
+     */
+    suspend fun release(): Unit = giveBack(retire = null)
 
     /**
      * Gives the session back after something went wrong, keeping it only if [failure] says the
@@ -246,13 +389,13 @@ class Lease internal constructor(
      * session would make the shortage that caused it worse.
      */
     suspend fun releaseAfter(failure: Throwable): Unit = giveBack(
-        healthy = when ((failure as? SftpException)?.disposition?.lease) {
-            LeaseFate.RETURNED, LeaseFate.NONE_HELD -> true
-            LeaseFate.EVICTED, null -> false
+        retire = when ((failure as? SftpException)?.disposition?.lease) {
+            LeaseFate.RETURNED, LeaseFate.NONE_HELD -> null
+            LeaseFate.EVICTED, null -> Retirement.POISONED
         },
     )
 
-    private suspend fun giveBack(healthy: Boolean) {
+    private suspend fun giveBack(retire: Retirement?) {
         if (!handedBack.compareAndSet(false, true)) {
             LOG.warn(
                 "{} was given back twice. The second one is ignored, but the code that did it is " +
@@ -261,7 +404,7 @@ class Lease internal constructor(
             )
             return
         }
-        pool.giveBack(entry, healthy)
+        pool.giveBack(entry, retire)
     }
 
     private companion object {

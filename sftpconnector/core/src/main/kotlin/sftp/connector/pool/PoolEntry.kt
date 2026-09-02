@@ -35,6 +35,34 @@ enum class EntryState {
 }
 
 /**
+ * Why a session left the pool, in the words an operator reads off the eviction counter.
+ *
+ * The five are a closed set, and naming them here rather than spelling a string at each place a
+ * session is thrown away is what keeps the counter's labels from drifting apart: two sites
+ * writing "poison" and "poisoned" would split one number in half on the dashboard.
+ */
+internal enum class Retirement {
+    /** It reached the end of the lifetime it was given when it was opened. */
+    LIFETIME,
+
+    /** It sat unused for longer than the pool keeps a spare. */
+    IDLE,
+
+    /** Something that happened on it proved it was no longer trustworthy. */
+    POISONED,
+
+    /** It was asked whether it was still there and it did not answer. */
+    VALIDATION,
+
+    /** The connector is shutting down and is not keeping anything. */
+    SHUTDOWN,
+    ;
+
+    /** The value the counter is tagged with. */
+    val label: String get() = name.lowercase()
+}
+
+/**
  * The pool's record of one session.
  *
  * The entry outlives any one borrowing of it, which is what lets the pool talk about a session it
@@ -48,6 +76,12 @@ enum class EntryState {
 class PoolEntry internal constructor(
     /** Counts from one within a pool. It is what a log line uses to follow one session over time. */
     val id: Long,
+    /**
+     * The moment this session stops being reusable however healthy it looks, as milliseconds on
+     * the pool's clock. It is this session's own moment rather than a shared one, so a pool that
+     * filled in one burst does not retire everything it holds in another.
+     */
+    internal val expiresAt: Long,
 ) {
 
     private val mutableState = MutableStateFlow(EntryState.Connecting)
@@ -55,6 +89,28 @@ class PoolEntry internal constructor(
     val state: StateFlow<EntryState> get() = mutableState
 
     internal var connection: SftpConnection? = null
+
+    /** When it went on the shelf. Meaningless while somebody is holding it. */
+    internal var idleSince: Long = 0
+
+    /** When the caller currently holding it took it. Meaningless while it is on the shelf. */
+    internal var borrowedAt: Long = 0
+
+    /**
+     * Where the lease was taken, captured as a stack trace because that is the only thing that
+     * points at the code holding a session too long. Nothing is thrown; it is carried so a leak
+     * report can name a line rather than a session number.
+     */
+    internal var borrower: Throwable? = null
+
+    /** A leak is worth saying once. Said every housekeeping round, it would bury the log. */
+    internal var leakReported = false
+
+    internal fun claimedBy(borrower: Throwable, now: Long) {
+        this.borrower = borrower
+        borrowedAt = now
+        leakReported = false
+    }
 
     internal fun moveTo(next: EntryState) {
         mutableState.value = next

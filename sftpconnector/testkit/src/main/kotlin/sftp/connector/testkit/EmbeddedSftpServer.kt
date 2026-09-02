@@ -1,6 +1,8 @@
 package sftp.connector.testkit
 
+import org.apache.sshd.common.channel.RequestHandler
 import org.apache.sshd.common.file.virtualfs.VirtualFileSystemFactory
+import org.apache.sshd.common.session.ConnectionService
 import org.apache.sshd.server.SshServer
 import org.apache.sshd.server.auth.password.PasswordAuthenticator
 import org.apache.sshd.server.keyprovider.SimpleGeneratorHostKeyProvider
@@ -28,6 +30,16 @@ class EmbeddedSftpServer private constructor(
     val host: String get() = LOOPBACK
     val port: Int get() = sshd.port
 
+    /**
+     * Cuts every session the server is holding, the way a restart, an idle reaper or a firewall
+     * dropping the flow does: no notice to the client, which goes on believing it has a session
+     * until it tries to use one. It returns once the server side is really closed, so a test never
+     * races the kill it just asked for.
+     */
+    fun killLiveSessions() {
+        sshd.activeSessions.toList().forEach { it.close(true).await() }
+    }
+
     override fun close() {
         sshd.stop(true)
     }
@@ -39,12 +51,18 @@ class EmbeddedSftpServer private constructor(
          * [offersSftp] is a fault hook. An SSH server that authenticates and then refuses the
          * `sftp` subsystem is a real deployment - a locked-down account, a server built for shell
          * access - and it fails at a different point from every other failure a test can stage.
+         *
+         * [onGlobalRequest] is told the name of every global request a client sends, which is how
+         * a keepalive becomes observable: it is a request with no reply worth reading, so the only
+         * proof that a client is speaking on an idle session is the server hearing it. The
+         * observer answers nothing, so the server behaves exactly as it would without one.
          */
         fun start(
             root: Path,
             user: String,
             password: String,
             offersSftp: Boolean = true,
+            onGlobalRequest: (String) -> Unit = {},
         ): EmbeddedSftpServer {
             val sshd = SshServer.setUpDefaultServer().apply {
                 host = LOOPBACK
@@ -58,6 +76,14 @@ class EmbeddedSftpServer private constructor(
                 }
                 subsystemFactories = if (offersSftp) listOf(SftpSubsystemFactory()) else emptyList()
                 fileSystemFactory = VirtualFileSystemFactory(root)
+                globalRequestHandlers = listOf(
+                    RequestHandler<ConnectionService> { _, request, _, _ ->
+                        onGlobalRequest(request)
+                        // Unsupported and not a reply, so the handlers the server came with still
+                        // get their turn and nothing here changes what the client is told.
+                        RequestHandler.Result.Unsupported
+                    },
+                ) + globalRequestHandlers.orEmpty()
             }
             sshd.start()
             return EmbeddedSftpServer(sshd, root)

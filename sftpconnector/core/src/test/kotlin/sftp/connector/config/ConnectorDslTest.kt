@@ -126,6 +126,41 @@ class ConnectorDslTest {
         assertThat(minimalConnector { }.pool.acquireTimeout).isEqualTo(30.seconds)
     }
 
+    /**
+     * The proxy on this path drops a tunnel it has not seen traffic on for five minutes, and it
+     * does so without telling either end. A connector configured to go quiet for longer than that,
+     * or to keep a parked session for longer, would be holding sessions the network had already
+     * taken away and would find out one caller at a time.
+     */
+    @Test
+    fun `I14_a keepalive or an idle timeout that outlasts the path's idle cutoff is refused`() {
+        assertThatThrownBy { minimalConnector { pool { keepAlive = 5.minutes; idleCutoff = 5.minutes } } }
+            .isInstanceOf(ConfigurationError::class.java)
+            .hasMessageContaining("keepAlive 5m is not shorter than idleCutoff 5m")
+
+        assertThatThrownBy { minimalConnector { pool { idleTimeout = 6.minutes; idleCutoff = 5.minutes } } }
+            .isInstanceOf(ConfigurationError::class.java)
+            .hasMessageContaining("idleTimeout 6m is not shorter than idleCutoff 5m")
+
+        // Both defaults sit under the cutoff, so a connector nobody tuned is already correct.
+        val defaults = minimalConnector { }.pool
+        assertThat(defaults.keepAlive).isLessThan(defaults.idleCutoff)
+        assertThat(defaults.idleTimeout).isLessThan(defaults.idleCutoff)
+    }
+
+    @Test
+    fun `a pool told to keep more sessions ready than it may hold is refused`() {
+        assertThatThrownBy { minimalConnector { pool { maxSize = 2; minIdle = 3 } } }
+            .isInstanceOf(ConfigurationError::class.java)
+            .hasMessageContaining("minIdle 3 is more than maxSize 2")
+
+        assertThatThrownBy { minimalConnector { pool { maxLifetimeJitter = 1.5 } } }
+            .isInstanceOf(ConfigurationError::class.java)
+            .hasMessageContaining("maxLifetimeJitter 1.5 is outside 0.0..1.0")
+
+        assertThat(minimalConnector { }.pool.minIdle).isZero()
+    }
+
     private fun minimalConnector(extra: SftpConnectorBuilder.() -> Unit): SftpConnectorConfig =
         sftpConnector("vendor-drop") {
             endpoint { host = "sftp.example" }
