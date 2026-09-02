@@ -47,8 +47,8 @@ Base package: `sftp.connector`. Sub-packages follow the spec's layers: `transpor
   has no rsa-sha2 signatures.
 - Resilience4j (`resilience4j-kotlin` plus the modules you need).
 - Micrometer `micrometer-core`. Logging `org.slf4j` - **not** JBoss Logging and not
-  `io.quarkus.logging.Log`; the root CLAUDE.md's JBoss rule belongs to snapshotcache, and
-  spec Sec 3.2 (D3) fixes slf4j for this connector.
+  `io.quarkus.logging.Log`. Spec Sec 3.2 (D3) fixes slf4j for this connector, which keeps
+  `core` free of any framework.
 - Tests: JUnit 5 + Mockito (`mockito-core`, `mockito-kotlin`) + AssertJ, and
   `kotlinx-coroutines-test` for virtual time. Apache MINA SSHD for the embedded server.
 - Quarkus only in `sftpconnector/quarkus`. ArchUnit fails the build if `core` imports it.

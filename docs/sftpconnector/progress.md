@@ -47,9 +47,10 @@ host actually offers. The scaffold pom's `1.8` was a template leftover and is co
 
 ### C3: slf4j, not JBoss Logging
 
-The root `CLAUDE.md` mandates `org.jboss.logging.Logger`. That rule is scoped to the
-snapshotcache framework, whose host is Quarkus. Spec Sec 3.2 (D3) fixes `org.slf4j` for this
-connector, which Quarkus routes into its log manager without configuration, and which keeps
-`core` free of any framework. Spec wins inside `sftpconnector/`.
+A repo-root `CLAUDE.md` used to mandate `org.jboss.logging.Logger`. That rule belonged to the
+snapshotcache framework, whose host is Quarkus, and the file has since been deleted as
+another project's. Spec Sec 3.2 (D3) fixes `org.slf4j` for this connector, which Quarkus
+routes into its log manager without configuration, and which keeps `core` free of any
+framework. Use slf4j; do not reintroduce a framework logger in `core`.
 
 ---
