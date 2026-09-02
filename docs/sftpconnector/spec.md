@@ -432,7 +432,15 @@ consumer per directory is an assumption of Sec 7.3.
 ### 8.1 Actions
 
 `onAck` and `onNack` are each one of `Move(target, overwrite)`, `Delete` or `Noop`. Default is
-`Noop` for both; the pipeline in Sec 1.1 configures `onAck = Move("temp/", overwrite = true)`.
+`Noop` for both; the pipeline in Sec 1.1 configures `onAck = Move("temp/", Overwrite.REPLACE)`.
+
+`overwrite` is the `Overwrite` enum (`REFUSE`, `REPLACE`), not a boolean, wherever it appears
+(D33). `REPLACE` is not a bit on a request: SFTP version 3 has no way to say "put this here and
+replace whatever is there", so on a server without the POSIX rename extension it is a short
+sequence of requests with a gap in the middle, and the gap is what a caller has to know about.
+A boolean cannot carry that, and a reader of `rename(from, to, true)` learns nothing from it.
+A relative `target` is resolved under the watched directory it belongs to, in one place, so the
+validator, the probe and the ack executor cannot disagree about which folder `temp/` is.
 
 ### 8.2 Move rules
 
@@ -527,10 +535,16 @@ path and attempt number in its message.
 
 1. Build and validate configuration (Sec 12). Invalid configuration is `ConfigurationError`
    and the connector does not start.
-2. Open one session and run the probe: `realpath` of each watched directory, `mkdir` of each
-   action target when `createActionTargets` is on, and a rename of a zero-byte marker into each action
-   target and back. A failed probe is fatal at startup. `startupProbe = false` disables the
-   marker rename for servers where writing a marker is unwelcome.
+2. Open one session and run the probe: `realpath` then `stat` of each watched directory,
+   insisting on a directory; `mkdir` of each action target when `createActionTargets` is on;
+   and a rename of a zero-byte marker into each action target and back. A failed probe is fatal
+   at startup and names the directory, the check, and the remedy. `startupProbe = false`
+   disables the marker rename for servers where writing a marker is unwelcome.
+
+   `realpath` alone proves nothing about a path existing (D32, measured): on MINA SSHD and on
+   OpenSSH, resolving a path that leads nowhere succeeds and returns the canonical name, and so
+   does resolving one that leads to a file. It is a string operation. The `stat` is the check;
+   `realpath` only fixes the spelling the rest of the probe uses.
 3. Fill to `minIdle` in the background; readiness does not wait for it.
 
 ### 11.2 Shutdown
@@ -575,11 +589,12 @@ sftpConnector("vendor-drop") {
         bulkhead { maxConcurrentTransfers = 4 }
     }
     polling {
+        directories("inbound/", "inbound-priority/")
         overlap = OverlapPolicy.SKIP
         maxFilesPerPoll = 1000; maxInFlight = 16
         readiness = sizeStable(checks = 2, interval = 10.seconds) + minAge(1.minutes)
         staging { dir = Path("/var/etl/stage"); digest = Digest.SHA256 }
-        onAck = move("temp/", overwrite = true); onNack = noop()
+        onAck = move("temp/", Overwrite.REPLACE); onNack = noop()
         createActionTargets = true; startupProbe = true
     }
 }
@@ -669,6 +684,8 @@ transport in the testkit is a genuine second implementation.
 | D22 | The connector computes a digest during staging; the application compares it | The digest is free while bytes stream through; the expected value's origin is application knowledge. Checksum is integrity, not completeness, and cannot replace the readiness check because it needs the download first |
 | D23 | Unmapped JSch errors are `Unknown`, recoverable, poisoned, logged raw and counted | JSch error text is not an API; a wording change must surface as a metric and a log line, never as a silent misclassification or a dead connector |
 | D26 | The middle cancellation tier is the keepalive ladder, not `socketTimeout` | Measured against mwiede 2.28.7 (Sec 5.3): JSch implements `serverAliveInterval` by setting the socket read timeout, so a positive `keepAlive` always overwrites `session.timeout`. A hung server is bounded by `keepAlive x (serverAliveCountMax + 1)` and not at all by `socketTimeout` |
+| D32 | The startup probe checks each watched directory with `stat`, not `realpath` alone | Measured (Sec 11.1): `realpath` of a path that leads nowhere, and of one that leads to a file, both succeed and return a canonical name on MINA SSHD and on OpenSSH. It is a string operation and proves nothing about existence. The same is why validation-on-borrow uses `realpath "."` - it proves the session answers, which is all that check wants |
+| D33 | `overwrite` is an enum wherever it appears, never a boolean | `REPLACE` is a sequence of requests with a gap on a server without the POSIX rename extension, and a boolean cannot say so (Sec 8.1). `Move` takes the same type as `rename`, so a relative target resolves in one place and the validator, probe and executor agree about which folder it names |
 | D31 | `socketTimeout` is removed rather than repurposed; `serverAliveCountMax` is pinned to 1 | Spending it as a probe count would round a duration to a multiple of `keepAlive`, making it half of two knobs; and keeping the name while changing the job preserves the misreading D26 exists to end. Pinning the count makes twice `keepAlive` a promise this connector makes rather than one inherited from a dependency's next release (Sec 5.3) |
 | D29 | Refusing an overwrite is the connector's decision, never the server's | Measured (Sec 5.2): JSch sends `posix-rename@openssh.com` on its own whenever the server advertised it, so on such a server a rename onto an occupied target destroys the old file and reports success. `Overwrite.REFUSE` is unenforceable at the server and must be a look-then-request in the connector. A writer arriving between the two still wins; on a server without the extension the request itself is refused as well, which closes the race there and only there |
 | D30 | A refused overwrite is `OverwriteRefused`, its own class beside `PoolExhausted` and `CircuitOpen` | It is a deterministic policy decision, so retrying it can never succeed and counting it against the breaker charges the connector for doing what it was told. `ServerFailure` is right about the session and the message but wrong about both of those, and from Sec 9 onward would cost three attempts and a breaker failure per call. The session is untouched - under `REFUSE` nothing was even sent - so the lease is returned and the watch continues |
