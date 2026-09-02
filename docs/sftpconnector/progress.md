@@ -132,6 +132,19 @@ D29. **Widening a ticket's scope to `spec.md` was considered and declined** - a 
 fifteen sessions in parallel with their own code is a spec nobody reviewed. Recording the finding
 and raising it is the right protocol, and it worked here.
 
+### C10: two tickets after the acceptance run - pressure (16) and deep review (17)
+
+The acceptance run proves the failures someone imagined. What it does not do is what a Raft
+harness does: put a seeded random adversary on the network, check every invariant after every
+operation, model-check the lock-guarded structures, partition the real network, and soak for
+hours reading the meters. Spec Sec 17 now has those layers (D34, D35) and Sec 17.3 the partition
+matrix; tickets 16 and 17 build and then review them, each a fresh session so the reviewer did
+not write the harness. Validated dependency versions are in the ticket. Two decisions inside
+this: Lincheck is adopted as a cheap guard rather than an investment - `InFlightSet` is the
+real candidate, `SessionRegistry` gets one run - and JMH is not added, because nothing here has
+a hot path. A path-traversal defect the planning survey found in T6's download path is fixed as
+a hotfix before T11 rather than left for the review; it is on the seams table until it lands.
+
 ### Open seams - things deferred, and who picks them up
 
 Coordinator-maintained. A ticket that closes one strikes it through in its own entry; a ticket
@@ -146,6 +159,7 @@ because each was correctly deferred by the ticket that found it.
 | ~~`socketTimeout` is dead configuration~~ | T2 measurement, spec D26 | ~~T8~~ | **Closed by T8, which removed it.** The bound on a hung server is `keepAlive x 2`, the adapter pins `serverAliveCountMax = 1` rather than inheriting it, and `keepAlive`'s own documentation names the bound. Spec 5.2, 5.3, 12 and S2 are reconciled, and D31 records why removing beat repurposing |
 | `Lease.connection` hands a direct `withLease` caller a full `SftpConnection`, so it can call `abort()` | T8 | The ticket that first has cause to close it | T7 ruled `abort()` is the pool's alone. `withSession` enforces that through `BorrowedSession`; a direct `withLease` caller is only asked, not stopped |
 | A session cut loose by the ladder counts as `reason=poisoned` | T8 | Whoever revisits the five fixed labels with the maintainer | A dashboard cannot tell "the server poisoned it" from "we cut it to rescue a thread". Spec 13 fixes five labels and the ground rules forbid a sixth, so the WARN line is the only place that distinction lives |
+| **Path traversal in `SftpClient.download`'s default target** | found during planning, T6 code | **Hotfix, before T11** | `RemoteFile.name` is `substringAfterLast('/')`, joined unvalidated to the staging dir. On Windows a listed `..\..\evil.csv` escapes it; `..` writes to its parent anywhere. Trust-boundary input validation; must not sit open across six tickets |
 | `HostKeyPolicy.Fingerprint(sha256)` unimplemented | T1 | The first ticket needing fingerprint pinning | Two of spec 5.2's three policies ship. Kotlin's exhaustive `when` names every site when it is added, so this cannot rot silently |
 | `sftp_pool_leak_total` registers on first use | T5 | The ticket that next revisits T4's exact-meters assertion | No series on a dashboard until the first leak, so an alert must treat absent as zero |
 | `Attempt.number` is always 1; the pool names its own operation `acquire` | T2, T4 | T11, which owns retries and is the layer that knows which try it is | Log lines and metrics attribute a caller's failure to the pool rather than to the operation that failed |

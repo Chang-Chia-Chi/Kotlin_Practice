@@ -77,6 +77,14 @@ without a version in the modules, the way the existing modules do.
 - Never weaken or modify a test an earlier ticket wrote. A failing earlier test means your
   change is wrong - stop and report.
 - `CancellationException` is never wrapped, never swallowed.
+- **Every string that arrives from the server is untrusted input** - a listed name, a path, an
+  error message. Validate it at the boundary before it touches the filesystem, a log format
+  string, or anything that interprets it. A listed name is joined to a local directory in
+  exactly one place, and that place checks the result stayed inside the directory. This rule
+  exists because the read path shipped without it.
+- **Docker is expected wherever the suite runs.** The Toxiproxy tier is a gate, not an option;
+  it skips with a message naming Docker as the reason only so a machine without it can still run
+  the rest. Do not read a skip as a pass.
 
 ## Comments and messages carry reasons, not citations
 

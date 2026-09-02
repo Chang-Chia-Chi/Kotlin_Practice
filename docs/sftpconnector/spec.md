@@ -684,6 +684,8 @@ transport in the testkit is a genuine second implementation.
 | D22 | The connector computes a digest during staging; the application compares it | The digest is free while bytes stream through; the expected value's origin is application knowledge. Checksum is integrity, not completeness, and cannot replace the readiness check because it needs the download first |
 | D23 | Unmapped JSch errors are `Unknown`, recoverable, poisoned, logged raw and counted | JSch error text is not an API; a wording change must surface as a metric and a log line, never as a silent misclassification or a dead connector |
 | D26 | The middle cancellation tier is the keepalive ladder, not `socketTimeout` | Measured against mwiede 2.28.7 (Sec 5.3): JSch implements `serverAliveInterval` by setting the socket read timeout, so a positive `keepAlive` always overwrites `session.timeout`. A hung server is bounded by `keepAlive x (serverAliveCountMax + 1)` and not at all by `socketTimeout` |
+| D34 | Three pressure layers after the scenario table: seeded randomized adversary, Lincheck, soak | The JVM has no `labrpc`; the fake transport's one hook already is one. A scenario table proves the failures someone imagined; a seeded adversary checking every invariant after every op finds the interleaving nobody did, and is replayable by seed. Lincheck is a cheap guard on the two lock-guarded structures. The soak is the only place thread and heap flatness can be measured (Sec 17) |
+| D35 | Performance is measured as degradation and recorded, never asserted; no JMH | Throughput is bounded by one JSch channel per session and the server's session cap, so there is no hot path to benchmark. A latency assertion loose enough not to flake is too loose to catch what it is for; the numbers go in the progress log as observations, the way T6 recorded S11's heap |
 | D32 | The startup probe checks each watched directory with `stat`, not `realpath` alone | Measured (Sec 11.1): `realpath` of a path that leads nowhere, and of one that leads to a file, both succeed and return a canonical name on MINA SSHD and on OpenSSH. It is a string operation and proves nothing about existence. The same is why validation-on-borrow uses `realpath "."` - it proves the session answers, which is all that check wants |
 | D33 | `overwrite` is an enum wherever it appears, never a boolean | `REPLACE` is a sequence of requests with a gap on a server without the POSIX rename extension, and a boolean cannot say so (Sec 8.1). `Move` takes the same type as `rename`, so a relative target resolves in one place and the validator, probe and executor agree about which folder it names |
 | D31 | `socketTimeout` is removed rather than repurposed; `serverAliveCountMax` is pinned to 1 | Spending it as a probe count would round a duration to a multiple of `keepAlive`, making it half of two knobs; and keeping the name while changing the job preserves the misreading D26 exists to end. Pinning the count makes twice `keepAlive` a promise this connector makes rather than one inherited from a dependency's next release (Sec 5.3) |
@@ -729,7 +731,33 @@ Three layers, same as snapshotcache:
    fault hooks: kill a session server-side mid-transfer, delay responses past the socket
    timeout, reject auth, remove a file between list and download, deny rename. Proves the JSch
    adapter, the error table and the cancellation ladder.
-3. **Toxiproxy (optional).** Half-open connections and proxy stalls through Testcontainers.
+3. **Toxiproxy.** Real network partitions through Testcontainers, between the CONNECT proxy and
+   the SSH server - the production failure is "the tunnel is up but the far side is gone", which
+   the network gives no signal for. A CI gate wherever Docker is present; skips with a clear
+   message where it is not. The partition matrix is Sec 17.3.
+
+Three more layers run after the scenario table, in the pressure ticket, the way a Raft
+implementation is tested rather than the way a library usually is (D34):
+
+4. **Seeded randomized adversary over the fake.** `FakeSftpTransport`'s single hook is a
+   controllable network. A seeded random drives it for thousands of sequences - succeed, delay,
+   throw one of the failure classes, kill the session mid-call - and every invariant in Sec 17.1
+   is checked after every operation. Deterministic per seed, shrunk to the shortest failing
+   prefix, runs on every build in seconds under virtual time. This is the layer that finds the
+   interleaving nobody wrote a scenario for.
+5. **Lincheck model checking** on the two lock-guarded structures, `InFlightSet` and
+   `SessionRegistry`, exploring thread interleavings exhaustively and printing the one that
+   breaks. A cheap regression guard, not an investment: one Mutex with nothing suspending inside
+   it has few interleavings worth exploring.
+6. **Soak (opt-in).** `watch` for hours behind a random-fault proxy, sampling threads, post-GC
+   heap and the `sftp_*` meters every minute; asserts flatness by slope, recovery time by bound,
+   and exactly-once delivery to the temp folder by count.
+
+Performance is measured as *degradation*, not throughput: JSch serialises on one channel and the
+server caps sessions, so throughput is bounded by design and a microbenchmark answers nothing.
+What is recorded is acquire p50/p99 as concurrency passes `maxSize`, listing memory under
+concurrent 100k listings, and op latency by failure class under each partition. Numbers are
+observations in the progress log, not assertions in a test (D35).
 
 ### 17.1 Invariants
 
@@ -751,6 +779,7 @@ Tests are named `I<n>_<description>`.
 | I12 | Ack and nack are each accepted once per event |
 | I13 | After abort, no `.part` file exists in the staging directory |
 | I14 | `keepAlive < idleCutoff` and `idleTimeout < idleCutoff` are rejected at build time when violated |
+| I15 | At-least-once with no phantom failure: every file that was acked is at the ack target; every file listed and not acked is in flight, not ready, or redelivered; no file is silently gone and no landed move is reported as failed |
 
 ### 17.2 Scenario table
 
@@ -768,3 +797,22 @@ Tests are named `I<n>_<description>`.
 | S10 | Wrong password | `AuthenticationFailed`, no retry, breaker untouched, `watch` terminates |
 | S11 | 100k entries with `maxFilesPerPoll = 1000` | Listing stops after 1000 entries, memory flat |
 | S12 | Same file listed while in flight on a `PROCEED` overlap | Emitted once |
+
+### 17.3 Partition matrix (Toxiproxy)
+
+Topology: `client -> LoopbackConnectProxy (in-process) -> Toxiproxy (container) ->
+EmbeddedSftpServer`. One test per row, named by its fault, asserting the disposition, the
+counter that moved and the recovery - never the toxic itself.
+
+| ID | Fault | While | Expected |
+|---|---|---|---|
+| P1 | half-open: `timeout` toxic with `timeout=0` (data drops, no FIN), both directions | mid-download | `SessionLost` within `2 x keepAlive`; poisoned; retried on a fresh lease; one `FileSeen`, one file in the temp folder |
+| P2 | `reset_peer` | mid-download | as P1, and faster than the keepalive bound |
+| P3 | `reset_peer` | after a `rename` request is on the wire, before its reply | I11: retry stats the target; success reported once; no phantom `NoSuchFile`; `sftp_retry_total{op=rename}` is 1 |
+| P4 | `proxy.disable()` | pool at 0 idle, a poll starting | `ConnectFailed`; breaker counts; `watch` emits `PollFailed` and continues; first poll after `enable()` is `PollCompleted` |
+| P5 | flapping: `disable`/`enable` every 3 s for 60 s | `watch` running | breaker cycles closed, open, half-open, closed; sessions never exceed `maxSize`; every tick is `PollCompleted`, `PollFailed` or `PollSkipped`; the flow never terminates |
+| P6 | `timeout=0` | during `close()` with a download in flight | I9 holds under a real partition; `.part` gone; `reason=shutdown` counted |
+
+Not in the matrix on purpose: cooperative cancel under `bandwidth` (proved with the loopback
+proxy's `holdAfter`), `latency` p99 (the soak's job), `slicer` (SSH's own framing makes a
+framing bug implausible).
