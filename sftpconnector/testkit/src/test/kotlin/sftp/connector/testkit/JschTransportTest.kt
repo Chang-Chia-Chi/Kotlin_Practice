@@ -1,6 +1,5 @@
 package sftp.connector.testkit
 
-import com.jcraft.jsch.JSchUnknownHostKeyException
 import kotlinx.coroutines.runBlocking
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.Test
@@ -8,6 +7,7 @@ import org.junit.jupiter.api.io.TempDir
 import sftp.connector.config.HostKeyPolicy
 import sftp.connector.config.SftpConnectorConfig
 import sftp.connector.config.sftpConnector
+import sftp.connector.error.HostKeyRejected
 import sftp.connector.transport.SftpConnection
 import sftp.connector.transport.jsch.JschTransport
 import java.nio.file.Files
@@ -77,9 +77,9 @@ class JschTransportTest {
      * The other half of the host key policy: without this, accept-all could be doing nothing at
      * all and every test above would still pass.
      *
-     * The assertion is on the exception's type, not its wording. JSch's message text is free
-     * text that changes between releases, and the connector maps these to its own error classes
-     * anyway; until it does, the type is the only part worth pinning.
+     * The assertion is on the exception's type, not its wording. JSch's message text is free text
+     * that changes between releases; the connector's own type is the contract, and a JSch type
+     * arriving here instead would mean the transport seam had let one through.
      */
     @Test
     fun `a strict host key policy refuses a server whose key it has never seen`() = runBlocking {
@@ -90,7 +90,7 @@ class JschTransportTest {
 
             val refusal = runCatching { JschTransport(verifying).connect() }.exceptionOrNull()
 
-            assertThat(refusal).isInstanceOf(JSchUnknownHostKeyException::class.java)
+            assertThat(refusal).isInstanceOf(HostKeyRejected::class.java)
         }
     }
 

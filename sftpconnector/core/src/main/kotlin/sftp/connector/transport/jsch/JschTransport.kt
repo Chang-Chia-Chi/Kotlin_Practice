@@ -4,6 +4,8 @@ import com.jcraft.jsch.ChannelSftp
 import com.jcraft.jsch.JSch
 import com.jcraft.jsch.ProxyHTTP
 import com.jcraft.jsch.Session
+import io.micrometer.core.instrument.MeterRegistry
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -12,6 +14,7 @@ import kotlinx.coroutines.withContext
 import sftp.connector.config.AuthMethod
 import sftp.connector.config.HostKeyPolicy
 import sftp.connector.config.SftpConnectorConfig
+import sftp.connector.error.Attempt
 import sftp.connector.transport.SftpConnection
 import sftp.connector.transport.SftpTransport
 import kotlin.time.Duration
@@ -21,8 +24,19 @@ import kotlin.time.Duration
  * type. Everything JSch needs told - the proxy tunnel, the host key policy, the socket timeout,
  * the keepalive that has to fire before the proxy gives up on an idle tunnel - is applied here
  * from the connector's own configuration.
+ *
+ * Nothing JSch raises leaves this class: every call goes through the error mapper, so callers
+ * above the transport see the connector's own failures and never a type from the SSH library.
  */
-class JschTransport(private val config: SftpConnectorConfig) : SftpTransport {
+class JschTransport(
+    private val config: SftpConnectorConfig,
+    /** Whatever the host supplies; a private one when the connector is used on its own. */
+    meters: MeterRegistry = SimpleMeterRegistry(),
+) : SftpTransport {
+
+    private val errors = JschErrorMapper(meters)
+
+    private val endpointLabel = "${config.endpoint.host}:${config.endpoint.port}"
 
     /**
      * JSch blocks, so its calls run here instead of on the caller's thread. The width matches
@@ -33,17 +47,24 @@ class JschTransport(private val config: SftpConnectorConfig) : SftpTransport {
     @OptIn(ExperimentalCoroutinesApi::class)
     private val io: CoroutineDispatcher = Dispatchers.IO.limitedParallelism(config.pool.maxSize)
 
+    /**
+     * The transport is told nothing about retries, so every failure it raises reports the first
+     * attempt. The layer that decides to try again is the layer that knows which try this is.
+     */
     override suspend fun connect(): SftpConnection = withContext(io) {
-        val session = openSession()
-        val channel = try {
-            (session.openChannel("sftp") as ChannelSftp).also { it.connect(config.pool.connectTimeout.toTimeoutMillis()) }
-        } catch (failure: Throwable) {
-            // A session whose channel never opened is unusable, and left alone it would keep its
-            // socket and its reader thread for the life of the process.
-            session.disconnect()
-            throw failure
+        errors.translating(Attempt(endpointLabel, "connect")) {
+            val session = openSession()
+            val channel = try {
+                (session.openChannel("sftp") as ChannelSftp)
+                    .also { it.connect(config.pool.connectTimeout.toTimeoutMillis()) }
+            } catch (failure: Throwable) {
+                // A session whose channel never opened is unusable, and left alone it would keep
+                // its socket and its reader thread for the life of the process.
+                session.disconnect()
+                throw failure
+            }
+            JschConnection(session, channel, io, errors, endpointLabel)
         }
-        JschConnection(session, channel, io)
     }
 
     private fun openSession(): Session {
@@ -83,9 +104,13 @@ private class JschConnection(
     private val session: Session,
     private val channel: ChannelSftp,
     private val io: CoroutineDispatcher,
+    private val errors: JschErrorMapper,
+    private val endpoint: String,
 ) : SftpConnection {
 
-    override suspend fun realpath(path: String): String = withContext(io) { channel.realpath(path) }
+    override suspend fun realpath(path: String): String = withContext(io) {
+        errors.translating(Attempt(endpoint, "realpath", path)) { channel.realpath(path) }
+    }
 
     /**
      * Uncancellable on purpose. A session left half-closed keeps its socket and its reader
@@ -93,8 +118,16 @@ private class JschConnection(
      * most likely to happen.
      */
     override suspend fun close(): Unit = withContext(io + NonCancellable) {
-        channel.disconnect()
-        session.disconnect()
+        errors.translating(Attempt(endpoint, "close")) {
+            try {
+                channel.disconnect()
+            } finally {
+                // Whatever the channel did. A channel that would not close is no reason to leave
+                // the session holding its socket and its reader thread for the life of the
+                // process, which is the one thing closing exists to prevent.
+                session.disconnect()
+            }
+        }
     }
 }
 

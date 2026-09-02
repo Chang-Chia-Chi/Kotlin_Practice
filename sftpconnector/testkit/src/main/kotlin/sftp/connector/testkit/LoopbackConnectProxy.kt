@@ -24,6 +24,18 @@ class LoopbackConnectProxy private constructor(private val server: ServerSocket)
 
     private val sockets = CopyOnWriteArrayList<Socket>()
 
+    @Volatile
+    private var relaying = true
+
+    /**
+     * Stops moving bytes in either direction while leaving both sockets open, which is the
+     * failure a read timeout exists for: the peer has neither answered nor hung up, so nothing
+     * short of the clock will ever unblock the reader.
+     */
+    fun stall() {
+        relaying = false
+    }
+
     override fun close() {
         server.close()
         sockets.forEach { runCatching { it.close() } }
@@ -78,7 +90,16 @@ class LoopbackConnectProxy private constructor(private val server: ServerSocket)
 
     private fun copy(from: Socket, to: Socket) {
         try {
-            from.getInputStream().copyTo(to.getOutputStream())
+            val buffer = ByteArray(BUFFER_BYTES)
+            while (true) {
+                val read = from.getInputStream().read(buffer)
+                if (read < 0) break
+                // A stalled tunnel keeps reading, so the sender's own buffers never fill and it
+                // never learns that nothing is arriving at the other end.
+                if (!relaying) continue
+                to.getOutputStream().write(buffer, 0, read)
+                to.getOutputStream().flush()
+            }
         } catch (endOfTunnel: IOException) {
             // Either end closing is how a tunnel ends; there is nothing to report.
         } finally {
@@ -90,6 +111,7 @@ class LoopbackConnectProxy private constructor(private val server: ServerSocket)
     companion object {
         private const val LOOPBACK = "127.0.0.1"
         private const val END_OF_HEADER = "\r\n\r\n"
+        private const val BUFFER_BYTES = 8 * 1024
         private val ESTABLISHED = "HTTP/1.0 200 Connection established\r\n\r\n".toByteArray()
 
         fun start(): LoopbackConnectProxy {

@@ -156,3 +156,163 @@ Versions pinned in the parent `dependencyManagement`: mwiede JSch 2.28.7, resili
   untouched; use `mvn -B -fae test` to see the connector modules build in the full reactor.
 - **Size:** 900 lines of Kotlin, 596 of them neither blank nor comment; the gap is the KDoc the
   comment rule asks for. At the top of the budget, so ticket 02 should not assume room to spare.
+
+---
+
+## T2: Error model and JSch message mapping
+
+**Built:** Nothing JSch raises leaves the transport any more. `sftp.connector.error` holds the
+sealed failure hierarchy, and `sftp.connector.transport.jsch.JschErrorMapper` turns every JSch
+exception into one of its classes. `JschTransport.connect()`, `realpath` and `close` all run
+through the mapper, so a caller in another module sees the connector's own types and never
+`JSchException` or `com.jcraft.jsch.SftpException`. That closes a hole the ArchUnit rule cannot
+see: it inspects what `core`'s main classes import, not what their methods throw.
+
+**Concepts named:**
+
+- **`Attempt`** (`error`) is one try at one operation against one server: endpoint, operation,
+  path, number. Every failure raised while the connector is running carries one and folds it into
+  its own message, so one log line places a failure without reading the lines around it.
+  `ConfigurationError` is the single failure without one, because nothing had been attempted yet.
+- **`Disposition`** (`error`) is the seam this ticket's design work went into. Spec Sec 10.2 is a
+  table of four decisions - retry, breaker, lease, what `watch` does - and the four only make
+  sense together. Rather than exposing `recoverable`, `poisons` and `fatal` for callers to
+  combine, every failure answers with one of six named `Disposition` constants, each carrying all
+  four answers (`Retry`, `LeaseFate`, `WatchReaction`). A caller reads one value and obeys; the
+  day a row changes, it changes in one place instead of in every caller that guessed. `poisons`
+  survives on `Recoverable` because spec Sec 10.1 fixes it there, but it is now an input to the
+  disposition rather than something a caller is expected to interpret.
+- **The mapper** is a deep module with one method. `translating(attempt) { ... }` is its whole
+  surface, and running a JSch call through it is what makes forgetting the cancellation rule
+  impossible rather than merely unlikely - there is no way to reach the table without it. It lives
+  in `transport.jsch` because that is the only package allowed to name a JSch type, which is also
+  the only sensible home for the knowledge of what JSch's messages mean.
+- **Two testkit fault hooks.** `EmbeddedSftpServer.start(offersSftp = false)` authenticates and
+  then refuses the sftp subsystem; `LoopbackConnectProxy.stall()` stops relaying bytes while
+  keeping both sockets open and still draining the sender, so the peer neither answers nor hangs up.
+
+**The table, as measured against mwiede JSch 2.28.7.** Every row below was produced by staging the
+real condition and reading what came out. Nothing here is remembered wording.
+
+| Condition staged | JSch threw | Message observed | Maps to |
+|---|---|---|---|
+| wrong password | `JSchException` | `Auth fail for methods 'password,keyboard-interactive,publickey'` | `AuthenticationFailed` |
+| strict policy, empty known_hosts | `JSchUnknownHostKeyException` | `reject HostKey: [127.0.0.1]:59131` | `HostKeyRejected` |
+| socket accepted, nothing ever spoken | `JSchException` | `Session.connect: java.net.SocketTimeoutException: Read timed out` | `ConnectFailed` |
+| port with nothing listening | `JSchException` | `java.net.ConnectException: Connection refused: getsockopt` | `ConnectFailed` |
+| name that does not resolve | `JSchException` | `java.net.UnknownHostException: no.such.host.invalid` | `ConnectFailed` |
+| proxy port with nothing behind it | `JSchProxyException` | `ProxyHTTP: com.jcraft.jsch.JSchException: java.net.ConnectException: Connection refused: getsockopt` | `ConnectFailed` |
+| server without the sftp subsystem | `JSchException` | `failed to send channel request` | `ConnectFailed` |
+| tunnel stalls under a live request | `SftpException` id 4 | `java.io.IOException: inputstream is closed` | `SessionLost` |
+| server killed under a live session | `SftpException` id 4 | `java.io.IOException: Pipe closed` | `SessionLost` |
+
+Two of these are worth keeping in mind. The host key and proxy failures have exception types of
+their own in this fork, so they are matched by type rather than by wording and a rewording cannot
+silently reclassify them. And **the two transport breakages arrive as `SftpException` with the
+generic `SSH_FX_FAILURE` code and an `IOException` cause** - the same type and code the server
+uses for its own refusals. Mapping by status code alone would have called a dead socket a server
+failure and handed a broken session to the next caller, so the mapper checks the cause first.
+
+The three connect-phase rows show JSch stringifying the underlying socket exception into its own
+message and then replacing the cause with a copy of itself. The text is the only place the real
+fault survives, which is why the `java.net.` marker in the message is what that row matches on.
+
+**Acceptance:**
+
+- *Sealed hierarchy exactly as spec Sec 10.1, each class carrying a poisons flag where applicable* -
+  `error/SftpException.kt`. `FailureModelTest.every failure class lands on the row the failure
+  model puts it on` walks all twelve; its `rowOf` is a `when` over the sealed type, so a class
+  added later without a decided behaviour fails compilation rather than reaching production
+  undecided.
+- *Mapper is one class; a table entry for auth fail, unknown host key, connect timeout, socket
+  timeout, session down, proxy failure, channel not opened* - `JschErrorMapper`, one class, one
+  public method.
+- *One embedded-server test per table row triggers the real condition* -
+  `JschErrorMappingTest`, nine tests, all against the embedded server or a real socket. Its
+  `failureFrom` helper insists on the connector's own exception type, so every row also proves the
+  transport seam holds. One row is not staged there and says so in the code: `session is down` is
+  unit-tested in `JschErrorMapperTest` instead, because the transport opens its channel during
+  connect and nothing yet holds a live session to ask a second channel of.
+- *Unmapped message maps to Unknown with the raw message preserved, WARN logged,
+  sftp_error_unmapped_total incremented* - `JschErrorMapperTest.a wording the table has never seen
+  keeps its raw text, warns, and is counted`, which reads the warning off standard error the way
+  an operator would, and `.a wording the table knows is not counted as unmapped`.
+- *CancellationException is never wrapped* - `JschErrorMapperTest.a cancellation passes through
+  untouched` asserts identity, not just type.
+- *Progress entry appended* - this.
+
+Two named scenarios are proven at this layer: `S10_` (wrong password is fatal, breaker untouched,
+watch stops) and `S2_` (a stalled tunnel is `SessionLost`, poisoned, counted). `I10_a fatal failure
+stops the watch and no other failure does` runs over every class in the hierarchy.
+
+**Deviations:**
+
+1. **One assertion in T1's `JschTransportTest` was changed.** `a strict host key policy refuses a
+   server whose key it has never seen` asserted `JSchUnknownHostKeyException`; it now asserts
+   `HostKeyRejected`. T1's own note said the JSch type was worth pinning only "until" the mapping
+   existed, and that mapping is this ticket. The assertion is stronger afterwards, not weaker: the
+   JSch type arriving there would now mean the seam had leaked. Flagged because the standing rule
+   is not to touch an earlier ticket's tests.
+2. **`ServerFailure.poisons = true` is a reading, not a ruling - please confirm.** Spec Sec 10.1
+   annotates `poisons = false` on `PermissionDenied` and `NoSuchFile` and marks `Unknown` as
+   poisoning, and says nothing about `ConnectFailed`, `SessionLost`, `OperationTimeout` or
+   `ServerFailure`. This ticket read silence as poisoning. For `ServerFailure` that is arguably
+   wrong: a well-formed `SSH_FX_FAILURE` proves the channel parsed the request and answered, so
+   the session is demonstrably healthy and is being thrown away for a per-request refusal - and
+   spec Sec 8.2 expects exactly that status from a server without `posix-rename`. Real transport
+   breakage no longer needs this flag to be caught, because the `IOException`-cause rule sends it
+   to `SessionLost` first. Left as-is rather than decided alone; a one-word change if the
+   maintainer agrees.
+3. **`OperationTimeout` has no producer.** It is in the hierarchy because spec Sec 10.1 puts it
+   there, and it is exercised by the failure-model tests, but nothing raises it yet: it belongs to
+   the time limiter in the resilience ticket.
+4. **`Attempt.number` is always 1 from the transport.** The transport is told nothing about
+   retries. The layer that decides to try again is the layer that knows which try it is, and it
+   will have to build the `Attempt` or renumber the failure; `connect()` has no parameter to
+   thread it through, and the signature is fixed.
+5. **`PoolExhausted` and `CircuitOpen` take only an `Attempt`** and carry a fixed message. The
+   tickets that raise them should add whatever detail is worth saying - how long the acquire
+   waited, how long the breaker has been open. Note also that spec Sec 9 calls the second one
+   `CircuitOpenException` while spec Sec 10.1 calls it `CircuitOpen`; the hierarchy's name won.
+6. **`sftp_error_unmapped_total` is registered as a literal metric name**, not in Micrometer's
+   dotted convention, because spec Sec 13 fixes the name and the ground rules forbid inventing one.
+   A registry that renames meters by convention would leave this one alone.
+7. **Size.** About 660 lines of Kotlin that is neither blank nor comment across three main files
+   and three test files, against a 200-600 budget. Twelve of those classes are the hierarchy spec
+   Sec 10.1 fixes and are one or two lines each; the largest single file is the nine-row
+   embedded-server test. Nothing here looked like it would get simpler by being smaller, but the
+   ticket did run over and the next one should not assume slack.
+
+**For the next ticket:**
+
+- **`keepAlive`, not `socketTimeout`, is what unblocks a stalled read - spec Sec 5.3 is wrong about
+  this, and it is ticket 08's to settle.** JSch implements `serverAliveInterval` *by* setting the
+  socket read timeout, so it overrides `session.timeout` whenever it is set - and the DSL requires
+  `keepAlive` to be positive, so it is always set. Measured: with `socketTimeout = 500ms` and the
+  default `keepAlive = 30s`, a stalled tunnel took **60 seconds** to fail, which is
+  `keepAlive x (serverAliveCountMax + 1)` and has nothing to do with `socketTimeout`. With
+  `socketTimeout = 5s` and `keepAlive = 300ms` the same stall failed in 1.2 seconds. So today
+  `socketTimeout` is dead configuration, and the real bound on a hung server is the keepalive
+  ladder. Spec Sec 5.3's "socket timeout" tier should be restated in those terms before the
+  cancellation ladder is built on it.
+- **The same value bounds the key exchange**, which is a trap for any test that shortens it. A
+  `keepAlive` below the handshake time fails `connect()` with
+  `timeout in waiting for rekeying process.` instead of failing the read. That wording was
+  observed but is deliberately *not* in the table: it only appears under a misconfiguration, it
+  cannot be staged reliably, and `Unknown` already handles it correctly and visibly. The `S2_` test
+  works around it with a throwaway connection that warms the first key exchange in the JVM; four
+  consecutive full runs were clean.
+- **A `@Test fun x() = runBlocking { ... }` whose last expression is not `Unit` is silently not
+  run.** JUnit 5.11 does not report it - the class simply shows fewer tests than it has. Four of
+  the nine tests in `JschErrorMappingTest` were being skipped this way and were only found by
+  counting. Every test in that file now says `runBlocking<Unit>`. Worth doing everywhere.
+- **`NoSuchFile` is retried and counted against the breaker**, because spec Sec 10.2 puts every
+  recoverable failure in the "counted" column. Scenario S5 wants a file that vanished between list
+  and download to be `FileGone` with no error and no retry, so the source or client layer has to
+  turn `NoSuchFile` into `FileGone` *before* it reaches the retry ladder. Left as the spec has it;
+  a directory another system is writing into would otherwise open the breaker on its own.
+- **Run every JSch call through `translating`.** It rethrows `CancellationException` by identity,
+  leaves `Error` alone, and returns an already-classified failure untouched, so nesting it is
+  safe - a decided failure is never reburied inside an `Unknown`.
+- **`LoopbackConnectProxy.stall()` and `EmbeddedSftpServer(offersSftp = false)`** are testkit main
+  source and available to any ticket that needs a silent peer or a server that refuses SFTP.

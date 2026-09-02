@@ -35,7 +35,17 @@ class EmbeddedSftpServer private constructor(
     companion object {
         private const val LOOPBACK = "127.0.0.1"
 
-        fun start(root: Path, user: String, password: String): EmbeddedSftpServer {
+        /**
+         * [offersSftp] is a fault hook. An SSH server that authenticates and then refuses the
+         * `sftp` subsystem is a real deployment - a locked-down account, a server built for shell
+         * access - and it fails at a different point from every other failure a test can stage.
+         */
+        fun start(
+            root: Path,
+            user: String,
+            password: String,
+            offersSftp: Boolean = true,
+        ): EmbeddedSftpServer {
             val sshd = SshServer.setUpDefaultServer().apply {
                 host = LOOPBACK
                 port = 0
@@ -46,7 +56,7 @@ class EmbeddedSftpServer private constructor(
                 passwordAuthenticator = PasswordAuthenticator { offeredUser, offeredPassword, _ ->
                     offeredUser == user && offeredPassword == password
                 }
-                subsystemFactories = listOf(SftpSubsystemFactory())
+                subsystemFactories = if (offersSftp) listOf(SftpSubsystemFactory()) else emptyList()
                 fileSystemFactory = VirtualFileSystemFactory(root)
             }
             sshd.start()
