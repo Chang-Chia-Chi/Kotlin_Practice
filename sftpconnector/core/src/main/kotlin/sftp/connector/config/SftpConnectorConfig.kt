@@ -1,5 +1,6 @@
 package sftp.connector.config
 
+import sftp.connector.client.Overwrite
 import java.nio.file.Path
 import kotlin.time.Duration
 
@@ -129,8 +130,76 @@ data class PoolConfig(
 
 /** What the connector does with a watched directory, and where the files it takes from one go. */
 data class PollingConfig(
+    /**
+     * The directories this connector takes files from. They are named here rather than only at the
+     * call that starts watching one, because the connector has to be able to check them before it
+     * is asked to do anything: a directory that is not there, or an action target on the wrong
+     * disk, is a fault worth hearing about at start-up rather than at the first file an hour later.
+     */
+    val directories: List<String>,
+    /** What happens to a file once the consumer says it is done with it. */
+    val onAck: PostAction,
+    /** What happens to a file the consumer says it could not process. */
+    val onNack: PostAction,
+    /**
+     * Whether the connector creates the folders its actions move files into. Off for an account
+     * that is not allowed to create directories; the folders then have to exist already, and the
+     * start-up check says so if they do not.
+     */
+    val createActionTargets: Boolean,
+    /**
+     * Whether start-up moves a marker file into each action target and back. It is the only check
+     * that proves a move will actually work, and it is a knob because it writes to the server:
+     * an account that is watched, audited or simply not welcome to leave files in a folder turns
+     * it off and accepts finding out at the first ack instead.
+     */
+    val startupProbe: Boolean,
     val staging: StagingConfig,
-)
+) {
+    /**
+     * The folders files from [directory] are moved into, once, however many actions aim at the
+     * same one.
+     */
+    fun actionTargetsUnder(directory: String): List<String> =
+        listOf(onAck, onNack)
+            .filterIsInstance<PostAction.Move>()
+            .map { it.targetUnder(directory) }
+            .distinct()
+}
+
+/**
+ * What becomes of a file after the consumer has finished with it.
+ *
+ * Moving is the usual one, and it is also what makes the connector idempotent enough to be useful:
+ * a file that is no longer in the watched directory is a file no later poll can hand out again.
+ */
+sealed interface PostAction {
+
+    /**
+     * Puts the file somewhere else on the same server.
+     *
+     * @param target where it goes. A path starting with `/` is that path on the server; anything
+     *   else is a folder under the directory the file came from, so one connector watching several
+     *   directories files each of them into its own. That is the layout the folder usually wants,
+     *   and the lister knows to leave such a folder out of its own results.
+     */
+    data class Move(val target: String, val overwrite: Overwrite = Overwrite.REFUSE) : PostAction {
+
+        /** Where this action puts a file taken from [directory]. */
+        fun targetUnder(directory: String): String =
+            if (target.startsWith("/")) target.trimEnd('/')
+            else "${directory.trimEnd('/')}/${target.trim('/')}"
+    }
+
+    /** Removes the file. Nothing keeps a copy, so the pipeline downstream had better have one. */
+    data object Delete : PostAction
+
+    /**
+     * Leaves the file where it is. The default, because moving or deleting a file on somebody
+     * else's server is not something to do by inheriting a setting.
+     */
+    data object Noop : PostAction
+}
 
 /** Where downloads land, and how their bytes are summed up. */
 data class StagingConfig(

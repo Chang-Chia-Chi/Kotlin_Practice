@@ -140,7 +140,9 @@ because each was correctly deferred by the ticket that found it.
 
 | Seam | Left by | Owner | What happens if it is forgotten |
 |---|---|---|---|
-| `SftpPool.housekeep()` has no production caller | T5 | Whichever ticket builds the connector's `CoroutineScope` - T9 startup is the natural home, T13 owns cancelling it | The housekeeper never runs: no lifetime eviction, no idle eviction, no leak reports, and `minIdle` is a knob with no effect. The most consequential open seam on this list |
+| ~~`SftpPool.housekeep()` has no production caller~~ | T5 | ~~T9~~ | **Closed by T9.** `SftpConnector.start` launches it into the connector's own scope, after the start-up checks have passed so a refused start-up leaves nothing dialling. T13 stops it by cancelling `SftpConnector.backgroundWork` |
+| A start-up the probe refuses leaves its sessions open and its dispatcher running | T9 | T13 | The pool has no `close()`, so the session the checks borrowed and `JschTransport`'s bounded dispatcher outlive a refused start. In production the process does not start and the JVM takes them; in a long-lived host that starts connectors on demand it is a leak per refusal. T13's `close()` is the repair, and `start` needs to call it on its own failure path once it exists |
+| `PostAction.Delete` and `PostAction.Move.overwrite` have no consumer | T9 | T10 | The three actions spec 8.1 fixes are configurable and only `Move` is read, by the probe. Kotlin's exhaustive `when` names T10's site when the executor lands, so this cannot rot silently |
 | ~~`socketTimeout` is dead configuration~~ | T2 measurement, spec D26 | ~~T8~~ | **Closed by T8, which removed it.** The bound on a hung server is `keepAlive x 2`, the adapter pins `serverAliveCountMax = 1` rather than inheriting it, and `keepAlive`'s own documentation names the bound. Spec 5.2, 5.3, 12 and S2 are reconciled, and D31 records why removing beat repurposing |
 | `Lease.connection` hands a direct `withLease` caller a full `SftpConnection`, so it can call `abort()` | T8 | The ticket that first has cause to close it | T7 ruled `abort()` is the pool's alone. `withSession` enforces that through `BorrowedSession`; a direct `withLease` caller is only asked, not stopped |
 | A session cut loose by the ladder counts as `reason=poisoned` | T8 | Whoever revisits the five fixed labels with the maintainer | A dashboard cannot tell "the server poisoned it" from "we cut it to rescue a thread". Spec 13 fixes five labels and the ground rules forbid a sixth, so the WARN line is the only place that distinction lives |
@@ -1536,3 +1538,179 @@ is the two intervals `serverAliveCountMax = 1` buys.
 - **`FakeSftpTransport` now records an `Abort`** and hangs up on the session without going through
   the `answer` hook, because a real abort is called while another thread is stuck and so cannot be
   given anything to wait for.
+
+---
+
+## T9: Startup sequence and probe
+
+**Built:** the connector is a thing now. `SftpConnector.start(config)` takes a configuration and
+hands back something running: it asks the server whether the configuration describes anything the
+server can actually do, and if it does, it launches the pool's housekeeper into a scope of its own
+and returns. The largest open seam on the list is closed - `SftpPool.housekeep()` has a production
+caller, so lifetime eviction, idle eviction, leak reporting and `minIdle` all do something for the
+first time. The polling block gained the five knobs the checks read, with build-time validation,
+and the testkit gained a server whose second root is on another filesystem.
+
+**Concepts named:**
+
+- **`SftpConnector`** (`sftp.connector`) is the first thing in this build with a *lifecycle* rather
+  than behaviour. Everything before it did something when called; this one is started, keeps
+  running while nobody is asking it for anything, and will one day be stopped. It exists rather
+  than being an assembly a caller writes by hand for exactly one reason: the pool looks after
+  itself only while something runs its housekeeper, and a pool that launched that coroutine in its
+  own constructor would be a pool nothing could stop. So the scope belongs to the object with the
+  life, and the object with the life is this.
+- **`backgroundWork`** is that scope, narrowed to the one thing anyone outside needs from it: a
+  `Job` to cancel. Handing over the `CoroutineScope` would let a caller launch into the connector's
+  own supervisor, which is not something anyone should be able to do by accident; a `Job` can only
+  be watched and cancelled. It is where the phased shutdown will end and is deliberately not that
+  shutdown - its documentation says outright that nothing is drained and no session is hung up on.
+- **`StartupProbe`** is the deep module, and its whole surface is `run()`. Behind it are three
+  kinds of check against two kinds of path, and the design work went into the fact that **the
+  message is the deliverable**. A probe that reports "start-up failed" has done all the work and
+  thrown away the only reason for doing it, so every check names the path it was looking at, what
+  it was trying, and what to change - `checking(trying, remedy) { }` is the shape that makes
+  writing one without a remedy impossible rather than merely unlikely.
+- **`PostAction`** (`config`) is spec 8.1's `Move` / `Delete` / `Noop` as a sealed set, and
+  `Move.targetUnder(directory)` is where a relative target becomes a path. That method is the whole
+  reason the type is not a string: a target of `temp/` is a different folder for each watched
+  directory, and the probe, the validator and T10's executor all have to agree about which.
+- **`EmbeddedSftpServer.start(separateFilesystemAt = ...)`** is a second root that renames cannot
+  cross. It is a fault hook because a test cannot mount a second disk, and it is faithful because
+  what a client sees is exactly what a real boundary looks like from a client: two ordinary
+  folders, two ordinary listings, two ordinary stats, and one rename that fails with a status
+  carrying no information at all.
+
+**What a resolved path knows that a configured one does not.** Two of the checks exist because of
+this, and both were found by review rather than by writing them.
+
+- Spec 12's rule is "action targets are not equal to the watched directory", and comparing the
+  configured strings enforces it only in the spelling somebody happened to use. `directories("drop")`
+  with `onAck = move("/home/etl/drop")` is the same folder twice and is not the same string twice,
+  and the connector would then have handed the same file to every poll it ever ran while succeeding
+  at every step. The builder cannot know; the probe has the server's own answer, so the comparison
+  is made there as well, against the resolved path.
+- `move(".")` escapes it in the other direction: it resolves onto the watched directory and is
+  never equal to it as a string. It is refused at build time for naming no folder, which is what it
+  does - along with `""`, `"/"` and `".."`.
+
+**Measured: `realpath` does not check that anything is there.** Against MINA SSHD 2.19.0, resolving
+a path that leads nowhere and resolving one that leads to a file both succeed and return the
+canonical name. So spec 11.1's "realpath of each watched directory" cannot be the whole check, and
+the probe follows it with a `stat` that insists on a directory. Both tests for it go red - and only
+those two - when that second half is removed, which is how the measurement was taken.
+
+**Acceptance:**
+
+- *Configuration validation failures surface as `ConfigurationError` before any connection is
+  opened* - structurally, and then tested. `SftpConnectorConfig` has one producer, `sftpConnector { }`,
+  which raises every fault it can decide on its own from a module that has no transport in it; the
+  new rules are `ConnectorDslTest.an action target that is the watched directory itself is refused`
+  and `.a move target starting with a slash is that path, and any other is under the directory it
+  came from`. `SftpConnectorTest.an action that files a message back where it came from is refused
+  before there is a connector` states it from the connector's own side.
+- *Probe: realpath of each watched directory; mkdir of action targets when `createActionTargets`;
+  marker rename into each target and back; `startupProbe = false` skips the marker rename* -
+  `StartupAgainstServerTest`: `.a watched directory that is not there stops the connector from
+  starting`, `.a watched directory that is a file stops the connector from starting`, `.the
+  connector makes the folder its actions move files into, and leaves nothing else behind`, `.a
+  folder the connector was told not to create stops it when nobody has created it`, and
+  `.startupProbe off skips the marker rename and starts anyway`.
+- *A cross-filesystem action target fails startup with `ConfigurationError` (S6)* -
+  `S6_a move target on another filesystem stops the connector from starting`. See below.
+- *`minIdle` fill runs in the background; the connector is usable before it completes* -
+  `SftpConnectorTest.the pool fills to its minimum in the background, and the connector works
+  before it has`. It asserts one session the instant `start` returns - the one the checks
+  borrowed, one short of the minimum - answers a `client.exists` at that moment, and finds two
+  spares after one housekeeping interval of virtual time.
+- *Progress entry appended* - this.
+
+Three tests beyond the checkboxes: `.an action target the server resolves onto the watched
+directory stops the connector`, `.a connector that has started once starts again over what it
+left` (the ordinary production case - every restart after the first finds the folder already
+there), and `SftpConnectorTest.a start-up that was refused starts no housekeeper`.
+
+**How S6 is enforced, not merely asserted.** Removing the marker rename fails `S6_` and nothing
+else, which is the whole argument for the rename in one line: every other check passes against a
+cross-filesystem target. The folder is there, the listing works, the stat works, and the connector
+would have run happily until the first ack. Removing the resolved-path comparison in `prepare`
+likewise fails only `.an action target the server resolves onto the watched directory stops the
+connector`.
+
+**What S6 stages.** The server serves one root holding `drop/` and `elsewhere/`, and is told that
+`elsewhere` is on another filesystem. Its SFTP subsystem gets an accessor that refuses any rename
+crossing that line with `AtomicMoveNotSupportedException` - the JDK's own name for what a kernel
+answers a `rename(2)` between two mounts with - and MINA maps an `IOException` it has no other
+mapping for to `SSH_FX_FAILURE`, which is exactly the featureless status D19 is about. Nothing else
+about the folder differs: `mkdir` creates it, `stat` reports it as a directory, and only the move
+fails. The test asserts the refusal names both paths and says "same filesystem", and then that
+neither directory holds anything afterwards - a start-up that refuses and leaves a file on somebody
+else's server is a start-up nobody will let run twice.
+
+**Deviations:**
+
+1. **`polling { directories(...) }` is a new knob that spec 12's DSL block does not have.** Spec
+   11.1 step 2 asks for a check of "each watched directory" and spec 12's validation rules compare
+   action targets against "the watched directory", so both already assume the configuration names
+   them; `watch(dir, every)` takes a directory at call time, which is too late for a start-up
+   check. The alternative was a parameter on `start`, which would put a value nothing validated
+   outside the one type that is validated. **For the maintainer:** spec 12's block needs the line.
+2. **`move(target, overwrite)` takes T7's `Overwrite` enum where spec 12 writes
+   `move("temp/", overwrite = true)`.** This is T7 deviation 3 being honoured - a boolean cannot
+   carry what replacing means on this protocol, and T7 asked that the ticket building `Move` take
+   the type. It defaults to `REFUSE`, matching `SftpClient.rename`.
+3. **The `minIdle` fill happens on the housekeeper's first round, one `housekeepingInterval` after
+   start, rather than immediately.** Spec 11.1 step 3 asks that the fill be in the background and
+   that readiness not wait for it, and both hold; spec 4.5 defines topping up as one of the things
+   the housekeeper does every round. Making it immediate means the housekeeper sweeping before its
+   first delay, which is a change to T5's function whose timing three of T5's tests are written
+   against. A pool that is cold for thirty seconds works - it pays for one handshake - so the trade
+   was not worth taking an earlier ticket's tests apart for.
+4. **`config` now imports `sftp.connector.client.Overwrite`.** The same shape as T4 deviation 1
+   (`error` importing `pool.PoolStats`) and accepted on the same grounds: the alternative is a
+   second overwrite-shaped type in `config` meaning exactly what the first one means. Inside one
+   module. Appealable, and the appeal would have to say what the second type buys.
+5. **A start-up the probe refuses leaves the session it borrowed open.** The pool has no `close()`
+   until T13, and half of one built here would be a seam nobody had designed - T1 and T3's
+   precedent is absent rather than stubbed. The cost is one socket and a reader thread per refused
+   start, which in production is a process that does not start anyway. On the open-seams table
+   against T13, whose `close()` is what `start` should call on its own failure path.
+6. **The `AcceptAll` warning is not repeated at start-up, which T1 deviation 2 left for this
+   ticket to decide.** Spec 5.2 says the warning is logged "at startup", and T1 logs it while the
+   configuration is built. Declined because in every real arrangement the two moments are the same
+   moment - `sftpConnector { }` and `SftpConnector.start` are consecutive statements - so a second
+   line would be a duplicate rather than a fact. If the Quarkus adapter ever builds configurations
+   long before it starts connectors from them, this is worth revisiting there, where the gap would
+   actually exist.
+7. **`makeDirectory` was extracted from `SftpClient.mkdir` as an `internal` extension on
+   `SftpSession`.** The probe needs the idempotent create-with-parents on a session it is holding,
+   and `mkdir` had it locked inside a lease. No behaviour changed and T7's sixteen write-path tests
+   pass untouched.
+8. **Size.** About 470 lines that are neither blank nor comment across two new main files, four
+   modified ones and two new test files, roughly 210 of them tests. Inside the 200-600 budget.
+
+**For the next ticket:**
+
+- **The housekeeper is launched by `SftpConnector.start`, after the checks and into a
+  `SupervisorJob` scope of the connector's own. T13 stops it by cancelling
+  `SftpConnector.backgroundWork`,** which is that scope's job and the only handle on it. T12's
+  watchers belong in the same scope, which is why it is named for background work rather than for
+  housekeeping.
+- **`start` is where a failed start-up has to give things back.** Today it cannot, because there is
+  nothing to give them back to. Once `close()` exists, `start` should call it before rethrowing.
+- **`PollingConfig.actionTargetsUnder(directory)` is the one place a relative move target becomes a
+  path,** and T10's lister has to exclude exactly those folders under recursion. Working out where a
+  moved file went any other way is how two parts of the connector come to disagree about which
+  folder is the temp folder.
+- **`PostAction` is configured and only half read.** The probe reads `Move` and nothing reads
+  `Delete` or `Move.overwrite`; T10's ack and nack are what make the sealed `when` exhaustive.
+- **The probe runs on one session and every step of it is a `checking(trying, remedy) { }`.** A
+  check added without a remedy does not compile, which is deliberate: the reason this class exists
+  is the sentence it prints, not the round trips it makes.
+- **`realpath` proves nothing about a path existing** - measured above. Any later code that treats a
+  successful `realpath` as evidence the path is there is wrong on this server and on OpenSSH.
+- **`EmbeddedSftpServer.start(separateFilesystemAt = "elsewhere")`** is testkit main source and
+  available to any ticket that needs a move the server will not make. It is also the only way to
+  stage a `ServerFailure` from a real server that is not about an occupied target.
+- **A connector that watches nothing opens no session at start-up.** Every earlier ticket's test
+  configuration names no `directories`, which is why nothing started dialling when this landed.

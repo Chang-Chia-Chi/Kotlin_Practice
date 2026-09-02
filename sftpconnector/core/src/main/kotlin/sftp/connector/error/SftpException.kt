@@ -164,12 +164,17 @@ class HostKeyRejected(val attempt: Attempt, detail: String, cause: Throwable? = 
 /**
  * Configuration that cannot start a connector.
  *
- * Thrown while the configuration block is being built, so an unreachable endpoint description or
- * an impossible timeout surfaces at assembly time rather than on the first connect attempt an
- * hour into a run. It carries no [Attempt] because nothing was attempted: there was no connector
- * yet to attempt anything with.
+ * Most of these are thrown while the configuration block is being built, so an unreachable
+ * endpoint description or an impossible timeout surfaces at assembly time rather than on the first
+ * connect attempt an hour into a run. The rest come from the checks start-up runs against the
+ * server, which are the ones that catch a configuration only the server can refute: a directory
+ * that is not there, a folder the account may not create, a move the server cannot make. Those
+ * carry [cause], because the server's own answer is evidence and paraphrasing it loses detail.
+ *
+ * It carries no [Attempt] even then. An attempt says which of several tries this was and invites
+ * another; a configuration fault is a statement that no number of tries will do.
  */
-class ConfigurationError(message: String) : Fatal(message, null)
+class ConfigurationError(message: String, cause: Throwable? = null) : Fatal(message, cause)
 
 /**
  * No session came free in time. Nothing was asked of the server, so there is nothing to retry and

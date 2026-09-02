@@ -1,6 +1,7 @@
 package sftp.connector.config
 
 import org.slf4j.LoggerFactory
+import sftp.connector.client.Overwrite
 import sftp.connector.error.ConfigurationError
 import java.nio.file.Files
 import java.nio.file.Path
@@ -133,6 +134,31 @@ class SftpConnectorBuilder internal constructor(private val name: String) {
                 "the pool would keep parked sessions the path had already dropped"
         }
 
+        polling.watched.forEachIndexed { position, directory ->
+            if (directory.isBlank()) faults += "polling directory ${position + 1} of ${polling.watched.size} is blank"
+        }
+        // An action that files a message back into the folder it came out of would hand the same
+        // file to the next poll, and the poll after that, for as long as the connector runs. The
+        // check is per watched directory because a relative target resolves against each of them.
+        listOf("onAck" to polling.onAck, "onNack" to polling.onNack).forEach { (knob, action) ->
+            val move = action as? PostAction.Move ?: return@forEach
+            // Nothing left once the separators and the here-and-above dots come off means the
+            // target names no folder at all. "." is the worst of those, because it reads like a
+            // path and resolves onto the watched directory itself, which the check below would
+            // then miss - the two spellings are not equal as strings.
+            if (move.target.trim('/', '.', ' ').isEmpty()) {
+                faults += "polling $knob moves files to \"${move.target}\", which names no folder to move them to"
+                return@forEach
+            }
+            polling.watched.filter { it.isNotBlank() }.forEach { directory ->
+                val target = move.targetUnder(directory)
+                if (target == directory.trimEnd('/')) {
+                    faults += "polling $knob moves files to $target, which is the directory they were watched in, " +
+                        "so acting on a file would move it onto itself and every later poll would find it again"
+                }
+            }
+        }
+
         // Checked here rather than at the first download, because a staging directory that is
         // missing or read-only makes every download fail and the fault is the same one every time.
         // Finding that at deployment costs a restart; finding it an hour into a run costs the run.
@@ -188,6 +214,11 @@ class SftpConnectorBuilder internal constructor(private val name: String) {
                 housekeepingInterval = pool.housekeepingInterval,
             ),
             polling = PollingConfig(
+                directories = polling.watched.toList(),
+                onAck = polling.onAck,
+                onNack = polling.onNack,
+                createActionTargets = polling.createActionTargets,
+                startupProbe = polling.startupProbe,
                 staging = StagingConfig(dir = polling.staging.dir, digest = polling.staging.digest),
             ),
         )
@@ -262,6 +293,40 @@ class PoolBuilder internal constructor() {
 class PollingBuilder internal constructor() {
 
     internal val staging = StagingBuilder()
+
+    internal val watched = mutableListOf<String>()
+
+    /** What becomes of a file the consumer has finished with. Defaults leave the server alone. */
+    var onAck: PostAction = PostAction.Noop
+    var onNack: PostAction = PostAction.Noop
+
+    /**
+     * On by default, because a connector configured to move files into a folder and refusing to
+     * make it is a connector that fails on its first ack over something it could have arranged.
+     * An account not allowed to create directories turns it off and has them made upstream.
+     */
+    var createActionTargets: Boolean = true
+
+    /**
+     * On by default. The alternative to checking whether a move works at start-up is discovering
+     * it at the first file, which on an hourly pipeline can be an hour after anyone was watching.
+     */
+    var startupProbe: Boolean = true
+
+    /**
+     * The directories this connector takes files from. Naming them here is what lets start-up
+     * check them; the call that starts a poll names one of them again.
+     */
+    fun directories(vararg paths: String) {
+        watched += paths
+    }
+
+    /** Moves the file into [target]. See [PostAction.Move] for where a relative target lands. */
+    fun move(target: String, overwrite: Overwrite = Overwrite.REFUSE): PostAction = PostAction.Move(target, overwrite)
+
+    fun delete(): PostAction = PostAction.Delete
+
+    fun noop(): PostAction = PostAction.Noop
 
     fun staging(configure: StagingBuilder.() -> Unit) {
         staging.apply(configure)

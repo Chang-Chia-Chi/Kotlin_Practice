@@ -194,6 +194,55 @@ class ConnectorDslTest {
         assertThat(defaults.digest).isEqualTo(Digest.SHA256)
     }
 
+    /**
+     * The one rule about post-processing that can be decided without asking the server, and the
+     * reason it is decided here: an action that files a message back into the directory it came
+     * out of would hand the same file to every poll for as long as the connector ran, and nothing
+     * about that looks like a failure from the outside.
+     */
+    @Test
+    fun `an action target that is the watched directory itself is refused`() {
+        assertThatThrownBy { minimalConnector { polling { directories("/drop"); onAck = move("/drop") } } }
+            .isInstanceOf(ConfigurationError::class.java)
+            .hasMessageContaining("onAck moves files to /drop, which is the directory they were watched in")
+
+        // The same fault in the spelling the comparison above cannot see: "." is not the string
+        // "/drop" and never will be, but it resolves onto it, so it is refused for naming no
+        // folder rather than for being equal to one.
+        assertThatThrownBy { minimalConnector { polling { directories("/drop"); onNack = move(".") } } }
+            .isInstanceOf(ConfigurationError::class.java)
+            .hasMessageContaining("onNack moves files to \".\", which names no folder")
+
+        assertThatThrownBy { minimalConnector { polling { directories("/drop"); onNack = move("") } } }
+            .isInstanceOf(ConfigurationError::class.java)
+            .hasMessageContaining("names no folder")
+
+        // And the ordinary arrangement is accepted: a folder under the watched directory.
+        val configured = minimalConnector { polling { directories("/drop"); onAck = move("temp/") } }
+        assertThat(configured.polling.actionTargetsUnder("/drop")).containsExactly("/drop/temp")
+    }
+
+    @Test
+    fun `a move target starting with a slash is that path, and any other is under the directory it came from`() {
+        val config = minimalConnector {
+            polling { directories("/drop", "/inbox"); onAck = move("done/"); onNack = move("/quarantine") }
+        }
+
+        assertThat(config.polling.actionTargetsUnder("/drop")).containsExactly("/drop/done", "/quarantine")
+        assertThat(config.polling.actionTargetsUnder("/inbox")).containsExactly("/inbox/done", "/quarantine")
+    }
+
+    @Test
+    fun `a connector nobody configured for polling leaves the server alone and still checks itself`() {
+        val defaults = minimalConnector { }.polling
+
+        assertThat(defaults.directories).isEmpty()
+        assertThat(defaults.onAck).isEqualTo(PostAction.Noop)
+        assertThat(defaults.onNack).isEqualTo(PostAction.Noop)
+        assertThat(defaults.createActionTargets).isTrue()
+        assertThat(defaults.startupProbe).isTrue()
+    }
+
     private fun minimalConnector(extra: SftpConnectorBuilder.() -> Unit): SftpConnectorConfig =
         sftpConnector("vendor-drop") {
             endpoint { host = "sftp.example" }

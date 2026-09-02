@@ -195,11 +195,7 @@ class SftpClient(
      *   because filling in a path nobody asked for turns a typo into a directory tree.
      */
     suspend fun mkdir(remote: String, parents: Boolean = false): Unit = meters.timing("mkdir") {
-        pool.withLease { lease ->
-            val session = lease.connection
-            if (parents) ancestorsOf(remote).forEach { session.ensureDirectory(it) }
-            session.ensureDirectory(remote)
-        }
+        pool.withLease { lease -> lease.connection.makeDirectory(remote, parents) }
     }
 
     /**
@@ -297,6 +293,18 @@ private suspend fun SftpSession.clearTheWay(path: String) {
     } catch (alreadyGone: NoSuchFile) {
         LOG.debug("{} was already gone when it was cleared for a rename: {}", path, alreadyGone.message)
     }
+}
+
+/**
+ * Makes sure there is a directory at [path], creating the ones above it too when [parents] says so.
+ *
+ * It is out here rather than inside [SftpClient.mkdir] because the same work has to be doable on a
+ * session somebody else is holding: a sequence that creates the folders it needs and then uses them
+ * would otherwise have to give the session back in the middle of itself.
+ */
+internal suspend fun SftpSession.makeDirectory(path: String, parents: Boolean) {
+    if (parents) ancestorsOf(path).forEach { ensureDirectory(it) }
+    ensureDirectory(path)
 }
 
 /**
