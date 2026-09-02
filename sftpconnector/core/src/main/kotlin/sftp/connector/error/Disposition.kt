@@ -10,7 +10,7 @@ package sftp.connector.error
  * every one of those callers would be a place to remember. So the failure answers, and the
  * caller obeys.
  *
- * The six constants are the six ways a failure can end. Read one to learn everything.
+ * The constants are the ways a failure can end. Read one to learn everything.
  */
 enum class Disposition(
     val retry: Retry,
@@ -56,6 +56,14 @@ enum class Disposition(
      * it as a failure would make a working safety mechanism look like an outage.
      */
     SKIP_THE_TICK(Retry.NEVER, false, LeaseFate.NONE_HELD, WatchReaction.REPORT_A_SKIP),
+
+    /**
+     * The connector refused on its own instruction and there is nothing more to decide. Asking
+     * again would put the same question to a server that never heard the first one, and counting
+     * it against the breaker would charge the connector for obeying its own configuration. The
+     * session held while the refusal was decided is untouched and goes straight back.
+     */
+    ACCEPT_THE_REFUSAL(Retry.NEVER, false, LeaseFate.RETURNED, WatchReaction.REPORT_THE_FAILURE),
 }
 
 /** Whether the operation is worth attempting again, and how soon. */

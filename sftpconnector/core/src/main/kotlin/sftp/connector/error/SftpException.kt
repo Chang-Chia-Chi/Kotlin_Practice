@@ -218,6 +218,23 @@ private fun explainExhaustion(stats: PoolStats?, waited: Duration, freed: Long):
         "room came free $freed times while it waited; $reading"
 }
 
+/**
+ * The path the operation was aiming at is occupied, and the overwrite policy said not to replace
+ * what is there.
+ *
+ * It sits beside [PoolExhausted] and [CircuitOpen] rather than under [Recoverable] because it is
+ * the same shape of failure as those two: real, and nobody's session's fault, and no reason to try
+ * again. Trying again cannot help - the file in the way will still be in the way - and holding it
+ * against the server would charge the connector for doing exactly what it was configured to do,
+ * which is how a pipeline behaving correctly opens its own circuit breaker.
+ *
+ * The session is untouched, because under a refusing policy nothing was ever sent.
+ */
+class OverwriteRefused(val attempt: Attempt, detail: String) :
+    SftpException(attempt.describe(detail), null) {
+    override val disposition: Disposition get() = Disposition.ACCEPT_THE_REFUSAL
+}
+
 /** The breaker is open, so the connector deliberately sent nothing. */
 class CircuitOpen(val attempt: Attempt) : SftpException(
     attempt.describe("the circuit breaker is open, so nothing was sent to the server"),

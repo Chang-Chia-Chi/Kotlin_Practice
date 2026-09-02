@@ -13,6 +13,7 @@ import sftp.connector.config.SftpConnectorConfig
 import sftp.connector.config.sftpConnector
 import sftp.connector.error.Attempt
 import sftp.connector.error.NoSuchFile
+import sftp.connector.error.OverwriteRefused
 import sftp.connector.error.ServerFailure
 import sftp.connector.pool.SftpPool
 import sftp.connector.testkit.FakeSftpTransport
@@ -64,7 +65,7 @@ class SftpWritePathTest {
         val client = clientOver(server)
 
         assertThatThrownBy { runBlocking { client.upload(fileHolding(CONTENT), "/drop/ledger.csv") } }
-            .isInstanceOf(ServerFailure::class.java)
+            .isInstanceOf(OverwriteRefused::class.java)
             .hasMessageContaining("already something at /drop/ledger.csv")
 
         assertThat(server.calls.map { it.operation }).doesNotContain(Operation.Write)
@@ -91,7 +92,7 @@ class SftpWritePathTest {
         val client = clientOver(server)
 
         assertThatThrownBy { runBlocking { client.rename("/drop/ledger.csv", "/drop/temp/ledger.csv") } }
-            .isInstanceOf(ServerFailure::class.java)
+            .isInstanceOf(OverwriteRefused::class.java)
 
         // Nothing was sent at all. The connector decides this one, because a server with the POSIX
         // rename extension would have replaced the target and called it a success.

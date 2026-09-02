@@ -10,6 +10,7 @@ import org.slf4j.LoggerFactory
 import sftp.connector.config.SftpConnectorConfig
 import sftp.connector.error.Attempt
 import sftp.connector.error.NoSuchFile
+import sftp.connector.error.OverwriteRefused
 import sftp.connector.error.ServerFailure
 import sftp.connector.pool.SftpPool
 import sftp.connector.transport.Listing
@@ -272,25 +273,15 @@ class SftpClient(
     /**
      * Says no on the caller's own instruction, before anything is sent.
      *
-     * It is reported as the server's generic failure because that is what the refusal is - the
-     * operation was not carried out, for a reason to do with this one request and not with the
-     * session - and because a server that refuses the same thing itself answers with exactly that.
-     * A caller handling one of them therefore handles both.
+     * It has a failure class of its own rather than borrowing the server's generic refusal,
+     * because the two want opposite treatment. A server's refusal is worth another go and worth
+     * counting against the server; this one is neither - the file in the way will still be in the
+     * way on the next attempt, and the server did nothing wrong.
      */
-    private fun refuse(operation: String, path: String): Nothing = throw ServerFailure(
+    private fun refuse(operation: String, path: String): Nothing = throw OverwriteRefused(
         Attempt(endpoint, operation, path),
-        statusCode = SSH_FX_FAILURE,
         detail = "there is already something at $path and this $operation was told not to replace it",
     )
-
-    private companion object {
-        /**
-         * The one status an SFTP version 3 server has for everything it will not do. The connector
-         * uses it when it refuses on the caller's behalf before sending anything, because "the
-         * operation failed" is exactly as much as the server would have said.
-         */
-        private const val SSH_FX_FAILURE = 4
-    }
 }
 
 /**

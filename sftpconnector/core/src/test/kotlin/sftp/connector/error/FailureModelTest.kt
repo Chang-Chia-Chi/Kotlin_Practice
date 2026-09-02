@@ -63,6 +63,22 @@ class FailureModelTest {
         assertThat(CircuitOpen(ATTEMPT).disposition.countsAgainstTheBreaker).isFalse()
     }
 
+    /**
+     * The connector was told not to replace anything and it did not. Asking again would put the
+     * same question to a server that never heard the first one, and a breaker that counted this
+     * would open on a pipeline doing precisely what it was configured to do.
+     */
+    @Test
+    fun `a refused overwrite is not retried, is not held against the server, and keeps its session`() {
+        val refused = OverwriteRefused(ATTEMPT, "there is already something at /inbox/x.csv")
+
+        assertThat(refused.disposition).isEqualTo(Disposition.ACCEPT_THE_REFUSAL)
+        assertThat(refused.disposition.retry).isEqualTo(Retry.NEVER)
+        assertThat(refused.disposition.countsAgainstTheBreaker).isFalse()
+        assertThat(refused.disposition.lease).isEqualTo(LeaseFate.RETURNED)
+        assertThat(refused.disposition.watch).isEqualTo(WatchReaction.REPORT_THE_FAILURE)
+    }
+
     @Test
     fun `I10_a fatal failure stops the watch and no other failure does`() {
         assertThat(EVERY_FAILURE).isNotEmpty()
@@ -101,6 +117,7 @@ class FailureModelTest {
         is AuthenticationFailed, is HostKeyRejected, is ConfigurationError -> Disposition.STOP_THE_CONNECTOR
         is PoolExhausted -> Disposition.FAIL_THE_ATTEMPT
         is CircuitOpen -> Disposition.SKIP_THE_TICK
+        is OverwriteRefused -> Disposition.ACCEPT_THE_REFUSAL
     }
 
     @Test
@@ -127,6 +144,7 @@ class FailureModelTest {
             ConfigurationError("nothing was configured"),
             PoolExhausted(ATTEMPT),
             CircuitOpen(ATTEMPT),
+            OverwriteRefused(ATTEMPT, "there is already something there"),
         )
     }
 }
