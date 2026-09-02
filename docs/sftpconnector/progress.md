@@ -75,6 +75,23 @@ transport seam had leaked. This is the shape of exception the rule allows - an e
 assertion that a later ticket makes stricter, declared in the progress entry. An assertion
 that gets loosened, deleted or retargeted to make new code pass is still a stop-and-report.
 
+### Open seams - things deferred, and who picks them up
+
+Coordinator-maintained. A ticket that closes one strikes it through in its own entry; a ticket
+that adds one appends a row. These are the things most likely to be lost between sessions,
+because each was correctly deferred by the ticket that found it.
+
+| Seam | Left by | Owner | What happens if it is forgotten |
+|---|---|---|---|
+| `SftpPool.housekeep()` has no production caller | T5 | Whichever ticket builds the connector's `CoroutineScope` - T9 startup is the natural home, T13 owns cancelling it | The housekeeper never runs: no lifetime eviction, no idle eviction, no leak reports, and `minIdle` is a knob with no effect. The most consequential open seam on this list |
+| `socketTimeout` is dead configuration | T2 measurement, spec D26 | T8 | A knob that reads as the bound on a hung server and bounds nothing. T8 either makes it mean something or removes it |
+| `HostKeyPolicy.Fingerprint(sha256)` unimplemented | T1 | The first ticket needing fingerprint pinning | Two of spec 5.2's three policies ship. Kotlin's exhaustive `when` names every site when it is added, so this cannot rot silently |
+| `sftp_pool_leak_total` registers on first use | T5 | The ticket that next revisits T4's exact-meters assertion | No series on a dashboard until the first leak, so an alert must treat absent as zero |
+| `Attempt.number` is always 1; the pool names its own operation `acquire` | T2, T4 | T11, which owns retries and is the layer that knows which try it is | Log lines and metrics attribute a caller's failure to the pool rather than to the operation that failed |
+| `Retirement.SHUTDOWN` has no producer | T5 | T13 | `sftp_pool_evicted_total{reason=shutdown}` never appears |
+| `OperationTimeout` has no producer | T2 | T11's time limiter | A failure class in the hierarchy that nothing raises |
+| `MutableStateFlow.value` can resume an undispatched collector under the registry lock | flagged by the maintainer | Any ticket that collects `PoolEntry.state`/`Lease.state` | Foreign code runs inside a critical section. Still theoretical: T5 confirmed nothing collects either, both read `state.value` |
+
 ### C6: spec Sec 5.3 amended - the middle cancellation tier is `keepAlive`
 
 T2 measured that `socketTimeout` bounds nothing: JSch implements `serverAliveInterval` by
