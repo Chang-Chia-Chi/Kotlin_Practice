@@ -75,6 +75,32 @@ transport seam had leaked. This is the shape of exception the rule allows - an e
 assertion that a later ticket makes stricter, declared in the progress entry. An assertion
 that gets loosened, deleted or retargeted to make new code pass is still a stop-and-report.
 
+### C7: a byte-count mismatch gets its own class (ruling on T6's open question)
+
+T6 raised a download whose byte count disagreed with the listed size as `SessionLost`, and asked
+for a ruling. Neither of the two classes it chose between is right, so the hierarchy gains one:
+**`IncompleteTransfer`**, `Recoverable`, `poisons = true`. Spec Sec 10.1 and D28 record it.
+
+T6 framed the trade as honest-message-that-poisons versus right-disposition-with-a-fabricated
+status code, and both readings were sound - but the reason neither fits is that every other
+`Recoverable` class describes a fault *the wire reported*, and this is the connector's own
+integrity check failing. There was no class for that because the spec did not foresee one.
+
+The deciding argument is what an operator does next. `SessionLost` sends them to the network and
+the proxy. The actual evidence is that a file changed size underneath a download - which is
+exactly the signal spec open item 1 is still waiting on, and exactly what a stalled uploader
+produces. Reporting it as a lost session hides the one observation that would tell the maintainer
+their readiness convention is wrong.
+
+It keeps `poisons = true`. A short read and a half-dead session are indistinguishable from where
+the check stands, so the safe reading costs one handshake on a rare event - and in the pipeline
+this connector was built for, the readiness checks of Sec 7.5 are what should be preventing the
+benign case in the first place.
+
+Adding a class is safe by construction: T2's `FailureModelTest.rowOf` is a `when` over the sealed
+type, so a class added without a decided behaviour fails compilation rather than reaching
+production undecided. Ticket 07 applies this as a separate first commit.
+
 ### Open seams - things deferred, and who picks them up
 
 Coordinator-maintained. A ticket that closes one strikes it through in its own entry; a ticket

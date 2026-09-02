@@ -193,9 +193,20 @@ Defaults: keepalive 30 s, idle timeout 4 min, max lifetime 30 min.
 ### 5.1 Interface
 
 `SftpTransport` opens a `Connection`; a `Connection` offers `list(path, selector)`, `stat`,
-`openRead`, `openWrite`, `rename`, `delete`, `mkdir`, `realpath`, `abort()` and `close()`. The
-JSch adapter is the only implementation in production; the testkit provides a scripted fake for
-pool and source tests that never open a socket.
+`readTo(path, sink)`, `openWrite`, `rename`, `delete`, `mkdir`, `realpath`, `abort()` and
+`close()`. The JSch adapter is the only implementation in production; the testkit provides a
+scripted fake for pool and source tests that never open a socket.
+
+The read operation is `readTo(path, sink)` rather than the `openRead` earlier drafts named.
+Returning a stream would put every blocking socket read on whatever thread the caller happened
+to be on, and Sec 3.3 requires them all on the bounded dispatcher; handing the transport a sink
+keeps the whole transfer inside one call on that dispatcher, which is also where the progress
+monitor of Sec 5.3 hangs. `openRead` is not this operation renamed - it is the streaming
+download of Sec 14.1, deferred out of v1 by Sec 1.3, and whichever release builds it adds it
+beside `readTo`.
+
+Operations join this interface as the ticket needing them arrives, absent rather than stubbed,
+so nothing above the seam can call a method that does not yet work.
 
 ### 5.2 JSch adapter
 
@@ -454,7 +465,8 @@ SftpException (sealed)
     ConnectFailed        proxy refused, TCP timeout, DNS
     SessionLost          socket timeout, "session is down", connection lost
     OperationTimeout
-    ServerFailure        SSH_FX_FAILURE and other generic codes
+    ServerFailure        SSH_FX_FAILURE and other generic codes; poisons = false (D27)
+    IncompleteTransfer   the connector's own check failed: bytes received != size listed; poisons (D28)
     Unknown              unmapped JSch message, raw text preserved; poisons
     PermissionDenied     poisons = false; no fast retry
     NoSuchFile           poisons = false; per-operation meaning (Sec 6.1)
@@ -629,6 +641,7 @@ transport in the testkit is a genuine second implementation.
 | D22 | The connector computes a digest during staging; the application compares it | The digest is free while bytes stream through; the expected value's origin is application knowledge. Checksum is integrity, not completeness, and cannot replace the readiness check because it needs the download first |
 | D23 | Unmapped JSch errors are `Unknown`, recoverable, poisoned, logged raw and counted | JSch error text is not an API; a wording change must surface as a metric and a log line, never as a silent misclassification or a dead connector |
 | D26 | The middle cancellation tier is the keepalive ladder, not `socketTimeout` | Measured against mwiede 2.28.7 (Sec 5.3): JSch implements `serverAliveInterval` by setting the socket read timeout, so a positive `keepAlive` always overwrites `session.timeout`. A hung server is bounded by `keepAlive x (serverAliveCountMax + 1)` and not at all by `socketTimeout` |
+| D28 | A byte count that disagrees with the listed size is `IncompleteTransfer`, not `SessionLost` | Every other `Recoverable` class describes a fault the wire reported; this one is the connector's own integrity check failing, and it had no class. Reporting it as `SessionLost` sends an operator to look at the network when the actual evidence is that a file changed size under them - which is precisely the signal open item 1 is waiting on, and the one a stalled uploader produces. It poisons, because a short read and a half-dead session are indistinguishable from here and the safe reading costs one handshake on a rare event |
 | D27 | `ServerFailure` does not poison the session | A well-formed `SSH_FX_FAILURE` proves the channel parsed the request and answered, so the session is healthy and a per-request refusal is no reason to throw it away. Sec 8.2 expects exactly that status from a server without `posix-rename`, which would otherwise evict a session on every overwrite rename. Real transport breakage arrives with an `IOException` cause and is classified `SessionLost` before this rule is reached |
 
 ---
