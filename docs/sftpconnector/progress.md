@@ -349,3 +349,132 @@ stops the watch and no other failure does` runs over every class in the hierarch
   safe - a decided failure is never reburied inside an `Unknown`.
 - **`LoopbackConnectProxy.stall()` and `EmbeddedSftpServer(offersSftp = false)`** are testkit main
   source and available to any ticket that needs a silent peer or a server that refuses SFTP.
+
+---
+
+## T3: Pool core: registry, entry states, acquire and release
+
+**Built:** `sftp.connector.pool` exists. A caller borrows a session from a bounded pool and gives it
+back, the pool opens one when there is nothing on the shelf, and every session it holds is counted in
+one place under one lock. `sftpconnector/testkit` gained `FakeSftpTransport`, a transport that answers
+from a script, so the pool is proven with no socket, no server and no wall clock.
+
+A separate first commit applied coordinator decision C4: `ServerFailure.poisons` is now `false`, with
+`FailureModelTest`'s row table moved to match and the mapper test strengthened to assert the session
+survives a status refusal. T2's open question is closed.
+
+**Concepts named:**
+
+- **`SessionRegistry`** (internal to `core`) is where this ticket's design went. It *decides and never
+  acts*: every method answers a question - which session does this caller get, may this one go back on
+  the shelf - and returns before anything slow happens. The lock is private to it and it is handed no
+  transport, so dialling a server while the pool is locked cannot be written by mistake; it would first
+  have to be made possible by giving the class a transport it has no other use for. `handBack` returns
+  *the connection to close* rather than closing it, which is how the one piece of I/O a handback implies
+  gets carried out of the lock. This is what makes I5 structural rather than remembered.
+- **`Checkout`** is the answer `checkOut` gives: `Reuse` or `Dial`. A sealed answer rather than a
+  session plus a flag, so the caller has no decision left to take - it does the one thing its answer
+  names. Ticket 05 adds the third case, `Prove`.
+- **`PoolEntry` and `EntryState`.** The entry outlives any one borrowing, which is what lets the pool
+  talk about a session it has not opened yet or one it has decided to throw away but not yet hung up
+  on. The three transitional states are the whole reason no lock is held across a round trip.
+- **`Lease`** never asks its holder what state the session is in. `releaseAfter(failure)` reads
+  `failure.disposition.lease` and obeys it; there is no poison flag for a caller to set, and so no
+  caller can set it differently from the caller next door. Anything unclassified - an application
+  error, a cancellation - evicts, because a session nobody has vouched for is not worth handing on.
+- **`PoolStats`** is one consistent reading taken under the lock, not three reads of a moving target.
+  It is also the observation point I1 is asserted at, and the question whose *answer arriving at all*
+  proves I5.
+- **`FakeSftpTransport`** has one hook, `answer: suspend (Call) -> Unit`, and it is the whole scripting
+  surface. Suspending in it is a slow server, throwing from it is a failing one, and asserting in it is
+  a test of what the caller may do while it waits - which is exactly how I1 and I5 are proven. Its
+  `Operation` is an enum, not a string, because a test that filters the call record for a misspelled
+  operation finds nothing and reports that nothing happened, which is what a passing test looks like.
+
+**Acceptance:**
+
+- *Entry states as a StateFlow per entry* - `EntryState` has all six; `an entry publishes the states it
+  passes through` walks InUse to Idle, then InUse to Closed through `Lease.state`. `Validating` has no
+  producer yet and belongs to ticket 05.
+- *Acquire pops the most recently used idle entry or registers a Connecting entry and connects outside
+  the lock* - `the first caller opens a session and the next one gets it back` (one connect for two
+  borrows, LIFO from the deque's end) and `a session that never opened is not left occupying the pool`.
+- *Release pushes to the idle deque and releases the permit last* - `what a failure says about the
+  session is what happens to it`, and `a lease given back twice is ignored the second time`, which
+  proves no permit was invented by asserting the next acquire beyond capacity still blocks.
+- *Fake transport with scripted connect success, failure and delay via hook points* -
+  `FakeSftpTransport`; failure in `a session that never opened...`, delay in `a connect cancelled
+  halfway leaves the pool all of its capacity`.
+- *I1, I2, I5* - `I1_idle plus inUse plus connecting never exceeds maxSize`, `I2_an entry is handed to
+  at most one lease at a time`, `I5_no transport call executes while the registry lock is held`.
+- *Progress entry appended* - this.
+
+**How the three invariants are enforced, not merely asserted.** Each was checked by breaking the pool
+and confirming that its own test - and, for I5, only its own test - went red.
+
+- **I1** is the semaphore, taken before an entry exists and released after it is handed back, so a
+  session being opened occupies capacity exactly as much as one being used. Widening it to
+  `maxSize + 2` fails I1 at the hook with `sessions accounted for during Call(operation=Connect...)`.
+- **I2** is the idle deque: an entry leaves it under the lock and returns only through a handback, so
+  two callers cannot hold the same one. Changing `removeLastOrNull()` to `lastOrNull()` fails I2 with
+  `fake session 5 was already lent to someone else`.
+- **I5** is the private lock plus the transport-free registry, and the test proves it with the one
+  question only an unlocked pool can answer: `stats()` needs the same non-reentrant mutex, so a
+  transport call made from inside it could never get a reply. Adding a method that closes a connection
+  under the lock fails I5 and nothing else. The timeout turns what would be a deadlock into a red test
+  rather than a hung one.
+
+**Deviations:**
+
+1. **Two of ticket 04's checkboxes are done here, deliberately and declared.** `withLease` releasing on
+   every exit path, and a second release being logged and ignored, are 04's checkbox 2. They are here
+   because "release it back" is this ticket's own deliverable and there is no safe way to express or
+   test it otherwise: without the use-block every test leaks a permit on its failure path, and without
+   the release-once guard a double release silently invents capacity. Poison eviction (04's checkbox 3)
+   is likewise here, because this ticket's own statement says "connect **and close** happen in the
+   transitional states outside the lock" - the close path is the Evicting mechanism. **Ticket 04 still
+   owns:** the bounded wait and `PoolExhausted` with statistics, the meters, I3, I4, and the
+   embedded-server demo. Its checkboxes 2 and 3 should be read as done and re-verified, not rebuilt.
+2. **Acquire waits without a bound.** `acquireTimeout` is ticket 04's checkbox 1 and is not implemented,
+   so `capacity.acquire()` suspends until a permit frees. No caller of the pool exists yet, so nothing
+   can hang on this today, but it must not stay that way past 04.
+3. **Validation on borrow is not here.** It is ticket 05's checkbox 2 verbatim, so `validationBypass`,
+   `Checkout.Prove` and the realpath round trip were built, reviewed against the ticket boundary, and
+   removed again. `EntryState.Validating` stays in the enum because this ticket fixes the six states,
+   and `SessionRegistry.stats` already counts a validating entry as in use, so 05 adds a producer
+   rather than an accounting rule. The pool takes no `Clock` yet for the same reason.
+4. **No pool meters.** `sftp_pool_active`, `_idle`, `_pending`, `_created_total` are 04's checkbox 6.
+   `PoolStats` is the shape they will read from, and it has no `pending` count yet because nothing
+   counts waiters until the bounded wait exists.
+5. **No `close()` on the pool.** Sessions opened stay open. Graceful shutdown is ticket 13 and I9 is
+   its invariant; adding a half-shutdown here would be a seam nobody had designed. Absent rather than
+   stubbed, following T1's precedent for transport operations.
+6. **No new configuration knob**, so the standing rule about knobs landing in the DSL with build-time
+   validation has nothing to apply to. `pool.maxSize` was already there from T1.
+7. **Size.** 674 lines across five files, 385 of them neither blank nor comment, inside the 200-600
+   budget on the measure the earlier entries used. The first draft was about 890 and over the top of it;
+   the overage was precisely the two tickets' worth of work removed in deviations 2 and 3, which is
+   worth knowing: the budget noticed the scope error before the review did.
+
+**For the next ticket:**
+
+- **Read deviation 1 before starting 04.** Two of its six checkboxes are already green.
+- **`releaseAfter` evicts on `LeaseFate.NONE_HELD`,** which the failure model marks "n/a" rather than
+  "evicted" for `PoolExhausted` and `CircuitOpen`. Neither can be raised by a caller that is holding a
+  lease, so the case is unreachable today and the reading is the safe one. Ticket 04 owns the lease
+  contract and should either confirm it or make `NONE_HELD` keep the session.
+- **`Semaphore.acquire()` is cancellation-safe** and gives the permit back itself if the coroutine is
+  cancelled between being granted one and resuming, so 04's bounded wait can be `withTimeoutOrNull`
+  around it without leaking. The cleanup path already in `acquire` runs under `NonCancellable`, which
+  it must: taking the registry's lock is a suspension, and a cancelled coroutine cannot wait for a lock.
+  Anything 04 or 13 adds to a release path needs the same treatment.
+- **`close()` in the pool catches `Exception`, never `Throwable`.** An `AssertionError` thrown by a
+  testkit hook inside a close would otherwise be swallowed and the invariant tests would pass on the
+  close path without checking anything. That is not a style choice; it was found by making I5 fail.
+- **`FakeSftpTransport` is testkit main source** and takes one hook. A ticket needing a session that
+  dies while parked, a connect that hangs, or an assertion about what the caller was holding at the
+  moment of a call should reach for that hook rather than add a second mechanism.
+- **`kotlinx-coroutines-test` is now managed in the parent pom** and is a test dependency of `testkit`.
+  Virtual time is how a test proves something did *not* happen without waiting for it.
+- **The `autoCreate` to `createActionTargets` rename landed while this ticket was being written** and
+  is not part of it. Nothing in the pool reads that knob, so the two changes do not touch.
