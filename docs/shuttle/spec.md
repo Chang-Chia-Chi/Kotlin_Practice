@@ -820,7 +820,7 @@ shuttle:
       fetch: { store: minio, path: /metadata.path }
       process:
         - { extract: { from: message, json: { batchId: /batchId } } }
-        - { expand: { format: json, files: /images[*].path, from: minio } }
+        - { expand: { format: json, files: "/images[*].path", from: minio } }   # quoted: `[` may not start inside a flow mapping's plain scalar
         - { custom: imageResizer, config: { maxWidth: 2048 } }
       target: { store: partner, directory: /incoming }
       notify:

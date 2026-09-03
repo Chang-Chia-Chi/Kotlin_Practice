@@ -1,0 +1,108 @@
+shuttle:
+  shuttleStateStore:
+    oracle: { datasource: shuttle }            # every transfer's progress, durable, two tables
+  notifier:   { workers: 4, batch: 50, sweepEvery: 30s }
+  supervision:
+    restartBackoff: { initial: 30s, max: 15m }
+    readiness: all-routes-down
+  digest: md5                                  # process default; a route may override
+  drainTimeout: 60s                            # below the pod's 90 s termination grace period
+
+  objectStores:                                # where files live; source, target or fetch location
+    vendor:
+      sftp:
+        host: sftp.example
+        port: 22
+        auth: { user: ${SFTP_USER}, password: ${SFTP_PASSWORD} }
+        hostKey: acceptAll                     # warns at startup
+        idleCutoff: 5m                         # the proxy's idle limit still applies even without a proxy block
+        pool: { maxSize: 20, maxConcurrentTransfers: 16 }
+        staging: { dir: /var/shuttle/stage/vendor, minFree: 1g }   # below minFree a fetch is deferred (Sec 4.1)
+    partner:
+      sftp:
+        host: partner.example
+        auth: { user: ${PARTNER_USER}, password: ${PARTNER_PASSWORD} }
+        pool: { maxSize: 4 }                     # rule 9: mirror (1, the default) + image-sets (2) both target it
+        staging: { dir: /var/shuttle/stage/partner }               # minFree defaults to 1g
+    minio:
+      s3:
+        endpoint: https://minio.internal
+        region: us-east-1
+        pathStyle: true
+        credentials: { accessKey: ${S3_ACCESS_KEY}, secretKey: ${S3_SECRET_KEY} }
+        timeouts: { connect: 5s, socket: 30s, apiCall: 45s }   # apiCall below drainTimeout (rule 3)
+
+  channels:                                    # where messages go, or come from
+    downstream:
+      http:
+        method: POST
+        url: https://downstream.internal/api/files
+        auth: { bearer: ${DOWNSTREAM_TOKEN} }
+        timeout: 10s
+        response: { success: [200-299], retry: [408, 429, 500-599], reference: /requestId }
+        policy: { maxAttempts: 50, giveUpAfter: 24h, backoff: { initial: 5s, max: 15m } }
+        body:
+          - { path: fileId,          field: TRANSFER_ID }
+          - { path: file.name,       field: STORED_NAME }
+          - { path: file.size,       field: TARGET_SIZE }
+          - { path: file.md5,        field: DIGEST }
+          - { path: location.bucket, field: TARGET_LOCATION }
+          - { path: location.key,    field: TARGET_KEY }
+          - { path: receivedAt,      field: SOURCE_MTIME, format: ISO_INSTANT }
+          - { path: orderNumber,     attribute: orderNumber }
+          - { path: order,           provider: orderDetails }
+          - { path: event,           field: EVENT }               # fetched | stored | acked, so the receiver can route on it
+          - { path: source,          value: vendor-drop }
+    upstream-receipt:
+      http:
+        method: POST
+        url: https://upstream.internal/api/received
+        auth: { header: { name: X-Api-Key, value: ${UPSTREAM_KEY} } }
+        timeout: 5s
+        response: { success: [200-299], retry: [500-599] }
+        body:
+          - { path: object, field: SOURCE_PATH }
+          - { path: md5,    field: SOURCE_DIGEST }
+    events:
+      nats: { url: nats://events.internal:4222, credentials: ${NATS_CREDS} }
+
+  routes:
+    vendor-drop:                               # milestone 1
+      source:
+        poll:
+          store: vendor
+          directory: /inbox
+          every: 1h
+          readiness: [ { sizeStable: { checks: 2, interval: 10s } }, { minAge: 1m } ]
+          onAck: { move: temp/ }
+      process:
+        - { extract: { from: fileName, regex: "(?<orderNumber>\\d+)-.*\\.csv" } }
+        - { rename: { pattern: "{yyyyMMdd}-{name}" } }
+        - { zip: {} }
+      target: { store: minio, bucket: landing, key: "vendor/{name}" }
+      notify:
+        - { on: acked, channel: downstream }
+      parallelism: 4
+      maxAttempts: 5
+      stuckAfter: 3h
+      recheckFinished: 24h                     # a finished file still listed is digested again at most this often (Sec 4.3)
+
+    mirror:                                    # move A to B, tell nobody
+      source: { poll: { store: vendor, directory: /outbound, every: 15m, onAck: delete } }
+      target: { store: partner, directory: /incoming }
+
+    # an unzip step reads `- { unzip: { maxEntries: 10000, maxBytes: 10g } }`; both limits default to those values
+
+    image-sets:                                # milestone 2
+      source:
+        subscribe: { channel: events, subject: images.ready, onAck: ack, inProgressEvery: 10s }
+      fetch: { store: minio, path: /metadata.path }
+      process:
+        - { extract: { from: message, json: { batchId: /batchId } } }
+        - { expand: { format: json, files: "/images[*].path", from: minio } }   # quoted: `[` may not start inside a flow mapping's plain scalar
+        - { custom: imageResizer, config: { maxWidth: 2048 } }
+      target: { store: partner, directory: /incoming }
+      notify:
+        - { on: fetched, channel: upstream-receipt }
+        - { on: acked,    channel: downstream }
+      parallelism: 2
