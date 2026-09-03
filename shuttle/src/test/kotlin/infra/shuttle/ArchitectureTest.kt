@@ -53,35 +53,36 @@ class ArchitectureTest {
             .check(all)
     }
 
+    /** Spec 3.2: `quarkus` is the composition root; it may import everything above it and Quarkus, and nothing imports it. */
     @Test
-    fun `quarkus is depended on by nothing`() {
+    fun `quarkus is depended on by nothing and is the only package that imports Quarkus`() {
+        assertTrue(all.contain("infra.shuttle.quarkus.ShuttleHost"), "the sentence has a subject")
         noClasses().that().resideOutsideOfPackage("infra.shuttle.quarkus..")
             .should().dependOnClassesThat().resideInAnyPackage("infra.shuttle.quarkus..", "io.quarkus..", "jakarta..")
-            .allowEmptyShould(true)
             .check(all)
     }
 
     @Test
-    fun `java sql and jdbi appear nowhere outside the jdbi package`() {
-        noClasses().that().resideOutsideOfPackage("infra.shuttle.jdbi..")
+    fun `java sql and jdbi appear nowhere outside the jdbi package and the composition root`() {
+        noClasses().that().resideOutsideOfPackages("infra.shuttle.jdbi..", "infra.shuttle.quarkus..")
             .should().dependOnClassesThat().resideInAnyPackage("java.sql..", "javax.sql..", "org.jdbi..")
             .allowEmptyShould(true)
             .check(all)
     }
 
-    /** Spec 3.2: only `sftp` and `quarkus` import the connector, and `quarkus` does not exist yet. */
+    /** Spec 3.2: only `sftp` and `quarkus` import the connector. */
     @Test
-    fun `the sftp connector appears nowhere outside the sftp package`() {
+    fun `the sftp connector appears nowhere outside the sftp package and the composition root`() {
         assertTrue(all.contain("infra.shuttle.sftp.SftpPollSource"), "the sentence above has a subject")
-        noClasses().that().resideOutsideOfPackage("infra.shuttle.sftp..")
+        noClasses().that().resideOutsideOfPackages("infra.shuttle.sftp..", "infra.shuttle.quarkus..")
             .should().dependOnClassesThat().resideInAnyPackage("sftp.connector..")
             .allowEmptyShould(true)
             .check(all)
     }
 
     @Test
-    fun `jnats appears nowhere outside the nats package`() {
-        noClasses().that().resideOutsideOfPackage("infra.shuttle.nats..")
+    fun `jnats appears nowhere outside the nats package and the composition root`() {
+        noClasses().that().resideOutsideOfPackages("infra.shuttle.nats..", "infra.shuttle.quarkus..")
             .should().dependOnClassesThat().resideInAnyPackage("io.nats..")
             .allowEmptyShould(true)
             .check(all)
@@ -104,9 +105,10 @@ class ArchitectureTest {
             .check(all)
     }
 
+    /** The composition root is the one place a clock is born; everything below it is handed one. */
     @Test
     fun `time is java time Clock injected`() {
-        noClasses().that().resideInAPackage("infra.shuttle..")
+        noClasses().that().resideInAPackage("infra.shuttle..").and().resideOutsideOfPackage("infra.shuttle.quarkus..")
             .should().callMethod(java.time.Instant::class.java, "now")
             .orShould().callMethod(java.time.Clock::class.java, "systemUTC")
             .orShould().callMethod(java.time.Clock::class.java, "systemDefaultZone")

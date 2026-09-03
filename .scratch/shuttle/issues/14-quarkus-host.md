@@ -11,14 +11,14 @@ ordered shutdown within the drain timeout.
 
 **Nature:** shutdown ordering and timing work
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `I12`: close returns within the drain timeout with a delivery parked in a stalled loopback server, and every PENDING row stays PENDING
-- [ ] S15, S18, S24, S25, S31 through the real host; try mode prints attributes per step, the key and one body per channel for a sample name, opens no connection, and reports a mapping-versus-regex mismatch by rule 17
-- [ ] A boot with a missing table fails naming the DDL; a boot with a missing bucket fails naming the bucket; both readiness rules behave as spec Sec 10 says
-- [ ] Every endpoint of spec Sec 14.1 answers under the admin role and changes what it says it changes, including the manual ack and the route restart
-- [ ] Blocking calls run on the module's bounded IO dispatcher; metrics appear in the host registry
-- [ ] Progress entry appended
+- [x] `I12`: close returns within the drain timeout with a delivery parked in a stalled loopback server, and every PENDING row stays PENDING
+- [x] S15, S18, S24, S25, S31 through the real host; try mode prints attributes per step, the key and one body per channel for a sample name, opens no connection, and reports a mapping-versus-regex mismatch by rule 17
+- [x] A boot with a missing table fails naming the DDL; a boot with a missing bucket fails naming the bucket; both readiness rules behave as spec Sec 10 says
+- [x] Every endpoint of spec Sec 14.1 answers under the admin role and changes what it says it changes, including the manual ack and the route restart
+- [x] Blocking calls run on the module's bounded IO dispatcher; metrics appear in the host registry
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket, stubs throwing NotImplementedError
 for later seams; 200-600 lines including tests; no Thread.sleep; invariant tests named

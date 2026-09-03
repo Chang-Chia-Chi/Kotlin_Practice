@@ -66,6 +66,32 @@ class RouteSupervisorTest {
         assertEquals(listOf(0L, 30_000L, 60_000L, 90_000L), starts, "every restart waits `initial`")
     }
 
+    /** Spec 14.1: an operator restart cuts the current run short, or the wait before the next one, and the backoff is `initial` again. */
+    @Test
+    fun restart_cancels_the_current_run_and_a_restart_during_the_wait_cuts_it_short_and_resets_the_backoff() = runTest {
+        val starts = mutableListOf<Long>()
+        val supervisor = supervisor(mapOf("dead" to { flow { starts += testScheduler.currentTime; if (starts.size == 1) awaitCancellation() else emit(RouteEvent.RouteDown(cause)) } }))
+        backgroundScope.launch { supervisor.run() }
+        runCurrent()
+        assertEquals(1.0, up("dead"), "the first run is live")
+
+        assertEquals(true, supervisor.restart("dead"))
+        runCurrent()
+        assertEquals(listOf(0L, 0L), starts, "the run is cancelled and restarted with no wait")
+        assertEquals(1.0, restarts("dead"))
+
+        // The second run died at once: the supervisor is 30 s into its wait; a restart at 10 s starts it then.
+        advanceTimeBy(10.seconds); runCurrent()
+        assertEquals(true, supervisor.restart("dead"))
+        runCurrent()
+        assertEquals(listOf(0L, 0L, 10_000L), starts)
+
+        // It died again, and the wait is `initial` again, not the doubled one.
+        advanceTimeBy(30.seconds); runCurrent()
+        assertEquals(listOf(0L, 0L, 10_000L, 40_000L), starts)
+        assertEquals(false, supervisor.restart("nobody"))
+    }
+
     /** A live trigger never completes on its own: after its script it stays open until cancelled. */
     private fun live(script: ScriptedSource): () -> Flow<RouteEvent> = { flow { script.events().collect { emit(it) }; awaitCancellation() } }
 

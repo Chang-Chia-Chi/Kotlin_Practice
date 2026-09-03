@@ -1946,3 +1946,186 @@ InMemoryStateStoreTest 19, InMemoryTargetTest 3, RecordingChannelTest 2, Scripte
   SFTP target under `parallelism` 2 with D42 on Oracle (`StateStoreContract.D42_...` already runs there).
   `CrashMatrixTest.dieAt` is the model for a death with children in flight: cancel the runner's job, not the
   hook.
+
+---
+
+## 14: Quarkus host, validate and try modes, admin, bounded shutdown
+
+**Built:** `infra.shuttle.quarkus`, the composition root and the only package that imports Quarkus, Jakarta,
+the connector, JDBI and jnats beside their own adapters (spec 3.2). `ShuttleHost(config, env, beans, store,
+reads, registry, clock, targets, s3Client, natsConnection, httpClient, hook, io)` is a plain class with no
+Quarkus in it: `start()` is spec 12.1 steps 2 to 7 in order (one read per state-store table through the seam,
+`byId(0)` and `outboxPending()`, failing with the whole of `StateStoreSchema.DDL` in the message; every channel
+constructed, so an `http` secret missing from the environment ends startup; one `S3Client` per S3 store shared by
+target and fetcher and `probe()` on every route's target, a missing bucket named; every SFTP staging directory
+emptied (D17); every `custom` and `provider` resolved through `NamedBeans` while the chains are built; then the
+notifier launched, then the supervisor), `close()` is spec 12.3 (readiness false, routes cancelled and joined,
+notifier cancelled and joined, S3 clients closed, NATS connections closed, all under
+`withTimeoutOrNull(drainTimeout)`, a warning when it overran), `ready()` is the supervisor's rule gated by
+started-and-not-shutting-down, and the seven operations of spec 14.1 are `routes()`, `transfers(route, state,
+limit)` with children folded under their parents, `deliveries(id)`, `redrive(id)`, `ack(id)` (STORED to ACKED
+with the route's `acked` requests plus `wake`), `redriveDelivery(id)` (plus `wake`), `restart(route)`, the three
+writes answering `Outcome.DONE | NOT_FOUND | WRONG_STATE`. `ShuttleHost.load(files, env, beans)` is step 1:
+`YamlLoader.load` then `Rules.validate`, throwing with every rule number listed. `NamedBeans(lookup)` resolves a
+CDI name to a `Processor` or `Provider` and answers `produces(name)` for rules 15 and 17;
+`StoreReads(transfers, outbox)` is the admin's read side over the two whole-table views both stores offer off
+the seam. `ShuttleLifecycle` (`@Singleton`) builds and starts the host on `StartupEvent` unless `shuttle.mode`
+says otherwise, reading the YAML paths from `shuttle.config`, the JDBI store from the Quarkus datasource the
+YAML names (`AgroalDataSourceUtil.dataSourceInstance(name)`), and swapping in any `StateStore`, `StoreReads` or
+`@Named("<store>") ObjectStoreTarget` bean that exists; `onStop` closes the host. `ShuttleClock` produces the
+one `Clock`; `ShuttleReadiness` is the `@Readiness` check at `/q/health/ready`; `AdminResource` is the seven
+endpoints under `@RolesAllowed("shuttle-admin")` at class level, 503 before the host is up, 404 and 409 from
+the outcomes. `ValidateCommand(files, env, beans, out)` prints `rule <n>: ...` per violation and exits 1;
+`TryCommand(files, env, beans, out, clock, route, fileName, sourcePath, content, message)` validates, runs the
+route's chain over the sample in a temp directory through its own `ProcessContext`, prints
+`step <i> <name>: attributes {...}` (and the objects when they changed), rule 17 judged again against the
+attributes actually set, `key: ...` per object, and `body <channel> (<moment>):` with the rendered JSON per
+notified channel; exit 0 only when clean. `ShuttleMain` (`@QuarkusMain`, a static `main`) puts the first
+argument into `shuttle.mode` and runs `ShuttleApp : QuarkusApplication`, which dispatches `validate`, `try` or
+`waitForExit`. `RouteSupervisor.restart(route)` is the one core addition: each run and each wait is a
+cancellable phase, an operator restart cancels the current one and the backoff is `initial` again.
+
+**Concepts named:**
+
+- **The composition root is a plain class with the framework beside it, not inside it.** `ShuttleHost` takes
+  its clients as factories and its test doubles as parameters, so spec 12's orders, I12, S15 and S18 are proven
+  in plain JUnit against the embedded SSHD and a loopback server in 15 s; the one `@QuarkusTest` proves only
+  what Quarkus adds: the role check, the health path, the scrape, JSON over HTTP.
+- **A connector's life is a route's run.** One connector per polled route, started inside the route's event
+  flow at every supervised start and closed in its `finally` under `NonCancellable`, so the connector's own
+  probe refusing a password is one `RouteDown` for one route (S18, S23) and shutdown's "cancel the collectors"
+  is what drains each connector under its own bound (12.3).
+- **Rule 9's arithmetic is the pool size.** Each route's connector gets `parallelism + 1` sessions and a
+  bulkhead of `parallelism`, so the routes on one store together never exceed the store's `maxSize`, which is
+  the account's cap.
+- **The step-2 round trip goes through the seam.** `byId(0)` and `outboxPending()` are one read per table on
+  any store; a table that is not there surfaces as the adapter's exception, and the host names the DDL. No
+  SQL lives outside the `jdbi` package.
+- **`${VAR}` is the environment plus what MicroProfile Config knows under an upper-case name**, so a secret may
+  arrive as an environment variable, through a mounted properties file, or as a test's config override; the
+  YAML still holds only references (rule 25).
+- **A restart is a phase cut short.** The supervisor runs each route's run and each wait as an `async` under a
+  `supervisorScope`, keyed by route; `restart` cancels that job with the route marked, and the loop reads the
+  mark as "start again now with `initial`" rather than as its own cancellation.
+
+**Acceptance:**
+
+- [x] I12: `ShuttleHostTest.I12_close_returns_within_drainTimeout_with_a_delivery_parked_and_PENDING_rows_stay_PENDING`
+  (a loopback `HttpServer` that never answers; the notifier's request is parked; `close()` measured under the
+  5 s `drainTimeout`; the row still PENDING; readiness false first).
+- [x] S15: `S15_shutdown_during_store_leaves_the_row_PROCESSED_and_staging_is_empty_at_the_next_start`
+  (`HookDriver` paused at `afterProcess`; the row stays PROCESSED; a stray file in staging is gone after the
+  next `start()`; the row then finishes). S18:
+  `S18_a_wrong_password_leaves_the_route_down_and_restarted_with_backoff_and_the_process_alive` (restarts
+  counted, the server saw each attempt, readiness false, `close()` clean). S24:
+  `S24_rule_9_ends_startup_naming_the_rule` and `ValidateCommandTest.S24_rule_9_is_reported_in_validate_mode`.
+  S25: `ValidateCommandTest.S25_five_violations_print_five_rule_numbers_and_exit_non_zero` (rules 1, 3, 7, 12,
+  25; exit 1; the command holds no client, so nothing can be opened). S31:
+  `TryCommandTest.S31_prints_the_attributes_per_step_the_key_and_one_body_per_notified_channel` and
+  `S31_a_mapping_naming_an_attribute_the_regex_does_not_produce_is_reported_by_rule_17`;
+  `a_sample_name_the_regex_does_not_match_is_the_extract_step_rejecting_it`.
+- [x] Missing table: `a_boot_with_a_missing_table_fails_naming_the_DDL` (a real `JdbiStateStore` over an
+  in-memory H2 with no tables; the message carries `StateStoreSchema.DDL` and the `CREATE TABLE`). Missing
+  bucket: `a_boot_with_a_missing_bucket_fails_naming_the_bucket` (a Mockito `S3Client` whose `headBucket`
+  throws `NoSuchBucketException`; nothing is put). Readiness:
+  `readiness_follows_the_configured_rule_with_one_route_up_and_one_down` (two stores on one server, one with a
+  wrong password; `all-routes-down` ready, `any-route-down` not) and
+  `ShuttleQuarkusTest.readiness_at_the_conventional_path_is_UP_once_the_route_is_up_and_the_meters_are_in_the_scrape`.
+- [x] Admin: `the_admin_operations_change_exactly_what_spec_14_1_says` (every operation against the host, the
+  manual ack on a row paused at `afterLedgerStored`, the delivery re-drive on a row parked in the stalled
+  server, the restart counted and the route back up) and
+  `ShuttleQuarkusTest.every_admin_endpoint_answers_under_the_role_and_changes_what_it_says`,
+  `an_anonymous_caller_is_refused_on_every_endpoint` (401), `a_caller_without_the_admin_role_is_refused` (403).
+  `RouteSupervisorTest.restart_cancels_the_current_run_and_a_restart_during_the_wait_cuts_it_short_and_resets_the_backoff`.
+- [x] Bounded IO: `ShuttleHost.ioDispatcher(config)` is `Dispatchers.IO.limitedParallelism(sum of
+  parallelism)`, handed to `JdbiStateStore`, `S3Target` and `NatsChannel`; metrics: `shuttle_route_up` found
+  on the injected `MeterRegistry` and in `/q/metrics` (the Quarkus test).
+- [x] Progress entry: this one. Suite after this ticket: 224 tests, 0 failures, 0 errors, 78 s wall clock
+  (`ShuttleHostTest` 15 s, `ShuttleQuarkusTest` 9 s for one boot, `ArchitectureTest` 10 s, the rest under 3 s).
+
+**Deviations:**
+
+1. **Spec 12.1 step 6 is inside step 7.** Connectors are started by the route's own run, not before the
+   notifier: `SftpConnector.start` runs the connector's probe, so a rejected password at boot would otherwise
+   end the deployment, while S18 and S23 want one route down and the process alive. A store or channel probe
+   still ends startup (step 3).
+2. **Ticket 13's deviation 8, settled:** one connector per polled route, because the connector's polling
+   configuration carries one `onAck` and one directory. The pool is sized to the route's share of rule 9:
+   `maxSize = parallelism + 1`, `maxConcurrentTransfers = parallelism`, `minIdle` capped, through
+   `SftpConnectorConfig.copy` on what `sftpConnectorConfig` built. Two routes on one server therefore register
+   the connector's endpoint-keyed pool gauges twice; Micrometer keeps the first (the connector's own known
+   limitation, T14 of its progress log). Debt: a connector-side `name` tag on those gauges.
+3. **`${VAR}` reads MicroProfile Config too** (`environment()`), not the process environment alone.
+4. **ArchitectureTest amended** for the composition root: `infra.shuttle.quarkus` is exempt from the "jdbi
+   only", "jnats only", "connector only" and "no `Clock.systemUTC`" rules, per spec 3.2's "everything above,
+   Quarkus"; the "quarkus is depended on by nothing" rule now has a subject and no `allowEmptyShould`.
+5. **The Quarkus datasource is named.** `shuttleStateStore.oracle.datasource: shuttle` is
+   `quarkus.datasource.shuttle.*` in `application.properties` (`db-kind=oracle`, URL, user and password from
+   `SHUTTLE_DB_*`); with the URL unset Quarkus deactivates it, which is what the test relies on.
+6. **Command modes** are a static `@QuarkusMain` main setting `shuttle.mode` before `Quarkus.run(ShuttleApp)`;
+   picocli is not in the local repository. `ShuttleLifecycle` stays quiet unless the mode is `serve`.
+7. **The missing-table boot is proven on H2** (a real JDBC database, `com.h2database:h2` test-scoped), not on
+   Oracle; the Oracle tier is ticket 15's.
+8. **Subscribe routes are half wired:** events come from `NatsChannel.events`, the fetcher throws
+   `NotImplementedError` naming ticket 17 because `Fetch` carries no bucket for `S3Fetcher`. The SFTP target
+   throws `NotImplementedError` naming ticket 18 in `ShuttleHost.targetFor`. A route fetching from S3 has no
+   staging directory yet (`stagingFor`), also 17's.
+9. **The admin's reads are whole-table views** (`JdbiStateStore.transfers()`/`outbox()`, the test kit's
+   lists) filtered in memory, marked `ponytail:`; a `WHERE` on the store's view is the upgrade.
+10. **Pom:** quarkus-arc, rest, rest-jackson, security, elytron-security-properties-file, smallrye-health,
+    micrometer-registry-prometheus, agroal, jdbc-oracle (compile; ojdbc11 rides in, the explicit test-scoped
+    ojdbc11 dropped); test: quarkus-junit5, quarkus-test-security, rest-assured, h2. `quarkus-maven-plugin`
+    (build, generate-code, generate-code-tests), kotlin all-open for `ApplicationScoped`, `Singleton` and
+    `Path`, surefire's `java.util.logging.manager` and `maven.home`. **`micrometer-core` pinned to 1.14.2**
+    in `dependencyManagement`: the reactor parent's explicit 1.17.1 beat the child's BOM import, and Quarkus's
+    registry binding then failed with `NoSuchMethodError: WarnThenDebugLogger.isEnabled()` against the
+    1.14.2 commons; the module had been running a split Micrometer since ticket 01 without anything noticing.
+11. **`TransferPipeline`, `RouteRunner`, `Notifier` untouched**; the host's own constructor takes `hook`,
+    `io`, `targets`, `s3Client`, `natsConnection`, `httpClient` with production defaults.
+12. **`try` mode on a sample the regex does not match** prints the extract step's `REJECT` and exits 1: the
+    processor rejects before any attribute is set, so the runtime rule 17 check never sees it.
+13. **Size:** ShuttleHost 390 lines, Commands 190, Lifecycle 120, AdminResource 80, tests 640; over the
+    guideline because this is the host and every adapter is wired here once. Deep: one class owns both
+    orders and the admin operations, and nothing wraps an adapter.
+14. **The embedded users block has no default password**, unlike etl-host's: `shuttle-admin` expands
+    `${SHUTTLE_ADMIN_PASSWORD}` with no fallback, so a deployment that forgets the variable refuses to boot
+    (`SRCFG00011: Could not expand value SHUTTLE_ADMIN_PASSWORD`, raised while SmallRye builds the elytron
+    realm's mapping) instead of starting with a credential that is public in this repository; the test tree
+    supplies its own throwaway value in `shuttle/src/test/resources/application.properties`, which no test
+    authenticates with because every security assertion here carries `@TestSecurity`.
+
+**For the next ticket:**
+
+- **15 (M1 acceptance):** boot the host the way `ShuttleHostTest` does: `ShuttleHost.load(files, env,
+  NamedBeans.none)` on a YAML whose SFTP store points at `EmbeddedSftpServer` and whose S3 store points at
+  the MinIO container (`S3Target.client` is the default `s3Client` factory: drop the `targets` override and
+  the real target is built and probed), then `ShuttleHost(config, env::get, beans, JdbiStateStore(jdbi, io,
+  clock), StoreReads(store::transfers, store::outbox), registry, clock, io = io)` with `io =
+  ShuttleHost.ioDispatcher(config)` and `jdbi = Jdbi.create(<the Oracle container's URL>)`; `start()`,
+  drop files, `close()`. Through Quarkus instead: `ShuttleQuarkusTest`'s `HostResource` plus test-tree
+  producers; leave the `StateStore` producer out and set `quarkus.datasource.shuttle.jdbc.url` (and user,
+  password) in the resource's overrides to reach the real datasource path, and leave the `@Named("minio")`
+  target producer out for the real S3 client. Every `${VAR}` a test YAML needs goes into the resource's
+  override map (`environment()` reads them from config). Rule 3 bites at test scale: with `drainTimeout: 5s`
+  the store needs `drainTimeout: 1s, cancelGrace: 500ms` and a channel `timeout` under 5 s.
+- **17 (expand):** `ShuttleHost.fetcherFor` is the seam for a subscribed route's fetcher and `stagingFor`
+  for its staging directory; both throw naming you. `S3Fetcher(client, bucket, io).fetcher` wants a bucket
+  that `Fetch(store, path)` does not carry: either a `bucket` on `fetch` (a YAML key, a DSL knob, a rule) or
+  the pointer yielding `bucket/key`. The S3 client for a store is `s3ClientFor(store)` inside the host, one
+  per declaration, closed at shutdown after the drain.
+- **18 (SFTP target):** `ShuttleHost.targetFor(route)` throws `NotImplementedError` for an `SftpStore`
+  target; replace that branch with your adapter. Sessions: a route that targets an SFTP store needs its own
+  connector (or a client over one), and rule 9 already counts its `parallelism` against the store, so size
+  its pool `parallelism` the way `share(route)` does for a poll. Close it in `close()` after the routes have
+  joined, beside the S3 clients.
+- **20 (M2 acceptance):** a subscribe route's events are already wired from `NatsChannel.events(RouteName,
+  Source.Subscribe)` with one connection per `nats:` channel from `natsConnectionFor` (credentials file
+  through `Nats.credentials`); the connection is closed after the drain. The callback ack is already passed
+  through `channels` to every pipeline.
+- **Gotchas:** `RouteSupervisor.restart` marks the route and cancels its phase; a mark left behind when no
+  phase was running is consumed by the next cancellation, which then loops once more and exits at the next
+  phase, so a stale mark cannot keep a cancelled supervisor alive. `ShuttleHost.close()` may be called after
+  a failed `start()` (every field is null-checked). `ready()` is false until `start()` has returned, so a
+  probe during boot is DOWN. A `@Singleton` Kotlin bean with a `private set` needs `final var` under
+  all-open. The JDK `HttpServer` prints "Executor has been shut down" on `stop(0)` with a parked handler;
+  noise, not a failure.
