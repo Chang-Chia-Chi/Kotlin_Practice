@@ -2,7 +2,7 @@
 
 **What to build:** The image-sets route runs end to end against the test kit: a message names a metadata file,
 the route fetches it from a store, expand reads the listed paths and fetches each child through
-the context, children are stored in parallel, the parent is UPLOADED when the last child is,
+the context, children are stored in parallel, the parent is STORED when the last child is,
 the message is acked once, and downstream is told once.
 
 **Blocked by:** 08 (Crash matrix), 11 (S3 target), 16 (NATS channel)

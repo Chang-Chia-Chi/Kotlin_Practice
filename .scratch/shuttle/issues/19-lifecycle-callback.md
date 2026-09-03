@@ -1,4 +1,4 @@
-# 19: Lifecycle notifications and callback acks
+# 19: Notifications and callback acks
 
 **What to build:** A route can tell a channel when an object was fetched or stored, not only when it is done,
 each as an outbox row created in the transaction that defines the event; and a route can make a
@@ -12,7 +12,7 @@ is not acked until upstream has answered.
 **Status:** ready-for-agent
 
 - [ ] `I20` for all three events: a delivery row exists if and only if its transition committed
-- [ ] S30: a callback ack returning 500 then 200 keeps the transfer UPLOADED through the failure and ACKED after the 200, with one done delivery
+- [ ] S30: a callback ack returning 500 then 200 keeps the transfer STORED through the failure and ACKED after the 200, with one done delivery
 - [ ] A fetched delivery exists after a crash right after fetch and is delivered by the notifier
 - [ ] Rule 12 rejects a callback naming a channel without the notify role
 - [ ] Progress entry appended

@@ -4,7 +4,7 @@
 and a loopback HTTP server, S27 to S30 named by id, with open items 9 and 10 of spec Sec 17
 re-checked and the spec amended wherever a measurement contradicts it.
 
-**Blocked by:** 15 (M1 acceptance), 16 (NATS channel), 17 (Expand), 18 (SFTP target), 19 (Lifecycle and callback)
+**Blocked by:** 15 (M1 acceptance), 16 (NATS channel), 17 (Expand), 18 (SFTP target), 19 (Notification moments and callback)
 
 **Nature:** diagnosis work
 

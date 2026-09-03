@@ -1,9 +1,9 @@
 # 06: Transfer pipeline, entry points and children
 
 **What to build:** One source object goes all the way against the fakes: decide the entry point from the state
-store, fetch, process, store every object of the final payload, UPLOADED, ack, ACKED with done
+store, fetch, process, store every object of the final payload, STORED, ack, ACKED with done
 deliveries or straight to DONE when the route notifies nobody. A final payload of several
-objects becomes child rows; the parent is UPLOADED when the last child is and acked only once.
+objects becomes child rows; the parent is STORED when the last child is and acked only once.
 Failures count attempts and become FAILED or REJECTED with the right nack flags.
 
 **Blocked by:** 05 (Processing chain)
@@ -15,7 +15,7 @@ Failures count attempts and become FAILED or REJECTED with the right nack flags.
 - [ ] `I1`, `I2`, `I7`, `I9`, `I10`, `I11`, `I16`, `I17` as named tests
 - [ ] S1, S10, S11, S12, S19 on fakes
 - [ ] Every row of the spec Sec 4.3 entry-point table has a test, including a false verify falling back to a full run and the re-ack counted as `reacked`
-- [ ] Store is called exactly once per object per successful run and verify exactly once per UPLOADED entry
+- [ ] Store is called exactly once per object per successful run and verify exactly once per STORED entry
 - [ ] Staging is empty after success and after every failure path, including files a processor created
 - [ ] Progress entry appended
 

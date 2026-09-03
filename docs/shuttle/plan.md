@@ -123,14 +123,14 @@ M2 (image-sets route)
 G2 --> G15 (nats) ---------------+
 G7, G10, G15 --> G16 (expand)    +--> G19 (M2 accept)
 G12 + connector ticket 07 --> G17 (sftp target)
-G8, G11 --> G18 (lifecycle + callback)
+G8, G11 --> G18 (notification moments + callback)
 G14 --> G19
 ```
 
 G0 freezes the surface. G2 to G8 prove the whole behaviour against the test kit with no
 socket, no container and no connector. G9 to G11 are technology adapters in parallel from G0.
 G12 is the only M1 phase that needs the connector. G13 hosts everything; G14 accepts M1. M2
-adds the subscription source, fan-out, the SFTP target and the remaining lifecycle features.
+adds the subscription source, fan-out, the SFTP target and the remaining notification moments and the callback ack.
 
 ---
 
@@ -214,16 +214,16 @@ adds the subscription source, fan-out, the SFTP target and the remaining lifecyc
 ### G5 - Transfer pipeline, entry points, children
 
 - **Goal:** stages 0 to 4 of spec 4.1 for one source object against the test kit.
-- **Deliverables:** `TransferPipeline`: decide, fetch, process, store each object, UPLOADED,
-  ack, ACKED with `done` deliveries or straight to DONE; children creation when the final
-  payload has several objects, parent UPLOADED on the last child, parent ack only; staging
+- **Deliverables:** `TransferPipeline`: decide, fetch, process, store each object, STORED,
+  ack, ACKED with `acked` deliveries or straight to DONE; children creation when the final
+  payload has several objects, parent STORED on the last child, parent ack only; staging
   deletion on every path; `attempts`, FAILED, REJECTED, `nack` flags; the entry points of spec
   4.3 including `reacked`.
 - **Blocked by:** G4.
 - **Fixed contracts:** spec 4.1, 4.2, 4.3, 4.5; I1, I2, I7, I9, I10, I11, I16, I17.
 - **Acceptance:** named tests for those invariants; S1, S10, S11, S12, S19 on fakes; a test
   per 4.3 row; `store` called exactly once per object per successful run and `verify` once per
-  UPLOADED entry.
+  STORED entry.
 - **Size:** medium; the correctness phase.
 
 ### G6 - Route runner, reconciliation, supervision
@@ -383,10 +383,10 @@ adds the subscription source, fan-out, the SFTP target and the remaining lifecyc
   repaired by the next `store`; `I6_` on SFTP.
 - **Size:** small-medium.
 
-### G18 - Lifecycle notifications and callback acks
+### G18 - Notifications and callback acks
 
 - **Goal:** `fetched` and `stored` deliveries, and the `callback` ack action.
-- **Deliverables:** outbox rows created in the FETCHED and UPLOADED transactions; the
+- **Deliverables:** outbox rows created in the FETCHED and STORED transactions; the
   `callback` ack calling a channel synchronously with the stage's retry; the ack-versus-
   notification rule enforced by rule 12.
 - **Blocked by:** G8, G11.

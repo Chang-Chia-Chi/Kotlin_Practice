@@ -28,7 +28,7 @@ nothing lost on the way. Two concrete cases exist today:
 A third shape, moving files from A to B and telling nobody, must also be expressible. The
 common structure is one **route**: a trigger that says a source object exists, a fetch of its
 bytes, an optional processing chain, a store into a target, the acknowledgement of the trigger,
-and notifications at lifecycle points. Everything below the file event on the SFTP side is the
+and notifications at chosen transfer states. Everything below the file event on the SFTP side is the
 connector's business; this spec owns everything above it.
 
 ### 1.2 Goals
@@ -66,7 +66,7 @@ connector's business; this spec owns everything above it.
 | Term | Definition |
 |---|---|
 | Route | One trigger, one fetch, a processing chain, one target, an ack, and notifications. The unit of configuration and of supervision. |
-| Source object | The unit everything is counted in: one file for a polled directory, one message for a subscription. One transfer row, one ack, one `done` notification. |
+| Source object | The unit everything is counted in: one file for a polled directory, one message for a subscription. One transfer row, one ack, one `acked` notification. |
 | Trigger | What says a source object exists: a `poll` of an object store directory, or a `subscribe` to a channel. |
 | Object store | A place files live: SFTP server, S3 bucket. Declared once, usable as a route's source, its target, or its fetch location. |
 | Channel | A place messages go or come from: HTTP endpoint, NATS subject, later mail or SMS. A route notifies through one; a route may be triggered by one. |
@@ -78,7 +78,7 @@ connector's business; this spec owns everything above it.
 | Attribute | A string named by a processor or the source event, carried on the transfer row and the stored object, readable by the mapping table. |
 | Provider | A named Kotlin bean that computes a JSON node from a transfer row for the mapping table. |
 | Ack | The commit action on the source side, whose vocabulary depends on the trigger kind. |
-| Delivery | One notification of one lifecycle event of one transfer on one channel. One row in `delivery_outbox`. |
+| Delivery | One notification announcing one transfer state on one channel. One row in `delivery_outbox`. |
 | Notifier | The process-wide loop that turns pending deliveries into channel calls. |
 | Shuttle state store | The Oracle tables that make a crash survivable. The only durable memory the process has. |
 | Reconciliation | The end-of-poll repair, polling sources only, for a transfer moved but never recorded as acked. |
@@ -98,7 +98,7 @@ connector's business; this spec owns everything above it.
  route       one supervised collector per route; decides from the state store what each object needs;
              bounded parallel pipelines; reconciliation at PollCompleted for polling sources
    ▼
- pipeline    fetch -> process chain -> store (each object) -> UPLOADED -> ack -> ACKED + deliveries
+ pipeline    fetch -> process chain -> store (each object) -> STORED -> ack -> ACKED + deliveries
    ▼
  state store file_transfer, delivery_outbox                                    (Oracle through JDBI)
    │
@@ -169,12 +169,12 @@ One coroutine per source object, at most `parallelism` per route.
 | 0 | Decide | Look up the transfer by identity; choose the entry point (Sec 4.3) | SEEN |
 | 1 | Fetch | Bring the object's bytes to staging through the source's `Fetcher`; the digest is computed as the bytes stream; the staged object carries name, size, mtime, digest, content type | FETCHED |
 | 2 | Process | Run the chain (Sec 6); attributes freeze at the end; every mapping table of the route's channels is checked against them (Sec 9.6) | PROCESSED, or REJECTED |
-| 3 | Store | For each object in the final payload: `target.store(key, file, metadata)`; a payload of one is the transfer itself, a payload of N becomes N child rows (Sec 4.5) | UPLOADED |
-| 4 | Ack | The trigger's ack action (Sec 5.3); for a parent, only once every child is UPLOADED | ACKED, plus one PENDING delivery per `on: done` channel, in one transaction |
+| 3 | Store | For each object in the final payload: `target.store(key, file, metadata)`; a payload of one is the transfer itself, a payload of N becomes N child rows (Sec 4.5) | STORED |
+| 4 | Ack | The trigger's ack action (Sec 5.3); for a parent, only once every child is STORED | ACKED, plus one PENDING delivery per `on: acked` channel, in one transaction |
 | 5 | Notify | Owned by the notifier, not this coroutine (Sec 9) | DONE when every delivery is DELIVERED; immediately when the route notifies nobody |
 
-Lifecycle notifications other than `done` (Sec 9.1) are created in the transaction of the
-transition that defines them: `fetched` with FETCHED, `stored` with UPLOADED.
+Notifications other than `acked` (Sec 9.1) are created in the transaction of the
+transition that defines them: `fetched` with FETCHED, `stored` with STORED.
 
 Staging is deleted after stage 3 succeeds and on every failure path, including every file a
 processor created; the local copy never outlives the pipeline that made it. The source object
@@ -185,7 +185,7 @@ silent `none` would re-list the same file for ever.
 ### 4.2 Transfer states
 
 ```
- (none) → SEEN → FETCHED → PROCESSED → UPLOADED → ACKED → DONE
+ (none) → SEEN → FETCHED → PROCESSED → STORED → ACKED → DONE
                     │           │                             ▲
                     │           └── Reject ──→ REJECTED ── re-drive ─┘ (back to SEEN)
                     │
@@ -203,14 +203,14 @@ an unacknowledged message. The state store decides how much work is left:
 
 | State | Action |
 |---|---|
-| none, SEEN, FETCHED, PROCESSED | Full run from stage 1. A staged file from an earlier process is never trusted (D17). For a parent that already has child rows, the chain runs again and yields the same children; each child whose row is UPLOADED with a true `verify` skips the store, the rest are stored (S28). |
-| UPLOADED | `target.verify(ref)` for the transfer, or for every child. All true: skip to stage 4. Any false: full run on the same row. |
-| ACKED, DONE | The object is back although it was acked. Same as UPLOADED: verify, ack again, counted as `reacked`, logged at WARN. |
+| none, SEEN, FETCHED, PROCESSED | Full run from stage 1. A staged file from an earlier process is never trusted (D17). For a parent that already has child rows, the chain runs again and yields the same children; each child whose row is STORED with a true `verify` skips the store, the rest are stored (S28). |
+| STORED | `target.verify(ref)` for the transfer, or for every child. All true: skip to stage 4. Any false: full run on the same row. |
+| ACKED, DONE | The object is back although it was acked. Same as STORED: verify, ack again, counted as `reacked`, logged at WARN. |
 | REJECTED, FAILED | `nack(redeliver = false)`, no work. |
 
 ### 4.4 Crash matrix
 
-Hook points: `afterFetch`, `afterProcess`, `afterStore`, `afterLedgerUploaded`, `afterAck`,
+Hook points: `afterFetch`, `afterProcess`, `afterStore`, `afterLedgerStored`, `afterAck`,
 `afterLedgerAcked`, `afterDeliverySent`. A crash inside `store` is the target adapter's
 contract (Sec 7.2, I6).
 
@@ -219,8 +219,8 @@ contract (Sec 7.2, I6).
 | fetch | object still there | nothing | SEEN or FETCHED | full run | none |
 | process | still there | nothing | PROCESSED | full run | none |
 | store, before ledger | still there | 1 copy | PROCESSED | full run: store again | one extra store |
-| ledger UPLOADED | still there | 1 copy | UPLOADED | verify, ack | none |
-| ack, before ledger | acked | 1 copy | UPLOADED | polling: reconciliation writes ACKED (Sec 4.6); subscription: the message is not redelivered, and the stuck detector surfaces the row (Sec 11) | delayed notification |
+| ledger STORED | still there | 1 copy | STORED | verify, ack | none |
+| ack, before ledger | acked | 1 copy | STORED | polling: reconciliation writes ACKED (Sec 4.6); subscription: the message is not redelivered, and the stuck detector surfaces the row (Sec 11) | delayed notification |
 | ledger ACKED | acked | 1 copy | ACKED, PENDING | notifier delivers | none |
 | delivery sent, before ledger | acked | 1 copy | ACKED, PENDING | notifier delivers again | one duplicate notification, deduplicated downstream |
 
@@ -231,15 +231,15 @@ extra delivery per channel per event, and never a lost object (I8).
 
 A final payload of N objects creates N child rows under the transfer in one transaction, each
 FETCHED with its own staged object, digest and key. Children are stored under the route's
-parallelism like any object. The parent's UPLOADED is written when the last child is UPLOADED;
-the parent's ack is the only ack; the parent's `done` notification is the only notification; a
+parallelism like any object. The parent's STORED is written when the last child is STORED;
+the parent's ack is the only ack; the parent's `acked` notification is the only notification; a
 child that reaches `maxAttempts` fails the parent. A re-drive of a parent re-runs the chain and
 replaces its children.
 
 ### 4.6 Reconciliation, polling sources only
 
 At `PollCompleted` with a complete listing, meaning it ended before the connector's
-`maxFilesPerPoll`: every transfer of that route in UPLOADED whose `updated_at` is older than the
+`maxFilesPerPoll`: every transfer of that route in STORED whose `updated_at` is older than the
 poll's start and whose identity was not listed transitions to ACKED with its deliveries created,
 through the same function stage 4 uses. A truncated listing skips reconciliation and counts it.
 Subscription sources have no listing and therefore no reconciliation; the row is surfaced by the
@@ -282,7 +282,7 @@ is validated at boot (rule 12):
 `callback` is for an upstream that must be told before it considers the object released: the
 call is synchronous, retried with the stage, and the transfer is not ACKED until it succeeds.
 Rule for choosing: if a wrong answer from the call must stop the pipeline, it is an ack action;
-if upstream only wants to know, it is a lifecycle notification (Sec 9.1).
+if upstream only wants to know, it is a notification on a transfer state (Sec 9.1).
 
 ---
 
@@ -456,9 +456,9 @@ CREATE INDEX ix_file_transfer_parent ON file_transfer (parent_id);
 CREATE TABLE delivery_outbox (
   id                NUMBER(19)     NOT NULL,
   file_transfer_id  NUMBER(19)     NOT NULL,
-  lifecycle         VARCHAR2(16)   NOT NULL,           -- which moment of the transfer: FETCHED | STORED | DONE
+  transfer_state    VARCHAR2(16)   NOT NULL,           -- the transfer state this notification announces: FETCHED | STORED | ACKED
   channel           VARCHAR2(64)   NOT NULL,
-  status            VARCHAR2(16)   NOT NULL,           -- how far the sending got: PENDING | DELIVERED | FAILED
+  notification_state VARCHAR2(16)  NOT NULL,           -- the notification's own progress: PENDING | DELIVERED | FAILED
   attempts          NUMBER(5)      DEFAULT 0 NOT NULL,
   next_attempt_at   TIMESTAMP      NOT NULL,
   last_status       VARCHAR2(64),
@@ -468,9 +468,9 @@ CREATE TABLE delivery_outbox (
   delivered_at      TIMESTAMP,
   CONSTRAINT pk_delivery_outbox PRIMARY KEY (id),
   CONSTRAINT fk_delivery_transfer FOREIGN KEY (file_transfer_id) REFERENCES file_transfer (id),
-  CONSTRAINT uq_delivery_lifecycle_channel UNIQUE (file_transfer_id, lifecycle, channel)
+  CONSTRAINT uq_delivery_state_channel UNIQUE (file_transfer_id, transfer_state, channel)
 );
-CREATE INDEX ix_delivery_due ON delivery_outbox (status, next_attempt_at);
+CREATE INDEX ix_delivery_due ON delivery_outbox (notification_state, next_attempt_at);
 ```
 
 Two tables because a transfer has many deliveries, each with its own attempts, retry time and
@@ -486,7 +486,7 @@ interface StateStore {
     suspend fun fetched(id: TransferId, staged: StagedSummary, events: List<DeliveryRequest>)   // + FETCHED rows, 1 txn
     suspend fun processed(id: TransferId, attributes: Map<String, String>)
     suspend fun children(id: TransferId, staged: List<StagedSummary>): List<Transfer>          // 1 txn
-    suspend fun uploaded(id: TransferId, target: TargetRef, events: List<DeliveryRequest>)     // + STORED rows; parent when last child
+    suspend fun stored(id: TransferId, target: TargetRef, events: List<DeliveryRequest>)     // + STORED rows; parent when last child
     suspend fun acked(id: TransferId, events: List<DeliveryRequest>)                           // ACKED (+ children) + DONE rows; DONE when none
     suspend fun rejected(id: TransferId, reason: String)
     suspend fun failedAttempt(id: TransferId, error: String, maxAttempts: Int): Transfer
@@ -508,16 +508,17 @@ that must be atomic across both tables (I11, I20).
 
 ## 9. Notifications
 
-### 9.1 Lifecycle events
+### 9.1 Notification moments
 
-A route attaches channel deliveries to events: `fetched`, `stored`, `done`. Each attachment is
-one outbox row created in the transaction that defines the event (I20), delivered
-asynchronously and at-least-once by the notifier. On the row, `lifecycle` says which moment of
-the transfer the notification is about and never changes; `status` says how far the sending
-itself has got, PENDING, DELIVERED or FAILED, and is what the notifier advances. Neither word
-is used on the transfer table, whose column is `state`. The notifier needs no
-route: the row names its channel, and the body is rendered from the transfer row it points to. `done` fires after the ack. A route with no
-attachments creates no rows and goes ACKED to DONE in the same transaction (I17).
+A route attaches channel deliveries to transfer states: `on: fetched`, `on: stored`,
+`on: acked`, each naming the state whose transition creates the row. Each attachment is one
+outbox row created in the transaction that defines that state (I20), delivered asynchronously
+and at-least-once by the notifier. On the row, `transfer_state` says which transfer state the
+notification announces and never changes; `notification_state` says how far the sending itself
+has got, PENDING, DELIVERED or FAILED, and is what the notifier advances. The notifier needs no
+route: the row names its channel, and the body is rendered from the transfer row it points to.
+DONE is not a notification moment: it is reached only once every notification is delivered, so
+a route with no attachments goes ACKED to DONE in the same transaction (I17).
 
 ### 9.2 The `DeliveryChannel` seam
 
@@ -750,7 +751,7 @@ shuttle:
         - { zip: {} }
       target: { store: minio, bucket: landing, key: "vendor/{name}" }
       notify:
-        - { on: done, channel: downstream }
+        - { on: acked, channel: downstream }
       parallelism: 4
       maxAttempts: 5
       stuckAfter: 3h
@@ -770,7 +771,7 @@ shuttle:
       target: { store: partner, directory: /incoming }
       notify:
         - { on: fetched, channel: upstream-receipt }
-        - { on: done,    channel: downstream }
+        - { on: acked,    channel: downstream }
       parallelism: 2
 ```
 
@@ -809,7 +810,7 @@ shuttle {
         source = poll(objectStore("vendor"), directory = "/inbox") { every = 1.hours; onAck = move("temp/") }
         process = extract(from = FileName, regex = "(?<orderNumber>\\d+)-.*\\.csv") then rename("{yyyyMMdd}-{name}") then zip()
         target = objectStore("minio").bucket("landing") { key = "vendor/{name}" }
-        notify(on = Done, channel("downstream"))
+        notify(on = Acked, channel("downstream"))
         parallelism = 4
     }
 }
@@ -828,7 +829,7 @@ Each is public numbering, reported by number in validate mode and at startup.
 | 5 | A route has exactly one `source` and exactly one `target` |
 | 6 | A `subscribe` source has a `fetch` with a store and a path; a `poll` source has none |
 | 7 | `parallelism >= 1`, `maxAttempts >= 1`, `stuckAfter > 0` |
-| 8 | Every `notify.on` is one of `fetched`, `stored`, `done`; a pair of event and channel appears once per route |
+| 8 | Every `notify.on` is one of `fetched`, `stored`, `acked`; a pair of state and channel appears once per route |
 | 9 | Per object store, the sum of route parallelism plus one per polled directory is at most `pool.maxSize`, and `maxConcurrentTransfers <= maxSize` |
 | 10 | Every SFTP store's `keepAlive` and `idleTimeout` are below its `idleCutoff` |
 | 11 | Every staging directory exists, is writable, and is local disk; two stores do not share one |
@@ -859,7 +860,7 @@ Each is public numbering, reported by number in validate mode and at startup.
 | `GET /admin/shuttle/transfers?route=&state=&limit=` | transfer rows, children folded under parents |
 | `GET /admin/shuttle/transfers/{id}/deliveries` | event, channel, state, attempts, last status, reference, delivered time |
 | `POST /admin/shuttle/transfers/{id}/redrive` | REJECTED or FAILED to SEEN |
-| `POST /admin/shuttle/transfers/{id}/ack` | UPLOADED to ACKED by hand, for a subscription whose ack was lost (Sec 4.6) |
+| `POST /admin/shuttle/transfers/{id}/ack` | STORED to ACKED by hand, for a subscription whose ack was lost (Sec 4.6) |
 | `POST /admin/shuttle/deliveries/{id}/redrive` | FAILED to PENDING; wakes the notifier |
 | `POST /admin/shuttle/routes/{name}/restart` | restart a route now, resetting its backoff |
 
@@ -928,7 +929,7 @@ poll are appeals to the connector's spec.
 | D3 | Two tables, no attempt table, no payload column; attempts trace by log | One transfer has many deliveries; an attempt history nobody asked to query is a third table |
 | D4 | AWS SDK v2 synchronous, Apache client, checksums when-required, path style | Sequential per-object work gains nothing from async; SDK checksums can fail against older MinIO |
 | D5 | Key is a pure function of the object's name; the S3 target prunes other versions inside every `store` | Versioning is bucket-wide; a deterministic key makes retry an overwrite; the prune after the retry also cleans crash-gap versions |
-| D6 | Order: store, ack, notify; `done` deliveries are created in the ACKED transaction; reconciliation repairs ack-then-crash for polling sources | The source-side ack is the commit; the outbox makes notification reliable, not ordering |
+| D6 | Order: store, ack, notify; `acked` deliveries are created in the ACKED transaction; reconciliation repairs ack-then-crash for polling sources | The source-side ack is the commit; the outbox makes notification reliable, not ordering |
 | D7 | The notifier is a cold flow with a buffer and a wake; rows never ride a `SharedFlow`; an in-memory in-flight set guards double selection | Cold gives backpressure by suspension and loses nothing; `SharedFlow` broadcasts, drops without subscribers and never completes |
 | D8 | Channel seam is one suspend function; the body is a mapping table rendered at send time; a Kotlin lambda is the code-only escape hatch | The notifier must not know HTTP; a table is reviewable by non-Kotlin readers and loadable from YAML |
 | D9 | Per-channel policy; a transfer is DONE when every delivery is DELIVERED; a FAILED delivery never fails the transfer | The object is safe once ACKED; webhook practice retries per endpoint and dead-letters |
@@ -948,9 +949,9 @@ poll are appeals to the connector's spec.
 | D23 | One `Processor` seam with `Continue` and `Reject`; quality, rename, zip, extract, expand and custom code are all processors; cardinality of the result decides child rows | Three special cases collapsed into one contract with four re-run rules |
 | D24 | Processors are pure over staging: immutable inputs, no network, digests computed by the pipeline | A crash re-runs the chain; only a side-effect-free chain makes that harmless |
 | D25 | Attributes are a bounded string map on the row and on the object; producers declare them; the mapping is checked against them at attribute freeze, before the store | A notification is never created that cannot be rendered, and the check happens while fixing it costs nothing |
-| D26 | Lifecycle notifications `fetched`, `stored`, `done`, each created in the transaction defining the event; the ack-versus-notification rule | Reliability comes from the outbox; a callback that must gate progress is an ack action |
+| D26 | Notifications on transfer states `fetched`, `stored`, `acked`, each created in the transaction defining that state; the ack-versus-notification rule | Reliability comes from the outbox; a callback that must gate progress is an ack action |
 | D27 | Ack vocabulary per trigger kind, plus `callback` | The no-data-loss argument depends on knowing what the commit does to the source |
-| D28 | The unit of tracking, ack and `done` notification is the source object; children never notify | One row, one ack, one notification, whatever the fan-out |
+| D28 | The unit of tracking, ack and `acked` notification is the source object; children never notify | One row, one ack, one notification, whatever the fan-out |
 | D29 | YAML is the primary configuration, Kotlin DSL the model, numbered validation rules, a `validate` mode connecting to nothing | Operations edit data; the repository's SimpleEtl precedent; Benthos-style lint |
 | D30 | No expression language; a table row has `format`, `default`, `trim`, `upper`, `lower` and nothing that composes; conditionals are providers | Smaller surface, reviewable by data; revisit trigger in Sec 15.3 |
 | D31 | Routes are supervised with capped backoff; readiness `all-routes-down` by default | With per-route health nobody restarts the pod for one route |
@@ -1009,17 +1010,17 @@ expand with children, the SFTP target, `fetched` notifications, callback acks.
 | I7 | A REJECTED or FAILED transfer is neither stored nor delivered until re-driven |
 | I8 | Restart at any hook point converges to DONE with at most one extra store and one extra delivery per channel per event |
 | I9 | Staging holds no file that is not inside a running pipeline |
-| I10 | The ack action runs only when the transfer, and every child, is UPLOADED and verified |
+| I10 | The ack action runs only when the transfer, and every child, is STORED and verified |
 | I11 | Each transition that creates delivery rows is one transaction with the row change; DELIVERED and the DONE flip are one transaction |
 | I12 | Shutdown returns within `drainTimeout` and leaves every PENDING row PENDING |
 | I13 | Two channels on one event are delivered independently |
 | I14 | Every validation rule of Sec 13.3 rejects a configuration that violates it, by number |
 | I15 | Attributes never change after the chain ends, and a mapping table is checked against them before the store |
-| I16 | A parent is acked only when every child is UPLOADED, and a failed child fails the parent |
+| I16 | A parent is acked only when every child is STORED, and a failed child fails the parent |
 | I17 | A route with no notifications goes ACKED to DONE in one transaction and creates no outbox row |
 | I18 | A processor never modifies an input file, and every file it creates is deleted with the staging area |
 | I19 | Per object store, running pipelines plus listers never exceed the pool's `maxSize` |
-| I20 | A lifecycle delivery row exists if and only if the transition defining its event was committed |
+| I20 | A notification row exists if and only if the transition to its transfer state was committed |
 | I21 | A dead route is restarted with backoff between `initial` and `max`, and readiness follows the configured rule |
 | I22 | A provider is invoked at most once per rendering however many rows select from it |
 
@@ -1029,10 +1030,10 @@ expand with children, the SFTP target, `fetched` notifications, callback acks.
 |---|---|---|
 | S1 | Vendor-drop happy path, one file, one channel | DONE; object with metadata and attributes; file in temp; one delivery with reference |
 | S2 | Crash after store, before ledger (and, in the S3 tier, inside store between PUT and prune) | Next poll: store again; one copy; DONE |
-| S3 | Crash after ledger UPLOADED, before ack | Next poll: verify, ack, no second store |
-| S4 | Crash after the move, before ledger ACKED | Reconciliation marks ACKED and creates `done` deliveries; DONE |
+| S3 | Crash after ledger STORED, before ack | Next poll: verify, ack, no second store |
+| S4 | Crash after the move, before ledger ACKED | Reconciliation marks ACKED and creates `acked` deliveries; DONE |
 | S5 | Crash after delivery sent, before ledger | Delivered again; two calls with one transfer id; row DELIVERED once |
-| S6 | Copy missing at UPLOADED | Full run on the same row; DONE |
+| S6 | Copy missing at STORED | Full run on the same row; DONE |
 | S7 | Downstream 503 twice then 200 | Two Retry with backoff, then DELIVERED; attempts 3 |
 | S8 | Downstream 400 | Reject; delivery FAILED; transfer ACKED; `rejected` counted |
 | S9 | Downstream down past `giveUpAfter` | FAILED with `gave_up`; re-drive returns it to PENDING and it delivers |
@@ -1043,7 +1044,7 @@ expand with children, the SFTP target, `fetched` notifications, callback acks.
 | S14 | Listing truncated at `maxFilesPerPoll` | Reconciliation skipped and counted |
 | S15 | Shutdown during store and during delivery | Rows stay PROCESSED and PENDING; close within bound; staging empty at next start |
 | S16 | State store unavailable for one poll | Every object nacked with redelivery; nothing stored; next poll completes all |
-| S17 | Two channels on `done`, one always 503 | The other delivers; transfer ACKED; pending gauge shows one |
+| S17 | Two channels on `acked`, one always 503 | The other delivers; transfer ACKED; pending gauge shows one |
 | S18 | Wrong SFTP password | Route down; supervised restarts with backoff; readiness per rule; process alive |
 | S19 | Mirror route, no notifications | ACKED to DONE in one transaction; no outbox row |
 | S20 | Rename then zip | One archive stored under the renamed key; `STORED_NAME` differs from `SOURCE_NAME`; `SOURCE_DIGEST` and `DIGEST` differ |
@@ -1053,10 +1054,10 @@ expand with children, the SFTP target, `fetched` notifications, callback acks.
 | S24 | Pool arithmetic exceeded | Rejected by rule 9 in validate mode and at startup |
 | S25 | Validate mode on a file with five violations | Five rule numbers listed; exit non-zero; no connection opened |
 | S26 | Missing required attribute at freeze | FAILED before the store, reason names the row; nothing stored |
-| S27 | Image-sets happy path (M2) | Parent FETCHED; N children stored on the SFTP target; message acked once; `fetched` and `done` delivered once each |
+| S27 | Image-sets happy path (M2) | Parent FETCHED; N children stored on the SFTP target; message acked once; `fetched` and `acked` delivered once each |
 | S28 | Crash with half the children stored (M2) | Next redelivery: children verified, the rest stored, parent acked; message acked once |
 | S29 | One child fails five times (M2) | Parent FAILED; message not acked; re-drive re-runs the chain |
-| S30 | `callback` ack returns 500 then 200 (M2) | Transfer stays UPLOADED through the failure; ACKED after the 200; one `done` delivery |
+| S30 | `callback` ack returns 500 then 200 (M2) | Transfer stays STORED through the failure; ACKED after the 200; one `acked` delivery |
 
 ---
 
@@ -1067,10 +1068,10 @@ expand with children, the SFTP target, `fetched` notifications, callback acks.
 - Vocabulary: object stores and channels declared once with roles at the route; triggers `poll`
   and `subscribe`; the ack vocabulary per trigger kind; `callback` acks.
 - Ledger becomes the shuttle state store; `file_transfer` gains `parent_id`, `kind`,
-  `source_*`, `stored_*`, `attributes`; `delivery_outbox` gains `lifecycle` and its `state` is renamed `status`.
+  `source_*`, `stored_*`, `attributes`; `delivery_outbox` gains `transfer_state` and its own `state` becomes `notification_state`.
 - Quality check becomes one of several processors under a single `Processor` seam; attributes
   and providers added; the mapping table replaces the Kotlin body builder as the primary form.
-- Lifecycle notifications `fetched`, `stored`, `done`; a route may notify nobody.
+- Notifications on transfer states `fetched`, `stored`, `acked`; a route may notify nobody.
 - YAML as the primary configuration with numbered rules and a validate mode; Kotlin DSL kept as
   the model.
 - Route supervision with backoff; readiness `all-routes-down`; pool arithmetic per store.
