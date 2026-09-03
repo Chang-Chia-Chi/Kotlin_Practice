@@ -434,3 +434,129 @@ Final run: ArchitectureTest 7, MappingRendererTest 12, RulesTest 30, SurfaceTest
   serialisation, escaping included.
 - **14 (try mode):** `render(table, sampleTransfer, DeliveryMoment.ACKED)` per notified channel.
 
+
+---
+
+## 11: S3 target and fetcher over the AWS SDK
+
+**Built:** `infra.shuttle.s3`, the module's first adapter over a real technology. `S3Target(client,
+bucket, io, clock, betweenPutAndHead = {})` implements `ObjectStoreTarget` per spec 7.2: `store` is
+one `PutObject` carrying the metadata map as user metadata and `Content-MD5` when the map says the
+digest is MD5, then a `HeadObject` of the new version that checks the content length and, on an
+unencrypted object, the ETag against that MD5; the returned `TargetRef` is `("s3", bucket, key,
+versionId, size)`. `verify` is a HEAD of key and version id. `probe` is a HEAD of the bucket, failing
+with the bucket's name when it is missing, and a read of the lifecycle configuration, warning when
+no enabled rule expires non-current versions. Nothing in the package names a delete operation.
+`S3Target.client(endpoint, region, pathStyle, accessKey, secretKey, connect, socket, apiCall)` builds
+the D4 client: synchronous, Apache HTTP client, endpoint override, path style, static credentials,
+API-call timeout. `S3Fetcher(client, bucket, io).fetcher` is the `Fetcher` for spec 4.1 stage 1:
+one GET streamed to the staging path through a `DigestInputStream`, the file deleted if the stream
+fails, the `StagedObject` carrying name, size, `LastModified`, digest and content type.
+`ObjectStoreTargetContract` in the test kit is the shared seam test; `InMemoryTargetTest` and the
+`minio`-tagged `S3TargetTest` are its two subclasses. `Minio` is one container per JVM for every
+`minio`-tagged class. The pom gains the AWS SDK BOM 2.29.51, `s3` with the Netty client excluded,
+`apache-client`, `commons-logging` at runtime, Testcontainers core 1.20.4 with the MinIO module
+1.21.3, and the `excludedGroups` property (`oracle,minio` by default, `-DexcludedGroups=none`
+to opt in), wired into surefire the way `etl-host/pom.xml` does it.
+
+**Concepts named:**
+
+- **`TargetMetadata` (core):** the keys the pipeline writes into the metadata map a target
+  receives: `digest`, `digest-algorithm`, and attributes under `attr-<name>`. The S3 target reads
+  the first two to decide on `Content-MD5` and the ETag check; the SDK adds the `x-amz-meta-`
+  prefix, so `attr-orderNumber` lands as spec 6.4's `x-amz-meta-attr-orderNumber`.
+- **The adapter's own crash point:** `betweenPutAndHead` is a suspend hook the constructor takes
+  and production leaves a no-op; spec 4.4 says a crash inside `store` is the adapter's contract,
+  and this is where the I6 replay throws.
+- **`warnings`:** the target keeps the messages it warned about, beside logging them, so a test
+  can assert "warns" and "is silent" without a log appender.
+- **Contract versus fake:** the shared contract asserts only what the seam promises (a fresh ref
+  per store, the newest content current at the key, `verify` true for a ref that exists and false
+  for one that does not). The in-memory fake additionally answers false for a superseded ref;
+  S3 with versioning answers true for it, because the old version still exists. That stricter
+  fake-only behaviour stayed in `InMemoryTargetTest` under its own test name.
+
+**Acceptance:**
+
+- *Shared contract passes against in-memory and S3 on MinIO with versioning, tagged `minio`* -
+  `ObjectStoreTargetContract.I6_a_fresh_ref_per_store_and_the_newest_content_current_at_the_key`
+  runs in `InMemoryTargetTest` (default suite) and `S3TargetTest` (`@Tag("minio")`, bucket
+  versioning enabled in `Minio.versionedBucket`).
+- *I6 on MinIO: three stores read back the newest by key; a crash between PUT and HEAD is repaired
+  by the next store; no delete call is ever made* -
+  `S3TargetTest.I6_three_stores_read_back_the_newest_by_key_a_crash_between_PUT_and_HEAD_is_repaired_by_the_next_store_and_nothing_is_deleted`:
+  the hook throws `CancellationException` on the third store, the fourth store makes its version
+  current, the listing shows four versions and no delete marker, and a Mockito spy on the client
+  verifies `deleteObject` and `deleteObjects` were never called.
+- *Corrupted body rejected by Content-MD5; ETag check passes single-part and is skipped with a
+  WARN under encryption* - `a_corrupted_body_is_rejected_by_Content_MD5_and_leaves_no_version`
+  (HTTP 400 from MinIO, no version created); the ETag pass is the silent I6 store (`warnings`
+  empty); `the_ETag_check_is_skipped_with_a_WARN_when_the_HEAD_reports_encryption` stubs the HEAD
+  through a spy to report AES256 and a non-MD5 ETag, and the store succeeds with one warning.
+- *Verify of a version expired by hand is false; probe warns without a non-current expiry and is
+  silent with one; the suite passes under a credential without delete permission; the multipart
+  threshold is pinned* - `verify_of_a_version_expired_by_hand_is_false` (the test deletes the
+  version through the client); `probe_warns_without_a_non_current_expiry_is_silent_with_one_and_fails_on_a_missing_bucket`;
+  the delete-less credential is NOT proven, see deviation 1; the threshold is pinned by
+  construction: a single `PutObject` and no multipart path, so the ceiling is S3's 5 GiB single-PUT
+  limit against a 10 MB largest file (documented in the class KDoc).
+- *The fetcher's digest matches the object's; the AWS SDK only in the s3 package* -
+  `S3FetcherTest.the_fetcher_streams_the_object_to_staging_and_its_digest_matches_the_objects`
+  (SHA-256 recomputed independently in the test), `a_missing_object_surfaces_as_the_SDKs_NoSuchKey_and_leaves_no_file`;
+  `ArchitectureTest.each adapter depends on core and its own technology only` now has `s3` classes
+  to check and is green.
+- *Progress entry appended* - this entry.
+
+Default run (`mvn -o -pl shuttle test`): 88 tests green, MinIO excluded. Opt-in run
+(`-DexcludedGroups=none -Dtest=S3TargetTest,S3FetcherTest`): 8 tests green in about 9 s including
+the container start.
+
+**Deviations:**
+
+1. **The delete-less credential is not exercised.** The MinIO image ships no `mc`, the admin API
+   needs its own signed protocol, and a `minio/mc` container is not in the local image cache, so
+   no user with a PUT/GET/HEAD-only policy was created. What stands instead is the structural
+   proof: the package contains no delete call, and the spy verifies none is made across the I6
+   replay. Debt; repaid by adding a `minio/mc` sidecar (or an admin-API client) to the fixture
+   and running the target under the restricted user, which the acceptance run of ticket 15 can do.
+2. **`Content-MD5` and the ETag check depend on the metadata map.** The seam hands the target a
+   file and a map; the target sends `Content-MD5` and compares the ETag only when the map carries
+   `digest-algorithm: md5` (`TargetMetadata`), and otherwise verifies size only. Ticket 06 must
+   write those keys; a route on SHA-256 gets the size check, as spec 6.5 implies.
+3. **Encryption is noticed per store, not at startup.** Spec 7.2 says the adapter "falls back to
+   size plus metadata with a WARN at startup" if the bucket encrypts; `probe` does not read the
+   bucket's encryption configuration, and the WARN is emitted on each store whose HEAD reports
+   server-side encryption. Debt: one `GetBucketEncryption` in `probe` repays it.
+4. **`verify` answers false on HTTP 400 as well as 404.** MinIO answers 400 to a malformed version
+   id (the contract's "no-such-version" ref) and 404 to a deleted one; both mean "that version is
+   not there".
+5. **SDK 2.29.51 has no checksum-calculation switch.** D4's "checksums when-required" is that
+   version's default behaviour; the explicit `requestChecksumCalculation(WHEN_REQUIRED)` exists
+   from 2.30 and must be set if the SDK is ever raised, or MinIO PUTs start carrying CRC32
+   trailers. Recorded in the client builder's KDoc.
+6. **`commons-logging` is a runtime dependency.** httpclient 4.x needs it and the quarkus BOM
+   leaves it off; without it the first SDK call fails with `NoClassDefFoundError`. Ticket 14 may
+   replace it with Quarkus's `commons-logging-jboss-logging` bridge.
+7. **`TargetMetadata` added to `core`.** Three constants so the pipeline and the adapters agree on
+   key names without the pipeline importing `s3`.
+8. **`InMemoryTargetTest` was reshaped**, not weakened: its I6 test split into the contract's
+   seam-level half and an in-memory-only half that keeps every original assertion, including the
+   superseded-ref-is-false one the S3 target cannot share.
+9. **Size:** 183 main, 301 test lines; in budget.
+
+**For the next ticket:**
+
+- **14 (host):** produce the client with `S3Target.client(store.endpoint, store.region,
+  store.pathStyle, accessKey, secretKey, timeouts.connect, timeouts.socket, timeouts.apiCall)`
+  from `S3Store` and the resolved secrets; one `S3Client` per declaration, shared by the target and
+  the fetcher; `probe()` at startup fails on a missing bucket and only warns on the lifecycle rule.
+  The `S3Target` takes the module's bounded IO dispatcher; every SDK call runs there.
+- **06 (pipeline):** build the metadata map with `TargetMetadata.DIGEST`,
+  `TargetMetadata.DIGEST_ALGORITHM` (the enum name, any case) and `TargetMetadata.ATTRIBUTE_PREFIX`
+  + name for attributes; spec 7.1's source mtime, source name and transfer id are further plain
+  keys. A `store` that throws is a stage error; the object it may have left is a non-current
+  version the next store supersedes (I6).
+- **10 (Oracle) and 15:** the `excludedGroups` property already lists `oracle`; add the tag and
+  nothing in the pom. The MinIO tier costs about 9 s per JVM.
+- **16/17 (S3 fetch for subscriptions):** `S3Fetcher(client, bucket, io).fetcher` is ready; it
+  reads `path` as the key, so the route's `fetch.path` pointer must resolve to a bare key.
