@@ -1,0 +1,561 @@
+<title>SFTP Ingest, Drawn</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=Source+Sans+3:ital,wght@0,400;0,600;1,400&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+  :root {
+    --paper: #F5F7F3;
+    --paper-2: #EBEFE7;
+    --ink: #1B2430;
+    --ink-2: #3A4552;
+    --muted: #67717C;
+    --rule: #D3D9CF;
+    --green: #2F7D5B;
+    --green-soft: #DDEDE3;
+    --amber: #B7791F;
+    --amber-soft: #F6E9CF;
+    --mono-bg: #E9EDE5;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --paper: #12181D;
+      --paper-2: #1A2229;
+      --ink: #E4E9E2;
+      --ink-2: #C3CBC4;
+      --muted: #97A2AC;
+      --rule: #2C363E;
+      --green: #5CBF8E;
+      --green-soft: #1C3A2D;
+      --amber: #E0A73A;
+      --amber-soft: #3C2E14;
+      --mono-bg: #1E272E;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --paper: #12181D;
+    --paper-2: #1A2229;
+    --ink: #E4E9E2;
+    --ink-2: #C3CBC4;
+    --muted: #97A2AC;
+    --rule: #2C363E;
+    --green: #5CBF8E;
+    --green-soft: #1C3A2D;
+    --amber: #E0A73A;
+    --amber-soft: #3C2E14;
+    --mono-bg: #1E272E;
+    color-scheme: dark;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: "Source Sans 3", "Segoe UI", system-ui, sans-serif;
+    font-size: 17px;
+    line-height: 1.55;
+  }
+  h1, h2, h3 {
+    font-family: "Archivo", "Helvetica Neue", Arial, sans-serif;
+    text-wrap: balance;
+    margin: 0;
+    line-height: 1.15;
+  }
+  h1 { font-size: 2.4rem; font-weight: 700; letter-spacing: -0.01em; }
+  h2 { font-size: 1.55rem; font-weight: 600; }
+  h3 { font-size: 1.1rem; font-weight: 600; }
+  p { margin: 0; max-width: 66ch; }
+  code, .mono {
+    font-family: "JetBrains Mono", ui-monospace, Menlo, monospace;
+    font-size: 0.86em;
+  }
+  code { background: var(--mono-bg); padding: 0.05em 0.35em; border-radius: 3px; }
+  a { color: var(--green); }
+  a:focus-visible, button:focus-visible { outline: 2px solid var(--green); outline-offset: 2px; }
+
+  .page { max-width: 980px; margin: 0 auto; padding: 0 24px 96px; }
+
+  header.masthead {
+    padding: 56px 0 28px;
+    border-bottom: 1px solid var(--rule);
+    display: grid;
+    gap: 14px;
+  }
+  .eyebrow {
+    font-family: "Archivo", sans-serif;
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--muted);
+  }
+  .lede { font-size: 1.15rem; color: var(--ink-2); max-width: 60ch; }
+
+  nav.parts {
+    position: sticky; top: 0; z-index: 2;
+    background: var(--paper);
+    border-bottom: 1px solid var(--rule);
+    display: flex; gap: 4px;
+    padding: 8px 0;
+  }
+  nav.parts a {
+    font-family: "Archivo", sans-serif;
+    font-size: 0.9rem; font-weight: 600;
+    text-decoration: none; color: var(--ink-2);
+    padding: 6px 12px; border-radius: 4px;
+  }
+  nav.parts a:hover { background: var(--paper-2); }
+
+  section.part { padding-top: 48px; display: grid; gap: 28px; }
+  section.part > .part-head { display: grid; gap: 6px; }
+  .block { display: grid; gap: 14px; }
+
+  figure { margin: 0; display: grid; gap: 10px; }
+  figure .frame {
+    background: var(--paper-2);
+    border: 1px solid var(--rule);
+    border-radius: 6px;
+    padding: 18px 12px;
+    overflow-x: auto;
+  }
+  figure svg { display: block; width: 100%; height: auto; max-width: 100%; color: var(--ink); font-family: "Source Sans 3", system-ui, sans-serif; }
+  figure svg .mono { font-family: "JetBrains Mono", ui-monospace, monospace; }
+  figcaption { font-size: 0.92rem; color: var(--muted); max-width: 70ch; }
+
+  .promises { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  .promise {
+    border-top: 3px solid var(--green);
+    padding: 12px 0 0;
+    display: grid; gap: 6px; align-content: start;
+  }
+  .promise h3 { font-size: 1rem; }
+  .promise p { font-size: 0.95rem; color: var(--ink-2); }
+  @media (max-width: 720px) { .promises { grid-template-columns: 1fr; } }
+
+  .table-wrap { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.95rem; }
+  th, td { text-align: left; vertical-align: top; padding: 9px 12px 9px 0; border-bottom: 1px solid var(--rule); }
+  th { font-family: "Archivo", sans-serif; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); font-weight: 600; }
+  td.num { font-family: "Archivo", sans-serif; font-weight: 700; color: var(--green); font-variant-numeric: tabular-nums; width: 2.2rem; }
+  td.cost { color: var(--muted); }
+  td.crash { color: var(--amber); font-weight: 600; }
+
+  .ledger {
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: 0.82rem;
+    background: var(--mono-bg);
+    border: 1px solid var(--rule);
+    border-radius: 6px;
+    padding: 12px 16px;
+    overflow-x: auto;
+    line-height: 1.7;
+    white-space: pre;
+  }
+  .ledger .ok { color: var(--green); }
+  .ledger .warn { color: var(--amber); }
+  .ledger .dim { color: var(--muted); }
+
+  .decisions { display: grid; gap: 0; border-top: 1px solid var(--rule); }
+  .decision {
+    display: grid; grid-template-columns: 2.4rem 1fr; gap: 12px;
+    padding: 16px 0; border-bottom: 1px solid var(--rule);
+  }
+  .decision .rank { font-family: "Archivo", sans-serif; font-weight: 700; font-size: 1.4rem; color: var(--green); line-height: 1; }
+  .decision .body { display: grid; gap: 4px; }
+  .decision .body p { font-size: 0.97rem; color: var(--ink-2); }
+  .decision .ref { font-size: 0.82rem; color: var(--muted); }
+
+  .footnote { font-size: 0.9rem; color: var(--muted); border-top: 1px solid var(--rule); padding-top: 18px; margin-top: 20px; }
+  @media (prefers-reduced-motion: no-preference) { html { scroll-behavior: smooth; } }
+</style>
+
+<div class="page">
+  <header class="masthead">
+    <div class="eyebrow">Design overview · companion to docs/sftpingest/spec.md v0.1</div>
+    <h1>SFTP Ingest, Drawn</h1>
+    <p class="lede">Every hour: take every finished file out of one SFTP folder, copy it into MinIO, move the original to a temp folder, and tell downstream. The whole design exists to make one sentence true: <strong>a file can be lost only if Oracle, MinIO and the SFTP server all lose it at once.</strong></p>
+  </header>
+
+  <nav class="parts" aria-label="Parts">
+    <a href="#everyone">For everyone</a>
+    <a href="#engineers">For engineers</a>
+    <a href="#decisions">The five decisions</a>
+  </nav>
+
+  <!-- ============================================================ PART 1 -->
+  <section class="part" id="everyone">
+    <div class="part-head">
+      <div class="eyebrow">Part 1</div>
+      <h2>The job, as a mailroom</h2>
+      <p>A courier checks an inbox once an hour. For every envelope it finds, it copies the envelope into a vault and checks the copy, stamps the original and moves it to a "done" tray, then tells everyone who cares that the copy is in the vault. The whole time it writes each step into a logbook.</p>
+    </div>
+
+    <figure>
+      <div class="frame">
+        <svg viewBox="0 0 760 270" role="img" aria-label="Files move from the SFTP inbox to the MinIO vault, the original moves to the temp tray on the same server, downstream is told, and the Oracle logbook records every step.">
+          <defs>
+            <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+            </marker>
+            <marker id="arrow-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--green)"/>
+            </marker>
+          </defs>
+          <!-- inbox -->
+          <rect x="20" y="50" width="170" height="72" rx="6" fill="var(--paper)" stroke="currentColor" stroke-width="1.5"/>
+          <text x="105" y="80" text-anchor="middle" font-size="14" font-weight="600" fill="currentColor">SFTP inbox</text>
+          <text x="105" y="100" text-anchor="middle" font-size="12" fill="var(--muted)">upstream drops files here</text>
+          <!-- vault -->
+          <rect x="300" y="50" width="170" height="72" rx="6" fill="var(--paper)" stroke="currentColor" stroke-width="1.5"/>
+          <text x="385" y="80" text-anchor="middle" font-size="14" font-weight="600" fill="currentColor">MinIO vault</text>
+          <text x="385" y="100" text-anchor="middle" font-size="12" fill="var(--muted)">one object per file</text>
+          <!-- downstream -->
+          <rect x="580" y="50" width="160" height="72" rx="6" fill="var(--paper)" stroke="currentColor" stroke-width="1.5"/>
+          <text x="660" y="80" text-anchor="middle" font-size="14" font-weight="600" fill="currentColor">Downstream</text>
+          <text x="660" y="100" text-anchor="middle" font-size="12" fill="var(--muted)">HTTP today, more later</text>
+          <!-- temp tray -->
+          <rect x="20" y="180" width="170" height="60" rx="6" fill="var(--paper)" stroke="currentColor" stroke-width="1.5" stroke-dasharray="5 4"/>
+          <text x="105" y="205" text-anchor="middle" font-size="14" font-weight="600" fill="currentColor">temp/ tray</text>
+          <text x="105" y="224" text-anchor="middle" font-size="12" fill="var(--muted)">purged by downstream</text>
+          <!-- logbook -->
+          <rect x="300" y="180" width="440" height="60" rx="6" fill="var(--green-soft)" stroke="var(--green)" stroke-width="1.5"/>
+          <text x="520" y="205" text-anchor="middle" font-size="14" font-weight="600" fill="var(--green)">Logbook · two tables in Oracle</text>
+          <text x="520" y="224" text-anchor="middle" font-size="12" fill="var(--green)">every step of every file, written before the next step starts</text>
+          <!-- arrows -->
+          <line x1="190" y1="86" x2="298" y2="86" stroke="currentColor" stroke-width="1.5" marker-end="url(#arrow)"/>
+          <text x="244" y="76" text-anchor="middle" font-size="12" fill="currentColor">1 · copy, verify</text>
+          <line x1="470" y1="86" x2="578" y2="86" stroke="currentColor" stroke-width="1.5" marker-end="url(#arrow)"/>
+          <text x="524" y="76" text-anchor="middle" font-size="12" fill="currentColor">3 · tell</text>
+          <line x1="105" y1="122" x2="105" y2="178" stroke="var(--green)" stroke-width="2" marker-end="url(#arrow-green)"/>
+          <text x="115" y="154" font-size="12" font-weight="600" fill="var(--green)">2 · move the original</text>
+          <!-- logbook dashed ties -->
+          <line x1="385" y1="122" x2="385" y2="178" stroke="var(--green)" stroke-width="1" stroke-dasharray="3 3"/>
+          <line x1="660" y1="122" x2="660" y2="178" stroke="var(--green)" stroke-width="1" stroke-dasharray="3 3"/>
+        </svg>
+      </div>
+      <figcaption>Three moves per file, in this order. The move of the original (2) happens only after the copy is verified (1), and downstream is told (3) only after the move. The logbook is what makes any interruption resumable.</figcaption>
+    </figure>
+
+    <div class="block">
+      <h3>The three promises</h3>
+      <div class="promises">
+        <div class="promise">
+          <h3>Nothing is lost</h3>
+          <p>A file leaves the inbox only after its copy is verified in the vault. The move is the last thing ever done to the original, so a crash before it leaves the file where it was, to be redone.</p>
+        </div>
+        <div class="promise">
+          <h3>Nobody is told too early</h3>
+          <p>"Moved" and "tell downstream" are written into the logbook in one stroke. A separate loop sends the notifications, so one can only ever go out after the copy exists and the original is moved.</p>
+        </div>
+        <div class="promise">
+          <h3>One bad file never stops the rest</h3>
+          <p>Every file is handled on its own. A file that fails five times, or fails the quality check, is marked, left in the inbox and handed to an operator. Nothing is ever deleted.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="block">
+      <h3>What can go wrong, and why it is fine</h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>If the process dies…</th><th>…the next hour</th><th>Cost</th></tr></thead>
+          <tbody>
+            <tr><td>while copying</td><td>copies again</td><td class="cost">one extra copy, overwritten</td></tr>
+            <tr><td>after copying, before the logbook says so</td><td>copies again</td><td class="cost">one extra copy, overwritten</td></tr>
+            <tr><td>after the logbook says "copied", before the move</td><td>checks the vault, then moves</td><td class="cost">none</td></tr>
+            <tr><td>after the move, before the logbook says so</td><td>sees the file is gone from the inbox and writes "moved"</td><td class="cost">the notification waits one hour</td></tr>
+            <tr><td>after telling downstream, before the logbook says so</td><td>tells them again</td><td class="cost">downstream sees the same file id twice and ignores the repeat</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>That table is the entire safety argument, and every row is an automated test. A stakeholder can stop reading here.</p>
+    </div>
+  </section>
+
+  <!-- ============================================================ PART 2 -->
+  <section class="part" id="engineers">
+    <div class="part-head">
+      <div class="eyebrow">Part 2</div>
+      <h2>Three pieces of state, three owners</h2>
+      <p>Everything not drawn below is stateless and can be killed at any moment. The connector remembers only which files it has emitted and not yet heard back about. The ledger is the single source of truth for what happened to a file. The relay's set is a "these rows are taken" guard, not a cache and not a store.</p>
+    </div>
+
+    <figure>
+      <div class="frame">
+        <svg viewBox="0 0 760 210" role="img" aria-label="Three owners of state: the connector's in-memory in-flight set of files, the durable Oracle ledger with two tables, and the relay's in-memory in-flight set of delivery ids.">
+          <!-- connector -->
+          <rect x="16" y="20" width="200" height="170" rx="6" fill="none" stroke="currentColor" stroke-width="1.2" stroke-dasharray="5 4"/>
+          <text x="116" y="44" text-anchor="middle" font-size="13" font-weight="600" fill="currentColor">SFTP connector</text>
+          <text x="116" y="61" text-anchor="middle" font-size="11" fill="var(--muted)">in memory · its own spec</text>
+          <rect x="32" y="82" width="168" height="84" rx="4" fill="var(--paper)" stroke="currentColor" stroke-width="1"/>
+          <text x="116" y="106" text-anchor="middle" font-size="12" font-weight="600" fill="currentColor">in-flight set of files</text>
+          <text x="116" y="124" text-anchor="middle" font-size="11" fill="var(--muted)">emitted, not yet acked</text>
+          <text x="116" y="140" text-anchor="middle" font-size="11" fill="var(--muted)">or nacked</text>
+          <!-- ledger -->
+          <rect x="248" y="20" width="264" height="170" rx="6" fill="var(--green-soft)" stroke="var(--green)" stroke-width="1.5"/>
+          <text x="380" y="44" text-anchor="middle" font-size="13" font-weight="600" fill="var(--green)">Ledger</text>
+          <text x="380" y="61" text-anchor="middle" font-size="11" fill="var(--green)">Oracle · durable · the only truth</text>
+          <rect x="264" y="76" width="232" height="46" rx="4" fill="var(--paper)" stroke="var(--green)" stroke-width="1"/>
+          <text x="380" y="95" text-anchor="middle" font-size="12" font-weight="600" fill="currentColor" class="mono">file_transfer</text>
+          <text x="380" y="112" text-anchor="middle" font-size="11" fill="var(--muted)">one row per name + size + mtime</text>
+          <rect x="264" y="130" width="232" height="46" rx="4" fill="var(--paper)" stroke="var(--green)" stroke-width="1"/>
+          <text x="380" y="149" text-anchor="middle" font-size="12" font-weight="600" fill="currentColor" class="mono">delivery_outbox</text>
+          <text x="380" y="166" text-anchor="middle" font-size="11" fill="var(--muted)">one row per file × channel</text>
+          <!-- relay -->
+          <rect x="544" y="20" width="200" height="170" rx="6" fill="none" stroke="currentColor" stroke-width="1.2" stroke-dasharray="5 4"/>
+          <text x="644" y="44" text-anchor="middle" font-size="13" font-weight="600" fill="currentColor">Relay</text>
+          <text x="644" y="61" text-anchor="middle" font-size="11" fill="var(--muted)">in memory · this app</text>
+          <rect x="560" y="82" width="168" height="84" rx="4" fill="var(--paper)" stroke="currentColor" stroke-width="1"/>
+          <text x="644" y="106" text-anchor="middle" font-size="12" font-weight="600" fill="currentColor">in-flight delivery ids</text>
+          <text x="644" y="124" text-anchor="middle" font-size="11" fill="var(--muted)">bounded by batch + workers</text>
+          <text x="644" y="140" text-anchor="middle" font-size="11" fill="var(--muted)">empty when idle</text>
+        </svg>
+      </div>
+      <figcaption>Dashed boxes hold state that must not survive a restart; the solid green box holds state that must. After a restart the two dashed sets are empty, the ledger says what is left to do, and the redo is safe because everything is at-least-once.</figcaption>
+    </figure>
+
+    <div class="block">
+      <h3>One file's journey, and where a crash lands</h3>
+      <p>One coroutine per file, at most four at a time. The ack is the commit point for the source: it is the last write to the original and it happens only after the copy is verified. Everything after it is made reliable by the outbox, not by ordering.</p>
+    </div>
+
+    <figure>
+      <div class="frame">
+        <svg viewBox="0 0 900 330" role="img" aria-label="Seven stages from download to deliver, with the ack highlighted as the commit point and, under each gap between stages, what the next poll does if the process crashes there.">
+          <defs>
+            <marker id="arrow2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+            </marker>
+          </defs>
+          <!-- stage boxes: x = 20 + i*126, width 104 -->
+          <g font-size="12" fill="currentColor">
+            <rect x="20"  y="110" width="104" height="60" rx="5" fill="var(--paper)" stroke="currentColor" stroke-width="1.2"/>
+            <text x="72"  y="134" text-anchor="middle" font-weight="600">Download</text>
+            <text x="72"  y="152" text-anchor="middle" font-size="11" fill="var(--muted)">stage + SHA-256</text>
+
+            <rect x="146" y="110" width="104" height="60" rx="5" fill="var(--paper)" stroke="currentColor" stroke-width="1.2"/>
+            <text x="198" y="134" text-anchor="middle" font-weight="600">Quality</text>
+            <text x="198" y="152" text-anchor="middle" font-size="11" fill="var(--muted)">NONE today</text>
+
+            <rect x="272" y="110" width="104" height="60" rx="5" fill="var(--paper)" stroke="currentColor" stroke-width="1.2"/>
+            <text x="324" y="134" text-anchor="middle" font-weight="600">Upload</text>
+            <text x="324" y="152" text-anchor="middle" font-size="11" fill="var(--muted)">PUT, HEAD, prune</text>
+
+            <rect x="398" y="110" width="104" height="60" rx="5" fill="var(--green-soft)" stroke="var(--green)" stroke-width="1.2"/>
+            <text x="450" y="134" text-anchor="middle" font-weight="600" class="mono">UPLOADED</text>
+            <text x="450" y="152" text-anchor="middle" font-size="11" fill="var(--muted)">ledger row</text>
+
+            <rect x="524" y="104" width="104" height="72" rx="5" fill="var(--paper)" stroke="var(--green)" stroke-width="2.5"/>
+            <text x="576" y="134" text-anchor="middle" font-weight="700" fill="var(--green)">Ack</text>
+            <text x="576" y="152" text-anchor="middle" font-size="11" fill="var(--muted)">move to temp/</text>
+
+            <rect x="650" y="110" width="104" height="60" rx="5" fill="var(--green-soft)" stroke="var(--green)" stroke-width="1.2"/>
+            <text x="702" y="134" text-anchor="middle" font-weight="600" class="mono">ACKED</text>
+            <text x="702" y="152" text-anchor="middle" font-size="11" fill="var(--muted)">+ PENDING rows, 1 txn</text>
+
+            <rect x="776" y="110" width="104" height="60" rx="5" fill="var(--paper)" stroke="currentColor" stroke-width="1.2"/>
+            <text x="828" y="134" text-anchor="middle" font-weight="600">Deliver</text>
+            <text x="828" y="152" text-anchor="middle" font-size="11" fill="var(--muted)">relay, per channel</text>
+          </g>
+          <!-- commit label -->
+          <text x="576" y="86" text-anchor="middle" font-size="12" font-weight="700" fill="var(--green)">commit point for the source</text>
+          <line x1="576" y1="90" x2="576" y2="102" stroke="var(--green)" stroke-width="1.5"/>
+          <!-- arrows between boxes -->
+          <g stroke="currentColor" stroke-width="1.2" marker-end="url(#arrow2)">
+            <line x1="124" y1="140" x2="144" y2="140"/>
+            <line x1="250" y1="140" x2="270" y2="140"/>
+            <line x1="376" y1="140" x2="396" y2="140"/>
+            <line x1="502" y1="140" x2="522" y2="140"/>
+            <line x1="628" y1="140" x2="648" y2="140"/>
+            <line x1="754" y1="140" x2="774" y2="140"/>
+          </g>
+          <!-- crash ticks and labels: gap centers at 135, 261, 387, 513, 639, 765 and after deliver at 880 -->
+          <g stroke="var(--amber)" stroke-width="1.2">
+            <line x1="135" y1="176" x2="135" y2="206"/>
+            <line x1="261" y1="176" x2="261" y2="206"/>
+            <line x1="387" y1="176" x2="387" y2="206"/>
+            <line x1="513" y1="176" x2="513" y2="206"/>
+            <line x1="639" y1="176" x2="639" y2="206"/>
+            <line x1="765" y1="176" x2="765" y2="206"/>
+            <line x1="880" y1="176" x2="880" y2="206"/>
+          </g>
+          <text x="20" y="196" font-size="11" font-weight="600" fill="var(--amber)">crash here →</text>
+          <g font-size="11" fill="currentColor">
+            <text x="135" y="224" text-anchor="middle">redo from</text>
+            <text x="135" y="238" text-anchor="middle">download</text>
+
+            <text x="261" y="224" text-anchor="middle">redo from</text>
+            <text x="261" y="238" text-anchor="middle">download</text>
+
+            <text x="387" y="224" text-anchor="middle">PUT again,</text>
+            <text x="387" y="238" text-anchor="middle">prune again</text>
+            <text x="387" y="254" text-anchor="middle" fill="var(--muted)">1 extra upload</text>
+
+            <text x="513" y="224" text-anchor="middle">HEAD object,</text>
+            <text x="513" y="238" text-anchor="middle">then ack only</text>
+            <text x="513" y="254" text-anchor="middle" fill="var(--muted)">no redo</text>
+
+            <text x="639" y="224" text-anchor="middle">gone from listing:</text>
+            <text x="639" y="238" text-anchor="middle">reconcile → ACKED</text>
+            <text x="639" y="254" text-anchor="middle" fill="var(--muted)">notify waits a poll</text>
+
+            <text x="758" y="224" text-anchor="middle">relay</text>
+            <text x="758" y="238" text-anchor="middle">delivers</text>
+
+            <text x="880" y="224" text-anchor="end">deliver again;</text>
+            <text x="880" y="238" text-anchor="end">downstream dedupes</text>
+            <text x="880" y="254" text-anchor="end" fill="var(--muted)">1 extra call</text>
+          </g>
+          <!-- entry-point rule -->
+          <line x1="20" y1="286" x2="880" y2="286" stroke="var(--rule)" stroke-width="1"/>
+          <text x="20" y="308" font-size="11" fill="var(--muted)">Entry point on every FileSeen: below UPLOADED → restart from download · UPLOADED or later → verify object, ack · REJECTED / FAILED → nack, no work</text>
+        </svg>
+      </div>
+      <figcaption>The invariant this figure proves: a restart at any point converges with at most one extra upload and one extra delivery per channel, and never a lost file (spec I8). The amber marks are the hook points the tests crash at.</figcaption>
+    </figure>
+
+    <div class="block">
+      <h3>The ledger, as it looks for one file</h3>
+      <div class="ledger"><span class="dim">file_transfer   id 4471  vendor-drop  /inbox/orders-0903.csv  9,812,404 B  2026-09-03T07:41:09Z</span>
+<span class="ok">SEEN</span> → <span class="ok">DOWNLOADED</span> (sha256 3f9c…e2a1) → <span class="ok">UPLOADED</span> (landing/vendor/orders-0903.csv, v 7Kq…) → <span class="ok">ACKED</span> → <span class="ok">DONE</span>
+<span class="dim">delivery_outbox for 4471</span>
+  downstream   <span class="ok">DELIVERED</span>   attempts 1   reference req-8c21f
+  audit-topic  <span class="warn">PENDING</span>     attempts 3   next 07:53:40   last HTTP 503</div>
+      <p>Two tables because one file has many deliveries and each needs its own attempts, retry time and reference. No attempt-history table: every attempt logs its file id, channel, attempt number, status and reference, and that is the trace.</p>
+    </div>
+
+    <div class="block">
+      <h3>The second loop: the relay</h3>
+      <p>A cold <code>Flow</code> over the ledger with a bounded buffer and parallel workers, woken by every ack and by a 30-second sweep. Not a <code>SharedFlow</code>: a shared flow broadcasts to every subscriber, drops values when nobody is collecting, and never completes. Each of those is wrong for a work queue where one worker must handle each row and none may be lost.</p>
+    </div>
+
+    <figure>
+      <div class="frame">
+        <svg viewBox="0 0 860 250" role="img" aria-label="The relay selects due PENDING rows excluding ids in its in-flight set, buffers them, delivers through parallel workers, records the outcome as delivered, retry later or failed, and removes the id from the set in a finally block.">
+          <defs>
+            <marker id="arrow3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+            </marker>
+          </defs>
+          <!-- select -->
+          <rect x="20" y="70" width="170" height="90" rx="5" fill="var(--green-soft)" stroke="var(--green)" stroke-width="1.2"/>
+          <text x="105" y="94" text-anchor="middle" font-size="12" font-weight="600" fill="currentColor">select from ledger</text>
+          <text x="105" y="112" text-anchor="middle" font-size="11" fill="var(--muted)">PENDING, due now</text>
+          <text x="105" y="127" text-anchor="middle" font-size="11" fill="var(--muted)">id ∉ in-flight set</text>
+          <text x="105" y="142" text-anchor="middle" font-size="11" fill="var(--muted)">limit batchSize</text>
+          <!-- buffer -->
+          <rect x="222" y="85" width="146" height="60" rx="5" fill="var(--paper)" stroke="currentColor" stroke-width="1.2"/>
+          <text x="295" y="109" text-anchor="middle" font-size="12" font-weight="600" fill="currentColor">buffer</text>
+          <text x="295" y="127" text-anchor="middle" font-size="11" fill="var(--muted)">emit suspends when full</text>
+          <!-- workers -->
+          <rect x="400" y="40" width="110" height="36" rx="5" fill="var(--paper)" stroke="currentColor" stroke-width="1.2"/>
+          <text x="455" y="63" text-anchor="middle" font-size="12" fill="currentColor">worker · POST</text>
+          <rect x="400" y="97" width="110" height="36" rx="5" fill="var(--paper)" stroke="currentColor" stroke-width="1.2"/>
+          <text x="455" y="120" text-anchor="middle" font-size="12" fill="currentColor">worker · POST</text>
+          <rect x="400" y="154" width="110" height="36" rx="5" fill="var(--paper)" stroke="currentColor" stroke-width="1.2"/>
+          <text x="455" y="177" text-anchor="middle" font-size="12" fill="currentColor">worker · POST</text>
+          <!-- outcomes -->
+          <rect x="580" y="30" width="260" height="46" rx="5" fill="var(--green-soft)" stroke="var(--green)" stroke-width="1.2"/>
+          <text x="710" y="49" text-anchor="middle" font-size="12" font-weight="600" fill="currentColor">Delivered → DELIVERED + reference</text>
+          <text x="710" y="66" text-anchor="middle" font-size="11" fill="var(--muted)">file DONE once every channel delivered</text>
+          <rect x="580" y="92" width="260" height="46" rx="5" fill="var(--paper)" stroke="currentColor" stroke-width="1.2"/>
+          <text x="710" y="111" text-anchor="middle" font-size="12" font-weight="600" fill="currentColor">Retry → next attempt = now + backoff</text>
+          <text x="710" y="128" text-anchor="middle" font-size="11" fill="var(--muted)">5 s × 2ⁿ, cap 15 min, jitter</text>
+          <rect x="580" y="154" width="260" height="46" rx="5" fill="var(--amber-soft)" stroke="var(--amber)" stroke-width="1.2"/>
+          <text x="710" y="173" text-anchor="middle" font-size="12" font-weight="600" fill="currentColor">Reject or policy exhausted → FAILED</text>
+          <text x="710" y="190" text-anchor="middle" font-size="11" fill="var(--muted)">file stays ACKED; operator re-drives</text>
+          <!-- arrows -->
+          <g stroke="currentColor" stroke-width="1.2" marker-end="url(#arrow3)" fill="none">
+            <line x1="190" y1="115" x2="220" y2="115"/>
+            <line x1="368" y1="115" x2="398" y2="58"/>
+            <line x1="368" y1="115" x2="398" y2="115"/>
+            <line x1="368" y1="115" x2="398" y2="172"/>
+            <line x1="510" y1="58" x2="578" y2="53"/>
+            <line x1="510" y1="115" x2="578" y2="115"/>
+            <line x1="510" y1="172" x2="578" y2="177"/>
+          </g>
+          <!-- finally return -->
+          <path d="M 710 200 L 710 226 L 105 226 L 105 162" fill="none" stroke="currentColor" stroke-width="1" stroke-dasharray="4 3" marker-end="url(#arrow3)"/>
+          <text x="410" y="221" text-anchor="middle" font-size="11" fill="currentColor">finally: remove id from the in-flight set</text>
+          <!-- wake -->
+          <text x="105" y="34" text-anchor="middle" font-size="11" fill="var(--green)" font-weight="600">wake: every ack, and every 30 s</text>
+          <line x1="105" y1="40" x2="105" y2="68" stroke="var(--green)" stroke-width="1.2" stroke-dasharray="3 3" marker-end="url(#arrow3)"/>
+        </svg>
+      </div>
+      <figcaption>Backpressure is native: <code>emit</code> suspends when the buffer is full, so the next select runs only after the previous batch drained, and at most batch size plus worker count rows are ever in memory. Cancelling the scope leaves rows PENDING, which is the correct shutdown.</figcaption>
+    </figure>
+  </section>
+
+  <!-- ============================================================ DECISIONS -->
+  <section class="part" id="decisions">
+    <div class="part-head">
+      <div class="eyebrow">Part 3</div>
+      <h2>The five decisions that carry the requirements</h2>
+      <p>Ranked. If you read nothing else in the spec, read these entries in its decision log.</p>
+    </div>
+
+    <div class="decisions">
+      <div class="decision">
+        <div class="rank">1</div>
+        <div class="body">
+          <h3>The ledger is the only truth; the connector persists nothing.</h3>
+          <p>Carries "no data lost": every file has a durable resume point, and after any crash the next poll continues from it instead of guessing. The connector's own dedup store is deliberately unused, because a file recorded as uploaded but not yet moved would be filtered out and never acked.</p>
+          <div class="ref">spec D1 · 4.3 · 4.4</div>
+        </div>
+      </div>
+      <div class="decision">
+        <div class="rank">2</div>
+        <div class="body">
+          <h3>Ack is the commit; deliveries are created in the ACKED transaction; reconciliation repairs move-then-crash.</h3>
+          <p>Carries "nobody is told too early": the notification becomes durable in the same instant the source is committed, and a separate loop sends it. The one crash window this leaves, between the move and the ledger write, is closed at the next poll by noticing the file is gone.</p>
+          <div class="ref">spec D6 · 4.5 · I10 · I11</div>
+        </div>
+      </div>
+      <div class="decision">
+        <div class="rank">3</div>
+        <div class="body">
+          <h3>Deterministic object key; prune every other version after every PUT.</h3>
+          <p>Carries "delete the old version if we upload twice" on a bucket whose versioning cannot be turned off. A retry is an overwrite, never a sibling, and the prune after the retry also removes a version left by an earlier crash.</p>
+          <div class="ref">spec D5 · 6.3 · I6</div>
+        </div>
+      </div>
+      <div class="decision">
+        <div class="rank">4</div>
+        <div class="body">
+          <h3>Cold-flow relay with a bounded buffer and an in-memory guard; per-channel policy; a failed delivery never fails the file.</h3>
+          <p>Carries "high performance" and "multiple channels": memory is bounded by construction, one slow channel never blocks another, and a dead downstream becomes a dead-letter with a re-drive button instead of a stuck pipeline.</p>
+          <div class="ref">spec D7 · D9 · 7.3 · 7.4 · I4 · I5 · I13</div>
+        </div>
+      </div>
+      <div class="decision">
+        <div class="rank">5</div>
+        <div class="body">
+          <h3>Every timeout below the drain; bounded parallelism everywhere; one replica.</h3>
+          <p>Carries "high stability": a pod can be restarted at any moment and converges, shutdown is bounded, and the server's five-session cap is respected as a real ceiling of about four parallel transfers.</p>
+          <div class="ref">spec 3.3 · 11.2 · D13 · I14</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="block">
+      <h3>Where each requirement lands</h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Requirement from the brief</th><th>Where it lives</th></tr></thead>
+          <tbody>
+            <tr><td>Run hourly, all files under one folder</td><td>connector <code>watch(dir, every = 1h)</code>, overlap SKIP · spec 9, D12</td></tr>
+            <tr><td>Move to temp after processing</td><td>connector <code>onAck = move("temp/")</code>, called only after UPLOADED · 4.1, I10</td></tr>
+            <tr><td>Quality check seam, no-op today</td><td><code>QualityCheck.NONE</code> on the complete staged file · 8, D11</td></tr>
+            <tr><td>Download, upload, delete old version, notify</td><td>stages 1 to 5, prune inside upload · 4.1, 6.3</td></tr>
+            <tr><td>Multiple notification channels</td><td><code>DeliveryChannel</code> seam, one outbox row per channel, HTTP first · 7</td></tr>
+            <tr><td>No data lost</td><td>crash matrix and invariant I8 · 4.4, 17.1</td></tr>
+            <tr><td>High performance</td><td>bounded parallel pipelines, relay batch and buffer, load scenario S13 · 9, 7.3</td></tr>
+            <tr><td>High stability</td><td>failure model, startup checks, ordered shutdown · 10, 11</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <p class="footnote">Deliberately not here: a second replica, streaming transfers, an attempt-history table, content parsing for the notification body, creation of the bucket or the tables, a Quarkus scheduler. Each has a named seam or a recorded reason in spec sections 14 and 15. The spec wins wherever this page and it disagree.</p>
+  </section>
+</div>
