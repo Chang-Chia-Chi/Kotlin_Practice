@@ -36,8 +36,13 @@ every step, and how to tell downstream.
   passes everything.
 - **Bounded, observable, safe under shutdown.** Every stage has a timeout below the shutdown
   drain, every queue is bounded, and a pod restart at any moment is survivable.
-- **Framework-free core.** The pipeline, ledger contract, channel contract and relay know
-  nothing of Quarkus, JDBI, the AWS SDK or HTTP; each of those is an adapter package.
+- **Source and target as vocabulary, not as a framework.** A route moves a file from a
+  source to a target and tells channels. The DSL says exactly that; the pipeline sees a source
+  only as events and a download function, and a target only as "store one copy at this key,
+  verify it, probe it". What kind of place either one is stays inside its adapter (D21).
+- **Framework-free core.** The pipeline, ledger contract, target contract, channel contract
+  and relay know nothing of Quarkus, JDBI, the AWS SDK or HTTP; each of those is an adapter
+  package.
 
 ### 1.3 Non-goals
 
@@ -55,12 +60,14 @@ every step, and how to tell downstream.
 
 | Term | Definition |
 |---|---|
-| Route | One watched directory on one connector, with one target and a list of channels. |
+| Route | One source, one target and a list of channels. Today the source is one watched directory on one connector and the target is one S3 bucket. |
+| Source | Where files come from. The pipeline sees it as a flow of `IngestEvent` plus a `Downloader`; the SFTP connector is the one implementation, the test kit's scripted source the second. |
+| Target | Where copies go. The pipeline sees it as `store`, `verify` and `probe`; the S3 adapter is the one implementation, the test kit's in-memory target the second. |
 | File identity | Source system, directory, name, size and mtime together. Two listings with the same five values are the same file (D2). |
 | Transfer | The ledger's record of one file identity moving through the pipeline. One row in `file_transfer`. |
 | Delivery | The ledger's record of one transfer being announced on one channel. One row in `delivery_outbox`. |
-| Stage | One step of the per-file pipeline: download, quality, upload, ack. |
-| Ack | The connector's ack, which runs the configured move into the temp folder. Always the pipeline's call, after upload. |
+| Stage | One step of the per-file pipeline: download, quality, store, ack. |
+| Ack | The connector's ack, which runs the configured move into the temp folder. Always the pipeline's call, after the store. |
 | Channel | An adapter that announces a transfer to one downstream party and reports delivered, retry or reject. |
 | Relay | The coroutine that turns PENDING deliveries into channel calls. |
 | Reconciliation | The end-of-poll pass that repairs a transfer whose file vanished from the source between the move and the ledger write. |
@@ -79,7 +86,7 @@ every step, and how to tell downstream.
  consumer    one collector per route; decides from the ledger what each FileSeen needs;
    │         launches bounded per-file pipelines; reconciles at PollCompleted
    ▼
- pipeline    download -> quality -> upload + prune versions -> ledger UPLOADED
+ pipeline    download -> quality -> target.store (S3: PUT, HEAD, prune) -> ledger UPLOADED
    │         -> ack (move) -> ledger ACKED + outbox rows           (one file, one coroutine)
    ▼
  ledger      file_transfer, delivery_outbox                        (Oracle through JDBI)
@@ -100,10 +107,10 @@ boundaries are dependency sentences enforced by ArchUnit (D18):
 
 | Package | Holds | May import |
 |---|---|---|
-| `infra.sftpingest.pipeline` | consumer, per-file pipeline, states, `IngestEvent`, `Ledger`, `ObjectStore`, `DeliveryChannel`, `QualityCheck`, relay, config DSL, metrics names | kotlin-stdlib, coroutines, micrometer-core, jboss-logging |
+| `infra.sftpingest.pipeline` | consumer, per-file pipeline, states, `IngestEvent`, `Downloader`, `Ledger`, `Target`, `DeliveryChannel`, `QualityCheck`, relay, config DSL, metrics names | kotlin-stdlib, coroutines, micrometer-core, jboss-logging |
 | `infra.sftpingest.sftp` | the binding from the connector's `SftpEvent` flow and `download` to `IngestEvent` and the `Downloader` function | `pipeline`, the connector core |
 | `infra.sftpingest.jdbi` | Oracle ledger | `pipeline`, JDBI |
-| `infra.sftpingest.s3` | AWS SDK object store | `pipeline`, AWS SDK v2 |
+| `infra.sftpingest.s3` | the S3 target over the AWS SDK, including the version prune | `pipeline`, AWS SDK v2 |
 | `infra.sftpingest.http` | HTTP channel | `pipeline`, `java.net.http`, Jackson |
 | `infra.sftpingest.quarkus` | CDI producers, property mapping, readiness, admin resource, shutdown | everything above, Quarkus, the connector's Quarkus adapter |
 
@@ -113,7 +120,7 @@ The pipeline consumes the source through two small types it owns, a sealed `Inge
 (`Seen(file, ack, nack)`, `PollCompleted(listed, truncated)`, `PollFailed`, `PollSkipped`,
 `RouteDown(error)`) and a `Downloader` function from a file identity and a staging directory to
 a `LocalFile` with its digest. The `sftp` package maps the connector's events onto them (D20). Every seam in `pipeline` has a second
-implementation in the test tree (in-memory ledger, in-memory object store, recording channel),
+implementation in the test tree (in-memory ledger, in-memory target, recording channel),
 which is what keeps the pipeline suite free of containers and sub-second.
 
 Logging is `org.jboss.logging.Logger` in every package, for the reasons the sibling frameworks
@@ -142,13 +149,14 @@ connector's `maxConcurrentTransfers` under the five-session cap, D21 of its spec
 | 0 | Decide | Look up the transfer by identity; choose an entry point (Sec 4.3) | SEEN (row created or reused) |
 | 1 | Download | `connector.download(file, staging)`; the connector verifies size and returns the digest | DOWNLOADED (digest recorded) |
 | 2 | Quality | `QualityCheck.check(localFile, meta)`; Pass continues, Fail stops (Sec 8) | REJECTED on Fail |
-| 3 | Upload | PUT to `<bucket>/<key>` with digest metadata; HEAD verifies content length; list versions of the key and delete every version except the one PUT returned | UPLOADED (key, version id) |
+| 3 | Store | `target.store(key, file, metadata)`; the adapter guarantees that afterwards exactly one copy exists at the key and returns a reference to it (Sec 6.1) | UPLOADED (key, target ref) |
 | 4 | Ack | `ack()`: the connector moves the file into the temp folder | ACKED, plus one PENDING delivery per channel, in one transaction |
 | 5 | Deliver | Owned by the relay, not this coroutine (Sec 7) | DONE when every delivery is DELIVERED |
 
-Local staging is deleted after stage 3 succeeds and on every failure path. Stage 3 verifies
-with a HEAD rather than trusting the PUT's response alone because the SDK's own checksums are
-turned off (D4): the size match plus the digest stored as metadata is the integrity statement.
+Local staging is deleted after stage 3 succeeds and on every failure path. What "exactly one
+copy" costs is the adapter's business: the S3 adapter does a PUT, a HEAD that checks the content
+length because the SDK's own checksums are off (D4), and a prune of every other version of the
+key (Sec 6.3). The pipeline never learns that versions exist.
 
 ### 4.2 Transfer states
 
@@ -178,7 +186,7 @@ failure or crash, and the ledger decides how much work is left:
 | Ledger state | Action |
 |---|---|
 | none, SEEN, DOWNLOADED | Full pipeline from stage 1. A staged file from an earlier process is not trusted (D17). |
-| UPLOADED | HEAD the recorded key and version. Present with the recorded size: skip to stage 4. Absent: full pipeline from stage 1 on the same row. |
+| UPLOADED | `target.verify(ref)` on the recorded reference. True: skip to stage 4. False: full pipeline from stage 1 on the same row. |
 | ACKED, DONE | The file is back in the inbox although it was moved. Same rule as UPLOADED: verify, then ack again. Logged at WARN and counted, because it means someone put a file back. |
 | REJECTED, FAILED | `nack(redeliver = false)`, no work, no log beyond DEBUG. |
 
@@ -187,18 +195,19 @@ The connector's spec permits ack without a preceding download for exactly the UP
 ### 4.4 Crash matrix
 
 Every row of this table is a scenario in Sec 17.2, driven by a hook point named in the
-`Hook` interface (`afterDownload`, `afterQuality`, `afterPut`, `afterPrune`,
-`afterLedgerUploaded`, `afterMove`, `afterLedgerAcked`, `afterDeliverySent`).
+`Hook` interface (`afterDownload`, `afterQuality`, `afterStore`, `afterLedgerUploaded`,
+`afterMove`, `afterLedgerAcked`, `afterDeliverySent`). A crash inside `store` itself, for S3
+between the PUT and the prune, is the adapter's contract to survive and is replayed in the
+adapter's own test tier (Sec 6.3, I6).
 
 | Crash after | Source | Bucket | Ledger | Next poll does | Extra effects |
 |---|---|---|---|---|---|
 | download | file in inbox | nothing | SEEN or DOWNLOADED | full pipeline | none |
-| PUT, before prune | in inbox | 1 new version | DOWNLOADED | full pipeline: PUT again, prune removes both older versions | one extra version, pruned |
-| prune, before ledger | in inbox | 1 version | DOWNLOADED | full pipeline: PUT again, prune | one extra upload |
-| ledger UPLOADED | in inbox | 1 version | UPLOADED | HEAD ok, ack | none |
-| move, before ledger | in temp | 1 version | UPLOADED | reconciliation marks ACKED and creates deliveries (Sec 4.5) | delivery delayed to the next poll |
-| ledger ACKED | in temp | 1 version | ACKED, PENDING | relay delivers | none |
-| delivery sent, before ledger | in temp | 1 version | ACKED, PENDING | relay delivers again | one duplicate notification, deduplicated downstream |
+| store, before ledger | in inbox | 1 copy | DOWNLOADED | full pipeline: store again | one extra upload |
+| ledger UPLOADED | in inbox | 1 copy | UPLOADED | verify true, ack | none |
+| move, before ledger | in temp | 1 copy | UPLOADED | reconciliation marks ACKED and creates deliveries (Sec 4.5) | delivery delayed to the next poll |
+| ledger ACKED | in temp | 1 copy | ACKED, PENDING | relay delivers | none |
+| delivery sent, before ledger | in temp | 1 copy | ACKED, PENDING | relay delivers again | one duplicate notification, deduplicated downstream |
 
 The invariant the table proves: **at any crash point, at most one extra upload and at most one
 extra delivery per channel, and never a lost one** (I8).
@@ -239,7 +248,7 @@ CREATE TABLE file_transfer (
   target_kind       VARCHAR2(16),                      -- S3
   target_bucket     VARCHAR2(255),
   target_key        VARCHAR2(1024),
-  target_version_id VARCHAR2(255),
+  target_ref        VARCHAR2(512),                     -- adapter-defined; S3: the version id
   first_seen_at     TIMESTAMP      NOT NULL,
   updated_at        TIMESTAMP      NOT NULL,
   completed_at      TIMESTAMP,
@@ -281,7 +290,7 @@ interface Ledger {
     suspend fun find(identity: FileIdentity): Transfer?
     suspend fun seen(identity: FileIdentity): Transfer                     // insert or reuse
     suspend fun downloaded(id: TransferId, digest: Digest)
-    suspend fun uploaded(id: TransferId, target: ObjectRef)
+    suspend fun uploaded(id: TransferId, target: TargetRef)
     suspend fun acked(id: TransferId, channels: List<ChannelName>)        // ACKED + PENDING rows, one txn
     suspend fun rejected(id: TransferId, reason: String)
     suspend fun failedAttempt(id: TransferId, error: String, maxAttempts: Int): Transfer  // increments; may flip to FAILED
@@ -300,9 +309,28 @@ must be atomic (I11). The in-memory implementation in the test tree is the secon
 
 ---
 
-## 6. Object Store
+## 6. Target
 
-### 6.1 Client
+### 6.1 The `Target` seam
+
+```kotlin
+interface Target {
+    suspend fun store(key: String, file: Path, metadata: Map<String, String>): TargetRef
+    //  contract: afterwards exactly one copy exists at key, and it is the one just written
+    suspend fun verify(ref: TargetRef): Boolean          // the copy the ref names exists with the recorded size
+    suspend fun probe()                                  // fails startup when the target is unreachable or missing
+}
+
+data class TargetRef(val kind: String, val bucket: String, val key: String, val ref: String?, val size: Long)
+```
+
+Three methods because the pipeline needs exactly three facts: the copy is there, it is still
+there, the place exists. How an adapter keeps the "exactly one copy" promise is its own
+business: S3 with versioning prunes, an SFTP target would upload under a temporary name and
+rename over, a local directory would write and move. The test kit's in-memory target is the
+second implementation (D21).
+
+### 6.2 S3 client
 
 AWS SDK for Java v2, synchronous `S3Client` over the Apache HTTP client (D4). Configuration
 that is not optional against MinIO: endpoint override, path-style access, a fixed placeholder
@@ -312,18 +340,11 @@ MinIO version is an open item (Sec 16). Timeouts: connect, socket and API call, 
 call timeout required to be below the shutdown drain timeout (Sec 11.2), because a socket read
 cannot be interrupted and a stage parked inside the SDK drains when that timeout fires.
 
-### 6.2 The `ObjectStore` seam
+### 6.3 The S3 target: key, metadata, versions
 
-```kotlin
-interface ObjectStore {
-    suspend fun put(key: String, file: Path, metadata: Map<String, String>): ObjectRef   // returns version id when versioning is on
-    suspend fun head(key: String, versionId: String?): ObjectHead?                      // null when absent
-    suspend fun pruneVersions(key: String, keep: String): Int                            // deletes every other version, returns count
-    suspend fun probe()                                                                  // HEAD bucket at startup
-}
-```
-
-### 6.3 Key, metadata, versions
+`store` is PUT, then HEAD comparing the content length, then the prune below; `verify` is a HEAD
+of the key and version id; `probe` is a HEAD of the bucket. The version id the PUT returns is
+the `TargetRef.ref`.
 
 - The key is a pure function of file identity, configured per route (default
   `<prefix>/<file name>`), so a retry overwrites instead of creating a sibling (D5).
@@ -332,7 +353,8 @@ interface ObjectStore {
 - Versioning is on bucket-wide and cannot be changed, so every successful PUT is followed by
   a prune: list versions for that exact key, delete every version id except the one the PUT
   returned (D5). The prune also removes a version left by a crash between an earlier PUT and
-  its ledger write, because the retry is a PUT on the same key followed by the same prune. A
+  its prune, or between the prune and the ledger write, because the retry is a PUT on the same
+  key followed by the same prune; the adapter's own tests replay both crashes (I6). A
   lifecycle rule for non-current versions is worth requesting from the bucket owner as a safety
   net; the design does not depend on it.
 
@@ -359,7 +381,7 @@ data class DeliveryEvent(          // the fixed vocabulary every body is built f
     val transferId: Long, val route: String,
     val fileName: String, val fileSize: Long, val fileMtime: Instant,
     val digest: String, val digestAlgo: String,
-    val bucket: String, val key: String, val versionId: String?,
+    val bucket: String, val key: String, val targetRef: String?,
     val firstSeenAt: Instant, val ackedAt: Instant,
     val attempt: Int,
 )
@@ -482,9 +504,9 @@ interface QualityCheck {
 }
 ```
 
-Scope: the complete staged local file after the connector's size check and before upload. A
+Scope: the complete staged local file after the connector's size check and before the store. A
 file still being written on the server is the readiness check's problem, upstream of this
-seam; a failed upload is the pipeline's. `Fail` moves the transfer to REJECTED, tells the
+seam; a failed store is the pipeline's. `Fail` moves the transfer to REJECTED, tells the
 connector `nack(reason, redeliver = false)`, deletes the staged file, counts a metric, and
 leaves the file in the inbox for an operator (D11). Nothing is uploaded and nothing is
 notified. Default is `NONE`.
@@ -522,8 +544,8 @@ notified. Default is `NONE`.
 |---|---|---|
 | Connector recoverable error after its retry budget | download, ack | `failedAttempt`; `nack(redeliver = true)`; next poll retries; FAILED at `maxAttempts` |
 | Connector fatal error | anywhere | watch terminates; route down; readiness false |
-| Object store client or 5xx error | upload, HEAD, prune | SDK retries first; then as connector recoverable above |
-| Object store 4xx (access denied, no such bucket) | upload | same path, logged at ERROR with the reason: ops fixes configuration, the file waits |
+| Target client or 5xx error | store, verify | SDK retries first; then as connector recoverable above |
+| Target 4xx (access denied, no such bucket) | store | same path, logged at ERROR with the reason: ops fixes configuration, the file waits |
 | Ledger unavailable | any transition | as recoverable; the poll continues with other files; a run with the ledger down completes nothing |
 | Quality Fail | quality | REJECTED, terminal until re-drive |
 | Channel Retry | deliver | backoff per policy |
@@ -548,8 +570,8 @@ oldest PENDING delivery's age. Both are alert inputs; neither takes action.
 1. Build and validate the DSL configuration. Invalid configuration ends startup.
 2. Ledger: one round trip on each table. A missing table ends startup with the DDL name in the
    message.
-3. Object store: `probe()` HEADs the bucket. Absent or forbidden ends startup; the bucket is
-   never created.
+3. Target: `probe()`. For S3 that is a HEAD of the bucket; absent or forbidden ends startup,
+   and the bucket is never created.
 4. Staging directory: every file in it is deleted (D17). Nothing in it can be trusted after a
    restart, and the ledger will redo whatever was in flight.
 5. Channels: no call by default. A downstream call may have side effects, so a startup probe
@@ -591,9 +613,8 @@ package maps `application.properties` onto it, so the same DSL serves tests and 
 ```kotlin
 sftpIngest {
     ledger { /* datasource name */ }
-    objectStore {
+    s3("landing-minio") {                         // a named target client; a route picks one
         endpoint = "https://minio.internal"; region = "us-east-1"; pathStyle = true
-        bucket = "landing"
         credentials = fromEnvironment("S3_ACCESS_KEY", "S3_SECRET_KEY")
         connectTimeout = 5.seconds; socketTimeout = 30.seconds; apiCallTimeout = 60.seconds
     }
@@ -602,14 +623,16 @@ sftpIngest {
     drainTimeout = 30.seconds
 
     route("vendor-drop") {
-        connector = "vendor"                      // a connector built by the connector's own DSL
-        directory = "/inbox"
-        interval = 1.hours
+        source = sftp(connector = "vendor", directory = "/inbox") {   // built by the connector's own DSL
+            every = 1.hours
+            onDone = move("temp/")                // the ack action is a source concept
+        }
+        target = s3(client = "landing-minio", bucket = "landing") {
+            key = { f -> "vendor/${f.name}" }     // the key is a target concept
+        }
         parallelism = 4
         maxAttempts = 5
         stuckAfter = 3.hours
-        ack = move("temp/")
-        key = { f -> "vendor/${f.name}" }
         quality = QualityCheck.NONE
         channels += http("downstream") { /* Sec 7.5 */ }
     }
@@ -650,12 +673,12 @@ key.
 | Metric | Type | Tags / notes |
 |---|---|---|
 | `sftp_ingest_files_total` | counter | `route`, `outcome`: done, rejected, failed, reacked |
-| `sftp_ingest_stage_seconds` | timer | `route`, `stage`: download, quality, upload, prune, ack; `result`: ok, error |
+| `sftp_ingest_stage_seconds` | timer | `route`, `stage`: download, quality, store, ack; `result`: ok, error |
 | `sftp_ingest_inflight` | gauge | `route`: pipelines running |
 | `sftp_ingest_stuck_files` | gauge | `route`: transfers older than `stuckAfter` before ACKED |
 | `sftp_ingest_reconciled_total` | counter | `route` |
 | `sftp_ingest_reconcile_skipped_total` | counter | `route`: truncated listing |
-| `sftp_ingest_versions_pruned_total` | counter | `route` |
+| `sftp_ingest_versions_pruned_total` | counter | `route`; emitted by the S3 target |
 | `sftp_ingest_poll_total` | counter | `route`, `result`: completed, failed, skipped |
 | `sftp_ingest_delivery_total` | counter | `channel`, `outcome`: delivered, retry, rejected, gave_up |
 | `sftp_ingest_delivery_seconds` | timer | `channel` |
@@ -704,8 +727,8 @@ and upload and the vocabulary stops being fixed. Not built until asked (Sec 16, 
 | D2 | File identity is name, size and mtime | Matches the connector's in-flight key; a re-drop with a new mtime is a new file, a byte-identical re-copy with the same mtime is the same one |
 | D3 | Two tables, no attempt table; attempts are traced by log | A transfer has many deliveries, each with its own state; an attempt history table would be a third table nobody has asked to query |
 | D4 | AWS SDK v2, synchronous, Apache client, checksums when-required, path-style, placeholder region | Sequential per-file work gains nothing from async; SDK checksums can fail against older MinIO; the connector's digest is the integrity value |
-| D5 | Key is a pure function of identity; prune all other versions after every PUT | Versioning is a bucket-wide policy; a deterministic key makes retry an overwrite; the prune after the retry also cleans crash-gap versions |
-| D6 | Order: upload, ack, notify; deliveries are created in the ACKED transaction; reconciliation repairs move-then-crash | The source-side move is the commit, as in Camel, Spring Integration and NiFi; the outbox makes the notification reliable, not the ordering. Cost: a crash between the move and the ledger write delays that file's notification to the next poll |
+| D5 | Key is a pure function of identity; the S3 target prunes all other versions inside every `store` | Versioning is a bucket-wide policy; a deterministic key makes retry an overwrite; the prune after the retry also cleans crash-gap versions |
+| D6 | Order: store, ack, notify; deliveries are created in the ACKED transaction; reconciliation repairs move-then-crash | The source-side move is the commit, as in Camel, Spring Integration and NiFi; the outbox makes the notification reliable, not the ordering. Cost: a crash between the move and the ledger write delays that file's notification to the next poll |
 | D7 | Relay is a cold flow with a buffer and a wake signal; rows never ride a `SharedFlow`; an in-memory in-flight set guards double selection | Cold gives backpressure by suspension and loses nothing; `SharedFlow` broadcasts, drops without subscribers and never completes. The set is bounded by construction and must not survive a restart; a ledger claim is the two-replica seam |
 | D8 | Channel seam is one suspend function returning Delivered, Retry or Reject; the HTTP channel is declarative over a Jackson tree builder | The relay must not know HTTP; a body builder over a fixed vocabulary escapes correctly where string templates cannot; the reference lands on the delivery row |
 | D9 | Per-channel policy; a transfer is DONE only when every channel delivered; a FAILED delivery never fails the transfer | The file is safe once ACKED; webhook practice retries each endpoint independently and dead-letters with a redeliver action |
@@ -715,11 +738,12 @@ and upload and the vocabulary stops being fixed. Not built until asked (Sec 16, 
 | D13 | One replica per route | The connector's in-flight set is per process and the relay's guard is in memory; both seams for a second replica are named, neither built |
 | D14 | Credentials from environment variables populated by Vault; rotation is a rollout | The SDK reads them without configuration; a live rotation would need a credentials provider that re-reads, which nobody has asked for |
 | D15 | The DBA applies the DDL; the bucket is never created | The sibling archive layer's rule: an ambient side effect at boot is what provisioning exists to avoid |
-| D16 | Upload verified by HEAD content length plus digest metadata | With SDK checksums off, the size match is the only cheap post-condition; the digest is what an auditor compares |
+| D16 | The S3 store is verified by a HEAD content length plus digest metadata | With SDK checksums off, the size match is the only cheap post-condition; the digest is what an auditor compares |
 | D17 | The staging directory is emptied at startup; downloads are redone | A staged file from a dead process has no ledger row that vouches for it; files are small |
 | D18 | One module; adapters are packages; ArchUnit sentences | The seams have real second implementations in tests; a second module would buy nothing until a second host exists |
 | D19 | The body is rendered at send time from the transfer row; no payload column | A stored payload freezes a body shape across deployments and duplicates every field already on the row |
-| D20 | The pipeline consumes the connector through `IngestEvent` and a `Downloader` function that it owns; only the `sftp` package imports the connector | The connector is unimplemented while this application is built, so every phase but the binding must compile and test without it; the mapping is a dozen lines and the fake source in the test kit is its second implementation |
+| D20 | The pipeline consumes the source through `IngestEvent` and a `Downloader` function that it owns; only the `sftp` package imports the connector | The connector is unimplemented while this application is built, so every phase but the binding must compile and test without it; the mapping is a dozen lines and the fake source in the test kit is its second implementation |
+| D21 | Source and target are DSL vocabulary; the target seam is `store`, `verify`, `probe` and nothing about versions; no `Source` interface exists | The pipeline should not know what kind of place either end is. The source seam is already `IngestEvent` plus `Downloader` with the scripted source as its second implementation, so a `Source` interface would be a name without a capability. The old target seam leaked S3 versioning into the pipeline and the crash matrix; narrowing it moves that accident into the one adapter that has it. No registry, no plugin discovery, no source-times-target matrix: a second source or target is one adapter class and one DSL function, as a second channel is |
 
 ---
 
@@ -749,12 +773,12 @@ and upload and the vocabulary stops being fixed. Not built until asked (Sec 16, 
 
 Three tiers, the connector's shape:
 
-1. **Fakes, no I/O.** In-memory ledger, in-memory object store, recording channel, the
+1. **Fakes, no I/O.** In-memory ledger, in-memory target, recording channel, the
    connector's fake transport or a scripted `FileSeen` source. Pipeline state machine, entry
    points, crash matrix through hook points, reconciliation, relay invariants, shutdown phases.
    Deterministic through an injected `Clock` and `runTest`; no `Thread.sleep`.
 2. **Real adapters, one at a time.** Ledger against Oracle in Testcontainers, tagged `oracle`;
-   object store against MinIO in Testcontainers, versioning enabled, tagged `minio`; HTTP
+   S3 target against MinIO in Testcontainers, versioning enabled, tagged `minio`; HTTP
    channel against a JDK `HttpServer` on loopback scripted per scenario; the connector's
    embedded SSHD from its testkit.
 3. **End to end.** One route through the embedded SSHD, MinIO, Oracle and the loopback server,
@@ -766,16 +790,16 @@ Tests are named `I<n>_<description>`.
 
 | ID | Invariant |
 |---|---|
-| I1 | A transfer reaches DONE only if a HEAD of its recorded key and version returns its recorded size |
+| I1 | A transfer reaches DONE only if `verify` of its recorded target reference is true |
 | I2 | The application never deletes a file from the source; the only source write is the connector's move |
 | I3 | A delivery row is DELIVERED only after a channel returned Delivered for it |
 | I4 | A delivery id is never inside two workers at once |
 | I5 | The relay's in-flight set never exceeds `batchSize + parallelism` and is empty whenever the relay is idle |
-| I6 | After a successful upload stage exactly one version of the key exists |
+| I6 | After `store` returns, exactly one copy exists at the key, including after a crash inside a previous `store` on the same key (S3: between PUT and prune) |
 | I7 | A REJECTED or FAILED transfer is neither uploaded nor delivered until re-driven |
 | I8 | Restart at any hook point converges to DONE with at most one extra upload and at most one extra delivery per channel |
 | I9 | The staging directory holds no file that is not inside a running pipeline |
-| I10 | `ack()` is called only when the ledger state is UPLOADED or later and the object was verified |
+| I10 | `ack()` is called only when the ledger state is UPLOADED or later and the target reference was verified |
 | I11 | The ACKED transition and its PENDING rows are one transaction; the DELIVERED transition and a DONE flip are one transaction |
 | I12 | Shutdown returns within `drainTimeout` and leaves every PENDING row PENDING |
 | I13 | Two channels on one route are delivered independently: one channel's Retry never delays the other |
@@ -786,11 +810,11 @@ Tests are named `I<n>_<description>`.
 | ID | Scenario | Expected |
 |---|---|---|
 | S1 | Happy path, one file, one channel | DONE; object with metadata; file in temp; one delivery with reference |
-| S2 | Crash after PUT, before prune | Next poll: PUT again, prune leaves one version, DONE |
-| S3 | Crash after ledger UPLOADED, before move | Next poll: HEAD, ack, no second upload |
+| S2 | Crash after store, before ledger UPLOADED (and, in the S3 adapter tier, inside store between PUT and prune) | Next poll: store again, one copy at the key, DONE |
+| S3 | Crash after ledger UPLOADED, before move | Next poll: verify, ack, no second store |
 | S4 | Crash after move, before ledger ACKED | Next poll: reconciliation marks ACKED, deliveries created, DONE |
 | S5 | Crash after delivery sent, before ledger | Relay delivers again; downstream sees two calls with one `fileId`; row DELIVERED once |
-| S6 | Object missing at UPLOADED (deleted from the bucket) | Full pipeline again on the same row; DONE |
+| S6 | Copy missing at UPLOADED (deleted from the target) | Full pipeline again on the same row; DONE |
 | S7 | Downstream 503 twice then 200 | Two Retry with backoff, then DELIVERED; attempts = 3 |
 | S8 | Downstream 400 | Reject; delivery FAILED; transfer stays ACKED; `gave_up` not incremented, `rejected` is |
 | S9 | Downstream down past `giveUpAfter` | Delivery FAILED with `gave_up`; re-drive returns it to PENDING and it delivers |
@@ -799,7 +823,7 @@ Tests are named `I<n>_<description>`.
 | S12 | Same identity re-dropped after DONE | Verify, ack again, counted as `reacked`, no upload, no delivery |
 | S13 | 5,000 files of 10 MB in one poll | All DONE; in-flight never above `parallelism`; staging never above `parallelism × 10 MB`; no `PollSkipped` at the next tick |
 | S14 | Listing truncated at `maxFilesPerPoll` | Reconciliation skipped and counted; nothing marked ACKED by absence |
-| S15 | Shutdown during upload and during delivery | Upload's row stays DOWNLOADED, delivery's row stays PENDING, close within bound, staging empty at next start |
+| S15 | Shutdown during store and during delivery | The store's row stays DOWNLOADED, delivery's row stays PENDING, close within bound, staging empty at next start |
 | S16 | Ledger unavailable for one poll | Every file nacked with redelivery; nothing uploaded; next poll with the ledger back completes all |
 | S17 | Two channels, one always 503 | The other channel delivers; transfer stays ACKED; `outbox_pending{channel}` shows one |
 | S18 | Wrong SFTP password | Watch terminates; `route_up` 0; readiness false; process alive |

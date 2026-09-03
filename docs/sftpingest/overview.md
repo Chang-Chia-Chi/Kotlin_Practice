@@ -81,7 +81,7 @@ flowchart LR
         subgraph pipe["Consumer + per-file pipelines · ×4 in parallel"]
             direction TB
             P1["1 decide entry point from the ledger"] --> P2["2 download through the connector"]
-            P2 --> P3["3 quality check (NONE today)"] --> P4["4 PUT · HEAD · prune other versions"]
+            P2 --> P3["3 quality check (NONE today)"] --> P4["4 store in target (S3: PUT · HEAD · prune)"]
             P4 --> P5["5 ledger → UPLOADED"] --> P6["6 ack() → move to temp/ · commit point"]
             P6 --> P7["7 ledger → ACKED + PENDING per channel · 1 txn"]
         end
@@ -106,7 +106,7 @@ flowchart LR
     P2 -- "download()" --> POOL
     POOL -- ".part → file" --> STG
     P6 == "ack()" ==> POOL
-    P4 -- "PUT · HEAD · prune (S3 SDK v2)" --> MINIO
+    P4 -- "store (S3 SDK v2: PUT · HEAD · prune)" --> MINIO
     P5 == "JDBI" ==> FT
     P7 == "JDBI · ACKED + PENDING" ==> DO
     P7 -. "wake" .-> R1
@@ -161,10 +161,8 @@ sequenceDiagram
     P->>L: find(identity) → decide entry point
     P->>C: download → staged file + SHA-256
     P->>P: quality check (NONE today)
-    P->>S: PUT key (digest as metadata)
-    P->>S: HEAD → size matches
-    P->>S: list versions, delete all but the new one
-    P->>L: UPLOADED (key, version id)
+    P->>S: store(key, file, metadata), S3 adapter: PUT, HEAD, prune other versions
+    P->>L: UPLOADED (key, target ref)
     P->>C: ack() → move to temp/
     P->>L: ACKED + one PENDING delivery per channel (one transaction)
     P-)R: wake
@@ -185,7 +183,7 @@ stateDiagram-v2
     [*] --> SEEN: FileSeen, no row
     SEEN --> DOWNLOADED: staged + digest
     DOWNLOADED --> REJECTED: quality Fail
-    DOWNLOADED --> UPLOADED: PUT + HEAD + prune
+    DOWNLOADED --> UPLOADED: target.store
     UPLOADED --> ACKED: move to temp/ (+ PENDING deliveries)
     ACKED --> DONE: every delivery DELIVERED
     SEEN --> FAILED: attempts = max
@@ -197,7 +195,7 @@ stateDiagram-v2
 
     note right of UPLOADED
         Crash before this row: redo from download.
-        Crash after it: HEAD the object, then ack only.
+        Crash after it: verify the copy, then ack only.
     end note
     note right of ACKED
         Crash between the move and this row:
@@ -239,7 +237,7 @@ Ranked. If you read nothing else in the spec, read these entries in its decision
 |---|---|---|---|
 | 1 | **The ledger is the only truth; the connector persists nothing.** | No data loss across a crash; at-least-once with a known resume point for every file. | D1, 4.3, 4.4 |
 | 2 | **Ack is the commit; deliveries are created in the ACKED transaction; reconciliation repairs move-then-crash.** | Nobody is told before the file is safe; the notification is durable the instant the source is committed. | D6, 4.5, I10, I11 |
-| 3 | **Deterministic key, prune every other version after every PUT.** | "Delete the old version if we upload twice" on a bucket whose versioning cannot be turned off; a retry is an overwrite, never a sibling. | D5, 6.3, I6 |
+| 3 | **Deterministic key; the target promises "exactly one copy", and the S3 adapter keeps it by pruning inside every store.** | "Delete the old version if we upload twice" on a bucket whose versioning cannot be turned off; a retry is an overwrite, never a sibling; the pipeline never learns that versions exist. | D5, D21, 6.1, 6.3, I6 |
 | 4 | **Cold-flow relay with a bounded buffer and an in-memory in-flight guard; per-channel policy; a failed delivery never fails the file.** | High throughput without unbounded memory; one slow channel never blocks another; a dead downstream is a dead-letter, not a stuck pipeline. | D7, D9, 7.3, 7.4, I4, I5, I13 |
 | 5 | **Every timeout below the drain; bounded parallelism everywhere; one replica.** | Stability: a pod restart at any moment converges (I8); shutdown is bounded (I12); the five-session cap on the server is respected. | 3.3, 11.2, D13, I14 |
 
@@ -250,7 +248,7 @@ Ranked. If you read nothing else in the spec, read these entries in its decision
 | Run hourly, all files under one folder | connector `watch(dir, every = 1h)`, overlap SKIP (spec 9, D12) |
 | Move to temp after processing | connector `onAck = move("temp/")`, called only after UPLOADED (4.1, I10) |
 | Quality check seam, no-op today | `QualityCheck.NONE` on the complete staged file (8, D11) |
-| Download, upload, delete old version, notify | stages 1 to 5, prune in stage 3 (4.1, 6.3) |
+| Download, upload, delete old version, notify | stages 1 to 5, the prune inside the S3 store (4.1, 6.3) |
 | Multiple notification channels | `DeliveryChannel` seam, one outbox row per channel, HTTP first (7) |
 | No data lost | crash matrix and I8 (4.4, 17.1) |
 | High performance | bounded parallel pipelines, relay batch and buffer, S13 load scenario (9, 7.3) |

@@ -1,7 +1,7 @@
 # 05: Crash matrix replay
 
 **What to build:** A restart at any point converges. For each hook point of spec Sec 4.4 the pipeline is
-cancelled there, a second poll runs from the same in-memory ledger and object store, and the
+cancelled there, a second poll runs from the same in-memory ledger and target, and the
 end state matches the table: at most one extra upload, at most one extra delivery per channel,
 never a lost file. Any fix the replay forces in the pipeline or consumer lands here and is
 recorded.

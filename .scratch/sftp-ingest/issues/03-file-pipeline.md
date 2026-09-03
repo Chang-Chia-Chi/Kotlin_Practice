@@ -1,7 +1,7 @@
 # 03: Per-file pipeline and ledger-driven entry points
 
 **What to build:** One file goes all the way against the fakes: decide the entry point from the ledger, download,
-quality check, upload with HEAD verification and version prune, ledger UPLOADED, ack, ledger
+quality check, store in the target, ledger UPLOADED, ack, ledger
 ACKED with one pending delivery per channel in one transaction. A quality failure rejects the
 file without touching the store; a retryable error nacks with redelivery and counts an attempt;
 the fifth failure marks the file FAILED and nacks without redelivery. A file seen again is
@@ -14,10 +14,10 @@ resumed from whatever the ledger says, including ack-only for an already uploade
 **Status:** ready-for-agent
 
 - [ ] Stages 1 to 4 of spec Sec 4.1 run in order and the staged file is deleted on success and on every failure path
-- [ ] Every row of the spec Sec 4.3 entry-point table has a test, including HEAD-absent falling back to a full run and the re-ack of an ACKED or DONE file counted as `reacked`
-- [ ] `I1`, `I2`, `I6`, `I7`, `I9`, `I10` and the ACKED half of `I11` as named tests
+- [ ] Every row of the spec Sec 4.3 entry-point table has a test, including a false verify falling back to a full run and the re-ack of an ACKED or DONE file counted as `reacked`
+- [ ] `I1`, `I2`, `I7`, `I9`, `I10` and the ACKED half of `I11` as named tests; store is called exactly once per successful run and verify exactly once per UPLOADED entry
 - [ ] S1, S10, S11, S12 against the fakes
-- [ ] A quality Fail leaves the object store untouched, marks REJECTED and nacks with redeliver = false
+- [ ] A quality Fail leaves the target untouched, marks REJECTED and nacks with redeliver = false
 - [ ] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket, stubs throwing NotImplementedError

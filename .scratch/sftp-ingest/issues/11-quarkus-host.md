@@ -7,7 +7,7 @@ under the admin role, and a shutdown from the Quarkus event that stops routes, d
 connector, cancels the relay leaving rows PENDING, and closes the clients, all within the
 drain timeout.
 
-**Blocked by:** 05 (Crash matrix), 06 (Relay), 07 (Oracle ledger), 08 (S3 store), 09 (HTTP channel), 10 (Connector binding)
+**Blocked by:** 05 (Crash matrix), 06 (Relay), 07 (Oracle ledger), 08 (S3 target), 09 (HTTP channel), 10 (Connector binding)
 
 **Nature:** shutdown ordering and timing work
 

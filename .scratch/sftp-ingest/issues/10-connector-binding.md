@@ -12,7 +12,7 @@ configuration hands the temp-folder move and the readiness checks to the connect
 
 **Status:** ready-for-agent
 
-- [ ] Against the connector testkit's embedded SSHD with the in-memory ledger and object store: one poll moves a file to `temp/` only after the object store holds it
+- [ ] Against the connector testkit's embedded SSHD with the in-memory ledger and target: one poll moves a file to `temp/` only after the target holds it
 - [ ] A file removed between listing and download produces no transfer beyond SEEN and no error
 - [ ] A wrong password ends the flow with `RouteDown`
 - [ ] Only the sftp package imports the connector

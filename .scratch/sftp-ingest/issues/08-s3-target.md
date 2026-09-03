@@ -1,10 +1,12 @@
-# 08: S3 object store adapter over the AWS SDK
+# 08: S3 target adapter over the AWS SDK
 
-**What to build:** Objects land in a versioned MinIO through AWS SDK v2 configured as agreed: synchronous client
+**What to build:** Copies land in a versioned MinIO through AWS SDK v2 configured as agreed: synchronous client
 over the Apache HTTP client, endpoint override, path-style access, placeholder region,
-environment credentials, checksums only when required, and explicit timeouts. Put returns the
-version id and stores the digest metadata, head answers null for an absent object, prune
-deletes every other version of exactly that key, and probe fails startup on a missing bucket.
+environment credentials, checksums only when required, and explicit timeouts. Store is one
+call that leaves exactly one copy at the key: PUT with digest metadata, HEAD of the content
+length, then a prune of every other version of exactly that key, returning the version id as
+the reference. Verify answers whether that version still exists with the recorded size, and
+probe fails startup on a missing bucket. The pipeline never learns that versions exist.
 
 **Blocked by:** 01 (Walking skeleton)
 
@@ -12,9 +14,9 @@ deletes every other version of exactly that key, and probe fails startup on a mi
 
 **Status:** ready-for-agent
 
-- [ ] The shared object-store contract test class passes against both the in-memory store and the S3 store on Testcontainers MinIO with versioning enabled, tagged `minio`
-- [ ] `I6` on MinIO: three puts of one key leave exactly one version after prune
-- [ ] Head of a deleted version returns null; a key sharing a prefix with a neighbour is never pruned by the neighbour's prune
+- [ ] The shared target contract test class passes against both the in-memory target and the S3 target on Testcontainers MinIO with versioning enabled, tagged `minio`
+- [ ] `I6` on MinIO: three stores of one key leave exactly one version; a crash between PUT and prune, played through a hook inside the adapter, is repaired by the next store
+- [ ] Verify of a deleted version is false; a key sharing a prefix with a neighbour is never pruned by the neighbour's store
 - [ ] Metadata on every object carries digest, digest algorithm, source mtime, source name and transfer id
 - [ ] Probe fails with a message naming the bucket when it is absent or forbidden; the bucket is never created
 - [ ] The AWS SDK appears only in the s3 package

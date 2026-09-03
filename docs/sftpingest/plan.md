@@ -50,13 +50,13 @@ kit.
 
 ```
 sftp-ingest/src/main/kotlin/infra/sftpingest/
-  pipeline/   Transfer, TransferState, FileIdentity, Digest, LocalFile, ObjectRef,
-              IngestEvent, Downloader, Ledger, ObjectStore, DeliveryChannel,
+  pipeline/   Transfer, TransferState, FileIdentity, Digest, LocalFile, TargetRef,
+              IngestEvent, Downloader, Ledger, Target, DeliveryChannel,
               DeliveryEvent, DeliveryOutcome, DeliveryPolicy, QualityCheck, Hook,
               RouteConsumer, FilePipeline, Relay, IngestConfig + DSL, IngestMetrics
   sftp/       SftpBinding: connector SftpEvent -> IngestEvent, connector download -> Downloader
   jdbi/       JdbiLedger, LedgerSchema (the DDL text)
-  s3/         S3ObjectStore
+  s3/         S3Target (store = PUT + HEAD + prune, verify, probe)
   http/       HttpChannel, HttpChannelBuilder (the channel DSL block)
   quarkus/    Producers, IngestHost (start/stop), ReadinessCheck, AdminResource, HostConfig
 ```
@@ -80,7 +80,7 @@ Exactly five interfaces, all in `pipeline`:
 | Interface | Role | Second implementation |
 |---|---|---|
 | `Ledger` | every state transition, spec 5.2 | `InMemoryLedger` (test kit) |
-| `ObjectStore` | put, head, pruneVersions, probe, spec 6.2 | `InMemoryObjectStore`, versioned (test kit) |
+| `Target` | store, verify, probe, spec 6.1 | `InMemoryTarget` (test kit) |
 | `DeliveryChannel` | deliver one event, spec 7.1 | `RecordingChannel` (test kit) |
 | `QualityCheck` | Pass or Fail on a staged file, spec 8 | `QualityCheck.NONE` and a scripted one |
 | `Hook` | named interleaving points, spec 4.4 | no-op and the test driver |
@@ -98,6 +98,8 @@ the test kit's `ScriptedSource` produces them directly. Everything else is a con
 - A plug into the connector's `SeenRepository`.
 - Creation of the bucket or the tables at startup.
 - A `RetryPolicy`, `Notifier`, `StageExecutor` or any other single-implementation interface.
+- A `Source` interface, a source or target registry, or plugin discovery. The source seam is
+  `IngestEvent` plus `Downloader`; a second source or target is one adapter and one DSL function.
 - A second Maven module, a custom time abstraction, a logging facade.
 - Streaming transfers, resume, content parsing for the notification body.
 
@@ -139,7 +141,7 @@ in Quarkus; G10 is the acceptance run.
   against final signatures.
 - **Deliverables:** the `pipeline` value types and the five interfaces of 2.3; `IngestEvent`,
   `Downloader`, `DeliveryEvent`, `DeliveryOutcome`, `DeliveryPolicy` with spec 7.2 defaults;
-  `TransferState` and delivery states; `Hook` with the eight named points of spec 4.4 and a
+  `TransferState` and delivery states; `Hook` with the seven named points of spec 4.4 and a
   no-op runner; the config DSL of spec 12.1 producing an immutable `IngestConfig`, with every
   validation rule of spec 12.1 wired; `IngestMetrics` holding the spec 13 names as constants;
   `ArchitectureTest` with the 2.2 sentences; `docs/sftpingest/progress.md` created with the
@@ -155,8 +157,8 @@ in Quarkus; G10 is the acceptance run.
 
 - **Goal:** the instruments every later phase uses, no socket.
 - **Deliverables:** `InMemoryLedger` with the same transaction semantics as spec 5.2, recording
-  every call in order; `InMemoryObjectStore` with versioning on, returning a fresh version id
-  per put and listing all versions; `RecordingChannel` with scripted outcomes per call;
+  every call in order; `InMemoryTarget` returning a fresh reference per store, keeping exactly
+  one copy per key and answering `verify` from it; `RecordingChannel` with scripted outcomes per call;
   `ScriptedSource` producing an `IngestEvent` flow from a script (files, poll boundaries,
   truncation, failures) and recording every ack and nack with its arguments; a scripted
   `Downloader` that materializes a file of given bytes or throws; `HookDriver` that suspends a
@@ -170,14 +172,15 @@ in Quarkus; G10 is the acceptance run.
 ### G2 - Per-file pipeline and entry points
 
 - **Goal:** stages 0 to 4 of spec 4.1 against the test kit, with the entry-point rules of 4.3.
-- **Deliverables:** `FilePipeline`: decide, download, quality, upload with HEAD and prune,
+- **Deliverables:** `FilePipeline`: decide, download, quality, store,
   ledger UPLOADED, ack, ledger ACKED with deliveries; staging deletion on success and on every
   failure path; `attempts` and the FAILED flip at `maxAttempts`; REJECTED on quality Fail;
   `nack(redeliver = true)` for retryable errors and `redeliver = false` for REJECTED and
   FAILED; the four entry points of spec 4.3 including the re-ack of an ACKED or DONE file.
-- **Fixed contracts:** I1, I2, I6, I7, I9, I10, I11 (the ACKED half); spec 4.3 table.
+- **Fixed contracts:** I1, I2, I7, I9, I10, I11 (the ACKED half); spec 4.3 table.
 - **Acceptance:** named tests for those invariants; S1, S10, S11, S12 against the fakes; a
-  test per 4.3 row; a test that a quality Fail leaves the object store untouched.
+  test per 4.3 row; a test that a quality Fail leaves the target untouched; `store` is called
+  exactly once per successful run and `verify` exactly once per UPLOADED entry.
 - **Size:** medium. The correctness phase; give it the review attention.
 
 ### G3 - Route consumer and reconciliation
@@ -201,7 +204,7 @@ in Quarkus; G10 is the acceptance run.
 
 - **Goal:** every row of spec 4.4 survives a restart.
 - **Deliverables:** the `I8_` test family: for each hook point, cancel the pipeline there, run
-  a second poll from the same in-memory ledger and object store, assert the end state and the
+  a second poll from the same in-memory ledger and target, assert the end state and the
   extra-upload and extra-delivery counts the 4.4 table promises; any pipeline or consumer fix
   the replay forces, recorded in the progress entry.
 - **Blocked by:** G3.
@@ -236,17 +239,20 @@ in Quarkus; G10 is the acceptance run.
   identity violation on `seen` returns the existing row.
 - **Size:** medium. Needs Docker.
 
-### G6 - S3 object store adapter
+### G6 - S3 target adapter
 
-- **Goal:** `S3ObjectStore` over AWS SDK v2 against a versioned MinIO.
+- **Goal:** `S3Target` over AWS SDK v2 against a versioned MinIO.
 - **Deliverables:** client construction per spec 6.1 with checksums when-required, path style,
-  endpoint override, timeouts; `put` with metadata returning the version id; `head`; `pruneVersions`
-  deleting every other version by exact key; `probe`; tests tagged `minio` on Testcontainers
-  with versioning enabled on the bucket.
-- **Fixed contracts:** spec 6.2 signatures; I6 on MinIO.
-- **Acceptance:** the same contract test class runs against `InMemoryObjectStore` and
-  `S3ObjectStore`; `I6_` puts three times and lists one version; `head` of a deleted version
-  returns null; a key with a sibling prefix is never pruned by the neighbour's prune.
+  endpoint override, timeouts; `store` as PUT with metadata, HEAD of the content length, then
+  the prune of every other version by exact key, returning the version id as the reference;
+  `verify` as a HEAD of key and version; `probe` as a HEAD of the bucket; tests tagged `minio`
+  on Testcontainers with versioning enabled on the bucket.
+- **Fixed contracts:** spec 6.1 signatures; spec 6.3; I6 on MinIO.
+- **Acceptance:** the same contract test class runs against `InMemoryTarget` and `S3Target`;
+  `I6_` stores three times and lists one version, and replays a crash between PUT and prune
+  through a hook inside the adapter, after which the next `store` leaves one version; `verify`
+  of a deleted version is false; a key with a sibling prefix is never pruned by the
+  neighbour's store.
 - **Size:** small-medium. Needs Docker.
 
 ### G7 - HTTP channel
@@ -275,7 +281,7 @@ in Quarkus; G10 is the acceptance run.
   does not start until both connector tickets are merged.
 - **Fixed contracts:** spec 9.
 - **Acceptance:** against the connector testkit's embedded SSHD: one poll moves a file to
-  `temp/` only after the in-memory object store holds it; a file removed between listing and
+  `temp/` only after the in-memory target holds it; a file removed between listing and
   download yields no transfer beyond SEEN; a wrong password ends the flow with `RouteDown`.
 - **Size:** small-medium.
 
@@ -314,7 +320,7 @@ in Quarkus; G10 is the acceptance run.
 | Spec invariant | Phase |
 |---|---|
 | I1, I2, I7, I9, I10 | G2 |
-| I6 | G2 (fake), G6 (MinIO) |
+| I6 | G6 |
 | I11 | G2 (fake), G5 (Oracle) |
 | I8 | G3b |
 | I3, I4, I5, I13 | G4 |
