@@ -16,6 +16,9 @@ Failures count attempts and become FAILED or REJECTED with the right nack flags.
 - [ ] S1, S10, S11, S12 in both halves, S19, S33 on fakes; `I24` as a named test: a finished identity returning with a different digest gets a new revision through `supersede` and the old row is untouched
 - [ ] Every row of the spec Sec 4.3 entry-point table has a test, including a false verify falling back to a full run, the re-ack counted as `reacked`, and two children of one parent on one key rejecting the transfer with both paths in the reason
 - [ ] Store is called exactly once per object per successful run and verify exactly once per STORED entry
+- [ ] D40: a DONE identity listed again inside `recheckFinished` of its `updated_at` is skipped with no fetch and no state write; listed outside the window it is fetched and digested (S12); `recheckFinished = 0s` rechecks on every poll
+- [ ] D41: with the staging volume's usable space (a function injected at the filesystem boundary, no real disk fill) below `staging.minFree`, the object is nacked with redelivery before any fetch, `attempts` is unchanged, `shuttle_staging_deferred_total` increments and `shuttle_staging_free_bytes` reads the value; above the watermark the run proceeds
+- [ ] D42: a child's STORED transition and the parent's last-child flip are one call on the state store seam that the in-memory store implements without a parent-wide lock; the seam method's contract is written so ticket 10 can implement it as one child update plus one conditional parent update
 - [ ] Staging is empty after success and after every failure path, including files a processor created
 - [ ] Progress entry appended
 

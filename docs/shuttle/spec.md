@@ -1,6 +1,6 @@
 # Shuttle - Design Spec
 
-Version: v0.3 (v0.2 amended after an independent design review; not yet implemented; supersedes v0.1 "SFTP Ingest")
+Version: v0.4 (v0.3 amended for three operational watch-outs from a staff review, Sec 21; not yet implemented; supersedes v0.1 "SFTP Ingest")
 Scope: one process, one replica, many routes; each route moves source objects from one place
 to another, processes them on the way, and tells other systems
 Status: ready for a phase plan
@@ -182,6 +182,13 @@ is a different matter: what happens to it is the ack action, which every polled 
 explicitly (rule 12), because a silent `delete` would be the one irreversible default and a
 silent `none` would re-list the same file for ever.
 
+Staging is also bounded in bytes, not only in pipelines (D41). Before stage 1 the pipeline reads
+the usable space of the store's staging volume; below the store's `staging.minFree` (default
+1 GiB) the object is deferred: `nack(redeliver = true)`, no attempt counted, one WARN, the next
+trigger retries. `shuttle_staging_free_bytes` is refreshed at every such check and
+`shuttle_staging_deferred_total` counts the deferrals. A chain that fills the volume anyway,
+an archive larger than its listing suggested, fails as a stage error like any other I/O failure.
+
 ### 4.2 Transfer states
 
 ```
@@ -205,7 +212,7 @@ an unacknowledged message. The state store decides how much work is left:
 |---|---|
 | none, SEEN, FETCHED, PROCESSED | Full run from stage 1. A staged file from an earlier process is never trusted (D17). For a parent that already has child rows, the chain runs again and yields the same children; each child whose row is STORED with a true `verify` skips the store, the rest are stored (S28). |
 | STORED | `target.verify(ref)` for the transfer, or for every child. All true: skip to stage 4. Any false: full run on the same row. |
-| ACKED, DONE | The object is back although it was acked. A polled file is fetched and digested first. The row's own digest means the same file came back: verify, ack again, counted as `reacked`, logged at WARN. A different digest means new content under an old identity: a new transfer is created with the next `revision`, pointing at the row it supersedes, and runs from stage 1; the old row and its target version are never touched (S12). A redelivered message is verified and acked again, `reacked`, without a fetch. |
+| ACKED, DONE | The object is back although it was acked. A polled file is fetched and digested first. The row's own digest means the same file came back: verify, ack again, counted as `reacked`, logged at WARN. A different digest means new content under an old identity: a new transfer is created with the next `revision`, pointing at the row it supersedes, and runs from stage 1; the old row and its target version are never touched (S12). A finished polled identity is fetched for this check at most once per the route's `recheckFinished` (default 24 h; `0s` means every poll), measured from the row's `updated_at`; listed again inside that window it is skipped with no fetch and no state write, so a directory whose ack is `none` costs no download per poll for files that stay (D40). A redelivered message is verified and acked again, `reacked`, without a fetch. |
 | REJECTED, FAILED | `nack(redeliver = false)`, no work. |
 
 ### 4.4 Crash matrix
@@ -234,7 +241,10 @@ A final payload of N objects creates N child rows under the transfer in one tran
 FETCHED with its own staged object, digest and key. Children are stored under the route's
 parallelism like any object. The parent's STORED is written when the last child is STORED;
 the parent's ack is the only ack; the parent's `acked` notification is the only notification; a
-child that reaches `maxAttempts` fails the parent. A re-drive of a parent re-runs the chain and
+child that reaches `maxAttempts` fails the parent. A child's STORED transition is one statement
+on the child's row followed by a conditional update of the parent's row that fires only when no
+sibling is left unstored; no lock on the parent is held per child, so N children storing
+concurrently do not serialise on one row (D42). A re-drive of a parent re-runs the chain and
 replaces its children. Two children of one parent that resolve to the same key are a cardinality
 error: the transfer is rejected with both source paths in the reason, because storing both would
 make one silently overwrite its sibling (S33).
@@ -274,7 +284,8 @@ A polled file's identity is store, directory, name, size and mtime, plus a revis
 at 1 and increases only when the same name, size and mtime come back with a different digest
 after the earlier transfer finished (D2, Sec 4.3). Size and mtime are the cheap prefilter and
 the digest is the authority; the check costs one download only in the collision case, because a
-finished file normally leaves the source directory. A message's identity
+finished file normally leaves the source directory, and when it stays, under `none`, at most one
+download per `recheckFinished` (Sec 4.3). A message's identity
 is channel, subject and the message id, or a configured pointer into the body when the
 broker's id is not stable across redeliveries.
 
@@ -352,7 +363,7 @@ again (I18):
 | `quality` | the file | unchanged, or Reject | nothing |
 | `rename` | name, attributes, dates, through a pattern such as `{yyyyMMdd}-{name}` | one object with a new name, same file | nothing |
 | `zip` | every object | one archive created through `newStagedFile` | nothing |
-| `unzip` | one archive | one object per entry | nothing |
+| `unzip` | one archive, up to `maxEntries` (default 10,000) entries and `maxBytes` (default 10 GiB) uncompressed | one object per entry, or Reject naming the limit and the count or size that broke it (D41) | nothing |
 | `extract` | `from: fileName` (the current name), `from: sourcePath` (the listing path or object key), `from: content` (the bytes), or `from: message` (the subscription message) | unchanged, or Reject when the regex does not match | the regex's named groups become attributes of the same names, or positional groups named by `into: [..]`; for JSON, the map key is the attribute name and the pointer its source |
 | `expand` | a metadata file or the message | one child per listed path, fetched through `ctx.fetch` | nothing |
 | `custom` | anything | anything | what it declares in `produces` |
@@ -641,6 +652,8 @@ event as the same event. The reference it returns is per call and never a dedup 
 | Target client or 5xx | store, verify | SDK retries first; then as recoverable above |
 | Target 4xx | store | same path, logged at ERROR: configuration for ops to fix, the object waits |
 | State store unavailable | any transition | as recoverable; a run with the store down completes nothing (S16) |
+| Staging volume below `staging.minFree` | before fetch | deferred: `nack(redeliver = true)`, no attempt counted, `shuttle_staging_deferred_total`; the next trigger retries |
+| `unzip` beyond `maxEntries` or `maxBytes` | process | Reject, REJECTED until re-drive; the limit and the value are in the reason |
 | Processor Reject | process | REJECTED, terminal until re-drive |
 | Processor throws | process | as recoverable; five throws is FAILED |
 | Missing required mapping input | attribute freeze | FAILED with the row named; no retry until re-drive after a fix |
@@ -725,13 +738,13 @@ shuttle:
         hostKey: acceptAll                     # warns at startup
         idleCutoff: 5m                         # the proxy's idle limit still applies even without a proxy block
         pool: { maxSize: 20, maxConcurrentTransfers: 16 }
-        staging: /var/shuttle/stage/vendor
+        staging: { dir: /var/shuttle/stage/vendor, minFree: 1g }   # below minFree a fetch is deferred (Sec 4.1)
     partner:
       sftp:
         host: partner.example
         auth: { user: ${PARTNER_USER}, password: ${PARTNER_PASSWORD} }
         pool: { maxSize: 4 }                     # rule 9: mirror (1, the default) + image-sets (2) both target it
-        staging: /var/shuttle/stage/partner
+        staging: { dir: /var/shuttle/stage/partner }               # minFree defaults to 1g
     minio:
       s3:
         endpoint: https://minio.internal
@@ -793,10 +806,13 @@ shuttle:
       parallelism: 4
       maxAttempts: 5
       stuckAfter: 3h
+      recheckFinished: 24h                     # a finished file still listed is digested again at most this often (Sec 4.3)
 
     mirror:                                    # move A to B, tell nobody
       source: { poll: { store: vendor, directory: /outbound, every: 15m, onAck: delete } }
       target: { store: partner, directory: /incoming }
+
+    # an unzip step reads `- { unzip: { maxEntries: 10000, maxBytes: 10g } }`; both limits default to those values
 
     image-sets:                                # milestone 2
       source:
@@ -827,7 +843,8 @@ shuttle {
 
     objectStores {
         sftp("vendor") { endpoint { host = "sftp.example" }; auth { password(env("SFTP_USER"), env("SFTP_PASSWORD")) }
-                         pool { maxSize = 20; maxConcurrentTransfers = 16 }; staging = Path("/var/shuttle/stage/vendor") }
+                         pool { maxSize = 20; maxConcurrentTransfers = 16 }
+                         staging { dir = Path("/var/shuttle/stage/vendor"); minFree = 1.gib } }
         s3("minio") { endpoint = "https://minio.internal"; pathStyle = true
                       credentials = fromEnvironment("S3_ACCESS_KEY", "S3_SECRET_KEY") }
     }
@@ -850,6 +867,7 @@ shuttle {
         target = objectStore("minio").bucket("landing") { key = "vendor/{name}" }
         notify(on = Acked, channel("downstream"))
         parallelism = 4
+        recheckFinished = 24.hours
     }
 }
 ```
@@ -866,14 +884,14 @@ Each is public numbering, reported by number in validate mode and at startup.
 | 4 | Route names, store names and channel names are unique; a store and a channel may not share a name |
 | 5 | A route has exactly one `source` and exactly one `target` |
 | 6 | A `subscribe` source has a `fetch` with a store and a path; a `poll` source has none |
-| 7 | `parallelism >= 1` (1 when omitted), `maxAttempts >= 1`, `stuckAfter > 0`, `inProgressEvery > 0` |
+| 7 | `parallelism >= 1` (1 when omitted), `maxAttempts >= 1`, `stuckAfter > 0`, `inProgressEvery > 0`, `recheckFinished >= 0` (24 h when omitted), every store's `staging.minFree >= 0` (1 GiB when omitted) |
 | 8 | Every `notify.on` is one of `fetched`, `stored`, `acked`; a pair of state and channel appears once per route |
 | 9 | Per object store, the sum of `parallelism` over every route that polls it, fetches from it or targets it, plus one lister per polled directory, is at most `pool.maxSize`, and `maxConcurrentTransfers <= maxSize` |
 | 10 | Every SFTP store's `keepAlive` and `idleTimeout` are below its `idleCutoff` |
 | 11 | Every staging directory exists, is writable, and is local disk; two stores do not share one |
 | 12 | `onAck` is stated explicitly, no default, and it and `onNack` belong to the trigger kind's vocabulary; a `callback` names a channel offering the notify role |
 | 13 | A `key` or `directory` pattern uses only `{name}` (the staged object's name at store time, after the chain), `{sourceName}` (the source object's original name), `{yyyyMMdd}` and attribute names declared in the route, and yields no `..` |
-| 14 | Every built-in processor's configuration parses: patterns compile, pointers are valid, `extract.from` is one of `fileName`, `sourcePath`, `content`, `message` with `message` only on a subscribed route, a regex has named groups or an `into` list whose length equals its group count, `expand.from` names a store |
+| 14 | Every built-in processor's configuration parses: patterns compile, pointers are valid, `extract.from` is one of `fileName`, `sourcePath`, `content`, `message` with `message` only on a subscribed route, a regex has named groups or an `into` list whose length equals its group count, `expand.from` names a store, `unzip.maxEntries >= 1` and `unzip.maxBytes > 0` |
 | 15 | Every `custom` processor and every `provider` resolves to a named bean |
 | 16 | Every mapping `field` is in the vocabulary |
 | 17 | Every mapping `attribute` is declared by a processor in that route |
@@ -924,6 +942,8 @@ Micrometer through the host's registry. Tags `route`, `channel`, `store`; never 
 | `shuttle_outbox_pending`, `shuttle_outbox_oldest_seconds` | gauge | `channel` |
 | `shuttle_notifier_inflight` | gauge | |
 | `shuttle_supersedes_total` | counter | `route`; a finished identity came back with different content and got a new revision |
+| `shuttle_staging_free_bytes` | gauge | `store`; usable space of the staging volume, refreshed before every fetch |
+| `shuttle_staging_deferred_total` | counter | `route`; fetches deferred because the volume was below `staging.minFree` |
 
 ---
 
@@ -1001,6 +1021,9 @@ poll are appeals to the connector's spec.
 | D37 | Two children of one parent on one key reject the transfer | The alternative is one child silently overwriting its sibling |
 | D38 | The NATS trigger sends in-progress signals every `inProgressEvery` while a transfer runs | A run longer than the consumer's ack wait would otherwise be redelivered mid-flight |
 | D39 | The timeout chain is PUT, `apiCall`, `drainTimeout`, termination grace, each below the next; reference values 20 s, 45 s, 60 s, 90 s | A blocking PUT cannot be interrupted, so every layer must outlast the one inside it; the reference configuration must pass its own validator |
+| D40 | A finished polled identity is re-digested at most once per `recheckFinished`, measured from the row's `updated_at`; inside the window it is skipped without a fetch or a write | Identity carries mtime, so a file that stays under `none` is the same identity on every poll and D2's digest check would download the whole directory every interval; the row's own timestamp throttles it with no new column and no in-memory memory (v0.4) |
+| D41 | Staging is bounded in bytes: `staging.minFree` defers a fetch below the watermark without counting an attempt; `unzip` rejects beyond `maxEntries` or `maxBytes` | Parallelism bounds pipelines, not bytes; an archive that expands past the volume evicts the pod, and a deferral is disk pressure, not the object's fault, so it must not walk the object to FAILED (v0.4) |
+| D42 | A child's STORED is one statement on its own row plus a conditional parent update; no parent lock per child | N children of one parent store under the route's parallelism, and a parent lock taken by each would serialise the fan-out on one Oracle row (v0.4) |
 
 ---
 
@@ -1152,3 +1175,22 @@ Three defects found by an independent review of v0.2, each settled by grilling:
   target it.
 - The NATS trigger sends in-progress signals while a transfer runs (D38, `inProgressEvery`).
 - The acceptance plan grows to 24 invariants and 33 scenarios.
+
+---
+
+## 21. Changes from v0.3
+
+Three watch-outs raised by a staff engineer's review, each settled against the v0.3 text:
+
+- A finished file that stays in its directory is no longer downloaded on every poll. v0.3 said
+  the digest check "costs one download only in the collision case, because a finished file
+  normally leaves"; under `onAck: none`, or while a `move` keeps being refused, nothing leaves,
+  and every interval re-downloaded the directory. `recheckFinished` throttles the check from
+  the row's `updated_at` (D40, Sec 4.3, rule 7).
+- Staging is bounded in bytes. `staging.minFree` defers a fetch below the watermark without
+  counting an attempt, and `unzip` has `maxEntries` and `maxBytes` that reject a bomb (D41,
+  Sec 4.1, 6.3, 11, rules 7 and 14, two meters in 14.2). `staging` is now an object with `dir`.
+- Child completion takes no lock on the parent. The v0.3 design already batched child creation,
+  bounded child stores by parallelism and let only the parent notify, so the review's other
+  concern was met; what remained was the trap of a per-child parent lock, now ruled out (D42,
+  Sec 4.5).

@@ -15,6 +15,7 @@ contract test class that proves the in-memory store proves this one.
 - [ ] The shared state-store contract test class passes against the in-memory store and the JDBI store on Testcontainers Oracle, tagged `oracle` and excluded by a pom property
 - [ ] `I11` and `I20` on Oracle: a failing delivery insert rolls back the transition that created it
 - [ ] A unique-identity violation on `seen` returns the existing row; `due` excludes given ids, honours the limit and uses a skip-locked select
+- [ ] D42 on Oracle: a child's STORED is one update of the child row plus one conditional update of the parent that fires only when no sibling is unstored; no `SELECT ... FOR UPDATE` on the parent per child, and N children completing concurrently leave exactly one parent STORED write
 - [ ] JDBI and `java.sql` appear only in the jdbi package
 - [ ] Progress entry appended
 

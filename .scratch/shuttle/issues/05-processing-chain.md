@@ -14,6 +14,7 @@ every notified channel's mapping is checked against them before the store.
 
 - [ ] `I15` and `I18` as named tests; S20 on fakes; S26
 - [ ] Every built-in of spec Sec 6.3 except expand and extraction from a message has a test; unzip yields one object per entry; zip yields one archive created through the context
+- [ ] `unzip` past `maxEntries` or past `maxBytes` uncompressed is Reject with the limit and the offending count or size in the reason, and stops reading the archive there (D41): a small archive declaring more entries than the limit is rejected without extracting them all
 - [ ] A processor writing into its input is detected; a processor throwing is a retryable stage error
 - [ ] Attribute limits of rule 22 enforced; `SOURCE_DIGEST` and `DIGEST` differ after zip
 - [ ] The mapping check runs at attribute freeze and a missing required attribute fails the transfer before any store

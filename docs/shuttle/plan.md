@@ -1,7 +1,7 @@
 # Shuttle - Implementation Plan
 
-Version: v0.3
-Companion to: `docs/shuttle/spec.md` v0.3 (Sec 1 to 20)
+Version: v0.4
+Companion to: `docs/shuttle/spec.md` v0.4 (Sec 1 to 21; v0.4 adds `recheckFinished`, `staging.minFree`, the `unzip` limits and the two staging meters to G0, G1, G4 and G5, and D42 to G5 and G9)
 Purpose: break the application into phases small enough for an agent to implement in one
 session each, with fixed contracts and fixed acceptance criteria, so implementations may vary
 but assertions may not.

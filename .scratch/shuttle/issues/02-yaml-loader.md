@@ -15,7 +15,8 @@ wrap later.
 - [ ] Rule 9 counts the poll, fetch and target roles of every route on a store, and a route without `parallelism` counts as 1
 - [ ] `${VAR}` references resolve from an injected environment map; a literal secret fails rule 25
 - [ ] S25: a file with five violations reports five rule numbers in one report and opens no connection
-- [ ] An unknown key is an error naming its YAML path; durations like `30s`, `1h` and ranges like `[200-299]` parse
+- [ ] An unknown key is an error naming its YAML path; durations like `30s`, `1h`, byte sizes like `1g`, `10g` and ranges like `[200-299]` parse
+- [ ] `staging: { dir, minFree }`, route `recheckFinished` and `unzip: { maxEntries, maxBytes }` load with the spec's defaults when omitted (v0.4)
 - [ ] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket, stubs throwing NotImplementedError
