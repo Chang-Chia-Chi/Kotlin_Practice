@@ -527,3 +527,76 @@ ProcessingChainTest 4, RulesTest 30, SurfaceTest 3, testkit 25, YamlLoaderTest 1
 - **16/17:** `ExpandProcessor` and `Extract(from = Message)` are the two remaining shells;
   `processorFor` refuses the latter at construction, so rule 14's "message only on a subscribed
   route" is the only thing standing between a config and a `NotImplementedError` until then.
+---
+
+## 12: HTTP channel
+
+**Built:** `infra.shuttle.http.HttpChannel(config: core.HttpChannel, http: HttpClient, env: (String) -> String?)`,
+the `DeliveryChannel` for a channel declared with `http:`. One request per `deliver`: method and
+URL from the config, `Content-Type: application/json`, the auth header (bearer, basic, or a named
+header) from secrets resolved against `env` at construction, the request timeout from the config,
+and the body as `ObjectMapper.writeValueAsBytes(event.body)`, the `JsonNode` ticket 04 put on
+`DeliveryEvent`. The outcome comes from the channel's `response` section: a status in `success`
+is `Delivered(reference)` with the reference read by the JSON pointer `response.reference` from
+the response body, or `null` with a WARN when the pointer resolves nothing or there is no
+pointer; a status in `retry` is `Retry(status, body excerpt)`; any other status is `Reject`.
+Connection refused, any other `IOException` and `HttpTimeoutException` are `Retry(null, cause)`.
+One INFO line per attempt: transfer id, event, channel, attempt, status, reference. Tests in
+`HttpChannelTest` against a loopback `com.sun.net.httpserver.HttpServer` on port 0.
+
+**Concepts named:**
+
+- **The send is `sendAsync` bridged into `suspendCancellableCoroutine`,** not a blocking `send`
+  on a dispatcher. Cancelling the coroutine cancels the JDK request through the future at once,
+  so a cancelled delivery neither blocks a thread for the remaining timeout nor comes back with
+  an outcome. `CancellationException` is not an `IOException` and passes through untouched.
+- **The reference is best-effort.** A downstream that answers success without the id it promised
+  has still received the notification; the row is DELIVERED with a null reference and the WARN
+  names the channel, transfer and pointer (spec 9.7 makes the id the receiver's obligation).
+- **Secrets resolve at boot.** `Secret.Env` is looked up when the channel is constructed, so a
+  missing variable fails startup with the channel and variable named rather than the first
+  delivery hours later.
+
+**Acceptance:**
+
+- *200 with the pointer resolving: Delivered with reference; 200 without: Delivered with null and
+  a WARN; 503 and 429: Retry; 400: Reject; refused and a stall past the timeout: Retry* -
+  `HttpChannelTest.200 with the reference pointer resolving yields Delivered with the reference`,
+  `200 without the pointer resolving yields Delivered with a null reference`,
+  `a retry status yields Retry and any other status yields Reject`, `connection refused yields Retry`,
+  `a stall past the timeout yields Retry`. The WARN is logged, not asserted.
+- *Auth modes bearer, basic and header; CancellationException never converted* -
+  `auth modes bearer basic and header set the header the server sees` (asserts the header the
+  server recorded), `CancellationException propagates unchanged and produces no outcome` (a job
+  cancelled while the handler stalls ends in under a second with the exception and no outcome).
+  Escaping: `a body value with quotes and backslashes arrives escaped and parses back`.
+- *`java.net.http` only in the http package* - `ArchitectureTest.each adapter depends on core and
+  its own technology only`, now with classes in `infra.shuttle.http` to check.
+- *Progress entry appended* - this entry.
+
+**Deviations:**
+
+1. **No IO dispatcher parameter.** Plan 2.5 puts blocking `HttpClient.send` on the module's
+   bounded IO dispatcher; this channel does not block, so there is nothing to put there. The
+   first version did use `withContext(io) { http.send(...) }` and the cancellation test showed
+   the cost: a cancelled coroutine waited the full request timeout and then returned `Retry`.
+   `sendAsync` plus `suspendCancellableCoroutine` is stdlib-and-JDK only (no
+   `kotlinx-coroutines-jdk8`). Ticket 14 produces only the `HttpClient`.
+2. **Retry and Reject carry the first 200 characters of the response body as `reason`.** The
+   spec leaves `reason` free; an excerpt is what an operator wants in the log.
+3. **A failed reference lookup on a non-JSON success body is the same null-plus-WARN**, not an
+   error: the notification was received.
+4. Size: 107 main, 159 test lines; in budget.
+
+**For the next ticket:**
+
+- **09 (notifier):** construct `HttpChannel(config, httpClient, env)` per `http:` channel and
+  call `deliver(DeliveryEvent(transferId, moment, channel, attempts + 1, renderedBody))`; map
+  `Delivered` to `delivered(id, reference)`, `Retry` to `retryLater`, `Reject` to
+  `deliveryFailed`. Do not catch `CancellationException` around it either.
+- **14 (host):** produce one `HttpClient` for the process (`HttpClient.newBuilder().connectTimeout(...)`)
+  and pass `System.getenv()::get` as `env`; a missing secret variable throws
+  `IllegalStateException` at construction, which is the boot failure spec 12.1 wants. No
+  dispatcher is needed for this channel.
+- Gotcha: `com.sun.net.httpserver.Headers` normalises header names (`X-api-key`), which is why
+  the test reads them that way; the client sends what the config says.
