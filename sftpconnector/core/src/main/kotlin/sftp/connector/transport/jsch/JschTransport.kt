@@ -173,7 +173,7 @@ private class JschConnection(
      */
     override suspend fun list(dir: String, onEntry: (RemoteFile) -> Listing): Unit = withContext(io) {
         errors.translating(Attempt(endpoint, "list", dir)) {
-            channel.ls(dir) { entry ->
+            channel.ls(dir.literally()) { entry ->
                 when {
                     entry.filename == "." || entry.filename == ".." -> ChannelSftp.LsEntrySelector.CONTINUE
                     onEntry(entry.attrs.describe(dir.asDirectoryOf(entry.filename))) == Listing.CONTINUE ->
@@ -186,14 +186,14 @@ private class JschConnection(
     }
 
     override suspend fun stat(path: String): RemoteFile = withContext(io) {
-        errors.translating(Attempt(endpoint, "stat", path)) { channel.stat(path).describe(path) }
+        errors.translating(Attempt(endpoint, "stat", path)) { channel.stat(path.literally()).describe(path) }
     }
 
     override suspend fun readTo(path: String, sink: OutputStream): Unit =
-        transferring(Attempt(endpoint, "read", path)) { channel.get(path, sink, it) }
+        transferring(Attempt(endpoint, "read", path)) { channel.get(path.literally(), sink, it) }
 
     override suspend fun writeFrom(path: String, source: InputStream): Unit =
-        transferring(Attempt(endpoint, "write", path)) { channel.put(source, path, it, ChannelSftp.OVERWRITE) }
+        transferring(Attempt(endpoint, "write", path)) { channel.put(source, path.literally(), it, ChannelSftp.OVERWRITE) }
 
     /**
      * Moves the bytes of one file, under a monitor that stops as soon as nobody is waiting for
@@ -223,11 +223,11 @@ private class JschConnection(
      * not do.
      */
     override suspend fun rename(from: String, to: String): Unit = withContext(io) {
-        errors.translating(Attempt(endpoint, "rename", from)) { channel.rename(from, to) }
+        errors.translating(Attempt(endpoint, "rename", from)) { channel.rename(from.literally(), to.literally()) }
     }
 
     override suspend fun delete(path: String): Unit = withContext(io) {
-        errors.translating(Attempt(endpoint, "delete", path)) { channel.rm(path) }
+        errors.translating(Attempt(endpoint, "delete", path)) { channel.rm(path.literally()) }
     }
 
     override suspend fun mkdir(path: String): Unit = withContext(io) {
@@ -286,6 +286,21 @@ private class StopWhenNobodyIsWaiting(private val caller: Job) : SftpProgressMon
 
     override fun end() = Unit
 }
+
+/**
+ * The path as JSch has to be handed it to take it as a name rather than a pattern.
+ *
+ * JSch reads `*` and `?` in the last component of the path it is given as wildcards and lists
+ * the directory to resolve them, in every operation except mkdir and realpath: a rename onto
+ * `l*.csv` landed on whichever neighbour matched and replaced it, a delete of `*.csv` sent one
+ * remove per file that matched, and a stat of one answered for another. A backslash is its escape
+ * for exactly those, and is stripped on the way out. Every path the connector sends names one
+ * thing, so every path is escaped here, before the library sees it; the operations that send the
+ * path raw are left raw, because an escape there would be sent to the server as part of the name.
+ */
+private fun String.literally(): String = replace(PATTERN_CHARACTERS) { "\\" + it.value }
+
+private val PATTERN_CHARACTERS = Regex("""[\\*?]""")
 
 /** JSch counts timeouts in milliseconds as an `Int`, and treats a negative one as an error. */
 private fun Duration.toTimeoutMillis(): Int =
