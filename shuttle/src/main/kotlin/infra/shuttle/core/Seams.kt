@@ -1,0 +1,59 @@
+package infra.shuttle.core
+
+import com.fasterxml.jackson.databind.JsonNode
+import java.nio.file.Path
+import java.time.Instant
+
+/** Spec 8.2. Every method is one transaction. */
+interface StateStore {
+    suspend fun find(identity: SourceIdentity): Transfer?
+    suspend fun seen(identity: SourceIdentity, kind: TransferKind): Transfer
+    suspend fun supersede(finished: TransferId, kind: TransferKind): Transfer
+    suspend fun fetched(id: TransferId, staged: StagedSummary, events: List<DeliveryRequest>)
+    suspend fun processed(id: TransferId, attributes: Map<String, String>)
+    suspend fun children(id: TransferId, staged: List<StagedSummary>): List<Transfer>
+    suspend fun stored(id: TransferId, target: TargetRef, events: List<DeliveryRequest>)
+    suspend fun acked(id: TransferId, events: List<DeliveryRequest>)
+    suspend fun rejected(id: TransferId, reason: String)
+    suspend fun failedAttempt(id: TransferId, error: String, maxAttempts: Int): Transfer
+    suspend fun unlisted(route: RouteName, olderThan: Instant, listed: Set<SourceIdentity>): List<TransferId>
+    suspend fun due(now: Instant, excluding: Set<DeliveryId>, limit: Int): List<Delivery>
+    suspend fun delivered(id: DeliveryId, reference: String?)
+    suspend fun retryLater(id: DeliveryId, at: Instant, status: String?, error: String)
+    suspend fun deliveryFailed(id: DeliveryId, status: String?, error: String)
+    suspend fun redrive(id: TransferId)
+    suspend fun redriveDelivery(id: DeliveryId)
+    suspend fun stuck(route: RouteName, olderThan: Instant): Int
+}
+
+/** Spec 7.1. After `store`, the current object at `key` is the one just written; nothing is ever deleted. */
+interface ObjectStoreTarget {
+    suspend fun store(key: String, file: Path, metadata: Map<String, String>): TargetRef
+    suspend fun verify(ref: TargetRef): Boolean
+    suspend fun probe()
+}
+
+/** Spec 9.2. `CancellationException` is never caught or converted. */
+interface DeliveryChannel {
+    val name: ChannelName
+    val policy: DeliveryPolicy
+    suspend fun deliver(event: DeliveryEvent): DeliveryOutcome
+}
+
+/** Spec 4.4: the named interleaving points, spelled as the crash matrix spells them. */
+@Suppress("EnumEntryName")
+enum class HookPoint { afterFetch, afterProcess, afterStore, afterLedgerStored, afterAck, afterLedgerAcked, afterDeliverySent }
+
+interface Hook {
+    suspend fun at(point: HookPoint, transfer: TransferId)
+
+    /** The production runner: every point is a no-op. */
+    object None : Hook {
+        override suspend fun at(point: HookPoint, transfer: TransferId) = Unit
+    }
+}
+
+/** Spec 9.6: a named bean the renderer calls, not the pipeline. */
+fun interface Provider {
+    suspend fun provide(transfer: Transfer): JsonNode
+}

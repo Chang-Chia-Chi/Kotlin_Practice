@@ -1,0 +1,188 @@
+package infra.shuttle.core
+
+import infra.shuttle.core.ExtractFrom.FileName
+import infra.shuttle.core.Field.DIGEST
+import infra.shuttle.core.Field.TRANSFER_ID
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.io.TempDir
+import java.nio.file.Path
+import kotlin.time.Duration.Companion.hours
+import kotlin.time.Duration.Companion.minutes
+import kotlin.time.Duration.Companion.seconds
+
+/** Spec 13.3: every rule rejects a configuration that violates only it, by number (I14). */
+class RulesTest {
+
+    @TempDir
+    lateinit var staging: Path
+
+    /** Spec 13.2's vendor-drop build, valid under every rule; each test bends one thing. */
+    private fun config(
+        vendor: SftpStoreBuilder.() -> Unit = {},
+        downstream: HttpChannelBuilder.() -> Unit = {},
+        vendorDrop: RouteBuilder.() -> Unit = {},
+        more: ShuttleBuilder.() -> Unit = {},
+    ) = shuttle {
+        shuttleStateStore { oracle(datasource = "shuttle") }
+        notifier { workers = 4; batch = 50; sweepEvery = 30.seconds }
+        supervision { restartBackoff(30.seconds, max = 15.minutes); readiness = Readiness.AllRoutesDown }
+        digest = Digest.MD5
+        drainTimeout = 60.seconds
+        objectStores {
+            sftp("vendor") {
+                endpoint { host = "sftp.example" }; auth { password(env("SFTP_USER"), env("SFTP_PASSWORD")) }
+                pool { maxSize = 20; maxConcurrentTransfers = 16 }; staging { dir = this@RulesTest.staging }
+                vendor()
+            }
+            s3("minio") { endpoint = "https://minio.internal"; pathStyle = true; credentials = fromEnvironment("S3_ACCESS_KEY", "S3_SECRET_KEY") }
+        }
+        channels {
+            http("downstream") {
+                method = HttpMethod.POST; url = "https://downstream.internal/api/files"; auth = bearer(env("DOWNSTREAM_TOKEN"))
+                response { success = 200..299; retry = setOf(408, 429) + (500..599); reference = "/requestId" }
+                body = mapping {
+                    "fileId" from TRANSFER_ID
+                    "file.md5" from DIGEST
+                    "orderNumber" fromAttribute "orderNumber"
+                    "source" value "vendor-drop"
+                }
+                downstream()
+            }
+        }
+        route("vendor-drop") {
+            source = poll(objectStore("vendor"), directory = "/inbox") { every = 1.hours; onAck = move("temp/") }
+            process = extract(from = FileName, regex = "(?<orderNumber>\\d+)-.*\\.csv") then rename("{yyyyMMdd}-{name}") then zip()
+            target = objectStore("minio").bucket("landing") { key = "vendor/{name}" }
+            notify(on = Acked, channel("downstream"))
+            parallelism = 4
+            vendorDrop()
+        }
+        more()
+    }
+
+    private fun violated(config: ShuttleConfig, beans: Map<String, Set<String>> = emptyMap()) =
+        Rules.validate(config) { beans[it] }.violations.map { it.rule }.distinct()
+
+    @Test
+    fun rule11_every_staging_directory_exists_is_writable_local_and_unshared() =
+        assertEquals(listOf(11), violated(config(vendor = { staging { dir = this@RulesTest.staging.resolve("missing") } })))
+
+    @Test
+    fun rule12_onAck_is_explicit_and_in_the_trigger_kinds_vocabulary() =
+        assertEquals(listOf(12), violated(config(vendorDrop = { source = poll(objectStore("vendor"), directory = "/inbox") })))
+
+    @Test
+    fun rule13_key_and_directory_patterns_use_only_known_placeholders() =
+        assertEquals(listOf(13), violated(config(vendorDrop = { target = objectStore("minio").bucket("landing") { key = "vendor/{nope}" } })))
+
+    @Test
+    fun rule14_every_built_in_processor_configuration_parses() =
+        assertEquals(listOf(14), violated(config(vendorDrop = { process = listOf(extract(from = FileName, regex = "(?<orderNumber>\\d+")) })))
+
+    @Test
+    fun rule14_unzip_maxEntries_is_at_least_one() =
+        assertEquals(listOf(14), violated(config(vendorDrop = { process = process then unzip(maxEntries = 0) })))
+
+    @Test
+    fun rule14_unzip_maxBytes_is_positive() =
+        assertEquals(listOf(14), violated(config(vendorDrop = { process = process then unzip(maxBytes = 0) })))
+
+    @Test
+    fun rule15_every_custom_processor_and_provider_resolves_to_a_bean() =
+        assertEquals(listOf(15), violated(config(vendorDrop = { process = process then custom("imageResizer") })))
+
+    @Test
+    fun rule16_every_mapping_field_is_in_the_vocabulary() =
+        assertEquals(listOf(16), violated(config(downstream = { body = mapping { row(MappingRow("x", field = "NOPE")) } })))
+
+    @Test
+    fun rule17_every_mapping_attribute_is_declared_by_a_processor_in_that_route() =
+        assertEquals(listOf(17), violated(config(downstream = { body = mapping { "orderNumber" fromAttribute "orderNo" } })))
+
+    @Test
+    fun rule18_every_select_is_a_json_pointer_and_every_format_parses() =
+        assertEquals(
+            listOf(18),
+            violated(config(downstream = { body = mapping { "order" by provider("orderDetails", select = "requestId") } }), beans = mapOf("orderDetails" to emptySet())),
+        )
+
+    @Test
+    fun rule19_a_mapping_row_has_exactly_one_source() =
+        assertEquals(listOf(19), violated(config(downstream = { body = mapping { row(MappingRow("x", field = "TRANSFER_ID", value = "v")) } })))
+
+    @Test
+    fun rule20_success_and_retry_status_sets_are_disjoint() =
+        assertEquals(listOf(20), violated(config(downstream = { response { success = 200..299; retry = setOf(204) } })))
+
+    @Test
+    fun rule21_digest_is_md5_sha256_or_sha1() =
+        assertEquals(listOf(21), violated(config(downstream = { body = mapping { row(MappingRow("x", field = "DIGEST", digest = "crc32")) } })))
+
+    @Test
+    fun rule22_attribute_names_are_at_most_32_and_64_characters_each() =
+        assertEquals(listOf(22), violated(config(vendorDrop = { process = process then extract(from = FileName, regex = "(?<${"a".repeat(65)}>.*)") })))
+
+    @Test
+    fun rule23_a_move_target_is_not_the_polled_directory() =
+        assertEquals(listOf(23), violated(config(vendorDrop = { source = poll(objectStore("vendor"), directory = "/inbox") { onAck = move("/inbox") } })))
+
+    @Test
+    fun rule24_readiness_is_known_and_restartBackoff_initial_is_at_most_max() =
+        assertEquals(listOf(24), violated(config(more = { supervision { restartBackoff(15.minutes, max = 30.seconds) } })))
+
+    @Test
+    fun rule25_a_secret_appears_only_as_an_environment_reference() =
+        assertEquals(listOf(25), violated(config(vendor = { auth { password(env("SFTP_USER"), Secret.Literal("hunter2")) } })))
+
+    @Test
+    fun the_baseline_passes_every_rule() = assertEquals(emptyList<Int>(), violated(config()))
+
+    @Test
+    fun rule1_every_referenced_name_exists() =
+        assertEquals(listOf(1), violated(config(vendorDrop = { target = objectStore("nope").bucket("landing") })))
+
+    @Test
+    fun rule2_the_referenced_declaration_offers_the_role_used() =
+        assertEquals(listOf(2), violated(config(vendorDrop = { source = poll(objectStore("minio"), directory = "/inbox") { onAck = AckAction.Delete } })))
+
+    @Test
+    fun rule3_every_timeout_is_below_drainTimeout() =
+        assertEquals(listOf(3), violated(config(downstream = { timeout = 61.seconds })))
+
+    @Test
+    fun rule4_names_are_unique_across_routes_stores_and_channels() =
+        assertEquals(listOf(4), violated(config(more = { channels { nats("vendor") { url = "nats://events.internal:4222" } } })))
+
+    @Test
+    fun rule6_only_a_subscribe_source_has_a_fetch() =
+        assertEquals(listOf(6), violated(config(vendorDrop = { fetch(objectStore("minio"), "/metadata.path") })))
+
+    @Test
+    fun rule7_parallelism_maxAttempts_stuckAfter_and_inProgressEvery_are_positive() =
+        assertEquals(listOf(7), violated(config(vendorDrop = { parallelism = 0 })))
+
+    @Test
+    fun rule7_recheckFinished_is_not_negative() =
+        assertEquals(listOf(7), violated(config(vendorDrop = { recheckFinished = (-1).seconds })))
+
+    @Test
+    fun rule7_staging_minFree_is_not_negative() =
+        assertEquals(listOf(7), violated(config(vendor = { staging { dir = this@RulesTest.staging; minFree = -1 } })))
+
+    @Test
+    fun rule8_a_state_and_channel_pair_appears_once_per_route() =
+        assertEquals(listOf(8), violated(config(vendorDrop = { notify(on = Acked, channel("downstream")) })))
+
+    @Test
+    fun rule9_pool_arithmetic_per_object_store() =
+        assertEquals(listOf(9), violated(config(vendorDrop = { parallelism = 20 })))
+
+    @Test
+    fun rule10_sftp_keepAlive_and_idleTimeout_are_below_idleCutoff() =
+        assertEquals(listOf(10), violated(config(vendor = { idleCutoff = 20.seconds })))
+
+    @Test
+    fun rule5_a_route_has_exactly_one_source_and_one_target() =
+        assertEquals(listOf(5), violated(config(vendorDrop = { target = null })))
+}
