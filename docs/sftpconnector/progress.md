@@ -211,6 +211,10 @@ because each was correctly deferred by the ticket that found it.
 | The bounded IO dispatcher is as wide as the pool, and everything on it already holds a pool place | T6 | Every later ticket | This is what stops a listing blocked on its consumer from starving a download: threads wanted can never exceed threads available. An operation that runs on that dispatcher without first holding a pool place turns a slow path into a deadlock, and no test would catch it until concurrency was high |
 | A `withContext(dispatcher)` that produces a resource drops it when its caller is cancelled - at the switch back, not in the block, so `NonCancellable` inside does not help | R1 | T12, T13, and anything that opens a socket, a file or a lease under a dispatcher switch | R1 finding 1 is this shape: the handshake finished on the IO thread and the session was replaced by the `CancellationException` on the way back to the caller. The fake transport cannot show it because it answers on the caller's own coroutine. The only two defences are to hold the resource on the producing side and close it when the value is dropped (what `JschTransport.connect` does now), or to never switch dispatchers on the producing path |
 | A cancelled `withLease` is not proof the operation did not land | R1 | T7's compensation review, T11 | The ladder drops a cancelled call's outcome by design, the scope drops the block's result when cancellation lands at the instant it completed, and every dispatcher switch back does the same. A rename that landed on the server can therefore surface as `CancellationException`. I11's lost-reply reasoning has to treat "cancelled" like "reply lost", and a retry after cancellation is never attempted anyway |
+| An `upload` or a `rename` under `REFUSE` retried after a lost reply is refused by its own earlier success | R2 | T11 | The look that decides `REFUSE` runs before the request on every attempt, so a retry of an attempt that landed finds the file it put there and raises `OverwriteRefused` - a phantom failure with the disposition that says "do not retry". T11 has to decide the policy once, before the first attempt, and send every attempt as a replacement; or treat `OverwriteRefused` on a retry as the moment to stat the target and apply I11 |
+| On a server without the POSIX rename extension, a `REPLACE` refused for a reason that is not the target still clears a file at the target | R2 | The maintainer; the startup probe is the defence | The sequence cannot tell an occupied target from a rename the server could never do, and spec 8.2 mandates the sequence. The caller is now told the target was cleared (R2 finding 5); the loss itself stands. On a server with the extension it cannot happen any more |
+| A local I/O failure inside a transfer is classified `SessionLost` | R2 | Whoever next touches the mapper (T2's table) | JSch wraps an `IOException` from the caller's stream into its status exception with the generic code and the `IOException` as cause, and the mapper reads that shape as the connection breaking. A full local disk under a download, or an unreadable local file under an upload, poisons a healthy session and sends a retry to a fresh one to fail the same way. Reasoned from the mapper and JSch's `put`/`get`, not reproduced |
+| A local failure inside a lease throws away a healthy session | R2 | Whoever has cause | `upload` opens the local file, and `download` the partial file, inside `withLease`; a `java.nio` exception there is unclassified, so `releaseAfter` evicts the session. A handshake per local mistake, the same price as R1 finding 4. Opening the local side before borrowing closes it and was not done because nothing lies |
 
 ### C6: spec Sec 5.3 amended - the middle cancellation tier is `keepAlive`
 
@@ -2222,3 +2226,190 @@ should cut blocked leases first or in parallel, or the housekeeper's cancel queu
 finding 1, a cancelled top-up dial closes its own session in the transport and the pool sees a dial
 that never landed; nothing is parked by a cancelled housekeeper. Every `withContext(dispatcher)` that
 produces something owned is the seams row's shape.
+
+---
+
+## R2: Fable review of the write path and compensation (T7)
+
+A review-and-fix session under C12, on `claude-fable-5-1`, of code it did not write: `SftpClient`'s
+write operations and `moveOnto`, `Overwrite`, `BorrowedSession`, the write operations of
+`JschConnection`, and the tests under `client/` and `WritePathAgainstServerTest`. 180 tests were
+green at the start and 189 are green at the end (46 core, 143 testkit). Five findings were fixed in
+five commits, each with the invariant or the truth it restores in its message; the rest are recorded
+here. No earlier test was edited. Every finding has a failing test in `WritePathReviewTest`, run red
+before its fix; the extension and the SSH library's own behaviour were reproduced against the
+embedded server, because the fake is a server without the extension that takes every path literally.
+
+The method was the one the brief asks for: trace every path through `moveOnto` and `clearTheWay` under
+both policies against a server with and without the extension, asking at each request what the server
+holds afterwards and what the caller is told; read the SSH library's source (the sources jar was
+fetched for this) for what it does with a path before it is sent; walk `withSession`'s loan against a
+block that launches work it does not wait for; and check each promise the T7 entry makes to T11
+against the mechanism it rests on.
+
+**Findings, by severity.**
+
+*High.*
+
+1. **JSch reads a path as a pattern, so a rename or an upload could land on a neighbour and a delete
+   could remove every file that matched** - `JschTransport.kt`, every path-taking operation, commit
+   `ed5af6f`. `ChannelSftp.rename`, `rm`, `put`, `get`, `stat` and `ls` treat `*` and `?` in the last
+   component as wildcards and list the directory to resolve them (`glob_remote`), with a backslash as
+   the escape, stripped on the way out; `mkdir` and `realpath` send the path raw. Interleaving: a
+   `rename(from, "/drop/temp/l*.csv", REPLACE)` had JSch list `/drop/temp`, match `ledger-old.csv`,
+   and send a posix-rename onto *that*, which the server replaced and reported as success;
+   `upload(..., "/drop/l*.csv", REPLACE)` did the same to `ledger.csv`; `delete("/drop/*.csv")` sent one
+   remove per file that matched, and removed both. A name the server listed is untrusted input and a
+   POSIX name may hold either character, so the source's own ack action could do this to a neighbour.
+   Reproduced by the three `..names one file..`/`..lands on the name it was given..` tests against the
+   embedded server (legal neighbour names, a wildcard in the requested path; the literal name itself
+   cannot exist on the Windows host, so the assertion is that the neighbour is untouched, which holds
+   on every host). Fix: `literally()` escapes `\`, `*` and `?` at the one place the library is handed a
+   path, for exactly the operations that unquote it. The read path (`list`, `stat`, `readTo`) had the
+   same defect - a download of a listed `a?.csv` could fetch a different file - and is covered by the
+   same fix, which is why it sits in the transport and not in the client.
+2. **`REPLACE` deleted a healthy target when the rename could never have landed** -
+   `SftpClient.moveOnto`, commit `86c7a28`. Look-before-delete (T7 deviation 4) reads a refusal with an
+   occupied target as "the target is in the way". S6's case with a file at the target: rename refused
+   (other filesystem), look says occupied, delete the healthy target, rename refused again,
+   `ServerFailure` passed on with nothing said about the file that is gone. Reproduced against the
+   embedded server with `separateFilesystemAt`: `/other/ledger.csv` was gone after the refused rename.
+   On a server that advertised the POSIX rename extension a refusal is never about occupancy, because
+   that server replaces without being asked - so `SftpSession` gained `renameReplaces`, read from the
+   handshake by the JSch adapter (`getExtension("posix-rename@openssh.com") == "1"`, the same test the
+   library applies before choosing the request) and `false` in the fake, and on such a server the
+   refusal is passed on as given. A seam by the codebase-design skill's test: two adapters answer it
+   differently. On a server without the extension the target is cleared only when it is a file: a
+   directory there is not what replacing a file means, and against the fake, which does not know a
+   directory from a file when deleting, the old sequence deleted the directory and put the file in
+   its place (`..refused by a directory at the target..`). The residual loss on a non-extension server
+   with a file at the target stands (finding 5, seams row).
+3. **A rename's "no such file" was reported against the source when it was about the target** -
+   `SftpClient.moveOnto`, commit `3724927`. T7's promise to T11 - "a missing path reported by `rename`
+   is always the source, never the target" - was true of the connector's own delete and false of the
+   server: it answers `SSH_FX_NO_SUCH_FILE` when the target's directory does not exist, and the
+   transport builds the attempt on `from`. Interleaving for I11: reply lost, retry on a fresh session,
+   `NoSuchFile` naming the source, stat the target, nothing there, report the source gone - while it
+   sat where it always was. Reproduced against the embedded server under both policies
+   (`..names the target as missing..`). Fix: on that answer the source is looked at; still there, and
+   the failure names `to` on `attempt.path`, keeping the server's words in the message. The
+   discrimination T11 reads is now on the class *and* on the path it names (below).
+
+*Medium.*
+
+4. **A call still in flight when the `withSession` block ended kept using a session the pool had
+   re-lent** - `BorrowedSession`, commit `6663d44`. The loan was revoked by a flag read at the start of
+   each call, so a call that had passed the check and was on the wire when the block returned - one
+   the block launched and did not wait for - ran on after `withLease` released the lease: two callers
+   on one channel, I2 broken from outside the pool. Reproduced against the fake on virtual time
+   (`I2_a call still in flight..`): `withSession` returned with the escaped `realpath` still parked
+   inside the transport and `stats().inUse == 0`. Fix: calls are taken one at a time under a mutex and
+   the revocation takes the same lock, so the loan cannot end while a call is in flight and no call can
+   start once it has; `withSession` ends the loan under `NonCancellable`, because a cancelled block is
+   the likeliest to have left a call behind. The wait is bounded by the ladder when the caller is
+   cancelled and by the keepalive floor otherwise - the bound every call already has. Cost: a call made
+   from inside another call's callback (a stat from a listing's entry callback) now waits on the lock
+   instead of corrupting the channel's stream; neither was ever going to work. `close()` and `abort()`
+   are confirmed unreachable through the borrowed session: it implements `SftpSession` only and holds
+   the connection as one, so no cast reaches them.
+5. **After clearing the target, a second refusal said nothing about it** - `SftpClient.moveOnto`,
+   commit `ed63778`, raised by the spec-axis self-review. On a server without the extension the
+   sequence cannot tell an occupied target from a rename the server could never do, so a refusal with a
+   file at the target still clears the file and is refused again; spec 8.2 mandates the sequence. The
+   second `ServerFailure` read as "the source is still where it was" and let a caller take it for
+   "nothing changed". It now says the target was cleared and holds nothing. Proved red against the fake.
+
+*Low, noted, not changed.*
+
+6. **A local I/O failure inside a transfer is `SessionLost`.** JSch wraps an `IOException` from the
+   caller's stream into its status exception with the generic code and the exception as cause, and the
+   mapper reads that shape - correctly for the wire - as the connection breaking. A full local disk
+   under a download poisons a healthy session and retries on a fresh one. Mapper territory; seams row.
+7. **A local failure inside a lease evicts a healthy session.** `upload` opens the local file and
+   `download` the partial inside `withLease`, so a `java.nio` exception there is unclassified and
+   `releaseAfter` poisons. R1 finding 4's price, not a lie; seams row.
+8. **`writeFrom` leaves the caller's stream open.** Documented at the interface, mirrors `readTo`, and
+   `upload` closes its own with `use`. A contract, not a footgun; T7's note about `@TempDir` teardown
+   on Windows is the cost of getting it wrong in a test and stands.
+9. **`literally()` is a name that needs its KDoc** (standards-axis, judgement call). Left.
+
+**Beliefs from the T7 entry, checked against the mechanism.**
+
+- *"A missing path reported by `rename` is always the source, never the target"* - **falsified**
+  (finding 3). True of the connector's delete, false of the server.
+- *"`ServerFailure` means the source is still where it was"* - confirmed on every path, including the
+  landed-then-cancelled orderings: the ladder and every dispatcher switch back replace a landed
+  call's outcome with the `CancellationException`, never with a failure class, so no path reports a
+  landed rename as `ServerFailure`. What `ServerFailure` did not say was whether the *target* is still
+  where it was (finding 5).
+- *"Refusing is the connector's decision; the window is the look"* - confirmed. On `upload` and
+  `rename`, explicit and relative targets alike (JSch resolves both the stat and the request against
+  the same working directory), the window is between the stat's reply and the request's arrival and
+  nothing wider. Through the glob (finding 1) a wildcard target made the look answer for a neighbour,
+  which was a false refusal rather than a bypass. No bypass found.
+- *"The delete inside the replace sequence swallows `NoSuchFile`"* - confirmed, and still the right
+  call: it keeps the connector's own clearing out of the signal T11 reads.
+- *"`REPLACE` is look, delete, rename, with a gap"* - confirmed as the sequence on a server without
+  the extension, and now *only* there. Enumerated at each of the three points: a writer between
+  refusal and look wins and is replaced (that is what `REPLACE` means); a lost reply on the delete
+  retries into either a clear target or the same sequence; a lost reply on the second rename retries
+  into `NoSuchFile` naming the source, which I11 resolves; a cancellation between delete and rename
+  leaves the target empty and the source in place, and the caller is told "cancelled", which R1's row
+  says is the truthful answer. The one lie was finding 5.
+- *"`upload` writes straight to the target; a retry restarts over the top"* - confirmed for `REPLACE`.
+  **Under `REFUSE` the retry is refused by its own success** - seams row, below, for T11. The same is
+  true of `rename` under `REFUSE`, which T7 did not say.
+- *"`mkdir` is idempotent whatever `parents` says"* - confirmed, now against the real server too
+  (`mkdir twice against a real server..`).
+- *"`withSession` revokes the loan when the block returns"* - **falsified as stated** (finding 4); it
+  now ends when the last call on it does, which is the only version that keeps I2.
+- *Every JSch write call goes through `translating` on the bounded dispatcher while holding a pool
+  place* - confirmed by reading every call site: `rename`, `delete`, `mkdir` are `withContext(io) {
+  translating {..} }`, `writeFrom` goes through `transferring`, and every client operation borrows
+  through `withLease` first. `renameReplaces` is a field set at construction, no call.
+
+**Seams.** Four rows added above: `REFUSE` retried after a lost reply refuses itself; the residual
+loss on a non-extension server; the mapper's reading of a local I/O failure; a local failure inside a
+lease. The R1 row "a cancelled `withLease` is not proof the operation did not land" stays, owner T11,
+with its consequence spelled out below. Closed none.
+
+**Spec findings, raised and not applied** (scope was `progress.md`, C9's protocol): spec 6.1's rename
+row should read "on `NoSuchFile` *naming the source* after a retry, stat `to`"; spec 6.1's
+`withSession` sentence "revoked when the block returns" should say the loan ends when the last call on
+it does; spec 8.2's "on failure delete the target then rename again" should say the target is cleared
+only on a server without the extension and only when it is a file, and that on such a server a refusal
+after the clearing leaves the target empty; and spec 5.2 should note that the SSH library reads `*`
+and `?` in a path as a pattern and that the adapter escapes them. `SftpSession.renameReplaces` is a
+transport-interface addition that spec 5.1's list of operations does not name.
+
+**What T11 may rely on for I11 - the discriminator, operation by operation.**
+
+- **`rename(from, to, policy)`**, after any attempt whose outcome was lost (`SessionLost`,
+  `OperationTimeout` from the time limiter, or a `CancellationException` T11 chooses to retry after):
+  - `NoSuchFile` with `attempt.path == from`: the source is not there. Either it never was or an
+    earlier attempt landed. Stat `to`: present with the expected size, the move landed and the call
+    succeeds (I11); absent, the file is at neither place and `NoSuchFile` is the truth.
+  - `NoSuchFile` with `attempt.path == to`: the source is still there and the target's location does
+    not exist. Nothing landed; the failure is deterministic and a fresh session will not change it.
+  - `ServerFailure`: the source is still where it was. If the message says the target was cleared,
+    the target is gone as well (a non-extension server only). Deterministic.
+  - `OverwriteRefused` **on a retry**: the look found something at `to` *before* the request went
+    out, and one of the things it can find is the earlier attempt's own landed file. T11 must not
+    read it as final on a retry: stat `to` and apply I11, or - the cleaner shape - decide the policy
+    once before the first attempt and send every attempt as a replacement.
+  - `PermissionDenied`: source still where it was, nothing landed.
+  - The `CancellationException` case: no information at all, by R1's row. Landed or not are both
+    possible, including for the second rename of the replace sequence. Treat as "reply lost".
+  - The expected size is the source layer's `RemoteFile.size`, as T7 said; `rename` takes none.
+- **`delete(path)`**: `NoSuchFile` after a retry is success. With finding 1 a path is literal, so
+  that answer is about this path and no other.
+- **`upload(local, remote, policy)`**: an attempt that landed and lost its reply leaves a whole file
+  at `remote`; one cut short leaves a partial one. "My upload landed" is `stat(remote).size` equal to
+  the local size - the same size discriminator as I11; there is no digest on the write path and
+  nothing to compare one against without downloading. Under `REPLACE` a retry restarts over the top
+  and needs no discrimination. Under `REFUSE` the retry is refused by its own file (seams row): the
+  look must run once, before the first attempt, and the write is a replacement on every attempt.
+- **`mkdir`**: retry blindly; a directory already there is the outcome.
+- **`withSession`**: no retry, as the spec says; and the loan ends when the last call on it ends, so
+  a block that launched work and did not wait for it delays its own lease's return rather than
+  handing the pool a session that is still in use.
