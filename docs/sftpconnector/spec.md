@@ -734,6 +734,7 @@ transport in the testkit is a genuine second implementation.
 | D22 | The connector computes a digest during staging; the application compares it | The digest is free while bytes stream through; the expected value's origin is application knowledge. Checksum is integrity, not completeness, and cannot replace the readiness check because it needs the download first |
 | D23 | Unmapped JSch errors are `Unknown`, recoverable, poisoned, logged raw and counted | JSch error text is not an API; a wording change must surface as a metric and a log line, never as a silent misclassification or a dead connector |
 | D26 | The middle cancellation tier is the keepalive ladder, not `socketTimeout` | Measured against mwiede 2.28.7 (Sec 5.3): JSch implements `serverAliveInterval` by setting the socket read timeout, so a positive `keepAlive` always overwrites `session.timeout`. A hung server is bounded by `keepAlive x (serverAliveCountMax + 1)` and not at all by `socketTimeout` |
+| D44 | A partition is noticed at `2 x keepAlive` plus tens of milliseconds, never sooner | Two intervals is JSch's give-up from the last byte received; the disconnect, the ladder and the eviction follow it. Ten runs at `keepAlive = 500 ms` landed at 1023-1064 ms. Sec 17.3's bound is asserted with one keepalive of grace (Sec 17.3) |
 | D43 | `close()` is bounded by `drainTimeout + cancelGrace`, cuts all held leases at once, and is uncancellable | The grace is per blocked call, so sequential cuts would cost one grace each; cutting in parallel makes the bound a sum of two knobs, not a product. A close that can be cancelled is a close whose bound is a suggestion. Measured under S9 with a download held mid-stream: about 1 s against `drainTimeout = 1 s`, `cancelGrace = 300 ms` (Sec 11.2) |
 | D41 | Server-answered failures are neither retried inside the call nor counted by the breaker; only wire failures are | An answered request proves the server is reachable and understood it, which is what the breaker measures; and repeating an answered request inside the same call cannot change the answer, while it can move a *new* upstream file over a landed one (T11 found this race under `REPLACE`). `NoSuchFile` from a download would otherwise cost S5 three attempts and let a directory another system writes into open the breaker (Sec 10.2) |
 | D42 | The transfer bulkhead is a kotlinx `Semaphore`, not resilience4j's `Bulkhead` | resilience4j's suspend bulkhead takes its permit inside `withContext(Dispatchers.IO)` and only then enters its try, so a caller cancelled at the switch back leaks the permit for the life of the process - the exact shape R1 found in the transport. Its no-wait variant turns the fifth transfer away instead of queuing it. A semaphore taken before the dispatcher switch has neither problem (Sec 9) |
@@ -864,12 +865,23 @@ counter that moved and the recovery - never the toxic itself.
 
 | ID | Fault | While | Expected |
 |---|---|---|---|
-| P1 | half-open: `timeout` toxic with `timeout=0` (data drops, no FIN), both directions | mid-download | `SessionLost` within `2 x keepAlive`; poisoned; retried on a fresh lease; one `FileSeen`, one file in the temp folder |
+| P1 | half-open: `timeout` toxic with `timeout=0` (data drops, no FIN), both directions | mid-download | `SessionLost` within `2 x keepAlive` plus one keepalive of grace (D44); poisoned; retried on a fresh lease; one `FileSeen`, one file in the temp folder |
 | P2 | `reset_peer` | mid-download | as P1, and faster than the keepalive bound |
 | P3 | `reset_peer` | after a `rename` request is on the wire, before its reply | I11: retry stats the target; success reported once; no phantom `NoSuchFile`; `sftp_retry_total{op=rename}` is 1 |
 | P4 | `proxy.disable()` | pool at 0 idle, a poll starting | `ConnectFailed`; breaker counts; `watch` emits `PollFailed` and continues; first poll after `enable()` is `PollCompleted` |
 | P5 | flapping: `disable`/`enable` every 3 s for 60 s | `watch` running | breaker cycles closed, open, half-open, closed; sessions never exceed `maxSize`; every tick is `PollCompleted`, `PollFailed` or `PollSkipped`; the flow never terminates |
 | P6 | `timeout=0` | during `close()` with a download in flight | I9 holds under a real partition; `.part` gone; `reason=shutdown` counted |
+
+`2 x keepAlive` is JSch's give-up point measured from the last byte received; the connector's
+write-off - disconnect, ladder, eviction - lands a few tens of milliseconds after it and can
+never land before it. Measured under P1 and the stall at `keepAlive = 500 ms`: 1023-1064 ms
+across ten runs (D44). A partition test asserts the bound plus one keepalive of grace and
+records the number.
+
+Docker is present on the development machine after all (T15); T1's finding was stale. The
+skip path has not been exercised anywhere yet: Testcontainers falls back through every client
+strategy and the named pipe is always reachable here, so it must be run once on a machine
+without Docker and the message read.
 
 Not in the matrix on purpose: cooperative cancel under `bandwidth` (proved with the loopback
 proxy's `holdAfter`), `latency` p99 (the soak's job), `slicer` (SSH's own framing makes a
