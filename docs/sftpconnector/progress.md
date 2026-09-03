@@ -145,6 +145,22 @@ real candidate, `SessionRegistry` gets one run - and JMH is not added, because n
 a hot path. A path-traversal defect the planning survey found in T6's download path is fixed as
 a hotfix before T11 rather than left for the review; it is on the seams table until it lands.
 
+### C11: `SizeStable` observes inside one poll, batched (ruling on T10's open question)
+
+T10 built `SizeStable` remembering sizes across polls, because the coordinator's brief steered it
+there, and then found and stated the cost plainly: on the hourly pipeline the shipped default
+makes every file wait for the *second* poll - an hour of latency where `sizeStable(2, 10.seconds)`
+reads as ten seconds. That is the coordinator's error, and the ruling reverses it.
+
+The spec's "inside one poll" stands, done as a **batch**: the poll lists its candidates (bounded
+by `maxFilesPerPoll`, which is what that cap is for), releases the listing's session, stats every
+candidate, waits one `interval`, stats them again, and only then emits. The objection T10 raised
+against inside-one-poll - a hundred files costing a quarter of an hour while holding the
+listing's session - was against the *serial* per-file reading, and batching dissolves it: one
+wait per poll, no session held across it. Spec Sec 7.5 and D36 record it. The across-poll memory,
+its cap and its `synchronized` go. A hotfix session applies this before T11, alongside the
+traversal fix.
+
 ### Open seams - things deferred, and who picks them up
 
 Coordinator-maintained. A ticket that closes one strikes it through in its own entry; a ticket

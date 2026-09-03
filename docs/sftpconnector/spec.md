@@ -409,7 +409,7 @@ and the clock, and `Readiness` is `Ready`, `NotReady(reason)` or `Skip`. Built-i
 
 | Check | Meaning | Caveat |
 |---|---|---|
-| `SizeStable(checks, interval)` | Size unchanged across `checks` stats `interval` apart, inside one poll | A stalled uploader passes |
+| `SizeStable(checks, interval)` | Size unchanged across `checks` stats `interval` apart, inside one poll, **batched**: every candidate is stated, one `interval` elapses, every candidate is stated again (D36) | A stalled uploader passes |
 | `MinAge(duration)` | mtime older than `duration` | A slow appender fails until it stops |
 | `MarkerFile(suffix)` | `<name><suffix>` exists | Requires producer cooperation; the only deterministic check |
 | `RenameClaim` | Rename to a claim name succeeds | Proves nothing on Linux: rename succeeds while a writer holds the file open |
@@ -417,6 +417,13 @@ and the clock, and `Readiness` is `Ready`, `NotReady(reason)` or `Skip`. Built-i
 
 Default: `SizeStable(2, 10.seconds) + MinAge(1.minutes)`. A file that is not ready is counted in
 `PollCompleted.notReady` and reconsidered next tick.
+
+Readiness runs as a phase between the listing and the emitting, over the poll's candidates as a
+batch (bounded by `maxFilesPerPoll`, which is what that cap is for). So a poll costs
+`(checks - 1) x interval` of readiness latency in total, not per file, and the listing's session
+is released before the wait begins. Remembering sizes *across* polls was built first and
+rejected (D36): on the hourly pipeline it made every file wait for the second poll, an hour of
+latency where the default reads as ten seconds.
 
 ### 7.6 Ticker and overlap
 
@@ -684,6 +691,7 @@ transport in the testkit is a genuine second implementation.
 | D22 | The connector computes a digest during staging; the application compares it | The digest is free while bytes stream through; the expected value's origin is application knowledge. Checksum is integrity, not completeness, and cannot replace the readiness check because it needs the download first |
 | D23 | Unmapped JSch errors are `Unknown`, recoverable, poisoned, logged raw and counted | JSch error text is not an API; a wording change must surface as a metric and a log line, never as a silent misclassification or a dead connector |
 | D26 | The middle cancellation tier is the keepalive ladder, not `socketTimeout` | Measured against mwiede 2.28.7 (Sec 5.3): JSch implements `serverAliveInterval` by setting the socket read timeout, so a positive `keepAlive` always overwrites `session.timeout`. A hung server is bounded by `keepAlive x (serverAliveCountMax + 1)` and not at all by `socketTimeout` |
+| D36 | `SizeStable` observes inside one poll, batched: one wait per poll, not per file and not across polls | Across polls, the shipped default is an hour of latency per file on the hourly pipeline - the second tick is the first chance to see a stable size. Serially per file inside one poll, a hundred new files cost a quarter of an hour holding the listing's session. Batched, the poll pays `(checks - 1) x interval` once, with the listing's session already released, and `maxFilesPerPoll` bounds what is held (Sec 7.5) |
 | D34 | Three pressure layers after the scenario table: seeded randomized adversary, Lincheck, soak | The JVM has no `labrpc`; the fake transport's one hook already is one. A scenario table proves the failures someone imagined; a seeded adversary checking every invariant after every op finds the interleaving nobody did, and is replayable by seed. Lincheck is a cheap guard on the two lock-guarded structures. The soak is the only place thread and heap flatness can be measured (Sec 17) |
 | D35 | Performance is measured as degradation and recorded, never asserted; no JMH | Throughput is bounded by one JSch channel per session and the server's session cap, so there is no hot path to benchmark. A latency assertion loose enough not to flake is too loose to catch what it is for; the numbers go in the progress log as observations, the way T6 recorded S11's heap |
 | D32 | The startup probe checks each watched directory with `stat`, not `realpath` alone | Measured (Sec 11.1): `realpath` of a path that leads nowhere, and of one that leads to a file, both succeed and return a canonical name on MINA SSHD and on OpenSSH. It is a string operation and proves nothing about existence. The same is why validation-on-borrow uses `realpath "."` - it proves the session answers, which is all that check wants |
