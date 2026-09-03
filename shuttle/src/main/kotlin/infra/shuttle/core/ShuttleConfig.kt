@@ -100,7 +100,8 @@ data class HttpChannel(
     val body: MappingTable = MappingTable(emptyList()),
 ) : Channel
 
-data class NatsChannel(override val name: String, val url: String?, val credentials: Secret? = null) : Channel
+/** `subject` is what `notify` publishes on; a channel used only as a `subscribe` source states none (rule 2). */
+data class NatsChannel(override val name: String, val url: String?, val credentials: Secret? = null, val subject: String? = null) : Channel
 
 /** Spec 5.3. */
 sealed interface AckAction {

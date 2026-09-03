@@ -20,7 +20,7 @@
         <!-- Container-backed tiers are opt-in: `-DexcludedGroups=none`. A property, not a literal,
              for the reason etl-host/pom.xml gives: a literal in <configuration> beats the user
              property and the documented opt-in would silently run zero tests. -->
-        <excludedGroups>oracle,minio</excludedGroups>
+        <excludedGroups>oracle,minio,nats</excludedGroups>
         <testcontainers.version>1.20.4</testcontainers.version>
     </properties>
 
@@ -101,6 +101,9 @@
              classpath (Quarkus supplies its own bridge); without this the first S3 call dies with
              NoClassDefFoundError: LogFactory. Ticket 14 may swap it for the Quarkus bridge. -->
         <dependency><groupId>commons-logging</groupId><artifactId>commons-logging</artifactId><version>1.2</version><scope>runtime</scope></dependency>
+
+        <!-- G15: the `nats` package only. 2.21.2 is what the local repository holds. -->
+        <dependency><groupId>io.nats</groupId><artifactId>jnats</artifactId><version>2.21.2</version></dependency>
 
         <!-- G9: the `jdbi` package only. The Oracle driver is the host's runtime concern
              (ticket 14); here it is test-scoped for the Testcontainers class. -->

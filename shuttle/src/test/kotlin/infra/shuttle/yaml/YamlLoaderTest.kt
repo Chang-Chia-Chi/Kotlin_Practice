@@ -5,12 +5,14 @@ import infra.shuttle.core.Backoff
 import infra.shuttle.core.DeliveryPolicy
 import infra.shuttle.core.ExtractFrom
 import infra.shuttle.core.HttpChannel
+import infra.shuttle.core.NatsChannel
 import infra.shuttle.core.ProcessorSpec
 import infra.shuttle.core.Report
 import infra.shuttle.core.ResponseSpec
 import infra.shuttle.core.Rules
 import infra.shuttle.core.S3Store
 import infra.shuttle.core.S3Timeouts
+import infra.shuttle.core.Secret
 import infra.shuttle.core.SftpStore
 import infra.shuttle.core.Source
 import infra.shuttle.core.Staging
@@ -108,6 +110,21 @@ class YamlLoaderTest {
         val http = config.channels.single() as HttpChannel
         assertEquals(ResponseSpec((200..299).toSet(), setOf(408, 429) + (500..599), "/requestId"), http.response)
         assertEquals(DeliveryPolicy(maxAttempts = 50, giveUpAfter = 24.hours, backoff = Backoff(5.seconds, 15.minutes)), http.policy)
+    }
+
+    /** G15: `subject` is what the channel publishes on when a route notifies through it. */
+    @Test
+    fun a_nats_channel_reads_its_url_credentials_and_subject() {
+        val config = YamlLoader.load(
+            """
+            shuttle:
+              channels:
+                events:
+                  nats: { url: nats://events.internal:4222, credentials: ${'$'}{NATS_CREDS}, subject: files.stored }
+            """.trimIndent(),
+            mapOf("NATS_CREDS" to "creds"),
+        )
+        assertEquals(NatsChannel("events", "nats://events.internal:4222", Secret.Env("NATS_CREDS"), "files.stored"), config.channels.single())
     }
 
     @TempDir

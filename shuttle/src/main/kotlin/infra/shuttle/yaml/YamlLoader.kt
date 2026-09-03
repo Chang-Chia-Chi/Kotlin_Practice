@@ -94,7 +94,7 @@ object YamlLoader {
         n.obj("channels")?.entries()?.forEach { (name, channel) ->
             channel.one(
                 "http" to { channels { http(name) { read(it) } } },
-                "nats" to { c -> channels { nats(name) { url = c.str("url"); credentials = c.secret("credentials") } } },
+                "nats" to { c -> channels { nats(name) { url = c.str("url"); credentials = c.secret("credentials"); subject = c.str("subject") } } },
             )
         }
         n.obj("routes")?.entries()?.forEach { (name, route) -> route(name) { read(route) } }

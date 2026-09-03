@@ -142,7 +142,8 @@ object Rules {
             }
             route.fetch?.let { reference(name, it.store, "fetch", stores) { true } }
             route.target?.let { reference(name, it.store, "target", stores) { true } }
-            route.notify.forEach { reference(name, it.channel, "notify", channels) { true } }
+            // Rule 2: a nats channel offers the notify role only once it says which subject to publish on.
+            route.notify.forEach { reference(name, it.channel, "notify", channels) { c -> c !is NatsChannel || c.subject != null } }
             if (route.parallelism < 1) fail(7, "route $name: parallelism must be >= 1")
             if (route.maxAttempts < 1) fail(7, "route $name: maxAttempts must be >= 1")
             route.stuckAfter?.let { if (!it.isPositive()) fail(7, "route $name: stuckAfter must be > 0") }
