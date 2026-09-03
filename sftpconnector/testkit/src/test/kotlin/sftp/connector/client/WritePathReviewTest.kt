@@ -178,6 +178,45 @@ class WritePathReviewTest {
             }
         }
 
+    /**
+     * The loan is revoked when the block returns, and the revocation used to be a flag read at the
+     * start of each call. A call that had passed the check and was still on the wire when the block
+     * ended kept using the session after the pool had lent it to somebody else - I2 broken from
+     * outside the pool, by a block that launched work it did not wait for. The loan now ends when
+     * the last call on it does.
+     */
+    @Test
+    fun `a call still in flight when the block ends keeps the session until it finishes`() = runTest {
+        val parked = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val server = FakeSftpTransport(answer = { call ->
+            if (call.operation == Operation.Realpath) {
+                parked.complete(Unit)
+                release.await()
+            }
+        }).directory("/drop")
+        val config = fakeConfig()
+        val pool = SftpPool(server, config)
+        val client = SftpClient(pool, config)
+
+        val block = async {
+            client.withSession {
+                val session = this
+                backgroundScope.launch { session.realpath("/drop") }
+                parked.await()
+            }
+        }
+
+        assertThat(withTimeoutOrNull(10.seconds) { block.await() })
+            .describedAs("withSession returning while a call it launched is still on the wire")
+            .isNull()
+        assertThat(pool.stats().inUse).describedAs("sessions out while the call is in flight").isEqualTo(1)
+
+        release.complete(Unit)
+        block.await()
+        assertThat(pool.stats().inUse).isZero()
+    }
+
     /** T7 proved this against the fake only; a startup that creates its folders runs twice for real. */
     @Test
     fun `mkdir twice against a real server is content the second time`() = runBlocking<Unit> {

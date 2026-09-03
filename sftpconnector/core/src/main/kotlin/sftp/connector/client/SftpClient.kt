@@ -2,10 +2,12 @@ package sftp.connector.client
 
 import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.channels.SendChannel
 import kotlinx.coroutines.channels.trySendBlocking
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.channelFlow
+import kotlinx.coroutines.withContext
 import org.slf4j.LoggerFactory
 import sftp.connector.config.SftpConnectorConfig
 import sftp.connector.error.Attempt
@@ -247,7 +249,9 @@ class SftpClient(
      * because the pool lends the same session out again afterwards and a caller that hung up on it
      * would break the next caller's work rather than its own; and the session it was handed stops
      * working the moment [block] returns, so a reference kept past the block fails loudly here
-     * instead of quietly using a session that now belongs to somebody else.
+     * instead of quietly using a session that now belongs to somebody else. A call the block
+     * launched and did not wait for is let finish first: the session is not given back while
+     * anything is still using it, whatever the block did.
      *
      * Nothing here retries. The connector cannot know which part of a caller's sequence is safe to
      * send twice, so a caller that wants a second go says so itself.
@@ -258,7 +262,9 @@ class SftpClient(
             try {
                 borrowed.block()
             } finally {
-                borrowed.handItBack()
+                // Uncancellable because ending the loan may have to wait for a call still in
+                // flight, and a cancelled block is the likeliest to have left one behind.
+                withContext(NonCancellable) { borrowed.handItBack() }
             }
         }
     }
