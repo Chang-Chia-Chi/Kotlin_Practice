@@ -100,14 +100,19 @@ boundaries are dependency sentences enforced by ArchUnit (D18):
 
 | Package | Holds | May import |
 |---|---|---|
-| `infra.sftpingest.pipeline` | consumer, per-file pipeline, states, `Ledger`, `ObjectStore`, `DeliveryChannel`, `QualityCheck`, relay, config DSL, metrics names | kotlin-stdlib, coroutines, the connector core, micrometer-core, jboss-logging |
+| `infra.sftpingest.pipeline` | consumer, per-file pipeline, states, `IngestEvent`, `Ledger`, `ObjectStore`, `DeliveryChannel`, `QualityCheck`, relay, config DSL, metrics names | kotlin-stdlib, coroutines, micrometer-core, jboss-logging |
+| `infra.sftpingest.sftp` | the binding from the connector's `SftpEvent` flow and `download` to `IngestEvent` and the `Downloader` function | `pipeline`, the connector core |
 | `infra.sftpingest.jdbi` | Oracle ledger | `pipeline`, JDBI |
 | `infra.sftpingest.s3` | AWS SDK object store | `pipeline`, AWS SDK v2 |
 | `infra.sftpingest.http` | HTTP channel | `pipeline`, `java.net.http`, Jackson |
 | `infra.sftpingest.quarkus` | CDI producers, property mapping, readiness, admin resource, shutdown | everything above, Quarkus, the connector's Quarkus adapter |
 
 Rules: nothing in `pipeline` imports an adapter; each adapter imports only `pipeline` and its
-own technology; only `quarkus` imports Quarkus. Every seam in `pipeline` has a second
+own technology; only `quarkus` imports Quarkus; only `sftp` and `quarkus` import the connector.
+The pipeline consumes the source through two small types it owns, a sealed `IngestEvent`
+(`Seen(file, ack, nack)`, `PollCompleted(listed, truncated)`, `PollFailed`, `PollSkipped`,
+`RouteDown(error)`) and a `Downloader` function from a file identity and a staging directory to
+a `LocalFile` with its digest. The `sftp` package maps the connector's events onto them (D20). Every seam in `pipeline` has a second
 implementation in the test tree (in-memory ledger, in-memory object store, recording channel),
 which is what keeps the pipeline suite free of containers and sub-second.
 
@@ -713,6 +718,7 @@ and upload and the vocabulary stops being fixed. Not built until asked (Sec 16, 
 | D17 | The staging directory is emptied at startup; downloads are redone | A staged file from a dead process has no ledger row that vouches for it; files are small |
 | D18 | One module; adapters are packages; ArchUnit sentences | The seams have real second implementations in tests; a second module would buy nothing until a second host exists |
 | D19 | The body is rendered at send time from the transfer row; no payload column | A stored payload freezes a body shape across deployments and duplicates every field already on the row |
+| D20 | The pipeline consumes the connector through `IngestEvent` and a `Downloader` function that it owns; only the `sftp` package imports the connector | The connector is unimplemented while this application is built, so every phase but the binding must compile and test without it; the mapping is a dozen lines and the fake source in the test kit is its second implementation |
 
 ---
 
