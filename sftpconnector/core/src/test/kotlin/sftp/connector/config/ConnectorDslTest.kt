@@ -28,13 +28,14 @@ class ConnectorDslTest {
             }
             auth { password("etl", "s3cret") }
             hostKey = HostKeyPolicy.Strict(KNOWN_HOSTS)
-            pool { cancelGrace = 45.seconds }
+            pool { cancelGrace = 45.seconds; drainTimeout = 2.minutes }
         }
 
         assertThat(config.name).isEqualTo("vendor-drop")
         assertThat(config.endpoint).isEqualTo(Endpoint("sftp.example", 2222, HttpConnectProxy("proxy.internal", 3128)))
         assertThat(config.hostKey).isEqualTo(HostKeyPolicy.Strict(KNOWN_HOSTS))
         assertThat(config.pool.cancelGrace).isEqualTo(45.seconds)
+        assertThat(config.pool.drainTimeout).isEqualTo(2.minutes)
         assertThat(config.pool.connectTimeout).isEqualTo(10.seconds)
         assertThat(config.pool.keepAlive).isEqualTo(30.seconds)
         assertThat(config.pool.maxSize).isEqualTo(5)
@@ -151,6 +152,25 @@ class ConnectorDslTest {
         val defaults = minimalConnector { }.pool
         assertThat(defaults.keepAlive).isLessThan(defaults.idleCutoff)
         assertThat(defaults.idleTimeout).isLessThan(defaults.idleCutoff)
+    }
+
+    /**
+     * Closing waits the drain and then one grace for what it had to cut, so a drain no longer
+     * than the grace promises the sessions a chance it never gives them.
+     */
+    @Test
+    fun `a drain no longer than the grace it is followed by is refused, and the default is`() {
+        assertThatThrownBy { minimalConnector { pool { drainTimeout = 5.seconds; cancelGrace = 5.seconds } } }
+            .isInstanceOf(ConfigurationError::class.java)
+            .hasMessageContaining("drainTimeout 5s must be longer than cancelGrace 5s")
+
+        assertThatThrownBy { minimalConnector { pool { drainTimeout = Duration.ZERO } } }
+            .isInstanceOf(ConfigurationError::class.java)
+            .hasMessageContaining("drainTimeout must be positive")
+
+        val defaults = minimalConnector { }.pool
+        assertThat(defaults.drainTimeout).isEqualTo(30.seconds)
+        assertThat(defaults.drainTimeout).isGreaterThan(defaults.cancelGrace)
     }
 
     @Test

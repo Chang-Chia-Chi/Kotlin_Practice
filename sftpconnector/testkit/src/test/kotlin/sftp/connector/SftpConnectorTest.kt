@@ -1,5 +1,8 @@
 package sftp.connector
 
+import io.micrometer.core.instrument.MeterRegistry
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
@@ -16,7 +19,10 @@ import sftp.connector.config.PollingBuilder
 import sftp.connector.config.SftpConnectorConfig
 import sftp.connector.config.sftpConnector
 import sftp.connector.error.ConfigurationError
+import sftp.connector.error.PoolExhausted
 import sftp.connector.pool.virtualClock
+import sftp.connector.source.Readiness
+import sftp.connector.source.ReadinessCheck
 import sftp.connector.source.SftpEvent
 import sftp.connector.testkit.FakeSftpTransport
 import java.nio.file.Path
@@ -116,13 +122,67 @@ class SftpConnectorTest {
         assertThat(collector.isCancelled).describedAs("the collector was cancelled").isFalse()
     }
 
+    /**
+     * Closing is one call, and it is the whole of what a host's shutdown hook does. A tick caught
+     * mid-handover stops, and every file it had handed over and not yet had an answer for goes
+     * back as cancelled, to be listed again on the next start; the watch ends in its collector as
+     * if the connector had merely stopped, once the consumer is done with what it was holding;
+     * and what comes after - a watch, an operation - is refused rather than left to spin or to
+     * queue for a session that is never coming.
+     */
+    @Test
+    fun `close ends a watch normally, gives every unanswered file back, and refuses what comes after`() = runTest {
+        val transport = FakeSftpTransport().directory("/drop").file("/drop/a.csv", "1").file("/drop/b.csv", "2")
+        val meters = SimpleMeterRegistry()
+        val connector = start(transport, meters) { directories("/drop"); readiness = ReadinessCheck { _, _ -> Readiness.Ready } }
+        val events = mutableListOf<SftpEvent>()
+        val consumerBusy = CompletableDeferred<Unit>()
+        val collector = launch {
+            connector.source.watch("/drop", 1.minutes).collect { events += it; if (it is SftpEvent.FileSeen) consumerBusy.await() }
+        }
+        runCurrent()
+        assertThat(events.filterIsInstance<SftpEvent.FileSeen>()).describedAs("one file with the consumer").hasSize(1)
+        assertThat(meters.get("sftp_inflight").gauge().value()).describedAs("held: one with the consumer, one the tick is waiting to hand over").isEqualTo(2.0)
+
+        connector.close()
+        runCurrent()
+
+        assertThat(meters.get("sftp_inflight").gauge().value()).describedAs("files still held").isZero()
+        assertThat(meters.get("sftp_ack_total").tag("outcome", "cancelled").counter().count()).isEqualTo(2.0)
+        consumerBusy.complete(Unit)
+        runCurrent()
+        assertThat(collector.isCompleted).describedAs("the collector finished").isTrue()
+        assertThat(collector.isCancelled).describedAs("the collector was cancelled").isFalse()
+        assertThat(transport.openSessions).describedAs("sessions left open").isZero()
+        assertThat(connector.pool.stats().total).isZero()
+
+        val watchAfter = runCatching { connector.source.watch("/drop", 1.minutes).collect { } }.exceptionOrNull()
+        assertThat(watchAfter).isInstanceOf(IllegalStateException::class.java).hasMessageContaining("closed")
+        val operationAfter = runCatching { connector.client.exists("/drop") }.exceptionOrNull()
+        assertThat(operationAfter).isInstanceOfSatisfying(PoolExhausted::class.java) { assertThat(it.closing).isTrue() }
+    }
+
+    /** A refused start-up gives back the session its checks borrowed, so a host that starts connectors on demand does not leak one per refusal. */
+    @Test
+    fun `a start-up that was refused leaves no session open`() = runTest {
+        val transport = FakeSftpTransport()
+
+        val refusal = runCatching { start(transport) { directories("/drop") } }.exceptionOrNull()
+
+        assertThat(refusal).isInstanceOf(ConfigurationError::class.java)
+        assertThat(transport.calls.map { it.operation }).contains(FakeSftpTransport.Operation.Connect)
+        assertThat(transport.openSessions).describedAs("sessions the refused start-up left open").isZero()
+    }
+
     private suspend fun TestScope.start(
         transport: FakeSftpTransport,
+        meters: MeterRegistry = SimpleMeterRegistry(),
         polling: PollingBuilder.() -> Unit,
     ): SftpConnector =
         SftpConnector.start(
             configFor(polling),
             transport,
+            meters,
             clock = virtualClock(),
             background = StandardTestDispatcher(testScheduler),
         )

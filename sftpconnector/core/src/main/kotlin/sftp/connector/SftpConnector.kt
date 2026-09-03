@@ -6,9 +6,12 @@ import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.slf4j.LoggerFactory
 import sftp.connector.client.SftpClient
 import sftp.connector.config.SftpConnectorConfig
@@ -30,7 +33,8 @@ import kotlin.coroutines.CoroutineContext
  * constructor would be a pool nothing could stop.
  *
  * Starting one is configuration in, a running thing out, and it either returns something usable or
- * it refuses. The refusing is most of the point: see [StartupProbe].
+ * it refuses. The refusing is most of the point: see [StartupProbe]. Stopping one is [close], and
+ * that is the only call a host's shutdown hook needs to make.
  */
 class SftpConnector private constructor(
 
@@ -44,6 +48,7 @@ class SftpConnector private constructor(
     val source: SftpSource,
 
     private val scope: CoroutineScope,
+    private val name: String,
 ) {
 
     /**
@@ -52,12 +57,34 @@ class SftpConnector private constructor(
      * watch a consumer is collecting.
      *
      * Cancelling it stops all of that - each watch then ends normally in its collector, with the
-     * files its running tick had handed over given back - and it is where a graceful shutdown
-     * ends, but it is not that shutdown. Nothing is drained, no caller is waited for and no
-     * session is hung up on by cancelling this; the sessions the pool holds are closed by the
-     * phased close that does not exist yet.
+     * files its running tick had handed over given back - and it is the first thing [close] does,
+     * but it is not that shutdown. Nothing is drained, no caller is waited for and no session is
+     * hung up on by cancelling this.
      */
     val backgroundWork: Job get() = scope.coroutineContext.job
+
+    /**
+     * Stops the connector: no new tick, no new watch, no new lease; the sessions out on lease
+     * are given the drain timeout to come back on their own and cut apart after it; and every
+     * session the pool holds is hung up on. Returns within the drain timeout plus one cancel
+     * grace, and leaves no partial file behind: a download cut mid-transfer removes its own.
+     *
+     * The watchers go first. A running tick stops, and every file it had handed over and not yet
+     * had an answer for is given back as if nacked with redelivery - the next start lists it
+     * again. A consumer in the middle of acking is not stopped, because it is not the
+     * connector's coroutine: its ack lands if it reaches the pool before the pool stops lending,
+     * and is refused at once otherwise, in which case the file is still where it was. The
+     * housekeeper goes with the watchers; a closing pool refuses it rounds, so there is nothing
+     * for it to outlive the drain for.
+     *
+     * Calling it twice is harmless: the second finds nothing running and nothing lent.
+     */
+    suspend fun close() {
+        LOG.info("Connector \"{}\" is closing.", name)
+        scope.cancel()
+        pool.close()
+        LOG.info("Connector \"{}\" is closed.", name)
+    }
 
     companion object {
 
@@ -97,7 +124,18 @@ class SftpConnector private constructor(
             val scope = CoroutineScope(background + SupervisorJob() + CoroutineName("sftp-${config.name}"))
             val source = SftpSource(client, config, meterRegistry, clock, scope)
 
-            StartupProbe(client, config).run()
+            try {
+                StartupProbe(client, config).run()
+            } catch (refused: Throwable) {
+                // A start-up that refuses gives back what its checks borrowed. In a process that
+                // then exits it would not matter; in a host that starts connectors on demand it
+                // is a socket and a reader thread per refusal.
+                withContext(NonCancellable) {
+                    scope.cancel()
+                    pool.close()
+                }
+                throw refused
+            }
 
             scope.launch { pool.housekeep() }
             LOG.info(
@@ -107,7 +145,7 @@ class SftpConnector private constructor(
                 config.polling.directories.size,
                 if (config.polling.directories.size == 1) "directory" else "directories",
             )
-            return SftpConnector(client, pool, source, scope)
+            return SftpConnector(client, pool, source, scope, config.name)
         }
 
         private val LOG = LoggerFactory.getLogger(SftpConnector::class.java)

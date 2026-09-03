@@ -108,6 +108,7 @@ class SftpConnectorBuilder internal constructor(private val name: String) {
             "connectTimeout" to pool.connectTimeout,
             "keepAlive" to pool.keepAlive,
             "cancelGrace" to pool.cancelGrace,
+            "drainTimeout" to pool.drainTimeout,
             "idleTimeout" to pool.idleTimeout,
             "idleCutoff" to pool.idleCutoff,
             "maxLifetime" to pool.maxLifetime,
@@ -125,6 +126,13 @@ class SftpConnectorBuilder internal constructor(private val name: String) {
         if (pool.maxLifetimeJitter !in 0.0..1.0) {
             faults += "pool maxLifetimeJitter ${pool.maxLifetimeJitter} is outside 0.0..1.0, so a session's " +
                 "lifetime would be shorter than maxLifetime or more than twice it"
+        }
+        // Closing waits the drain and then one grace for what it had to cut, so a drain shorter
+        // than the grace is a shutdown that gives up on its sessions before it has given them the
+        // chance it promised.
+        if (pool.drainTimeout <= pool.cancelGrace) {
+            faults += "pool drainTimeout ${pool.drainTimeout} must be longer than cancelGrace ${pool.cancelGrace}, " +
+                "since a closing connector waits the drain first and gives the sessions it had to cut one grace after it"
         }
         if (pool.minIdle < 0) faults += "pool minIdle ${pool.minIdle} is not a number of sessions"
         if (pool.minIdle > pool.maxSize) {
@@ -250,6 +258,7 @@ class SftpConnectorBuilder internal constructor(private val name: String) {
                 connectTimeout = pool.connectTimeout,
                 keepAlive = pool.keepAlive,
                 cancelGrace = pool.cancelGrace,
+                drainTimeout = pool.drainTimeout,
                 idleTimeout = pool.idleTimeout,
                 idleCutoff = pool.idleCutoff,
                 maxLifetime = pool.maxLifetime,
@@ -338,6 +347,7 @@ class PoolBuilder internal constructor() {
     var connectTimeout: Duration = 10.seconds
     var keepAlive: Duration = 30.seconds
     var cancelGrace: Duration = 5.seconds
+    var drainTimeout: Duration = 30.seconds
     var idleTimeout: Duration = 4.minutes
     var idleCutoff: Duration = 5.minutes
     var maxLifetime: Duration = 30.minutes

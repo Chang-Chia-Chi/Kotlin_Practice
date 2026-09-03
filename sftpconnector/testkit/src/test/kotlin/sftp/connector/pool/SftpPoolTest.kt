@@ -20,7 +20,7 @@ import sftp.connector.error.ServerFailure
 import sftp.connector.error.SessionLost
 import sftp.connector.testkit.FakeSftpTransport
 import sftp.connector.testkit.FakeSftpTransport.Operation
-import sftp.connector.transport.SftpConnection
+import sftp.connector.transport.SftpSession
 import java.nio.file.Path
 import kotlin.time.Duration.Companion.seconds
 
@@ -166,7 +166,7 @@ class SftpPoolTest {
     fun `I2_an entry is handed to at most one lease at a time`() = runTest {
         val transport = FakeSftpTransport()
         val pool = SftpPool(transport, config(maxSize = MAX_SIZE))
-        val lentOut = mutableSetOf<SftpConnection>()
+        val lentOut = mutableSetOf<SftpSession>()
 
         val callers = (1..12).map {
             launch {

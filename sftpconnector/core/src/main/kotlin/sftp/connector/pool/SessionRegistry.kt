@@ -48,6 +48,23 @@ internal class SessionRegistry(
 
     private var sessionsCreated = 0L
 
+    /**
+     * Set once, when the pool starts closing, and never cleared. Read without the lock on the way
+     * into an acquire, so a caller learns at the door that nothing is coming; the answer that
+     * counts is the one [checkOut] gives under the lock, which is the same instant the drain
+     * counts what is out.
+     */
+    @Volatile
+    var closing: Boolean = false
+        private set
+
+    /**
+     * Sessions retired and not yet hung up on. They have left [entries], and the drain has to
+     * know about them all the same: a shutdown that returned while one was still being closed
+     * would leave an entry that ends `Closed` a moment after "every entry ends Closed" was said.
+     */
+    private var retiring = 0
+
     @Volatile
     private var published = PoolStats(idle = 0, inUse = 0, connecting = 0)
 
@@ -72,8 +89,13 @@ internal class SessionRegistry(
      * nothing on this network says when a tunnel is dropped and a session that looks open can
      * turn out not to be. [borrower] is where the claim was made, kept in case the caller never
      * gives the session back.
+     *
+     * Null once the pool is closing: nothing is lent from then on, and the refusal is decided
+     * under the same lock the drain counts under, so an entry cannot appear that the drain has
+     * not seen.
      */
-    suspend fun checkOut(borrower: Throwable): Checkout = mutex.withLock {
+    suspend fun checkOut(borrower: Throwable): Checkout? = mutex.withLock {
+        if (closing) return null
         val now = clock.millis()
         val warm = idle.removeLastOrNull()
         val checkout = if (warm == null) {
@@ -95,16 +117,24 @@ internal class SessionRegistry(
         checkout
     }
 
-    /** The session opened. */
-    suspend fun filled(entry: PoolEntry, connection: SftpConnection) = mutex.withLock {
+    /**
+     * The session opened. Null when the pool took it. Otherwise the pool has already written
+     * [entry] off - a shutdown that ran out of patience while the dial was still in progress -
+     * and what comes back is the session to hang up on, retired for that reason. Not through
+     * [retire], because the entry was retired once already and the count of sessions still
+     * being hung up on has had it.
+     */
+    suspend fun filled(entry: PoolEntry, connection: SftpConnection): Retired? = mutex.withLock {
+        if (entry !in entries) return Retired(entry, connection, Retirement.SHUTDOWN)
         entry.connection = connection
         entry.moveTo(EntryState.InUse)
         recount()
+        null
     }
 
-    /** The session answered, so it is sound and the caller may have it. */
+    /** The session answered, so it is sound and the caller may have it - unless the pool has retired it in the meantime. */
     suspend fun proved(entry: PoolEntry) = mutex.withLock {
-        entry.moveTo(EntryState.InUse)
+        if (entry in entries) entry.moveTo(EntryState.InUse)
         recount()
     }
 
@@ -119,10 +149,19 @@ internal class SessionRegistry(
      * Returns the session to hang up on, or null when it went back on the shelf. Returning it
      * rather than closing it is how the one piece of I/O a handback can imply gets carried out of
      * the lock.
+     *
+     * While the pool is closing nothing goes back on the shelf, whatever the caller had to say:
+     * the connector is not keeping anything, and that is the reason the session leaves with.
      */
     suspend fun handBack(entry: PoolEntry, failed: Retirement?): Retired? = mutex.withLock {
+        // Already retired by somebody else, which only a shutdown does to an entry a caller still
+        // holds. There is nothing left to decide and nothing to hang up on.
+        if (entry !in entries) return null
         val now = clock.millis()
-        val reason = failed ?: Retirement.LIFETIME.takeIf { now >= entry.expiresAt }
+        val reason = when {
+            closing -> Retirement.SHUTDOWN
+            else -> failed ?: Retirement.LIFETIME.takeIf { now >= entry.expiresAt }
+        }
         val outcome = if (reason == null) {
             entry.moveTo(EntryState.Idle)
             entry.idleSince = now
@@ -136,10 +175,48 @@ internal class SessionRegistry(
         outcome
     }
 
-    /** The connection is closed and the entry is finished. */
+    /** The connection is closed and the entry is finished. Said twice of one entry, the second is nothing. */
     suspend fun closed(entry: PoolEntry) = mutex.withLock {
-        entry.moveTo(EntryState.Closed)
+        if (entry.state.value != EntryState.Closed) {
+            retiring--
+            entry.moveTo(EntryState.Closed)
+        }
         recount()
+    }
+
+    /**
+     * From here on nothing is lent, nothing handed back is kept, and no housekeeping round is
+     * decided. What is out stays out until its holder brings it back or the pool cuts it.
+     */
+    suspend fun beginClosing() = mutex.withLock {
+        closing = true
+        recount()
+    }
+
+    /**
+     * Whether the drain has nothing left to wait for: every entry is on the shelf, and every
+     * retired session has been hung up on.
+     */
+    suspend fun isQuiet(): Boolean = mutex.withLock {
+        retiring == 0 && entries.all { it.state.value == EntryState.Idle }
+    }
+
+    /** The entries some caller is holding right now, which are the ones a drain can only end by cutting. */
+    suspend fun held(): List<PoolEntry> = mutex.withLock {
+        entries.filter { it.state.value in HOLDABLE }
+    }
+
+    /**
+     * Retires everything at once, whoever holds it. The sessions on the shelf are handed back
+     * to be hung up on; an entry still out is written off here and hung up on by the caller,
+     * and its holder finds, when it finally hands the entry back, that there is nothing left to
+     * decide. An entry whose dial has not landed has no session yet; the dial learns from
+     * [filled] that nobody wants what it opened.
+     */
+    suspend fun closeEverything(): List<Retired> = mutex.withLock {
+        val retired = entries.toList().map { retire(it, Retirement.SHUTDOWN) }
+        recount()
+        retired
     }
 
     /**
@@ -161,6 +238,9 @@ internal class SessionRegistry(
      * impossible to write rather than merely unwise.
      */
     suspend fun sweep(takeRoom: () -> Boolean): Housekeeping = mutex.withLock {
+        // A closing pool is not kept in shape: nothing is retired that the drain is not already
+        // waiting for, and nothing is opened for a shelf that is about to be cleared.
+        if (closing) return Housekeeping(emptyList(), emptyList(), emptyList())
         val now = clock.millis()
         val retired = mutableListOf<Retired>()
         var spares = idle.size
@@ -225,6 +305,7 @@ internal class SessionRegistry(
     private fun retire(entry: PoolEntry, reason: Retirement): Retired {
         entry.moveTo(EntryState.Evicting)
         entries -= entry
+        retiring++
         idle.remove(entry)
         entry.borrower = null
         val connection = entry.connection

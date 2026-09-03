@@ -14,6 +14,7 @@ import kotlinx.coroutines.channels.produce
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.FlowCollector
 import kotlinx.coroutines.flow.catch
@@ -131,14 +132,16 @@ class SftpSource(
      *
      * @throws IllegalArgumentException when [directory] is not one the configuration names.
      * @throws IllegalStateException on collection, when another collector is already watching
-     *   [directory] on this connector: one consumer per directory is what keeps a file from being
-     *   handed over twice.
+     *   [directory] on this connector - one consumer per directory is what keeps a file from being
+     *   handed over twice - or when the connector has stopped, since a ticker started in a scope
+     *   that has been cancelled would end at once and a consumer looping on `watch` would spin.
      */
     @OptIn(ExperimentalCoroutinesApi::class)
     fun watch(directory: String, every: Duration): Flow<SftpEvent> {
         requireConfigured(directory)
         require(every.isPositive()) { "a watch of $directory needs a positive interval, not $every" }
         return flow {
+            check(background.isActive) { "the connector has been closed, so $directory cannot be watched on it" }
             check(watching.add(directory)) {
                 "$directory is already being watched on this connector; one consumer per directory " +
                     "is what keeps a file from being handed over twice"

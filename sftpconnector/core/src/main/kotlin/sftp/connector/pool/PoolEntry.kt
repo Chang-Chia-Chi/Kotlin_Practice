@@ -137,8 +137,14 @@ class PoolEntry internal constructor(
         leakReported = false
     }
 
+    /**
+     * [EntryState.Closed] is where an entry's life ends, and nothing moves it on from there. A
+     * shutdown writes off an entry whose holder has not come back, and that holder may still be
+     * on its way to handing it back or to reporting that its dial landed; whatever it reports, the
+     * entry stays finished.
+     */
     internal fun moveTo(next: EntryState) {
-        mutableState.value = next
+        if (mutableState.value != EntryState.Closed) mutableState.value = next
     }
 
     override fun toString(): String = "session #$id (${mutableState.value})"

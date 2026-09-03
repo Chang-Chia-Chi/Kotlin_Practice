@@ -221,7 +221,18 @@ class PoolExhausted(
     val waited: Duration = Duration.ZERO,
     /** How often room came free while this caller queued. Zero means nothing moved at all. */
     val roomFreedWhileWaiting: Long = 0,
-) : SftpException(attempt.describe(explainExhaustion(stats, waited, roomFreedWhileWaiting)), null) {
+    /**
+     * The pool was not full but closing: the connector is shutting down and lends nothing more.
+     * Raised at once rather than after the wait, because no session is ever coming.
+     */
+    val closing: Boolean = false,
+) : SftpException(
+    attempt.describe(
+        if (closing) "the connector is closing and lends no session, so this was not started"
+        else explainExhaustion(stats, waited, roomFreedWhileWaiting),
+    ),
+    null,
+) {
     override val disposition: Disposition get() = Disposition.FAIL_THE_ATTEMPT
 }
 

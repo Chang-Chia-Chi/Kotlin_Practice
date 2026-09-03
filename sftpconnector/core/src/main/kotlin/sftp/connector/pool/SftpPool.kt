@@ -4,8 +4,10 @@ import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.withContext
@@ -18,12 +20,14 @@ import sftp.connector.error.LeaseFate
 import sftp.connector.error.PoolExhausted
 import sftp.connector.error.SftpException
 import sftp.connector.transport.SftpConnection
+import sftp.connector.transport.SftpSession
 import sftp.connector.transport.SftpTransport
 import java.time.Clock
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.coroutines.coroutineContext
+import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
 
 /**
@@ -112,15 +116,19 @@ class SftpPool(
      * released by something other than the code that took it. Everyone else wants [withLease].
      *
      * @throws PoolExhausted when the wait runs out, carrying what the pool looked like at that
-     *   moment and what that means.
+     *   moment and what that means - or at once, with `closing` set, when the pool is closing
+     *   and no session is ever coming.
      */
     suspend fun acquire(): Lease {
+        // The door is not even queued at while the pool is closing. The wait would end the
+        // same way once room came free, only later, and a shutdown is waiting on that room.
+        if (registry.closing) throw refusedWhileClosing()
         admit()
         val borrower = Throwable("this is where the session was taken, not a failure")
         var claimed: PoolEntry? = null
         try {
             while (true) {
-                val checkout = registry.checkOut(borrower)
+                val checkout = registry.checkOut(borrower) ?: throw refusedWhileClosing()
                 claimed = checkout.entry
                 when (checkout) {
                     is Checkout.Dial -> dial(checkout.entry)
@@ -137,8 +145,11 @@ class SftpPool(
                 }
                 // A caller that has already been cancelled will not release what it is handed, so
                 // it is turned away here instead - while the pool can still put the session back
-                // itself.
+                // itself. So is a caller whose pool started closing while its session was being
+                // opened or proved: the drain has counted the entry, and the session goes the way
+                // of everything else the pool holds rather than out to a caller.
                 coroutineContext.ensureActive()
+                if (registry.closing) throw refusedWhileClosing()
                 return Lease(
                     this,
                     checkout.entry,
@@ -167,8 +178,18 @@ class SftpPool(
     private suspend fun dial(entry: PoolEntry) {
         val opened = transport.connect()
         meters.sessionOpened()
-        withContext(NonCancellable) { registry.filled(entry, opened) }
+        withContext(NonCancellable) {
+            // A pool that has written the entry off in the meantime - a shutdown that ran out of
+            // patience before the handshake finished - wants nothing opened for it, and this is
+            // the only place that knows the session exists.
+            registry.filled(entry, opened)?.let { finish(it) }
+        }
     }
+
+    private suspend fun refusedWhileClosing() = PoolExhausted(attempt = queuedAttempt(), stats = stats(), closing = true)
+
+    /** The operation that was queued, when the caller said which; the pool's own name for what it was doing otherwise. */
+    private suspend fun queuedAttempt(): Attempt = coroutineContext[CurrentAttempt]?.attempt ?: Attempt(endpoint, "acquire")
 
     /**
      * Asks a parked session whether it is still there, and replaces it when it is not.
@@ -228,10 +249,8 @@ class SftpPool(
                     meters.turnedAway()
                     // Read while this caller still counts among the waiters: the statistics
                     // describe the pool as the refused caller found it, itself included.
-                    // The operation that was queued, when the caller said which; the pool's
-                    // own name for what it was doing otherwise.
                     throw PoolExhausted(
-                        attempt = coroutineContext[CurrentAttempt]?.attempt ?: Attempt(endpoint, "acquire"),
+                        attempt = queuedAttempt(),
                         stats = stats(),
                         waited = acquireTimeout,
                         roomFreedWhileWaiting = roomFreed.get() - freedBefore,
@@ -254,6 +273,57 @@ class SftpPool(
     private fun freeRoom() {
         roomFreed.incrementAndGet()
         capacity.release()
+    }
+
+    /**
+     * Stops lending, lets what is out come back, cuts what does not, and hangs up on everything.
+     *
+     * Returns within the drain timeout plus one cancel grace, whatever the sessions are doing,
+     * and leaves every entry closed. Acquire fails at once from the first instant; a session
+     * handed back from then on is retired as `shutdown` rather than shelved. The drain is the
+     * time a caller mid-operation is given to finish on its own. What is still out after it is
+     * cut apart - all of it at once, since a cut is a socket close that does not wait for
+     * anything - and given one grace to hand its session back the way a cut call does, through
+     * the failure the cut raises. What has not come back even then is written off: its session
+     * was destroyed by the cut, and its holder finds nothing left to decide when it finally
+     * hands the entry back.
+     *
+     * The cut comes before the orderly hang-ups, and not only for the sake of the bound: the
+     * hang-ups run on the transport's IO dispatcher, which is exactly as wide as this pool, and a
+     * pool whose every session is blocked is a dispatcher with no thread free to hang up on
+     * anything. Cutting frees those threads first. The hang-ups then run side by side, so a
+     * peer that makes one of them slow is paid for once rather than once per session.
+     *
+     * The call cannot be cancelled, and does not need to be: it is bounded already, and a pool
+     * left half-closed is sockets and threads for the life of the process. A caller that has
+     * been cancelled by the time it calls this still closes everything.
+     */
+    suspend fun close(): Unit = withContext(NonCancellable) {
+        registry.beginClosing()
+        if (!settled(within = settings.drainTimeout)) {
+            cutEverythingHeld()
+            settled(within = settings.cancelGrace)
+        }
+        val retired = registry.closeEverything()
+        coroutineScope { retired.forEach { launch { finish(it) } } }
+        LOG.info("The pool to {} is closed.", endpoint)
+    }
+
+    /** Waits, up to [within], for every session to be back on the shelf and every retired one hung up on. */
+    private suspend fun settled(within: Duration): Boolean = withTimeoutOrNull(within) {
+        while (!registry.isQuiet()) delay(SETTLE_POLL)
+    } != null
+
+    private suspend fun cutEverythingHeld() {
+        val held = registry.held()
+        if (held.isEmpty()) return
+        LOG.warn(
+            "{} still out when the pool to {} had to close; each is being cut apart to get its thread back, " +
+                "and its operation will fail with a lost session.",
+            held.size,
+            endpoint,
+        )
+        held.forEach { it.cutLoose() }
     }
 
     /**
@@ -385,6 +455,13 @@ class SftpPool(
 
     private companion object {
         private val LOG = LoggerFactory.getLogger(SftpPool::class.java)
+
+        /**
+         * How often a closing pool looks whether everything is back. A look is one uncontended
+         * lock; nothing is signalled from under the registry's lock instead, so that nothing can
+         * ever be resumed while it is held.
+         */
+        private val SETTLE_POLL = 20.milliseconds
     }
 }
 
@@ -399,7 +476,11 @@ class SftpPool(
 class Lease internal constructor(
     private val pool: SftpPool,
     internal val entry: PoolEntry,
-    val connection: SftpConnection,
+    /**
+     * The operations, and nothing about the session's life: ending it - orderly or by force - is
+     * the pool's alone, whether the session is on the shelf or out on this lease.
+     */
+    val connection: SftpSession,
 ) {
 
     private val handedBack = AtomicBoolean(false)

@@ -96,6 +96,14 @@ data class PoolConfig(
      * something that otherwise has none.
      */
     val cancelGrace: Duration,
+    /**
+     * How long a closing connector waits for the sessions that are out on lease to come back on
+     * their own before it cuts them apart. Closing is bounded by this plus one [cancelGrace] -
+     * the grace is what the cut calls are given to hand their sessions back - so this must be
+     * the longer of the two. At the file sizes in scope a transfer is not worth an unbounded
+     * shutdown; one that outlasts the drain is cut and its partial file removed.
+     */
+    val drainTimeout: Duration,
     /** How long a session may sit unused before the pool hangs up on it, down to [minIdle]. */
     val idleTimeout: Duration,
     /**

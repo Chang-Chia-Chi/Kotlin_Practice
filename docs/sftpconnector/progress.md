@@ -202,26 +202,26 @@ because each was correctly deferred by the ticket that found it.
 | Seam | Left by | Owner | What happens if it is forgotten |
 |---|---|---|---|
 | ~~`SftpPool.housekeep()` has no production caller~~ | T5 | ~~T9~~ | **Closed by T9.** `SftpConnector.start` launches it into the connector's own scope, after the start-up checks have passed so a refused start-up leaves nothing dialling. T13 stops it by cancelling `SftpConnector.backgroundWork` |
-| A start-up the probe refuses leaves its sessions open and its dispatcher running | T9 | T13 | The pool has no `close()`, so the session the checks borrowed and `JschTransport`'s bounded dispatcher outlive a refused start. In production the process does not start and the JVM takes them; in a long-lived host that starts connectors on demand it is a leak per refusal. T13's `close()` is the repair, and `start` needs to call it on its own failure path once it exists |
+| ~~A start-up the probe refuses leaves its sessions open and its dispatcher running~~ | T9 | ~~T13~~ | **Closed by T13.** `start` cancels its scope and closes the pool before rethrowing what the probe refused; `SftpConnectorTest.a start-up that was refused leaves no session open`. The dispatcher was never a leak: `Dispatchers.IO.limitedParallelism` is a view over the shared IO pool and holds no thread of its own, so there is nothing to close |
 | ~~`PostAction.Delete` and `PostAction.Move.overwrite` have no consumer~~ | T9 | ~~T10~~ | **Closed by T10.** `SftpSource.FileHandling.perform` is the exhaustive `when`: an ack or nack moves with the configured overwrite policy, deletes, or leaves the file alone |
 | ~~`NoSuchFile` from `download` is turned into `FileGone` *outside* the client~~ | T10 | ~~T11~~ | **Closed by T11.** A missing path is never retried inside a call and never counted against the breaker, for every operation: it is the server's answer about the path, and each operation has already said what it means to it by the time the retry sees it (T11 deviations 2 and 3) |
 | `SizeStable` observes across polls, not inside one, so the shipped default is ready on the *second* poll | T10 | The maintainer; spec 7.5 is tier 2 | On the hourly pipeline the default readiness adds an hour of latency per file where the spec's in-poll wording adds ten seconds. Recorded in T10 deviation 1 with both costs; needs a ruling, not a workaround |
 | `FileGone` is an event of the live poll only | T10 | Whoever builds a consumer helper that downloads concurrently | A consumer that downloads inside its collect block sees `FileGone` follow `FileSeen`; one that downloads after the poll has ended gets only `download()`'s null. T12's `consume` is inline and unaffected |
 | Readiness constructor faults are not aggregated with the builder's | T10 | Whoever next touches DSL validation | `sizeStable(checks = 0, ...)` raises `ConfigurationError` at the moment the polling block runs, before `build()` collects the rest, so an operator with two faults hears about one at a time |
 | ~~`socketTimeout` is dead configuration~~ | T2 measurement, spec D26 | ~~T8~~ | **Closed by T8, which removed it.** The bound on a hung server is `keepAlive x 2`, the adapter pins `serverAliveCountMax = 1` rather than inheriting it, and `keepAlive`'s own documentation names the bound. Spec 5.2, 5.3, 12 and S2 are reconciled, and D31 records why removing beat repurposing |
-| `Lease.connection` hands a direct `withLease` caller a full `SftpConnection`, so it can call `abort()` | T8 | The ticket that first has cause to close it | T7 ruled `abort()` is the pool's alone. `withSession` enforces that through `BorrowedSession`; a direct `withLease` caller is only asked, not stopped |
+| ~~`Lease.connection` hands a direct `withLease` caller a full `SftpConnection`, so it can call `abort()`~~ | T8 | ~~The ticket that first has cause to close it~~ | **Closed by T13.** `Lease.connection` is an `SftpSession`; neither `close()` nor `abort()` is reachable from a lease. T3's `I2_` test names the type once and was narrowed with it, as R1 anticipated |
 | A session cut loose by the ladder counts as `reason=poisoned` | T8 | Whoever revisits the five fixed labels with the maintainer | A dashboard cannot tell "the server poisoned it" from "we cut it to rescue a thread". Spec 13 fixes five labels and the ground rules forbid a sixth, so the WARN line is the only place that distinction lives |
 | ~~Path traversal in `SftpClient.download`'s default target~~ | found during planning, T6 code | ~~Hotfix, before T11~~ | **Closed by the hotfix before T11.** `download` with no explicit target now refuses, with `UnsafeFileName` (`ACCEPT_THE_REFUSAL`), any listed name whose join to the staging directory does not normalise back inside it under exactly that name, or that holds a backslash; the red run wrote `evil.csv` two directories above a temp dir on Windows before the guard went in |
 | `HostKeyPolicy.Fingerprint(sha256)` unimplemented | T1 | The first ticket needing fingerprint pinning | Two of spec 5.2's three policies ship. Kotlin's exhaustive `when` names every site when it is added, so this cannot rot silently |
 | `sftp_pool_leak_total` registers on first use | T5 | The ticket that next revisits T4's exact-meters assertion | No series on a dashboard until the first leak, so an alert must treat absent as zero |
 | ~~`Attempt.number` is always 1; the pool names its own operation `acquire`~~ | T2, T4 | ~~T11~~ | **Closed by T11.** The retry loop puts the try in the coroutine context (`CurrentAttempt`); the transport and the fake number every failure by it through `Attempt.inside`, and `PoolExhausted` carries the queued caller's operation and path |
-| `Retirement.SHUTDOWN` has no producer | T5 | T13 | `sftp_pool_evicted_total{reason=shutdown}` never appears |
+| ~~`Retirement.SHUTDOWN` has no producer~~ | T5 | ~~T13~~ | **Closed by T13.** Every session that leaves a closing pool leaves as `shutdown` - handed back healthy, handed back poisoned, cut, parked, or landed from a dial nobody was left to receive - because the registry decides the reason under its lock and reads its own closing state first |
 | ~~`OperationTimeout` has no producer~~ | T2 | ~~T11's time limiter~~ | **Closed by T11.** The time limiter raises it, after asking the coroutine whether the timeout was its own or an outer cancellation |
 | `MutableStateFlow.value` can resume an undispatched collector under the registry lock | flagged by the maintainer | Any ticket that collects `PoolEntry.state`/`Lease.state` | Foreign code runs inside a critical section. Still theoretical: T5 confirmed nothing collects either, both read `state.value` |
 | ~~A download whose byte count does not match the listed size raises `SessionLost`, which poisons~~ | T6 | ~~The maintainer~~ | **Closed by C7 and applied by T7.** The class is `IncompleteTransfer`, recoverable and poisoning, spec D28 |
 | ~~A refusal the connector decides itself - `Overwrite.REFUSE` over an occupied path - is raised as `ServerFailure`, which spec 10.2 retries and counts against the breaker~~ | T7 | ~~The maintainer~~ | **Closed by C8 and applied by T8.** The class is `OverwriteRefused`, top-level beside `PoolExhausted` and `CircuitOpen`, spec D30. It needed a seventh `Disposition`, `ACCEPT_THE_REFUSAL`: no retry, breaker untouched, watch continues, and the lease *returned* rather than `NONE_HELD`, which would have claimed there was no session when there was one. T11 can start |
 | `writeFrom` and the `SftpSession`/`SftpConnection` split are in the code and not in spec 5.1 or 6.1 | T7 | The maintainer; T7's scope boundary allowed `progress.md` but not `spec.md` | Spec 5.1 still names `openWrite` and spec 6.1 still declares `withSession(block: suspend Connection.() -> T)`. A later ticket reading the spec builds against names that are not there. Spec 5.1 already carries the `readTo` note that makes exactly this argument for the read side; the write side needs the same sentence |
-| A borrower can call `abort()` on the session it was lent | T8 | The ticket that next has cause to narrow the lease | `Lease.connection` is a full `SftpConnection`, so `close()` and now `abort()` are both reachable by a `withLease` caller - and T7 established that destroying a session is the pool's alone. `withSession` is safe, because `BorrowedSession` hands over an `SftpSession` with neither on it; a direct `withLease` caller is not. Nothing does it today |
+| ~~A borrower can call `abort()` on the session it was lent~~ | T8 | ~~The ticket that next has cause to narrow the lease~~ | **Closed by T13**, the same narrowing as the row above |
 | Only a blocking call made *inside* `withLease` is on the cancellation ladder | T8 | Every later ticket | `dial()` is bounded by `connectTimeout` and `proves()` is wrapped, so both existing paths are covered. A third blocking transport call added outside a lease would be bounded on a hung server only by the keepalive floor, whatever `cancelGrace` said, and no test would notice |
 | A session cut loose by the ladder is counted `sftp_pool_evicted_total{reason=poisoned}` | T8 | Whichever ticket revisits spec 13's five eviction labels | A dashboard cannot tell a session the server poisoned from one the connector destroyed to rescue a thread. The two have different remedies; only the WARN line separates them |
 | The bounded IO dispatcher is as wide as the pool, and everything on it already holds a pool place | T6 | Every later ticket | This is what stops a listing blocked on its consumer from starving a download: threads wanted can never exceed threads available. An operation that runs on that dispatcher without first holding a pool place turns a slow path into a deadlock, and no test would catch it until concurrency was high |
@@ -234,9 +234,11 @@ because each was correctly deferred by the ticket that found it.
 | `OperationTimeout` says its lease is `EVICTED`, and the lease was already decided | T11 | Whoever next revisits `Disposition` | The timeout cancels the try, the ladder decides the session's fate on what actually stopped the call, and only then is the class raised; a call the transfer monitor stopped in time keeps its session. The disposition's `lease` is read by nothing on that path, so nothing is wrong, but a reader of the hierarchy is told a fate that is advisory |
 | ~~`ServerFailure` counts against the breaker~~ | T2's disposition, T11 | ~~The maintainer~~ | **Closed by C13, applied by T12's pre-task (`65a967c`).** Every failure the server answered - `NoSuchFile`, `PermissionDenied`, `ServerFailure` - is on `RETRY_ON_THE_NEXT_TICK`, which is not counted and not retried in-call; `RETRY_ON_THIS_SESSION` had nothing left on it and is gone. The retry predicate reads `retry == IMMEDIATELY` and the breaker predicate reads `countsAgainstTheBreaker`, with no class list in either |
 | A `consume` pipeline re-runs its block every tick for a file whose ack action keeps being refused | T12 | Whoever first sees the WARN line repeat | An ack whose move is refused (`OverwriteRefused` under `REFUSE`, or a permission) leaves the file where it was; the next tick hands it over again and `consume` runs the block again - a download per tick for a file that never leaves. The WARN line per tick is the only signal. The alternative, ending the pipeline on one file's refusal, was declined; nacking for good after N refusals would need N and a policy |
-| A watch on a connector that has been stopped ends normally, and a collector that restarts it gets another normal end | T12 | T13 | Cancelling the connector's scope closes the ticker's channel with a cancellation, which the watch reads as "the connector stopped me" and ends without an error. A consumer that loops on `watch` after that would start a new ticker in a cancelled scope and end again at once, forever. T13's `Closing` state is where a watch on a closed connector should be refused at the claim |
+| ~~A watch on a connector that has been stopped ends normally, and a collector that restarts it gets another normal end~~ | T12 | ~~T13~~ | **Closed by T13.** The claim is refused with `IllegalStateException` when the scope the ticker would run in is no longer active, which is the first thing `close()` makes true; `SftpConnectorTest.close ends a watch normally, gives every unanswered file back, and refuses what comes after` |
 | A skipped tick's event is handed over on the ticker's own coroutine, so under `SKIP` a busy collector delays the ticker | T12 | Whoever measures it | The ticker sends `PollSkipped(OVERLAP)` on the same rendezvous channel as everything else and waits for the collector to take it; the next interval is counted from then. Under `PROCEED` the ticker sends nothing itself. Harmless on an hourly schedule; a buffer of one for the ticker's own events is the fix if it ever matters |
 | Under `REFUSE`, a retry's window is the backoff | T11 | Whoever has cause | The policy's look ran once, before the first request. A retry after a lost reply first looks for its own landed file at the target and stops there if it finds it; only when it does not does it send a plain rename - and on a server with the POSIX rename extension a stranger's file that arrived at the target during the backoff is then replaced. T7's race, widened from the look to the backoff; the alternative - applying the policy's look again - refuses the retry for its own landed file |
+| A file the consumer holds from a tick that has already completed stays in flight across `close()` | T13 | Whoever builds `ackWait` (spec 7.2), or nobody | A tick still running at close withdraws everything it handed over; a tick that finished left its files with the consumer by T10's design, and nothing enumerates the in-flight set from outside. The process is ending, so the file is listed again on the next start either way; only `sftp_inflight` on a closed connector reads above zero until then |
+| A failing assertion before `close()` in a `runTest` that started a connector hangs the test instead of failing it | T9, seen by T13 | Whoever next writes one | The connector's scope shares the test scheduler but is not a child of the test's job, so `runTest` waits for a scheduler the housekeeper's `delay` loop never lets go idle. T13's connector test declares its readiness so the assertion cannot fail that way; a `try`/`catch` that closes the connector before rethrowing is the general shape |
 | The breaker and `sftp_breaker_state` are per `SftpClient` | T11 | T14's binding | A second client for the same endpoint on one registry registers a gauge whose id exists and reads the first client's breaker (R1 finding 6's shape); the breakers themselves are separate, so the two clients open independently |
 
 ### C6: spec Sec 5.3 amended - the middle cancellation tier is `keepAlive`
@@ -2865,3 +2867,190 @@ and again on restart; the ticker's own `send` under `SKIP` delays it.
 - **`readiness` checks that time themselves out must catch their own timeout.** A `withTimeout` let
   out of a check ends the watch as a bug (named in the exception); `withTimeoutOrNull` and `NotReady`
   is the shape.
+
+## T13: Graceful shutdown
+
+Built on `claude-fable-5-1`. 231 tests were green at the start and 241 are green at the end (52 core,
+189 testkit): 6 in `PoolShutdownTest`, 1 in `ShutdownAgainstServerTest`, 2 added to `SftpConnectorTest`,
+1 added to `ConnectorDslTest`. The self-review (standards and spec axes, two sub-agents) found five things
+that were changed before the commit and are folded in below: `close()` cut the held sessions twice, once in
+its `try` and once in its `finally`, and could be entered by an already-cancelled caller and throw before it
+had stopped lending; `proved` was the one registry mutation that ignored whether the entry was still the
+registry's; a `Retired` was hand-built in the pool for a dial that landed late, which made the count of
+sessions still being hung up on balance by luck; the attempt a refused caller carries was looked up in two
+places; and the orderly hang-ups at the end ran one after another on a dispatcher no wider than the pool.
+
+**Built:** the connector can be stopped. `SftpConnector.close()` is one suspend call, and it is the whole of
+what a host's shutdown hook needs: from its first instant no session is lent, no watch is claimed and no
+housekeeping round is decided; the watchers are cancelled and every file a running tick had handed over goes
+back as cancelled; the sessions out on lease are given `drainTimeout` to come back on their own; what is
+still out is cut apart, all at once, and given one `cancelGrace` to hand back through the failure the cut
+raises; and everything the pool holds is hung up on, in parallel, with every entry ending `Closed` and every
+one counted as `sftp_pool_evicted_total{reason=shutdown}`. `start` calls it before rethrowing a refusal.
+`drainTimeout` joined the DSL, `PoolExhausted` learned to say the pool is closing, and `Lease.connection` is
+an `SftpSession`.
+
+**Concepts named:**
+
+- **The pool's closing state lives in the registry, and the registry decides everything that reads it under
+  its lock.** This is where the ticket's design went. There is no `Closing` object and no flag each party
+  reads at a moment of its own: `SessionRegistry.closing` is set once by `beginClosing()`, and the four
+  decisions that depend on it are the registry's own methods - `checkOut` answers null, `handBack` retires
+  with `SHUTDOWN` whatever the caller had to say, `sweep` decides an empty round, and `filled` hands back
+  the session of a dial nobody was left to receive. Because the refusal in `checkOut` is taken under the
+  same lock the drain counts under, an entry cannot appear that the drain has not seen. The pool reads the
+  flag without the lock in exactly two places, both for speed and never for the decision: at the door of
+  `acquire`, so a caller does not queue for a session that is never coming, and after a dial or a proof
+  lands, so a session opened for a caller during the drain goes the way of everything else the pool holds.
+- **`Closed` is terminal.** `PoolEntry.moveTo` no longer leaves it. A shutdown writes off an entry whose
+  holder has not come back, and that holder may still be on its way to handing it back or to reporting that
+  its dial landed; whatever it reports, the entry stays finished. With that, `handBack` and `filled` need
+  only ask whether the entry is still in `entries` - "already retired by somebody else" is a state only a
+  shutdown produces - and `closed()` said twice of one entry is nothing.
+- **Quiet** is what the drain waits for: every entry on the shelf, and every retired session hung up on.
+  The second half is `retiring`, a count kept in the registry, because a retired session has left
+  `entries` and the drain would otherwise return while one was still being closed under `NonCancellable`
+  on another coroutine, leaving an entry that ends `Closed` a moment after "every entry ends `Closed`" was
+  said. Every `Retired` is made by the registry, and the count moves only in `retire` and `closed`.
+- **The drain polls; nothing signals from under the lock.** `settled(within)` looks every 20 ms, one
+  uncontended lock per look, under `withTimeoutOrNull`. A `CompletableDeferred` or a `StateFlow` completed
+  from `recount()` would be the seams-table hazard the maintainer flagged - something resumed while the
+  registry's lock is held - and a shutdown is not where 20 ms matters.
+- **The force is `cutLoose()`, at once, and the grace is one, shared.** T8 asked for the cuts to be made
+  in parallel or for a reason why not; the reason is that a cut does not wait for anything - it is
+  `abort()`, a socket close on the calling thread, measured by T8 at well under a second - so making them
+  one after another *is* making them at once, and the grace is not the ladder's grace-then-cut per lease
+  but one wait for all the cut threads to come back, which they do concurrently on their own coroutines.
+  The drain timeout was every lease's grace already. The hang-ups that follow are the part that can wait
+  on a peer (R1 finding 5), so those run side by side under `coroutineScope`.
+- **`close()` cannot be cancelled, and need not be.** It is bounded by construction, and a pool left
+  half-closed is sockets and threads for the life of the process. `withContext(NonCancellable)` around the
+  whole of it also covers a caller that was cancelled before it called: the registry's lock, the delays and
+  the timeouts all still work under it, which `I9_` proves on virtual time.
+- **The source reads its scope, not a flag.** A watch claimed after `close()` is refused because the scope
+  its ticker would run in is no longer active - the fact that governs a watch, and the first thing `close()`
+  makes true. T12 asked for "T13's state" to be read at the claim; this is that state, seen from where a
+  watch lives, and it also covers a scope stopped by `backgroundWork.cancel()` alone.
+
+**Acceptance:**
+
+- *`close()` is a suspend function with the phases Closing, cancel watchers, drain, force, stop
+  housekeeper* - `SftpConnector.close()` is `scope.cancel()` then `pool.close()`, and `SftpPool.close()` is
+  `beginClosing`, `settled(drainTimeout)`, `cutEverythingHeld`, `settled(cancelGrace)`, `closeEverything`.
+  See deviation 1 for the order.
+- *During Closing, acquire fails fast with `PoolExhausted(closing = true)`* -
+  `PoolShutdownTest.during closing an acquire fails at once with PoolExhausted closing`: a caller arriving
+  after the pool started closing is refused with no virtual time spent; one queued before it started is
+  refused the moment room comes free, not at its acquire timeout. Seen through the client in
+  `SftpConnectorTest.close ends a watch normally, gives every unanswered file back, and refuses what comes
+  after` (`client.exists` after close), and through a retry in S9.
+- *Unacked files at shutdown are treated as nacks with redelivery* - the same connector test: a tick caught
+  mid-handover, one file with the consumer and one waiting to be handed over, both given back as
+  `cancelled` with `sftp_inflight` at zero, and the collector ending normally once the consumer lets go.
+  T10's mechanism, proved under a real close. See the seams row for a tick that had already finished.
+- *I9* - `I9_close returns within the drain plus one grace and leaves every entry closed`: three entries -
+  parked, handed back a second into the drain, and blocked on a read the fake never answers. `close()` is
+  still running at the end of the drain, the blocked one has been cut, and at exactly
+  `drainTimeout + cancelGrace` `close()` has returned with all three `Closed`, no session open, three
+  counted `shutdown`. The blocked thread then comes back and hands back an entry the pool has finished
+  with, and nothing is counted twice.
+- *S9* - `ShutdownAgainstServerTest.S9_closing during a download leaves no partial file, releases the
+  lease, and returns within the bound`. See below.
+- *`sftp_pool_evicted_total{reason=shutdown}` counts closed entries* - every test above reads it;
+  `a session handed back during the drain is retired as shutdown, and close returns once the last is back`
+  pins that a session handed back *poisoned* during the drain is `shutdown` and not `poisoned`.
+- *Progress entry appended* - this.
+
+Three tests beyond the checkboxes: `a dial that lands into a closing pool is hung up on, and its caller
+refused` and `a dial that lands after the pool gave up waiting for it is hung up on all the same` are the
+two orderings of a handshake against a close, the second being the leak-shaped one (an entry written off,
+then a session arriving for it); `a closing pool is not kept in shape` is the housekeeper opening nothing
+for a shelf about to be cleared. `SftpConnectorTest.a start-up that was refused leaves no session open`
+closes T9's seam, and `ConnectorDslTest.a drain no longer than the grace it is followed by is refused, and
+the default is` is the knob.
+
+**How I9 is enforced, not merely asserted.** The bound is two `withTimeoutOrNull`s and nothing else waits:
+the drain, and then the grace for what was cut. Removing the cut fails `I9_` at the fake's `Abort`
+assertion and nowhere else: the bound and the counts still hold on the fake, whose hang-up is instant,
+because the write-off then hangs up on a session nobody cut - against the server that hang-up would queue
+behind the blocked thread on a dispatcher of width one, which is why the cut comes first. Removing the
+grace wait fails `I9_` at "returned before the cut had its grace", and only that. Removing
+`retiring` from `isQuiet` is invisible to the fake, whose hang-ups are instant; it is there for the real
+transport, where a hang-up is a round trip under `NonCancellable` on another coroutine.
+
+**What S9 measured.** A started connector through the tunnel, one session, a real download held
+mid-file at 64 KiB of eight mebibytes and never let go, `drainTimeout = 1 s`, `cancelGrace = 300 ms`.
+`close()` returned in about a second: the drain ran out, the cut landed, the blocked thread came back with
+"inputstream is closed", the lease was handed back as `shutdown`, and the pool was quiet well inside the
+grace. The download's own coroutine then retried - after a 100 ms backoff, on the closing pool - and ended
+with `PoolExhausted(closing = true)`, which is where an operation in progress at shutdown ends; the
+partial file was removed by the first try's cleanup, the pool holds nothing, and the server saw its
+session go. The assertion band is `[drainTimeout, drainTimeout + cancelGrace + 2 s]`, the two seconds being
+for the closes on a loaded machine and not part of the bound.
+
+**Deviations:**
+
+1. **The housekeeper is cancelled with the watchers, before the pool stops lending, rather than last.**
+   Spec 11.2 cancels watchers in step 2 and stops the housekeeper in step 5, and T12 suggested a child
+   supervisor so the two could be told apart. Neither is needed: a closing pool refuses the housekeeper its
+   rounds, so there is nothing for it to outlive the drain for, and R1's concern - its cancel queueing
+   behind the closes of a round in progress - is moot because nothing joins it. Cancelling the scope before
+   `beginClosing` rather than after opens a window of microseconds in which an ack in flight may still
+   borrow a session; that ack then lands rather than being refused, which is a file that does not have to
+   be handed over again after restart. One line either way; this is the one with less machinery.
+2. **`close()` does not join the connector's scope.** A tick's `withdraw` after its cancellation, or a
+   housekeeper mid-hang-up, may still be running for a moment after `close()` returns. Both are memory
+   work or work already under `NonCancellable`; joining them would put an unbounded wait back into a call
+   whose point is its bound, in the one case (R1 finding 5, a peer that will not take the close) that no
+   timeout can shorten.
+3. **`drainTimeout` must be longer than `cancelGrace`,** as the coordinator's brief asked. The spec review
+   noted that `drain = 1 s, grace = 5 s` - cut fast, let the cut unblock - is a configuration somebody
+   could want and is now refused. Recorded; the rule is the brief's, and a deployment that wants it can
+   argue the point with a use.
+4. **Two earlier tests were edited, both mechanically forced.** T3's `I2_an entry is handed to at most one
+   lease at a time` built a `mutableSetOf<SftpConnection>()` from `lease.connection`; it is
+   `mutableSetOf<SftpSession>()`, the narrowing R1 finding 8 described and the shape C5 allows. T1's
+   `a described connector becomes an immutable configuration` set `cancelGrace = 45.seconds` against the
+   default drain of thirty and would have been refused by deviation 3's rule; it now also sets
+   `drainTimeout = 2.minutes` and asserts it. Nothing was weakened.
+5. **A session cut by the drain is counted `shutdown`, not `poisoned`.** The two T8 rows about a cut
+   session counting as `poisoned` still stand for a cut the ladder makes outside a drain; inside one, the
+   reason a session is leaving is that the pool is closing, and the label says so.
+6. **`SftpConnector` carries `config.name`** for its two log lines. A scalar on the constructor, noted by
+   the review; passing the whole configuration for a name would be the larger thing.
+7. **`SftpConnector.close()` is called twice harmlessly, not refused.** The second `scope.cancel()` is a
+   no-op and the second `pool.close()` finds an empty registry and returns without waiting.
+8. **Size.** About 115 lines of main source that are neither blank nor comment across eight files, and
+   about 320 of tests, two new files and three earlier ones. Inside the budget.
+
+**Seams.** Closed above, struck through: a refused start-up leaves its sessions open;
+`Retirement.SHUTDOWN` has no producer; a watch on a stopped connector ends normally and again on restart;
+`Lease.connection` reaches `abort()` (both rows). The `withContext(dispatcher)` row stays as the standing
+rule it is; `close()` creates nothing inside a dispatcher switch - the decision of what to close is taken
+under the registry's lock and the hang-ups run on the transport's own path. Added: a file held from a tick
+that already completed stays in flight across `close()`; a failing assertion before `close()` in a
+`runTest` with a started connector hangs rather than fails.
+
+**For the next tickets:**
+
+- **T14 (Quarkus): `SftpConnector.close()` is the one call**, `runBlocking` under a timeout no shorter
+  than `drainTimeout + cancelGrace` of the connector's own configuration - the call is bounded by that and
+  cannot be cancelled, so a shorter timeout on the `runBlocking` would only make the hook return early
+  while the close goes on. `abort()` runs on the closing thread (R1 finding 5), so an event-loop host should
+  call `close()` from a worker thread. `drainTimeout` is a pool knob and belongs in the pool block of the
+  config mapping. The "dispatcher closes" of spec 11.2 step 5 has nothing behind it: the transport's
+  dispatcher is a view over the shared IO pool.
+- **T15 (acceptance): I9 and S9 are `PoolShutdownTest.I9_` and `ShutdownAgainstServerTest.S9_`.** The
+  `Executor has been shut down` lines T12 saw in the log are gone from the tests that close the connector
+  before the server, as predicted; a test that still stops the server with a started connector will still
+  see them. A pool used without a connector needs `pool.close()` at the end of its test to leave no session
+  open; the earlier tests do not, and the fake makes that harmless.
+- **`SessionRegistry.filled` returns the session to hang up on** when the pool has written the entry off.
+  Anything that dials outside `SftpPool.dial` must do the same with what it gets back, or the session
+  leaks exactly the way R1 finding 1 described.
+- **`PoolEntry.moveTo` never leaves `Closed`.** A later ticket that wants to reuse an entry object
+  cannot; entries are made, not recycled.
+- **`isQuiet` counts on `retiring`**, which every `Retired` from `retire()` raises and `closed()` lowers.
+  A `Retired` made anywhere but the registry would drift it and a drain would then wait its full bound.
+- **A `runTest` that starts a connector and then fails an assertion hangs** (seams row). Declare the
+  readiness the test needs, and assert after `close()` where possible.
