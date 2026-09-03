@@ -3,6 +3,7 @@ package sftp.connector.partition
 import eu.rekawek.toxiproxy.Proxy
 import eu.rekawek.toxiproxy.ToxiproxyClient
 import eu.rekawek.toxiproxy.model.ToxicDirection
+import eu.rekawek.toxiproxy.model.ToxicList
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeout
@@ -73,6 +74,15 @@ abstract class PartitionTest {
          */
         fun drop(vararg directions: ToxicDirection) {
             directions.forEach { proxy.toxics().timeout("drop-${it.name.lowercase()}", it, 0) }
+            partitionedAt = TimeSource.Monotonic.markNow()
+        }
+
+        /**
+         * Does [what] to the bytes - any toxic the matrix names - and takes the mark that
+         * [healOnceNoticed] measures from. A reset, a delay: whatever the row is about.
+         */
+        fun damage(what: ToxicList.() -> Unit) {
+            proxy.toxics().what()
             partitionedAt = TimeSource.Monotonic.markNow()
         }
 

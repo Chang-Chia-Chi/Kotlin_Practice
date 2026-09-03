@@ -12,6 +12,14 @@
     <artifactId>sftpconnector-testkit</artifactId>
     <name>SFTP Connector (testkit)</name>
 
+    <properties>
+        <!-- The opt-in tiers. The soak runs for as long as it is told, and the measurements are
+             observations for the progress log rather than assertions; neither belongs in every
+             build. -Dsftp.soak.minutes=N runs the soak alone, -Dsftp.measure runs the measurements alone. -->
+        <sftp.excludedGroups>soak,measure</sftp.excludedGroups>
+        <sftp.groups></sftp.groups>
+    </properties>
+
     <dependencies>
         <dependency>
             <groupId>dynacache</groupId>
@@ -57,4 +65,44 @@
             <artifactId>testcontainers-toxiproxy</artifactId>
         </dependency>
     </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <groups>${sftp.groups}</groups>
+                    <excludedGroups>${sftp.excludedGroups}</excludedGroups>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+
+    <profiles>
+        <profile>
+            <id>soak</id>
+            <activation>
+                <property>
+                    <name>sftp.soak.minutes</name>
+                </property>
+            </activation>
+            <properties>
+                <sftp.groups>soak</sftp.groups>
+                <sftp.excludedGroups>measure</sftp.excludedGroups>
+            </properties>
+        </profile>
+        <profile>
+            <id>measure</id>
+            <activation>
+                <property>
+                    <name>sftp.measure</name>
+                </property>
+            </activation>
+            <properties>
+                <sftp.groups>measure</sftp.groups>
+                <sftp.excludedGroups>soak</sftp.excludedGroups>
+            </properties>
+        </profile>
+    </profiles>
 </project>
