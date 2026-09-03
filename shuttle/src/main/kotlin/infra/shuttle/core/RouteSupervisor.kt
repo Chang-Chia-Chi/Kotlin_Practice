@@ -3,12 +3,15 @@ package infra.shuttle.core
 import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.Tags
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.supervisorScope
 import org.jboss.logging.Logger
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
@@ -18,7 +21,8 @@ import java.util.concurrent.atomic.AtomicInteger
  * run that delivered a `Seen` or a `PollCompleted` (the trigger listed or produced something; a `PollFailed`
  * alone does not count). `shuttle_route_up{route}` is 1 while a run is in progress and 0 while it waits, and
  * [ready] reads those gauges under the configured rule. One instance per process; [events] is the route's
- * trigger, opened afresh at every start.
+ * trigger, opened afresh at every start. [restart] is spec 14.1's operator restart: the route's current run, or
+ * the wait before its next one, is cut short and the backoff reset to `initial`.
  */
 class RouteSupervisor(
     private val runners: Collection<RouteRunner>,
@@ -28,11 +32,21 @@ class RouteSupervisor(
     private val registry: MeterRegistry,
 ) {
     private val up = runners.associate { it.route.name to registry.gauge(ShuttleMetrics.ROUTE_UP, Tags.of("route", it.route.name), AtomicInteger())!! }
+    private val phases = ConcurrentHashMap<String, Job>()
+    private val restarts = ConcurrentHashMap.newKeySet<String>()
 
     /** `all-routes-down`: unready only when every route is down; `any-route-down`: unready as soon as one is. */
     fun ready(): Boolean = when (readiness) {
         Readiness.AllRoutesDown -> up.values.any { it.get() == 1 }
         Readiness.AnyRouteDown -> up.values.all { it.get() == 1 }
+    }
+
+    /** Restart [route] now: its run is cancelled and its pipelines with it, or its wait is cut short; false when no such route. */
+    fun restart(route: String): Boolean {
+        if (route !in up) return false
+        restarts += route
+        phases[route]?.cancel()
+        return true
     }
 
     /** Runs until cancelled; cancellation reaches every route and its pipelines. */
@@ -48,15 +62,32 @@ class RouteSupervisor(
             var triggered = false
             gauge.set(1)
             val outcome = runCatching {
-                runner.run(events(route).onEach { if (it is RouteEvent.Seen || it is RouteEvent.PollCompleted) triggered = true })
+                phase(route.name) { runner.run(events(route).onEach { if (it is RouteEvent.Seen || it is RouteEvent.PollCompleted) triggered = true }) }
             }
             gauge.set(0)
             outcome.exceptionOrNull()?.let { if (it is CancellationException) throw it }
-            if (triggered) wait = backoff.initial
-            log.warnv("route {0} is down ({1}); restarting in {2}", route.name, outcome.exceptionOrNull()?.toString() ?: "trigger completed", wait)
-            delay(wait)
-            wait = minOf(wait * backoff.factor, backoff.max)
+            val restarted = outcome.isSuccess && outcome.getOrNull() == null
+            if (triggered || restarted) wait = backoff.initial
+            if (restarted) {
+                log.infov("route {0} restarted by the operator", route.name)
+            } else {
+                log.warnv("route {0} is down ({1}); restarting in {2}", route.name, outcome.exceptionOrNull()?.toString() ?: "trigger completed", wait)
+                wait = if (phase(route.name) { delay(wait) } == null) backoff.initial else minOf(wait * backoff.factor, backoff.max)
+            }
             registry.counter(ShuttleMetrics.ROUTE_RESTARTS, "route", route.name).increment()
+        }
+    }
+
+    /** One cancellable step of a route's life; null when [restart] cut it short, the block's failure otherwise. */
+    private suspend fun phase(route: String, block: suspend () -> Unit): Unit? = supervisorScope {
+        val job = async { block() }
+        phases[route] = job
+        try {
+            job.await()
+        } catch (e: CancellationException) {
+            if (restarts.remove(route)) null else throw e
+        } finally {
+            phases.remove(route, job)
         }
     }
 

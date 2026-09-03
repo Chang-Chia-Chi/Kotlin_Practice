@@ -47,6 +47,16 @@
                 <version>${coroutines.version}</version>
                 <scope>test</scope>
             </dependency>
+            <!-- G13. The reactor parent manages micrometer-core itself (1.17.1), and a parent's explicit entry
+                 beats a child's BOM import, so without this line the module ran a 1.17 core beside the
+                 1.14 commons the BOM below manages: fine until Quarkus binds its registry and calls a
+                 commons method the older jar lacks (NoSuchMethodError: WarnThenDebugLogger.isEnabled).
+                 Stated explicitly here, the whole of Micrometer is 1.14.2. -->
+            <dependency>
+                <groupId>io.micrometer</groupId>
+                <artifactId>micrometer-core</artifactId>
+                <version>1.14.2</version>
+            </dependency>
             <dependency>
                 <groupId>io.micrometer</groupId>
                 <artifactId>micrometer-bom</artifactId>
@@ -124,11 +134,29 @@
              (ticket 14); here it is test-scoped for the Testcontainers class. -->
         <dependency><groupId>org.jdbi</groupId><artifactId>jdbi3-core</artifactId><version>3.45.4</version></dependency>
 
+        <!-- G13: the `quarkus` package only. The same extension set etl-host runs on, minus the
+             scheduler: CDI, REST with Jackson, the role check and its smallest real identity
+             provider, health at /q/health/ready, a Prometheus registry so the meters are real, and
+             the datasource the Oracle state store reads (ojdbc11 rides in at runtime scope with it). -->
+        <dependency><groupId>io.quarkus</groupId><artifactId>quarkus-arc</artifactId></dependency>
+        <dependency><groupId>io.quarkus</groupId><artifactId>quarkus-rest</artifactId></dependency>
+        <dependency><groupId>io.quarkus</groupId><artifactId>quarkus-rest-jackson</artifactId></dependency>
+        <dependency><groupId>io.quarkus</groupId><artifactId>quarkus-security</artifactId></dependency>
+        <dependency><groupId>io.quarkus</groupId><artifactId>quarkus-elytron-security-properties-file</artifactId></dependency>
+        <dependency><groupId>io.quarkus</groupId><artifactId>quarkus-smallrye-health</artifactId></dependency>
+        <dependency><groupId>io.quarkus</groupId><artifactId>quarkus-micrometer-registry-prometheus</artifactId></dependency>
+        <dependency><groupId>io.quarkus</groupId><artifactId>quarkus-agroal</artifactId></dependency>
+        <dependency><groupId>io.quarkus</groupId><artifactId>quarkus-jdbc-oracle</artifactId></dependency>
+
         <dependency><groupId>org.junit.jupiter</groupId><artifactId>junit-jupiter</artifactId><scope>test</scope></dependency>
+        <dependency><groupId>io.quarkus</groupId><artifactId>quarkus-junit5</artifactId><scope>test</scope></dependency>
+        <dependency><groupId>io.quarkus</groupId><artifactId>quarkus-test-security</artifactId><scope>test</scope></dependency>
+        <dependency><groupId>io.rest-assured</groupId><artifactId>rest-assured</artifactId><scope>test</scope></dependency>
+        <!-- G13: a real JDBC database with no tables, for the boot check that names the DDL. -->
+        <dependency><groupId>com.h2database</groupId><artifactId>h2</artifactId><scope>test</scope></dependency>
         <dependency><groupId>org.mockito</groupId><artifactId>mockito-core</artifactId><scope>test</scope></dependency>
         <dependency><groupId>org.jetbrains.kotlinx</groupId><artifactId>kotlinx-coroutines-test</artifactId><scope>test</scope></dependency>
         <dependency><groupId>com.tngtech.archunit</groupId><artifactId>archunit-junit5</artifactId><scope>test</scope></dependency>
-        <dependency><groupId>com.oracle.database.jdbc</groupId><artifactId>ojdbc11</artifactId><version>23.5.0.24.07</version><scope>test</scope></dependency>
         <dependency>
             <groupId>org.testcontainers</groupId><artifactId>oracle-free</artifactId>
             <version>${testcontainers.version}</version><scope>test</scope>
@@ -152,10 +180,54 @@
     <build>
         <plugins>
             <plugin>
+                <groupId>io.quarkus</groupId>
+                <artifactId>quarkus-maven-plugin</artifactId>
+                <version>${quarkus.version}</version>
+                <extensions>true</extensions>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>build</goal>
+                            <goal>generate-code</goal>
+                            <goal>generate-code-tests</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.jetbrains.kotlin</groupId>
+                <artifactId>kotlin-maven-plugin</artifactId>
+                <configuration>
+                    <!-- Kotlin classes are final and CDI subclasses what it proxies or intercepts;
+                         all-open on the three annotations the host uses, as etl-host does. -->
+                    <compilerPlugins><plugin>all-open</plugin></compilerPlugins>
+                    <pluginOptions>
+                        <option>all-open:annotation=jakarta.enterprise.context.ApplicationScoped</option>
+                        <option>all-open:annotation=jakarta.inject.Singleton</option>
+                        <option>all-open:annotation=jakarta.ws.rs.Path</option>
+                    </pluginOptions>
+                </configuration>
+                <dependencies>
+                    <dependency>
+                        <groupId>org.jetbrains.kotlin</groupId>
+                        <artifactId>kotlin-maven-allopen</artifactId>
+                        <version>${kotlin.version}</version>
+                    </dependency>
+                </dependencies>
+                <executions>
+                    <execution><id>compile</id><phase>compile</phase><goals><goal>compile</goal></goals></execution>
+                    <execution><id>test-compile</id><phase>test-compile</phase><goals><goal>test-compile</goal></goals></execution>
+                </executions>
+            </plugin>
+            <plugin>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <configuration>
                     <excludedGroups>${excludedGroups}</excludedGroups>
                     <trimStackTrace>false</trimStackTrace>
+                    <systemPropertyVariables>
+                        <java.util.logging.manager>org.jboss.logmanager.LogManager</java.util.logging.manager>
+                        <maven.home>${maven.home}</maven.home>
+                    </systemPropertyVariables>
                 </configuration>
             </plugin>
         </plugins>
