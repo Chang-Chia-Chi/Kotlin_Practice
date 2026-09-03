@@ -9,13 +9,13 @@ event, never a lost object. Any fix the replay forces lands here and is recorded
 
 **Nature:** state machine reasoning
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `I8` as one named test per spec Sec 4.4 row, each asserting end state, store count and delivery count
-- [ ] S2, S3, S4, S5, S6 by id
-- [ ] A crash after the move and before ACKED is repaired by reconciliation on the second poll, not by the pipeline; the subscribe row of the table runs against the test kit's message source and is repaired by the redelivery's re-ack
-- [ ] Every deviation the replay forced is in the progress entry
-- [ ] Progress entry appended
+- [x] `I8` as one named test per spec Sec 4.4 row, each asserting end state, store count and delivery count
+- [x] S2, S3, S4, S5, S6 by id
+- [x] A crash after the move and before ACKED is repaired by reconciliation on the second poll, not by the pipeline; the subscribe row of the table runs against the test kit's message source and is repaired by the redelivery's re-ack
+- [x] Every deviation the replay forced is in the progress entry
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket, stubs throwing NotImplementedError
 for later seams; 200-600 lines including tests; no Thread.sleep; invariant tests named
