@@ -1,3 +1,5 @@
+> **Stale: written against spec v0.1 (SFTP Ingest). The spec is now v0.2 (Shuttle); this plan is re-cut next.**
+
 # SFTP Ingest - Implementation Plan
 
 Version: v0.1

@@ -1,3 +1,5 @@
+> **Stale: drawn against spec v0.1 (SFTP Ingest). The spec is now v0.2 (Shuttle); the picture is redrawn after the plan.**
+
 # SFTP Ingest - The Picture
 
 Companion to `spec.md`. The spec is the authority; this page exists so a reader gets the shape
