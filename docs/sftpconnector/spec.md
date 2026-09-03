@@ -206,7 +206,9 @@ monitor of Sec 5.3 hangs. `openRead` is not `readTo` renamed - it is the streami
 Sec 14.1, deferred out of v1 by Sec 1.3, and whichever release builds it adds it alongside.
 
 `SftpConnection` is `SftpSession` plus `close()`. See Sec 6.1 on `withSession` for why the
-split exists.
+split exists. `SftpSession.renameReplaces` reports whether this server's rename replaces an
+occupied target (the POSIX rename extension, read from the handshake); the overwrite policy in
+Sec 8.2 branches on it, and the testkit fake answers `false`.
 
 Operations join this interface as the ticket needing them arrives, absent rather than stubbed,
 so nothing above the seam can call a method that does not yet work.
@@ -228,6 +230,11 @@ so nothing above the seam can call a method that does not yet work.
   overwrite is therefore the connector's own decision, taken before the request goes out, and
   cannot be delegated to the server. Any code that sends a bare rename and reads the answer is
   trusting a behaviour half the servers in scope do not have.
+- **JSch reads `*` and `?` in the last path component as a glob** (D37, verified in the 2.28.7
+  sources) for `rename`, `rm`, `put`, `get`, `stat` and `ls`. A rename onto `l*.csv` landed on
+  and replaced a neighbour; `delete("/drop/*.csv")` removed every match. The adapter escapes
+  `\`, `*` and `?` at the one place a path is handed to the library, so a path names one thing.
+  `mkdir` and `realpath` are sent unquoted because JSch does not expand those.
 
 ### 5.3 Cancellation: three tiers
 
@@ -293,7 +300,7 @@ in production the first time it occurs, not silently absorbed.
 | `stat` | `(path): RemoteFile?` | Blind retry |
 | `download` | `(remote, localTarget): LocalFile` | Restart from zero into a fresh `.part` file |
 | `upload` | `(local, remote, overwrite)` | Restart; remote partial is overwritten |
-| `rename` | `(from, to, overwrite)` | On `NoSuchFile` after a retry, stat `to`; existing with the expected size counts as success |
+| `rename` | `(from, to, overwrite)` | On `NoSuchFile` **naming the source** after a retry, stat `to`: existing with the expected size counts as success, absent means the file is gone. `NoSuchFile` **naming the target** means nothing landed and the source is untouched (D38). A cancellation or timeout is a lost reply and carries no information |
 | `delete` | `(path)` | `NoSuchFile` after a retry counts as success |
 | `mkdir` | `(path, parents)` | `AlreadyExists` counts as success |
 | `exists` | `(path): Boolean` | Blind retry |
@@ -302,8 +309,10 @@ in production the first time it occurs, not silently absorbed.
 `withSession` hands the block an `SftpSession`, not an `SftpConnection`. The difference is
 `close()`: the pool lends the same session out again after the block ends, so a caller that hung
 up on it would break the *next* caller's work rather than its own. The block is therefore handed
-something with no hang-up on it, and the loan is revoked when the block returns - a reference
-stashed past the block fails loudly instead of quietly using a session the pool has re-lent.
+something with no hang-up on it, and the loan ends when the block has returned **and the last
+call made on it has finished** (D39) - a reference stashed past the block fails loudly instead
+of quietly using a session the pool has re-lent, and a call still on the wire when the block
+returns is waited for rather than raced.
 `abort()` is likewise the pool's, never a borrower's, because it destroys the session.
 
 "Transparent reconnect" means: an operation that fails with a poisoned session is retried on a
@@ -459,8 +468,13 @@ validator, the probe and the ack executor cannot disagree about which folder `te
 - Rename across filesystems fails with the generic `SSH_FX_FAILURE`. The startup probe
   (Sec 11.1) performs a rename into the target and fails fast on this.
 - SFTP version 3 rename fails when the target exists on servers without the POSIX rename
-  extension. `overwrite = true` is implemented as rename, and on failure delete the target then
-  rename again.
+  extension. `Overwrite.REPLACE` is implemented as rename, and on failure - **only on a server
+  without the extension, and only when a file (not a directory) is at the target** - delete the
+  target then rename again (D40). On a server with the extension a refusal can never be about an
+  occupied target, so it is passed on as given and nothing is cleared; S6's cross-filesystem case
+  was deleting a healthy target before this rule. When the second rename is refused after the
+  target was cleared, the failure says so: the target is now empty, and the caller must not read
+  "source untouched" as "target untouched".
 - A file moved between listing and download yields `FileGone`, not an error.
 
 ### 8.3 Idempotency
@@ -691,6 +705,10 @@ transport in the testkit is a genuine second implementation.
 | D22 | The connector computes a digest during staging; the application compares it | The digest is free while bytes stream through; the expected value's origin is application knowledge. Checksum is integrity, not completeness, and cannot replace the readiness check because it needs the download first |
 | D23 | Unmapped JSch errors are `Unknown`, recoverable, poisoned, logged raw and counted | JSch error text is not an API; a wording change must surface as a metric and a log line, never as a silent misclassification or a dead connector |
 | D26 | The middle cancellation tier is the keepalive ladder, not `socketTimeout` | Measured against mwiede 2.28.7 (Sec 5.3): JSch implements `serverAliveInterval` by setting the socket read timeout, so a positive `keepAlive` always overwrites `session.timeout`. A hung server is bounded by `keepAlive x (serverAliveCountMax + 1)` and not at all by `socketTimeout` |
+| D37 | The adapter escapes `\`, `*` and `?` in every path it hands JSch for rename, rm, put, get, stat, ls | JSch expands those as a glob in the last component (Sec 5.2); a listed name containing them would otherwise act on its neighbours. Found by R2 against the embedded server: a replace onto `l*.csv` destroyed `ledger-old.csv` |
+| D38 | A `NoSuchFile` from rename names the path that is missing | The server answers NO_SUCH_FILE for a missing target directory as well as a missing source, and the adapter used to report both against the source. I11's retry would then stat the target, find nothing, and report the source gone while it was still there. The client now looks at the source on that answer and names whichever is missing (Sec 6.1) |
+| D39 | A borrowed session's loan ends when the last call on it finishes, not when the block returns | The revocation was a flag read at call start; a call launched from the block and still on the wire when the block returned kept using a session the pool had re-lent - I2 broken from outside the pool. Calls and the revocation now share a lock, and ending the loan waits under `NonCancellable`, bounded by the ladder (Sec 6.1) |
+| D40 | `REPLACE` clears the target only where clearing could help: a non-extension server, a file at the target | On a server with the extension a refusal is never about the target, so clearing deletes a healthy file for nothing - S6's case did exactly that. A directory at the target is never cleared. A refusal after a clear names the now-empty target (Sec 8.2) |
 | D36 | `SizeStable` observes inside one poll, batched: one wait per poll, not per file and not across polls | Across polls, the shipped default is an hour of latency per file on the hourly pipeline - the second tick is the first chance to see a stable size. Serially per file inside one poll, a hundred new files cost a quarter of an hour holding the listing's session. Batched, the poll pays `(checks - 1) x interval` once, with the listing's session already released, and `maxFilesPerPoll` bounds what is held (Sec 7.5) |
 | D34 | Three pressure layers after the scenario table: seeded randomized adversary, Lincheck, soak | The JVM has no `labrpc`; the fake transport's one hook already is one. A scenario table proves the failures someone imagined; a seeded adversary checking every invariant after every op finds the interleaving nobody did, and is replayable by seed. Lincheck is a cheap guard on the two lock-guarded structures. The soak is the only place thread and heap flatness can be measured (Sec 17) |
 | D35 | Performance is measured as degradation and recorded, never asserted; no JMH | Throughput is bounded by one JSch channel per session and the server's session cap, so there is no hot path to benchmark. A latency assertion loose enough not to flake is too loose to catch what it is for; the numbers go in the progress log as observations, the way T6 recorded S11's heap |
