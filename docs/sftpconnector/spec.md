@@ -438,8 +438,10 @@ latency where the default reads as ten seconds.
 
 `watch` owns the ticker. `overlap` mirrors the Quarkus scheduler: `SKIP` (default) emits
 `PollSkipped` when the previous tick is still running, `PROCEED` starts a new tick alongside. A
-second `watch` on the same directory of the same connector is rejected at call time, since one
-consumer per directory is an assumption of Sec 7.3.
+second `watch` on the same directory of the same connector is rejected **when collected** - a
+cold flow has done nothing at the call, and a claim taken there would leak on a flow nobody
+collects - since one consumer per directory is an assumption of Sec 7.3. The claim is released
+when the collector leaves, however it leaves.
 
 ---
 
