@@ -149,6 +149,35 @@ class WritePathReviewTest {
         assertThat(client.stat("/drop/temp")?.isDirectory).isTrue()
     }
 
+    /**
+     * T7's promise to T11 was that a missing path reported by a rename is always the source. The
+     * server also answers "no such file" when the target's directory does not exist, and that
+     * answer used to come back naming the source - so a retry would have looked at the target,
+     * found nothing, and reported the source gone while it sat where it always was. What is
+     * missing is now looked for: the source still being there means the answer was about the
+     * target, and the failure names the target.
+     */
+    @Test
+    fun `a rename into a directory that is not there names the target as missing and leaves the source alone`() =
+        runBlocking<Unit> {
+            remoteRoot.resolve("drop").createDirectory()
+            remoteRoot.resolve("drop/ledger.csv").writeText(CONTENT)
+
+            withClient { client ->
+                for (policy in Overwrite.entries) {
+                    assertThatThrownBy {
+                        runBlocking { client.rename("/drop/ledger.csv", "/drop/nowhere/ledger.csv", policy) }
+                    }
+                        .describedAs("under $policy")
+                        .isInstanceOfSatisfying(NoSuchFile::class.java) {
+                            assertThat(it.attempt.path).describedAs("the path reported missing under $policy")
+                                .isEqualTo("/drop/nowhere/ledger.csv")
+                        }
+                    assertThat(remoteRoot.resolve("drop/ledger.csv").readText()).isEqualTo(CONTENT)
+                }
+            }
+        }
+
     /** T7 proved this against the fake only; a startup that creates its folders runs twice for real. */
     @Test
     fun `mkdir twice against a real server is content the second time`() = runBlocking<Unit> {

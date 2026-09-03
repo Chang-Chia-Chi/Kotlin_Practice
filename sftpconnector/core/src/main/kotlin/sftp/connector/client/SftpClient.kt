@@ -292,15 +292,38 @@ class SftpClient(
     private suspend fun SftpSession.moveOnto(from: String, to: String, overwrite: Overwrite) {
         if (overwrite == Overwrite.REFUSE) {
             if (entryAt(to) != null) refuse("rename", to)
-            rename(from, to)
+            renameNamingWhatIsMissing(from, to)
             return
         }
         try {
-            rename(from, to)
+            renameNamingWhatIsMissing(from, to)
         } catch (refused: ServerFailure) {
             if (renameReplaces || entryAt(to)?.isDirectory != false) throw refused
             clearTheWay(to)
+            renameNamingWhatIsMissing(from, to)
+        }
+    }
+
+    /**
+     * A rename whose "no such file" names the path that is not there.
+     *
+     * The server gives one answer for a source that is gone and for a target whose directory does
+     * not exist, and the transport reports it against the source. A retry reads a missing source
+     * as "my earlier attempt may have landed" and goes to look at the target, so a missing target
+     * directory reported as a missing source would have it find nothing there and report the
+     * source gone while the source sat where it always was. So the source is looked at: still
+     * there, and the answer was about the target, which is what the failure then names.
+     */
+    private suspend fun SftpSession.renameNamingWhatIsMissing(from: String, to: String) {
+        try {
             rename(from, to)
+        } catch (missing: NoSuchFile) {
+            if (entryAt(from) == null) throw missing
+            throw NoSuchFile(
+                missing.attempt.copy(path = to),
+                "the source is still at $from, so what the server could not find is where $to would go: ${missing.message}",
+                missing,
+            )
         }
     }
 
