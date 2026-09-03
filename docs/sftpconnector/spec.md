@@ -583,18 +583,34 @@ download) is what a *later* try reads; it is not a reason to send one now.
 
 ### 11.2 Shutdown
 
-`close()` is a suspend function with phases, bounded by `drainTimeout` (default 30 s):
+`close()` is a suspend function with phases, bounded by `drainTimeout + cancelGrace`
+(defaults 30 s and 5 s) and uncancellable end to end, because it is bounded by construction
+(D43):
 
-1. Connector state becomes `Closing`. Acquire fails fast with `PoolExhausted(closing = true)`.
-2. Watchers are cancelled. No new listing starts; unacked files are treated as nacks.
-3. Drain: wait for leased entries to be released. In-flight downloads are cancelled through the
-   Sec 5.3 ladder and their `.part` files deleted; at the file sizes in scope, finishing them is
-   not worth an unbounded shutdown (D16).
-4. Force: remaining leases are aborted, which unblocks their threads.
-5. Housekeeper stops, dispatcher closes, every entry ends in `Closed`.
+1. The connector's scope is cancelled: watchers and the housekeeper together. No new listing
+   starts, a new `watch` claim is refused, and every unacked file is withdrawn as `cancelled`
+   for redelivery. The housekeeper goes here rather than last because a closing pool refuses it
+   rounds anyway, and nothing needs it to outlive the drain.
+2. The pool stops lending. `acquire` fails fast at the door with `PoolExhausted(closing = true)`,
+   with no wait; a caller already queued is refused when room frees. The closing state lives in
+   the registry and every decision that reads it is taken under the registry's lock.
+3. Drain: wait up to `drainTimeout` for leased entries to come back. A handback during the drain
+   retires the session as `shutdown` whatever the caller said.
+4. Force: every lease still held is cut at once through the Sec 5.3 ladder - one `cancelGrace`
+   for all of them, not one each - which unblocks their threads and deletes their `.part` files;
+   at the file sizes in scope, finishing them is not worth an unbounded shutdown (D16).
+5. Every remaining session is hung up on in parallel; every entry ends `Closed` and is counted
+   `sftp_pool_evicted_total{reason=shutdown}`.
 
-The connector owns a `CoroutineScope` with a `SupervisorJob`; the Quarkus adapter calls
-`close()` from the shutdown event with `runBlocking` under the same timeout.
+There is no "dispatcher closes" step: `Dispatchers.IO.limitedParallelism` is a view over the
+shared IO pool and owns no threads. `start` calls `close()` before rethrowing a refused probe,
+so a start-up that fails leaves nothing open. A second `close()` is harmless.
+
+The connector owns a `CoroutineScope` with a `SupervisorJob`. The Quarkus adapter calls
+`close()` from the shutdown event with `runBlocking`, under a timeout **no shorter than**
+`drainTimeout + cancelGrace` - the call is bounded and uncancellable, so a shorter timeout only
+returns early while the close carries on - and from a worker thread, because `abort()` runs on
+the closing thread and an event loop must not block on a socket close.
 
 ---
 
@@ -718,6 +734,7 @@ transport in the testkit is a genuine second implementation.
 | D22 | The connector computes a digest during staging; the application compares it | The digest is free while bytes stream through; the expected value's origin is application knowledge. Checksum is integrity, not completeness, and cannot replace the readiness check because it needs the download first |
 | D23 | Unmapped JSch errors are `Unknown`, recoverable, poisoned, logged raw and counted | JSch error text is not an API; a wording change must surface as a metric and a log line, never as a silent misclassification or a dead connector |
 | D26 | The middle cancellation tier is the keepalive ladder, not `socketTimeout` | Measured against mwiede 2.28.7 (Sec 5.3): JSch implements `serverAliveInterval` by setting the socket read timeout, so a positive `keepAlive` always overwrites `session.timeout`. A hung server is bounded by `keepAlive x (serverAliveCountMax + 1)` and not at all by `socketTimeout` |
+| D43 | `close()` is bounded by `drainTimeout + cancelGrace`, cuts all held leases at once, and is uncancellable | The grace is per blocked call, so sequential cuts would cost one grace each; cutting in parallel makes the bound a sum of two knobs, not a product. A close that can be cancelled is a close whose bound is a suggestion. Measured under S9 with a download held mid-stream: about 1 s against `drainTimeout = 1 s`, `cancelGrace = 300 ms` (Sec 11.2) |
 | D41 | Server-answered failures are neither retried inside the call nor counted by the breaker; only wire failures are | An answered request proves the server is reachable and understood it, which is what the breaker measures; and repeating an answered request inside the same call cannot change the answer, while it can move a *new* upstream file over a landed one (T11 found this race under `REPLACE`). `NoSuchFile` from a download would otherwise cost S5 three attempts and let a directory another system writes into open the breaker (Sec 10.2) |
 | D42 | The transfer bulkhead is a kotlinx `Semaphore`, not resilience4j's `Bulkhead` | resilience4j's suspend bulkhead takes its permit inside `withContext(Dispatchers.IO)` and only then enters its try, so a caller cancelled at the switch back leaks the permit for the life of the process - the exact shape R1 found in the transport. Its no-wait variant turns the fifth transfer away instead of queuing it. A semaphore taken before the dispatcher switch has neither problem (Sec 9) |
 | D37 | The adapter escapes `\`, `*` and `?` in every path it hands JSch for rename, rm, put, get, stat, ls | JSch expands those as a glob in the last component (Sec 5.2); a listed name containing them would otherwise act on its neighbours. Found by R2 against the embedded server: a replace onto `l*.csv` destroyed `ledger-old.csv` |
