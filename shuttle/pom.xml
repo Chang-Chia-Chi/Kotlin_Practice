@@ -17,6 +17,11 @@
         <kotlin.compiler.jvmTarget>17</kotlin.compiler.jvmTarget>
         <maven.compiler.release>17</maven.compiler.release>
         <quarkus.version>3.17.5</quarkus.version>
+        <!-- Container-backed tiers are opt-in: `-DexcludedGroups=none`. A property, not a literal,
+             for the reason etl-host/pom.xml gives: a literal in <configuration> beats the user
+             property and the documented opt-in would silently run zero tests. -->
+        <excludedGroups>oracle,minio</excludedGroups>
+        <testcontainers.version>1.20.4</testcontainers.version>
     </properties>
 
     <dependencyManagement>
@@ -55,6 +60,15 @@
                 <version>${junit.version}</version>
                 <scope>test</scope>
             </dependency>
+            <!-- G10. Stated before the platform BOM so the S3 client and its HTTP client are one
+                 SDK version; 2.29.51 is what the local repository holds. -->
+            <dependency>
+                <groupId>software.amazon.awssdk</groupId>
+                <artifactId>bom</artifactId>
+                <version>2.29.51</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
             <dependency>
                 <groupId>io.quarkus.platform</groupId>
                 <artifactId>quarkus-bom</artifactId>
@@ -74,10 +88,58 @@
         <dependency><groupId>com.fasterxml.jackson.core</groupId><artifactId>jackson-databind</artifactId></dependency>
         <!-- G1: the `yaml` package only; ArchitectureTest keeps it out of `core`. -->
         <dependency><groupId>com.fasterxml.jackson.dataformat</groupId><artifactId>jackson-dataformat-yaml</artifactId></dependency>
+        <!-- G10: the `s3` package only. Synchronous client over the Apache HTTP client (D4); the
+             SDK's Netty client is excluded because nothing here is asynchronous. -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId><artifactId>s3</artifactId>
+            <exclusions>
+                <exclusion><groupId>software.amazon.awssdk</groupId><artifactId>netty-nio-client</artifactId></exclusion>
+            </exclusions>
+        </dependency>
+        <dependency><groupId>software.amazon.awssdk</groupId><artifactId>apache-client</artifactId></dependency>
+        <!-- httpclient 4.x logs through commons-logging and the quarkus BOM leaves it off the runtime
+             classpath (Quarkus supplies its own bridge); without this the first S3 call dies with
+             NoClassDefFoundError: LogFactory. Ticket 14 may swap it for the Quarkus bridge. -->
+        <dependency><groupId>commons-logging</groupId><artifactId>commons-logging</artifactId><version>1.2</version><scope>runtime</scope></dependency>
+
+        <!-- G9: the `jdbi` package only. The Oracle driver is the host's runtime concern
+             (ticket 14); here it is test-scoped for the Testcontainers class. -->
+        <dependency><groupId>org.jdbi</groupId><artifactId>jdbi3-core</artifactId><version>3.45.4</version></dependency>
 
         <dependency><groupId>org.junit.jupiter</groupId><artifactId>junit-jupiter</artifactId><scope>test</scope></dependency>
         <dependency><groupId>org.mockito</groupId><artifactId>mockito-core</artifactId><scope>test</scope></dependency>
         <dependency><groupId>org.jetbrains.kotlinx</groupId><artifactId>kotlinx-coroutines-test</artifactId><scope>test</scope></dependency>
         <dependency><groupId>com.tngtech.archunit</groupId><artifactId>archunit-junit5</artifactId><scope>test</scope></dependency>
+        <dependency><groupId>com.oracle.database.jdbc</groupId><artifactId>ojdbc11</artifactId><version>23.5.0.24.07</version><scope>test</scope></dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId><artifactId>oracle-free</artifactId>
+            <version>${testcontainers.version}</version><scope>test</scope>
+        </dependency>
+        <!-- The MinIO tier, tagged `minio`. The MinIO module is newer than the Testcontainers core
+             the Oracle module (ticket 10) pins, so its own core is excluded and 1.20.4 serves both,
+             the arrangement etl-host/pom.xml uses for the same reason. -->
+        <dependency>
+            <groupId>org.testcontainers</groupId><artifactId>testcontainers</artifactId>
+            <version>1.20.4</version><scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId><artifactId>minio</artifactId>
+            <version>1.21.3</version><scope>test</scope>
+            <exclusions>
+                <exclusion><groupId>org.testcontainers</groupId><artifactId>testcontainers</artifactId></exclusion>
+            </exclusions>
+        </dependency>
     </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <excludedGroups>${excludedGroups}</excludedGroups>
+                    <trimStackTrace>false</trimStackTrace>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
 </project>

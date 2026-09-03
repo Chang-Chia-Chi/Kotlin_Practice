@@ -12,14 +12,14 @@ digest.
 
 **Nature:** adapter work
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] The shared target contract test class passes against the in-memory target and the S3 target on Testcontainers MinIO with versioning enabled, tagged `minio`
-- [ ] `I6` on MinIO: three stores of one key read back the newest content by key; a crash between PUT and HEAD, played through an adapter hook, is repaired by the next store; no delete call is ever made
-- [ ] A corrupted body is rejected by Content-MD5; the ETag check passes on a single-part object and is skipped with a WARN when the bucket reports encryption
-- [ ] Verify of a version expired by hand is false; probe warns on a bucket without a non-current-version expiry and is silent with one; the suite passes under a credential without delete permission; the multipart threshold is pinned above the largest expected file
-- [ ] The fetcher's digest matches the object's; the AWS SDK appears only in the s3 package
-- [ ] Progress entry appended
+- [x] The shared target contract test class passes against the in-memory target and the S3 target on Testcontainers MinIO with versioning enabled, tagged `minio`
+- [x] `I6` on MinIO: three stores of one key read back the newest content by key; a crash between PUT and HEAD, played through an adapter hook, is repaired by the next store; no delete call is ever made
+- [x] A corrupted body is rejected by Content-MD5; the ETag check passes on a single-part object and is skipped with a WARN when the bucket reports encryption
+- [ ] Verify of a version expired by hand is false; probe warns on a bucket without a non-current-version expiry and is silent with one; the suite passes under a credential without delete permission; the multipart threshold is pinned above the largest expected file (three of four proven; the delete-less credential is progress entry 11 deviation 1)
+- [x] The fetcher's digest matches the object's; the AWS SDK appears only in the s3 package
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket, stubs throwing NotImplementedError
 for later seams; 200-600 lines including tests; no Thread.sleep; invariant tests named

@@ -58,5 +58,12 @@ data class Transfer(
 /** Spec 7.1. */
 data class TargetRef(val kind: String, val location: String, val key: String, val ref: String?, val size: Long)
 
+/** Spec 7.1's metadata keys the pipeline writes and a target may read; attributes go under `attr-<name>`. */
+object TargetMetadata {
+    const val DIGEST = "digest"
+    const val DIGEST_ALGORITHM = "digest-algorithm"
+    const val ATTRIBUTE_PREFIX = "attr-"
+}
+
 /** The row-side facts of a staged object: everything in spec 6.1 except the local path. */
 data class StagedSummary(val name: String, val size: Long, val mtime: Instant, val digest: Digest, val contentType: String?)

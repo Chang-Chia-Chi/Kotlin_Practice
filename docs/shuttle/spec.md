@@ -243,8 +243,11 @@ parallelism like any object. The parent's STORED is written when the last child 
 the parent's ack is the only ack; the parent's `acked` notification is the only notification; a
 child that reaches `maxAttempts` fails the parent. A child's STORED transition is one statement
 on the child's row followed by a conditional update of the parent's row that fires only when no
-sibling is left unstored; no lock on the parent is held per child, so N children storing
-concurrently do not serialise on one row (D42). A re-drive of a parent re-runs the chain and
+sibling is left unstored. The parent row is touched first so its row lock orders the tail of
+sibling transactions: a zero-row conditional update locks nothing, and under read committed two
+last children would each see the other unstored and neither would flip (measured in ticket 10).
+No lock spans I/O, no `SELECT ... FOR UPDATE` is taken, and the uploads run in parallel; only
+the final row writes queue on the parent for a moment (D42). A re-drive of a parent re-runs the chain and
 replaces its children. Two children of one parent that resolve to the same key are a cardinality
 error: the transfer is rejected with both source paths in the reason, because storing both would
 make one silently overwrite its sibling (S33).
@@ -445,6 +448,9 @@ comparing size; `probe` is the connector's startup probe on the directory. The c
 DDL applied by the DBA (D15); the code carries the reference text.
 
 ```sql
+CREATE SEQUENCE file_transfer_seq;                     -- ids; the store reads NEXTVAL
+CREATE SEQUENCE delivery_outbox_seq;
+
 CREATE TABLE file_transfer (
   id                NUMBER(19)     NOT NULL,
   route             VARCHAR2(64)   NOT NULL,
@@ -1023,7 +1029,7 @@ poll are appeals to the connector's spec.
 | D39 | The timeout chain is PUT, `apiCall`, `drainTimeout`, termination grace, each below the next; reference values 20 s, 45 s, 60 s, 90 s | A blocking PUT cannot be interrupted, so every layer must outlast the one inside it; the reference configuration must pass its own validator |
 | D40 | A finished polled identity is re-digested at most once per `recheckFinished`, measured from the row's `updated_at`; inside the window it is skipped without a fetch or a write | Identity carries mtime, so a file that stays under `none` is the same identity on every poll and D2's digest check would download the whole directory every interval; the row's own timestamp throttles it with no new column and no in-memory memory (v0.4) |
 | D41 | Staging is bounded in bytes: `staging.minFree` defers a fetch below the watermark without counting an attempt; `unzip` rejects beyond `maxEntries` or `maxBytes` | Parallelism bounds pipelines, not bytes; an archive that expands past the volume evicts the pod, and a deferral is disk pressure, not the object's fault, so it must not walk the object to FAILED (v0.4) |
-| D42 | A child's STORED is one statement on its own row plus a conditional parent update; no parent lock per child | N children of one parent store under the route's parallelism, and a parent lock taken by each would serialise the fan-out on one Oracle row (v0.4) |
+| D42 | A child's STORED is one statement on its own row plus a conditional parent update; no `FOR UPDATE`, no lock across I/O, the parent row touched so the last two children order their tails | N children of one parent store under the route's parallelism; the uploads must not serialise, but a lock-free conditional flip loses the last child under read committed, so the row writes queue on the parent for a moment (v0.4, amended by ticket 10) |
 
 ---
 

@@ -616,3 +616,292 @@ status and reference. Meters: `shuttle_delivery_total{channel,event,outcome}`,
   in one scope per process; on shutdown cancel that scope inside `drainTimeout` and every
   in-flight row stays PENDING (I12). Tests drive time with `ClockFixture.advance` plus
   `advanceTimeBy` together, since the sweep is a `delay` and `next_attempt_at` is the wall clock.
+
+---
+
+## 10: Oracle state store over JDBI
+
+**Built:** `infra.shuttle.jdbi`, two classes. `StateStoreSchema.DDL` is spec 8.1 verbatim, with
+`statements()` splitting it into what the driver accepts. `JdbiStateStore(jdbi, dispatcher, clock)`
+implements every 8.2 method as one `inTransaction` on the injected dispatcher: the transitions
+that create outbox rows insert them inside that transaction; `seen` inserts and, on
+`uq_file_transfer_identity`, re-selects the winner; `due` is one `FOR UPDATE SKIP LOCKED` select
+bounded by `ROWNUM` over an ordered id subquery; children are deleted and re-inserted FETCHED;
+a child's `stored` touches the parent row, then runs the conditional flip and creates the parent's
+rows only when it fired; `acked` moves parent and children in one statement; `delivered` flips
+DONE through a `NOT EXISTS` over the outbox. Three read-side methods (`transfer`, `transfers`,
+`outbox`) exist for the tests and the admin surface; they are not part of the seam. The
+contract test moved: `testkit/StateStoreContract` holds every seam-level assertion of ticket 03's
+`InMemoryStateStoreTest` plus `I20_` and `D42_`; `InMemoryStateStoreTest` and
+`JdbiStateStoreTest` are its two subclasses. The pom adds `jdbi3-core` 3.45.4 (compile), `ojdbc11`
+and Testcontainers `oracle-free` 1.20.4 (test), and `excludedGroups=oracle` as a property the
+way `etl-host` does; `-DexcludedGroups=none` opts the Oracle class in.
+
+**Concepts named:** *the contract* is `StateStoreContract`: one set of assertions, a `store`, three
+read views and a `poisonedEvents()` hook that makes a delivery insert fail inside the transaction
+(the in-memory store's switch; on Oracle a 65-character channel name against `VARCHAR2(64)`).
+*The tail lock* is the parent-row touch in `stored` (D42, amended). *Latest revision* is how
+`find`/`seen`/`unlisted` resolve an identity, as ticket 03 fixed it.
+
+**Acceptance:**
+
+- *DDL matches 8.1 verbatim* - `StateStoreSchemaTest.the_DDL_text_matches_spec_8_1_verbatim`
+  reads `docs/shuttle/spec.md` and compares the 8.1 block to the constant.
+- *The contract passes against both stores, tagged `oracle`, excluded by a pom property* -
+  `InMemoryStateStoreTest` 16 and `JdbiStateStoreTest` 17 (the 15 shared tests plus two Oracle-only
+  ones), `@Tag("oracle")`, `<excludedGroups>oracle</excludedGroups>`.
+- *I11 and I20 on Oracle* - `I11_a_failing_delivery_insert_leaves_the_transfer_state_unchanged`
+  and `I20_a_notification_row_exists_iff_its_transition_committed` in the contract, green on
+  Oracle: the oversize channel fails the insert and the transition is not there afterwards.
+- *Unique-identity violation on `seen` returns the existing row; `due` excludes ids, honours the
+  limit, skip-locked* - `seen_creates_a_SEEN_row_and_returns_the_existing_row_for_a_known_identity`
+  and `seen_returns_the_existing_row_when_the_unique_identity_constraint_fires` (proves the DDL's
+  constraint refuses a duplicate); `due_orders_by_next_attempt_excludes_ids_and_honours_the_limit`;
+  `due_skips_rows_another_session_holds_locked` (a second connection holds a row `FOR UPDATE`, `due`
+  returns the other one, then both once released).
+- *D42 on Oracle* - `D42_children_completing_concurrently_leave_exactly_one_parent_STORED_write`:
+  eight children `stored` at once on `Dispatchers.IO`; the parent is STORED once with one set of
+  outbox rows (the unique constraint would refuse a second).
+- *JDBI and `java.sql` only in the jdbi package* - `ArchitectureTest`, now with classes to check.
+- *Progress entry* - this.
+
+Default run: 92 tests green with the Oracle class excluded; opt-in run
+`-DexcludedGroups=none -Dtest=JdbiStateStoreTest`: 17 green in 62 s after a container start of
+about a minute (`gvenzl/oracle-free:23-slim-faststart`, already pulled).
+
+**Deviations:**
+
+1. **Spec 8.1 gained two sequences** (`file_transfer_seq`, `delivery_outbox_seq`). The v0.4 DDL had
+   `id NUMBER(19) NOT NULL` with nothing to generate it; the store reads `NEXTVAL`. Open item 7
+   ("sequence names") is now answered in the DDL.
+2. **D42 amended: the parent row is touched before the conditional flip.** A zero-row conditional
+   update locks nothing, so under read committed two last children each see the other unstored and
+   neither flips. The touch is a row lock for the tail of the child's transaction only, no
+   `FOR UPDATE`, nothing across I/O; spec 4.5 and D42 now say so.
+3. **`unlisted` is one select filtered in Kotlin**, not one statement with the listing inlined: a
+   STORED-and-unacked set is small by construction, and an inlined listing of thousands of
+   identities would fight Oracle's 1,000-element `IN` limit for no gain. (ponytail)
+4. **`due` returns fewer than `limit` when rows are locked**: `ROWNUM` picks before `SKIP LOCKED`
+   skips. Bounded is what the spec asks; the next wake or sweep collects the rest.
+5. **Instants are truncated to microseconds on the way in**, Oracle `TIMESTAMP`'s precision, so what
+   is read equals what was written; `unlisted` normalises the listing's mtimes the same way.
+6. **The contract's I11 asserts "some failure" by default**; the in-memory subclass overrides the
+   assertion to the injected `IOException`, so ticket 03's assertion is not weakened, and the
+   `calls` assertion moved to an in-memory-only test.
+7. **JDBI `stored` only flips a parent that is not already STORED** (`p.state <> 'STORED'`); the
+   in-memory store has no such guard. Untested by the contract; noted so ticket 06 relies on neither.
+8. **Size:** 373 main (299 store, 74 schema), 434 test (269 contract, 94 Oracle, 38 schema, 33
+   in-memory subclass). Over 600 in total because the contract absorbed ticket 03's test bodies.
+
+**For the next ticket:**
+
+- **14 (host):** produce `Jdbi.create(dataSource)` from the Quarkus datasource and hand it to
+  `JdbiStateStore(jdbi, ioDispatcher, clock)`; `ojdbc11` must be a runtime dependency there (it is
+  test-scoped here). The startup check "table missing" can be `SELECT 1 FROM file_transfer WHERE
+  ROWNUM = 0`, naming `StateStoreSchema.DDL` on failure. The Oracle class takes about two minutes
+  wall clock with the container; do not fold it into the default run.
+- **06 (pipeline) and 09 (notifier):** the read views `transfer/transfers/outbox` are on
+  `JdbiStateStore` and `InMemoryStateStore`, not on the seam; production code must not need them.
+- **Gotcha:** run the Oracle class with `-DexcludedGroups=none`; a plain `-Dtest=JdbiStateStoreTest`
+  runs zero tests and reports green.
+
+---
+
+## 11: S3 target and fetcher over the AWS SDK
+
+**Built:** `infra.shuttle.s3`, the module's first adapter over a real technology. `S3Target(client,
+bucket, io, clock, betweenPutAndHead = {})` implements `ObjectStoreTarget` per spec 7.2: `store` is
+one `PutObject` carrying the metadata map as user metadata and `Content-MD5` when the map says the
+digest is MD5, then a `HeadObject` of the new version that checks the content length and, on an
+unencrypted object, the ETag against that MD5; the returned `TargetRef` is `("s3", bucket, key,
+versionId, size)`. `verify` is a HEAD of key and version id. `probe` is a HEAD of the bucket, failing
+with the bucket's name when it is missing, and a read of the lifecycle configuration, warning when
+no enabled rule expires non-current versions. Nothing in the package names a delete operation.
+`S3Target.client(endpoint, region, pathStyle, accessKey, secretKey, connect, socket, apiCall)` builds
+the D4 client: synchronous, Apache HTTP client, endpoint override, path style, static credentials,
+API-call timeout. `S3Fetcher(client, bucket, io).fetcher` is the `Fetcher` for spec 4.1 stage 1:
+one GET streamed to the staging path through a `DigestInputStream`, the file deleted if the stream
+fails, the `StagedObject` carrying name, size, `LastModified`, digest and content type.
+`ObjectStoreTargetContract` in the test kit is the shared seam test; `InMemoryTargetTest` and the
+`minio`-tagged `S3TargetTest` are its two subclasses. `Minio` is one container per JVM for every
+`minio`-tagged class. The pom gains the AWS SDK BOM 2.29.51, `s3` with the Netty client excluded,
+`apache-client`, `commons-logging` at runtime, Testcontainers core 1.20.4 with the MinIO module
+1.21.3, and the `excludedGroups` property (`oracle,minio` by default, `-DexcludedGroups=none`
+to opt in), wired into surefire the way `etl-host/pom.xml` does it.
+
+**Concepts named:**
+
+- **`TargetMetadata` (core):** the keys the pipeline writes into the metadata map a target
+  receives: `digest`, `digest-algorithm`, and attributes under `attr-<name>`. The S3 target reads
+  the first two to decide on `Content-MD5` and the ETag check; the SDK adds the `x-amz-meta-`
+  prefix, so `attr-orderNumber` lands as spec 6.4's `x-amz-meta-attr-orderNumber`.
+- **The adapter's own crash point:** `betweenPutAndHead` is a suspend hook the constructor takes
+  and production leaves a no-op; spec 4.4 says a crash inside `store` is the adapter's contract,
+  and this is where the I6 replay throws.
+- **`warnings`:** the target keeps the messages it warned about, beside logging them, so a test
+  can assert "warns" and "is silent" without a log appender.
+- **Contract versus fake:** the shared contract asserts only what the seam promises (a fresh ref
+  per store, the newest content current at the key, `verify` true for a ref that exists and false
+  for one that does not). The in-memory fake additionally answers false for a superseded ref;
+  S3 with versioning answers true for it, because the old version still exists. That stricter
+  fake-only behaviour stayed in `InMemoryTargetTest` under its own test name.
+
+**Acceptance:**
+
+- *Shared contract passes against in-memory and S3 on MinIO with versioning, tagged `minio`* -
+  `ObjectStoreTargetContract.I6_a_fresh_ref_per_store_and_the_newest_content_current_at_the_key`
+  runs in `InMemoryTargetTest` (default suite) and `S3TargetTest` (`@Tag("minio")`, bucket
+  versioning enabled in `Minio.versionedBucket`).
+- *I6 on MinIO: three stores read back the newest by key; a crash between PUT and HEAD is repaired
+  by the next store; no delete call is ever made* -
+  `S3TargetTest.I6_three_stores_read_back_the_newest_by_key_a_crash_between_PUT_and_HEAD_is_repaired_by_the_next_store_and_nothing_is_deleted`:
+  the hook throws `CancellationException` on the third store, the fourth store makes its version
+  current, the listing shows four versions and no delete marker, and a Mockito spy on the client
+  verifies `deleteObject` and `deleteObjects` were never called.
+- *Corrupted body rejected by Content-MD5; ETag check passes single-part and is skipped with a
+  WARN under encryption* - `a_corrupted_body_is_rejected_by_Content_MD5_and_leaves_no_version`
+  (HTTP 400 from MinIO, no version created); the ETag pass is the silent I6 store (`warnings`
+  empty); `the_ETag_check_is_skipped_with_a_WARN_when_the_HEAD_reports_encryption` stubs the HEAD
+  through a spy to report AES256 and a non-MD5 ETag, and the store succeeds with one warning.
+- *Verify of a version expired by hand is false; probe warns without a non-current expiry and is
+  silent with one; the suite passes under a credential without delete permission; the multipart
+  threshold is pinned* - `verify_of_a_version_expired_by_hand_is_false` (the test deletes the
+  version through the client); `probe_warns_without_a_non_current_expiry_is_silent_with_one_and_fails_on_a_missing_bucket`;
+  the delete-less credential is NOT proven, see deviation 1; the threshold is pinned by
+  construction: a single `PutObject` and no multipart path, so the ceiling is S3's 5 GiB single-PUT
+  limit against a 10 MB largest file (documented in the class KDoc).
+- *The fetcher's digest matches the object's; the AWS SDK only in the s3 package* -
+  `S3FetcherTest.the_fetcher_streams_the_object_to_staging_and_its_digest_matches_the_objects`
+  (SHA-256 recomputed independently in the test), `a_missing_object_surfaces_as_the_SDKs_NoSuchKey_and_leaves_no_file`;
+  `ArchitectureTest.each adapter depends on core and its own technology only` now has `s3` classes
+  to check and is green.
+- *Progress entry appended* - this entry.
+
+Default run (`mvn -o -pl shuttle test`): 88 tests green, MinIO excluded. Opt-in run
+(`-DexcludedGroups=none -Dtest=S3TargetTest,S3FetcherTest`): 8 tests green in about 9 s including
+the container start.
+
+**Deviations:**
+
+1. **The delete-less credential is not exercised.** The MinIO image ships no `mc`, the admin API
+   needs its own signed protocol, and a `minio/mc` container is not in the local image cache, so
+   no user with a PUT/GET/HEAD-only policy was created. What stands instead is the structural
+   proof: the package contains no delete call, and the spy verifies none is made across the I6
+   replay. Debt; repaid by adding a `minio/mc` sidecar (or an admin-API client) to the fixture
+   and running the target under the restricted user, which the acceptance run of ticket 15 can do.
+2. **`Content-MD5` and the ETag check depend on the metadata map.** The seam hands the target a
+   file and a map; the target sends `Content-MD5` and compares the ETag only when the map carries
+   `digest-algorithm: md5` (`TargetMetadata`), and otherwise verifies size only. Ticket 06 must
+   write those keys; a route on SHA-256 gets the size check, as spec 6.5 implies.
+3. **Encryption is noticed per store, not at startup.** Spec 7.2 says the adapter "falls back to
+   size plus metadata with a WARN at startup" if the bucket encrypts; `probe` does not read the
+   bucket's encryption configuration, and the WARN is emitted on each store whose HEAD reports
+   server-side encryption. Debt: one `GetBucketEncryption` in `probe` repays it.
+4. **`verify` answers false on HTTP 400 as well as 404.** MinIO answers 400 to a malformed version
+   id (the contract's "no-such-version" ref) and 404 to a deleted one; both mean "that version is
+   not there".
+5. **SDK 2.29.51 has no checksum-calculation switch.** D4's "checksums when-required" is that
+   version's default behaviour; the explicit `requestChecksumCalculation(WHEN_REQUIRED)` exists
+   from 2.30 and must be set if the SDK is ever raised, or MinIO PUTs start carrying CRC32
+   trailers. Recorded in the client builder's KDoc.
+6. **`commons-logging` is a runtime dependency.** httpclient 4.x needs it and the quarkus BOM
+   leaves it off; without it the first SDK call fails with `NoClassDefFoundError`. Ticket 14 may
+   replace it with Quarkus's `commons-logging-jboss-logging` bridge.
+7. **`TargetMetadata` added to `core`.** Three constants so the pipeline and the adapters agree on
+   key names without the pipeline importing `s3`.
+8. **`InMemoryTargetTest` was reshaped**, not weakened: its I6 test split into the contract's
+   seam-level half and an in-memory-only half that keeps every original assertion, including the
+   superseded-ref-is-false one the S3 target cannot share.
+9. **Size:** 183 main, 301 test lines; in budget.
+
+**For the next ticket:**
+
+- **14 (host):** produce the client with `S3Target.client(store.endpoint, store.region,
+  store.pathStyle, accessKey, secretKey, timeouts.connect, timeouts.socket, timeouts.apiCall)`
+  from `S3Store` and the resolved secrets; one `S3Client` per declaration, shared by the target and
+  the fetcher; `probe()` at startup fails on a missing bucket and only warns on the lifecycle rule.
+  The `S3Target` takes the module's bounded IO dispatcher; every SDK call runs there.
+- **06 (pipeline):** build the metadata map with `TargetMetadata.DIGEST`,
+  `TargetMetadata.DIGEST_ALGORITHM` (the enum name, any case) and `TargetMetadata.ATTRIBUTE_PREFIX`
+  + name for attributes; spec 7.1's source mtime, source name and transfer id are further plain
+  keys. A `store` that throws is a stage error; the object it may have left is a non-current
+  version the next store supersedes (I6).
+- **10 (Oracle) and 15:** the `excludedGroups` property already lists `oracle`; add the tag and
+  nothing in the pom. The MinIO tier costs about 9 s per JVM.
+- **16/17 (S3 fetch for subscriptions):** `S3Fetcher(client, bucket, io).fetcher` is ready; it
+  reads `path` as the key, so the route's `fetch.path` pointer must resolve to a bare key.
+
+---
+
+## 12: HTTP channel
+
+**Built:** `infra.shuttle.http.HttpChannel(config: core.HttpChannel, http: HttpClient, env: (String) -> String?)`,
+the `DeliveryChannel` for a channel declared with `http:`. One request per `deliver`: method and
+URL from the config, `Content-Type: application/json`, the auth header (bearer, basic, or a named
+header) from secrets resolved against `env` at construction, the request timeout from the config,
+and the body as `ObjectMapper.writeValueAsBytes(event.body)`, the `JsonNode` ticket 04 put on
+`DeliveryEvent`. The outcome comes from the channel's `response` section: a status in `success`
+is `Delivered(reference)` with the reference read by the JSON pointer `response.reference` from
+the response body, or `null` with a WARN when the pointer resolves nothing or there is no
+pointer; a status in `retry` is `Retry(status, body excerpt)`; any other status is `Reject`.
+Connection refused, any other `IOException` and `HttpTimeoutException` are `Retry(null, cause)`.
+One INFO line per attempt: transfer id, event, channel, attempt, status, reference. Tests in
+`HttpChannelTest` against a loopback `com.sun.net.httpserver.HttpServer` on port 0.
+
+**Concepts named:**
+
+- **The send is `sendAsync` bridged into `suspendCancellableCoroutine`,** not a blocking `send`
+  on a dispatcher. Cancelling the coroutine cancels the JDK request through the future at once,
+  so a cancelled delivery neither blocks a thread for the remaining timeout nor comes back with
+  an outcome. `CancellationException` is not an `IOException` and passes through untouched.
+- **The reference is best-effort.** A downstream that answers success without the id it promised
+  has still received the notification; the row is DELIVERED with a null reference and the WARN
+  names the channel, transfer and pointer (spec 9.7 makes the id the receiver's obligation).
+- **Secrets resolve at boot.** `Secret.Env` is looked up when the channel is constructed, so a
+  missing variable fails startup with the channel and variable named rather than the first
+  delivery hours later.
+
+**Acceptance:**
+
+- *200 with the pointer resolving: Delivered with reference; 200 without: Delivered with null and
+  a WARN; 503 and 429: Retry; 400: Reject; refused and a stall past the timeout: Retry* -
+  `HttpChannelTest.200 with the reference pointer resolving yields Delivered with the reference`,
+  `200 without the pointer resolving yields Delivered with a null reference`,
+  `a retry status yields Retry and any other status yields Reject`, `connection refused yields Retry`,
+  `a stall past the timeout yields Retry`. The WARN is logged, not asserted.
+- *Auth modes bearer, basic and header; CancellationException never converted* -
+  `auth modes bearer basic and header set the header the server sees` (asserts the header the
+  server recorded), `CancellationException propagates unchanged and produces no outcome` (a job
+  cancelled while the handler stalls ends in under a second with the exception and no outcome).
+  Escaping: `a body value with quotes and backslashes arrives escaped and parses back`.
+- *`java.net.http` only in the http package* - `ArchitectureTest.each adapter depends on core and
+  its own technology only`, now with classes in `infra.shuttle.http` to check.
+- *Progress entry appended* - this entry.
+
+**Deviations:**
+
+1. **No IO dispatcher parameter.** Plan 2.5 puts blocking `HttpClient.send` on the module's
+   bounded IO dispatcher; this channel does not block, so there is nothing to put there. The
+   first version did use `withContext(io) { http.send(...) }` and the cancellation test showed
+   the cost: a cancelled coroutine waited the full request timeout and then returned `Retry`.
+   `sendAsync` plus `suspendCancellableCoroutine` is stdlib-and-JDK only (no
+   `kotlinx-coroutines-jdk8`). Ticket 14 produces only the `HttpClient`.
+2. **Retry and Reject carry the first 200 characters of the response body as `reason`.** The
+   spec leaves `reason` free; an excerpt is what an operator wants in the log.
+3. **A failed reference lookup on a non-JSON success body is the same null-plus-WARN**, not an
+   error: the notification was received.
+4. Size: 107 main, 159 test lines; in budget.
+
+**For the next ticket:**
+
+- **09 (notifier):** construct `HttpChannel(config, httpClient, env)` per `http:` channel and
+  call `deliver(DeliveryEvent(transferId, moment, channel, attempts + 1, renderedBody))`; map
+  `Delivered` to `delivered(id, reference)`, `Retry` to `retryLater`, `Reject` to
+  `deliveryFailed`. Do not catch `CancellationException` around it either.
+- **14 (host):** produce one `HttpClient` for the process (`HttpClient.newBuilder().connectTimeout(...)`)
+  and pass `System.getenv()::get` as `env`; a missing secret variable throws
+  `IllegalStateException` at construction, which is the boot failure spec 12.1 wants. No
+  dispatcher is needed for this channel.
+- Gotcha: `com.sun.net.httpserver.Headers` normalises header names (`X-api-key`), which is why
+  the test reads them that way; the client sends what the config says.
+

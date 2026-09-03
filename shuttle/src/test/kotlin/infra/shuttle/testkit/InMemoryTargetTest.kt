@@ -1,36 +1,28 @@
 package infra.shuttle.testkit
 
+import infra.shuttle.core.ObjectStoreTarget
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Assertions.assertArrayEquals
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
-import org.junit.jupiter.api.Assertions.assertNotEquals
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
-import org.junit.jupiter.api.io.TempDir
 import java.io.IOException
-import java.nio.file.Files
-import java.nio.file.Path
 
-class InMemoryTargetTest {
-    @TempDir lateinit var dir: Path
+class InMemoryTargetTest : ObjectStoreTargetContract() {
     private val target = InMemoryTarget("bucket")
-
-    private fun file(name: String, content: String) = Files.writeString(dir.resolve(name), content)
+    override fun target(): ObjectStoreTarget = target
+    override fun location() = "bucket"
+    override suspend fun currentBytes(key: String) = target.bytes(key)
 
     @Test
-    fun I6_a_fresh_ref_per_store_one_copy_per_key_and_verify_follows_the_current_ref() = runTest {
+    fun I6_one_copy_per_key_a_superseded_ref_no_longer_verifies_and_the_newest_metadata_wins() = runTest {
         val first = target.store("out/a.csv", file("a1", "one"), mapOf("digest" to "x"))
-        val second = target.store("out/a.csv", file("a2", "two!"), emptyMap())
-        assertNotEquals(first, second)
-        assertEquals("out/a.csv", second.key)
-        assertEquals("bucket", second.location)
-        assertEquals(4, second.size)
-        assertTrue(target.verify(second))
+        target.store("out/a.csv", file("a2", "two!"), emptyMap())
         assertFalse(target.verify(first))
         assertArrayEquals("two!".toByteArray(), target.bytes("out/a.csv"))
         assertEquals(setOf("out/a.csv"), target.keys)
-        assertEquals(emptyMap<String, String>(), target.metadata("out/a.csv")) // the newest store's metadata
+        assertEquals(emptyMap<String, String>(), target.metadata("out/a.csv"))
         assertEquals(2, target.calls.count { it.method == "store" })
     }
 
