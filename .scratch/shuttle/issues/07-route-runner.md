@@ -9,14 +9,14 @@ process with capped backoff while per-route health and the readiness rule are co
 
 **Nature:** coroutine structure work
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `I19` and `I21` as named tests; S14, S16, S23
-- [ ] With `parallelism + 1` objects at most `parallelism` pipelines run at once on the virtual clock; a poll failure never cancels a running pipeline
-- [ ] Reconciliation marks ACKED exactly the STORED rows older than the poll start and absent from a complete listing, creating their acked deliveries through the same function the pipeline uses
-- [ ] Restart delays follow the backoff from initial to max on the virtual clock and reset after a successful trigger; both readiness rules of spec Sec 10 compute correctly
-- [ ] Stuck gauge refreshes at every poll completion
-- [ ] Progress entry appended
+- [x] `I19` and `I21` as named tests; S14, S16, S23
+- [x] With `parallelism + 1` objects at most `parallelism` pipelines run at once on the virtual clock; a poll failure never cancels a running pipeline
+- [x] Reconciliation marks ACKED exactly the STORED rows older than the poll start and absent from a complete listing, creating their acked deliveries through the same function the pipeline uses
+- [x] Restart delays follow the backoff from initial to max on the virtual clock and reset after a successful trigger; both readiness rules of spec Sec 10 compute correctly
+- [x] Stuck gauge refreshes at every poll completion
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket, stubs throwing NotImplementedError
 for later seams; 200-600 lines including tests; no Thread.sleep; invariant tests named

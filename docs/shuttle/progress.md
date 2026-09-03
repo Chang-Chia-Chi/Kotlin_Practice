@@ -1062,3 +1062,129 @@ ScriptedSourceTest 2, YamlLoaderTest 10; 151 tests, 0 failures, 0 errors (`oracl
 - **16 (expand, S28):** `ProcessContext.fetch` throws `NotImplementedError` in the pipeline's
   context; deviation 1 and 2 are yours.
 
+---
+
+## 07: Route runner, reconciliation and supervision
+
+**Built:** `infra.shuttle.core.RouteRunner` and `RouteSupervisor`, replacing the G0 shells.
+`RouteRunner(route, pipeline, fetch, store, wake, clock, registry)`; `suspend fun run(events:
+Flow<RouteEvent>)` collects one route's flow in order under a `supervisorScope`. Every `Seen` is one
+`pipeline.run(event, fetch)` coroutine behind `Semaphore(route.parallelism)`: the permit is taken
+by the collector before `launch`, so the collector suspends on the trigger while the route is full,
+and the permit and `shuttle_inflight{route}` are released in `invokeOnCompletion`, exactly once
+whether the pipeline ran, threw or was cancelled before it started. `PollFailed` and `PollSkipped`
+are counted in `shuttle_poll_total{route,result}` with one WARN and touch no pipeline. `PollCompleted`
+counts `completed`, then, when not truncated, `store.unlisted(route, startedAt, listed)` and
+`store.acked(id, requests)` for each id (the route's `on: acked` requests, the same transition stage
+4 writes), one INFO per row, `shuttle_reconciled_total` by the count, one `wake` when rows were
+repaired and the route notifies on acked; when truncated, `shuttle_reconcile_skipped_total` and one
+WARN. Every `PollCompleted` then refreshes `shuttle_stuck_transfers{route}` from `store.stuck(route,
+now - stuckAfter)` when `stuckAfter` is set. A state store that throws inside that repair is logged
+and left to the next poll: nothing but cancellation reaches the collector (spec 11). `RouteDown` is
+the trigger's last word: collection stops there (`transformWhile`), the in-flight pipelines finish,
+and `run` throws the cause. A flow that completes returns normally after the pipelines finish;
+cancelling `run` cancels them.
+`RouteSupervisor(runners, events: (Route) -> Flow<RouteEvent>, restartBackoff, readiness, registry)`;
+`suspend fun run()` launches one child per runner under a `supervisorScope`, each looping: gauge
+`shuttle_route_up{route}` to 1, `runner.run(events(route))`, gauge to 0, one WARN naming the cause
+and the delay, `delay`, `shuttle_route_restarts_total{route}`, again. The delay starts at `initial`,
+doubles by `Backoff.factor` and is capped at `max`; it falls back to `initial` after a run that
+delivered a `Seen` or a `PollCompleted`. `fun ready()`: `AllRoutesDown` is ready while any route's
+gauge is 1, `AnyRouteDown` only while every gauge is 1; both false before `run` starts.
+
+**Concepts named:**
+
+- **The collector** is the coroutine collecting the route's flow; the pipelines are its children.
+  Backpressure to the trigger is the collector suspending on the semaphore.
+- **A successful trigger** (spec 10 "resets") is a run in which the trigger delivered a `Seen` or a
+  `PollCompleted`: it listed or produced something. A run of nothing but `PollFailed` then
+  `RouteDown` keeps climbing the backoff. The supervisor sees this by decorating the flow with
+  `onEach` before handing it to the runner; the runner knows nothing of restarts.
+- **The route is down** from the moment `runner.run` returns or throws until the restart.
+  Normal completion of the flow counts as down too (spec 11: "trigger terminates").
+- **RouteDown ends the run by throwing its cause**, chosen over returning it so that a trigger
+  that throws instead of emitting `RouteDown` takes the same path through the supervisor.
+
+**Acceptance:**
+
+- *I19 and I21 as named tests; S14, S16, S23* -
+  `RouteRunnerTest.I19_with_parallelism_plus_one_objects_at_most_parallelism_pipelines_run_at_once`
+  (the store-wide cap of I19, sessions per pool, is the connector pool's and rule 9's; the runner's
+  share is the bound per route),
+  `RouteSupervisorTest.I21_a_dead_route_is_restarted_with_backoff_doubling_from_initial_to_max`
+  (starts at 0, 30, 90, 210, 450, 930, 1830, 2730 s on the virtual clock; 7 restarts counted),
+  `S23_I21_two_routes_one_dead_the_other_keeps_completing_and_readiness_follows_the_rule`,
+  `RouteRunnerTest.S14_a_truncated_listing_skips_reconciliation_and_counts_it`,
+  `S16_a_poll_with_the_state_store_unavailable_completes_nothing_and_the_next_poll_completes_all`.
+- *`parallelism + 1` objects, at most `parallelism` pipelines at once; a poll failure never cancels a
+  running pipeline* - `I19_...` (three objects, parallelism 2, two parked at `afterFetch` while the
+  gauge reads 2 and the third waits), `a_poll_failure_or_skip_is_counted_and_never_cancels_a_running_pipeline`.
+- *Reconciliation marks ACKED exactly the STORED rows older than the poll start and absent from a
+  complete listing, through the same function the pipeline uses* -
+  `S4_a_complete_poll_acks_exactly_the_STORED_rows_older_than_its_start_and_absent_from_the_listing`
+  (one unlisted old row ACKED with its `acked` delivery and one wake; a listed row and a row updated
+  after the poll's start equal to their snapshots).
+- *Restart delays follow the backoff and reset after a successful trigger; both readiness rules* -
+  `I21_...`, `the_backoff_resets_after_a_run_that_delivered_a_PollCompleted` (starts at 0, 30, 60,
+  90 s), `S23_I21_...` (true under `all-routes-down`, false under `any-route-down`).
+- *Stuck gauge refreshes at every poll completion* -
+  `the_stuck_gauge_is_refreshed_at_every_poll_completion` (1 with a SEEN row five minutes old against
+  `stuckAfter = 3m`, 0 at the next poll once it is REJECTED).
+- Also: `one_Seen_on_a_mirror_route_runs_one_pipeline_to_DONE` (the tracer bullet),
+  `RouteDown_ends_the_run_with_its_cause_once_the_in_flight_pipelines_have_finished`,
+  `cancelling_the_run_cancels_the_pipelines_and_releases_every_permit_and_the_gauge` (staging empty,
+  the row left FETCHED, the same runner completes the next run).
+- *Progress entry appended* - this entry.
+
+Final run: ArchitectureTest 7, AttributeFreezeTest 4, BuiltInProcessorsTest 8, MappingRendererTest 12,
+NotifierTest 13, ProcessingChainTest 4, RouteRunnerTest 9, RouteSupervisorTest 3, RulesTest 30,
+SurfaceTest 3, TransferPipelineTest 19, HttpChannelTest 8, StateStoreSchemaTest 2, ClockFixtureTest 1,
+FakeProcessContextTest 2, HookDriverTest 3, InMemoryStateStoreTest 18, InMemoryTargetTest 3,
+RecordingChannelTest 2, ScriptedSourceTest 2, YamlLoaderTest 10; 163 tests, 0 failures, 0 errors
+(`oracle` and `minio` excluded).
+
+**Deviations:**
+
+1. **The supervisor takes the runners plus a flow source, not a `(Route) -> suspend () -> Unit`
+   factory.** It needs to see the events to know a trigger succeeded (spec 10's reset), and wrapping
+   the flow with `onEach` is the one place that can without a callback on the runner.
+2. **No `Clock` on the supervisor.** The delays are `delay`, which the virtual clock drives; a wall
+   clock has nothing to read there. The ticket listed one; YAGNI.
+3. **`shuttle_stuck_transfers{route}` is registered for every route** and only refreshed when
+   `stuckAfter` is set, so the series exists at 0 rather than being absent for routes without a cap.
+4. **A trigger flow that throws, rather than emitting `RouteDown`, cancels the in-flight pipelines**:
+   the exception leaves `supervisorScope` and takes its children with it. `RouteDown` is the
+   protocol for a graceful stop; a throwing flow is the process-crash path of spec 4.4 for whatever
+   was in flight, and the supervisor restarts the route either way.
+5. Size: 159 main, 310 test; in budget.
+
+**For the next ticket:**
+
+- **08 (crash matrix):** drive one route through `RouteRunner.run(ScriptedSource(clock).seen(...)
+  .pollCompleted(...).events())` in `launch` under `runTest` with a `HookDriver` as the pipeline's
+  hook; `advanceUntilIdle()` parks the pipelines at the paused point; `hook.crash(point)` is the
+  process dying there (the runner's `invokeOnCompletion` releases the permit and the gauge); then a
+  second `run` of the same flow (the `ScriptedSource` replays; identities are compared by value) is
+  the next poll from the same `InMemoryStateStore` and `InMemoryTarget`. S4 is `crash(afterAck)`
+  then a `PollCompleted` that does not list the file, with `clock.advance` between them so the row's
+  `updated_at` is older than the poll's `startedAt`. Never leave a point paused: `resume` disarms
+  the gate even after a `cancel` (see the cancellation test).
+- **13 (SFTP source):** the runner collects the flow in order and suspends on `Seen` while
+  `parallelism` pipelines run, so a trigger that emits from a listing loop is back-pressured by the
+  route; emit `PollCompleted(startedAt, listed, truncated)` once per poll with `startedAt` read
+  before the listing and `truncated = true` when the listing hit `maxFilesPerPoll`; emit
+  `PollSkipped` when the previous poll is still running; emit `RouteDown(cause)` as the last event
+  and then complete, never throw out of the flow (deviation 4). Inside D40's window the pipeline
+  tells the trigger nothing (ticket 06 deviation 4): whatever releases the connector's in-flight
+  entry for that file must be the trigger's own bookkeeping after `pipeline.run` returns, which the
+  runner does not expose; the simplest is a `finally` in the `Seen`'s producing coroutine keyed on
+  the ack and nack having both not fired, or an in-flight set that a listing refreshes.
+- **14 (host):** one `RouteSupervisor` per process: `RouteSupervisor(runners, { route ->
+  sources.getValue(route.name).events() }, config.supervision.restartBackoff,
+  config.supervision.readiness, registry)`; run it in the process scope beside the notifier;
+  `ready()` is the readiness probe's answer; cancel the scope on shutdown inside `drainTimeout`.
+  One `RouteRunner` per route with the `TransferPipeline` built as ticket 06's note says. Gotcha:
+  two routes on one store both register `shuttle_staging_free_bytes{store}` (ticket 06's gauge);
+  Micrometer keeps the first and ignores the second, so only the first route's reading is
+  published. Both read the same volume, so the value is right but the refresh cadence is one route's.
+
