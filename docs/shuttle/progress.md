@@ -1420,3 +1420,183 @@ ScriptedSourceTest 2, YamlLoaderTest 11; 165 tests, 0 failures, 0 errors (`oracl
   is `Delivered`) is ticket 12's, the stage retry is this ticket's. The `fetched` delivery after
   a crash is the notifier's ordinary sweep; nothing to wire.
 
+---
+
+## 13: SFTP poll source, the real trigger
+
+**Built:** `infra.shuttle.sftp.SftpPollSource(source, config, route, poll, clock)` and the top-level
+`sftpConnectorConfig(store, poll, algorithm, resolve)`, the only two things in the module that name
+`sftp.connector`. `fun events(): Flow<RouteEvent>` is the connector's `watch(poll.directory,
+poll.every)` read as one route's flow: `PollStarted` is where `startedAt` is read (before the
+listing) and where abandoned files are given back; `FileSeen` becomes `RouteEvent.Seen(identity,
+SourceView(file.path), ack = file.ack(), nack = { file.nack(reason, it) })`; the connector's
+`PollCompleted(tick, seen, emitted, notReady)` becomes `RouteEvent.PollCompleted(startedAt, listed,
+truncated)`; `PollFailed` and `PollSkipped` pass through; `FileGone` becomes nothing, because the
+fetcher's own failure answers it. `val fetcher: Fetcher` is `FileSeen.download(into)` for the file
+`event.source.path` names, looked up in the source's own path-keyed in-flight map; a null download
+(gone since it was listed) is an `IOException`, which is the stage error the pipeline charges an
+attempt for and nacks. The flow never throws: `catch { emit(RouteDown(it)) }` is the last event of a
+watch that ended on a failure no tick could survive. `sftpConnectorConfig` maps `SftpStore`'s host,
+port, auth (through a caller's `resolve`), `hostKey`, `pool`, `keepAlive`, `idleTimeout`,
+`idleCutoff`, `drainTimeout`, `cancelGrace` and `staging` plus one `Source.Poll`'s `directory`,
+`readiness` and `onAck`/`onNack` onto the connector's DSL, with `overlap = SKIP` (spec 5.1) and the
+route's digest as the connector's staging digest, so the sum the download already computed is the
+one the pipeline wants.
+
+**Concepts named:**
+
+- **The in-flight map** is the source's only state: remote path to the `FileSeen`, its identity, the
+  tick that handed it over, and whether the fetcher has been called on it. It serves three purposes
+  and that is why it is one map: it is how the fetcher finds the event for the path the pipeline
+  gives it, it is what makes `listed` complete, and it is what a later poll releases from.
+- **`listed` is what a STORED row may still be**, not what this poll emitted. Spec 4.6 acks every
+  STORED row a complete listing did not name, and a file between its store and its move is in flight
+  and for that reason *not* handed over again - so `listed` is this tick's identities plus every
+  identity still in the map from an earlier tick. Without the second half, reconciliation would write
+  ACKED for a file whose move had not happened.
+- **Truncation is a reading of counts, not a flag.** The connector reports `seen`, `emitted` and
+  `notReady`; the listing is `take(maxFilesPerPoll)` over a walk that, with `recursive = false` (the
+  only shape `Source.Poll` can describe), yields exactly the files. So `truncated = seen >=
+  config.polling.maxFilesPerPoll`: at the cap nothing proves the directory held no more, and saying
+  `true` only skips one poll's repair, which is the safe direction.
+- **D40's window is exactly the entries whose fetcher was never called.** Every other path out of
+  `TransferPipeline.run` acks, nacks, or has fetched first; only a finished row that came back inside
+  `recheckFinished` returns saying nothing (ticket 06 deviation 4). That is what makes the release
+  precise rather than a timeout: at a `PollStarted`, every entry from an *earlier* tick that has
+  still not reached the fetcher is nacked with redelivery, and the next listing hands it over again.
+- **A run that ends gives back everything it held.** The connector withdraws only the files the
+  *running* tick handed over, and only when that tick is cancelled; a file held from an earlier tick
+  would otherwise stay in its in-flight set for the life of the process, invisible to every later
+  poll and to the route's own restart. The flow's `finally` nacks the lot under `NonCancellable`.
+
+**Acceptance:**
+
+- *The vendor-drop route moves a file to `temp/` only after the target holds it; the mirror route
+  deletes after store* -
+  `SftpPollSourceTest.S1_the_vendor_drop_route_moves_the_file_to_temp_only_after_the_target_holds_it`
+  (a `HookDriver` paused at `afterStore` reads the server's directory before the ack and at
+  `afterLedgerAcked` after it, so D6's order is asserted on the server rather than inferred),
+  `S1_the_mirror_route_deletes_the_file_after_the_target_holds_it`.
+- *A file removed between listing and fetch produces no transfer beyond SEEN and no error* -
+  `a_file_removed_between_the_listing_and_the_fetch_leaves_a_SEEN_row_and_no_error` (SEEN, one
+  attempt, nothing stored, the run's staging directory gone; the pipeline's WARN is its report, and
+  nothing reaches the collector).
+- *A wrong password ends the flow with route down* -
+  `a_wrong_password_ends_the_flow_with_RouteDown_as_its_last_event`
+  (`RouteDown(AuthenticationFailed)` last, no `PollFailed`, and `collect` returns rather than throwing).
+- *`idleCutoff` and readiness reach the connector's DSL* -
+  `SftpConnectorConfigTest.the_store_and_the_poll_reach_the_connectors_config`,
+  `the_readiness_checks_reach_the_connector_in_order`,
+  `a_store_that_declares_no_readiness_hands_every_listed_file_over`,
+  `the_ack_vocabulary_maps_onto_the_connectors_post_actions`,
+  `rule12_an_ack_action_of_another_trigger_is_not_something_a_poll_can_do`,
+  `sha1_has_no_name_in_the_connector_so_its_downloads_are_summed_with_sha256`.
+- *Only the sftp package imports the connector* -
+  `ArchitectureTest.the sftp connector appears nowhere outside the sftp package` (with the subject
+  asserted, so the sentence cannot pass by having nothing to check), and the existing
+  `each adapter depends on core and its own technology only`, whose `sftp` rule is now real.
+- Also: `a_file_on_the_server_becomes_one_Seen_whose_identity_is_the_store_directory_name_size_and_mtime`
+  (the tracer bullet; spec 5.2, mtime at the second the server reports),
+  `a_poll_lists_every_identity_still_in_flight_from_an_earlier_poll` (spec 4.6's contract: one file
+  fetched and never answered, and the *next* poll, which emitted nothing, still names it),
+  `a_listing_that_reaches_maxFilesPerPoll_completes_truncated`,
+  `a_Seen_the_route_neither_answered_nor_fetched_is_given_back_and_handed_over_again` (D40),
+  `a_run_that_ends_gives_back_every_file_it_was_holding_so_the_next_run_lists_them`.
+- *Progress entry appended* - this entry.
+
+Final run: ArchitectureTest 9, AttributeFreezeTest 4, BuiltInProcessorsTest 8, MappingRendererTest 12,
+NotifierTest 13, ProcessingChainTest 4, RouteRunnerTest 9, RouteSupervisorTest 3, RulesTest 32,
+SurfaceTest 3, TransferPipelineTest 19, HttpChannelTest 8, StateStoreSchemaTest 2,
+SftpConnectorConfigTest 6, SftpPollSourceTest 9, ClockFixtureTest 1, FakeProcessContextTest 2,
+HookDriverTest 3, InMemoryStateStoreTest 18, InMemoryTargetTest 3, RecordingChannelTest 2,
+ScriptedSourceTest 2, YamlLoaderTest 11; 183 tests, 0 failures, 0 errors (`oracle`, `minio` and
+`nats` excluded). `SftpPollSourceTest` costs 3.4 s against the embedded SSHD, so it carries no group
+tag and stays in the default tier, like the connector's own server-backed classes.
+
+**Deviations:**
+
+1. **The installed connector artifacts had to be rebuilt before anything could compile.**
+   `dynacache:sftpconnector-core:0.1.0-SNAPSHOT` in `~/.m2` held no `sftp/connector/source` package
+   at all (no `SftpSource`, `SftpEvent`, `InFlightSet`, `ReadinessCheck`, `OverlapPolicy`), and the
+   `dynacache-parent` and `sftpconnector` aggregator poms there were older than the reactor's, so
+   Maven called both connector poms invalid - `'dependencies.dependency.version' ... is missing` for
+   `resilience4j-retry`, `-circuitbreaker`, `-timelimiter`, `lincheck`, `junit-platform-suite` and
+   `testcontainers-toxiproxy` - and dropped *every* transitive dependency, which is why the embedded
+   server was not on the classpath either. Fixed by reinstalling, offline and without touching a line
+   of `sftpconnector/`: `mvn -o -N install`, `mvn -o -N install -f sftpconnector/pom.xml`, then
+   `mvn -o -DskipTests install -pl sftpconnector/core,sftpconnector/testkit`. Anyone building this
+   module from a fresh local repository has to do the same, or build the whole reactor.
+2. **`org.apache.sshd:sshd-common` is pinned to 2.19.0** in `shuttle/pom.xml`'s
+   `dependencyManagement`, before the Quarkus BOM import. The test kit brings `sshd-core` 2.19.0; the
+   platform BOM would otherwise hold `sshd-common` at 2.12.1, which is the two halves of one server
+   on two versions.
+3. **`truncated` is derived, because the connector reports counts and not a flag:**
+   `seen >= config.polling.maxFilesPerPoll`. It is exact for the only listing shape `Source.Poll` can
+   describe (`recursive = false`, so the walk yields files and nothing else, and both the
+   per-directory `maxEntries` and the `take` are that same number). Were `recursive` ever added, a
+   directory entry would consume a cap slot without counting in `seen` and the reading would have to
+   become "unless the walk finished", which is a connector change; until then this only ever errs
+   toward `true`, which skips one poll's repair.
+4. **The D40 release is `!fetchStarted` plus one tick, not a timeout.** See "Concepts named". Its
+   ceiling, recorded as a `ponytail:` comment: a pipeline that sits between the state store and the
+   fetcher for longer than one poll interval - a state store that has stopped answering - has its
+   file released early, and its later ack is the connector's "already settled", so the move does not
+   happen and the next poll drives the row again from ACKED or STORED. Nothing is lost. The clean
+   upgrade is a completion callback on `RouteRunner`, which is a core change and was not made.
+5. **The flow's `finally` nacks every file still held, under `NonCancellable`.** A pipeline caught
+   mid-ack by a route ending has its ack ignored and its file driven again next poll; that is a
+   wasted cycle, against a leak that never heals, and the leak is the worse of the two.
+6. **`RouteDown` is emitted for a watch that failed, not for one that completed normally.** The
+   connector ending a watch because it was stopped completes the flow, and `RouteRunner` already
+   reads a completed flow as the route being down (progress 07); fabricating a cause for it would put
+   an invented exception in the supervisor's log.
+7. **No `maxFilesPerPoll` on `SftpStore`.** Spec 13.1 lists it "if present" and it is not; the
+   connector's own default of 1000 stands and truncation is read off
+   `config.polling.maxFilesPerPoll`, so a knob added later flows through with no change here. No YAML
+   grammar, DSL or rule was added for it, per "prefer using what exists".
+8. **One connector per polled route, not one per store.** `PollingConfig.onAck` is per connector
+   while `Source.Poll.onAck` is per route, so two routes polling one store with different ack actions
+   cannot share one `SftpConnectorConfig`. `sftpConnectorConfig` therefore takes one store and one
+   poll. Ticket 14 has to decide; see below.
+9. **The wrong-password test builds `SftpSource` from a raw pool and client** rather than through
+   `SftpConnector.start`, whose start-up probe refuses the password before a watch exists. What is
+   under test is a watch that ends on a rejection, which is what the connector's own
+   `WatchAgainstServerTest` does for the same reason.
+10. Size: 292 main, 488 test, 780 total against a 200-600 target. About two fifths is KDoc and
+    per-assertion reasoning; the code is one class, one function and five private helpers, and there
+    is one test per checkbox plus the four that hold the `listed`, truncation and release contracts.
+
+**For the next ticket:**
+
+- **14 (host):** build one connector per *polled route* with
+  `sftpConnectorConfig(store, poll, route.digest ?: config.digest) { secret -> ... }`, resolving
+  `Secret.Env` from the environment and `Secret.Literal` to itself, then
+  `SftpConnector.start(config, meterRegistry = registry, clock = clock)`; `start` runs the probe, so
+  a bad password, a missing watched directory or an action target that cannot be written fails the
+  deployment rather than the first file an hour later. Deviation 8 is yours to settle: sharing one
+  connector per store means one `onAck` for every route on it (rule 12 could refuse the mix at boot),
+  while one per route means one pool and one `maxConcurrentTransfers` each, and rule 9's per-store
+  session budget has to be divided between them.
+  `SftpPollSource(connector.source, config, RouteName(route.name), poll, clock)` gives the runner
+  `source.events()` and `source.fetcher`. A route with `fetch.store` on SFTP (the subscribe shape)
+  needs a `Fetcher` that is *not* this one: `SftpPollSource.fetcher` only knows files its own poll
+  handed over, and a fetch by path with no `FileSeen` behind it is
+  `client.download(client.stat(path)!!, into)` - a few lines in this package, not a change here.
+  Shut down by cancelling the supervisor's scope and then `connector.close()` inside `drainTimeout`;
+  closing first would cut the sessions the in-flight acks still need.
+- **15 (M1 acceptance):** `SftpPollSourceTest` is the SFTP half and runs in the default tier at about
+  3.4 s for nine tests, embedded SSHD and all; there is nothing to opt into and no container. S1 is
+  its two named tests. If the acceptance suite wants the whole M1 chain against a server it can reuse
+  that class's wiring: `EmbeddedSftpServer.start`, `sftpConnectorConfig`, `SftpConnector.start`,
+  `RouteRunner` over `SftpPollSource.events()`, `HookDriver` for the pauses, and
+  `FileReadiness.SizeStable(checks = 1, interval = 1.milliseconds)` so a file is ready the moment it
+  is listed instead of a minute later.
+- **18 (SFTP target):** the poll uses `SftpClient.list`, `stat` (through the readiness checks),
+  `download`, `rename` (the `move` ack) and `delete` (the `delete` ack). Left untouched and waiting
+  for you: `upload(local, remote, overwrite)`, which is `ObjectStoreTarget.store`;
+  `mkdir(remote, parents)` for a target directory that does not exist; `exists` for `verify`; and
+  `withSession` for anything that needs two calls on one session. `Overwrite.REFUSE` is the
+  connector's default and the one an upload should keep, with the write-then-rename shape
+  `SftpClient.upload`'s KDoc describes, since a target directory someone else is watching must never
+  see a partial file.
+

@@ -69,6 +69,16 @@ class ArchitectureTest {
             .check(all)
     }
 
+    /** Spec 3.2: only `sftp` and `quarkus` import the connector, and `quarkus` does not exist yet. */
+    @Test
+    fun `the sftp connector appears nowhere outside the sftp package`() {
+        assertTrue(all.contain("infra.shuttle.sftp.SftpPollSource"), "the sentence above has a subject")
+        noClasses().that().resideOutsideOfPackage("infra.shuttle.sftp..")
+            .should().dependOnClassesThat().resideInAnyPackage("sftp.connector..")
+            .allowEmptyShould(true)
+            .check(all)
+    }
+
     @Test
     fun `jnats appears nowhere outside the nats package`() {
         noClasses().that().resideOutsideOfPackage("infra.shuttle.nats..")

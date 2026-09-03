@@ -10,13 +10,13 @@ actions map onto the connector's actions.
 
 **Nature:** adapter work
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Against the connector testkit's embedded SSHD with the in-memory state store and target: the vendor-drop route moves a file to `temp/` only after the target holds it; the mirror route deletes after store
-- [ ] A file removed between listing and fetch produces no transfer beyond SEEN and no error
-- [ ] A wrong password ends the flow with route down; `idleCutoff` and readiness reach the connector's DSL
-- [ ] Only the sftp package imports the connector
-- [ ] Progress entry appended
+- [x] Against the connector testkit's embedded SSHD with the in-memory state store and target: the vendor-drop route moves a file to `temp/` only after the target holds it; the mirror route deletes after store
+- [x] A file removed between listing and fetch produces no transfer beyond SEEN and no error
+- [x] A wrong password ends the flow with route down; `idleCutoff` and readiness reach the connector's DSL
+- [x] Only the sftp package imports the connector
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket, stubs throwing NotImplementedError
 for later seams; 200-600 lines including tests; no Thread.sleep; invariant tests named

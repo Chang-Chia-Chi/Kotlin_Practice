@@ -39,7 +39,7 @@ class RouteRunnerTest {
     )
 
     private fun runner(route: Route = route(), hook: Hook = Hook.None): RouteRunner {
-        val pipeline = TransferPipeline(route, DigestAlgorithm.MD5, store, target, ProcessingChain(emptyList(), DigestAlgorithm.MD5), emptyMap(), { true }, { wakes++ }, hook, clock, registry, Staging(staging)) { 10.gib }
+        val pipeline = TransferPipeline(route, DigestAlgorithm.MD5, store, target, ProcessingChain(emptyList(), DigestAlgorithm.MD5), emptyMap(), { true }, { wakes++ }, hook, clock, registry, Staging(staging), usableSpace = { 10.gib })
         return RouteRunner(route, pipeline, fetcher, store, { wakes++ }, clock, registry)
     }
 
@@ -198,7 +198,7 @@ class RouteRunnerTest {
     fun S16_a_poll_with_the_state_store_unavailable_completes_nothing_and_the_next_poll_completes_all() = runTest {
         val flaky = Unavailable(store).apply { down = true }
         val route = route(parallelism = 2).copy(stuckAfter = 3.minutes)
-        val pipeline = TransferPipeline(route, DigestAlgorithm.MD5, flaky, target, ProcessingChain(emptyList(), DigestAlgorithm.MD5), emptyMap(), { true }, { wakes++ }, Hook.None, clock, registry, Staging(staging)) { 10.gib }
+        val pipeline = TransferPipeline(route, DigestAlgorithm.MD5, flaky, target, ProcessingChain(emptyList(), DigestAlgorithm.MD5), emptyMap(), { true }, { wakes++ }, Hook.None, clock, registry, Staging(staging), usableSpace = { 10.gib })
         val runner = RouteRunner(route, pipeline, fetcher, flaky, { wakes++ }, clock, registry)
         val poll = source.seen(id("a.csv")).seen(id("b.csv")).pollCompleted(setOf(id("a.csv"), id("b.csv"))).events()
 

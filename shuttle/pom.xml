@@ -60,6 +60,15 @@
                 <version>${junit.version}</version>
                 <scope>test</scope>
             </dependency>
+            <!-- G12. The connector test kit's embedded SSHD brings sshd-core 2.19.0 with it, and
+                 the platform BOM below would otherwise hold sshd-common back to 2.12.1: the two
+                 halves of one server on two versions. Stated first, so both are 2.19.0. -->
+            <dependency>
+                <groupId>org.apache.sshd</groupId>
+                <artifactId>sshd-common</artifactId>
+                <version>2.19.0</version>
+                <scope>test</scope>
+            </dependency>
             <!-- G10. Stated before the platform BOM so the S3 client and its HTTP client are one
                  SDK version; 2.29.51 is what the local repository holds. -->
             <dependency>
@@ -104,6 +113,12 @@
 
         <!-- G15: the `nats` package only. 2.21.2 is what the local repository holds. -->
         <dependency><groupId>io.nats</groupId><artifactId>jnats</artifactId><version>2.21.2</version></dependency>
+
+        <!-- G12: the `sftp` package only; ArchitectureTest keeps `sftp.connector..` out of every
+             other package. The test kit is the connector's own embedded SSHD, used by the sftp
+             package's tests and nothing else. -->
+        <dependency><groupId>dynacache</groupId><artifactId>sftpconnector-core</artifactId><version>0.1.0-SNAPSHOT</version></dependency>
+        <dependency><groupId>dynacache</groupId><artifactId>sftpconnector-testkit</artifactId><version>0.1.0-SNAPSHOT</version><scope>test</scope></dependency>
 
         <!-- G9: the `jdbi` package only. The Oracle driver is the host's runtime concern
              (ticket 14); here it is test-scoped for the Testcontainers class. -->
