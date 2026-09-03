@@ -356,7 +356,7 @@ adds the subscription source, fan-out, the SFTP target and the remaining lifecyc
 - **Goal:** spec 5.1's `subscribe` and the NATS channel role.
 - **Deliverables:** `NatsChannel`: a JetStream pull or push subscription mapped onto
   `RouteEvent` with `ack`, `term`, `nak`; message identity per spec 5.2; `deliver` as publish;
-  the `extract.message` processor's `SourceView`; tests tagged `nats` on Testcontainers.
+  the `SourceView` that `extract` reads with `from: message`; tests tagged `nats` on Testcontainers.
 - **Blocked by:** G2.
 - **Acceptance:** a message becomes one `Seen` with working ack and nak; a nak redelivers; a
   publish lands on the subject; a broker outage ends with `RouteDown`.

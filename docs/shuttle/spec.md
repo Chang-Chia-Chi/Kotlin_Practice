@@ -576,7 +576,7 @@ Vocabulary: `TRANSFER_ID`, `PARENT_ID`, `ROUTE`, `KIND`, `SOURCE_KIND`, `SOURCE_
 `TARGET_REF`, `TARGET_SIZE`, `FIRST_SEEN_AT`, `ACKED_AT`, `EVENT`, `ATTEMPT`.
 
 Boot checks: every `field` is in the vocabulary; every `provider` resolves to a bean; every
-`attribute` is declared by a processor in that route or by the route's `extract.message`; every
+`attribute` is declared by a processor in that route; every
 `select` is a valid pointer; every `format` parses (rules 16 to 19). A code-built configuration
 may also give a Kotlin lambda producing a Jackson tree, the only escape hatch (D8).
 
@@ -1047,7 +1047,7 @@ expand with children, the SFTP target, `fetched` notifications, callback acks.
 | S18 | Wrong SFTP password | Route down; supervised restarts with backoff; readiness per rule; process alive |
 | S19 | Mirror route, no notifications | ACKED to DONE in one transaction; no outbox row |
 | S20 | Rename then zip | One archive stored under the renamed key; `STORED_NAME` differs from `SOURCE_NAME`; `SOURCE_DIGEST` and `DIGEST` differ |
-| S21 | `extract.name` attribute used by the mapping | Body carries it; a route whose mapping names an undeclared attribute fails validation by rule 17 |
+| S21 | An attribute extracted from the file name used by the mapping | Body carries it; a route whose mapping names an undeclared attribute fails validation by rule 17 |
 | S22 | One provider selected by three rows | One invocation; three paths filled |
 | S23 | Two routes, one dead | The other keeps completing; readiness true under `all-routes-down` |
 | S24 | Pool arithmetic exceeded | Rejected by rule 9 in validate mode and at startup |
