@@ -17,6 +17,11 @@
         <kotlin.compiler.jvmTarget>17</kotlin.compiler.jvmTarget>
         <maven.compiler.release>17</maven.compiler.release>
         <quarkus.version>3.17.5</quarkus.version>
+        <!-- G9. The Testcontainers Oracle class is excluded by default and opted into with
+             `-DexcludedGroups=none`; a property, not a literal, because a literal in
+             <configuration> beats the user property of the same name (etl-host measured it). -->
+        <excludedGroups>oracle</excludedGroups>
+        <testcontainers.version>1.20.4</testcontainers.version>
     </properties>
 
     <dependencyManagement>
@@ -75,9 +80,29 @@
         <!-- G1: the `yaml` package only; ArchitectureTest keeps it out of `core`. -->
         <dependency><groupId>com.fasterxml.jackson.dataformat</groupId><artifactId>jackson-dataformat-yaml</artifactId></dependency>
 
+        <!-- G9: the `jdbi` package only. The Oracle driver is the host's runtime concern
+             (ticket 14); here it is test-scoped for the Testcontainers class. -->
+        <dependency><groupId>org.jdbi</groupId><artifactId>jdbi3-core</artifactId><version>3.45.4</version></dependency>
+
         <dependency><groupId>org.junit.jupiter</groupId><artifactId>junit-jupiter</artifactId><scope>test</scope></dependency>
         <dependency><groupId>org.mockito</groupId><artifactId>mockito-core</artifactId><scope>test</scope></dependency>
         <dependency><groupId>org.jetbrains.kotlinx</groupId><artifactId>kotlinx-coroutines-test</artifactId><scope>test</scope></dependency>
         <dependency><groupId>com.tngtech.archunit</groupId><artifactId>archunit-junit5</artifactId><scope>test</scope></dependency>
+        <dependency><groupId>com.oracle.database.jdbc</groupId><artifactId>ojdbc11</artifactId><version>23.5.0.24.07</version><scope>test</scope></dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId><artifactId>oracle-free</artifactId>
+            <version>${testcontainers.version}</version><scope>test</scope>
+        </dependency>
     </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <excludedGroups>${excludedGroups}</excludedGroups>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
 </project>
