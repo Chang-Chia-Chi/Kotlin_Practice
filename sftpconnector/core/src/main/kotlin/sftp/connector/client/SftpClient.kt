@@ -12,6 +12,7 @@ import sftp.connector.error.Attempt
 import sftp.connector.error.NoSuchFile
 import sftp.connector.error.OverwriteRefused
 import sftp.connector.error.ServerFailure
+import sftp.connector.error.UnsafeFileName
 import sftp.connector.pool.SftpPool
 import sftp.connector.transport.Listing
 import sftp.connector.transport.RemoteFile
@@ -19,6 +20,7 @@ import sftp.connector.transport.SftpSession
 import java.io.InputStream
 import java.io.OutputStream
 import java.nio.file.Files
+import java.nio.file.InvalidPathException
 import java.nio.file.Path
 
 /**
@@ -122,21 +124,51 @@ class SftpClient(
      * "not right now". Anything downloading files it listed a moment ago has to expect it: on a
      * directory another system is writing into and moving files out of, it is ordinary.
      *
-     * @param localTarget where the finished file goes. The default puts it in the configured
-     *   staging directory under the name it has on the server, which collides when two watched
-     *   directories hold a file of the same name - a caller in that position names its own target.
+     * @param localTarget where the finished file goes. Null puts it in the configured staging
+     *   directory under the name it has on the server, once that name has been checked to be one
+     *   (see [stagingTargetFor]); that collides when two watched directories hold a file of the
+     *   same name - a caller in that position names its own target, and a caller that names its
+     *   own target has taken over deciding what is safe to write.
+     * @throws sftp.connector.error.UnsafeFileName when no target was given and the listed name is
+     *   not one that can be written under the staging directory.
      */
-    suspend fun download(
-        remote: RemoteFile,
-        localTarget: Path = config.polling.staging.dir.resolve(remote.name),
-    ): LocalFile = meters.timing("download") {
+    suspend fun download(remote: RemoteFile, localTarget: Path? = null): LocalFile = meters.timing("download") {
+        val target = localTarget ?: stagingTargetFor(remote)
         pool.withLease { lease ->
             staging.receive(
-                target = localTarget,
+                target = target,
                 expectedSize = remote.size,
                 attempt = Attempt(endpoint, "download", remote.path),
             ) { sink -> lease.connection.readTo(remote.path, sink) }
         }
+    }
+
+    /**
+     * The staging directory joined to the name the server listed [remote] under - the one place a
+     * name the server chose reaches the local filesystem, so the one place it is checked.
+     *
+     * The check reads the join backwards. A name of `..` resolves to the directory above; a name
+     * with a backslash in it is two directories up on Windows and one odd file on everything else,
+     * and a name that means different things on different machines is never one to write; a
+     * drive-relative name is rewritten by the filesystem into some other name or onto some other
+     * drive; and a name the filesystem cannot spell at all has nowhere to go. Every one of those
+     * shows up the same way: after resolving and normalising, the result either left the staging
+     * directory or no longer ends in exactly the listed name. Refusing on that, rather than on a
+     * list of bad characters, means a shape nobody thought of is still caught.
+     */
+    private fun stagingTargetFor(remote: RemoteFile): Path {
+        val dir = config.polling.staging.dir.normalize()
+        val name = remote.name
+        val target = try {
+            dir.resolve(name).normalize()
+        } catch (unspellable: InvalidPathException) {
+            null
+        }
+        if ('\\' !in name && target != null && target.startsWith(dir) && target.fileName?.toString() == name) return target
+        throw UnsafeFileName(
+            Attempt(endpoint, "download", remote.path),
+            detail = "the listed name '$name' cannot be a file name under the staging directory $dir, so nothing was written",
+        )
     }
 
     /**

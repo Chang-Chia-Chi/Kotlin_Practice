@@ -240,6 +240,20 @@ class OverwriteRefused(val attempt: Attempt, detail: String) :
     override val disposition: Disposition get() = Disposition.ACCEPT_THE_REFUSAL
 }
 
+/**
+ * The name a file was listed under cannot be a local file name: joined to the staging directory
+ * it lands somewhere else, or it holds a separator this connector never writes.
+ *
+ * A listed name is the server's word, and whoever can write to the server can call a file `..`
+ * or `..\..\evil.csv`. It is refused for the same reasons an overwrite is: the name will be the
+ * same on the next attempt, so retrying cannot help, and the server answered nothing wrong, so
+ * the breaker has no business counting it. No session was borrowed before the refusal.
+ */
+class UnsafeFileName(val attempt: Attempt, detail: String) :
+    SftpException(attempt.describe(detail), null) {
+    override val disposition: Disposition get() = Disposition.ACCEPT_THE_REFUSAL
+}
+
 /** The breaker is open, so the connector deliberately sent nothing. */
 class CircuitOpen(val attempt: Attempt) : SftpException(
     attempt.describe("the circuit breaker is open, so nothing was sent to the server"),

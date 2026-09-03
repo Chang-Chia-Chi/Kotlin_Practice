@@ -117,7 +117,7 @@ class FailureModelTest {
         is AuthenticationFailed, is HostKeyRejected, is ConfigurationError -> Disposition.STOP_THE_CONNECTOR
         is PoolExhausted -> Disposition.FAIL_THE_ATTEMPT
         is CircuitOpen -> Disposition.SKIP_THE_TICK
-        is OverwriteRefused -> Disposition.ACCEPT_THE_REFUSAL
+        is OverwriteRefused, is UnsafeFileName -> Disposition.ACCEPT_THE_REFUSAL
     }
 
     @Test
@@ -145,6 +145,7 @@ class FailureModelTest {
             PoolExhausted(ATTEMPT),
             CircuitOpen(ATTEMPT),
             OverwriteRefused(ATTEMPT, "there is already something there"),
+            UnsafeFileName(ATTEMPT, "the listed name '..' cannot be a file name under the staging directory"),
         )
     }
 }

@@ -6,6 +6,7 @@ import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
+import org.assertj.core.api.Assertions.catchThrowable
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import sftp.connector.config.Digest
@@ -13,7 +14,9 @@ import sftp.connector.config.HostKeyPolicy
 import sftp.connector.config.SftpConnectorConfig
 import sftp.connector.config.sftpConnector
 import sftp.connector.error.Attempt
+import sftp.connector.error.Disposition
 import sftp.connector.error.NoSuchFile
+import sftp.connector.error.UnsafeFileName
 import sftp.connector.pool.SftpPool
 import sftp.connector.testkit.FakeSftpTransport
 import sftp.connector.testkit.FakeSftpTransport.Operation
@@ -204,6 +207,80 @@ class SftpClientTest {
             assertThat(stage).isEmptyDirectory()
             assertNothingIsStillOut()
         }
+
+    /**
+     * A listed name is the server's word, and the join of that word to the staging directory is
+     * the one place it touches the local filesystem. `..` names the directory above the staging
+     * directory on every operating system.
+     */
+    @Test
+    fun `a listed name of dot-dot is refused before anything is read or written`() = runBlocking<Unit> {
+        assertRefusedWithoutATrace(listedAs("/drop/.."))
+    }
+
+    /**
+     * On Windows `..\..\evil.csv` is a path two directories up; elsewhere it is one odd file
+     * name. It is refused on both, because a name that means two different things depending on
+     * where the connector happens to run is never one it should write.
+     */
+    @Test
+    fun `a listed name with a backslash segment is refused on every operating system`() = runBlocking<Unit> {
+        assertRefusedWithoutATrace(listedAs("/drop/..\\..\\evil.csv"))
+    }
+
+    /**
+     * The one absolute-looking shape a name can take after the last slash is a drive-relative
+     * Windows path, which `Path.resolve` rewrites on Windows - to a different name on the same
+     * drive, or to another drive entirely. Either way it stops being the listed name and is
+     * refused. Where it is a plain file name it lands under exactly that name and nowhere else;
+     * on either operating system nothing lands outside the staging directory.
+     */
+    @Test
+    fun `a listed name that looks like a drive path lands under exactly that name or not at all`() = runBlocking<Unit> {
+        val server = listedAs("/drop/C:evil")
+        val client = clientOver(server)
+        val listed = client.list("/drop").toList().single()
+
+        val outcome = runCatching { client.download(listed) }
+
+        assertThat(stage.listDirectoryEntries().map { it.fileName.toString() }).isSubsetOf(listOf("C:evil"))
+        if (outcome.isFailure) assertRefusal(outcome.exceptionOrNull()!!, server, "/drop/C:evil")
+        assertNothingIsStillOut()
+    }
+
+    @Test
+    fun `a plain listed name still lands in the staging directory`() = runBlocking<Unit> {
+        val client = clientOver(listedAs("/drop/plain.csv"))
+        val listed = client.list("/drop").toList().single()
+
+        val landed = client.download(listed)
+
+        assertThat(landed.path).isEqualTo(stage.resolve("plain.csv"))
+        assertThat(landed.path.readText()).isEqualTo(CONTENT)
+        assertNothingIsStillOut()
+    }
+
+    private fun listedAs(remotePath: String): FakeSftpTransport = FakeSftpTransport().file(remotePath, CONTENT)
+
+    private suspend fun assertRefusedWithoutATrace(server: FakeSftpTransport) {
+        val client = clientOver(server)
+        val listed = client.list("/drop").toList().single()
+
+        val failure = catchThrowable { runBlocking { client.download(listed) } }
+
+        assertRefusal(failure, server, listed.path)
+        assertNothingIsStillOut()
+    }
+
+    /** Refused with the class that means "no retry, nothing against the server", and with no trace on disk or on the wire. */
+    private fun assertRefusal(failure: Throwable?, server: FakeSftpTransport, remotePath: String) {
+        assertThat(failure).isInstanceOf(UnsafeFileName::class.java)
+            .hasMessageContaining(remotePath)
+            .hasMessageContaining(stage.toString())
+        assertThat((failure as UnsafeFileName).disposition).isEqualTo(Disposition.ACCEPT_THE_REFUSAL)
+        assertThat(stage).isEmptyDirectory()
+        assertThat(server.calls.map { it.operation }).doesNotContain(Operation.Read, Operation.Write)
+    }
 
     @Test
     fun `the client publishes how long each operation took and how it went`() = runBlocking<Unit> {

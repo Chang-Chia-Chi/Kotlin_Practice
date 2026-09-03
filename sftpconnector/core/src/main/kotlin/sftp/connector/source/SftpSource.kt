@@ -142,7 +142,7 @@ class SftpSource(
         /** [localTarget] null means the client's own default, so the local name is decided in one place. */
         suspend fun download(slot: InFlightSlot, localTarget: Path?): LocalFile? =
             try {
-                if (localTarget == null) client.download(slot.file) else client.download(slot.file, localTarget)
+                client.download(slot.file, localTarget)
             } catch (absent: NoSuchFile) {
                 // Not a settlement the consumer made, so a slot already settled is left as it is:
                 // a file acked and then downloaded is gone because the ack moved it.
