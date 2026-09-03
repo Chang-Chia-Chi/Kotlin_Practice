@@ -43,7 +43,7 @@ class LadderReviewTest {
      * handshake has begun and will finish whether or not anybody is waiting for it.
      */
     @Test
-    fun `I4_a session that finishes its handshake into a cancelled caller is hung up on, not left running`() =
+    fun `a session that finishes its handshake into a cancelled caller is hung up on, not left running`() =
         runBlocking<Unit> {
             EmbeddedSftpServer.start(remoteRoot, USER, PASSWORD).use { server ->
                 LoopbackConnectProxy.start().use { tunnel ->

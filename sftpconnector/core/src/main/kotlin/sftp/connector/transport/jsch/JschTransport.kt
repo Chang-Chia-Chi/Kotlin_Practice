@@ -29,7 +29,6 @@ import sftp.connector.transport.SftpTransport
 import java.io.InputStream
 import java.io.OutputStream
 import java.time.Instant
-import java.util.concurrent.atomic.AtomicReference
 import kotlin.time.Duration
 
 /**
@@ -74,7 +73,7 @@ class JschTransport(
      * starts one.
      */
     override suspend fun connect(): SftpConnection {
-        val opened = AtomicReference<SftpConnection>()
+        var opened: SftpConnection? = null
         try {
             return withContext(io) {
                 errors.translating(Attempt(endpointLabel, "connect")) {
@@ -89,10 +88,18 @@ class JschTransport(
                         throw failure
                     }
                     JschConnection(session, channel, io, errors, endpointLabel)
-                }.also(opened::set)
+                }.also { opened = it }
             }
         } catch (cancelled: CancellationException) {
-            withContext(NonCancellable) { opened.get()?.close() }
+            opened?.let { orphan ->
+                try {
+                    withContext(NonCancellable) { orphan.close() }
+                } catch (failure: Exception) {
+                    // The cancellation is what the caller is owed, and a hang-up that failed on a
+                    // session being written off anyway is no reason to hand them something else.
+                    LOG.warn("Hanging up a session nobody was left to receive failed, and it is being dropped anyway: {}", failure.message)
+                }
+            }
             throw cancelled
         }
     }
@@ -105,6 +112,8 @@ class JschTransport(
          * the interval is the knob and this is not.
          */
         private const val UNANSWERED_KEEPALIVES = 1
+
+        private val LOG = LoggerFactory.getLogger(JschTransport::class.java)
     }
 
     private fun openSession(): Session {
