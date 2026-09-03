@@ -342,7 +342,7 @@ again (I18):
 | `rename` | name, attributes, dates, through a pattern such as `{yyyyMMdd}-{name}` | one object with a new name, same file | nothing |
 | `zip` | every object | one archive created through `newStagedFile` | nothing |
 | `unzip` | one archive | one object per entry | nothing |
-| `extract` | `from: fileName` (the current name), `from: sourcePath` (the listing path or object key), `from: content` (the bytes), or `from: message` (the subscription message) | unchanged | named regex groups over a string, or values at JSON pointers into content or message; every name declared |
+| `extract` | `from: fileName` (the current name), `from: sourcePath` (the listing path or object key), `from: content` (the bytes), or `from: message` (the subscription message) | unchanged, or Reject when the regex does not match | the regex's named groups become attributes of the same names, or positional groups named by `into: [..]`; for JSON, the map key is the attribute name and the pointer its source |
 | `expand` | a metadata file or the message | one child per listed path, fetched through `ctx.fetch` | nothing |
 | `custom` | anything | anything | what it declares in `produces` |
 
@@ -456,7 +456,7 @@ CREATE INDEX ix_file_transfer_parent ON file_transfer (parent_id);
 CREATE TABLE delivery_outbox (
   id                NUMBER(19)     NOT NULL,
   file_transfer_id  NUMBER(19)     NOT NULL,
-  transfer_state    VARCHAR2(16)   NOT NULL,           -- the transfer state this notification announces: FETCHED | STORED | ACKED
+  on_state          VARCHAR2(16)   NOT NULL,           -- the moment this notification announces, fixed for ever: FETCHED | STORED | ACKED
   channel           VARCHAR2(64)   NOT NULL,
   notification_state VARCHAR2(16)  NOT NULL,           -- the notification's own progress: PENDING | DELIVERED | FAILED
   attempts          NUMBER(5)      DEFAULT 0 NOT NULL,
@@ -468,7 +468,7 @@ CREATE TABLE delivery_outbox (
   delivered_at      TIMESTAMP,
   CONSTRAINT pk_delivery_outbox PRIMARY KEY (id),
   CONSTRAINT fk_delivery_transfer FOREIGN KEY (file_transfer_id) REFERENCES file_transfer (id),
-  CONSTRAINT uq_delivery_state_channel UNIQUE (file_transfer_id, transfer_state, channel)
+  CONSTRAINT uq_delivery_on_state_channel UNIQUE (file_transfer_id, on_state, channel)
 );
 CREATE INDEX ix_delivery_due ON delivery_outbox (notification_state, next_attempt_at);
 ```
@@ -513,9 +513,11 @@ that must be atomic across both tables (I11, I20).
 A route attaches channel deliveries to transfer states: `on: fetched`, `on: stored`,
 `on: acked`, each naming the state whose transition creates the row. Each attachment is one
 outbox row created in the transaction that defines that state (I20), delivered asynchronously
-and at-least-once by the notifier. On the row, `transfer_state` says which transfer state the
-notification announces and never changes; `notification_state` says how far the sending itself
-has got, PENDING, DELIVERED or FAILED, and is what the notifier advances. The notifier needs no
+and at-least-once by the notifier. On the row, `on_state` says which moment the notification
+announces, written from the route's `on:` key, and never changes even as the transfer moves on
+to DONE; it is not a copy of the transfer's `state` but the reason the row exists, and it is
+what tells two notifications to one channel apart. `notification_state` says how far the
+sending itself has got, PENDING, DELIVERED or FAILED, and is what the notifier advances. The notifier needs no
 route: the row names its channel, and the body is rendered from the transfer row it points to.
 DONE is not a notification moment: it is reached only once every notification is delivered, so
 a route with no attachments goes ACKED to DONE in the same transaction (I17).
@@ -835,7 +837,7 @@ Each is public numbering, reported by number in validate mode and at startup.
 | 11 | Every staging directory exists, is writable, and is local disk; two stores do not share one |
 | 12 | `onAck` is stated explicitly, no default, and it and `onNack` belong to the trigger kind's vocabulary; a `callback` names a channel offering the notify role |
 | 13 | A `key` or `directory` pattern uses only `{name}` (the staged object's name at store time, after the chain), `{sourceName}` (the source object's original name), `{yyyyMMdd}` and attribute names declared in the route, and yields no `..` |
-| 14 | Every built-in processor's configuration parses: patterns compile, pointers are valid, `extract.from` is one of `fileName`, `sourcePath`, `content`, `message` with `message` only on a subscribed route, `expand.from` names a store |
+| 14 | Every built-in processor's configuration parses: patterns compile, pointers are valid, `extract.from` is one of `fileName`, `sourcePath`, `content`, `message` with `message` only on a subscribed route, a regex has named groups or an `into` list whose length equals its group count, `expand.from` names a store |
 | 15 | Every `custom` processor and every `provider` resolves to a named bean |
 | 16 | Every mapping `field` is in the vocabulary |
 | 17 | Every mapping `attribute` is declared by a processor in that route |
@@ -1068,7 +1070,7 @@ expand with children, the SFTP target, `fetched` notifications, callback acks.
 - Vocabulary: object stores and channels declared once with roles at the route; triggers `poll`
   and `subscribe`; the ack vocabulary per trigger kind; `callback` acks.
 - Ledger becomes the shuttle state store; `file_transfer` gains `parent_id`, `kind`,
-  `source_*`, `stored_*`, `attributes`; `delivery_outbox` gains `transfer_state` and its own `state` becomes `notification_state`.
+  `source_*`, `stored_*`, `attributes`; `delivery_outbox` gains `on_state` and its own `state` becomes `notification_state`.
 - Quality check becomes one of several processors under a single `Processor` seam; attributes
   and providers added; the mapping table replaces the Kotlin body builder as the primary form.
 - Notifications on transfer states `fetched`, `stored`, `acked`; a route may notify nobody.
