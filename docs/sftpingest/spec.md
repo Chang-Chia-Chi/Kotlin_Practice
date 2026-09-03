@@ -625,7 +625,7 @@ sftpIngest {
     route("vendor-drop") {
         source = sftp(connector = "vendor", directory = "/inbox") {   // built by the connector's own DSL
             every = 1.hours
-            onDone = move("temp/")                // the ack action is a source concept
+            onAck = move("temp/")                 // the ack action is a source concept, named as the connector names it
         }
         target = s3(client = "landing-minio", bucket = "landing") {
             key = { f -> "vendor/${f.name}" }     // the key is a target concept
