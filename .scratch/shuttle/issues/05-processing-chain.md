@@ -10,15 +10,15 @@ every notified channel's mapping is checked against them before the store.
 
 **Nature:** state machine work
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `I15` and `I18` as named tests; S20 on fakes; S26
-- [ ] Every built-in of spec Sec 6.3 except expand and extraction from a message has a test; unzip yields one object per entry; zip yields one archive created through the context
-- [ ] `unzip` past `maxEntries` or past `maxBytes` uncompressed is Reject with the limit and the offending count or size in the reason, and stops reading the archive there (D41): a small archive declaring more entries than the limit is rejected without extracting them all
-- [ ] A processor writing into its input is detected; a processor throwing is a retryable stage error
-- [ ] Attribute limits of rule 22 enforced; `SOURCE_DIGEST` and `DIGEST` differ after zip
-- [ ] The mapping check runs at attribute freeze and a missing required attribute fails the transfer before any store
-- [ ] Progress entry appended
+- [x] `I15` and `I18` as named tests; S20 on fakes; S26
+- [x] Every built-in of spec Sec 6.3 except expand and extraction from a message has a test; unzip yields one object per entry; zip yields one archive created through the context
+- [x] `unzip` past `maxEntries` or past `maxBytes` uncompressed is Reject with the limit and the offending count or size in the reason, and stops reading the archive there (D41): a small archive declaring more entries than the limit is rejected without extracting them all
+- [x] A processor writing into its input is detected; a processor throwing is a retryable stage error
+- [x] Attribute limits of rule 22 enforced; `SOURCE_DIGEST` and `DIGEST` differ after zip
+- [x] The mapping check runs at attribute freeze and a missing required attribute fails the transfer before any store
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket, stubs throwing NotImplementedError
 for later seams; 200-600 lines including tests; no Thread.sleep; invariant tests named

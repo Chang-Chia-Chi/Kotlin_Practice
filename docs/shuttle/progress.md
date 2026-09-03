@@ -434,3 +434,96 @@ Final run: ArchitectureTest 7, MappingRendererTest 12, RulesTest 30, SurfaceTest
   serialisation, escaping included.
 - **14 (try mode):** `render(table, sampleTransfer, DeliveryMoment.ACKED)` per notified channel.
 
+
+---
+
+## 05: Processing chain and built-in processors
+
+**Built:** `ProcessingChain.kt` and `Processors.kt` in `core`; the processor shells left `Shells.kt`
+(only `ExpandProcessor` remains a shell, for ticket 16/17).
+
+- `ProcessingChain(processors, algorithm).run(payload, ctx): ChainResult` runs the chain in order.
+  `Outcome.Reject` ends it as `ChainResult.Rejected(reason)`; a processor that throws becomes
+  `StageError(stage, cause)` (retryable, spec 11); `CancellationException` passes through. When
+  the chain ends the attributes are frozen into an unmodifiable copy, rule 22 is judged on them
+  (more than 32, a name over 64 characters, or over 1 KB is a `Rejected` naming rule 22), and every
+  object whose file is not one of the inputs gets `size` and `digest` recomputed from its bytes;
+  the result is `ChainResult.Done(payload, attributes)`.
+- `ProcessingChain.checkMappings(attributes, tables, providerExists)`: spec 6.4 at freeze. For each
+  notified channel's table, `MappingRenderer.check` (rules 15, 16, 18, 19, 21) and then every
+  `attribute` row that is `required` with no `default` must find a non-blank frozen value;
+  otherwise `FreezeFailure("mapping row <path>: attribute <name> is required and not set")`,
+  which the pipeline maps to FAILED with no retry (spec 11). Nothing is rendered at freeze.
+- `Digest.of(path, algorithm)`: streams a file through MD5, SHA-256 or SHA-1; the fetch adapters
+  can share it.
+- `processorFor(spec, custom): Processor` turns a `ProcessorSpec` into behaviour: `Quality`
+  (rejects an empty file), `Rename` (pattern parsed once; `{name}`, `{sourceName}`, a date pattern
+  of `yMdHmsS` letters from the clock in UTC, any other token an attribute), `Zip` (one archive
+  named `<first>.zip` through `newStagedFile`, entries named as the objects), `Unzip` (one object
+  per entry keeping the entry path as the name so S33's `a/x.csv` and `b/x.csv` differ; past
+  `maxEntries` or past `maxBytes` uncompressed the read stops and the chain is rejected naming the
+  limit, D41), `Extract` from `fileName`, `sourcePath` or `content` (named groups, positional
+  groups named by `into`, or JSON pointers; Reject when the regex does not match or a pointer is
+  absent), `VerifyDigest` (expected hex from the named attribute, case-insensitive; Reject on a
+  missing attribute or a mismatch), `Custom` through the injected lookup (`IllegalArgumentException`
+  for an unknown name). `Extract` from `message` and `Expand` throw `NotImplementedError`.
+
+**Concepts named:** *chain result* (Done with frozen attributes, or Rejected) versus *stage error*
+(a throw, retryable) versus *freeze failure* (a mapping that cannot be satisfied, terminal until
+re-drive): the three exits ticket 06 maps to REJECTED, `failedAttempt` and FAILED. *Input* is any
+path in the incoming payload; everything else in the final payload is *new* and gets its digest
+from the pipeline, never from the processor.
+
+**Acceptance:**
+
+- *I15, I18, S20, S26* - `AttributeFreezeTest.I15_attributes_never_change_after_the_chain_ends_and_mappings_are_checked_before_the_store`,
+  `ProcessingChainTest.I18_a_processor_never_modifies_an_input_and_every_created_file_is_deleted_with_staging`,
+  `BuiltInProcessorsTest.S20_rename_then_zip_yields_one_archive_under_the_renamed_key_with_a_different_digest`,
+  `AttributeFreezeTest.S26_missing_required_attribute_at_freeze_fails_before_the_store`; S21's
+  positive half is `AttributeFreezeTest.S21_an_attribute_extracted_from_the_file_name_is_available_to_the_mapping`.
+- *Every built-in except expand and message extraction; unzip one per entry; zip one archive through
+  the context* - `BuiltInProcessorsTest`: `quality_...`, `rename_...`, `S20_...`, `unzip_yields_one_object_per_entry_...`,
+  `extract_sets_attributes_from_the_file_name_the_source_path_and_json_content_and_rejects_a_non_match`,
+  `verifyDigest_...`, `a_custom_processor_resolves_by_name_and_an_unknown_name_fails_at_construction`.
+- *Unzip limits, stopping at the limit* - `unzip_rejects_past_maxEntries_without_extracting_them_all_and_past_maxBytes`
+  (five entries, `maxEntries = 2`: rejected after the third is seen, at most three files created).
+- *Writing into an input detected; a throw is a retryable stage error* - `I18_...` (second half, the
+  kit's `inputsUntouched()` is false) and `ProcessingChainTest.a_processor_throwing_is_a_retryable_stage_error_carrying_the_cause`.
+- *Rule 22 enforced; `SOURCE_DIGEST` and `DIGEST` differ after zip* - `AttributeFreezeTest.rule22_attribute_limits_are_enforced_when_the_chain_ends`
+  (all three limits) and `S20_...`.
+- *Mapping check at freeze; missing required attribute fails before any store* - `S26_...` (the
+  in-memory target records no call) and `I15_...`.
+- *Progress entry* - this.
+
+Final run: ArchitectureTest 7, AttributeFreezeTest 4, BuiltInProcessorsTest 8, MappingRendererTest 12,
+ProcessingChainTest 4, RulesTest 30, SurfaceTest 3, testkit 25, YamlLoaderTest 10; 103 tests, 0 failures.
+
+**Deviations:**
+
+1. **Rule 22 broken at run time is a `Rejected`, not a stage error.** Spec 11 has no row for it;
+   retrying cannot help a processor that sets 33 attributes, so it is terminal until re-drive like
+   any Reject.
+2. **The freeze check does not render.** Spec 6.4 asks for "a missing required attribute" to fail
+   before the store; the check scans `attribute` rows for a required, defaultless row whose value is
+   unset or blank. Rendering at freeze would fail on `field` rows the store has not filled yet
+   (`TARGET_KEY`), so 04's dry-run suggestion was not taken.
+3. **`quality` has one built-in check, non-empty**, since spec 13.1 configures none; its
+   constructor takes any `(StagedObject) -> String?` for a route that needs more.
+4. **`rename` detects a date token by its letters** (`yMdHmsS` only); an attribute named like a date
+   pattern would be misread. Spec rule 13 names `{yyyyMMdd}` alone.
+5. **Size:** 225 main, 328 test; in budget.
+
+**For the next ticket:**
+
+- **06 (pipeline):** `ChainResult.Rejected` is REJECTED; `StageError` is `failedAttempt` (spec 11
+  "processor throws"); `FreezeFailure` is FAILED with no retry ("missing required mapping input").
+  After `Done`, call `ProcessingChain.checkMappings(done.attributes, route.notify.map { channels[it.channel].body }) { beans(it) != null }`
+  before any store; `done.payload.objects.size` decides one row or N children; `done.attributes`
+  is what `processed(id, attributes)` records. Build the chain once per route with
+  `route.process.map { processorFor(it, custom) }`; `Digest.of` is there for a fetcher that has
+  the file but not the digest.
+- **Gotcha:** `unzip` keeps the entry path as the object's `name`; a `key: "{name}"` target then
+  holds `a/x.csv` verbatim. That is what S33 needs to detect the same-key collision.
+- **16/17:** `ExpandProcessor` and `Extract(from = Message)` are the two remaining shells;
+  `processorFor` refuses the latter at construction, so rule 14's "message only on a subscribed
+  route" is the only thing standing between a config and a `NotImplementedError` until then.

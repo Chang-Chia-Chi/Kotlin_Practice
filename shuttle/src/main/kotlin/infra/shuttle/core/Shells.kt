@@ -4,7 +4,7 @@ import kotlinx.coroutines.flow.Flow
 
 /*
  * G0 shells: the names later phases fill in. Every method throws until its phase lands
- * (G4 processors, G5 pipeline, G6 runner and supervisor, G8 notifier).
+ * (G5 pipeline, G6 runner and supervisor, G8 notifier, G16 expand).
  */
 
 /** Spec 4.1 stages 0 to 4 for one source object (G5). */
@@ -27,38 +27,8 @@ class RouteSupervisor {
     suspend fun run(): Nothing = throw NotImplementedError()
 }
 
-/** Spec 6.3 built-ins (G4); each is the others' second implementation of the seam. */
-class QualityProcessor : Processor {
-    override val produces = emptySet<String>()
-    override suspend fun process(payload: Payload, ctx: ProcessContext): Outcome = throw NotImplementedError()
-}
-
-class RenameProcessor(val spec: ProcessorSpec.Rename) : Processor {
-    override val produces = emptySet<String>()
-    override suspend fun process(payload: Payload, ctx: ProcessContext): Outcome = throw NotImplementedError()
-}
-
-class ZipProcessor : Processor {
-    override val produces = emptySet<String>()
-    override suspend fun process(payload: Payload, ctx: ProcessContext): Outcome = throw NotImplementedError()
-}
-
-class UnzipProcessor(val spec: ProcessorSpec.Unzip) : Processor {
-    override val produces = emptySet<String>()
-    override suspend fun process(payload: Payload, ctx: ProcessContext): Outcome = throw NotImplementedError()
-}
-
-class ExtractProcessor(val spec: ProcessorSpec.Extract) : Processor {
-    override val produces = spec.produces
-    override suspend fun process(payload: Payload, ctx: ProcessContext): Outcome = throw NotImplementedError()
-}
-
+/** Spec 6.3 `expand`: one child per listed path, fetched through the context (G16). */
 class ExpandProcessor(val spec: ProcessorSpec.Expand) : Processor {
-    override val produces = emptySet<String>()
-    override suspend fun process(payload: Payload, ctx: ProcessContext): Outcome = throw NotImplementedError()
-}
-
-class VerifyDigestProcessor(val spec: ProcessorSpec.VerifyDigest) : Processor {
     override val produces = emptySet<String>()
     override suspend fun process(payload: Payload, ctx: ProcessContext): Outcome = throw NotImplementedError()
 }
