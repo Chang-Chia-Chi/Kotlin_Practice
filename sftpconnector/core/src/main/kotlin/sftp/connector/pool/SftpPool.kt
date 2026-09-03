@@ -271,8 +271,18 @@ class SftpPool(
     private suspend fun sweep() {
         val round = registry.sweep(capacity::tryAcquire)
         round.leaking.forEach { report(it) }
-        round.retired.forEach { finish(it) }
-        round.toOpen.forEach { openForTheShelf(it) }
+        // What the round decided it carries out, even if this coroutine is cancelled in the
+        // middle - which is what a shutdown does to it. A retired session is already off the
+        // shelf and this list is the last thing holding its connection, so left unclosed it keeps
+        // its socket for the life of the process; and an entry reserved for the shelf holds room
+        // that only being dialled or given back ever frees.
+        withContext(NonCancellable) { round.retired.forEach { finish(it) } }
+        val toOpen = ArrayDeque(round.toOpen)
+        try {
+            while (toOpen.isNotEmpty()) openForTheShelf(toOpen.removeFirst())
+        } finally {
+            toOpen.forEach { giveBack(it, Retirement.POISONED) }
+        }
     }
 
     /**
