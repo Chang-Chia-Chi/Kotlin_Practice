@@ -3,6 +3,11 @@ package sftp.connector.config
 import org.slf4j.LoggerFactory
 import sftp.connector.client.Overwrite
 import sftp.connector.error.ConfigurationError
+import sftp.connector.source.MarkerFile
+import sftp.connector.source.MinAge
+import sftp.connector.source.ReadinessCheck
+import sftp.connector.source.SizeStable
+import sftp.connector.source.plus
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.time.Duration
@@ -137,6 +142,10 @@ class SftpConnectorBuilder internal constructor(private val name: String) {
         polling.watched.forEachIndexed { position, directory ->
             if (directory.isBlank()) faults += "polling directory ${position + 1} of ${polling.watched.size} is blank"
         }
+        // Zero of either is a poll that can never hand over a file, which reads in a log as a
+        // directory that is always empty rather than as a knob that was set wrong.
+        if (polling.maxInFlight < 1) faults += "polling maxInFlight ${polling.maxInFlight} would let no file be handed over"
+        if (polling.maxFilesPerPoll < 1) faults += "polling maxFilesPerPoll ${polling.maxFilesPerPoll} would read no entries"
         // An action that files a message back into the folder it came out of would hand the same
         // file to the next poll, and the poll after that, for as long as the connector runs. The
         // check is per watched directory because a relative target resolves against each of them.
@@ -220,6 +229,10 @@ class SftpConnectorBuilder internal constructor(private val name: String) {
                 createActionTargets = polling.createActionTargets,
                 startupProbe = polling.startupProbe,
                 staging = StagingConfig(dir = polling.staging.dir, digest = polling.staging.digest),
+                maxInFlight = polling.maxInFlight,
+                maxFilesPerPoll = polling.maxFilesPerPoll,
+                recursive = polling.recursive,
+                readiness = polling.readiness,
             ),
         )
     }
@@ -313,6 +326,18 @@ class PollingBuilder internal constructor() {
      */
     var startupProbe: Boolean = true
 
+    var maxInFlight: Int = 16
+    var maxFilesPerPoll: Int = 1000
+    var recursive: Boolean = false
+
+    /**
+     * The default is a heuristic, and an honest one: a file whose size has held still across two
+     * polls and that nobody has touched for a minute is probably finished. An uploader that
+     * stalls mid-file passes it. The only check that cannot be fooled is a marker the uploader
+     * writes when it is done, which needs the uploader's cooperation - ask for it.
+     */
+    var readiness: ReadinessCheck = sizeStable(checks = 2, interval = 10.seconds) + minAge(1.minutes)
+
     /**
      * The directories this connector takes files from. Naming them here is what lets start-up
      * check them; the call that starts a poll names one of them again.
@@ -320,6 +345,15 @@ class PollingBuilder internal constructor() {
     fun directories(vararg paths: String) {
         watched += paths
     }
+
+    /** Ready once the size has been seen unchanged [checks] times, at least [interval] apart. */
+    fun sizeStable(checks: Int, interval: Duration): ReadinessCheck = SizeStable(checks, interval)
+
+    /** Ready once the file was last modified at least [duration] ago. */
+    fun minAge(duration: Duration): ReadinessCheck = MinAge(duration)
+
+    /** Ready once `<name><suffix>` exists beside the file; the markers themselves are never handed over. */
+    fun markerFile(suffix: String): ReadinessCheck = MarkerFile(suffix)
 
     /** Moves the file into [target]. See [PostAction.Move] for where a relative target lands. */
     fun move(target: String, overwrite: Overwrite = Overwrite.REFUSE): PostAction = PostAction.Move(target, overwrite)

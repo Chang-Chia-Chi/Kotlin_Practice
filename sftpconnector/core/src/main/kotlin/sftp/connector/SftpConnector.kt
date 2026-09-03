@@ -13,6 +13,7 @@ import org.slf4j.LoggerFactory
 import sftp.connector.client.SftpClient
 import sftp.connector.config.SftpConnectorConfig
 import sftp.connector.pool.SftpPool
+import sftp.connector.source.SftpSource
 import sftp.connector.transport.SftpTransport
 import sftp.connector.transport.jsch.JschTransport
 import java.time.Clock
@@ -38,6 +39,9 @@ class SftpConnector private constructor(
 
     /** The sessions, for a caller that wants to see how full the pool is. */
     val pool: SftpPool,
+
+    /** The watched directories as flows of events, with per-file ack and nack. */
+    val source: SftpSource,
 
     private val scope: CoroutineScope,
 ) {
@@ -86,6 +90,7 @@ class SftpConnector private constructor(
         ): SftpConnector {
             val pool = SftpPool(transport, config, meterRegistry, clock)
             val client = SftpClient(pool, config, meterRegistry)
+            val source = SftpSource(client, config, meterRegistry, clock)
 
             StartupProbe(client, config).run()
 
@@ -98,7 +103,7 @@ class SftpConnector private constructor(
                 config.polling.directories.size,
                 if (config.polling.directories.size == 1) "directory" else "directories",
             )
-            return SftpConnector(client, pool, scope)
+            return SftpConnector(client, pool, source, scope)
         }
 
         private val LOG = LoggerFactory.getLogger(SftpConnector::class.java)

@@ -5,6 +5,9 @@ import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import sftp.connector.error.ConfigurationError
+import sftp.connector.source.AllOf
+import sftp.connector.source.MinAge
+import sftp.connector.source.SizeStable
 import java.io.ByteArrayOutputStream
 import java.io.PrintStream
 import java.nio.file.Files
@@ -241,6 +244,31 @@ class ConnectorDslTest {
         assertThat(defaults.onNack).isEqualTo(PostAction.Noop)
         assertThat(defaults.createActionTargets).isTrue()
         assertThat(defaults.startupProbe).isTrue()
+    }
+
+    /**
+     * The poll's own knobs. A zero of either count is a poll that can never hand over a file, and
+     * the shipped readiness check is the heuristic the design names: a size that held still, and
+     * a minute of nobody touching it.
+     */
+    @Test
+    fun `a poll that could hand over nothing is refused, and the defaults are the documented heuristic`() {
+        assertThatThrownBy { minimalConnector { polling { maxInFlight = 0; maxFilesPerPoll = 0 } } }
+            .isInstanceOf(ConfigurationError::class.java)
+            .hasMessageContaining("maxInFlight 0")
+            .hasMessageContaining("maxFilesPerPoll 0")
+
+        val defaults = minimalConnector { }.polling
+        assertThat(defaults.maxInFlight).isEqualTo(16)
+        assertThat(defaults.maxFilesPerPoll).isEqualTo(1000)
+        assertThat(defaults.recursive).isFalse()
+        val heuristic = defaults.readiness as AllOf
+        assertThat(heuristic.checks).hasSize(2)
+        assertThat(heuristic.checks[0]).isInstanceOfSatisfying(SizeStable::class.java) {
+            assertThat(it.checks).isEqualTo(2)
+            assertThat(it.interval).isEqualTo(10.seconds)
+        }
+        assertThat(heuristic.checks[1]).isInstanceOfSatisfying(MinAge::class.java) { assertThat(it.duration).isEqualTo(1.minutes) }
     }
 
     private fun minimalConnector(extra: SftpConnectorBuilder.() -> Unit): SftpConnectorConfig =

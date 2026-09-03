@@ -29,10 +29,10 @@ internal class ClientMeters(private val meters: MeterRegistry, private val endpo
         val started = Timer.start(meters)
         try {
             val result = block()
-            started.stop(timer(operation, OK))
+            started.stop(timer(operation, ResultLabel.OK))
             return result
         } catch (failure: Throwable) {
-            started.stop(timer(operation, outcomeOf(failure)))
+            started.stop(timer(operation, resultLabelOf(failure)))
             throw failure
         }
     }
@@ -43,23 +43,26 @@ internal class ClientMeters(private val meters: MeterRegistry, private val endpo
 
     private companion object {
         private const val OP_SECONDS = "sftp_op_seconds"
-
-        private const val OK = "ok"
-        private const val RECOVERABLE = "recoverable"
-        private const val FATAL = "fatal"
-        private const val CANCELLED = "cancelled"
-
-        /**
-         * A failure nobody classified is counted as fatal rather than as something to retry. It is
-         * a bug in the connector or in the code it was handed, and no amount of waiting has ever
-         * cured one of those; counting it among the retryable failures would bury it in the noise
-         * of a flaky network, which is the one place it must not be.
-         */
-        private fun outcomeOf(failure: Throwable): String = when {
-            failure is CancellationException -> CANCELLED
-            failure !is SftpException -> FATAL
-            failure.disposition.watch == WatchReaction.STOP -> FATAL
-            else -> RECOVERABLE
-        }
     }
+}
+
+/** The four ways a timed piece of work can end, as the `result` tag spells them. */
+internal object ResultLabel {
+    const val OK = "ok"
+    const val RECOVERABLE = "recoverable"
+    const val FATAL = "fatal"
+    const val CANCELLED = "cancelled"
+}
+
+/**
+ * A failure nobody classified is counted as fatal rather than as something to retry. It is
+ * a bug in the connector or in the code it was handed, and no amount of waiting has ever
+ * cured one of those; counting it among the retryable failures would bury it in the noise
+ * of a flaky network, which is the one place it must not be.
+ */
+internal fun resultLabelOf(failure: Throwable): String = when {
+    failure is CancellationException -> ResultLabel.CANCELLED
+    failure !is SftpException -> ResultLabel.FATAL
+    failure.disposition.watch == WatchReaction.STOP -> ResultLabel.FATAL
+    else -> ResultLabel.RECOVERABLE
 }

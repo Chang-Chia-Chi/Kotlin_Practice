@@ -155,7 +155,11 @@ because each was correctly deferred by the ticket that found it.
 |---|---|---|---|
 | ~~`SftpPool.housekeep()` has no production caller~~ | T5 | ~~T9~~ | **Closed by T9.** `SftpConnector.start` launches it into the connector's own scope, after the start-up checks have passed so a refused start-up leaves nothing dialling. T13 stops it by cancelling `SftpConnector.backgroundWork` |
 | A start-up the probe refuses leaves its sessions open and its dispatcher running | T9 | T13 | The pool has no `close()`, so the session the checks borrowed and `JschTransport`'s bounded dispatcher outlive a refused start. In production the process does not start and the JVM takes them; in a long-lived host that starts connectors on demand it is a leak per refusal. T13's `close()` is the repair, and `start` needs to call it on its own failure path once it exists |
-| `PostAction.Delete` and `PostAction.Move.overwrite` have no consumer | T9 | T10 | The three actions spec 8.1 fixes are configurable and only `Move` is read, by the probe. Kotlin's exhaustive `when` names T10's site when the executor lands, so this cannot rot silently |
+| ~~`PostAction.Delete` and `PostAction.Move.overwrite` have no consumer~~ | T9 | ~~T10~~ | **Closed by T10.** `SftpSource.FileHandling.perform` is the exhaustive `when`: an ack or nack moves with the configured overwrite policy, deletes, or leaves the file alone |
+| `NoSuchFile` from `download` is turned into `FileGone` *outside* the client | T10 | T11 | T11's retry wraps inside the client, so unless its download predicate excludes `NoSuchFile`, a file that vanished between listing and download costs three attempts and a breaker failure before it is reported gone - which is exactly what T2 warned would open the breaker on a directory another system writes into |
+| `SizeStable` observes across polls, not inside one, so the shipped default is ready on the *second* poll | T10 | The maintainer; spec 7.5 is tier 2 | On the hourly pipeline the default readiness adds an hour of latency per file where the spec's in-poll wording adds ten seconds. Recorded in T10 deviation 1 with both costs; needs a ruling, not a workaround |
+| `FileGone` is an event of the live poll only | T10 | Whoever builds a consumer helper that downloads concurrently | A consumer that downloads inside its collect block sees `FileGone` follow `FileSeen`; one that downloads after the poll has ended gets only `download()`'s null. T12's `consume` is inline and unaffected |
+| Readiness constructor faults are not aggregated with the builder's | T10 | Whoever next touches DSL validation | `sizeStable(checks = 0, ...)` raises `ConfigurationError` at the moment the polling block runs, before `build()` collects the rest, so an operator with two faults hears about one at a time |
 | ~~`socketTimeout` is dead configuration~~ | T2 measurement, spec D26 | ~~T8~~ | **Closed by T8, which removed it.** The bound on a hung server is `keepAlive x 2`, the adapter pins `serverAliveCountMax = 1` rather than inheriting it, and `keepAlive`'s own documentation names the bound. Spec 5.2, 5.3, 12 and S2 are reconciled, and D31 records why removing beat repurposing |
 | `Lease.connection` hands a direct `withLease` caller a full `SftpConnection`, so it can call `abort()` | T8 | The ticket that first has cause to close it | T7 ruled `abort()` is the pool's alone. `withSession` enforces that through `BorrowedSession`; a direct `withLease` caller is only asked, not stopped |
 | A session cut loose by the ladder counts as `reason=poisoned` | T8 | Whoever revisits the five fixed labels with the maintainer | A dashboard cannot tell "the server poisoned it" from "we cut it to rescue a thread". Spec 13 fixes five labels and the ground rules forbid a sixth, so the WARN line is the only place that distinction lives |
@@ -1728,3 +1732,227 @@ else's server is a start-up nobody will let run twice.
   stage a `ServerFailure` from a real server that is not about an occupied target.
 - **A connector that watches nothing opens no session at start-up.** Every earlier ticket's test
   configuration names no `directories`, which is why nothing started dialling when this landed.
+
+---
+
+## T10: Poll with ack, nack, readiness and in-flight backpressure
+
+**Built:** the hourly use case works end to end. `sftp.connector.source` exists, and
+`SftpConnector.source.poll(dir)` is a cold flow that lists a watched directory once, holds back
+files that are still being written, hands every ready file to the consumer as a `FileSeen` with
+`ack`, `nack` and `download` on it, and ends with a `PollCompleted` that counts what it saw. An ack
+runs the configured action - move with its overwrite policy, delete, or nothing - so a file lands in
+`temp/` when the consumer says it is done. A file that vanished between listing and download comes
+back as gone rather than as a failure. A file the consumer still holds is never handed over again by
+any poll, the listing waits when `maxInFlight` files are out, and a collection that ends without
+answering gives every place back. The polling block gained four knobs with build-time validation,
+the four readiness checks and their `+` composition ship, and the four meters spec 13 names for the
+source are published.
+
+**Concepts named:**
+
+- **`InFlightSet`** (`source`, internal) is the deep module, and its whole surface is `holds`,
+  `admit` and the slot `admit` hands back. Three promises live behind it and nowhere else: a file in
+  the set is not handed over again by any poll, the set holds at most `maxInFlight` files and a
+  poll wanting one more waits for room, and every file comes back exactly once. Membership and
+  exclusion are decided under one plain lock that nothing slow is ever taken inside; waiting for
+  room is a `Semaphore` taken *before* the lock, and the consumer's work - the move, the delete -
+  runs long after the lock was released. `admit` checks membership twice on purpose: once before
+  the wait, so a duplicate never queues for room it will not use, and once under the lock after it,
+  because a poll running alongside may have taken the same file while this one waited. The second
+  check is I7 under a `PROCEED` overlap and the first cannot replace it - a test proves that by
+  removing only the second.
+- **`InFlightSlot`** is one file's place and the once-only guard. *Settling* and *releasing* are two
+  steps: settling is the decision, taken first and atomically, so the second of two competing calls
+  learns it lost and does nothing; the action then runs with the file still in the set, so an
+  overlapping poll cannot hand it over while it is half moved; only then does the place go back.
+  That ordering is I12, and it is also why an ack whose move fails leaves the file where it was
+  and counts nothing - the file is re-listed next poll.
+- **`Settlement`** (`ACK`, `NACK`, `CANCELLED`, `GONE`) is the closed set of ways a file leaves
+  the set, and three of its labels are the `sftp_ack_total{outcome}` tags spec 13 fixes. `GONE` is
+  the fourth because nobody answered: it is counted with the poll's files, as
+  `sftp_poll_files{state=gone}`, not with the consumer's answers.
+- **`SftpEvent`** is spec 7.1's four events for this ticket. `FileSeen` carries `ack()`, `nack(reason,
+  redeliver)` and `download(localTarget)` as methods on the event rather than closures in fields;
+  to a caller they read the same, and the once-only guard lives in the slot the event holds rather
+  than in three captured lambdas. `PollSkipped` and `PollFailed` are absent rather than stubbed,
+  following T1, and are T12's to add - the compiler names every consumer's `when` when they land.
+- **`ReadinessCheck`** is a suspending `fun interface` over `(file, ctx)`, where `ReadinessContext`
+  offers exactly what spec 7.5 says - `stat` on a session of the check's own, and the clock - and
+  nothing else. `Readiness` is `Ready`, `NotReady(reason)` or `Skip`, and `Skip` has a producer:
+  `MarkerFile` skips the markers themselves, so a directory full of `.done` files does not read as
+  a directory full of stuck uploads. `AllOf` is the composite and `+` builds one, flattening.
+- **`SftpSource.FileHandling`** is the per-directory half of an answer. The directory is the one
+  thing an ack needs that the event does not carry: a relative target is a different folder under
+  each watched directory, and it is resolved through `PollingConfig.actionTargetsUnder` - the same
+  call the probe and the lister make, which is what stops three parts of the connector disagreeing
+  about which folder `temp/` is.
+- **`SourceMeters`** owns the four names and lives beside the source, for the reason `PoolMeters`
+  and `ClientMeters` live beside theirs. The `result` label rule was one private function in
+  `ClientMeters`; it is now `resultLabelOf` in the same file, shared by both timers rather than
+  copied.
+
+**Acceptance:**
+
+- *poll returns a cold Flow of the sealed events PollStarted, FileSeen, FileGone, PollCompleted* -
+  `SftpSourceTest.a poll is cold, and reports the listing as events`, which asserts no listing was
+  sent before collection and pins the first and last events by value; `.a file gone at download
+  time is reported, and needs no answer` for `FileGone`, including that it follows its `FileSeen`.
+- *ack runs the ack action (Move with overwrite, Delete, Noop) and releases the slot; nack runs the
+  nack action, releases the slot, and redelivers on a later poll unless redeliver = false* -
+  `.an ack moves the file into its folder and gives the place back` runs the full replace sequence
+  against the fake (a server without the rename extension, target occupied); `.a delete action
+  removes the file, and a noop leaves it where it was`; `.a nacked file is handed over again on a
+  later poll unless told otherwise`.
+- *I12, I8, I7* - `I12_ack and nack are each accepted once per file`, `I8_cancelling a collector
+  with unacked files gives every place back`, `I7_a file in flight is not handed over by any poll`,
+  and `I7_a file two waiting polls both want is handed over once`. See below.
+- *Readiness interface plus SizeStable, MinAge, MarkerFile, AllOf; default SizeStable(2, 10s) +
+  MinAge(1m); not-ready files counted in PollCompleted* - `ReadinessTest`, four tests on fixed
+  clocks; `SftpSourceTest.a file that is not ready is counted and looked at again next poll`;
+  the default is pinned by `ConnectorDslTest.a poll that could hand over nothing is refused, and
+  the defaults are the documented heuristic`, added to T1's file, additive only.
+- *Action targets inside the watched directory are excluded from listing, also under recursive* -
+  `.the folders actions move files into are left out of a recursive walk`: `temp/` and `failed/`
+  under the watched directory are configured as the two targets, both hold files, and neither file
+  is handed over while a file in an unrelated subdirectory is.
+- *S5, S7, S12 against the embedded server* - `SourceAgainstServerTest`, through a started
+  connector so the folder the start-up made is the folder the ack moves into: `S5_a file removed
+  between the listing and the download is gone, not failed`, `S7_an ack without a download runs
+  the move and transfers nothing` (the staging directory is asserted empty, which is the only way
+  "no transfer" is visible from outside a real server), and `S12_a file listed again while in
+  flight is handed over once`, staged as two concurrent collections by hand since overlap is T12's.
+- *Meters sftp_poll_seconds, sftp_poll_files{state}, sftp_inflight, sftp_ack_total{outcome}* -
+  `.the source publishes what a dashboard needs to watch a directory`, plus the gauge read in
+  nearly every other test, since `sftp_inflight` is how a test sees the internal set at all.
+- *Progress entry appended* - this.
+
+Three tests beyond the checkboxes: `.the listing waits when maxInFlight files are out, and moves
+on when one comes back` is the backpressure itself, proved by looking rather than waiting; `.a
+consumer whose block throws gives every place back as well` is I8's other half, found by review;
+and `.a poll of a directory the connector was not configured for is refused at the call`.
+
+**How I7, I8 and I12 are enforced, not merely asserted.** Each was checked by breaking the set and
+watching the right test - and only the right test - go red.
+
+- **I7** is the membership check under `InFlightSet`'s lock. Removing every membership check fails
+  `I7_a file in flight is not handed over by any poll`, `S12_`, and the redeliver-for-good test,
+  because exclusion is the same check. Removing only the check *under the lock*, leaving the one
+  before the wait, fails exactly `I7_a file two waiting polls both want is handed over once` - two
+  polls waiting on a full set for the same file, room coming free twice - and nothing else.
+- **I8** is the `catch (Throwable)` around the whole poll body withdrawing every slot it handed
+  over. Replacing the withdrawal with a no-op fails `I8_` at "places still taken after the cancel"
+  and `S12_` at its final in-flight count, which is I8 seen from the server side.
+- **I12** is `InFlightSlot.settle`'s compare-and-set. Making it always succeed fails `I12_` alone,
+  and with the honest symptom: the set itself refuses the second release, "the number of released
+  permits cannot be greater than 16".
+
+**How the locking works, and what runs outside it.** One plain lock guards two hash sets; every
+section under it is a membership test or an insert or a remove, and none suspends. The semaphore is
+acquired before the lock and released after it. `settle` is a compare-and-set with no lock at all.
+Everything that touches a server - the readiness check's `stat`, the download, the move, the delete
+- runs on a session of its own with nothing held. The listing's own session is held for the length
+of the listing, which is spec 7.1's design: when the poll is waiting for room the lister is waiting
+on the consumer. For a directory of fewer than the channel's 64 buffered entries the listing has
+already finished and given its session back by then.
+
+**Deviations:**
+
+1. **`SizeStable` observes across polls, where spec 7.5 says "inside one poll" - please rule.**
+   The coordinator's brief for this ticket steered this way: "`SizeStable` needs to remember what
+   it saw last tick, which means it has state across polls and needs the injected `Clock`". The
+   argument for it is in the class's own documentation - inside one poll means waiting `interval`
+   per file, in turn, while holding the listing's session, so a hundred new files make a poll take
+   a quarter of an hour. The cost, which the review found and this entry must state plainly: on
+   the hourly pipeline the shipped default is ready on the *second* poll, which is an hour of
+   latency per file where the spec's wording is ten seconds. The two readings need a decision, and
+   it is tier 2 - spec 7.5's row and the default in spec 12. Options are to keep this and say so in
+   7.5, or to make the observations concurrent inside one poll, which is a design the ticket did
+   not have room for. What it remembers is bounded (10,000 files, oldest forgotten first, and a
+   forgotten file merely costs one more poll), so the memory is not the problem.
+2. **`FileSeen.download()` is a method on the event, which spec 7.1 does not list.** D17 says the
+   download is a separate call and the consumer chooses when; it still is, and the consumer still
+   may. But `FileGone` has to be produced by *something* that saw the download hit `NoSuchFile`,
+   and the consumer's own `client.download` cannot tell the source. So the event offers the download
+   that knows, returning null for gone - the same shape as `stat` returning null for a path that is
+   not there - and releasing the place on the spot. `FileGone` is emitted when the download happened
+   inside the collect block, which the after-`emit` check sees; a download after the poll has ended
+   has no poll to speak, and gets the null and the counter. On the open-seams table.
+3. **A collection that ends abnormally withdraws its files as `cancelled`, without running the nack
+   action.** Spec 7.2 says cancellation "is treated as nack with redelivery"; here it is treated as
+   redelivery. Running the nack action - by default nothing, but configurably a move to `failed/` -
+   for files the consumer never looked at would file every unprocessed message as a failure on
+   every shutdown, and it would be I/O inside a cancelled coroutine. The counter has its own
+   `cancelled` label in spec 13, which reads as the same distinction. Review also widened *which*
+   endings withdraw: originally only cancellation, now any - a consumer's block throwing, or the
+   listing failing mid-way - because a place nobody will ever give back is capacity lost until
+   restart. A consumer that stored events from a poll that failed and acks them later finds the ack
+   ignored and the file handed over again next poll: at-least-once, and the application's ledger
+   is what deduplicates (D14).
+4. **`poll(dir)` refuses a directory the configuration does not name**, with
+   `IllegalArgumentException` at the call. Only configured directories were checked at start-up
+   and only their action folders were created, so a poll of any other would fail at the first ack
+   an hour later. Not in the spec; the same reasoning as T9's `directories(...)` knob.
+5. **`maxFilesPerPoll` and `recursive` are built; `sortBy` is not.** Spec 7.4 names all three and
+   the ticket names none; the first two cost a parameter each and the walk needed `recursive` to
+   mean anything. `sortBy` needs materialisation and a design, and nothing asked for it. The walk
+   descends after finishing each directory's listing rather than as subdirectories are found, so it
+   holds one session at a time however deep the tree.
+6. **`SftpClient.list` gained `withDirectories: Boolean = false`.** T6's method, additive, every
+   existing caller named its arguments, and its sixteen tests pass untouched. The alternative was a
+   second listing mechanism, which T6's note said not to build.
+7. **`nack(reason: Throwable, ...)`.** Spec 7.2 does not type `reason`. T12's `consume` nacks when
+   the consumer's block throws, so the thing it has in hand is a throwable; a manual caller wraps a
+   sentence in one. It is logged at WARN with the file and whether it will be seen again.
+8. **Readiness constructor faults are `ConfigurationError` but not aggregated.** `sizeStable(0, ...)`
+   raises at the moment the polling block runs, so an operator with that fault and another hears
+   about them one at a time, where the builder reports everything else at once. On the open-seams
+   table; the fix is the builder holding a description and constructing late.
+9. **The pool needs at least two sessions for a poll whose readiness check stats.** The listing
+   holds one and `ReadinessContext.stat` takes another, by spec 6.2. On a pool of one the stat
+   waits `acquireTimeout` and fails with `PoolExhausted`. D21's five, "leaving one for the lister",
+   already assumes this; it is written down here because a test with `maxSize = 1` would find it
+   the hard way.
+10. **`RenameClaim`, `ackWait` and `SeenRepository` are not built.** The first proves nothing on
+    Linux by spec 7.5's own row and is spec 14.2's seam; the other two are off by default and not
+    in this ticket.
+11. **Three review findings were declined.** The cap applied twice - `maxEntries` on each listing
+    and `take` on the walk - stays: the first is what T6's S11 pins at the server, the second is the
+    only total under recursion, and they are one knob. `SftpSource`'s constructor defaults for the
+    registry and the clock follow `SftpPool` and `SftpClient`. And `SourceMeters` keying its file
+    counters by the tag string is four lines shorter than four named fields and reads the same.
+12. **Size.** About 320 lines of main source and 420 of tests that are neither blank nor comment,
+    plus 65 in modified files, against a 200-600 budget. Over the top of it, and the honest reading
+    is that this slice is large: eight checkboxes, three invariants, three scenarios, four readiness
+    checks, four knobs and 23 tests. Nothing here looked like it would get simpler for being
+    smaller, but the next ticket should not read this as slack.
+
+**For the next ticket:**
+
+- **T11: do not retry `NoSuchFile` from `download`.** The conversion to gone sits in
+  `SftpSource.FileHandling.download`, *outside* `client.download`, which is where the retry ladder
+  will go. Spec 6.1's download row says a retry restarts from zero into a fresh `.part` file, and
+  nothing about that cures a file that is not there. If the predicate retries it, S5 costs three
+  attempts and a breaker failure, and T2's warning about a directory another system writes into
+  opening the breaker comes true. On the open-seams table.
+- **T12: `consume` must catch the block's exception and nack, not let it out of `collect`.** A
+  throwable escaping the collect block now ends the poll and withdraws every unanswered file as
+  `cancelled` - correct for a consumer that has died, wrong for one file that failed to parse.
+- **T12: `PollSkipped` and `PollFailed` join the sealed interface**, and the tick counter is per
+  source, so a watch's ticks continue the numbering its polls use. `FileHandling` is built per
+  `poll(dir)` call and is cheap. S12 under a real `PROCEED` overlap is already the set's promise;
+  the staged test in `SourceAgainstServerTest` is the same interleaving by hand.
+- **T13: a poll waiting on its consumer holds the listing's session** for directories longer than
+  the channel buffer, and cancelling the collector releases it through the cooperative tier - the
+  selector answers `STOP` when the consumer is gone. The drain should expect a lease held by a poll
+  and cancel the watchers before waiting for leases, which is spec 11.2's order anyway.
+- **`sftp_inflight` is the only window onto the set from outside `core`.** `InFlightSet` is
+  internal; tests read the gauge. A test that needs the set's contents rather than its size has to
+  add a seam.
+- **The readiness checks are `synchronized` where they keep memory,** because two polls of
+  different directories share one `SizeStable` instance through the configuration. A check added
+  later with memory of its own needs the same.
+- **A suspending `fun interface` works in Kotlin 2.2:** `ReadinessCheck { _, _ -> Ready }` is how
+  every test here says "always ready".
+- **`FakeSftpTransport` needed nothing new.** `file`, `directory` and `remove` between polls, and
+  its recorded `Rename`/`Delete` calls, staged everything this ticket asked.

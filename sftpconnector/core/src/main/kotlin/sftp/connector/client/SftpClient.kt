@@ -53,12 +53,14 @@ class SftpClient(
      * the first thousand pays for the first thousand. That is the whole reason this is a flow and
      * not a list.
      *
-     * Directories are not reported. A listing of a directory is about the files in it, and a
-     * caller wanting to walk into subdirectories is doing something this operation does not
-     * pretend to do.
+     * Directories are not reported unless asked for. A listing of a directory is about the files
+     * in it; a caller that wants to walk into subdirectories asks to see them and does the
+     * walking itself, because this operation holds a session for as long as it runs and a walk
+     * from inside it would hold one per level.
      *
      * @param maxEntries stop after this many have been handed on, however much of the directory is
      *   left. It bounds the work of one listing, not the size of the directory.
+     * @param withDirectories report subdirectories as entries too, [RemoteFile.isDirectory] set.
      * @param filter runs on the session's own thread as each entry arrives, before the entry is
      *   handed on, so a filter that rejects most of a directory saves the consumer from ever
      *   seeing it. Keep it cheap: it holds the read up.
@@ -66,6 +68,7 @@ class SftpClient(
     fun list(
         dir: String,
         maxEntries: Int = Int.MAX_VALUE,
+        withDirectories: Boolean = false,
         filter: (RemoteFile) -> Boolean = { true },
     ): Flow<RemoteFile> = channelFlow {
         meters.timing("list") {
@@ -73,7 +76,7 @@ class SftpClient(
                 var handedOn = 0
                 lease.connection.list(dir) { entry ->
                     when {
-                        entry.isDirectory || !filter(entry) -> Listing.CONTINUE
+                        (entry.isDirectory && !withDirectories) || !filter(entry) -> Listing.CONTINUE
                         !handOn(entry) -> Listing.STOP
                         ++handedOn >= maxEntries -> Listing.STOP
                         else -> Listing.CONTINUE

@@ -1,6 +1,7 @@
 package sftp.connector.config
 
 import sftp.connector.client.Overwrite
+import sftp.connector.source.ReadinessCheck
 import java.nio.file.Path
 import kotlin.time.Duration
 
@@ -155,6 +156,27 @@ data class PollingConfig(
      */
     val startupProbe: Boolean,
     val staging: StagingConfig,
+    /**
+     * How many files may be handed to the consumer and not yet acked or nacked, across every
+     * directory this connector polls. Once that many are out, the listing waits for one to come
+     * back before handing over the next. It is the one knob that protects whatever is downstream
+     * from a directory that filled up while nobody was polling.
+     */
+    val maxInFlight: Int,
+    /** How many entries one poll reads before stopping, however many more the directory holds. */
+    val maxFilesPerPoll: Int,
+    /**
+     * Whether a poll walks into subdirectories. The folders its own actions move files into are
+     * left out of the walk whatever this says, so a file that has been dealt with is never found
+     * again by the poll that dealt with it.
+     */
+    val recursive: Boolean,
+    /**
+     * What a listed file has to pass before it is handed over. A check may keep memory between
+     * polls - watching a size hold still is only possible by remembering it - so the instance here
+     * belongs to this one connector.
+     */
+    val readiness: ReadinessCheck,
 ) {
     /**
      * The folders files from [directory] are moved into, once, however many actions aim at the
