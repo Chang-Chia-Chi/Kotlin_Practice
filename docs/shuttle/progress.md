@@ -527,6 +527,95 @@ ProcessingChainTest 4, RulesTest 30, SurfaceTest 3, testkit 25, YamlLoaderTest 1
 - **16/17:** `ExpandProcessor` and `Extract(from = Message)` are the two remaining shells;
   `processorFor` refuses the latter at construction, so rule 14's "message only on a subscribed
   route" is the only thing standing between a config and a `NotImplementedError` until then.
+
+---
+
+## 10: Oracle state store over JDBI
+
+**Built:** `infra.shuttle.jdbi`, two classes. `StateStoreSchema.DDL` is spec 8.1 verbatim, with
+`statements()` splitting it into what the driver accepts. `JdbiStateStore(jdbi, dispatcher, clock)`
+implements every 8.2 method as one `inTransaction` on the injected dispatcher: the transitions
+that create outbox rows insert them inside that transaction; `seen` inserts and, on
+`uq_file_transfer_identity`, re-selects the winner; `due` is one `FOR UPDATE SKIP LOCKED` select
+bounded by `ROWNUM` over an ordered id subquery; children are deleted and re-inserted FETCHED;
+a child's `stored` touches the parent row, then runs the conditional flip and creates the parent's
+rows only when it fired; `acked` moves parent and children in one statement; `delivered` flips
+DONE through a `NOT EXISTS` over the outbox. Three read-side methods (`transfer`, `transfers`,
+`outbox`) exist for the tests and the admin surface; they are not part of the seam. The
+contract test moved: `testkit/StateStoreContract` holds every seam-level assertion of ticket 03's
+`InMemoryStateStoreTest` plus `I20_` and `D42_`; `InMemoryStateStoreTest` and
+`JdbiStateStoreTest` are its two subclasses. The pom adds `jdbi3-core` 3.45.4 (compile), `ojdbc11`
+and Testcontainers `oracle-free` 1.20.4 (test), and `excludedGroups=oracle` as a property the
+way `etl-host` does; `-DexcludedGroups=none` opts the Oracle class in.
+
+**Concepts named:** *the contract* is `StateStoreContract`: one set of assertions, a `store`, three
+read views and a `poisonedEvents()` hook that makes a delivery insert fail inside the transaction
+(the in-memory store's switch; on Oracle a 65-character channel name against `VARCHAR2(64)`).
+*The tail lock* is the parent-row touch in `stored` (D42, amended). *Latest revision* is how
+`find`/`seen`/`unlisted` resolve an identity, as ticket 03 fixed it.
+
+**Acceptance:**
+
+- *DDL matches 8.1 verbatim* - `StateStoreSchemaTest.the_DDL_text_matches_spec_8_1_verbatim`
+  reads `docs/shuttle/spec.md` and compares the 8.1 block to the constant.
+- *The contract passes against both stores, tagged `oracle`, excluded by a pom property* -
+  `InMemoryStateStoreTest` 16 and `JdbiStateStoreTest` 17 (the 15 shared tests plus two Oracle-only
+  ones), `@Tag("oracle")`, `<excludedGroups>oracle</excludedGroups>`.
+- *I11 and I20 on Oracle* - `I11_a_failing_delivery_insert_leaves_the_transfer_state_unchanged`
+  and `I20_a_notification_row_exists_iff_its_transition_committed` in the contract, green on
+  Oracle: the oversize channel fails the insert and the transition is not there afterwards.
+- *Unique-identity violation on `seen` returns the existing row; `due` excludes ids, honours the
+  limit, skip-locked* - `seen_creates_a_SEEN_row_and_returns_the_existing_row_for_a_known_identity`
+  and `seen_returns_the_existing_row_when_the_unique_identity_constraint_fires` (proves the DDL's
+  constraint refuses a duplicate); `due_orders_by_next_attempt_excludes_ids_and_honours_the_limit`;
+  `due_skips_rows_another_session_holds_locked` (a second connection holds a row `FOR UPDATE`, `due`
+  returns the other one, then both once released).
+- *D42 on Oracle* - `D42_children_completing_concurrently_leave_exactly_one_parent_STORED_write`:
+  eight children `stored` at once on `Dispatchers.IO`; the parent is STORED once with one set of
+  outbox rows (the unique constraint would refuse a second).
+- *JDBI and `java.sql` only in the jdbi package* - `ArchitectureTest`, now with classes to check.
+- *Progress entry* - this.
+
+Default run: 92 tests green with the Oracle class excluded; opt-in run
+`-DexcludedGroups=none -Dtest=JdbiStateStoreTest`: 17 green in 62 s after a container start of
+about a minute (`gvenzl/oracle-free:23-slim-faststart`, already pulled).
+
+**Deviations:**
+
+1. **Spec 8.1 gained two sequences** (`file_transfer_seq`, `delivery_outbox_seq`). The v0.4 DDL had
+   `id NUMBER(19) NOT NULL` with nothing to generate it; the store reads `NEXTVAL`. Open item 7
+   ("sequence names") is now answered in the DDL.
+2. **D42 amended: the parent row is touched before the conditional flip.** A zero-row conditional
+   update locks nothing, so under read committed two last children each see the other unstored and
+   neither flips. The touch is a row lock for the tail of the child's transaction only, no
+   `FOR UPDATE`, nothing across I/O; spec 4.5 and D42 now say so.
+3. **`unlisted` is one select filtered in Kotlin**, not one statement with the listing inlined: a
+   STORED-and-unacked set is small by construction, and an inlined listing of thousands of
+   identities would fight Oracle's 1,000-element `IN` limit for no gain. (ponytail)
+4. **`due` returns fewer than `limit` when rows are locked**: `ROWNUM` picks before `SKIP LOCKED`
+   skips. Bounded is what the spec asks; the next wake or sweep collects the rest.
+5. **Instants are truncated to microseconds on the way in**, Oracle `TIMESTAMP`'s precision, so what
+   is read equals what was written; `unlisted` normalises the listing's mtimes the same way.
+6. **The contract's I11 asserts "some failure" by default**; the in-memory subclass overrides the
+   assertion to the injected `IOException`, so ticket 03's assertion is not weakened, and the
+   `calls` assertion moved to an in-memory-only test.
+7. **JDBI `stored` only flips a parent that is not already STORED** (`p.state <> 'STORED'`); the
+   in-memory store has no such guard. Untested by the contract; noted so ticket 06 relies on neither.
+8. **Size:** 373 main (299 store, 74 schema), 434 test (269 contract, 94 Oracle, 38 schema, 33
+   in-memory subclass). Over 600 in total because the contract absorbed ticket 03's test bodies.
+
+**For the next ticket:**
+
+- **14 (host):** produce `Jdbi.create(dataSource)` from the Quarkus datasource and hand it to
+  `JdbiStateStore(jdbi, ioDispatcher, clock)`; `ojdbc11` must be a runtime dependency there (it is
+  test-scoped here). The startup check "table missing" can be `SELECT 1 FROM file_transfer WHERE
+  ROWNUM = 0`, naming `StateStoreSchema.DDL` on failure. The Oracle class takes about two minutes
+  wall clock with the container; do not fold it into the default run.
+- **06 (pipeline) and 09 (notifier):** the read views `transfer/transfers/outbox` are on
+  `JdbiStateStore` and `InMemoryStateStore`, not on the seam; production code must not need them.
+- **Gotcha:** run the Oracle class with `-DexcludedGroups=none`; a plain `-Dtest=JdbiStateStoreTest`
+  runs zero tests and reports green.
+
 ---
 
 ## 12: HTTP channel
@@ -600,3 +689,4 @@ One INFO line per attempt: transfer id, event, channel, attempt, status, referen
   dispatcher is needed for this channel.
 - Gotcha: `com.sun.net.httpserver.Headers` normalises header names (`X-api-key`), which is why
   the test reads them that way; the client sends what the config says.
+
