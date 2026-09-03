@@ -25,7 +25,10 @@ internal class BorrowedSession(private val session: SftpSession) : SftpSession {
      * wire when the block returned went on using the session after the pool had lent it to
      * somebody else. Holding the lock for the length of the call means the loan cannot end while
      * a call is in flight, and no call can start once it has. An SFTP channel does one thing at a
-     * time in any case, so nothing is lost by taking calls in turn.
+     * time in any case, so nothing is lost by taking calls in turn - and a call made from inside
+     * another call's callback, such as a stat from a listing's entry callback, now waits for a
+     * lock the listing holds rather than corrupting the channel's stream underneath it. Neither
+     * was ever going to work; this one at least stops where the fault is.
      */
     private val oneAtATime = Mutex()
 

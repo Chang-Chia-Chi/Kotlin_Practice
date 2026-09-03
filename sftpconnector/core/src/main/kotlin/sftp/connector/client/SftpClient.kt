@@ -205,11 +205,12 @@ class SftpClient(
      *   a single atomic request against a server offering the POSIX rename extension, and a delete
      *   followed by a second rename against a server without it - during which [to] holds nothing,
      *   and after which a failure has left [to] empty rather than holding either file.
-     * @throws sftp.connector.error.NoSuchFile when [from] is not there. It is the answer worth
-     *   telling apart from the rest: a retry that gets it after a reply went missing is being told
-     *   its own earlier attempt may already have landed, and can settle the question by looking at
-     *   [to]. No other path's absence is ever reported this way - a target that was already gone
-     *   is what a replacement wanted in the first place, and is not passed on as a failure.
+     * @throws sftp.connector.error.NoSuchFile naming, on its attempt's path, the path that is not
+     *   there: [from], or [to] when the source is still there and it is the target's location the
+     *   server could not find. The first is the answer worth telling apart from the rest: a retry
+     *   that gets it after a reply went missing is being told its own earlier attempt may already
+     *   have landed, and can settle the question by looking at [to]. A target that was already gone
+     *   is never reported this way - it is what a replacement wanted in the first place.
      */
     suspend fun rename(from: String, to: String, overwrite: Overwrite = Overwrite.REFUSE): Unit =
         meters.timing("rename") {
@@ -304,9 +305,23 @@ class SftpClient(
         try {
             renameNamingWhatIsMissing(from, to)
         } catch (refused: ServerFailure) {
-            if (renameReplaces || entryAt(to)?.isDirectory != false) throw refused
+            val inTheWay = entryAt(to)
+            if (renameReplaces || inTheWay == null || inTheWay.isDirectory) throw refused
             clearTheWay(to)
-            renameNamingWhatIsMissing(from, to)
+            try {
+                renameNamingWhatIsMissing(from, to)
+            } catch (refusedAgain: ServerFailure) {
+                // The refusal was never about the target, and the target is gone. The caller
+                // reads a refusal as "the source is still where it was", which is true, and must
+                // not read it as "nothing changed", which is not.
+                throw ServerFailure(
+                    refusedAgain.attempt,
+                    refusedAgain.statusCode,
+                    "$to was cleared to make room for this rename and the rename was refused anyway, so " +
+                        "$to now holds nothing and the source is still at $from: ${refusedAgain.message}",
+                    refusedAgain,
+                )
+            }
         }
     }
 
@@ -351,8 +366,9 @@ class SftpClient(
  * Takes whatever is at [path] away so that a rename can land there.
  *
  * A path that has gone in the meantime is the state this was trying to reach, so it is not passed
- * on. That also keeps the one failure a rename retry reads as a signal unambiguous: a missing path
- * reported by a rename is always the source, never the target.
+ * on. That also keeps the one failure a rename retry reads as a signal unambiguous: a rename never
+ * reports its target as missing on account of the clearing, only on account of the server having
+ * nowhere to put it.
  */
 private suspend fun SftpSession.clearTheWay(path: String) {
     try {

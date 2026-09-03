@@ -14,6 +14,7 @@ import org.junit.jupiter.api.io.TempDir
 import sftp.connector.config.HostKeyPolicy
 import sftp.connector.config.SftpConnectorConfig
 import sftp.connector.config.sftpConnector
+import sftp.connector.error.Attempt
 import sftp.connector.error.NoSuchFile
 import sftp.connector.error.ServerFailure
 import sftp.connector.error.SftpException
@@ -150,6 +151,30 @@ class WritePathReviewTest {
     }
 
     /**
+     * The loss the sequence cannot avoid on a server without the extension: a refusal that was
+     * never about the target, with a file at the target, still clears that file and is refused
+     * again. The spec accepts that; what was missing was the caller being told. The second refusal
+     * now says the target was cleared, so nobody reads "the source is still where it was" as
+     * "nothing changed".
+     */
+    @Test
+    fun `a refusal after the target was cleared says so`() = runBlocking<Unit> {
+        val server = FakeSftpTransport(answer = { call -> if (call.operation == Operation.Rename) throw crossFilesystem() })
+            .file("/drop/ledger.csv", CONTENT)
+            .file("/other/ledger.csv", "yesterday's run")
+        val config = fakeConfig()
+        val client = SftpClient(SftpPool(server, config), config)
+
+        assertThatThrownBy { runBlocking { client.rename("/drop/ledger.csv", "/other/ledger.csv", Overwrite.REPLACE) } }
+            .isInstanceOf(ServerFailure::class.java)
+            .hasMessageContaining("/other/ledger.csv was cleared")
+            .hasMessageContaining("across filesystems")
+
+        assertThat(client.exists("/other/ledger.csv")).describedAs("the residual loss, now stated").isFalse()
+        assertThat(client.exists("/drop/ledger.csv")).isTrue()
+    }
+
+    /**
      * T7's promise to T11 was that a missing path reported by a rename is always the source. The
      * server also answers "no such file" when the target's directory does not exist, and that
      * answer used to come back naming the source - so a retry would have looked at the target,
@@ -186,7 +211,7 @@ class WritePathReviewTest {
      * the last call on it does.
      */
     @Test
-    fun `a call still in flight when the block ends keeps the session until it finishes`() = runTest {
+    fun `I2_a call still in flight when the block ends keeps the session until it finishes`() = runTest {
         val parked = CompletableDeferred<Unit>()
         val release = CompletableDeferred<Unit>()
         val server = FakeSftpTransport(answer = { call ->
@@ -254,5 +279,11 @@ class WritePathReviewTest {
         private const val PASSWORD = "s3cret"
 
         private const val CONTENT = "id,amount\n1,42\n"
+
+        private fun crossFilesystem() = ServerFailure(
+            Attempt("fake:22", "rename", "/drop/ledger.csv"),
+            statusCode = 4,
+            detail = "the server will not rename across filesystems",
+        )
     }
 }
