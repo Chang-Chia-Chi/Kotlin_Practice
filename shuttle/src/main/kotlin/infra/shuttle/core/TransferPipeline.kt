@@ -34,12 +34,18 @@ class TransferPipeline(
     private val registry: MeterRegistry,
     private val staging: Staging,
     private val usableSpace: (Path) -> Long = { Files.getFileStore(it).usableSpace },
+    channels: Map<ChannelName, DeliveryChannel> = emptyMap(),
+    private val renderer: MappingRenderer = MappingRenderer(),
 ) {
     private val name = RouteName(route.name)
     private val polled = route.source is Source.Poll
     private val kind = if (polled) TransferKind.OBJECT else TransferKind.MESSAGE
     private val targetKey = route.target?.key ?: "{name}"
-    private val tables = route.notify.mapNotNull { bodies[ChannelName(it.channel)] }
+    /** Spec 5.3: a `callback` ack names a channel the pipeline calls itself; rule 12 guarantees it is declared, the host must provide it. */
+    private val callbackChannel = (route.source?.onAck as? AckAction.Callback)
+        ?.let { checkNotNull(channels[ChannelName(it.channel)]) { "route ${route.name}: callback channel ${it.channel} was not provided" } }
+    private val callbackBody = callbackChannel?.let { bodies[it.name] } ?: MappingTable(emptyList())
+    private val tables = (route.notify.map { ChannelName(it.channel) } + listOfNotNull(callbackChannel?.name)).distinct().mapNotNull { bodies[it] }
     private val stagingStore = route.fetch?.store ?: (route.source as? Source.Poll)?.store ?: route.name
     private val freeBytes = registry.gauge(ShuttleMetrics.STAGING_FREE_BYTES, Tags.of("store", stagingStore), AtomicLong())!!
 
@@ -172,9 +178,14 @@ class TransferPipeline(
             return ref
         }
 
-        /** Stage 4 in the source's order (D6): a polled file is moved first, a subscribed message is written ACKED first. */
+        /**
+         * Stage 4. A `callback` ack (spec 5.3) is called first, whatever the source's order, so no ledger write and no
+         * source-side ack precede upstream's answer; then the source's order (D6): a polled file is moved first, a
+         * subscribed message is written ACKED first.
+         */
         private suspend fun ack(transfer: Transfer) {
             val id = transfer.id
+            if (callbackChannel != null) stage("ack") { callback(callbackChannel, id) }
             if (polled) {
                 stage("ack") { event.ack() }; hook.at(HookPoint.afterAck, id)
                 ledger(DeliveryMoment.ACKED) { store.acked(id, it) }; hook.at(HookPoint.afterLedgerAcked, id)
@@ -185,7 +196,25 @@ class TransferPipeline(
             count("done")
         }
 
-        /** The ack action again for a finished row that came back; no ledger write, no new deliveries. */
+        /**
+         * The `callback` ack: the channel's body rendered from the row as the notifier would for `acked`, one synchronous
+         * call, no outbox row. Anything but `Delivered` is a stage error, retried with the stage (spec 11); a
+         * `CancellationException` passes through untouched.
+         */
+        private suspend fun callback(channel: DeliveryChannel, id: TransferId) {
+            val current = checkNotNull(store.byId(id)) { "transfer ${id.value} vanished before its callback" }
+            val attempt = current.attempts + 1
+            val body = renderer.render(callbackBody, current, DeliveryMoment.ACKED, attempt)
+            val outcome = channel.deliver(DeliveryEvent(id, DeliveryMoment.ACKED, channel.name, attempt, body))
+            log.infov("callback transfer={0} channel={1} attempt={2} outcome={3}", id.value, channel.name.value, attempt, outcome)
+            when (outcome) {
+                is DeliveryOutcome.Delivered -> Unit
+                is DeliveryOutcome.Retry -> throw IllegalStateException("callback ${channel.name.value} answered Retry ${outcome.status}: ${outcome.reason}")
+                is DeliveryOutcome.Reject -> throw IllegalStateException("callback ${channel.name.value} answered Reject ${outcome.status}: ${outcome.reason}")
+            }
+        }
+
+        /** The ack action again for a finished row that came back; no ledger write, no new deliveries, and no callback: ACKED proves it succeeded. */
         private suspend fun reack(transfer: Transfer) {
             log.warnv("route {0}: transfer {1} ({2}) is {3} and came back unchanged; acking again", route.name, transfer.id.value, event.identity.sourceName, transfer.state)
             stage("ack") { event.ack() }; hook.at(HookPoint.afterAck, transfer.id)

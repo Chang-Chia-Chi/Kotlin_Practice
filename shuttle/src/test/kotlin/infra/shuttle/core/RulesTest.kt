@@ -72,6 +72,24 @@ class RulesTest {
     fun rule12_onAck_is_explicit_and_in_the_trigger_kinds_vocabulary() =
         assertEquals(listOf(12), violated(config(vendorDrop = { source = poll(objectStore("vendor"), directory = "/inbox") })))
 
+    /** A nats channel without a subject is declared but offers no notify role (rule 2's reading), so a callback may not name it. */
+    @Test
+    fun rule12_a_callback_names_a_channel_offering_the_notify_role() =
+        assertEquals(
+            listOf(12),
+            violated(config(
+                more = { channels { nats("events") { url = "nats://events.internal:4222" } } },
+                vendorDrop = { source = poll(objectStore("vendor"), directory = "/inbox") { onAck = callback(channel("events")) } },
+            )),
+        )
+
+    @Test
+    fun rule12_a_callback_may_name_a_channel_offering_notify() =
+        assertEquals(
+            emptyList<Int>(),
+            violated(config(vendorDrop = { source = poll(objectStore("vendor"), directory = "/inbox") { onAck = callback(channel("downstream")) } })),
+        )
+
     @Test
     fun rule13_key_and_directory_patterns_use_only_known_placeholders() =
         assertEquals(listOf(13), violated(config(vendorDrop = { target = objectStore("minio").bucket("landing") { key = "vendor/{nope}" } })))
@@ -99,6 +117,17 @@ class RulesTest {
     @Test
     fun rule17_every_mapping_attribute_is_declared_by_a_processor_in_that_route() =
         assertEquals(listOf(17), violated(config(downstream = { body = mapping { "orderNumber" fromAttribute "orderNo" } })))
+
+    /** The callback channel's body is rendered for the route too, so rule 17 reads it although the route does not notify it. */
+    @Test
+    fun rule17_reads_the_body_of_a_callback_channel() =
+        assertEquals(
+            listOf(17),
+            violated(config(
+                more = { channels { http("upstream") { method = HttpMethod.POST; url = "https://upstream.internal/ack"; body = mapping { "orderNumber" fromAttribute "orderNo" } } } },
+                vendorDrop = { source = poll(objectStore("vendor"), directory = "/inbox") { onAck = callback(channel("upstream")) } },
+            )),
+        )
 
     @Test
     fun rule18_every_select_is_a_json_pointer_and_every_format_parses() =

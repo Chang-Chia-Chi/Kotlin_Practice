@@ -1313,3 +1313,110 @@ RecordingChannelTest 2, ScriptedSourceTest 2, YamlLoaderTest 10; 163 tests, 0 fa
   Micrometer keeps the first and ignores the second, so only the first route's reading is
   published. Both read the same volume, so the value is right but the refresh cadence is one route's.
 
+---
+
+## 19: Notifications and callback acks
+
+**Built:** the `callback` ack action of spec 5.3 in `TransferPipeline`, and the proof that
+`fetched` and `stored` deliveries ride their own transactions (ticket 06's `ledger` already did
+the wiring; this ticket adds the `I20_` tests). `TransferPipeline` gained two trailing
+constructor parameters with defaults, `channels: Map<ChannelName, DeliveryChannel> = emptyMap()`
+and `renderer: MappingRenderer = MappingRenderer()`; nothing existing was renamed or reordered.
+When the route's source `onAck` is `AckAction.Callback(channel)`, stage 4 opens with one
+synchronous call to that channel through the `DeliveryChannel` seam: the row is re-read with
+`byId`, the channel's mapping table is rendered for moment `acked` with `attempt = attempts + 1`
+(the same rendering the notifier does), `deliver(DeliveryEvent(...))` is called, and only
+`Delivered` lets the stage go on to the source's own order of D6 (poll: move then ledger;
+subscribe: ledger then broker). `Retry`, `Reject` and a thrown exception are stage errors:
+`failedAttempt`, `nack(redeliver = true)` below `maxAttempts`, FAILED at it, the row staying
+STORED meanwhile and verified (not stored again) on every retry. `CancellationException` passes
+through. No outbox row is written for the callback itself. Rule 12 now checks that the named
+channel *offers notify* (a nats channel without a `subject` is declared but does not), not only
+that it exists, and rule 17 reads the callback channel's mapping table too. `Source.onAck` is a
+one-line extension in `ShuttleConfig.kt` so `Rules` and the pipeline read the ack action of
+either trigger kind the same way.
+
+**Concepts named:**
+
+- **The callback is the first act of stage 4**, whatever the source's order, so neither a ledger
+  write nor a source-side ack precedes upstream's answer; a STORED row is the whole memory of a
+  callback that has not succeeded yet.
+- **A re-ack never repeats the callback.** ACKED is written only after the callback succeeded,
+  so a finished row that comes back (S12, S32, D40) proves upstream already answered; `reack`
+  runs the connector's own ack only. This is what keeps a polled `callback` route from telling
+  upstream again every `recheckFinished`.
+- **The callback's body is checked at attribute freeze** with the notified channels' tables,
+  so a missing required input fails before the store (spec 6.4, S26), not at the ack.
+
+**Acceptance:** all in `TransferPipelineTest` (26 tests) unless named otherwise.
+
+- *I20 for all three events* -
+  `I20_a_fetched_delivery_row_exists_iff_the_FETCHED_transition_committed` (green on arrival:
+  ticket 06's wiring), `I20_a_stored_delivery_row_exists_iff_the_STORED_transition_committed`,
+  `I20_an_acked_delivery_row_exists_iff_the_ACKED_transition_committed`; each arms
+  `failNextDeliveryInsert` for exactly that transition (before the run for `fetched`, since
+  `seen` inserts nothing; at `afterStore`; at `afterLedgerStored`), asserts no row, the previous
+  state, the attempt counted and no wake, then re-runs and asserts one PENDING row of that moment
+  with the transfer ACKED, not DONE.
+- *S30* - `S30_a_callback_ack_answering_500_then_200_keeps_the_transfer_STORED_through_the_failure_and_ACKED_after_with_one_acked_delivery`:
+  `RecordingChannel` scripted `Retry("500")` then `Delivered`; STORED, attempts 1, no outbox row,
+  no source ack after the first run; ACKED with exactly one `acked` outbox row (to a second,
+  notified channel) after the second; the callback saw attempts 1 and 2, both moment `acked`.
+  Also `a_callback_answering_Reject_or_throwing_is_a_stage_error_and_FAILED_at_maxAttempts`
+  and `a_subscribed_callback_precedes_the_ACKED_ledger_and_the_broker_ack_and_a_redelivery_does_not_call_it_again`
+  (hook order `... afterLedgerStored, callback:STORED, afterLedgerAcked, afterAck`).
+- *A `fetched` delivery exists after a crash right after fetch and is delivered by the notifier* -
+  `a_fetched_delivery_created_before_a_crash_right_after_fetch_is_delivered_by_the_notifier`:
+  `HookDriver.crash(afterFetch)`, row FETCHED with one PENDING row and staging empty; a `Notifier`
+  over the same store and a `RecordingChannel` delivers it (`event: fetched` in the body) and the
+  transfer stays FETCHED.
+- *Rule 12 rejects a callback naming a channel without the notify role* -
+  `RulesTest.rule12_a_callback_names_a_channel_offering_the_notify_role` (a nats channel with no
+  subject), `rule12_a_callback_may_name_a_channel_offering_notify`, and
+  `rule17_reads_the_body_of_a_callback_channel`.
+- *Progress entry appended* - this entry.
+
+Final run: ArchitectureTest 8, AttributeFreezeTest 4, BuiltInProcessorsTest 8, MappingRendererTest 12,
+NotifierTest 13, ProcessingChainTest 4, RulesTest 35, SurfaceTest 3, TransferPipelineTest 26,
+HttpChannelTest 8, StateStoreSchemaTest 2, ClockFixtureTest 1, FakeProcessContextTest 2,
+HookDriverTest 3, InMemoryStateStoreTest 18, InMemoryTargetTest 3, RecordingChannelTest 2,
+ScriptedSourceTest 2, YamlLoaderTest 11; 165 tests, 0 failures, 0 errors (`oracle`, `minio`, `nats` excluded).
+
+**Deviations:**
+
+1. **`Reject` from a callback is the same recoverable stage error as `Retry`.** Spec 11 has one
+   row, "Callback ack fails: as recoverable", and no 4xx distinction for acks (the target's 4xx
+   row takes the same path); five answers of any kind are FAILED with the last reason on the row.
+2. **The callback is not repeated on a re-ack** (see Concepts). Spec 4.3 says "ack again"; the
+   connector's ack is repeated, the callback is not, because ACKED proves it succeeded.
+3. **The callback's stage timer is a second `ack` sample.** Spec 14.2 fixes the `stage` values
+   to fetch, process, store, ack; the callback records under `ack` and the connector's ack records
+   another sample, so a callback route has two `ack` samples per transfer. Adding a `callback`
+   stage value would change the fixed vocabulary.
+4. **A callback route whose channel is not in `channels` fails at construction**
+   (`IllegalStateException` naming the route and channel), not at the first transfer: a wiring
+   gap is a boot failure (spec 12.1), and rule 12 already guarantees the channel is declared.
+5. **Rule 12's spelling of "offers notify" is rule 2's:** any channel but a nats channel without a
+   `subject`. The predicate is one shared `offersNotify` in `Rules`.
+6. Size: 38 main lines added, 203 test; in budget.
+
+**For the next ticket:**
+
+- **13 (SFTP source):** when the route's `onAck` is `AckAction.Callback`, the pipeline calls the
+  channel itself, before `Seen.ack`; the `Seen.ack` lambda must **not** call any channel and must
+  do what `none` does for a polled file: nothing to the file (it stays listed; D40 bounds the
+  re-checks), release the connector's in-flight entry only. It must never move or delete under a
+  callback unless a later spec adds a combined form. `Seen.nack` is unchanged. For a subscribed
+  route (16) the same holds with the broker ack in place of `none`: the pipeline's order is
+  callback, ledger ACKED, then `Seen.ack` acks the broker.
+- **14 (host):** pass `channels = <every DeliveryChannel by name>` (the notifier's collection,
+  `associateBy { it.name }`) and `renderer = <the notifier's MappingRenderer>` to every
+  `TransferPipeline`, by name; the two trailing parameters default to empty and a provider-less
+  renderer, and a callback route with its channel missing throws at construction. Gotcha for the
+  merge with 07: `usableSpace` is no longer the last parameter, so a trailing-lambda construction
+  `TransferPipeline(...) { freeBytes }` no longer compiles; pass it positionally or by name.
+- **20 (M2 acceptance):** S30 on the loopback HTTP server is `HttpChannel` in the `channels` map
+  of a route with `onAck: callback: <name>`; the outcome mapping (500 in `retry` is `Retry`, 200
+  is `Delivered`) is ticket 12's, the stage retry is this ticket's. The `fetched` delivery after
+  a crash is the notifier's ordinary sweep; nothing to wire.
+
