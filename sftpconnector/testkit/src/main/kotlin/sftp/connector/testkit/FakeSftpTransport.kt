@@ -76,6 +76,15 @@ class FakeSftpTransport(
         contents.remove(path)
     }
 
+    /**
+     * Everything the server holds right now, a file's size against its path and null for a
+     * directory. For a test that keeps a model of the server and needs the truth to compare it
+     * with, read without a session and without a listing.
+     */
+    fun snapshot(): Map<String, Int?> = synchronized(contents) { contents.mapValues { it.value?.size } }
+
+    fun bytesAt(path: String): ByteArray? = contents[path]
+
     override suspend fun connect(): SftpConnection {
         record(Call(Operation.Connect, session = 0))
         return FakeSession(sessionsOpened.incrementAndGet())
