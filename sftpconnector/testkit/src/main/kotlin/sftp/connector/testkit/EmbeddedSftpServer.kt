@@ -12,6 +12,7 @@ import org.apache.sshd.sftp.server.SftpSubsystemProxy
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.CopyOption
 import java.nio.file.Path
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * A real SSH and SFTP server on loopback, serving one directory.
@@ -29,7 +30,14 @@ class EmbeddedSftpServer private constructor(
 
     /** The directory the server exposes as its root. Write files here to make them appear. */
     val root: Path,
+    private val passwordsOffered: AtomicInteger,
 ) : AutoCloseable {
+
+    /**
+     * How many passwords clients have offered, right or wrong. A client told its password was
+     * wrong and asking again is visible here and nowhere else.
+     */
+    val authAttempts: Int get() = passwordsOffered.get()
 
     val host: String get() = LOOPBACK
     val port: Int get() = sshd.port
@@ -85,6 +93,7 @@ class EmbeddedSftpServer private constructor(
             onGlobalRequest: (String) -> Unit = {},
             separateFilesystemAt: String? = null,
         ): EmbeddedSftpServer {
+            val passwordsOffered = AtomicInteger()
             val sshd = SshServer.setUpDefaultServer().apply {
                 host = LOOPBACK
                 port = 0
@@ -93,6 +102,7 @@ class EmbeddedSftpServer private constructor(
                 // exists to support.
                 keyPairProvider = SimpleGeneratorHostKeyProvider().apply { algorithm = "RSA" }
                 passwordAuthenticator = PasswordAuthenticator { offeredUser, offeredPassword, _ ->
+                    passwordsOffered.incrementAndGet()
                     offeredUser == user && offeredPassword == password
                 }
                 subsystemFactories = if (offersSftp) listOf(sftpSubsystem(root, separateFilesystemAt)) else emptyList()
@@ -107,7 +117,7 @@ class EmbeddedSftpServer private constructor(
                 ) + globalRequestHandlers.orEmpty()
             }
             sshd.start()
-            return EmbeddedSftpServer(sshd, root)
+            return EmbeddedSftpServer(sshd, root, passwordsOffered)
         }
 
         private fun sftpSubsystem(root: Path, separateFilesystemAt: String?) = SftpSubsystemFactory().apply {

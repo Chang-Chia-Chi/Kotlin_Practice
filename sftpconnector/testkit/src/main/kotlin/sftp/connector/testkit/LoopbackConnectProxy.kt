@@ -26,8 +26,16 @@ class LoopbackConnectProxy private constructor(private val server: ServerSocket)
 
     private val sockets = CopyOnWriteArrayList<Socket>()
 
+    private val tunnels = CopyOnWriteArrayList<Tunnel>()
+
+    /** One client's tunnel through the proxy, with its own switch, so a stall reaches only the tunnels that exist. */
+    private class Tunnel {
+        @Volatile
+        var relaying = true
+    }
+
     @Volatile
-    private var relaying = true
+    private var refusing = false
 
     private val deliveredToClient = AtomicLong()
 
@@ -41,12 +49,26 @@ class LoopbackConnectProxy private constructor(private val server: ServerSocket)
     private var whenHeld: () -> Unit = {}
 
     /**
-     * Stops moving bytes in either direction while leaving both sockets open, which is the
-     * failure a read timeout exists for: the peer has neither answered nor hung up, so nothing
-     * short of the clock will ever unblock the reader.
+     * Stops moving bytes in either direction on every tunnel open right now, while leaving their
+     * sockets open, which is the failure a read timeout exists for: the peer has neither answered
+     * nor hung up, so nothing short of the clock will ever unblock the reader. A tunnel opened
+     * afterwards relays normally, which is what lets a retry on a fresh session get through.
      */
     fun stall() {
-        relaying = false
+        tunnels.forEach { it.relaying = false }
+    }
+
+    /**
+     * Answers every CONNECT from now on with a refusal and hangs up, the way a proxy does while
+     * the network behind it is down. Nothing already tunnelled is touched. [acceptConnections]
+     * ends it.
+     */
+    fun refuseConnections() {
+        refusing = true
+    }
+
+    fun acceptConnections() {
+        refusing = false
     }
 
     /**
@@ -79,8 +101,14 @@ class LoopbackConnectProxy private constructor(private val server: ServerSocket)
      */
     val bytesDelivered: Long get() = deliveredToClient.get()
 
+    private val tunnelsAsked = AtomicLong()
+
+    /** How many tunnels clients have asked for, refused ones included. A client that did not dial is visible here. */
+    val connectsAsked: Long get() = tunnelsAsked.get()
+
     /**
-     * Runs [action] once, the next time the client sends anything at all.
+     * Runs [action] once, the next time the client sends anything at all - after what it sent has
+     * been passed on, so an action that stalls the tunnel loses the reply and not the request.
      *
      * On a stalled tunnel that moment is the only one a test can act on with any confidence: the
      * request is on the wire, so the thread that sent it is committed to waiting for an answer
@@ -117,16 +145,23 @@ class LoopbackConnectProxy private constructor(private val server: ServerSocket)
     private fun tunnel(client: Socket) {
         val target = try {
             val (host, port) = readConnectRequest(client.getInputStream())
+            tunnelsAsked.incrementAndGet()
+            if (refusing) throw IOException("refusing every CONNECT for now")
             Socket(host, port)
         } catch (refused: IOException) {
-            runCatching { client.close() }
+            runCatching {
+                client.getOutputStream().write(REFUSED)
+                client.getOutputStream().flush()
+                client.close()
+            }
             return
         }
         sockets += target
+        val tunnel = Tunnel().also { tunnels += it }
         client.getOutputStream().write(ESTABLISHED)
         client.getOutputStream().flush()
-        daemon("connect-proxy-upstream") { copy(client, target, toClient = false) }
-        copy(target, client, toClient = true)
+        daemon("connect-proxy-upstream") { copy(client, target, toClient = false, tunnel) }
+        copy(target, client, toClient = true, tunnel)
     }
 
     /**
@@ -149,18 +184,20 @@ class LoopbackConnectProxy private constructor(private val server: ServerSocket)
         return authority.substring(0, separator) to port
     }
 
-    private fun copy(from: Socket, to: Socket, toClient: Boolean) {
+    private fun copy(from: Socket, to: Socket, toClient: Boolean, tunnel: Tunnel) {
         try {
             val buffer = ByteArray(BUFFER_BYTES)
             while (true) {
                 val read = from.getInputStream().read(buffer)
                 if (read < 0) break
-                if (!toClient) whenClientSpeaks.also { whenClientSpeaks = {} }()
                 // A stalled tunnel keeps reading, so the sender's own buffers never fill and it
                 // never learns that nothing is arriving at the other end.
-                if (!relaying) continue
-                to.getOutputStream().write(buffer, 0, read)
-                to.getOutputStream().flush()
+                if (tunnel.relaying) {
+                    to.getOutputStream().write(buffer, 0, read)
+                    to.getOutputStream().flush()
+                }
+                if (!toClient) whenClientSpeaks.also { whenClientSpeaks = {} }()
+                if (!tunnel.relaying) continue
                 if (toClient && deliveredToClient.addAndGet(read.toLong()) >= holdAfter) {
                     // Once only: the count is not reset, so the next chunk does not stop again.
                     holdAfter = Long.MAX_VALUE
@@ -183,6 +220,7 @@ class LoopbackConnectProxy private constructor(private val server: ServerSocket)
         private const val END_OF_HEADER = "\r\n\r\n"
         private const val BUFFER_BYTES = 8 * 1024
         private val ESTABLISHED = "HTTP/1.0 200 Connection established\r\n\r\n".toByteArray()
+        private val REFUSED = "HTTP/1.0 503 Service Unavailable\r\n\r\n".toByteArray()
 
         fun start(): LoopbackConnectProxy {
             val server = ServerSocket(0, 0, InetAddress.getLoopbackAddress())

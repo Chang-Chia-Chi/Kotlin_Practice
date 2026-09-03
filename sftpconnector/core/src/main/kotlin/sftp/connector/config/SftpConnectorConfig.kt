@@ -17,6 +17,7 @@ data class SftpConnectorConfig(
     val hostKey: HostKeyPolicy,
     val pool: PoolConfig,
     val polling: PollingConfig,
+    val resilience: ResilienceConfig,
 )
 
 /** Where the server is, and how the connector gets onto its network. */
@@ -247,3 +248,46 @@ enum class Digest(internal val algorithmName: String) {
     /** Weak against a forger, and still the only thing many upstreams publish. */
     MD5("MD5"),
 }
+
+/**
+ * How the connector behaves when the server does not: how often it tries again, when it stops
+ * trying for a while, how many transfers it runs at once, and how long it gives one call.
+ */
+data class ResilienceConfig(
+    val retry: RetryPolicy,
+    val circuitBreaker: BreakerPolicy,
+    /**
+     * How many downloads and uploads may be on the wire at once. It is below the pool's size on
+     * purpose, so that a batch of transfers never takes every session and leaves the listing
+     * with nothing to run on.
+     */
+    val maxConcurrentTransfers: Int,
+    /**
+     * How long one try at a single round trip may take, counted from before its session is
+     * borrowed. It has to be longer than the wait for a session, or a busy pool would be reported
+     * as a server that stopped answering.
+     */
+    val operationTimeout: Duration,
+    /**
+     * The same, for one try at something whose length the other end decides: moving a whole
+     * file, or listing a directory at the pace its consumer reads it.
+     */
+    val transferTimeout: Duration,
+)
+
+/** How many tries one call gets, and how the waits between them grow. */
+data class RetryPolicy(val maxAttempts: Int, val backoff: Backoff)
+
+/**
+ * Exponential: each wait is twice the one before, from [initial] up to [max]. With [jitter] each
+ * wait is spread randomly around that, so callers that failed together do not all come back in
+ * the same instant.
+ */
+data class Backoff(val initial: Duration, val max: Duration, val jitter: Boolean = true)
+
+/**
+ * When the connector stops sending to a server that keeps failing, and for how long. The breaker
+ * opens once [failureRateThreshold] percent of the last [slidingWindow] calls failed, stays open
+ * for [waitInOpen], then lets one call through to find out whether the server is back.
+ */
+data class BreakerPolicy(val failureRateThreshold: Int, val slidingWindow: Int, val waitInOpen: Duration)

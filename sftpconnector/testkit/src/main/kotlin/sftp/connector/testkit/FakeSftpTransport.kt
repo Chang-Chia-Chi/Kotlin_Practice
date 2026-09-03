@@ -95,9 +95,10 @@ class FakeSftpTransport(
          * record, the test's hook gets its chance to make the server slow or make it fail, and a
          * session somebody kept past its hang-up is caught here rather than quietly answering.
          */
-        private suspend fun asked(operation: Operation, path: String? = null) {
+        private suspend fun asked(operation: Operation, path: String? = null): Attempt {
             record(Call(operation, id, path))
             check(!closed) { "session $id was used after it was closed" }
+            return Attempt.inside(ENDPOINT, operation.name.lowercase(), path)
         }
 
         override suspend fun realpath(path: String): String {
@@ -118,14 +119,14 @@ class FakeSftpTransport(
         }
 
         override suspend fun stat(path: String): RemoteFile {
-            asked(Operation.Stat, path)
-            if (!contents.containsKey(path)) throw missing(path, "stat")
+            val attempt = asked(Operation.Stat, path)
+            if (!contents.containsKey(path)) throw missing(attempt)
             return describe(path, contents[path]?.size)
         }
 
         override suspend fun readTo(path: String, sink: OutputStream) {
-            asked(Operation.Read, path)
-            val bytes = contents[path] ?: throw missing(path, "read")
+            val attempt = asked(Operation.Read, path)
+            val bytes = contents[path] ?: throw missing(attempt)
             sink.write(bytes)
         }
 
@@ -135,10 +136,10 @@ class FakeSftpTransport(
         }
 
         override suspend fun rename(from: String, to: String) {
-            asked(Operation.Rename, from)
+            val attempt = asked(Operation.Rename, from)
             synchronized(contents) {
-                if (!contents.containsKey(from)) throw missing(from, "rename")
-                if (contents.containsKey(to)) throw occupied(to, "rename")
+                if (!contents.containsKey(from)) throw missing(attempt)
+                if (contents.containsKey(to)) throw occupied(attempt.copy(path = to))
                 contents[to] = contents.remove(from)
             }
         }
@@ -147,17 +148,17 @@ class FakeSftpTransport(
         override val renameReplaces: Boolean = false
 
         override suspend fun delete(path: String) {
-            asked(Operation.Delete, path)
+            val attempt = asked(Operation.Delete, path)
             synchronized(contents) {
-                if (!contents.containsKey(path)) throw missing(path, "delete")
+                if (!contents.containsKey(path)) throw missing(attempt)
                 contents.remove(path)
             }
         }
 
         override suspend fun mkdir(path: String) {
-            asked(Operation.Mkdir, path)
+            val attempt = asked(Operation.Mkdir, path)
             synchronized(contents) {
-                if (contents.containsKey(path)) throw occupied(path, "mkdir")
+                if (contents.containsKey(path)) throw occupied(attempt)
                 contents[path] = null
             }
         }
@@ -187,8 +188,7 @@ class FakeSftpTransport(
         override fun toString(): String = "fake session $id"
     }
 
-    private fun missing(path: String, operation: String) =
-        NoSuchFile(Attempt(ENDPOINT, operation, path), "the server has no such path: $path")
+    private fun missing(attempt: Attempt) = NoSuchFile(attempt, "the server has no such path: ${attempt.path}")
 
     /**
      * What a version 3 server without the POSIX rename extension answers when the path it was
@@ -197,10 +197,10 @@ class FakeSftpTransport(
      * extension would give is the easy case, and the sequence a caller has to fall back on is the
      * one worth being able to stage.
      */
-    private fun occupied(path: String, operation: String) = ServerFailure(
-        Attempt(ENDPOINT, operation, path),
+    private fun occupied(attempt: Attempt) = ServerFailure(
+        attempt,
         statusCode = 4,
-        detail = "there is already something at $path",
+        detail = "there is already something at ${attempt.path}",
     )
 
     private companion object {

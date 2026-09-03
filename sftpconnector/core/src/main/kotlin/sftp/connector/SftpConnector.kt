@@ -89,7 +89,7 @@ class SftpConnector private constructor(
             background: CoroutineContext = Dispatchers.Default,
         ): SftpConnector {
             val pool = SftpPool(transport, config, meterRegistry, clock)
-            val client = SftpClient(pool, config, meterRegistry)
+            val client = SftpClient(pool, config, meterRegistry, clock)
             val source = SftpSource(client, config, meterRegistry, clock)
 
             StartupProbe(client, config).run()

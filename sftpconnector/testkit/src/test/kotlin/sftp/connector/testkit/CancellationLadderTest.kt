@@ -152,7 +152,14 @@ class CancellationLadderTest {
     fun `a server that goes quiet ends the call itself, and the session goes with it`() = runBlocking<Unit> {
         remoteRoot.resolve("drop").createDirectory()
 
-        withTunnelledClient({ pool { keepAlive = KEEPALIVE; validationBypass = 1.minutes } }) { client, tunnel ->
+        // One try, because this is about how the call ends and not about what happens next: with
+        // the retries T11 added, the stalled call would be tried again on a fresh tunnel and the
+        // lost session would never reach the caller. The assertion is unchanged.
+        val oneTry: SftpConnectorBuilder.() -> Unit = {
+            pool { keepAlive = KEEPALIVE; validationBypass = 1.minutes }
+            resilience { retry { maxAttempts = 1 } }
+        }
+        withTunnelledClient(oneTry) { client, tunnel ->
             client.exists("/drop")
             tunnel.stall()
 

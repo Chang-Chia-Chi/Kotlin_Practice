@@ -200,7 +200,8 @@ class SftpSource(
          */
         private suspend fun perform(action: PostAction, file: RemoteFile) {
             when (action) {
-                is PostAction.Move -> client.rename(file.path, "${action.targetUnder(directory)}/${file.name}", action.overwrite)
+                is PostAction.Move ->
+                    client.rename(file.path, "${action.targetUnder(directory)}/${file.name}", action.overwrite, file.size)
                 PostAction.Delete -> client.delete(file.path)
                 PostAction.Noop -> Unit
             }

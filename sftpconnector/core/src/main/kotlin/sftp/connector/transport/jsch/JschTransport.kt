@@ -76,7 +76,7 @@ class JschTransport(
         var opened: SftpConnection? = null
         try {
             return withContext(io) {
-                errors.translating(Attempt(endpointLabel, "connect")) {
+                errors.translating(Attempt.inside(endpointLabel, "connect")) {
                     val session = openSession()
                     val channel = try {
                         (session.openChannel("sftp") as ChannelSftp)
@@ -163,7 +163,7 @@ private class JschConnection(
 ) : SftpConnection {
 
     override suspend fun realpath(path: String): String = withContext(io) {
-        errors.translating(Attempt(endpoint, "realpath", path)) { channel.realpath(path) }
+        errors.translating(Attempt.inside(endpoint, "realpath", path)) { channel.realpath(path) }
     }
 
     /**
@@ -172,7 +172,7 @@ private class JschConnection(
      * closes the remote handle cleanly, so the session is still good afterwards.
      */
     override suspend fun list(dir: String, onEntry: (RemoteFile) -> Listing): Unit = withContext(io) {
-        errors.translating(Attempt(endpoint, "list", dir)) {
+        errors.translating(Attempt.inside(endpoint, "list", dir)) {
             channel.ls(dir.literally()) { entry ->
                 when {
                     entry.filename == "." || entry.filename == ".." -> ChannelSftp.LsEntrySelector.CONTINUE
@@ -186,14 +186,14 @@ private class JschConnection(
     }
 
     override suspend fun stat(path: String): RemoteFile = withContext(io) {
-        errors.translating(Attempt(endpoint, "stat", path)) { channel.stat(path.literally()).describe(path) }
+        errors.translating(Attempt.inside(endpoint, "stat", path)) { channel.stat(path.literally()).describe(path) }
     }
 
     override suspend fun readTo(path: String, sink: OutputStream): Unit =
-        transferring(Attempt(endpoint, "read", path)) { channel.get(path.literally(), sink, it) }
+        transferring(Attempt.inside(endpoint, "read", path)) { channel.get(path.literally(), sink, it) }
 
     override suspend fun writeFrom(path: String, source: InputStream): Unit =
-        transferring(Attempt(endpoint, "write", path)) { channel.put(source, path.literally(), it, ChannelSftp.OVERWRITE) }
+        transferring(Attempt.inside(endpoint, "write", path)) { channel.put(source, path.literally(), it, ChannelSftp.OVERWRITE) }
 
     /**
      * Moves the bytes of one file, under a monitor that stops as soon as nobody is waiting for
@@ -223,18 +223,18 @@ private class JschConnection(
      * not do.
      */
     override suspend fun rename(from: String, to: String): Unit = withContext(io) {
-        errors.translating(Attempt(endpoint, "rename", from)) { channel.rename(from.literally(), to.literally()) }
+        errors.translating(Attempt.inside(endpoint, "rename", from)) { channel.rename(from.literally(), to.literally()) }
     }
 
     /** Read the way JSch reads it when deciding which request to send: advertised, at version 1. */
     override val renameReplaces: Boolean = channel.getExtension(POSIX_RENAME) == "1"
 
     override suspend fun delete(path: String): Unit = withContext(io) {
-        errors.translating(Attempt(endpoint, "delete", path)) { channel.rm(path.literally()) }
+        errors.translating(Attempt.inside(endpoint, "delete", path)) { channel.rm(path.literally()) }
     }
 
     override suspend fun mkdir(path: String): Unit = withContext(io) {
-        errors.translating(Attempt(endpoint, "mkdir", path)) { channel.mkdir(path) }
+        errors.translating(Attempt.inside(endpoint, "mkdir", path)) { channel.mkdir(path) }
     }
 
     /**
@@ -243,7 +243,7 @@ private class JschConnection(
      * most likely to happen.
      */
     override suspend fun close(): Unit = withContext(io + NonCancellable) {
-        errors.translating(Attempt(endpoint, "close")) {
+        errors.translating(Attempt.inside(endpoint, "close")) {
             try {
                 channel.disconnect()
             } finally {

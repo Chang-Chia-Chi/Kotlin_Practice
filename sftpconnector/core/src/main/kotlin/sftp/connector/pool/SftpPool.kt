@@ -13,6 +13,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import org.slf4j.LoggerFactory
 import sftp.connector.config.SftpConnectorConfig
 import sftp.connector.error.Attempt
+import sftp.connector.error.CurrentAttempt
 import sftp.connector.error.LeaseFate
 import sftp.connector.error.PoolExhausted
 import sftp.connector.error.SftpException
@@ -227,8 +228,10 @@ class SftpPool(
                     meters.turnedAway()
                     // Read while this caller still counts among the waiters: the statistics
                     // describe the pool as the refused caller found it, itself included.
+                    // The operation that was queued, when the caller said which; the pool's
+                    // own name for what it was doing otherwise.
                     throw PoolExhausted(
-                        attempt = Attempt(endpoint, "acquire"),
+                        attempt = coroutineContext[CurrentAttempt]?.attempt ?: Attempt(endpoint, "acquire"),
                         stats = stats(),
                         waited = acquireTimeout,
                         roomFreedWhileWaiting = roomFreed.get() - freedBefore,

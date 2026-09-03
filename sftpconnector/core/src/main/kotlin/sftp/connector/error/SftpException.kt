@@ -1,6 +1,9 @@
 package sftp.connector.error
 
 import sftp.connector.pool.PoolStats
+import kotlin.coroutines.AbstractCoroutineContextElement
+import kotlin.coroutines.CoroutineContext
+import kotlin.coroutines.coroutineContext
 import kotlin.time.Duration
 
 /**
@@ -30,6 +33,29 @@ data class Attempt(
         append(", attempt=").append(number)
         append(')')
     }
+
+    companion object {
+        /**
+         * An attempt at [operation], numbered by the try the calling coroutine is inside - the
+         * first, when it is inside none. For the layers underneath the one that retries, which
+         * know what they were asked and not how many times it has been asked before.
+         */
+        suspend fun inside(endpoint: String, operation: String, path: String? = null): Attempt =
+            Attempt(endpoint, operation, path, coroutineContext[CurrentAttempt]?.attempt?.number ?: 1)
+    }
+}
+
+/**
+ * The try a coroutine is running, carried in its context for whatever it calls.
+ *
+ * The transport and the pool are told what to do and not how many times it has been tried
+ * before, so a failure they raise would always report the first try, and a full pool would name
+ * its own acquire rather than the operation that was queued for it. The layer that retries knows
+ * both, and it is the caller of everything underneath - so it puts the try in the context, and a
+ * failure raised anywhere inside reads it from there.
+ */
+class CurrentAttempt(val attempt: Attempt) : AbstractCoroutineContextElement(CurrentAttempt) {
+    companion object Key : CoroutineContext.Key<CurrentAttempt>
 }
 
 /**

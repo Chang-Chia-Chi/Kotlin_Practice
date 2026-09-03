@@ -188,7 +188,7 @@ because each was correctly deferred by the ticket that found it.
 | ~~`SftpPool.housekeep()` has no production caller~~ | T5 | ~~T9~~ | **Closed by T9.** `SftpConnector.start` launches it into the connector's own scope, after the start-up checks have passed so a refused start-up leaves nothing dialling. T13 stops it by cancelling `SftpConnector.backgroundWork` |
 | A start-up the probe refuses leaves its sessions open and its dispatcher running | T9 | T13 | The pool has no `close()`, so the session the checks borrowed and `JschTransport`'s bounded dispatcher outlive a refused start. In production the process does not start and the JVM takes them; in a long-lived host that starts connectors on demand it is a leak per refusal. T13's `close()` is the repair, and `start` needs to call it on its own failure path once it exists |
 | ~~`PostAction.Delete` and `PostAction.Move.overwrite` have no consumer~~ | T9 | ~~T10~~ | **Closed by T10.** `SftpSource.FileHandling.perform` is the exhaustive `when`: an ack or nack moves with the configured overwrite policy, deletes, or leaves the file alone |
-| `NoSuchFile` from `download` is turned into `FileGone` *outside* the client | T10 | T11 | T11's retry wraps inside the client, so unless its download predicate excludes `NoSuchFile`, a file that vanished between listing and download costs three attempts and a breaker failure before it is reported gone - which is exactly what T2 warned would open the breaker on a directory another system writes into |
+| ~~`NoSuchFile` from `download` is turned into `FileGone` *outside* the client~~ | T10 | ~~T11~~ | **Closed by T11.** A missing path is never retried inside a call and never counted against the breaker, for every operation: it is the server's answer about the path, and each operation has already said what it means to it by the time the retry sees it (T11 deviations 2 and 3) |
 | `SizeStable` observes across polls, not inside one, so the shipped default is ready on the *second* poll | T10 | The maintainer; spec 7.5 is tier 2 | On the hourly pipeline the default readiness adds an hour of latency per file where the spec's in-poll wording adds ten seconds. Recorded in T10 deviation 1 with both costs; needs a ruling, not a workaround |
 | `FileGone` is an event of the live poll only | T10 | Whoever builds a consumer helper that downloads concurrently | A consumer that downloads inside its collect block sees `FileGone` follow `FileSeen`; one that downloads after the poll has ended gets only `download()`'s null. T12's `consume` is inline and unaffected |
 | Readiness constructor faults are not aggregated with the builder's | T10 | Whoever next touches DSL validation | `sizeStable(checks = 0, ...)` raises `ConfigurationError` at the moment the polling block runs, before `build()` collects the rest, so an operator with two faults hears about one at a time |
@@ -198,9 +198,9 @@ because each was correctly deferred by the ticket that found it.
 | ~~Path traversal in `SftpClient.download`'s default target~~ | found during planning, T6 code | ~~Hotfix, before T11~~ | **Closed by the hotfix before T11.** `download` with no explicit target now refuses, with `UnsafeFileName` (`ACCEPT_THE_REFUSAL`), any listed name whose join to the staging directory does not normalise back inside it under exactly that name, or that holds a backslash; the red run wrote `evil.csv` two directories above a temp dir on Windows before the guard went in |
 | `HostKeyPolicy.Fingerprint(sha256)` unimplemented | T1 | The first ticket needing fingerprint pinning | Two of spec 5.2's three policies ship. Kotlin's exhaustive `when` names every site when it is added, so this cannot rot silently |
 | `sftp_pool_leak_total` registers on first use | T5 | The ticket that next revisits T4's exact-meters assertion | No series on a dashboard until the first leak, so an alert must treat absent as zero |
-| `Attempt.number` is always 1; the pool names its own operation `acquire` | T2, T4 | T11, which owns retries and is the layer that knows which try it is | Log lines and metrics attribute a caller's failure to the pool rather than to the operation that failed |
+| ~~`Attempt.number` is always 1; the pool names its own operation `acquire`~~ | T2, T4 | ~~T11~~ | **Closed by T11.** The retry loop puts the try in the coroutine context (`CurrentAttempt`); the transport and the fake number every failure by it through `Attempt.inside`, and `PoolExhausted` carries the queued caller's operation and path |
 | `Retirement.SHUTDOWN` has no producer | T5 | T13 | `sftp_pool_evicted_total{reason=shutdown}` never appears |
-| `OperationTimeout` has no producer | T2 | T11's time limiter | A failure class in the hierarchy that nothing raises |
+| ~~`OperationTimeout` has no producer~~ | T2 | ~~T11's time limiter~~ | **Closed by T11.** The time limiter raises it, after asking the coroutine whether the timeout was its own or an outer cancellation |
 | `MutableStateFlow.value` can resume an undispatched collector under the registry lock | flagged by the maintainer | Any ticket that collects `PoolEntry.state`/`Lease.state` | Foreign code runs inside a critical section. Still theoretical: T5 confirmed nothing collects either, both read `state.value` |
 | ~~A download whose byte count does not match the listed size raises `SessionLost`, which poisons~~ | T6 | ~~The maintainer~~ | **Closed by C7 and applied by T7.** The class is `IncompleteTransfer`, recoverable and poisoning, spec D28 |
 | ~~A refusal the connector decides itself - `Overwrite.REFUSE` over an occupied path - is raised as `ServerFailure`, which spec 10.2 retries and counts against the breaker~~ | T7 | ~~The maintainer~~ | **Closed by C8 and applied by T8.** The class is `OverwriteRefused`, top-level beside `PoolExhausted` and `CircuitOpen`, spec D30. It needed a seventh `Disposition`, `ACCEPT_THE_REFUSAL`: no retry, breaker untouched, watch continues, and the lease *returned* rather than `NONE_HELD`, which would have claimed there was no session when there was one. T11 can start |
@@ -210,11 +210,15 @@ because each was correctly deferred by the ticket that found it.
 | A session cut loose by the ladder is counted `sftp_pool_evicted_total{reason=poisoned}` | T8 | Whichever ticket revisits spec 13's five eviction labels | A dashboard cannot tell a session the server poisoned from one the connector destroyed to rescue a thread. The two have different remedies; only the WARN line separates them |
 | The bounded IO dispatcher is as wide as the pool, and everything on it already holds a pool place | T6 | Every later ticket | This is what stops a listing blocked on its consumer from starving a download: threads wanted can never exceed threads available. An operation that runs on that dispatcher without first holding a pool place turns a slow path into a deadlock, and no test would catch it until concurrency was high |
 | A `withContext(dispatcher)` that produces a resource drops it when its caller is cancelled - at the switch back, not in the block, so `NonCancellable` inside does not help | R1 | T12, T13, and anything that opens a socket, a file or a lease under a dispatcher switch | R1 finding 1 is this shape: the handshake finished on the IO thread and the session was replaced by the `CancellationException` on the way back to the caller. The fake transport cannot show it because it answers on the caller's own coroutine. The only two defences are to hold the resource on the producing side and close it when the value is dropped (what `JschTransport.connect` does now), or to never switch dispatchers on the producing path |
-| A cancelled `withLease` is not proof the operation did not land | R1 | T7's compensation review, T11 | The ladder drops a cancelled call's outcome by design, the scope drops the block's result when cancellation lands at the instant it completed, and every dispatcher switch back does the same. A rename that landed on the server can therefore surface as `CancellationException`. I11's lost-reply reasoning has to treat "cancelled" like "reply lost", and a retry after cancellation is never attempted anyway |
-| An `upload` or a `rename` under `REFUSE` retried after a lost reply is refused by its own earlier success | R2 | T11 | The look that decides `REFUSE` runs before the request on every attempt, so a retry of an attempt that landed finds the file it put there and raises `OverwriteRefused` - a phantom failure with the disposition that says "do not retry". T11 has to decide the policy once, before the first attempt, and send every attempt as a replacement; or treat `OverwriteRefused` on a retry as the moment to stat the target and apply I11 |
+| ~~A cancelled `withLease` is not proof the operation did not land~~ | R1 | ~~T7's compensation review, T11~~ | **Closed by T11.** The compensation reads whether an earlier try *reached the server*, recorded before the request is sent, and never the class of what ended the try; a cancellation is never retried at all, because the caller is gone |
+| ~~An `upload` or a `rename` under `REFUSE` retried after a lost reply is refused by its own earlier success~~ | R2 | ~~T11~~ | **Closed by T11.** The look runs once, on the first try that gets to look, and every later try is sent as a plain request; `RenameTries` and `upload` each hold that fact across tries |
 | On a server without the POSIX rename extension, a `REPLACE` refused for a reason that is not the target still clears a file at the target | R2 | The maintainer; the startup probe is the defence | The sequence cannot tell an occupied target from a rename the server could never do, and spec 8.2 mandates the sequence. The caller is now told the target was cleared (R2 finding 5); the loss itself stands. On a server with the extension it cannot happen any more |
 | A local I/O failure inside a transfer is classified `SessionLost` | R2 | Whoever next touches the mapper (T2's table) | JSch wraps an `IOException` from the caller's stream into its status exception with the generic code and the `IOException` as cause, and the mapper reads that shape as the connection breaking. A full local disk under a download, or an unreadable local file under an upload, poisons a healthy session and sends a retry to a fresh one to fail the same way. Reasoned from the mapper and JSch's `put`/`get`, not reproduced |
 | A local failure inside a lease throws away a healthy session | R2 | Whoever has cause | `upload` opens the local file, and `download` the partial file, inside `withLease`; a `java.nio` exception there is unclassified, so `releaseAfter` evicts the session. A handshake per local mistake, the same price as R1 finding 4. Opening the local side before borrowing closes it and was not done because nothing lies |
+| `OperationTimeout` says its lease is `EVICTED`, and the lease was already decided | T11 | Whoever next revisits `Disposition` | The timeout cancels the try, the ladder decides the session's fate on what actually stopped the call, and only then is the class raised; a call the transfer monitor stopped in time keeps its session. The disposition's `lease` is read by nothing on that path, so nothing is wrong, but a reader of the hierarchy is told a fate that is advisory |
+| `ServerFailure` counts against the breaker | T2's disposition, T11 | The maintainer | On a server without the POSIX rename extension every refused overwrite is a `ServerFailure`, and each one counts: a pipeline configured to `REFUSE` on a busy target opens its own breaker, the way C4 said it would have poisoned its own sessions. T11 counts it because the disposition says so and excludes only `NoSuchFile`, on instruction |
+| Under `REFUSE`, a retry's window is the backoff | T11 | Whoever has cause | The policy's look ran once, before the first request. A retry after a lost reply first looks for its own landed file at the target and stops there if it finds it; only when it does not does it send a plain rename - and on a server with the POSIX rename extension a stranger's file that arrived at the target during the backoff is then replaced. T7's race, widened from the look to the backoff; the alternative - applying the policy's look again - refuses the retry for its own landed file |
+| The breaker and `sftp_breaker_state` are per `SftpClient` | T11 | T14's binding | A second client for the same endpoint on one registry registers a gauge whose id exists and reads the first client's breaker (R1 finding 6's shape); the breakers themselves are separate, so the two clients open independently |
 
 ### C6: spec Sec 5.3 amended - the middle cancellation tier is `keepAlive`
 
@@ -2413,3 +2417,218 @@ transport-interface addition that spec 5.1's list of operations does not name.
 - **`withSession`**: no retry, as the spec says; and the loan ends when the last call on it ends, so
   a block that launched work and did not wait for it delays its own lease's return rather than
   handing the pool a session that is still in use.
+
+---
+
+## T11: Resilience and transparent reconnect
+
+Built on `claude-fable-5-1`. 189 tests were green at the start and 216 are green at the end (50 core,
+166 testkit): 4 new in `ResilienceDslTest`, 18 in `RetrySemanticsTest`, 5 in
+`ResilienceAgainstServerTest`. One earlier test's *setup* was touched and is declared under
+Deviations; no assertion was changed. The self-review (standards and spec axes, two sub-agents)
+found two things that were fixed before the commit and are folded in below: the breaker's clock
+*can* be injected, so S3 runs on virtual time and a settable clock rather than a real wait; and a
+retry under `REFUSE` that sent its rename without looking first could, on a server with the POSIX
+rename extension, move a file the uploader had since put at the source over the one that had
+already landed - so a retry after a try that reached the server now looks for its landed file
+before it sends anything.
+
+**Built:** a session that dies under an operation, a proxy that refuses for a while, or a server
+that stalls no longer reaches the caller as a failure unless the budget is spent or the failure is
+final. Every client operation runs through `sftp.connector.resilience.Resilience`, which is
+`Retry( CircuitBreaker( TransferLimit( TimeLimiter( withLease { op } ) ) ) )`, outermost first,
+each try on a fresh lease. The retry, breaker and time limiter are Resilience4j's; the transfer
+limit is a coroutine semaphore (Deviation 1). A `resilience { }` block in the DSL carries
+`retry { maxAttempts; backoff = exponential(initial, max, jitter) }`, `circuitBreaker {
+failureRateThreshold; slidingWindow; waitInOpen }`, `bulkhead { maxConcurrentTransfers }`,
+`operationTimeout` and `transferTimeout`, all validated at build time. `sftp_retry_total{op}` and
+`sftp_breaker_state` are published under the endpoint. `OperationTimeout` has a producer.
+`Attempt.number` counts the try, and a full pool names the operation that was queued for it.
+
+**Concepts named:**
+
+- **A try knows three things the operation does not** - which number it is, whether an earlier try
+  *reached the server*, and what proves that try landed - and those live in one place per
+  operation. **`RenameTries`** (`client/Compensation.kt`) holds all three for a rename: the size the
+  file had before the first request (from the caller's listing, or measured once when the caller has
+  none), whether a try before this one sent the request, and whether the target has already been
+  looked at and found free. A missing source after a try that reached the server sends it to look at
+  the target: a file of the expected size there is the landed rename and the call succeeds (I11); no
+  file, or a file of another size, and the missing source is the truth. The look comes *before*
+  the retry's own rename as well as after a missing-source answer, because on a server that
+  replaces without being asked a rename sent regardless would move whatever the uploader had since
+  put at the source over the file that had already landed. `upload` and `delete` hold
+  the one fact each of them needs as state captured across tries in the operation itself: `upload`
+  that its look ran, `delete` that a try reached the server. `mkdir` and `download` need none -
+  a directory already there was the outcome, and a download restarts into a fresh partial.
+- **"Decided once."** Under `REFUSE` the look at the target runs on the first try that gets to
+  look, and never again: a later try would find the earlier try's own landed file there and refuse
+  the operation for it - a phantom failure with the one disposition that says never retry (R2's
+  seams row). Every later try is sent as a plain request against a target already known to be the
+  connector's to take; under `REPLACE` the sequence is the same one T7 built, on every try.
+- **"Reached the server", not "failed how".** The fact I11 rests on is whether a request went out,
+  which is recorded before the request is sent rather than inferred from the class of what came
+  back. A `ConnectFailed` on the first try therefore does not make a missing source on the second
+  look like a landed rename - nothing was sent - and a cancelled try, had one been retried, would
+  count the same as a lost reply (R1's row: "a cancelled `withLease` is not proof the operation did
+  not land"). Nothing retries after a cancellation, because the caller is gone.
+- **`CurrentAttempt`** (`error`) is a coroutine-context element carrying the try. The transport and
+  the pool know what they were asked and not how many times; the retry loop puts the try in the
+  context and `Attempt.inside(endpoint, op, path)` reads the number off it, so every failure raised
+  anywhere under a try names it, and `PoolExhausted` names the caller's operation and path rather
+  than the pool's own `acquire`. The fake transport does the same, so a test can assert `attempt=3`.
+- **The retry predicate reads the `Disposition` and makes one reading** (Deviation 2): a try is
+  repeated only when its failure is `RETRY_ON_A_FRESH_SESSION` - the wire produced it and the reply
+  was lost. A failure the server *answered* (`NoSuchFile`, `ServerFailure`, `PermissionDenied`) is the
+  server's decision about that request, the same server asked again a second later decides the
+  same, and by the time it arrives at the retry the operation has already said what it means to it.
+  Its retry is the next tick, which is the source's business. The breaker predicate reads
+  `countsAgainstTheBreaker` with one exclusion, `NoSuchFile` (Deviation 3).
+- **The seams.** `Resilience` is the one place the order lives; its interface is two methods,
+  `attempting(operation, path, transfer, unhurried, stillWorthRetrying, block)` and `once(operation,
+  block)` for `withSession`, which the breaker guards and nothing else touches. The client's
+  operations are the per-operation semantics and nothing about retrying; the transport and the pool
+  are unchanged except for reading the try off the context. `Compensation.kt` took `moveOnto`,
+  `renameNamingWhatIsMissing`, `clearTheWay`, `entryAt` and `refuse` out of `SftpClient` unchanged,
+  because `RenameTries` is the thing that composes them now.
+
+**Acceptance:**
+
+- *Retry, CircuitBreaker, Bulkhead, TimeLimiter wrap every client operation, outermost first in
+  that order.* `Resilience.attempting` is the order, read top to bottom. `RetrySemanticsTest.an open
+  breaker fails a call fast, before any session is asked for` proves the retry sees the breaker
+  (`CircuitOpen` ends the loop, no dial); `a try that runs out of time is reported as a timeout and
+  tried again` proves the time limiter sits inside the retry and the breaker; `transfers past the
+  limit wait for one to finish, and a waiter that gives up frees its place` proves the transfer
+  limit and its cancellation. The bulkhead is not Resilience4j's - Deviation 1.
+- *Only recoverable errors are retried and counted by the breaker; fatal errors short-circuit and
+  are not counted.* `a failure whose disposition says never is not tried again and not counted`
+  (`AuthenticationFailed` and `OverwriteRefused` each against a breaker of one call that a single
+  counted failure would open; `PermissionDenied` is not retried, and *is* counted, as its
+  disposition says); `S10_` against the real server. `a failure names
+  which try it was, and a full pool names the operation that was queued for it` proves
+  `PoolExhausted` is not retried and carries the caller's attempt. What "recoverable" means to the
+  retry is narrower than spec 10.2's table - Deviation 2.
+- *Per-operation semantics.* `I11_a rename retried after a lost reply reports success when the
+  target holds the expected size`, `I11_a stranger's file at the target is not taken for the landed
+  one`, `I11_a rename with no size given measures the source once before sending anything`, `a
+  refusing rename asks about the target once, so its retry is not refused by its own landed file`;
+  `a delete retried after a lost reply reads a missing path as the delete having worked` and `a
+  delete of a path that is not there is reported on the first try and not tried again`; `a mkdir
+  retried after a lost reply finds its directory there and is content`; `a download that loses its
+  session starts over into a fresh partial file on a new one` and `a download of a file that is gone
+  is not tried again and not held against the server`; `an upload under a refusing policy asks once,
+  so its retry writes over what it left`; `a listing is tried again only while nothing has been
+  handed on`. On the wire: `I11_a rename whose reply is lost on the wire is retried and reports the
+  move that landed` - the proxy passes the rename on and stalls, the keepalive ends the call, the
+  retry finds the file at the target with the size it had.
+- *Breaker open makes acquire fail fast with `CircuitOpen`.* `RetrySemanticsTest.S3_an open breaker
+  fails a call fast without a session, and a probe after the wait closes it` (no `Connect` recorded
+  while open; the wait in open passes on the test scheduler's clock and the probe closes it) and
+  `ResilienceAgainstServerTest.S3_` (no CONNECT reaches the proxy while open; the message names
+  `op=exists`; the wait passes on a settable clock the client was handed).
+- *S1, S2, S3, S10.* `ResilienceAgainstServerTest`: `S1_a session killed mid-download is replaced
+  and the download completes, with the file seen once` (through `SftpSource.poll`: one `FileSeen`,
+  the whole file, one retry, one poisoned eviction, two sessions opened); `S2_a stall past the
+  keepalive poisons the session and the call is retried on a fresh one` (the breaker's count is
+  made visible by a window of two: one failure and the retry's success open it); `S3_the breaker
+  opens on failed dials, refuses without dialling, and closes on a successful probe` (and its
+  virtual-time twin in `RetrySemanticsTest`); `S10_a wrong
+  password is refused once, never retried, and never held against the server` (the server counts
+  the passwords offered; the client's one call offers exactly one connect's worth).
+- *Meters.* `the meters the ticket names are published under the endpoint`, and every retry test
+  reads `sftp_retry_total{op}`; every breaker test reads `sftp_breaker_state`.
+- *Progress entry appended.* This.
+
+**Deviations:**
+
+1. **The transfer limit is `kotlinx.coroutines.sync.Semaphore`, not Resilience4j's `Bulkhead`.**
+   Read from the library's Kotlin module: `Bulkhead.executeSuspendFunction` takes its permit inside
+   `withContext(Dispatchers.IO)` whenever a wait is configured, and only then enters its `try` - so a
+   caller cancelled at the switch back holds a permit nothing releases, the exact shape of R1
+   finding 1 and a transfer slot lost until restart; with no wait configured it blocks nothing but
+   turns the fifth concurrent download away on the spot with `BulkheadFullException`, which has no
+   class in the hierarchy and would need one. A suspending semaphore is cancelled cleanly, a transfer
+   beyond the limit waits its turn (bounded by the transfers ahead of it, each on the clock), and it
+   is, literally, the coroutine-compatible semaphore bulkhead spec 9 describes. `resilience4j-bulkhead`
+   is not a dependency. The spec's order and the DSL knob are unchanged.
+2. **Within one call, only a failure the wire produced is retried.** Spec 10.2 has "Recoverable, no
+   poison: retry yes"; here `NoSuchFile` and `ServerFailure` are not retried inside the call. Three
+   reasons, in order of weight: the coordinator's instruction that `NoSuchFile` from `download` is
+   never retried, which the class's `Disposition` (`RETRY_ON_THIS_SESSION`, pinned by T2's
+   `FailureModelTest`) contradicts, so the predicate could not simply read it; T7's two tests
+   `a rename refused while nothing is at the target is passed on rather than met with a delete`
+   (one rename sent) and R2's `a refusal after the target was cleared says so` (the "cleared"
+   wording reaching the caller), which a retried `ServerFailure` breaks - a second try of the
+   replace sequence finds the target already cleared and reports a plain refusal, rewriting R2
+   finding 5's truth; and `PermissionDenied`'s own reasoning in T2 ("retrying in a hundred
+   milliseconds asks the same question of the same unchanged server"), which applies to every
+   answer the server gives. The next tick is the retry for those, and T12 owns it. **For the
+   maintainer:** spec 10.2's two "no poison" rows and `NoSuchFile`'s disposition want reconciling
+   with 6.1's "per-operation meaning"; the cleanest shape is a disposition for "the server
+   answered: report it, keep the session, no immediate retry", which touches T2's test and was not
+   done here.
+3. **`NoSuchFile` is not counted against the breaker**, though its disposition says it is. The
+   coordinator's instruction, and T2's own warning that a directory another system moves files out
+   of would otherwise open the breaker on its own. `ServerFailure` *is* still counted, as its
+   disposition says; on a server without the POSIX rename extension every refused overwrite counts,
+   which C4 called wrong for poisoning and is arguably wrong for counting too. Raised, not changed.
+4. **Time limiter outside `withLease`, so the wait for a session is on the clock**, as the
+   coordinator specified and for the reason the ladder gives: a timeout that fires inside the lease
+   cancels a coroutine whose blocking call the ladder is not watching, and is then bounded only by
+   the keepalive floor. The cost is that a caller queued longer than the operation timeout is
+   reported as `OperationTimeout` - poisoning, counted - rather than `PoolExhausted`. The DSL
+   refuses that configuration: `operationTimeout` and `transferTimeout` must be longer than
+   `acquireTimeout` (defaults 1 min and 15 min against 30 s).
+5. **A listing is retried only until its first entry has been handed on.** Spec 6.1 says "blind
+   retry"; starting a listing over after entries went out would hand them on twice, and
+   remembering which ones would cost the memory the flow exists not to spend (S11). A listing that
+   dies mid-way fails the poll; the next tick lists again.
+6. **`rename` takes `expectedSize: Long? = null`.** I11 needs the size and spec 6.1's signature has
+   none; the source passes `file.size`, a caller without it costs one `stat` before the first
+   request. `StartupProbe` is unaffected (it works inside `withSession`).
+7. **Two knobs the spec's DSL example does not show:** `operationTimeout` and `transferTimeout`,
+   directly on the `resilience` block. Spec 9 says "per-operation timeout" without a knob; one
+   clock for a round trip and one for anything whose length the other end decides (a file's size,
+   a listing consumer's pace) was the smallest honest version.
+8. **`bulkhead { maxConcurrentTransfers }` unset means four, or the pool's size when smaller.**
+   Spec 12 validates `maxConcurrentTransfers <= maxSize`; a fixed default of four made every
+   existing test config with a pool of one or two refuse to build. Set explicitly, the rule holds.
+9. **One earlier test's setup was touched** (C5's shape, declared): `CancellationLadderTest.a
+   server that goes quiet ends the call itself, and the session goes with it` now builds its
+   config with `resilience { retry { maxAttempts = 1 } }`. Its assertion - the stalled call ends
+   with `SessionLost` after the keepalive, the session is gone - is unchanged; with retries the
+   stalled call would be tried again on a fresh tunnel and succeed, which is S2 and is proved
+   separately. Nothing else in the earlier suites needed anything: `LoopbackConnectProxy.stall()`
+   now stalls only the tunnels that exist (a retry's fresh tunnel relays), and
+   `onNextClientRequest` fires after the bytes were passed on, both of which every earlier use
+   tolerates.
+10. **`SftpClient` takes a `Clock`** (default the system's; `SftpConnector.start` passes its own)
+    for the breaker's wait in open, through `CircuitBreakerConfig.Builder.clock`. The first draft
+    waited real time in S3 on the belief that the library offered no clock seam; the standards
+    review read the jar and found one. Backoffs are on virtual time everywhere the fake is used;
+    the server scenarios run with a one-millisecond backoff and no test waits for a clock.
+
+**Seams.** Closed above, struck through: `Attempt.number`/`acquire`; `OperationTimeout` has no
+producer; `NoSuchFile` from `download` turned into `FileGone` outside the client; a `REFUSE`
+retried after a lost reply refused by its own success; and R1's "a cancelled `withLease` is not
+proof the operation did not land" (owner T11 - the compensation reads "reached the server", not
+the failure). Added: `OperationTimeout`'s `EVICTED` is advisory, `sftp_breaker_state` on a shared
+registry, the `REFUSE` window under retry, `ServerFailure` counting against the breaker.
+
+**For the next ticket (T12, watch/consume; T13, shutdown):**
+
+- `CircuitOpen` and `PoolExhausted` reach the source with the caller's operation in them; `watch`
+  maps `CircuitOpen` to `PollSkipped(BreakerOpen)` per its disposition (`REPORT_A_SKIP`) and
+  nothing here does that yet.
+- The retry's `delay` is cancellable; a shutdown that cancels a poll mid-backoff sees a
+  `CancellationException` from inside `Resilience.attempting` and no further try.
+- A `PermissionDenied` is not retried here: the next tick is its retry, and T12 decides what
+  "waits a full tick" means for a file whose ack action was refused on permissions.
+- Every `Resilience` is per `SftpClient`, and its breaker gauge registers under the endpoint; a
+  second client for the same endpoint on one registry reads the first's breaker (R1 finding 6).
+- Under `REFUSE`, a retry after a lost reply looks for its own landed file first and, finding
+  none, sends a plain rename against a target found free on the first try; on a server with the
+  POSIX rename extension a stranger's file that arrived at the target during the backoff is then
+  replaced. The window is the backoff rather than the look, and it is the same race T7 accepted,
+  widened; recorded as a seams row.

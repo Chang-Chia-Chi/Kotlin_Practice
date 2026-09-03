@@ -42,6 +42,7 @@ class SftpConnectorBuilder internal constructor(private val name: String) {
     private var auth: AuthBuilder? = null
     private val pool = PoolBuilder()
     private val polling = PollingBuilder()
+    private val resilience = ResilienceBuilder()
 
     /** Required. There is deliberately no default; see [HostKeyPolicy]. */
     var hostKey: HostKeyPolicy? = null
@@ -60,6 +61,10 @@ class SftpConnectorBuilder internal constructor(private val name: String) {
 
     fun polling(configure: PollingBuilder.() -> Unit) {
         polling.apply(configure)
+    }
+
+    fun resilience(configure: ResilienceBuilder.() -> Unit) {
+        resilience.apply(configure)
     }
 
     internal fun build(): SftpConnectorConfig {
@@ -168,6 +173,37 @@ class SftpConnectorBuilder internal constructor(private val name: String) {
             }
         }
 
+        val retry = resilience.retry
+        if (retry.maxAttempts < 1) faults += "retry maxAttempts ${retry.maxAttempts} would send nothing at all"
+        if (retry.backoff.initial <= Duration.ZERO) faults += "retry backoff initial ${retry.backoff.initial} must be positive"
+        if (retry.backoff.max < retry.backoff.initial) {
+            faults += "retry backoff max ${retry.backoff.max} is shorter than its initial ${retry.backoff.initial}"
+        }
+        val breaker = resilience.circuitBreaker
+        if (breaker.failureRateThreshold !in 1..100) {
+            faults += "circuitBreaker failureRateThreshold ${breaker.failureRateThreshold} is outside 1..100"
+        }
+        if (breaker.slidingWindow < 1) faults += "circuitBreaker slidingWindow ${breaker.slidingWindow} holds no calls to judge by"
+        if (breaker.waitInOpen <= Duration.ZERO) faults += "circuitBreaker waitInOpen must be positive, not ${breaker.waitInOpen}"
+        // Unset, it is four, or the whole pool when the pool is smaller than that: the number
+        // is a share of the pool, and a pool of one has nothing to leave for the lister.
+        val transfers = resilience.bulkhead.maxConcurrentTransfers ?: minOf(DEFAULT_CONCURRENT_TRANSFERS, pool.maxSize)
+        if (transfers < 1) faults += "bulkhead maxConcurrentTransfers $transfers would let no file move"
+        if (transfers > pool.maxSize) {
+            faults += "bulkhead maxConcurrentTransfers $transfers is more than pool maxSize ${pool.maxSize}, so that many " +
+                "could never run at once"
+        }
+        // The clock on a call starts before its session is borrowed, so a limit that can run out
+        // while the caller is still queued reports a full pool as a server that stopped answering
+        // - and counts it against the breaker, which is the one thing a full pool must never do.
+        listOf("operationTimeout" to resilience.operationTimeout, "transferTimeout" to resilience.transferTimeout)
+            .forEach { (knob, value) ->
+                if (value <= pool.acquireTimeout) {
+                    faults += "resilience $knob $value is not longer than pool acquireTimeout ${pool.acquireTimeout}, so a " +
+                        "caller queued for a session would be reported as the server timing out"
+                }
+            }
+
         // Checked here rather than at the first download, because a staging directory that is
         // missing or read-only makes every download fail and the fault is the same one every time.
         // Finding that at deployment costs a restart; finding it an hour into a run costs the run.
@@ -234,6 +270,13 @@ class SftpConnectorBuilder internal constructor(private val name: String) {
                 recursive = polling.recursive,
                 readiness = polling.readiness,
             ),
+            resilience = ResilienceConfig(
+                retry = RetryPolicy(retry.maxAttempts, retry.backoff),
+                circuitBreaker = BreakerPolicy(breaker.failureRateThreshold, breaker.slidingWindow, breaker.waitInOpen),
+                maxConcurrentTransfers = transfers,
+                operationTimeout = resilience.operationTimeout,
+                transferTimeout = resilience.transferTimeout,
+            ),
         )
     }
 
@@ -245,6 +288,7 @@ class SftpConnectorBuilder internal constructor(private val name: String) {
     private companion object {
         private val LOG = LoggerFactory.getLogger(SftpConnectorBuilder::class.java)
         private val PORTS = 1..65535
+        private const val DEFAULT_CONCURRENT_TRANSFERS = 4
     }
 }
 
@@ -365,6 +409,60 @@ class PollingBuilder internal constructor() {
     fun staging(configure: StagingBuilder.() -> Unit) {
         staging.apply(configure)
     }
+}
+
+/**
+ * Defaults for a flaky network in front of a healthy server: three tries a call, a breaker that
+ * opens when half of the last twenty calls failed and probes again after a minute, four transfers
+ * at once out of a pool of five.
+ */
+@SftpDsl
+class ResilienceBuilder internal constructor() {
+
+    internal val retry = RetryBuilder()
+    internal val circuitBreaker = CircuitBreakerBuilder()
+    internal val bulkhead = BulkheadBuilder()
+
+    /** For one try at a single round trip, borrowing the session included. */
+    var operationTimeout: Duration = 1.minutes
+
+    /** For one try at moving one whole file, or at a listing read at the consumer's pace. */
+    var transferTimeout: Duration = 15.minutes
+
+    fun retry(configure: RetryBuilder.() -> Unit) {
+        retry.apply(configure)
+    }
+
+    fun circuitBreaker(configure: CircuitBreakerBuilder.() -> Unit) {
+        circuitBreaker.apply(configure)
+    }
+
+    fun bulkhead(configure: BulkheadBuilder.() -> Unit) {
+        bulkhead.apply(configure)
+    }
+}
+
+@SftpDsl
+class RetryBuilder internal constructor() {
+    /** Tries in total, the first included. */
+    var maxAttempts: Int = 3
+    var backoff: Backoff = exponential(1.seconds, max = 30.seconds, jitter = true)
+
+    fun exponential(initial: Duration, max: Duration, jitter: Boolean = true): Backoff = Backoff(initial, max, jitter)
+}
+
+@SftpDsl
+class CircuitBreakerBuilder internal constructor() {
+    /** Percent of the last [slidingWindow] calls that have to fail before the breaker opens. */
+    var failureRateThreshold: Int = 50
+    var slidingWindow: Int = 20
+    var waitInOpen: Duration = 1.minutes
+}
+
+@SftpDsl
+class BulkheadBuilder internal constructor() {
+    /** Unset means four, or as many as the pool holds when that is fewer. */
+    var maxConcurrentTransfers: Int? = null
 }
 
 @SftpDsl
