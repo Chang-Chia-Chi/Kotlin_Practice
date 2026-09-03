@@ -8,12 +8,12 @@ key, verify by stat, probe through the connector's startup probe.
 
 **Nature:** adapter work
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] The shared target contract test class passes against the SFTP target on the embedded SSHD
-- [ ] `I6` on SFTP: a crash between upload and rename is repaired by the next store
-- [ ] Verify of a removed file is false; probe fails on a missing directory
-- [ ] Progress entry appended
+- [x] The shared target contract test class passes against the SFTP target on the embedded SSHD
+- [x] `I6` on SFTP: a crash between upload and rename is repaired by the next store
+- [x] Verify of a removed file is false; probe fails on a missing directory
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket, stubs throwing NotImplementedError
 for later seams; 200-600 lines including tests; no Thread.sleep; invariant tests named

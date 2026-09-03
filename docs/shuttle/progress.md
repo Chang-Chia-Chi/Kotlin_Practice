@@ -1704,3 +1704,119 @@ InMemoryStateStoreTest 18, InMemoryTargetTest 3, RecordingChannelTest 2, Scripte
   row (S28) currently stores every child again, one extra store per child rather than per transfer. Add
   `I8_` rows for a crash after the first child's store and after its ledger once the seam can read a parent's
   children.
+
+---
+
+## 18: SFTP target, upload to `.part` and rename over the key
+
+**Built:** `infra.shuttle.sftp.SftpTarget(client, directory, io)`, the second `ObjectStoreTarget` over
+a real technology and spec 7.3 in one class. `store` makes the folders the *key* names (once per
+folder), uploads the staged file to `<directory>/<key>.part` with `Overwrite.REPLACE`, renames it
+over `<directory>/<key>` with `Overwrite.REPLACE` and the staged size as `expectedSize`, then stats
+the key and checks the size that landed; the ref is `("sftp", directory, key, mtime, size)`. `verify`
+is that stat again: true while the file at the key is the size and mtime the ref named. `probe` is a
+stat of the target directory, refusing with the path when there is nothing there and when what is
+there is a file. `SftpTargetTest` is `ObjectStoreTargetContract`'s third subclass, against the
+connector's `EmbeddedSftpServer`, in the default tier at 1.1 s for five tests. No production code
+outside the `sftp` package changed, and no core file was touched.
+
+**Concepts named:**
+
+- **The partial name is this adapter's own.** `<key>.part` is written by nothing else, which is what
+  makes it safe to take back: whatever is at that name is a store of this key that died before its
+  rename. That single fact is what turns I6 from a repair procedure into `Overwrite.REPLACE`.
+- **The ref is the key's mtime.** SFTP has no version id, and `location` plus `key` already name the
+  path, so a ref whose `ref` field carried the path would be inert - `verify(ref.copy(ref = ...))`
+  could not tell a stale ref from a live one, which the shared contract requires. The mtime the
+  server reported for the file the rename put there is the one per-write identity the protocol
+  offers, so that is what the ref carries and what `verify` compares alongside the size.
+- **`io` is about whose clock, not how many threads.** The connector already runs its blocking work
+  on `Dispatchers.IO.limitedParallelism(pool.maxSize)`; what the injected dispatcher decides is
+  whether the connector's own timeouts and retry backoffs see real time. A caller on a scheduler
+  that skips time - `runTest`, which is how the shared contract is written - makes every request
+  time out before the socket can answer. That was found by running the contract, not by reasoning.
+- **The target directory is the partner's; the key's folders are ours.** `mkdir(parents = true)` is
+  called only for the folders a key names *below* the target directory, so a missing target
+  directory stays a start-up failure (spec 12.1) instead of being quietly created by the first file.
+
+**Acceptance:**
+
+- *The shared target contract passes against the SFTP target on the embedded SSHD* -
+  `SftpTargetTest` extends `ObjectStoreTargetContract`, so
+  `I6_a_fresh_ref_per_store_and_the_newest_content_current_at_the_key` runs against a real server.
+- *`I6` on SFTP: a crash between upload and rename is repaired by the next store* -
+  `SftpTargetTest.I6_a_store_that_died_between_the_upload_and_the_rename_is_repaired_by_the_next_store`
+  (a `.part` holding another version is put on the server through the connector's own client, which
+  is exactly what a process killed between the two calls leaves; the next store lands its content at
+  the key and the folder afterwards holds one file and no partial).
+- *Verify of a removed file is false; probe fails on a missing directory* -
+  `verify_is_false_for_a_copy_that_has_been_taken_away_or_written_over` (false for a different file
+  under the same name as well as for no file at all),
+  `probe_passes_on_the_target_directory_and_fails_naming_a_path_that_is_not_a_directory`.
+- Also: `a_key_with_no_folder_in_it_lands_in_the_target_directory` (the ordinary `key` pattern, and
+  the branch that keeps `mkdir` off the partner's own folder).
+- *Progress entry appended* - this entry.
+
+Final run: ArchitectureTest 9, AttributeFreezeTest 4, BuiltInProcessorsTest 8, MappingRendererTest 12,
+NotifierTest 13, ProcessingChainTest 4, RouteRunnerTest 9, RouteSupervisorTest 3, RulesTest 35,
+SurfaceTest 3, TransferPipelineTest 26, HttpChannelTest 8, StateStoreSchemaTest 2,
+SftpConnectorConfigTest 6, SftpPollSourceTest 9, SftpTargetTest 5, ClockFixtureTest 1,
+FakeProcessContextTest 2, HookDriverTest 3, InMemoryStateStoreTest 18, InMemoryTargetTest 3,
+RecordingChannelTest 2, ScriptedSourceTest 2, YamlLoaderTest 11; 198 tests, 0 failures, 0 errors
+(`oracle`, `minio` and `nats` excluded). `SftpTargetTest` costs 1.1 s against the embedded SSHD -
+one server and one connector per test method - so it carries no group tag.
+
+**Deviations:**
+
+1. **Both operations replace, where progress 13 expected the upload to keep `Overwrite.REFUSE`.**
+   Refusing on the partial name makes I6 unrepairable: a store killed between its upload and its
+   rename leaves `<key>.part` on the server, and every later store of that key would refuse until a
+   person logged in and deleted it. The name is this adapter's own and nothing else may write it, so
+   there is nothing to protect. The rename replaces because spec 7.1 makes the key a pure function
+   of the object's name, so a retry aims at the name its own earlier attempt took. The partial file
+   that progress 13 was protecting against - a watcher of the target directory seeing half a file
+   under the name it waits for - is still prevented, by the `.part` name itself.
+2. **`verify` compares the mtime as well as the size**, where spec 7.3 says only "a stat comparing
+   size". The addition is what makes `TargetRef.ref` mean anything on this protocol; see "Concepts
+   named". It errs toward false: a partner that rewrites the file under the same name gets a false,
+   which is the safe direction for a check that exists to ask "is what I stored still there".
+3. **`probe` is a stat of the directory, not the connector's `StartupProbe`.** Spec 7.3 says the
+   connector's startup probe, and the ticket allowed this: `StartupProbe` is `internal` to the
+   connector, is driven by `polling.directories` and `actionTargets`, and is run by
+   `SftpConnector.start` before a client exists - there is no way to point it at a target directory.
+   A target-only connector has no polling directories, so its start-up probe checks nothing, and
+   this stat with its own message is what a start-up gets instead. Repaying it means a public
+   "check this directory" on the connector, which is a connector change and out of scope here.
+4. **The metadata map is dropped.** SFTP has nowhere to put it and nothing reads it back, so it is a
+   DEBUG line naming the count and no sidecar file the partner never asked for. Spec 7.1 leaves this
+   to the adapter.
+5. **Two concurrent stores of the same key would share the partial name.** The pipeline runs one
+   transfer per file and a retry is sequential, so nothing in this deployment does that; if two
+   routes ever wrote one key on one server they would already be fighting over the key itself.
+6. Size: 109 main, 144 test, 253 total against a 200-600 target. One class, three seam methods and
+   two private helpers; the file is over half KDoc, because the two `Overwrite.REPLACE` decisions
+   are the whole ticket and had to be written down where they are made.
+
+**For the next ticket:**
+
+- **14 (host):** construct it as `SftpTarget(connector.client, target.directory, io)` where `io` is
+  the module's bounded IO dispatcher, and call `probe()` at start-up (spec 12.1) - `SftpConnector`'s
+  own probe checks nothing for a target-only connector, so nothing else will tell a deployment that
+  the partner's folder is missing. **One connector per store is right for targets** and it is the
+  opposite of the poll's constraint (deviation 8 of progress 13): a target connector needs no
+  `polling` block at all - no directories, no `onAck` - so its config is just endpoint, auth, host
+  key and pool, and every route targeting one store can share one. Build that config with the
+  connector's own `sftpConnector(name) { ... }` DSL rather than `sftpConnectorConfig`, which needs a
+  `Source.Poll`; `SftpTargetTest.start` is the four-line shape. Note that `SftpStore` is the store
+  declaration for both directions, so a store that is polled by one route and targeted by another
+  gets two connectors and two pools, which rule 9's per-store session budget has to account for.
+  The target directory itself comes from the route's `Target` declaration, not from the store.
+- **20 (M2 acceptance, the partner-server half):** `SftpTargetTest`'s wiring is the whole setup -
+  `EmbeddedSftpServer.start(root, user, password)`, `sftpConnector { ... }`, `SftpConnector.start`,
+  `SftpTarget(connector.client, "/landing", Dispatchers.IO)` - and a delivered file can be read
+  straight off the server's root directory on local disk. Two things to assert that only an
+  end-to-end run can: that the partner never sees the final name holding a partial file (list the
+  directory while a store is in flight, or pause at `HookPoint.afterStore`), and that a route whose
+  source is one SFTP store and whose target is another moves bytes between two servers without the
+  two connectors sharing anything. `runTest` cannot drive any of it - see "Concepts named" on `io`;
+  use `runBlocking` with `withTimeout`.
