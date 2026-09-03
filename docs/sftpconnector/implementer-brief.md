@@ -95,6 +95,23 @@ operator nothing. A comment must read as a complete thought with no document ope
 Two things that look like citations and stay: ticket and finding names (T3, S7) point at
 `progress.md` history, and invariant names (I1, I14) are the invariants' own identifiers.
 
+## Which model builds which ticket
+
+Fixed by the maintainer. The split is by what a wrong interleaving costs, not by size.
+
+| Work | Model | Why |
+|---|---|---|
+| Coordination, the fake transport, the invariant test skeletons | Fable 5.1 | Holds the whole map |
+| Pool state machine (T3-T5): semaphore, mutex, StateFlow, permits under cancellation | Fable 5.1 | I1-I6; a lost permit is capacity lost until restart |
+| Cancellation ladder (T8): blocking JSch I/O, the progress monitor, `withTimeout` lifecycles interleaving | Fable 5.1 | The one place a thread is left behind |
+| Semantic compensation (T7 overwrite, T11 retry): lost-reply idempotency, I11 | Fable 5.1 | A phantom failure looks exactly like a real one |
+| Watch, overlap, shutdown drain (T12, T13) | Fable 5.1 | Same risk class as the pool: coroutine lifecycles under cancellation |
+| Lincheck, randomized adversary, deep review (T15-T17) | Fable 5.1 | Interleaving exploration is the job |
+| DSL and build-time validation (T1), error table (T2), staging and digest (T6), readiness checks (T10), metrics, Quarkus adapter (T14) | Opus 5 | Well-specified, single-threaded or pure data; fast and accurate |
+
+T1-T9 were built before this split existed, on Opus 5. The Fable-tier ones among them (T3, T4,
+T5, T7, T8) each get a fresh Fable 5.1 review-and-fix session before T11 builds on them.
+
 ## How to work the ticket
 
 You are running the `implement` workflow. In order:
