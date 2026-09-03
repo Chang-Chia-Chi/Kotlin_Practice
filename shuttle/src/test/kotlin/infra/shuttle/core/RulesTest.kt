@@ -146,6 +146,21 @@ class RulesTest {
     fun rule2_the_referenced_declaration_offers_the_role_used() =
         assertEquals(listOf(2), violated(config(vendorDrop = { source = poll(objectStore("minio"), directory = "/inbox") { onAck = AckAction.Delete } })))
 
+    /** G15: a nats channel offers the notify role only once it says which subject to publish on. */
+    @Test
+    fun rule2_a_nats_channel_notified_on_states_a_subject() =
+        assertEquals(
+            listOf(2),
+            violated(config(more = { channels { nats("events") { url = "nats://events.internal:4222" } } }, vendorDrop = { notify(on = Acked, channel("events")) })),
+        )
+
+    @Test
+    fun rule2_a_nats_channel_with_a_subject_may_be_notified_on() =
+        assertEquals(
+            emptyList<Int>(),
+            violated(config(more = { channels { nats("events") { url = "nats://events.internal:4222"; subject = "files.stored" } } }, vendorDrop = { notify(on = Acked, channel("events")) })),
+        )
+
     @Test
     fun rule3_every_timeout_is_below_drainTimeout() =
         assertEquals(listOf(3), violated(config(downstream = { timeout = 61.seconds })))

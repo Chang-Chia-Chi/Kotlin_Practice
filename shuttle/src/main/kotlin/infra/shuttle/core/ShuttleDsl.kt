@@ -225,7 +225,8 @@ class HttpChannelBuilder(private val name: String) {
 class NatsChannelBuilder(private val name: String) {
     var url: String? = null
     var credentials: Secret? = null
-    internal fun build() = NatsChannel(name, url, credentials)
+    var subject: String? = null
+    internal fun build() = NatsChannel(name, url, credentials, subject)
 }
 
 /** Spec 9.6 as infix rows; `row` admits a raw row for what the infix forms cannot say. */

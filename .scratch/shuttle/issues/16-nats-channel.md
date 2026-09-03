@@ -8,14 +8,14 @@ delivery, and the message view the message-extraction processor reads.
 
 **Nature:** adapter work
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] A message becomes one `Seen` with working ack and nak; a nak redelivers; term stops redelivery
-- [ ] Identity per spec Sec 5.2 is stable across a redelivery
-- [ ] In-progress signals flow every `inProgressEvery` while a transfer runs, and a run longer than the consumer's ack wait is not redelivered
-- [ ] A publish lands on the subject and returns the sequence as the reference; a broker outage ends with route down
-- [ ] Tests tagged `nats` on Testcontainers; jnats appears only in the nats package
-- [ ] Progress entry appended
+- [x] A message becomes one `Seen` with working ack and nak; a nak redelivers; term stops redelivery
+- [x] Identity per spec Sec 5.2 is stable across a redelivery
+- [x] In-progress signals flow every `inProgressEvery` while a transfer runs, and a run longer than the consumer's ack wait is not redelivered
+- [x] A publish lands on the subject and returns the sequence as the reference; a broker outage ends with route down
+- [x] Tests tagged `nats` on Testcontainers; jnats appears only in the nats package
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket, stubs throwing NotImplementedError
 for later seams; 200-600 lines including tests; no Thread.sleep; invariant tests named

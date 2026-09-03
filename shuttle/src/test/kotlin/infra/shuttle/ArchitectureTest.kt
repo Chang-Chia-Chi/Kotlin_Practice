@@ -70,6 +70,14 @@ class ArchitectureTest {
     }
 
     @Test
+    fun `jnats appears nowhere outside the nats package`() {
+        noClasses().that().resideOutsideOfPackage("infra.shuttle.nats..")
+            .should().dependOnClassesThat().resideInAnyPackage("io.nats..")
+            .allowEmptyShould(true)
+            .check(all)
+    }
+
+    @Test
     fun `logging is jboss logging directly and no context object carries a logger`() {
         noClasses().that().resideInAPackage("infra.shuttle..")
             .should().dependOnClassesThat().resideInAnyPackage("org.slf4j..", "java.util.logging..", "org.apache.logging..")

@@ -1062,3 +1062,128 @@ ScriptedSourceTest 2, YamlLoaderTest 10; 151 tests, 0 failures, 0 errors (`oracl
 - **16 (expand, S28):** `ProcessContext.fetch` throws `NotImplementedError` in the pipeline's
   context; deviation 1 and 2 are yours.
 
+---
+
+## 16: NATS channel: subscribe trigger and publish
+
+**Built:** `infra.shuttle.nats.NatsChannel(config: core.NatsChannel, connection: io.nats.client.Connection,
+io: CoroutineDispatcher = Dispatchers.IO)`, one class carrying both roles a NATS channel has.
+
+`events(route, source: Source.Subscribe): Flow<RouteEvent>` is the `subscribe` trigger of spec
+5.1. It pull-subscribes to `source.subject` on a durable JetStream consumer named after the
+route, fetches one message at a time with a one second wait, and turns each message into one
+`RouteEvent.Seen`. The `Seen`'s `ack` applies the route's `onAck` (`term` for `AckAction.Term`,
+`ack` otherwise) and its `nack(redeliver)` is `nak` when it asks for redelivery and `term` when
+it does not, which is the whole `subscribe` vocabulary of spec 5.3. From the moment a `Seen` is
+handed out until one of those runs, a coroutine tells the broker `inProgress` every
+`inProgressEvery` (D38); a signal the broker misses is swallowed, because it costs at worst one
+redelivery. Identity is spec 5.2: `SourceKind.NATS`, `sourceRef` = `channel:subject`,
+`sourceName` = the publisher's `Nats-Msg-Id` header when it set one and the stream sequence
+otherwise, no size and no mtime. The `SourceView` handed over is `SourceView(msg.subject,
+msg.data, headers)` - core's existing type, which is already what `extract from: message` reads.
+A closed connection, a failed subscribe, or a fetch that throws ends the flow with
+`RouteEvent.RouteDown(cause)`; supervision restarts the route with backoff (spec 10).
+
+`deliver(event)` is a JetStream publish of the rendered body on the channel's `subject`, with
+the stream sequence the server answers as the delivery's `reference`. A broker that does not
+answer is `Retry(null, cause)`. One INFO line per attempt. `CancellationException` is rethrown
+before any other catch in both methods; every blocking jnats call runs on `io` through
+`runInterruptible`, so cancelling the collector interrupts the call in flight.
+
+`pom.xml`: `io.nats:jnats:2.21.2` (compile, the `nats` package only) and `nats` added to the
+`excludedGroups` property, so the tier is opt-in with `-DexcludedGroups=none` like `oracle` and
+`minio`. No new Testcontainers module: the broker is a `GenericContainer` on `nats:2.10-alpine`
+run with `-js`, waiting for the `Server is ready` log line.
+
+**Concepts named:**
+
+- **The durable consumer is the route.** `PullSubscribeOptions.durable(routeName)`, with the
+  route name's illegal characters replaced. The consumer is created with the server's defaults
+  on first use and bound to the operator's when it already exists, so the ack wait that
+  `inProgressEvery` must stay below remains the operator's - a value spec 5.1 says the process
+  cannot read. No configuration knob, no stream name to state.
+- **The message id, not the delivery count, is the identity.** The stream sequence and
+  `Nats-Msg-Id` are both the same on a redelivery; `deliveredCount` and the reply subject are
+  not. That is what makes `find(identity)` re-enter the same transfer after a nak (spec 4.3).
+- **A trigger that ends is a route that restarts.** Rather than guessing which broker failures
+  jnats will recover from, anything the fetch loop throws, and a connection that reports
+  `CLOSED`, is one `RouteDown` and the end of the flow. Spec 10 already owns the retry policy
+  for that, with backoff and a counted restart; duplicating it inside the adapter would give
+  the operator two backoffs to reason about.
+- **The publish subject belongs to the channel, the subscribe subject to the route.** Spec
+  13.1's `nats:` block has no subject because its example channel is only ever a source. A
+  channel a route notifies through has to name one, so `subject` joins the block (see
+  Deviations).
+
+**Acceptance:**
+
+- *A message becomes one `Seen` with working ack and nak; a nak redelivers; term stops
+  redelivery* - `NatsChannelTest.a publish lands on the subject, answers the stream sequence, and
+  becomes one Seen`, `an acked message is not redelivered`, `a nak redelivers the message under
+  the same identity`, `a nack that asks for no redelivery terms the message`, `onAck term stops
+  redelivery too`. The test consumer is created with a two second ack wait, so "not redelivered"
+  is five seconds of quiet, two and a half ack waits.
+- *Identity per spec 5.2 is stable across a redelivery* - `a nak redelivers the message under the
+  same identity` asserts the whole `SourceIdentity` is equal on the redelivery.
+- *In-progress signals flow every `inProgressEvery`, and a run longer than the ack wait is not
+  redelivered* - `in progress signals hold off redelivery for a run longer than the ack wait`:
+  `inProgressEvery` 500 ms against a two second ack wait, held for six seconds, no redelivery.
+- *A publish lands on the subject and returns the sequence as the reference; a broker outage ends
+  with route down* - `a publish lands on the subject, answers the stream sequence, and becomes one
+  Seen` asserts `Delivered("1")` then `Delivered("2")` and reads both back off the subject;
+  `a closed connection ends the flow with RouteDown`.
+- *Tests tagged `nats` on Testcontainers; jnats appears only in the nats package* - the class is
+  `@Tag("nats")`; `ArchitectureTest.jnats appears nowhere outside the nats package` and
+  `each adapter depends on core and its own technology only`, now with classes in
+  `infra.shuttle.nats` to check.
+- *Progress entry appended* - this entry.
+
+**Cost of the nats tier:** 31.2 s of test time, 59 s wall clock for
+`-DexcludedGroups=none -Dtest=NatsChannelTest` including Maven start, against an image already
+in the local Docker cache. Seven tests, one container for the JVM.
+
+**Deviations:**
+
+1. **`subject` is new on `core.NatsChannel`** (`data class NatsChannel(name, url, credentials,
+   subject)`), with the YAML key `nats: { ..., subject: files.stored }` and the DSL property
+   `nats("events") { subject = "..." }`. `deliver` has to publish somewhere and nothing else in
+   the model reaches it: `Notify` names only a channel, and `DeliveryEvent` carries no route. It
+   is optional, so a channel used only as a `subscribe` source is unchanged. No new rule number:
+   this is rule 2 ("the referenced declaration offers the role used"), whose notify check now
+   reads `channel !is NatsChannel || channel.subject != null`. Tests
+   `RulesTest.rule2_a_nats_channel_notified_on_states_a_subject`,
+   `rule2_a_nats_channel_with_a_subject_may_be_notified_on`,
+   `YamlLoaderTest.a_nats_channel_reads_its_url_credentials_and_subject`. **Spec 13.1's `nats:`
+   key list and the rule 2 sentence in 13.3 need this recorded**; this ticket may only touch
+   `shuttle/` and this file.
+2. **No identity pointer knob.** Spec 5.2 allows "a configured pointer into the body when the
+   broker's id is not stable across redeliveries". The JetStream stream sequence and
+   `Nats-Msg-Id` are both stable, so nothing needed configuring; if a publisher ever proves
+   otherwise, the knob lands then.
+3. **No `policy` and no `body` on the nats channel config,** so `policy` is `DeliveryPolicy()`
+   defaults and the notifier renders an empty body for it (the notifier takes bodies as a map it
+   is given, so this is ticket 14's wiring, not a gap here). One knob per ticket.
+4. **`SourceView` was already the message view.** Core declares
+   `SourceView(path, body: ByteArray?, headers)` with the comment "Subscribe: the message body
+   and headers", so nothing new was declared in core for ticket 17 to read.
+5. Size: 166 main, 172 test lines, plus four one-line edits to core and the loader; in budget.
+
+**For the next ticket:**
+
+- **14 (host wiring):** produce one `io.nats.client.Connection` per `nats:` channel declaration
+  (`Nats.connect(Options.builder().server(config.url)` plus
+  `.authHandler(Nats.credentials(...))` when `credentials` is set) and construct
+  `NatsChannel(config, connection, io)` once, using the same instance for both roles: the
+  notifier's `DeliveryChannel` map and the route runtime's trigger. Close the connection on
+  shutdown after the drain. `excludedGroups` is now `oracle,minio,nats`; the container tiers run
+  with `-DexcludedGroups=none`. The stream and the durable consumer are the operator's to
+  provision (spec 17, open item 9): the adapter creates a durable named after the route if it is
+  absent, and the operator's ack wait must stay above `inProgressEvery` (rule 7 only checks the
+  latter is positive; the process cannot read the former).
+- **17 (extract):** `extract from: message` reads `ProcessContext.source`, which for a subscribed
+  route is the `SourceView` this trigger builds: `path` is the concrete subject the message
+  arrived on, `body` is the raw message bytes (parse it yourself; the adapter does not), and
+  `headers` is every header flattened to its first value. `fetch.path` is a JSON pointer into
+  that same body (spec 5.1). The S3 fetcher of ticket 11 expects a bare key, not a leading
+  slash, so whatever the pointer yields is passed on as-is.
+
