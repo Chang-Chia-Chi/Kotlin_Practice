@@ -1972,3 +1972,64 @@ already finished and given its session back by then.
   every test here says "always ready".
 - **`FakeSftpTransport` needed nothing new.** `file`, `directory` and `remove` between polls, and
   its recorded `Rename`/`Delete` calls, staged everything this ticket asked.
+
+## Corrections before T11
+
+Two targeted fixes applied as two commits after T10, on the coordinator's instruction (C10 for the
+first, C11 for the second). Neither is a ticket. 177 tests green afterwards (46 core, 131 testkit),
+up from 169.
+
+**Fix 1 - a listed name that escapes the staging directory is refused** (commit
+`1403ccd`). `SftpClient.download` with no explicit `localTarget` now resolves the listed name
+against the staging directory in one private place, `stagingTargetFor`, and refuses unless the
+normalised result still starts with the staging directory *and* still ends in exactly the listed
+name, and the name holds no backslash. A name the filesystem cannot spell (`InvalidPathException`)
+is refused the same way. The refusal is `UnsafeFileName`, a new top-level class beside
+`OverwriteRefused` on `ACCEPT_THE_REFUSAL`: no retry, breaker untouched, no session borrowed. The
+message names the remote path and the staging directory. A caller passing its own target is not
+guarded. `localTarget` became `Path? = null`, which let `SftpSource.FileHandling.download` pass the
+consumer's choice straight through. The red run on Windows wrote `evil.csv` two directories above
+the temp staging directory, into `%LOCALAPPDATA%`; that is the defect, demonstrated. The seam row
+is struck through above. Tests: four in `SftpClientTest` (`..`, `..\..\evil.csv`, `C:evil`, and a
+plain name), plus `UnsafeFileName`'s row in `FailureModelTest`'s exhaustive `when` - the one
+earlier-ticket test touched by this fix, and only because the `when` will not compile without it.
+
+**Fix 2 - `SizeStable` observes inside one poll, batched** (D36). `ReadinessCheck` keeps its single
+abstract per-file `check(file, ctx)` - every `ReadinessCheck { _, _ -> Ready }` in T10's tests
+compiles unchanged - and gains a non-abstract `check(files, ctx): Map<RemoteFile, Readiness>` that
+defaults to asking per file. `SizeStable` overrides the batch form: stat every candidate, `delay`
+one `interval`, stat again, `checks - 1` times; a single file is a batch of one. `AllOf` overrides
+it so each check is asked only about the files every earlier check let through. `MinAge` and
+`MarkerFile` are untouched, and `+` still flattens. The across-poll memory, its cap, its
+`synchronized` and its use of the clock are gone. `SftpSource.poll` is now three phases: collect
+the listing's candidates (bounded by `maxFilesPerPoll`), which returns the listing's session; run
+readiness over the batch; emit.
+
+*Earlier tests retargeted, as C11 mandates:* `ReadinessTest`'s
+`a size is stable once it has held still across the interval, and a change starts over` asserted
+the across-poll semantics with three fixed clocks and is replaced by
+`a batch is stated twice one interval apart, and only the size that moved is not ready` (three
+files, one grows during the wait, virtual time advances by exactly one interval for the batch),
+plus `a size check over a batch remembers nothing between calls` and
+`a composite over a batch asks each check only about the files still ready`. `SftpSourceTest`
+gained `a poll pays the size check's interval once for all of its files` and
+`the listing's session is back in the pool before any readiness check runs` (asserting
+`pool.stats().inUse == 0` from inside a check), and its pool became a field so the second could
+read it. Every other T10 test is unchanged and green.
+
+**For T11 and later:**
+
+- **A poll no longer needs a pool of two.** T10's deviation 9 is void: the listing is finished and
+  its session returned before any check stats.
+- **A poll waiting on its consumer no longer holds the listing's session** - the listing runs to
+  `maxFilesPerPoll` before the first `FileSeen`, and it is the *emitting* that suspends on
+  `maxInFlight`. T10's note to T13 about the drain expecting a lease held by a waiting poll is
+  therefore weaker than written; a poll holds a session only while listing or while a check stats.
+  The price is `maxFilesPerPoll` `RemoteFile` objects held per poll, which is what that cap is for.
+- **`SizeStable` stats one file at a time**, `checks` round trips per file per poll, each on its
+  own lease. A thousand candidates is two thousand stats. It is marked `ponytail:` in the source;
+  a fan-out bounded by the pool is the upgrade if it ever shows on `sftp_poll_seconds`.
+- **The `delay` inside `SizeStable` is on the poll's coroutine**, so cancelling the collector
+  cancels the wait, and under `runTest` it is virtual time.
+- **T10's note that checks with memory must be `synchronized` no longer applies to anything
+  shipped**; a custom check that keeps memory across polls still needs it, for the same reason.

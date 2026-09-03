@@ -1,10 +1,10 @@
 package sftp.connector.source
 
+import kotlinx.coroutines.delay
 import sftp.connector.client.SftpClient
 import sftp.connector.error.ConfigurationError
 import sftp.connector.transport.RemoteFile
 import java.time.Clock
-import java.time.Instant
 import kotlin.time.Duration
 
 /**
@@ -13,11 +13,19 @@ import kotlin.time.Duration
  * A listing shows a file the moment its uploader creates it, which on most uploads is long before
  * the last byte lands. Nothing on the protocol says whether a writer still has it open, so a check
  * is evidence rather than proof: the one exception is a marker the uploader writes when it is
- * done, and that needs the uploader's cooperation. A check runs once per listed file per poll and
- * may keep memory between polls; a file it turns away is looked at again on the next one.
+ * done, and that needs the uploader's cooperation. A check is asked once per poll, about that
+ * poll's candidates; a file it turns away is looked at again on the next one.
  */
 fun interface ReadinessCheck {
     suspend fun check(file: RemoteFile, ctx: ReadinessContext): Readiness
+
+    /**
+     * The poll's candidates at once. A check that has to wait answers them together, so the wait
+     * is paid once per poll rather than once per file; any other check answers one file at a time
+     * and need not override this.
+     */
+    suspend fun check(files: List<RemoteFile>, ctx: ReadinessContext): Map<RemoteFile, Readiness> =
+        files.associateWith { check(it, ctx) }
 }
 
 sealed interface Readiness {
@@ -41,45 +49,54 @@ class ReadinessContext(private val client: SftpClient, val clock: Clock) {
 }
 
 /**
- * Ready once the size has been seen unchanged [checks] times at least [interval] apart.
+ * Ready once the size has been seen unchanged [checks] times, [interval] apart, within the poll
+ * that listed the file.
  *
- * The observations are spread across polls rather than taken inside one, because taking them
- * inside one means waiting [interval] for every file in the directory, in turn, while holding
- * the listing's session - a hundred files would make a poll take a quarter of an hour. The
- * evidence is the same either way: the size held still for at least that long. A size that
- * changes starts the count over.
+ * The observations are taken over the poll's candidates as a batch: every file is stated, one
+ * [interval] passes, every file is stated again. So a poll pays `(checks - 1) x interval` once,
+ * however many files it listed, and pays it with the listing's session already back in the pool -
+ * which is what makes waiting inside the poll affordable. Remembering sizes across polls instead
+ * was built first and taken out: on an hourly pipeline it made every file wait for the second
+ * poll, an hour where this reads as ten seconds.
  *
- * What it remembers is bounded and forgetting is safe in the only direction that matters: a
- * forgotten file is a new file, which costs it one more poll and never hands over a file early.
+ * A file that is not on the server by the time it is stated is not ready; the next poll will not
+ * list it.
  */
-class SizeStable(
-    val checks: Int,
-    val interval: Duration,
-    // ponytail: files remembered at once, oldest dropped first; a knob if a directory ever holds more.
-    remembered: Int = 10_000,
-) : ReadinessCheck {
+class SizeStable(val checks: Int, val interval: Duration) : ReadinessCheck {
 
     init {
         if (checks < 1) throw ConfigurationError("sizeStable needs at least one check, not $checks")
         if (interval <= Duration.ZERO) throw ConfigurationError("sizeStable needs a positive interval, not $interval")
     }
 
-    private class Observed(var size: Long, var counted: Int, var lastCountedAt: Instant)
+    /** A file on its own is a batch of one, and costs the same wait. */
+    override suspend fun check(file: RemoteFile, ctx: ReadinessContext): Readiness = check(listOf(file), ctx).getValue(file)
 
-    private val memory = object : LinkedHashMap<String, Observed>(16, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Observed>?): Boolean = size > remembered
+    // ponytail: one stat at a time; a fan-out bounded by the pool if a directory of a thousand files ever makes this the slow part.
+    override suspend fun check(files: List<RemoteFile>, ctx: ReadinessContext): Map<RemoteFile, Readiness> {
+        val turnedAway = mutableMapOf<RemoteFile, Readiness>()
+        var holdingStill = mutableMapOf<RemoteFile, Long>()
+        for (file in files) {
+            val size = ctx.stat(file.path)?.size
+            if (size == null) turnedAway[file] = GONE else holdingStill[file] = size
+        }
+        repeat(checks - 1) {
+            delay(interval)
+            val stillHolding = mutableMapOf<RemoteFile, Long>()
+            for ((file, size) in holdingStill) {
+                when (val now = ctx.stat(file.path)?.size) {
+                    size -> stillHolding[file] = size
+                    null -> turnedAway[file] = GONE
+                    else -> turnedAway[file] = Readiness.NotReady("size went from $size to $now within $interval")
+                }
+            }
+            holdingStill = stillHolding
+        }
+        return files.associateWith { turnedAway[it] ?: Readiness.Ready }
     }
 
-    override suspend fun check(file: RemoteFile, ctx: ReadinessContext): Readiness = synchronized(memory) {
-        val now = ctx.clock.instant()
-        val known = memory[file.path]
-        val observed = when {
-            known == null || known.size != file.size -> Observed(file.size, 1, now).also { memory[file.path] = it }
-            now >= known.lastCountedAt.plusMillis(interval.inWholeMilliseconds) -> known.apply { counted++; lastCountedAt = now }
-            else -> known
-        }
-        if (observed.counted >= checks) Readiness.Ready
-        else Readiness.NotReady("size ${file.size} seen ${observed.counted} of $checks times $interval apart")
+    private companion object {
+        private val GONE = Readiness.NotReady("gone from the server since it was listed")
     }
 }
 
@@ -115,7 +132,11 @@ class MarkerFile(val suffix: String) : ReadinessCheck {
     }
 }
 
-/** Every check in turn; the first that is not [Readiness.Ready] is the answer. */
+/**
+ * Every check in turn; the first that is not [Readiness.Ready] is the answer. Over a batch, each
+ * check is asked only about the files every earlier check let through, so a check that waits
+ * waits for nothing already turned away.
+ */
 class AllOf(vararg checks: ReadinessCheck) : ReadinessCheck {
 
     val checks: List<ReadinessCheck> = checks.toList()
@@ -126,6 +147,21 @@ class AllOf(vararg checks: ReadinessCheck) : ReadinessCheck {
             if (readiness != Readiness.Ready) return readiness
         }
         return Readiness.Ready
+    }
+
+    override suspend fun check(files: List<RemoteFile>, ctx: ReadinessContext): Map<RemoteFile, Readiness> {
+        val turnedAway = mutableMapOf<RemoteFile, Readiness>()
+        var stillReady = files
+        for (each in checks) {
+            if (stillReady.isEmpty()) break
+            val answers = each.check(stillReady, ctx)
+            for (file in stillReady) {
+                val answer = answers.getValue(file)
+                if (answer != Readiness.Ready) turnedAway[file] = answer
+            }
+            stillReady = stillReady.filterNot { it in turnedAway }
+        }
+        return files.associateWith { turnedAway[it] ?: Readiness.Ready }
     }
 }
 

@@ -331,8 +331,8 @@ class PollingBuilder internal constructor() {
     var recursive: Boolean = false
 
     /**
-     * The default is a heuristic, and an honest one: a file whose size has held still across two
-     * polls and that nobody has touched for a minute is probably finished. An uploader that
+     * The default is a heuristic, and an honest one: a file whose size has held still for ten
+     * seconds and that nobody has touched for a minute is probably finished. An uploader that
      * stalls mid-file passes it. The only check that cannot be fooled is a marker the uploader
      * writes when it is done, which needs the uploader's cooperation - ask for it.
      */

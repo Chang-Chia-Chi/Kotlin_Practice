@@ -8,6 +8,8 @@ import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.currentTime
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.assertj.core.api.Assertions.assertThat
@@ -28,6 +30,7 @@ import sftp.connector.source.SftpEvent.PollStarted
 import sftp.connector.testkit.FakeSftpTransport
 import sftp.connector.testkit.FakeSftpTransport.Operation
 import java.nio.file.Path
+import kotlin.time.Duration.Companion.seconds
 
 /**
  * The source against a scripted server: what a poll hands over, what an answer does to the file,
@@ -43,6 +46,8 @@ class SftpSourceTest {
     lateinit var stage: Path
 
     private val registry = SimpleMeterRegistry()
+
+    private lateinit var pool: SftpPool
 
     private lateinit var client: SftpClient
 
@@ -265,6 +270,42 @@ class SftpSourceTest {
      * usual layout, and a walk that descended into them would hand every dealt-with file back to
      * the consumer. Any other subdirectory is walked.
      */
+    /**
+     * Readiness is a phase of the poll, over every candidate at once: with the shipped size check
+     * nothing is handed over before the interval, and everything ready is handed over after one
+     * interval - not one per file.
+     */
+    @Test
+    fun `a poll pays the size check's interval once for all of its files`() = runTest {
+        val transport = FakeSftpTransport().directory("/drop").file("/drop/a.csv", "1").file("/drop/b.csv", "22")
+        val source = sourceOver(transport) { readiness = sizeStable(checks = 2, interval = 10.seconds) }
+        val events = mutableListOf<SftpEvent>()
+        val collector = launch { source.poll("/drop").collect { events += it } }
+
+        runCurrent()
+        assertThat(events.filterIsInstance<FileSeen>()).describedAs("handed over before the interval").isEmpty()
+        assertThat(collector.isCompleted).isFalse()
+
+        advanceUntilIdle()
+
+        assertThat(currentTime).describedAs("virtual time the poll took").isEqualTo(10_000)
+        assertThat(events.filterIsInstance<FileSeen>().map { it.file.path }).containsExactly("/drop/a.csv", "/drop/b.csv")
+        assertThat(events.last()).isEqualTo(PollCompleted(1, seen = 2, emitted = 2, notReady = 0))
+    }
+
+    /** What makes waiting inside the poll affordable: nothing of the pool's is held while a check waits. */
+    @Test
+    fun `the listing's session is back in the pool before any readiness check runs`() = runTest {
+        val source = sourceOver(FakeSftpTransport().directory("/drop").file("/drop/a.csv", "1")) {
+            readiness = ReadinessCheck { _, _ ->
+                assertThat(pool.stats().inUse).describedAs("sessions out while readiness runs").isZero()
+                Readiness.Ready
+            }
+        }
+
+        assertThat(source.poll("/drop").toList().filterIsInstance<FileSeen>()).hasSize(1)
+    }
+
     @Test
     fun `the folders actions move files into are left out of a recursive walk`() = runTest {
         val transport = FakeSftpTransport()
@@ -340,7 +381,7 @@ class SftpSourceTest {
                 polling()
             }
         }
-        val pool = SftpPool(transport, config, registry, virtualClock())
+        pool = SftpPool(transport, config, registry, virtualClock())
         client = SftpClient(pool, config, registry)
         return SftpSource(client, config, registry, virtualClock())
     }

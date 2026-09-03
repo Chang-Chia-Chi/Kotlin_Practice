@@ -49,9 +49,11 @@ class SftpSource(
      * every file that is ready and not already out with the consumer, and [SftpEvent.PollCompleted]
      * once the listing is exhausted.
      *
-     * The listing and anything the checks ask of the server run on different sessions, so a poll
-     * needs a pool of at least two. A file the consumer downloads while still collecting is
-     * followed by [SftpEvent.FileGone] if it turned out not to be there.
+     * A poll is three phases: the listing, whose session is back in the pool before the next
+     * begins; the readiness checks, over everything the listing found as one batch, so a check
+     * that waits holds nothing while it waits and waits once rather than once per file; and the
+     * handing over. A file the consumer downloads while still collecting is followed by
+     * [SftpEvent.FileGone] if it turned out not to be there.
      *
      * A collection that ends any way but normally - cancelled, or failed by the listing or by the
      * consumer's own block - gives every file this poll handed over and not yet answered back to
@@ -75,17 +77,21 @@ class SftpSource(
             try {
                 meters.timingPoll {
                     emit(SftpEvent.PollStarted(tick, directory))
+                    val candidates = mutableListOf<RemoteFile>()
                     filesUnder(directory).collect { file ->
                         seen++
-                        if (inFlight.holds(file)) return@collect
-                        when (val readiness = polling.readiness.check(file, readinessContext)) {
+                        if (!inFlight.holds(file)) candidates += file
+                    }
+                    val verdicts = polling.readiness.check(candidates, readinessContext)
+                    for (file in candidates) {
+                        when (val readiness = verdicts.getValue(file)) {
                             Readiness.Skip -> Unit
                             is Readiness.NotReady -> {
                                 notReady++
                                 LOG.debug("{} is not ready yet: {}", file.path, readiness.reason)
                             }
                             Readiness.Ready -> {
-                                val slot = inFlight.admit(file) ?: return@collect
+                                val slot = inFlight.admit(file) ?: continue
                                 handedOver += slot
                                 emitted++
                                 emit(SftpEvent.FileSeen(file, slot, handling))
