@@ -791,7 +791,7 @@ shuttle:
           - { path: object, field: SOURCE_PATH }
           - { path: md5,    field: SOURCE_DIGEST }
     events:
-      nats: { url: nats://events.internal:4222, credentials: ${NATS_CREDS} }
+      nats: { url: nats://events.internal:4222, credentials: ${NATS_CREDS}, subject: images.done }   # subject: what notify publishes on; optional for a subscribe-only channel
 
   routes:
     vendor-drop:                               # milestone 1
@@ -885,7 +885,7 @@ Each is public numbering, reported by number in validate mode and at startup.
 | Rule | Statement |
 |---|---|
 | 1 | Every name a route references exists in `objectStores` or `channels` |
-| 2 | The referenced declaration offers the role used: poll or target on an object store, subscribe or notify on a channel, and the adapter implements that role |
+| 2 | The referenced declaration offers the role used: poll or target on an object store, subscribe or notify on a channel, and the adapter implements that role; a NATS channel used for notify states a `subject` |
 | 3 | Every S3 `apiCall` timeout, channel `timeout`, and each connector's drain plus cancel grace is below `drainTimeout` |
 | 4 | Route names, store names and channel names are unique; a store and a channel may not share a name |
 | 5 | A route has exactly one `source` and exactly one `target` |
