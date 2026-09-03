@@ -56,6 +56,69 @@ That table is the whole safety argument. Every row is a test (spec 17.2, S2 to S
 
 ## Part 2 - For engineers
 
+### The whole system in one picture
+
+One process, three components, four things outside it. The connector owns the server side of
+the conversation and hands each ready file to the consumer as an event with an ack and a nack.
+The pipelines do the work for one file and write every step to the ledger. The relay is a
+second, independent loop that turns ledger rows into downstream calls. The pipelines and the
+relay never talk to each other except through the ledger and one wake signal, which is what
+lets either be restarted without the other noticing.
+
+```mermaid
+flowchart LR
+    subgraph sftp["SFTP server"]
+        IN["inbox/"]
+        TMP["temp/ (purged by downstream)"]
+    end
+
+    subgraph proc["sftp-ingest process · one replica · Kotlin + Quarkus"]
+        subgraph conn["SFTP connector (its own spec)"]
+            TK["watch ticker · every 1 h"] --> LS["lister + readiness"]
+            POOL["session pool · 5 max"]
+            IFF["in-flight files · memory"]
+        end
+        subgraph pipe["Consumer + per-file pipelines · ×4 in parallel"]
+            direction TB
+            P1["1 decide entry point from the ledger"] --> P2["2 download through the connector"]
+            P2 --> P3["3 quality check (NONE today)"] --> P4["4 PUT · HEAD · prune other versions"]
+            P4 --> P5["5 ledger → UPLOADED"] --> P6["6 ack() → move to temp/ · commit point"]
+            P6 --> P7["7 ledger → ACKED + PENDING per channel · 1 txn"]
+        end
+        subgraph relay["Relay · one coroutine, cold Flow"]
+            direction LR
+            R1["select due"] --> R2["buffer"] --> R3["workers ×4"] --> R4["record outcome"]
+            RIF["in-flight delivery ids · memory"]
+        end
+        STG[("staging · local disk")]
+    end
+
+    subgraph ora["Oracle ledger · durable · the only truth"]
+        FT[("file_transfer")]
+        DO[("delivery_outbox")]
+    end
+    MINIO[("MinIO bucket · versioning on")]
+    DS["Downstream · HTTP · dedupes on fileId"]
+
+    IN -- "list · download (JSch)" --> POOL
+    POOL -- "rename → temp/" --> TMP
+    LS -- "FileSeen(file, ack, nack)" --> P1
+    P2 -- "download()" --> POOL
+    POOL -- ".part → file" --> STG
+    P6 == "ack()" ==> POOL
+    P4 -- "PUT · HEAD · prune (S3 SDK v2)" --> MINIO
+    P5 == "JDBI" ==> FT
+    P7 == "JDBI · ACKED + PENDING" ==> DO
+    P7 -. "wake" .-> R1
+    R1 == "select due (JDBI)" ==> DO
+    R4 == "DELIVERED / retry / FAILED" ==> DO
+    R3 -- "POST body (JDK HttpClient)" --> DS
+    DS -. "2xx + request id" .-> R3
+```
+
+Thick edges are the durable commit path; dotted edges are signals or responses, never data;
+the two memory boxes are the only state that must not survive a restart.
+
 ### Three pieces of state, three owners
 
 Everything else is stateless and can be restarted at any moment.

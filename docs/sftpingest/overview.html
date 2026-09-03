@@ -276,7 +276,171 @@
   <section class="part" id="engineers">
     <div class="part-head">
       <div class="eyebrow">Part 2</div>
-      <h2>Three pieces of state, three owners</h2>
+      <h2>The whole system in one picture</h2>
+      <p>One process, three components, four things outside it. The connector owns the server side of the conversation and hands each ready file to the consumer as an event with an ack and a nack. The pipelines do the work for one file and write every step to the ledger. The relay is a second, independent loop that turns ledger rows into downstream calls. Two arrows in green are the durable commit path.</p>
+    </div>
+
+    <figure>
+      <div class="frame">
+        <svg viewBox="0 0 1000 660" role="img" aria-label="The sftp-ingest process holds three components: the SFTP connector, the consumer with its per-file pipelines, and the relay. The connector talks to the SFTP server, the pipelines write to MinIO and the Oracle ledger and wake the relay, and the relay reads the ledger and posts to downstream.">
+          <defs>
+            <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+            </marker>
+            <marker id="arr-g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--green)"/>
+            </marker>
+          </defs>
+
+          <!-- ===== external: SFTP server ===== -->
+          <rect x="20" y="100" width="130" height="200" rx="6" fill="var(--paper)" stroke="currentColor" stroke-width="1.5"/>
+          <text x="85" y="124" text-anchor="middle" font-size="13" font-weight="600" fill="currentColor">SFTP server</text>
+          <rect x="34" y="150" width="102" height="42" rx="4" fill="none" stroke="currentColor" stroke-width="1"/>
+          <text x="85" y="176" text-anchor="middle" font-size="12" fill="currentColor" class="mono">inbox/</text>
+          <rect x="34" y="216" width="102" height="42" rx="4" fill="none" stroke="currentColor" stroke-width="1" stroke-dasharray="4 3"/>
+          <text x="85" y="242" text-anchor="middle" font-size="12" fill="currentColor" class="mono">temp/</text>
+          <text x="85" y="282" text-anchor="middle" font-size="10" fill="var(--muted)">purged by downstream</text>
+
+          <!-- ===== external: MinIO ===== -->
+          <rect x="820" y="100" width="160" height="70" rx="6" fill="var(--paper)" stroke="currentColor" stroke-width="1.5"/>
+          <text x="900" y="128" text-anchor="middle" font-size="13" font-weight="600" fill="currentColor">MinIO bucket</text>
+          <text x="900" y="148" text-anchor="middle" font-size="10" fill="var(--muted)">versioning on · one key per file</text>
+
+          <!-- ===== external: Downstream ===== -->
+          <rect x="820" y="380" width="160" height="70" rx="6" fill="var(--paper)" stroke="currentColor" stroke-width="1.5"/>
+          <text x="900" y="408" text-anchor="middle" font-size="13" font-weight="600" fill="currentColor">Downstream</text>
+          <text x="900" y="428" text-anchor="middle" font-size="10" fill="var(--muted)">HTTP · dedupes on fileId</text>
+
+          <!-- ===== external: Oracle ledger ===== -->
+          <rect x="420" y="580" width="330" height="64" rx="6" fill="var(--green-soft)" stroke="var(--green)" stroke-width="1.5"/>
+          <text x="585" y="602" text-anchor="middle" font-size="13" font-weight="600" fill="var(--green)">Oracle ledger · durable · the only truth</text>
+          <text x="500" y="628" text-anchor="middle" font-size="11" fill="currentColor" class="mono">file_transfer</text>
+          <text x="670" y="628" text-anchor="middle" font-size="11" fill="currentColor" class="mono">delivery_outbox</text>
+
+          <!-- ===== process ===== -->
+          <rect x="210" y="40" width="560" height="500" rx="8" fill="none" stroke="currentColor" stroke-width="1.2" stroke-dasharray="6 4"/>
+          <text x="224" y="62" font-size="13" font-weight="700" fill="currentColor">sftp-ingest process · one replica · Kotlin + Quarkus</text>
+
+          <!-- connector -->
+          <rect x="230" y="80" width="150" height="220" rx="6" fill="var(--paper)" stroke="currentColor" stroke-width="1.2"/>
+          <text x="305" y="102" text-anchor="middle" font-size="13" font-weight="600" fill="currentColor">SFTP connector</text>
+          <text x="305" y="117" text-anchor="middle" font-size="10" fill="var(--muted)">its own spec</text>
+          <g font-size="11" fill="currentColor">
+            <text x="242" y="144">ticker · every 1 h</text>
+            <text x="242" y="168">pool · 5 sessions</text>
+            <text x="242" y="192">lister + readiness</text>
+            <rect x="238" y="203" width="118" height="20" rx="3" fill="none" stroke="currentColor" stroke-width="0.8" stroke-dasharray="3 2"/>
+            <text x="242" y="217">in-flight files · mem</text>
+            <text x="242" y="243">download → staging</text>
+            <text x="242" y="267">ack → move temp/</text>
+          </g>
+
+          <!-- pipelines -->
+          <rect x="435" y="80" width="315" height="220" rx="6" fill="var(--paper)" stroke="currentColor" stroke-width="1.2"/>
+          <text x="592" y="102" text-anchor="middle" font-size="13" font-weight="600" fill="currentColor">Consumer + per-file pipelines</text>
+          <text x="592" y="117" text-anchor="middle" font-size="10" fill="var(--muted)">one coroutine per file · at most 4 in parallel</text>
+          <g font-size="11" fill="currentColor">
+            <text x="448" y="142">1  decide the entry point from the ledger</text>
+            <text x="448" y="164">2  download through the connector</text>
+            <text x="448" y="186">3  quality check (NONE today)</text>
+            <text x="448" y="208">4  PUT · HEAD · prune other versions</text>
+            <text x="448" y="230">5  ledger → UPLOADED</text>
+            <text x="448" y="252" fill="var(--green)" font-weight="600">6  ack() → move temp/ · commit point</text>
+            <text x="448" y="274" fill="var(--green)" font-weight="600">7  ledger → ACKED + PENDING rows · 1 txn</text>
+          </g>
+
+          <!-- staging -->
+          <rect x="230" y="340" width="150" height="54" rx="6" fill="var(--paper)" stroke="currentColor" stroke-width="1" stroke-dasharray="4 3"/>
+          <text x="305" y="361" text-anchor="middle" font-size="11" font-weight="600" fill="currentColor">staging · local disk</text>
+          <text x="305" y="378" text-anchor="middle" font-size="9.5" fill="var(--muted)">2 writes · 4 reads · wiped at boot</text>
+
+          <!-- relay -->
+          <rect x="435" y="340" width="315" height="190" rx="6" fill="var(--paper)" stroke="currentColor" stroke-width="1.2"/>
+          <text x="592" y="362" text-anchor="middle" font-size="13" font-weight="600" fill="currentColor">Relay</text>
+          <text x="592" y="377" text-anchor="middle" font-size="10" fill="var(--muted)">one coroutine · cold Flow with a bounded buffer</text>
+          <g font-size="10.5" fill="currentColor">
+            <rect x="447" y="392" width="66" height="36" rx="4" fill="none" stroke="currentColor" stroke-width="1"/>
+            <text x="480" y="414" text-anchor="middle">select due</text>
+            <rect x="525" y="392" width="66" height="36" rx="4" fill="none" stroke="currentColor" stroke-width="1"/>
+            <text x="558" y="414" text-anchor="middle">buffer</text>
+            <rect x="603" y="392" width="66" height="36" rx="4" fill="none" stroke="currentColor" stroke-width="1"/>
+            <text x="636" y="414" text-anchor="middle">workers ×4</text>
+            <rect x="681" y="392" width="58" height="36" rx="4" fill="none" stroke="currentColor" stroke-width="1"/>
+            <text x="710" y="414" text-anchor="middle">record</text>
+          </g>
+          <g stroke="currentColor" stroke-width="1" marker-end="url(#arr)">
+            <line x1="513" y1="410" x2="523" y2="410"/>
+            <line x1="591" y1="410" x2="601" y2="410"/>
+            <line x1="669" y1="410" x2="679" y2="410"/>
+          </g>
+          <rect x="447" y="444" width="150" height="20" rx="3" fill="none" stroke="currentColor" stroke-width="0.8" stroke-dasharray="3 2"/>
+          <text x="452" y="458" font-size="11" fill="currentColor">in-flight delivery ids · memory</text>
+          <text x="452" y="486" font-size="10" fill="var(--muted)">woken by every ack and by a 30 s sweep</text>
+          <text x="452" y="504" font-size="10" fill="var(--muted)">outcome: DELIVERED · retry with backoff · FAILED</text>
+
+          <!-- ===== arrows ===== -->
+          <!-- SFTP <-> connector -->
+          <line x1="150" y1="176" x2="230" y2="176" stroke="currentColor" stroke-width="1.2" marker-start="url(#arr)" marker-end="url(#arr)"/>
+          <text x="190" y="166" text-anchor="middle" font-size="10" fill="var(--muted)">JSch</text>
+          <text x="190" y="192" text-anchor="middle" font-size="9.5" fill="currentColor">list · download</text>
+          <text x="190" y="205" text-anchor="middle" font-size="10" fill="currentColor">rename</text>
+
+          <!-- connector -> pipelines: FileSeen -->
+          <line x1="380" y1="142" x2="435" y2="142" stroke="currentColor" stroke-width="1.2" marker-end="url(#arr)"/>
+          <text x="407" y="132" text-anchor="middle" font-size="10" fill="currentColor">FileSeen</text>
+          <text x="407" y="156" text-anchor="middle" font-size="9.5" fill="var(--muted)">(ack, nack)</text>
+          <!-- pipelines -> connector: download, ack -->
+          <line x1="435" y1="232" x2="380" y2="232" stroke="currentColor" stroke-width="1.2" marker-end="url(#arr)"/>
+          <text x="407" y="224" text-anchor="middle" font-size="9.5" fill="currentColor">download()</text>
+          <line x1="435" y1="266" x2="380" y2="266" stroke="var(--green)" stroke-width="1.6" marker-end="url(#arr-g)"/>
+          <text x="407" y="258" text-anchor="middle" font-size="10" fill="var(--green)" font-weight="600">ack()</text>
+
+          <!-- connector -> staging -->
+          <line x1="305" y1="300" x2="305" y2="340" stroke="currentColor" stroke-width="1" marker-end="url(#arr)"/>
+          <text x="313" y="324" font-size="10" fill="var(--muted)">.part → file</text>
+
+          <!-- pipelines -> MinIO -->
+          <line x1="750" y1="142" x2="820" y2="142" stroke="currentColor" stroke-width="1.2" marker-end="url(#arr)"/>
+          <text x="785" y="126" text-anchor="middle" font-size="10" fill="currentColor">PUT · HEAD</text>
+          <text x="785" y="156" text-anchor="middle" font-size="10" fill="currentColor">prune</text>
+          <text x="785" y="169" text-anchor="middle" font-size="9.5" fill="var(--muted)">S3 SDK v2</text>
+
+          <!-- pipelines -> ledger via the gutter -->
+          <path d="M 435 288 L 405 288 L 405 612 L 420 612" fill="none" stroke="var(--green)" stroke-width="1.4" marker-end="url(#arr-g)"/>
+          <text transform="translate(396 470) rotate(-90)" text-anchor="middle" font-size="10" fill="var(--green)" font-weight="600">JDBI · SEEN → … → ACKED + PENDING</text>
+
+          <!-- pipelines -> relay wake -->
+          <line x1="592" y1="300" x2="592" y2="340" stroke="currentColor" stroke-width="1" stroke-dasharray="4 3" marker-end="url(#arr)"/>
+          <text x="600" y="324" font-size="10" fill="var(--muted)">wake after 7</text>
+
+          <!-- relay <-> ledger -->
+          <line x1="592" y1="530" x2="592" y2="580" stroke="var(--green)" stroke-width="1.4" marker-start="url(#arr-g)" marker-end="url(#arr-g)"/>
+          <text x="600" y="551" font-size="10" fill="var(--green)" font-weight="600">JDBI · select due</text>
+          <text x="600" y="564" font-size="10" fill="var(--green)" font-weight="600">DELIVERED / retry / FAILED</text>
+
+          <!-- relay -> downstream -->
+          <line x1="750" y1="404" x2="820" y2="404" stroke="currentColor" stroke-width="1.2" marker-end="url(#arr)"/>
+          <text x="785" y="394" text-anchor="middle" font-size="10" fill="currentColor">POST body</text>
+          <line x1="820" y1="430" x2="750" y2="430" stroke="currentColor" stroke-width="1" stroke-dasharray="4 3" marker-end="url(#arr)"/>
+          <text x="785" y="446" text-anchor="middle" font-size="9.5" fill="var(--muted)">2xx + req id</text>
+          <text x="785" y="460" text-anchor="middle" font-size="9.5" fill="var(--muted)">HttpClient</text>
+
+          <!-- legend -->
+          <g font-size="10" fill="var(--muted)">
+            <rect x="20" y="560" width="14" height="10" rx="2" fill="none" stroke="currentColor" stroke-width="0.8" stroke-dasharray="3 2"/>
+            <text x="40" y="569">dashed box · in memory, must not survive a restart</text>
+            <line x1="20" y1="590" x2="34" y2="590" stroke="var(--green)" stroke-width="1.6"/>
+            <text x="40" y="594">green · the durable commit path</text>
+            <line x1="20" y1="612" x2="34" y2="612" stroke="currentColor" stroke-width="1" stroke-dasharray="4 3"/>
+            <text x="40" y="616">dashed arrow · signal or response, never data</text>
+          </g>
+        </svg>
+      </div>
+      <figcaption>Every arrow is a call or a signal; the adapter that implements it is named on the arrow (JSch inside the connector, the S3 SDK, JDBI, the JDK HttpClient). Nothing crosses the process boundary except through one of those four. The pipelines and the relay never talk to each other except through the ledger and one wake signal, which is what lets either be restarted without the other noticing.</figcaption>
+    </figure>
+
+    <div class="block">
+      <h3>Three pieces of state, three owners</h3>
       <p>Everything not drawn below is stateless and can be killed at any moment. The connector remembers only which files it has emitted and not yet heard back about. The ledger is the single source of truth for what happened to a file. The relay's set is a "these rows are taken" guard, not a cache and not a store.</p>
     </div>
 
