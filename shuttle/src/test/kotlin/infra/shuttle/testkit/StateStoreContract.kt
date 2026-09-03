@@ -237,6 +237,20 @@ abstract class StateStoreContract {
         assertEquals(TransferState.DONE, transfer(parent.id).state)
     }
 
+    @Test
+    fun childrenOf_lists_a_parents_children_in_id_order_and_nothing_for_a_row_without_children() = runTest {
+        val parent = store.seen(identity("set.json"), TransferKind.MESSAGE)
+        val single = storedTransfer("a")
+        assertEquals(emptyList<Transfer>(), store.childrenOf(parent.id))
+        assertEquals(emptyList<Transfer>(), store.childrenOf(single.id))
+        val children = store.children(parent.id, listOf(staged("c2"), staged("c1")))
+        store.stored(children[0].id, ref("c2"), emptyList())
+        assertEquals(listOf("c2", "c1"), store.childrenOf(parent.id).map { it.identity.sourceName })
+        assertEquals(listOf(TransferState.STORED, TransferState.FETCHED), store.childrenOf(parent.id).map { it.state })
+        assertEquals(ref("c2"), store.childrenOf(parent.id).first().target)
+        assertEquals(emptyList<Transfer>(), store.childrenOf(children[0].id), "a child has no children")
+    }
+
     /** D42: siblings store concurrently; the parent flips once, with one set of rows. */
     @Test
     fun D42_children_completing_concurrently_leave_exactly_one_parent_STORED_write() = runTest {

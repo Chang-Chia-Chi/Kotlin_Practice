@@ -85,8 +85,10 @@ class JdbiStateStore(private val jdbi: Jdbi, private val dispatcher: CoroutineDi
                 "UPDATE file_transfer SET state = 'FETCHED', source_digest = :d, digest = :d, digest_algo = :algo, stored_name = :name, stored_mtime = :mtime WHERE id = :id",
             ) { bind("d", it.digest.hex).bind("algo", it.digest.algorithm.name).bind("name", it.name).bind("mtime", it.mtime.ts()).bind("id", child.id.value) }
         }
-        h.createQuery("SELECT * FROM file_transfer WHERE parent_id = :id ORDER BY id").bind("id", id.value).map { rs, _ -> transferRow(rs) }.list()
+        h.childrenOf(id)
     }
+
+    override suspend fun childrenOf(id: TransferId) = tx { it.childrenOf(id) }
 
     /**
      * D42: one update on the child's row, then the parent. Touching the parent row first takes its row
@@ -210,6 +212,9 @@ class JdbiStateStore(private val jdbi: Jdbi, private val dispatcher: CoroutineDi
 
     private fun Handle.transfer(id: TransferId): Transfer =
         createQuery("SELECT * FROM file_transfer WHERE id = :id").bind("id", id.value).map { rs, _ -> transferRow(rs) }.one()
+
+    private fun Handle.childrenOf(id: TransferId): List<Transfer> =
+        createQuery("SELECT * FROM file_transfer WHERE parent_id = :id ORDER BY id").bind("id", id.value).map { rs, _ -> transferRow(rs) }.list()
 
     private fun Handle.latest(identity: SourceIdentity): Transfer? {
         val size = if (identity.sourceSize == null) "source_size IS NULL" else "source_size = :size"

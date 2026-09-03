@@ -84,6 +84,8 @@ class InMemoryStateStore(private val clock: Clock) : StateStore {
         }
     }
 
+    override suspend fun childrenOf(id: TransferId) = tx("childrenOf", id) { kidsOf(id) }
+
     /** One update on the row, then the conditional parent update that fires when no sibling is left unstored (D42). */
     override suspend fun stored(id: TransferId, target: TargetRef, events: List<DeliveryRequest>) = tx("stored", id, target, events) {
         val row = update(id) { copy(state = STORED, target = target) }
@@ -101,7 +103,7 @@ class InMemoryStateStore(private val clock: Clock) : StateStore {
     override suspend fun acked(id: TransferId, events: List<DeliveryRequest>) = tx("acked", id, events) {
         val at = clock.instant()
         update(id) { copy(state = ACKED, ackedAt = at) }
-        childrenOf(id).forEach { update(it.id) { copy(state = ACKED, ackedAt = at) } }
+        kidsOf(id).forEach { update(it.id) { copy(state = ACKED, ackedAt = at) } }
         insertDeliveries(id, events)
         finishWhenAllDelivered(id)
     }
@@ -198,7 +200,7 @@ class InMemoryStateStore(private val clock: Clock) : StateStore {
         if (rows.getValue(id).state == ACKED && mine.all { it.state == DeliveryState.DELIVERED }) {
             val at = clock.instant()
             update(id) { copy(state = DONE, completedAt = at) }
-            childrenOf(id).forEach { update(it.id) { copy(state = DONE, completedAt = at) } }
+            kidsOf(id).forEach { update(it.id) { copy(state = DONE, completedAt = at) } }
         }
     }
 
@@ -208,7 +210,7 @@ class InMemoryStateStore(private val clock: Clock) : StateStore {
     private fun updateDelivery(id: DeliveryId, change: Delivery.() -> Delivery): Delivery =
         outboxRows.getValue(id).change().let { it.copy(attempts = it.attempts + 1) }.also { outboxRows[id] = it }
 
-    private fun childrenOf(id: TransferId) = rows.values.filter { it.parentId == id }
+    private fun kidsOf(id: TransferId) = rows.values.filter { it.parentId == id }
     private fun latest(identity: SourceIdentity) =
         rows.values.filter { it.kind != TransferKind.CHILD && it.identity.key() == identity.key() }.maxByOrNull { it.identity.revision }
     private fun SourceIdentity.key() = copy(revision = 1)

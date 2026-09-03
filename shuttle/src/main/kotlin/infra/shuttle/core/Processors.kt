@@ -8,17 +8,19 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
 
+/** One mapper for every built-in that reads JSON: extract, expand and the pipeline's `fetch.path`. */
+internal val JSON = ObjectMapper()
+
 /**
  * Spec 6.3: configuration to behaviour. `custom` resolves through the injected lookup (CDI in the host,
  * a map in tests); an unknown name is a configuration error here, which rule 15 has already refused at boot.
- * `expand` and `extract from: message` are milestone 2 (tickets 16 and 17).
  */
 fun processorFor(spec: ProcessorSpec, custom: (ProcessorSpec.Custom) -> Processor?): Processor = when (spec) {
     ProcessorSpec.Quality -> QualityProcessor { if (Files.size(it.path) == 0L) "${it.name} is empty" else null }
     is ProcessorSpec.Rename -> RenameProcessor(spec)
     ProcessorSpec.Zip -> ZipProcessor()
     is ProcessorSpec.Unzip -> UnzipProcessor(spec)
-    is ProcessorSpec.Extract -> if (spec.from == ExtractFrom.Message) throw NotImplementedError("extract from: message is ticket 17") else ExtractProcessor(spec)
+    is ProcessorSpec.Extract -> ExtractProcessor(spec)
     is ProcessorSpec.Expand -> ExpandProcessor(spec)
     is ProcessorSpec.VerifyDigest -> VerifyDigestProcessor(spec)
     is ProcessorSpec.Custom -> custom(spec) ?: throw IllegalArgumentException("no custom processor named ${spec.name}")
@@ -98,7 +100,7 @@ class UnzipProcessor(private val spec: ProcessorSpec.Unzip) : Processor {
     }
 }
 
-/** Spec 6.3 `extract` from the file name, the source path or the content; named or positional regex groups, or JSON pointers. */
+/** Spec 6.3 `extract` from the file name, the source path, the content or the message body; named or positional regex groups, or JSON pointers. */
 class ExtractProcessor(private val spec: ProcessorSpec.Extract) : Processor {
     private val regex = spec.regex?.let(::Regex)
     override val produces = spec.produces
@@ -109,27 +111,55 @@ class ExtractProcessor(private val spec: ProcessorSpec.Extract) : Processor {
             ExtractFrom.FileName -> o.name
             ExtractFrom.SourcePath -> ctx.transfer.sourcePath
             ExtractFrom.Content -> Files.readString(o.path)
-            ExtractFrom.Message -> throw NotImplementedError("extract from: message is ticket 17")
+            ExtractFrom.Message -> ctx.source.body?.decodeToString() ?: return Outcome.Reject("extract: the message has no body")
         }
+        val where = when (spec.from) { ExtractFrom.Content -> o.name; ExtractFrom.Message -> "the message"; else -> subject }
         if (regex != null) {
-            val match = regex.find(subject) ?: return Outcome.Reject("extract: ${if (spec.from == ExtractFrom.Content) o.name else subject} does not match ${spec.regex}")
+            val match = regex.find(subject) ?: return Outcome.Reject("extract: $where does not match ${spec.regex}")
             val names = spec.into ?: produces.toList()
             val values = if (spec.into != null) match.groupValues.drop(1) else names.map { match.groups[it]?.value ?: "" }
             names.zip(values).forEach { (n, v) -> ctx.setAttribute(n, v) }
         }
         spec.json?.let { pointers ->
-            val tree = MAPPER.readTree(subject)
+            val tree = JSON.readTree(subject)
             for ((name, pointer) in pointers) {
                 val node = tree.at(pointer)
-                if (node.isMissingNode || node.isNull) return Outcome.Reject("extract: $pointer is absent from ${o.name}")
+                if (node.isMissingNode || node.isNull) return Outcome.Reject("extract: $pointer is absent from $where")
                 ctx.setAttribute(name, if (node.isValueNode) node.asText() else node.toString())
             }
         }
         return Outcome.Continue(payload)
     }
-
-    private companion object { val MAPPER = ObjectMapper() }
 }
+
+/**
+ * Spec 6.3 `expand`: one child per listed path, each fetched from `from` through the context. `format: json`
+ * reads the current object, `format: message` the subscription message; `files` is a JSON pointer whose one
+ * `[*]` walks an array (`/images[*].path`, `/paths[*]`, or `/paths` for an array of strings). Nothing listed,
+ * or a pointer that lands on something other than a string, is a Reject: the metadata is the bad input.
+ */
+class ExpandProcessor(private val spec: ProcessorSpec.Expand) : Processor {
+    private val pointer = expandPointer(spec.files)
+    override val produces = emptySet<String>()
+
+    override suspend fun process(payload: Payload, ctx: ProcessContext): Outcome {
+        val (bytes, where) = when (spec.format) {
+            "json" -> payload.objects.single().let { Files.readAllBytes(it.path) to it.name }
+            "message" -> (ctx.source.body ?: return Outcome.Reject("expand: the message has no body")) to "the message"
+            else -> throw IllegalArgumentException("expand: format ${spec.format} is not json or message")
+        }
+        val (head, tail) = pointer
+        val listed = JSON.readTree(bytes).at(head)
+        val nodes = if (listed.isArray) listed.toList() else listOf(listed)
+        val paths = nodes.map { n -> n.at(tail).takeIf { it.isTextual }?.asText() ?: return Outcome.Reject("expand: ${spec.files} is absent from $where or is not a path") }
+        if (paths.isEmpty()) return Outcome.Reject("expand: ${spec.files} lists no paths in $where")
+        return Outcome.Continue(Payload(paths.map { ctx.fetch(spec.from, it) }))
+    }
+}
+
+/** `expand.files` split at its `[*]`: the pointer to the array and the pointer into each element (`.path` reads as `/path`); rule 14 checks both. */
+internal fun expandPointer(files: String): Pair<String, String> =
+    files.substringBefore("[*]") to files.substringAfter("[*]", "").let { if (it.startsWith(".")) it.replace('.', '/') else it }
 
 /** Spec 6.5 `verifyDigest`: the expected value comes from an attribute; the transport computed, the application compares. */
 class VerifyDigestProcessor(private val spec: ProcessorSpec.VerifyDigest) : Processor {

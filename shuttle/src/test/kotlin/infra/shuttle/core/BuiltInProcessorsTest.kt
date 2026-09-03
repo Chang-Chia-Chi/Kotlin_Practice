@@ -131,6 +131,40 @@ class BuiltInProcessorsTest {
         }
         assertEquals(mine, processorFor(ProcessorSpec.Custom("mine")) { if (it.name == "mine") mine else null })
         assertThrows(IllegalArgumentException::class.java) { processorFor(ProcessorSpec.Custom("nope")) { null } }
-        assertThrows(NotImplementedError::class.java) { processorFor(ProcessorSpec.Extract(ExtractFrom.Message, json = mapOf("a" to "/a"))) { null } }
+    }
+
+    private fun messageCtx(body: String) = FakeProcessContext(dir, fetcher, clock, source = SourceView("images", body.toByteArray()))
+
+    @Test
+    fun extract_from_message_sets_attributes_from_the_message_body_by_regex_or_json_and_rejects_a_message_without_one() = runTest {
+        messageCtx("""{"batchId":"b7","subject":"images.ready"}""").use { ctx ->
+            val payload = input()
+            assertTrue(run(processorFor(ProcessorSpec.Extract(ExtractFrom.Message, json = mapOf("batchId" to "/batchId"))) { null }, payload, ctx) is ChainResult.Done)
+            assertTrue(run(processorFor(ProcessorSpec.Extract(ExtractFrom.Message, regex = "\"subject\":\"(?<subject>[^\"]+)\"")) { null }, payload, ctx) is ChainResult.Done)
+            assertEquals(mapOf("batchId" to "b7", "subject" to "images.ready"), ctx.attributes)
+            assertEquals(ChainResult.Rejected("extract: /nope is absent from the message"), run(processorFor(ProcessorSpec.Extract(ExtractFrom.Message, json = mapOf("x" to "/nope"))) { null }, payload, ctx))
+        }
+        ctx().use { ctx ->
+            assertEquals(ChainResult.Rejected("extract: the message has no body"), run(processorFor(ProcessorSpec.Extract(ExtractFrom.Message, json = mapOf("x" to "/x"))) { null }, input(), ctx))
+        }
+    }
+
+    @Test
+    fun expand_fetches_one_child_per_path_listed_in_a_json_metadata_file_or_in_the_message_and_rejects_an_absent_or_empty_list() = runTest {
+        fetcher.file("sets/set.json", """{"images":[{"path":"img/1.png"},{"path":"img/2.png"}],"none":[]}""".toByteArray())
+            .file("img/1.png", "one".toByteArray()).file("img/2.png", "two".toByteArray())
+        ctx().use { ctx ->
+            val done = run(processorFor(ProcessorSpec.Expand("json", "/images[*].path", "minio")) { null }, input("sets/set.json"), ctx) as ChainResult.Done
+            assertEquals(listOf("1.png", "2.png"), done.payload.objects.map { it.name })
+            assertEquals(listOf("one", "two"), done.payload.objects.map { Files.readString(it.path) })
+            assertEquals(done.payload.objects.map { it.path }, ctx.createdFiles, "each child is a file the context owns")
+            assertEquals(done.payload.objects.map { Digest.of(it.path, DigestAlgorithm.MD5) }, done.payload.objects.map { it.digest })
+            assertEquals(ChainResult.Rejected("expand: /none[*].path lists no paths in set.json"), run(processorFor(ProcessorSpec.Expand("json", "/none[*].path", "minio")) { null }, input("sets/set.json"), ctx))
+            assertEquals(ChainResult.Rejected("expand: /nope is absent from set.json or is not a path"), run(processorFor(ProcessorSpec.Expand("json", "/nope", "minio")) { null }, input("sets/set.json"), ctx))
+        }
+        messageCtx("""{"paths":["img/2.png"]}""").use { ctx ->
+            val done = run(processorFor(ProcessorSpec.Expand("message", "/paths", "minio")) { null }, input(), ctx) as ChainResult.Done
+            assertEquals(listOf("2.png"), done.payload.objects.map { it.name })
+        }
     }
 }

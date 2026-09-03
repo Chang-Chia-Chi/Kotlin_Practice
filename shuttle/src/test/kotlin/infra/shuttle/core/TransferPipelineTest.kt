@@ -52,6 +52,96 @@ class TransferPipelineTest {
 
     private fun stagingIsEmpty() = assertEquals(0L, Files.list(staging).count(), "staging holds no file outside a running pipeline (I9)")
 
+    /** Spec 13.1's image-sets route on the fakes: a message names a metadata file, expand fans it out, children go to the target. */
+    private val message = SourceIdentity(RouteName("drop"), SourceKind.NATS, "nats:images", "msg-1", null, null)
+    private fun imageSets(notify: List<Notify> = emptyList(), parallelism: Int = 2) = route(notify).copy(
+        source = Source.Subscribe("nats", "images", onAck = AckAction.Ack), fetch = Fetch("minio", "/metadata/path"), parallelism = parallelism,
+    )
+    private val imageChain = listOf(
+        processorFor(ProcessorSpec.Extract(ExtractFrom.Message, json = mapOf("batchId" to "/batchId"))) { null },
+        processorFor(ProcessorSpec.Expand("json", "/images[*].path", "minio")) { null },
+    )
+    private suspend fun imageMessage(): RouteEvent.Seen {
+        fetcher.file("sets/set.json", """{"images":[{"path":"img/1.png"},{"path":"img/2.png"}]}""".toByteArray())
+            .file("img/1.png", "one".toByteArray()).file("img/2.png", "two".toByteArray())
+        val body = """{"batchId":"b7","metadata":{"path":"sets/set.json"}}""".toByteArray()
+        return source.seen(message, SourceView("images", body)).events().toList().last() as RouteEvent.Seen
+    }
+
+    @Test
+    fun S27_image_sets_happy_path_a_message_expands_into_children_stored_in_parallel_acked_once_with_fetched_and_acked_delivered_once_each() = runTest {
+        val event = imageMessage()
+        pipeline(imageSets(listOf(Notify(DeliveryMoment.FETCHED, "upstream"), Notify(DeliveryMoment.ACKED, "downstream"))), imageChain).run(event, fetcher)
+
+        val parent = store.transfers.single { it.kind == TransferKind.MESSAGE }
+        val children = store.transfers.filter { it.parentId == parent.id }
+        assertEquals(TransferState.ACKED, parent.state)
+        assertEquals(mapOf("batchId" to "b7"), parent.attributes)
+        assertEquals(listOf("1.png", "2.png"), children.map { it.target!!.key })
+        assertTrue(children.all { it.state == TransferState.ACKED }, "children follow the parent's ack")
+        assertEquals("one", String(target.bytes("1.png")))
+        assertEquals(listOf("sets/set.json", "img/1.png", "img/2.png"), fetcher.calls.map { it.path }, "the metadata through fetch.path, each image through ctx.fetch")
+        assertEquals(listOf(message), source.acks, "the message is acked once")
+        assertEquals(listOf(DeliveryMoment.FETCHED to parent.id, DeliveryMoment.ACKED to parent.id), store.outbox.map { it.moment to it.transferId }, "fetched and acked once each, on the parent")
+        stagingIsEmpty()
+    }
+
+    @Test
+    fun S28_half_the_children_stored_the_redelivery_verifies_them_stores_the_rest_and_acks_the_message_once() = runTest {
+        val event = imageMessage()
+        val pipeline = pipeline(imageSets(parallelism = 1), imageChain)
+        target.failNextStore = true
+        pipeline.run(event, fetcher) // the first child's store fails, the second is stored anyway
+
+        val parent = store.transfers.single { it.kind == TransferKind.MESSAGE }
+        val (one, two) = store.transfers.filter { it.parentId == parent.id }
+        assertEquals(TransferState.PROCESSED, parent.state)
+        assertEquals(listOf(TransferState.FETCHED, TransferState.STORED), listOf(one.state, two.state))
+        assertEquals(1, one.attempts, "the failure is the child's attempt")
+        assertEquals(0, parent.attempts)
+        assertEquals(listOf(ScriptedSource.Nack(message, true)), source.nacks)
+        stagingIsEmpty()
+        target.calls.clear()
+
+        pipeline.run(event, fetcher) // the redelivery
+        assertEquals(listOf(InMemoryTarget.Call("store", "1.png"), InMemoryTarget.Call("verify", "2.png")), target.calls, "the stored child is verified and skipped, the other stored")
+        assertEquals(listOf(one.id, two.id), store.transfers.filter { it.parentId == parent.id }.map { it.id }, "the same child rows")
+        assertEquals(TransferState.DONE, store.transfer(parent.id).state)
+        assertEquals(listOf(message), source.acks, "acked once")
+        stagingIsEmpty()
+    }
+
+    @Test
+    fun S29_one_child_failing_five_times_fails_the_parent_the_message_is_not_acked_and_a_redrive_replaces_the_children_and_reruns_the_chain() = runTest {
+        val event = imageMessage()
+        val pipeline = pipeline(imageSets(parallelism = 1), imageChain)
+        repeat(5) { target.failNextStore = true; pipeline.run(event, fetcher) }
+
+        val parent = store.transfers.single { it.kind == TransferKind.MESSAGE }
+        val before = store.transfers.filter { it.parentId == parent.id }
+        assertEquals(TransferState.FAILED, parent.state)
+        assertEquals(listOf(TransferState.FAILED, TransferState.STORED), before.map { it.state })
+        assertEquals(5, before[0].attempts)
+        assertEquals("child ${before[0].id.value} failed: injected: store failed", parent.lastError)
+        assertTrue(source.acks.isEmpty(), "the message is never acked")
+        assertEquals(List(4) { ScriptedSource.Nack(message, true) } + ScriptedSource.Nack(message, false), source.nacks)
+        assertEquals(1.0, counter("failed"))
+        assertEquals(5, fetcher.calls.count { it.path == "sets/set.json" }, "the chain re-ran on every redelivery")
+        stagingIsEmpty()
+
+        pipeline.run(event, fetcher) // I7: FAILED does no work
+        assertEquals(5, fetcher.calls.count { it.path == "sets/set.json" })
+
+        store.redrive(parent.id)
+        pipeline.run(event, fetcher)
+        val after = store.transfers.filter { it.parentId == parent.id }
+        assertEquals(TransferState.DONE, store.transfer(parent.id).state)
+        assertEquals(2, after.size)
+        assertTrue(after.none { a -> before.any { it.id == a.id } }, "the re-drive replaced the children")
+        assertEquals(listOf(message), source.acks)
+        stagingIsEmpty()
+    }
+
     @Test
     fun I17_S19_a_mirror_route_with_no_notifications_goes_none_to_DONE_and_creates_no_outbox_row() = runTest {
         val event = seen()
@@ -302,7 +392,11 @@ class TransferPipelineTest {
         repeat(5) { target.failNextStore = true; pipeline.run(other, fetcher) }
         val failedParent = store.transfers.single { it.identity.sourceName == "b.csv" && it.kind != TransferKind.CHILD }
         assertEquals(TransferState.FAILED, failedParent.state)
-        assertEquals(5, failedParent.attempts)
+        val failedChild = store.transfers.single { it.parentId == failedParent.id && it.state == TransferState.FAILED }
+        assertEquals(5, failedChild.attempts, "the attempts are the child's, kept across the re-runs")
+        assertEquals(0, failedParent.attempts)
+        assertEquals("child ${failedChild.id.value} failed: injected: store failed", failedParent.lastError)
+        assertEquals(1, store.transfers.count { it.parentId == failedParent.id && it.state == TransferState.STORED }, "the sibling stored once and kept its row")
         assertEquals(listOf(event.identity), source.acks, "the failed parent was never acked")
         assertEquals(ScriptedSource.Nack(other.identity, false), source.nacks.last())
         stagingIsEmpty()
@@ -422,7 +516,7 @@ class TransferPipelineTest {
     fun a_subscribed_message_is_written_ACKED_before_the_broker_ack_and_a_redelivery_is_reacked_without_a_fetch() = runTest {
         val route = route().copy(source = Source.Subscribe("nats", "images", onAck = AckAction.Ack), fetch = Fetch("minio", "/path"))
         val identity = SourceIdentity(RouteName("drop"), SourceKind.NATS, "nats:images", "msg-1", null, null)
-        val event = source.seen(identity, SourceView("a.csv")).events().toList().last() as RouteEvent.Seen
+        val event = source.seen(identity, SourceView("images", """{"path":"a.csv"}""".toByteArray())).events().toList().last() as RouteEvent.Seen
         val order = mutableListOf<String>()
         val hook = object : Hook {
             override suspend fun at(point: HookPoint, transfer: TransferId) { order += point.name }
@@ -572,7 +666,7 @@ class TransferPipelineTest {
         val upstream = RecordingChannel("upstream")
         val route = route().copy(source = Source.Subscribe("nats", "images", onAck = AckAction.Callback("upstream")), fetch = Fetch("minio", "/path"))
         val identity = SourceIdentity(RouteName("drop"), SourceKind.NATS, "nats:images", "msg-1", null, null)
-        val event = source.seen(identity, SourceView("a.csv")).events().toList().last() as RouteEvent.Seen
+        val event = source.seen(identity, SourceView("images", """{"path":"a.csv"}""".toByteArray())).events().toList().last() as RouteEvent.Seen
         val order = mutableListOf<String>()
         val hook = object : Hook {
             override suspend fun at(point: HookPoint, transfer: TransferId) { order += point.name }
