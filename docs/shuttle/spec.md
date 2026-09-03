@@ -514,7 +514,10 @@ that must be atomic across both tables (I11, I20).
 
 A route attaches channel deliveries to events: `fetched`, `stored`, `done`. Each attachment is
 one outbox row created in the transaction that defines the event (I20), delivered
-asynchronously and at-least-once by the notifier. `done` fires after the ack. A route with no
+asynchronously and at-least-once by the notifier. On the row, `event` says which lifecycle
+moment the notification is about and never changes; `state` says how far the delivery itself
+has got, PENDING, DELIVERED or FAILED, and is what the notifier advances. The notifier needs no
+route: the row names its channel, and the body is rendered from the transfer row it points to. `done` fires after the ack. A route with no
 attachments creates no rows and goes ACKED to DONE in the same transaction (I17).
 
 ### 9.2 The `DeliveryChannel` seam
@@ -831,7 +834,7 @@ Each is public numbering, reported by number in validate mode and at startup.
 | 10 | Every SFTP store's `keepAlive` and `idleTimeout` are below its `idleCutoff` |
 | 11 | Every staging directory exists, is writable, and is local disk; two stores do not share one |
 | 12 | `onAck` is stated explicitly, no default, and it and `onNack` belong to the trigger kind's vocabulary; a `callback` names a channel offering the notify role |
-| 13 | A `key` or `directory` pattern uses only `{name}`, `{yyyyMMdd}` and attribute names declared in the route, and yields no `..` |
+| 13 | A `key` or `directory` pattern uses only `{name}` (the staged object's name at store time, after the chain), `{sourceName}` (the source object's original name), `{yyyyMMdd}` and attribute names declared in the route, and yields no `..` |
 | 14 | Every built-in processor's configuration parses: patterns compile, pointers are valid, `expand.from` names a store |
 | 15 | Every `custom` processor and every `provider` resolves to a named bean |
 | 16 | Every mapping `field` is in the vocabulary |
