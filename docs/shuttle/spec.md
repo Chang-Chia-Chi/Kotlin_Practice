@@ -125,7 +125,7 @@ are dependency sentences enforced by ArchUnit (D18):
 | `infra.shuttle.http` | the HTTP channel | `core`, `java.net.http` |
 | `infra.shuttle.nats` | the NATS channel: subscribe trigger and publish (milestone 2) | `core`, jnats |
 | `infra.shuttle.jdbi` | the Oracle state store | `core`, JDBI |
-| `infra.shuttle.quarkus` | producers, host lifecycle, readiness, admin resource, named-bean lookup, validate mode | everything above, Quarkus |
+| `infra.shuttle.quarkus` | producers, host lifecycle, readiness, admin resource, named-bean lookup, validate and try modes | everything above, Quarkus |
 
 Rules: nothing in `core` imports an adapter or a technology; each adapter imports only `core`
 and its own technology; only `quarkus` imports Quarkus; only `sftp` and `quarkus` import the
@@ -650,11 +650,21 @@ delivery's age. Alert inputs; no action.
 6. Connectors started, with their own probes (marker rename into every ack target).
 7. Notifier started, then every route.
 
-### 12.2 Validate mode
+### 12.2 Validate and try modes
 
 `shuttle validate <files>` runs steps 1 and 5 only, connects to nothing, prints every violation
 with its rule number, exits non-zero on any. This is what lets operations edit YAML without a
 build and without a deployment.
+
+`shuttle try --route <name> --file-name <name> [--source-path <path>] [--content <file>]
+[--message <file>]` goes one step further for one route: it validates, then runs the route's
+processing chain over the sample inputs with a fake context in a temp directory, and prints the
+attributes each step set, the key the target would use, and the rendered body for every channel
+the route notifies. It connects to nothing and stores nothing. This is where a user finds that a
+regex group is named `orderNo` while the mapping says `orderNumber`, the way Logstash's grok
+debugger or Benthos's mapping evaluator would show it, before any deployment (D35). Custom
+processors run too, so one that reads a network would fail here first, which is the rule
+anyway.
 
 ### 12.3 Shutdown
 
@@ -724,6 +734,7 @@ shuttle:
           - { path: receivedAt,      field: SOURCE_MTIME, format: ISO_INSTANT }
           - { path: orderNumber,     attribute: orderNumber }
           - { path: order,           provider: orderDetails }
+          - { path: event,           field: EVENT }               # fetched | stored | acked, so the receiver can route on it
           - { path: source,          value: vendor-drop }
     upstream-receipt:
       http:
@@ -960,6 +971,7 @@ poll are appeals to the connector's spec.
 | D32 | One object store declaration per account; pool arithmetic validated per declaration | The cap is per account and two declarations cannot be reconciled by the process |
 | D33 | Digest algorithm is a process default with route override; MD5 is the first deployment's | Downstream expects MD5; MD5 buys `Content-MD5` and the ETag check for free |
 | D34 | No logger in any context object; correlation through MDC | The repository's rule is direct JBoss logging; MDC gives correlation to every logger in the call |
+| D35 | A `try` mode renders one route's chain and bodies over sample inputs offline | Validation proves shape, not outcome; every comparable tool gives users a way to see what a sample produces before deploying, and ours costs nothing because the chain and the renderer are already pure |
 
 ---
 
@@ -1060,6 +1072,7 @@ expand with children, the SFTP target, `fetched` notifications, callback acks.
 | S28 | Crash with half the children stored (M2) | Next redelivery: children verified, the rest stored, parent acked; message acked once |
 | S29 | One child fails five times (M2) | Parent FAILED; message not acked; re-drive re-runs the chain |
 | S30 | `callback` ack returns 500 then 200 (M2) | Transfer stays STORED through the failure; ACKED after the 200; one `acked` delivery |
+| S31 | `shuttle try` on the vendor-drop route with a sample name | Prints the attributes per step, the key, and one body per notified channel; opens no connection; a mapping naming an attribute the regex does not produce is reported by rule 17 |
 
 ---
 
@@ -1074,8 +1087,8 @@ expand with children, the SFTP target, `fetched` notifications, callback acks.
 - Quality check becomes one of several processors under a single `Processor` seam; attributes
   and providers added; the mapping table replaces the Kotlin body builder as the primary form.
 - Notifications on transfer states `fetched`, `stored`, `acked`; a route may notify nobody.
-- YAML as the primary configuration with numbered rules and a validate mode; Kotlin DSL kept as
+- YAML as the primary configuration with numbered rules, a validate mode and a try mode; Kotlin DSL kept as
   the model.
 - Route supervision with backoff; readiness `all-routes-down`; pool arithmetic per store.
 - Digest algorithm configurable, MD5 first, with `Content-MD5` and ETag checks on S3.
-- Two milestones; the acceptance plan grows from 14 to 22 invariants and 18 to 30 scenarios.
+- Two milestones; the acceptance plan grows from 14 to 22 invariants and 18 to 31 scenarios.

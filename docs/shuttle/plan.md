@@ -57,7 +57,7 @@ shuttle/src/main/kotlin/infra/shuttle/
   http/     HttpChannel
   nats/     NatsChannel: subscribe trigger -> RouteEvent, publish (G15)
   jdbi/     JdbiStateStore, StateStoreSchema (the DDL text)
-  quarkus/  Producers, ShuttleHost, ReadinessCheck, AdminResource, NamedBeans, ValidateCommand
+  quarkus/  Producers, ShuttleHost, ReadinessCheck, AdminResource, NamedBeans, ValidateCommand, TryCommand
 ```
 
 ArchUnit sentences, enforced from G0:
@@ -324,16 +324,17 @@ adds the subscription source, fan-out, the SFTP target and the remaining notific
   SEEN; a wrong password ends with `RouteDown`.
 - **Size:** small-medium.
 
-### G13 - Quarkus host, validate mode, admin
+### G13 - Quarkus host, validate and try modes, admin
 
 - **Goal:** the running application of spec 12 and 14.
 - **Deliverables:** producers in order; `ShuttleHost` running spec 12.1 startup and 12.3
   shutdown under `drainTimeout`; `NamedBeans` resolving custom processors and providers by CDI
-  name; `ValidateCommand` for spec 12.2; readiness per the configured rule; the seven admin
+  name; `ValidateCommand` and `TryCommand` for spec 12.2, the latter over the G4 chain and the G3
+  renderer with the test kit's fake context; readiness per the configured rule; the seven admin
   endpoints of spec 14.1 under the admin role; the bounded IO dispatcher; metrics bound.
 - **Blocked by:** G1, G7, G8, G9, G10, G11, G12.
 - **Fixed contracts:** I12; spec 12 ordering; spec 14.1.
-- **Acceptance:** `I12_`; S15, S18, S24, S25 through the real host; boot fails naming the DDL
+- **Acceptance:** `I12_`; S15, S18, S24, S25, S31 through the real host; boot fails naming the DDL
   on a missing table and the bucket on a missing bucket; readiness follows the rule; every
   admin endpoint changes what it says it changes.
 - **Size:** medium.
@@ -428,7 +429,7 @@ adds the subscription source, fan-out, the SFTP target and the remaining notific
 | S14, S16, S23 | G6 |
 | S2 to S6 | G7 |
 | S7, S8, S9, S17, S22 | G8 |
-| S15, S18, S24 | G13 |
+| S15, S18, S24, S31 | G13 |
 | S13 and S1 to S26 end to end | G14 |
 | S27, S28, S29 | G16, G19 |
 | S30 | G18, G19 |
