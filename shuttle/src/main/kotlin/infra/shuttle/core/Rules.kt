@@ -2,7 +2,6 @@ package infra.shuttle.core
 
 import java.nio.file.Files
 import java.nio.file.Path
-import java.time.format.DateTimeFormatter
 import java.util.regex.Pattern
 import java.util.regex.PatternSyntaxException
 
@@ -91,15 +90,8 @@ object Rules {
         fun channel(channel: Channel) {
             if (channel !is HttpChannel) return
             if ((channel.response.success intersect channel.response.retry).isNotEmpty()) fail(20, "channel ${channel.name}: success and retry overlap")
-            for (row in channel.body.rows) {
-                val at = "channel ${channel.name} row ${row.path}"
-                if (listOfNotNull(row.field, row.attribute, row.provider, row.value).size != 1) fail(19, "$at: exactly one of field, attribute, provider, value")
-                if (row.field != null && Field.entries.none { it.name == row.field }) fail(16, "$at: ${row.field} is not in the vocabulary")
-                if (row.provider != null && beans(row.provider) == null) fail(15, "$at: no bean named ${row.provider}")
-                if (row.select != null && !row.select.isJsonPointer()) fail(18, "$at: select ${row.select} is not a JSON pointer")
-                if (row.format != null && !row.format.parsesAsFormat()) fail(18, "$at: format ${row.format} does not parse")
-                if (row.digest != null && DigestAlgorithm.entries.none { it.name.equals(row.digest, ignoreCase = true) }) fail(21, "$at: digest ${row.digest} is not md5, sha256 or sha1")
-            }
+            MappingRenderer.check(channel.body, declaredAttributes = null) { beans(it) != null }
+                .forEach { fail(it.rule, "channel ${channel.name} ${it.message}") }
         }
 
         /** Rule 25. */
@@ -165,8 +157,8 @@ object Rules {
             }
             route.process.forEach { processor(name, it, source is Source.Subscribe, placeholders) }
             route.notify.mapNotNull { channels[it.channel] as? HttpChannel }.distinct().forEach { channel ->
-                channel.body.rows.filter { it.attribute != null && it.attribute !in declared }
-                    .forEach { fail(17, "route $name: channel ${channel.name} row ${it.path} reads attribute ${it.attribute}, which no processor declares") }
+                MappingRenderer.check(channel.body, declared) { true }.filter { it.rule == 17 }
+                    .forEach { fail(17, "route $name: channel ${channel.name} ${it.message}") }
             }
         }
 
@@ -233,16 +225,11 @@ object Rules {
 
         private fun <T> List<T>.duplicates() = groupingBy { it }.eachCount().filterValues { it > 1 }.keys
         private fun String.isJsonPointer() = isEmpty() || startsWith("/")
-        private fun String.parsesAsFormat() = this in ISO_FORMATS || runCatching { DateTimeFormatter.ofPattern(this) }.isSuccess
     }
 
     private val PLACEHOLDER = Regex("""\{([^}]*)}""")
     private val PLACEHOLDERS = setOf("name", "sourceName", "yyyyMMdd")
     private val SFTP_ACKS = setOf<AckAction>(AckAction.Move(""), AckAction.Delete, AckAction.None)
     private val S3_ACKS = SFTP_ACKS + AckAction.Tag("", "")
-    private val ISO_FORMATS = setOf(
-        "ISO_INSTANT", "ISO_DATE", "ISO_DATE_TIME", "ISO_LOCAL_DATE", "ISO_LOCAL_DATE_TIME", "ISO_LOCAL_TIME",
-        "ISO_OFFSET_DATE_TIME", "ISO_ZONED_DATE_TIME", "ISO_OFFSET_DATE", "ISO_TIME", "BASIC_ISO_DATE",
-    )
     private val NETWORK_FILESYSTEMS = setOf("nfs", "nfs4", "cifs", "smbfs", "smb", "fuse.sshfs", "afs")
 }

@@ -139,3 +139,85 @@ Final run: ArchitectureTest 7, RulesTest 30, SurfaceTest 3; 40 tests, 0 failures
   the test classpath already. ArchUnit's `coreAllowed` list is the one place to extend if core
   legitimately needs another package of the JDK. Tests are JUnit 5 assertions only; AssertJ is
   not on the classpath by design.
+
+---
+
+## 04: Mapping renderer and providers
+
+**Built:** `MappingRenderer.kt` in `core` replaces the G0 shell: `render(table, transfer, moment,
+attempt): JsonNode`, a pure suspend function from the row plus its frozen attributes to a Jackson
+tree, and `MappingRenderer.check(table, declaredAttributes?, providerExists): List<Violation>`,
+the spec 9.6 boot checks by rule number. `Rules` now delegates every row check to `check` (rules
+15, 16, 18, 19, 21 per channel; rule 17 per route), so the pipeline's attribute-freeze check and
+validate mode are one implementation. `MappingFailure(path, detail)` is the one exception: a
+required row with no value, an unresolvable provider, or a value the row's `type` cannot coerce.
+`MappingRendererTest`, twelve tests.
+
+**Concepts named:**
+
+- **Missing** is: the source has no value, a `select` points at nothing, or the text is blank after
+  `trim`. `default` fills a missing value first; only then is `required` judged, so a row with a
+  default is never missing and `required: false` omits the path.
+- **A provider's node keeps its own JSON type.** Mounted whole it is set as-is; a selected scalar
+  is set as-is too unless the row states `trim`, `upper`, `lower` or a non-string `type`, in which
+  case it goes through the same text pipeline as every other value. Providers are resolved by an
+  injected `(String) -> Provider?` and memoized per rendering (I22).
+- **Formats** are `DateTimeFormatter`: `ISO_*` names by reflection on the class's constants, else
+  `ofPattern`; instants render in UTC and default to `ISO_INSTANT`. `check` and `render` share the
+  one `formatter` function, so rule 18 rejects exactly what render could not format.
+- **`SOURCE_PATH`** is `sourceRef/sourceName` (no column of its own in spec 8.1). `KIND`,
+  `SOURCE_KIND`, `DIGEST_ALGO`, `EVENT` render lowercase.
+
+**Acceptance:**
+
+- *Every row key has a test; dotted paths nest; quotes and backslashes escaped* -
+  `field_rows_read_the_transfer_row_and_dotted_paths_nest`, `attribute_and_value_rows`,
+  `a_provider_mounts_whole_and_select_picks_a_piece`, `type_coerces_to_number_and_boolean`,
+  `format_renders_an_instant_and_defaults_to_ISO_INSTANT`,
+  `default_applies_before_required_and_required_false_omits_the_path`,
+  `trim_upper_and_lower_transform_the_value`, `a_name_with_quotes_and_backslashes_survives_serialisation`.
+- *I22* - `I22_a_provider_selected_by_three_rows_is_invoked_once` (three paths, one invocation; S22's fakes half).
+- *Missing required reports the row; `required: false` omits; default before required* -
+  `a_missing_required_value_reports_the_row`, `default_applies_before_required_and_required_false_omits_the_path`.
+- *check rejects undeclared attribute (17), unknown field (16), unregistered provider (15), invalid
+  pointer (18), unparseable format (18) by number* - `check_rejects_each_bad_row_by_rule_number`
+  (also 19 and 21), `check_without_declared_attributes_skips_rule_17`; `RulesTest` rule15_ to
+  rule21_ still green through the delegation.
+- *Progress entry* - this entry.
+
+Final run: ArchitectureTest 7, MappingRendererTest 12, RulesTest 30, SurfaceTest 3; 52 tests, 0 failures.
+
+**Deviations:**
+
+1. **`render` takes `(table, transfer, moment, attempt)`, not the shell's `(table, transfer,
+   event: DeliveryEvent?)`.** `DeliveryEvent` carries the rendered body, so it cannot be the
+   renderer's input; the notifier renders, then builds the event. `attempt` defaults to 1 for try mode.
+2. **`check` returns `List<Violation>` and lives on the companion**, not the shell's
+   `List<String>` on the instance: the ticket asks for rejection by rule number, and `Rules` needs
+   it without a provider lookup.
+3. **Number `format` is not implemented.** Spec 9.6 says `format` covers "timestamps and numbers";
+   rule 18 as built accepts only `DateTimeFormatter` input, and no channel in spec 13.1 formats a
+   number. Debt: add a `DecimalFormat` branch behind rule 18 when a channel needs one.
+4. **`digest: <algo>` on a `field: DIGEST` row renders the row's digest only when the algorithms
+   match**; otherwise the value is missing. A second algorithm needs a home on the transfer row
+   (spec 6.5 computes it in the same stream); that column does not exist in 8.1 and is ticket 06's
+   question if a channel asks for it.
+5. **Blank after `trim` counts as missing.** The spec does not say; the alternative sends `""` to a
+   receiver that declared the field required.
+6. **Size:** 129 main lines, 163 test, against a 200 to 600 budget: in budget.
+
+**For the next ticket:**
+
+- **05 (attribute freeze):** call `MappingRenderer.check(channel.body, frozenAttributes) { beans(it) != null }`
+  for every channel the route notifies; a non-empty list fails the transfer before the store,
+  naming the row (the message starts with `row <path>:`). Attribute *presence* is not a check
+  concern: a declared-but-unset attribute surfaces at render time as `MappingFailure` unless the
+  row has a `default` or `required: false`; if spec 6.4's "missing required attribute fails before
+  the store" must be proven at freeze, render each notified channel once at freeze with
+  `moment = ACKED` and let `MappingFailure` fail the transfer (the renderer is pure, so the dry run costs nothing).
+- **09 (notifier):** `MappingRenderer(providers).render(channel.body, transfer, delivery.moment,
+  delivery.attempts + 1)` at send time, then `DeliveryEvent(..., body)`. `MappingFailure` at send
+  time is a `Reject`-shaped outcome (configuration, not transport).
+- **12 (HTTP):** the body is the `JsonNode`; `ObjectMapper.writeValueAsBytes(node)` is the whole
+  serialisation, escaping included.
+- **14 (try mode):** `render(table, sampleTransfer, DeliveryMoment.ACKED)` per notified channel.

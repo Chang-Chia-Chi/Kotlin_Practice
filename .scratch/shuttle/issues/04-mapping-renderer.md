@@ -9,13 +9,13 @@ The same component checks a table against a route's declared attributes before a
 
 **Nature:** pure function work
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Every row key of spec Sec 9.6 has a test; dotted paths nest; a name containing quotes and backslashes is escaped
-- [ ] `I22`: one provider selected by three rows is invoked once
-- [ ] A missing required value reports the row; `required: false` omits the path; `default` applies before `required`
-- [ ] The check function rejects an undeclared attribute, an unknown field, an unregistered provider, an invalid pointer and an unparseable format, by rule number
-- [ ] Progress entry appended
+- [x] Every row key of spec Sec 9.6 has a test; dotted paths nest; a name containing quotes and backslashes is escaped
+- [x] `I22`: one provider selected by three rows is invoked once
+- [x] A missing required value reports the row; `required: false` omits the path; `default` applies before `required`
+- [x] The check function rejects an undeclared attribute, an unknown field, an unregistered provider, an invalid pointer and an unparseable format, by rule number
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket, stubs throwing NotImplementedError
 for later seams; 200-600 lines including tests; no Thread.sleep; invariant tests named
