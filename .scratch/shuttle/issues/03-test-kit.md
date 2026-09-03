@@ -10,14 +10,14 @@ hook driver that suspends a pipeline at any named point and cancels it there, an
 
 **Nature:** concurrency work in the hook driver; the rest is scaffolding
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] In-memory state store implements every method of spec Sec 8.2 with the atomicity of the transitions that create delivery rows, records every call, and has its own test
-- [ ] In-memory target returns a fresh reference per store, keeps exactly one copy per key, answers verify, and has its own test
-- [ ] Recording channel returns scripted outcomes and records every event; scripted source emits a route-event flow from a script covering objects, poll completion with and without truncation, poll failure and route down, recording every ack and nack
-- [ ] Fake process context allocates staged files in a temp directory and detects a processor writing into an input
-- [ ] Hook driver demonstrably suspends, resumes and cancels a sample coroutine at a named point with no sleeps
-- [ ] Progress entry appended
+- [x] In-memory state store implements every method of spec Sec 8.2 with the atomicity of the transitions that create delivery rows, records every call, and has its own test
+- [x] In-memory target returns a fresh reference per store, keeps exactly one copy per key, answers verify, and has its own test
+- [x] Recording channel returns scripted outcomes and records every event; scripted source emits a route-event flow from a script covering objects, poll completion with and without truncation, poll failure and route down, recording every ack and nack
+- [x] Fake process context allocates staged files in a temp directory and detects a processor writing into an input
+- [x] Hook driver demonstrably suspends, resumes and cancels a sample coroutine at a named point with no sleeps
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket, stubs throwing NotImplementedError
 for later seams; 200-600 lines including tests; no Thread.sleep; invariant tests named

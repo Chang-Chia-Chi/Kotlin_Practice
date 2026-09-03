@@ -238,6 +238,122 @@ Final run: ArchitectureTest 7, RulesTest 30, SurfaceTest 3, YamlLoaderTest 10; 5
 
 ---
 
+## 03: Test kit: fakes, scripted source, hook driver
+
+**Built:** `infra.shuttle.testkit` under `shuttle/src/test/kotlin/infra/shuttle/testkit/`, the
+module's own test sources: the module has no test-jar and every later ticket's tests live beside
+it, so the kit is plain test code and `ArchitectureTest` (which imports main classes only) never
+sees it. Seven fakes, one class each, no interface beyond the frozen seams:
+
+- `HookDriver : Hook` - `pauseAt(point)`, `awaitArrival(point): TransferId`, `resume(point)`,
+  `cancelAt(point)`, `crash(point)`. A point not paused is a no-op. A pause is one-shot: every
+  coroutine reaching the point suspends on one `CompletableDeferred`; `resume` completes it,
+  `crash` completes it with a `CancellationException` thrown inside the paused coroutine,
+  `cancelAt` cancels the arrived jobs; all three disarm the point so the next run passes. A second
+  `resume` is a no-op. `awaitArrival` on a point that is not paused throws.
+- `InMemoryStateStore(clock) : StateStore` - every 8.2 method. `tx` takes the `Mutex`, records a
+  `Call(method, args)` into `calls`, snapshots both tables and restores them if the method
+  throws, so a transition is all or nothing. `failNextDeliveryInsert` (one-shot) makes the next
+  delivery-row insert throw an `IOException` inside the transaction. Inspection: `transfers`,
+  `outbox`, `transfer(id)`.
+- `InMemoryTarget(location) : ObjectStoreTarget` - one copy per key, fresh `TargetRef` per
+  `store` (`ref = "v<n>"`), `verify` true only for the current ref at its key, `probe` no-op,
+  `calls`, `failNextStore` (one-shot, throws before writing), `bytes(key)`, `metadata(key)`, `keys`.
+- `RecordingChannel(name, policy, vararg outcomes) : DeliveryChannel` - outcomes in order, the
+  last repeats, default `Delivered(null)`; `events` records every `DeliveryEvent`.
+- `ScriptedSource(clock)` - `seen(identity[, source])`, `pollCompleted(listed[, truncated])`,
+  `pollFailed(cause)`, `pollSkipped()`, `routeDown(cause)`, chained; `events(): Flow<RouteEvent>`
+  is cold and replays; each `Seen`'s `ack`/`nack` record into `acks` and `nacks` (`Nack(identity,
+  redeliver)`). `ScriptedSource.identity(name, ...)` builds a poll identity with defaults.
+- `ScriptedFetcher(clock) : Fetcher` - `file(path, bytes)`, `gone(path)`, `failNext`; copies the
+  bytes into the requested path, digests with the requested algorithm, names the object after
+  the path's last segment, `mtime` from the clock; `calls`.
+- `FakeProcessContext(dir, fetcher, clock, ...) : ProcessContext, AutoCloseable` -
+  `newStagedFile` allocates `<n>-<name>` in `dir` and appends to `createdFiles`; `fetch` delegates
+  to the fetcher into a new staged file; `attributes` is the record of `setAttribute`;
+  `snapshot(payload)` then `inputsUntouched()` detects a processor writing into an input (size
+  plus MD5); `close()` deletes every created file.
+- `ClockFixture(start) : Clock` - `advance(kotlin.time.Duration)`, `set(instant)`. It is the wall
+  clock the module reads (`updated_at`, `next_attempt_at`, "older than"); `runTest`'s virtual
+  time drives `delay` only. A test that wants both moves them together.
+
+**Concepts named:** *transaction* in the kit is `InMemoryStateStore.tx`: lock, record, snapshot,
+run, restore on throw. *Gate* is one paused hook point. *Fingerprint* is the input snapshot.
+The seams stayed where ticket 01 froze them; the kit's only additions are inspection and
+injection knobs on the fakes.
+
+**Acceptance:**
+
+- *State store: every seam method has a test; atomicity; `seen` returns the existing row; `due`
+  excludes and limits; `unlisted` exact; parent STORED when the last child is* -
+  `InMemoryStateStoreTest` (13): `I11_a_failing_delivery_insert_leaves_the_transfer_state_unchanged`,
+  `seen_creates_a_SEEN_row_and_returns_the_existing_row_for_a_known_identity`,
+  `due_orders_by_next_attempt_excludes_ids_and_honours_the_limit`,
+  `unlisted_is_exactly_the_STORED_rows_older_than_the_instant_and_not_listed`,
+  `children_replace_earlier_children_and_the_parent_is_STORED_when_the_last_child_is`; the rest
+  cover `supersede` (I24), `acked` to DONE (I17), `delivered`/`deliveryFailed`/`redriveDelivery`,
+  `failedAttempt`/`redrive`, `rejected`, a child failing its parent (I16), `stuck`, `retryLater`.
+- *Target: fresh ref, one copy, verify, count* - `InMemoryTargetTest.I6_...` and
+  `a_failed_store_writes_nothing_and_the_switch_is_one_shot`.
+- *Channel and source* - `RecordingChannelTest.S7_...`, `ScriptedSourceTest.emits_the_scripted_flow_...`
+  (all five event kinds, complete and truncated poll, every ack and nack with its flag) and
+  `the_fetcher_copies_scripted_bytes_digests_them_and_can_fail_or_report_a_file_gone`.
+- *Fake context* - `FakeProcessContextTest.I18_allocates_staged_files_...` and
+  `I18_detects_a_processor_writing_into_an_input`.
+- *Hook driver, no sleeps* - `HookDriverTest`: a coroutine observed suspended at `afterStore`
+  after `advanceUntilIdle` (flag false, job active), then resumed and finished; a second cancelled
+  there with the `CancellationException` caught and the code after the point never run; a third
+  `crash`ed, then the disarmed point passed.
+- *Progress entry* - this.
+
+Final run: ArchitectureTest 7, RulesTest 30, SurfaceTest 3, ClockFixtureTest 1,
+FakeProcessContextTest 2, HookDriverTest 3, InMemoryStateStoreTest 13, InMemoryTargetTest 2,
+RecordingChannelTest 2, ScriptedSourceTest 2; 65 tests, 0 failures, 0 errors.
+
+**Deviations:**
+
+1. **Size: 496 lines of fakes plus 530 of tests, against 200 to 600.** Seven fakes and a store
+   with eighteen methods, each with its own test class as the acceptance demands; nothing is
+   padding, and the store's rollback is one generic `tx`.
+2. **Identity resolution ignores `revision`.** `find`, `seen` and `unlisted` compare identities
+   with `revision` normalised and return the latest revision, because a listing always carries
+   revision 1 and the runner must see the row `supersede` created (spec 4.3, S12). Children are
+   never found by identity. Ticket 10 should read the same way or the fakes and Oracle diverge.
+3. **A child's `stored` attaches its `events` to the parent**, created only in the call that
+   flips the parent STORED (D42's conditional update), so a parent gets one set of `stored` rows
+   however many children. `children()` replaces the parent's existing children (4.5 re-drive).
+4. **The outbox row's `attempts` is counted by the store**: `delivered`, `retryLater` and
+   `deliveryFailed` each add one; `redriveDelivery` resets it to 0 and `next_attempt_at` to now.
+   DONE requires every row DELIVERED, so a FAILED row keeps the transfer ACKED (D9).
+5. **`failedAttempt` on a child at `maxAttempts` marks the parent FAILED** in the same
+   transaction (spec 4.5, I16).
+6. **Rollback is a whole-table snapshot per transaction** (ponytail: an undo log if tables grow;
+   they will not in tests).
+
+**For the next ticket:**
+
+- **Pausing and crashing a pipeline (07, 08):** `val hook = HookDriver(); hook.pauseAt(afterStore)`;
+  launch the pipeline with `hook`; `hook.awaitArrival(afterStore)` suspends until it gets there;
+  assert on the store and target while it is parked; then `hook.resume`, `hook.crash` (the
+  pipeline sees a `CancellationException` at the point, exactly the process dying) or
+  `hook.cancelAt`. Re-arm with `pauseAt` for the next run. Never leave a point paused at the end
+  of a test: `runTest` fails on the parked coroutine.
+- **Making a delivery insert fail (06, 09, I11/I20):** `store.failNextDeliveryInsert = true`
+  before the transition; the call throws `IOException` and the row is as it was. One-shot.
+- **Crash inside `store` (06, 08):** `target.failNextStore = true`, one-shot, nothing written.
+- **Reconciliation (07):** `unlisted` is judged on `updated_at < olderThan`, so advance
+  `ClockFixture` between storing and `PollCompleted`; `ScriptedSource.pollCompleted` stamps
+  `startedAt` from the clock at script time.
+- **`ScriptedSource.events()` is cold**: each collection replays the same `Seen` instances, so
+  `acks`/`nacks` accumulate across runs; compare `Seen` by `identity`.
+- **`FakeProcessContext`** wants `snapshot(payload)` before the chain and `inputsUntouched()`
+  after; use it in a `use {}` so `close()` deletes created files (I18). Default `transfer` and
+  `source` are a one-file poll on route `drop`; pass your own for children or messages.
+- **Gotcha:** `InMemoryStateStore.calls` and the fakes' lists are plain or synchronized lists
+  meant to be read after `advanceUntilIdle`, not while pipelines run.
+
+---
+
 ## 04: Mapping renderer and providers
 
 **Built:** `MappingRenderer.kt` in `core` replaces the G0 shell: `render(table, transfer, moment,
@@ -317,3 +433,4 @@ Final run: ArchitectureTest 7, MappingRendererTest 12, RulesTest 30, SurfaceTest
 - **12 (HTTP):** the body is the `JsonNode`; `ObjectMapper.writeValueAsBytes(node)` is the whole
   serialisation, escaping included.
 - **14 (try mode):** `render(table, sampleTransfer, DeliveryMoment.ACKED)` per notified channel.
+
