@@ -1,58 +1,65 @@
-> **Stale: drawn against spec v0.1 (SFTP Ingest). The spec is now v0.2 (Shuttle); the picture is redrawn after the plan.**
+# Shuttle - The Picture
 
-# SFTP Ingest - The Picture
-
-Companion to `spec.md`. The spec is the authority; this page exists so a reader gets the shape
-in five minutes and knows which five decisions carry the requirements. Section numbers below
-point into the spec.
+Companion to `spec.md` v0.2 and `plan.md` v0.2. The spec is the authority; this page exists so
+a reader gets the shape in five minutes, knows which decisions carry the requirements, and sees
+where the work is. Section numbers point into the spec.
 
 ---
 
 ## Part 1 - For everyone
 
-### The job, as a mailroom
+### The job, as a courier route
 
-Every hour a courier checks an inbox on the SFTP server. For each envelope in it, the courier:
+A shuttle runs **routes**. On every route a courier does the same six things for each item:
 
-1. **Copies** it into the vault (the MinIO bucket) and checks the copy is complete.
-2. **Stamps** the original and moves it to the "done" tray on the same server (the temp folder,
-   which downstream empties on its own schedule).
-3. **Tells** everyone who cares (the downstream systems) that the copy is in the vault.
+1. **Notices** an item exists: a folder is checked every hour, or a message arrives.
+2. **Picks it up**: the bytes come to a local workbench.
+3. **Works on it**, optionally: check it, rename it, zip it, read a number off its label, or
+   split a manifest into the items it lists.
+4. **Drops it** where it belongs: a MinIO bucket, or another SFTP server.
+5. **Stamps the source** so it is not picked up again: move the file, delete it, or acknowledge
+   the message. This is the commit.
+6. **Tells people**: at pickup, at drop, or at the stamp, through whatever channel they asked
+   for. Or tells nobody.
 
-The whole time, the courier writes every step for every envelope in a **logbook** (the ledger,
-two tables in Oracle). If the courier collapses halfway, the next courier opens the logbook,
-sees exactly where each envelope stopped, and continues from there. Nothing is done twice
-unless the logbook could not be written in time, and nothing is ever skipped.
+The whole time the courier writes every step into a **logbook** (the shuttle state store, two
+tables in Oracle). If the courier collapses halfway, the next one opens the logbook and
+continues from the last written step.
 
 ```mermaid
 flowchart LR
-    A[(SFTP inbox)] -->|1 copy| B[(MinIO vault)]
-    A -->|2 move original| T[(temp tray)]
-    B -->|3 tell| D[Downstream systems]
-    L[[Logbook<br/>Oracle]] -. records every step .- A
-    L -. records every step .- B
-    L -. records every step .- D
+    S[(source<br/>SFTP folder · NATS message)] -->|1 notice · 2 pick up| W[workbench<br/>local staging]
+    W -->|3 work on it| W
+    W -->|4 drop| T[(target<br/>MinIO · partner SFTP)]
+    S -.->|5 stamp: move · delete · ack| S
+    T -->|6 tell| D[channels<br/>HTTP · NATS]
+    L[[logbook<br/>Oracle]] -. every step .- W
 ```
+
+Two routes exist today. **Vendor drop**: an SFTP folder, hourly, into MinIO, stamp by moving to
+`temp/`, tell one HTTP API. **Image sets**: a NATS message naming a manifest in MinIO, the
+manifest's images uploaded to a partner's SFTP server, stamp by acknowledging the message, tell
+upstream at pickup and downstream at the end. A third shape, move A to B and tell nobody, is one
+route with no channels.
 
 ### The three promises
 
 | Promise | How it is kept |
 |---|---|
-| **Nothing is lost.** | A file leaves the inbox only after its copy is verified in the vault. The move is the last thing done to the original. A crash before the move leaves the file where it was, to be redone. |
-| **Nobody is told too early.** | The notification is written to the logbook in the same stroke as "moved", and a separate loop sends it. It can only ever be sent after the copy exists and the original is moved. |
-| **One bad envelope never stops the rest.** | Each file is handled on its own. A file that fails five times is marked FAILED, left in the inbox, and an operator decides. A file that fails quality is marked REJECTED the same way. Neither is ever deleted. |
+| **Nothing is lost.** | The source is stamped only after the copy is verified at the target. A crash before the stamp leaves the item where it was, to be redone. |
+| **Nobody is told too early.** | Every "tell" is written into the logbook in the same stroke as the step it announces, and a separate loop sends it. It can never be sent about something that did not happen. |
+| **One bad item never stops the rest.** | Every item is handled on its own. An item that fails five times, or fails a check, is marked, left in place, and handed to an operator. Nothing is ever deleted except by a configured stamp. |
 
 ### What can go wrong, and why it is fine
 
 | If the courier collapses... | ...the next courier | Cost |
 |---|---|---|
-| while copying | copies again | one extra copy, overwritten |
-| after copying, before writing it down | copies again | one extra copy, overwritten |
-| after writing "copied", before moving | checks the vault, then moves | none |
-| after moving, before writing "moved" | notices the file is gone from the inbox, writes "moved" | the notification waits one hour |
-| after telling downstream, before writing it down | tells them again | downstream sees the same file id twice and ignores the repeat |
+| before the drop is written down | picks up and drops again | one extra copy, overwritten |
+| after "dropped", before the stamp | checks the copy, then stamps | none |
+| after the stamp, before it is written down | sees the item is gone from the folder and writes "stamped" | the last "tell" waits one poll |
+| after a "tell", before it is written down | tells again | the receiver sees the same item id twice and ignores the repeat |
 
-That table is the whole safety argument. Every row is a test (spec 17.2, S2 to S5).
+Every row is a test (spec 18.2, S2 to S5).
 
 ---
 
@@ -60,204 +67,188 @@ That table is the whole safety argument. Every row is a test (spec 17.2, S2 to S
 
 ### The whole system in one picture
 
-One process, three components, four things outside it. The connector owns the server side of
-the conversation and hands each ready file to the consumer as an event with an ack and a nack.
-The pipelines do the work for one file and write every step to the ledger. The relay is a
-second, independent loop that turns ledger rows into downstream calls. The pipelines and the
-relay never talk to each other except through the ledger and one wake signal, which is what
-lets either be restarted without the other noticing.
+One process, one replica. Object stores and channels are declared once; a route gives each a
+role. Every route is its own supervised loop; all routes share the state store, the stores'
+session pools and one notifier. The routes and the notifier never talk to each other except
+through the state store and one wake signal.
 
 ```mermaid
 flowchart LR
-    subgraph sftp["SFTP server"]
-        IN["inbox/"]
-        TMP["temp/ (purged by downstream)"]
+    subgraph stores["objectStores · declared once"]
+        VEN[("vendor · SFTP")]
+        PAR[("partner · SFTP")]
+        MIN[("minio · S3, versioned")]
+    end
+    subgraph chans["channels · declared once"]
+        HTTP["downstream · HTTP"]
+        UP["upstream-receipt · HTTP"]
+        NATS["events · NATS"]
     end
 
-    subgraph proc["sftp-ingest process · one replica · Kotlin + Quarkus"]
-        subgraph conn["SFTP connector (its own spec)"]
-            TK["watch ticker · every 1 h"] --> LS["lister + readiness"]
-            POOL["session pool · 5 max"]
-            IFF["in-flight files · memory"]
+    subgraph proc["shuttle process · one replica · Kotlin + Quarkus"]
+        subgraph r1["route vendor-drop · supervised"]
+            T1["poll vendor:/inbox every 1h"] --> P1["pipeline ×4: fetch → process → store → ack"]
         end
-        subgraph pipe["Consumer + per-file pipelines · ×4 in parallel"]
-            direction TB
-            P1["1 decide entry point from the ledger"] --> P2["2 download through the connector"]
-            P2 --> P3["3 quality check (NONE today)"] --> P4["4 store in target (S3: PUT · HEAD · prune)"]
-            P4 --> P5["5 ledger → UPLOADED"] --> P6["6 ack() → move to temp/ · commit point"]
-            P6 --> P7["7 ledger → ACKED + PENDING per channel · 1 txn"]
+        subgraph r2["route image-sets · supervised"]
+            T2["subscribe events:images.ready"] --> P2["pipeline ×2: fetch → expand → store children → ack"]
         end
-        subgraph relay["Relay · one coroutine, cold Flow"]
-            direction LR
-            R1["select due"] --> R2["buffer"] --> R3["workers ×4"] --> R4["record outcome"]
-            RIF["in-flight delivery ids · memory"]
-        end
-        STG[("staging · local disk")]
+        NOT["notifier · cold Flow · workers ×4<br/>in-flight ids · memory"]
+        STG[("staging · local disk · wiped at boot")]
     end
 
-    subgraph ora["Oracle ledger · durable · the only truth"]
-        FT[("file_transfer")]
-        DO[("delivery_outbox")]
+    subgraph ora["shuttle state store · Oracle · the only truth"]
+        FT[("file_transfer · state")]
+        DO[("delivery_outbox · on_state · notification_state")]
     end
-    MINIO[("MinIO bucket · versioning on")]
-    DS["Downstream · HTTP · dedupes on fileId"]
 
-    IN -- "list · download (JSch)" --> POOL
-    POOL -- "rename → temp/" --> TMP
-    LS -- "FileSeen(file, ack, nack)" --> P1
-    P2 -- "download()" --> POOL
-    POOL -- ".part → file" --> STG
-    P6 == "ack()" ==> POOL
-    P4 -- "store (S3 SDK v2: PUT · HEAD · prune)" --> MINIO
-    P5 == "JDBI" ==> FT
-    P7 == "JDBI · ACKED + PENDING" ==> DO
-    P7 -. "wake" .-> R1
-    R1 == "select due (JDBI)" ==> DO
-    R4 == "DELIVERED / retry / FAILED" ==> DO
-    R3 -- "POST body (JDK HttpClient)" --> DS
-    DS -. "2xx + request id" .-> R3
+    VEN -- "list · download · rename (connector, pool 20)" --> T1
+    P1 -- "store: PUT · Content-MD5 · HEAD · prune" --> MIN
+    NATS -- "message · ack / nak" --> T2
+    MIN -- "fetch metadata + images" --> P2
+    P2 -- "store: upload .part · rename" --> PAR
+    P1 & P2 == "SEEN … STORED · ACKED + rows" ==> FT
+    P1 & P2 == "one row per on: state × channel" ==> DO
+    P1 & P2 -. "wake" .-> NOT
+    NOT == "select due · DELIVERED / retry / FAILED" ==> DO
+    NOT -- "POST body from the mapping table" --> HTTP
+    NOT -- "POST on: fetched" --> UP
 ```
 
-Thick edges are the durable commit path; dotted edges are signals or responses, never data;
-the two memory boxes are the only state that must not survive a restart.
+Thick edges are the durable commit path; dotted edges are signals; the two memory boxes,
+staging and the notifier's id set, are the only state that must not survive a restart.
 
-### Three pieces of state, three owners
-
-Everything else is stateless and can be restarted at any moment.
-
-```mermaid
-flowchart TB
-    subgraph connector["SFTP connector (its own spec)"]
-        IF["in-flight set of files<br/>(in memory; which files are emitted and not yet acked)"]
-    end
-    subgraph ledger["Ledger (Oracle, durable)"]
-        FT["file_transfer<br/>one row per file identity<br/>SEEN → DOWNLOADED → UPLOADED → ACKED → DONE"]
-        DO["delivery_outbox<br/>one row per file × channel<br/>PENDING → DELIVERED | FAILED"]
-    end
-    subgraph relay["Relay (in memory)"]
-        RS["in-flight set of delivery ids<br/>(bounded; empty when idle)"]
-    end
-    FT --- DO
-```
-
-- The **connector** remembers only which files it has emitted and not yet heard back about.
-  It never persists anything (connector D14).
-- The **ledger** is the single source of truth for what happened to a file. File identity is
-  name + size + mtime (D2).
-- The **relay's set** is not a cache and not a store: it is a "these rows are taken" guard so
-  a delivery in flight is not selected twice (spec 7.4).
-
-### One file's journey
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant C as Connector
-    participant P as Pipeline (one coroutine per file)
-    participant S as MinIO (S3 SDK)
-    participant L as Ledger (Oracle)
-    participant R as Relay
-    participant D as Downstream
-
-    C->>P: FileSeen(file, ack, nack)
-    P->>L: find(identity) → decide entry point
-    P->>C: download → staged file + SHA-256
-    P->>P: quality check (NONE today)
-    P->>S: store(key, file, metadata), S3 adapter: PUT, HEAD, prune other versions
-    P->>L: UPLOADED (key, target ref)
-    P->>C: ack() → move to temp/
-    P->>L: ACKED + one PENDING delivery per channel (one transaction)
-    P-)R: wake
-    R->>L: select due PENDING rows
-    R->>D: POST body built from the ledger row
-    D-->>R: 2xx + request id
-    R->>L: DELIVERED (reference) → DONE when every channel delivered
-```
-
-The ack (step 9) is the **commit point** for the source: it is the last write to the original,
-and it happens only after the copy is verified (I10). Everything after it is made reliable by
-the outbox, not by ordering (D6).
-
-### The state machine, with the crash points
+### One item's journey, and the states it leaves behind
 
 ```mermaid
 stateDiagram-v2
-    [*] --> SEEN: FileSeen, no row
-    SEEN --> DOWNLOADED: staged + digest
-    DOWNLOADED --> REJECTED: quality Fail
-    DOWNLOADED --> UPLOADED: target.store
-    UPLOADED --> ACKED: move to temp/ (+ PENDING deliveries)
-    ACKED --> DONE: every delivery DELIVERED
+    [*] --> SEEN: trigger says it exists
+    SEEN --> FETCHED: bytes in staging, digest computed
+    FETCHED --> PROCESSED: chain ran, attributes frozen, mappings checked
+    PROCESSED --> REJECTED: a processor said Reject
+    PROCESSED --> STORED: every object stored and verified, one copy per key
+    STORED --> ACKED: the source stamped (move · delete · ack · callback)
+    ACKED --> DONE: every notification delivered, or none configured
     SEEN --> FAILED: attempts = max
-    DOWNLOADED --> FAILED: attempts = max
-    UPLOADED --> FAILED: attempts = max
+    FETCHED --> FAILED: attempts = max
+    PROCESSED --> FAILED: attempts = max
+    STORED --> FAILED: attempts = max
     REJECTED --> SEEN: re-drive
     FAILED --> SEEN: re-drive
     DONE --> [*]
 
-    note right of UPLOADED
-        Crash before this row: redo from download.
-        Crash after it: verify the copy, then ack only.
-    end note
-    note right of ACKED
-        Crash between the move and this row:
-        reconciliation at the next poll writes it,
-        because the file is gone from the listing
-        and the object is proven to exist.
-    end note
+    note right of FETCHED : on: fetched → outbox row (on_state = FETCHED)
+    note right of STORED : on: stored → outbox row (on_state = STORED)
+    note right of ACKED : on: acked → outbox row (on_state = ACKED)
 ```
 
-Entry points are decided from the ledger on every `FileSeen` (spec 4.3): anything below
-UPLOADED restarts from download; UPLOADED and above verify the object and ack; REJECTED and
-FAILED are nacked without work.
+The ack is the **commit point** for the source. Entry points on every re-trigger are decided
+from the row (spec 4.3): anything before STORED restarts from fetch, STORED verifies the copy and
+acks, ACKED or DONE verifies and re-acks, REJECTED and FAILED do nothing until re-driven. A
+parent with children re-runs its deterministic chain and stores only the children not yet
+verified.
 
-### The second loop: the relay
+### Where a value travels: from a file name to a body
 
 ```mermaid
 flowchart LR
-    Q["select PENDING<br/>next_attempt_at ≤ now<br/>id ∉ in-flight set<br/>limit batchSize"] --> B["buffer(batchSize)<br/>emit suspends when full"]
-    B --> W1[worker] & W2[worker] & W3[worker]
-    W1 & W2 & W3 --> O{outcome}
-    O -->|Delivered| DEL["DELIVERED + reference<br/>DONE if all channels"]
-    O -->|Retry| RT["next_attempt_at = now + backoff<br/>attempts + 1"]
-    O -->|Reject or policy exhausted| FL["delivery FAILED<br/>transfer stays ACKED"]
-    DEL & RT & FL -->|finally: remove id| Q
-    ACK["pipeline: acked()"] -. wake .-> Q
-    T["sweep every 30 s"] -. wake .-> Q
+    FN["12345-ACME.csv"] --> EX["extract from: fileName<br/>regex (?&lt;orderNumber&gt;\\d+)-(?&lt;vendor&gt;[A-Z]+)"]
+    EX --> AT["attributes on the row<br/>orderNumber = 12345 · vendor = ACME<br/>frozen after the chain"]
+    AT --> K["target key<br/>{vendor}/{orderNumber}/{storedName}"]
+    AT --> B["mapping table<br/>path: orderNumber · attribute: orderNumber"]
+    AT --> PR["provider bean<br/>orderDetails(row) → JSON node"]
+    AT --> M["object metadata<br/>x-amz-meta-attr-orderNumber"]
+    B --> BODY["rendered body at send time"]
+    PR --> BODY
 ```
 
-A cold `Flow` with `buffer` and `flatMapMerge`, not a `SharedFlow`: a shared flow broadcasts
-to every subscriber, drops values when nobody is collecting, and never completes, each of
-which is wrong for a work queue (D7). The buffer bounds memory to `batchSize + parallelism`
-rows; cancellation leaves rows PENDING, which is the correct shutdown.
+Attributes are the only way information leaves a processor. Every producer declares the names
+it sets; every mapping row naming an attribute is checked against those declarations at boot
+(rule 17) and again at attribute freeze, before the store. `shuttle try --route vendor-drop
+--file-name 12345-ACME.csv` prints all of this for a sample without connecting to anything.
+
+### The second loop: the notifier
+
+Pending outbox rows become channel calls through a cold `Flow` with a bounded buffer and
+parallel workers. Delivered rows record the receiver's reference and flip the transfer to DONE
+when every row is delivered; retryable outcomes back off with jitter; rejected or exhausted rows
+become FAILED without touching the transfer. Every transaction that creates rows wakes the loop;
+a sweep every 30 s catches the rest. Cancelling leaves rows PENDING. The in-memory in-flight set
+of ids is bounded by batch plus workers and empty when idle; it must not survive a restart.
 
 ### The five decisions that carry the requirements
 
-Ranked. If you read nothing else in the spec, read these entries in its decision log.
-
 | # | Decision | Requirement it carries | Spec |
 |---|---|---|---|
-| 1 | **The ledger is the only truth; the connector persists nothing.** | No data loss across a crash; at-least-once with a known resume point for every file. | D1, 4.3, 4.4 |
-| 2 | **Ack is the commit; deliveries are created in the ACKED transaction; reconciliation repairs move-then-crash.** | Nobody is told before the file is safe; the notification is durable the instant the source is committed. | D6, 4.5, I10, I11 |
-| 3 | **Deterministic key; the target promises "exactly one copy", and the S3 adapter keeps it by pruning inside every store.** | "Delete the old version if we upload twice" on a bucket whose versioning cannot be turned off; a retry is an overwrite, never a sibling; the pipeline never learns that versions exist. | D5, D21, 6.1, 6.3, I6 |
-| 4 | **Cold-flow relay with a bounded buffer and an in-memory in-flight guard; per-channel policy; a failed delivery never fails the file.** | High throughput without unbounded memory; one slow channel never blocks another; a dead downstream is a dead-letter, not a stuck pipeline. | D7, D9, 7.3, 7.4, I4, I5, I13 |
-| 5 | **Every timeout below the drain; bounded parallelism everywhere; one replica.** | Stability: a pod restart at any moment converges (I8); shutdown is bounded (I12); the five-session cap on the server is respected. | 3.3, 11.2, D13, I14 |
+| 1 | **One durable state store is the only truth; the two in-memory sets never survive a restart.** | No data lost; a known resume point for every item. | D1, 4.3, 4.4, I8 |
+| 2 | **Ack is the commit; notifications are outbox rows created in the transaction of the state they announce.** | Nobody told too early; every tell is as durable as the step it reports. | D6, D26, I11, I20 |
+| 3 | **Object stores and channels declared once, role given at the route; the target promises "exactly one copy".** | Same server as source and target without duplicated secrets; retries overwrite, never sibling. | D21, D22, D5, I6 |
+| 4 | **One `Processor` seam, pure over staging, attributes as its only output.** | Any processing, re-runnable after a crash, with values checked before anything is stored. | D23, D24, D25, I15, I18 |
+| 5 | **Configuration as data: YAML, 25 numbered rules, validate and try modes; routes supervised.** | Operations edit and verify without a build; one dead route never takes the pod. | D29, D30, D31, D35, I14, I21 |
 
-### Where each requirement lands
+---
 
-| Requirement from the brief | Where |
-|---|---|
-| Run hourly, all files under one folder | connector `watch(dir, every = 1h)`, overlap SKIP (spec 9, D12) |
-| Move to temp after processing | connector `onAck = move("temp/")`, called only after UPLOADED (4.1, I10) |
-| Quality check seam, no-op today | `QualityCheck.NONE` on the complete staged file (8, D11) |
-| Download, upload, delete old version, notify | stages 1 to 5, the prune inside the S3 store (4.1, 6.3) |
-| Multiple notification channels | `DeliveryChannel` seam, one outbox row per channel, HTTP first (7) |
-| No data lost | crash matrix and I8 (4.4, 17.1) |
-| High performance | bounded parallel pipelines, relay batch and buffer, S13 load scenario (9, 7.3) |
-| High stability | failure model, startup checks, ordered shutdown (10, 11) |
+## Part 3 - The plan and the tickets
+
+Twenty phases, two milestones. Milestone 1 ships the vendor-drop and mirror routes; milestone 2
+the image-sets route. Everything from G2 to G8 is proven against the test kit with no socket and
+no container; only G12 and G17 wait on the SFTP connector.
+
+```mermaid
+flowchart LR
+    G0[G0 skeleton] --> G1[G1 yaml]
+    G0 --> G2[G2 test kit]
+    G0 --> G3[G3 mapping]
+    G0 --> G9[G9 oracle]
+    G0 --> G10[G10 s3]
+    G3 --> G11[G11 http]
+    G2 --> G4[G4 chain]
+    G3 --> G4
+    G4 --> G5[G5 pipeline]
+    G5 --> G6[G6 route runner]
+    G6 --> G7[G7 crash matrix]
+    G2 --> G8[G8 notifier]
+    G3 --> G8
+    G6 --> G12[G12 sftp poll]
+    C10[connector 10 + 12] -.-> G12
+    G1 & G7 & G8 & G9 & G10 & G11 & G12 --> G13[G13 host]
+    G13 --> G14[G14 M1 accept]
+    G2 --> G15[G15 nats]
+    G7 & G10 & G15 --> G16[G16 expand]
+    G12 --> G17[G17 sftp target]
+    C07[connector 07] -.-> G17
+    G8 & G11 --> G18[G18 moments + callback]
+    G14 & G15 & G16 & G17 & G18 --> G19[G19 M2 accept]
+```
+
+| # | Ticket | Blocked by | Nature |
+|---|---|---|---|
+| 01 | Skeleton, frozen surface, rules, boundary gates | none | scaffolding + rule tests |
+| 02 | YAML loader and validate function | 01 | adapter |
+| 03 | Test kit | 01 | concurrency in the hook driver |
+| 04 | Mapping renderer and providers | 01 | pure function |
+| 05 | Processing chain and built-ins | 03, 04 | state machine |
+| 06 | Transfer pipeline, entry points, children | 05 | state machine |
+| 07 | Route runner, reconciliation, supervision | 06 | coroutine structure |
+| 08 | Crash matrix replay | 07 | state-machine reasoning |
+| 09 | Notifier | 03, 04 | concurrency |
+| 10 | Oracle state store | 01 | adapter |
+| 11 | S3 target and fetcher | 01 | adapter |
+| 12 | HTTP channel | 04 | adapter |
+| 13 | SFTP poll source | 07, connector 10 + 12 | adapter |
+| 14 | Quarkus host, validate and try modes, admin | 02, 08 to 13 | shutdown ordering |
+| 15 | Milestone 1 acceptance | 14 | diagnosis |
+| 16 | NATS channel | 03 | adapter |
+| 17 | Expand, fetch, parent completion | 08, 11, 16 | state machine |
+| 18 | SFTP target | 13, connector 07 | adapter |
+| 19 | Notification moments and callback acks | 09, 12 | state machine |
+| 20 | Milestone 2 acceptance | 15 to 19 | diagnosis |
+
+**Frontier now:** ticket 01. After it, five open at once: 02, 03, 04, 10, 11. The tickets live
+in `.scratch/shuttle/issues/`; each states what it delivers, what blocks it, the nature of the
+work, and its acceptance by invariant, scenario and rule number.
 
 ### What is deliberately not here
 
-No second replica, no streaming, no attempt-history table, no content parsing for the body,
-no bucket or table creation, no Quarkus scheduler. Each has a named seam or a recorded reason
-in spec 14 and 15.
+No second replica, no expression language, no attempt-history table, no multiple targets per
+route, no creation of buckets or tables, no Quarkus scheduler. Each has a named seam or a
+recorded reason in spec 15 and 16. The spec wins wherever this page and it disagree.
