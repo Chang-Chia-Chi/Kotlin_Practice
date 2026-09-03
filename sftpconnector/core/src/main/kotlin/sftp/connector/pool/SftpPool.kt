@@ -212,9 +212,21 @@ class SftpPool(
         if (!capacity.tryAcquire()) {
             val freedBefore = roomFreed.get()
             waiting.incrementAndGet()
+            // Whether the permit was taken is read off this flag and never off the wait's own
+            // answer. The semaphore gives a permit back itself when the caller is cancelled while
+            // waiting for it, but not when the cancellation lands in the instant after it was
+            // granted: the wait then throws with the permit already taken and its answer thrown
+            // away, and a permit lost there is capacity the pool has lost until restart.
+            var granted = false
             try {
-                if (withTimeoutOrNull(acquireTimeout) { capacity.acquire() } == null) {
+                withTimeoutOrNull(acquireTimeout) {
+                    capacity.acquire()
+                    granted = true
+                }
+                if (!granted) {
                     meters.turnedAway()
+                    // Read while this caller still counts among the waiters: the statistics
+                    // describe the pool as the refused caller found it, itself included.
                     throw PoolExhausted(
                         attempt = Attempt(endpoint, "acquire"),
                         stats = stats(),
@@ -222,6 +234,9 @@ class SftpPool(
                         roomFreedWhileWaiting = roomFreed.get() - freedBefore,
                     )
                 }
+            } catch (failure: Throwable) {
+                if (granted) freeRoom()
+                throw failure
             } finally {
                 waiting.decrementAndGet()
             }
