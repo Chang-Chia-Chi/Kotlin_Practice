@@ -342,9 +342,7 @@ again (I18):
 | `rename` | name, attributes, dates, through a pattern such as `{yyyyMMdd}-{name}` | one object with a new name, same file | nothing |
 | `zip` | every object | one archive created through `newStagedFile` | nothing |
 | `unzip` | one archive | one object per entry | nothing |
-| `extract.name` | name | unchanged | named groups of a regular expression |
-| `extract.json` | file content | unchanged | values at JSON pointers |
-| `extract.message` | the source message, subscriptions only | unchanged | named fields |
+| `extract` | `from: fileName` (the current name), `from: sourcePath` (the listing path or object key), `from: content` (the bytes), or `from: message` (the subscription message) | unchanged | named regex groups over a string, or values at JSON pointers into content or message; every name declared |
 | `expand` | a metadata file or the message | one child per listed path, fetched through `ctx.fetch` | nothing |
 | `custom` | anything | anything | what it declares in `produces` |
 
@@ -458,9 +456,9 @@ CREATE INDEX ix_file_transfer_parent ON file_transfer (parent_id);
 CREATE TABLE delivery_outbox (
   id                NUMBER(19)     NOT NULL,
   file_transfer_id  NUMBER(19)     NOT NULL,
-  event             VARCHAR2(16)   NOT NULL,           -- FETCHED | STORED | DONE
+  lifecycle         VARCHAR2(16)   NOT NULL,           -- which moment of the transfer: FETCHED | STORED | DONE
   channel           VARCHAR2(64)   NOT NULL,
-  state             VARCHAR2(16)   NOT NULL,           -- PENDING | DELIVERED | FAILED
+  status            VARCHAR2(16)   NOT NULL,           -- how far the sending got: PENDING | DELIVERED | FAILED
   attempts          NUMBER(5)      DEFAULT 0 NOT NULL,
   next_attempt_at   TIMESTAMP      NOT NULL,
   last_status       VARCHAR2(64),
@@ -470,9 +468,9 @@ CREATE TABLE delivery_outbox (
   delivered_at      TIMESTAMP,
   CONSTRAINT pk_delivery_outbox PRIMARY KEY (id),
   CONSTRAINT fk_delivery_transfer FOREIGN KEY (file_transfer_id) REFERENCES file_transfer (id),
-  CONSTRAINT uq_delivery_event_channel UNIQUE (file_transfer_id, event, channel)
+  CONSTRAINT uq_delivery_lifecycle_channel UNIQUE (file_transfer_id, lifecycle, channel)
 );
-CREATE INDEX ix_delivery_due ON delivery_outbox (state, next_attempt_at);
+CREATE INDEX ix_delivery_due ON delivery_outbox (status, next_attempt_at);
 ```
 
 Two tables because a transfer has many deliveries, each with its own attempts, retry time and
@@ -514,9 +512,10 @@ that must be atomic across both tables (I11, I20).
 
 A route attaches channel deliveries to events: `fetched`, `stored`, `done`. Each attachment is
 one outbox row created in the transaction that defines the event (I20), delivered
-asynchronously and at-least-once by the notifier. On the row, `event` says which lifecycle
-moment the notification is about and never changes; `state` says how far the delivery itself
-has got, PENDING, DELIVERED or FAILED, and is what the notifier advances. The notifier needs no
+asynchronously and at-least-once by the notifier. On the row, `lifecycle` says which moment of
+the transfer the notification is about and never changes; `status` says how far the sending
+itself has got, PENDING, DELIVERED or FAILED, and is what the notifier advances. Neither word
+is used on the transfer table, whose column is `state`. The notifier needs no
 route: the row names its channel, and the body is rendered from the transfer row it points to. `done` fires after the ack. A route with no
 attachments creates no rows and goes ACKED to DONE in the same transaction (I17).
 
@@ -746,7 +745,7 @@ shuttle:
           readiness: [ { sizeStable: { checks: 2, interval: 10s } }, { minAge: 1m } ]
           onAck: { move: temp/ }
       process:
-        - { extract: { name: { pattern: "(?<orderNumber>\\d+)-.*\\.csv" } } }
+        - { extract: { from: fileName, regex: "(?<orderNumber>\\d+)-.*\\.csv" } }
         - { rename: { pattern: "{yyyyMMdd}-{name}" } }
         - { zip: {} }
       target: { store: minio, bucket: landing, key: "vendor/{name}" }
@@ -765,7 +764,7 @@ shuttle:
         subscribe: { channel: events, subject: images.ready, onAck: ack }
       fetch: { store: minio, path: /metadata.path }
       process:
-        - { extract: { message: { batchId: /batchId } } }
+        - { extract: { from: message, json: { batchId: /batchId } } }
         - { expand: { format: json, files: /images[*].path, from: minio } }
         - { custom: imageResizer, config: { maxWidth: 2048 } }
       target: { store: partner, directory: /incoming }
@@ -808,7 +807,7 @@ shuttle {
     }
     route("vendor-drop") {
         source = poll(objectStore("vendor"), directory = "/inbox") { every = 1.hours; onAck = move("temp/") }
-        process = extractName("(?<orderNumber>\\d+)-.*\\.csv") then rename("{yyyyMMdd}-{name}") then zip()
+        process = extract(from = FileName, regex = "(?<orderNumber>\\d+)-.*\\.csv") then rename("{yyyyMMdd}-{name}") then zip()
         target = objectStore("minio").bucket("landing") { key = "vendor/{name}" }
         notify(on = Done, channel("downstream"))
         parallelism = 4
@@ -835,10 +834,10 @@ Each is public numbering, reported by number in validate mode and at startup.
 | 11 | Every staging directory exists, is writable, and is local disk; two stores do not share one |
 | 12 | `onAck` is stated explicitly, no default, and it and `onNack` belong to the trigger kind's vocabulary; a `callback` names a channel offering the notify role |
 | 13 | A `key` or `directory` pattern uses only `{name}` (the staged object's name at store time, after the chain), `{sourceName}` (the source object's original name), `{yyyyMMdd}` and attribute names declared in the route, and yields no `..` |
-| 14 | Every built-in processor's configuration parses: patterns compile, pointers are valid, `expand.from` names a store |
+| 14 | Every built-in processor's configuration parses: patterns compile, pointers are valid, `extract.from` is one of `fileName`, `sourcePath`, `content`, `message` with `message` only on a subscribed route, `expand.from` names a store |
 | 15 | Every `custom` processor and every `provider` resolves to a named bean |
 | 16 | Every mapping `field` is in the vocabulary |
-| 17 | Every mapping `attribute` is declared by a processor in that route or by the source's `extract.message` |
+| 17 | Every mapping `attribute` is declared by a processor in that route |
 | 18 | Every mapping `select` is a valid JSON pointer and every `format` parses |
 | 19 | A mapping row has exactly one of `field`, `attribute`, `provider`, `value` |
 | 20 | A channel's `response.success` and `response.retry` are disjoint status sets |
@@ -1068,7 +1067,7 @@ expand with children, the SFTP target, `fetched` notifications, callback acks.
 - Vocabulary: object stores and channels declared once with roles at the route; triggers `poll`
   and `subscribe`; the ack vocabulary per trigger kind; `callback` acks.
 - Ledger becomes the shuttle state store; `file_transfer` gains `parent_id`, `kind`,
-  `source_*`, `stored_*`, `attributes`; `delivery_outbox` gains `event`.
+  `source_*`, `stored_*`, `attributes`; `delivery_outbox` gains `lifecycle` and its `state` is renamed `status`.
 - Quality check becomes one of several processors under a single `Processor` seam; attributes
   and providers added; the mapping table replaces the Kotlin body builder as the primary form.
 - Lifecycle notifications `fetched`, `stored`, `done`; a route may notify nobody.

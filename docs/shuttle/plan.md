@@ -201,7 +201,7 @@ adds the subscription source, fan-out, the SFTP target and the remaining lifecyc
 - **Goal:** spec 6 against the fake context.
 - **Deliverables:** chain runner enforcing the four re-run rules of spec 6.2, attribute limits
   (rule 22), digest recomputation for new files, `SOURCE_DIGEST` versus `DIGEST`; built-ins
-  `quality`, `rename`, `zip`, `unzip`, `extract.name`, `extract.json`, `verifyDigest`; custom
+  `quality`, `rename`, `zip`, `unzip`, `extract` from file name, source path and content, `verifyDigest`; custom
   processor resolution through an injected lookup; attribute freeze followed by the G3 check
   against every channel the route notifies.
 - **Blocked by:** G2, G3.
@@ -367,7 +367,7 @@ adds the subscription source, fan-out, the SFTP target and the remaining lifecyc
 - **Goal:** the image-sets route end to end against the test kit.
 - **Deliverables:** `expand` processor reading paths from a metadata file or the message and
   fetching children through `ctx.fetch`; the route-level `fetch` for subscriptions; parent
-  completion rules exercised with children stored in parallel; `extract.message`.
+  completion rules exercised with children stored in parallel; `extract` with `from: message`.
 - **Blocked by:** G7, G10, G15.
 - **Fixed contracts:** spec 4.5, 6.3; I16.
 - **Acceptance:** S27, S28, S29 on fakes with the scripted fetcher; `I16_`.

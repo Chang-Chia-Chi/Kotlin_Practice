@@ -12,7 +12,7 @@ the message is acked once, and downstream is told once.
 **Status:** ready-for-agent
 
 - [ ] S27, S28, S29 on fakes with the scripted fetcher; `I16` as a named test
-- [ ] Expand reads paths from a metadata file and from the message; `extract.message` sets attributes from the message
+- [ ] Expand reads paths from a metadata file and from the message; `extract` with `from: message` sets attributes from the message
 - [ ] A child failing five times fails the parent and the message is not acked; a re-drive of the parent replaces its children
 - [ ] Progress entry appended
 
