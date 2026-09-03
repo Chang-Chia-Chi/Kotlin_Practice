@@ -239,7 +239,8 @@ because each was correctly deferred by the ticket that found it.
 | Under `REFUSE`, a retry's window is the backoff | T11 | Whoever has cause | The policy's look ran once, before the first request. A retry after a lost reply first looks for its own landed file at the target and stops there if it finds it; only when it does not does it send a plain rename - and on a server with the POSIX rename extension a stranger's file that arrived at the target during the backoff is then replaced. T7's race, widened from the look to the backoff; the alternative - applying the policy's look again - refuses the retry for its own landed file |
 | A file the consumer holds from a tick that has already completed stays in flight across `close()` | T13 | Whoever builds `ackWait` (spec 7.2), or nobody | A tick still running at close withdraws everything it handed over; a tick that finished left its files with the consumer by T10's design, and nothing enumerates the in-flight set from outside. The process is ending, so the file is listed again on the next start either way; only `sftp_inflight` on a closed connector reads above zero until then |
 | A failing assertion before `close()` in a `runTest` that started a connector hangs the test instead of failing it | T9, seen by T13 | Whoever next writes one | The connector's scope shares the test scheduler but is not a child of the test's job, so `runTest` waits for a scheduler the housekeeper's `delay` loop never lets go idle. T13's connector test declares its readiness so the assertion cannot fail that way; a `try`/`catch` that closes the connector before rethrowing is the general shape |
-| The breaker and `sftp_breaker_state` are per `SftpClient` | T11 | T14's binding | A second client for the same endpoint on one registry registers a gauge whose id exists and reads the first client's breaker (R1 finding 6's shape); the breakers themselves are separate, so the two clients open independently |
+| ~~The breaker and `sftp_breaker_state` are per `SftpClient`~~ | T11 | ~~T14's binding~~ | **Ruled on by T14, and the same ruling covers R1 finding 6's `PoolMeters`.** The adapter produces one connector per application by construction - one `sftp.connector` prefix, one configuration, one produced bean - so neither collision can arise from it, and no guard was added for a shape the module cannot make. The colliding gauges themselves are untouched: a host that builds a second connector by hand still gets them, and the row below records what that costs |
+| A second connector for one endpoint on one registry silently reads the first one's pool gauges and breaker state | T14, restating T11 and R1 finding 6 | Whoever first hosts two connectors against one server | Registering a gauge whose id already exists returns the existing gauge, and `PoolMeters` and `ClientMeters` identify themselves by endpoint alone. Nothing throws; the numbers lie. The fix is a tag - the connector's name beside the endpoint - which is a change to spec 13's meter identity and therefore the maintainer's, not an adapter's. The adapter's own defence is that it cannot produce the second connector |
 
 ### C6: spec Sec 5.3 amended - the middle cancellation tier is `keepAlive`
 
@@ -3054,3 +3055,185 @@ that already completed stays in flight across `close()`; a failing assertion bef
   A `Retired` made anywhere but the registry would drift it and a drain would then wait its full bound.
 - **A `runTest` that starts a connector and then fails an assertion hangs** (seams row). Declare the
   readiness the test needs, and assert after `close()` where possible.
+
+---
+
+## T14: Quarkus adapter
+
+Built on `claude-opus-5[1m]`. 241 tests were green at the start and 247 are green at the end
+(52 core, 189 testkit, 6 quarkus): 5 in `SftpConnectorPropertiesTest` and 1 `@QuarkusTest` in
+`SftpConnectorAdapterTest`. Nothing in `core` or `testkit` was touched, so the 241 are the same
+241. The self-review (standards and spec axes, two sub-agents) found three things that were
+changed before the commit and are folded in below: `hostKey.known-hosts` was declared in the
+mapping and never read, so a strict policy silently dropped the file it was given; the Prometheus
+registry was a compile-scope dependency, which would have put it on the classpath of every host
+that wanted a connector; and the `quarkus-maven-plugin` was binding a `build` goal a library
+module has nothing to package.
+
+**Built:** a Quarkus host now gets a connector out of its application properties. Put
+`sftp.connector.*` in `application.properties`, inject `SftpConnector`, and the module does the
+rest: reads the properties, puts them to the DSL, hands the host's own `MeterRegistry` to the
+pool so the pool's gauges land in whatever the host scrapes, starts the connector with the
+application, and closes it on the shutdown event within the bound the connector promises. The
+core learned nothing about Quarkus: `sftpconnector/quarkus` is a new module depending on
+`sftpconnector-core`, and `core`'s `ArchitectureTest` passes unchanged.
+
+**Concepts named:**
+
+- **The properties carry values and decide nothing.** `SftpConnectorProperties` is a
+  `@ConfigMapping` in which *every* leaf is `Optional`, including the ones the connector cannot
+  run without. A property nobody set arrives as absent rather than as a substitute the operator
+  never chose, and `toConnectorConfig()` then simply does not mention it, so the builder's own
+  default stands. There is one definition of what a valid configuration is and it is the
+  builder's; the mapping never has a second opinion. What this buys is the thing the builder was
+  built for: an operator with several faults in one properties file hears about all of them in one
+  `ConfigurationError` and corrects them in one pass. `SftpConnectorPropertiesTest.every fault in
+  one properties file is reported together` is that claim with six faults in it.
+- **The consequence, which is the rule for the next knob:** an absent property must leave the
+  builder's default in place, never restate it. A default written twice is a default that will
+  one day disagree with itself, and the copy in the adapter would be the one no test covers.
+  `a property nobody set keeps the connector's own default` is the guard on that.
+- **A knob is one value even when it is three properties.** The backoff curve is `initial`, `max`
+  and `jitter`, and naming any one of them replaces the whole curve, with the two nobody named
+  coming from the builder's own curve. Readiness is the same shape read the other way: naming any
+  check replaces the connector's default heuristic outright rather than adding to it, because a
+  deployment that says "ready when the marker is there" means that and not "that as well as a
+  minute of age". Several named checks compose, and all of them must pass.
+- **One connector per application, by construction rather than by guard.** This is the ruling on
+  the two open seams that were routed here. One `sftp.connector` prefix means one configuration
+  means one produced bean, so a second connector for the same endpoint on one registry cannot
+  come from this module, and nothing was written to refuse a shape the module cannot make. The
+  colliding gauges are untouched and the seams row now records what a host that builds a second
+  connector by hand is taking on.
+- **The close is dispatched, and its timeout is an assertion rather than a cut.** Closing is
+  bounded by `drainTimeout + cancelGrace` and cannot be cancelled, so `withTimeoutOrNull` around
+  it cannot make the hook return sooner. What it is for is the log line underneath: if it ever
+  fires, the close overran its own bound, which is a fault worth a WARN. The work runs under
+  `runBlocking(Dispatchers.IO)` rather than on the thread that delivered the event, because
+  cutting a session loose is a blocking socket close made on whichever thread is doing the
+  closing (R1 finding 5).
+
+**Acceptance:**
+
+- *Separate module depending on core; CDI producer builds the connector through the DSL from
+  mapped configuration* - `sftpconnector/quarkus` (`sftpconnector-quarkus`) is in the
+  aggregator's `<modules>` and depends on `sftpconnector-core`, `quarkus-arc` and
+  `quarkus-micrometer`. `SftpConnectorLifecycle.connector` is the producer, and it starts what
+  `toConnectorConfig()` built. Proved end to end by the `@QuarkusTest` below, which injects the
+  connector and polls with it.
+- *Shutdown event calls `close()` under `drainTimeout`* - `SftpConnectorLifecycle.stop` observes
+  `ShutdownEvent` and calls `close()` under `runBlocking(Dispatchers.IO)` inside
+  `withTimeoutOrNull(drainTimeout + cancelGrace + 5s)`, per spec 11.2's last paragraph and T13's
+  note. The `@QuarkusTest` calls it and then finds the pool holding nothing, at least one entry
+  counted `sftp_pool_evicted_total{reason=shutdown}`, and `client.exists` refused with
+  `PoolExhausted`.
+- *Host `MeterRegistry` is bound; the pool gauges appear in the host's metrics endpoint* - the
+  same test reads `sftp_pool_active`, `_idle` and `_pending` off the injected `MeterRegistry`
+  under the endpoint tag, finds `sftp_pool_idle` at 1 after the poll handed its session back, and
+  then asserts all three appear in `PrometheusMeterRegistry.scrape()` - which is the endpoint's
+  own content rather than a registration somewhere.
+- *A Quarkus test boots against the embedded server, polls once, shuts down cleanly* -
+  `SftpConnectorAdapterTest.a host gets a connector from its properties, polls with it, and closes
+  it on shutdown`. See below.
+- *ArchUnit in core still passes: no Quarkus import in core* - `core`'s 52 tests, including
+  `ArchitectureTest`, are green and untouched. `core` gained no dependency.
+- *Progress entry appended* - this.
+
+**What the `@QuarkusTest` measured.** `EmbeddedSftpServerResource` starts a real MINA SSHD before
+Quarkus reads configuration - it has to be a `QuarkusTestResourceLifecycleManager`, because the
+port is chosen by the operating system and the connector is built and started while the
+application boots, long before a test method runs - and hands back the address, the credential and
+a staging directory as configuration overrides. The application then starts a connector against
+it, whose start-up probe made `/drop/done`. The test writes `vendor.csv` and its `.ready` marker,
+polls once, receives exactly one `FileSeen` (the marker is skipped, not handed over), acks it, and
+finds the file at `/drop/done/vendor.csv`. Readiness is the marker rather than the default
+heuristic precisely so there is no clock in the test. The gauges are then read, the shutdown
+observer is called with a `ShutdownEvent`, and the pool is empty with nothing staged and no
+partial file. Calling the observer a second time finds nothing to do, which is what the
+application's own shutdown event does a moment later. The core's slf4j `DEBUG` line from
+`StartupProbe` appears in Quarkus's log format in that run, which is spec 3.2's D3 working with no
+configuration.
+
+**Deviations:**
+
+1. **Three dependency versions are pinned in the module's own `pom.xml`, not the parent's.** The
+   brief asks for versions in the parent. These cannot go there: they exist *because* this module
+   imports `quarkus-bom`, whose managed versions beat the reactor's for this module only.
+   `micrometer-core` is held to the platform's 1.13.7 because the platform manages
+   `micrometer-commons` and the registry implementations but not the core, so the module otherwise
+   resolves a 1.17 core beside a 1.13 commons - measured, it is what the first run produced. The
+   connector touches only `MeterRegistry`, `Counter`, `Gauge` and `Timer`, unchanged since
+   Micrometer 1.0, so converging on the older is safe. `sshd-common` is pinned to 2.19.0 for the
+   mirror-image reason - the platform manages the common and not the core, and the first test run
+   failed with `NoSuchMethodError: ValidateUtils.hasContent` from a 2.19 core on a 2.12 common.
+   `quarkus.version` is 3.17.5, matching `etl-host`, which is the only Quarkus this repository has
+   resolved. **Debt:** `sshd-common 2.19.0` now sits beside the parent's `sshd-core`/`sshd-sftp`
+   2.19.0 literals, so an SSHD bump is two edits or the split-version failure comes back. Repaid by
+   converting the parent's literals to an `${sshd.version}` property, which T1 deviation 3 already
+   asked for and which this ticket's scope (parent `<modules>` and `<dependencyManagement>` only)
+   did not allow.
+2. **The `AcceptAll` warning is still not repeated at start-up.** T9 deviation 6 left this to be
+   decided here, on the grounds that a host which builds configurations long before starting
+   connectors from them is where a second line would earn its place. This host is not that host:
+   the configuration is built in `SftpConnectorLifecycle`'s constructor and the connector is
+   started by the producer method on that same bean, which runs as the bean is created. The two
+   moments are microseconds apart in the same start-up, and the warning is in the log either way.
+   Declined again. The shape that would change it is a host holding configurations in a registry
+   and starting connectors from them on demand - and it would then be the *starting* that needs
+   the line, not the building.
+3. **`HostKeyPolicy.Strict` with no known-hosts file named reaches the transport as the empty
+   path.** The adapter validates nothing by design, and the builder does not check that a
+   known-hosts file exists, so a strict policy with no file is refused by the first handshake
+   rather than at build time. The empty path is deliberate: standing in a location nobody named -
+   the account's own `~/.ssh/known_hosts` - is the one substitution that could silently succeed
+   against the wrong recorded key. On the seams table below.
+4. **The Prometheus registry is a test-scope dependency, and `quarkus-micrometer` is the
+   compile-scope one.** Spec 3.2 lists "micrometer" among the module's dependencies; a registry
+   *implementation* is not that. `quarkus-micrometer` alone binds a composite registry with no
+   children on which every gauge is a silent no-op, so the module's own test needs a real one -
+   but shipping it would put Prometheus on the classpath of every host that wanted an SFTP
+   connector.
+5. **The `quarkus-maven-plugin` binds `generate-code` and `generate-code-tests`, not `build`.**
+   This module is a library a host depends on, not an application, so there is no runner to
+   package; the plugin is here for the application model the `@QuarkusTest` boots against. The
+   suite and `mvn package` are both green without the `build` goal.
+6. **The shutdown observer keeps the started connector in a field rather than injecting it.** An
+   observer that took `SftpConnector` as an injection point would, after a start-up that had
+   already failed, ask the container to start a second connector while the application was
+   stopping.
+7. **The adapter's enums restate two of core's sealed types.** `HostKeyKind` and `ActionKind` are
+   the spellings a properties file can use for `HostKeyPolicy` and `PostAction`; a properties file
+   cannot name a Kotlin type. A new policy or action in core means editing an enum and one `when`
+   here, which the compiler names.
+8. **Size.** 244 lines of main source that are neither blank nor comment across two files, and 220
+   of tests across three, plus a 141-line pom. Inside the 200-600 budget.
+
+**Seams.** Closed above, struck through: the breaker and `sftp_breaker_state` being per
+`SftpClient`, which is the same ruling as R1 finding 6's `PoolMeters`. Added to the table above: a
+second connector for one endpoint on one registry reads the first one's numbers, which is now the
+maintainer's and needs a change to spec 13's meter identity. Added below: the strict host-key
+policy that cannot check its own file.
+
+| Seam | Left by | Owner | What happens if it is forgotten |
+|---|---|---|---|
+| `HostKeyPolicy.Strict` does not check that its known-hosts file exists | T14 | Whoever next touches DSL validation | A strict policy with a mistyped or missing path is refused by the first handshake with the SSH library's message rather than at build time with the connector's. The builder is where the check belongs, beside the staging-directory check that already lives there |
+
+**For the next tickets:**
+
+- **T15 (acceptance): the adapter's test is `SftpConnectorAdapterTest`, and it is one test on
+  purpose.** Its last act stops the connector, so a second test method in that class would run
+  against a stopped one. A `@QuarkusTest` that wants a live connector needs its own class, and the
+  application boot it pays for is about five seconds.
+- **A `@QuarkusTest` cannot observe the real `ShutdownEvent`,** which fires after the last test.
+  Calling `SftpConnectorLifecycle.stop(ShutdownEvent())` is how the shutdown path is exercised
+  deterministically, and the real event afterwards finds nothing running and returns.
+- **The properties are `Optional` all the way down, and that is load-bearing.** A knob given a
+  `@WithDefault` in the mapping is a default that has left the builder, and the two will drift.
+  The only `@WithDefault` in the mapping is `readiness.size-stable-interval`, which is inert
+  unless `size-stable-checks` is also set.
+- **Durations in the mapping are `java.time.Duration`,** converted with `toKotlinDuration()`.
+  Quarkus parses `30s` and `4m`; plain SmallRye, which is what the unit test builds, parses only
+  ISO-8601, so a `@WithDefault` duration has to be written `PT10S`.
+- **`quarkus-micrometer` alone is a composite registry with no children,** on which every gauge is
+  a silent no-op. Any later test that reads a meter in a Quarkus host needs a registry
+  implementation on its own test classpath, or it goes green against nothing.
