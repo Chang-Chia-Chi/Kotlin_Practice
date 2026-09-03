@@ -144,6 +144,14 @@
                 <version>2.0.5</version>
                 <scope>test</scope>
             </dependency>
+            <!-- Model checking of the connector's two lock-guarded structures. The new group:
+                 the org.jetbrains.kotlinx one is deprecated at ERROR since 3.5. -->
+            <dependency>
+                <groupId>org.jetbrains.lincheck</groupId>
+                <artifactId>lincheck</artifactId>
+                <version>3.7</version>
+                <scope>test</scope>
+            </dependency>
         </dependencies>
     </dependencyManagement>
 

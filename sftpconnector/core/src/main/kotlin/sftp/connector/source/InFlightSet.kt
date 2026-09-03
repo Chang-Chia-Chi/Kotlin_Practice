@@ -44,22 +44,30 @@ internal class InFlightSet(capacity: Int) {
     suspend fun admit(file: RemoteFile): InFlightSlot? {
         if (holds(file)) return null
         room.acquire()
-        synchronized(lock) {
-            if (file in inFlight || file in excluded) {
-                room.release()
-                return null
-            }
-            inFlight += file
+        if (!enter(file)) {
+            room.release()
+            return null
         }
         return InFlightSlot(file, this)
     }
 
     internal fun leave(file: RemoteFile, forGood: Boolean) {
-        synchronized(lock) {
-            inFlight -= file
-            if (forGood) excluded += file
-        }
+        exit(file, forGood)
         room.release()
+    }
+
+    /**
+     * The lock body of [admit]: the second look, and the file's entry when it passes. Whether the
+     * file entered. Non-suspending on purpose, so the lock can be model-checked on its own.
+     */
+    internal fun enter(file: RemoteFile): Boolean = synchronized(lock) {
+        if (file in inFlight || file in excluded) false else inFlight.add(file)
+    }
+
+    /** The lock body of [leave]. Whether the file was in the set. */
+    internal fun exit(file: RemoteFile, forGood: Boolean): Boolean = synchronized(lock) {
+        if (forGood) excluded += file
+        inFlight.remove(file)
     }
 }
 

@@ -5,6 +5,7 @@ import kotlinx.coroutines.sync.withLock
 import sftp.connector.config.PoolConfig
 import sftp.connector.transport.SftpConnection
 import java.time.Clock
+import java.util.EnumSet
 import kotlin.random.Random
 
 /**
@@ -337,8 +338,12 @@ internal class SessionRegistry(
     }
 
     private companion object {
-        /** The states in which some caller is holding the session and could be holding it too long. */
-        private val HOLDABLE = setOf(EntryState.InUse, EntryState.Validating)
+        /**
+         * The states in which some caller is holding the session and could be holding it too long.
+         * An EnumSet, which compares by ordinal: a hash set of enum constants is looked up by identity
+         * hash, and a model checker that makes identity hashes deterministic cannot find them in one.
+         */
+        private val HOLDABLE: Set<EntryState> = EnumSet.of(EntryState.InUse, EntryState.Validating)
     }
 }
 
