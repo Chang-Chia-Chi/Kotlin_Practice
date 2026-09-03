@@ -232,7 +232,10 @@ because each was correctly deferred by the ticket that found it.
 | A local I/O failure inside a transfer is classified `SessionLost` | R2 | Whoever next touches the mapper (T2's table) | JSch wraps an `IOException` from the caller's stream into its status exception with the generic code and the `IOException` as cause, and the mapper reads that shape as the connection breaking. A full local disk under a download, or an unreadable local file under an upload, poisons a healthy session and sends a retry to a fresh one to fail the same way. Reasoned from the mapper and JSch's `put`/`get`, not reproduced |
 | A local failure inside a lease throws away a healthy session | R2 | Whoever has cause | `upload` opens the local file, and `download` the partial file, inside `withLease`; a `java.nio` exception there is unclassified, so `releaseAfter` evicts the session. A handshake per local mistake, the same price as R1 finding 4. Opening the local side before borrowing closes it and was not done because nothing lies |
 | `OperationTimeout` says its lease is `EVICTED`, and the lease was already decided | T11 | Whoever next revisits `Disposition` | The timeout cancels the try, the ladder decides the session's fate on what actually stopped the call, and only then is the class raised; a call the transfer monitor stopped in time keeps its session. The disposition's `lease` is read by nothing on that path, so nothing is wrong, but a reader of the hierarchy is told a fate that is advisory |
-| `ServerFailure` counts against the breaker | T2's disposition, T11 | The maintainer | On a server without the POSIX rename extension every refused overwrite is a `ServerFailure`, and each one counts: a pipeline configured to `REFUSE` on a busy target opens its own breaker, the way C4 said it would have poisoned its own sessions. T11 counts it because the disposition says so and excludes only `NoSuchFile`, on instruction |
+| ~~`ServerFailure` counts against the breaker~~ | T2's disposition, T11 | ~~The maintainer~~ | **Closed by C13, applied by T12's pre-task (`65a967c`).** Every failure the server answered - `NoSuchFile`, `PermissionDenied`, `ServerFailure` - is on `RETRY_ON_THE_NEXT_TICK`, which is not counted and not retried in-call; `RETRY_ON_THIS_SESSION` had nothing left on it and is gone. The retry predicate reads `retry == IMMEDIATELY` and the breaker predicate reads `countsAgainstTheBreaker`, with no class list in either |
+| A `consume` pipeline re-runs its block every tick for a file whose ack action keeps being refused | T12 | Whoever first sees the WARN line repeat | An ack whose move is refused (`OverwriteRefused` under `REFUSE`, or a permission) leaves the file where it was; the next tick hands it over again and `consume` runs the block again - a download per tick for a file that never leaves. The WARN line per tick is the only signal. The alternative, ending the pipeline on one file's refusal, was declined; nacking for good after N refusals would need N and a policy |
+| A watch on a connector that has been stopped ends normally, and a collector that restarts it gets another normal end | T12 | T13 | Cancelling the connector's scope closes the ticker's channel with a cancellation, which the watch reads as "the connector stopped me" and ends without an error. A consumer that loops on `watch` after that would start a new ticker in a cancelled scope and end again at once, forever. T13's `Closing` state is where a watch on a closed connector should be refused at the claim |
+| A skipped tick's event is handed over on the ticker's own coroutine, so under `SKIP` a busy collector delays the ticker | T12 | Whoever measures it | The ticker sends `PollSkipped(OVERLAP)` on the same rendezvous channel as everything else and waits for the collector to take it; the next interval is counted from then. Under `PROCEED` the ticker sends nothing itself. Harmless on an hourly schedule; a buffer of one for the ticker's own events is the fix if it ever matters |
 | Under `REFUSE`, a retry's window is the backoff | T11 | Whoever has cause | The policy's look ran once, before the first request. A retry after a lost reply first looks for its own landed file at the target and stops there if it finds it; only when it does not does it send a plain rename - and on a server with the POSIX rename extension a stranger's file that arrived at the target during the backoff is then replaced. T7's race, widened from the look to the backoff; the alternative - applying the policy's look again - refuses the retry for its own landed file |
 | The breaker and `sftp_breaker_state` are per `SftpClient` | T11 | T14's binding | A second client for the same endpoint on one registry registers a gauge whose id exists and reads the first client's breaker (R1 finding 6's shape); the breakers themselves are separate, so the two clients open independently |
 
@@ -2648,3 +2651,217 @@ registry, the `REFUSE` window under retry, `ServerFailure` counting against the 
   POSIX rename extension a stranger's file that arrived at the target during the backoff is then
   replaced. The window is the backoff rather than the look, and it is the same race T7 accepted,
   widened; recorded as a seams row.
+
+---
+
+## T12: Watch ticker, overlap policy and error policy
+
+Built on `claude-fable-5-1`. 216 tests were green at the start and 231 are green at the end (51 core,
+180 testkit): 11 in `SftpWatchTest`, 2 in `WatchAgainstServerTest`, 1 each added to `SftpConnectorTest`
+and `ConnectorDslTest`, and `FailureModelTest` reshaped by the pre-task (one row test replaced, one
+added; the count there is unchanged). The self-review (standards and spec axes, two sub-agents) found
+four things that were fixed before the commit and are folded in below: the server demo asserted tick
+*numbers* on a real interval, which a slow ack could shift by one skipped tick; a tick failing in the
+instant its collector left would have reached the thread's default handler rather than a log line; a
+cancellation thrown *inside* a tick by nobody - a custom check letting its own `withTimeout` escape -
+would have ended the tick without a word where a poll would have thrown it; and S12 had no test under
+a real `PROCEED` overlap.
+
+**Pre-task, commit `65a967c` - ruling C13 / spec D41 applied.** `RETRY_ON_THE_NEXT_TICK` is now the
+disposition for every failure the *server answered*: `NoSuchFile`, `PermissionDenied`, `ServerFailure`.
+It keeps the session, is not retried inside the call, and no longer counts against the breaker.
+`RETRY_ON_THIS_SESSION` had no class left on it and is deleted rather than kept as a name nothing lands
+on. The line between the two retry dispositions is now `Recoverable.poisons` alone - a session is
+untrustworthy exactly when the wire failed - so `PermissionDenied` lost its override. `Resilience`'s two
+predicates read the answers with no class list: `retry == IMMEDIATELY` and `countsAgainstTheBreaker`;
+the `!is NoSuchFile` exclusion T11 carried is gone. *Earlier tests changed, as C13 mandates:*
+`FailureModelTest.a recoverable failure that does not poison keeps the session it was using` (pinned
+`NoSuchFile` to `RETRY_ON_THIS_SESSION`, counted, retried immediately) is replaced by `.a failure the
+server answered keeps its session, waits a full tick, and is not held against the server` over the three
+classes; `.a permission refusal waits a full tick rather than asking again immediately` is replaced by
+`.a short transfer is retried on a fresh session and counted, like any failure of the wire`, since the
+permission row is now inside the first; and `rowOf` puts the three on one row. No other earlier test
+asserted a server-answered failure as counted - T11's `a failure whose disposition says never is not
+tried again and not counted` asserts `PermissionDenied` is not retried and never asserted the breaker,
+and every JSch-mapping assertion of `countsAgainstTheBreaker` is on a wire failure.
+
+**Built:** the pipeline shape spec 7.1 promised. `source.watch(dir, every)` is a cold flow that polls
+when collected and again every interval for as long as the collector keeps collecting, reports a tick
+that failed as `PollFailed` and a tick that sent nothing as `PollSkipped`, and ends only on a failure no
+later tick could survive - which is I10, read off the failure's own `Disposition.watch` and never off its
+class. `source.consume(dir, every) { file -> }` is the ordinary pipeline over it: the block per file,
+acked when it returns, nacked when it throws, and neither ending the watch. The overlap policy is a
+knob, `polling { overlap = OverlapPolicy.SKIP }`, and `SftpEvent` gained the two events T10 left out.
+The ticker runs in the connector's own scope, so cancelling `backgroundWork` ends every watch.
+
+**Concepts named:**
+
+- **A tick is a number taken when the interval comes round, whether or not anything runs for it.**
+  T10's per-source counter is the only counter: `poll(dir)` takes a number at collection and the ticker
+  takes one per interval, so a watch's ticks continue its polls' numbering (the first test proves poll
+  1, watch 2, 3). The number is taken *before* the overlap decision, which is why a skipped tick has one.
+  `poll` is now `flow { emitAll(tickOf(dir, ticks.incrementAndGet())) }` and `tickOf(dir, tick)` is
+  T10's body unchanged with the number passed in; that is the whole refactor of `poll`.
+- **The ticker is a producer in the connector's scope; the watch is a collector of its channel.** The
+  seam that answers the brief's "how does `watch` get into the connector's scope without handing the
+  scope out": `SftpSource` takes a `CoroutineScope` at construction (the connector passes its own; a
+  source built alone gets `CoroutineScope(SupervisorJob())`, which nothing stops and whose watches end
+  when their collectors do), and `watch` runs `background.produce { tickEvery(...) }` and consumes the
+  channel into its own `emit`. A rendezvous channel, so backpressure is suspension exactly as for `poll`:
+  a tick's `send(FileSeen)` waits for the collector to take it. Each tick that runs is a `launch` inside
+  the producer, so the ticker is free to come round again while a tick works - which is what makes
+  overlap a thing that can happen at all. Cancelling the collector cancels the channel, which cancels
+  the producer and every tick under it, and the tick's own `catch` (T10's) withdraws what it had handed
+  over. Cancelling the connector's scope closes the channel with a cancellation; the watch tells that
+  apart from its own by asking its own job (`ensureActive`, T11's shape) and ends *normally*, logging
+  that the connector stopped it. A fatal in any tick fails the producer, which closes the channel with
+  the error, cancels the sibling ticks under `PROCEED`, and reaches the collector as the thrown error.
+- **The watch claim.** `watching`, a synchronised set of directories; `add` under its lock is the whole
+  decision, and a second collector of the same directory is refused with `IllegalStateException` naming
+  the directory and the reason (one consumer per directory is what the in-flight set's promise rests on).
+  Released in the collector's `finally`, so a watch that ended any way gives the directory back.
+- **`OverlapPolicy`** (`config`): `SKIP` (default) and `PROCEED`, as spec 12 spells them. The decision
+  is made by the ticker alone - one coroutine, so no lock - from whether the latest tick's job is still
+  active. Under `SKIP` the ticker sends `PollSkipped(tick, OVERLAP)` and launches nothing; under
+  `PROCEED` it launches alongside, and the in-flight set is what keeps S12 (proved under a real overlap
+  now, with `maxInFlight = 1` so the first tick is still waiting for room when the second lists).
+- **`SkipCause`** (`source`): `OVERLAP`, `BREAKER_OPEN`. `PollFailed(tick, error: SftpException)` is
+  typed, so a consumer can read `error.disposition` rather than the class.
+- **The error policy is one `catch` operator, `reportingFailures`,** and it is where I10 lives. It sees
+  only the tick's own failures - the `catch` operator passes a downstream failure and the tick's own
+  cancellation untouched - and does what `disposition.watch` says: `REPORT_THE_FAILURE` emits
+  `PollFailed`, `REPORT_A_SKIP` emits `PollSkipped(BREAKER_OPEN)`, `STOP` rethrows. Nothing sorts
+  classes; `PoolExhausted` (S4), `CircuitOpen` (S3's shape), `PermissionDenied` (D20) and
+  `AuthenticationFailed` (S10) each arrive by their disposition. Two things that are not
+  `SftpException`s are decided here as well, and both end the watch, because no tick survives a bug by
+  waiting: an unclassified exception (logged at ERROR and rethrown), and a `CancellationException`
+  raised while the tick itself is active - a check that let its own `withTimeout` out - which is turned
+  into an `IllegalStateException` naming the tick and carrying the timeout as cause, because rethrown as
+  a cancellation it would have ended the tick's coroutine silently and the watch would have carried on
+  with a tick missing. That is not wrapping a cancellation: the tick was not being cancelled, which is
+  what `ensureActive` establishes first.
+- **`consume`'s two answers.** The block's exception is the nack, but this collector's own cancellation
+  is not the block failing (`ensureActive` before the nack, so a `withTimeout` the block set for itself
+  *is* a nack, and a shutdown is not). An ack or nack *action* that fails with a connector failure is
+  logged and the pipeline goes on - the file is still where it was and the next tick hands it over again
+  - unless the failure is fatal; an action failing with anything else is a bug and ends the pipeline.
+
+**Acceptance:**
+
+- *watch(dir, every) repeats poll on a ticker driven by the injected clock* -
+  `SftpWatchTest.a watch polls when collected and again every interval, numbering its ticks after the
+  source's polls`: poll takes tick 1, the watch starts on tick 2 the instant it is collected, tick 3
+  after one interval of virtual time, three listings. See deviation 2 for "driven by the injected clock".
+- *OverlapPolicy SKIP emits PollSkipped(Overlap) while a tick runs (S8); PROCEED runs a second tick
+  alongside* - `S8_under SKIP a tick that comes round while the last is still running is skipped, and no
+  second listing is sent` (the first listing never answers; two intervals later the events are
+  `PollStarted(1)`, `PollSkipped(2, OVERLAP)`, `PollSkipped(3, OVERLAP)` and one listing was sent);
+  `under PROCEED a tick that comes round while the last is still running runs alongside it` (two
+  `PollStarted`, two listings); `S12_a file listed again by a tick running alongside is handed over
+  once`. Mutating the ticker to ignore the policy fails S8 and nothing else.
+- *Recoverable errors emit PollFailed and the flow continues; fatal errors terminate the flow with the
+  error (I10); PoolExhausted emits PollFailed (S4); breaker open emits PollSkipped(BreakerOpen)* -
+  `I10_a recoverable failure is reported and the watch goes on, and a fatal failure ends it with the
+  error` (a listing refused on permissions is `PollFailed(1)`, tick 2 lists and completes, a rejected
+  password on tick 3 ends the collect with `AuthenticationFailed` and no listing follows); `S4_a full
+  pool fails the tick, and the watch continues` (one session, held by somebody else past the acquire
+  timeout on virtual time; `PollFailed(1, PoolExhausted)`, then `PollCompleted(2)` once it is given
+  back); `an open breaker skips the tick` (a breaker of one call opened by a lost session;
+  `PollFailed(1, SessionLost)` then `PollSkipped(2, BREAKER_OPEN)` and one listing in total). Mutating
+  `STOP` to report-and-continue fails I10 and nothing else on virtual time - and hangs the wrong-password
+  server demo, which is the same fact seen from a real interval.
+- *A second watch on the same directory of the same connector is rejected at call time* - `a second
+  watch of the same directory is refused until the first has ended`. See deviation 1 for "call time".
+- *consume(dir, every) { } acks on normal return and nacks on exception* - `consume acks a file its block
+  returns from, nacks one it throws on, and goes on`: the acked file is deleted by its action and not
+  seen again, the nacked one is counted as a nack and handed over again next tick, the pipeline is
+  still running when it is, and nothing is left in flight.
+- *Demo against the embedded server: the watch survives a server restart between ticks and terminates on
+  a wrong password* - `WatchAgainstServerTest.the watch survives a server restart between ticks` (a
+  started connector; after the first tick's file is acked every server session is cut and a second file
+  is written; the next tick is `PollFailed(SessionLost)` because the pool, told to skip validation,
+  handed it the dead session and the retry budget is one; the tick after lists on a fresh session and
+  the second file is acked into `temp/`; asserted as an order of events, not tick numbers) and `a wrong
+  password ends the watch with the rejection, and no tick asks again` (the collect ends with
+  `AuthenticationFailed`, no `PollFailed` was ever emitted, the server counted one connect's worth of
+  passwords, the breaker of one call is still closed).
+- *Progress entry appended* - this.
+
+Four tests beyond the checkboxes: `a cancellation that is nobody's, let out of a check, ends the watch as
+a bug rather than silently`; `a collector whose block throws ends the watch with its own exception and
+gives every place back` (what `consume` exists to prevent, seen from `watch`, and I8 for a watch);
+`SftpConnectorTest.stopping the connector's background work ends a watch normally in its collector`
+(the T13 seam: `backgroundWork.cancelAndJoin()`, and the collector is completed and not cancelled);
+`ConnectorDslTest.a tick that comes round while the last is running is skipped by default, and may be
+told to proceed`.
+
+**Deviations:**
+
+1. **A second watch is refused when its flow is collected, not when `watch()` is called.** Spec 7.6 and
+   the ticket say "at call time". `watch` returns a cold flow, and nothing has happened at the call: a
+   claim taken there would be held by a flow that is built and never collected, for ever, and a flow
+   object collected twice - ordinary Kotlin - would hold no claim the second time. So the claim is the
+   first thing the collection does, before any listing, and the refusal is an exception out of
+   `collect` rather than an event - which, from the caller's `watch(dir).collect { }`, is the same
+   statement. **For the maintainer:** spec 7.6's "at call time" should read "when collected".
+2. **The ticker is `delay(every)` on the scope's scheduler, and reads no `Clock`.** The ticket says
+   "driven by the injected clock". A coroutine cannot sleep on a `java.time.Clock`; the injected clock
+   is what timestamps are read from, and under `runTest` the scheduler's time and the injected
+   `virtualClock()` are the same time, which is the only sense in which the checkbox can be tested and
+   is how every test here runs. The interval is counted from each tick's launch (or from the skipped
+   tick's event being taken), so the schedule drifts by however long the ticker's own `send` waits;
+   on the seams table.
+3. **A watch the connector stops ends normally.** Spec 7.1 says a watch "never terminates on
+   recoverable errors" and 11.2 says "watchers are cancelled"; neither says what the collector sees.
+   Chosen: the flow completes, with an INFO line, because the collector did nothing wrong and is not
+   the thing being stopped, and a `CancellationException` thrown into a live collector is a trap - a
+   `launch` would end silently, a `runBlocking` would throw. The cost is on the seams table: a consumer
+   that loops on `watch` after the connector stopped gets another normal end at once, until T13's
+   `Closing` state refuses the claim.
+4. **`SftpSource` takes a `CoroutineScope`, and `SftpConnector.start` makes its scope before the probe.**
+   The scope is a name and a job and costs nothing until something is launched, and the housekeeper is
+   still launched only after the checks pass - T9's `a start-up that was refused starts no housekeeper`
+   is unchanged and green. The parameter is defaulted, so T11's `SftpSource(client, config, meters)` in
+   `ResilienceAgainstServerTest` builds unchanged. Whether the watchers should sit under a supervisor of
+   their own beneath the connector's, so T13 can cancel them before the housekeeper, is T13's to decide:
+   it can pass `scope + SupervisorJob(scope.job)` here and cancel that.
+5. **A tick that fails at the instant its collector leaves is logged, not reported.** The producer's
+   channel is already cancelled by then, so the failure cannot be delivered and, under a supervisor,
+   nobody else handles it; a `CoroutineExceptionHandler` on the producer turns what would have been the
+   thread's default handler into a WARN line. Reasoned from `ProducerCoroutine.onCancelled`, not
+   reproduced: the window is a channel cancel racing a tick's throw.
+6. **`ResultLabel` and `sftp_poll_seconds` are untouched.** A failed tick is already timed and labelled
+   by T10's `timingPoll` (`recoverable` for everything a watch survives, `fatal` for what ends it); a
+   tick skipped for overlap runs nothing and records nothing, which is consistent with spec 13 naming
+   no skip counter. No new meter.
+7. **Size.** About 135 lines of main source that are neither blank nor comment across five files (all
+   but ~15 in `SftpSource`), about 360 in the two new test files and 30 in three earlier ones. Inside
+   the budget.
+
+**Seams.** Closed above, struck through: `ServerFailure` counts against the breaker. Added: `consume`
+re-runs its block for a file whose ack keeps being refused; a watch on a stopped connector ends normally
+and again on restart; the ticker's own `send` under `SKIP` delays it.
+
+**For the next ticket (T13, shutdown):**
+
+- **The watchers are `produce` coroutines in the scope `SftpConnector.start` hands `SftpSource`.**
+  Today that is the connector's own scope, beside the housekeeper. Spec 11.2 cancels watchers in step 2
+  and stops the housekeeper in step 5, so T13 will want them separable: a child supervisor for the
+  source is one line at the `SftpSource` call, and the housekeeper's `launch` should keep its `Job`.
+- **Cancelling a watcher ends its collector's flow normally,** and the running tick's `catch` withdraws
+  every unanswered file as `cancelled` (T10's mechanism, unchanged). An ack the consumer is in the middle
+  of runs on the *consumer's* coroutine, which is not cancelled: it will hit step 1's fast-failing
+  acquire, and `consume` will log that the answer could not be carried out. That is the "unacked files
+  are treated as nacks" of 11.2, with the file re-listed on the next start.
+- **A watch claimed after the connector is closing should be refused at the claim** - `watching.add`
+  in `watch` is the place, and the state to read is T13's. Without it a looping consumer spins (seams
+  row).
+- **The `Executor has been shut down` lines in the test log are MINA's own,** printed on the server's
+  own threads when a server is stopped with a client session still open, and predate this ticket
+  (they appear under T11's `ResilienceAgainstServerTest` as well). T13's `close()` hanging up the
+  pool's sessions before the server stops is what will make them go away.
+- **`SftpEvent`'s `when` is now six-armed** and every consumer's exhaustive `when` over it was named by
+  the compiler when the two events landed; nothing in `core` or `testkit` switched on it exhaustively.
+- **`readiness` checks that time themselves out must catch their own timeout.** A `withTimeout` let
+  out of a check ends the watch as a bug (named in the exception); `withTimeoutOrNull` and `NotReady`
+  is the shape.

@@ -271,6 +271,13 @@ class ConnectorDslTest {
         assertThat(heuristic.checks[1]).isInstanceOfSatisfying(MinAge::class.java) { assertThat(it.duration).isEqualTo(1.minutes) }
     }
 
+    /** Two listings of one directory at once buy nothing, so a tick that finds the last one running waits it out unless told otherwise. */
+    @Test
+    fun `a tick that comes round while the last is running is skipped by default, and may be told to proceed`() {
+        assertThat(minimalConnector { }.polling.overlap).isEqualTo(OverlapPolicy.SKIP)
+        assertThat(minimalConnector { polling { overlap = OverlapPolicy.PROCEED } }.polling.overlap).isEqualTo(OverlapPolicy.PROCEED)
+    }
+
     private fun minimalConnector(extra: SftpConnectorBuilder.() -> Unit): SftpConnectorConfig =
         sftpConnector("vendor-drop") {
             endpoint { host = "sftp.example" }

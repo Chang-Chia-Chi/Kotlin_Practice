@@ -48,13 +48,14 @@ class SftpConnector private constructor(
 
     /**
      * Everything the connector runs on its own behalf, under one supervisor job so that one such
-     * task failing does not take the others with it. Today that is the housekeeper; the watchers
-     * join it when there are any.
+     * task failing does not take the others with it: the housekeeper, and the ticker of every
+     * watch a consumer is collecting.
      *
-     * Cancelling it stops all of that, and it is where a graceful shutdown ends - but it is not
-     * that shutdown. Nothing is drained, no caller is waited for and no session is hung up on by
-     * cancelling this; the sessions the pool holds are closed by the phased close that does not
-     * exist yet.
+     * Cancelling it stops all of that - each watch then ends normally in its collector, with the
+     * files its running tick had handed over given back - and it is where a graceful shutdown
+     * ends, but it is not that shutdown. Nothing is drained, no caller is waited for and no
+     * session is hung up on by cancelling this; the sessions the pool holds are closed by the
+     * phased close that does not exist yet.
      */
     val backgroundWork: Job get() = scope.coroutineContext.job
 
@@ -90,11 +91,14 @@ class SftpConnector private constructor(
         ): SftpConnector {
             val pool = SftpPool(transport, config, meterRegistry, clock)
             val client = SftpClient(pool, config, meterRegistry, clock)
-            val source = SftpSource(client, config, meterRegistry, clock)
+            // Made before the checks and used only after them: a scope is a name and a job, and
+            // costs nothing until something is launched into it. The source needs it at
+            // construction, because every watch a consumer collects ticks in it.
+            val scope = CoroutineScope(background + SupervisorJob() + CoroutineName("sftp-${config.name}"))
+            val source = SftpSource(client, config, meterRegistry, clock, scope)
 
             StartupProbe(client, config).run()
 
-            val scope = CoroutineScope(background + SupervisorJob() + CoroutineName("sftp-${config.name}"))
             scope.launch { pool.housekeep() }
             LOG.info(
                 "Connector \"{}\" is up against {} and looking after {} watched {}.",

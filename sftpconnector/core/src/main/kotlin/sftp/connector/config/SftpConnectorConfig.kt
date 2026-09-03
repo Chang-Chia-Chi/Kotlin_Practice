@@ -178,6 +178,8 @@ data class PollingConfig(
      * belongs to this one connector.
      */
     val readiness: ReadinessCheck,
+    /** What a watch's tick does when the tick before it is still running. */
+    val overlap: OverlapPolicy,
 ) {
     /**
      * The folders files from [directory] are moved into, once, however many actions aim at the
@@ -188,6 +190,25 @@ data class PollingConfig(
             .filterIsInstance<PostAction.Move>()
             .map { it.targetUnder(directory) }
             .distinct()
+}
+
+/**
+ * What a watch does when its interval comes round and the previous tick has not finished - a
+ * long listing, a slow readiness check, or a consumer still working through the last batch.
+ */
+enum class OverlapPolicy {
+    /**
+     * Report the tick as skipped and let the running one finish. The default, because two
+     * listings of one directory at once buy nothing: the running tick is already handing over
+     * everything it found, and a file it holds would not be handed over twice anyway.
+     */
+    SKIP,
+
+    /**
+     * Start the tick alongside the running one. A file the first tick is still holding is not
+     * handed over again; what a second tick can add is files that arrived since the first listed.
+     */
+    PROCEED,
 }
 
 /**

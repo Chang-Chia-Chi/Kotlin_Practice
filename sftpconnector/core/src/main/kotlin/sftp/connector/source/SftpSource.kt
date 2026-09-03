@@ -2,20 +2,40 @@ package sftp.connector.source
 
 import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineExceptionHandler
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.ProducerScope
+import kotlinx.coroutines.channels.consumeEach
+import kotlinx.coroutines.channels.produce
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.FlowCollector
+import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.take
+import kotlinx.coroutines.launch
 import org.slf4j.LoggerFactory
 import sftp.connector.client.LocalFile
 import sftp.connector.client.SftpClient
+import sftp.connector.config.OverlapPolicy
 import sftp.connector.config.PostAction
 import sftp.connector.config.SftpConnectorConfig
 import sftp.connector.error.NoSuchFile
+import sftp.connector.error.SftpException
+import sftp.connector.error.WatchReaction
 import sftp.connector.transport.RemoteFile
 import java.nio.file.Path
 import java.time.Clock
+import java.util.Collections
 import java.util.concurrent.atomic.AtomicLong
+import kotlin.time.Duration
 
 /**
  * A watched directory as a cold flow of events, with the consumer saying when each file is done.
@@ -24,6 +44,12 @@ import java.util.concurrent.atomic.AtomicLong
  * that is busy slows the listing down rather than being sent files it has no room for. The room
  * is [sftp.connector.config.PollingConfig.maxInFlight]: files handed over and not yet acked or
  * nacked, across every directory this source polls.
+ *
+ * [poll] is one listing. [watch] is the same listing on a ticker, for as long as the collector
+ * keeps collecting: it reports a failed tick as an event and goes on, because a lost session or a
+ * full pool is the next tick's to survive, and ends only on a failure no later tick could survive
+ * - a rejected password, a rejected host key. [consume] is the ordinary pipeline over a watch:
+ * the consumer's block per file, acked when it returns and nacked when it throws.
  */
 class SftpSource(
     private val client: SftpClient,
@@ -32,6 +58,13 @@ class SftpSource(
     meterRegistry: MeterRegistry = SimpleMeterRegistry(),
     /** What the readiness checks read. Injected so a test can age a file without waiting. */
     clock: Clock = Clock.systemUTC(),
+    /**
+     * Where a watch's ticker runs. The connector hands over its own scope, so that stopping the
+     * connector stops every watch; a source built on its own gets a scope nothing stops, and its
+     * watches end when their collectors do. A supervisor, because one watch ending on a fatal
+     * failure says nothing about the watch of another directory.
+     */
+    private val background: CoroutineScope = CoroutineScope(SupervisorJob()),
 ) {
 
     private val polling = config.polling
@@ -43,6 +76,13 @@ class SftpSource(
     private val readinessContext = ReadinessContext(client, clock)
 
     private val ticks = AtomicLong()
+
+    /**
+     * The directories a watch is running on right now. One consumer per directory is what the
+     * in-flight set's promise rests on, so the second is refused; adding to a synchronised set
+     * is the whole decision, made under its lock.
+     */
+    private val watching: MutableSet<String> = Collections.synchronizedSet(HashSet())
 
     /**
      * One listing of [directory], as events: [SftpEvent.PollStarted], a [SftpEvent.FileSeen] for
@@ -64,12 +104,174 @@ class SftpSource(
      *   only those were checked at start-up and only those have their action folders in place.
      */
     fun poll(directory: String): Flow<SftpEvent> {
+        requireConfigured(directory)
+        return flow { emitAll(tickOf(directory, ticks.incrementAndGet())) }
+    }
+
+    /**
+     * [poll], repeated: once as soon as the flow is collected, and again every [every] after
+     * that, for as long as the collector keeps collecting. The ticks continue the numbering of
+     * this source's polls.
+     *
+     * A tick that fails is reported as [SftpEvent.PollFailed] and the next tick runs as usual,
+     * whatever the failure was - a lost session, a full pool, a listing the server refused - and
+     * a tick the breaker will not let through is [SftpEvent.PollSkipped]. The one thing that ends
+     * the flow early is a failure that no later tick could survive: the flow ends with that error.
+     * A failure the connector has no name for is a bug, and ends the flow too, since no tick
+     * survives a bug by waiting.
+     *
+     * When the interval comes round while the previous tick is still running, the configured
+     * overlap policy decides: a skipped tick is reported as [SftpEvent.PollSkipped], or the new
+     * tick runs alongside, with the in-flight set keeping a file from being handed over twice.
+     *
+     * The ticker runs in the connector's own scope, so that stopping the connector stops every
+     * watch; the flow then ends normally in its collector. Cancelling the collector stops the
+     * ticker and gives the directory back, and every file the running tick had handed over and not
+     * yet had an answer for goes back to the set, as for [poll].
+     *
+     * @throws IllegalArgumentException when [directory] is not one the configuration names.
+     * @throws IllegalStateException on collection, when another collector is already watching
+     *   [directory] on this connector: one consumer per directory is what keeps a file from being
+     *   handed over twice.
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    fun watch(directory: String, every: Duration): Flow<SftpEvent> {
+        requireConfigured(directory)
+        require(every.isPositive()) { "a watch of $directory needs a positive interval, not $every" }
+        return flow {
+            check(watching.add(directory)) {
+                "$directory is already being watched on this connector; one consumer per directory " +
+                    "is what keeps a file from being handed over twice"
+            }
+            try {
+                val events = background.produce(failedAfterItsCollectorLeft(directory)) { tickEvery(directory, every) }
+                try {
+                    events.consumeEach { emit(it) }
+                } catch (stopped: CancellationException) {
+                    // A cancelled receive is either this collector's own cancellation, which
+                    // goes on, or the connector stopping its watchers, which ends the flow.
+                    currentCoroutineContext().ensureActive()
+                    LOG.info("The watch of {} ended because the connector stopped it.", directory)
+                }
+            } finally {
+                watching.remove(directory)
+            }
+        }
+    }
+
+    /**
+     * The ordinary pipeline: [watch], with [block] run for every file handed over, acked when it
+     * returns and nacked when it throws. One file failing never ends the pipeline - the nack says
+     * whether it comes round again - and neither does an ack or nack action that could not be
+     * carried out: the file is then still where it was, and the next tick hands it over again.
+     * What ends the pipeline is what ends a watch, or a bug: an exception that is not one of the
+     * connector's own failures out of an ack or a nack.
+     */
+    suspend fun consume(directory: String, every: Duration, block: suspend (SftpEvent.FileSeen) -> Unit) {
+        watch(directory, every).collect { event ->
+            if (event !is SftpEvent.FileSeen) return@collect
+            try {
+                block(event)
+            } catch (failed: Exception) {
+                // This collector's own cancellation is not the block failing. Anything else is,
+                // including a timeout the block set for itself.
+                currentCoroutineContext().ensureActive()
+                answering(event) { event.nack(failed) }
+                return@collect
+            }
+            answering(event) { event.ack() }
+        }
+    }
+
+    private suspend fun answering(event: SftpEvent.FileSeen, answer: suspend () -> Unit) {
+        try {
+            answer()
+        } catch (failed: SftpException) {
+            if (failed.disposition.watch == WatchReaction.STOP) throw failed
+            LOG.warn(
+                "The answer for {} could not be carried out, so it is still where it was and will be handed over again: {}",
+                event.file.path,
+                failed.toString(),
+            )
+        }
+    }
+
+    /**
+     * A tick's failure normally reaches the collector through the channel. It cannot when the
+     * collector has already gone - cancelled at the very moment the tick was failing - and a
+     * failure with nobody to tell is logged here rather than left to the thread's default handler.
+     */
+    private fun failedAfterItsCollectorLeft(directory: String) = CoroutineExceptionHandler { _, failure ->
+        LOG.warn("A tick of {} failed just as its collector was leaving, so nobody was told: {}", directory, failure.toString())
+    }
+
+    /**
+     * The ticker. Each tick is numbered when it comes round, whether it runs or is skipped, and a
+     * tick that runs is a coroutine of its own, so the ticker is free to come round again while
+     * it works. A skipped tick is handed over like any other event, so under the skipping policy
+     * the ticker waits for a collector that is busy, and the interval is counted from then. The
+     * overlap decision needs no lock: the ticker is the only coroutine that makes it.
+     */
+    private suspend fun ProducerScope<SftpEvent>.tickEvery(directory: String, every: Duration) {
+        var latest: Job? = null
+        while (true) {
+            val tick = ticks.incrementAndGet()
+            if (latest?.isActive == true && polling.overlap == OverlapPolicy.SKIP) {
+                LOG.warn("Tick {} of {} is skipped: the tick before it is still running after {}.", tick, directory, every)
+                send(SftpEvent.PollSkipped(tick, SkipCause.OVERLAP))
+            } else {
+                latest = launch { tickOf(directory, tick).reportingFailures(tick, directory).collect { send(it) } }
+            }
+            delay(every)
+        }
+    }
+
+    /**
+     * What a watch does about a tick that failed: what the failure itself says a watch should do.
+     * Only the tick's own failures come through here - a failure of the consumer downstream, or
+     * the tick being cancelled, passes untouched. A failure the connector has no name for is a
+     * bug, and ends the watch, since no tick survives a bug by waiting; so does a cancellation
+     * that is nobody's, which is what a check that lets its own timeout escape produces, because
+     * letting it out of the tick would end the tick without a word to anyone.
+     */
+    private fun Flow<SftpEvent>.reportingFailures(tick: Long, directory: String): Flow<SftpEvent> = catch { failed ->
+        if (failed is CancellationException) {
+            currentCoroutineContext().ensureActive()
+            throw IllegalStateException(
+                "tick $tick of $directory was cancelled by something inside it while the tick itself was not being cancelled; " +
+                    "a check or an action that times itself out has to catch its own timeout",
+                failed,
+            )
+        }
+        if (failed !is SftpException) {
+            LOG.error("The watch of {} is ending on tick {} with a failure the connector has no name for: {}", directory, tick, failed.toString())
+            throw failed
+        }
+        when (failed.disposition.watch) {
+            WatchReaction.REPORT_THE_FAILURE -> {
+                LOG.warn("Tick {} of {} failed; the next tick will try again: {}", tick, directory, failed.toString())
+                emit(SftpEvent.PollFailed(tick, failed))
+            }
+            WatchReaction.REPORT_A_SKIP -> {
+                LOG.info("Tick {} of {} is skipped: {}", tick, directory, failed.message)
+                emit(SftpEvent.PollSkipped(tick, SkipCause.BREAKER_OPEN))
+            }
+            WatchReaction.STOP -> {
+                LOG.error("The watch of {} is ending on tick {}, because no later tick could survive this: {}", directory, tick, failed.toString())
+                throw failed
+            }
+        }
+    }
+
+    private fun requireConfigured(directory: String) {
         require(directory in polling.directories) {
             "$directory is not a directory this connector was configured to watch: ${polling.directories}"
         }
+    }
+
+    private fun tickOf(directory: String, tick: Long): Flow<SftpEvent> {
         val handling = FileHandling(directory)
         return flow {
-            val tick = ticks.incrementAndGet()
             val handedOver = mutableListOf<InFlightSlot>()
             var seen = 0
             var emitted = 0

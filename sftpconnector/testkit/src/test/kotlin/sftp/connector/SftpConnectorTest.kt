@@ -2,6 +2,7 @@ package sftp.connector
 
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
@@ -16,10 +17,12 @@ import sftp.connector.config.SftpConnectorConfig
 import sftp.connector.config.sftpConnector
 import sftp.connector.error.ConfigurationError
 import sftp.connector.pool.virtualClock
+import sftp.connector.source.SftpEvent
 import sftp.connector.testkit.FakeSftpTransport
 import java.nio.file.Path
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.Duration.Companion.minutes
 import kotlin.time.Duration.Companion.seconds
 
 /**
@@ -91,6 +94,26 @@ class SftpConnectorTest {
 
         assertThat(refusal).isInstanceOf(ConfigurationError::class.java)
             .hasMessageContaining("move it onto itself")
+    }
+
+    /**
+     * A watch ticks in the connector's own scope, which is what lets the connector stop it. When
+     * the connector's background work is cancelled the watch ends in its collector - normally,
+     * because the collector did nothing wrong and is not the thing being stopped.
+     */
+    @Test
+    fun `stopping the connector's background work ends a watch normally in its collector`() = runTest {
+        val connector = start(FakeSftpTransport().directory("/drop")) { directories("/drop") }
+        val events = mutableListOf<SftpEvent>()
+        val collector = launch { connector.source.watch("/drop", 1.minutes).collect { events += it } }
+        runCurrent()
+        assertThat(events).isNotEmpty()
+
+        connector.backgroundWork.cancelAndJoin()
+        runCurrent()
+
+        assertThat(collector.isCompleted).describedAs("the collector finished").isTrue()
+        assertThat(collector.isCancelled).describedAs("the collector was cancelled").isFalse()
     }
 
     private suspend fun TestScope.start(

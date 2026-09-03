@@ -269,6 +269,7 @@ class SftpConnectorBuilder internal constructor(private val name: String) {
                 maxFilesPerPoll = polling.maxFilesPerPoll,
                 recursive = polling.recursive,
                 readiness = polling.readiness,
+                overlap = polling.overlap,
             ),
             resilience = ResilienceConfig(
                 retry = RetryPolicy(retry.maxAttempts, retry.backoff),
@@ -373,6 +374,9 @@ class PollingBuilder internal constructor() {
     var maxInFlight: Int = 16
     var maxFilesPerPoll: Int = 1000
     var recursive: Boolean = false
+
+    /** Whether a tick that finds the last one still running waits it out or runs alongside it. */
+    var overlap: OverlapPolicy = OverlapPolicy.SKIP
 
     /**
      * The default is a heuristic, and an honest one: a file whose size has held still for ten

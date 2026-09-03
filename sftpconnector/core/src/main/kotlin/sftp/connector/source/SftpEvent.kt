@@ -1,6 +1,7 @@
 package sftp.connector.source
 
 import sftp.connector.client.LocalFile
+import sftp.connector.error.SftpException
 import sftp.connector.transport.RemoteFile
 import java.nio.file.Path
 
@@ -61,10 +62,29 @@ sealed interface SftpEvent {
     /** Listed, and then not there when the consumer went to download it. */
     data class FileGone(val file: RemoteFile) : SftpEvent
 
+    /** A tick of a watch that deliberately sent nothing. Not a fault; the next tick runs as usual. */
+    data class PollSkipped(val tick: Long, val cause: SkipCause) : SftpEvent
+
+    /**
+     * A tick of a watch that failed in a way the next tick may not - a session lost, a full
+     * pool, a listing the server refused. The watch goes on; a failure that no later tick could
+     * survive ends the watch with the error instead of arriving as an event.
+     */
+    data class PollFailed(val tick: Long, val error: SftpException) : SftpEvent
+
     /**
      * The listing is over. [seen] entries passed through the checks, [emitted] of them were handed
      * over, [notReady] are waiting to pass and will be looked at again next poll. The rest were
      * already in flight or skipped.
      */
     data class PollCompleted(val tick: Long, val seen: Int, val emitted: Int, val notReady: Int) : SftpEvent
+}
+
+/** Why a tick sent nothing. */
+enum class SkipCause {
+    /** The tick before it was still running, and the overlap policy says one at a time. */
+    OVERLAP,
+
+    /** The circuit breaker is open, so the connector is deliberately leaving the server alone. */
+    BREAKER_OPEN,
 }
