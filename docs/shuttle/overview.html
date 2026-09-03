@@ -75,7 +75,7 @@
 
 <div class="page">
   <header class="masthead">
-    <div class="eyebrow">Design overview · companion to docs/shuttle/spec.md v0.2 and plan.md v0.2</div>
+    <div class="eyebrow">Design overview · companion to docs/shuttle/spec.md v0.3 and plan.md v0.3</div>
     <h1>Shuttle, Drawn</h1>
     <p class="lede">Routes that notice a file or a message, carry it to where it belongs, stamp the source, and tell the systems that care. The whole design exists to make one sentence true: <strong>an item can be lost only if the source, the target and the Oracle state store all lose it at once.</strong></p>
   </header>
@@ -145,7 +145,7 @@
       <div class="promises">
         <div class="promise"><h3>Nothing is lost</h3><p>The source is stamped only after the copy is verified at the target. A crash before the stamp leaves the item where it was, to be redone.</p></div>
         <div class="promise"><h3>Nobody is told too early</h3><p>Every tell is written into the logbook in the same stroke as the step it announces, and a separate loop sends it. It can never be sent about something that did not happen.</p></div>
-        <div class="promise"><h3>One bad item never stops the rest</h3><p>Every item is handled on its own. An item that fails five times, or fails a check, is marked, left in place, and handed to an operator. Nothing is deleted except by a configured stamp.</p></div>
+        <div class="promise"><h3>One bad item never stops the rest</h3><p>Every item is handled on its own. An item that fails five times, or fails a check, is marked, left in place, and handed to an operator. Nothing is deleted except by a configured stamp; at the target the application only ever overwrites, and older copies expire by the bucket's own rule.</p></div>
       </div>
     </div>
 
@@ -158,6 +158,7 @@
             <tr><td>before the drop is written down</td><td>it is picked up and dropped again</td><td class="cost">one extra copy, overwritten</td></tr>
             <tr><td>after "dropped", before the stamp</td><td>the copy is checked, then the source stamped</td><td class="cost">none</td></tr>
             <tr><td>after the stamp, before it is written down</td><td>the item is gone from the folder, so "stamped" is written</td><td class="cost">the last tell waits one poll</td></tr>
+            <tr><td>after "stamped" is written down, before the message broker is told (message routes)</td><td>the broker sends the message again; the stamp is repeated, nothing new is told</td><td class="cost">none</td></tr>
             <tr><td>after a tell, before it is written down</td><td>the tell is sent again</td><td class="cost">the receiver sees the same item id twice and ignores the repeat</td></tr>
           </tbody>
         </table>
@@ -269,7 +270,7 @@
 
           <line x1="805" y1="130" x2="910" y2="126" stroke="currentColor" stroke-width="1.2" marker-end="url(#a2)"/>
           <text x="857" y="116" text-anchor="middle" font-size="9" fill="currentColor">store</text>
-          <text x="857" y="146" text-anchor="middle" font-size="9" fill="var(--muted)">1 copy / key</text>
+          <text x="857" y="146" text-anchor="middle" font-size="9" fill="var(--muted)">never deletes</text>
 
           <line x1="176" y1="256" x2="285" y2="266" stroke="currentColor" stroke-width="1.2" marker-start="url(#a2)" marker-end="url(#a2)"/>
           <text x="230" y="244" text-anchor="middle" font-size="9.5" fill="currentColor">message</text>
@@ -331,7 +332,7 @@
             <text x="375" y="152" text-anchor="middle" font-size="10.5" fill="var(--muted)">attributes frozen</text>
             <rect x="470" y="110" width="110" height="56" rx="5" fill="var(--paper)" stroke="currentColor" stroke-width="1.2"/>
             <text x="525" y="133" text-anchor="middle" font-weight="600" class="svgmono">STORED</text>
-            <text x="525" y="152" text-anchor="middle" font-size="10.5" fill="var(--muted)">1 copy per key</text>
+            <text x="525" y="152" text-anchor="middle" font-size="10.5" fill="var(--muted)">newest current at key</text>
             <rect x="620" y="104" width="110" height="68" rx="5" fill="var(--paper)" stroke="var(--green)" stroke-width="2.5"/>
             <text x="675" y="133" text-anchor="middle" font-weight="700" fill="var(--green)" class="svgmono">ACKED</text>
             <text x="675" y="152" text-anchor="middle" font-size="10.5" fill="var(--muted)">source stamped</text>
@@ -555,7 +556,7 @@
     <div class="decisions">
       <div class="decision"><div class="rank">1</div><div class="body"><h3>One durable state store is the only truth; the two in-memory sets never survive a restart.</h3><p>Carries "nothing is lost": every item has a known resume point, and after a crash the next trigger continues from it. The connector's own dedup store is deliberately unused, and the notifier's id set is a guard, not a store.</p><div class="ref">spec D1 · D7 · 4.3 · 4.4 · I8</div></div></div>
       <div class="decision"><div class="rank">2</div><div class="body"><h3>Ack is the commit; a notification is an outbox row written in the transaction of the state it announces.</h3><p>Carries "nobody is told too early": a tell is exactly as durable as the step it reports, and a separate loop sends it at-least-once. The row's on_state is the moment, its notification_state the progress.</p><div class="ref">spec D6 · D26 · I11 · I20</div></div></div>
-      <div class="decision"><div class="rank">3</div><div class="body"><h3>Object stores and channels declared once, role given at the route; a target promises "exactly one copy".</h3><p>Carries reuse without duplicated secrets, and retries that overwrite instead of creating siblings. The S3 adapter keeps the promise by pruning inside store; the pipeline never learns that versions exist.</p><div class="ref">spec D21 · D22 · D5 · I6</div></div></div>
+      <div class="decision"><div class="rank">3</div><div class="body"><h3>Object stores and channels declared once, role given at the route; a target promises "the current copy is the one just written" and never deletes.</h3><p>Carries reuse without duplicated secrets, and retries that overwrite instead of creating siblings. Expiry of older versions belongs to the bucket's lifecycle rule, so no transfer can erase what an earlier one delivered, and the process holds no delete permission.</p><div class="ref">spec D21 · D22 · D5 · I6</div></div></div>
       <div class="decision"><div class="rank">4</div><div class="body"><h3>One Processor seam, pure over staging, with attributes as its only output.</h3><p>Carries any processing that is safe to re-run after a crash, and values that are checked against every mapping before anything is stored.</p><div class="ref">spec D23 · D24 · D25 · I15 · I18</div></div></div>
       <div class="decision"><div class="rank">5</div><div class="body"><h3>Configuration as data: YAML, 25 numbered rules, validate and try modes; routes supervised.</h3><p>Carries operations editing and verifying without a build, and one dead route never taking the pod with it.</p><div class="ref">spec D29 · D30 · D31 · D35 · I14 · I21</div></div></div>
     </div>

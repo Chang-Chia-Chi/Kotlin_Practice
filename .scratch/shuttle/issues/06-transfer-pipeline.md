@@ -13,8 +13,8 @@ Failures count attempts and become FAILED or REJECTED with the right nack flags.
 **Status:** ready-for-agent
 
 - [ ] `I1`, `I2`, `I7`, `I9`, `I10`, `I11`, `I16`, `I17` as named tests
-- [ ] S1, S10, S11, S12, S19 on fakes
-- [ ] Every row of the spec Sec 4.3 entry-point table has a test, including a false verify falling back to a full run and the re-ack counted as `reacked`
+- [ ] S1, S10, S11, S12 in both halves, S19, S33 on fakes; `I24` as a named test: a finished identity returning with a different digest gets a new revision through `supersede` and the old row is untouched
+- [ ] Every row of the spec Sec 4.3 entry-point table has a test, including a false verify falling back to a full run, the re-ack counted as `reacked`, and two children of one parent on one key rejecting the transfer with both paths in the reason
 - [ ] Store is called exactly once per object per successful run and verify exactly once per STORED entry
 - [ ] Staging is empty after success and after every failure path, including files a processor created
 - [ ] Progress entry appended

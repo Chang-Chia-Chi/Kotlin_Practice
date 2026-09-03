@@ -11,7 +11,8 @@ wrap later.
 
 **Status:** ready-for-agent
 
-- [ ] The spec Sec 13.1 document loads and equals the spec Sec 13.2 DSL build for the vendor-drop route
+- [ ] The spec Sec 13.1 document loads, passes all 25 rules, and equals the spec Sec 13.2 DSL build for the vendor-drop route
+- [ ] Rule 9 counts the poll, fetch and target roles of every route on a store, and a route without `parallelism` counts as 1
 - [ ] `${VAR}` references resolve from an injected environment map; a literal secret fails rule 25
 - [ ] S25: a file with five violations reports five rule numbers in one report and opens no connection
 - [ ] An unknown key is an error naming its YAML path; durations like `30s`, `1h` and ranges like `[200-299]` parse

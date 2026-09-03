@@ -1,6 +1,6 @@
 # Shuttle - The Picture
 
-Companion to `spec.md` v0.2 and `plan.md` v0.2. The spec is the authority; this page exists so
+Companion to `spec.md` v0.3 and `plan.md` v0.3. The spec is the authority; this page exists so
 a reader gets the shape in five minutes, knows which decisions carry the requirements, and sees
 where the work is. Section numbers point into the spec.
 
@@ -48,7 +48,7 @@ route with no channels.
 |---|---|
 | **Nothing is lost.** | The source is stamped only after the copy is verified at the target. A crash before the stamp leaves the item where it was, to be redone. |
 | **Nobody is told too early.** | Every "tell" is written into the logbook in the same stroke as the step it announces, and a separate loop sends it. It can never be sent about something that did not happen. |
-| **One bad item never stops the rest.** | Every item is handled on its own. An item that fails five times, or fails a check, is marked, left in place, and handed to an operator. Nothing is ever deleted except by a configured stamp. |
+| **One bad item never stops the rest.** | Every item is handled on its own. An item that fails five times, or fails a check, is marked, left in place, and handed to an operator. Nothing is ever deleted except by a configured stamp; at the target the application only ever overwrites, and older copies expire by the bucket's own rule. |
 
 ### What can go wrong, and why it is fine
 
@@ -57,6 +57,7 @@ route with no channels.
 | before the drop is written down | picks up and drops again | one extra copy, overwritten |
 | after "dropped", before the stamp | checks the copy, then stamps | none |
 | after the stamp, before it is written down | sees the item is gone from the folder and writes "stamped" | the last "tell" waits one poll |
+| after "stamped" is written down, before the message broker is told (message routes) | the broker sends the message again; the stamp is repeated, nothing new is told | none |
 | after a "tell", before it is written down | tells again | the receiver sees the same item id twice and ignores the repeat |
 
 Every row is a test (spec 18.2, S2 to S5).
@@ -102,7 +103,7 @@ flowchart LR
     end
 
     VEN -- "list · download · rename (connector, pool 20)" --> T1
-    P1 -- "store: PUT · Content-MD5 · HEAD · prune" --> MIN
+    P1 -- "store: PUT · Content-MD5 · HEAD, never delete" --> MIN
     NATS -- "message · ack / nak" --> T2
     MIN -- "fetch metadata + images" --> P2
     P2 -- "store: upload .part · rename" --> PAR
@@ -125,7 +126,7 @@ stateDiagram-v2
     SEEN --> FETCHED: bytes in staging, digest computed
     FETCHED --> PROCESSED: chain ran, attributes frozen, mappings checked
     PROCESSED --> REJECTED: a processor said Reject
-    PROCESSED --> STORED: every object stored and verified, one copy per key
+    PROCESSED --> STORED: every object stored and verified, the newest current at its key
     STORED --> ACKED: the source stamped (move · delete · ack · callback)
     ACKED --> DONE: every notification delivered, or none configured
     SEEN --> FAILED: attempts = max
@@ -181,7 +182,7 @@ of ids is bounded by batch plus workers and empty when idle; it must not survive
 |---|---|---|---|
 | 1 | **One durable state store is the only truth; the two in-memory sets never survive a restart.** | No data lost; a known resume point for every item. | D1, 4.3, 4.4, I8 |
 | 2 | **Ack is the commit; notifications are outbox rows created in the transaction of the state they announce.** | Nobody told too early; every tell is as durable as the step it reports. | D6, D26, I11, I20 |
-| 3 | **Object stores and channels declared once, role given at the route; the target promises "exactly one copy".** | Same server as source and target without duplicated secrets; retries overwrite, never sibling. | D21, D22, D5, I6 |
+| 3 | **Object stores and channels declared once, role given at the route; the target promises "the current copy is the one just written" and never deletes.** | Same server as source and target without duplicated secrets; retries overwrite, never sibling; expiry belongs to the bucket, so no transfer can erase what an earlier one delivered. | D21, D22, D5, I6 |
 | 4 | **One `Processor` seam, pure over staging, attributes as its only output.** | Any processing, re-runnable after a crash, with values checked before anything is stored. | D23, D24, D25, I15, I18 |
 | 5 | **Configuration as data: YAML, 25 numbered rules, validate and try modes; routes supervised.** | Operations edit and verify without a build; one dead route never takes the pod. | D29, D30, D31, D35, I14, I21 |
 

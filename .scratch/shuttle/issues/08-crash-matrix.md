@@ -13,7 +13,7 @@ event, never a lost object. Any fix the replay forces lands here and is recorded
 
 - [ ] `I8` as one named test per spec Sec 4.4 row, each asserting end state, store count and delivery count
 - [ ] S2, S3, S4, S5, S6 by id
-- [ ] A crash after the ack and before ACKED is repaired by reconciliation on the second poll, not by the pipeline
+- [ ] A crash after the move and before ACKED is repaired by reconciliation on the second poll, not by the pipeline; the subscribe row of the table runs against the test kit's message source and is repaired by the redelivery's re-ack
 - [ ] Every deviation the replay forced is in the progress entry
 - [ ] Progress entry appended
 

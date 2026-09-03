@@ -1,7 +1,7 @@
 # Shuttle - Implementation Plan
 
-Version: v0.2
-Companion to: `docs/shuttle/spec.md` v0.2 (Sec 1 to 19)
+Version: v0.3
+Companion to: `docs/shuttle/spec.md` v0.3 (Sec 1 to 20)
 Purpose: break the application into phases small enough for an agent to implement in one
 session each, with fixed contracts and fixed acceptance criteria, so implementations may vary
 but assertions may not.
@@ -53,7 +53,7 @@ shuttle/src/main/kotlin/infra/shuttle/
   yaml/     YamlLoader: files -> ShuttleConfig through the DSL; ${VAR} resolution; rule reporting
   sftp/     SftpPollSource (connector watch -> RouteEvent, connector download -> Fetcher),
             SftpTarget (upload + rename; G17)
-  s3/       S3Target (store = PUT + Content-MD5 + HEAD + ETag + prune, verify, probe), S3Fetcher
+  s3/       S3Target (store = PUT + Content-MD5 + HEAD + ETag, never a delete; verify; probe with the lifecycle check), S3Fetcher
   http/     HttpChannel
   nats/     NatsChannel: subscribe trigger -> RouteEvent, publish (G15)
   jdbi/     JdbiStateStore, StateStoreSchema (the DDL text)
@@ -163,8 +163,9 @@ adds the subscription source, fan-out, the SFTP target and the remaining notific
   wraps in G13.
 - **Blocked by:** G0.
 - **Fixed contracts:** spec 13.1 grammar; rule 25 (secrets only by reference).
-- **Acceptance:** the spec 13.1 document loads and equals the spec 13.2 DSL build for the
-  vendor-drop route; S25 with five violations reports five numbers; a literal secret fails rule
+- **Acceptance:** the spec 13.1 document loads, passes all 25 rules, and equals the spec 13.2 DSL
+  build for the vendor-drop route; rule 9 counts poll, fetch and target roles and a missing
+  `parallelism` is 1; S25 with five violations reports five numbers; a literal secret fails rule
   25; an unknown key is an error naming its path.
 - **Size:** medium.
 
@@ -218,10 +219,11 @@ adds the subscription source, fan-out, the SFTP target and the remaining notific
   ack, ACKED with `acked` deliveries or straight to DONE; children creation when the final
   payload has several objects, parent STORED on the last child, parent ack only; staging
   deletion on every path; `attempts`, FAILED, REJECTED, `nack` flags; the entry points of spec
-  4.3 including `reacked`.
+  4.3 including `reacked` and the digest check that opens a new revision through `supersede`;
+  the same-key rejection for children of one parent.
 - **Blocked by:** G4.
-- **Fixed contracts:** spec 4.1, 4.2, 4.3, 4.5; I1, I2, I7, I9, I10, I11, I16, I17.
-- **Acceptance:** named tests for those invariants; S1, S10, S11, S12, S19 on fakes; a test
+- **Fixed contracts:** spec 4.1, 4.2, 4.3, 4.5; I1, I2, I7, I9, I10, I11, I16, I17, I24.
+- **Acceptance:** named tests for those invariants; S1, S10, S11, S12 in both halves, S19, S33 on fakes; a test
   per 4.3 row; `store` called exactly once per object per successful run and `verify` once per
   STORED entry.
 - **Size:** medium; the correctness phase.
@@ -250,7 +252,7 @@ adds the subscription source, fan-out, the SFTP target and the remaining notific
   extra-store and extra-delivery counts; any fix the replay forces, recorded.
 - **Blocked by:** G6.
 - **Fixed contracts:** I8; spec 4.4 row by row.
-- **Acceptance:** one `I8_` case per row; S2, S3, S4, S5, S6.
+- **Acceptance:** one `I8_` case per row, the subscribe row with the test kit's message source; S2, S3, S4, S5, S6.
 - **Size:** small-medium; pure state-machine reasoning, its own session.
 
 ### G8 - Notifier
@@ -283,15 +285,17 @@ adds the subscription source, fan-out, the SFTP target and the remaining notific
 
 - **Goal:** spec 7.2 against a versioned MinIO, plus the S3 `Fetcher` M2 will use.
 - **Deliverables:** client per spec 7.2; `store` as PUT with `Content-MD5` when the digest is
-  MD5, HEAD of content length, ETag check on single-part unencrypted objects, prune of every
-  other version; `verify`; `probe`; the multipart threshold pinned; `S3Fetcher` streaming an
+  MD5, HEAD of content length, ETag check on single-part unencrypted objects, no delete of any
+  kind; `verify`; `probe` reading the bucket's lifecycle configuration; the multipart threshold pinned; `S3Fetcher` streaming an
   object to staging with the digest; tests tagged `minio` with versioning on.
 - **Blocked by:** G0.
 - **Fixed contracts:** spec 7.1, 7.2; I6 on MinIO.
 - **Acceptance:** the shared target contract test passes against the in-memory target and S3;
-  `I6_` stores three times and lists one version, and replays a crash between PUT and prune
-  through an adapter hook; a corrupted body is rejected by `Content-MD5`; `verify` of a deleted
-  version is false; a sibling key is never pruned; the fetcher's digest matches the object's.
+  `I6_` stores three times and reads the newest content by key, and replays a crash between PUT
+  and HEAD through an adapter hook; a corrupted body is rejected by `Content-MD5`; `verify` of a
+  version expired by hand is false; `probe` warns on a bucket without a non-current-version
+  expiry and is silent with one; the suite runs under a credential without delete permission;
+  the fetcher's digest matches the object's.
 - **Size:** medium. Needs Docker.
 
 ### G11 - HTTP channel
@@ -356,11 +360,13 @@ adds the subscription source, fan-out, the SFTP target and the remaining notific
 
 - **Goal:** spec 5.1's `subscribe` and the NATS channel role.
 - **Deliverables:** `NatsChannel`: a JetStream pull or push subscription mapped onto
-  `RouteEvent` with `ack`, `term`, `nak`; message identity per spec 5.2; `deliver` as publish;
-  the `SourceView` that `extract` reads with `from: message`; tests tagged `nats` on Testcontainers.
+  `RouteEvent` with `ack`, `term`, `nak`; in-progress signals every `inProgressEvery` while a
+  transfer runs; message identity per spec 5.2; `deliver` as publish; the `SourceView` that
+  `extract` reads with `from: message`; tests tagged `nats` on Testcontainers.
 - **Blocked by:** G2.
 - **Acceptance:** a message becomes one `Seen` with working ack and nak; a nak redelivers; a
-  publish lands on the subject; a broker outage ends with `RouteDown`.
+  run longer than the consumer's ack wait is not redelivered while signals flow; a publish lands
+  on the subject; a broker outage ends with `RouteDown`.
 - **Size:** medium. Needs Docker.
 
 ### G16 - Expand, fetch and parent completion on fakes
@@ -370,8 +376,8 @@ adds the subscription source, fan-out, the SFTP target and the remaining notific
   fetching children through `ctx.fetch`; the route-level `fetch` for subscriptions; parent
   completion rules exercised with children stored in parallel; `extract` with `from: message`.
 - **Blocked by:** G7, G10, G15.
-- **Fixed contracts:** spec 4.5, 6.3; I16.
-- **Acceptance:** S27, S28, S29 on fakes with the scripted fetcher; `I16_`.
+- **Fixed contracts:** spec 4.5, 6.3; I16, I23.
+- **Acceptance:** S27, S28, S29, S32 on fakes with the scripted fetcher; `I16_`, `I23_`.
 - **Size:** medium.
 
 ### G17 - SFTP target
@@ -412,7 +418,7 @@ adds the subscription source, fan-out, the SFTP target and the remaining notific
 | I14 | G0 |
 | I22 | G3 |
 | I15, I18 | G4 |
-| I1, I2, I7, I9, I10, I11, I16, I17 | G5 |
+| I1, I2, I7, I9, I10, I11, I16, I17, I24 | G5 |
 | I19, I21 | G6 |
 | I8 | G7 |
 | I3, I4, I5, I13 | G8 |
@@ -420,16 +426,18 @@ adds the subscription source, fan-out, the SFTP target and the remaining notific
 | I11, I20 on Oracle | G9 |
 | I12 | G13 |
 | I20 all events | G18 |
+| I23 | G16 |
 
 | Scenario | Phase |
 |---|---|
 | S25 | G1, G13 |
 | S20, S21, S26 | G4 |
-| S1, S10, S11, S12, S19 | G5 |
+| S1, S10, S11, S12, S19, S33 | G5 |
 | S14, S16, S23 | G6 |
 | S2 to S6 | G7 |
 | S7, S8, S9, S17, S22 | G8 |
 | S15, S18, S24, S31 | G13 |
+| S32 | G16 |
 | S13 and S1 to S26 end to end | G14 |
 | S27, S28, S29 | G16, G19 |
 | S30 | G18, G19 |

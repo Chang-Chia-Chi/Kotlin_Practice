@@ -11,7 +11,7 @@ the message is acked once, and downstream is told once.
 
 **Status:** ready-for-agent
 
-- [ ] S27, S28, S29 on fakes with the scripted fetcher; `I16` as a named test
+- [ ] S27, S28, S29, S32 on fakes with the scripted fetcher; `I16` and `I23` as named tests: the ledger is written ACKED before the broker ack, and a redelivery after that crash is re-acked with no new outbox rows
 - [ ] Expand reads paths from a metadata file and from the message; `extract` with `from: message` sets attributes from the message
 - [ ] A child failing five times fails the parent and the message is not acked; a re-drive of the parent replaces its children
 - [ ] Progress entry appended

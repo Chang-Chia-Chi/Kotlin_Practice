@@ -1,6 +1,6 @@
 # Shuttle - Design Spec
 
-Version: v0.2 (agreed in design review, not yet implemented; supersedes v0.1 "SFTP Ingest")
+Version: v0.3 (v0.2 amended after an independent design review; not yet implemented; supersedes v0.1 "SFTP Ingest")
 Scope: one process, one replica, many routes; each route moves source objects from one place
 to another, processes them on the way, and tells other systems
 Status: ready for a phase plan
@@ -170,7 +170,7 @@ One coroutine per source object, at most `parallelism` per route.
 | 1 | Fetch | Bring the object's bytes to staging through the source's `Fetcher`; the digest is computed as the bytes stream; the staged object carries name, size, mtime, digest, content type | FETCHED |
 | 2 | Process | Run the chain (Sec 6); attributes freeze at the end; every mapping table of the route's channels is checked against them (Sec 9.6) | PROCESSED, or REJECTED |
 | 3 | Store | For each object in the final payload: `target.store(key, file, metadata)`; a payload of one is the transfer itself, a payload of N becomes N child rows (Sec 4.5) | STORED |
-| 4 | Ack | The trigger's ack action (Sec 5.3); for a parent, only once every child is STORED | ACKED, plus one PENDING delivery per `on: acked` channel, in one transaction |
+| 4 | Ack | The trigger's ack action (Sec 5.3); for a parent, only once every child is STORED. A polled file is moved first and written ACKED after, because the move is visible to the next listing; a subscribed message is written ACKED first and acked at the broker after, because an acked message is never redelivered (Sec 4.4) | ACKED, plus one PENDING delivery per `on: acked` channel, in one transaction |
 | 5 | Notify | Owned by the notifier, not this coroutine (Sec 9) | DONE when every delivery is DELIVERED; immediately when the route notifies nobody |
 
 Notifications other than `acked` (Sec 9.1) are created in the transaction of the
@@ -205,7 +205,7 @@ an unacknowledged message. The state store decides how much work is left:
 |---|---|
 | none, SEEN, FETCHED, PROCESSED | Full run from stage 1. A staged file from an earlier process is never trusted (D17). For a parent that already has child rows, the chain runs again and yields the same children; each child whose row is STORED with a true `verify` skips the store, the rest are stored (S28). |
 | STORED | `target.verify(ref)` for the transfer, or for every child. All true: skip to stage 4. Any false: full run on the same row. |
-| ACKED, DONE | The object is back although it was acked. Same as STORED: verify, ack again, counted as `reacked`, logged at WARN. |
+| ACKED, DONE | The object is back although it was acked. A polled file is fetched and digested first. The row's own digest means the same file came back: verify, ack again, counted as `reacked`, logged at WARN. A different digest means new content under an old identity: a new transfer is created with the next `revision`, pointing at the row it supersedes, and runs from stage 1; the old row and its target version are never touched (S12). A redelivered message is verified and acked again, `reacked`, without a fetch. |
 | REJECTED, FAILED | `nack(redeliver = false)`, no work. |
 
 ### 4.4 Crash matrix
@@ -220,7 +220,8 @@ contract (Sec 7.2, I6).
 | process | still there | nothing | PROCESSED | full run | none |
 | store, before ledger | still there | 1 copy | PROCESSED | full run: store again | one extra store |
 | ledger STORED | still there | 1 copy | STORED | verify, ack | none |
-| ack, before ledger | acked | 1 copy | STORED | polling: reconciliation writes ACKED (Sec 4.6); subscription: the message is not redelivered, and the stuck detector surfaces the row (Sec 11) | delayed notification |
+| poll: move, before ledger | moved | 1 copy | STORED | reconciliation writes ACKED (Sec 4.6) | delayed notification |
+| subscribe: ledger ACKED, before broker ack | not acked, redelivered | 1 copy | ACKED, PENDING | verify, ack the broker again, `reacked`; no new deliveries | none |
 | ledger ACKED | acked | 1 copy | ACKED, PENDING | notifier delivers | none |
 | delivery sent, before ledger | acked | 1 copy | ACKED, PENDING | notifier delivers again | one duplicate notification, deduplicated downstream |
 
@@ -234,7 +235,9 @@ FETCHED with its own staged object, digest and key. Children are stored under th
 parallelism like any object. The parent's STORED is written when the last child is STORED;
 the parent's ack is the only ack; the parent's `acked` notification is the only notification; a
 child that reaches `maxAttempts` fails the parent. A re-drive of a parent re-runs the chain and
-replaces its children.
+replaces its children. Two children of one parent that resolve to the same key are a cardinality
+error: the transfer is rejected with both source paths in the reason, because storing both would
+make one silently overwrite its sibling (S33).
 
 ### 4.6 Reconciliation, polling sources only
 
@@ -242,8 +245,9 @@ At `PollCompleted` with a complete listing, meaning it ended before the connecto
 `maxFilesPerPoll`: every transfer of that route in STORED whose `updated_at` is older than the
 poll's start and whose identity was not listed transitions to ACKED with its deliveries created,
 through the same function stage 4 uses. A truncated listing skips reconciliation and counts it.
-Subscription sources have no listing and therefore no reconciliation; the row is surfaced by the
-stuck detector and an operator re-drives or acks it through the admin API.
+Subscription sources have no listing and need no reconciliation: their ledger write precedes the
+broker ack (Sec 4.4), so the gap that reconciliation repairs for polled files cannot leave a
+subscribed row behind.
 
 ---
 
@@ -259,11 +263,18 @@ stuck detector and an operator re-drives or acks it through the admin API.
 `poll` on SFTP is the connector's `watch(dir, every)` with overlap SKIP, readiness defaulting to
 size stable twice 10 s apart plus minimum age one minute, and the connector's in-flight set
 bounding how far the lister runs ahead. `poll` on S3 is a later adapter. `subscribe` on NATS is
-milestone 2.
+milestone 2. While a subscribed transfer runs, the trigger tells the broker every
+`inProgressEvery` (default 10 s) that the message is still being worked on, so a run longer than
+the consumer's ack wait is not redelivered under our feet; the operator keeps `inProgressEvery`
+below the consumer's ack wait, which the process cannot read.
 
 ### 5.2 Identity
 
-A polled file's identity is store, directory, name, size and mtime (D2). A message's identity
+A polled file's identity is store, directory, name, size and mtime, plus a revision that starts
+at 1 and increases only when the same name, size and mtime come back with a different digest
+after the earlier transfer finished (D2, Sec 4.3). Size and mtime are the cheap prefilter and
+the digest is the authority; the check costs one download only in the collision case, because a
+finished file normally leaves the source directory. A message's identity
 is channel, subject and the message id, or a configured pointer into the body when the
 broker's id is not stable across redeliveries.
 
@@ -377,7 +388,7 @@ the transport computes, the application compares).
 ```kotlin
 interface ObjectStoreTarget {
     suspend fun store(key: String, file: Path, metadata: Map<String, String>): TargetRef
-    //  contract: afterwards exactly one copy exists at key, and it is the one just written
+    //  contract: afterwards the current object at key is the one just written; nothing is deleted
     suspend fun verify(ref: TargetRef): Boolean
     suspend fun probe()
 }
@@ -385,7 +396,8 @@ data class TargetRef(val kind: String, val location: String, val key: String, va
 ```
 
 The key is a pure function of the staged object's name and the route's `key` pattern, so a
-retry overwrites instead of creating a sibling (D5). Metadata carries digest, digest algorithm,
+retry overwrites instead of creating a sibling, and the target never deletes: what an overwrite
+leaves behind is the bucket's business, not the pipeline's (D5). Metadata carries digest, digest algorithm,
 source mtime, source name, transfer id and the attributes.
 
 ### 7.2 S3 target
@@ -393,14 +405,18 @@ source mtime, source name, transfer id and the attributes.
 AWS SDK v2, synchronous client over the Apache HTTP client, endpoint override, path-style
 access, placeholder region, environment credentials, request and response checksum calculation
 when-required (D4), timeouts with the API-call timeout below the drain (rule 3). `store` is PUT
-with `Content-MD5` when the digest is MD5, a HEAD comparing content length and, on a single-part
-object without server-side encryption, the ETag against the MD5, then a prune of every other
-version of exactly that key because versioning is bucket-wide and cannot be changed (D5). The
-multipart threshold is pinned above the largest expected file so the ETag rule holds; if the
-bucket ever encrypts, the adapter falls back to size plus metadata with a WARN at startup.
-`verify` is a HEAD of key and version id. `probe` is a HEAD of the bucket; the bucket is never
-created. A crash between PUT and prune is repaired by the next `store` and is the adapter's own
-contract test (I6).
+with `Content-MD5` when the digest is MD5, then a HEAD comparing content length and, on a
+single-part object without server-side encryption, the ETag against the MD5. Nothing is deleted:
+versioning is bucket-wide, a PUT makes the new object the current version, a GET by key returns
+only that one, and older versions are expired by the bucket's lifecycle rule for non-current
+versions, a deployment prerequisite (D5). The credential the process runs with carries no delete
+permission. The multipart threshold is pinned above the largest expected file so the ETag rule
+holds; if the bucket ever encrypts, the adapter falls back to size plus metadata with a WARN at
+startup. `verify` is a HEAD of key and version id. `probe` is a HEAD of the bucket and a read of
+its lifecycle configuration: the bucket is never created, and a missing non-current-version
+expiry is a WARN naming the bucket rather than a failure, because the process still works and
+only the bucket grows. A crash between PUT and HEAD leaves one non-current version and is
+repaired by the next `store`; that is the adapter's own contract test (I6).
 
 ### 7.3 SFTP target (milestone 2)
 
@@ -428,6 +444,8 @@ CREATE TABLE file_transfer (
   source_name       VARCHAR2(512)  NOT NULL,           -- file name, or message id
   source_size       NUMBER(19),
   source_mtime      TIMESTAMP,
+  revision          NUMBER(5)      DEFAULT 1 NOT NULL,  -- next value when the same identity returns with different content
+  supersedes_id     NUMBER(19),                        -- the finished row this revision replaces
   source_digest     VARCHAR2(128),
   digest            VARCHAR2(128),
   digest_algo       VARCHAR2(16),
@@ -448,7 +466,8 @@ CREATE TABLE file_transfer (
   completed_at      TIMESTAMP,
   CONSTRAINT pk_file_transfer PRIMARY KEY (id),
   CONSTRAINT fk_file_transfer_parent FOREIGN KEY (parent_id) REFERENCES file_transfer (id),
-  CONSTRAINT uq_file_transfer_identity UNIQUE (route, source_ref, source_name, source_size, source_mtime)
+  CONSTRAINT fk_file_transfer_supersedes FOREIGN KEY (supersedes_id) REFERENCES file_transfer (id),
+  CONSTRAINT uq_file_transfer_identity UNIQUE (route, source_ref, source_name, source_size, source_mtime, revision)
 );
 CREATE INDEX ix_file_transfer_state  ON file_transfer (route, state, updated_at);
 CREATE INDEX ix_file_transfer_parent ON file_transfer (parent_id);
@@ -483,6 +502,7 @@ attempt table: every attempt logs transfer id, event, channel, attempt, status a
 interface StateStore {
     suspend fun find(identity: SourceIdentity): Transfer?
     suspend fun seen(identity: SourceIdentity, kind: TransferKind): Transfer
+    suspend fun supersede(finished: TransferId, kind: TransferKind): Transfer                  // a new row, revision + 1, the old row untouched, 1 txn
     suspend fun fetched(id: TransferId, staged: StagedSummary, events: List<DeliveryRequest>)   // + FETCHED rows, 1 txn
     suspend fun processed(id: TransferId, attributes: Map<String, String>)
     suspend fun children(id: TransferId, staged: List<StagedSummary>): List<Transfer>          // 1 txn
@@ -501,7 +521,7 @@ interface StateStore {
 }
 ```
 
-Every method is one transaction; `fetched`, `uploaded`, `acked` and `delivered` are the ones
+Every method is one transaction; `fetched`, `stored`, `acked` and `delivered` are the ones
 that must be atomic across both tables (I11, I20).
 
 ---
@@ -602,8 +622,11 @@ event as the same event. The reference it returns is per call and never a dedup 
   channel at startup ends startup instead.
 - **Pools.** One object store declaration is one connector and one pool, shared by every route
   on it. The session cap is per account, so the operator rule is one declaration per account
-  with `pool.maxSize` at the account's cap (20 today). Rule 9: per store, the sum of route
-  parallelism plus one lister per polled directory must be at most `maxSize`; `maxConcurrentTransfers`
+  with `pool.maxSize` at the account's cap (20 today). Rule 9: per store, the sum of
+  `parallelism` over every route that polls it, fetches from it or targets it, plus one lister
+  per polled directory, must be at most `maxSize`, because a session is consumed by listing,
+  fetching and uploading alike; a route that uses one store as both source and target is counted
+  twice on purpose. A route that states no `parallelism` runs one pipeline. `maxConcurrentTransfers`
   is the shared bulkhead. Two declarations for one account cannot be detected and would defeat
   the cap.
 
@@ -668,11 +691,13 @@ anyway.
 
 ### 12.3 Shutdown
 
-Bounded by `drainTimeout` (30 s), from the Quarkus shutdown event: readiness false; cancel the
+Bounded by `drainTimeout` (60 s), from the Quarkus shutdown event: readiness false; cancel the
 route collectors, which drains each connector under its own bound; cancel the notifier, leaving
 rows PENDING; close the S3 clients, then the datasource. Every stage timeout, channel timeout
 and the connectors' drain plus cancel grace fit inside `drainTimeout` (rule 3), and the pod's
-termination grace period exceeds it, written beside the manifest.
+termination grace period exceeds it. The chain, each value below the next because a blocking PUT
+cannot be interrupted: the largest expected PUT (about 20 s for 10 MB), `apiCall` 45 s,
+`drainTimeout` 60 s, termination grace period 90 s in the manifest (D39).
 
 ---
 
@@ -689,7 +714,7 @@ shuttle:
     restartBackoff: { initial: 30s, max: 15m }
     readiness: all-routes-down
   digest: md5                                  # process default; a route may override
-  drainTimeout: 30s
+  drainTimeout: 60s                            # below the pod's 90 s termination grace period
 
   objectStores:                                # where files live; source, target or fetch location
     vendor:
@@ -705,7 +730,7 @@ shuttle:
       sftp:
         host: partner.example
         auth: { user: ${PARTNER_USER}, password: ${PARTNER_PASSWORD} }
-        pool: { maxSize: 2 }
+        pool: { maxSize: 4 }                     # rule 9: mirror (1, the default) + image-sets (2) both target it
         staging: /var/shuttle/stage/partner
     minio:
       s3:
@@ -713,7 +738,7 @@ shuttle:
         region: us-east-1
         pathStyle: true
         credentials: { accessKey: ${S3_ACCESS_KEY}, secretKey: ${S3_SECRET_KEY} }
-        timeouts: { connect: 5s, socket: 30s, apiCall: 60s }
+        timeouts: { connect: 5s, socket: 30s, apiCall: 45s }   # apiCall below drainTimeout (rule 3)
 
   channels:                                    # where messages go, or come from
     downstream:
@@ -775,7 +800,7 @@ shuttle:
 
     image-sets:                                # milestone 2
       source:
-        subscribe: { channel: events, subject: images.ready, onAck: ack }
+        subscribe: { channel: events, subject: images.ready, onAck: ack, inProgressEvery: 10s }
       fetch: { store: minio, path: /metadata.path }
       process:
         - { extract: { from: message, json: { batchId: /batchId } } }
@@ -798,7 +823,7 @@ shuttle {
     notifier { workers = 4; batch = 50; sweepEvery = 30.seconds }
     supervision { restartBackoff(30.seconds, max = 15.minutes); readiness = AllRoutesDown }
     digest = Digest.MD5
-    drainTimeout = 30.seconds
+    drainTimeout = 60.seconds
 
     objectStores {
         sftp("vendor") { endpoint { host = "sftp.example" }; auth { password(env("SFTP_USER"), env("SFTP_PASSWORD")) }
@@ -841,9 +866,9 @@ Each is public numbering, reported by number in validate mode and at startup.
 | 4 | Route names, store names and channel names are unique; a store and a channel may not share a name |
 | 5 | A route has exactly one `source` and exactly one `target` |
 | 6 | A `subscribe` source has a `fetch` with a store and a path; a `poll` source has none |
-| 7 | `parallelism >= 1`, `maxAttempts >= 1`, `stuckAfter > 0` |
+| 7 | `parallelism >= 1` (1 when omitted), `maxAttempts >= 1`, `stuckAfter > 0`, `inProgressEvery > 0` |
 | 8 | Every `notify.on` is one of `fetched`, `stored`, `acked`; a pair of state and channel appears once per route |
-| 9 | Per object store, the sum of route parallelism plus one per polled directory is at most `pool.maxSize`, and `maxConcurrentTransfers <= maxSize` |
+| 9 | Per object store, the sum of `parallelism` over every route that polls it, fetches from it or targets it, plus one lister per polled directory, is at most `pool.maxSize`, and `maxConcurrentTransfers <= maxSize` |
 | 10 | Every SFTP store's `keepAlive` and `idleTimeout` are below its `idleCutoff` |
 | 11 | Every staging directory exists, is writable, and is local disk; two stores do not share one |
 | 12 | `onAck` is stated explicitly, no default, and it and `onNack` belong to the trigger kind's vocabulary; a `callback` names a channel offering the notify role |
@@ -873,7 +898,7 @@ Each is public numbering, reported by number in validate mode and at startup.
 | `GET /admin/shuttle/transfers?route=&state=&limit=` | transfer rows, children folded under parents |
 | `GET /admin/shuttle/transfers/{id}/deliveries` | event, channel, state, attempts, last status, reference, delivered time |
 | `POST /admin/shuttle/transfers/{id}/redrive` | REJECTED or FAILED to SEEN |
-| `POST /admin/shuttle/transfers/{id}/ack` | STORED to ACKED by hand, for a subscription whose ack was lost (Sec 4.6) |
+| `POST /admin/shuttle/transfers/{id}/ack` | STORED to ACKED by hand: an operator override for a source the process can no longer reach, never a recovery path the design relies on |
 | `POST /admin/shuttle/deliveries/{id}/redrive` | FAILED to PENDING; wakes the notifier |
 | `POST /admin/shuttle/routes/{name}/restart` | restart a route now, resetting its backoff |
 
@@ -898,7 +923,7 @@ Micrometer through the host's registry. Tags `route`, `channel`, `store`; never 
 | `shuttle_delivery_seconds` | timer | `channel` |
 | `shuttle_outbox_pending`, `shuttle_outbox_oldest_seconds` | gauge | `channel` |
 | `shuttle_notifier_inflight` | gauge | |
-| `shuttle_versions_pruned_total` | counter | `store`; the S3 target |
+| `shuttle_supersedes_total` | counter | `route`; a finished identity came back with different content and got a new revision |
 
 ---
 
@@ -938,11 +963,11 @@ poll are appeals to the connector's spec.
 | ID | Decision | Rationale |
 |---|---|---|
 | D1 | The application owns one durable state store in Oracle; the connector's `SeenRepository` is unused | The connector filters before emitting; a transfer recorded as uploaded but not yet acked would be filtered out and never acked. Two ledgers are two truths |
-| D2 | A polled file's identity is store, directory, name, size, mtime; a message's is channel, subject, message id | Matches the connector's in-flight key; a re-drop with a new mtime is a new object |
+| D2 | A polled file's identity is store, directory, name, size, mtime and a revision; a message's is channel, subject, message id | Matches the connector's in-flight key; a re-drop with a new mtime is a new object; a re-drop with the same mtime and different content is a new revision, found by digest after one download, because re-acking it would move corrected content aside unread (v0.3) |
 | D3 | Two tables, no attempt table, no payload column; attempts trace by log | One transfer has many deliveries; an attempt history nobody asked to query is a third table |
 | D4 | AWS SDK v2 synchronous, Apache client, checksums when-required, path style | Sequential per-object work gains nothing from async; SDK checksums can fail against older MinIO |
-| D5 | Key is a pure function of the object's name; the S3 target prunes other versions inside every `store` | Versioning is bucket-wide; a deterministic key makes retry an overwrite; the prune after the retry also cleans crash-gap versions |
-| D6 | Order: store, ack, notify; `acked` deliveries are created in the ACKED transaction; reconciliation repairs ack-then-crash for polling sources | The source-side ack is the commit; the outbox makes notification reliable, not ordering |
+| D5 | Key is a pure function of the object's name; the S3 target overwrites and never deletes; the bucket's lifecycle rule expires non-current versions | Versioning is bucket-wide; a deterministic key makes retry an overwrite; a GET by key already returns only the current version, so the v0.2 prune bought nothing except the power to delete a copy an earlier transfer had delivered and announced (v0.3) |
+| D6 | Order: store, then ack and ledger ACKED in the order the source needs, then notify; a polled file is moved first and written ACKED after, reconciliation repairing the gap; a subscribed message is written ACKED first and acked at the broker after, redelivery repairing the gap; `acked` deliveries are created in the ACKED transaction | The source-side ack is the commit; a move is visible to the next listing and a broker ack is not, so each order puts the repairable step last (v0.3) |
 | D7 | The notifier is a cold flow with a buffer and a wake; rows never ride a `SharedFlow`; an in-memory in-flight set guards double selection | Cold gives backpressure by suspension and loses nothing; `SharedFlow` broadcasts, drops without subscribers and never completes |
 | D8 | Channel seam is one suspend function; the body is a mapping table rendered at send time; a Kotlin lambda is the code-only escape hatch | The notifier must not know HTTP; a table is reviewable by non-Kotlin readers and loadable from YAML |
 | D9 | Per-channel policy; a transfer is DONE when every delivery is DELIVERED; a FAILED delivery never fails the transfer | The object is safe once ACKED; webhook practice retries per endpoint and dead-letters |
@@ -972,6 +997,10 @@ poll are appeals to the connector's spec.
 | D33 | Digest algorithm is a process default with route override; MD5 is the first deployment's | Downstream expects MD5; MD5 buys `Content-MD5` and the ETag check for free |
 | D34 | No logger in any context object; correlation through MDC | The repository's rule is direct JBoss logging; MDC gives correlation to every logger in the call |
 | D35 | A `try` mode renders one route's chain and bodies over sample inputs offline | Validation proves shape, not outcome; every comparable tool gives users a way to see what a sample produces before deploying, and ours costs nothing because the chain and the renderer are already pure |
+| D36 | Rule 9 counts every role a route gives a store, and a missing `parallelism` is 1 | A session is consumed by listing, fetching and uploading alike; 1 is the only default that cannot break a cap by omission |
+| D37 | Two children of one parent on one key reject the transfer | The alternative is one child silently overwriting its sibling |
+| D38 | The NATS trigger sends in-progress signals every `inProgressEvery` while a transfer runs | A run longer than the consumer's ack wait would otherwise be redelivered mid-flight |
+| D39 | The timeout chain is PUT, `apiCall`, `drainTimeout`, termination grace, each below the next; reference values 20 s, 45 s, 60 s, 90 s | A blocking PUT cannot be interrupted, so every layer must outlast the one inside it; the reference configuration must pass its own validator |
 
 ---
 
@@ -982,12 +1011,14 @@ poll are appeals to the connector's spec.
 2. Downstream tolerates repeated calls per transfer id and event, and returns a per-call reference.
 3. The uploader's write convention on the vendor SFTP server (the connector's open item 1).
 4. Temp folder ownership on the vendor server.
-5. A lifecycle rule for non-current versions on the bucket, as a safety net.
+5. The lifecycle rule expiring non-current versions on the bucket, retention one year, in place
+   before the first deployment; `probe` warns when it is missing (D5).
 6. Top-of-hour alignment, if required, against the connector's `watch`.
 7. Oracle schema and sequence names; the datasource the state store shares with.
-8. Pod termination grace period versus `drainTimeout`.
-9. NATS JetStream stream and consumer configuration for `images.ready`, and whether the message
-   id is stable across redeliveries (Sec 5.2).
+8. The pod's termination grace period set to 90 s in the manifest (D39).
+9. NATS JetStream stream and consumer configuration for `images.ready`, whether the message
+   id is stable across redeliveries (Sec 5.2), and the consumer's ack wait, which
+   `inProgressEvery` must stay below (D38).
 10. The partner SFTP server's session cap and rename semantics (POSIX rename extension or not).
 11. The connector's D21 records a five-session cap; infra now says 20 per account. An appeal to
     record in the connector's progress log.
@@ -1020,7 +1051,7 @@ expand with children, the SFTP target, `fetched` notifications, callback acks.
 | I3 | A delivery row is DELIVERED only after a channel returned Delivered for it |
 | I4 | A delivery id is never inside two workers at once |
 | I5 | The notifier's in-flight set never exceeds `batch + workers` and is empty when idle |
-| I6 | After `store` returns, exactly one copy exists at the key, including after a crash inside a previous `store` on the same key |
+| I6 | After `store` returns, the current object at the key is the one just written, including after a crash inside a previous `store` on the same key; `store` never deletes |
 | I7 | A REJECTED or FAILED transfer is neither stored nor delivered until re-driven |
 | I8 | Restart at any hook point converges to DONE with at most one extra store and one extra delivery per channel per event |
 | I9 | Staging holds no file that is not inside a running pipeline |
@@ -1033,17 +1064,19 @@ expand with children, the SFTP target, `fetched` notifications, callback acks.
 | I16 | A parent is acked only when every child is STORED, and a failed child fails the parent |
 | I17 | A route with no notifications goes ACKED to DONE in one transaction and creates no outbox row |
 | I18 | A processor never modifies an input file, and every file it creates is deleted with the staging area |
-| I19 | Per object store, running pipelines plus listers never exceed the pool's `maxSize` |
+| I19 | Per object store, sessions in use by pipelines in any role plus listers never exceed the pool's `maxSize` |
 | I20 | A notification row exists if and only if the transition to its transfer state was committed |
 | I21 | A dead route is restarted with backoff between `initial` and `max`, and readiness follows the configured rule |
 | I22 | A provider is invoked at most once per rendering however many rows select from it |
+| I23 | A subscribed transfer whose message is redelivered after ledger ACKED ends acked with exactly one set of outbox rows |
+| I24 | A finished identity that returns with a different digest becomes a new revision; the finished row and its target version are never modified |
 
 ### 18.2 Scenario table
 
 | ID | Scenario | Expected |
 |---|---|---|
 | S1 | Vendor-drop happy path, one file, one channel | DONE; object with metadata and attributes; file in temp; one delivery with reference |
-| S2 | Crash after store, before ledger (and, in the S3 tier, inside store between PUT and prune) | Next poll: store again; one copy; DONE |
+| S2 | Crash after store, before ledger (and, in the S3 tier, inside store between PUT and HEAD) | Next poll: store again; one current copy, one non-current version left for the lifecycle rule; DONE |
 | S3 | Crash after ledger STORED, before ack | Next poll: verify, ack, no second store |
 | S4 | Crash after the move, before ledger ACKED | Reconciliation marks ACKED and creates `acked` deliveries; DONE |
 | S5 | Crash after delivery sent, before ledger | Delivered again; two calls with one transfer id; row DELIVERED once |
@@ -1053,7 +1086,7 @@ expand with children, the SFTP target, `fetched` notifications, callback acks.
 | S9 | Downstream down past `giveUpAfter` | FAILED with `gave_up`; re-drive returns it to PENDING and it delivers |
 | S10 | Processor Reject | REJECTED; nothing stored; object stays; re-drive re-runs from fetch |
 | S11 | Fetch fails five polls in a row | FAILED; `nack(redeliver = false)`; after restart the store still answers FAILED |
-| S12 | Same identity re-dropped after DONE | Verify, ack again, `reacked`, no store, no delivery |
+| S12 | Same identity re-dropped after DONE | Fetched and digested. Same digest: verify, ack again, `reacked`, no store, no delivery. Different digest: revision 2 created, stored, acked, notified; revision 1 and its target version untouched |
 | S13 | 5,000 files of 10 MB in one poll | All DONE; in-flight never above `parallelism`; staging bounded; no skipped poll next tick |
 | S14 | Listing truncated at `maxFilesPerPoll` | Reconciliation skipped and counted |
 | S15 | Shutdown during store and during delivery | Rows stay PROCESSED and PENDING; close within bound; staging empty at next start |
@@ -1073,6 +1106,8 @@ expand with children, the SFTP target, `fetched` notifications, callback acks.
 | S29 | One child fails five times (M2) | Parent FAILED; message not acked; re-drive re-runs the chain |
 | S30 | `callback` ack returns 500 then 200 (M2) | Transfer stays STORED through the failure; ACKED after the 200; one `acked` delivery |
 | S31 | `shuttle try` on the vendor-drop route with a sample name | Prints the attributes per step, the key, and one body per notified channel; opens no connection; a mapping naming an attribute the regex does not produce is reported by rule 17 |
+| S32 | Subscribed transfer: crash after ledger ACKED, before the broker ack (M2) | Message redelivered; verify, broker acked, `reacked`; outbox rows unchanged; no operator involved |
+| S33 | `unzip` yields `a/x.csv` and `b/x.csv` under one key pattern | REJECTED with both paths in the reason; nothing stored |
 
 ---
 
@@ -1092,3 +1127,28 @@ expand with children, the SFTP target, `fetched` notifications, callback acks.
 - Route supervision with backoff; readiness `all-routes-down`; pool arithmetic per store.
 - Digest algorithm configurable, MD5 first, with `Content-MD5` and ETag checks on S3.
 - Two milestones; the acceptance plan grows from 14 to 22 invariants and 18 to 31 scenarios.
+
+---
+
+## 20. Changes from v0.2
+
+Three defects found by an independent review of v0.2, each settled by grilling:
+
+- The S3 target no longer deletes. v0.2 pruned every other version at the key inside `store`,
+  which erased the copy an earlier transfer had delivered and announced whenever a corrected
+  file arrived under the same name, and made two same-named children of one parent re-store
+  each other for ever. A GET by key returns only the current version with no deletion at all,
+  so the bucket's lifecycle rule owns expiry and the process holds no delete permission (D5,
+  I6, S2). Same-named children reject the transfer instead (D37, S33).
+- Identity gains a revision, and a finished identity that comes back is digested before it is
+  re-acked. v0.2 would have moved a corrected file with the same name, size and mtime aside
+  without uploading it (D2, I24, S12, `revision` and `supersedes_id` in 8.1, `supersede` in 8.2).
+- The ack order depends on the trigger kind. A subscribed message is written ACKED before the
+  broker ack, so the crash between them is repaired by redelivery instead of by an operator
+  (D6, 4.4, 4.6, I23, S32). Polled files keep move-then-ledger with reconciliation.
+- The reference configuration now passes its own rules: rule 3 with `apiCall` 45 s under
+  `drainTimeout` 60 s under a 90 s grace period (D39), rule 9 counting every role a route gives
+  a store with `parallelism` defaulting to 1 (D36), and `partner` sized for both routes that
+  target it.
+- The NATS trigger sends in-progress signals while a transfer runs (D38, `inProgressEvery`).
+- The acceptance plan grows to 24 invariants and 33 scenarios.

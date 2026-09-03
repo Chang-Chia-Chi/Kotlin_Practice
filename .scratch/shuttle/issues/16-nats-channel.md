@@ -12,6 +12,7 @@ delivery, and the message view the message-extraction processor reads.
 
 - [ ] A message becomes one `Seen` with working ack and nak; a nak redelivers; term stops redelivery
 - [ ] Identity per spec Sec 5.2 is stable across a redelivery
+- [ ] In-progress signals flow every `inProgressEvery` while a transfer runs, and a run longer than the consumer's ack wait is not redelivered
 - [ ] A publish lands on the subject and returns the sequence as the reference; a broker outage ends with route down
 - [ ] Tests tagged `nats` on Testcontainers; jnats appears only in the nats package
 - [ ] Progress entry appended

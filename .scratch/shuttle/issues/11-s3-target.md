@@ -1,10 +1,12 @@
 # 11: S3 target and fetcher over the AWS SDK
 
 **What to build:** Copies land in a versioned MinIO through AWS SDK v2 configured as agreed. Store is one call
-that leaves exactly one copy at the key: PUT with Content-MD5 when the digest is MD5, HEAD of
-the content length, the ETag compared with the MD5 on single-part unencrypted objects, then a
-prune of every other version of exactly that key. Verify checks the version still exists; probe
-fails startup on a missing bucket. A fetcher streams an object to staging with its digest.
+that leaves the object just written as the current one at the key and deletes nothing: PUT with
+Content-MD5 when the digest is MD5, HEAD of the content length, the ETag compared with the MD5
+on single-part unencrypted objects. Older versions are the bucket's lifecycle rule's to expire.
+Verify checks the version still exists; probe fails startup on a missing bucket and warns on a
+bucket without a non-current-version expiry. A fetcher streams an object to staging with its
+digest.
 
 **Blocked by:** 01 (Skeleton)
 
@@ -13,9 +15,9 @@ fails startup on a missing bucket. A fetcher streams an object to staging with i
 **Status:** ready-for-agent
 
 - [ ] The shared target contract test class passes against the in-memory target and the S3 target on Testcontainers MinIO with versioning enabled, tagged `minio`
-- [ ] `I6` on MinIO: three stores of one key leave one version; a crash between PUT and prune, played through an adapter hook, is repaired by the next store
+- [ ] `I6` on MinIO: three stores of one key read back the newest content by key; a crash between PUT and HEAD, played through an adapter hook, is repaired by the next store; no delete call is ever made
 - [ ] A corrupted body is rejected by Content-MD5; the ETag check passes on a single-part object and is skipped with a WARN when the bucket reports encryption
-- [ ] Verify of a deleted version is false; a key sharing a prefix with a neighbour is never pruned by the neighbour's store; the multipart threshold is pinned above the largest expected file
+- [ ] Verify of a version expired by hand is false; probe warns on a bucket without a non-current-version expiry and is silent with one; the suite passes under a credential without delete permission; the multipart threshold is pinned above the largest expected file
 - [ ] The fetcher's digest matches the object's; the AWS SDK appears only in the s3 package
 - [ ] Progress entry appended
 
