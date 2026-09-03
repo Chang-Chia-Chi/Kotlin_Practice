@@ -99,6 +99,14 @@ class RulesTest {
         assertEquals(listOf(14), violated(config(vendorDrop = { process = listOf(extract(from = FileName, regex = "(?<orderNumber>\\d+")) })))
 
     @Test
+    fun rule14_expand_format_is_json_or_message_with_message_only_on_a_subscribed_route_and_files_a_pointer() {
+        assertEquals(listOf(14), violated(config(vendorDrop = { process = process then expand("lines", "/images[*].path", objectStore("minio")) })))
+        assertEquals(listOf(14), violated(config(vendorDrop = { process = process then expand("message", "/images[*].path", objectStore("minio")) })))
+        assertEquals(listOf(14), violated(config(vendorDrop = { process = process then expand("json", "images[*].path", objectStore("minio")) })))
+        assertEquals(emptyList<Int>(), violated(config(vendorDrop = { process = process then expand("json", "/images[*].path", objectStore("minio")) })))
+    }
+
+    @Test
     fun rule14_unzip_maxEntries_is_at_least_one() =
         assertEquals(listOf(14), violated(config(vendorDrop = { process = process then unzip(maxEntries = 0) })))
 

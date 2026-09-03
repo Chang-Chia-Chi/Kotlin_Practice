@@ -194,7 +194,10 @@ object Rules {
                 }
                 is ProcessorSpec.Expand -> {
                     if (spec.from !in stores) fail(14, "$at: from ${spec.from} names no object store")
-                    if (spec.files.isBlank()) fail(14, "$at: files is blank")
+                    if (spec.format !in EXPAND_FORMATS) fail(14, "$at: format ${spec.format} is not one of $EXPAND_FORMATS")
+                    if (spec.format == "message" && !subscribed) fail(14, "$at: format message on a route that does not subscribe")
+                    val (head, tail) = expandPointer(spec.files)
+                    if (spec.files.isBlank() || !head.isJsonPointer() || !tail.isJsonPointer()) fail(14, "$at: files ${spec.files} is not a JSON pointer with one optional [*]")
                 }
                 is ProcessorSpec.Custom -> if (beans(spec.name) == null) fail(15, "$at: no bean named ${spec.name}")
                 is ProcessorSpec.VerifyDigest -> if (spec.attribute.isBlank()) fail(14, "$at: attribute is blank")
@@ -230,6 +233,7 @@ object Rules {
 
         private fun <T> List<T>.duplicates() = groupingBy { it }.eachCount().filterValues { it > 1 }.keys
         private fun String.isJsonPointer() = isEmpty() || startsWith("/")
+        private val EXPAND_FORMATS = setOf("json", "message")
     }
 
     private val PLACEHOLDER = Regex("""\{([^}]*)}""")

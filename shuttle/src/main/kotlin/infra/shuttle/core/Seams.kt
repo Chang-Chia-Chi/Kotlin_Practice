@@ -14,6 +14,8 @@ interface StateStore {
     suspend fun fetched(id: TransferId, staged: StagedSummary, events: List<DeliveryRequest>)
     suspend fun processed(id: TransferId, attributes: Map<String, String>)
     suspend fun children(id: TransferId, staged: List<StagedSummary>): List<Transfer>
+    /** A parent's child rows in id order, empty for a row without children; what `verify` and S28 read (spec 4.3). */
+    suspend fun childrenOf(id: TransferId): List<Transfer>
     suspend fun stored(id: TransferId, target: TargetRef, events: List<DeliveryRequest>)
     suspend fun acked(id: TransferId, events: List<DeliveryRequest>)
     suspend fun rejected(id: TransferId, reason: String)

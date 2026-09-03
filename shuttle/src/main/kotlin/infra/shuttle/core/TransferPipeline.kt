@@ -2,6 +2,10 @@ package infra.shuttle.core
 
 import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.Tags
+import kotlinx.coroutines.async
+import kotlinx.coroutines.supervisorScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import org.jboss.logging.Logger
 import java.nio.file.Files
 import java.nio.file.Path
@@ -36,6 +40,8 @@ class TransferPipeline(
     private val usableSpace: (Path) -> Long = { Files.getFileStore(it).usableSpace },
     channels: Map<ChannelName, DeliveryChannel> = emptyMap(),
     private val renderer: MappingRenderer = MappingRenderer(),
+    /** `expand` fetching from a store other than the one `run` was handed; the route's own fetch store needs no entry. */
+    private val fetchers: Map<String, Fetcher> = emptyMap(),
 ) {
     private val name = RouteName(route.name)
     private val polled = route.source is Source.Poll
@@ -48,6 +54,8 @@ class TransferPipeline(
     private val tables = (route.notify.map { ChannelName(it.channel) } + listOfNotNull(callbackChannel?.name)).distinct().mapNotNull { bodies[it] }
     private val stagingStore = route.fetch?.store ?: (route.source as? Source.Poll)?.store ?: route.name
     private val freeBytes = registry.gauge(ShuttleMetrics.STAGING_FREE_BYTES, Tags.of("store", stagingStore), AtomicLong())!!
+    /** Spec 4.5: uploads of this route, single objects and children alike, never exceed `parallelism` (rule 9's arithmetic). */
+    private val uploads = Semaphore(route.parallelism)
 
     suspend fun run(event: RouteEvent.Seen, fetch: Fetcher) = Run(event, fetch).execute()
 
@@ -122,19 +130,26 @@ class TransferPipeline(
             }
             val dir = Files.createDirectories(staging.dir.resolve(transfer.id.value.toString()))
             try {
-                val staged = stage("fetch") { fetch(event.source.path, dir.resolve(event.identity.sourceName.substringAfterLast('/')), algorithm) }
+                val staged = stage("fetch") { fetch(sourcePath(), dir.resolve(event.identity.sourceName.substringAfterLast('/')), algorithm) }
                 block(staged, dir)
             } finally {
                 dir.toFile().deleteRecursively()
             }
         }
 
+        /** Spec 5.1: a polled file's path is the listing's; a subscribed transfer's is read from the message at `fetch.path`. */
+        private fun sourcePath(): String = route.fetch?.let { f ->
+            val body = event.source.body ?: throw IllegalStateException("route ${route.name}: the message has no body to read fetch.path ${f.path} from")
+            JSON.readTree(body).at(f.path).takeIf { it.isTextual }?.asText()
+                ?: throw IllegalStateException("route ${route.name}: fetch.path ${f.path} is absent from the message")
+        } ?: event.source.path
+
         /** Stages 1 (ledger) to 4 over a staged object. */
         private suspend fun resume(transfer: Transfer, staged: StagedObject, dir: Path) {
             val id = transfer.id
             ledger(DeliveryMoment.FETCHED) { store.fetched(id, staged.summary, it) }
             hook.at(HookPoint.afterFetch, id)
-            val ctx = Context(TransferView(id, name, transfer.identity, event.source.path, transfer.firstSeenAt, transfer.parentId), event.source, dir)
+            val ctx = Context(TransferView(id, name, transfer.identity, event.source.path, transfer.firstSeenAt, transfer.parentId), event.source, dir, fetch)
             val done = when (val result = stage("process") { chain.run(Payload(listOf(staged)), ctx) }) {
                 is ChainResult.Rejected -> return reject(transfer, result.reason)
                 is ChainResult.Done -> result
@@ -148,20 +163,53 @@ class TransferPipeline(
                 return reject(transfer, "cardinality: ${names.joinToString(" and ")} both resolve to key $key")
             }
             if (objects.size == 1) {
-                val ref = stage("store") { storeOne(id, objects.single(), keys.single(), done.attributes) }
+                val ref = uploads.withPermit { stage("store") { storeOne(id, objects.single(), keys.single(), done.attributes) } }
                 ledger(DeliveryMoment.STORED) { store.stored(id, ref, it) }
                 hook.at(HookPoint.afterLedgerStored, id)
             } else {
-                val children = store.children(id, objects.map { it.summary })
-                registry.counter(ShuttleMetrics.CHILDREN, "route", route.name).increment(children.size.toDouble())
-                // ponytail: children upload one after another; a Semaphore(route.parallelism) of asyncs when M2 measures a need.
-                for ((i, child) in children.withIndex()) {
-                    val ref = stage("store") { storeOne(child.id, objects[i], keys[i], done.attributes) }
-                    ledger(DeliveryMoment.STORED) { store.stored(child.id, ref, it) } // the parent flips STORED with the last child (D42)
-                    hook.at(HookPoint.afterLedgerStored, child.id)
-                }
+                val children = childRows(id, objects)
+                // every child runs to its end whatever a sibling did; the first failure is the run's, after all have finished
+                val errors = supervisorScope { children.indices.map { i -> async { storeChild(children[i], objects[i], keys[i], done.attributes) } } }
+                    .mapNotNull { child -> try { child.await(); null } catch (e: CancellationException) { throw e } catch (e: Exception) { e } }
+                errors.firstOrNull { it !is ChildFailed }?.let { throw it }
+                if (errors.isNotEmpty()) throw ChildFailed(errors.any { (it as ChildFailed).terminal }, errors.first())
             }
             ack(transfer)
+        }
+
+        /**
+         * Spec 4.3 for a parent that already has child rows: when the chain yielded the same children again (same
+         * names and digests, none FAILED) the rows stay, so a STORED one can skip its store; anything else, a re-drive
+         * after a failed child included, replaces them (4.5).
+         */
+        private suspend fun childRows(id: TransferId, objects: List<StagedObject>): List<Transfer> {
+            val existing = store.childrenOf(id).associateBy { it.identity.sourceName }
+            val same = existing.size == objects.size && objects.all { o -> existing[o.name]?.let { it.state != TransferState.FAILED && it.digest == o.digest } == true }
+            if (same) return objects.map { existing.getValue(it.name) }
+            return store.children(id, objects.map { it.summary })
+                .also { registry.counter(ShuttleMetrics.CHILDREN, "route", route.name).increment(it.size.toDouble()) }
+        }
+
+        /**
+         * One child's stage 3 (spec 4.5). A STORED child whose copy verifies skips the store (S28); the ledger write flips
+         * the parent with the last sibling (D42). A failure is the child's attempt, and the store fails the parent when
+         * the child reaches `maxAttempts` (I16); the parent's own count is untouched.
+         */
+        private suspend fun storeChild(child: Transfer, o: StagedObject, key: String, attributes: Map<String, String>) {
+            if (child.state == TransferState.STORED && child.target?.let { target.verify(it) } == true) return
+            try {
+                uploads.withPermit {
+                    val ref = stage("store") { storeOne(child.id, o, key, attributes) }
+                    ledger(DeliveryMoment.STORED) { store.stored(child.id, ref, it) }
+                    hook.at(HookPoint.afterLedgerStored, child.id)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                log.warnv("route {0}: child {1} of transfer {2} failed: {3}", route.name, child.id.value, child.parentId?.value, e.toString())
+                val after = store.failedAttempt(child.id, e.message ?: e.toString(), route.maxAttempts)
+                throw ChildFailed(after.state == TransferState.FAILED, e)
+            }
         }
 
         private suspend fun storeOne(id: TransferId, o: StagedObject, key: String, attributes: Map<String, String>): TargetRef {
@@ -227,11 +275,14 @@ class TransferPipeline(
             event.nack(false)
         }
 
-        /** Spec 11: the attempt is charged to [row]; FAILED at `maxAttempts`, or at once for a freeze failure; the trigger is told. */
+        /**
+         * Spec 11: the attempt is charged to [row]; FAILED at `maxAttempts`, or at once for a freeze failure; the trigger
+         * is told. A child's failure was charged to the child already, and the parent is FAILED only if the store said so.
+         */
         private suspend fun failed(e: Exception) {
             log.warnv("route {0}: transfer {1} failed: {2}", route.name, row?.id?.value ?: event.identity.sourceName, e.toString())
             log.debug("stage error", e)
-            val after = row?.let {
+            val after = if (e is ChildFailed) null else row?.let {
                 try {
                     store.failedAttempt(it.id, e.message ?: e.toString(), if (e is FreezeFailure) 1 else route.maxAttempts)
                 } catch (t: CancellationException) {
@@ -240,7 +291,7 @@ class TransferPipeline(
                     log.error("state store unavailable while recording the failure", t); null
                 }
             }
-            val terminal = after?.state == TransferState.FAILED
+            val terminal = after?.state == TransferState.FAILED || (e is ChildFailed && e.terminal)
             if (terminal) count("failed")
             event.nack(!terminal)
         }
@@ -263,25 +314,29 @@ class TransferPipeline(
         }
     }
 
-    /**
-     * Spec 4.3 at STORED: `verify` of the row's reference, once. A parent carries no reference of its own
-     * and the seam lists no children, so a parent answers false and re-runs; ticket 16 (S28) needs a child read.
-     */
-    private suspend fun verified(row: Transfer): Boolean = row.target?.let { target.verify(it) } ?: false
+    /** Spec 4.3 at STORED: `verify` of the row's reference, once, or of every child's for a parent, which has no reference of its own. */
+    private suspend fun verified(row: Transfer): Boolean = row.target?.let { target.verify(it) }
+        ?: store.childrenOf(row.id).let { children -> children.isNotEmpty() && children.all { c -> c.target?.let { target.verify(it) } ?: false } }
 
     private fun count(outcome: String) = registry.counter(ShuttleMetrics.TRANSFERS, "route", route.name, "outcome", outcome).increment()
 
-    /** Spec 6.2 over the run's staging directory; `fetch` is `expand`'s (ticket 16). */
-    private inner class Context(override val transfer: TransferView, override val source: SourceView, private val dir: Path) : ProcessContext {
+    /** Spec 6.2 over the run's staging directory; `fetch` pulls `expand`'s children into it, so they die with the run (I9). */
+    private inner class Context(override val transfer: TransferView, override val source: SourceView, private val dir: Path, private val own: Fetcher) : ProcessContext {
         override val attributes = LinkedHashMap<String, String>()
         override val clock: Clock get() = this@TransferPipeline.clock
         private var created = 0
         override fun setAttribute(name: String, value: String) { attributes[name] = value }
         override fun newStagedFile(name: String): Path = dir.resolve("${created++}-${name.substringAfterLast('/')}")
-        override suspend fun fetch(store: String, path: String): StagedObject = throw NotImplementedError("expand is ticket 16")
+        override suspend fun fetch(store: String, path: String): StagedObject {
+            val fetcher = if (store == stagingStore) own else fetchers[store] ?: throw IllegalStateException("route ${route.name}: no fetcher for store $store")
+            return fetcher(path, newStagedFile(path), algorithm)
+        }
     }
 
     private companion object {
         val log: Logger = Logger.getLogger(TransferPipeline::class.java)
     }
 }
+
+/** A child's store failed and was charged to the child; [terminal] when that child, and so the parent, is now FAILED. */
+private class ChildFailed(val terminal: Boolean, cause: Throwable) : RuntimeException(cause.message, cause)

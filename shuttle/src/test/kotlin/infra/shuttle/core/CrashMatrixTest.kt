@@ -48,9 +48,11 @@ class CrashMatrixTest {
         target = Target("minio", bucket = "landing"), notify = listOf(Notify(DeliveryMoment.ACKED, "downstream")),
     )
 
-    private fun runner(route: Route = polled): RouteRunner {
+    private val noChain = ProcessingChain(emptyList(), DigestAlgorithm.MD5)
+
+    private fun runner(route: Route = polled, chain: ProcessingChain = noChain): RouteRunner {
         val pipeline = TransferPipeline(
-            route, DigestAlgorithm.MD5, store, target, ProcessingChain(emptyList(), DigestAlgorithm.MD5), emptyMap(), { true },
+            route, DigestAlgorithm.MD5, store, target, chain, emptyMap(), { true },
             { notifier.wake() }, hook, clock, registry, Staging(staging), usableSpace = { 10.gib },
         )
         return RouteRunner(route, pipeline, fetcher, store, { notifier.wake() }, clock, registry)
@@ -62,18 +64,106 @@ class CrashMatrixTest {
     private val subscribed = polled.copy(source = Source.Subscribe("nats", "images", onAck = AckAction.Ack), fetch = Fetch("minio", "/path"))
     private val message = SourceIdentity(RouteName("drop"), SourceKind.NATS, "nats:images", "msg-1", null, null)
     /** One message: the subscribed row's trigger and, replayed, the broker's redelivery of the unacked message. */
-    private val redelivery: Flow<RouteEvent> by lazy { source.seen(message, SourceView("a.csv")).events() }
+    private val redelivery: Flow<RouteEvent> by lazy { source.seen(message, SourceView("images", """{"path":"a.csv"}""".toByteArray())).events() }
+
+    /** Spec 13.1's image-sets route: the message names a metadata file listing two images, each a child on the target; uploads one at a time. */
+    private val imageSets = polled.copy(source = Source.Subscribe("nats", "images", onAck = AckAction.Ack), fetch = Fetch("minio", "/metadata"), parallelism = 1)
+    private val imageChain = ProcessingChain(listOf(processorFor(ProcessorSpec.Expand("json", "/images", "minio")) { null }), DigestAlgorithm.MD5)
+    /** One message: the parent's trigger and, replayed, the broker's redelivery of it. */
+    private val set: Flow<RouteEvent> by lazy {
+        fetcher.file("set.json", """{"images":["img/1.png","img/2.png"]}""".toByteArray()).file("img/1.png", "one".toByteArray()).file("img/2.png", "two".toByteArray())
+        source.seen(message, SourceView("images", """{"metadata":"set.json"}""".toByteArray())).events()
+    }
 
     /** The process dies at [point]: the pipeline parked there sees a `CancellationException`; the trigger's flow finishes. */
-    private suspend fun TestScope.crashAt(point: HookPoint, events: Flow<RouteEvent>, route: Route = polled): TransferId {
+    private suspend fun TestScope.crashAt(point: HookPoint, events: Flow<RouteEvent>, route: Route = polled, chain: ProcessingChain = noChain): TransferId {
         hook.pauseAt(point)
-        val run = launch { runner(route).run(events) }
+        val run = launch { runner(route, chain).run(events) }
         val id = hook.awaitArrival(point)
         hook.crash(point)
         advanceUntilIdle()
         assertTrue(run.isCompleted, "the runner returns once the crashed pipeline is gone")
         assertEquals(0L, Files.list(staging).count(), "staging holds nothing after the crash (I9)")
         return id
+    }
+
+    /**
+     * The process dies while one child is parked at [point]: the runner's job goes, and with it every sibling upload
+     * under it. `hook.crash` would kill the parked child alone and its sibling would carry on, which is a retry, not a death.
+     */
+    private suspend fun TestScope.dieAt(point: HookPoint, events: Flow<RouteEvent>): TransferId {
+        hook.pauseAt(point)
+        val run = launch { runner(imageSets, imageChain).run(events) }
+        val child = hook.awaitArrival(point)
+        run.cancel()
+        hook.resume(point)
+        advanceUntilIdle()
+        assertEquals(0L, Files.list(staging).count(), "staging holds nothing after the death (I9)")
+        return child
+    }
+
+    /** The invariant of spec 4.4 for a parent of two: both children and the parent DONE, [stores] stores in all, one delivery, every child's copy current. */
+    private suspend fun assertConvergedSet(stores: Int) {
+        val parent = store.transfers.single { it.kind == TransferKind.MESSAGE }
+        val children = store.childrenOf(parent.id)
+        assertEquals(TransferState.DONE, parent.state)
+        assertEquals(listOf(TransferState.DONE, TransferState.DONE), children.map { it.state })
+        assertEquals(stores, stores(), "stores across both runs")
+        assertEquals(listOf(DeliveryState.DELIVERED), ackedRows().map { it.state }, "one acked delivery row, DELIVERED once")
+        assertEquals(1, downstream.events.size, "channel calls")
+        assertEquals(listOf("one", "two"), listOf("1.png", "2.png").map { String(target.bytes(it)) })
+        assertTrue(children.all { target.verify(it.target!!) }, "every child's reference is the current object")
+        assertEquals(listOf(message), source.acks, "the message is acked once")
+    }
+
+    @Test
+    fun I8_S28_after_the_first_childs_store_before_its_ledger_the_redelivery_stores_it_again_and_the_rest_once() = runTest {
+        val child = dieAt(HookPoint.afterStore, set)
+        val parent = store.transfer(child).parentId!!
+        assertEquals(TransferState.PROCESSED, store.transfer(parent).state)
+        assertEquals(listOf(TransferState.FETCHED, TransferState.FETCHED), store.childrenOf(parent).map { it.state }, "the ledger never saw the copy")
+        assertEquals(setOf("1.png"), target.keys, "one copy on the target")
+
+        runner(imageSets, imageChain).run(set)
+        deliver()
+
+        assertEquals(listOf("store", "store", "store"), target.calls.map { it.method }, "the first child again, then the second")
+        assertConvergedSet(stores = 3)
+    }
+
+    @Test
+    fun I8_S28_after_the_first_childs_ledger_the_redelivery_verifies_it_and_stores_only_the_rest() = runTest {
+        val child = dieAt(HookPoint.afterLedgerStored, set)
+        val parent = store.transfer(child).parentId!!
+        assertEquals(TransferState.PROCESSED, store.transfer(parent).state)
+        assertEquals(listOf(TransferState.STORED, TransferState.FETCHED), store.childrenOf(parent).map { it.state }, "half the children stored")
+
+        runner(imageSets, imageChain).run(set)
+        deliver()
+
+        assertEquals(listOf(InMemoryTarget.Call("store", "1.png"), InMemoryTarget.Call("verify", "1.png"), InMemoryTarget.Call("store", "2.png")), target.calls)
+        assertEquals(listOf(child), store.childrenOf(parent).map { it.id }.take(1), "the stored child kept its row")
+        assertConvergedSet(stores = 2)
+    }
+
+    @Test
+    fun I23_S32_a_parent_redelivered_after_ledger_ACKED_is_reacked_with_every_child_verified_and_no_new_outbox_rows() = runTest {
+        val id = crashAt(HookPoint.afterLedgerAcked, set, imageSets, imageChain)
+        assertEquals(TransferState.ACKED, store.transfer(id).state)
+        assertTrue(store.childrenOf(id).all { it.state == TransferState.ACKED })
+        val outbox = store.outbox
+        assertEquals(listOf(DeliveryState.PENDING), ackedRows().map { it.state })
+        assertTrue(source.acks.isEmpty(), "the broker was never acked")
+        val fetches = fetcher.calls.size
+
+        runner(imageSets, imageChain).run(set)
+        assertEquals(1.0, registry.counter(ShuttleMetrics.TRANSFERS, "route", "drop", "outcome", "reacked").count())
+        assertEquals(fetches, fetcher.calls.size, "no fetch for a redelivered message")
+        assertEquals(listOf(InMemoryTarget.Call("verify", "1.png"), InMemoryTarget.Call("verify", "2.png")), target.calls.drop(2), "every child verified, nothing stored")
+        assertEquals(outbox, store.outbox, "exactly the outbox rows the ledger wrote before the crash")
+        deliver()
+
+        assertConvergedSet(stores = 2)
     }
 
     /** The notifier of the restarted process delivers what is PENDING. */

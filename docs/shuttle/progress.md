@@ -1820,3 +1820,129 @@ one server and one connector per test method - so it carries no group tag.
   source is one SFTP store and whose target is another moves bytes between two servers without the
   two connectors sharing anything. `runTest` cannot drive any of it - see "Concepts named" on `io`;
   use `runBlocking` with `withTimeout`.
+
+---
+
+## 17: Expand, fetch and parent completion on fakes
+
+**Built:** spec 13.1's image-sets route end to end against the test kit: a message names a metadata file, the
+route fetches it through `fetch.store` at the path read from the message, `expand` fans it out, the children are
+stored in parallel under the route's parallelism, the parent is STORED with the last child (D42), the message is
+acked once and downstream told once. Four production changes, all in `core` and `jdbi`:
+
+- `ExpandProcessor` replaces the last G0 shell (`Shells.kt` deleted). `format: json` reads the current payload
+  object, `format: message` the subscription message body; `files` is a JSON pointer with one optional `[*]`
+  (`/images[*].path`, `/paths[*]`, or `/paths` for an array of strings, `.path` after the star reading as
+  `/path`); every listed path is fetched through `ctx.fetch(from, path)` into a file the run owns, and the
+  payload becomes one object per child, named by the fetcher after the path's last segment. Nothing listed, or
+  a pointer landing on something other than a string, is a Reject. `ExtractProcessor` accepts `from: message`
+  (the body as the regex or JSON subject; a message without a body is a Reject) and `processorFor` no longer
+  refuses it. Rule 14 gained `expand.format` in `{json, message}`, `message` only on a subscribed route, and
+  `files` a pointer on both sides of the star (`expandPointer`, shared with the processor).
+- `TransferPipeline`: stage 1 of a subscribed transfer fetches the path `fetch.path` points at in the message
+  body (`sourcePath()`; a body without it is a stage error, retried to FAILED). `Context.fetch(store, path)` runs
+  the run's own fetcher when `store` is the route's fetch or poll store and otherwise looks `store` up in a new
+  trailing constructor parameter `fetchers: Map<String, Fetcher> = emptyMap()`. Children are stored in parallel:
+  one `async` per child under `supervisorScope`, each upload under the pipeline's `Semaphore(route.parallelism)`
+  (one per route, shared by every run, single objects included, so uploads per route never exceed the number
+  rule 9 budgets); every child runs to its end whatever a sibling did and the first failure becomes the run's
+  once all have finished. A STORED child whose `verify` is true skips its store (S28).
+- `StateStore.childrenOf(id)`, one read, added to the seam: a parent's rows in id order. `verified(parent)`
+  verifies every child's reference; `childRows` keeps the existing rows when the chain yields the same children
+  (same names and digests, none FAILED) and calls `children(...)` to replace them otherwise.
+- A child's failure is the child's attempt: `storeChild` calls `failedAttempt(child.id, ..., maxAttempts)` and
+  throws `ChildFailed(terminal)`; the store fails the parent when the child reaches the cap (both stores already
+  did), `failed()` charges nothing to the parent for a `ChildFailed` and nacks with redelivery unless terminal.
+
+**Concepts named:** *kept children*: the rows a re-run reuses because the chain reproduced them, which is what
+lets a child's `attempts` climb across redeliveries and a STORED child skip its store; *replaced children*: the
+`children(...)` call, now reserved for a first run, a changed listing and a re-drive after a failed child.
+*The route's upload budget*: the pipeline-level semaphore, distinct from the runner's pipeline permits (fetch
+side); a parent run holds one runner permit while its children queue on upload permits, and nothing waits the
+other way, so there is no cycle. *A death versus a crash*: `hook.crash` kills the coroutine parked at a point,
+which for a child is one sibling of several; a process death is the runner's job cancelled
+(`CrashMatrixTest.dieAt`), taking every upload with it.
+
+**Acceptance:**
+
+- *S27, S28, S29, S32 on fakes with the scripted fetcher; I16 and I23 as named tests* -
+  `TransferPipelineTest.S27_image_sets_happy_path_a_message_expands_into_children_stored_in_parallel_acked_once_with_fetched_and_acked_delivered_once_each`
+  (parallelism 2, `batchId` from the message, one `fetched` and one `acked` row on the parent, three fetches),
+  `TransferPipelineTest.S28_half_the_children_stored_the_redelivery_verifies_them_stores_the_rest_and_acks_the_message_once`
+  (`store 1.png, verify 2.png` on the redelivery, the same child rows, the attempt on the child),
+  `TransferPipelineTest.S29_one_child_failing_five_times_fails_the_parent_the_message_is_not_acked_and_a_redrive_replaces_the_children_and_reruns_the_chain`,
+  `CrashMatrixTest.I23_S32_a_parent_redelivered_after_ledger_ACKED_is_reacked_with_every_child_verified_and_no_new_outbox_rows`
+  (the outbox equal before and after, no fetch, `verify` per child, `reacked` 1), and
+  `TransferPipelineTest.I16_a_parent_is_acked_only_when_every_child_is_STORED_and_a_failed_child_fails_the_parent`
+  (its second half now asserts the child's five attempts, the parent's zero, the parent's `lastError` naming
+  the child, and the sibling's row kept). The single-object subscribe row `I8_subscribe_...` of ticket 08 stays.
+- *Expand from a metadata file and from the message; extract from message* -
+  `BuiltInProcessorsTest.expand_fetches_one_child_per_path_listed_in_a_json_metadata_file_or_in_the_message_and_rejects_an_absent_or_empty_list`,
+  `BuiltInProcessorsTest.extract_from_message_sets_attributes_from_the_message_body_by_regex_or_json_and_rejects_a_message_without_one`,
+  `RulesTest.rule14_expand_format_is_json_or_message_with_message_only_on_a_subscribed_route_and_files_a_pointer`.
+- *A child failing five times fails the parent and the message is not acked; a re-drive replaces its children* -
+  `S29_...` (four nacks with redelivery then one without, `failed` counted once, the chain re-run five times, a
+  FAILED row does nothing, new child ids after the re-drive).
+- *Ticket 08's two child crash rows* -
+  `CrashMatrixTest.I8_S28_after_the_first_childs_store_before_its_ledger_the_redelivery_stores_it_again_and_the_rest_once`
+  (three stores in all, one extra) and
+  `CrashMatrixTest.I8_S28_after_the_first_childs_ledger_the_redelivery_verifies_it_and_stores_only_the_rest`
+  (`store, verify, store`, the stored child's row kept); both end in `assertConvergedSet`.
+- *Seam addition with a contract test on both stores* -
+  `StateStoreContract.childrenOf_lists_a_parents_children_in_id_order_and_nothing_for_a_row_without_children`,
+  green in `InMemoryStateStoreTest` and on Oracle (below).
+- *Progress entry appended* - this entry.
+
+Final run: ArchitectureTest 9, AttributeFreezeTest 4, BuiltInProcessorsTest 10, CrashMatrixTest 12,
+MappingRendererTest 12, NotifierTest 13, ProcessingChainTest 4, RouteRunnerTest 9, RouteSupervisorTest 3,
+RulesTest 36, SurfaceTest 3, TransferPipelineTest 29, HttpChannelTest 8, StateStoreSchemaTest 2,
+SftpConnectorConfigTest 6, SftpPollSourceTest 9, ClockFixtureTest 1, FakeProcessContextTest 2, HookDriverTest 3,
+InMemoryStateStoreTest 19, InMemoryTargetTest 3, RecordingChannelTest 2, ScriptedSourceTest 2, YamlLoaderTest 11;
+212 tests, 0 failures, 0 errors (`oracle`, `minio`, `nats` excluded). Oracle tier
+(`-DexcludedGroups=none -Dtest=JdbiStateStoreTest`): JdbiStateStoreTest 20, 0 failures, 0 errors, in 50 s
+(the 18 shared contract tests including `childrenOf_...` plus the two Oracle-only ones).
+
+**Deviations:**
+
+1. **06's deviation 1 repaid by a seam read, not by `children` returning existing rows.** `childrenOf` is one
+   `SELECT`; `children(id, staged)` keeps its replace-everything meaning, and the pipeline decides between the
+   two from what the chain yielded. Spec 4.5's "a re-drive re-runs the chain and replaces its children" holds
+   when any child is FAILED (the S29 re-drive) or the listing changed; a re-drive of a parent that failed for a
+   reason of its own (a callback, say) with every child STORED keeps and verifies them, one `verify` each and no
+   store, which is spec 4.3's STORED row applied to children and stricter than a blanket replace.
+2. **06's deviation 2 repaid: a child's failure is the child's attempt.** The parent's `attempts` stays at zero
+   through child failures; it is FAILED by the store's `failedAttempt` on the child at `maxAttempts`, with
+   `lastError` naming the child. `shuttle_transfers_total{outcome=failed}` counts once, at that moment.
+3. **Siblings finish when one child fails** (`supervisorScope`), so a transient failure on child 3 of 8 costs one
+   re-upload on the redelivery, not six. A cancellation still takes every child at once.
+4. **The upload permit covers the child's STORED ledger write and hook**, not only `target.store`: under
+   parallelism 1 the second child cannot start before the first's row is written, which is what makes the two
+   crash rows deterministic and keeps "at most `parallelism` uploads" true of the ledger's view as well.
+5. **`format: lines` is not implemented.** Ticket 17 mentions a line list; the grammar has `format`, `files`,
+   `from` and no knob a line list could use, and spec 13.1 shows JSON only. One `when` branch when a route needs it.
+6. **`expand` has no cardinality cap** beyond what the metadata lists; spec 6.3 states none (unzip's D41 limits
+   are its own). Two listed paths with one name collide on the key and S33 rejects the transfer.
+7. **A single-object re-run of a former parent leaves stale child rows.** If a re-drive's chain yields one
+   object where it once yielded N, the run stores on the parent row and the old children stay FETCHED/STORED;
+   `verified` uses the row's own reference then, so nothing misbehaves, but the rows are debris. Clearing them
+   would cost `childrenOf` on every single-object run; not paid.
+8. **A message whose body lacks `fetch.path` is a stage error**, retried to FAILED at `maxAttempts`, not a
+   Reject: spec 11 has no row for a malformed message and the run has no staged object to reject with yet.
+9. **Size:** `git diff --stat` 381 insertions, 54 deletions across 12 files (about 115 net main, 215 net test);
+   in budget.
+
+**For the next ticket:**
+
+- **14 (host):** a subscribed route's `RouteRunner` fetcher is the `fetch.store`'s: `S3Fetcher(client, bucket,
+  io).fetcher` for an S3 store, the same client as the store's target if it has one. Pass `fetchers` to
+  `TransferPipeline` only when a route's `expand.from` names a store other than its `fetch.store` (rule 14
+  guarantees the name exists; the pipeline throws `IllegalStateException` at the first `ctx.fetch` otherwise).
+  `fetch.path` is a JSON pointer into the raw message body and must resolve to a bare S3 key (ticket 11's
+  fetcher takes `path` as the key). The NATS `SourceView` of ticket 16 is what `extract from: message` and
+  `expand format: message` read; the runner's parallelism still bounds pipelines, and the pipeline's own
+  semaphore bounds uploads, so a route's pool arithmetic under rule 9 is unchanged.
+- **20 (M2 acceptance):** S27 to S29 and S32 on fakes are `TransferPipelineTest` and `CrashMatrixTest` above; the
+  real-adapter re-proof is NATS redelivery after a process death (I23) and the parallel child uploads on the
+  SFTP target under `parallelism` 2 with D42 on Oracle (`StateStoreContract.D42_...` already runs there).
+  `CrashMatrixTest.dieAt` is the model for a death with children in flight: cancel the runner's job, not the
+  hook.
