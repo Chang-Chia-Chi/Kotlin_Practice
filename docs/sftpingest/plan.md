@@ -115,18 +115,18 @@ the module: a concurrent set touched at select and in `finally`, never elsewhere
 ## 3. Phase Plan
 
 ```
-G0 --+--> G1 --+--> G2 --> G3 --+
-     |         |                |
-     |         +--> G4 ---------+---> G9 --> G10
-     |                          |
-     +--> G5 (Oracle ledger) ---+
-     +--> G6 (S3 store) --------+
-     +--> G7 (HTTP channel) ----+
-                                |
-     connector tickets 10 + 12 -+--> G8 (binding) --+
+G0 --+--> G1 --+--> G2 --> G3 --> G3b --+
+     |         |                        |
+     |         +--> G4 -----------------+---> G9 --> G10
+     |                                  |
+     +--> G5 (Oracle ledger) -----------+
+     +--> G6 (S3 store) ----------------+
+     +--> G7 (HTTP channel) ------------+
+                                        |
+     connector tickets 10 + 12 ---------+--> G8 (binding) --+
 ```
 
-G0 freezes the surface. G1 to G4 prove the whole behaviour against the test kit with no
+G0 freezes the surface. G1 to G4, with G3b, prove the whole behaviour against the test kit with no
 socket, no container and no connector. G5 to G7 are the three technology adapters and run in
 parallel from G0. G8 is the only phase that needs the connector to exist. G9 hosts everything
 in Quarkus; G10 is the acceptance run.
@@ -180,18 +180,35 @@ in Quarkus; G10 is the acceptance run.
   test per 4.3 row; a test that a quality Fail leaves the object store untouched.
 - **Size:** medium. The correctness phase; give it the review attention.
 
-### G3 - Crash matrix, reconciliation, route consumer
+### G3 - Route consumer and reconciliation
 
-- **Goal:** every row of spec 4.4 survives, and the route consumer around the pipeline.
+- **Goal:** the collector around the pipeline, and the end-of-poll repair.
 - **Deliverables:** `RouteConsumer`: collects an `IngestEvent` flow, bounds pipelines at
   `parallelism` under a `SupervisorJob`, counts `PollFailed` and `PollSkipped`, marks the route
   down on `RouteDown`; reconciliation at `PollCompleted` per spec 4.5 including the truncated
-  listing rule; `stuck_files` refresh; the hook points wired into the pipeline.
-- **Fixed contracts:** I8; spec 4.4 and 4.5.
-- **Acceptance:** `I8_` replays every 4.4 row through the hook driver: cancel at the point,
-  run a second poll from the same ledger, assert the end state and the extra-upload and
-  extra-delivery counts; S2 to S6, S14, S16; a `PollFailed` never cancels a running pipeline.
+  listing rule; `stuck_files` refresh; the hook points wired into the pipeline so G3b can
+  stop it anywhere.
+- **Fixed contracts:** spec 4.5; the parallelism bound; a `PollFailed` never cancels a
+  running pipeline.
+- **Acceptance:** S14, S16; a test that `parallelism + 1` files run at most `parallelism`
+  pipelines at once on the virtual clock; reconciliation marks ACKED exactly the UPLOADED
+  rows older than the poll start and absent from a complete listing, and creates their
+  deliveries; a `RouteDown` ends the collector with the route gauge at zero and no pipeline
+  cancelled.
 - **Size:** medium.
+
+### G3b - Crash matrix replay
+
+- **Goal:** every row of spec 4.4 survives a restart.
+- **Deliverables:** the `I8_` test family: for each hook point, cancel the pipeline there, run
+  a second poll from the same in-memory ledger and object store, assert the end state and the
+  extra-upload and extra-delivery counts the 4.4 table promises; any pipeline or consumer fix
+  the replay forces, recorded in the progress entry.
+- **Blocked by:** G3.
+- **Fixed contracts:** I8; spec 4.4 row by row.
+- **Acceptance:** `I8_` with one case per 4.4 row; S2, S3, S4, S5, S6.
+- **Size:** small-medium, and pure state-machine reasoning: it deserves a session of its own
+  rather than the tail of G3's.
 
 ### G4 - Relay
 
@@ -254,8 +271,8 @@ in Quarkus; G10 is the acceptance run.
   `PollCompleted` to `PollCompleted(listed, truncated)`, `PollFailed` and `PollSkipped`
   counted, a terminated watch to `RouteDown`; the connector's `download` as the `Downloader`;
   route configuration handing `onAck = move(temp)` and readiness to the connector's DSL.
-- **Blocked by:** connector tickets 10 (poll, ack, nack) and 12 (watch). This phase does not
-  start until both are merged.
+- **Blocked by:** G3, and connector tickets 10 (poll, ack, nack) and 12 (watch). This phase
+  does not start until both connector tickets are merged.
 - **Fixed contracts:** spec 9.
 - **Acceptance:** against the connector testkit's embedded SSHD: one poll moves a file to
   `temp/` only after the in-memory object store holds it; a file removed between listing and
@@ -270,7 +287,7 @@ in Quarkus; G10 is the acceptance run.
   from the shutdown event under `drainTimeout`; readiness per spec 11.1; `AdminResource` with
   the five endpoints of spec 12.3 under the admin role; the bounded IO dispatcher of 2.5;
   metrics bound to the host registry.
-- **Blocked by:** G4, G5, G6, G7, G8.
+- **Blocked by:** G3b, G4, G5, G6, G7, G8.
 - **Fixed contracts:** I12; spec 11 ordering; spec 12.3 endpoints.
 - **Acceptance:** `I12_` measures close within `drainTimeout` with a delivery parked in a
   stalled loopback server; S15; S18; a boot with a missing table fails naming the DDL; a boot
@@ -299,7 +316,7 @@ in Quarkus; G10 is the acceptance run.
 | I1, I2, I7, I9, I10 | G2 |
 | I6 | G2 (fake), G6 (MinIO) |
 | I11 | G2 (fake), G5 (Oracle) |
-| I8 | G3 |
+| I8 | G3b |
 | I3, I4, I5, I13 | G4 |
 | I12 | G9 |
 | I14 | G0 |
@@ -307,7 +324,8 @@ in Quarkus; G10 is the acceptance run.
 | Spec scenario | Phase |
 |---|---|
 | S1, S10, S11, S12 | G2 |
-| S2, S3, S4, S5, S6, S14, S16 | G3 |
+| S14, S16 | G3 |
+| S2, S3, S4, S5, S6 | G3b |
 | S7, S8, S9, S17 | G4 |
 | S15, S18 | G9 |
 | S13 and the full table end to end | G10 |
