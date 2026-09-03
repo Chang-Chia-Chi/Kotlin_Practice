@@ -203,7 +203,7 @@ an unacknowledged message. The state store decides how much work is left:
 
 | State | Action |
 |---|---|
-| none, SEEN, FETCHED, PROCESSED | Full run from stage 1. A staged file from an earlier process is never trusted (D17). |
+| none, SEEN, FETCHED, PROCESSED | Full run from stage 1. A staged file from an earlier process is never trusted (D17). For a parent that already has child rows, the chain runs again and yields the same children; each child whose row is UPLOADED with a true `verify` skips the store, the rest are stored (S28). |
 | UPLOADED | `target.verify(ref)` for the transfer, or for every child. All true: skip to stage 4. Any false: full run on the same row. |
 | ACKED, DONE | The object is back although it was acked. Same as UPLOADED: verify, ack again, counted as `reacked`, logged at WARN. |
 | REJECTED, FAILED | `nack(redeliver = false)`, no work. |
