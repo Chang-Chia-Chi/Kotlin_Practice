@@ -50,6 +50,8 @@ internal class BorrowedSession(private val session: SftpSession) : SftpSession {
 
     override suspend fun rename(from: String, to: String) = inHand().rename(from, to)
 
+    override val renameReplaces: Boolean get() = inHand().renameReplaces
+
     override suspend fun delete(path: String) = inHand().delete(path)
 
     override suspend fun mkdir(path: String) = inHand().mkdir(path)

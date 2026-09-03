@@ -226,6 +226,9 @@ private class JschConnection(
         errors.translating(Attempt(endpoint, "rename", from)) { channel.rename(from.literally(), to.literally()) }
     }
 
+    /** Read the way JSch reads it when deciding which request to send: advertised, at version 1. */
+    override val renameReplaces: Boolean = channel.getExtension(POSIX_RENAME) == "1"
+
     override suspend fun delete(path: String): Unit = withContext(io) {
         errors.translating(Attempt(endpoint, "delete", path)) { channel.rm(path.literally()) }
     }
@@ -268,6 +271,8 @@ private class JschConnection(
 
     private companion object {
         private val LOG = LoggerFactory.getLogger(JschTransport::class.java)
+
+        private const val POSIX_RENAME = "posix-rename@openssh.com"
     }
 }
 

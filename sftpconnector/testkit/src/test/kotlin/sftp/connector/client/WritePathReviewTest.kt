@@ -101,6 +101,54 @@ class WritePathReviewTest {
         }
     }
 
+    /**
+     * S6's refusal with something at the target. The server refuses a rename across filesystems
+     * with the same status it refuses an occupied target with, and the replace sequence used to
+     * read every refusal with an occupied target as "the target is in the way": it deleted a
+     * healthy file, sent the rename again, and passed on the second refusal - with the caller told
+     * nothing about the file that was gone. On a server offering the POSIX rename extension a
+     * refusal is never about the target being occupied, because that server replaces without
+     * being asked, so there is nothing to clear and no reason to try.
+     */
+    @Test
+    fun `a replacing rename refused for a reason that is not the target leaves the target alone`() = runBlocking<Unit> {
+        remoteRoot.resolve("drop").createDirectory()
+        remoteRoot.resolve("other").createDirectory()
+        remoteRoot.resolve("drop/ledger.csv").writeText(CONTENT)
+        remoteRoot.resolve("other/ledger.csv").writeText("yesterday's run")
+
+        withClient(separateFilesystemAt = "other") { client ->
+            assertThatThrownBy {
+                runBlocking { client.rename("/drop/ledger.csv", "/other/ledger.csv", Overwrite.REPLACE) }
+            }.isInstanceOf(ServerFailure::class.java)
+
+            assertThat(remoteRoot.resolve("other/ledger.csv").exists())
+                .describedAs("the target, which the rename could never have replaced, is still there")
+                .isTrue()
+            assertThat(remoteRoot.resolve("other/ledger.csv").readText()).isEqualTo("yesterday's run")
+            assertThat(remoteRoot.resolve("drop/ledger.csv").readText()).isEqualTo(CONTENT)
+        }
+    }
+
+    /**
+     * A directory at the target is not something REPLACE means to remove, and on a server
+     * without the extension the delete would be refused anyway. Against the fake, which does not
+     * know a directory from a file when deleting, the old sequence removed the directory and
+     * put the file in its place.
+     */
+    @Test
+    fun `a replacing rename refused by a directory at the target does not try to clear it`() = runBlocking<Unit> {
+        val server = FakeSftpTransport().file("/drop/ledger.csv", CONTENT).directory("/drop/temp")
+        val config = fakeConfig()
+        val client = SftpClient(SftpPool(server, config), config)
+
+        assertThatThrownBy { runBlocking { client.rename("/drop/ledger.csv", "/drop/temp", Overwrite.REPLACE) } }
+            .isInstanceOf(ServerFailure::class.java)
+
+        assertThat(server.calls.map { it.operation }).doesNotContain(Operation.Delete)
+        assertThat(client.stat("/drop/temp")?.isDirectory).isTrue()
+    }
+
     /** T7 proved this against the fake only; a startup that creates its folders runs twice for real. */
     @Test
     fun `mkdir twice against a real server is content the second time`() = runBlocking<Unit> {

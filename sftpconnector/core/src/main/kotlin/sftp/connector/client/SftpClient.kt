@@ -276,15 +276,18 @@ class SftpClient(
      * refused as well, which closes the race there but nowhere else.
      *
      * **Replacing is a sequence with a gap.** Against a server with the extension the first rename
-     * is the whole story. Without it the server refuses - with the one generic status it uses for
-     * everything it will not do, so the refusal alone does not say the target is what is in the
-     * way. Looking before clearing keeps a replacement from deleting and retrying its way through a
-     * refusal that was never about the target, and gets the caller the refusal the server actually
-     * gave rather than the one a pointless second attempt would have produced. What no care closes
-     * is the gap in the middle: between the delete and the second rename the target path holds
-     * nothing, so anything watching it can find it empty, and a failure in the gap leaves it empty
-     * with the source still where it started. A caller that cannot afford that needs a server with
-     * the extension, which the startup probe is the place to find out about.
+     * is the whole story: it replaces without being asked, so a refusal from it was never about the
+     * target being in the way, and is passed on as given. Without the extension the server refuses
+     * an occupied target - with the one generic status it uses for everything it will not do, so
+     * the refusal alone does not say the target is what is in the way. Looking before clearing
+     * keeps a replacement from deleting and retrying its way through a refusal that was never about
+     * the target, and gets the caller the refusal the server actually gave rather than the one a
+     * pointless second attempt would have produced. Only a file is ever cleared: a directory at the
+     * target is not what replacing a file means. What no care closes is the gap in the middle:
+     * between the delete and the second rename the target path holds nothing, so anything watching
+     * it can find it empty, and a failure in the gap leaves it empty with the source still where it
+     * started. A caller that cannot afford that needs a server with the extension, which the
+     * startup probe is the place to find out about.
      */
     private suspend fun SftpSession.moveOnto(from: String, to: String, overwrite: Overwrite) {
         if (overwrite == Overwrite.REFUSE) {
@@ -295,7 +298,7 @@ class SftpClient(
         try {
             rename(from, to)
         } catch (refused: ServerFailure) {
-            if (entryAt(to) == null) throw refused
+            if (renameReplaces || entryAt(to)?.isDirectory != false) throw refused
             clearTheWay(to)
             rename(from, to)
         }

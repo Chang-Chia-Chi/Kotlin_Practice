@@ -143,6 +143,9 @@ class FakeSftpTransport(
             }
         }
 
+        /** A server without the extension, always: see [occupied]. */
+        override val renameReplaces: Boolean = false
+
         override suspend fun delete(path: String) {
             asked(Operation.Delete, path)
             synchronized(contents) {

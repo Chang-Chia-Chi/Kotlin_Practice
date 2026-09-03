@@ -112,6 +112,17 @@ interface SftpSession {
     suspend fun rename(from: String, to: String)
 
     /**
+     * Whether a [rename] onto an occupied path replaces what is there rather than being refused.
+     *
+     * True on a server offering the POSIX rename extension, which the SSH library uses on its own
+     * once the server has advertised it. It is a fact about the server that a caller replacing a
+     * file has to know: on such a server a refused rename was never about the target being in the
+     * way, so there is nothing to clear and no reason to send it again - and on a server without
+     * it, clearing the target and sending again is the only way to replace.
+     */
+    val renameReplaces: Boolean
+
+    /**
      * Removes the file at [path].
      *
      * @throws sftp.connector.error.NoSuchFile when there is nothing there. Whether that is a
