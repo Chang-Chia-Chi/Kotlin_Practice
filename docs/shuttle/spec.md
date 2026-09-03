@@ -177,7 +177,10 @@ Lifecycle notifications other than `done` (Sec 9.1) are created in the transacti
 transition that defines them: `fetched` with FETCHED, `stored` with UPLOADED.
 
 Staging is deleted after stage 3 succeeds and on every failure path, including every file a
-processor created.
+processor created; the local copy never outlives the pipeline that made it. The source object
+is a different matter: what happens to it is the ack action, which every polled route states
+explicitly (rule 12), because a silent `delete` would be the one irreversible default and a
+silent `none` would re-list the same file for ever.
 
 ### 4.2 Transfer states
 
@@ -827,7 +830,7 @@ Each is public numbering, reported by number in validate mode and at startup.
 | 9 | Per object store, the sum of route parallelism plus one per polled directory is at most `pool.maxSize`, and `maxConcurrentTransfers <= maxSize` |
 | 10 | Every SFTP store's `keepAlive` and `idleTimeout` are below its `idleCutoff` |
 | 11 | Every staging directory exists, is writable, and is local disk; two stores do not share one |
-| 12 | `onAck` and `onNack` belong to the trigger kind's vocabulary; a `callback` names a channel offering the notify role |
+| 12 | `onAck` is stated explicitly, no default, and it and `onNack` belong to the trigger kind's vocabulary; a `callback` names a channel offering the notify role |
 | 13 | A `key` or `directory` pattern uses only `{name}`, `{yyyyMMdd}` and attribute names declared in the route, and yields no `..` |
 | 14 | Every built-in processor's configuration parses: patterns compile, pointers are valid, `expand.from` names a store |
 | 15 | Every `custom` processor and every `provider` resolves to a named bean |
