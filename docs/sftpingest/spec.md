@@ -634,6 +634,7 @@ A JAX-RS resource under the host's admin role, mirroring `etl-host`:
 |---|---|
 | `GET /admin/ingest/routes` | route state, last poll, counts by transfer state |
 | `GET /admin/ingest/transfers?route=&state=&limit=` | ledger rows |
+| `GET /admin/ingest/transfers/{id}/deliveries` | every delivery of one transfer: channel, state, attempts, last status, reference, delivered time. This is the "which request id did we send downstream for this file" query |
 | `POST /admin/ingest/transfers/{id}/redrive` | REJECTED or FAILED to SEEN; the next poll picks it up |
 | `POST /admin/ingest/deliveries/{id}/redrive` | FAILED delivery to PENDING; wakes the relay |
 

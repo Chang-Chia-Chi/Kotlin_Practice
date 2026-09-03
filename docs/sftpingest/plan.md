@@ -268,7 +268,7 @@ in Quarkus; G10 is the acceptance run.
 - **Deliverables:** `Producers` in the documented order; `HostConfig` mapping properties onto
   the DSL; `IngestHost` running spec 11.1 startup steps 1 to 7 and spec 11.2 shutdown in order
   from the shutdown event under `drainTimeout`; readiness per spec 11.1; `AdminResource` with
-  the four endpoints of spec 12.3 under the admin role; the bounded IO dispatcher of 2.5;
+  the five endpoints of spec 12.3 under the admin role; the bounded IO dispatcher of 2.5;
   metrics bound to the host registry.
 - **Blocked by:** G4, G5, G6, G7, G8.
 - **Fixed contracts:** I12; spec 11 ordering; spec 12.3 endpoints.
