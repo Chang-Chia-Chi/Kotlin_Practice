@@ -39,6 +39,7 @@ class Notifier(
     private val registry: MeterRegistry,
     private val clock: Clock,
     private val random: Random = Random.Default,
+    private val hook: Hook = Hook.None,
 ) {
     private val channels = channels.associateBy { it.name }
     private val inFlight: MutableSet<DeliveryId> = ConcurrentHashMap.newKeySet()
@@ -102,6 +103,7 @@ class Notifier(
                 DeliveryOutcome.Retry(null, e.toString())
             }
         }
+        hook.at(HookPoint.afterDeliverySent, row.transferId)
         val policy = channel?.policy ?: DeliveryPolicy()
         val now = clock.instant()
         val tag = when (outcome) {

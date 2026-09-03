@@ -1600,3 +1600,107 @@ tag and stays in the default tier, like the connector's own server-backed classe
   `SftpClient.upload`'s KDoc describes, since a target directory someone else is watching must never
   see a partial file.
 
+
+---
+
+## 08: Crash matrix replay
+
+**Built:** `CrashMatrixTest` in `shuttle/src/test/kotlin/infra/shuttle/core/`: spec 4.4 replayed row by row on the
+fakes through the public collector. Each row is one test: `RouteRunner.run` over a `ScriptedSource` flow with a
+`HookDriver` paused at the row's point, `hook.crash(point)` as the process dying there, then the row's "next
+trigger" (a replay of the same cold flow, a `PollCompleted` that no longer lists the file with the clock advanced,
+or the redelivery of the same message) from the same `InMemoryStateStore` and `InMemoryTarget`, then a `Notifier`
+over the same store, and one `assertConverged`: DONE, the store count across both runs, exactly one `acked` outbox
+row per channel in DELIVERED, the number of channel calls, the bytes at the key, and `verify` true for the row's
+reference. One production change: `Notifier` gained a trailing defaulted `hook: Hook = Hook.None` and calls
+`hook.at(HookPoint.afterDeliverySent, transferId)` after the channel answers and before the outcome is recorded,
+so the last row of the matrix is reachable through the same driver as the other seven. Nothing else in the
+pipeline, the runner or the seams needed changing: every row converged on first run.
+
+**Concepts named:**
+
+- **The replay** is a crash and its next trigger in one test; *converged* is `assertConverged`, the matrix's
+  invariant sentence as one function every row ends with.
+- **The next trigger** is decided by what the crash left on the source: a file still there is the same flow
+  replayed (`ScriptedSource.events()` is cold); a moved file is a `PollCompleted` without it; an unacked message
+  is the same `Seen` again.
+- **A process death in the notifier** is cancelling the notifier's job while a delivery is parked at
+  `afterDeliverySent`, then a fresh `Notifier` over the same store. `HookDriver.crash` alone would cancel only the
+  delivery coroutine and the same loop would re-select the row, which is a retry, not a restart.
+
+**Acceptance:** all in `CrashMatrixTest` (9 tests).
+
+- *I8 as one named test per spec 4.4 row, each asserting end state, store count and delivery count* -
+  after fetch: `I8_after_fetch_the_next_poll_runs_fully_with_no_extra_store_and_no_extra_delivery` (FETCHED,
+  0 stores, then 1 store, 1 delivery, fetched twice); after process:
+  `I8_after_process_the_next_poll_runs_fully_with_no_extra_store_and_no_extra_delivery` (PROCESSED, same counts);
+  after store before ledger: `I8_S2_after_store_before_ledger_the_next_poll_stores_again_one_extra_store_and_no_extra_delivery`
+  (PROCESSED with one copy, then 2 stores, the row on `v2`, 1 delivery); after ledger STORED:
+  `I8_S3_after_ledger_STORED_the_next_poll_verifies_and_acks_with_no_second_store_and_no_extra_delivery`
+  (STORED, not moved; then `store, verify` only, one ack, 1 delivery); poll move before ledger:
+  `I8_S4_poll_move_before_ledger_is_repaired_by_reconciliation_on_the_next_poll_with_a_delayed_delivery`
+  (STORED and moved with no outbox row; the next poll's reconciliation writes ACKED and the delivery,
+  `shuttle_reconciled_total` 1, the pipeline fetched, stored, verified and acked nothing); subscribe ledger ACKED
+  before broker ack: `I8_subscribe_ledger_ACKED_before_broker_ack_is_repaired_by_the_redelivery_reacked_with_no_new_deliveries`
+  (ACKED with one PENDING row and no broker ack; the redelivery verifies, acks, `reacked` 1, no fetch, the outbox
+  unchanged: I23, S32 on fakes); after ledger ACKED:
+  `I8_after_ledger_ACKED_the_notifier_delivers_and_the_next_poll_does_nothing` (ACKED, PENDING, moved; an empty
+  next poll reconciles nothing, the notifier delivers, 1 store); delivery sent before ledger:
+  `I8_S5_delivery_sent_before_ledger_is_delivered_again_two_calls_one_transfer_id_and_the_row_DELIVERED_once`
+  (the row PENDING with one channel call and an empty in-flight set after the death; the restarted notifier calls
+  again, two events with one transfer id both at attempt 1, the row DELIVERED with `attempts` 1, DONE).
+- *S2, S3, S4, S5, S6 by id* - `I8_S2_...`, `I8_S3_...` (the pipeline-level S3 is
+  `TransferPipelineTest.S3_a_STORED_row_whose_verify_is_true_skips_to_the_ack_with_no_second_store`),
+  `I8_S4_...` (the reconciliation-only S4 is `RouteRunnerTest.S4_...`), `I8_S5_...`,
+  `S6_copy_missing_at_STORED_runs_fully_on_the_same_row_and_reaches_DONE` (the crash left STORED, the copy was
+  overwritten from outside; `store, store, verify, store`, the same row id, fetched again, DONE; the
+  pipeline-level S6 is `TransferPipelineTest.I1_S6_...`).
+- *A crash after the move and before ACKED is repaired by reconciliation on the second poll, not by the
+  pipeline; the subscribe row runs against the test kit's message source and is repaired by the redelivery's
+  re-ack* - `I8_S4_...` and `I8_subscribe_...`.
+- *Every deviation the replay forced is in the progress entry* - below.
+- *Progress entry appended* - this entry.
+
+Final run: ArchitectureTest 9, AttributeFreezeTest 4, BuiltInProcessorsTest 8, CrashMatrixTest 9,
+MappingRendererTest 12, NotifierTest 13, ProcessingChainTest 4, RouteRunnerTest 9, RouteSupervisorTest 3,
+RulesTest 35, SurfaceTest 3, TransferPipelineTest 26, HttpChannelTest 8, StateStoreSchemaTest 2,
+SftpConnectorConfigTest 6, SftpPollSourceTest 9, ClockFixtureTest 1, FakeProcessContextTest 2, HookDriverTest 3,
+InMemoryStateStoreTest 18, InMemoryTargetTest 3, RecordingChannelTest 2, ScriptedSourceTest 2, YamlLoaderTest 11;
+202 tests, 0 failures, 0 errors (`oracle`, `minio`, `nats` excluded).
+
+**Deviations:**
+
+1. **`Notifier` gained `hook: Hook = Hook.None` as its last constructor parameter** and one
+   `hook.at(afterDeliverySent, transferId)` between the channel's answer and the outcome record. Spec 4.4 names
+   the point; ticket 09 built the notifier without it. The production runner passes nothing and the point is a
+   no-op (`Hook.None`). Nothing was renamed or reordered.
+2. **No production fix in the pipeline, the runner or the seams was forced.** Every row converged as tickets 06
+   and 07 left them.
+3. **S6's "copy missing" is a copy overwritten from outside.** `InMemoryTarget` never deletes (I6's `store` never
+   deletes, and the fake has no delete knob); an outside `store` on the key makes the row's reference
+   non-current, which is the same `verify = false` the pipeline reacts to.
+4. **The `I8_S5_` death is `job.cancel()` on the notifier, not `HookDriver.crash`** (see Concepts): the crash
+   primitive kills one coroutine, and the notifier's loop would legitimately retry the row inside the same
+   process, which is a different claim from the matrix's.
+5. Size: 254 test lines, 2 production lines; in budget.
+
+**For the next ticket:**
+
+- **14 (host):** `Notifier`'s new parameter has a default; construct it as before. Nothing in the matrix needs a
+  host-side hook: `Hook.None` for both the pipeline and the notifier in production.
+- **15 (M1 acceptance):** the matrix on fakes proves the state machine: which state each crash leaves, what the
+  next trigger does, and that at most one extra store and one extra channel call follow. What the real adapters
+  must re-prove, per row: "after store before ledger" and S2's S3 tier, that a crash *inside* `S3Target.store`
+  between PUT and HEAD leaves one current copy (I6, ticket 11's contract, not replayed here since the fake store
+  is atomic); "poll move before ledger", that the SFTP move is visible to the next listing so `unlisted`
+  finds the row (ticket 13's source with the embedded SSHD, and `JdbiStateStore.unlisted` on `updated_at`);
+  "delivery sent before ledger", that `HttpChannel` returning `Delivered` before the process dies makes the
+  loopback server see two requests with one transfer id; the subscribe row is M2 (NATS redelivery after a
+  process death, tickets 16 and 20). Recipe: the same nine tests with the adapters swapped in under the `oracle`,
+  `minio` and `nats` tags, since every test drives only `RouteRunner.run`, the `HookDriver` and the seams.
+- **17 (expand):** no row has child coverage yet. `afterStore` and `afterLedgerStored` are reached with a child
+  id (ticket 06), so a crash between two children leaves the parent PROCESSED with some children STORED; ticket
+  06's deviation 1 (a parent re-runs the chain and replaces its children) means the "half the children stored"
+  row (S28) currently stores every child again, one extra store per child rather than per transfer. Add
+  `I8_` rows for a crash after the first child's store and after its ledger once the seam can read a parent's
+  children.
