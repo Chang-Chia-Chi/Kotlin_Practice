@@ -7,8 +7,9 @@ import java.util.regex.PatternSyntaxException
 
 data class Violation(val rule: Int, val message: String)
 
-data class Report(val violations: List<Violation>) {
-    val ok get() = violations.isEmpty()
+/** Rule violations by number, plus the load errors of a document that never became a configuration (spec 12.2). */
+data class Report(val violations: List<Violation>, val errors: List<String> = emptyList()) {
+    val ok get() = violations.isEmpty() && errors.isEmpty()
 }
 
 /**
