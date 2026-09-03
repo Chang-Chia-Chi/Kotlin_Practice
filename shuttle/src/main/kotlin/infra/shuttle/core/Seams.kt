@@ -7,6 +7,8 @@ import java.time.Instant
 /** Spec 8.2. Every method is one transaction. */
 interface StateStore {
     suspend fun find(identity: SourceIdentity): Transfer?
+    /** The row a delivery points to; the notifier renders from it (spec 9.1). */
+    suspend fun byId(id: TransferId): Transfer?
     suspend fun seen(identity: SourceIdentity, kind: TransferKind): Transfer
     suspend fun supersede(finished: TransferId, kind: TransferKind): Transfer
     suspend fun fetched(id: TransferId, staged: StagedSummary, events: List<DeliveryRequest>)
@@ -18,6 +20,8 @@ interface StateStore {
     suspend fun failedAttempt(id: TransferId, error: String, maxAttempts: Int): Transfer
     suspend fun unlisted(route: RouteName, olderThan: Instant, listed: Set<SourceIdentity>): List<TransferId>
     suspend fun due(now: Instant, excluding: Set<DeliveryId>, limit: Int): List<Delivery>
+    /** Every PENDING row, for the outbox gauges of spec 14.2; read-only. */
+    suspend fun outboxPending(): List<Delivery>
     suspend fun delivered(id: DeliveryId, reference: String?)
     suspend fun retryLater(id: DeliveryId, at: Instant, status: String?, error: String)
     suspend fun deliveryFailed(id: DeliveryId, status: String?, error: String)

@@ -527,3 +527,92 @@ ProcessingChainTest 4, RulesTest 30, SurfaceTest 3, testkit 25, YamlLoaderTest 1
 - **16/17:** `ExpandProcessor` and `Extract(from = Message)` are the two remaining shells;
   `processorFor` refuses the latter at construction, so rule 14's "message only on a subscribed
   route" is the only thing standing between a config and a `NotImplementedError` until then.
+
+---
+
+## 09: Notifier: pending deliveries become channel calls
+
+**Built:** `infra.shuttle.core.Notifier`, replacing the G0 shell: one loop per process that turns
+PENDING outbox rows into channel calls. `Notifier(store, channels, bodies, renderer, config,
+registry, clock, random)`; `suspend fun run()` runs until cancelled; `fun wake()` is the conflated
+signal a row-creating transaction sends; `inFlightCount` reads the in-flight set. Each pass selects
+at most `batch` due rows not in flight, adds their ids to the set, hands each to one of `workers`
+permits, refreshes the outbox gauges, and then waits for a wake or `sweepEvery`, or re-selects at
+once when the batch was full. A delivery renders its body at send time through `MappingRenderer`
+with `attempts + 1`, calls the channel, and records the outcome: `Delivered` writes `delivered`
+(the store flips DONE when every row is DELIVERED, I11), `Retry` writes `retryLater` at now plus
+spec 9.3's backoff, or `deliveryFailed` with `gave_up` once `attempt >= maxAttempts` or the row is
+older than `giveUpAfter`; `Reject` writes `deliveryFailed` as `rejected`. A channel exception is a
+`Retry`; a `MappingFailure` or an unknown channel is a `Reject`; `CancellationException` passes
+through untouched. One INFO line per attempt names transfer, event, channel, attempt, outcome,
+status and reference. Meters: `shuttle_delivery_total{channel,event,outcome}`,
+`shuttle_delivery_seconds{channel}`, `shuttle_outbox_pending{channel}`,
+`shuttle_outbox_oldest_seconds{channel}`, `shuttle_notifier_inflight`.
+
+**Concepts named:**
+
+- **The in-flight set** is the only shared mutable state of the module (plan 2.5): a concurrent set
+  of delivery ids, added at select, removed in `finally` on every exit path, exposed as a gauge.
+- **`wake`** is a `Channel<Unit>(CONFLATED)`: it carries no rows (D7, plan 2.4), only the fact that
+  a select is worth running now; the sweep is the guarantee.
+- **The give-up rule** is judged only when the channel answered `Retry`: `attempt >= maxAttempts`
+  or `now - createdAt >= giveUpAfter`. A re-driven row starts at attempt 1 again; its age is
+  unchanged, so a downstream still down after a re-drive gives up on the next `Retry`.
+- **Two seam methods added to `StateStore`** (see deviations): `byId(id)` and `outboxPending()`.
+
+**Acceptance:**
+
+- *I3, I4, I5, I13 as named tests; S7, S8, S9, S17, S22 on fakes* -
+  `NotifierTest.I3_a_delivery_is_DELIVERED_only_after_the_channel_returned_Delivered`,
+  `I4_a_delivery_id_is_never_inside_two_workers_at_once` (a parked delivery; every later select's
+  `excluding` holds its id), `I5_the_in_flight_set_never_exceeds_batch_plus_workers_and_is_empty_when_idle`
+  (7 rows, batch 2, workers 1), `I13_two_channels_on_one_event_are_delivered_independently`,
+  `S7_downstream_503_twice_then_200`, `S8_downstream_400`, `S9_downstream_down_past_giveUpAfter`
+  (with the re-drive delivering), `S17_two_channels_on_acked_one_always_503`,
+  `S22_one_provider_selected_by_three_rows_is_invoked_once_at_send_time`.
+- *A wake causes a select before the sweep interval elapses* -
+  `a_wake_causes_a_select_before_the_sweep_interval_elapses` (delivered 2 s in, sweep at 30 s).
+- *Backoff follows spec 9.3; `maxAttempts` and `giveUpAfter` both flip to FAILED with `gave_up`* -
+  `backoff_follows_spec_9_3_with_full_jitter_below_the_ceiling_and_the_cap_at_max` (11 attempts,
+  ceilings 5, 10, 20 ... 640, 900, 900), `S7` (no jitter: exactly +5 s then +10 s),
+  `maxAttempts_flips_a_delivery_to_FAILED_with_gave_up`, `S9`.
+- *Bodies rendered at send time; cancellation leaves the row PENDING and the set empty* - `S22`
+  (the provider is invoked zero times before `run`, once at send), `I3` (the body carries the
+  transfer id and `acked`), `cancellation_mid_delivery_leaves_the_row_PENDING_and_the_set_empty`.
+- *Meters of spec 14.2* - the counter per outcome in S7, S8, S9 and the maxAttempts test; the
+  in-flight gauge in I5 and the cancellation test; the pending and oldest gauges in S17.
+- *Progress entry appended* - this entry.
+
+**Deviations:**
+
+1. **`StateStore` gained `byId(id: TransferId): Transfer?` and `outboxPending(): List<Delivery>`.**
+   Spec 8.2 has no way to load the transfer row a delivery points to, yet spec 9.1 says the body is
+   rendered from that row; and it has no way to count PENDING rows per channel, yet spec 14.2 asks
+   for `shuttle_outbox_pending` and `shuttle_outbox_oldest_seconds`. Both are read-only, one
+   statement each. `InMemoryStateStore` implements them; **ticket 10's `JdbiStateStore` must too**
+   (a `SELECT` by primary key, and `SELECT ... WHERE notification_state = 'PENDING'`). The gauge
+   refresh is a full PENDING scan per pass, marked `ponytail:`; an aggregate query is the upgrade.
+2. **The loop is a select loop with a `Semaphore(workers)` and one `launch` per row under
+   `coroutineScope`, not literally `flow { }.buffer(batch).flatMapMerge(workers)`.** `flattenMerge`
+   keeps an internal buffer of its own, which would let the set exceed `batch + workers` and make I5
+   unprovable as stated. The observable properties spec 9.4 wants hold: backpressure by suspension
+   (the next select waits until every row of the batch has a permit), nothing lost, rows never on a
+   `SharedFlow`, cancellation cancelling the children so `finally` empties the set.
+3. **A `MappingFailure` at send time is a `Reject`** (delivery FAILED, transfer untouched): a body
+   that cannot be rendered will not render on retry either; spec 11 says a missing mapping input is
+   not retried. Rendering normally cannot fail here because the check ran at attribute freeze (05).
+4. Size: 148 main, 294 test; in budget. No `Backoff` type added: `DeliveryPolicy.backoff` and
+   `fullJitter` from G0 are what the computation reads.
+
+**For the next ticket:**
+
+- **06 (pipeline):** after `acked`, `stored` or `fetched` creates rows, call `notifier.wake()`;
+  the sweep covers a missed wake. The notifier never needs the route.
+- **10 (Oracle):** implement `byId` and `outboxPending`; keep 03's `attempts` counting on
+  `delivered`, `retryLater` and `deliveryFailed`, which this ticket relies on for `attempt = attempts + 1`.
+- **12 (HTTP):** `DeliveryEvent.body` is the rendered `JsonNode`; return `Retry` for anything the
+  policy should back off on, `Reject` for a 4xx. A thrown exception is treated as `Retry` here.
+- **14 (host):** `bodies` is `config.channels` mapped to their `MappingTable`s; run the notifier
+  in one scope per process; on shutdown cancel that scope inside `drainTimeout` and every
+  in-flight row stays PENDING (I12). Tests drive time with `ClockFixture.advance` plus
+  `advanceTimeBy` together, since the sweep is a `delay` and `next_attempt_at` is the wall clock.

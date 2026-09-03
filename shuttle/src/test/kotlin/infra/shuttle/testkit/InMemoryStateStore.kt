@@ -54,6 +54,8 @@ class InMemoryStateStore(private val clock: Clock) : StateStore {
 
     override suspend fun find(identity: SourceIdentity) = tx("find", identity) { latest(identity) }
 
+    override suspend fun byId(id: TransferId) = tx("byId", id) { rows[id] }
+
     override suspend fun seen(identity: SourceIdentity, kind: TransferKind) = tx("seen", identity, kind) {
         latest(identity) ?: insert(identity, kind)
     }
@@ -127,6 +129,8 @@ class InMemoryStateStore(private val clock: Clock) : StateStore {
         outboxRows.values.filter { it.state == DeliveryState.PENDING && it.nextAttemptAt <= now && it.id !in excluding }
             .sortedBy { it.nextAttemptAt }.take(limit)
     }
+
+    override suspend fun outboxPending() = tx("outboxPending") { outboxRows.values.filter { it.state == DeliveryState.PENDING } }
 
     override suspend fun delivered(id: DeliveryId, reference: String?) = tx("delivered", id, reference) {
         val row = updateDelivery(id) { copy(state = DeliveryState.DELIVERED, reference = reference, deliveredAt = clock.instant()) }

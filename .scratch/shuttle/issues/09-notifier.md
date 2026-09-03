@@ -11,14 +11,14 @@ with the in-flight set empty.
 
 **Nature:** concurrency work
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `I3`, `I4`, `I5`, `I13` as named tests; S7, S8, S9, S17, S22 on fakes
-- [ ] A wake causes a select before the sweep interval elapses on the virtual clock
-- [ ] Backoff follows spec Sec 9.3; `maxAttempts` and `giveUpAfter` both flip a delivery to FAILED with the `gave_up` outcome
-- [ ] Bodies are rendered at send time through the mapping renderer; cancellation mid-delivery leaves the row PENDING and the set empty
-- [ ] Meters of spec Sec 14.2 for deliveries, outbox and notifier in-flight
-- [ ] Progress entry appended
+- [x] `I3`, `I4`, `I5`, `I13` as named tests; S7, S8, S9, S17, S22 on fakes
+- [x] A wake causes a select before the sweep interval elapses on the virtual clock
+- [x] Backoff follows spec Sec 9.3; `maxAttempts` and `giveUpAfter` both flip a delivery to FAILED with the `gave_up` outcome
+- [x] Bodies are rendered at send time through the mapping renderer; cancellation mid-delivery leaves the row PENDING and the set empty
+- [x] Meters of spec Sec 14.2 for deliveries, outbox and notifier in-flight
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket, stubs throwing NotImplementedError
 for later seams; 200-600 lines including tests; no Thread.sleep; invariant tests named
