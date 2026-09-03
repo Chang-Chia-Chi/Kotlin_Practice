@@ -1,12 +1,16 @@
 package infra.shuttle.core
 
 import infra.shuttle.testkit.ClockFixture
+import infra.shuttle.testkit.HookDriver
 import infra.shuttle.testkit.InMemoryStateStore
 import infra.shuttle.testkit.InMemoryTarget
+import infra.shuttle.testkit.RecordingChannel
 import infra.shuttle.testkit.ScriptedFetcher
 import infra.shuttle.testkit.ScriptedSource
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import kotlinx.coroutines.flow.toList
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -16,6 +20,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.time.Duration.Companion.hours
 import kotlin.time.Duration.Companion.minutes
+import kotlin.time.Duration.Companion.seconds
 
 /** Spec 4.1 to 4.5 on the fakes: one source object through stages 0 to 4. */
 class TransferPipelineTest {
@@ -34,9 +39,12 @@ class TransferPipelineTest {
         target = Target("minio", bucket = "landing", key = "{name}"), notify = notify,
     )
 
-    private fun pipeline(route: Route = route(), processors: List<Processor> = emptyList(), hook: Hook = Hook.None) = TransferPipeline(
-        route, DigestAlgorithm.MD5, store, target, ProcessingChain(processors, DigestAlgorithm.MD5), emptyMap(), { true },
-        { wakes++ }, hook, clock, registry, Staging(staging), { freeBytes },
+    private fun pipeline(
+        route: Route = route(), processors: List<Processor> = emptyList(), hook: Hook = Hook.None,
+        channels: Map<ChannelName, DeliveryChannel> = emptyMap(), bodies: Map<ChannelName, MappingTable> = emptyMap(),
+    ) = TransferPipeline(
+        route, DigestAlgorithm.MD5, store, target, ProcessingChain(processors, DigestAlgorithm.MD5), bodies, { true },
+        { wakes++ }, hook, clock, registry, Staging(staging), { freeBytes }, channels,
     )
 
     private suspend fun seen(name: String = "a.csv"): RouteEvent.Seen =
@@ -337,7 +345,7 @@ class TransferPipelineTest {
 
         val required = MappingTable(listOf(MappingRow("orderNumber", attribute = "orderNumber")))
         val route = route(notify = listOf(Notify(DeliveryMoment.ACKED, "downstream")))
-        TransferPipeline(route, DigestAlgorithm.MD5, store, target, ProcessingChain(emptyList(), DigestAlgorithm.MD5), mapOf(ChannelName("downstream") to required), { true }, { wakes++ }, Hook.None, clock, registry, Staging(staging)) { freeBytes }
+        pipeline(route, bodies = mapOf(ChannelName("downstream") to required))
             .run(event, fetcher)
         stagingIsEmpty()
         val row = store.transfers.single()
@@ -434,6 +442,164 @@ class TransferPipelineTest {
         assertEquals(listOf(InMemoryTarget.Call("verify", "a.csv")), target.calls)
         assertEquals(listOf(identity, identity), source.acks)
         assertEquals(1.0, counter("reacked"))
+    }
+
+    /** Arms the store's one-shot delivery-insert failure at [point], or before the run when null, so exactly the next transition fails. */
+    private fun armInsertFailure(point: HookPoint?): Hook {
+        if (point == null) store.failNextDeliveryInsert = true
+        return object : Hook {
+            override suspend fun at(p: HookPoint, transfer: TransferId) { if (p == point) store.failNextDeliveryInsert = true }
+        }
+    }
+
+    /** I20 for one moment: the failed transition leaves no row and the previous state; the committed one leaves exactly one PENDING row. */
+    private suspend fun I20(moment: DeliveryMoment, armAt: HookPoint?, previous: TransferState) {
+        val event = seen()
+        val route = route(notify = listOf(Notify(moment, "downstream")))
+        pipeline(route, hook = armInsertFailure(armAt)).run(event, fetcher)
+        val row = store.transfers.single()
+        assertEquals(previous, row.state, "$moment: the failed transaction left the previous state")
+        assertTrue(store.outbox.isEmpty(), "$moment: no row without the transition")
+        assertEquals(0, wakes)
+        assertEquals(1, row.attempts)
+        assertEquals(listOf(ScriptedSource.Nack(event.identity, true)), source.nacks)
+
+        pipeline(route).run(event, fetcher)
+        val delivery = store.outbox.single()
+        assertEquals(moment, delivery.moment)
+        assertEquals(DeliveryState.PENDING, delivery.state)
+        assertEquals(ChannelName("downstream"), delivery.channel)
+        assertEquals(TransferState.ACKED, store.transfers.single().state, "$moment: ACKED, not DONE, while the row is PENDING")
+        assertEquals(1, wakes)
+        stagingIsEmpty()
+    }
+
+    @Test
+    fun I20_a_fetched_delivery_row_exists_iff_the_FETCHED_transition_committed() = runTest {
+        I20(DeliveryMoment.FETCHED, armAt = null, previous = TransferState.SEEN) // `seen` inserts nothing, so `fetched` is the next transition
+    }
+
+    private val body = MappingTable(listOf(MappingRow("fileId", field = "TRANSFER_ID"), MappingRow("event", field = "EVENT")))
+
+    @Test
+    fun a_fetched_delivery_created_before_a_crash_right_after_fetch_is_delivered_by_the_notifier() = runTest {
+        val event = seen()
+        val hook = HookDriver().apply { pauseAt(HookPoint.afterFetch) }
+        val job = launch { pipeline(route(notify = listOf(Notify(DeliveryMoment.FETCHED, "downstream"))), hook = hook).run(event, fetcher) }
+        hook.awaitArrival(HookPoint.afterFetch)
+        hook.crash(HookPoint.afterFetch)
+        job.join()
+        assertTrue(job.isCancelled, "the process died at afterFetch")
+        val row = store.transfers.single()
+        assertEquals(TransferState.FETCHED, row.state)
+        assertEquals(DeliveryState.PENDING, store.outbox.single().state)
+        stagingIsEmpty()
+
+        val channel = RecordingChannel("downstream")
+        val config = NotifierConfig(workers = 1, batch = 10, sweepEvery = 30.seconds)
+        backgroundScope.launch { Notifier(store, listOf(channel), mapOf(channel.name to body), MappingRenderer(), config, registry, clock).run() }
+        runCurrent()
+
+        val delivery = store.outbox.single()
+        assertEquals(DeliveryMoment.FETCHED, delivery.moment)
+        assertEquals(DeliveryState.DELIVERED, delivery.state)
+        assertEquals(TransferState.FETCHED, store.transfer(row.id).state, "a delivered fetched row moves the transfer nowhere")
+        val sent = channel.events.single()
+        assertEquals(row.id.value.toString(), sent.body.get("fileId").asText())
+        assertEquals("fetched", sent.body.get("event").asText())
+    }
+
+    @Test
+    fun S30_a_callback_ack_answering_500_then_200_keeps_the_transfer_STORED_through_the_failure_and_ACKED_after_with_one_acked_delivery() = runTest {
+        val event = seen()
+        val upstream = RecordingChannel("upstream", outcomes = arrayOf(DeliveryOutcome.Retry("500", "server error"), DeliveryOutcome.Delivered("cb-1")))
+        val route = route(notify = listOf(Notify(DeliveryMoment.ACKED, "downstream")))
+            .copy(source = Source.Poll("sftp", "/in", 1.minutes, onAck = AckAction.Callback("upstream")))
+        val pipeline = pipeline(route, channels = mapOf(upstream.name to upstream), bodies = mapOf(upstream.name to body))
+
+        pipeline.run(event, fetcher)
+        val row = store.transfers.single()
+        assertEquals(TransferState.STORED, row.state, "not ACKED until the callback succeeds (spec 5.3)")
+        assertEquals(1, row.attempts)
+        assertTrue(store.outbox.isEmpty(), "no acked delivery before the callback succeeds")
+        assertTrue(source.acks.isEmpty(), "the connector's own ack waits for the callback too")
+        assertEquals(listOf(ScriptedSource.Nack(event.identity, true)), source.nacks)
+        stagingIsEmpty()
+        target.calls.clear()
+
+        pipeline.run(event, fetcher)
+        assertEquals(TransferState.ACKED, store.transfer(row.id).state)
+        assertEquals(listOf(InMemoryTarget.Call("verify", "a.csv")), target.calls, "verified, not stored again")
+        val delivery = store.outbox.single()
+        assertEquals(DeliveryMoment.ACKED, delivery.moment)
+        assertEquals(ChannelName("downstream"), delivery.channel)
+        assertEquals(listOf(event.identity), source.acks)
+        assertEquals(listOf(1, 2), upstream.events.map { it.attempt }, "the callback is retried with the stage")
+        upstream.events.forEach {
+            assertEquals(DeliveryMoment.ACKED, it.moment)
+            assertEquals(row.id, it.transferId)
+            assertEquals("acked", it.body.get("event").asText())
+        }
+    }
+
+    @Test
+    fun a_callback_answering_Reject_or_throwing_is_a_stage_error_and_FAILED_at_maxAttempts() = runTest {
+        val event = seen()
+        val upstream = object : DeliveryChannel {
+            override val name = ChannelName("upstream")
+            override val policy = DeliveryPolicy()
+            var calls = 0
+            override suspend fun deliver(event: DeliveryEvent): DeliveryOutcome =
+                if (calls++ % 2 == 0) DeliveryOutcome.Reject("400", "bad request") else throw java.io.IOException("connection reset")
+        }
+        val route = route().copy(source = Source.Poll("sftp", "/in", 1.minutes, onAck = AckAction.Callback("upstream")))
+        val pipeline = pipeline(route, channels = mapOf(upstream.name to upstream))
+
+        repeat(5) { pipeline.run(event, fetcher) }
+
+        val row = store.transfers.single()
+        assertEquals(TransferState.FAILED, row.state)
+        assertEquals(5, row.attempts)
+        assertEquals(5, upstream.calls)
+        assertEquals("callback upstream answered Reject 400: bad request", row.lastError, "the fifth call was a Reject; the reason is on the row")
+        assertTrue(source.acks.isEmpty(), "never acked at the source")
+        assertEquals(List(4) { ScriptedSource.Nack(event.identity, true) } + ScriptedSource.Nack(event.identity, false), source.nacks)
+        assertEquals(1, target.calls.count { it.method == "store" }, "stored once, verified on every retry")
+    }
+
+    @Test
+    fun a_subscribed_callback_precedes_the_ACKED_ledger_and_the_broker_ack_and_a_redelivery_does_not_call_it_again() = runTest {
+        val upstream = RecordingChannel("upstream")
+        val route = route().copy(source = Source.Subscribe("nats", "images", onAck = AckAction.Callback("upstream")), fetch = Fetch("minio", "/path"))
+        val identity = SourceIdentity(RouteName("drop"), SourceKind.NATS, "nats:images", "msg-1", null, null)
+        val event = source.seen(identity, SourceView("a.csv")).events().toList().last() as RouteEvent.Seen
+        val order = mutableListOf<String>()
+        val hook = object : Hook {
+            override suspend fun at(point: HookPoint, transfer: TransferId) { order += point.name }
+        }
+        val observed = object : DeliveryChannel by upstream {
+            override suspend fun deliver(event: DeliveryEvent) = upstream.deliver(event).also { order += "callback:${store.transfer(event.transferId).state}" }
+        }
+        val pipeline = pipeline(route, hook = hook, channels = mapOf(upstream.name to observed))
+
+        pipeline.run(event, fetcher)
+        assertEquals(listOf("afterFetch", "afterProcess", "afterStore", "afterLedgerStored", "callback:STORED", "afterLedgerAcked", "afterAck"), order)
+        assertEquals(TransferState.DONE, store.transfers.single().state)
+
+        pipeline.run(event, fetcher) // redelivered after the ledger write (S32): the ACKED row proves upstream answered
+        assertEquals(listOf(identity, identity), source.acks)
+        assertEquals(1, upstream.events.size, "no second callback on a re-ack")
+        assertEquals(1.0, counter("reacked"))
+    }
+
+    @Test
+    fun I20_a_stored_delivery_row_exists_iff_the_STORED_transition_committed() = runTest {
+        I20(DeliveryMoment.STORED, armAt = HookPoint.afterStore, previous = TransferState.PROCESSED)
+    }
+
+    @Test
+    fun I20_an_acked_delivery_row_exists_iff_the_ACKED_transition_committed() = runTest {
+        I20(DeliveryMoment.ACKED, armAt = HookPoint.afterLedgerStored, previous = TransferState.STORED)
     }
 
     @Test

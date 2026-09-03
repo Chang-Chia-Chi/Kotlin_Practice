@@ -142,8 +142,7 @@ object Rules {
             }
             route.fetch?.let { reference(name, it.store, "fetch", stores) { true } }
             route.target?.let { reference(name, it.store, "target", stores) { true } }
-            // Rule 2: a nats channel offers the notify role only once it says which subject to publish on.
-            route.notify.forEach { reference(name, it.channel, "notify", channels) { c -> c !is NatsChannel || c.subject != null } }
+            route.notify.forEach { reference(name, it.channel, "notify", channels, offersNotify) }
             if (route.parallelism < 1) fail(7, "route $name: parallelism must be >= 1")
             if (route.maxAttempts < 1) fail(7, "route $name: maxAttempts must be >= 1")
             route.stuckAfter?.let { if (!it.isPositive()) fail(7, "route $name: stuckAfter must be > 0") }
@@ -158,7 +157,8 @@ object Rules {
                 listOfNotNull(target.key, target.directory).forEach { pattern(13, "route $name target", it, placeholders) }
             }
             route.process.forEach { processor(name, it, source is Source.Subscribe, placeholders) }
-            route.notify.mapNotNull { channels[it.channel] as? HttpChannel }.distinct().forEach { channel ->
+            val callback = (source?.onAck as? AckAction.Callback)?.channel
+            (route.notify.map { it.channel } + listOfNotNull(callback)).mapNotNull { channels[it] as? HttpChannel }.distinct().forEach { channel ->
                 MappingRenderer.check(channel.body, declared) { true }.filter { it.rule == 17 }
                     .forEach { fail(17, "route $name: channel ${channel.name} ${it.message}") }
             }
@@ -168,7 +168,7 @@ object Rules {
         private fun ack(route: String, onAck: AckAction?, onNack: AckAction?, acks: Set<AckAction>, nacks: Set<AckAction>) {
             when (onAck) {
                 null -> fail(12, "route $route states no onAck")
-                is AckAction.Callback -> if (onAck.channel !in channels) fail(12, "route $route: callback names $${onAck.channel}, which is no channel offering notify")
+                is AckAction.Callback -> if (channels[onAck.channel]?.let(offersNotify) != true) fail(12, "route $route: callback names ${onAck.channel}, which is no channel offering notify")
                 else -> if (acks.none { it::class == onAck::class }) fail(12, "route $route: onAck $onAck is not in the trigger's vocabulary")
             }
             if (onNack != null && nacks.none { it::class == onNack::class }) fail(12, "route $route: onNack $onNack is not in the trigger's vocabulary")
@@ -205,6 +205,9 @@ object Rules {
                 ProcessorSpec.Quality, ProcessorSpec.Zip -> Unit
             }
         }
+
+        /** Rule 2: a nats channel offers the notify role only once it says which subject to publish on. */
+        private val offersNotify: (Channel) -> Boolean = { it !is NatsChannel || it.subject != null }
 
         /** Rules 1 and 2 for one reference. */
         private fun <T> reference(route: String, ref: String, use: String, declared: Map<String, T>, offers: (T) -> Boolean) {

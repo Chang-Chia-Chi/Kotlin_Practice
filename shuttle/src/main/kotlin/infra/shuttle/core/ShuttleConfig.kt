@@ -139,6 +139,9 @@ sealed interface Source {
     ) : Source
 }
 
+/** The ack action of either trigger kind (spec 5.3). */
+val Source.onAck: AckAction? get() = when (this) { is Source.Poll -> onAck; is Source.Subscribe -> onAck }
+
 data class Fetch(val store: String, val path: String)
 data class Target(val store: String, val bucket: String? = null, val directory: String? = null, val key: String = "{name}")
 data class Notify(val on: DeliveryMoment, val channel: String)
