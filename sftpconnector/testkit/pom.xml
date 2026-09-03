@@ -46,5 +46,15 @@
             <groupId>org.slf4j</groupId>
             <artifactId>slf4j-simple</artifactId>
         </dependency>
+        <dependency>
+            <groupId>org.junit.platform</groupId>
+            <artifactId>junit-platform-suite</artifactId>
+        </dependency>
+        <!-- The partition tier: a Toxiproxy container between the CONNECT proxy and the server,
+             for the faults a loopback tunnel cannot stage. -->
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers-toxiproxy</artifactId>
+        </dependency>
     </dependencies>
 </project>

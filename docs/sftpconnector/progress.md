@@ -3217,6 +3217,7 @@ policy that cannot check its own file.
 | Seam | Left by | Owner | What happens if it is forgotten |
 |---|---|---|---|
 | `HostKeyPolicy.Strict` does not check that its known-hosts file exists | T14 | Whoever next touches DSL validation | A strict policy with a mistyped or missing path is refused by the first handshake with the SSH library's message rather than at build time with the connector's. The builder is where the check belongs, beside the staging-directory check that already lives there |
+| `connection is closed by foreign host` on `connect` is not in the error table | T15 | Whoever next touches the mapper (T2's table) | It is what a connection cut during the version exchange produces, seen when a Toxiproxy toxic was removed from under a handshake. The unknown-wording default - retryable, session discarded - is right for it, so nothing is wrong; it is one WARN line per occurrence until the row is added |
 
 **For the next tickets:**
 
@@ -3237,3 +3238,172 @@ policy that cannot check its own file.
 - **`quarkus-micrometer` alone is a composite registry with no children,** on which every gauge is
   a silent no-op. Any later test that reads a meter in a Quarkus host needs a registry
   implementation on its own test classpath, or it goes green against nothing.
+
+---
+
+## T15: Acceptance run: full scenario table and Toxiproxy tier
+
+**Built:** the scenario table as one named suite; the one scenario that had no end-to-end proof;
+the partition tier's base and its first two cases against a real Toxiproxy container; the Sec 16
+re-check below. No production code changed.
+
+- `AcceptanceScenarios` (testkit) - a JUnit platform `@Suite` that selects S1 to S12 by class
+  and method. `mvn -Dtest=AcceptanceScenarios` runs exactly the twelve, verified: `Tests run: 12`.
+  It selects, it does not copy: every scenario stays in the class the ticket that built it left it
+  in, and runs there on every build. The suite itself runs only by name, because surefire's default
+  includes do not match it - by design, or the twelve would run twice per build.
+- `AcceptanceScenariosTest` - keeps the list honest on every build: the suite is a suite, every
+  selected method exists and is a `@Test`, the IDs are exactly 1 to 12 each once, and no selection
+  is from a transport-layer class (`JschErrorMappingTest`, `JschTransportTest`).
+- `WatchUnderOpenBreakerTest.S3_` - **the one new end-to-end proof.** S3's expected column is a
+  sequence of ticks: `PollSkipped(BreakerOpen)` each tick until the half-open probe succeeds.
+  The breaker was proven against a real server through the client (`ResilienceAgainstServerTest.S3_`)
+  and one skipped tick on the fake (`SftpWatchTest`), but no test showed a watch skipping every
+  tick through the wait *and* the first tick after it being let through as the probe that closes
+  the breaker. Fake transport, virtual time, one test; the probe's tick number is not asserted
+  because Resilience4j leaves open strictly after the wait, so the assertion is on the shape.
+- `partition/PartitionTest` - the base T16's matrix extends. Interface: `withPartitionedClient
+  (extra) { client, partition -> }` and `untilEvictedAsPoisoned(n)`, plus the meter readers.
+  `Partition` carries `server`, `tunnel`, the Toxiproxy `proxy` handle (T16's rows each name a
+  toxic, so a wrapper per toxic would be a pass-through), `globalRequestsHeard`, `drop(directions)`,
+  `heal()` and `healOnceNoticed()`, which is the whole of a row's recovery: wait for the pool to
+  write the session off, heal, return how long the noticing took counted from `drop`. A row asserts
+  `sftp_error_unmapped_total` is zero beside the poisoned eviction, which is what says the loss was
+  classified rather than caught by the unknown-wording default. Behind it: one container per JVM started lazily after the first host port is
+  exposed, `host.testcontainers.internal` as the upstream, a proxy per topology on the container's
+  8666 deleted on the way out, the warm handshake at the shipped keepalive, `pool.close()`.
+- `partition/HalfOpenPartitionTest` - **P1** (`timeout` toxic, `timeout=0`, both directions,
+  mid-download) and the reply stall the ticket names (the proxy swallows replies under a live
+  request; the request direction is proven open by the keepalives the server heard).
+
+**Concepts named:** *Partition* - the network between client and server as a test can damage and
+repair it; the seam is `withPartitionedClient`, which is the only thing a matrix row touches.
+*Heal window* - the retry backoff in the partition base is the time a test has, after the pool has
+written a session off, to repair the network before the fresh dial (see deviation 2). *End-to-end
+layer* - a scenario counts when the assertion is on what the connector did (client, source, watch),
+not what the adapter raised; the fake transport on virtual time is that layer for tick sequences.
+
+**Acceptance:**
+
+- [x] One suite covers S1 to S12, each named by its ID - `AcceptanceScenarios`, 12 tests run by
+  name; `AcceptanceScenariosTest` (3 tests) proves the coverage on every build.
+
+  | ID | Class and method | Layer |
+  |---|---|---|
+  | S1 | `ResilienceAgainstServerTest.S1_` | embedded server through a tunnel, `SftpSource.poll` + `download` |
+  | S2 | `ResilienceAgainstServerTest.S2_` | embedded server, `SftpClient` with retry (the transport-layer S2 in `JschErrorMappingTest` is not counted) |
+  | S3 | `WatchUnderOpenBreakerTest.S3_` **(new)** | fake transport, virtual time, `SftpSource.watch` |
+  | S4 | `SftpWatchTest.S4_` | fake transport, virtual time, `watch` over a real pool |
+  | S5 | `SourceAgainstServerTest.S5_` | embedded server, started `SftpConnector` |
+  | S6 | `StartupAgainstServerTest.S6_` | embedded server, `SftpConnector.start` |
+  | S7 | `SourceAgainstServerTest.S7_` | embedded server, started `SftpConnector` |
+  | S8 | `SftpWatchTest.S8_` | fake transport, virtual time, `watch` |
+  | S9 | `ShutdownAgainstServerTest.S9_` | embedded server through a tunnel, `SftpConnector.close` |
+  | S10 | `ResilienceAgainstServerTest.S10_` | embedded server, `SftpClient` (the "watch terminates" half is `WatchAgainstServerTest.a wrong password ends the watch...`, unnamed; the transport-layer S10 is not counted) |
+  | S11 | `ReadPathAgainstServerTest.S11_` | embedded server, `SftpClient.list` |
+  | S12 | `SftpWatchTest.S12_` | fake transport, a real `PROCEED` overlap (the two-polls version against the server is `SourceAgainstServerTest.S12_`, not selected: one per ID) |
+
+  S4, S8 and S12 are on the fake deliberately: spec Sec 17 layer 1 names overlap, pool invariants
+  and source events as the fake's, and a real server could prove a tick sequence only with a timer.
+- [x] Toxiproxy tier for half-open connection and proxy stall - `HalfOpenPartitionTest`, 2 tests,
+  **ran here against Docker Desktop** (Testcontainers 2.0.5, `ghcr.io/shopify/toxiproxy:2.9.0`),
+  three consecutive green runs. The skip when Docker is absent is `assumeTrue` in the base's
+  `@BeforeAll` with a message that begins `SKIPPED, NOT PASSED`. **The skip path could not be
+  exercised on this machine:** Testcontainers falls back through every client strategy, and the
+  Docker named pipe is always reachable here, so `DOCKER_HOST` pointed at a dead port still found
+  Docker. The coordinator should run the class once on a machine without Docker and read the message.
+- [x] Sec 16 open items re-checked - the subsection below. One measurement contradicts spec 17.3
+  P1's bound; recorded there and raised, `spec.md` untouched.
+- [x] Progress entry appended.
+
+**Deviations:**
+
+1. **S3 is proven on the fake, not against the embedded server.** The ticket says the table runs
+   "against the embedded server"; spec Sec 17 puts tick sequences on layer 1, and the spec wins.
+   The breaker's real-server proof is still `ResilienceAgainstServerTest.S3_`, and T16's P5 is the
+   breaker cycling under a watch on a real network.
+2. **The partition base retries with a fixed 250 ms backoff, not 1 ms.** The first P1 run had two
+   retries: the fresh dial went out 1 ms after the eviction, its handshake was in progress under the
+   toxics when the healer removed them, and Toxiproxy ended that connection - JSch reported
+   `connection is closed by foreign host`. That retry was the toxic's, not the partition's. A
+   half-open connection is the old flow dead and a new one working, so the base gives the test the
+   backoff as the window in which to heal. T16's reset rows need the same window: `reset_peer` stays
+   armed for new connections too.
+3. **`Partition.heal()` removes toxics and does not re-enable the proxy.** Re-enabling goes through
+   the server's update path, which can restart the listener and cut every connection through it;
+   P4 and P5 call `disable()`/`enable()` on the handle themselves.
+
+**Spec Sec 16 re-check:**
+
+- **Item 3 (JSch wording) - closed by T2, stands.** One new wording surfaced here that is not in
+  T2's table: `connection is closed by foreign host`, `op=connect`, which is what a connection cut
+  during the version exchange produces. The mapper's default for an unknown wording - retryable,
+  session discarded - did the right thing, and the WARN line asked for the table entry. Recorded in
+  the seams table for whoever next touches the mapper.
+- **Item 2 (temp folder ownership) - closed by T9's code, for both ownership models.**
+  `createActionTargets = true` (the default) has the probe `mkdir -p` the target and, when the
+  account may not, refuses start-up with the remedy "set it false and have it created upstream";
+  `false` has the probe insist the folder is there and refuse with "createActionTargets is off"
+  when it is not. Either way the marker rename then proves the move into it. Tests: `StartupAgainstServerTest`
+  (`the connector makes the folder...`, `a folder the connector was told not to create stops it...`,
+  `a connector that has started once starts again over what it left`). The one path without a test
+  is the refused `mkdir` itself, because the embedded server's virtual filesystem cannot deny one;
+  it is the same `checking` wrapper the tested refusals go through.
+- **Item 1 (producer-side completeness) - cannot be closed by code; here is what the default does.**
+  The shipped default is `sizeStable(2, 10.seconds) + minAge(1.minutes)`, batched per D36: the poll
+  stats every candidate, waits ten seconds once with the listing's session released, stats again,
+  and hands over a file whose size did not change and whose mtime is at least a minute old.
+  - *Protects against:* an upload still writing at any steady rate (its size moves within ten
+    seconds, or its mtime is under a minute old); a file that appeared in the last minute; a
+    pre-allocated file still being filled (each write moves the mtime).
+  - *Does not protect against:* an uploader paused for more than a minute mid-file - a network
+    stall, a retry backoff, a client-side flow-control pause - because a paused file has a stable
+    size and an old mtime, which is exactly what a finished file has; an uploader that writes in
+    bursts more than a minute apart; a server clock behind the connector's, which makes every file
+    look older than it is by the skew (`MinAge` compares the server's mtime to the connector's clock).
+    SFTP mtime has one-second resolution, which is noise beside a one-minute floor.
+  - *The question for the upstream team, precisely:* "Do you upload under a temporary name and
+    rename when finished, or write a marker file next to the finished file? If neither, what is the
+    longest pause your uploader can take in the middle of one file, and how far can your server's
+    clock be from ours?" A rename or marker convention makes readiness deterministic
+    (`markerFile(suffix)` ships); an answer to the pause question sizes `minAge`.
+
+**Measurements** (recorded, not asserted beyond a bound; D35):
+
+| Case | `keepAlive` | Session written off after | Bound asserted |
+|---|---|---|---|
+| P1, both directions dropped mid-download | 500 ms | 1046, 1048, 1052 ms | `< 2 x keepAlive + keepAlive` |
+| Reply stall under a live request | 500 ms | 1024, 1025, 1027 ms | same |
+
+**A measurement contradicts spec 17.3 P1's "`SessionLost` within `2 x keepAlive`":** the session
+is written off `2 x keepAlive` *plus* 25 to 50 ms, every run, and cannot be sooner. The mark is
+taken the moment the toxics are in place; in P1 the 64 KB the tunnel was holding lands on the
+client in the same instant, on the relay thread that took the mark, and the stall case holds no
+bytes at all and shows the same excess. Two intervals is when JSch's keepalive gives up, counted
+from the last byte the client received; the disconnect, the ladder and the eviction follow.
+Measured from the partition, the bound is not met and never will be. **Proposed decision entry:** *"Spec 17.3's `within 2 x keepAlive` is JSch's give-up point,
+measured from the last byte received; the connector's write-off lands a few tens of milliseconds
+after it. A partition test asserts `2 x keepAlive` plus one keepalive of grace and records the
+number."* The tests assert that today; the spec wording is the coordinator's to change.
+
+**For the next ticket (T16):**
+
+- **Extend `PartitionTest`; do not copy it.** A row is `withPartitionedClient(extra) { client,
+  partition -> ... }`, faults through `partition.proxy.toxics()` (or `drop`), recovery through
+  `partition.healOnceNoticed()`, or `heal()` after `untilEvictedAsPoisoned(n)` for a row that
+  counts differently. The 250 ms backoff is the heal window; a
+  row that arms `reset_peer` and heals after the first reset relies on it.
+- **`heal()` does not re-enable a disabled proxy** (deviation 3); P4 and P5 own `disable()`/`enable()`,
+  and should expect every connection through the proxy to be cut by `enable()`.
+- **A `Partition` is a bare `SftpPool` and `SftpClient`, not a started connector.** A row that acks
+  with `move("temp/")` creates the folder itself (P1 does); a row that needs the housekeeper or
+  `close()` (P6) should start an `SftpConnector` over the same config and its own scope, as
+  `ShutdownAgainstServerTest` does, and `withPartitionedClient` will still close the pool it made.
+- **One container per JVM, one proxy at a time on port 8666**, named `sftp-<n>`; the topology
+  deletes its proxy on the way out. Two topologies alive at once would need a second listen port
+  from the container's range.
+- **`Testcontainers.exposeHostPorts(port)` for every new server**, which the base does; the first
+  call is what lets the container start with `host.testcontainers.internal` at all, and later
+  calls add ports to the running forwarder.
+- **The reactor is longer now:** S11 alone is fifty seconds, and the partition class is eight
+  seconds plus the container's first start.
