@@ -107,6 +107,12 @@ class JschErrorMapper(private val meters: MeterRegistry) {
             message.contains(SOCKET_FAILURE_MARKER) ->
                 ConnectFailed(attempt, "the connection could not be established: $message", failure)
 
+            // The far side accepted the TCP connection and closed it before its version line: a
+            // proxy whose upstream is down behind a port publisher that still accepts, or a
+            // load balancer with nothing behind it. No session was ever established.
+            message.startsWith("connection is closed by foreign host") ->
+                ConnectFailed(attempt, "the far side closed the connection before the handshake: $message", failure)
+
             else -> unknown(failure, attempt)
         }
     }

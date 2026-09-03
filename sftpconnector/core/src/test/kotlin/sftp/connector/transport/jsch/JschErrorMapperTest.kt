@@ -157,6 +157,21 @@ class JschErrorMapperTest {
         assertThat(mapper.translating(ATTEMPT) { "/inbox" }).isEqualTo("/inbox")
     }
 
+    /**
+     * What JSch says when the far side accepts the TCP connection and closes it before sending
+     * its version line - a proxy whose upstream is down behind a port publisher that still
+     * accepts, or a toxic removed from under a handshake. No session was ever established, so it
+     * is a failure to connect, and a known one: found by T15 once and by the P4 partition row on
+     * every run.
+     */
+    @Test
+    fun `a connection the far side closes during the version exchange is a failure to connect`() {
+        val failure = mapping(JSchException("connection is closed by foreign host"))
+
+        assertThat(failure).isInstanceOf(ConnectFailed::class.java)
+        assertThat(unmappedCount()).isZero()
+    }
+
     private fun mapping(thrown: Exception): Throwable =
         runCatching { mapper.translating(ATTEMPT) { throw thrown } }.exceptionOrNull()!!
 
