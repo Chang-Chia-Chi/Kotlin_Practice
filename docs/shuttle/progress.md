@@ -705,6 +705,10 @@ about a minute (`gvenzl/oracle-free:23-slim-faststart`, already pulled).
 - **Gotcha:** run the Oracle class with `-DexcludedGroups=none`; a plain `-Dtest=JdbiStateStoreTest`
   runs zero tests and reports green.
 
+**Merge note:** ticket 09's two read-only seam methods, `byId` and `outboxPending`, were added to
+`JdbiStateStore` as one `SELECT` each under the shared contract (`byId_returns_the_row_in_any_state_and_null_for_an_unknown_id`,
+`outboxPending_lists_exactly_the_PENDING_rows`), green on the in-memory store and on Oracle.
+
 ---
 
 ## 11: S3 target and fetcher over the AWS SDK

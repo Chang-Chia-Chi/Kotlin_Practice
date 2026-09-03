@@ -43,6 +43,10 @@ class JdbiStateStore(private val jdbi: Jdbi, private val dispatcher: CoroutineDi
 
     override suspend fun find(identity: SourceIdentity) = tx { it.latest(identity) }
 
+    override suspend fun byId(id: TransferId) = tx { h ->
+        h.createQuery("SELECT * FROM file_transfer WHERE id = :id").bind("id", id.value).map { rs, _ -> transferRow(rs) }.findOne().orElse(null)
+    }
+
     override suspend fun seen(identity: SourceIdentity, kind: TransferKind) = tx { h ->
         h.latest(identity) ?: try {
             h.insert(identity, kind)
@@ -150,6 +154,11 @@ class JdbiStateStore(private val jdbi: Jdbi, private val dispatcher: CoroutineDi
         ).bind("now", now.ts()).bind("limit", limit)
         if (excluding.isNotEmpty()) q.bindList("ex", excluding.map { it.value })
         q.map { rs, _ -> deliveryRow(rs) }.list()
+    }
+
+    // ponytail: full PENDING scan per notifier pass, as the in-memory store does; an aggregate per channel is the upgrade if the outbox grows large.
+    override suspend fun outboxPending() = tx { h ->
+        h.createQuery("SELECT * FROM delivery_outbox WHERE notification_state = 'PENDING' ORDER BY id").map { rs, _ -> deliveryRow(rs) }.list()
     }
 
     override suspend fun delivered(id: DeliveryId, reference: String?) = tx { h ->

@@ -266,4 +266,25 @@ abstract class StateStoreContract {
         assertEquals(2, store.stuck(route, clock.instant()))
         assertEquals(0, store.stuck(route, clock.instant().minusSeconds(60)))
     }
+
+    @Test
+    fun byId_returns_the_row_in_any_state_and_null_for_an_unknown_id() = runTest {
+        val seen = store.seen(identity("a"), TransferKind.OBJECT)
+        val rejected = store.seen(identity("b"), TransferKind.OBJECT).also { store.rejected(it.id, "no") }
+        assertEquals(seen, store.byId(seen.id))
+        assertEquals(TransferState.REJECTED, store.byId(rejected.id)!!.state)
+        assertNull(store.byId(TransferId(seen.id.value + rejected.id.value + 1000)))
+    }
+
+    @Test
+    fun outboxPending_lists_exactly_the_PENDING_rows() = runTest {
+        val a = storedTransfer("a", onStored)
+        storedTransfer("b", onStored)
+        val delivered = outbox().first { it.transferId == a.id }
+        store.delivered(delivered.id, "ref")
+        val pending = store.outboxPending()
+        assertEquals(outbox().filter { it.state == DeliveryState.PENDING }.map { it.id }.toSet(), pending.map { it.id }.toSet())
+        assertEquals(1, pending.size)
+        assertTrue(pending.none { it.id == delivered.id })
+    }
 }
