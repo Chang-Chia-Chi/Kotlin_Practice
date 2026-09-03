@@ -209,6 +209,8 @@ because each was correctly deferred by the ticket that found it.
 | Only a blocking call made *inside* `withLease` is on the cancellation ladder | T8 | Every later ticket | `dial()` is bounded by `connectTimeout` and `proves()` is wrapped, so both existing paths are covered. A third blocking transport call added outside a lease would be bounded on a hung server only by the keepalive floor, whatever `cancelGrace` said, and no test would notice |
 | A session cut loose by the ladder is counted `sftp_pool_evicted_total{reason=poisoned}` | T8 | Whichever ticket revisits spec 13's five eviction labels | A dashboard cannot tell a session the server poisoned from one the connector destroyed to rescue a thread. The two have different remedies; only the WARN line separates them |
 | The bounded IO dispatcher is as wide as the pool, and everything on it already holds a pool place | T6 | Every later ticket | This is what stops a listing blocked on its consumer from starving a download: threads wanted can never exceed threads available. An operation that runs on that dispatcher without first holding a pool place turns a slow path into a deadlock, and no test would catch it until concurrency was high |
+| A `withContext(dispatcher)` that produces a resource drops it when its caller is cancelled - at the switch back, not in the block, so `NonCancellable` inside does not help | R1 | T12, T13, and anything that opens a socket, a file or a lease under a dispatcher switch | R1 finding 1 is this shape: the handshake finished on the IO thread and the session was replaced by the `CancellationException` on the way back to the caller. The fake transport cannot show it because it answers on the caller's own coroutine. The only two defences are to hold the resource on the producing side and close it when the value is dropped (what `JschTransport.connect` does now), or to never switch dispatchers on the producing path |
+| A cancelled `withLease` is not proof the operation did not land | R1 | T7's compensation review, T11 | The ladder drops a cancelled call's outcome by design, the scope drops the block's result when cancellation lands at the instant it completed, and every dispatcher switch back does the same. A rename that landed on the server can therefore surface as `CancellationException`. I11's lost-reply reasoning has to treat "cancelled" like "reply lost", and a retry after cancellation is never attempted anyway |
 
 ### C6: spec Sec 5.3 amended - the middle cancellation tier is `keepAlive`
 
@@ -2049,3 +2051,174 @@ read it. Every other T10 test is unchanged and green.
   cancels the wait, and under `runTest` it is virtual time.
 - **T10's note that checks with memory must be `synchronized` no longer applies to anything
   shipped**; a custom check that keeps memory across polls still needs it, for the same reason.
+
+---
+
+## R1: Fable review of the pool and the ladder (T3-T5, T8)
+
+A review-and-fix session under C12, on `claude-fable-5-1`, of code it did not write: `SessionRegistry`,
+`SftpPool`, `PoolEntry`, `CancellationLadder`, `PoolMeters`, the JSch adapter's `connect`, `abort` and
+progress monitor, and the tests under `pool/` and `CancellationLadderTest`. 177 tests were green at the
+start and 180 are green at the end (46 core, 134 testkit). Three findings were fixed in three commits,
+each with the invariant it restores in its message; the rest are recorded here. No earlier test was
+edited.
+
+The method was the one the brief asks for: trace every exit path of `acquire`, `withLease`, `proves`,
+`giveBack` and `sweep` for the permit and the session; walk every ordering of a cancellation against
+the ladder; then check each belief the T3-T8 entries record against the mechanism it rests on. Two of
+the three fixes are in places every earlier test walked past - because the fake transport answers a
+connect on the caller's own coroutine, and because nothing had yet cancelled the housekeeper.
+
+**Findings, by severity.**
+
+*High.*
+
+1. **A session that finished its handshake into a cancelled caller was left running, with the pool
+   never told** - `JschTransport.connect`, commit `f92310b`. T4 closed the gap between `connect()`
+   returning and `registry.filled`, and its test proves it with the fake. The real adapter runs the
+   handshake inside `withContext(io)`, and a `withContext` that switches dispatchers hands its result
+   back through a *cancellable* resume on the caller's dispatcher: when the caller's job is cancelled
+   by then, the value is replaced with the `CancellationException`. Interleaving: `acquire` → `dial` →
+   `session.connect` on the IO thread; the caller is cancelled (a consumer walking away, a
+   `withTimeout`, a shutdown); the handshake finishes anyway; the pool's `catch` sees an entry with
+   `connection == null`, discards it with nothing to close, and gives the permit back. I4 held and the
+   session leaked: a socket, JSch's reader thread, and a server-side session the keepalive keeps alive
+   for the life of the process. Reproduced by `LadderReviewTest.I4_a session that finishes its
+   handshake into a cancelled caller is hung up on, not left running`, which lands the cancellation on
+   the first bytes the client sends through the tunnel and then asks the server how many sessions it
+   holds - red for the full five-second bound before the fix. The fix keeps hold of the session on the
+   producing side and hangs up on it when the scope drops it; the transport's contract - a session you
+   own, or a throw and you own nothing - is unchanged. **The first attempt, `withContext(io +
+   NonCancellable)`, was tried and did not work**: the drop is at the delivery, not in the block, so
+   `NonCancellable` inside the switch protects nothing. That is now a seams row, because T12 and T13
+   will both write code of this shape. Two corrections from the self-review followed in
+   `49bc341`: the hang-up on the orphan runs through the error mapper, so a hang-up that
+   failed would have replaced the `CancellationException` with a mapped failure - it is now caught
+   and warned about, the way `SftpPool.close` does it; and the commit's `(I4)` overstates - the permit
+   came back, and what leaked was the session, which is T4's own checkbox ("releases the permit and
+   closes the half-open entry") rather than the numbered invariant. The test lost its `I4_` prefix
+   for the same reason.
+2. **A housekeeping round cancelled between deciding and doing stranded what it had decided** -
+   `SftpPool.sweep`, commit `48d0d0f`. `SessionRegistry.sweep` retires sessions and reserves room for
+   spares under the lock, and returns; `SftpPool.sweep` then closed and dialled with nothing between
+   the two that survived a cancellation - which is what T13's shutdown will do to the housekeeper.
+   Cancelled while hanging up on the first retired session (the fake's `close` hook, or in production
+   `registry.closed` waiting for a contended lock), the rest of the round's list was dropped, and that
+   list was the last reference to those connections: sockets and reader threads for the life of the
+   process. Cancelled while dialling the first spare, every spare after it stayed registered as
+   `Connecting` with its permit taken - I1's bound eaten from the inside, `sftp_pool_active` counting
+   sessions that do not exist, and invisible to leak detection, which watches only the states a caller
+   holds. Two tests in `PoolReviewTest` on virtual time: `I4_a housekeeper cancelled while opening
+   spares gives back every room the round reserved` (one entry stranded before, the pool fills to its
+   size after) and `a housekeeper cancelled while hanging up on one retired session still hangs up on
+   the rest` (two sessions left open before). Retired sessions are now closed under `NonCancellable`
+   and every reserved entry is dialled or given back in a `finally`. The self-review found the
+   retired loop sitting outside that `try`, so an `Error` out of a hang-up (which `SftpPool.close`
+   deliberately lets through) would still have stranded the reserved entries; `9eb4962` moves it
+   inside. On the label: the stranded entries never took the pool past `maxSize`, so `(I1)` in the
+   commit is loose - they ate the bound from inside it; the invariant restored is I4 for the
+   permits, and I9's "leaves every entry `Closed`" for the retired list.
+
+*Medium.*
+
+3. **A permit granted at the instant its waiter is cancelled was lost** - `SftpPool.admit`, commit
+   `37d4597`. **Reasoned, not reproduced.** T3's note that `Semaphore.acquire()` is
+   cancellation-safe is true of the semaphore: it gives the permit back if the waiter is cancelled
+   while suspended, and again if the cancellation is seen when the granted continuation is dispatched.
+   What it does not cover is the scope around it. `withTimeoutOrNull { capacity.acquire() }` completes
+   its block *after* the permit is in hand, and if the caller's cancellation lands between the
+   dispatched resume's activity check and the block's completion - or, on the fast path, between
+   `tryAcquire` failing and `acquire` taking a permit freed a moment later by another thread - the
+   scope finalises as cancelled and throws the permit away with its result. `admit` runs before
+   `acquire`'s `try`, so nothing downstream frees it. The window is a few instructions wide and needs a
+   release and a cancel from two other threads to land inside it, which no scheduler a test controls
+   can order; a stress test would be probabilistic and was not written. The fix is the smallest that is
+   obviously right: a flag set inside the block the moment the permit is held, read on the way out
+   instead of the wait's own answer, and `freeRoom()` on the throwing path when it is set. A waiter
+   granted at the last instant of its timeout is now served rather than turned away, which is also
+   right. Covered for non-regression by T4's `a caller that cannot be served is turned away`, `I4_`'s
+   timed-out path, and the pending-gauge test.
+
+*Low, noted, not changed.*
+
+4. **A cancelled acquire throws away a healthy session.** `acquire`'s `catch` discards the claimed
+   entry as `POISONED` on every path, including a `Reuse`, a proved `Prove`, and a dial that landed. The
+   session is fine in all three; the cost is a handshake per cancelled borrow, not a leak. Handing the
+   entry back to the shelf instead would need to exclude the dial that never landed (no connection) and
+   the validation the ladder cut (`unfitAfterCancelling`), and T4's `a session that opens into a
+   cancelled caller is closed rather than left running` pins `Connect, Close` for the filled case. Left
+   as it is, recorded as the price it is.
+5. **`abort()` may block the aborting thread on a wedged peer.** From memory of the library rather than
+   its source (no sources jar locally, so not verified against the pinned fork): `Session.disconnect`
+   disconnects each channel first, which sends a channel-close packet, and only then closes the socket.
+   On a peer whose receive window is shut and whose TCP send buffer is already full, that write blocks
+   with no timeout, and the ladder's `NonCancellable` cut waits behind it. T8 measured the common case
+   - a stalled proxy - returning in under a second, which is the case that matters; the pathological
+   one has no fix inside the library's API. Separately, `abort()` runs on the caller's thread by design;
+   on an event-loop host that is a blocking socket close on the loop, which T14 should know.
+6. **`PoolMeters` on a shared host registry.** Registering a gauge whose id already exists returns the
+   existing gauge, so a second `SftpPool` for the same endpoint on one `MeterRegistry` keeps reading the
+   first pool's `lastCount`. Nothing throws; the numbers lie. T14's binding is where this is decided.
+7. **`reason=poisoned` for a cut session.** The seams row stands; noted, not touched.
+8. **`Lease.connection` reaches `abort()` and `close()`.** Decided: left, with the reason. Closing it is
+   narrowing the property to `SftpSession` - one word - plus one type argument in T3's `I2_` test, which
+   builds a `mutableSetOf<SftpConnection>()` from it. Nothing reaches the hole today: every production
+   borrower goes through `SftpClient`, and `withSession` is guarded by `BorrowedSession`. T13 has to
+   reshape `Lease` to cut leases during the drain and is the ticket with cause to narrow it in the same
+   change; doing it here would be an edit to an earlier test for a hole nothing exercises.
+
+**Beliefs from the T3-T8 entries, checked against the mechanism.**
+
+- *T3, I1/I2/I5 mechanisms* - confirmed. I5 in particular: the registry is handed no transport,
+  `sweep(takeRoom)` runs `Semaphore.tryAcquire`, which is a CAS loop with no suspension and no
+  re-entry, and nothing else under the lock touches a meter or a socket. `lastCount` is a volatile
+  read plus an atomic read; no gauge path can reach the mutex. `PoolMeters` registration cannot throw
+  on a fresh registry, and on a shared one degrades as in finding 6.
+- *T3, "`Semaphore.acquire()` is cancellation-safe, so a `withTimeoutOrNull` around it cannot leak"* -
+  **falsified** (finding 3). The semaphore protects its own suspension; the scope does not protect its
+  value.
+- *T4, the after-connect gap is closed* - confirmed for the pool, **falsified as complete** (finding
+  1): the same gap one layer down, and the fake cannot show it.
+- *T4, `freeRoom()` is the only release path* - confirmed on every exit traced: success, a returning
+  failure, a poisoning failure, an unclassified error, cancellation before the block runs, during it,
+  at the instant it completes, during `proves`, during `proved`'s lock, a failed dial, a cancelled dial,
+  the housekeeper's failed and cancelled dials, and now finding 3's path. The release-once guard on
+  `Lease` means a `release()` that throws and is followed by `releaseAfter` in `withLease`'s catch frees
+  exactly one permit.
+- *T4, `NONE_HELD` keeps the session* - confirmed, and the reasoning stands.
+- *T5, `sweep(takeRoom)` is safe by type* - confirmed, see above.
+- *T5, `entries.size < maxSize` bounds the top-up* - confirmed, jointly with the permit. The two views
+  do disagree: an entry retired but not yet freed is in neither `entries` nor the free permits, and an
+  idle entry is in `entries` and holds no permit. Every disagreement makes the top-up more
+  conservative, never less. Lifetime eviction on release against the housekeeper: no double retire,
+  because `sweep` sees only idle entries and `handBack` decides under the same lock.
+- *T5, nothing collects `state`* - still true (grepped). The hazard is also smaller than the seams row
+  says: an `Unconfined` collector runs on the setter's stack only until its first suspension, and a
+  re-entrant `stats()` from it suspends on the mutex rather than deadlocking, so the cost is latency in
+  the critical section, not correctness. Still theoretical; the row stays.
+- *T8, `supervisorScope` is load-bearing* - confirmed by mechanism: a job that is cancelling and whose
+  block throws a non-cancellation exception finalises with that exception as the root cause, so under
+  `coroutineScope` the cut session's `SessionLost` would become the scope's own. Every ordering was
+  walked: cancellation before the block runs (the child never starts; the session goes back `Idle`);
+  during a transfer the monitor stops (the child ends with the `CancellationException`, `Idle`);
+  during a call the keepalive ends inside the grace (`SessionLost` is the child's root cause,
+  `unfitAfterCancelling`, `POISONED`); after the grace (`cutLoose`, the scope waits for the child to
+  return from the closed socket, `POISONED`); and after the keepalive had already ended the read
+  (`await` throws `SessionLost` without suspending, the caller is told the session died, `EVICTED`).
+  Every reported exception is the truthful one for its ordering.
+- *T8 deviation 4, `ensureActive()` at the end of `transferring`* - confirmed harmless; nothing between
+  the monitor's stop and it can throw first, since JSch returns normally from a monitor-stopped
+  transfer. It is also, as it turns out, redundant: a `withContext` whose job was cancelled completes
+  with the `CancellationException` even when its block returns normally. Left in.
+- *T8 deviation 5, the ladder does not wrap `dial`* - confirmed as the right call; finding 1 is what
+  was actually missing on that path.
+
+**Seams.** Two rows added above: the dispatcher-switch drop, and "cancelled is not proof it did not
+land". Closed none. The `Lease.connection` row is answered by finding 8 and stays for T13.
+
+**For T13 (shutdown) and T12 (watch).** After finding 2, cancelling the housekeeper waits for the
+closes of the sessions the current round had retired; they run on the IO dispatcher, so a drain
+should cut blocked leases first or in parallel, or the housekeeper's cancel queues behind them. After
+finding 1, a cancelled top-up dial closes its own session in the transport and the pool sees a dial
+that never landed; nothing is parked by a cancelled housekeeper. Every `withContext(dispatcher)` that
+produces something owned is the seams row's shape.
