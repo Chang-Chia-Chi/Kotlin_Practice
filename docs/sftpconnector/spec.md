@@ -542,11 +542,22 @@ path and attempt number in its message.
 | Class | Retry | Breaker | Lease | `watch` |
 |---|---|---|---|---|
 | Recoverable, poisons | Yes | Counted | Evicted | Emits `PollFailed`, continues |
-| Recoverable, no poison | Yes, except `PermissionDenied` which waits a full tick | Counted | Returned | Emits `PollFailed`, continues |
+| Recoverable, no poison, **the wire failed** (`IncompleteTransfer`) | Yes, fresh lease | Counted | Evicted | Emits `PollFailed`, continues |
+| Recoverable, no poison, **the server answered** (`NoSuchFile`, `PermissionDenied`, `ServerFailure`) | No, not inside the call; the next tick is the retry (D41) | Not counted | Returned | Emits `PollFailed`, continues |
 | Fatal | No | Not counted | Evicted | Terminates with the error |
 | PoolExhausted | No | Not counted | n/a | Emits `PollFailed`, continues |
 | CircuitOpen | No | n/a | n/a | Emits `PollSkipped`, continues |
 | OverwriteRefused | No | Not counted | Returned | Emits `PollFailed`, continues |
+
+The split in the second and third rows is the one the retry ladder actually needs (D41). A
+failure the *wire* produced - a lost session, a timed-out call, a short read - says nothing
+about the request, and a fresh lease may well succeed. A failure the *server answered* proves
+the request arrived and was understood: the file is not there, the account may not, the
+operation is refused. Sending it again inside the same call cannot change the answer, and
+counting it against the breaker charges the connector for a healthy server doing its job - on a
+server without the POSIX rename extension every refused overwrite would count. The per-operation
+meaning in Sec 6.1 (`NoSuchFile` after a retry is success for `delete`, is `FileGone` for a
+download) is what a *later* try reads; it is not a reason to send one now.
 
 ---
 
@@ -705,6 +716,8 @@ transport in the testkit is a genuine second implementation.
 | D22 | The connector computes a digest during staging; the application compares it | The digest is free while bytes stream through; the expected value's origin is application knowledge. Checksum is integrity, not completeness, and cannot replace the readiness check because it needs the download first |
 | D23 | Unmapped JSch errors are `Unknown`, recoverable, poisoned, logged raw and counted | JSch error text is not an API; a wording change must surface as a metric and a log line, never as a silent misclassification or a dead connector |
 | D26 | The middle cancellation tier is the keepalive ladder, not `socketTimeout` | Measured against mwiede 2.28.7 (Sec 5.3): JSch implements `serverAliveInterval` by setting the socket read timeout, so a positive `keepAlive` always overwrites `session.timeout`. A hung server is bounded by `keepAlive x (serverAliveCountMax + 1)` and not at all by `socketTimeout` |
+| D41 | Server-answered failures are neither retried inside the call nor counted by the breaker; only wire failures are | An answered request proves the server is reachable and understood it, which is what the breaker measures; and repeating an answered request inside the same call cannot change the answer, while it can move a *new* upstream file over a landed one (T11 found this race under `REPLACE`). `NoSuchFile` from a download would otherwise cost S5 three attempts and let a directory another system writes into open the breaker (Sec 10.2) |
+| D42 | The transfer bulkhead is a kotlinx `Semaphore`, not resilience4j's `Bulkhead` | resilience4j's suspend bulkhead takes its permit inside `withContext(Dispatchers.IO)` and only then enters its try, so a caller cancelled at the switch back leaks the permit for the life of the process - the exact shape R1 found in the transport. Its no-wait variant turns the fifth transfer away instead of queuing it. A semaphore taken before the dispatcher switch has neither problem (Sec 9) |
 | D37 | The adapter escapes `\`, `*` and `?` in every path it hands JSch for rename, rm, put, get, stat, ls | JSch expands those as a glob in the last component (Sec 5.2); a listed name containing them would otherwise act on its neighbours. Found by R2 against the embedded server: a replace onto `l*.csv` destroyed `ledger-old.csv` |
 | D38 | A `NoSuchFile` from rename names the path that is missing | The server answers NO_SUCH_FILE for a missing target directory as well as a missing source, and the adapter used to report both against the source. I11's retry would then stat the target, find nothing, and report the source gone while it was still there. The client now looks at the source on that answer and names whichever is missing (Sec 6.1) |
 | D39 | A borrowed session's loan ends when the last call on it finishes, not when the block returns | The revocation was a flag read at call start; a call launched from the block and still on the wire when the block returned kept using a session the pool had re-lent - I2 broken from outside the pool. Calls and the revocation now share a lock, and ending the loan waits under `NonCancellable`, bounded by the ladder (Sec 6.1) |

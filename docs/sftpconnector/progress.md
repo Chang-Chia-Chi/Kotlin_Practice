@@ -177,6 +177,22 @@ coupled to the registry), one for the write path's compensation. The reviews fol
 implementer protocol - file:line and a failing test per finding, fixes in their own commits,
 no earlier test weakened, a progress entry.
 
+### C13: only wire failures are retried in-call or counted (ruling on T11's deviations 2 and 3)
+
+T11 asked for a ruling: spec Sec 10.2 retried and counted every no-poison recoverable failure,
+and its own build could not honour that without breaking T7's "one rename sent", R2's "was
+cleared" truth, T10's `FileGone` conversion, and D20's full-tick wait for `PermissionDenied`.
+The ruling adopts T11's reading and goes one step further than T11 did: a failure the server
+*answered* (`NoSuchFile`, `PermissionDenied`, `ServerFailure`) is not retried inside the call
+**and not counted by the breaker** - T11 left `ServerFailure` counted and raised it as a seam.
+An answered request is proof of a reachable, comprehending server, which is what the breaker
+measures; counting it would open the circuit on a non-extension server for every refused
+overwrite. Spec Sec 10.2 and D41 record it. T12 applies the code side as a pre-task: a
+disposition for "answered: report, keep the session, no in-call retry", `ServerFailure` moved
+onto it, and T2's `FailureModelTest` rows updated to the ruling - a mandated change to an
+earlier test's expectations, declared. D42 records T11's deviation 1 (the transfer bulkhead is
+a kotlinx `Semaphore`) as a decision, on R1's evidence.
+
 ### Open seams - things deferred, and who picks them up
 
 Coordinator-maintained. A ticket that closes one strikes it through in its own entry; a ticket
