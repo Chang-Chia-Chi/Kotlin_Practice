@@ -24,9 +24,8 @@ import sftp.connector.config.ResilienceConfig
 import sftp.connector.error.Attempt
 import sftp.connector.error.CircuitOpen
 import sftp.connector.error.CurrentAttempt
-import sftp.connector.error.Disposition
-import sftp.connector.error.NoSuchFile
 import sftp.connector.error.OperationTimeout
+import sftp.connector.error.Retry as RetryAnswer
 import sftp.connector.error.SftpException
 import sftp.connector.pool.SftpPool
 import sftp.connector.transport.SftpSession
@@ -53,19 +52,14 @@ import kotlin.time.toJavaDuration
  * beyond the limit waits its turn rather than being turned away.
  *
  * Nothing here decides what a failure means. Every failure the connector raises already says
- * whether it is worth another go and whether the server is to blame for it, and this reads those
- * answers rather than keeping its own list of classes - with one reading it has to make. A failure
- * the wire produced - a session that died, a reply that never came, a connection that never
- * opened - is retried here, on a fresh session, because the reply was lost and the next try may
- * get one. A failure the server answered - a path that is not there, a request it refused - is
- * the server's decision about that request, and the same server asked the same thing a second
- * later gives the same answer; by the time such a failure arrives here the operation has already
- * said what it means to it (a rename has looked for its own landed file, a mkdir has found its
- * directory), and its retry is the next tick, which is the source's business. Retrying it here
- * would cost three tries and a backoff to learn nothing, and would rewrite the operation's own
- * account of what the server is left holding. A path that is not there is also not held against
- * the server: on a directory another system moves files out of it is ordinary, and a breaker that
- * counted it would open on a healthy server.
+ * whether it is worth another go now and whether the server is to blame for it, and this reads
+ * those two answers and keeps no list of classes. The answers come out as: a failure the wire
+ * produced - a session that died, a reply that never came, a connection that never opened - is
+ * retried here on a fresh session, because the reply was lost and the next try may get one; a
+ * failure the server answered - a path that is not there, a request it refused - is retried by
+ * the next tick, which is the source's business, because by the time it arrives here the
+ * operation has already said what it means to it (a rename has looked for its own landed file,
+ * a mkdir has found its directory) and asking again now would only rewrite that account.
  */
 internal class Resilience(
     settings: ResilienceConfig,
@@ -201,10 +195,10 @@ internal class Resilience(
             else IntervalFunction.ofExponentialBackoff(initial.toJavaDuration(), 2.0, max.toJavaDuration())
 
         private fun Throwable.worthAnotherTry(): Boolean =
-            this is SftpException && disposition == Disposition.RETRY_ON_A_FRESH_SESSION
+            this is SftpException && disposition.retry == RetryAnswer.IMMEDIATELY
 
         private fun Throwable.countsAgainstTheBreaker(): Boolean =
-            this is SftpException && disposition.countsAgainstTheBreaker && this !is NoSuchFile
+            this is SftpException && disposition.countsAgainstTheBreaker
 
         /** 0 closed, 1 half-open, 2 open; the states a breaker is forced or disabled into read as what they act like. */
         private fun CircuitBreaker.State.reading(): Int = when (this) {

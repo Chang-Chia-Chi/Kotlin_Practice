@@ -25,17 +25,14 @@ enum class Disposition(
     RETRY_ON_A_FRESH_SESSION(Retry.IMMEDIATELY, true, LeaseFate.EVICTED, WatchReaction.REPORT_THE_FAILURE),
 
     /**
-     * The server refused this request and the connection carrying it is fine, so the retry costs
-     * no handshake.
+     * The server answered, and the answer was no: the path is not there, the account may not,
+     * the operation is refused. An answer proves the request arrived and was understood, so the
+     * session carrying it is healthy and the breaker - which measures whether the server can be
+     * reached - has nothing to count. Sending the same request again inside the same call cannot
+     * change the answer; whatever has to change - a file arriving, a permission, a mount -
+     * changes at human speed, and the next tick is soon enough to ask again.
      */
-    RETRY_ON_THIS_SESSION(Retry.IMMEDIATELY, true, LeaseFate.RETURNED, WatchReaction.REPORT_THE_FAILURE),
-
-    /**
-     * Retrying within seconds cannot help, because whatever has to change - a permission, an
-     * ownership, a mount - changes at human speed. Waiting a whole poll interval turns a hot
-     * retry loop against an unchanging server into one attempt per tick.
-     */
-    RETRY_ON_THE_NEXT_TICK(Retry.AFTER_A_FULL_TICK, true, LeaseFate.RETURNED, WatchReaction.REPORT_THE_FAILURE),
+    RETRY_ON_THE_NEXT_TICK(Retry.AFTER_A_FULL_TICK, false, LeaseFate.RETURNED, WatchReaction.REPORT_THE_FAILURE),
 
     /**
      * Nothing the connector can do will make the next attempt go differently, so it stops rather

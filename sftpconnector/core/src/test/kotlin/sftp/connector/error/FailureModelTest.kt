@@ -4,7 +4,7 @@ import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.Test
 
 /**
- * The five rows of the failure model, asserted as the four decisions each row makes.
+ * The rows of the failure model, asserted as the four decisions each row makes.
  *
  * The point of these is that a caller never has to combine `recoverable`, `poisons` and `fatal`
  * itself. If that combination is ever wrong here, it is wrong in one place instead of in every
@@ -23,25 +23,35 @@ class FailureModelTest {
         assertThat(disposition.watch).isEqualTo(WatchReaction.REPORT_THE_FAILURE)
     }
 
+    /**
+     * The server answered - no such path, refused, permission denied - which proves it is
+     * reachable and understood the request. That is the opposite of what a breaker counts, and
+     * asking again inside the same call cannot change an answer; the next tick asks again.
+     */
     @Test
-    fun `a recoverable failure that does not poison keeps the session it was using`() {
-        val disposition = NoSuchFile(ATTEMPT, "the server has no such path").disposition
-
-        assertThat(disposition).isEqualTo(Disposition.RETRY_ON_THIS_SESSION)
-        assertThat(disposition.retry).isEqualTo(Retry.IMMEDIATELY)
-        assertThat(disposition.countsAgainstTheBreaker).isTrue()
-        assertThat(disposition.lease).isEqualTo(LeaseFate.RETURNED)
+    fun `a failure the server answered keeps its session, waits a full tick, and is not held against the server`() {
+        listOf(
+            NoSuchFile(ATTEMPT, "the server has no such path"),
+            ServerFailure(ATTEMPT, statusCode = 4, detail = "the server refused"),
+            PermissionDenied(ATTEMPT, "the server refused on permissions"),
+        ).forEach { answered ->
+            val disposition = answered.disposition
+            assertThat(answered.poisons).describedAs(answered::class.simpleName).isFalse()
+            assertThat(disposition).describedAs(answered::class.simpleName).isEqualTo(Disposition.RETRY_ON_THE_NEXT_TICK)
+            assertThat(disposition.retry).isEqualTo(Retry.AFTER_A_FULL_TICK)
+            assertThat(disposition.countsAgainstTheBreaker).isFalse()
+            assertThat(disposition.lease).isEqualTo(LeaseFate.RETURNED)
+            assertThat(disposition.watch).isEqualTo(WatchReaction.REPORT_THE_FAILURE)
+        }
     }
 
-    /** The one exception to "recoverable means try again now". */
+    /** The connector's own check failing is a wire failure: the reply was short, so the reply is asked for again. */
     @Test
-    fun `a permission refusal waits a full tick rather than asking again immediately`() {
-        val denied = PermissionDenied(ATTEMPT, "the server refused on permissions")
+    fun `a short transfer is retried on a fresh session and counted, like any failure of the wire`() {
+        val disposition = IncompleteTransfer(ATTEMPT, "fewer bytes arrived than the listing promised").disposition
 
-        assertThat(denied.poisons).isFalse()
-        assertThat(denied.disposition).isEqualTo(Disposition.RETRY_ON_THE_NEXT_TICK)
-        assertThat(denied.disposition.retry).isEqualTo(Retry.AFTER_A_FULL_TICK)
-        assertThat(denied.disposition.lease).isEqualTo(LeaseFate.RETURNED)
+        assertThat(disposition).isEqualTo(Disposition.RETRY_ON_A_FRESH_SESSION)
+        assertThat(disposition.countsAgainstTheBreaker).isTrue()
     }
 
     @Test
@@ -112,8 +122,7 @@ class FailureModelTest {
         is ConnectFailed, is SessionLost, is OperationTimeout, is IncompleteTransfer, is Unknown ->
             Disposition.RETRY_ON_A_FRESH_SESSION
 
-        is NoSuchFile, is ServerFailure -> Disposition.RETRY_ON_THIS_SESSION
-        is PermissionDenied -> Disposition.RETRY_ON_THE_NEXT_TICK
+        is NoSuchFile, is ServerFailure, is PermissionDenied -> Disposition.RETRY_ON_THE_NEXT_TICK
         is AuthenticationFailed, is HostKeyRejected, is ConfigurationError -> Disposition.STOP_THE_CONNECTOR
         is PoolExhausted -> Disposition.FAIL_THE_ATTEMPT
         is CircuitOpen -> Disposition.SKIP_THE_TICK

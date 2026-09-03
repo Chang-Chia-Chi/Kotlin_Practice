@@ -76,9 +76,12 @@ sealed class SftpException(message: String, cause: Throwable?) : RuntimeExceptio
  * Something went wrong that trying again might survive: a dropped connection, a busy server, a
  * file that was not there this second.
  *
- * [poisons] says whether the session it happened on is still trustworthy. It is the one fact a
- * recoverable failure knows that its class does not already imply, and it is what separates the
- * two retry dispositions.
+ * [poisons] says whether the session it happened on is still trustworthy, and it is the one fact
+ * a recoverable failure knows that its class does not already imply. It is also the line between
+ * the two retry dispositions: a session is untrustworthy exactly when the wire failed - the
+ * reply never came, or came short - and only then is the reply worth asking for again inside the
+ * same call. A session still trusted is one the server answered on, and an answer is not
+ * retried; the next tick asks again.
  */
 sealed class Recoverable(
     val attempt: Attempt,
@@ -88,7 +91,7 @@ sealed class Recoverable(
 ) : SftpException(attempt.describe(detail), cause) {
 
     override val disposition: Disposition
-        get() = if (poisons) Disposition.RETRY_ON_A_FRESH_SESSION else Disposition.RETRY_ON_THIS_SESSION
+        get() = if (poisons) Disposition.RETRY_ON_A_FRESH_SESSION else Disposition.RETRY_ON_THE_NEXT_TICK
 }
 
 /** No session was established: the proxy refused, the address did not resolve, the handshake never finished. */
@@ -113,9 +116,10 @@ class OperationTimeout(attempt: Attempt, detail: String, cause: Throwable? = nul
  * The session survives it. A well-formed status reply proves the channel parsed the request and
  * answered, which is the definition of a healthy channel; the refusal was of this one request. It
  * is also the ordinary answer from a server without the POSIX rename extension, so discarding the
- * session here would cost a handshake on every overwrite rename against such a server. Breakage
- * that only looks like this arrives carrying an IO error and is classified as a lost session
- * before it ever reaches this class.
+ * session here would cost a handshake on every overwrite rename against such a server - and
+ * counting it against the breaker would open the circuit on that same server for doing its job.
+ * Breakage that only looks like this arrives carrying an IO error and is classified as a lost
+ * session before it ever reaches this class.
  */
 class ServerFailure(attempt: Attempt, val statusCode: Int, detail: String, cause: Throwable? = null) :
     Recoverable(attempt, detail, cause, poisons = false)
@@ -154,9 +158,7 @@ class Unknown(attempt: Attempt, val rawMessage: String, cause: Throwable? = null
  * this one waits for the next poll instead.
  */
 class PermissionDenied(attempt: Attempt, detail: String, cause: Throwable? = null) :
-    Recoverable(attempt, detail, cause, poisons = false) {
-    override val disposition: Disposition get() = Disposition.RETRY_ON_THE_NEXT_TICK
-}
+    Recoverable(attempt, detail, cause, poisons = false)
 
 /**
  * The path is not there. Ordinary rather than exceptional on a directory another system is
