@@ -161,6 +161,22 @@ wait per poll, no session held across it. Spec Sec 7.5 and D36 record it. The ac
 its cap and its `synchronized` go. A hotfix session applies this before T11, alongside the
 traversal fix.
 
+### C12: model assignment and escalation
+
+The maintainer fixed which model builds which ticket, by what a wrong interleaving costs rather
+than by size: pool, cancellation ladder, compensation, watch and shutdown, and the pressure tiers
+on Fable 5.1; DSL, error table, staging, readiness, metrics and the Quarkus adapter on Opus 5.
+The table and the three escalation rules - concurrency work always goes to Fable, code with no
+test net always goes to Fable, and an Opus session stuck after two attempts is re-dispatched to
+Fable - are in the implementer brief.
+
+T1-T9 were built before the split, on Opus 5 by inheritance. T3, T4, T5, T7 and T8 sit on the
+Fable side of it, so each gets a fresh Fable 5.1 review-and-fix session before T11 builds on
+them: one for the pool and the ladder together (they share the `pool` package and the ladder is
+coupled to the registry), one for the write path's compensation. The reviews follow the
+implementer protocol - file:line and a failing test per finding, fixes in their own commits,
+no earlier test weakened, a progress entry.
+
 ### Open seams - things deferred, and who picks them up
 
 Coordinator-maintained. A ticket that closes one strikes it through in its own entry; a ticket

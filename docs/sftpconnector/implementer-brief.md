@@ -112,6 +112,23 @@ Fixed by the maintainer. The split is by what a wrong interleaving costs, not by
 T1-T9 were built before this split existed, on Opus 5. The Fable-tier ones among them (T3, T4,
 T5, T7, T8) each get a fresh Fable 5.1 review-and-fix session before T11 builds on them.
 
+**Escalation - three situations where an Opus 5 assignment is overridden to Fable 5.1:**
+
+1. **Low-level concurrency or a state-machine refactor** - locks, isolation, memory ordering,
+   a race being hunted. The boundary conditions are the ones a unit test cannot enumerate, and
+   a locally-optimal fix there is a hidden bug. Any ticket that turns out to touch the pool's
+   lock discipline, the in-flight set, the ladder or a `NonCancellable` path moves to Fable
+   regardless of the row it started on.
+2. **Changing code that has no test net under it.** Not this project's situation - the harness
+   is the point - but the rule stands for any later work that finds itself editing code no test
+   reaches: Fable, because fixing A while breaking B is what a narrow context does there.
+3. **Stuck-and-escalate.** An Opus 5 session that cannot get its ticket green after **two**
+   attempts, or reports itself looping, is stopped and the ticket is re-dispatched to a fresh
+   Fable 5.1 session with the stuck session's report attached. The coordinator does this; an
+   implementer's job is to report the stall honestly rather than try a third time.
+
+The coordinator passes `model` explicitly on every dispatch. Inheritance is not the mechanism.
+
 ## How to work the ticket
 
 You are running the `implement` workflow. In order:
