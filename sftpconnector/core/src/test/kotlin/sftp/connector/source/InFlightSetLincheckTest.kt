@@ -27,16 +27,16 @@ class InFlightSetLincheckTest {
     private val set = InFlightSet(FILES.size)
 
     @Operation
-    fun enter(@Param(name = "file") file: Int): Boolean = set.enter(FILES[file.of()])
+    fun enter(@Param(name = "file") file: Int): Boolean = set.enter(FILES[file.asFile()])
 
     @Operation
-    fun exit(@Param(name = "file") file: Int): Boolean = set.exit(FILES[file.of()], forGood = false)
+    fun exit(@Param(name = "file") file: Int): Boolean = set.exit(FILES[file.asFile()], forGood = false)
 
     @Operation
-    fun exclude(@Param(name = "file") file: Int): Boolean = set.exit(FILES[file.of()], forGood = true)
+    fun exclude(@Param(name = "file") file: Int): Boolean = set.exit(FILES[file.asFile()], forGood = true)
 
     @Operation
-    fun holds(@Param(name = "file") file: Int): Boolean = set.holds(FILES[file.of()])
+    fun holds(@Param(name = "file") file: Int): Boolean = set.holds(FILES[file.asFile()])
 
     @Operation
     fun size(): Int = set.size
@@ -51,7 +51,7 @@ class InFlightSetLincheckTest {
             .check(this::class.java)
 
     /** The generator has been seen to stray outside its configured range; every integer names a file. */
-    private fun Int.of(): Int = mod(FILES.size)
+    private fun Int.asFile(): Int = mod(FILES.size)
 
     private companion object {
         val FILES = List(3) { RemoteFile("/drop/f$it.csv", it.toLong(), Instant.EPOCH, isDirectory = false) }

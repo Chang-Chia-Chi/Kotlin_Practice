@@ -79,7 +79,7 @@ class AdversaryTest {
         val (sessionsBefore, threadsBefore, heapBefore) = checkNotNull(atThousand)
         val (sessionsAfter, threadsAfter, heapAfter) = checkNotNull(atEnd)
         println("adversary leak run: sessions $sessionsBefore -> $sessionsAfter, threads $threadsBefore -> $threadsAfter, post-GC heap ${heapBefore shr 20} MB -> ${heapAfter shr 20} MB")
-        assertThat(sessionsAfter).describedAs("open sessions").isLessThanOrEqualTo(MAX_SIZE)
+        assertThat(sessionsAfter).describedAs("open sessions").isBetween(sessionsBefore - MAX_SIZE, sessionsBefore + MAX_SIZE)
         assertThat(threadsAfter - threadsBefore).describedAs("threads gained").isLessThanOrEqualTo(2)
         assertThat(heapAfter - heapBefore).describedAs("post-GC heap gained").isLessThanOrEqualTo(HEAP_BAND)
     }
@@ -334,7 +334,11 @@ class AdversaryTest {
                 run.outcome = runCatching {
                     connector.source.poll(DROP).collect { event ->
                         when (event) {
-                            is FileSeen -> Held(++model.ids, event).also { model.held += it; run.handed += it }
+                            is FileSeen -> {
+                                assertThat(model.held.filter { it.inFlight && it.name == event.file.name && it.listedSize == event.file.size })
+                                    .describedAs("I7: ${event.file.path} was handed over while the consumer still had it").isEmpty()
+                                Held(++model.ids, event).also { model.held += it; run.handed += it }
+                            }
                             is SftpEvent.PollCompleted -> run.completed = event
                             else -> Unit
                         }
@@ -347,6 +351,7 @@ class AdversaryTest {
                 val failure = checkNotNull(run.outcome).exceptionOrNull()
                 log += "      poll -> ${failure?.let { it::class.simpleName } ?: "completed"}, handed over ${handed.map { it.first }}${faultsOf(run.log)}"
                 if (run.cancelled || closing) return@to
+                if (failure is AssertionError) throw failure
                 if (failure == null) {
                     val listing = checkNotNull(run.listing)
                     assertThat(handed).describedAs("I7: a poll hands over only what it listed, and nothing twice").isSubsetOf(listing.listed).doesNotHaveDuplicates()

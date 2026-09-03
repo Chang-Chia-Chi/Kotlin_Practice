@@ -72,9 +72,8 @@ abstract class PartitionTest {
          * neither side is told. Bytes already past the proxy still arrive. The moment the toxics
          * are in place is what [healOnceNoticed] measures from.
          */
-        fun drop(vararg directions: ToxicDirection) {
-            directions.forEach { proxy.toxics().timeout("drop-${it.name.lowercase()}", it, 0) }
-            partitionedAt = TimeSource.Monotonic.markNow()
+        fun drop(vararg directions: ToxicDirection) = damage {
+            directions.forEach { timeout("drop-${it.name.lowercase()}", it, 0) }
         }
 
         /**

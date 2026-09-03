@@ -83,6 +83,7 @@ class FakeSftpTransport(
      */
     fun snapshot(): Map<String, Int?> = synchronized(contents) { contents.mapValues { it.value?.size } }
 
+    /** The bytes of the file at [path], or null for a directory or nothing: what a download of it would deliver. */
     fun bytesAt(path: String): ByteArray? = contents[path]
 
     override suspend fun connect(): SftpConnection {

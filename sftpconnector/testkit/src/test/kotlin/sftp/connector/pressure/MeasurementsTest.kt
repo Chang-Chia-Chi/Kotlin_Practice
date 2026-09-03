@@ -21,6 +21,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.io.path.createDirectory
 import kotlin.time.Duration
+import kotlin.time.Duration.Companion.minutes
 import kotlin.time.Duration.Companion.seconds
 import kotlin.time.TimeSource
 
@@ -103,7 +104,7 @@ class MeasurementsTest {
         auth { password(USER, PASSWORD) }
         hostKey = HostKeyPolicy.AcceptAll
         pool { maxSize = MAX_SIZE; acquireTimeout = 60.seconds }
-        resilience { operationTimeout = 2.seconds * 60; transferTimeout = 2.seconds * 60 }
+        resilience { operationTimeout = 2.minutes; transferTimeout = 2.minutes }
         polling { staging { dir = stage } }
     }
 

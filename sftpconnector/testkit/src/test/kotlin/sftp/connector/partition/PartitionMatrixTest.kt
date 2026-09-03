@@ -29,6 +29,7 @@ import sftp.connector.source.SftpSource
 import sftp.connector.source.SkipCause
 import sftp.connector.transport.jsch.JschTransport
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.TimeUnit
 import kotlin.io.path.createDirectory
 import kotlin.io.path.exists
 import kotlin.io.path.listDirectoryEntries
@@ -99,11 +100,13 @@ class PartitionMatrixTest : PartitionTest() {
                 pool.withLease { it.connection.realpath(".") }
                 partition.damage { latency("hold-the-reply", DOWNSTREAM, REPLY_HOLD.inWholeMilliseconds) }
                 partition.tunnel.onNextClientRequest { partition.damage { resetPeer("reset", DOWNSTREAM, 0) } }
-                val healer = launch { partition.healOnceNoticed() }
+                var noticedAfter: Duration? = null
+                val healer = launch { noticedAfter = partition.healOnceNoticed() }
 
                 client.rename("/drop/a.csv", "/drop/temp/a.csv", Overwrite.REPLACE, expectedSize = CONTENT.length.toLong())
                 healer.join()
 
+                assertThat(noticedAfter!!).describedAs("the held reply ran into the reset, and the session was written off at once").isLessThan(REPLY_HOLD + HEAL_SLACK)
                 assertThat(remoteRoot.resolve("drop/temp/a.csv").exists()).isTrue()
                 assertThat(remoteRoot.resolve("drop/a.csv").exists()).isFalse()
                 assertThat(retries("rename")).describedAs("one retry, which found the landed file").isEqualTo(1.0)
@@ -173,14 +176,17 @@ class PartitionMatrixTest : PartitionTest() {
                     }
                 }
 
+                var lastEnabledAt = TimeSource.Monotonic.markNow()
                 repeat(FLAPS) {
                     partition.proxy.disable()
                     delay(FLAP_EVERY)
+                    lastEnabledAt = TimeSource.Monotonic.markNow()
                     partition.proxy.enable()
                     delay(FLAP_EVERY)
                 }
                 val quietFrom = events.size
                 untilEvent(events) { it is PollCompleted && events.indexOf(it) >= quietFrom }
+                val recovered = lastEnabledAt.elapsedNow()
                 sampler.cancelAndJoin()
                 assertThat(collector.isActive).describedAs("the watch never ended").isTrue()
                 collector.cancelAndJoin()
@@ -194,8 +200,9 @@ class PartitionMatrixTest : PartitionTest() {
                 assertThat(breakerStates).describedAs("the breaker opened").contains(2)
                 assertThat(breakerStates.lastIndexOf(0)).describedAs("and closed again after opening").isGreaterThan(breakerStates.indexOf(2))
                 assertThat(unmappedFailures()).describedAs("every failure of the flapping was classified").isZero()
+                assertThat(recovered).describedAs("from the last enable() to a completed poll").isLessThan(WAIT_IN_OPEN + 1.seconds + KEEPALIVE * 2 + HEAL_SLACK)
                 println(
-                    "partition measured: P5 $started ticks - $completed completed, $failed failed " +
+                    "partition measured: P5 recovered ${recovered.inWholeMilliseconds} ms after the last enable(); $started ticks - $completed completed, $failed failed " +
                         "(${events.filterIsInstance<PollFailed>().map { it.error::class.simpleName }.distinct()}), $skippedByBreaker skipped by the breaker; " +
                         "breaker half-open seen: ${1 in breakerStates}; sessions opened ${sessionsOpened()}, evicted as poisoned ${evictedAsPoisoned()}",
                 )
@@ -237,19 +244,20 @@ class PartitionMatrixTest : PartitionTest() {
         remoteRoot.resolve("drop").createDirectory()
         withPartitionedClient({ pool { keepAlive = KEEPALIVE; validationBypass = 1.minutes }; resilience { retry { maxAttempts = 1 } } }) { client, partition ->
             val rows = mutableListOf<String>()
+            fun opSecondsMillis() = meters.find("sftp_op_seconds").tag("op", "exists").timers().sumOf { it.totalTime(TimeUnit.MILLISECONDS) }
             suspend fun measure(toxic: String, arm: () -> Unit) {
                 pool.withLease { it.connection.realpath(".") }
                 arm()
-                val began = TimeSource.Monotonic.markNow()
+                val timedBefore = opSecondsMillis()
                 val outcome = runCatching { client.exists("/drop") }
-                rows += "| $toxic | ${outcome.fold({ "ok" }, { it::class.simpleName })} | ${began.elapsedNow().inWholeMilliseconds} ms |"
+                rows += "| $toxic | ${outcome.fold({ "ok" }, { it::class.simpleName })} | ${(opSecondsMillis() - timedBefore).toLong()} ms |"
                 partition.heal()
             }
             measure("none") {}
             measure("latency 200 ms downstream") { partition.damage { latency("lag", DOWNSTREAM, 200) } }
             measure("reset_peer upstream") { partition.damage { resetPeer("reset", UPSTREAM, 0) } }
             measure("timeout 0 both directions") { partition.drop(UPSTREAM, DOWNSTREAM) }
-            println("measured: one stat under each toxic, keepAlive $KEEPALIVE, one attempt\n| toxic | outcome | latency |\n|---|---|---|\n${rows.joinToString("\n")}")
+            println("measured: sftp_op_seconds of one stat under each toxic, keepAlive $KEEPALIVE, one attempt\n| toxic | outcome | op_seconds |\n|---|---|---|\n${rows.joinToString("\n")}")
         }
     }
 

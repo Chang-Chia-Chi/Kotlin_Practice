@@ -95,7 +95,7 @@ internal class Adversary(
 
     private suspend fun roll(call: Call, log: OpLog) {
         val op = call.operation
-        val attempt = Attempt.inside(ENDPOINT, op.name.lowercase(), call.path)
+        val attempt = attemptFor(call)
         val outcome = rnd.nextInt(100)
         when {
             op == Operation.Connect -> when {
@@ -119,10 +119,14 @@ internal class Adversary(
         if (took >= LONG_ENOUGH_TO_TIME_OUT) wireFaultSeen = true
         log.faults += "${describe(call)} stalled $took"
         delay(took)
+        // Killed while this call was on the wire: the answer never comes.
+        if (call.session in dead) lost(call, log, "killed mid-call")
     }
 
     private suspend fun lost(call: Call, log: OpLog, how: String): Nothing =
-        wire(call, log, how, SessionLost(Attempt.inside(ENDPOINT, call.operation.name.lowercase(), call.path), "adversary: the session died under this call"))
+        wire(call, log, how, SessionLost(attemptFor(call), "adversary: the session died under this call"))
+
+    private suspend fun attemptFor(call: Call): Attempt = Attempt.inside(ENDPOINT, call.operation.name.lowercase(), call.path)
 
     private fun wire(call: Call, log: OpLog, how: String, failure: Throwable): Nothing {
         wireFaultSeen = true

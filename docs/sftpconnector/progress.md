@@ -241,6 +241,7 @@ because each was correctly deferred by the ticket that found it.
 | A failing assertion before `close()` in a `runTest` that started a connector hangs the test instead of failing it | T9, seen by T13 | Whoever next writes one | The connector's scope shares the test scheduler but is not a child of the test's job, so `runTest` waits for a scheduler the housekeeper's `delay` loop never lets go idle. T13's connector test declares its readiness so the assertion cannot fail that way; a `try`/`catch` that closes the connector before rethrowing is the general shape |
 | ~~The breaker and `sftp_breaker_state` are per `SftpClient`~~ | T11 | ~~T14's binding~~ | **Ruled on by T14, and the same ruling covers R1 finding 6's `PoolMeters`.** The adapter produces one connector per application by construction - one `sftp.connector` prefix, one configuration, one produced bean - so neither collision can arise from it, and no guard was added for a shape the module cannot make. The colliding gauges themselves are untouched: a host that builds a second connector by hand still gets them, and the row below records what that costs |
 | A second connector for one endpoint on one registry silently reads the first one's pool gauges and breaker state | T14, restating T11 and R1 finding 6 | Whoever first hosts two connectors against one server | Registering a gauge whose id already exists returns the existing gauge, and `PoolMeters` and `ClientMeters` identify themselves by endpoint alone. Nothing throws; the numbers lie. The fix is a tag - the connector's name beside the endpoint - which is a change to spec 13's meter identity and therefore the maintainer's, not an adapter's. The adapter's own defence is that it cannot produce the second connector |
+| `SessionRegistry.lifetime()` draws its jitter from an unseeded `Random`, and the retry's jitter is Resilience4j's | T16 | Whoever next needs a replayable run of the connector | A seeded harness has to set `maxLifetimeJitter = 0.0` and `jitter = false` or its seed does not replay; a `Random` handed in with the clock would keep both the spread and the replay |
 
 ### C6: spec Sec 5.3 amended - the middle cancellation tier is `keepAlive`
 
@@ -3217,7 +3218,7 @@ policy that cannot check its own file.
 | Seam | Left by | Owner | What happens if it is forgotten |
 |---|---|---|---|
 | `HostKeyPolicy.Strict` does not check that its known-hosts file exists | T14 | Whoever next touches DSL validation | A strict policy with a mistyped or missing path is refused by the first handshake with the SSH library's message rather than at build time with the connector's. The builder is where the check belongs, beside the staging-directory check that already lives there |
-| `connection is closed by foreign host` on `connect` is not in the error table | T15 | Whoever next touches the mapper (T2's table) | It is what a connection cut during the version exchange produces, seen when a Toxiproxy toxic was removed from under a handshake. The unknown-wording default - retryable, session discarded - is right for it, so nothing is wrong; it is one WARN line per occurrence until the row is added |
+| ~~`connection is closed by foreign host` on `connect` is not in the error table~~ | T15 | ~~Whoever next touches the mapper (T2's table)~~ | **Closed by T16 (`bc39171`).** Partition row P4 reproduces it on every run: a proxy disabled behind Docker's port publisher accepts the connection and closes it before the version line, and P5 produced it twenty-two times in a minute. The row maps it to `ConnectFailed`; `JschErrorMapperTest` has the case |
 
 **For the next tickets:**
 
@@ -3407,3 +3408,194 @@ number."* The tests assert that today; the spec wording is the coordinator's to 
   calls add ports to the running forwarder.
 - **The reactor is longer now:** S11 alone is fifty seconds, and the partition class is eight
   seconds plus the container's first start.
+
+---
+
+## T16: Pressure: randomized adversary, model checking, partition matrix, soak
+
+Built on `claude-fable-5-1`. 253 tests were green at the start and 263 are green at the end
+(55 core - 53 plus the two model checks in their own execution - 202 testkit, 6 quarkus), with two opt-in groups outside the count.
+One defect was found and fixed in its own commit; two production refactors were made for the model
+checker and are declared below; no earlier test was weakened. The harness found four flaws in its own
+model before it found one in the connector, and each is described because the next reader will meet
+the same shapes.
+
+**Built:**
+
+- **Tier A** - `pressure/AdversaryTest` and `pressure/Adversary` (testkit). A real `SftpConnector`
+  over `FakeSftpTransport`, the network played from the sequence's own `Random` through the fake's
+  one hook: stall (10 ms, 1 s, 30 s - the last past the operation timeout), lose the reply, land a
+  rename and then lose its reply (the I11 case, done to the fake's contents by the hook), refuse with
+  `ServerFailure`, invent a `NoSuchFile` on a stat, rename or delete, an unknown wording, a refused or
+  rejected connect, and a killed session that answers nothing again - including a call already on the
+  wire. Eleven ops: `poll`, `ack`, `nack(redeliver)`, `download`, `cancelCollector`, `killSession`,
+  `advanceClock`, `addFile`, `blockTarget` (a stranger's file at the ack target, for `OverwriteRefused`),
+  `removeFile`, `growFile`; one sequence in five closes the connector mid-way with whatever is in
+  flight. 5000 sequences x 40 ops on virtual time, **52.6 s wall**; the model is the server as two
+  maps of names and the files the consumer holds; a failure is rerun on ever shorter prefixes and
+  rethrown with the seed, a replay line and the full operation log. Checked after every op: I1
+  (`total <= maxSize`), I7/I8 (the `sftp_inflight` gauge against the model, and no file handed over
+  while a held copy is still in flight), `sftp_pool_leak_total` zero, and the breaker: a window of one
+  makes "the breaker never counts a `Fatal`, an `OverwriteRefused` or an answered refusal" exact -
+  whenever no counted-class fault has happened since it last closed, it reads closed. At quiescence:
+  I4 (the pool fills to `maxSize` and the next caller is refused with `PoolExhausted`), no orphan
+  session (`openSessions == total`), I13, and I15 as a ledger - the fake's every file against the
+  model's. At the end: I9 on virtual time, `openSessions == 0`, `total == 0`, `created_total ==
+  evicted_total` (every session opened left for a reason), no `.part`. The leak run: 50,000 ops on
+  one seed, sessions 2 -> 2, threads 4 -> 4, post-GC heap 11 MB -> 18 MB alone and 19 -> 28 MB inside the reactor (the
+  harness's own operation log is most of that), all inside the band.
+- **Tier B** - `InFlightSetLincheckTest` and `SessionRegistryLincheckTest` (core), Lincheck 3.7 in a
+  surefire execution of its own with a 600 s fork timeout, `ModelCheckingOptions` only; 7 s and 30 s
+  per build. Lincheck 3.7 carries no JUnit 4, so there was nothing to exclude.
+- **Tier C** - `partition/PartitionMatrixTest`, P2 to P6 on T15's base, plus `Partition.damage` (any
+  toxic, with the mark the recovery is measured from). Green against Docker Desktop.
+- **Tier D** - `pressure/SoakTest`, gated on `-Dsftp.soak.minutes=N` through a surefire profile
+  (`@Tag("soak")`, excluded by default); run once here at N=5, numbers below.
+- **Measurements** - `pressure/MeasurementsTest` and the matrix's `measure_` row, `@Tag("measure")`,
+  run with `-Dsftp.measure`; observations only, in the table below.
+
+**Concepts named:** *Adversary* - the network as a seeded random plays it; its seam is the fake's
+hook, and its one addition is a per-operation log (`OpLog`, a coroutine-context element) of what it
+did to the wire, because the model that judges an outcome cannot see the wire. *Ledger* - the fake's
+contents against the model's, the whole of I15 in one equality. *Landed* - a rename the server
+carried out before its reply was lost; the model learns of it at the instant it lands, exactly as it
+learns of a listing, and the ack that follows may then honestly fail. *Lock body* - the
+non-suspending core of a lock-guarded structure, which is what a model checker can check.
+
+**Acceptance:**
+
+- [x] Tier A, the seeded fault model - `AdversaryTest.model_thousands of random sequences...`, 5000 x
+  40, 52.6 s; shrinking is `runShrinking`, exercised four times on the way (below).
+- [x] Tier A invariants after every op - `World.checkStep`; the quiescent ones in `checkQuiescent`,
+  because an entry being hung up on mid-op is neither leaked nor orphaned, and a `.part` mid-download
+  is the design. Deviation 1 says what runs where.
+- [x] Tier A leak check - `AdversaryTest.leak_fifty thousand ops...`, band asserted on all three.
+- [x] Tier B - both classes green; the approach, and why it is the lock body, in deviation 2.
+- [x] Tier C - one named test per row P2-P6, each asserting the disposition, the counter and the
+  recovery time; skip on no Docker is the base's `assumeTrue` from T15.
+- [x] Tier D - `SoakTest`, N=5 run below; CSVs in `sftpconnector/testkit/target/soak/`.
+- [x] Degradation recorded - the measurements table below.
+- [x] One defect, one commit, the row in its message (`bc39171`, P4). Spec contradictions raised
+  below, `spec.md` untouched.
+- [x] This entry.
+
+**Defect found and fixed:**
+
+1. **`connection is closed by foreign host` at `connect` was `Unknown`** - `JschErrorMapper`, commit
+   `bc39171`, found by P4 and reproduced by P5 twenty-two times in a minute. A proxy disabled behind
+   Docker's port publisher accepts the TCP connection and closes it before the version line, and
+   JSch reports that from `Session.connect`. The default for an unknown wording - retry, discard the
+   session - was right by accident, and `sftp_error_unmapped_total` counted every dial. T15 saw the
+   wording once from a toxic removed under a handshake and left it on the seams table; that row is
+   closed. Mapped to `ConnectFailed`; `JschErrorMapperTest` has the case, run red first. The same
+   shape exists in production: a load balancer with nothing behind it.
+
+**What the harness found in itself first** (each a false alarm whose fix made the check exact):
+
+- A 30 s stall's wire fault was consumed by the check before its timeout fired, and the breaker was
+  then "seen closed" with the fault still in flight. The flag clears only at quiescence.
+- With a breaker window of 2, an old counted failure still in the window opened the breaker on a
+  later *success*, so "closed means no fault since" was unsound. A window of one makes it exact.
+- The network moved a file whose reply it then lost, and the world grew the same name at the source
+  before the ack finished; the model's "unknown location" resolution found it at both places. The
+  model now learns of a landed move at the instant it lands (`Adversary.onLanded`).
+- The client buffers a listing and the tick checks the in-flight set only as it drains that buffer,
+  so an ack completing in between makes a file both listed and free. The listing expectation is now:
+  nothing handed over that was not listed, everything listed and free at listing time handed over,
+  and I7 asserted at the instant of each handover instead.
+
+**Deviations:**
+
+1. **The quiescent invariants run at quiescence, not after every op.** I4's fill-and-refuse probe,
+   `openSessions == total`, I13 and the I15 ledger are checked when the op's tail settled the world
+   (every op has a random tail of 0, 100 ms or 5 min 31 s; two in four are the long one). Mid-op, a
+   session being hung up on is open in the transport and gone from the registry, and a `.part` under
+   a download is the design; asserting either there would assert a transient. I1, I7/I8, the leak
+   counter and the breaker run after every op.
+2. **Tier B checks the lock bodies, not the suspending operations, and two production lines moved
+   for it.** `InFlightSet.admit` is not linearizable by design: a duplicate that passes the first look
+   while another poll admits the same file waits for room it will then not use, which no sequential
+   run can produce and which `SftpSourceTest.I7_a file two waiting polls both want...` proves
+   directly. The checker reported that first, then its own verifier failed with a null pointer on the
+   suspending wrapper. So `InFlightSet`'s lock bodies are now `enter`/`exit`, non-suspending and
+   `internal`, and those are what the model check covers (I7's double entry, I8's exit, the
+   for-good exclusion); the room the semaphore keeps is the library's. `SessionRegistry`'s `HOLDABLE`
+   became an `EnumSet`, because a model checker that makes identity hashes deterministic cannot find
+   an enum constant in a `HashSet` built before instrumentation (`hash(InUse) = 0` in the trace). The
+   registry run checks its single-lock calls (`checkOut`, `stats`, `beginClosing`, `closeEverything`):
+   its multi-call sequences - check out, dial, fill; hand back, hang up, close - are outside the lock
+   by design (I5), their intermediate states are observable on purpose, and a wrapper that composed
+   them was reported for exactly that. Those sequences are Tier A's and R1's. Not the coroutines
+   mismatch the ticket anticipated: suspend operations ran; the shape of the structures was the limit.
+3. **The world sets `maxLifetimeJitter = 0.0` and `jitter = false`.** `SessionRegistry.lifetime()` uses
+   an unseeded `kotlin.random.Random` and the retry's jitter is Resilience4j's own; either would make a
+   seed not replay. Seams row added.
+4. **The directory is kept under forty files.** `SftpClient.list` hands entries on with
+   `trySendBlocking`, which parks the calling thread once the channel's buffer is full; the fake answers
+   on the caller's own coroutine, so on the one test thread a listing over the buffer would deadlock
+   the test. Production runs the listing on the IO dispatcher and is unaffected; S11 covers 100k
+   against the real server.
+5. **P3 holds the reply with a `latency` toxic before the request goes out.** A `reset_peer` toxic
+   fires on the next bytes through its direction; the first staging (a tunnel stall plus a reset) left
+   nothing flowing through the proxy in either direction, and the rename sat until the operation
+   timeout. With the reply held for 500 ms inside the proxy, the reset added behind it the moment
+   the request has passed the tunnel is what the reply runs into, and the server heard the rename
+   with certainty. The retry's log line reads "is at /drop/temp/a.csv with the expected 15 bytes, so
+   the rename whose reply was lost had landed; reported as success". Not asserted on P1/P2: the class
+   of the first try's failure, which is not observable from outside a successful retry; it is proved by
+   exclusion (evicted as poisoned, nothing unmapped, and in P2 noticed inside the reset's time).
+6. **Tier D's recovery bound adds the tick interval and the breaker's wait in open** to the ticket's
+   `2 x keepAlive + max backoff`: a watch recovers on its next tick, and a breaker that opened lets
+   nothing through until its wait has run. Proposed decision entry below. The N=5 run never needed
+   either: every recovery was under 1.11 s against a bound of 8 s.
+7. **`FakeSftpTransport` gained `snapshot()` and `bytesAt()`**, so a model can be checked against the
+   truth without a listing and the hook can move a file the way the server would.
+
+**Spec findings raised, not applied** (C9's protocol):
+
+- **I15's "no landed move is reported as failed" holds only while a retry is permitted.** A rename
+  that landed and lost its reply is rescued by the retry's look at the target (I11); when that retry
+  is refused - the budget spent, the breaker open - the ack must report failure while the file is at
+  the target, and the file is then neither redelivered nor acked. The adversary models the move at the
+  instant it lands and asserts I11 only when a retry's stat saw the landed file. *Proposed:* "I15's
+  phantom-failure clause is bounded by the retry budget and the breaker; a lost reply on the last
+  permitted try is reported as failure, and the consumer's WARN line is the only record."
+- **Tier D's `2 x keepAlive + max backoff`** omits the watch's tick and the breaker's wait in open.
+  *Proposed:* "Recovery is measured heal-to-next-`PollCompleted` and bounded by `2 x keepAlive + max
+  backoff + interval + waitInOpen`."
+- **`InFlightSet`'s class comment says a duplicate never queues for room it will not use.** It does
+  when the duplicate arrived between the two looks; the outcome is still once, never twice.
+  *Proposed:* the comment says "seldom", and spec 7.3 says the second look is what keeps the promise.
+
+**Measurements** (D35; recorded, not asserted):
+
+| What | Setting | Observed |
+|---|---|---|
+| Tier A wall time | 5000 x 40 ops, virtual time | 52.6 s |
+| Tier A leak run | 50,000 ops, one seed | sessions 2 -> 2, threads flat (4 -> 4 alone, 29 -> 29 inside the reactor), post-GC heap +7 to +9 MB |
+| Tier B per build | model checking, 10 iterations x 500 | `InFlightSet` 7 s, `SessionRegistry` 30 s |
+| P2 reset mid-download | `keepAlive` 500 ms | session written off 26 ms after the reset |
+| P3 reply held then reset | reply held 500 ms | written off 542 ms after the mark; one retry; success once |
+| P4 proxy down, then back | breaker 3/50 %, `waitInOpen` 1 s, tick 300 ms | `PollFailed(ConnectFailed)`, breaker 2, then `PollCompleted` 1344 ms after `enable()`, 5 ticks skipped |
+| P5 flapping 3 s for 60 s | `maxSize` 2, tick 1 s | 61 ticks: 30 completed, 1 failed (`ConnectFailed`), 30 skipped; breaker 0 -> 2 -> 1 -> 0 seen; sessions never above 2; 10 opened, 9 evicted poisoned |
+| P6 close under a two-way drop | `drainTimeout` 1 s, `cancelGrace` 300 ms | closed in 1045 ms; `.part` gone; one `reason=shutdown` |
+| Acquire wait, `maxSize` 3, 30 rounds per caller | concurrency 1 / 2 / 3 / 4 / 5 | p50 34 / 31 / 27 / 274 / 398 us; p99 79 / 61 / 75 / 1104 / 839 us |
+| Three concurrent 100k listings | embedded server | 100,000 each in 1 m 44 s; post-GC heap 9 MB before, 38 MB peak used, 11 MB after |
+| One stat under each toxic, one attempt | `keepAlive` 500 ms | none: ok 37 ms; latency 200 ms: ok 208 ms; reset_peer: `SessionLost` 20 ms; timeout 0 both ways: `SessionLost` 1011 ms |
+| Soak, N=5 | `maxSize` 2, `keepAlive` 500 ms, tick 1 s, a file every 500 ms, a fault every 2-10 s | 42 faults (stall, kill, refuse); 585 produced, 585 delivered, none twice; threads 36 -> 37; post-GC heap 11.26 -> 11.45 MB (46 KB/min); `created_total` 26 against the sessions killed; breaker 0 at every sample; recovery 47-1106 ms, stalls slowest (2 x keepAlive), refusals fastest |
+
+**For the next ticket (T17, the deep review):**
+
+- Read `AdversaryTest`'s KDoc and the four self-findings above before reading the model; each one is a
+  timing fact about the connector that a reviewer will otherwise rediscover as a "bug".
+- The replay line in a failure is `runSequence(seed=..., ops=..., closeAt=...)`; call it from a
+  scratch test. The op log names every fault the network injected, per operation.
+- The adversary never faults `Close` or `Abort` (a real hang-up closes the socket whatever the peer
+  does), never injects `NoSuchFile` on a read, and only cuts a call the fake is stalling; a killed
+  session otherwise fails its calls at their next hook. A lost reply on `delete` is not simulated (no
+  delete action in the world). Those are the places a reviewer would widen it.
+- The Lincheck wrappers are deliberately narrow; deviation 2 says what a wider one reports and why.
+- `PartitionMatrixTest.measure_...` and `MeasurementsTest` are `@Tag("measure")`; `SoakTest` is
+  `@Tag("soak")`. The default reactor excludes both groups through `sftp.excludedGroups`.
+- The reactor is longer again: Tier A adds a minute, Tier B forty seconds, the matrix about two and a
+  half minutes with P5's sixty.
