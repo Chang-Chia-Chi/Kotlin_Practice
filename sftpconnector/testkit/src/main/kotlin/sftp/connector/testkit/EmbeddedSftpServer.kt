@@ -35,6 +35,13 @@ class EmbeddedSftpServer private constructor(
     val port: Int get() = sshd.port
 
     /**
+     * Sessions the server is holding right now. A client that hung up is gone from here within
+     * a moment; one that never hung up stays for as long as its keepalive keeps it alive, which
+     * is what makes a leaked session observable from the one place it cannot hide.
+     */
+    val liveSessions: Int get() = sshd.activeSessions.size
+
+    /**
      * Cuts every session the server is holding, the way a restart, an idle reaper or a firewall
      * dropping the flow does: no notice to the client, which goes on believing it has a session
      * until it tries to use one. It returns once the server side is really closed, so a test never

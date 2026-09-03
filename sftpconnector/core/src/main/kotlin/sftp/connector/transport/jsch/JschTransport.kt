@@ -8,6 +8,7 @@ import com.jcraft.jsch.SftpATTRS
 import com.jcraft.jsch.SftpProgressMonitor
 import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -28,6 +29,7 @@ import sftp.connector.transport.SftpTransport
 import java.io.InputStream
 import java.io.OutputStream
 import java.time.Instant
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.time.Duration
 
 /**
@@ -61,20 +63,37 @@ class JschTransport(
     /**
      * The transport is told nothing about retries, so every failure it raises reports the first
      * attempt. The layer that decides to try again is the layer that knows which try this is.
+     *
+     * Either returns a session the caller owns, or throws and the caller owns nothing. The
+     * handshake blocks a thread and finishes whether or not the caller is still waiting for it,
+     * and when the caller has been cancelled in the meantime the scope that carried the handshake
+     * throws its result away on the way back to the caller's dispatcher - a session with a socket
+     * and a reader thread that nothing above this method was ever handed and so nothing above it
+     * could ever close. So the session is kept hold of here as well, and hung up on when it turns
+     * out that nobody is left to hand it to. A caller cancelled before the handshake began never
+     * starts one.
      */
-    override suspend fun connect(): SftpConnection = withContext(io) {
-        errors.translating(Attempt(endpointLabel, "connect")) {
-            val session = openSession()
-            val channel = try {
-                (session.openChannel("sftp") as ChannelSftp)
-                    .also { it.connect(config.pool.connectTimeout.toTimeoutMillis()) }
-            } catch (failure: Throwable) {
-                // A session whose channel never opened is unusable, and left alone it would keep
-                // its socket and its reader thread for the life of the process.
-                session.disconnect()
-                throw failure
+    override suspend fun connect(): SftpConnection {
+        val opened = AtomicReference<SftpConnection>()
+        try {
+            return withContext(io) {
+                errors.translating(Attempt(endpointLabel, "connect")) {
+                    val session = openSession()
+                    val channel = try {
+                        (session.openChannel("sftp") as ChannelSftp)
+                            .also { it.connect(config.pool.connectTimeout.toTimeoutMillis()) }
+                    } catch (failure: Throwable) {
+                        // A session whose channel never opened is unusable, and left alone it
+                        // would keep its socket and its reader thread for the life of the process.
+                        session.disconnect()
+                        throw failure
+                    }
+                    JschConnection(session, channel, io, errors, endpointLabel)
+                }.also(opened::set)
             }
-            JschConnection(session, channel, io, errors, endpointLabel)
+        } catch (cancelled: CancellationException) {
+            withContext(NonCancellable) { opened.get()?.close() }
+            throw cancelled
         }
     }
 
