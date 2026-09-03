@@ -34,26 +34,27 @@ class QualityProcessor(private val check: (StagedObject) -> String?) : Processor
 /** Spec 6.3 `rename`: `{name}`, `{sourceName}`, `{yyyyMMdd}` (any date pattern) and attribute names; same file, new name. */
 class RenameProcessor(spec: ProcessorSpec.Rename) : Processor {
     private val pattern = spec.pattern
-    private val resolvers = TOKEN.findAll(pattern).map { resolver(it.groupValues[1]) }.toList() // parsed once
     override val produces = emptySet<String>()
 
-    private fun resolver(token: String): (StagedObject, ProcessContext) -> String = when {
-        token == "name" -> { o, _ -> o.name }
-        token == "sourceName" -> { _, c -> c.transfer.identity.sourceName }
-        DATE.matches(token) -> DateTimeFormatter.ofPattern(token).let { f -> { _, c -> f.format(c.clock.instant().atOffset(ZoneOffset.UTC)) } }
-        else -> { _, c -> c.attributes[token] ?: throw IllegalStateException("rename: attribute $token is not set") }
-    }
-
     override suspend fun process(payload: Payload, ctx: ProcessContext): Outcome = Outcome.Continue(Payload(payload.objects.map { o ->
-        var i = 0
-        o.copy(name = TOKEN.replace(pattern) { resolvers[i++](o, ctx) })
+        o.copy(name = expandPattern(pattern, o.name, ctx.transfer.identity.sourceName, ctx.attributes, ctx.clock))
     }))
-
-    private companion object {
-        val TOKEN = Regex("""\{([^}]+)}""")
-        val DATE = Regex("[yMdHmsS]+")
-    }
 }
+
+/** Rule 13's vocabulary, shared by `rename` and the target key: `{name}`, `{sourceName}`, a date pattern in UTC, or an attribute. */
+fun expandPattern(pattern: String, name: String, sourceName: String, attributes: Map<String, String>, clock: java.time.Clock): String =
+    TOKEN.replace(pattern) { m ->
+        val token = m.groupValues[1]
+        when {
+            token == "name" -> name
+            token == "sourceName" -> sourceName
+            DATE.matches(token) -> DateTimeFormatter.ofPattern(token).format(clock.instant().atOffset(ZoneOffset.UTC))
+            else -> attributes[token] ?: throw IllegalStateException("pattern $pattern: attribute $token is not set")
+        }
+    }
+
+private val TOKEN = Regex("""\{([^}]+)}""")
+private val DATE = Regex("[yMdHmsS]+")
 
 /** Spec 6.3 `zip`: every object into one archive named after the first, created through the context. */
 class ZipProcessor : Processor {

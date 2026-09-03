@@ -909,3 +909,156 @@ One INFO line per attempt: transfer id, event, channel, attempt, status, referen
 - Gotcha: `com.sun.net.httpserver.Headers` normalises header names (`X-api-key`), which is why
   the test reads them that way; the client sends what the config says.
 
+---
+
+## 06: Transfer pipeline, entry points and children
+
+**Built:** `infra.shuttle.core.TransferPipeline`, replacing the G0 shell: spec 4.1 stages 0 to 4
+for one source object. `TransferPipeline(route, algorithm, store, target, chain, bodies,
+providerExists, wake, hook, clock, registry, staging, usableSpace)`; `suspend fun run(event:
+RouteEvent.Seen, fetch: Fetcher)` (now `Unit`). One instance per route, safe to run concurrently:
+every per-object fact lives in a private `Run`. Stage 0 is the table of spec 4.3 from `find`:
+REJECTED and FAILED nack without redelivery and do nothing; STORED verifies the row's reference once
+and skips to the ack, or re-runs on the same row when the copy is gone; ACKED and DONE re-fetch a
+polled file (inside D40's window: nothing at all), re-ack it as `reacked` when the source digest is
+the row's own, or `supersede` it into the next revision when it is not (`shuttle_supersedes_total`);
+a redelivered message is verified and re-acked without a fetch; everything else runs from stage 1.
+Before stage 1 the injected usable-space function is read (D41): below `staging.minFree` the object
+is nacked with redelivery, no attempt counted, `shuttle_staging_deferred_total` incremented,
+`shuttle_staging_free_bytes{store}` refreshed either way. Stage 1 fetches into
+`<staging.dir>/<transfer id>/`, a directory the run creates and deletes in `finally` on every exit,
+including every file the chain created through the run's own `ProcessContext`. Stage 2 runs the
+chain, checks the notified channels' tables at freeze, writes `processed`, then expands the target
+key for every object (`expandPattern`, rule 13's vocabulary, now shared with `rename`) and rejects
+the transfer when two objects resolve to one key, naming both. Stage 3 stores one object on the
+row itself or N objects as N child rows through `children`; each child's `stored` is the one seam
+call that flips the parent when the last sibling lands (D42, the store's job). Stage 4 acks in the
+source's order (D6): poll moves first and writes ACKED after; subscribe writes ACKED first and acks
+the broker after. Every transition that can create outbox rows (`fetched`, `stored`, `acked`)
+wakes the notifier when the route attaches a channel to that moment. Every error is caught at the
+object boundary: `failedAttempt` on the row being driven (`maxAttempts` from the route, or 1 for a
+`FreezeFailure`), `nack(redeliver = true)` below the cap and `false` at it, one WARN, the stack at
+DEBUG. Meters: `shuttle_transfers_total{route,outcome}` (done, rejected, failed, reacked),
+`shuttle_stage_seconds{route,stage,result}` (fetch, process, store, ack), `shuttle_children_total`,
+`shuttle_supersedes_total`, `shuttle_staging_free_bytes`, `shuttle_staging_deferred_total`.
+
+**Concepts named:**
+
+- **The run** (`Run`) is one source object's pass through the stages; its `row` is the transfer an
+  error is charged to, null until a row is being driven, so a fetch that fails while re-checking a
+  finished identity, or a state store that is down before `seen`, nacks with redelivery and counts
+  nothing on any row.
+- **Resume** is stages 1 (ledger) to 4 over an already staged object; the full run, the STORED
+  re-run and the supersede all reach it, which is what keeps the entry-point table one function.
+- **`ledger(moment) { transition }`** is a transition that may create outbox rows: the route's
+  `notify` entries for that moment ride the seam call, and the wake follows only when there were any.
+- **`expandPattern`** (in `Processors.kt`) is rule 13's `{name}`, `{sourceName}`, date pattern and
+  attribute vocabulary as one function; `RenameProcessor` calls it now instead of its own resolvers.
+- **`TargetMetadata.SOURCE_MTIME`, `SOURCE_NAME`, `TRANSFER_ID`**: spec 7.1's three plain keys,
+  beside ticket 11's digest and attribute keys.
+
+**Acceptance:** all in `TransferPipelineTest` (19 tests).
+
+- *I1, I2, I7, I9, I10, I11, I16, I17 as named tests* -
+  `I1_S6_a_STORED_row_whose_copy_is_missing_is_stored_again_on_the_same_row_before_it_is_acked`,
+  `I2_the_only_source_writes_are_the_ack_and_nack_actions_of_the_trigger`, I7 inside `S10_...`
+  and `S11_...` (the next poll fetches and stores nothing),
+  `I9_staging_holds_no_file_after_a_processor_throws_after_a_store_fails_and_after_a_freeze_failure`,
+  `I10_the_ack_action_runs_only_once_the_transfer_is_STORED`,
+  `I11_a_failing_ACKED_transaction_leaves_the_row_STORED_with_no_outbox_row_and_the_attempt_counted`,
+  `I16_a_parent_is_acked_only_when_every_child_is_STORED_and_a_failed_child_fails_the_parent`,
+  `I17_S19_a_mirror_route_with_no_notifications_goes_none_to_DONE_and_creates_no_outbox_row`.
+- *S1, S10, S11, S12 both halves, S19, S33; I24* - `S1_vendor_drop_happy_path_one_file_one_channel`,
+  `S10_processor_Reject_is_REJECTED_nothing_stored_and_the_object_stays_until_redrive` (with the
+  re-drive re-running from fetch), `S11_fetch_fails_five_polls_in_a_row_is_FAILED_with_nack_no_redelivery`,
+  `S12_same_identity_re_dropped_after_DONE_with_the_same_digest_is_verified_and_acked_again_as_reacked`,
+  `I24_a_finished_identity_returning_with_a_different_digest_becomes_a_new_revision_and_the_old_row_is_untouched`
+  (revision 2 stored, acked and notified; revision 1 equal to its snapshot), `I17_S19_...`,
+  `S33_two_children_of_one_parent_on_one_key_reject_the_transfer_with_both_paths_in_the_reason`.
+- *Every row of spec 4.3* - none: `I17_S19_...`; SEEN, FETCHED, PROCESSED:
+  `a_row_parked_at_SEEN_FETCHED_or_PROCESSED_runs_fully_from_stage_1`; STORED true:
+  `S3_a_STORED_row_whose_verify_is_true_skips_to_the_ack_with_no_second_store`; STORED false:
+  `I1_S6_...`; ACKED/DONE: `S12_...`, `I24_...`, `D40_...` and the message half of
+  `a_subscribed_message_is_written_ACKED_before_the_broker_ack_and_a_redelivery_is_reacked_without_a_fetch`;
+  REJECTED, FAILED: `S10_...`, `S11_...`.
+- *Store once per object per successful run, verify once per STORED entry* - `target.calls` in
+  `S1_`, `S3_`, `I1_S6_`, `S12_`, `I16_` (two children, two stores).
+- *D40* - `D40_a_DONE_identity_listed_again_inside_recheckFinished_is_skipped_without_a_fetch_or_a_write_and_rechecked_outside_it`
+  (23 h: only `find` on the store, no fetch; 25 h: fetched and re-acked); `recheckFinished = 0s`
+  rechecks every poll in `S12_` and `I24_`.
+- *D41* - `D41_below_staging_minFree_the_object_is_deferred_with_redelivery_before_any_fetch_and_no_attempt_counted`
+  (both meters read, the run proceeds once the space is back).
+- *D42* - the pipeline calls `stored` once per child and never touches the parent; the seam
+  contract and both stores are ticket 03 and 10's (`StateStoreContract.D42_...`); `I16_` proves the
+  parent is STORED, acked once and DONE after the second child's `stored`.
+- *Staging empty after success and every failure path, including files a processor created* -
+  `stagingIsEmpty()` at the end of every scenario; `I9_` with a processor that creates a file then
+  throws, a failing store, and a freeze failure.
+- *Hook points* - `the_hook_points_of_spec_4_4_are_reached_in_order_on_a_polled_route` (fetch,
+  process, store, ledger stored, ack, ledger acked) and the subscribed test (ledger acked before ack).
+- *Progress entry appended* - this entry.
+
+Final run: ArchitectureTest 7, AttributeFreezeTest 4, BuiltInProcessorsTest 8, MappingRendererTest 12,
+NotifierTest 13, ProcessingChainTest 4, RulesTest 30, SurfaceTest 3, TransferPipelineTest 19,
+HttpChannelTest 8, StateStoreSchemaTest 2, ClockFixtureTest 1, FakeProcessContextTest 2,
+HookDriverTest 3, InMemoryStateStoreTest 18, InMemoryTargetTest 3, RecordingChannelTest 2,
+ScriptedSourceTest 2, YamlLoaderTest 10; 151 tests, 0 failures, 0 errors (`oracle` and `minio` excluded).
+
+**Deviations:**
+
+1. **A parent found at STORED (or finished) cannot be verified through the seam, so it re-runs.**
+   Spec 4.3 says "verify for every child" and S28 says verified children skip the store; the frozen
+   `StateStore` has no way to read a parent's children (`children(id, staged)` creates and replaces
+   them), and the parent row carries no reference of its own. `verified(row)` therefore answers
+   false for a parent, which is the spec's "any false: full run on the same row": the chain re-runs,
+   `children` replaces the rows, every child is stored again (an overwrite, D5). Debt for ticket 16
+   (S28, M2): a read of a parent's children on the seam, or `children` returning the existing rows
+   when the summaries match; then `verified` verifies each child and the store loop skips the true ones.
+2. **A child's failure is charged to the parent, not the child.** Spec 4.5 says "a child that reaches
+   `maxAttempts` fails the parent"; ticket 03's store does that through the child's `failedAttempt`.
+   But a re-run of a PROCESSED parent replaces its children (deviation 1), which would reset a child's
+   `attempts` on every retry and never reach the cap. A failing child store is a stage error of the
+   parent's run, so the parent's `attempts` climbs and FAILED at `maxAttempts` (I16 proven that way).
+   Revisit with deviation 1.
+3. **A `FreezeFailure` is `failedAttempt(id, reason, maxAttempts = 1)`.** The seam has no
+   `failed(id, reason)`; one attempt against a cap of one is FAILED in one transaction with the
+   reason on the row, and the trigger sees `nack(redeliver = false)`. It also adds one to `attempts`.
+4. **Inside D40's window the trigger is told nothing**: no ack, no nack. Spec 4.3 says skipped "with
+   no fetch and no state write"; a polled file under `none` stays listed whatever we say, and the
+   runner (07) owns whatever the connector needs to release the in-flight entry.
+5. **A finished polled row whose copy is gone and whose digest is unchanged re-runs on the same row**
+   (spec is silent): `fetched` moves the DONE row back to FETCHED and the run stores, acks and creates
+   `acked` deliveries again. I10 over a duplicate notification.
+6. **Children upload one after another**, not under `route.parallelism` (marked `ponytail:`); the
+   runner's parallelism bounds whole pipelines and no M1 route has children. D42's concurrent flip is
+   proven on the stores by ticket 10.
+7. **`seen` precedes the D41 check**, so a deferred new object already has a SEEN row with
+   `attempts = 0`; spec 4.1 asks for "no attempt counted", which holds.
+8. **Size: 258 main, 448 test lines** against 200 to 600. The correctness phase: every row of the
+   entry-point table, both halves of four scenarios and eight invariants have a test each, and none
+   is padding.
+
+**For the next ticket:**
+
+- **07 (runner):** construct one `TransferPipeline` per route: `chain = ProcessingChain(route.process.map
+  { processorFor(it, custom) }, algorithm)`, `algorithm = route.digest ?: config.digest`, `bodies` as
+  the notifier's map, `wake = notifier::wake`, `staging` from the SFTP store the route fetches from,
+  `usableSpace` left to its default. `run` never throws except `CancellationException`; launch it
+  under the route's `SupervisorJob` scope behind `Semaphore(route.parallelism)` and count
+  `shuttle_inflight` there. Reconciliation's "same function stage 4 uses" is `store.acked(id,
+  requests(ACKED))` plus `wake` when the list is not empty; the pipeline does not expose it, so the
+  runner writes those two lines itself (or lift `ledger` out if a third caller appears).
+- **08 (crash matrix):** every point of spec 4.4 except `afterDeliverySent` is reached with the
+  transfer id (child id at `afterStore` and `afterLedgerStored` of a child); `HookDriver.crash` at any
+  of them leaves staging empty (the `finally` runs on the `CancellationException`) and the row as the
+  matrix says. The poll order is ack, `afterAck`, ledger, `afterLedgerAcked`; subscribe is ledger,
+  `afterLedgerAcked`, ack, `afterAck`. To fail one specific transaction with the one-shot
+  `failNextDeliveryInsert`, arm it from a hook (see `I11_`): every transition inserts, even with no
+  events.
+- **13 (SFTP source):** the `Fetcher` receives `event.source.path` and the staging path
+  `<dir>/<transfer id>/<source name>`; it must create the file itself and name the `StagedObject`
+  after the source object. The `Seen.ack` is the whole ack action (move, delete, none, callback);
+  the pipeline calls it exactly once per successful run and once more per re-ack.
+- **16 (expand, S28):** `ProcessContext.fetch` throws `NotImplementedError` in the pipeline's
+  context; deviation 1 and 2 are yours.
+

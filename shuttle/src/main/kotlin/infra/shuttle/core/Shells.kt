@@ -4,13 +4,8 @@ import kotlinx.coroutines.flow.Flow
 
 /*
  * G0 shells: the names later phases fill in. Every method throws until its phase lands
- * (G5 pipeline, G6 runner and supervisor, G16 expand).
+ * (G6 runner and supervisor, G16 expand).
  */
-
-/** Spec 4.1 stages 0 to 4 for one source object (G5). */
-class TransferPipeline {
-    suspend fun run(event: RouteEvent.Seen, fetch: Fetcher): Nothing = throw NotImplementedError()
-}
 
 /** The collector around the pipeline and the end-of-poll reconciliation (G6). */
 class RouteRunner {

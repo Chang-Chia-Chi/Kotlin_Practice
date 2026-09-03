@@ -63,6 +63,9 @@ object TargetMetadata {
     const val DIGEST = "digest"
     const val DIGEST_ALGORITHM = "digest-algorithm"
     const val ATTRIBUTE_PREFIX = "attr-"
+    const val SOURCE_MTIME = "source-mtime"
+    const val SOURCE_NAME = "source-name"
+    const val TRANSFER_ID = "transfer-id"
 }
 
 /** The row-side facts of a staged object: everything in spec 6.1 except the local path. */
