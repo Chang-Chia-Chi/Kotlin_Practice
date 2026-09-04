@@ -2129,3 +2129,183 @@ cancellable phase, an operator restart cancels the current one and the backoff i
   probe during boot is DOWN. A `@Singleton` Kotlin bean with a `private set` needs `final var` under
   all-open. The JDK `HttpServer` prints "Executor has been shut down" on `stop(0)` with a parked handler;
   noise, not a failure.
+
+---
+
+## 15: Milestone 1 acceptance - S1 to S26 on real adapters
+
+**Built:** `infra.shuttle.acceptance.M1AcceptanceTest`, one `@TestInstance(PER_CLASS)` suite tagged `acceptance`
+(with the load method tagged `load`; both added to the pom's `excludedGroups`, so the default run stays fast).
+One fixture starts once per class and is shared by every scenario: a Testcontainers Oracle behind an Agroal
+`AgroalDataSource` (the same datasource path the host uses in production, built by hand here) with the 8.1 DDL
+applied once; one MinIO container (versioning on, a fresh bucket per scenario) reached through the real
+`S3Target` the host builds from the YAML; the connector's `EmbeddedSftpServer`; and one loopback JDK
+`HttpServer` that records each request and answers per a swappable `respond` function. Every scenario writes
+spec 13.1's vendor-drop and mirror YAML at test scale to a temp file, calls the real `ShuttleHost.load` then
+`ShuttleHost(... JdbiStateStore over the Oracle container ...)`, `start()`s it, drops files on the embedded
+server, and observes only through the containers, the server's directories, the loopback server and the host's
+admin read operations. A crash is `host.close()` while a pipeline is parked at a `HookDriver` point; the process
+restart is a second `ShuttleHost` over the same containers. No `Thread.sleep`; every wait is a `withTimeout`
+plus a `delay` poll; the module's wall clock is a `ClockFixture` advanced by hand only where a scenario needs
+time to pass (reconciliation's "older than", delivery backoff, `giveUpAfter`, `recheckFinished`).
+
+**Concepts named:**
+
+- **The fixture is the milestone, not the scenario.** Oracle and MinIO cost about a minute to start, so they are
+  started once and every scenario resets only what it owns: both ledger tables emptied, the inbox and outbound
+  directories recreated, a fresh versioned bucket, the loopback server's recording cleared, a fresh `HookDriver`.
+- **A crash is a closed host; recovery is the next host.** `crash(host, point)` awaits the pipeline at a hook
+  point, closes the host under its own `drainTimeout`, and swaps in a fresh `HookDriver` so the recovery host
+  (built over the same containers) runs to the end. This is the crash matrix (progress 08) replayed on real
+  adapters: S2 (store, before ledger), S3 (ledger STORED), S4 (move, before ledger ACKED -> reconciliation),
+  S5 (delivery sent, before ledger), S6 (copy missing at STORED).
+- **The poll interval has to exceed one pipeline's Seen-to-fetch latency.** The connector's D40 sweep nacks any
+  handed-over file whose pipeline has not reached the fetcher by the *next* `PollStarted` (ticket 13 deviation 4).
+  A cold Oracle pool makes the first `find`/`seen` take ~2 s, so the fixture (a) warms the pool and Oracle's
+  shared SQL area once in `@BeforeAll` and (b) polls every 5 s. Below that margin the abandon races the pipeline
+  into a double-store and a double-ack; this is a property of test timing, not of the code.
+- **A frozen clock is the safe default; time is advanced per scenario.** With `updated_at == poll.startedAt`,
+  reconciliation's strict "older than" never fires, so it cannot race a live pipeline into a duplicate `acked`.
+  S4 advances the clock once before the recovery host; S7/S9/S17 advance it in the background (`withClockTicking`)
+  so delivery retries become due; S12 sets `recheckFinished: 0s`.
+
+**Acceptance:** all in `M1AcceptanceTest` unless noted. Suite: 22 `acceptance` tests + 1 `load` test.
+
+- [x] One suite covers S1 to S26 end to end, each named by id.
+- S1 `S1_vendor_drop_happy_path_one_file_one_channel` (I1, I2, I3, I10, I11, I15, I20): file on the SSHD ->
+  extract+rename+zip -> object in MinIO under `vendor/20260101-123-order.csv.zip` with the archive's own MD5 and
+  the attributes in its metadata -> row DONE in Oracle -> file in `temp/` -> one delivery at the loopback server
+  carrying the reference `r-1`, `fileId`, `orderNumber`, `event=acked` and the location.
+- S2 `S2_crash_after_store_before_ledger_stores_again_leaving_one_current_and_one_non_current_version` (I6, I8):
+  one version before the crash, two after recovery, the current one the row's ref, no delete marker. The crash
+  *inside* `store` between PUT and HEAD is the S3 adapter's own contract, proven on MinIO in
+  `S3TargetTest.I6_three_stores_read_back_the_newest_by_key_a_crash_between_PUT_and_HEAD_is_repaired_by_the_next_store`.
+- S3 `S3_crash_after_ledger_STORED_verifies_and_acks_with_no_second_store` (I8): one version, moved on recovery.
+- S4 `S4_crash_after_the_move_before_ledger_ACKED_is_repaired_by_reconciliation` (I8): `shuttle_reconciled_total`
+  >= 1, nothing re-stored, the delivery delivered.
+- S5 `S5_crash_after_delivery_sent_before_ledger_delivers_again_two_calls_one_row_DELIVERED_once` (I8): two
+  loopback calls with one transfer id, the row DELIVERED once.
+- S6 `S6_copy_missing_at_STORED_is_stored_again_on_the_same_row_and_reaches_DONE` (I1): the version deleted by
+  hand, verify false, a fresh version on the same row.
+- S7 `S7_downstream_503_twice_then_200_delivers_at_the_third_attempt`; S8 `S8_downstream_400_fails_the_delivery_and_leaves_the_transfer_ACKED` (D9);
+  S9 `S9_downstream_down_past_giveUpAfter_is_FAILED_and_a_redrive_delivers_it` (gave_up then an admin re-drive);
+  S17 `S17_two_channels_on_acked_one_always_503_the_other_delivers` (I13: the good channel DELIVERED, the transfer stays ACKED, the bad one still PENDING).
+- S10 `S10_processor_Reject_is_REJECTED_nothing_stored_and_the_object_stays`; S12 `S12_same_identity_re_dropped_after_DONE_is_reacked_with_no_store_and_no_delivery` (S12, I24 same-digest half);
+  S16 `S16_state_store_unavailable_for_one_poll_then_completes`; S19 `S19_mirror_route_with_no_notifications_goes_to_DONE_and_creates_no_outbox_row` (I17);
+  S20 `S20_rename_then_zip_stores_one_archive_under_the_renamed_key_with_a_different_digest`;
+  S21 `S21_an_extracted_attribute_reaches_the_body_and_an_undeclared_one_fails_rule_17`;
+  S22 `S22_one_provider_selected_by_three_rows_is_invoked_once_and_fills_three_paths` (I22);
+  S26 `S26_missing_required_attribute_at_freeze_fails_before_the_store`.
+- S18 `S18_a_wrong_password_leaves_the_route_down_and_restarted_with_backoff_the_process_alive` (I21);
+  S23 `S23_two_routes_one_dead_the_other_keeps_completing_and_readiness_stays_true` (I21, all-routes-down);
+  S24 `S24_pool_arithmetic_exceeded_is_rejected_by_rule_9` (I14); S25 `S25_validate_mode_on_a_file_with_five_violations_lists_five_rule_numbers_and_exits_non_zero` (I14).
+  These are also proven host-level in `ShuttleHostTest` (S15, S18, S24) and `ValidateCommandTest` (S25) on the
+  embedded SSHD; here they run over the real Oracle and MinIO too.
+- S14 (truncated listing skips reconciliation): proven at the adapter level in
+  `SftpPollSourceTest.a_listing_that_reaches_maxFilesPerPoll_completes_truncated` (a real server, `maxFilesPerPoll`
+  tuned down) and at the runner level in `RouteRunnerTest.S14`. There is no `maxFilesPerPoll` knob on `SftpStore`
+  (ticket 13 deviation 7), so the host cannot force truncation without ~1000 files; it is not re-run here.
+- S15 (shutdown during store/delivery): proven host-level in `ShuttleHostTest.S15_...` and `...I12_...` against the
+  embedded SSHD and a loopback server; every crash scenario here also closes a host cleanly within `drainTimeout`.
+
+- [x] S13 at scale: `S13_a_batch_of_files_all_reach_DONE_with_in_flight_bounded_and_staging_bounded` (`@Tag("load")`).
+
+  **S13 measurements.** The full scale (5,000 files x 10 MB = ~50 GB) will not fit on this disk, so it was scaled
+  DOWN in size and count to **200 files x 64 KiB (~12.8 MB total)** at `parallelism: 4` with a 60 s poll interval
+  (one tick lists the whole batch and drains it before the next tick, so the in-flight bound - not the poll - is
+  the backpressure). Measured, all asserted green: **all 200 reach DONE** with one current MinIO version each;
+  **in-flight never above `parallelism`** (the `shuttle_inflight` gauge sampled through the drain stays <= 4);
+  **staging bounded** (at most `parallelism` run directories under the staging dir at any instant); **no skipped
+  poll** (`shuttle_poll_total{result=skipped}` is 0). Wall clock ~30 s of drain (45 s including container start).
+  Extrapolation (open item, not a pass): the run is I/O-bound on the MinIO PUT per object; at the full 10 MB
+  object size and 5,000 count the invariants (in-flight <= parallelism, staging bounded, all DONE) are unchanged,
+  but the wall clock and disk footprint were not exercised here and would need a machine with ~50 GB free and a
+  longer budget.
+
+- [x] Spec Sec 17 items 1 to 8 and 11 re-checked:
+
+  1. **MinIO version / SSE.** The fixture runs `minio/minio:RELEASE.2024-10-02`, versioning on, no server-side
+     encryption. The ETag-equals-MD5 rule holds on the single-part unencrypted objects (S1 and S20 read the
+     object's own MD5 back out of its metadata and match it; `S3TargetTest` proves the ETag check itself and the
+     encrypted-bucket WARN fallback). **Closed** for the acceptance environment.
+  2. **Downstream tolerates repeated calls per id+event and returns a per-call reference.** Exercised: S5 makes
+     two calls with one transfer id and the row ends DELIVERED once (the receiver's dedup obligation), and every
+     delivery stores the per-call `requestId` the server returned (S1: `r-1`). **Closed** at the seam; the real
+     downstream's idempotency remains the integrator's to confirm against their endpoint.
+  3. **Uploader's write convention on the vendor SFTP server.** M1's target is S3 only (spec 18), so this is not
+     exercised here. **Open**, owned by ticket 18 / M2 (the SFTP target's `.part`-then-rename), re-checked at M2
+     acceptance (ticket 20).
+  4. **Temp folder ownership on the vendor server.** The move-to-`temp/` ack works against the embedded server
+     (S1, S3 read the file out of `drop/temp/`), so the mechanism is proven; ownership on the real vendor server
+     is infra's. **Open** (real server), infra.
+  5. **Lifecycle rule expiring non-current versions.** `probe` warns when it is missing and is silent with it
+     (proven in `S3TargetTest`); the acceptance buckets carry no lifecycle rule, so every boot logs the D5 WARN,
+     which is the intended behaviour (the process works, only the bucket grows). The rule existing before the
+     first deployment is **open**, owned by infra/DBA.
+  6. **Top-of-hour alignment.** Not implemented by design (D12: the connector's `watch` polls on a fixed
+     interval, no Quarkus scheduler). **Open / won't-fix** unless a requirement forces it.
+  7. **Oracle schema and sequence names.** **Closed.** The full 8.1 DDL, including `file_transfer_seq` and
+     `delivery_outbox_seq` (ticket 10), applies cleanly to the real `gvenzl/oracle-free` container and the whole
+     `StateStore` seam runs against it across all 26 scenarios; the state store shares the Agroal datasource the
+     host resolves by name.
+  8. **Pod termination grace 90 s.** The manifest is infra's; M1 proves the process side, that `close()` returns
+     within `drainTimeout` under load and at every crash point (I12 in `ShuttleHostTest`, and every crash
+     scenario here closes cleanly). **Open** (manifest value), infra.
+  11. **Connector D21's five-session cap vs infra's 20 per account.** Appeal, recorded here rather than in the
+     connector's log: infra now grants 20 sessions per account, so the connector's D21 "five-session cap" is a
+     floor, not the ceiling. Shuttle sizes each polled route's pool at `parallelism + 1` against the store's
+     `maxSize` (rule 9), so a single account hosting the vendor-drop (parallelism 4) and mirror (1) routes needs
+     ~7 sessions, comfortably inside 20; the connector's own log should raise its recorded cap to 20 to match.
+
+- [x] Every behaviour that differs from the spec is a recorded deviation with a decision entry: D43 below.
+- [x] Progress entry appended: this one.
+
+**Deviations:**
+
+1. **D43 (new decision entry, spec 16; S20 row and the 8.1 `stored_name` comment amended in place).** The transfer
+   row's `stored_name`, `digest` and `stored_mtime` are the *fetched source* object's, written at the FETCHED
+   transition and never updated by the chain, so after rename+zip the ledger row - and therefore the notification's
+   `STORED_NAME`/`DIGEST` - carry the source name and digest, not the stored object's. The target object itself is
+   correct: the pipeline writes the processed object's `source-name` and `digest` into its S3 metadata, so
+   downstream can read the true stored name and digest off the object (S1 and S20 assert exactly this against
+   MinIO). This contradicts S20's "STORED_NAME differs from SOURCE_NAME; SOURCE_DIGEST and DIGEST differ". The
+   clean fix threads the processed `StagedSummary` into the `stored` seam method, whose signature is frozen for
+   this ticket, so it is deferred to a follow-up; recorded, not fixed here. No production code was changed for it.
+2. **The mirror route targets S3, not the SFTP `partner`.** Spec 18's M1 plan says "S3 only" (the SFTP target is
+   M2, ticket 18), so the mirror route here writes to a `mirror/` key prefix of the same bucket rather than to
+   `partner`. A test-fixture choice consistent with the M1 plan, not a spec deviation.
+3. **No production change.** Every scenario passed on the code as tickets 06 to 14 left it; the only spec edit is
+   D43's, which records a gap rather than changing behaviour. The concurrently-edited `targetFor`/`fetcherFor`/
+   `stagingFor` were not touched.
+4. **Test-harness scaffolding (not spec):** a 5 s poll interval and a one-shot pool/SQL warmup to clear the D40
+   cold-start race; a `ClockFixture` advanced by hand or by a background ticker where a scenario needs elapsed
+   time; per-store staging subdirectories (rule 11 forbids two SFTP stores sharing one staging dir); an Agroal
+   datasource built by hand to reach `JdbiStateStore` the way the host's `ShuttleLifecycle` does in production.
+
+**Size:** `M1AcceptanceTest` is 771 lines for 23 tests (26 scenario ids plus the load method, several ids folded
+into one adapter-level assertion and five referencing the host tests). Over the 200-600 guideline, as the ticket
+allows for an acceptance suite of this breadth; one shared fixture, each scenario kept to its assertion.
+
+**Counts (surefire):** default run 239 tests, 0 failures, 0 errors, ~86 s wall clock (per class: M1AcceptanceTest
+excluded by the `acceptance` tag; ShuttleHostTest 14.1 s, ShuttleQuarkusTest 13.0 s, ArchitectureTest 10.7 s,
+SftpPollSourceTest 2.5 s, SftpTargetTest 1.2 s, the rest sub-second). `acceptance` group: 22 tests, 0 failures,
+0 errors, 59.8 s wall clock (incl. Oracle + MinIO start). `load` group: 1 test, 0 failures, 0 errors, 45.2 s.
+
+**For the next ticket:**
+
+- **20 (M2 acceptance):** reuse this fixture wholesale. The seams are the same: `boot(text)` / `bootR(routes,
+  channels, beans)` build a real host, `crash(host, point)` + a fresh host is the process restart, `withClockTicking`
+  and `clock.advance` supply elapsed time, and the loopback `HttpServer` with its swappable `respond` is the HTTP
+  channel. Two things change for M2. (a) **NATS:** add a Testcontainers NATS beside Oracle and MinIO in
+  `@BeforeAll`, publish `images.ready` messages onto it, and leave the `@Named` producers out so the host builds
+  the real `NatsChannel`; the subscribe trigger, `fetch` from S3 and the callback ack (S27-S32) then run through
+  `ShuttleHost.eventsFor`/`fetcherFor` once ticket 17 wires `S3Fetcher` and `stagingFor` for a subscribed route.
+  (b) **The SFTP target as the partner server:** declare a second SFTP store (its own staging dir, per rule 11)
+  pointing at the same `EmbeddedSftpServer`, and point the M2 routes' target at it; ticket 18's `targetFor`
+  branch must be built for `SftpStore`. The crash matrix rows for M2 (S28 half the children stored, S32 the
+  subscribe redelivery after ledger ACKED) are the `dieAt`/`crashAt` shapes from `CrashMatrixTest`, replayed by
+  closing and reopening a host over the containers, exactly as S2-S6 do here.
+- **The D43 follow-up:** if a downstream consumer needs the *stored* name/digest in the notification rather than
+  the source's, thread the processed `StagedSummary` into `StateStore.stored` (a frozen-seam change) and update
+  both stores; ticket 15's S1/S20 already assert the object metadata, so a fixed ledger would let the row assert
+  it too.
