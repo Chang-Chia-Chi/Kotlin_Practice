@@ -56,6 +56,14 @@ fun expandPattern(pattern: String, name: String, sourceName: String, attributes:
     }
 
 /**
+ * Spec 7.1: the key one object of the final payload is stored under. A `bucket` or a `directory` is
+ * *where* the store puts it, never part of the key - the pipeline and `shuttle try` both resolve it here,
+ * so an operator's offline key is the key the target gets (D35).
+ */
+fun targetKey(target: Target?, name: String, sourceName: String, attributes: Map<String, String>, clock: java.time.Clock): String =
+    expandPattern(target?.key ?: "{name}", name, sourceName, attributes, clock)
+
+/**
  * Rule 13 at run time. The rule judges the *pattern* at boot, and `{name}` is the one part of a key
  * that the pattern does not carry: an unzip entry named `../../escaped.txt`, a rename, or an attribute
  * holding such a segment puts it into the resolved key instead. A `..` segment names a path outside the

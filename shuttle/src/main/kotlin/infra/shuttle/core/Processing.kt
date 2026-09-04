@@ -46,6 +46,33 @@ interface ProcessContext {
     val clock: Clock
 }
 
+/**
+ * Spec 6.2 over one run's staging directory: the attributes accumulate, every file a processor creates is
+ * allocated inside [dir] so it dies with the run (I9, I18), and `expand`'s fetch goes through [fetchers],
+ * keyed by store name. The pipeline and `shuttle try` share it, so what an operator tries offline is the
+ * context the route runs under (D35).
+ */
+class StagingContext(
+    override val transfer: TransferView,
+    override val source: SourceView,
+    private val dir: Path,
+    override val clock: Clock,
+    private val algorithm: DigestAlgorithm,
+    private val fetchers: Map<String, Fetcher>,
+) : ProcessContext {
+    override val attributes = LinkedHashMap<String, String>()
+    private var created = 0
+
+    override fun setAttribute(name: String, value: String) { attributes[name] = value }
+
+    override fun newStagedFile(name: String): Path = dir.resolve("${created++}-${name.substringAfterLast('/')}")
+
+    override suspend fun fetch(store: String, path: String): StagedObject {
+        val fetcher = fetchers[store] ?: throw IllegalStateException("route ${transfer.route.value}: no fetcher for store $store")
+        return fetcher(path, newStagedFile(path), algorithm)
+    }
+}
+
 data class TransferView(
     val id: TransferId,
     val route: RouteName,

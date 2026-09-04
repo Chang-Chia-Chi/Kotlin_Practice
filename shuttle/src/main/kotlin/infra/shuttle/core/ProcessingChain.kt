@@ -13,6 +13,14 @@ class StageError(stage: String, cause: Throwable) : RuntimeException("$stage: ${
 /** Spec 6.4: at attribute freeze a notified channel's table could not be satisfied; FAILED with no retry until re-drive. */
 class FreezeFailure(message: String) : RuntimeException(message)
 
+/**
+ * What one step of the chain did, seen from outside: its position, the attributes it set or changed, and
+ * its outcome. `shuttle try` prints these (D35); a running route observes nothing, which is the default.
+ */
+fun interface StepObserver {
+    fun stepped(index: Int, set: Map<String, String>, outcome: Outcome)
+}
+
 sealed interface ChainResult {
     /** The final payload, digests recomputed for new files, and the attributes frozen (I15). */
     data class Done(val payload: Payload, val attributes: Map<String, String>) : ChainResult
@@ -37,10 +45,11 @@ class ProcessingChain(
     private val io: CoroutineDispatcher = Dispatchers.IO,
 ) {
 
-    suspend fun run(payload: Payload, ctx: ProcessContext): ChainResult = withContext(io) {
+    suspend fun run(payload: Payload, ctx: ProcessContext, observe: StepObserver = NOTHING): ChainResult = withContext(io) {
         val inputs = payload.objects.map { it.path }.toSet()
         var current = payload
-        for (processor in processors) {
+        for ((index, processor) in processors.withIndex()) {
+            val before = ctx.attributes.toMap()
             val outcome = try {
                 processor.process(current, ctx)
             } catch (e: CancellationException) {
@@ -48,6 +57,7 @@ class ProcessingChain(
             } catch (e: Exception) {
                 throw StageError(processor::class.simpleName ?: "processor", e)
             }
+            observe.stepped(index, ctx.attributes.filter { (k, v) -> before[k] != v }, outcome)
             when (outcome) {
                 is Outcome.Reject -> return@withContext ChainResult.Rejected(outcome.reason)
                 is Outcome.Continue -> current = outcome.payload
@@ -68,6 +78,8 @@ class ProcessingChain(
     }
 
     companion object {
+        private val NOTHING = StepObserver { _, _, _ -> }
+
         /**
          * Spec 6.4, at attribute freeze: every notified channel's table checked against the frozen
          * attributes. A row reading an attribute that is not set, with no default and `required`,
