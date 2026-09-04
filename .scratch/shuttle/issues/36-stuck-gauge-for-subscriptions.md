@@ -10,13 +10,13 @@ Spec 5.
 
 **Nature:** metrics wiring; one default
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `RouteRunnerTest` (or `RouteSupervisorTest`): a subscribed route on the virtual clock refreshes `shuttle_stuck_transfers` every `sweepEvery` without any poll event; red before the fix
-- [ ] `stuckAfter` defaults per spec 11 (three poll intervals for a polled route; three `inProgressEvery`, or the value spec 11 names, for a subscribed one); the default lives in one place (the data class or the loader, matching the module's convention, progress 02) and rule 7 still refuses zero
-- [ ] The refresh for subscriptions is scheduled where the route's lifetime already is (the runner or supervisor), not a new scope; it stops with the route
-- [ ] Spec 11's sentence and 13.1's `stuckAfter` comment state the default; the YAML grammar and DSL need no new key
-- [ ] Progress entry appended
+- [x] `RouteRunnerTest` (or `RouteSupervisorTest`): a subscribed route on the virtual clock refreshes `shuttle_stuck_transfers` every `sweepEvery` without any poll event; red before the fix
+- [x] `stuckAfter` defaults per spec 11 (three poll intervals for a polled route; three `inProgressEvery`, or the value spec 11 names, for a subscribed one); the default lives in one place (the data class or the loader, matching the module's convention, progress 02) and rule 7 still refuses zero
+- [x] The refresh for subscriptions is scheduled where the route's lifetime already is (the runner or supervisor), not a new scope; it stops with the route
+- [x] Spec 11's sentence and 13.1's `stuckAfter` comment state the default; the YAML grammar and DSL need no new key
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket; 200-600 lines including tests; no Thread.sleep;
 invariant tests named `I<n>_<description>`, scenario tests by their `S<n>` id, validation tests by `rule<n>_`,

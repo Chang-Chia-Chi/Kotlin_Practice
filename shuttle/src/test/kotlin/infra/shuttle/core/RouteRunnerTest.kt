@@ -8,7 +8,9 @@ import infra.shuttle.testkit.ScriptedFetcher
 import infra.shuttle.testkit.ScriptedSource
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import kotlinx.coroutines.async
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -21,6 +23,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.time.Instant
 import kotlin.time.Duration.Companion.minutes
+import kotlin.time.Duration.Companion.seconds
 
 /** Spec 4.1 (bounded pipelines), 4.6 (reconciliation) and 11 (poll failures) on the fakes: one route's event flow end to end. */
 class RouteRunnerTest {
@@ -141,7 +144,6 @@ class RouteRunnerTest {
         val parked = store.seen(id("stuck.csv"), TransferKind.OBJECT)
         clock.advance(5.minutes)
         val runner = runner(route().copy(stuckAfter = 3.minutes))
-        val stuck = { registry.find(ShuttleMetrics.STUCK_TRANSFERS).tag("route", "drop").gauge()!!.value() }
 
         runner.run(source.pollCompleted(setOf(id("stuck.csv"))).events())
         assertEquals(1.0, stuck())
@@ -149,6 +151,45 @@ class RouteRunnerTest {
         store.rejected(parked.id, "gone")
         runner.run(ScriptedSource(clock).pollCompleted(emptySet()).events())
         assertEquals(0.0, stuck())
+    }
+
+    private fun stuck() = registry.find(ShuttleMetrics.STUCK_TRANSFERS).tag("route", "drop").gauge()!!.value()
+
+    private fun subscribed(stuckAfter: kotlin.time.Duration? = null) = Route(
+        name = "drop", source = Source.Subscribe("events", "images.ready", onAck = AckAction.Ack),
+        fetch = Fetch("minio", "/path"), target = Target("minio", bucket = "landing"), stuckAfter = stuckAfter,
+    )
+
+    /** Spec 11: a subscribed route has no poll to hang the refresh on, so it beats on its own `inProgressEvery` (D51). */
+    @Test
+    fun SPEC5_a_subscribed_route_refreshes_the_stuck_gauge_on_its_own_interval_without_any_poll() = runTest {
+        store.seen(id("stuck.csv"), TransferKind.OBJECT)
+        clock.advance(5.minutes)
+        val run = launch { runner(subscribed(stuckAfter = 3.minutes)).run(MutableSharedFlow()) }
+
+        advanceTimeBy(11.seconds) // one inProgressEvery, which defaults to 10s
+        assertEquals(1.0, stuck())
+
+        run.cancel()
+        store.seen(id("later.csv"), TransferKind.OBJECT)
+        clock.advance(5.minutes)
+        advanceTimeBy(1.minutes)
+        assertEquals(1.0, stuck(), "the refresh stops with the route")
+    }
+
+    /** Spec 11: `stuckAfter` omitted is three trigger intervals, so the gauge exists on every route (D51). */
+    @Test
+    fun SPEC5_a_route_without_stuckAfter_counts_a_transfer_older_than_three_trigger_intervals() = runTest {
+        store.seen(id("stuck.csv"), TransferKind.OBJECT)
+        clock.advance(2.minutes) // the route polls every minute
+        val runner = runner()
+
+        runner.run(ScriptedSource(clock).pollCompleted(emptySet()).events())
+        assertEquals(0.0, stuck(), "younger than three poll intervals")
+
+        clock.advance(2.minutes)
+        runner.run(ScriptedSource(clock).pollCompleted(emptySet()).events())
+        assertEquals(1.0, stuck())
     }
 
     @Test

@@ -3430,3 +3430,69 @@ jar in `~/.m2` at 21:17:13, mid-run. The rerun above, with nothing else building
 path from the in-flight set, or if the connector's event carried a fetch handle the consumer could
 hand on by path (a `download(path, into)` on `SftpSource` that downloads through the slot at that
 path, with the listed size check). The one caller is `SftpPollSource.fetch`.
+
+---
+
+## 36: Fix: the stuck gauge is refreshed for subscribed routes and `stuckAfter` has its default
+
+**Built:** `shuttle_stuck_transfers{route}` now moves on every route, not only on a polled one.
+`RouteRunner.run` launches, for a `Source.Subscribe` route and inside the same `supervisorScope`
+its pipelines already live in, a ticker that refreshes the gauge every `inProgressEvery`; it is
+cancelled when the flow ends and dies with the scope when the run fails or is cancelled, so it
+stops and restarts with the route (spec 10) and adds no scope of its own. `Route.stuckWindow` is
+the window the gauge reads with: `stuckAfter` when the route states one, three trigger intervals
+when it does not, so a route that omits the knob is measured instead of reading a flat 0.
+
+**Concepts named:**
+
+- **The trigger's beat** - `Source.interval`, `poll.every` for a poll and `inProgressEvery` for a
+  subscription. One expression of "how often this route's trigger comes round", next to
+  `Source.onAck` in `ShuttleConfig.kt`; both the refresh period and the default window are three
+  of it (D51).
+- **The stuck window** - `Route.stuckWindow`, the one place the default lives. `Route.stuckAfter`
+  stays nullable, so the DSL, the YAML grammar and rule 7 are untouched: rule 7 still refuses a
+  stated zero and says nothing about an omitted knob, matching progress 02's "every default lives
+  in exactly one place".
+- `RouteRunner.refreshStuck()` is the single reader of the store's `stuck` count; the poll path and
+  the ticker call the same private method, and a state store that fails there is logged, not raised
+  (it left the end-of-poll `try`, which is about reconciliation, and carries its own catch).
+
+**Acceptance:**
+
+- *A subscribed route refreshes the gauge every interval with no poll event, and stops with the
+  route* - `RouteRunnerTest.SPEC5_a_subscribed_route_refreshes_the_stuck_gauge_on_its_own_interval_without_any_poll`
+  (a `MutableSharedFlow` that never emits, virtual time advanced by 11 s; red before the fix at
+  0.0, and after cancelling the run a second parked row does not move the gauge).
+- *`stuckAfter` omitted is three trigger intervals, in one place* -
+  `RouteRunnerTest.SPEC5_a_route_without_stuckAfter_counts_a_transfer_older_than_three_trigger_intervals`
+  (a route polling every minute: a row 2 min old is not stuck, the same row 4 min old is).
+- *Rule 7 still refuses zero* - `RulesTest.rule7_parallelism_maxAttempts_stuckAfter_and_inProgressEvery_are_positive`,
+  unchanged and passing; `Rules.kt` was not touched.
+- *The YAML grammar and DSL need no new key* - `YamlLoaderTest` 11 tests unchanged, the spec 13.1
+  baseline still loads and passes every rule.
+- *Spec 11 and 13.1 state the default* - the Sec 11 stuck-detection sentence, the `stuckAfter` line
+  in the 13.1 document, rule 7's row and decision D51.
+- *Progress entry* - this entry.
+
+Final run: `-Dtest=RouteRunnerTest` 11 tests, 0 failures; default tier 273 tests, 0 failures
+(271 before, plus these two).
+
+**Deviations:**
+
+1. **The subscription refresh beats on `inProgressEvery`, not the notifier's `sweepEvery`** (D51).
+   Spec 11 said "every `sweepEvery` for subscriptions", but `sweepEvery` is `notifier.sweepEvery`,
+   a process-wide knob a route cannot see; reaching it would mean threading `NotifierConfig` into
+   every `RouteRunner` and through `ShuttleHost` (owned by another ticket this round) for a number
+   that has nothing to do with the route. `inProgressEvery` is the route's own beat, is what the
+   default window is three of, and gives one rule for both trigger kinds. Spec 11's sentence, rule
+   7's row and D51 record it; nothing implemented the old wording, so nothing relied on it.
+2. **`Route.stuckWindow` falls back to 1 min when `source` is null.** A route without a source fails
+   rule 5 and never runs, so the branch is unreachable in a started process; a non-null default beats
+   making the window nullable and giving the gauge a second "absent" state.
+3. **Size:** production +21 lines in `RouteRunner.kt` (a ticker, a private `refreshStuck`) and +9 in
+   `ShuttleConfig.kt`; tests +43 / -2; four spec lines and this entry.
+
+**For the next ticket:** anything that needs "how often does this route's trigger come round" should
+read `Source.interval` rather than matching on the source kind again. If a subscribed route ever
+gains a cheaper heartbeat than `inProgressEvery`, the ticker's period and the default window are the
+same expression - change `Source.interval` and both follow.
