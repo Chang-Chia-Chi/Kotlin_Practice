@@ -244,6 +244,21 @@ class SftpSource(
         }
     }
 
+    /**
+     * The handle the file at [path] was handed over on, while it is in flight - handed over and
+     * not yet given back - or null: nothing at that path was listed, or its file has been answered
+     * and its action run, or the watch that handed it over has ended and given it back.
+     *
+     * It is the very [SftpEvent.FileSeen] the poll or watch emitted, so a download through it is
+     * the download of the file that was listed and an ack through it is the same ack: one action,
+     * and whichever call comes second is the ignored second answer. It exists for a consumer that
+     * resumes from its own durable record, which has the path and nothing else, and would otherwise
+     * keep a path-to-handle table of its own - a second copy of the in-flight set. A lookup, not a
+     * claim: asking neither admits nor holds anything, so a handle looked up before the watch
+     * ended and used after it is a late answer like any other. Never waits.
+     */
+    fun inFlightAt(path: String): SftpEvent.FileSeen? = inFlight.slotAt(path)?.handle
+
     private suspend fun answering(event: SftpEvent.FileSeen, answer: suspend () -> Unit) {
         try {
             answer()
@@ -381,7 +396,9 @@ class SftpSource(
                                 handedOver += slot
                                 handovers?.record(slot)
                                 emitted++
-                                emit(SftpEvent.FileSeen(file, slot, handling))
+                                val seen = SftpEvent.FileSeen(file, slot, handling)
+                                slot.handedOverAs(seen)
+                                emit(seen)
                             }
                         }
                     }

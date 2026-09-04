@@ -448,6 +448,62 @@ class SftpWatchTest {
     }
 
     /**
+     * The handle a path is looked up as is the one the watch emitted, so an answer through
+     * either is the same answer: one action runs, and whichever call comes second is the ignored
+     * second answer with its one WARN. Two handles over one file would settle once too, but a
+     * consumer would then hold two objects for one file with no reason to prefer either.
+     */
+    @Test
+    fun `an ack through the looked-up handle and one through the emitted handle are one action and one ignored second answer`() = runTest {
+        val transport = FakeSftpTransport().directory("/drop").file("/drop/a.csv", "1")
+        val source = sourceOver(transport) { polling { onAck = delete() } }
+        val held = mutableListOf<FileSeen>()
+        val collector = launch { source.watch("/drop", EVERY).collect { if (it is FileSeen) held += it } }
+        runCurrent()
+        val lookedUp = checkNotNull(source.inFlightAt("/drop/a.csv")) { "the file the watch just handed over" }
+        assertThat(lookedUp).describedAs("the emitted handle itself").isSameAs(held.single())
+
+        val logged = capturingStandardError {
+            launch { lookedUp.ack() }
+            runCurrent()
+            launch { held.single().ack() }
+            runCurrent()
+        }
+
+        assertThat(transport.calls.count { it.operation == Operation.Delete }).describedAs("ack actions for two acks of one file").isEqualTo(1)
+        assertThat(inFlight()).isZero()
+        assertThat(source.inFlightAt("/drop/a.csv")).describedAs("looked up after the ack").isNull()
+        assertThat(Regex("The ack of /drop/a.csv on fake.example:22 was ignored").findAll(logged).count()).describedAs("ignored acks: $logged").isEqualTo(1)
+        assertTrue(logged.contains("the file had already been given back as ack"), "why it was ignored: $logged")
+        collector.cancelAndJoin()
+    }
+
+    /**
+     * The watch gave the file back as it ended, so the path is no longer in flight and the lookup
+     * says so; a handle looked up before that and used after it is a late answer like any other -
+     * ignored, no action run - and the next poll lists the file again.
+     */
+    @Test
+    fun `after the watch ended the lookup answers null, and a handle looked up before it is a late answer`() = runTest {
+        val transport = FakeSftpTransport().directory("/drop").file("/drop/a.csv", "1")
+        val source = sourceOver(transport) { polling { onAck = delete() } }
+        val collector = launch { source.watch("/drop", EVERY).collect {} }
+        runCurrent()
+        val lookedUp = checkNotNull(source.inFlightAt("/drop/a.csv")) { "the file the watch just handed over" }
+
+        collector.cancelAndJoin()
+
+        assertThat(source.inFlightAt("/drop/a.csv")).describedAs("looked up after the watch gave the file back").isNull()
+        val logged = capturingStandardError {
+            launch { lookedUp.ack() }
+            runCurrent()
+        }
+        assertThat(transport.calls.count { it.operation == Operation.Delete }).describedAs("ack actions run after the watch ended").isZero()
+        assertTrue(logged.contains("the watch that handed it over had already ended and given it back"), "why the late ack was ignored: $logged")
+        assertThat(source.poll("/drop").toList().filterIsInstance<FileSeen>().map { it.file.name }).containsExactly("a.csv")
+    }
+
+    /**
      * `consume` nacks the consumer's exception and goes on (T12), so this WARN is the
      * only record that failure ever leaves. Rendered from `toString()` it is a class name and a
      * sentence, and the frame that actually threw - the parse, the mapper, the row - is nowhere:

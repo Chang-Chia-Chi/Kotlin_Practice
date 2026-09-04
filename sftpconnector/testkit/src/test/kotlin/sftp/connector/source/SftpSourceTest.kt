@@ -517,6 +517,29 @@ class SftpSourceTest {
         assertThat(inFlight()).isEqualTo(2)
     }
 
+    /**
+     * A consumer that resumes from its own durable record has a path and nothing else, and the
+     * only way back to the file is the handle it was handed over on. The source answers that
+     * handle by path - the emitted instance itself, not a second one over the same file - for as
+     * long as the file is in flight, and null once it has been answered or when nothing at that
+     * path ever was.
+     */
+    @Test
+    fun `a file in flight is answered by its path as the handle it was handed over on, and null once answered or never listed`() = runTest {
+        val transport = FakeSftpTransport().directory("/drop").file("/drop/a.csv", "1")
+        val source = sourceOver(transport) { onAck = delete() }
+        val handedOver = source.poll("/drop").toList().filterIsInstance<FileSeen>().single()
+
+        assertThat(source.poll("/drop").toList().filterIsInstance<FileSeen>()).describedAs("handed over again by tick 2").isEmpty()
+        assertThat(source.inFlightAt("/drop/a.csv")).describedAs("looked up on tick 2").isSameAs(handedOver)
+        assertThat(source.inFlightAt("/drop/never.csv")).describedAs("a path never listed").isNull()
+
+        handedOver.ack()
+
+        assertThat(source.inFlightAt("/drop/a.csv")).describedAs("looked up after the ack").isNull()
+        assertThat(inFlight()).isZero()
+    }
+
     private fun inFlight(): Int = registry.get("sftp_inflight").gauge().value().toInt()
 
     private fun TestScope.sourceOver(transport: FakeSftpTransport, polling: PollingBuilder.() -> Unit): SftpSource {

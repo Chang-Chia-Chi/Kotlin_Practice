@@ -31,10 +31,11 @@ internal class InFlightSet(capacity: Int) {
     private val lock = Any()
 
     /**
-     * Keyed by path, which is the exclusivity; insertion-ordered, so [outstanding] can say what
-     * is out in the order it was handed over.
+     * Keyed by path, which is the exclusivity; the value is the file's place, so the set can answer
+     * a path with the very slot that was handed over. Insertion-ordered, so [outstanding] can say
+     * what is out in the order it was handed over.
      */
-    private val inFlight = LinkedHashMap<String, RemoteFile>()
+    private val inFlight = LinkedHashMap<String, InFlightSlot>()
     private val excluded = HashSet<RemoteFile>()
     private val room = Semaphore(capacity)
 
@@ -47,14 +48,21 @@ internal class InFlightSet(capacity: Int) {
     fun holds(file: RemoteFile): Boolean = synchronized(lock) { file.path in inFlight || file in excluded }
 
     /** The file out with the consumer at [path], or null when nothing is. Never waits. */
-    fun outAt(path: String): RemoteFile? = synchronized(lock) { inFlight[path] }
+    fun outAt(path: String): RemoteFile? = slotAt(path)?.file
+
+    /**
+     * The place of the file out with the consumer at [path], or null when nothing is - one look
+     * under the lock, so a caller with a path and nothing else gets back to the file without a
+     * table of its own. Never waits.
+     */
+    fun slotAt(path: String): InFlightSlot? = synchronized(lock) { inFlight[path] }
 
     /**
      * Every file out with the consumer right now, oldest first: handed over and not yet given back,
      * whichever poll handed it over. One copy taken under the lock, so a caller never iterates the
      * set while a poll alongside is changing it. Files nacked for good are not out; they are kept out.
      */
-    fun outstanding(): List<RemoteFile> = synchronized(lock) { inFlight.values.toList() }
+    fun outstanding(): List<RemoteFile> = synchronized(lock) { inFlight.values.map { it.file } }
 
     /**
      * Puts [file] in the set and returns its slot, or null when the file is already out or was
@@ -68,11 +76,10 @@ internal class InFlightSet(capacity: Int) {
     suspend fun admit(file: RemoteFile): InFlightSlot? {
         if (holds(file)) return null
         room.acquire()
-        if (!enter(file)) {
+        return place(file) ?: run {
             room.release()
-            return null
+            null
         }
-        return InFlightSlot(file, this)
     }
 
     internal fun leave(file: RemoteFile, forGood: Boolean) {
@@ -81,15 +88,17 @@ internal class InFlightSet(capacity: Int) {
     }
 
     /**
-     * The lock body of [admit]: the second look, and the file's entry when it passes. Whether the
-     * file entered. Non-suspending on purpose, so the lock can be model-checked on its own.
+     * The lock body of [admit] as the model checker sees it: whether the file entered.
+     * Non-suspending on purpose, so the lock can be model-checked on its own.
      */
-    internal fun enter(file: RemoteFile): Boolean = synchronized(lock) {
+    internal fun enter(file: RemoteFile): Boolean = place(file) != null
+
+    /** The second look, and the file's place when it passes. */
+    private fun place(file: RemoteFile): InFlightSlot? = synchronized(lock) {
         if (file.path in inFlight || file in excluded) {
-            false
+            null
         } else {
-            inFlight[file.path] = file
-            true
+            InFlightSlot(file, this).also { inFlight[file.path] = it }
         }
     }
 
@@ -99,7 +108,8 @@ internal class InFlightSet(capacity: Int) {
      */
     internal fun exit(file: RemoteFile, forGood: Boolean): Boolean = synchronized(lock) {
         if (forGood) excluded += file
-        inFlight.remove(file.path, file)
+        val out = inFlight[file.path]
+        out != null && out.file == file && inFlight.remove(file.path) != null
     }
 }
 
@@ -115,9 +125,22 @@ internal class InFlightSet(capacity: Int) {
 internal class InFlightSlot(val file: RemoteFile, private val set: InFlightSet) {
 
     private val settledAs = AtomicReference<Settlement?>(null)
+    private val handedOverAs = AtomicReference<SftpEvent.FileSeen?>(null)
 
     /** How this file was given back, or null while the consumer still has it. */
     val settlement: Settlement? get() = settledAs.get()
+
+    /**
+     * The handle the consumer was given for this place, or null between the place being taken
+     * and the tick handing it over. Answering a path with this, rather than with a fresh handle
+     * over the same place, is what lets an answer through either be the same answer.
+     */
+    val handle: SftpEvent.FileSeen? get() = handedOverAs.get()
+
+    /** Records the one handle this place was handed over on; a place is handed over once. */
+    fun handedOverAs(handle: SftpEvent.FileSeen) {
+        check(handedOverAs.compareAndSet(null, handle)) { "${file.path} was handed over twice on one place" }
+    }
 
     /** Records [outcome] as this file's fate, and says whether this call was the one that got to. */
     fun settle(outcome: Settlement): Boolean = settledAs.compareAndSet(null, outcome)
