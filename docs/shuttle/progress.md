@@ -3252,3 +3252,16 @@ which neither touch this ticket's code. Rerun alone: `ShuttleHostTest` 9/9 green
    even where a bind and a read cancel out.
 3. **Size:** production +22 / -4 lines (two helpers and their KDoc, one `?.` dropped at a call site);
    tests +46; spec one D50 row.
+
+---
+
+## Merge note after tickets 21 to 30
+
+On the fully merged branch both acceptance classes errored in `@BeforeAll` with
+`ContainerLaunchException: Timed out waiting for log output matching '.*DATABASE IS READY TO USE!.*\s'`:
+`AcceptanceFixture` started the Oracle container on Testcontainers' default 60 s start-up timeout and the
+`gvenzl/oracle-free:23-slim-faststart` image needs 90 s or more to report ready on this workstation. The
+fixture now builds the container with `.withStartupTimeout(Duration.ofMinutes(10))`, the same fix
+`JdbiStateStoreTest` already carries (`withStartupTimeoutSeconds` is the JDBC field the Oracle wait
+strategy ignores). Nothing else changed. With it, `M1AcceptanceTest` runs 23 tests and `M2AcceptanceTest`
+runs 5, both 0 failures and 0 errors (205 s and 95 s respectively).

@@ -47,6 +47,7 @@ import java.net.InetSocketAddress
 import java.nio.file.Files
 import java.nio.file.Path
 import java.sql.SQLException
+import java.time.Duration
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicInteger
@@ -65,7 +66,9 @@ import kotlin.io.path.writeText
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 abstract class AcceptanceFixture {
     protected class Received(val path: String, val body: JsonNode)
-    private val oracle = OracleContainer("gvenzl/oracle-free:23-slim-faststart")
+    // 90 s+ to report ready on a cold workstation; Testcontainers' default is 60 s
+    // (`withStartupTimeoutSeconds` is the JDBC field OracleContainer's own wait strategy ignores)
+    private val oracle = OracleContainer("gvenzl/oracle-free:23-slim-faststart").withStartupTimeout(Duration.ofMinutes(10))
     private lateinit var dataSource: AgroalDataSource
     protected lateinit var jdbi: Jdbi
     @Volatile protected var storeDown = false
