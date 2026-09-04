@@ -76,7 +76,12 @@ class SftpTarget(
         makeFolderFor(key)
         if (metadata.isNotEmpty()) log.debugv("{0}: SFTP holds no metadata, so {1} keys are not stored with it", remote, metadata.size)
         client.upload(file, partial, Overwrite.REPLACE)
-        client.rename(partial, remote, Overwrite.REPLACE, expectedSize = size)
+        // The partial as the server has just listed it, which is what lets a rename whose reply was
+        // lost tell its own landed file at the key from the copy an earlier store left there
+        // (connector D46: under REPLACE the key is expected to be occupied, so size alone decides
+        // nothing and the modification time has to come along). Passing it costs the one stat the
+        // connector would otherwise make for itself.
+        client.rename(partial, remote, Overwrite.REPLACE, listed = client.stat(partial))
         val landed = checkNotNull(client.stat(remote)) { "$remote is not there after the rename that put it there" }
         check(landed.size == size) { "stored $remote has ${landed.size} bytes, expected $size" }
         TargetRef("sftp", root, key, landed.modifiedAt.toString(), size)
