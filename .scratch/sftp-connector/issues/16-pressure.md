@@ -10,7 +10,7 @@ property (I15) this ticket proves.
 
 **Blocked by:** 15 (Acceptance run)
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] Tier A: seeded randomized fault model over `FakeSftpTransport`, ported from
       `snapshotcache`'s `RandomizedModelTest` pattern - fixed seed, per-sequence `Random(SEED + i)`,

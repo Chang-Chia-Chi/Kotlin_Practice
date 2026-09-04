@@ -10,32 +10,32 @@ why there are six lenses and not one.
 
 **Blocked by:** 16 (Pressure)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] **Concurrency**: every `Mutex`/`synchronized`, every `NonCancellable`, every `StateFlow`
+- [x] **Concurrency**: every `Mutex`/`synchronized`, every `NonCancellable`, every `StateFlow`
       write (the undispatched-collector hazard on the seams table), every `catch (Throwable)` vs
       `Exception`, every entry to the bounded dispatcher without a pool place held
-- [ ] **Resource lifecycle**: sockets, JSch reader threads, `.part` files, caller `InputStream`s
+- [x] **Resource lifecycle**: sockets, JSch reader threads, `.part` files, caller `InputStream`s
       (`writeFrom` leaves them open by design - is that documented at every call site?),
       coroutine scopes; for each: who creates, who closes, on which exit paths
-- [ ] **Security**: the traversal class generally - any server-supplied string reaching a `Path`,
+- [x] **Security**: the traversal class generally - any server-supplied string reaching a `Path`,
       a log format string, or a shell; password and host key material in logs and exception
       messages; `AcceptAll`; whether `Attempt` messages can carry credentials
-- [ ] **Operational readability**: every log line and exception message read cold at 3am - does it
+- [x] **Operational readability**: every log line and exception message read cold at 3am - does it
       name endpoint, operation, path, attempt and remedy in its own words; every meter - is
       absent-versus-zero documented for the lazily registered counters
-- [ ] **Failure semantics**: every `catch` - which classes, what disposition, is a
+- [x] **Failure semantics**: every `catch` - which classes, what disposition, is a
       `CancellationException` ever wrapped or swallowed; every retry site against spec Sec 6.1's
       per-operation table; the `NoSuchFile`-before-retry rule for S5
-- [ ] **Spec conformance**: `mattpocock-skills:code-review` spec axis over the whole module against
+- [x] **Spec conformance**: `mattpocock-skills:code-review` spec axis over the whole module against
       spec plus the recorded deviations - every D-number has code behind it; every seam on the
       table is closed or still honestly open with an owner
-- [ ] Six reports in `docs/sftpconnector/review/`, each finding with file:line, severity and a
+- [x] Six reports in `docs/sftpconnector/review/`, each finding with file:line, severity and a
       reproduction; Critical/High fixed in their own commits with tests; Medium fixed or recorded
       as a seam with an owner; Low listed
-- [ ] Spec Sec 16 open items re-checked; measurements that contradict the spec recorded and raised
+- [x] Spec Sec 16 open items re-checked; measurements that contradict the spec recorded and raised
       to the coordinator with a proposed decision entry
-- [ ] Final progress entry: what the build is, what it is not, and what the maintainer must decide
+- [x] Final progress entry: what the build is, what it is not, and what the maintainer must decide
       before production - `Fingerprint` pinning, the `reason=poisoned` label covering cut sessions,
       ack-wait, and anything this review adds to that list
 
