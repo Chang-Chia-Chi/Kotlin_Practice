@@ -691,6 +691,11 @@ reported as the server timing out and counted against the breaker - `maxLifetime
 `0.0..1.0`, a non-negative `validationBypass`, and every other duration positive.
 `ConnectorDsl.build()` is the authority and reports every fault at once.
 
+The configuration types are produced only by the DSL and cannot be constructed or copied outside
+the connector, so a configuration that exists at all is one `build()` checked; a host that needs to
+size a pool from its own numbers passes those numbers into the `pool` and `bulkhead` blocks rather
+than rewriting a built configuration afterwards.
+
 ---
 
 ## 13. Metrics

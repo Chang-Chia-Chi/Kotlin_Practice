@@ -9,8 +9,18 @@ import kotlin.time.Duration
  * Everything one connector needs to reach one SFTP server, frozen. Produced only by
  * [sftpConnector], which is where the values are checked, so a config that exists at all is a
  * config that passed validation.
+ *
+ * That is enforced rather than agreed: this type and the nested ones the builder assembles have
+ * constructors - and, with them, `copy` - visible only inside the connector. A caller that re-sizes
+ * a pool afterwards would be re-deriving rules like `minIdle <= maxSize` by hand and silently
+ * skipping the ones it forgot, so the numbers go into the DSL blocks and validation sees them.
+ *
+ * The vocabulary a DSL block *accepts* stays public - a host writes `HostKeyPolicy.Strict(path)`,
+ * `move("done/")` and `exponential(...)` - because those are values handed in for checking, not
+ * results handed back as checked.
  */
-data class SftpConnectorConfig(
+@ConsistentCopyVisibility
+data class SftpConnectorConfig internal constructor(
     val name: String,
     val endpoint: Endpoint,
     val auth: AuthMethod,
@@ -21,7 +31,8 @@ data class SftpConnectorConfig(
 )
 
 /** Where the server is, and how the connector gets onto its network. */
-data class Endpoint(
+@ConsistentCopyVisibility
+data class Endpoint internal constructor(
     val host: String,
     val port: Int,
     val proxy: HttpConnectProxy? = null,
@@ -35,7 +46,8 @@ data class Endpoint(
 }
 
 /** An HTTP proxy that tunnels the SSH connection with a CONNECT request. */
-data class HttpConnectProxy(val host: String, val port: Int)
+@ConsistentCopyVisibility
+data class HttpConnectProxy internal constructor(val host: String, val port: Int)
 
 sealed interface AuthMethod {
     /**
@@ -63,7 +75,8 @@ sealed interface HostKeyPolicy {
 }
 
 /** How the pool is sized, how long its sessions live, and how it keeps them alive. */
-data class PoolConfig(
+@ConsistentCopyVisibility
+data class PoolConfig internal constructor(
     val maxSize: Int,
     /**
      * How many open sessions the pool keeps ready even when nobody is asking. Sessions cost a
@@ -139,7 +152,8 @@ data class PoolConfig(
 )
 
 /** What the connector does with a watched directory, and where the files it takes from one go. */
-data class PollingConfig(
+@ConsistentCopyVisibility
+data class PollingConfig internal constructor(
     /**
      * The directories this connector takes files from. They are named here rather than only at the
      * call that starts watching one, because the connector has to be able to check them before it
@@ -254,7 +268,8 @@ sealed interface PostAction {
 }
 
 /** Where downloads land, and how their bytes are summed up. */
-data class StagingConfig(
+@ConsistentCopyVisibility
+data class StagingConfig internal constructor(
     /**
      * Local disk, and the connector's own. It has to be a real filesystem: the download is
      * finished by moving a partial file onto its final name in one step, and a network filesystem
@@ -282,7 +297,8 @@ enum class Digest(internal val algorithmName: String) {
  * How the connector behaves when the server does not: how often it tries again, when it stops
  * trying for a while, how many transfers it runs at once, and how long it gives one call.
  */
-data class ResilienceConfig(
+@ConsistentCopyVisibility
+data class ResilienceConfig internal constructor(
     val retry: RetryPolicy,
     val circuitBreaker: BreakerPolicy,
     /**
@@ -305,7 +321,8 @@ data class ResilienceConfig(
 )
 
 /** How many tries one call gets, and how the waits between them grow. */
-data class RetryPolicy(val maxAttempts: Int, val backoff: Backoff)
+@ConsistentCopyVisibility
+data class RetryPolicy internal constructor(val maxAttempts: Int, val backoff: Backoff)
 
 /**
  * Exponential: each wait is twice the one before, from [initial] up to [max]. With [jitter] each
@@ -319,4 +336,5 @@ data class Backoff(val initial: Duration, val max: Duration, val jitter: Boolean
  * opens once [failureRateThreshold] percent of the last [slidingWindow] calls failed, stays open
  * for [waitInOpen], then lets one call through to find out whether the server is back.
  */
-data class BreakerPolicy(val failureRateThreshold: Int, val slidingWindow: Int, val waitInOpen: Duration)
+@ConsistentCopyVisibility
+data class BreakerPolicy internal constructor(val failureRateThreshold: Int, val slidingWindow: Int, val waitInOpen: Duration)

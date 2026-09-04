@@ -298,6 +298,29 @@ class ConnectorDslTest {
         assertThat(minimalConnector { polling { overlap = OverlapPolicy.PROCEED } }.polling.overlap).isEqualTo(OverlapPolicy.PROCEED)
     }
 
+    /**
+     * A host that sizes the pool from its own arithmetic - so many fetches plus a lister - hands
+     * both numbers to the DSL and is answered by the same rules as anyone else. It used to hand
+     * them to a built configuration instead, where nothing was left to check them and a pool of
+     * two carrying three transfers was accepted without a word.
+     */
+    @Test
+    fun `a host sizing the pool from its own numbers is held to the rule that transfers fit in it`() {
+        fun sized(sessions: Int, transfers: Int) = minimalConnector {
+            pool { maxSize = sessions; minIdle = minOf(minIdle, sessions) }
+            resilience { bulkhead { maxConcurrentTransfers = transfers } }
+        }
+
+        assertThatThrownBy { sized(sessions = 2, transfers = 3) }
+            .isInstanceOf(ConfigurationError::class.java)
+            .hasMessageContaining("maxConcurrentTransfers 3 is more than pool maxSize 2")
+
+        val fits = sized(sessions = 3, transfers = 2)
+        assertThat(fits.pool.maxSize).isEqualTo(3)
+        assertThat(fits.pool.minIdle).isZero()
+        assertThat(fits.resilience.maxConcurrentTransfers).isEqualTo(2)
+    }
+
     private fun minimalConnector(extra: SftpConnectorBuilder.() -> Unit): SftpConnectorConfig =
         sftpConnector("vendor-drop") {
             endpoint { host = "sftp.example" }

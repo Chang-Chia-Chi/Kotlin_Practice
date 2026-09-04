@@ -69,7 +69,6 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.jboss.logging.Logger
 import sftp.connector.SftpConnector
-import sftp.connector.config.SftpConnectorConfig
 import software.amazon.awssdk.services.s3.S3Client
 import java.net.http.HttpClient
 import java.nio.file.Files
@@ -328,7 +327,14 @@ class ShuttleHost(
             route.parallelism * listOf(route.fetch?.store, route.target?.store).count { it == store.name }
         }
         SftpConnector.start(
-            sftpConnectorConfig(store, poll = null, algorithm = config.digest, resolve = ::resolve).sized(maxOf(1, sessions)),
+            sftpConnectorConfig(
+                store,
+                poll = null,
+                algorithm = config.digest,
+                resolve = ::resolve,
+                sessions = maxOf(1, sessions),
+                transfers = maxOf(1, sessions),
+            ),
             meterRegistry = registry,
             clock = clock,
         )
@@ -398,7 +404,14 @@ class ShuttleHost(
      */
     private fun polled(route: Route, poll: Source.Poll): Flow<RouteEvent> = flow {
         val declared = storeNamed(poll.store) as SftpStore
-        val connectorConfig = sftpConnectorConfig(declared, poll, route.digest ?: config.digest, ::resolve).sized(route.parallelism + 1, route.parallelism)
+        val connectorConfig = sftpConnectorConfig(
+            declared,
+            poll,
+            route.digest ?: config.digest,
+            ::resolve,
+            sessions = route.parallelism + 1,
+            transfers = route.parallelism,
+        )
         val connector = SftpConnector.start(connectorConfig, meterRegistry = registry, clock = clock)
         try {
             val source = SftpPollSource(connector.source, connectorConfig, RouteName(route.name), poll, clock)
@@ -408,12 +421,6 @@ class ShuttleHost(
             withContext(NonCancellable) { connector.close() }
         }
     }.catch { emit(RouteEvent.RouteDown(it)) }
-
-    /** Rule 9's arithmetic as a pool: [sessions] places, [transfers] of them carrying bytes at once. */
-    private fun SftpConnectorConfig.sized(sessions: Int, transfers: Int = sessions): SftpConnectorConfig = copy(
-        pool = pool.copy(maxSize = sessions, minIdle = minOf(pool.minIdle, sessions)),
-        resilience = resilience.copy(maxConcurrentTransfers = transfers),
-    )
 
     private fun storeNamed(name: String) = config.objectStores.first { it.name == name }
 

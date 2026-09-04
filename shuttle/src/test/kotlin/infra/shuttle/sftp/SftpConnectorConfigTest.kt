@@ -18,6 +18,7 @@ import sftp.connector.config.AuthMethod
 import sftp.connector.config.HostKeyPolicy
 import sftp.connector.config.OverlapPolicy
 import sftp.connector.config.PostAction
+import sftp.connector.error.ConfigurationError
 import sftp.connector.source.AllOf
 import sftp.connector.source.MinAge
 import sftp.connector.source.SizeStable
@@ -50,7 +51,17 @@ class SftpConnectorConfigTest {
         store: SftpStore = store(),
         poll: Source.Poll = poll(),
         algorithm: DigestAlgorithm = DigestAlgorithm.MD5,
-    ) = sftpConnectorConfig(store, poll, algorithm) { (it as Secret.Env).variable + "-value" }
+        // The host divides the store's budget between the routes on it; here one route gets all of it.
+        sessions: Int = store.pool.maxSize,
+        transfers: Int = store.pool.maxConcurrentTransfers,
+    ) = sftpConnectorConfig(
+        store,
+        poll,
+        algorithm,
+        { (it as Secret.Env).variable + "-value" },
+        sessions = sessions,
+        transfers = transfers,
+    )
 
     @Test
     fun the_store_and_the_poll_reach_the_connectors_config() {
@@ -106,6 +117,22 @@ class SftpConnectorConfigTest {
     fun rule12_an_ack_action_of_another_trigger_is_not_something_a_poll_can_do() {
         val refused = assertThrows(IllegalArgumentException::class.java) { configOf(poll = poll(onAck = AckAction.Term)) }
         assertEquals(true, refused.message!!.contains("onAck"), refused.message)
+    }
+
+    /**
+     * Rule 9's arithmetic belongs to the host, which divides a store's budget between the routes on
+     * it - but it goes in as numbers the builder checks, not as an edit to a finished configuration,
+     * so a share that lets more transfers run than there are sessions to run them is refused here
+     * rather than discovered as a pool that is always full.
+     */
+    @Test
+    fun the_hosts_share_of_the_store_sizes_the_pool_and_is_checked_before_a_connector_exists() {
+        val share = configOf(sessions = 3, transfers = 2)
+
+        assertEquals(3, share.pool.maxSize)
+        assertEquals(2, share.resilience.maxConcurrentTransfers)
+
+        assertThrows(ConfigurationError::class.java) { configOf(sessions = 2, transfers = 3) }
     }
 
     @Test

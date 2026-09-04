@@ -3700,3 +3700,90 @@ does exactly that and did not change.
 - The full reactor is about 24 minutes on this machine with Docker up, and two of its modules fail
   for environmental reasons unrelated to the connector. Run `-pl sftpconnector/core,sftpconnector/testkit`
   and `-pl shuttle` when you want a clean read.
+
+---
+
+## T21: A config the connector sees has always passed `build()`
+
+**Built:** the configuration types are no longer produced by convention. Every type the builder
+assembles - `SftpConnectorConfig`, `Endpoint`, `HttpConnectProxy`, `PoolConfig`, `PollingConfig`,
+`StagingConfig`, `ResilienceConfig`, `RetryPolicy`, `BreakerPolicy` - has an `internal` primary
+constructor and carries `@ConsistentCopyVisibility`, so `copy()` is internal with it. Outside
+`sftpconnector-core` there is now exactly one way to obtain a configuration, and it is the one that
+validates. Shuttle's `ShuttleHost.sized()`, which re-derived `minIdle <= maxSize` by hand on a
+finished config and never checked `maxConcurrentTransfers <= maxSize` at all, is gone: rule 9's
+arithmetic goes in as the `sessions` and `transfers` parameters of
+`infra.shuttle.sftp.sftpConnectorConfig`, which land in the `pool` and `bulkhead` blocks and are
+answered by the builder like anything else.
+
+**Spec:** section 12 gains a paragraph after the validation rules - the config types are produced
+only by the DSL and cannot be constructed or copied outside the connector, and a host that sizes a
+pool from its own numbers passes them into the `pool` and `bulkhead` blocks.
+
+**Concepts named:**
+
+- **Produced against accepted.** The seam is not "every data class in `config`". A type the builder
+  *hands back* is closed, because it carries the invariants `build()` just proved. A type a DSL
+  block *accepts* - `HostKeyPolicy.Strict(path)`, `PostAction.Move` behind `move()`, `Backoff`
+  behind `exponential()` - stays public, because it is a value handed in for checking rather than a
+  result handed out as checked, and closing it would only mean re-exporting each one as a factory.
+  `AuthMethod.Password` was already a plain class for its `toString`.
+- **The host's share, stated rather than applied.** `sftpConnectorConfig(..., sessions, transfers)`
+  is where a shuttle route's slice of a store's budget enters the connector. Stating it as builder
+  input rather than as an edit to the result is the whole ticket: the pair is now checked against
+  each other before a connector exists.
+
+**Acceptance:**
+
+- *Internal constructor and `@ConsistentCopyVisibility` on every produced config type; the DSL
+  remains the only producer* - `SftpConnectorConfig.kt`. `ConnectorDsl.kt` needed no edit at all:
+  it is in the same module, so `internal` is already visible to it. No connector test had to change
+  either - `core`'s tests are a friend module of `core`'s main sources, and every `testkit` and
+  `quarkus` test already went through `sftpConnector { }`.
+- *Shuttle compiles with `sized()` replaced by two parameters* - `mvn -B -o -pl shuttle -am
+  test-compile` is `BUILD SUCCESS`; `SftpConnectorConfig` is no longer imported by `ShuttleHost`.
+- *`transfers > sessions` through the DSL is refused at build time with the existing rule's message*
+  - `ConnectorDslTest.a host sizing the pool from its own numbers is held to the rule that transfers
+  fit in it`, and from shuttle's side
+  `SftpConnectorConfigTest.the_hosts_share_of_the_store_sizes_the_pool_and_is_checked_before_a_connector_exists`.
+- *Full reactor green, shuttle included* - see the counts below.
+
+**Test counts** (`mvn -B -o -fae test` from the repo root, then shuttle's default tier):
+
+| Module | Run | Result |
+|---|---|---|
+| `sftpconnector-core` | 55 + 2 (the Lincheck execution) | 0 failures, 0 errors. `ConnectorDslTest` reports 19, one more than before |
+| `sftpconnector-testkit` | 206 | 1 error, `PartitionMatrixTest.P3`, and it is the environment, not the change: `noticedAfter` was still null when the assertion read it, i.e. the proxy's reset was not noticed inside the window under a loaded full-reactor run. Re-run alone, `-Dtest=PartitionMatrixTest` is 5 of 5 green |
+| `sftpconnector-quarkus` | 6 | First run failed with `Port(s) already bound: 8081`, the flake this ticket was warned about. Re-run alone: 0 failures, 0 errors |
+| `shuttle` (`mvn -B -o -pl shuttle test`) | 266 | 0 failures, 0 errors, 0 skipped. `ShuttleQuarkusTest` (4) and `ShuttleHostTest` (9) both green on the first run |
+| `snapshotcache` | 161 | 5 errors, all `ContainerLaunchException` for `gvenzl/oracle-free`: no Docker image on this host, and unrelated to this ticket. It is why the reactor needs `-fae` here |
+
+**Deviations:**
+
+1. **`HostKeyPolicy.Strict`, `PostAction.Move` and `Backoff` keep public constructors**, against the
+   ticket's literal "every config data class". They are the vocabulary the public DSL setters accept
+   (`hostKey = `, `onAck = `, `backoff = `), and a config assembled from them is still validated by
+   `build()`, so nothing is bypassed by leaving them open - while closing them would break
+   `sftpConnectorConfig`'s own `HostKeyPolicy.Strict(policy.knownHosts)` and
+   `PostAction.Move(action.folder)` and force a factory per type for no invariant. The rule the code
+   follows is "closed if the builder produces it, open if a builder block accepts it".
+2. **`store.pool.maxConcurrentTransfers` no longer reaches the connector** from
+   `sftpConnectorConfig`; `transfers` does. This is not a behaviour change - both `ShuttleHost` call
+   sites already overwrote it through `sized()` - but the store field is now unread on this path.
+   Shuttle's ticket 31 owns what the field should mean.
+3. **Two shuttle tests changed, both because they built a config outside the DSL.**
+   `SftpConnectorConfigTest.configOf` gained `sessions`/`transfers` parameters defaulting to the
+   store's own numbers, so its assertions are untouched.
+   `SftpPollSourceTest.withConnector` lost its `tune: (SftpConnectorConfig) -> SftpConnectorConfig`
+   hook, whose one use was `it.copy(polling = it.polling.copy(maxFilesPerPoll = 2))`; the truncated
+   listing case now describes its connector to the DSL (`cappedConnectorConfig`) because no
+   `SftpStore` field carries a listing cap. The test's assertions are unchanged.
+
+**For the next ticket:**
+
+- A host that needs a knob the connector has and `SftpStore` does not (`maxFilesPerPoll` is the one
+  that surfaced here) can no longer reach it by editing the built config. Either the store gains the
+  field, or the caller describes the connector itself.
+- `@ConsistentCopyVisibility` is what keeps `copy()` from staying public under Kotlin 2.2; leaving
+  it off is a warning, not an error, so a new config type added without it silently re-opens the
+  hole this ticket closed.

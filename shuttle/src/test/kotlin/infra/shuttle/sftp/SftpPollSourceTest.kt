@@ -51,12 +51,15 @@ import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import sftp.connector.SftpConnector
 import sftp.connector.client.SftpClient
-import sftp.connector.config.SftpConnectorConfig
+import sftp.connector.config.HostKeyPolicy
+import sftp.connector.config.OverlapPolicy
+import sftp.connector.config.sftpConnector
 import sftp.connector.error.AuthenticationFailed
 import sftp.connector.pool.SftpPool
 import sftp.connector.source.SftpSource
 import sftp.connector.testkit.EmbeddedSftpServer
 import sftp.connector.transport.jsch.JschTransport
+import sftp.connector.config.Digest as ConnectorDigest
 import java.nio.file.Files
 import java.nio.file.Path
 import java.time.temporal.ChronoUnit
@@ -189,7 +192,7 @@ class SftpPollSourceTest {
             val poll = pollOf(AckAction.Move("temp/"))
             // Built without SftpConnector.start: its start-up probe would refuse the wrong password
             // before a watch existed, and what is under test is a watch that ends on one.
-            val config = sftpConnectorConfig(sftpStore(server), poll, DigestAlgorithm.MD5) { "not the password" }
+            val config = connectorConfig(server, poll) { "not the password" }
             val pool = SftpPool(JschTransport(config, registry), config, registry)
             val source = SftpPollSource(SftpSource(SftpClient(pool, config, registry), config, registry), config, RouteName(ROUTE), poll, clock)
 
@@ -249,7 +252,7 @@ class SftpPollSourceTest {
         seed("b.csv", CONTENT)
         seed("c.csv", CONTENT)
 
-        withConnector(AckAction.Move("temp/"), { it.copy(polling = it.polling.copy(maxFilesPerPoll = 2)) }) { source ->
+        withConnector(AckAction.Move("temp/"), maxFilesPerPoll = 2) { source ->
             val completed = withTimeout(TIMEOUT) { source.events().filterIsInstance<RouteEvent.PollCompleted>().first() }
 
             assertTrue(completed.truncated)
@@ -442,13 +445,15 @@ class SftpPollSourceTest {
     /** One started connector and the poll source over it, closed however [block] ends. */
     private suspend fun withConnector(
         onAck: AckAction,
-        tune: (SftpConnectorConfig) -> SftpConnectorConfig = { it },
+        maxFilesPerPoll: Int? = null,
         block: suspend CoroutineScope.(SftpPollSource) -> Unit,
     ) {
         remoteRoot.resolve("drop").createDirectories()
         EmbeddedSftpServer.start(remoteRoot, USER, PASSWORD).use { server ->
             val poll = pollOf(onAck)
-            val config = tune(sftpConnectorConfig(sftpStore(server), poll, DigestAlgorithm.MD5) { (it as Secret.Literal).value })
+            val config =
+                if (maxFilesPerPoll == null) connectorConfig(server, poll) { (it as Secret.Literal).value }
+                else cappedConnectorConfig(server, poll, maxFilesPerPoll)
             val connector = SftpConnector.start(config, meterRegistry = registry)
             try {
                 coroutineScope { block(SftpPollSource(connector.source, config, RouteName(ROUTE), poll, clock)) }
@@ -486,6 +491,31 @@ class SftpPollSourceTest {
         emptyMap(), { true }, { wakes++ }, hook, clock, registry, Staging(routeStage),
         usableSpace = { 10.gib }, channels = channels,
     )
+
+    /** The host's mapping, with this one route holding the whole of the store's budget. */
+    private fun connectorConfig(server: EmbeddedSftpServer, poll: Source.Poll, resolve: (Secret) -> String) =
+        sftpConnectorConfig(sftpStore(server), poll, DigestAlgorithm.MD5, resolve, sessions = 4, transfers = 4)
+
+    /**
+     * The same connector with a listing cap a test can reach with three files. No `SftpStore` field
+     * carries the cap, and a built configuration can no longer be edited into one (connector T21),
+     * so this case is described to the connector's own DSL instead of adjusted afterwards.
+     */
+    private fun cappedConnectorConfig(server: EmbeddedSftpServer, poll: Source.Poll, cap: Int) =
+        sftpConnector("vendor") {
+            endpoint { host = server.host; port = server.port }
+            auth { password(USER, PASSWORD) }
+            hostKey = HostKeyPolicy.AcceptAll
+            pool { maxSize = 4 }
+            polling {
+                directories(poll.directory)
+                onAck = move("temp/")
+                readiness = sizeStable(checks = 1, interval = 1.milliseconds)
+                overlap = OverlapPolicy.SKIP
+                maxFilesPerPoll = cap
+                staging { dir = connectorStage; digest = ConnectorDigest.MD5 }
+            }
+        }
 
     private fun pollOf(onAck: AckAction) = Source.Poll(
         store = "vendor", directory = "/drop", every = EVERY,
