@@ -4168,6 +4168,15 @@ the connector's. If a later reviewer wants the class smaller still, the only thi
    `YamlLoader.kt`, `ShuttleHost.kt`), tests 6, one spec rule row, one spec decision row, one spec comment
    and this entry.
 
+**Addendum, ticket 34's hand-off (done here after merging it in):** `ProcessingChain` gained a third
+constructor argument, `io: CoroutineDispatcher`, defaulting to an unbounded `Dispatchers.IO`;
+`ShuttleHost.chainFor` now passes the host's bounded view, so a chain's processor calls and its per-file
+digests sit inside the budget rule 9's arithmetic assumes rather than beside it. Nothing observes a
+private `chainFor`'s dispatcher cheaply through the host's seams - the chain is reached only through a
+`TransferPipeline` a boot builds - so the guarantee is stated in `chainFor`'s KDoc and here rather than
+asserted: `ProcessingChainTest` already covers what the argument does. Default tier after the merge: 287
+tests, 0 failures.
+
 **For the next ticket:** `shuttle try` (`Commands.kt`) still prints HTTP bodies only - progress 35's
 deviation 2, now the last place where a `nats` body is treated as a lesser kind: its rows are rendered by
 the notifier and judged by the rules, but not shown by validate mode.

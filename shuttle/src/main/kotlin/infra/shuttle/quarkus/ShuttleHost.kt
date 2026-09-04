@@ -367,10 +367,11 @@ class ShuttleHost(
         }
     }
 
-    /** Step 5: the chain, every `custom` name resolved now. */
+    /** Step 5: the chain, every `custom` name resolved now, on the host's bounded IO view (spec 3.3, ticket 34). */
     private fun chainFor(route: Route) = ProcessingChain(
         route.process.map { spec -> processorFor(spec) { beans.processor(it.name) } },
         route.digest ?: config.digest,
+        io,
     )
 
     /**
