@@ -109,9 +109,10 @@ class StoreReads(val transfers: suspend () -> List<Transfer>, val outbox: suspen
  * no Quarkus: `ShuttleLifecycle` hands it the host's registry, clock and datasource, and a test hands it the
  * test kit's store and target. Every client the host opens, it closes.
  *
- * `targets` replaces a store's target adapter by store name (the test kit's in-memory target; nothing in
- * production sets it). `s3Client` and `natsConnection` are the two client factories, overridable at the
- * same boundary a mock would sit at.
+ * `targets` replaces a store's target adapter by store name and `deliveryChannels` a channel's delivery
+ * adapter by channel name (the test kit's in-memory target and recording channel; nothing in production
+ * sets either). A replaced channel keeps no trigger, so a route may not `subscribe` to one. `s3Client`
+ * and `natsConnection` are the two client factories, overridable at the same boundary a mock would sit at.
  */
 class ShuttleHost(
     private val config: ShuttleConfig,
@@ -122,6 +123,7 @@ class ShuttleHost(
     private val registry: MeterRegistry,
     private val clock: Clock,
     private val targets: Map<String, ObjectStoreTarget> = emptyMap(),
+    private val deliveryChannels: Map<String, DeliveryChannel> = emptyMap(),
     private val s3Client: (S3Store) -> S3Client = { s3ClientFor(it, env) },
     private val natsConnection: (NatsChannelConfig) -> Connection = { natsConnectionFor(it, env) },
     private val httpClient: HttpClient = HttpClient.newHttpClient(),
@@ -151,12 +153,13 @@ class ShuttleHost(
     /** Spec 12.1 steps 2 to 7. Throws on any check that fails, which is the deployment ending. */
     fun start(): Unit = runBlocking {
         roundTrips()
-        val channels = config.channels.associate { ChannelName(it.name) to channelFor(it) }
         val routeTargets = config.routes.associate { it.name to targetFor(it) }
-        routeTargets.values.distinct().forEach { it.probe() }
+        probeStores(routeTargets.values)
+        val channels = config.channels.associate { ChannelName(it.name) to channelFor(it) }
         emptyStaging()
         val renderer = MappingRenderer(beans::provider)
-        val bodies = config.channels.filterIsInstance<HttpChannelConfig>().associate { ChannelName(it.name) to it.body }
+        // Spec 9.6: a body belongs to the channel, not to its kind, so every declared channel is in the map (SPEC6).
+        val bodies = config.channels.associate { ChannelName(it.name) to it.body }
         notifier = Notifier(store, channels.values, bodies, renderer, config.notifier, registry, clock, hook = hook)
         val runners = config.routes.map { route ->
             val pipeline = TransferPipeline(
@@ -287,7 +290,7 @@ class ShuttleHost(
     }
 
     /** Step 3: a channel adapter; an `http` one resolves its secrets here, so a missing variable ends startup. */
-    private fun channelFor(channel: Channel): DeliveryChannel = when (channel) {
+    private fun channelFor(channel: Channel): DeliveryChannel = deliveryChannels[channel.name] ?: when (channel) {
         is HttpChannelConfig -> HttpChannel(channel, httpClient, env)
         // The trigger's pull is a one second long-poll (ticket 16): on the bounded view it would hold a route's whole
         // IO budget at parallelism 1 and every ledger write behind it waited a second (measured by ticket 20, S28). The
@@ -295,6 +298,22 @@ class ShuttleHost(
         is NatsChannelConfig -> natsChannels.getOrPut(channel.name) {
             NatsChannel(channel, natsConnections.getOrPut(channel.name) { natsConnection(channel) }, Dispatchers.IO)
         }
+    }
+
+    /**
+     * Step 3: every store a route touches, before any channel is opened, so a bucket nobody created ends the
+     * deployment rather than the first message (SPEC8). A route's target is its adapter's own `probe()`; a
+     * subscribed route's `fetch.bucket` is the same HEAD on the fetch store's client, because the store
+     * declaration is an endpoint and the bucket is the route's (spec 5.1, rule 6). An SFTP fetch needs none:
+     * `connectorFor` starts the connector with its probe.
+     */
+    private suspend fun probeStores(routeTargets: Collection<ObjectStoreTarget>) {
+        routeTargets.distinct().forEach { it.probe() }
+        config.routes.mapNotNull { route ->
+            val fetch = route.fetch ?: return@mapNotNull null
+            val bucket = fetch.bucket ?: return@mapNotNull null
+            (storeNamed(fetch.store) as? S3Store)?.let { it to bucket }
+        }.distinct().forEach { (store, bucket) -> S3Target.headBucket(s3ClientFor(store), bucket, io) }
     }
 
     /** Step 3: the route's target adapter, one S3 client or one SFTP connector per store, shared with the fetcher. */

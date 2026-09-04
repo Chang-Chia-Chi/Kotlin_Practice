@@ -1,5 +1,6 @@
 package infra.shuttle.quarkus
 
+import infra.shuttle.core.DeliveryChannel
 import infra.shuttle.core.DeliveryState
 import infra.shuttle.core.Hook
 import infra.shuttle.core.HookPoint
@@ -11,6 +12,7 @@ import infra.shuttle.testkit.ClockFixture
 import infra.shuttle.testkit.HookDriver
 import infra.shuttle.testkit.InMemoryStateStore
 import infra.shuttle.testkit.InMemoryTarget
+import infra.shuttle.testkit.RecordingChannel
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -32,6 +34,7 @@ import org.mockito.Mockito
 import sftp.connector.testkit.EmbeddedSftpServer
 import software.amazon.awssdk.services.s3.S3Client
 import software.amazon.awssdk.services.s3.model.HeadBucketRequest
+import software.amazon.awssdk.services.s3.model.HeadBucketResponse
 import software.amazon.awssdk.services.s3.model.NoSuchBucketException
 import com.sun.net.httpserver.HttpServer
 import infra.shuttle.core.DeliveryId
@@ -107,15 +110,29 @@ class ShuttleHostTest {
             "      source: { poll: { store: $store, directory: /drop, every: 200ms, readiness: [ { sizeStable: { checks: 1, interval: 1ms } } ], onAck: $onAck } }\n" +
             "      target: { store: minio, bucket: landing }\n" + notify
 
+    /** Spec 13.1's image-sets shape at its smallest: a subscribe trigger and a fetch from a bucket of the S3 store. */
+    private val imageSets =
+        "    images:\n" +
+            "      source: { subscribe: { channel: events, subject: images.ready, onAck: ack } }\n" +
+            "      fetch: { store: minio, bucket: images, path: /metadata/path }\n" +
+            "      target: { store: minio, bucket: landing }\n"
+
     private fun config(text: String): ShuttleConfig {
         val file = files.resolve("shuttle.yaml")
         Files.writeString(file, text)
         return ShuttleHost.load(listOf(file), env, NamedBeans.none)
     }
 
-    private fun host(config: ShuttleConfig, registry: SimpleMeterRegistry = this.registry, hook: Hook = Hook.None) =
-        ShuttleHost(config, env::get, NamedBeans.none, store, StoreReads({ store.transfers }, { store.outbox }), registry, clock, targets = mapOf("minio" to target), hook = hook)
-            .also { hosts += it }
+    private fun host(
+        config: ShuttleConfig,
+        registry: SimpleMeterRegistry = this.registry,
+        hook: Hook = Hook.None,
+        channels: Map<String, DeliveryChannel> = emptyMap(),
+    ) =
+        ShuttleHost(
+            config, env::get, NamedBeans.none, store, StoreReads({ store.transfers }, { store.outbox }), registry, clock,
+            targets = mapOf("minio" to target), deliveryChannels = channels, hook = hook,
+        ).also { hosts += it }
 
     private suspend fun await(what: String, timeoutMillis: Long = TIMEOUT, condition: () -> Boolean) {
         withTimeoutOrNull(timeoutMillis) { while (!condition()) delay(20) } ?: fail("timed out waiting for $what")
@@ -241,6 +258,51 @@ class ShuttleHostTest {
         Mockito.verify(s3, Mockito.never()).putObject(any(software.amazon.awssdk.services.s3.model.PutObjectRequest::class.java), any(software.amazon.awssdk.core.sync.RequestBody::class.java))
     }
 
+    /**
+     * Review finding Spec 6: a channel's body is the channel's, not its kind's (spec 9.6). The host built
+     * the notifier's `bodies` from the HTTP channels alone, so a `nats` notification carried `{}`.
+     * The recording channel stands where the broker would; nothing here connects to NATS.
+     */
+    @Test
+    fun SPEC6_a_route_notifying_a_nats_channel_delivers_the_rendered_body_not_an_empty_one() = runBlocking {
+        val events = RecordingChannel("events")
+        val host = host(
+            config(yaml(route(notify = "      notify: [ { on: acked, channel: events } ]\n"), channels = NATS_EVENTS)),
+            channels = mapOf("events" to events),
+        )
+        host.start()
+        seed("first.csv")
+
+        await("the acked notification to reach the nats channel") { events.events.isNotEmpty() }
+
+        val body = events.events.single().body
+        assertEquals(store.transfers.single().id.value, body.get("fileId")?.asLong(), "the mapping table of a nats channel is rendered: $body")
+        assertEquals("acked", body.get("event")?.asText())
+    }
+
+    /**
+     * Review finding Spec 8: step 3 probes every declared store (spec 12.1), which includes the bucket a
+     * subscribed route reads. The target here is the in-memory one, so the only HEAD is the fetch bucket's,
+     * and a bucket that is not there ends the deployment instead of the first message.
+     */
+    @Test
+    fun SPEC8_a_boot_with_a_missing_fetch_bucket_fails_naming_the_bucket() {
+        val s3 = Mockito.mock(S3Client::class.java)
+        Mockito.`when`(s3.headBucket(any(HeadBucketRequest::class.java))).thenAnswer { call ->
+            if (call.getArgument<HeadBucketRequest>(0).bucket() == "images") throw NoSuchBucketException.builder().message("no").build()
+            HeadBucketResponse.builder().build()
+        }
+        val config = config(yaml(imageSets, channels = NATS_EVENTS))
+        val host = ShuttleHost(
+            config, env::get, NamedBeans.none, store, StoreReads({ store.transfers }, { store.outbox }), registry, clock,
+            targets = mapOf("minio" to target), s3Client = { s3 },
+        ).also { hosts += it }
+
+        val failure = assertThrows(IllegalStateException::class.java) { host.start() }
+
+        assertTrue(failure.message!!.contains("bucket images"), failure.message)
+    }
+
     @Test
     fun S24_rule_9_ends_startup_naming_the_rule() {
         val failure = assertThrows(IllegalStateException::class.java) {
@@ -306,5 +368,15 @@ class ShuttleHostTest {
         const val USER = "etl"
         const val PASSWORD = "s3cret"
         const val TIMEOUT = 30_000L
+
+        /** Spec 13.1's `events` channel with a body: what a `nats` notification publishes (spec 9.6). */
+        const val NATS_EVENTS =
+            "    events:\n" +
+                "      nats:\n" +
+                "        url: nats://127.0.0.1:1\n" +
+                "        subject: files.stored\n" +
+                "        body:\n" +
+                "          - { path: fileId, field: TRANSFER_ID }\n" +
+                "          - { path: event,  field: EVENT }\n"
     }
 }

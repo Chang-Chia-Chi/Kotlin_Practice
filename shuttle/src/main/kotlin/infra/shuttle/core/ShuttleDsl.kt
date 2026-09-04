@@ -226,7 +226,8 @@ class NatsChannelBuilder(private val name: String) {
     var url: String? = null
     var credentials: Secret? = null
     var subject: String? = null
-    internal fun build() = NatsChannel(name, url, credentials, subject)
+    var body: MappingTable = MappingTable(emptyList())
+    internal fun build() = NatsChannel(name, url, credentials, subject, body)
 }
 
 /** Spec 9.6 as infix rows; `row` admits a raw row for what the infix forms cannot say. */

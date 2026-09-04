@@ -4,6 +4,7 @@ import infra.shuttle.core.AckAction
 import infra.shuttle.core.Backoff
 import infra.shuttle.core.DeliveryPolicy
 import infra.shuttle.core.ExtractFrom
+import infra.shuttle.core.Field
 import infra.shuttle.core.HttpChannel
 import infra.shuttle.core.NatsChannel
 import infra.shuttle.core.ProcessorSpec
@@ -20,7 +21,9 @@ import infra.shuttle.core.StateStoreConfig
 import infra.shuttle.core.Violation
 import infra.shuttle.core.bucket
 import infra.shuttle.core.channel
+import infra.shuttle.core.env
 import infra.shuttle.core.extract
+import infra.shuttle.core.mapping
 import infra.shuttle.core.move
 import infra.shuttle.core.objectStore
 import infra.shuttle.core.rename
@@ -112,19 +115,32 @@ class YamlLoaderTest {
         assertEquals(DeliveryPolicy(maxAttempts = 50, giveUpAfter = 24.hours, backoff = Backoff(5.seconds, 15.minutes)), http.policy)
     }
 
-    /** G15: `subject` is what the channel publishes on when a route notifies through it. */
+    /**
+     * G15: `subject` is what the channel publishes on when a route notifies through it, and `body` is the
+     * mapping table it publishes, which spec 9.6 gives every channel whatever its kind. The DSL says the same.
+     */
     @Test
-    fun a_nats_channel_reads_its_url_credentials_and_subject() {
+    fun a_nats_channel_reads_its_url_credentials_subject_and_body() {
         val config = YamlLoader.load(
             """
             shuttle:
               channels:
                 events:
-                  nats: { url: nats://events.internal:4222, credentials: ${'$'}{NATS_CREDS}, subject: files.stored }
+                  nats:
+                    url: nats://events.internal:4222
+                    credentials: ${'$'}{NATS_CREDS}
+                    subject: files.stored
+                    body:
+                      - { path: fileId, field: TRANSFER_ID }
             """.trimIndent(),
             mapOf("NATS_CREDS" to "creds"),
         )
-        assertEquals(NatsChannel("events", "nats://events.internal:4222", Secret.Env("NATS_CREDS"), "files.stored"), config.channels.single())
+        val table = mapping { "fileId" from Field.TRANSFER_ID }
+        assertEquals(NatsChannel("events", "nats://events.internal:4222", Secret.Env("NATS_CREDS"), "files.stored", table), config.channels.single())
+        val dsl = shuttle {
+            channels { nats("events") { url = "nats://events.internal:4222"; credentials = env("NATS_CREDS"); subject = "files.stored"; body = table } }
+        }
+        assertEquals(dsl.channels.single(), config.channels.single())
     }
 
     @TempDir

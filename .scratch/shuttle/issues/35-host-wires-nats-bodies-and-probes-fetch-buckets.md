@@ -12,12 +12,12 @@ startup. Review findings Spec 6 and Spec 8.
 
 **Nature:** composition-root wiring
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `ShuttleHostTest` (or `ShuttleHostM2WiringTest`): a route notifying a `nats` channel with a body table delivers a rendered JSON body, not `{}`; proven through the host with the test kit's recording of what the channel was handed (a real broker is not needed if `NatsChannel` can be observed at its `deliver` input; otherwise `M2AcceptanceTest` gains the assertion under the `acceptance` tag); red before the fix
-- [ ] A subscribe route's `fetch.bucket` is probed at step 3 with the same HEAD the target probe uses; a missing fetch bucket ends startup naming the bucket (test beside `a_boot_with_a_missing_bucket_fails_naming_the_bucket`, with a Mockito `S3Client` whose `headBucket` throws for the fetch bucket only)
-- [ ] The `bodies` map is built once from every channel that carries a mapping table, whatever its kind; no per-kind branch remains in the host for it
-- [ ] Progress entry appended, with the S30/M2 acceptance implication stated (a callback over NATS now carries a body)
+- [x] `ShuttleHostTest` (or `ShuttleHostM2WiringTest`): a route notifying a `nats` channel with a body table delivers a rendered JSON body, not `{}`; proven through the host with the test kit's recording of what the channel was handed (a real broker is not needed if `NatsChannel` can be observed at its `deliver` input; otherwise `M2AcceptanceTest` gains the assertion under the `acceptance` tag); red before the fix
+- [x] A subscribe route's `fetch.bucket` is probed at step 3 with the same HEAD the target probe uses; a missing fetch bucket ends startup naming the bucket (test beside `a_boot_with_a_missing_bucket_fails_naming_the_bucket`, with a Mockito `S3Client` whose `headBucket` throws for the fetch bucket only)
+- [x] The `bodies` map is built once from every channel that carries a mapping table, whatever its kind; no per-kind branch remains in the host for it
+- [x] Progress entry appended, with the S30/M2 acceptance implication stated (a callback over NATS now carries a body)
 
 Ground rules for every ticket: implement only this ticket; 200-600 lines including tests; no Thread.sleep;
 invariant tests named `I<n>_<description>`, scenario tests by their `S<n>` id, validation tests by `rule<n>_`,
