@@ -3265,3 +3265,65 @@ fixture now builds the container with `.withStartupTimeout(Duration.ofMinutes(10
 `JdbiStateStoreTest` already carries (`withStartupTimeoutSeconds` is the JDBC field the Oracle wait
 strategy ignores). Nothing else changed. With it, `M1AcceptanceTest` runs 23 tests and `M2AcceptanceTest`
 runs 5, both 0 failures and 0 errors (205 s and 95 s respectively).
+
+---
+
+## 32: Fix: the SFTP target renames with the connector's listed-file signature
+
+**Built:** one call site. `SftpTarget.store` now renames with
+
+```kotlin
+client.rename(partial, remote, Overwrite.REPLACE, listed = client.stat(partial))
+```
+
+in place of `client.rename(partial, remote, Overwrite.REPLACE, expectedSize = size)`, plus the comment
+that says why the argument is there. Nothing else in `shuttle` named the old parameter: the whole
+reactor had one caller, this one.
+
+**What was wrong:** the connector's T17 failure-semantics batch changed `SftpClient.rename` to
+`rename(from, to, overwrite, listed: RemoteFile? = null)` under its decision **D46**. The old
+`expectedSize` was a bare size, and a size on its own decides nothing under `REPLACE`: the target of
+this adapter's rename is the key, and the key is *expected* to be occupied by an earlier store of the
+same file, so a rename whose reply was lost could take yesterday's same-size copy for the one it had
+just moved and report a move it never made. D46's discriminator is the source's size **and**
+modification time as the server listed them - a rename keeps both, and both readings come from the
+server's own stat, so no clock but the server's is compared. The build was red on exactly one line,
+`SftpTarget.kt:79`, `No parameter with name 'expectedSize' found`, which was this ticket's first red.
+
+**Why the stat and not `null`.** `null` is also correct - `RenameTries` stats `from` for itself before
+the first request, so the compensation survives either way - and it costs one round trip inside the
+attempt rather than one before it. The stat is passed because it is what the adapter already knows it
+is talking about: the partial is this adapter's own name and nothing else writes it. Behaviour is
+otherwise identical, so this is a pure signature follow-up and **no decision was added to spec 16**.
+
+**Residual, recorded rather than fixed** (it is D46's, not this adapter's): SFTP reports modification
+time in whole seconds, so an older copy of identical size written inside the same second is
+indistinguishable from the one this store moved. The cost is a duplicate that is really the same
+bytes, never a loss. `SftpTarget.verify` already lives with exactly that granularity - its ref carries
+the same size and mtime pair.
+
+**Tests: none added, and why.** Checklist item 3 asked for a lost-reply case at the shuttle seam if the
+test kit offers a hook for one. It does not. The kit's only lost-reply hook is
+`LoopbackConnectProxy.onNextClientRequest { stall() }`, which fires on the *next* client packet after
+it is armed; from outside `store` the next packets are the `mkdir` and the upload, so what loses its
+reply is the upload, never the rename. Nothing in the kit fires on a nominated SFTP request, and
+`EmbeddedSftpServer`'s one rename hook (`separateFilesystemAt`) refuses a rename rather than losing its
+answer. Arming the stall between the upload and the rename would need a seam inside `store`, and
+`store` is the interface - the adapter's whole point is that write-then-rename is one operation to its
+caller. So the compensation stays proved where it is provable, in the connector's own
+`ResilienceAgainstServerTest.I11_...` and `RetrySemanticsTest.I15_...`, and this ticket keeps
+checklist items 1 and 2 only.
+
+**Final run counts (surefire).** `-pl shuttle test -Dtest=SftpTargetTest`: 6 tests, 0 failures, 0
+errors, including `ObjectStoreTargetContract` on the SFTP target. Default tier (`mvn -B -o -pl shuttle
+test`): **271 tests, 0 failures, 0 errors, BUILD SUCCESS** - ticket 30's two noisy `ShuttleHostTest`
+readiness cases are green on this base.
+
+**Deviations:**
+
+1. **The connector artifacts in `~/.m2` had to be refreshed first**, offline and without touching
+   connector sources: `mvn -B -o -DskipTests install -pl sftpconnector/core,sftpconnector/testkit`.
+   The parent and aggregator poms were *not* stale this time, so progress 13's deviation 1 dance
+   (`mvn -o -N install` at the root and at `sftpconnector/pom.xml`) was not needed.
+2. **No test added.** See above; the checklist permits it and asks for the reason to be recorded here.
+3. **Size:** production +6 / -1 lines, five of them the comment. No test change, no spec change.
