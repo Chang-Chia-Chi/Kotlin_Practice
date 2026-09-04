@@ -290,8 +290,11 @@ class ShuttleHost(
     /** Step 3: a channel adapter; an `http` one resolves its secrets here, so a missing variable ends startup. */
     private fun channelFor(channel: Channel): DeliveryChannel = when (channel) {
         is HttpChannelConfig -> HttpChannel(channel, httpClient, env)
+        // The trigger's pull is a one second long-poll (ticket 16): on the bounded view it would hold a route's whole
+        // IO budget at parallelism 1 and every ledger write behind it waited a second (measured by ticket 20, S28). The
+        // NATS client owns its own threads, as the connector does for JSch (spec 3.3).
         is NatsChannelConfig -> natsChannels.getOrPut(channel.name) {
-            NatsChannel(channel, natsConnections.getOrPut(channel.name) { natsConnection(channel) }, io)
+            NatsChannel(channel, natsConnections.getOrPut(channel.name) { natsConnection(channel) }, Dispatchers.IO)
         }
     }
 

@@ -135,6 +135,7 @@ object Rules {
                 is Source.Subscribe -> {
                     reference(name, source.channel, "subscribe", channels) { it is NatsChannel }
                     if (route.fetch == null) fail(6, "route $name subscribes without a fetch")
+                    route.fetch?.let { if (stores[it.store] is S3Store && it.bucket == null) fail(6, "route $name fetches from S3 store ${it.store} without a bucket") }
                     if (!source.inProgressEvery.isPositive()) fail(7, "route $name: inProgressEvery must be > 0")
                     ack(name, source.onAck, source.onNack, setOf(AckAction.Ack, AckAction.Term), setOf(AckAction.Nak))
                 }

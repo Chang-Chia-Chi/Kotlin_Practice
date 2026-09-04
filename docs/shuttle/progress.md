@@ -2343,3 +2343,159 @@ SftpPollSourceTest 2.5 s, SftpTargetTest 1.2 s, the rest sub-second). `acceptanc
   the source's, thread the processed `StagedSummary` into `StateStore.stored` (a frozen-seam change) and update
   both stores; ticket 15's S1/S20 already assert the object metadata, so a fixed ledger would let the row assert
   it too.
+
+---
+
+## 20: Milestone 2 acceptance - S27 to S30 and S32 on real adapters
+
+**Built:** `infra.shuttle.acceptance.M2AcceptanceTest`, one `@TestInstance(PER_CLASS)` suite tagged `acceptance`, over
+the fixture ticket 15 built, now extracted into `AcceptanceFixture` (abstract, same package) so both milestones share
+it without a copy: the Testcontainers Oracle behind Agroal with the 8.1 DDL, MinIO (a fresh bucket per scenario), the
+connector's `EmbeddedSftpServer`, the loopback JDK `HttpServer` with its swappable `respond` and `release` latch, the
+`ClockFixture`, `boot`/`bootR`/`load`, `crash(host, point)`, `withClockTicking`, `await`/`awaitState`, `yaml`/`sftpStore`/
+`downstream`; `M1AcceptanceTest` keeps its scenarios and its own route builders, unchanged in behaviour (23 tests green
+after the move). M2 adds NATS JetStream from `NatsChannelTest`'s `NatsBroker` (the `nats:2.10-alpine` container with
+`-js`), one stream and one durable pull consumer named after the route per scenario with a two second ack wait, spec
+13.1's image-sets route at test scale (`subscribe` on NATS, `fetch` from MinIO by pointer, `extract from: message`,
+`expand` of a JSON metadata file, a pass-through `custom: imageResizer` bean, the SFTP target on the embedded SSHD as
+`partner`, `fetched` to `upstream-receipt` and `acked` to `downstream`), booted through `ShuttleHost.load` and
+`ShuttleHost(...)` exactly as M1 boots. Observation is only through the ledger's read views (`transfers`, `outbox`,
+`childrenOf`), the partner's directory on local disk, the loopback server's received requests, and the consumer's
+state at the broker (`JetStreamManagement.getConsumerInfo`: delivered sequence, ack pending, ack floor).
+
+Three production changes, none to a core seam, each forced by a measurement:
+
+- **Rule 6 extended** (ticket 14's addendum): a `subscribe` route whose `fetch.store` is an S3 store states a `bucket`.
+  One line in `Rules.route`, `RulesTest.rule6_a_subscribe_source_fetching_from_an_S3_store_states_a_bucket` (rejected
+  without, accepted with, and an SFTP fetch store needs none), `bucket: images` in spec 13.1 and in the test tree's copy.
+- **The outbox insert is idempotent on (transfer, `on_state`, channel)** in `JdbiStateStore` (`INSERT ... SELECT ...
+  FROM dual WHERE NOT EXISTS`) and in the test kit's `InMemoryStateStore`, with
+  `StateStoreContract.I20_a_transition_run_again_after_a_crash_keeps_its_existing_notification_row` green on both (D44).
+- **The NATS client runs on the unbounded `Dispatchers.IO`** in `ShuttleHost.channelFor`, not on the module's bounded
+  view (D45).
+
+**Concepts named:**
+
+- **The broker's ack state is a seam.** "Acked once", "redelivered", "not acked" and "termed" are all readable off the
+  consumer without touching the adapter: `delivered.consumerSequence` counts deliveries including redeliveries,
+  `numAckPending` is what the broker still owns, and `numRedelivered` is redelivered *and still unacked*, so it is 0 the
+  moment the redelivery is acked (which cost one wrong assertion).
+- **The message id is the identity; the duplicate window is the re-drive's gate.** Both the stream sequence and
+  `Nats-Msg-Id` come back unchanged on a redelivery, so a redelivery re-enters the same row (S28, S32). A re-drive of a
+  subscribed transfer has no trigger of its own, because the adapter terms the message when the transfer is FAILED: the
+  upstream must publish again under the same `Nats-Msg-Id`, and JetStream drops that republish as a duplicate inside
+  the stream's duplicate window (S29 found this the hard way: five attempts took 350 ms, the republish fell inside a
+  500 ms window and was never stored).
+- **A row exists after the transition.** Spec 4.4's "next trigger does a full run" repeats FETCHED on the same row; on
+  Oracle the 8.1 index refused the second `fetched` row and walked the parent to FAILED in five naks, while the fake
+  had been quietly appending a second row. Neither was the seam's meaning; the DDL was.
+- **The trigger's long-poll is not IO work.** `subscription.fetch(1, 1 s)` on a view of one thread held the route's
+  whole IO budget: every ledger write and every fetch waited behind it and each attempt took five seconds. Off the view
+  the same run takes under two.
+- **"Half stored" is a permit, not an order.** Under `parallelism: 1` the upload permit (ticket 17's deviation 4)
+  guarantees exactly one child STORED at a crash, but which child wins the permit is scheduling; the assertion says
+  "one STORED, and it is the one on the partner".
+
+**Acceptance:** all in `M2AcceptanceTest` unless named otherwise. Suite: 5 `acceptance` tests, 0 failures, 58 s.
+
+- [x] One suite covers S27 to S30 end to end, each named by id; S32 too.
+- S27 `S27_image_sets_happy_path_children_stored_on_the_partner_message_acked_once_fetched_and_acked_delivered_once_each`
+  (I10, I16, I20, D28, D43): three children stored in parallel on the partner with no `.part` left, the parent DONE
+  with `batchId` from the message, delivered once, ack pending 0, ack floor 1; two loopback requests, `/api/received`
+  with `SOURCE_PATH` `events:<subject>/1` and the metadata file's digest, `/api/files` with the parent id, `kind`
+  `message`, `event` `acked`, `batchId`, D43's source name (`b-1.json`) and digest, and no `location` (the rows are
+  `required: false`); the partner saw at most the route's `parallelism` in sessions.
+- S28 `S28_crash_with_half_the_children_stored_the_redelivery_verifies_them_stores_the_rest_and_acks_once` (I8, I16):
+  crash at `afterLedgerStored` under `parallelism: 1`, parent PROCESSED, one child STORED and one FETCHED, one copy on
+  the partner, the message still the broker's; the recovery host's redelivery keeps the child rows (same ids), the
+  stored child's `TargetRef` and the partner file's mtime are unchanged (verified by size and mtime, not stored again),
+  the rest stored, delivered twice and acked once, `fetched` and `acked` delivered once each.
+- S29 `S29_one_child_failing_five_times_fails_the_parent_the_message_is_not_acked_and_a_redrive_reruns_the_chain` (I16):
+  a folder on the partner where `2.png` must land makes every rename over it `SSH_FX_PERMISSION_DENIED`; five
+  deliveries later the child has 5 attempts, the parent 0 and FAILED, the sibling STORED, `failed` counted once,
+  nothing told downstream, the message termed (ack pending 0). The operator removes the folder, `redrive` answers DONE
+  and the row is SEEN; the upstream republishes under the same `Nats-Msg-Id`, retried until the publish ack is not a
+  duplicate; the chain re-runs, the children are replaced (new ids, spec 4.5), both files land, downstream is told once
+  and upstream's `fetched` is not repeated (its row existed, D44).
+- S30 `S30_a_callback_ack_answering_500_then_200_keeps_the_transfer_STORED_through_the_failure_and_ACKED_after_with_one_acked_delivery`:
+  `onAck: { callback: upstream-ack }` on the subscribed route; the first callback is held on the loopback latch while
+  the row is seen STORED with 0 attempts, no `acked` row and the message unacked at the broker; released with 500 it is
+  one failed attempt and a nak; the redelivery verifies the children, calls again (200), then ledger ACKED, broker ack,
+  one `acked` delivery; both callback bodies carry `event: acked`.
+- S32 `S32_crash_after_ledger_ACKED_before_the_broker_ack_the_redelivery_reacks_with_children_verified_and_no_new_outbox_rows`
+  (I23): downstream answers 503 until the crash so the `acked` row is PENDING under the frozen clock; crash at
+  `afterLedgerAcked`, parent ACKED, ack pending 1; the recovery host's redelivery is `reacked` once, the outbox holds
+  exactly the rows the ledger wrote before the crash, every child's file on the partner keeps its mtime, delivered twice,
+  acked on the redelivery, then DONE under the ticking clock.
+- The state store half of S28: `StateStoreContract.I20_a_transition_run_again_after_a_crash_keeps_its_existing_notification_row`
+  in `InMemoryStateStoreTest` (default tier) and `JdbiStateStoreTest` (Oracle tier, 21 tests, 0 failures).
+- [x] Spec Sec 17 items 9 and 10 re-checked, each closed for what the fixture can show and left open with what is
+  missing, in the spec itself (item 9: the real consumer's ack wait, `MaxDeliver` at least `maxAttempts`, the duplicate
+  window a re-drive must fall outside; item 10: whether the real partner advertises `posix-rename@openssh.com`, and its
+  session cap against `partner.pool.maxSize`).
+- [x] Every behaviour that differs from the spec is a recorded deviation with a decision entry: D44 to D47 below.
+- [x] Progress entry appended: this one.
+
+**Final run counts (surefire).** Default tier (`mvn -B -o -q -pl shuttle test`): 30 classes, 245 tests, 0 failures,
+0 errors, about 90 s wall clock; per class: ArchitectureTest 9, AttributeFreezeTest 4, BuiltInProcessorsTest 10,
+CrashMatrixTest 12, MappingRendererTest 12, NotifierTest 13, ProcessingChainTest 4, RouteRunnerTest 9,
+RouteSupervisorTest 4, RulesTest 37, SurfaceTest 3, TransferPipelineTest 29, HttpChannelTest 8, StateStoreSchemaTest 2,
+ShuttleHostM2WiringTest 4, ShuttleHostTest 9, ShuttleQuarkusTest 4, TryCommandTest 4, ValidateCommandTest 4,
+SftpConnectorConfigTest 6, SftpPollSourceTest 9, SftpTargetTest 5, ClockFixtureTest 1, FakeProcessContextTest 2,
+HookDriverTest 3, InMemoryStateStoreTest 20, InMemoryTargetTest 3, RecordingChannelTest 2, ScriptedSourceTest 2,
+YamlLoaderTest 11. `-DexcludedGroups=none`: M1AcceptanceTest 23 tests, 0 failures, 64 s (S13 `load` included);
+M2AcceptanceTest 5 tests, 0 failures, 58 s; JdbiStateStoreTest 21 tests, 0 failures, 46 s.
+
+**Deviations:**
+
+1. **D44, a production change in `jdbi` and the test kit.** The outbox insert skips a row that already exists for the
+   transfer, moment and channel. Spec 9.1 amended; the fake had been creating a second `fetched` row on a re-run, so
+   `CrashMatrixTest`'s after-fetch and after-process rows had never had a `fetched` notification to show it. A re-driven
+   transfer therefore does not tell upstream `fetched` again (S29 asserts it); if a consumer wants a "re-driven" moment,
+   that is a new `on:` value, not a second row.
+2. **D45, a host change.** `NatsChannel` is built on `Dispatchers.IO` instead of the bounded `io`, for the trigger's
+   long-poll; its `deliver` (a short publish) rides along. Spec 3.3 amended. The bounded view still carries JDBI, S3,
+   the HTTP channel and archive writing.
+3. **D46, a re-drive of a subscribed transfer needs a republish** under the same `Nats-Msg-Id`, outside the stream's
+   duplicate window; the adapter's `term` at FAILED (ticket 16) is kept, because a `nak` would redeliver a FAILED row for
+   ever. Spec 5.3 amended. Without a publisher-set id the republish is a new identity and the re-driven row stays SEEN.
+4. **D47, spec 13.1 corrected in three places:** `fetch.path` is `/metadata/path` (the written `/metadata.path` names a
+   key called `metadata.path` and every message failed to FAILED in five immediate naks); `fetch` states `bucket`
+   (rule 6); the `downstream` rows for `TARGET_SIZE`, `TARGET_LOCATION`, `TARGET_KEY` and `SOURCE_MTIME` are
+   `required: false`, because a message parent has none of them and the renderer's `MappingFailure` rejected its
+   `acked` notification outright. `shuttle/src/test/resources/spec-13-1.yaml` mirrors the block, so
+   `YamlLoaderTest.the_spec_13_1_document_...` keeps proving the reference configuration passes its own rules.
+5. **Spec 7.3 amended for ticket 18's deviations 2 and 3** (`verify` compares size and mtime; `probe` is a stat of the
+   directory), confirmed here: S28 and S32 keep every partner file's mtime across the verify.
+6. **"Message not acked" in S29 is "termed".** The broker cannot tell an ack from a term in `ConsumerInfo`; the
+   assertion is five deliveries, ack pending 0, and the operator-visible FAILED row with the reason.
+7. **Test-scale choices, not spec:** ack wait 2 s with `inProgressEvery: 500ms` (D38 at test scale, the operator's rule
+   "below the ack wait" kept); the stream's duplicate window 500 ms so S29's republish is reachable inside a test; the
+   stream in memory; `parallelism: 1` for S28 and S29 so "half stored" and "one child fails" are deterministic
+   (S27 keeps spec 13.1's 2 and exercises the parallel uploads and D42 on Oracle); the callback channel's timeout 4 s
+   so S30's held request outlives the assertions; S32's 503-until-the-crash so the `acked` row is deterministically
+   PENDING under the frozen clock; `upstream-receipt`'s `${UPSTREAM_KEY}` supplied by overriding the fixture's `env`.
+8. **The fixture extraction.** `M1AcceptanceTest` lost 279 lines to `AcceptanceFixture`; `versions`/`head`, the route
+   builders and the M1 constants stayed with it; `BODY` moved to the fixture because `downstream()` defaults to it. No
+   scenario changed.
+9. **A refused rename leaves `<key>.part` on the partner** until the next store of that key takes it back (S29's five
+   failures left `2.png.part` beside the folder); a FAILED transfer nobody re-drives leaves it for ever. The adapter's
+   own name, harmless to a watcher of the final name (ticket 18), but an operator will see it.
+10. **Size:** `M2AcceptanceTest` 394 lines for 5 scenarios, `AcceptanceFixture` 302 (moved, not new), production 8
+    lines across three files, `RulesTest` +13, `StateStoreContract` +20, spec +37/-14. Over the 200-600 guideline as
+    the ticket allows for the acceptance suite; one shared fixture, each scenario its own assertions.
+
+**Open items 9 and 10:** in spec 17, each with what was measured and what remains the operator's or infra's.
+
+**For the next ticket / open:**
+
+- **The D43 follow-up** stands as ticket 15 left it.
+- **`MaxDeliver` on the real consumer.** If the operator sets it below a route's `maxAttempts`, the broker stops
+  redelivering before the transfer is FAILED and the row stays STORED or FETCHED with no trigger; the process cannot
+  read it (spec 5.1). A boot-time consumer info read would make this a startup failure; not built.
+- **The real partner's `posix-rename`.** Without the extension the connector's REPLACE is a delete then a rename and
+  the key holds nothing in between; spec 7.3's "exactly one copy" still holds, a watcher of the final name may see it
+  absent for a moment.
+- **A `.part` after a refused rename** (deviation 9): a sweep or an ops note.
+- **Running M2 alone costs about 60 s** of container start (Oracle dominates) plus 58 s of scenarios; with M1 in the
+  same JVM MinIO and NATS are shared and Oracle is started once per class.

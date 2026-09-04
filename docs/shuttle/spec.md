@@ -138,8 +138,9 @@ every line carries them. Time is an injected `java.time.Clock`.
 
 Everything in `core` is `suspend`. Blocking calls, which are JDBI, the synchronous S3 client,
 `HttpClient.send` and archive writing, run on one bounded view of `Dispatchers.IO` owned by the
-module and sized to the sum of route parallelism; the connector owns its own for JSch.
-Per-object pipelines run under one `SupervisorJob` scope per route, the notifier under one
+module and sized to the sum of route parallelism; the connector owns its own for JSch, and the
+NATS client's pull, a one second long-poll, runs on the unbounded `Dispatchers.IO` for the same
+reason (D45). Per-object pipelines run under one `SupervisorJob` scope per route, the notifier under one
 scope per process, and no lock is held across I/O anywhere.
 
 ### 3.4 The five seams
@@ -309,6 +310,10 @@ call is synchronous, retried with the stage, and the transfer is not ACKED until
 Rule for choosing: if a wrong answer from the call must stop the pipeline, it is an ack action;
 if upstream only wants to know, it is a notification on a transfer state (Sec 9.1).
 
+A subscribed message whose transfer is REJECTED or FAILED is termed at the broker, so a re-drive
+(Sec 14.1) has no trigger until the upstream publishes the message again under the same id,
+outside the stream's duplicate window; a polled file is simply listed again (D46).
+
 ---
 
 ## 6. Processing
@@ -436,7 +441,8 @@ repaired by the next `store`; that is the adapter's own contract test (I6).
 
 `store` uploads to `<name>.part` in the target directory and renames over `<name>` with the
 connector's overwrite policy, so exactly one copy exists at the key; `verify` is a stat
-comparing size; `probe` is the connector's startup probe on the directory. The connector's
+comparing size and mtime, the one per-write identity the protocol offers (ticket 18); `probe` is
+a stat of the target directory, because the connector's startup probe cannot be pointed at one. The connector's
 `upload` and `rename` operations are the whole adapter.
 
 ---
@@ -553,7 +559,9 @@ that must be atomic across both tables (I11, I20).
 A route attaches channel deliveries to transfer states: `on: fetched`, `on: stored`,
 `on: acked`, each naming the state whose transition creates the row. Each attachment is one
 outbox row created in the transaction that defines that state (I20), delivered asynchronously
-and at-least-once by the notifier. On the row, `on_state` says which moment the notification
+and at-least-once by the notifier; there is one row per transfer, state and channel (8.1), so a
+transition that runs again after a crash keeps the row it already created, in whatever state the
+notifier has moved it to (D44). On the row, `on_state` says which moment the notification
 announces, written from the route's `on:` key, and never changes even as the transfer moves on
 to DONE; it is not a copy of the transfer's `state` but the reason the row exists, and it is
 what tells two notifications to one channel apart. `notification_state` says how far the
@@ -774,11 +782,11 @@ shuttle:
         body:
           - { path: fileId,          field: TRANSFER_ID }
           - { path: file.name,       field: STORED_NAME }
-          - { path: file.size,       field: TARGET_SIZE }
+          - { path: file.size,       field: TARGET_SIZE,     required: false }   # a message parent has no target of its own (D28) and no mtime (5.2):
           - { path: file.md5,        field: DIGEST }
-          - { path: location.bucket, field: TARGET_LOCATION }
-          - { path: location.key,    field: TARGET_KEY }
-          - { path: receivedAt,      field: SOURCE_MTIME, format: ISO_INSTANT }
+          - { path: location.bucket, field: TARGET_LOCATION, required: false }   # required rows would reject its notification (D47)
+          - { path: location.key,    field: TARGET_KEY,      required: false }
+          - { path: receivedAt,      field: SOURCE_MTIME,    format: ISO_INSTANT, required: false }
           - { path: orderNumber,     attribute: orderNumber }
           - { path: order,           provider: orderDetails }
           - { path: event,           field: EVENT }               # fetched | stored | acked, so the receiver can route on it
@@ -826,7 +834,7 @@ shuttle:
     image-sets:                                # milestone 2
       source:
         subscribe: { channel: events, subject: images.ready, onAck: ack, inProgressEvery: 10s }
-      fetch: { store: minio, path: /metadata.path }
+      fetch: { store: minio, bucket: images, path: /metadata/path }   # path: a JSON pointer into the message body (5.1); bucket: an S3 store is an endpoint, not a bucket (rule 6)
       process:
         - { extract: { from: message, json: { batchId: /batchId } } }
         - { expand: { format: json, files: "/images[*].path", from: minio } }   # quoted: `[` may not start inside a flow mapping's plain scalar
@@ -892,7 +900,7 @@ Each is public numbering, reported by number in validate mode and at startup.
 | 3 | Every S3 `apiCall` timeout, channel `timeout`, and each connector's drain plus cancel grace is below `drainTimeout` |
 | 4 | Route names, store names and channel names are unique; a store and a channel may not share a name |
 | 5 | A route has exactly one `source` and exactly one `target` |
-| 6 | A `subscribe` source has a `fetch` with a store and a path; a `poll` source has none |
+| 6 | A `subscribe` source has a `fetch` with a store and a path, and a `bucket` when that store is S3; a `poll` source has none |
 | 7 | `parallelism >= 1` (1 when omitted), `maxAttempts >= 1`, `stuckAfter > 0`, `inProgressEvery > 0`, `recheckFinished >= 0` (24 h when omitted), every store's `staging.minFree >= 0` (1 GiB when omitted) |
 | 8 | Every `notify.on` is one of `fetched`, `stored`, `acked`; a pair of state and channel appears once per route |
 | 9 | Per object store, the sum of `parallelism` over every route that polls it, fetches from it or targets it, plus one lister per polled directory, is at most `pool.maxSize`, and `maxConcurrentTransfers <= maxSize` |
@@ -1034,6 +1042,10 @@ poll are appeals to the connector's spec.
 | D41 | Staging is bounded in bytes: `staging.minFree` defers a fetch below the watermark without counting an attempt; `unzip` rejects beyond `maxEntries` or `maxBytes` | Parallelism bounds pipelines, not bytes; an archive that expands past the volume evicts the pod, and a deferral is disk pressure, not the object's fault, so it must not walk the object to FAILED (v0.4) |
 | D42 | A child's STORED is one statement on its own row plus a conditional parent update; no `FOR UPDATE`, no lock across I/O, the parent row touched so the last two children order their tails | N children of one parent store under the route's parallelism; the uploads must not serialise, but a lock-free conditional flip loses the last child under read committed, so the row writes queue on the parent for a moment (v0.4, amended by ticket 10) |
 | D43 | The row's `stored_name`, `digest` and `stored_mtime` are the fetched source object's, written at FETCHED and not updated by the chain; the target object alone carries the processed name and digest, in its metadata. `STORED_NAME` and `DIGEST` in a notification therefore render the source values | The `stored`/`processed` seam methods carry only a `TargetRef` (key, size), not the processed object's summary, and the seam is frozen; the S3 metadata (`source-name`, `digest`) is written by the pipeline from the final object, so downstream can read the true stored name and digest off the object. The clean fix is to thread the processed `StagedSummary` into `stored` — a frozen-seam change deferred to a follow-up (measured by ticket 15, S1 and S20 on real adapters) |
+| D44 | An outbox insert is idempotent on (transfer, `on_state`, channel): a transition that runs again after a crash keeps the row it created, whatever its notification state | Spec 4.4's "next trigger does a full run" repeats the FETCHED transition on the same row; the 8.1 index allows one row per transfer, state and channel, so on Oracle the second insert failed the run five times to FAILED while the fake appended a second row. The key is what makes a notification at-least-once rather than once-per-run (measured by ticket 20, S28) |
+| D45 | The NATS client runs on the unbounded `Dispatchers.IO`, not the module's bounded view | Its pull is a one second long-poll; on a view sized to route parallelism it held a route's whole IO budget at `parallelism: 1`, and every ledger write and fetch waited a second behind it (five seconds per attempt, measured by ticket 20). The connector already owns its own threads for the same reason |
+| D46 | A subscribed transfer's re-drive is triggered by the upstream publishing the message again under the same `Nats-Msg-Id`; the adapter terms a message when its transfer is REJECTED or FAILED | `nak` would redeliver a FAILED row for ever (the consumer's `MaxDeliver` is the operator's, not ours); `term` leaves nothing to redeliver, so the re-drive's trigger has to come from outside. The stream sequence changes on a republish, so only a publisher-set id survives it; the stream's duplicate window (2 min by default) swallows a republish inside it (measured by ticket 20, S29) |
+| D47 | Spec 13.1 corrected by measurement: `fetch.path` is a JSON pointer (`/metadata/path`), `fetch` states a `bucket` on an S3 store (rule 6), and the `downstream` rows that read a target or an mtime are `required: false` | `/metadata.path` names a key literally called `metadata.path` and every message failed at fetch; an S3 declaration is an endpoint, not a bucket; a message parent has no target and no mtime, so the shared body rejected its `acked` notification (ticket 20, S27) |
 
 ---
 
@@ -1049,10 +1061,21 @@ poll are appeals to the connector's spec.
 6. Top-of-hour alignment, if required, against the connector's `watch`.
 7. Oracle schema and sequence names; the datasource the state store shares with.
 8. The pod's termination grace period set to 90 s in the manifest (D39).
-9. NATS JetStream stream and consumer configuration for `images.ready`, whether the message
-   id is stable across redeliveries (Sec 5.2), and the consumer's ack wait, which
-   `inProgressEvery` must stay below (D38).
-10. The partner SFTP server's session cap and rename semantics (POSIX rename extension or not).
+9. NATS JetStream stream and consumer configuration for `images.ready`. **Measured (ticket 20)**: a
+   stream on the subject and a durable pull consumer named after the route (`image-sets`), which the
+   process binds to; both the stream sequence and a publisher's `Nats-Msg-Id` are stable across
+   redeliveries (S28, S32 re-enter the same row; S29 keeps one identity over five deliveries and a
+   republish); `inProgressEvery` 500 ms held a message through runs longer than a 2 s ack wait (D38).
+   **Open, the operator's**: the real consumer's ack wait (keep it at least three `inProgressEvery`),
+   `MaxDeliver` at least the route's `maxAttempts` (a broker that stops first leaves the row where it
+   was), and the stream's duplicate window, which a re-drive's republish must fall outside (D46).
+10. The partner SFTP server's session cap and rename semantics. **Measured on the embedded SSHD
+   (ticket 20)**: it advertises `posix-rename@openssh.com`, so a replacing rename is one request; a
+   rename onto a directory is `SSH_FX_PERMISSION_DENIED`, which the connector does not retry (S29);
+   the target connector for `partner` held at most the route's `parallelism` sessions (S27, rule 9).
+   **Open, infra's**: whether the real partner advertises the extension (without it a replace is a
+   delete then a rename, and the key holds nothing in between), and its session cap, which
+   `partner.pool.maxSize` must not exceed.
 11. The connector's D21 records a five-session cap; infra now says 20 per account. An appeal to
     record in the connector's progress log.
 

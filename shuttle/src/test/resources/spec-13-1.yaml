@@ -44,11 +44,11 @@ shuttle:
         body:
           - { path: fileId,          field: TRANSFER_ID }
           - { path: file.name,       field: STORED_NAME }
-          - { path: file.size,       field: TARGET_SIZE }
+          - { path: file.size,       field: TARGET_SIZE,     required: false }   # a message parent has no target of its own (D28) and no mtime (5.2):
           - { path: file.md5,        field: DIGEST }
-          - { path: location.bucket, field: TARGET_LOCATION }
-          - { path: location.key,    field: TARGET_KEY }
-          - { path: receivedAt,      field: SOURCE_MTIME, format: ISO_INSTANT }
+          - { path: location.bucket, field: TARGET_LOCATION, required: false }   # required rows would reject its notification (D47)
+          - { path: location.key,    field: TARGET_KEY,      required: false }
+          - { path: receivedAt,      field: SOURCE_MTIME,    format: ISO_INSTANT, required: false }
           - { path: orderNumber,     attribute: orderNumber }
           - { path: order,           provider: orderDetails }
           - { path: event,           field: EVENT }               # fetched | stored | acked, so the receiver can route on it
@@ -96,7 +96,7 @@ shuttle:
     image-sets:                                # milestone 2
       source:
         subscribe: { channel: events, subject: images.ready, onAck: ack, inProgressEvery: 10s }
-      fetch: { store: minio, path: /metadata.path }
+      fetch: { store: minio, bucket: images, path: /metadata/path }   # path: a JSON pointer into the message body (5.1); bucket: an S3 store is an endpoint, not a bucket (rule 6)
       process:
         - { extract: { from: message, json: { batchId: /batchId } } }
         - { expand: { format: json, files: "/images[*].path", from: minio } }   # quoted: `[` may not start inside a flow mapping's plain scalar

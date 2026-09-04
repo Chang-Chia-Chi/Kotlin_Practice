@@ -210,6 +210,19 @@ class RulesTest {
     fun rule6_only_a_subscribe_source_has_a_fetch() =
         assertEquals(listOf(6), violated(config(vendorDrop = { fetch(objectStore("minio"), "/metadata.path") })))
 
+    /** Ticket 14's addendum: `S3Fetcher` needs a bucket and an S3 store declares none, so the fetch states it (spec 13.1's image-sets). */
+    @Test
+    fun rule6_a_subscribe_source_fetching_from_an_S3_store_states_a_bucket() {
+        val events: ShuttleBuilder.() -> Unit = { channels { nats("events") { url = "nats://events.internal:4222" } } }
+        fun subscribed(bucket: String?): RouteBuilder.() -> Unit = {
+            source = subscribe(channel("events"), "images.ready") { onAck = AckAction.Ack }
+            fetch(objectStore("minio"), "/metadata.path", bucket)
+        }
+        assertEquals(listOf(6), violated(config(more = events, vendorDrop = subscribed(bucket = null))))
+        assertEquals(emptyList<Int>(), violated(config(more = events, vendorDrop = subscribed(bucket = "images"))))
+        assertEquals(emptyList<Int>(), violated(config(more = events, vendorDrop = { source = subscribe(channel("events"), "images.ready") { onAck = AckAction.Ack }; fetch(objectStore("vendor"), "/metadata.path") })))
+    }
+
     @Test
     fun rule7_parallelism_maxAttempts_stuckAfter_and_inProgressEvery_are_positive() =
         assertEquals(listOf(7), violated(config(vendorDrop = { parallelism = 0 })))

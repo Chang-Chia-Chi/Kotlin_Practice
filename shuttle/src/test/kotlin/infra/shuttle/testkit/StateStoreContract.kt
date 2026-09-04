@@ -124,6 +124,26 @@ abstract class StateStoreContract {
         assertEquals(listOf(DeliveryMoment.FETCHED, DeliveryMoment.ACKED), outbox().map { it.moment })
     }
 
+    /**
+     * Spec 4.4's "next trigger does a full run" for a crash after fetch: the FETCHED transition runs again for the same
+     * row, and the 8.1 index allows one row per transfer, moment and channel, so the transition keeps the row it
+     * already created, whatever state the notifier has moved it to (I20, measured by ticket 20 on Oracle).
+     */
+    @Test
+    fun I20_a_transition_run_again_after_a_crash_keeps_its_existing_notification_row() = runTest {
+        val t = store.seen(identity("a"), TransferKind.OBJECT)
+        val onFetched = listOf(DeliveryRequest(DeliveryMoment.FETCHED, hook))
+        store.fetched(t.id, staged("a"), onFetched)
+        val row = outbox().single()
+        store.delivered(row.id, "r-1")
+
+        store.fetched(t.id, staged("a"), onFetched)
+
+        assertEquals(TransferState.FETCHED, transfer(t.id).state)
+        assertEquals(listOf(row.id), outbox().map { it.id }, "the row already there is the transition's row")
+        assertEquals(DeliveryState.DELIVERED, outbox().single().state)
+    }
+
     @Test
     fun I17_acked_with_no_deliveries_pending_goes_straight_to_DONE() = runTest {
         val t = storedTransfer("a")

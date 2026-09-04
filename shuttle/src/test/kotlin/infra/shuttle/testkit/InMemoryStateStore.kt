@@ -189,7 +189,8 @@ class InMemoryStateStore(private val clock: Clock) : StateStore {
             throw IOException("injected: delivery insert failed")
         }
         val now = clock.instant()
-        events.forEach {
+        // One row per transfer, moment and channel (the 8.1 index): a transition run again after a crash keeps its row.
+        events.filter { e -> outboxRows.values.none { it.transferId == id && it.moment == e.moment && it.channel == e.channel } }.forEach {
             val row = Delivery(DeliveryId(nextDelivery++), id, it.moment, it.channel, DeliveryState.PENDING, 0, nextAttemptAt = now, createdAt = now)
             outboxRows[row.id] = row
         }

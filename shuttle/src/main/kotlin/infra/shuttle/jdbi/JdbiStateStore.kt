@@ -240,10 +240,12 @@ class JdbiStateStore(private val jdbi: Jdbi, private val dispatcher: CoroutineDi
         return transfer(TransferId(id))
     }
 
+    /** One row per transfer, moment and channel (`uq_delivery_on_state_channel`): a transition run again after a crash keeps its row (I20). */
     private fun Handle.insertDeliveries(id: TransferId, events: List<DeliveryRequest>) = events.forEach {
         update(
             "INSERT INTO delivery_outbox (id, file_transfer_id, on_state, channel, notification_state, attempts, next_attempt_at, created_at) " +
-                "VALUES (delivery_outbox_seq.NEXTVAL, :tid, :moment, :channel, 'PENDING', 0, :now, :now)",
+                "SELECT delivery_outbox_seq.NEXTVAL, :tid, :moment, :channel, 'PENDING', 0, :now, :now FROM dual " +
+                "WHERE NOT EXISTS (SELECT 1 FROM delivery_outbox WHERE file_transfer_id = :tid AND on_state = :moment AND channel = :channel)",
         ) { bind("tid", id.value).bind("moment", it.moment.name).bind("channel", it.channel.value) }
     }
 

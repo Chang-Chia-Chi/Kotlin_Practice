@@ -8,12 +8,12 @@ re-checked and the spec amended wherever a measurement contradicts it.
 
 **Nature:** diagnosis work
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] One suite covers S27 to S30 end to end, each named by id
-- [ ] Spec Sec 17 items 9 and 10 re-checked; each closed or left open with what is missing
-- [ ] Every behaviour that differs from the spec is a recorded deviation with a decision entry
-- [ ] Progress entry appended
+- [x] One suite covers S27 to S30 end to end, each named by id
+- [x] Spec Sec 17 items 9 and 10 re-checked; each closed or left open with what is missing
+- [x] Every behaviour that differs from the spec is a recorded deviation with a decision entry
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket, stubs throwing NotImplementedError
 for later seams; 200-600 lines including tests; no Thread.sleep; invariant tests named
