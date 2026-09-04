@@ -38,7 +38,6 @@ import java.io.IOException
 import java.nio.file.Path
 import java.time.Clock
 import java.time.Instant
-import java.util.concurrent.ConcurrentHashMap
 import sftp.connector.config.Digest as ConnectorDigest
 
 /**
@@ -53,11 +52,12 @@ import sftp.connector.config.Digest as ConnectorDigest
  * connector's `inFlight` plus what this tick emitted, because spec 4.6 acks every STORED row a
  * complete listing did not name and a file between its store and its move is exactly such a row.
  *
- * The one thing kept here is a handle table, not a mirror: the `FileSeen` a path was handed over
- * on, so that the fetcher downloads through the hand-over that launched the pipeline - the
- * connector checks the bytes against the size it listed, which is what keeps a re-drop between
- * listing and fetch from landing under the first file's identity. Nothing is decided from the
- * table; it is written on hand-over and cleared on the answer.
+ * Nothing about a file is kept here either. The pipeline's [Fetcher] has a path and the connector
+ * answers it: `inFlightAt(path)` is the very `FileSeen` the watch handed the file over on, so the
+ * fetch is the connector's download of the file it *listed* - the bytes checked against the size
+ * the listing saw, which is what keeps a re-drop between listing and fetch from landing under the
+ * first file's identity - and a path nothing is in flight at is a stage error (ticket 41,
+ * connector spec 7.3).
  *
  * The flow never throws (ticket 07 deviation 4): a watch that ends on a failure no tick could
  * survive - a rejected password, a rejected host key - ends with one [RouteEvent.RouteDown] and
@@ -69,8 +69,6 @@ class SftpPollSource(
     private val poll: Source.Poll,
     private val clock: Clock,
 ) {
-
-    private val handles = ConcurrentHashMap<String, SftpEvent.FileSeen>()
 
     /**
      * The route's events, in the order the watch produces them. `PollStarted` is not an event of
@@ -87,7 +85,6 @@ class SftpPollSource(
                     emitted = mutableSetOf()
                 }
                 is SftpEvent.FileSeen -> {
-                    handles[event.file.path] = event
                     val identity = identityOf(event.file)
                     emitted += identity
                     emit(seenEvent(event, identity))
@@ -106,15 +103,17 @@ class SftpPollSource(
     }.catch { emit(RouteEvent.RouteDown(it)) }
 
     /**
-     * Spec 4.1 stage 1: the connector's download of the file [path] names, onto the staging path
-     * the pipeline chose. A file that has gone from the server since it was listed answers null,
-     * and the connector has already given its place back; the [IOException] here is what makes the
-     * pipeline count an attempt and nack, and that nack is then a no-op the connector logs.
+     * Spec 4.1 stage 1: the connector's download of the file in flight at [path], onto the staging
+     * path the pipeline chose. Two ways it does not happen, and both are the same [IOException],
+     * the stage error that makes the pipeline count an attempt and nack: nothing is in flight at
+     * the path - never listed, already answered, or given back when a watch ended - or the file has
+     * gone from the server since it was listed, in which case the connector has already given its
+     * place back. Either way the nack is then a no-op the connector logs.
      */
     val fetcher: Fetcher = ::fetch
 
     private suspend fun fetch(path: String, into: Path, algorithm: DigestAlgorithm): StagedObject {
-        val seen = checkNotNull(handles[path]) { "$path is not a file this poll handed over" }
+        val seen = source.inFlightAt(path) ?: throw IOException("$path is not a file this poll has in flight")
         val local = seen.download(into) ?: throw IOException("$path has gone from the server since it was listed")
         return staged(local, seen.file.name, seen.file.modifiedAt, algorithm)
     }
@@ -131,24 +130,16 @@ class SftpPollSource(
     /**
      * Spec 5.3: the ack is the connector's configured post action - move, delete or none - and the
      * nack is the connector's, which for a polled file is always none: the file stays and the next
-     * poll is its redelivery. Both drop the handle whatever the action does - and only their own,
-     * so an answer that lands after the connector has handed the path over again does not drop
-     * the newcomer's.
+     * poll is its redelivery. Both go straight to the handle the pipeline was launched on, and the
+     * connector settles that handle once: whichever answer comes second - from here or from a
+     * handle looked up by path - is the ignored one it logs.
      */
     private fun seenEvent(seen: SftpEvent.FileSeen, identity: SourceIdentity) = RouteEvent.Seen(
         identity = identity,
         source = SourceView(seen.file.path),
-        ack = { answering(seen) { seen.ack() } },
-        nack = { redeliver -> answering(seen) { seen.nack(NackedByRoute(route.value), redeliver) } },
+        ack = { seen.ack() },
+        nack = { redeliver -> seen.nack(NackedByRoute(route.value), redeliver) },
     )
-
-    private suspend fun answering(seen: SftpEvent.FileSeen, answer: suspend () -> Unit) {
-        try {
-            answer()
-        } finally {
-            handles.remove(seen.file.path, seen)
-        }
-    }
 
     private class NackedByRoute(route: String) : RuntimeException("route $route did not process this file this time")
 }

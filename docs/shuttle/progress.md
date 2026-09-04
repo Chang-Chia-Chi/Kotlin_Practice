@@ -3774,3 +3774,100 @@ behaviour changed except the swallowed cancellation and the retirement of rule 1
 `S3Target`'s unused `clock` (and its `ShuttleHost` call), `Custom.config` reaching the bean
 (`ShuttleHost` and `Commands` pass `spec`, not `spec.name`), and `Expand.format` as an enum beside
 `ExtractFrom` (`ExpandProcessor` and rule 14's body). Whoever owns those files next should take them.
+
+---
+
+## 41: `SftpPollSource` keeps no handle table either
+
+**Built:** the last map in the poll source is gone. `handles: ConcurrentHashMap<String,
+SftpEvent.FileSeen>`, its import, the `put` on hand-over and the `answering` wrapper whose only body
+was a `finally` that removed the entry are deleted; `fetch` is
+`source.inFlightAt(path) ?: throw IOException("$path is not a file this poll has in flight")`, and
+`seenEvent`'s `ack` and `nack` call the connector's handle directly. `emitted`, reset on
+`PollStarted`, is the only state the class holds. 13 lines of code removed, 3 added (net -10
+non-comment lines; -27/+18 with the KDoc rewritten). Nothing else in shuttle changed.
+
+**Concepts named:**
+
+- **The connector answers the path, so nobody else has to.** Connector ticket 25 (spec 7.1 and 7.3,
+  D50) added `SftpSource.inFlightAt(path): SftpEvent.FileSeen?`: the very handle the watch emitted
+  for the file in flight at that path, or null - never listed, already answered and its action run,
+  or given back when the watch ended, and null too in the gap between a tick admitting a file and
+  handing it over. That is exactly the question ticket 31's table existed to answer, and the answer
+  is now one lookup on the module that owns the in-flight set. Under the deletion test the table
+  was pure duplication once the lookup existed: it decided nothing, and every property it had -
+  the emitted instance, so the download carries the listed size; only-its-own removal, so a late
+  answer never drops a newcomer's handle - is a property of the connector's set instead.
+- **The size check is what had to survive, and it does.** `FileSeen.download` is the connector's
+  download of the file it *listed*: the bytes are counted against `remote.size` and a mismatch is
+  `IncompleteTransfer`, so a re-drop between listing and fetch fails the fetch rather than landing
+  under the first file's identity. Because `inFlightAt` returns the emitted handle rather than a
+  fresh one over the same slot, going through the lookup and going through the emitted event are
+  the same download. That is what progress 31 deviation 1 was protecting and why the alternative it
+  rejected - `stat` the path and download what comes back - is still the wrong answer.
+- **A missing handle is a stage error, not a bug.** The table's absence was `checkNotNull`, an
+  `IllegalStateException` that read as "this cannot happen". It can: a path answered, or given back
+  by a watch that ended, is a path the pipeline may still call the fetcher for. It is the same
+  situation as a file gone from the server, so it is the same `IOException` - the pipeline charges
+  an attempt, nacks, and the connector logs the nack as the no-op it is.
+
+**Acceptance:**
+
+- [x] *A fetch after the handle was looked up keeps the connector's size check* -
+      `a_file_re_dropped_with_a_different_size_between_the_listing_and_the_fetch_is_refused`: the
+      file is listed at 15 bytes, rewritten to 19 while the watch holds it, and the pipeline run
+      leaves the row SEEN with 1 attempt, nothing in the target under the first identity and the run's
+      staging directory gone. The connector's own line is the proof: "the transfer ended after 19
+      bytes where the listing said the file had 15".
+- [x] *A fetch for a path with nothing in flight is an `IOException`* -
+      `a_fetch_for_a_path_nothing_is_in_flight_at_is_a_stage_error_naming_the_path`: `IOException`
+      naming `/drop/never-listed.csv`. **This is the assertion that was red** (`Unexpected type,
+      expected: <java.io.IOException> but was: <java.lang.IllegalStateException>`) and green after.
+      The size-check case was green both times, deviation 1.
+- [x] *No map, no `ConcurrentHashMap` import, only `emitted` per tick* -
+      `grep -n "handles\|ConcurrentHashMap\|answering" SftpPollSource.kt` finds nothing.
+- [x] *Every `S<n>`, `SPEC1` and `B1` test keeps its id and passes* - `S1` x2, `SPEC1` and `B1`
+      untouched and green; no earlier test was edited at all (`git diff` on the test file is
+      additions only).
+- [x] *The KDoc's "handle table" paragraph is superseded* - the class KDoc now says nothing about a
+      file is kept here either, and names `inFlightAt` and the listed-size check; `fetch`'s KDoc names
+      both ways it answers `IOException`; `seenEvent`'s KDoc says the connector settles the handle
+      once and a second answer from a lookup is its ignored one. **Progress 31 deviation 1 is
+      superseded by this entry**: the coordinator-approved table is gone, and its reasoning is now
+      the connector's contract.
+- [x] *Default tier green; `M1AcceptanceTest` green* - counts below.
+- [x] *Progress entry appended* - this one.
+
+**Final run counts (surefire).** `-pl shuttle test -Dtest=SftpPollSourceTest`: **14 tests, 0
+failures, 0 errors** (12 before, +2). Red run before the deletion: 14 tests, 1 failure, the
+`IOException` assertion. Default tier (`mvn -B -o -q -pl shuttle test`): 31 classes, **281 tests, 0
+failures, 0 errors, 0 skipped** - 279 at ticket 40's base plus this ticket's two.
+`M1AcceptanceTest` (`-DexcludedGroups=none -Dtest=M1AcceptanceTest`, Oracle and MinIO in containers,
+the real poll source through the host): **23 tests, 0 failures, 0 errors**, 91 s. No test was
+retried and nothing was flaky; one Maven build at a time throughout.
+
+**Deviations:**
+
+1. **Only one of the two tests was ever red.** The ticket asked for red "for whichever assertion the
+   table's absence changes", and that is the `IOException` one: `checkNotNull` threw
+   `IllegalStateException`. The size-check case passed against the table too, which is the point -
+   the table and `inFlightAt` hand back the same instance, so the fetch is byte-for-byte the same
+   download. It is kept because it is the assertion that fails if a later ticket ever "simplifies"
+   the fetcher into a `stat`-then-`download` by path, which is the identity hole progress 31
+   deviation 1 was guarding against and the only reason the table was allowed to survive.
+2. **`answering` went with the table.** The ticket names the `finally`; with the `finally` deleted
+   the wrapper's whole body was `answer()`, so the two lambdas call `seen.ack()` and `seen.nack(...)`
+   directly, as connector 25's "for the next ticket" paragraph said they would. No behaviour changed:
+   the connector's `answering` on its own side still swallows a non-fatal `SftpException`.
+3. **Size:** production -27/+18 in one file (13 code lines out, 3 in); tests +52, additions only;
+   the ticket file and this entry. Well inside the budget - this is a deletion ticket.
+
+**Seams.** None changed. `SftpPollSource`'s interface to the pipeline (`events()`, `fetcher`) is
+untouched; what changed is that its implementation now asks the connector a question instead of
+remembering the answer.
+
+**For the next ticket:** nothing is left over. `SftpPollSource` now holds one mutable local per
+collect (`emitted`) and no fields but its four constructor arguments; every question about what is
+out, whether a listing was cut short, who gives a file back and which file is in flight at a path is
+the connector's. If a later reviewer wants the class smaller still, the only thing left to move is
+`identityOf`, which is shuttle's vocabulary and belongs here.
