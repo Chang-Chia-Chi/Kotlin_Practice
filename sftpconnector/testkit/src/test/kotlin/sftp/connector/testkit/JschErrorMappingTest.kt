@@ -2,6 +2,7 @@ package sftp.connector.testkit
 
 import kotlinx.coroutines.runBlocking
 import org.assertj.core.api.Assertions.assertThat
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import sftp.connector.config.HostKeyPolicy
@@ -55,6 +56,10 @@ class JschErrorMappingTest {
             }
 
             assertThat(failure).isInstanceOf(AuthenticationFailed::class.java)
+            // The methods JSch quotes are the server's offer, not what was sent. Whose password
+            // it was, and that a password was all that was tried, are the connector's to say.
+            assertTrue(failure.message!!.contains("\"$USER\""), "the account: ${failure.message}")
+            assertTrue(failure.message!!.contains("offers a password"), "what was tried: ${failure.message}")
             assertThat(failure.disposition.retry).isEqualTo(Retry.NEVER)
             assertThat(failure.disposition.countsAgainstTheBreaker).isFalse()
             assertThat(failure.disposition.watch).isEqualTo(WatchReaction.STOP)
@@ -71,6 +76,11 @@ class JschErrorMappingTest {
             }
 
             assertThat(failure).isInstanceOf(HostKeyRejected::class.java)
+            // Which of the three refusals it was, and which file the accepted keys are kept in.
+            // JSch carries no fingerprint into the exception, so the message says so rather than
+            // leaving the reader looking for one.
+            assertTrue(failure.message!!.contains("not recorded for it"), "which refusal: ${failure.message}")
+            assertTrue(failure.message!!.contains(emptyKnownHosts.toString()), "which file was consulted: ${failure.message}")
             assertThat(failure.disposition.watch).isEqualTo(WatchReaction.STOP)
         }
     }
@@ -109,6 +119,8 @@ class JschErrorMappingTest {
 
             assertThat(failure).isInstanceOf(ConnectFailed::class.java)
             assertThat(failure).hasMessageContaining("proxy")
+            // `endpoint=` names the target, which is not the address that refused.
+            assertTrue(failure.message!!.contains("$LOOPBACK:$deadProxyPort"), "the proxy that refused: ${failure.message}")
         }
     }
 

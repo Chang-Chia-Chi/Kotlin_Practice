@@ -23,7 +23,7 @@ import java.time.ZoneOffset
  */
 class SessionRegistryLincheckTest {
 
-    private val registry = SessionRegistry(CONFIG.pool, Clock.fixed(Instant.EPOCH, ZoneOffset.UTC)) { 0 }
+    private val registry = SessionRegistry(CONFIG.pool, CONFIG.endpoint.address, Clock.fixed(Instant.EPOCH, ZoneOffset.UTC)) { 0 }
 
     @Operation(cancellableOnSuspension = false)
     suspend fun checkOut(): Long? = registry.checkOut(Throwable("lincheck"))?.entry?.id

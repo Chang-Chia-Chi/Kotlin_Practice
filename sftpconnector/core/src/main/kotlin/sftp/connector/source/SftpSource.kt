@@ -79,6 +79,13 @@ class SftpSource(
     private val ticks = AtomicLong()
 
     /**
+     * A watched path named so that two connectors watching `inbound/` on two servers are two
+     * different lines. Every line here is about a path, and a path on its own is the one thing
+     * that cannot be grepped for when a host runs more than one connector.
+     */
+    private fun at(path: String) = "$path on ${config.endpoint.address}"
+
+    /**
      * The directories a watch is running on right now. One consumer per directory is what the
      * in-flight set's promise rests on, so the second is refused; adding to a synchronised set
      * is the whole decision, made under its lock.
@@ -146,6 +153,10 @@ class SftpSource(
                 "$directory is already being watched on this connector; one consumer per directory " +
                     "is what keeps a file from being handed over twice"
             }
+            // "Is it polling at all?" had no answer in the log before this: the only per-tick
+            // lines are for a tick that failed or was skipped, so a healthy watch and a watch
+            // that never started read identically.
+            LOG.info("Watching {}, every {}.", at(directory), every)
             try {
                 val events = background.produce(failedAfterItsCollectorLeft(directory)) { tickEvery(directory, every) }
                 try {
@@ -154,7 +165,7 @@ class SftpSource(
                     // A cancelled receive is either this collector's own cancellation, which
                     // goes on, or the connector stopping its watchers, which ends the flow.
                     currentCoroutineContext().ensureActive()
-                    LOG.info("The watch of {} ended because the connector stopped it.", directory)
+                    LOG.info("The watch of {} ended because the connector stopped it.", at(directory))
                 }
             } finally {
                 watching.remove(directory)
@@ -193,7 +204,7 @@ class SftpSource(
             if (failed.disposition.watch == WatchReaction.STOP) throw failed
             LOG.warn(
                 "The answer for {} could not be carried out, so it is still where it was and will be handed over again: {}",
-                event.file.path,
+                at(event.file.path),
                 failed.toString(),
             )
         }
@@ -205,7 +216,7 @@ class SftpSource(
      * failure with nobody to tell is logged here rather than left to the thread's default handler.
      */
     private fun failedAfterItsCollectorLeft(directory: String) = CoroutineExceptionHandler { _, failure ->
-        LOG.warn("A tick of {} failed just as its collector was leaving, so nobody was told: {}", directory, failure.toString())
+        LOG.warn("A tick of {} failed just as its collector was leaving, so nobody was told.", at(directory), failure)
     }
 
     /**
@@ -220,7 +231,7 @@ class SftpSource(
         while (true) {
             val tick = ticks.incrementAndGet()
             if (latest?.isActive == true && polling.overlap == OverlapPolicy.SKIP) {
-                LOG.warn("Tick {} of {} is skipped: the tick before it is still running after {}.", tick, directory, every)
+                LOG.warn("Tick {} of {} is skipped: the tick before it is still running after {}.", tick, at(directory), every)
                 send(SftpEvent.PollSkipped(tick, SkipCause.OVERLAP))
             } else {
                 latest = launch { tickOf(directory, tick).reportingFailures(tick, directory).collect { send(it) } }
@@ -247,20 +258,20 @@ class SftpSource(
             )
         }
         if (failed !is SftpException) {
-            LOG.error("The watch of {} is ending on tick {} with a failure the connector has no name for: {}", directory, tick, failed.toString())
+            LOG.error("The watch of {} is ending on tick {} with a failure the connector has no name for.", at(directory), tick, failed)
             throw failed
         }
         when (failed.disposition.watch) {
             WatchReaction.REPORT_THE_FAILURE -> {
-                LOG.warn("Tick {} of {} failed; the next tick will try again: {}", tick, directory, failed.toString())
+                LOG.warn("Tick {} of {} failed; the next tick will try again: {}", tick, at(directory), failed.toString())
                 emit(SftpEvent.PollFailed(tick, failed))
             }
             WatchReaction.REPORT_A_SKIP -> {
-                LOG.info("Tick {} of {} is skipped: {}", tick, directory, failed.message)
+                LOG.info("Tick {} of {} is skipped: {}", tick, at(directory), failed.message)
                 emit(SftpEvent.PollSkipped(tick, SkipCause.BREAKER_OPEN))
             }
             WatchReaction.STOP -> {
-                LOG.error("The watch of {} is ending on tick {}, because no later tick could survive this: {}", directory, tick, failed.toString())
+                LOG.error("The watch of {} is ending on tick {}, because no later tick could survive this.", at(directory), tick, failed)
                 throw failed
             }
         }
@@ -293,7 +304,7 @@ class SftpSource(
                             Readiness.Skip -> Unit
                             is Readiness.NotReady -> {
                                 notReady++
-                                LOG.debug("{} is not ready yet: {}", file.path, readiness.reason)
+                                LOG.debug("{} is not ready yet: {}", at(file.path), readiness.reason)
                             }
                             Readiness.Ready -> {
                                 val slot = inFlight.admit(file) ?: continue
@@ -305,6 +316,14 @@ class SftpSource(
                         }
                     }
                     meters.listed(seen, emitted, notReady)
+                    LOG.debug(
+                        "Tick {} of {} finished: {} seen, {} handed over, {} not ready yet.",
+                        tick,
+                        at(directory),
+                        seen,
+                        emitted,
+                        notReady,
+                    )
                     emit(SftpEvent.PollCompleted(tick, seen, emitted, notReady))
                 }
             } catch (ended: Throwable) {
@@ -358,7 +377,7 @@ class SftpSource(
                 // Not a settlement the consumer made, so a slot already settled is left as it is:
                 // a file acked and then downloaded is gone because the ack moved it.
                 if (slot.settle(Settlement.GONE)) {
-                    LOG.info("{} was listed and is gone from the server; nothing to act on.", slot.file.path)
+                    LOG.info("{} was listed and is gone from the server; nothing to act on.", at(slot.file.path))
                     meters.settled(Settlement.GONE)
                     slot.release()
                 }
@@ -377,11 +396,14 @@ class SftpSource(
 
         suspend fun nack(slot: InFlightSlot, reason: Throwable, redeliver: Boolean) {
             if (!slot.settle(Settlement.NACK)) return alreadySettled("nack", slot)
+            // The throwable itself, not its `toString()`: `consume` nacks and goes on, so this
+            // line is the only record the consumer's failure ever leaves, and without the stack
+            // an operator is left with a class name and nothing to open.
             LOG.warn(
-                "The consumer could not process {} and it will {}: {}",
-                slot.file.path,
+                "The consumer could not process {} and it will {}.",
+                at(slot.file.path),
                 if (redeliver) "be handed over again on a later poll" else "not be handed over again until restart",
-                reason.toString(),
+                reason,
             )
             try {
                 perform(polling.onNack, slot.file)
@@ -414,9 +436,9 @@ class SftpSource(
 
         private fun alreadySettled(call: String, slot: InFlightSlot) {
             LOG.warn(
-                "A {} of {} was ignored: the file had already been given back as {}. Each file is answered once.",
+                "The {} of {} was ignored: the file had already been given back as {}. Each file is answered once.",
                 call,
-                slot.file.path,
+                at(slot.file.path),
                 slot.settlement?.label,
             )
         }

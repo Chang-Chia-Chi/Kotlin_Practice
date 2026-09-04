@@ -8,6 +8,7 @@ import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.assertj.core.api.Assertions.assertThat
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import sftp.connector.config.HostKeyPolicy
 import sftp.connector.config.SftpConnectorConfig
@@ -225,6 +226,8 @@ class HousekeeperTest {
                 .describedAs("times one lease was reported over eleven rounds of housekeeping")
                 .isEqualTo(1)
             assertThat(reported).contains("session #1").contains("HousekeeperTest")
+            // A host running two connectors cannot otherwise tell whose session #1 this is.
+            assertTrue(reported.contains("session #1 to sftp.example:22"), "which server the session is to: $reported")
             assertThat(meters.find("sftp_pool_leak_total").counter()?.count()).isEqualTo(1.0)
 
             // Never forced: the caller still holds a working session and gives it back itself.

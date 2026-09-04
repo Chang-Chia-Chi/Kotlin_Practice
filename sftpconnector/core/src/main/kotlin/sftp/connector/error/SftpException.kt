@@ -24,6 +24,16 @@ data class Attempt(
     val path: String? = null,
     /** Counting from one. */
     val number: Int = 1,
+    /**
+     * How many tries this operation is allowed in all, when a retry ladder is what numbered it.
+     *
+     * Without it `attempt=1` after a failure that is never retried and `attempt=3` after one that
+     * has run out of tries read the same to anyone who does not know `maxAttempts` by heart - and
+     * "this was the last one" is the single thing that decides whether to wait or to act. Null
+     * where nothing is retrying: the probe, a direct call, the layers underneath the ladder that
+     * are told what to do and not how many times it may be asked.
+     */
+    val budget: Int? = null,
 ) {
     internal fun describe(detail: String): String = buildString {
         append(detail)
@@ -31,6 +41,7 @@ data class Attempt(
         append(", op=").append(operation)
         if (path != null) append(", path=").append(path)
         append(", attempt=").append(number)
+        if (budget != null) append(" of ").append(budget)
         append(')')
     }
 
@@ -40,8 +51,10 @@ data class Attempt(
          * first, when it is inside none. For the layers underneath the one that retries, which
          * know what they were asked and not how many times it has been asked before.
          */
-        suspend fun inside(endpoint: String, operation: String, path: String? = null): Attempt =
-            Attempt(endpoint, operation, path, coroutineContext[CurrentAttempt]?.attempt?.number ?: 1)
+        suspend fun inside(endpoint: String, operation: String, path: String? = null): Attempt {
+            val outer = coroutineContext[CurrentAttempt]?.attempt
+            return Attempt(endpoint, operation, path, outer?.number ?: 1, outer?.budget)
+        }
     }
 }
 

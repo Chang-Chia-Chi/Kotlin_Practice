@@ -32,6 +32,7 @@ import sftp.connector.transport.SftpSession
 import java.time.Clock
 import java.util.concurrent.TimeoutException
 import kotlin.time.toJavaDuration
+import kotlin.time.toKotlinDuration
 
 /**
  * What stands between a client operation and the pool: the retries, the breaker, the limit on
@@ -70,8 +71,10 @@ internal class Resilience(
     clock: Clock,
 ) {
 
+    private val maxAttempts = settings.retry.maxAttempts
+
     private val retries: RetryConfig = RetryConfig.custom<Any>()
-        .maxAttempts(settings.retry.maxAttempts)
+        .maxAttempts(maxAttempts)
         .intervalFunction(settings.retry.backoff.asIntervals())
         .build()
 
@@ -98,6 +101,20 @@ internal class Resilience(
 
     init {
         Gauge.builder("sftp_breaker_state") { breaker.state.reading() }.tag("endpoint", endpoint).register(meters)
+        // The gauge says what the state is now, which is no help to anyone reading the log after
+        // the fact: the moment it opened, the moment the probe was let through, the moment it
+        // closed again are all moments that have passed. A breaker that has stopped every call to
+        // a server is the loudest thing this connector does, and it says so once per transition.
+        breaker.eventPublisher.onStateTransition {
+            val to = it.stateTransition.toState
+            LOG.warn(
+                "The circuit breaker for {} went from {} to {}.{}",
+                endpoint,
+                it.stateTransition.fromState.spelling(),
+                to.spelling(),
+                if (to.reading() == 2) " Every call is refused from here, without anything being sent." else "",
+            )
+        }
     }
 
     /**
@@ -129,10 +146,18 @@ internal class Resilience(
             RetryConfig.from<Any>(retries).retryOnException { it.worthAnotherTry() && stillWorthRetrying() }.build(),
         )
         retry.eventPublisher.onRetry {
-            LOG.warn("{} failed and is being tried again in {}: {}", operation, it.waitInterval, it.lastThrowable.message)
+            LOG.warn(
+                "{} against {} failed on try {} of {} and is being tried again in {}: {}",
+                operation,
+                endpoint,
+                tries,
+                maxAttempts,
+                it.waitInterval.toKotlinDuration(),
+                it.lastThrowable.message,
+            )
         }
         return retry.executeSuspendFunction {
-            val attempt = Attempt(endpoint, operation, path, ++tries)
+            val attempt = Attempt(endpoint, operation, path, ++tries, maxAttempts)
             if (attempt.number > 1) meters.counter("sftp_retry_total", "endpoint", endpoint, "op", operation).increment()
             withContext(CurrentAttempt(attempt)) {
                 throughTheBreaker(attempt) {
@@ -182,7 +207,8 @@ internal class Resilience(
             currentCoroutineContext().ensureActive()
             throw OperationTimeout(
                 attempt,
-                "no answer within ${limit.timeLimiterConfig.timeoutDuration}; the request may still land, so the session is not kept",
+                "no answer within ${limit.timeLimiterConfig.timeoutDuration.toKotlinDuration()}; " +
+                    "the request may still land, so the session is not kept",
                 ranOut,
             )
         }
@@ -199,6 +225,9 @@ internal class Resilience(
 
         private fun Throwable.countsAgainstTheBreaker(): Boolean =
             this is SftpException && disposition.countsAgainstTheBreaker
+
+        /** The library's `HALF_OPEN` in the words spec 9 uses for it, so a log line reads as prose. */
+        private fun CircuitBreaker.State.spelling(): String = name.lowercase().replace('_', '-')
 
         /** 0 closed, 1 half-open, 2 open; the states a breaker is forced or disabled into read as what they act like. */
         private fun CircuitBreaker.State.reading(): Int = when (this) {

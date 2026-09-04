@@ -12,14 +12,20 @@ import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.assertj.core.api.Assertions.assertThat
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertInstanceOf
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import sftp.connector.config.HostKeyPolicy
 import sftp.connector.config.PollingBuilder
 import sftp.connector.config.SftpConnectorConfig
 import sftp.connector.config.sftpConnector
+import sftp.connector.error.Attempt
 import sftp.connector.error.ConfigurationError
 import sftp.connector.error.PoolExhausted
+import sftp.connector.error.SessionLost
 import sftp.connector.pool.virtualClock
 import sftp.connector.source.Readiness
 import sftp.connector.source.ReadinessCheck
@@ -172,6 +178,30 @@ class SftpConnectorTest {
         assertThat(refusal).isInstanceOf(ConfigurationError::class.java)
         assertThat(transport.calls.map { it.operation }).contains(FakeSftpTransport.Operation.Connect)
         assertThat(transport.openSessions).describedAs("sessions the refused start-up left open").isZero()
+    }
+
+    /**
+     * The probe's whole value is the remedy in the message, and a remedy for a fault that is not
+     * there is worse than no message at all: the operator is sent to respell a path that is spelled
+     * correctly, on a start-up that would have worked a minute later. Only what the server answered
+     * says anything about the configuration; a connection that broke under the request says nothing
+     * about what was asked, so it goes up as the recoverable failure it is (spec 10.2) and the
+     * connector still refuses to start (spec 11.1) - carrying the truth rather than a guess.
+     */
+    @Test
+    fun `a session lost during the probe is reported as itself, not as a path to respell`() = runTest {
+        val transport = FakeSftpTransport { call ->
+            if (call.operation == FakeSftpTransport.Operation.Realpath) {
+                throw SessionLost(Attempt("fake:22", "realpath", call.path), "the connection broke under the request")
+            }
+        }.directory("/drop")
+
+        val refusal = runCatching { start(transport) { directories("/drop") } }.exceptionOrNull()
+
+        val lost = assertInstanceOf(SessionLost::class.java, refusal, "what a broken connection during the probe throws")
+        assertTrue(lost.message!!.contains("the connection broke"), "says what actually happened: ${lost.message}")
+        assertFalse(lost.message!!.contains("leading slash"), "does not blame the spelling: ${lost.message}")
+        assertEquals(0, transport.openSessions, "sessions the refused start-up left open")
     }
 
     private suspend fun TestScope.start(

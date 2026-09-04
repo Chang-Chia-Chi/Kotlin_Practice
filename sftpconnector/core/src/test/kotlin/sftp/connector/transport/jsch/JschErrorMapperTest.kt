@@ -6,7 +6,11 @@ import com.jcraft.jsch.JSchProxyException
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import sftp.connector.config.HostKeyPolicy
+import sftp.connector.config.SftpConnectorConfig
+import sftp.connector.config.sftpConnector
 import sftp.connector.error.Attempt
 import sftp.connector.error.AuthenticationFailed
 import sftp.connector.error.ConnectFailed
@@ -32,7 +36,7 @@ import com.jcraft.jsch.SftpException as JschStatusException
 class JschErrorMapperTest {
 
     private val meters = SimpleMeterRegistry()
-    private val mapper = JschErrorMapper(meters)
+    private val mapper = JschErrorMapper(meters, CONFIG)
 
     @Test
     fun `a missing path is recoverable and leaves the session in the pool`() {
@@ -80,11 +84,29 @@ class JschErrorMapperTest {
         assertThat(failure).hasMessageContaining("Pipe closed")
     }
 
+    /**
+     * `endpoint=` names the target, which is not the host that refused. Without the proxy in the
+     * message the operator pings a server that is perfectly healthy.
+     */
     @Test
-    fun `a proxy that will not open a tunnel is a failure to connect`() {
+    fun `a proxy that will not open a tunnel is a failure to connect, and names the proxy`() {
         val failure = mapping(JSchProxyException("ProxyHTTP: java.net.ConnectException: Connection refused"))
 
         assertThat(failure).isInstanceOf(ConnectFailed::class.java)
+        assertTrue(failure.message!!.contains("proxy.internal:3128"), "the address that refused: ${failure.message}")
+    }
+
+    /**
+     * The methods JSch quotes are the ones the *server* offers; the connector only ever sends a
+     * password, and whose password it was is the first thing anyone asks.
+     */
+    @Test
+    fun `a rejected credential names the account the connector offered`() {
+        val failure = mapping(JSchException("Auth fail for methods 'password,keyboard-interactive,publickey'"))
+
+        assertThat(failure).isInstanceOf(AuthenticationFailed::class.java)
+        assertTrue(failure.message!!.contains("\"etl\""), "the account: ${failure.message}")
+        assertTrue(failure.message!!.contains("offers a password"), "what was actually tried: ${failure.message}")
     }
 
     /**
@@ -193,5 +215,14 @@ class JschErrorMapperTest {
 
     private companion object {
         private val ATTEMPT = Attempt("sftp.example:22", "list", "/inbox")
+
+        private val CONFIG: SftpConnectorConfig = sftpConnector("vendor-drop") {
+            endpoint {
+                host = "sftp.example"
+                proxy { httpConnect("proxy.internal", 3128) }
+            }
+            auth { password("etl", "s3cret") }
+            hostKey = HostKeyPolicy.AcceptAll
+        }
     }
 }

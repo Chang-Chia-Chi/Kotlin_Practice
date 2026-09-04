@@ -12,6 +12,7 @@ import kotlinx.coroutines.test.currentTime
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.assertj.core.api.Assertions.assertThat
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import sftp.connector.config.HostKeyPolicy
 import sftp.connector.config.SftpConnectorConfig
@@ -22,6 +23,7 @@ import sftp.connector.error.SessionLost
 import sftp.connector.testkit.FakeSftpTransport
 import sftp.connector.testkit.FakeSftpTransport.Operation
 import java.io.ByteArrayOutputStream
+import java.io.PrintStream
 import java.nio.file.Path
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
@@ -75,9 +77,16 @@ class PoolShutdownTest {
             .hasSize(1)
         assertThat(closer.isCompleted).describedAs("returned before the cut had its grace").isFalse()
 
-        advanceTimeBy(GRACE)
-        runCurrent()
+        val closing = capturingStandardError {
+            advanceTimeBy(GRACE)
+            runCurrent()
+        }
         assertThat(closer.isCompleted).describedAs("close within drainTimeout + cancelGrace").isTrue()
+        // A shutdown nobody can reconstruct from the log is one nobody can tell from a hang: the
+        // line has to say how much was out, whether the drain ran out, and what was hung up on.
+        assertTrue(closing.contains("lease(s) were out when the drain began"), "what the drain started with: $closing")
+        assertTrue(closing.contains("did not settle"), "that the drain ran out rather than settling: $closing")
+        assertTrue(closing.contains("session(s) were hung up on"), "what was hung up on: $closing")
         assertThat(entries.map { it.value }).containsExactly(EntryState.Closed, EntryState.Closed, EntryState.Closed)
         assertThat(pool.stats().total).isZero()
         assertThat(transport.openSessions).describedAs("sessions left open").isZero()
@@ -208,6 +217,19 @@ class PoolShutdownTest {
 
         assertThat(transport.calls.filter { it.operation == Operation.Connect }).isEmpty()
         keeper.cancel()
+    }
+
+    /** The test binding writes to standard error and looks it up on every call. */
+    private fun capturingStandardError(body: () -> Unit): String {
+        val captured = ByteArrayOutputStream()
+        val original = System.err
+        System.setErr(PrintStream(captured, true))
+        try {
+            body()
+        } finally {
+            System.setErr(original)
+        }
+        return captured.toString()
     }
 
     private fun evictedAsShutdown(): Double =

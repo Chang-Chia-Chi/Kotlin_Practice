@@ -77,6 +77,12 @@ class PoolEntry internal constructor(
     /** Counts from one within a pool. It is what a log line uses to follow one session over time. */
     val id: Long,
     /**
+     * Which server this session is to, as `host:port`. It is in [toString] and therefore in every
+     * pool, ladder and lease line, because a host running two connectors cannot otherwise tell
+     * whose session #7 the line is about.
+     */
+    val endpoint: String,
+    /**
      * The moment this session stops being reusable however healthy it looks, as milliseconds on
      * the pool's clock. It is this session's own moment rather than a shared one, so a pool that
      * filled in one burst does not retire everything it holds in another.
@@ -147,7 +153,7 @@ class PoolEntry internal constructor(
         if (mutableState.value != EntryState.Closed) mutableState.value = next
     }
 
-    override fun toString(): String = "session #$id (${mutableState.value})"
+    override fun toString(): String = "session #$id to $endpoint (${mutableState.value})"
 }
 
 /** What the pool holds at one instant, counted in one pass so the numbers agree with each other. */
