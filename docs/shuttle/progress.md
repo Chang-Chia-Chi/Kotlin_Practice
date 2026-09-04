@@ -2911,3 +2911,72 @@ The constraint would refuse two same-named children of one parent, but nothing r
    this ticket's, but worth a look by whoever owns the readiness tickets.
 
 **Size:** production 2 lines (`StateStoreSchema.DDL`), tests +25, spec +5/-1.
+
+---
+
+## 28: A mapping digest row renders the asked-for digest or nothing
+
+**Built:** two lines of production behaviour and one new rule, both about spec 9.6's `digest: <algo>` row.
+
+- **The renderer honours the row's algorithm.** `MappingRenderer.render` now hands `row.digest` to `field`, and
+  `Field.DIGEST` answers `t.digest.hex` only when the transfer's algorithm is the one the row named; otherwise the
+  value is missing and the row falls through `default` and `required` like any other missing value. Before this, a
+  row asking for `sha256` on an MD5 route was delivered the MD5 hex under the `sha256` name (finding B7). The
+  comparison is case-insensitive, so `sha256` and `SHA256` both name `DigestAlgorithm.SHA256`. A row with no
+  `digest:` is unchanged: it takes whatever the transfer carries.
+- **Rule 26 refuses the mismatch at boot.** `Rules.route` compares every `digest:` row of every channel the route
+  notifies (and its callback channel) against `route.digest ?: config.digest` and reports rule 26 with the row's
+  path, the algorithm it asked for and the one the route computes. Rule 21 still owns "not md5, sha256 or sha1", so
+  rule 26 only speaks about the three known algorithms and the two rules never both fire on one row.
+
+**The decision, D49 (spec 16):** *a transfer carries one digest, the route's; the row's `digest: <algo>` selects
+rather than requests.* Spec 6.5 said a mapping row asking for an algorithm gets "a second digest computed during the
+same stream". That second digest has no home: 8.1's transfer row has one `digest`/`digest_algo` pair and the DDL is
+frozen, so a second algorithm would have to be recomputed off the object's bytes at send time, per notification,
+long after the stream is closed - a per-delivery re-read of every stored object to fill one JSON field. Against that,
+a route that needs SHA-256 downstream can simply set `digest: sha256` on the route, which costs nothing. So the
+smaller and more honest change is one digest per route, the renderer refusing to answer with the wrong one, and a
+boot rule that tells the operator about the mismatch once instead of silently omitting the field on every delivery.
+Spec 6.5, the 9.6 row table and 13.3 are corrected to match.
+
+**Correcting ticket 04's deviation 4.** That entry recorded the mismatch-is-missing behaviour as built; it was not.
+`row.digest` reached `MappingRow` and rule 21, and nothing else ever read it - `Field.DIGEST` returned `t.digest?.hex`
+whatever the row asked for. Deviation 4's closing question ("that column does not exist in 8.1 and is ticket 06's
+question if a channel asks for it") is now answered by D49: there is no second column and there will not be one.
+
+**Tests:**
+
+- `MappingRendererTest.B7_a_digest_row_asking_for_another_algorithm_renders_missing_not_the_wrong_hex` - on an MD5
+  transfer a `digest: md5` row and a bare `field: DIGEST` row both render the hex, a `digest: sha256, required: false`
+  row is absent, and a required one throws `MappingFailure` naming `file.sha256`; on a SHA-256 transfer the same
+  `digest: SHA256` row renders the hex. Red before the renderer change (it rendered `"sha256":"bb"`, the MD5 hex).
+- `RulesTest.rule26_a_mapping_digest_row_asks_for_the_algorithm_its_route_computes` - a `sha256` row on the baseline's
+  `digest = Digest.MD5` build is exactly `[26]`. Red before the rule.
+- `RulesTest.rule26_accepts_the_row_when_the_route_overrides_the_process_default` - the same row with
+  `route.digest = Digest.SHA256` is clean, which is what makes the rule read the route's override and not the
+  process default alone.
+
+**Deviations:**
+
+1. **No second digest and no `ValidateCommandTest` case.** The ticket offered two digests per route or a boot rule;
+   D49 takes the rule. `RulesTest` covers it, which the ticket allows instead of `ValidateCommandTest`; the validate
+   command reports whatever `Rules.validate` returns, and no rule has its own command test.
+2. **Spec 6.5 rewritten, not merely annotated.** Its "a second digest is computed during the same stream" is now
+   false, and leaving it beside D49 would leave the spec disagreeing with itself. Same for the 9.6 row table.
+3. **No YAML or DSL change.** The knob is not new: `digest:` on a mapping row already loads (`YamlLoader`, the row's
+   `str("digest")`) and the DSL already takes it through `row(MappingRow(...))`, as ticket 04's rule 21 test shows.
+   Rule 26 needed no grammar.
+4. **Two `ShuttleHostTest` tests fail in the full tier and pass alone**, before this ticket as after it:
+   `readiness_follows_the_configured_rule_with_one_route_up_and_one_down` and `S18_a_wrong_password_...`. Measured
+   both ways: the untouched baseline fails the same two (245 tests, 2 failures, plus a flaky
+   `ShuttleQuarkusTest.a_caller_without_the_admin_role_is_refused`); with this ticket applied, 248 tests, the same 2
+   failures, and all three quarkus classes green when run on their own. Neither test configures a `digest:` row, so
+   neither can reach this change. Timing under a loaded machine, left for whoever owns ticket 14's suite.
+5. **Size:** 12 production lines across `MappingRenderer.kt` and `Rules.kt`, 27 test lines, 5 spec lines. Well under
+   the 200-600 budget: the ticket is one row kind and one rule, and there was nothing else honest to add.
+
+**For the next ticket:**
+
+- **A route that needs two algorithms downstream** now has one answer, `digest:` on the route, and one refusal, rule
+  26. If a real channel ever needs both at once, the change is a second `digest`/`digest_algo` pair in 8.1's transfer
+  row and a second sink in the fetching component's stream - a DDL change, so a spec revision, not a ticket fix.

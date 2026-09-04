@@ -394,8 +394,9 @@ required attribute fails the transfer before the store, naming the row and the a
 ### 6.5 Digests
 
 `digest` is a process-wide default with a per-route override: `md5`, `sha256` or `sha1`. The
-algorithm is handed to whichever component fetches the bytes. A mapping row may ask for a
-specific algorithm, in which case a second digest is computed during the same stream. With
+algorithm is handed to whichever component fetches the bytes. A transfer carries exactly one
+digest (D49): a mapping row may name an algorithm with `digest: <algo>`, but only to state which
+one it expects, and rule 26 rejects a row naming any other at boot. With
 `md5`, the S3 target sends `Content-MD5` on every PUT and compares the returned ETag on a
 single-part object (Sec 7.2). Comparing against an upstream-supplied expected value is the
 `verifyDigest` processor, reading the expected value from an attribute (D22 of the connector:
@@ -623,7 +624,7 @@ A channel's body is a list of rows, each producing one JSON path (dotted paths n
 | `format: <spec>` | timestamps (`ISO_INSTANT`, a pattern) and numbers |
 | `default: <literal>`, `trim`, `upper`, `lower` | the only transformations a row can apply; none compose |
 | `required: true` (default) | a missing value fails the transfer at attribute freeze; `false` omits the path |
-| `digest: <algo>` | with `field: DIGEST`, asks for a specific algorithm |
+| `digest: <algo>` | with `field: DIGEST`, asks for a specific algorithm; the row is missing when the transfer's digest is another (D49), and rule 26 rejects the mismatch at boot |
 
 Vocabulary: `TRANSFER_ID`, `PARENT_ID`, `ROUTE`, `KIND`, `SOURCE_KIND`, `SOURCE_REF`,
 `SOURCE_NAME`, `SOURCE_PATH`, `SOURCE_SIZE`, `SOURCE_MTIME`, `SOURCE_DIGEST`, `STORED_NAME`,
@@ -924,6 +925,7 @@ Each is public numbering, reported by number in validate mode and at startup.
 | 23 | A `move` ack target is not the polled directory itself; the connector excludes it from listing |
 | 24 | `readiness` is `all-routes-down` or `any-route-down`; `restartBackoff.initial <= max` |
 | 25 | A secret appears only as a `${VAR}` reference, never as a literal |
+| 26 | A mapping row's `digest: <algo>` names the algorithm its route computes, `digest` or the process default (D49) |
 
 ---
 
@@ -1051,6 +1053,7 @@ poll are appeals to the connector's spec.
 | D46 | A subscribed transfer's re-drive is triggered by the upstream publishing the message again under the same `Nats-Msg-Id`; the adapter terms a message when its transfer is REJECTED or FAILED | `nak` would redeliver a FAILED row for ever (the consumer's `MaxDeliver` is the operator's, not ours); `term` leaves nothing to redeliver, so the re-drive's trigger has to come from outside. The stream sequence changes on a republish, so only a publisher-set id survives it; the stream's duplicate window (2 min by default) swallows a republish inside it (measured by ticket 20, S29) |
 | D47 | Spec 13.1 corrected by measurement: `fetch.path` is a JSON pointer (`/metadata/path`), `fetch` states a `bucket` on an S3 store (rule 6), and the `downstream` rows that read a target or an mtime are `required: false` | `/metadata.path` names a key literally called `metadata.path` and every message failed at fetch; an S3 declaration is an endpoint, not a bucket; a message parent has no target and no mtime, so the shared body rejected its `acked` notification (ticket 20, S27) |
 | D48 | `uq_file_transfer_identity` ends with `parent_id`: one row per route, source ref, name, size, mtime, revision and parent | A child's identity is its parent's plus its own name (Sec 4.5), but the 8.1 key held the source columns alone, so two parents expanding one shared name made Oracle refuse the second child with ORA-00001 while the in-memory store allowed it (the D44 drift again). Oracle compares a null key column equal to a null one and leaves out only a wholly null key, so every top-level row, all of them `parent_id` null, keeps exactly the uniqueness it had, and `seen`'s race catch with it; excluding CHILD rows instead needs a function-based index over all six columns, a larger change for the same guarantee (measured by ticket 26 on Oracle, B3) |
+| D49 | A transfer carries one digest, the route's; a mapping row's `digest: <algo>` selects rather than requests, so the renderer leaves the row missing when the algorithms differ and rule 26 refuses the mismatch at boot | v0.4's "a second digest is computed during the same stream" has no home: 8.1's row has one `digest`/`digest_algo` pair and the DDL is frozen, so a second algorithm would have to be recomputed per notification, off the object's bytes, at send time. The renderer must not answer a `sha256` row with the MD5 hex (finding B7); with one digest per route the only honest answers are the hex and nothing, and a mismatch is a configuration mistake the operator should hear about at boot, not a silently absent field per delivery (ticket 28) |
 
 ---
 
