@@ -192,6 +192,7 @@ class ShuttleHostTest {
 
         host.start()
 
+        // The second restart is counted the instant the second run dies, at the start of its wait: the gauge is 0 there.
         await("supervised restarts") { restarts("mirror") >= 2.0 }
         assertFalse(host.ready(), "all-routes-down with the only route down")
         assertTrue(server.authAttempts >= 2, "each restart tried the password again")

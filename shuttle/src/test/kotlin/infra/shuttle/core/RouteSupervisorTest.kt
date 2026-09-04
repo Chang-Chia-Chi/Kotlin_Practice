@@ -51,8 +51,31 @@ class RouteSupervisorTest {
         advanceTimeBy(3000.seconds); runCurrent()
 
         assertEquals(listOf(0, 30, 90, 210, 450, 930, 1830, 2730).map { it * 1000L }, starts, "delays 30, 60, 120, 240, 480, then capped at 900 s")
-        assertEquals(7.0, restarts("dead"))
+        assertEquals(8.0, restarts("dead"), "every run's end is counted at once; the eighth is in its wait")
         assertEquals(0.0, up("dead"))
+    }
+
+    /**
+     * Spec 10 "each restart logged and counted" against 14.2's `shuttle_route_up`: the counter moves at the instant
+     * the route goes down, so a reader that sees the n-th restart counted sees the gauge at 0 for the whole of that
+     * wait. Sampled inside every run and at every second of the virtual clock, the restarts counted are always the
+     * runs that have ended, `starts - up`.
+     */
+    @Test
+    fun the_restart_counter_and_the_route_gauge_never_disagree_about_a_route_being_down() = runTest {
+        val starts = mutableListOf<Long>()
+        val disagreements = mutableListOf<String>()
+        fun sample(where: String) {
+            val ended = starts.size - up("dead")
+            if (restarts("dead") != ended) disagreements += "$where: ${restarts("dead")} restarts counted, $ended runs ended"
+        }
+        val supervisor = supervisor(mapOf("dead" to { flow { starts += testScheduler.currentTime; sample("inside run ${starts.size}"); emit(RouteEvent.RouteDown(cause)) } }))
+        backgroundScope.launch { supervisor.run() }
+
+        repeat(200) { runCurrent(); sample("at ${testScheduler.currentTime} ms"); advanceTimeBy(1.seconds) }
+
+        assertEquals(listOf(0L, 30_000L, 90_000L), starts, "three runs in 200 s")
+        assertEquals(emptyList<String>(), disagreements)
     }
 
     @Test
@@ -78,7 +101,7 @@ class RouteSupervisorTest {
         assertEquals(true, supervisor.restart("dead"))
         runCurrent()
         assertEquals(listOf(0L, 0L), starts, "the run is cancelled and restarted with no wait")
-        assertEquals(1.0, restarts("dead"))
+        assertEquals(2.0, restarts("dead"), "the operator's restart, then the second run's death, each counted as it happened")
 
         // The second run died at once: the supervisor is 30 s into its wait; a restart at 10 s starts it then.
         advanceTimeBy(10.seconds); runCurrent()

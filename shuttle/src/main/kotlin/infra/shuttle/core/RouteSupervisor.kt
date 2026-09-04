@@ -66,6 +66,8 @@ class RouteSupervisor(
             }
             gauge.set(0)
             outcome.exceptionOrNull()?.let { if (it is CancellationException) throw it }
+            // Counted the instant the route is down, before its wait: a reader that sees the n-th restart sees the gauge at 0.
+            registry.counter(ShuttleMetrics.ROUTE_RESTARTS, "route", route.name).increment()
             val restarted = outcome.isSuccess && outcome.getOrNull() == null
             if (triggered || restarted) wait = backoff.initial
             if (restarted) {
@@ -74,7 +76,6 @@ class RouteSupervisor(
                 log.warnv("route {0} is down ({1}); restarting in {2}", route.name, outcome.exceptionOrNull()?.toString() ?: "trigger completed", wait)
                 wait = if (phase(route.name) { delay(wait) } == null) backoff.initial else minOf(wait * backoff.factor, backoff.max)
             }
-            registry.counter(ShuttleMetrics.ROUTE_RESTARTS, "route", route.name).increment()
         }
     }
 
