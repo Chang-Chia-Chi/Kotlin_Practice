@@ -58,18 +58,26 @@ class FakeSftpTransport(
     val openSessions: Int get() = sessionsOpened.get() - sessionsClosed.get()
 
     /**
-     * What the server holds, in the order it was put there, which is the order a listing reports.
-     * A null value is a directory: it has no bytes, and it is the one thing a listing reports that
-     * cannot be downloaded.
+     * One path on the server: its bytes and when it was last written. Null bytes are a directory:
+     * it has no bytes, and it is the one thing a listing reports that cannot be downloaded.
      */
-    private val contents: MutableMap<String, ByteArray?> = Collections.synchronizedMap(LinkedHashMap())
+    private class Entry(val bytes: ByteArray?, val modifiedAt: Instant) {
+        val size: Int? get() = bytes?.size
+    }
 
-    /** Puts a file on the server. [bytes] is what a download of it delivers. */
-    fun file(path: String, bytes: ByteArray): FakeSftpTransport = apply { contents[path] = bytes }
+    /** What the server holds, in the order it was put there, which is the order a listing reports. */
+    private val contents: MutableMap<String, Entry> = Collections.synchronizedMap(LinkedHashMap())
 
-    fun file(path: String, text: String): FakeSftpTransport = file(path, text.toByteArray())
+    /**
+     * Puts a file on the server. [bytes] is what a download of it delivers; [modifiedAt] is what
+     * a listing or a stat reports for it, one fixed instant unless a test needs two files to differ.
+     */
+    fun file(path: String, bytes: ByteArray, modifiedAt: Instant = MODIFIED_AT): FakeSftpTransport =
+        apply { contents[path] = Entry(bytes, modifiedAt) }
 
-    fun directory(path: String): FakeSftpTransport = apply { contents[path] = null }
+    fun file(path: String, text: String, modifiedAt: Instant = MODIFIED_AT): FakeSftpTransport = file(path, text.toByteArray(), modifiedAt)
+
+    fun directory(path: String): FakeSftpTransport = apply { contents[path] = Entry(null, MODIFIED_AT) }
 
     /** Takes a path away, the way another consumer moving a file out from under this one does. */
     fun remove(path: String) {
@@ -81,10 +89,13 @@ class FakeSftpTransport(
      * directory. For a test that keeps a model of the server and needs the truth to compare it
      * with, read without a session and without a listing.
      */
-    fun snapshot(): Map<String, Int?> = synchronized(contents) { contents.mapValues { it.value?.size } }
+    fun snapshot(): Map<String, Int?> = synchronized(contents) { contents.mapValues { it.value.size } }
 
     /** The bytes of the file at [path], or null for a directory or nothing: what a download of it would deliver. */
-    fun bytesAt(path: String): ByteArray? = contents[path]
+    fun bytesAt(path: String): ByteArray? = contents[path]?.bytes
+
+    /** What a listing reports for [path] right now, read without a session; for a caller that needs the file as it was listed. */
+    fun listed(path: String): RemoteFile = describe(path, checkNotNull(contents[path]) { "the server has nothing at $path" })
 
     override suspend fun connect(): SftpConnection {
         record(Call(Operation.Connect, session = 0))
@@ -121,28 +132,27 @@ class FakeSftpTransport(
             val prefix = if (dir.endsWith("/")) dir else "$dir/"
             // Copied under the map's own lock before anything is reported, because the callback is
             // free to change the server underneath a listing and a real server would not notice.
-            val entries = synchronized(contents) { contents.entries.map { it.key to it.value?.size } }
-            for ((path, size) in entries) {
+            val entries = synchronized(contents) { contents.entries.map { it.key to it.value } }
+            for ((path, entry) in entries) {
                 if (!path.startsWith(prefix) || path.substringAfter(prefix).contains('/')) continue
-                if (onEntry(describe(path, size)) == Listing.STOP) return
+                if (onEntry(describe(path, entry)) == Listing.STOP) return
             }
         }
 
         override suspend fun stat(path: String): RemoteFile {
             val attempt = asked(Operation.Stat, path)
-            if (!contents.containsKey(path)) throw missing(attempt)
-            return describe(path, contents[path]?.size)
+            return describe(path, contents[path] ?: throw missing(attempt))
         }
 
         override suspend fun readTo(path: String, sink: OutputStream) {
             val attempt = asked(Operation.Read, path)
-            val bytes = contents[path] ?: throw missing(attempt)
+            val bytes = contents[path]?.bytes ?: throw missing(attempt)
             sink.write(bytes)
         }
 
         override suspend fun writeFrom(path: String, source: InputStream) {
             asked(Operation.Write, path)
-            contents[path] = source.readBytes()
+            contents[path] = Entry(source.readBytes(), MODIFIED_AT)
         }
 
         override suspend fun rename(from: String, to: String) {
@@ -150,7 +160,8 @@ class FakeSftpTransport(
             synchronized(contents) {
                 if (!contents.containsKey(from)) throw missing(attempt)
                 if (contents.containsKey(to)) throw occupied(attempt.copy(path = to))
-                contents[to] = contents.remove(from)
+                // The entry moves whole: a rename on a real filesystem keeps the file's mtime.
+                contents[to] = contents.remove(from)!!
             }
         }
 
@@ -169,7 +180,7 @@ class FakeSftpTransport(
             val attempt = asked(Operation.Mkdir, path)
             synchronized(contents) {
                 if (contents.containsKey(path)) throw occupied(attempt)
-                contents[path] = null
+                contents[path] = Entry(null, MODIFIED_AT)
             }
         }
 
@@ -219,11 +230,11 @@ class FakeSftpTransport(
         /** Fixed, so a test comparing entries does not have to say anything about time. */
         private val MODIFIED_AT: Instant = Instant.parse("2024-01-01T00:00:00Z")
 
-        private fun describe(path: String, size: Int?) = RemoteFile(
+        private fun describe(path: String, entry: Entry) = RemoteFile(
             path = path,
-            size = (size ?: 0).toLong(),
-            modifiedAt = MODIFIED_AT,
-            isDirectory = size == null,
+            size = (entry.size ?: 0).toLong(),
+            modifiedAt = entry.modifiedAt,
+            isDirectory = entry.bytes == null,
         )
     }
 }

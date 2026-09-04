@@ -221,17 +221,18 @@ class SftpClient(
      *   a single atomic request against a server offering the POSIX rename extension, and a delete
      *   followed by a second rename against a server without it - during which [to] holds nothing,
      *   and after which a failure has left [to] empty rather than holding either file.
-     * @param expectedSize how many bytes the file at [from] holds, when the caller listed it. It
-     *   is what lets a retry after a lost reply tell its own landed file at [to] from somebody
-     *   else's; a caller without it costs one extra round trip to find out.
+     * @param listed the file at [from] as the caller listed it. Its size and modification time
+     *   are what let a retry after a lost reply tell its own landed file at [to] from somebody
+     *   else's (D46); a caller without it costs one extra round trip to find out.
      * @throws sftp.connector.error.NoSuchFile naming, on its attempt's path, the path that is not
      *   there: [from], or [to] when the source is still there and it is the target's location the
      *   server could not find. A missing source after a lost reply is looked into before it is
      *   reported - see [RenameTries] - so it means the file is at neither place.
      */
-    suspend fun rename(from: String, to: String, overwrite: Overwrite = Overwrite.REFUSE, expectedSize: Long? = null): Unit =
+    suspend fun rename(from: String, to: String, overwrite: Overwrite = Overwrite.REFUSE, listed: RemoteFile? = null): Unit =
         meters.timing("rename") {
-            val tries = RenameTries(from, to, overwrite, expectedSize)
+            require(listed == null || listed.path == from) { "the listed file is ${listed?.path}, not the source $from" }
+            val tries = RenameTries(from, to, overwrite, listed)
             resilience.attempting("rename", from) { session, attempt -> tries.attempt(session, attempt) }
         }
 

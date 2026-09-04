@@ -304,7 +304,7 @@ in production the first time it occurs, not silently absorbed.
 | `stat` | `(path): RemoteFile?` | Blind retry |
 | `download` | `(remote, localTarget): LocalFile` | Restart from zero into a fresh `.part` file |
 | `upload` | `(local, remote, overwrite)` | Restart; remote partial is overwritten |
-| `rename` | `(from, to, overwrite)` | On `NoSuchFile` **naming the source** after a retry, stat `to`: existing with the expected size counts as success, absent means the file is gone. `NoSuchFile` **naming the target** means nothing landed and the source is untouched (D38). A cancellation or timeout is a lost reply and carries no information |
+| `rename` | `(from, to, overwrite, listed)` | A retry after a lost reply looks before it sends: the file **as listed** (size and modification time, D46) still at `from` means nothing landed and the rename is sent; otherwise `to` holding the file as listed is the earlier try's rename having landed and counts as success. On `NoSuchFile` **naming the source** after a retry, stat `to`: holding the file as listed counts as success, absent or another file means the file is gone. Size alone never decides: under `REPLACE` the target is expected to be occupied by a same-size file. `NoSuchFile` **naming the target** means nothing landed and the source is untouched (D38). A cancellation or timeout is a lost reply and carries no information |
 | `delete` | `(path)` | `NoSuchFile` after a retry counts as success |
 | `mkdir` | `(path, parents)` | `AlreadyExists` counts as success |
 | `exists` | `(path): Boolean` | Blind retry |
@@ -500,6 +500,19 @@ in-memory default and leave persistence to a plugged repository, and both of whi
 move-or-delete after processing as the usual substitute (D14). A `SeenRepository` SPI for callers
 that cannot move files and want the connector to filter was specified here and is **not built**;
 Sec 14.5 says why and what such a caller does instead.
+
+What the connector does keep, for the length of one call, is what a retry needs to tell its own
+earlier try's work from somebody else's (Sec 6.1). For a move that is the file as it was listed -
+its size **and** its modification time, which a rename preserves and which SFTP reports in whole
+seconds from the server's own clock, so the two readings compared are the server's and no skew
+enters. Size alone is not an identity: under `REPLACE` the target is expected to hold yesterday's
+file of the same name, and a same-size file there is the ordinary case (D46). When the target
+holds a look-alike, the source decides: the listed file still at the source is a move that did
+not land, and it is sent again; the listed file gone from the source and at the target is a move
+that landed, and the retry reports success without sending. A new upload of the same name that
+arrives at the source during the backoff differs from the listing, and so reads as "landed" - the
+new file stays to be processed on a later tick. The two coincidences that remain (a same-second
+look-alike, or an identical re-upload within the backoff) each cost a duplicate, never a loss.
 
 ---
 
@@ -813,6 +826,7 @@ table in `progress.md` carries the row.
 | D28 | A byte count that disagrees with the listed size is `IncompleteTransfer`, not `SessionLost` | Every other `Recoverable` class describes a fault the wire reported; this one is the connector's own integrity check failing, and it had no class. Reporting it as `SessionLost` sends an operator to look at the network when the actual evidence is that a file changed size under them - which is precisely the signal open item 1 is waiting on, and the one a stalled uploader produces. It poisons, because a short read and a half-dead session are indistinguishable from here and the safe reading costs one handshake on a rare event |
 | D45 | The shipped readiness default is a heuristic with a stated blind spot, and open item 1 stays open until the upstream team answers | An uploader paused for longer than `minAge` mid-file passes `SizeStable + MinAge`, and no code the connector can write closes that: only the producer's convention can. `markerFile(suffix)` (Sec 7.5) is where the answer lands the day it arrives - it is the one deterministic check - and until then the blind spot is documented in Sec 7.5 and the T15 entry rather than designed around. `IncompleteTransfer` (D28) is the signal a stalled uploader actually produces |
 | D27 | `ServerFailure` does not poison the session | A well-formed `SSH_FX_FAILURE` proves the channel parsed the request and answered, so the session is healthy and a per-request refusal is no reason to throw it away. Sec 8.2 expects exactly that status from a server without `posix-rename`, which would otherwise evict a session on every overwrite rename. Real transport breakage arrives with an `IOException` cause and is classified `SessionLost` before this rule is reached |
+| D46 | A rename retried after a lost reply tells its own landed file by the source's size **and** modification time as listed, and reads the listed file still at the source as "not landed" | R2's I11 guidance - "a file of the expected size there is the landed rename" - was written for a `REFUSE` target found free a moment earlier; T11 applied it under `REPLACE`, whose target is expected to be occupied, so a lost reply on the first request adopted yesterday's same-size file, reported the ack as success and left the source to be processed twice (T17 lens 5 H2). A rename keeps the file's mtime, SFTP reports it in whole seconds, and both readings come from the server's stat, so listing-to-rename clock skew does not enter. The source is looked at first because the listed file still there settles it whatever the target holds, and reading a *changed* source as "landed" keeps a new same-name upload in the inbox rather than moving it unprocessed: the coincidences left cost a duplicate, never a loss. `rename` takes the `RemoteFile` as listed, since the source has it and one stat measures both when a caller has none (Sec 6.1, 8.3) |
 
 D24 and D25 were withdrawn during the design review and are not reused; a citation to either is
 a citation to nothing.
@@ -909,7 +923,7 @@ Tests are named `I<n>_<description>`.
 | I8 | Cancelling a collector with unacked files releases every in-flight slot |
 | I9 | `close()` returns within `drainTimeout + cancelGrace` and leaves every entry `Closed` |
 | I10 | A fatal error terminates `watch`; a recoverable error never does |
-| I11 | A rename retried after a lost reply reports success when the target exists with the expected size |
+| I11 | A rename retried after a lost reply reports success when the target holds the file as listed - size and modification time (D46) - and the source no longer does |
 | I12 | Ack and nack are each accepted once per event |
 | I13 | After abort, no `.part` file exists in the staging directory |
 | I14 | `keepAlive < idleCutoff` and `idleTimeout < idleCutoff` are rejected at build time when violated |
