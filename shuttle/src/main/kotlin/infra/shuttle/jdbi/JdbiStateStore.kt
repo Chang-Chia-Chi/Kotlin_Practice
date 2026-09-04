@@ -120,6 +120,11 @@ class JdbiStateStore(private val jdbi: Jdbi, private val dispatcher: CoroutineDi
         h.finishWhenAllDelivered(id)
     }
 
+    override suspend fun reacked(id: TransferId) = tx { h ->
+        h.update("UPDATE file_transfer SET updated_at = :now WHERE id = :id") { bind("id", id.value) }
+        Unit
+    }
+
     override suspend fun rejected(id: TransferId, reason: String) = tx { h ->
         h.update("UPDATE file_transfer SET state = 'REJECTED', last_error = :e, updated_at = :now WHERE id = :id") { bind("e", reason).bind("id", id.value) }
         Unit

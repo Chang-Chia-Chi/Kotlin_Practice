@@ -2499,3 +2499,62 @@ M2AcceptanceTest 5 tests, 0 failures, 58 s; JdbiStateStoreTest 21 tests, 0 failu
 - **A `.part` after a refused rename** (deviation 9): a sweep or an ops note.
 - **Running M2 alone costs about 60 s** of container start (Oracle dominates) plus 58 s of scenarios; with M1 in the
   same JVM MinIO and NATS are shared and Oracle is started once per class.
+
+---
+
+## 23: Fix: a finished identity is re-fetched at most once per `recheckFinished`
+
+**Built:** the re-ack path now writes one thing: the row's `updated_at`. `StateStore.reacked(id)` is a one-column
+touch in both adapters (`UPDATE file_transfer SET updated_at = :now WHERE id = :id`; the fake's `update(id) { this }`),
+called from `TransferPipeline.reack` after the source's ack action and before the `reacked` count. D40's window is
+measured from `updated_at`, so before this a DONE file that stayed under `onAck: none` was skipped for one window and
+then downloaded and digested on every poll for the rest of its life (review finding Spec 2). Now each re-check restarts
+the window from itself: 23 h skip, 25 h fetch, 26 h skip.
+
+**Concepts named:** `reacked` is now a ledger transition as well as an outcome: the state store's name for "acked
+again, nothing else changed". It creates no outbox row, moves no state, and leaves `acked_at` and `completed_at` as
+the first ack wrote them; the only visible effect is the window restarting.
+
+**Acceptance:**
+
+- [x] Three polls at 23 h, 25 h, 26 h on the fakes; red before the fix (the third poll fetched):
+  `TransferPipelineTest.SPEC2_a_finished_identity_is_refetched_at_most_once_per_recheckFinished`. `D40_` and `S12_`
+  now assert `done.copy(updatedAt = clock.instant())` where they asserted the untouched row (S12 advances the clock a
+  minute first so the assertion is not vacuous).
+- [x] Both stores under the contract: `StateStoreContract.reacked_advances_updated_at_and_changes_nothing_else` on a
+  DONE row and on an ACKED row with a PENDING delivery; `InMemoryStateStoreTest` 21/21, `JdbiStateStoreTest` 22/22 on
+  the Oracle container (`-DexcludedGroups=none -Dtest=JdbiStateStoreTest`, 115 s).
+- [x] `shuttle_transfers_total{outcome=reacked}` is unchanged in meaning: still one increment per re-ack in `reack`;
+  SPEC2 asserts exactly 1.0 across the three polls, `CrashMatrixTest` 12/12 and the subscribe re-ack tests still see 1.0.
+- [x] Progress entry appended.
+
+Default tier: every class green except `ShuttleHostTest`'s readiness assertions and `ShuttleQuarkusTest`'s boot, both
+environmental: `ShuttleQuarkusTest` died on port 8081 already bound by a sibling agent's tier and passed 4/4 alone;
+`ShuttleHostTest`'s `ready()` assertions fail on the base commit as well with this change stashed (timing against the
+supervisor's backoff), so they are not this ticket's.
+
+**Deviations:**
+
+1. **A seam method, not an idempotent `acked`.** The ticket preferred making `acked` idempotent-and-touching. On
+   paper: `acked` writes `acked_at = now`, its `finishWhenAllDelivered` writes `completed_at = now`, and a DONE row
+   with a FAILED delivery would drop back to ACKED, so idempotence needs three guards (`CASE`/`COALESCE`) in both
+   adapters for a transition whose name would then lie. `reacked(id)` is one line per adapter and says what it does.
+   Spec 8.2's listing is not edited, following the precedent of `byId` and `outboxPending` (ticket 09) and
+   `childrenOf` (ticket 17): the seam is four methods ahead of the listing; a doc-only tidy when someone next
+   touches 8.2.
+2. **The touch happens on a message re-ack too.** D40 only needs it for polled rows; `reack` is one path for both
+   and the write is harmless for a redelivered message (spec 4.4 S32 says "outbox rows unchanged", which holds).
+3. **Order: source ack, then the touch.** A crash between them leaves `updated_at` old and the next poll re-checks
+   once more, which is the safe direction (one extra download, never a missed check). The touch is not under
+   `ledger(...)` because it creates no deliveries and wakes nobody.
+4. **Test infrastructure, not spec:** `JdbiStateStoreTest`'s container gets `withStartupTimeout(4 min)`. The
+   faststart image needed 94 s to say `DATABASE IS READY TO USE!` on this workstation today and the module's
+   `LogMessageWaitStrategy` default is 60 s; three runs timed out before the change. `withStartupTimeoutSeconds` is
+   the JDBC-side field `OracleContainer` ignores. `AcceptanceFixture`'s container still has the 60 s default; out of
+   this ticket, same one-liner if M1/M2 hit it.
+
+**Size:** production 15 lines across `Seams.kt`, `JdbiStateStore.kt`, `TransferPipeline.kt` (7 of them the `reack`
+doc comment); tests +58 across the pipeline test, the contract, the fake and the Oracle test's timeout.
+
+**For the next ticket:** `AcceptanceFixture`'s Oracle startup timeout (deviation 4); the spec 8.2 listing lag
+(deviation 1).

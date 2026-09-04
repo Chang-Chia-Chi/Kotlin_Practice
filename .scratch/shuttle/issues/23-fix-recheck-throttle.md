@@ -10,12 +10,12 @@ existing `D40_` test checks 23 h and 25 h and never a third poll. Review finding
 
 **Nature:** state machine; a ledger write on the re-ack path through the StateStore seam
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] A pipeline test on the fakes polls a DONE identity three times across the window (23 h, 25 h, 26 h): the second poll re-fetches, the third does not; red before the fix
-- [ ] The re-ack advances the row's `updated_at` in both stores under the shared contract, without creating outbox rows or changing the state (a `reacked` transition, or the existing ack transition made idempotent; keep the seam's surface minimal and record the choice)
-- [ ] The `reacked` outcome counter of spec 14.2 is unchanged in meaning
-- [ ] Progress entry appended
+- [x] A pipeline test on the fakes polls a DONE identity three times across the window (23 h, 25 h, 26 h): the second poll re-fetches, the third does not; red before the fix
+- [x] The re-ack advances the row's `updated_at` in both stores under the shared contract, without creating outbox rows or changing the state (a `reacked` transition, or the existing ack transition made idempotent; keep the seam's surface minimal and record the choice)
+- [x] The `reacked` outcome counter of spec 14.2 is unchanged in meaning
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket; 200-600 lines including tests; no Thread.sleep;
 invariant tests named `I<n>_<description>`, scenario tests by their `S<n>` id, validation tests by `rule<n>_`,

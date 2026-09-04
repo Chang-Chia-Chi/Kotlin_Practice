@@ -27,7 +27,9 @@ import org.testcontainers.oracle.OracleContainer
 class JdbiStateStoreTest : StateStoreContract() {
 
     companion object {
-        private val container = OracleContainer("gvenzl/oracle-free:23-slim-faststart")
+        // the faststart image takes about 90 s to say ready on a loaded workstation; the log wait's 60 s default never got there
+        // (`withStartupTimeoutSeconds` is the JDBC field OracleContainer's own wait strategy ignores)
+        private val container = OracleContainer("gvenzl/oracle-free:23-slim-faststart").withStartupTimeout(java.time.Duration.ofMinutes(4))
         private lateinit var jdbi: Jdbi
 
         @JvmStatic @BeforeAll

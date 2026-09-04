@@ -212,6 +212,22 @@ abstract class StateStoreContract {
         assertEquals(0, transfer(t.id).attempts)
     }
 
+    /** D40 measures `recheckFinished` from `updated_at`, so a re-ack must advance it; the row is otherwise untouched, whatever its state (SPEC2). */
+    @Test
+    fun reacked_advances_updated_at_and_changes_nothing_else() = runTest {
+        val done = storedTransfer("a").also { store.acked(it.id, emptyList()) }.let { transfer(it.id) }
+        val acked = storedTransfer("b").also { store.acked(it.id, onAcked) }.let { transfer(it.id) }
+        assertEquals(listOf(TransferState.DONE, TransferState.ACKED), listOf(done.state, acked.state))
+        clock.advance(1.minutes)
+
+        store.reacked(done.id)
+        store.reacked(acked.id)
+
+        assertEquals(done.copy(updatedAt = clock.instant()), transfer(done.id))
+        assertEquals(acked.copy(updatedAt = clock.instant()), transfer(acked.id))
+        assertEquals(listOf(acked.id), outbox().map { it.transferId }, "no outbox row written")
+    }
+
     @Test
     fun rejected_is_terminal_until_redrive() = runTest {
         val t = store.seen(identity("a"), TransferKind.OBJECT)
