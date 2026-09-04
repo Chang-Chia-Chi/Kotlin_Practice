@@ -22,6 +22,7 @@ import sftp.connector.error.ServerFailure
 import sftp.connector.error.SessionLost
 import sftp.connector.error.SftpException
 import sftp.connector.error.Unknown
+import sftp.connector.error.onOneLine
 import java.io.IOException
 import kotlin.coroutines.cancellation.CancellationException
 import com.jcraft.jsch.SftpException as JschStatusException
@@ -214,7 +215,10 @@ class JschErrorMapper(
             attempt.path,
             attempt.number,
             failure.javaClass.name,
-            raw,
+            // The server's own words, and the one log line in the connector that prints text
+            // nobody has read. Verbatim is the point - the mapping row is added by copying this -
+            // so it stops at the line ending and nowhere else.
+            raw.onOneLine(),
             failure,
         )
         Counter.builder(UNMAPPED_ERRORS)

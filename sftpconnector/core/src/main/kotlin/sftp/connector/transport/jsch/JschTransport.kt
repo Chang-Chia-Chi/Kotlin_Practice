@@ -22,6 +22,8 @@ import sftp.connector.config.AuthMethod
 import sftp.connector.config.HostKeyPolicy
 import sftp.connector.config.SftpConnectorConfig
 import sftp.connector.error.Attempt
+import sftp.connector.error.ServerFailure
+import sftp.connector.error.onOneLine
 import sftp.connector.transport.Listing
 import sftp.connector.transport.RemoteFile
 import sftp.connector.transport.SftpConnection
@@ -158,7 +160,7 @@ class JschTransport(
     }
 }
 
-private class JschConnection(
+internal class JschConnection(
     private val session: Session,
     private val channel: ChannelSftp,
     private val io: CoroutineDispatcher,
@@ -166,8 +168,24 @@ private class JschConnection(
     private val endpoint: String,
 ) : SftpConnection {
 
+    /**
+     * The answer becomes the watched directory every later listing is asked for and every action
+     * target is built under, so it is the one server-supplied string that is not a file name and
+     * still ends up in front of a path join. A server that answers with something no path can hold
+     * is refused here rather than have the connector spend the run quoting it back.
+     */
     override suspend fun realpath(path: String): String = withContext(io) {
-        errors.translating(Attempt.inside(endpoint, "realpath", path)) { channel.realpath(path) }
+        val attempt = Attempt.inside(endpoint, "realpath", path)
+        val resolved = errors.translating(attempt) { channel.realpath(path) }
+        if (resolved.isEmpty() || resolved.any { it.cannotBeInAPath() }) {
+            throw ServerFailure(
+                attempt,
+                ChannelSftp.SSH_FX_FAILURE,
+                "the server resolved it to something no path can hold, so nothing was built on it: " +
+                    "'${resolved.onOneLine()}'",
+            )
+        }
+        resolved
     }
 
     /**
@@ -178,14 +196,57 @@ private class JschConnection(
     override suspend fun list(dir: String, onEntry: (RemoteFile) -> Listing): Unit = withContext(io) {
         errors.translating(Attempt.inside(endpoint, "list", dir)) {
             channel.ls(dir.literally()) { entry ->
+                val path = dir.entryPathFor(entry.filename)
                 when {
-                    entry.filename == "." || entry.filename == ".." -> ChannelSftp.LsEntrySelector.CONTINUE
-                    onEntry(entry.attrs.describe(dir.asDirectoryOf(entry.filename))) == Listing.CONTINUE ->
+                    path == null -> ChannelSftp.LsEntrySelector.CONTINUE
+                    onEntry(entry.attrs.describe(path)) == Listing.CONTINUE ->
                         ChannelSftp.LsEntrySelector.CONTINUE
 
                     else -> ChannelSftp.LsEntrySelector.BREAK
                 }
             }
+        }
+    }
+
+    /**
+     * The path of one listed entry, or null when the server did not answer with a name.
+     *
+     * The connector checks a listed name before joining it to the *staging* directory and did not
+     * check it before joining it to the *remote* one, and that asymmetry was the whole of the
+     * defect: an entry called `../../../home/etl/.ssh/authorized_keys` became a path the source
+     * quotes straight back as the source of a move and the argument of a delete, so a server that
+     * named its entries badly could have the account's own files moved somewhere it can read them,
+     * or unlinked. The move *target* was never at risk - it is built from the last segment - which
+     * is why this reads only as a defect of the source.
+     *
+     * A name is a name when it is one path segment: not empty, not the two entries the protocol
+     * reserves for the directory and its parent, and holding no separator, no NUL and no line
+     * break. That is the whole rule, and it is deliberately the same shape as the local one - what
+     * is refused is a name that could mean somewhere else, rather than a list of bad characters
+     * somebody has to keep up to date.
+     *
+     * A bad entry is skipped rather than failing the listing, and this is the one place the two
+     * readings diverge. Spec 7.4 already makes skipping the listing's way of not handing something
+     * over: directories go this way by default and `.` and `..` always have. Failing instead would
+     * cost the whole poll of that directory, on every tick, for as long as the entry is there -
+     * and the party who can name the entry is the party who would then be choosing when the
+     * connector runs. Skipping keeps the rest of the drop moving and leaves the WARN as the
+     * record.
+     */
+    private fun String.entryPathFor(name: String): String? = when {
+        // The protocol's own two entries, ordinary in every listing and silent since T6.
+        name == "." || name == ".." -> null
+        name.isNotEmpty() && name.none { it.cannotBeInAName() } -> asDirectoryOf(name)
+        else -> {
+            LOG.warn(
+                "{} answered a listing of {} with an entry whose name is not a name - it is empty, or holds a " +
+                    "separator, a NUL or a line break - so it was skipped instead of becoming a path this " +
+                    "connector would quote back at the server: '{}'",
+                endpoint,
+                this,
+                name.onOneLine(),
+            )
+            null
         }
     }
 
@@ -317,6 +378,18 @@ private fun Duration.toTimeoutMillis(): Int =
 
 /** Joins a directory to a name in it without doubling the separator a root path already ends with. */
 private fun String.asDirectoryOf(name: String): String = if (endsWith("/")) "$this$name" else "$this/$name"
+
+/**
+ * What no path this connector will quote back at a server may hold: a NUL, which ends the name
+ * early for everything downstream that reads a C string, and the line breaks and the other
+ * control characters, which would let whoever names a file write lines into this connector's log.
+ * No name a filesystem was meant to carry holds one, so a server sending one is saying something
+ * other than a name.
+ */
+private fun Char.cannotBeInAPath(): Boolean = isISOControl()
+
+/** The same, plus the separator that would make one name into several. */
+private fun Char.cannotBeInAName(): Boolean = this == '/' || cannotBeInAPath()
 
 /**
  * SFTP version 3 counts modification times in whole seconds since the epoch, so a file written

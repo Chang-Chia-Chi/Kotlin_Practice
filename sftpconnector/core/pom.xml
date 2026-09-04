@@ -76,6 +76,16 @@
             <groupId>org.jetbrains.lincheck</groupId>
             <artifactId>lincheck</artifactId>
         </dependency>
+        <!-- A stand-in for the SSH library's own channel, so the adapter's listing can be fed
+             the entries a non-conforming server sends and which no real server and no fake
+             transport can produce. Version named here because the reactor's parent manages the
+             connector's own stack and not this. -->
+        <dependency>
+            <groupId>org.mockito</groupId>
+            <artifactId>mockito-core</artifactId>
+            <version>5.14.2</version>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>

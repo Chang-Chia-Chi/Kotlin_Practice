@@ -35,11 +35,16 @@ data class Attempt(
      */
     val budget: Int? = null,
 ) {
+    /**
+     * The one place a failure's message is put together, and so the one place the two strings in
+     * it that nobody here wrote - a path the server named, and a detail that may be quoting the
+     * server's own words - are made safe to render. See [onOneLine].
+     */
     internal fun describe(detail: String): String = buildString {
-        append(detail)
+        append(detail.onOneLine())
         append(" (endpoint=").append(endpoint)
         append(", op=").append(operation)
-        if (path != null) append(", path=").append(path)
+        if (path != null) append(", path=").append(path.onOneLine())
         append(", attempt=").append(number)
         if (budget != null) append(" of ").append(budget)
         append(')')
@@ -55,6 +60,31 @@ data class Attempt(
             val outer = coroutineContext[CurrentAttempt]?.attempt
             return Attempt(endpoint, operation, path, outer?.number ?: 1, outer?.budget)
         }
+    }
+}
+
+/**
+ * The string as it can be put in a log line or an exception message without becoming two of them.
+ *
+ * A newline is a legal character in a file name on every POSIX filesystem, so an ordinary vendor
+ * with write access to a drop directory can name a file with one - no server compromise needed -
+ * and a server can word its own error text however it likes. Rendered as they arrive, either one
+ * turns a record into two against a plain-text appender, and the second can be spelled to read
+ * like one of the connector's own. A JSON appender would escape it; the connector does not choose
+ * the host's appender, so it does not get to rely on one.
+ *
+ * The rendering is guarded rather than the input, because not every string that reaches a message
+ * is a name that could have been refused: the server's own words go the same way, and there is
+ * nothing to refuse them for. The escapes are the ones a reader can undo by eye, so the text is
+ * still a copy of what the server said and not a summary of it.
+ */
+internal fun String.onOneLine(): String = buildString(length) {
+    for (character in this@onOneLine) when {
+        character == '\n' -> append("\\n")
+        character == '\r' -> append("\\r")
+        character == '\t' -> append("\\t")
+        character.isISOControl() -> append("\\u").append(character.code.toString(16).padStart(4, '0'))
+        else -> append(character)
     }
 }
 

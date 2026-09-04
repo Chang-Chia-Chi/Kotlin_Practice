@@ -3,11 +3,15 @@ package sftp.connector.client
 import sftp.connector.config.Digest
 import sftp.connector.error.Attempt
 import sftp.connector.error.IncompleteTransfer
+import sftp.connector.error.UnsafeFileName
 import java.io.OutputStream
 import java.nio.file.Files
+import java.nio.file.LinkOption
+import java.nio.file.NoSuchFileException
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.nio.file.StandardOpenOption
+import java.nio.file.attribute.BasicFileAttributes
 import java.security.MessageDigest
 import java.util.HexFormat
 
@@ -42,13 +46,19 @@ internal class StagingArea(private val algorithm: Digest) {
         transfer: suspend (OutputStream) -> Unit,
     ): LocalFile {
         val partial = target.resolveSibling("${target.fileName}$PARTIAL_SUFFIX")
+        clearWhatAnEarlierRunLeft(partial, attempt)
         try {
             val tally = Tally(
                 Files.newOutputStream(
                     partial,
-                    StandardOpenOption.CREATE,
-                    StandardOpenOption.TRUNCATE_EXISTING,
+                    // Together these say "make this file, and fail if anything is already there" -
+                    // and the failure is what matters. The partial file's name is the server's
+                    // name plus a suffix, so it is predictable to whoever names the file, and
+                    // creating it any other way would open whatever is at that name, following a
+                    // symbolic link somebody else put there straight into the file it points at.
+                    StandardOpenOption.CREATE_NEW,
                     StandardOpenOption.WRITE,
+                    LinkOption.NOFOLLOW_LINKS,
                 ),
                 algorithm,
             )
@@ -73,6 +83,40 @@ internal class StagingArea(private val algorithm: Digest) {
             // person, would find it and take it for a whole one.
             Files.deleteIfExists(partial)
         }
+    }
+
+    /**
+     * Takes away a partial file an earlier run left at [partial], and refuses everything else that
+     * might be sitting there.
+     *
+     * Spec 6.3 says no partial file survives a run and 14.1 defers resume, so a `.part` found here
+     * is a fragment nobody is ever going to finish and going over it is the right answer - but only
+     * when it is a plain file, which is the only thing this connector can have written. A symbolic
+     * link at that name was put there by somebody else, and it is the whole of the attack: the name
+     * is the server's name plus a suffix, so anyone who can see the listing can predict it, and a
+     * link followed here writes the download into whatever it points at. The link is left where it
+     * is rather than removed, because the connector did not put it there and quietly clearing it
+     * would take away the only evidence that somebody did.
+     *
+     * Read without following links, so the question asked is about the entry at that name and not
+     * about whatever it leads to.
+     */
+    private fun clearWhatAnEarlierRunLeft(partial: Path, attempt: Attempt) {
+        val existing = try {
+            Files.readAttributes(partial, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
+        } catch (nothingThere: NoSuchFileException) {
+            // The ordinary case, and the only one that costs nothing.
+            return
+        }
+        if (!existing.isRegularFile) {
+            throw UnsafeFileName(
+                attempt,
+                detail = "$partial is not a partial file this connector left behind - it is a link or a " +
+                    "directory somebody else put at the name the download would be written under, so " +
+                    "nothing was written and it was left where it is",
+            )
+        }
+        Files.delete(partial)
     }
 
     /**
