@@ -11,12 +11,12 @@ says nothing. Review finding Spec 1.
 
 **Nature:** adapter mapping plus the pipeline's ack order on a polled route
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] A test on the embedded SSHD runs a polled route with `onAck: callback` through `RouteRunner` and a `RecordingChannel`: the callback is called once before the ACKED ledger write, the file stays in the drop directory, the transfer ends ACKED then DONE, and the route never goes down; red before the fix
-- [ ] The connector's post-action for `Callback` is what `none` does; `Seen.ack` under a callback calls no channel and only releases the connector's in-flight entry
-- [ ] The connector config test names the mapping (`the_ack_vocabulary_maps_onto_the_connectors_post_actions` extended or a sibling)
-- [ ] Progress entry appended, including whether spec 5.3 needed a sentence
+- [x] A test on the embedded SSHD runs a polled route with `onAck: callback` through `RouteRunner` and a `RecordingChannel`: the callback is called once before the ACKED ledger write, the file stays in the drop directory, the transfer ends ACKED then DONE, and the route never goes down; red before the fix
+- [x] The connector's post-action for `Callback` is what `none` does; `Seen.ack` under a callback calls no channel and only releases the connector's in-flight entry
+- [x] The connector config test names the mapping (`the_ack_vocabulary_maps_onto_the_connectors_post_actions` extended or a sibling)
+- [x] Progress entry appended, including whether spec 5.3 needed a sentence
 
 Ground rules for every ticket: implement only this ticket; 200-600 lines including tests; no Thread.sleep;
 invariant tests named `I<n>_<description>`, scenario tests by their `S<n>` id, validation tests by `rule<n>_`,

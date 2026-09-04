@@ -310,6 +310,9 @@ is validated at boot (rule 12):
 
 `callback` is for an upstream that must be told before it considers the object released: the
 call is synchronous, retried with the stage, and the transfer is not ACKED until it succeeds.
+It says nothing about the source object itself: a polled file is left exactly as `none` leaves
+it - in place, listed again and skipped inside `recheckFinished` (D40) - while a subscribed
+message is still acked at the broker, because an unacked message would simply be redelivered.
 Rule for choosing: if a wrong answer from the call must stop the pipeline, it is an ack action;
 if upstream only wants to know, it is a notification on a transfer state (Sec 9.1).
 

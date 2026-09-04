@@ -1,6 +1,9 @@
 package infra.shuttle.sftp
 
 import infra.shuttle.core.AckAction
+import infra.shuttle.core.ChannelName
+import infra.shuttle.core.DeliveryChannel
+import infra.shuttle.core.DeliveryMoment
 import infra.shuttle.core.DigestAlgorithm
 import infra.shuttle.core.FileReadiness
 import infra.shuttle.core.Hook
@@ -27,6 +30,7 @@ import infra.shuttle.testkit.ClockFixture
 import infra.shuttle.testkit.HookDriver
 import infra.shuttle.testkit.InMemoryStateStore
 import infra.shuttle.testkit.InMemoryTarget
+import infra.shuttle.testkit.RecordingChannel
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -392,6 +396,38 @@ class SftpPollSourceTest {
         }
     }
 
+    /**
+     * Review finding Spec 1. Spec 5.3's `callback` is an ack action of any trigger, a poll included:
+     * the pipeline calls the channel itself before the ACKED write (ticket 19), and the connector's
+     * post action is what `none` is, so the file stays in the drop directory and the next listing is
+     * D40's re-check. Before the fix the mapping refused `Callback` and the route never started.
+     */
+    @Test
+    fun SPEC1_a_polled_route_with_a_callback_ack_calls_the_channel_before_ACKED_and_leaves_the_file() = runBlocking {
+        seed("first.csv", CONTENT)
+        val upstream = RecordingChannel("upstream")
+        val hook = HookDriver().apply { pauseAt(HookPoint.afterAck); pauseAt(HookPoint.afterLedgerAcked) }
+
+        withRoute(AckAction.Callback("upstream"), hook, mapOf(upstream.name to upstream)) { run ->
+            withTimeout(TIMEOUT) { hook.awaitArrival(HookPoint.afterAck) }
+            assertEquals(setOf("first.csv"), target.keys, "the target holds the object")
+            assertEquals(1, upstream.events.size, "and the callback has been called")
+            assertEquals(DeliveryMoment.ACKED, upstream.events.single().moment)
+            assertEquals(TransferState.STORED, store.transfers.single().state, "before any ledger write")
+            hook.resume(HookPoint.afterAck)
+
+            withTimeout(TIMEOUT) { hook.awaitArrival(HookPoint.afterLedgerAcked) }
+            assertTrue(remoteRoot.resolve("drop/first.csv").exists(), "a callback ack does to the file what none does")
+            assertFalse(remoteRoot.resolve("drop/temp").exists())
+            hook.resume(HookPoint.afterLedgerAcked)
+
+            assertTrue(run.isActive, "and the route never went down")
+        }
+
+        assertEquals(TransferState.DONE, store.transfers.single().state, "nobody to notify, so ACKED is DONE")
+        assertEquals(1, upstream.events.size, "D40 skips the file that stayed, so the callback is not called again")
+    }
+
     private fun identityOf(file: Path) = SourceIdentity(
         RouteName(ROUTE), SourceKind.SFTP, "vendor:/drop", file.fileName.toString(),
         Files.size(file), Files.getLastModifiedTime(file).toInstant().truncatedTo(ChronoUnit.SECONDS),
@@ -423,10 +459,15 @@ class SftpPollSourceTest {
     }
 
     /** The same, with the real runner and pipeline already collecting the source's events. */
-    private suspend fun withRoute(onAck: AckAction, hook: Hook = Hook.None, block: suspend CoroutineScope.(Job) -> Unit) =
+    private suspend fun withRoute(
+        onAck: AckAction,
+        hook: Hook = Hook.None,
+        channels: Map<ChannelName, DeliveryChannel> = emptyMap(),
+        block: suspend CoroutineScope.(Job) -> Unit,
+    ) =
         withConnector(onAck) { source ->
             val route = routeOf(onAck)
-            val runner = RouteRunner(route, pipelineFor(route, hook), source.fetcher, store, { wakes++ }, clock, registry)
+            val runner = RouteRunner(route, pipelineFor(route, hook, channels), source.fetcher, store, { wakes++ }, clock, registry)
             coroutineScope {
                 val run = launch { runner.run(source.events()) }
                 try {
@@ -440,10 +481,10 @@ class SftpPollSourceTest {
     private fun routeOf(onAck: AckAction) =
         Route(name = ROUTE, source = pollOf(onAck), target = Target("minio", bucket = "landing"))
 
-    private fun pipelineFor(route: Route, hook: Hook = Hook.None) = TransferPipeline(
+    private fun pipelineFor(route: Route, hook: Hook = Hook.None, channels: Map<ChannelName, DeliveryChannel> = emptyMap()) = TransferPipeline(
         route, DigestAlgorithm.MD5, store, target, ProcessingChain(emptyList(), DigestAlgorithm.MD5),
         emptyMap(), { true }, { wakes++ }, hook, clock, registry, Staging(routeStage),
-        usableSpace = { 10.gib },
+        usableSpace = { 10.gib }, channels = channels,
     )
 
     private fun pollOf(onAck: AckAction) = Source.Poll(

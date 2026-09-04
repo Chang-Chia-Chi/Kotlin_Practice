@@ -2980,3 +2980,58 @@ question if a channel asks for it") is now answered by D49: there is no second c
 - **A route that needs two algorithms downstream** now has one answer, `digest:` on the route, and one refusal, rule
   26. If a real channel ever needs both at once, the change is a second `digest`/`digest_algo` pair in 8.1's transfer
   row and a second sink in the fetching component's stream - a DDL change, so a spec revision, not a ticket fix.
+
+---
+
+## 22: Fix: a polled route with `onAck: callback` runs
+
+**Built:** one line of `SftpPollSource.postAction` - `null, AckAction.None, is AckAction.Callback ->
+PostAction.Noop`. Nothing else in production changed; the `Seen.ack` closure needed no change,
+because "ack the connector with a noop post action" is already exactly "call no channel and release
+the in-flight entry".
+
+**What was wrong:** spec 5.3 gives `callback: <channel>` to *any* trigger and rule 12 checks it as
+such (it only asks that the named channel exists and offers notify), but the connector mapping read
+the poll row of that table as the whole vocabulary and threw for anything else. So `ShuttleHost.polled`
+turned every start of such a route into `RouteDown`, the supervisor restarted it on the backoff, and
+it restart-looped for ever - while `validate` said the configuration was fine, because rule 12 is the
+only thing validate runs. A configuration the spec allows and validation accepts could never run.
+
+**Concepts named:**
+
+- **A `callback` says nothing about the source object.** It is a call the pipeline makes itself
+  (ticket 19 fixed its order: callback, then the source's own order for ack and ACKED), so what is
+  left for the source side is whatever that trigger does when it is told nothing: on a poll that is
+  `none` - the file stays, the next listing sees it again, and D40's `recheckFinished` bounds the
+  re-checks to one skip per poll with no fetch and no write. On a subscribed route the same
+  reasoning already gives `message.ack()` (`NatsChannel`, unchanged): an unacked message would be
+  redelivered, which is not "nothing". Spec 5.3 now says both in one sentence, so the next trigger
+  kind has the rule rather than a precedent.
+
+**Tests:** `SftpPollSourceTest.SPEC1_a_polled_route_with_a_callback_ack_calls_the_channel_before_ACKED_and_leaves_the_file`
+on the embedded SSHD - a real route through `RouteRunner`, `TransferPipeline`, `InMemoryStateStore`,
+`InMemoryTarget` and a `RecordingChannel`, paused at `afterAck` and `afterLedgerAcked` by a
+`HookDriver`. At `afterAck`: the target holds the object, the channel has been called once with
+moment ACKED, the row is still STORED. At `afterLedgerAcked`: the file is still in `/drop` and no
+`temp/` exists. After the run: DONE, the route never went down (`run.isActive`), and the channel was
+not called a second time - D40 skips the file that stayed. Red before the fix with
+`IllegalArgumentException: onAck: Callback(channel=upstream) is not something a poll on SFTP can do
+to a file`, thrown out of `sftpConnectorConfig` before a server existed. The class helpers
+`withRoute` and `pipelineFor` gained an optional `channels` map. `SftpConnectorConfigTest`'s
+`the_ack_vocabulary_maps_onto_the_connectors_post_actions` gained the `Callback` row.
+
+**Final run counts (surefire), default tier** (`mvn -B -o -pl shuttle test`): 30 classes, 248 tests,
+0 failures, 0 errors (247 before, +1: the new `SftpPollSourceTest` case, so `SftpPollSourceTest` is
+now 12 and `SftpConnectorConfigTest` still 6 - the new mapping is an assertion in the existing test).
+In the full pass, run while other agents' Maven builds shared the machine, the two known-noisy
+`ShuttleHostTest` readiness cases failed
+(`S18_a_wrong_password_leaves_the_route_down_and_restarted_with_backoff_and_the_process_alive` and
+`readiness_follows_the_configured_rule_with_one_route_up_and_one_down`); the class passes alone,
+9/9, and neither case touches this ticket's code. `ShuttleQuarkusTest` bound its port this time.
+
+**Deviations:**
+
+1. **Spec 5.3 gained one sentence** saying what a `callback` leaves the source object as - `none`
+   on a poll, still acked at the broker on a subscribe. Without it the mapping this ticket writes
+   is a guess a reader has to re-derive, and the S3 poll will face the same question.
+2. **Size:** production one changed line plus a six-line KDoc; tests +47 / -4; spec +3 lines.
