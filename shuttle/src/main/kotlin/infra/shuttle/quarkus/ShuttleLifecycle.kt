@@ -41,7 +41,7 @@ fun environment(): Map<String, String> {
 private val VARIABLE = Regex("[A-Z][A-Z0-9_]*")
 
 /**
- * The host's life inside Quarkus, modelled on `SftpConnectorLifecycle`: built and started on the startup event
+ * The host's life inside Quarkus: built and started on the startup event
  * unless the process was launched in a command mode, closed on the shutdown event. The Quarkus datasource named
  * by `shuttleStateStore.oracle.datasource` becomes the JDBI store; a `StateStore` bean, when one exists, replaces
  * it (the test kit's in-memory store, through a test-tree producer), a `StoreReads` bean its read side, and an

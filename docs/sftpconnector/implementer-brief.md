@@ -16,13 +16,17 @@ alone. Update the document first, code second.
 
 ## Module layout
 
-`sftpconnector/` is an aggregator (`packaging` pom). Three modules under it:
+`sftpconnector/` is an aggregator (`packaging` pom). Two modules under it:
 
 | Module | Artifact | Contains | Depends on |
 |---|---|---|---|
 | `sftpconnector/core` | `sftpconnector-core` | transport interface, JSch adapter, pool, client, source, resilience, DSL, errors, metrics | kotlin-stdlib, kotlinx-coroutines, mwiede JSch, resilience4j-kotlin, micrometer-core, slf4j-api |
 | `sftpconnector/testkit` | `sftpconnector-testkit` | embedded Apache MINA SSHD with fault hooks, and the scripted fake transport | `sftpconnector-core`, Apache MINA SSHD |
-| `sftpconnector/quarkus` | `sftpconnector-quarkus` | CDI producer, config mapping, shutdown hook, registry binding (ticket 14 creates it) | `sftpconnector-core`, Quarkus |
+
+There is no Quarkus adapter module. Ticket 14 built one and ticket 24 deleted it: it spelled every
+configuration knob a third time and had no consumer, because shuttle - the only Quarkus host -
+builds its configuration through the core DSL in its own words. A Quarkus host writes those few
+lines itself until a second one makes a shared mapping worth its weight.
 
 **Where tests live.** `testkit` depends on `core`, so `core`'s tests cannot use `testkit`.
 Therefore:
@@ -51,7 +55,7 @@ Base package: `sftp.connector`. Sub-packages follow the spec's layers: `transpor
   `core` free of any framework.
 - Tests: JUnit 5 + Mockito (`mockito-core`, `mockito-kotlin`) + AssertJ, and
   `kotlinx-coroutines-test` for virtual time. Apache MINA SSHD for the embedded server.
-- Quarkus only in `sftpconnector/quarkus`. ArchUnit fails the build if `core` imports it.
+- No Quarkus anywhere under `sftpconnector/`. ArchUnit fails the build if `core` imports it.
 - No database in this design. JDBI is available in the repo but nothing here needs it - do
   not add persistence.
 

@@ -97,8 +97,13 @@ the pool or the flow layer (D2).
 | Module | Depends on | Contains |
 |---|---|---|
 | `sftpconnector-core` | kotlin-stdlib, kotlinx-coroutines, JSch (mwiede), resilience4j-kotlin, micrometer-core, slf4j-api | everything in Sec 3.1 |
-| `sftpconnector-quarkus` | `sftpconnector-core`, Quarkus arc, config, micrometer | CDI producer, config mapping to the DSL, shutdown hook, registry binding |
 | `sftpconnector-testkit` | `sftpconnector-core`, Apache MINA SSHD | embedded server, fault hooks, fake transport |
+
+There is no Quarkus adapter module. Ticket 14 built one and ticket 24 deleted it: it spelled every
+configuration knob a third time and had no consumer, because shuttle - the only Quarkus host -
+builds its configuration through the core DSL in its own words. A Quarkus host writes those few
+lines itself until a second one makes a shared mapping worth its weight. D3 is unchanged by this:
+Quarkus stays out of the core either way.
 
 ArchUnit enforces: `sftpconnector-core` never imports Quarkus; only the `transport.jsch` package imports
 `com.jcraft`. Logging in core is `org.slf4j`, which Quarkus routes into its log manager without
