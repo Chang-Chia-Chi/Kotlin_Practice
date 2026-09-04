@@ -9,6 +9,7 @@ import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -44,6 +45,7 @@ import sftp.connector.testkit.FakeSftpTransport.Operation
 import java.io.ByteArrayOutputStream
 import java.io.PrintStream
 import java.nio.file.Path
+import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.minutes
 import kotlin.time.Duration.Companion.seconds
 
@@ -293,6 +295,22 @@ class SftpWatchTest {
         // collector a copy of the exception with the original as its cause.
         assertThat(generateSequence(ended) { it.cause }.any { it is TimeoutCancellationException })
             .describedAs("the timeout is the cause").isTrue()
+    }
+
+    /**
+     * The collector's own block let a timeout escape. That is a cancellation thrown *through*
+     * `emit`, not the connector stopping its watchers, and spec 10.1 says a cancellation is never
+     * caught or wrapped: the watch ends with it, so the caller learns its pipeline died, instead
+     * of returning normally with an INFO line saying the connector stopped it (T17 lens 5 M2).
+     */
+    @Test
+    fun `a timeout the collector lets out of its own block ends the watch with that timeout, not normally`() = runTest {
+        val source = sourceOver(FakeSftpTransport().directory("/drop"))
+
+        val ended = runCatching { source.watch("/drop", EVERY).collect { withTimeout(1.milliseconds) { delay(1.seconds) } } }.exceptionOrNull()
+
+        assertTrue(ended is TimeoutCancellationException, "the watch ended with the collector's own timeout: $ended")
+        assertTrue(source.poll("/drop").toList().filterIsInstance<PollCompleted>().isNotEmpty(), "the directory is watchable again")
     }
 
     /** What consume exists to prevent, seen from watch: the collector's own exception ends the watch, and every place comes back. */

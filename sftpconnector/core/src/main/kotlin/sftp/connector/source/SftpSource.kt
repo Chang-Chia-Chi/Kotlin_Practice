@@ -9,7 +9,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.ProducerScope
-import kotlinx.coroutines.channels.consumeEach
+import kotlinx.coroutines.channels.consume
 import kotlinx.coroutines.channels.produce
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
@@ -159,13 +159,25 @@ class SftpSource(
             LOG.info("Watching {}, every {}.", at(directory), every)
             try {
                 val events = background.produce(failedAfterItsCollectorLeft(directory)) { tickEvery(directory, every) }
-                try {
-                    events.consumeEach { emit(it) }
-                } catch (stopped: CancellationException) {
-                    // A cancelled receive is either this collector's own cancellation, which
-                    // goes on, or the connector stopping its watchers, which ends the flow.
-                    currentCoroutineContext().ensureActive()
-                    LOG.info("The watch of {} ended because the connector stopped it.", at(directory))
+                events.consume {
+                    while (true) {
+                        // Only the receive is asked what happened to the producer. What `emit`
+                        // throws is the collector's own - its block's exception, a timeout it
+                        // let escape, an operator's abort - and passes through untouched, a
+                        // cancellation included (spec 10.1).
+                        val next = receiveCatching()
+                        if (next.isClosed) {
+                            // The ticker never ends on its own. A closed channel with a failure
+                            // is a tick no later tick could survive; a cancellation is the
+                            // connector stopping its watchers, which ends the flow normally.
+                            val why = next.exceptionOrNull()
+                            if (why != null && why !is CancellationException) throw why
+                            currentCoroutineContext().ensureActive()
+                            LOG.info("The watch of {} ended because the connector stopped it.", at(directory))
+                            break
+                        }
+                        emit(next.getOrThrow())
+                    }
                 }
             } finally {
                 watching.remove(directory)
