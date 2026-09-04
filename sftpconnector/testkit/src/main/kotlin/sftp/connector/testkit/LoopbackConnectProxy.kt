@@ -58,6 +58,37 @@ class LoopbackConnectProxy private constructor(private val server: ServerSocket)
         tunnels.forEach { it.relaying = false }
     }
 
+    @Volatile
+    private var blackHoleAfter = Long.MAX_VALUE
+
+    @Volatile
+    private var blackHoled: CountDownLatch? = null
+
+    @Volatile
+    private var whenBlackHoled: () -> Unit = {}
+
+    private val readFromClient = AtomicLong()
+
+    /**
+     * Reads [afterBytes] more from the client and then stops reading from it for good, so the
+     * client's own send buffer fills and its next write blocks with nothing at the far end to
+     * drain it - the black hole a firewall whose state expired, or a NAT that forgot the flow,
+     * makes of a tunnel that still looks open.
+     *
+     * This is the opposite of [stall], and the difference is the direction: a stall keeps reading
+     * and throws the bytes away, so the sender's buffers never fill and only the clock ever
+     * unblocks its *read*. A black hole stops reading, so it is the sender's own *write* that
+     * blocks - the one fault neither the cooperative tier (no chunk ever completes to ask the
+     * monitor) nor the keepalive tier (its probe is a write behind the same lock) can end. Only a
+     * socket close can. [whenBlocked] runs the moment it stops reading; close() releases it.
+     */
+    fun blackHoleClientAfter(afterBytes: Long, whenBlocked: () -> Unit) {
+        this.whenBlackHoled = whenBlocked
+        blackHoled = CountDownLatch(1)
+        readFromClient.set(0)
+        blackHoleAfter = afterBytes
+    }
+
     /**
      * Answers every CONNECT from now on with a refusal and hangs up, the way a proxy does while
      * the network behind it is down. Nothing already tunnelled is touched. [acceptConnections]
@@ -123,9 +154,10 @@ class LoopbackConnectProxy private constructor(private val server: ServerSocket)
     private var whenClientSpeaks: () -> Unit = {}
 
     override fun close() {
-        // Released first, so a relay thread parked on a hold is not left waiting on a latch
-        // nothing will ever count down.
+        // Released first, so a relay thread parked on a hold or a black hole is not left waiting
+        // on a latch nothing will ever count down.
         resume()
+        blackHoled?.countDown()
         server.close()
         sockets.forEach { runCatching { it.close() } }
     }
@@ -188,8 +220,16 @@ class LoopbackConnectProxy private constructor(private val server: ServerSocket)
         try {
             val buffer = ByteArray(BUFFER_BYTES)
             while (true) {
+                if (!toClient && readFromClient.get() >= blackHoleAfter) {
+                    // Once: stop draining the client, so its send buffer fills and its write
+                    // blocks. Park until close() - nothing here reads from it again.
+                    blackHoleAfter = Long.MAX_VALUE
+                    whenBlackHoled()
+                    blackHoled?.await()
+                }
                 val read = from.getInputStream().read(buffer)
                 if (read < 0) break
+                if (!toClient) readFromClient.addAndGet(read.toLong())
                 // A stalled tunnel keeps reading, so the sender's own buffers never fill and it
                 // never learns that nothing is arriving at the other end.
                 if (tunnel.relaying) {

@@ -6,6 +6,7 @@ import com.jcraft.jsch.ProxyHTTP
 import com.jcraft.jsch.Session
 import com.jcraft.jsch.SftpATTRS
 import com.jcraft.jsch.SftpProgressMonitor
+import com.jcraft.jsch.SocketFactory
 import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import kotlinx.coroutines.CancellationException
@@ -30,6 +31,8 @@ import sftp.connector.transport.SftpConnection
 import sftp.connector.transport.SftpTransport
 import java.io.InputStream
 import java.io.OutputStream
+import java.net.InetSocketAddress
+import java.net.Socket
 import java.time.Instant
 import kotlin.time.Duration
 
@@ -79,7 +82,8 @@ class JschTransport(
         try {
             return withContext(io) {
                 errors.translating(Attempt.inside(endpointLabel, "connect")) {
-                    val session = openSession()
+                    val socket = RetainedSocket(config.pool.connectTimeout.toTimeoutMillis())
+                    val session = openSession(socket)
                     val channel = try {
                         (session.openChannel("sftp") as ChannelSftp)
                             .also { it.connect(config.pool.connectTimeout.toTimeoutMillis()) }
@@ -89,7 +93,7 @@ class JschTransport(
                         session.disconnect()
                         throw failure
                     }
-                    JschConnection(session, channel, io, errors, endpointLabel)
+                    JschConnection(session, channel, socket, io, errors, endpointLabel)
                 }.also { opened = it }
             }
         } catch (cancelled: CancellationException) {
@@ -122,7 +126,7 @@ class JschTransport(
         private val LOG = LoggerFactory.getLogger(JschTransport::class.java)
     }
 
-    private fun openSession(): Session {
+    private fun openSession(socketFactory: SocketFactory): Session {
         val jsch = JSch()
         val endpoint = config.endpoint
         val session = when (val credential = config.auth) {
@@ -144,6 +148,12 @@ class JschTransport(
 
         endpoint.proxy?.let { session.setProxy(ProxyHTTP(it.host, it.port)) }
 
+        // The connector opens the socket rather than letting the library dial it anonymously, so
+        // that a forced cut can close that exact socket. JSch hands the factory to the direct dial
+        // and to `ProxyHTTP.connect` alike, so a tunnelled session is covered too. The factory then
+        // owns the connect timeout, because setting one bypasses JSch's own timed dial.
+        session.setSocketFactory(socketFactory)
+
         // Set before connecting, because that is when JSch reads them, and together because they
         // are one setting in two halves. JSch implements the keepalive interval *by* making it the
         // socket's read timeout, so a session has no separately settable read timeout at all: this
@@ -163,6 +173,7 @@ class JschTransport(
 internal class JschConnection(
     private val session: Session,
     private val channel: ChannelSftp,
+    private val socket: RetainedSocket,
     private val io: CoroutineDispatcher,
     private val errors: JschErrorMapper,
     private val endpoint: String,
@@ -322,10 +333,25 @@ internal class JschConnection(
 
     /**
      * Closing the socket is what gets the blocked thread back, because that is the one thing a
-     * blocking read reacts to. It runs on the caller's own thread rather than on the IO
-     * dispatcher: every thread there may be the ones waiting to be rescued.
+     * blocking read - or a blocking write - reacts to. It runs on the caller's own thread rather
+     * than on the IO dispatcher: every thread there may be the ones waiting to be rescued.
+     *
+     * The socket is closed first, and `session.disconnect()` only after. `disconnect()` hangs up
+     * on every channel before it touches the socket, and hanging up on a channel sends a close
+     * packet under the session's write lock - the very lock a thread blocked writing to a peer
+     * that stopped reading is holding. So `disconnect()` on its own would park behind that writer
+     * and never reach the socket close that would free it, and neither tier 1 nor tier 2 can help
+     * a write. Closing the retained socket first fails the blocked write at once, releases the
+     * lock, and lets `disconnect()` run to the end.
      */
     override fun abort() {
+        try {
+            socket.close()
+        } catch (failure: Exception) {
+            // The disconnect below still runs; a socket that would not close is no reason to skip
+            // the library's own hang-up, and the session is being written off either way.
+            LOG.warn("Closing the socket to {} to cut it loose failed: {}", endpoint, failure.message)
+        }
         try {
             session.disconnect()
         } catch (failure: Exception) {
@@ -355,6 +381,40 @@ private class StopWhenNobodyIsWaiting(private val caller: Job) : SftpProgressMon
     override fun count(count: Long): Boolean = caller.isActive
 
     override fun end() = Unit
+}
+
+/**
+ * The socket JSch dials through, kept so a forced cut can close it directly.
+ *
+ * JSch's own `disconnect()` reaches the socket only after hanging up on every channel, and a
+ * channel hang-up is a write under the session's lock; a thread stuck writing to a dead peer
+ * holds that lock, so `disconnect()` cannot get to the socket close that would rescue it. Closing
+ * the socket from outside is the one move that does not need the lock. JSch accepts a
+ * [SocketFactory] on the direct dial and on `ProxyHTTP.connect`, so the socket this records is the
+ * real one either way - the tunnel to the proxy on a proxied session, the server socket otherwise.
+ *
+ * The factory owns the connect timeout: once one is set, JSch's own timed dial (`Util.createSocket`)
+ * is bypassed, so the timed `connect` has to happen here or not at all. [close] is safe to call from
+ * any thread and more than once.
+ */
+internal class RetainedSocket(private val connectTimeoutMillis: Int) : SocketFactory {
+
+    @Volatile
+    private var socket: Socket? = null
+
+    override fun createSocket(host: String, port: Int): Socket =
+        Socket().also {
+            it.connect(InetSocketAddress(host, port), connectTimeoutMillis)
+            socket = it
+        }
+
+    override fun getInputStream(socket: Socket): InputStream = socket.getInputStream()
+
+    override fun getOutputStream(socket: Socket): OutputStream = socket.getOutputStream()
+
+    fun close() {
+        socket?.close()
+    }
 }
 
 /**
