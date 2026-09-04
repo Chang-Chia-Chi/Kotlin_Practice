@@ -87,13 +87,18 @@ class SftpConnectorConfigTest {
         assertEquals(emptyList<Any>(), assertInstanceOf(AllOf::class.java, configOf(poll = poll(readiness = emptyList())).polling.readiness).checks)
     }
 
-    /** Spec 5.3: `move`, `delete` and `none` are the whole poll vocabulary, and the nack is always none. */
+    /**
+     * Spec 5.3: `move`, `delete` and `none` are the whole poll vocabulary, and the nack is always
+     * none. `callback` is an ack action of any trigger and asks nothing of the file: the pipeline
+     * makes the call itself, so the connector does what `none` does (ticket 22).
+     */
     @Test
     fun the_ack_vocabulary_maps_onto_the_connectors_post_actions() {
         assertEquals(PostAction.Move("temp/"), configOf(poll = poll(onAck = AckAction.Move("temp/"))).polling.onAck)
         assertEquals(PostAction.Delete, configOf(poll = poll(onAck = AckAction.Delete)).polling.onAck)
         assertEquals(PostAction.Noop, configOf(poll = poll(onAck = AckAction.None)).polling.onAck)
         assertEquals(PostAction.Noop, configOf(poll = poll(onAck = null)).polling.onAck)
+        assertEquals(PostAction.Noop, configOf(poll = poll(onAck = AckAction.Callback("upstream"))).polling.onAck)
         assertEquals(PostAction.Noop, configOf().polling.onNack, "a polled file's redelivery is the next poll")
     }
 

@@ -266,9 +266,15 @@ fun sftpConnectorConfig(
     }
 }
 
-/** Spec 5.3's poll vocabulary; rule 12 has already refused anything else by the time a route runs. */
+/**
+ * Spec 5.3's poll vocabulary; rule 12 has already refused anything else by the time a route runs.
+ *
+ * `callback` is an ack action of any trigger, so it reaches a poll too, and what it asks of the file
+ * is nothing: the channel is the pipeline's own call before the ACKED write (ticket 19), and the
+ * connector is left doing what `none` does - the file stays, and D40 bounds the re-checks.
+ */
 private fun postAction(knob: String, action: AckAction?): PostAction = when (action) {
-    null, AckAction.None -> PostAction.Noop
+    null, AckAction.None, is AckAction.Callback -> PostAction.Noop
     is AckAction.Move -> PostAction.Move(action.folder)
     AckAction.Delete -> PostAction.Delete
     else -> throw IllegalArgumentException("$knob: $action is not something a poll on SFTP can do to a file")
