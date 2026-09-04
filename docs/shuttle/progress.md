@@ -4291,3 +4291,89 @@ seams rather than helpers.
 **For the next ticket:** deviation 2 is ticket 38's to close if it wants it. `StepObserver` has exactly
 one implementation (try mode's printer); if a future ticket wants per-step timings or a debug log on a
 running route, that is the parameter to pass, not a new hook.
+
+---
+
+## 39: One per-route ledger owns each transition and its deliveries
+
+**Built:** ticket 06's "lift `ledger` out if a third caller appears", done now that the operator ack was
+that caller. `Ledger(store, notify, wake)` in `core/Ledger.kt` is a concrete class (plan 2.4: no
+single-implementation interface) holding one route's `notify` list and the notifier's wake. Its surface:
+`fetched(id, staged)`, `stored(id, target)`, `acked(id)`, `reacked(id)` and `val store`. Each of the first
+three hands the route's requests for that moment to the matching `StateStore` transition - the rows ride
+the transaction, I11 - and wakes once afterwards, only when rows were created (D7). `reacked` is the
+ticket 23 touch: no rows, no wake. The `StateStore` seam is byte-for-byte what it was.
+
+The three copies are gone:
+
+1. **`TransferPipeline`** lost its private `ledger(moment) { transition }` helper. Constructor parameters
+   removed: `store` and `wake`; added: `ledger` (17 to 16). The row's other transitions - `find`, `seen`,
+   `supersede`, `processed`, `children`, `childrenOf`, `byId`, `rejected`, `failedAttempt` - go through
+   `ledger.store`, kept as a private `store` field so the body reads as before.
+2. **`RouteRunner`**'s reconciliation lost its `acked` request list and its `wake`. Parameters removed:
+   `store` and `wake`; added: `ledger` (7 to 6). Each unlisted row is `ledger.acked(id)`, so the wake now
+   follows each row rather than once after the loop; the notifier's wake is a conflated channel, so N wakes
+   and one are the same signal.
+3. **`ShuttleHost.ack`** builds no request list and calls no `notifier.wake()`: the host keeps
+   `ledgers: Map<String, Ledger>`, one per route from `start()`, and the operator ack is `ledger.acked(id)`
+   after the STORED check. `DeliveryMoment` and `DeliveryRequest` are no longer imported by the host.
+
+And ticket 37's hand-off (its deviation 2): the two verdicts between the chain and the store are one
+function, `storeRefusal(objects, keys): String?` beside `keyLeavesTarget` in `Processors.kt`. The pipeline
+rejects with the string it returns; `shuttle try` prints it under `reject:`. Both strings are unchanged
+(`TransferPipelineTest` B4 and B5, `TryCommandTest` SPEC7 assert them on each side).
+
+**Concepts named:**
+
+- **The ledger is the route's, not the pipeline's.** What varies between the three callers was never the
+  transition - it was who held the `notify` list and the wake. Putting both in one object per route is
+  what lets the host's ack and the runner's reconciliation write ACKED exactly as stage 4 does (spec 4.6's
+  "through the same function stage 4 uses", now literally true).
+- **`val store` is on purpose.** A ledger that hid the store would have to re-expose nine transitions
+  that create no rows and wake nobody - a pass-through the deletion test would flag. The ledger owns the
+  three moments and the touch; the store stays the seam for everything else, reached through the ledger
+  so a caller holds one object.
+- **A wake is an event, not a count.** The `wakes++` counters proved the pipeline woke once per
+  row-creating transition and never on a failed one; that is now a property of `Ledger`, proved once in
+  `LedgerTest`, and the pipeline's and runner's tests assert the outbox rows, which the ledger ties to the
+  wake.
+
+**Tests:**
+
+- New `LedgerTest` (4): `acked_writes_the_row_creates_exactly_the_routes_acked_rows_and_wakes_once` (the
+  ticket's first red: `Unresolved reference 'Ledger'`), a STORED-only route whose `fetched` creates
+  nothing and wakes nobody and whose `stored` creates one row and wakes once,
+  `I11_a_failing_transaction_leaves_the_row_and_the_outbox_as_they_were_and_wakes_nobody` (the fake's
+  one-shot insert failure), and `reacked_touches_the_row_creates_nothing_and_wakes_nobody`.
+- Deleted `wakes` counters: `TransferPipelineTest` (the field and five assertions in I17_S19, S1, I11 and
+  the I20 helper), `RouteRunnerTest` (the field and one assertion in S4), `SftpPollSourceTest` (a field that
+  was incremented and never asserted). `ShuttleHostTest` had none: its manual-ack test observes a real
+  notifier delivering, and is unchanged.
+- Constructor call sites moved: `TransferPipelineTest`, `RouteRunnerTest` (including S16's flaky store),
+  `RouteSupervisorTest`, `CrashMatrixTest`, `SftpPollSourceTest` (`pipelineFor` gained a defaulted
+  `ledger` parameter so the four call sites that share no runner are untouched). Every `I<n>_`, `S<n>_`,
+  `B<n>_` and `SPEC<n>_` test keeps its id and is green.
+
+**Final run counts (surefire).** Default tier (`mvn -B -o -pl shuttle test`): 32 classes, **296 tests,
+0 failures, 0 errors** - ticket 37's 292 plus the four above. `-DexcludedGroups=none
+-Dtest=M1AcceptanceTest,M2AcceptanceTest`: `M1AcceptanceTest` 23 tests, `M2AcceptanceTest` 5 tests, 0 failures, 0 errors, about 2 minutes of containers.
+
+**Deviations:**
+
+1. **The empty-payload verdict moved after `store.processed`.** It sat before `checkMappings` and
+   `processed`; `storeRefusal` runs where the keys are, after them, so an empty final payload leaves a
+   REJECTED row that was PROCESSED first (attributes on it) rather than FETCHED. B4 asserts the state and
+   the reason, both unchanged. The cardinality verdict (S33) stays in the pipeline: try mode prints one
+   key per object and has no second object to collide with in the shapes it accepts.
+2. **Reconciliation wakes per row, not once per poll** (above). Nothing observes the difference through
+   the conflated channel, and the one-wake-per-poll line was the third copy of the rule this ticket deletes.
+3. **No decision number taken**; D54 is still free. The ledger is what ticket 06 said would happen.
+4. **Size:** production +39/-41 across five files plus `Ledger.kt` (30 lines); tests -11 net plus
+   `LedgerTest` (85 lines); this entry.
+
+**Seams.** `StateStore`, `ObjectStoreTarget`, `DeliveryChannel`, `Hook`, `Processor`: untouched. `Ledger`
+is a class with three callers and one fake behind it (the store's); it is not a seam and gets no interface.
+
+**For the next ticket:** `ShuttleHost.ack` answers NOT_FOUND for a row whose route left the configuration,
+as before; the row is still the store's. If an admin operation ever needs a ledger for a route the host no
+longer runs, that is a `Ledger(store, emptyList(), notifier::wake)`, not a new path.

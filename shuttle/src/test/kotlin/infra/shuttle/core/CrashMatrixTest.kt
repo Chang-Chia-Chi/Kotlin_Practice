@@ -53,11 +53,12 @@ class CrashMatrixTest {
     private val noChain = ProcessingChain(emptyList(), DigestAlgorithm.MD5, Dispatchers.Unconfined)
 
     private fun runner(route: Route = polled, chain: ProcessingChain = noChain): RouteRunner {
+        val ledger = Ledger(store, route.notify) { notifier.wake() }
         val pipeline = TransferPipeline(
-            route, DigestAlgorithm.MD5, store, target, chain, emptyMap(), { true },
-            { notifier.wake() }, hook, clock, registry, Staging(staging), usableSpace = { 10.gib },
+            route, DigestAlgorithm.MD5, ledger, target, chain, emptyMap(), { true },
+            hook, clock, registry, Staging(staging), usableSpace = { 10.gib },
         )
-        return RouteRunner(route, pipeline, fetcher, store, { notifier.wake() }, clock, registry)
+        return RouteRunner(route, pipeline, fetcher, ledger, clock, registry)
     }
 
     /** One poll listing the file: the trigger every polled row starts from and, replayed, the next poll while the file is still there. */

@@ -13,13 +13,13 @@ and hold neither `wake` nor request-building. The `StateStore` seam is unchanged
 
 **Nature:** deepening; deletion test says the three copies reappear if any one is removed
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] A `LedgerTest` on the fakes proves each transition writes the row, creates exactly the route's rows for that moment, and wakes once; the three `wakes++` counters in `TransferPipelineTest`, `RouteRunnerTest` and `ShuttleHostTest` collapse to assertions on the ledger's behaviour or are deleted
-- [ ] `TransferPipeline` loses `wake` and the request-building; `RouteRunner`'s reconciliation and `ShuttleHost.ack` call the ledger; constructor parameter counts go down, not up
-- [ ] Every existing `I<n>_`, `S<n>_`, `B<n>_` and `SPEC<n>_` test stays green with its id; the crash matrix is unchanged
-- [ ] The M1 and M2 acceptance classes are run once (`-DexcludedGroups=none`) and stay green
-- [ ] Progress entry appended, naming the constructor parameters removed
+- [x] A `LedgerTest` on the fakes proves each transition writes the row, creates exactly the route's rows for that moment, and wakes once; the three `wakes++` counters in `TransferPipelineTest`, `RouteRunnerTest` and `ShuttleHostTest` collapse to assertions on the ledger's behaviour or are deleted
+- [x] `TransferPipeline` loses `wake` and the request-building; `RouteRunner`'s reconciliation and `ShuttleHost.ack` call the ledger; constructor parameter counts go down, not up
+- [x] Every existing `I<n>_`, `S<n>_`, `B<n>_` and `SPEC<n>_` test stays green with its id; the crash matrix is unchanged
+- [x] The M1 and M2 acceptance classes are run once (`-DexcludedGroups=none`) and stay green
+- [x] Progress entry appended, naming the constructor parameters removed
 
 Ground rules for every ticket: implement only this ticket; 200-600 lines including tests; no Thread.sleep;
 invariant tests named `I<n>_<description>`, scenario tests by their `S<n>` id, validation tests by `rule<n>_`,

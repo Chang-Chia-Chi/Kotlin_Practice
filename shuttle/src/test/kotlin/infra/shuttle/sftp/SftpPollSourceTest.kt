@@ -21,6 +21,7 @@ import infra.shuttle.core.Source
 import infra.shuttle.core.SourceIdentity
 import infra.shuttle.core.SourceKind
 import infra.shuttle.core.Staging
+import infra.shuttle.core.Ledger
 import infra.shuttle.core.StateStore
 import infra.shuttle.core.Target
 import infra.shuttle.core.TransferPipeline
@@ -87,7 +88,6 @@ class SftpPollSourceTest {
     private val registry = SimpleMeterRegistry()
     private val store = InMemoryStateStore(clock)
     private val target = InMemoryTarget("landing")
-    private var wakes = 0
 
     @Test
     fun a_file_on_the_server_becomes_one_Seen_whose_identity_is_the_store_directory_name_size_and_mtime() = runBlocking {
@@ -394,11 +394,12 @@ class SftpPollSourceTest {
 
         withConnector(AckAction.Move("temp/")) { source ->
             val route = routeOf(AckAction.Move("temp/"))
+            val ledger = Ledger(slow, route.notify) {}
             val pipeline = TransferPipeline(
-                route, DigestAlgorithm.MD5, slow, target, ProcessingChain(emptyList(), DigestAlgorithm.MD5),
-                emptyMap(), { true }, { wakes++ }, hook, clock, registry, Staging(routeStage), usableSpace = { 10.gib },
+                route, DigestAlgorithm.MD5, ledger, target, ProcessingChain(emptyList(), DigestAlgorithm.MD5),
+                emptyMap(), { true }, hook, clock, registry, Staging(routeStage), usableSpace = { 10.gib },
             )
-            val run = launch { RouteRunner(route, pipeline, source.fetcher, slow, { wakes++ }, clock, registry).run(source.events()) }
+            val run = launch { RouteRunner(route, pipeline, source.fetcher, ledger, clock, registry).run(source.events()) }
             repeat(files.size) {
                 withTimeout(TIMEOUT) { hook.awaitArrival(HookPoint.afterLedgerAcked) }
                 hook.resume(HookPoint.afterLedgerAcked)
@@ -533,7 +534,8 @@ class SftpPollSourceTest {
     ) =
         withConnector(onAck) { source ->
             val route = routeOf(onAck)
-            val runner = RouteRunner(route, pipelineFor(route, hook, channels), source.fetcher, store, { wakes++ }, clock, registry)
+            val ledger = Ledger(store, route.notify) {}
+            val runner = RouteRunner(route, pipelineFor(route, hook, channels, ledger), source.fetcher, ledger, clock, registry)
             coroutineScope {
                 val run = launch { runner.run(source.events()) }
                 try {
@@ -547,9 +549,9 @@ class SftpPollSourceTest {
     private fun routeOf(onAck: AckAction) =
         Route(name = ROUTE, source = pollOf(onAck), target = Target("minio", bucket = "landing"))
 
-    private fun pipelineFor(route: Route, hook: Hook = Hook.None, channels: Map<ChannelName, DeliveryChannel> = emptyMap()) = TransferPipeline(
-        route, DigestAlgorithm.MD5, store, target, ProcessingChain(emptyList(), DigestAlgorithm.MD5),
-        emptyMap(), { true }, { wakes++ }, hook, clock, registry, Staging(routeStage),
+    private fun pipelineFor(route: Route, hook: Hook = Hook.None, channels: Map<ChannelName, DeliveryChannel> = emptyMap(), ledger: Ledger = Ledger(store, route.notify) {}) = TransferPipeline(
+        route, DigestAlgorithm.MD5, ledger, target, ProcessingChain(emptyList(), DigestAlgorithm.MD5),
+        emptyMap(), { true }, hook, clock, registry, Staging(routeStage),
         usableSpace = { 10.gib }, channels = channels,
     )
 

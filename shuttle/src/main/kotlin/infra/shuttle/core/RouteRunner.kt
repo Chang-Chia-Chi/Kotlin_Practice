@@ -29,13 +29,12 @@ class RouteRunner(
     val route: Route,
     private val pipeline: TransferPipeline,
     private val fetch: Fetcher,
-    private val store: StateStore,
-    private val wake: () -> Unit,
+    private val ledger: Ledger,
     private val clock: Clock,
     private val registry: MeterRegistry,
 ) {
+    private val store = ledger.store
     private val name = RouteName(route.name)
-    private val acked = route.notify.filter { it.on == DeliveryMoment.ACKED }.map { DeliveryRequest(DeliveryMoment.ACKED, ChannelName(it.channel)) }
     private val permits = Semaphore(route.parallelism)
     private val inflight = registry.gauge(ShuttleMetrics.INFLIGHT, Tags.of("route", route.name), AtomicInteger())!!
     private val stuck = registry.gauge(ShuttleMetrics.STUCK_TRANSFERS, Tags.of("route", route.name), AtomicInteger())!!
@@ -88,11 +87,10 @@ class RouteRunner(
             } else {
                 val ids = store.unlisted(name, event.startedAt, event.listed)
                 for (id in ids) {
-                    store.acked(id, acked)
+                    ledger.acked(id)
                     log.infov("route {0}: transfer {1} was moved but never recorded as acked; reconciled", route.name, id.value)
                 }
                 registry.counter(ShuttleMetrics.RECONCILED, "route", route.name).increment(ids.size.toDouble())
-                if (ids.isNotEmpty() && acked.isNotEmpty()) wake()
             }
         } catch (e: CancellationException) {
             throw e

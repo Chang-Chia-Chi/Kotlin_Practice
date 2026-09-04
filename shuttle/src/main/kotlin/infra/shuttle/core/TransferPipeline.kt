@@ -21,20 +21,20 @@ import kotlin.time.toKotlinDuration
  * `Fetcher` brings the bytes to a staging directory owned by the run and deleted in `finally` on every
  * path (I9, I18); the chain runs and its mappings are checked before any store; every object of the
  * final payload is stored, one row or N child rows through `children` (4.5); then the ack action and
- * the ACKED ledger write in the order the source needs (D6). Every error is caught at the object
- * boundary (spec 11): an attempt is counted on the row being driven, the trigger is told with the
- * right `redeliver` flag, and nothing but cancellation propagates. One instance per route, safe to
- * run concurrently: all per-object state lives in [Run].
+ * the ACKED ledger write in the order the source needs (D6). The transitions that create outbox rows
+ * and wake the notifier are the route's [Ledger]'s; the rest of the row's life is the store's own.
+ * Every error is caught at the object boundary (spec 11): an attempt is counted on the row being
+ * driven, the trigger is told with the right `redeliver` flag, and nothing but cancellation propagates.
+ * One instance per route, safe to run concurrently: all per-object state lives in [Run].
  */
 class TransferPipeline(
     private val route: Route,
     private val algorithm: DigestAlgorithm,
-    private val store: StateStore,
+    private val ledger: Ledger,
     private val target: ObjectStoreTarget,
     private val chain: ProcessingChain,
     bodies: Map<ChannelName, MappingTable>,
     private val providerExists: (String) -> Boolean,
-    private val wake: () -> Unit,
     private val hook: Hook,
     private val clock: Clock,
     private val registry: MeterRegistry,
@@ -45,6 +45,7 @@ class TransferPipeline(
     /** `expand` fetching from a store other than the one `run` was handed; the route's own fetch store needs no entry. */
     private val fetchers: Map<String, Fetcher> = emptyMap(),
 ) {
+    private val store = ledger.store
     private val name = RouteName(route.name)
     private val polled = route.source is Source.Poll
     private val kind = if (polled) TransferKind.OBJECT else TransferKind.MESSAGE
@@ -168,7 +169,7 @@ class TransferPipeline(
         /** Stages 1 (ledger) to 4 over a staged object. */
         private suspend fun resume(transfer: Transfer, staged: StagedObject, dir: Path) {
             val id = transfer.id
-            ledger(DeliveryMoment.FETCHED) { store.fetched(id, staged.summary, it) }
+            ledger.fetched(id, staged.summary)
             hook.at(HookPoint.afterFetch, id)
             val ctx = StagingContext(
                 TransferView(id, name, transfer.identity, event.source.path, transfer.firstSeenAt, transfer.parentId),
@@ -178,21 +179,18 @@ class TransferPipeline(
                 is ChainResult.Rejected -> return reject(transfer, result.reason)
                 is ChainResult.Done -> result
             }
-            // spec 6.1: a payload of nothing is not "the object unchanged". Without this the store step sees no
-            // object and no child, and the run acks: the source is moved away with no copy anywhere (I8).
-            if (done.payload.objects.isEmpty()) return reject(transfer, "process: the chain left no object to store")
             ProcessingChain.checkMappings(done.attributes, tables, providerExists)
             store.processed(id, done.attributes)
             hook.at(HookPoint.afterProcess, id)
             val objects = done.payload.objects
             val keys = objects.map { targetKey(route.target, it.name, transfer.identity.sourceName, done.attributes, clock) }
-            keys.firstOrNull(::keyLeavesTarget)?.let { return reject(transfer, "key: $it leaves the target directory") }
+            storeRefusal(objects, keys)?.let { return reject(transfer, it) }
             keys.withIndex().groupBy({ it.value }, { objects[it.index].name }).entries.firstOrNull { it.value.size > 1 }?.let { (key, names) ->
                 return reject(transfer, "cardinality: ${names.joinToString(" and ")} both resolve to key $key")
             }
             if (objects.size == 1) {
                 val ref = uploads.withPermit { stage("store") { storeOne(id, objects.single(), keys.single(), done.attributes) } }
-                ledger(DeliveryMoment.STORED) { store.stored(id, ref, it) }
+                ledger.stored(id, ref)
                 hook.at(HookPoint.afterLedgerStored, id)
             } else {
                 val children = childRows(id, objects)
@@ -228,7 +226,7 @@ class TransferPipeline(
             try {
                 uploads.withPermit {
                     val ref = stage("store") { storeOne(child.id, o, key, attributes) }
-                    ledger(DeliveryMoment.STORED) { store.stored(child.id, ref, it) }
+                    ledger.stored(child.id, ref)
                     hook.at(HookPoint.afterLedgerStored, child.id)
                 }
             } catch (e: CancellationException) {
@@ -264,9 +262,9 @@ class TransferPipeline(
             if (callbackChannel != null) stage("ack") { callback(callbackChannel, id) }
             if (polled) {
                 stage("ack") { event.ack() }; hook.at(HookPoint.afterAck, id)
-                ledger(DeliveryMoment.ACKED) { store.acked(id, it) }; hook.at(HookPoint.afterLedgerAcked, id)
+                ledger.acked(id); hook.at(HookPoint.afterLedgerAcked, id)
             } else {
-                ledger(DeliveryMoment.ACKED) { store.acked(id, it) }; hook.at(HookPoint.afterLedgerAcked, id)
+                ledger.acked(id); hook.at(HookPoint.afterLedgerAcked, id)
                 stage("ack") { event.ack() }; hook.at(HookPoint.afterAck, id)
             }
             count("done")
@@ -299,7 +297,7 @@ class TransferPipeline(
         private suspend fun reack(transfer: Transfer) {
             log.warnv("route {0}: transfer {1} ({2}) is {3} and came back unchanged; acking again", route.name, transfer.id.value, event.identity.sourceName, transfer.state)
             stage("ack") { event.ack() }; hook.at(HookPoint.afterAck, transfer.id)
-            store.reacked(transfer.id)
+            ledger.reacked(transfer.id)
             count("reacked")
         }
 
@@ -328,13 +326,6 @@ class TransferPipeline(
             val terminal = after?.state == TransferState.FAILED || (e is ChildFailed && e.terminal)
             if (terminal) count("failed")
             event.nack(!terminal)
-        }
-
-        /** A transition that may create outbox rows: the rows ride the transaction (I11), then the notifier is woken. */
-        private suspend fun ledger(moment: DeliveryMoment, transition: suspend (List<DeliveryRequest>) -> Unit) {
-            val events = route.notify.filter { it.on == moment }.map { DeliveryRequest(moment, ChannelName(it.channel)) }
-            transition(events)
-            if (events.isNotEmpty()) wake()
         }
 
         private suspend fun <T> stage(name: String, block: suspend () -> T): T {

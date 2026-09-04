@@ -35,7 +35,6 @@ class RouteRunnerTest {
     private val source = ScriptedSource(clock)
     private val fetcher = ScriptedFetcher(clock).file("a.csv", "a\n".toByteArray()).file("b.csv", "b\n".toByteArray()).file("c.csv", "c\n".toByteArray())
     private val registry = SimpleMeterRegistry()
-    private var wakes = 0
 
     private fun route(parallelism: Int = 1, notify: List<Notify> = emptyList()) = Route(
         name = "drop", source = Source.Poll("sftp", "/in", 1.minutes, onAck = AckAction.Move("done")),
@@ -44,8 +43,9 @@ class RouteRunnerTest {
 
     private fun runner(route: Route = route(), hook: Hook = Hook.None): RouteRunner {
         // the chain hops to its bounded IO view (spec 3.3); unconfined here keeps the hop inside runTest's scheduler
-        val pipeline = TransferPipeline(route, DigestAlgorithm.MD5, store, target, ProcessingChain(emptyList(), DigestAlgorithm.MD5, Dispatchers.Unconfined), emptyMap(), { true }, { wakes++ }, hook, clock, registry, Staging(staging), usableSpace = { 10.gib })
-        return RouteRunner(route, pipeline, fetcher, store, { wakes++ }, clock, registry)
+        val ledger = Ledger(store, route.notify) {}
+        val pipeline = TransferPipeline(route, DigestAlgorithm.MD5, ledger, target, ProcessingChain(emptyList(), DigestAlgorithm.MD5, Dispatchers.Unconfined), emptyMap(), { true }, hook, clock, registry, Staging(staging), usableSpace = { 10.gib })
+        return RouteRunner(route, pipeline, fetcher, ledger, clock, registry)
     }
 
     private fun id(name: String) = ScriptedSource.identity(name)
@@ -123,7 +123,6 @@ class RouteRunnerTest {
         assertEquals(young, store.transfer(young.id), "rows updated after the poll started are untouched")
         val delivery = store.outbox.single()
         assertEquals(unlisted.id to DeliveryMoment.ACKED, delivery.transferId to delivery.moment, "the acked delivery rides the same transition as stage 4")
-        assertEquals(1, wakes)
         assertEquals(1.0, reconciled())
         assertEquals(1.0, polls("completed"))
     }
@@ -241,8 +240,9 @@ class RouteRunnerTest {
     fun S16_a_poll_with_the_state_store_unavailable_completes_nothing_and_the_next_poll_completes_all() = runTest {
         val flaky = Unavailable(store).apply { down = true }
         val route = route(parallelism = 2).copy(stuckAfter = 3.minutes)
-        val pipeline = TransferPipeline(route, DigestAlgorithm.MD5, flaky, target, ProcessingChain(emptyList(), DigestAlgorithm.MD5, Dispatchers.Unconfined), emptyMap(), { true }, { wakes++ }, Hook.None, clock, registry, Staging(staging), usableSpace = { 10.gib })
-        val runner = RouteRunner(route, pipeline, fetcher, flaky, { wakes++ }, clock, registry)
+        val ledger = Ledger(flaky, route.notify) {}
+        val pipeline = TransferPipeline(route, DigestAlgorithm.MD5, ledger, target, ProcessingChain(emptyList(), DigestAlgorithm.MD5, Dispatchers.Unconfined), emptyMap(), { true }, Hook.None, clock, registry, Staging(staging), usableSpace = { 10.gib })
+        val runner = RouteRunner(route, pipeline, fetcher, ledger, clock, registry)
         val poll = source.seen(id("a.csv")).seen(id("b.csv")).pollCompleted(setOf(id("a.csv"), id("b.csv"))).events()
 
         runner.run(poll)
