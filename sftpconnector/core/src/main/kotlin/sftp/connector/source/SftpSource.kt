@@ -171,7 +171,7 @@ class SftpSource(
                         // Only the receive is asked what happened to the producer. What `emit`
                         // throws is the collector's own - its block's exception, a timeout it
                         // let escape, an operator's abort - and passes through untouched, a
-                        // cancellation included (spec 10.1).
+                        // cancellation included: it is never wrapped and never swallowed.
                         val next = receiveCatching()
                         if (next.isClosed) {
                             // The ticker never ends on its own. A closed channel with a failure

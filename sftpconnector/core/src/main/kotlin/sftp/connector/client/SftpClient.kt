@@ -95,13 +95,13 @@ class SftpClient(
         withDirectories: Boolean = false,
         filter: (RemoteFile) -> Boolean = { true },
     ): Flow<RemoteFile> = channelFlow {
-        meters.timing("list") {
+        meters.timing("list") { operation ->
             var handedOn = 0
             // A listing that dies before its first entry starts over on a fresh session. One
             // that dies after is not: starting over would hand the same entries on twice, and
             // remembering which ones would cost the memory this flow exists not to spend. The
             // consumer sees the failure and lists again when it is ready to.
-            resilience.attempting("list", dir, unhurried = true, stillWorthRetrying = { handedOn == 0 }) { session, _ ->
+            resilience.attempting(operation, dir, unhurried = true, stillWorthRetrying = { handedOn == 0 }) { session, _ ->
                 // The coroutine that owns the lease, so the hand-off below can watch it and not
                 // only the channel: the time limiter cancels this coroutine, not the collector, so
                 // a listing whose collector has stalled the buffer full is unblocked only if the
@@ -161,9 +161,9 @@ class SftpClient(
      *   given - when something this connector did not write is already sitting at the partial
      *   file's name, which is a symbolic link somebody else planted or a directory in the way.
      */
-    suspend fun download(remote: RemoteFile, localTarget: Path? = null): LocalFile = meters.timing("download") {
+    suspend fun download(remote: RemoteFile, localTarget: Path? = null): LocalFile = meters.timing("download") { operation ->
         val target = localTarget ?: stagingTargetFor(remote)
-        resilience.attempting("download", remote.path, transfer = true) { session, attempt ->
+        resilience.attempting(operation, remote.path, transfer = true) { session, attempt ->
             staging.receive(target = target, expectedSize = remote.size, attempt = attempt) { sink ->
                 session.readTo(remote.path, sink)
             }
@@ -216,13 +216,13 @@ class SftpClient(
      *   whatever the earlier try left, which is either nothing, part of this file, or all of it.
      */
     suspend fun upload(local: Path, remote: String, overwrite: Overwrite = Overwrite.REFUSE): Unit =
-        meters.timing("upload") {
+        meters.timing("upload") { operation ->
             // Decided on the first try that gets to ask. Asking again on a retry would find the
             // earlier try's own file there and refuse the upload for it.
             var targetFoundFree = overwrite == Overwrite.REPLACE
-            resilience.attempting("upload", remote, transfer = true) { session, attempt ->
+            resilience.attempting(operation, remote, transfer = true) { session, attempt ->
                 if (!targetFoundFree) {
-                    if (session.entryAt(remote) != null) refuse(attempt, "upload", remote)
+                    if (session.entryAt(remote) != null) refuse(attempt, operation, remote)
                     targetFoundFree = true
                 }
                 Files.newInputStream(local).use { session.writeFrom(remote, it) }
@@ -249,11 +249,11 @@ class SftpClient(
      *   file moved is then unknown.
      */
     suspend fun rename(from: String, to: String, overwrite: Overwrite = Overwrite.REFUSE, listed: RemoteFile? = null): Unit =
-        meters.timing("rename") {
+        meters.timing("rename") { operation ->
             require(listed == null || listed.path == from) { "the listed file is ${listed?.path}, not the source $from" }
             val tries = RenameTries(from, to, overwrite, listed)
             try {
-                resilience.attempting("rename", from) { session, attempt -> tries.attempt(session, attempt) }
+                resilience.attempting(operation, from) { session, attempt -> tries.tryOnce(session, attempt) }
             } catch (replyLost: SftpException) {
                 // A reply lost on the last permitted try: the retry that would have looked for
                 // the landed file is not coming, so the look is made once, here, on a fresh
@@ -261,7 +261,7 @@ class SftpClient(
                 // the lost reply it was.
                 if (replyLost.disposition.retry != Retry.IMMEDIATELY) throw replyLost
                 val landed = try {
-                    resilience.once("rename") { session -> tries.landedAfterAll(session) }
+                    resilience.once(operation) { session -> tries.landedAfterAll(session) }
                 } catch (lookFailed: SftpException) {
                     replyLost.addSuppressed(lookFailed)
                     throw replyLost
@@ -276,9 +276,9 @@ class SftpClient(
      * server and its reply was lost, in which case a path that is not there is the delete having
      * worked.
      */
-    suspend fun delete(remote: String): Unit = meters.timing("delete") {
+    suspend fun delete(remote: String): Unit = meters.timing("delete") { operation ->
         var reachedTheServer = false
-        resilience.attempting("delete", remote) { session, _ ->
+        resilience.attempting(operation, remote) { session, _ ->
             val anEarlierTryMayHaveLanded = reachedTheServer
             reachedTheServer = true
             try {
@@ -300,8 +300,8 @@ class SftpClient(
      * @param parents create the missing directories above [remote] as well. Off by default,
      *   because filling in a path nobody asked for turns a typo into a directory tree.
      */
-    suspend fun mkdir(remote: String, parents: Boolean = false): Unit = meters.timing("mkdir") {
-        resilience.attempting("mkdir", remote) { session, _ -> session.makeDirectory(remote, parents) }
+    suspend fun mkdir(remote: String, parents: Boolean = false): Unit = meters.timing("mkdir") { operation ->
+        resilience.attempting(operation, remote) { session, _ -> session.makeDirectory(remote, parents) }
     }
 
     /**
@@ -326,8 +326,8 @@ class SftpClient(
      * send twice, so a caller that wants a second go says so itself. The breaker still stands in
      * front of it: an open breaker means nothing is sent, whoever is asking.
      */
-    suspend fun <T> withSession(block: suspend SftpSession.() -> T): T = meters.timing("session") {
-        resilience.once("session") { session ->
+    suspend fun <T> withSession(block: suspend SftpSession.() -> T): T = meters.timing("session") { operation ->
+        resilience.once(operation) { session ->
             val borrowed = BorrowedSession(session)
             try {
                 borrowed.block()

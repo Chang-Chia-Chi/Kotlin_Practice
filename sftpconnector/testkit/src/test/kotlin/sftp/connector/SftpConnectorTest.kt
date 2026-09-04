@@ -210,8 +210,8 @@ class SftpConnectorTest {
      * there is worse than no message at all: the operator is sent to respell a path that is spelled
      * correctly, on a start-up that would have worked a minute later. Only what the server answered
      * says anything about the configuration; a connection that broke under the request says nothing
-     * about what was asked, so it goes up as the recoverable failure it is (spec 10.2) and the
-     * connector still refuses to start (spec 11.1) - carrying the truth rather than a guess.
+     * about what was asked, so it goes up as the recoverable failure it is and the connector
+     * still refuses to start - carrying the truth rather than a guess.
      */
     @Test
     fun `a session lost during the probe is reported as itself, not as a path to respell`() = runTest {

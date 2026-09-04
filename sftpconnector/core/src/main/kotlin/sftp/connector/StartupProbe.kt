@@ -4,13 +4,12 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 import org.slf4j.LoggerFactory
 import sftp.connector.client.SftpClient
+import sftp.connector.client.entryAt
 import sftp.connector.client.makeDirectory
 import sftp.connector.config.SftpConnectorConfig
 import sftp.connector.error.ConfigurationError
 import sftp.connector.error.Disposition
-import sftp.connector.error.NoSuchFile
 import sftp.connector.error.SftpException
-import sftp.connector.transport.RemoteFile
 import sftp.connector.transport.SftpSession
 import java.io.ByteArrayInputStream
 import java.util.UUID
@@ -194,13 +193,6 @@ internal class StartupProbe(
         }
     }
 
-    private suspend fun SftpSession.entryAt(path: String): RemoteFile? =
-        try {
-            stat(path)
-        } catch (absent: NoSuchFile) {
-            null
-        }
-
     /**
      * Takes the marker away wherever it ended up. Nothing here is allowed to throw: on the failing
      * path a failure raised while clearing up would replace the failure worth reporting with one
@@ -235,7 +227,7 @@ internal class StartupProbe(
      * correctly, on a start-up that would have worked a minute later; so they go up as themselves,
      * and the start-up still refuses, carrying the truth about why.
      *
-     * That line is exactly the one spec 10.2 already draws, and it is read off the failure rather
+     * That line is exactly the one the failure model already draws, and it is read off the failure rather
      * than off a list of classes here: "the server answered" is what [Disposition.RETRY_ON_THE_NEXT_TICK]
      * means.
      */

@@ -345,8 +345,8 @@ class SftpWatchTest {
 
     /**
      * The collector's own block let a timeout escape. That is a cancellation thrown *through*
-     * `emit`, not the connector stopping its watchers, and spec 10.1 says a cancellation is never
-     * caught or wrapped: the watch ends with it, so the caller learns its pipeline died, instead
+     * `emit`, not the connector stopping its watchers, and a cancellation is never caught or
+     * wrapped: the watch ends with it, so the caller learns its pipeline died, instead
      * of returning normally with an INFO line saying the connector stopped it (T17 lens 5 M2).
      */
     @Test
@@ -448,7 +448,7 @@ class SftpWatchTest {
     }
 
     /**
-     * `consume` nacks the consumer's exception and goes on (T12, spec 7.2), so this WARN is the
+     * `consume` nacks the consumer's exception and goes on (T12), so this WARN is the
      * only record that failure ever leaves. Rendered from `toString()` it is a class name and a
      * sentence, and the frame that actually threw - the parse, the mapper, the row - is nowhere:
      * an operator reading it at three in the morning has nothing to open. So the throwable itself

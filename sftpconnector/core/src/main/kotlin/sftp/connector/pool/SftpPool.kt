@@ -112,8 +112,12 @@ class SftpPool(
     /**
      * Borrows a session, waiting up to the acquire timeout for one to come free.
      *
+     * [withLease] is the interface. This is public only because the pool's own invariant tests
+     * live in the testkit, which is a separate module and so cannot see anything `internal` here;
+     * nothing in the connector calls it, and a caller that does owns the hand-back itself.
+     *
      * For callers that cannot express their work as one block - a lease held across a handover, or
-     * released by something other than the code that took it. Everyone else wants [withLease].
+     * released by something other than the code that took it.
      *
      * @throws PoolExhausted when the wait runs out, carrying what the pool looked like at that
      *   moment and what that means - or at once, with `closing` set, when the pool is closing
@@ -467,7 +471,7 @@ class SftpPool(
     /** Hangs up on a retired session and records why it went. */
     private suspend fun finish(retired: Retired) {
         retired.connection?.let {
-            close(it, retired.entry)
+            hangUpOn(it, retired.entry)
             // Counted only where there was a session to lose. An entry whose dial never landed
             // was never a session, and counting it as one would make a server refusing
             // connections look like a pool throwing away good sessions.
@@ -486,7 +490,7 @@ class SftpPool(
         }
     }
 
-    private suspend fun close(connection: SftpConnection, entry: PoolEntry) {
+    private suspend fun hangUpOn(connection: SftpConnection, entry: PoolEntry) {
         try {
             connection.close()
         } catch (cancelled: CancellationException) {
@@ -541,6 +545,10 @@ class Lease internal constructor(
      * Gives the session back for the next caller, or for retirement if the pool has finished with
      * it. A session that outlived its lifetime while this caller held it goes no further: the pool
      * decides that, because the holder has no way of knowing.
+     *
+     * [SftpPool.withLease] is the interface, and it calls this for you. This is public only
+     * because the pool's own invariant tests live in a separate module, which cannot see anything
+     * `internal` here.
      */
     suspend fun release(): Unit = giveBack(retire = null)
 
@@ -558,6 +566,10 @@ class Lease internal constructor(
      * A cancellation is the one thing that is not a failure at all: it says a caller stopped
      * waiting and nothing whatever about the session. What says something is whether getting the
      * caller's thread back cost the session its life, and the pool records that when it does it.
+     *
+     * [SftpPool.withLease] is the interface, and it calls this for you. This is public only
+     * because the pool's own invariant tests live in a separate module, which cannot see anything
+     * `internal` here.
      */
     suspend fun releaseAfter(failure: Throwable): Unit = giveBack(
         retire = if (failure is CancellationException) {

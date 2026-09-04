@@ -242,7 +242,7 @@ internal class Resilience(
         private fun Throwable.countsAgainstTheBreaker(): Boolean =
             this is SftpException && disposition.countsAgainstTheBreaker
 
-        /** The library's `HALF_OPEN` in the words spec 9 uses for it, so a log line reads as prose. */
+        /** The library's `HALF_OPEN` in the words this connector uses for it, so a log line reads as prose. */
         private fun CircuitBreaker.State.spelling(): String = name.lowercase().replace('_', '-')
 
         /** 0 closed, 1 half-open, 2 open; the states a breaker is forced or disabled into read as what they act like. */
