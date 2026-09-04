@@ -270,8 +270,8 @@ class RouteBuilder(private val name: String) {
     fun subscribe(channel: ChannelRef, subject: String, configure: SubscribeBuilder.() -> Unit = {}): Source =
         SubscribeBuilder().apply(configure).let { Source.Subscribe(channel.name, subject, it.onAck, it.onNack, it.inProgressEvery) }
 
-    fun fetch(store: StoreRef, path: String) {
-        fetch = Fetch(store.name, path)
+    fun fetch(store: StoreRef, path: String, bucket: String? = null) {
+        fetch = Fetch(store.name, path, bucket)
     }
 
     fun notify(on: DeliveryMoment, channel: ChannelRef) {

@@ -142,7 +142,12 @@ sealed interface Source {
 /** The ack action of either trigger kind (spec 5.3). */
 val Source.onAck: AckAction? get() = when (this) { is Source.Poll -> onAck; is Source.Subscribe -> onAck }
 
-data class Fetch(val store: String, val path: String)
+/**
+ * Spec 5.1: where a subscribed route's object is, and where in the message its path is written.
+ * [bucket] is the S3 bucket the key lives in - the store declaration is an endpoint, not a bucket,
+ * and the pointer yields a bare key (progress 11, 16 and 17); an SFTP fetch states none.
+ */
+data class Fetch(val store: String, val path: String, val bucket: String? = null)
 data class Target(val store: String, val bucket: String? = null, val directory: String? = null, val key: String = "{name}")
 data class Notify(val on: DeliveryMoment, val channel: String)
 enum class ExtractFrom { FileName, SourcePath, Content, Message }

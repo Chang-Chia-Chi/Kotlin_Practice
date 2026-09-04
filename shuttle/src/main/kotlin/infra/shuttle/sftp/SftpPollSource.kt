@@ -23,6 +23,7 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.withContext
 import org.jboss.logging.Logger
 import sftp.connector.client.LocalFile
+import sftp.connector.client.SftpClient
 import sftp.connector.config.HostKeyPolicy
 import sftp.connector.config.OverlapPolicy
 import sftp.connector.config.PostAction
@@ -128,20 +129,8 @@ class SftpPollSource(
         val entry = checkNotNull(inFlight[path]) { "$path is not a file this poll handed over" }
         entry.fetchStarted = true
         val local = entry.seen.download(into) ?: throw IOException("$path has gone from the server since it was listed")
-        return StagedObject(
-            name = entry.seen.file.name,
-            path = local.path,
-            size = local.size,
-            mtime = entry.seen.file.modifiedAt,
-            digest = digestOf(local, algorithm),
-            contentType = null,
-        )
+        return staged(local, entry.seen.file.name, entry.seen.file.modifiedAt, algorithm)
     }
-
-    /** The connector already summed the bytes as they streamed; re-reading is only for an algorithm it has no name for. */
-    private fun digestOf(local: LocalFile, algorithm: DigestAlgorithm): Digest =
-        if (local.digestAlgorithm == connectorDigest(algorithm)) Digest(algorithm, local.digest)
-        else Digest.of(local.path, algorithm)
 
     private fun identityOf(file: RemoteFile) = SourceIdentity(
         route = route,
@@ -227,7 +216,32 @@ class SftpPollSource(
 }
 
 /**
- * Spec 13.1's `sftp` object store and one route's `poll` as the connector's own configuration.
+ * Spec 5.1's fetch by path: the object a message named, on a store nothing polls. There is no
+ * `FileSeen` to download through, so the path is stat'd and the entry it answers with is downloaded
+ * onto the staging path the pipeline chose. A path that is not there is the [IOException] the
+ * pipeline counts as an attempt, the same answer a polled file that has gone gives.
+ */
+fun sftpFetcher(client: SftpClient): Fetcher = { path, into, algorithm ->
+    val remote = client.stat(path) ?: throw IOException("$path is not on the server")
+    staged(client.download(remote, into), remote.name, remote.modifiedAt, algorithm)
+}
+
+/**
+ * What a connector download is to the pipeline. The connector already summed the bytes as they
+ * streamed, so re-reading the file is only for an algorithm the connector has no name for.
+ */
+private fun staged(local: LocalFile, name: String, mtime: Instant, algorithm: DigestAlgorithm) = StagedObject(
+    name = name,
+    path = local.path,
+    size = local.size,
+    mtime = mtime,
+    digest = if (local.digestAlgorithm == connectorDigest(algorithm)) Digest(algorithm, local.digest) else Digest.of(local.path, algorithm),
+    contentType = null,
+)
+
+/**
+ * Spec 13.1's `sftp` object store and one route's `poll` - or no poll at all - as the connector's
+ * own configuration.
  *
  * Everything the connector checks it checks here, so a store that cannot make a connector says so
  * at boot. [resolve] turns a [Secret] into its value; reading the environment is the host's
@@ -236,7 +250,7 @@ class SftpPollSource(
  */
 fun sftpConnectorConfig(
     store: SftpStore,
-    poll: Source.Poll,
+    poll: Source.Poll?,
     algorithm: DigestAlgorithm,
     resolve: (Secret) -> String,
 ): SftpConnectorConfig = sftpConnector(store.name) {
@@ -258,7 +272,10 @@ fun sftpConnectorConfig(
         cancelGrace = store.cancelGrace
     }
     resilience { bulkhead { maxConcurrentTransfers = store.pool.maxConcurrentTransfers } }
-    polling {
+    // A store used only as a target or as a subscribed route's `fetch.store` states no `poll`, and
+    // then no polling block at all: no directory, no `onAck`, nothing for the start-up probe to
+    // check - which is what lets one connector serve every route on such a store (progress 18).
+    if (poll != null) polling {
         directories(poll.directory)
         onAck = postAction("onAck", poll.onAck)
         onNack = postAction("onNack", poll.onNack)

@@ -28,6 +28,7 @@ import infra.shuttle.core.SftpStore
 import infra.shuttle.core.ShuttleConfig
 import infra.shuttle.core.ShuttleMetrics
 import infra.shuttle.core.Source
+import infra.shuttle.core.Staging
 import infra.shuttle.core.StateStore
 import infra.shuttle.core.Transfer
 import infra.shuttle.core.TransferId
@@ -37,9 +38,12 @@ import infra.shuttle.core.processorFor
 import infra.shuttle.http.HttpChannel
 import infra.shuttle.jdbi.StateStoreSchema
 import infra.shuttle.nats.NatsChannel
+import infra.shuttle.s3.S3Fetcher
 import infra.shuttle.s3.S3Target
 import infra.shuttle.sftp.SftpPollSource
+import infra.shuttle.sftp.SftpTarget
 import infra.shuttle.sftp.sftpConnectorConfig
+import infra.shuttle.sftp.sftpFetcher
 import infra.shuttle.yaml.YamlLoader
 import io.micrometer.core.instrument.MeterRegistry
 import io.nats.client.Connection
@@ -132,6 +136,7 @@ class ShuttleHost(
     private val natsConnections = HashMap<String, Connection>()
     private val natsChannels = HashMap<String, NatsChannel>()
     private val sources = ConcurrentHashMap<String, SftpPollSource>()
+    private val connectors = HashMap<String, SftpConnector>()
     private val lastTrigger = ConcurrentHashMap<String, Instant>()
     private lateinit var notifier: Notifier
     private lateinit var supervisor: RouteSupervisor
@@ -171,7 +176,7 @@ class ShuttleHost(
     /**
      * Spec 12.3, from the Quarkus shutdown event: readiness false, the route collectors cancelled (each connector
      * drains under its own bound as its flow ends), the notifier cancelled leaving every PENDING row PENDING, then
-     * the S3 clients and NATS connections closed. The datasource is Quarkus's and closes after this returns.
+     * the target connectors, the S3 clients and the NATS connections closed. The datasource is Quarkus's and closes after this returns.
      */
     override fun close() {
         shuttingDown = true
@@ -183,6 +188,7 @@ class ShuttleHost(
         }
         if (drained == null) log.warnv("shutdown overran drainTimeout {0}; in-flight work abandoned", config.drainTimeout)
         scope.cancel()
+        runBlocking { connectors.values.forEach { runCatching { it.close() }.onFailure { e -> log.warn("closing an SFTP connector failed", e) } } }
         s3Clients.values.forEach { it.close() }
         natsConnections.values.forEach { runCatching { it.close() }.onFailure { e -> log.warn("closing a NATS connection failed", e) } }
     }
@@ -289,21 +295,45 @@ class ShuttleHost(
         }
     }
 
-    /** Step 3: the route's target adapter, one S3 client per store shared with the fetcher; the SFTP target is ticket 18's. */
-    private fun targetFor(route: Route): ObjectStoreTarget {
+    /** Step 3: the route's target adapter, one S3 client or one SFTP connector per store, shared with the fetcher. */
+    private suspend fun targetFor(route: Route): ObjectStoreTarget {
         val target = checkNotNull(route.target) { "route ${route.name} has no target" }
         targets[target.store]?.let { return it }
         return when (val declared = storeNamed(target.store)) {
             is S3Store -> S3Target(s3ClientFor(declared), checkNotNull(target.bucket) { "route ${route.name}: an S3 target needs a bucket" }, io, clock)
-            is SftpStore -> throw NotImplementedError("route ${route.name} targets SFTP store ${declared.name}: the SFTP target is ticket 18")
+            is SftpStore -> SftpTarget(
+                connectorFor(declared).client,
+                checkNotNull(target.directory) { "route ${route.name}: an SFTP target needs a directory" },
+                io,
+            )
         }
     }
 
     private fun s3ClientFor(store: S3Store): S3Client = s3Clients.getOrPut(store.name) { s3Client(store) }
 
+    /**
+     * Spec 10 and ticket 18's note: one connector per SFTP store used as a target or as a subscribed
+     * route's `fetch.store`, shared by every route on it and opened here at step 3, so the connector's
+     * own start-up and the target's `probe()` both run while a failure is still the deployment's. It
+     * carries no `polling` block - no directory, no `onAck` - which is exactly what lets one connector
+     * serve every route on the store, the opposite of a poll's constraint (deviation 8 of progress 13).
+     * Rule 9's remaining budget is its pool: the sum of `parallelism` over the routes that target or
+     * fetch from the store, the polled routes' own connectors having taken `parallelism + 1` each.
+     */
+    private suspend fun connectorFor(store: SftpStore): SftpConnector = connectors.getOrPut(store.name) {
+        val sessions = config.routes.sumOf { route ->
+            route.parallelism * listOf(route.fetch?.store, route.target?.store).count { it == store.name }
+        }
+        SftpConnector.start(
+            sftpConnectorConfig(store, poll = null, algorithm = config.digest, resolve = ::resolve).sized(maxOf(1, sessions)),
+            meterRegistry = registry,
+            clock = clock,
+        )
+    }
+
     /** Step 4 (D17): nothing in staging belongs to anyone at boot. */
     private fun emptyStaging() {
-        config.objectStores.filterIsInstance<SftpStore>().mapNotNull { it.staging?.dir }.distinct().forEach { dir ->
+        (config.objectStores.filterIsInstance<SftpStore>().mapNotNull { it.staging?.dir } + config.routes.map { stagingFor(it).dir }).distinct().forEach { dir ->
             Files.list(dir).use { children -> children.forEach { it.toFile().deleteRecursively() } }
         }
     }
@@ -314,14 +344,38 @@ class ShuttleHost(
         route.digest ?: config.digest,
     )
 
-    private fun stagingFor(route: Route) = checkNotNull(
-        (route.fetch?.store ?: (route.source as? Source.Poll)?.store)?.let { storeNamed(it) as? SftpStore }?.staging,
-    ) { "route ${route.name}: a fetch from an S3 store has no staging directory yet (ticket 17)" }
+    /**
+     * D41's staging directory: where this route's fetches land and what `minFree` defers them against.
+     * An SFTP store declares one and rule 11 has already checked it. An S3 store has no such knob - a
+     * bucket has no local disk to name - so a route fetching from one stages under the JVM's temp
+     * directory in a folder of the store's name: local disk, one per store, and no YAML key for a path
+     * nobody would set. It is emptied at boot with the declared ones (D17).
+     */
+    internal fun stagingFor(route: Route): Staging {
+        val store = storeNamed(checkNotNull(route.fetch?.store ?: (route.source as? Source.Poll)?.store) { "route ${route.name} fetches from nowhere" })
+        return (store as? SftpStore)?.staging
+            ?: Staging(Files.createDirectories(Path.of(System.getProperty("java.io.tmpdir"), "shuttle-staging", store.name)))
+    }
 
-    /** Stage 1's bytes: the connector's download for a polled route, through whichever source its current run holds. */
-    private fun fetcherFor(route: Route): Fetcher = when (route.source) {
+    /**
+     * Stage 1's bytes: the connector's download for a polled route, through whichever source its current
+     * run holds; for a subscribed route the `fetch.store`'s own fetcher, at the path read from the message
+     * (spec 5.1). `internal` because there is no way to reach a subscribed route's fetcher through a
+     * running host without a broker, and this is the seam that decides it.
+     */
+    internal suspend fun fetcherFor(route: Route): Fetcher = when (route.source) {
         is Source.Poll -> { path, into, algorithm -> sources.getValue(route.name).fetcher(path, into, algorithm) }
-        is Source.Subscribe -> { _, _, _ -> throw NotImplementedError("route ${route.name}: fetching for a subscribed route is ticket 17 (S3Fetcher needs the bucket)") }
+        is Source.Subscribe -> {
+            val fetch = checkNotNull(route.fetch) { "route ${route.name} subscribes without a fetch" }
+            when (val declared = storeNamed(fetch.store)) {
+                is S3Store -> S3Fetcher(
+                    s3ClientFor(declared),
+                    checkNotNull(fetch.bucket) { "route ${route.name}: a fetch from S3 store ${declared.name} needs a bucket" },
+                    io,
+                ).fetcher
+                is SftpStore -> sftpFetcher(connectorFor(declared).client)
+            }
+        }
         null -> throw IllegalStateException("route ${route.name} has no source")
     }
 
@@ -341,7 +395,7 @@ class ShuttleHost(
      */
     private fun polled(route: Route, poll: Source.Poll): Flow<RouteEvent> = flow {
         val declared = storeNamed(poll.store) as SftpStore
-        val connectorConfig = sftpConnectorConfig(declared, poll, route.digest ?: config.digest, ::resolve).share(route)
+        val connectorConfig = sftpConnectorConfig(declared, poll, route.digest ?: config.digest, ::resolve).sized(route.parallelism + 1, route.parallelism)
         val connector = SftpConnector.start(connectorConfig, meterRegistry = registry, clock = clock)
         try {
             val source = SftpPollSource(connector.source, connectorConfig, RouteName(route.name), poll, clock)
@@ -352,13 +406,11 @@ class ShuttleHost(
         }
     }.catch { emit(RouteEvent.RouteDown(it)) }
 
-    private fun SftpConnectorConfig.share(route: Route): SftpConnectorConfig {
-        val sessions = route.parallelism + 1
-        return copy(
-            pool = pool.copy(maxSize = sessions, minIdle = minOf(pool.minIdle, sessions)),
-            resilience = resilience.copy(maxConcurrentTransfers = route.parallelism),
-        )
-    }
+    /** Rule 9's arithmetic as a pool: [sessions] places, [transfers] of them carrying bytes at once. */
+    private fun SftpConnectorConfig.sized(sessions: Int, transfers: Int = sessions): SftpConnectorConfig = copy(
+        pool = pool.copy(maxSize = sessions, minIdle = minOf(pool.minIdle, sessions)),
+        resilience = resilience.copy(maxConcurrentTransfers = transfers),
+    )
 
     private fun storeNamed(name: String) = config.objectStores.first { it.name == name }
 

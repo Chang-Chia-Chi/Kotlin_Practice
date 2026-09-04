@@ -2129,3 +2129,35 @@ cancellable phase, an operator restart cancels the current one and the backoff i
   probe during boot is DOWN. A `@Singleton` Kotlin bean with a `private set` needs `final var` under
   all-open. The JDK `HttpServer` prints "Executor has been shut down" on `stop(0)` with a parked handler;
   noise, not a failure.
+
+**Addendum (pre-20 wiring):** deviation 8 is closed - the three seams ticket 14 left for 17 and 18 are
+filled, proven by `ShuttleHostM2WiringTest` (4 tests, plain JUnit over the embedded SSHD, `runBlocking`).
+`targetFor` builds `SftpTarget(connectorFor(store).client, target.directory, io)`, and `connectorFor` is
+**one connector per SFTP store used as a target or as a subscribed route's `fetch.store`**, opened at step 3
+so the connector's own start-up and the target's `probe()` both end a bad deployment, shared by every route
+on the store (a target connector needs no `polling` block, so `sftpConnectorConfig`'s `poll` is now nullable
+and the block is emitted only for a poll), and closed in `close()` after the routes and the notifier have
+joined, beside the S3 clients. Rule 9: `share(route)` became `sized(sessions, transfers)`; a polled route's
+connector still takes `parallelism + 1` places and a bulkhead of `parallelism`, and a store's target/fetch
+connector takes the sum of `parallelism` over the routes that target or fetch from it - together exactly
+rule 9's per-store budget. `fetcherFor` decides on the subscribed route's `fetch.store`: an `S3Store` gives
+`S3Fetcher(s3ClientFor(store), fetch.bucket, io).fetcher`, an `SftpStore` gives `sftpFetcher(client)`, which
+is `stat` then `download(entry, into)` - the `StagedObject` shaping and the connector-digest reuse now live
+in one private `staged(...)` in the `sftp` package, which `SftpPollSource.fetch` calls too. `fetcherFor` and
+`stagingFor` are `internal`: a subscribed route's fetcher cannot be reached through a running host without a
+broker, and that is the seam under test. `fetchers` on `TransferPipeline` is still empty - it is only for a
+divergent `expand.from`, which no wired route has yet.
+
+**Staging decision:** the fetch store's declared `Staging` when it is an SFTP store (rule 11 has checked
+it), otherwise `<java.io.tmpdir>/shuttle-staging/<store name>`, created on demand and emptied at boot with
+the declared ones (D17). No new YAML key and no new rule: a bucket has no local disk to name, the directory
+is one per store as rule 11 wants, and nothing an operator would plausibly set differently is hidden - if
+that turns out false, `staging` on an `s3` store is the upgrade, with rule 11 extended to it.
+
+**One config addition, and it is a deviation:** `fetch.bucket` (`Fetch(store, path, bucket)`, the YAML key,
+the DSL parameter). `S3Fetcher` needs a bucket, an S3 store declaration is an endpoint rather than a bucket,
+and progress 11, 16 and 17 all settled that `fetch.path` yields a **bare key** - so the bucket had to be
+configuration. It is nullable and unvalidated: a missing one ends startup at step 7 naming the route and the
+knob, rather than at validate time. **Ticket 20 should extend rule 6** ("a `subscribe` source has a `fetch`
+with a store and a path") to "and a bucket when that store is S3", with the `rule6_` test, and add
+`bucket:` to spec 13.1's image-sets `fetch` block. Suite after this change: 243 tests, 0 failures, 0 errors.
