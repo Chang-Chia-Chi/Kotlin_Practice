@@ -5,11 +5,10 @@ import infra.shuttle.core.ChannelName
 import infra.shuttle.core.Delivery
 import infra.shuttle.core.DeliveryChannel
 import infra.shuttle.core.DeliveryId
-import infra.shuttle.core.DeliveryMoment
-import infra.shuttle.core.DeliveryRequest
 import infra.shuttle.core.DeliveryState
 import infra.shuttle.core.Fetcher
 import infra.shuttle.core.Hook
+import infra.shuttle.core.Ledger
 import infra.shuttle.core.MappingRenderer
 import infra.shuttle.core.Notifier
 import infra.shuttle.core.ObjectStoreTarget
@@ -140,6 +139,7 @@ class ShuttleHost(
     private val sources = ConcurrentHashMap<String, SftpPollSource>()
     private val connectors = HashMap<String, SftpConnector>()
     private val lastTrigger = ConcurrentHashMap<String, Instant>()
+    private var ledgers: Map<String, Ledger> = emptyMap()
     private lateinit var notifier: Notifier
     private lateinit var supervisor: RouteSupervisor
     private var routes: Job? = null
@@ -162,13 +162,15 @@ class ShuttleHost(
         // Spec 9.6: a body belongs to the channel, not to its kind, so every declared channel is in the map (SPEC6).
         val bodies = config.channels.associate { ChannelName(it.name) to it.body }
         notifier = Notifier(store, channels.values, bodies, renderer, config.notifier, registry, clock, hook = hook)
+        ledgers = config.routes.associate { it.name to Ledger(store, it.notify, notifier::wake) }
         val runners = config.routes.map { route ->
+            val ledger = ledgers.getValue(route.name)
             val pipeline = TransferPipeline(
-                route, route.digest ?: config.digest, store, routeTargets.getValue(route.name), chainFor(route), bodies,
-                { beans.provider(it) != null }, notifier::wake, hook, clock, registry, stagingFor(route), channels = channels, renderer = renderer,
+                route, route.digest ?: config.digest, ledger, routeTargets.getValue(route.name), chainFor(route), bodies,
+                { beans.provider(it) != null }, hook, clock, registry, stagingFor(route), channels = channels, renderer = renderer,
                 fetchers = fetchersFor(route),
             )
-            RouteRunner(route, pipeline, fetcherFor(route), store, notifier::wake, clock, registry)
+            RouteRunner(route, pipeline, fetcherFor(route), ledger, clock, registry)
         }
         supervisor = RouteSupervisor(runners, ::eventsFor, config.supervision.restartBackoff, config.supervision.readiness, registry)
         deliveries = scope.launch { notifier.run() }
@@ -250,10 +252,8 @@ class ShuttleHost(
     suspend fun ack(id: TransferId): Outcome {
         val row = store.byId(id) ?: return Outcome.NOT_FOUND
         if (row.state != TransferState.STORED) return Outcome.WRONG_STATE
-        val route = config.routes.firstOrNull { it.name == row.identity.route.value } ?: return Outcome.NOT_FOUND
-        val events = route.notify.filter { it.on == DeliveryMoment.ACKED }.map { DeliveryRequest(DeliveryMoment.ACKED, ChannelName(it.channel)) }
-        store.acked(id, events)
-        if (events.isNotEmpty()) notifier.wake()
+        val ledger = ledgers[row.identity.route.value] ?: return Outcome.NOT_FOUND
+        ledger.acked(id)
         log.warnv("transfer {0} acked by the operator", id.value)
         return Outcome.DONE
     }

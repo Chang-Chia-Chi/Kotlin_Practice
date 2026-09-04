@@ -72,6 +72,17 @@ fun targetKey(target: Target?, name: String, sourceName: String, attributes: Map
  */
 fun keyLeavesTarget(key: String): Boolean = key.split('/').any { it == ".." }
 
+/**
+ * The two verdicts between the chain and the store, as the reason to reject or null: a payload of nothing is
+ * not "the object unchanged" (spec 6.1) - without it the store step sees no object and no child, and the run
+ * acks, so the source is moved away with no copy anywhere (I8) - and a resolved key that leaves the target
+ * directory. The pipeline rejects the row with the reason; `shuttle try` prints it (D35).
+ */
+fun storeRefusal(objects: List<StagedObject>, keys: List<String>): String? = when {
+    objects.isEmpty() -> "process: the chain left no object to store"
+    else -> keys.firstOrNull(::keyLeavesTarget)?.let { "key: $it leaves the target directory" }
+}
+
 private val TOKEN = Regex("""\{([^}]+)}""")
 private val DATE = Regex("[yMdHmsS]+")
 

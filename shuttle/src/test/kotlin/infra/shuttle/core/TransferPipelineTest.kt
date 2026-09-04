@@ -35,7 +35,6 @@ class TransferPipelineTest {
     private val source = ScriptedSource(clock)
     private val fetcher = ScriptedFetcher(clock).file("a.csv", "a,b\n".toByteArray())
     private val registry = SimpleMeterRegistry()
-    private var wakes = 0
     private var freeBytes = 10.gib
 
     private fun route(notify: List<Notify> = emptyList()) = Route(
@@ -47,8 +46,8 @@ class TransferPipelineTest {
         route: Route = route(), processors: List<Processor> = emptyList(), hook: Hook = Hook.None,
         channels: Map<ChannelName, DeliveryChannel> = emptyMap(), bodies: Map<ChannelName, MappingTable> = emptyMap(),
     ) = TransferPipeline(
-        route, DigestAlgorithm.MD5, store, target, ProcessingChain(processors, DigestAlgorithm.MD5), bodies, { true },
-        { wakes++ }, hook, clock, registry, Staging(staging), { freeBytes }, channels,
+        route, DigestAlgorithm.MD5, Ledger(store, route.notify) {}, target, ProcessingChain(processors, DigestAlgorithm.MD5), bodies, { true },
+        hook, clock, registry, Staging(staging), { freeBytes }, channels,
     )
 
     private suspend fun seen(name: String = "a.csv"): RouteEvent.Seen =
@@ -156,7 +155,6 @@ class TransferPipelineTest {
         assertEquals("a,b\n", String(target.bytes("a.csv")))
         assertEquals(listOf(event.identity), source.acks)
         assertTrue(store.outbox.isEmpty(), "no outbox row (I17)")
-        assertEquals(0, wakes)
         stagingIsEmpty()
     }
 
@@ -178,7 +176,6 @@ class TransferPipelineTest {
         val delivery = store.outbox.single()
         assertEquals(DeliveryMoment.ACKED, delivery.moment)
         assertEquals(ChannelName("downstream"), delivery.channel)
-        assertEquals(1, wakes)
         assertEquals(listOf(event.identity), source.acks)
         assertEquals(1.0, registry.counter(ShuttleMetrics.TRANSFERS, "route", "drop", "outcome", "done").count())
         stagingIsEmpty()
@@ -568,7 +565,6 @@ class TransferPipelineTest {
         assertEquals(TransferState.STORED, row.state)
         assertEquals(1, row.attempts)
         assertTrue(store.outbox.isEmpty())
-        assertEquals(0, wakes)
         assertEquals(listOf(event.identity), source.acks, "the polled file was moved before the ledger write (spec 4.4); reconciliation repairs it")
         assertEquals(listOf(ScriptedSource.Nack(event.identity, true)), source.nacks)
     }
@@ -648,7 +644,6 @@ class TransferPipelineTest {
         val row = store.transfers.single()
         assertEquals(previous, row.state, "$moment: the failed transaction left the previous state")
         assertTrue(store.outbox.isEmpty(), "$moment: no row without the transition")
-        assertEquals(0, wakes)
         assertEquals(1, row.attempts)
         assertEquals(listOf(ScriptedSource.Nack(event.identity, true)), source.nacks)
 
@@ -658,7 +653,6 @@ class TransferPipelineTest {
         assertEquals(DeliveryState.PENDING, delivery.state)
         assertEquals(ChannelName("downstream"), delivery.channel)
         assertEquals(TransferState.ACKED, store.transfers.single().state, "$moment: ACKED, not DONE, while the row is PENDING")
-        assertEquals(1, wakes)
         stagingIsEmpty()
     }
 

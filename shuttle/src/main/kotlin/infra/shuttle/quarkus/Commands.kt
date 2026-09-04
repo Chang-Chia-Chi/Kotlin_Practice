@@ -25,9 +25,9 @@ import infra.shuttle.core.TransferId
 import infra.shuttle.core.TransferKind
 import infra.shuttle.core.TransferState
 import infra.shuttle.core.TransferView
-import infra.shuttle.core.keyLeavesTarget
 import infra.shuttle.core.of
 import infra.shuttle.core.processorFor
+import infra.shuttle.core.storeRefusal
 import infra.shuttle.core.targetKey
 import infra.shuttle.yaml.YamlLoader
 import io.quarkus.runtime.Quarkus
@@ -136,11 +136,9 @@ class TryCommand(
             }
             violations.forEach(out::println)
 
-            // the two verdicts the pipeline reaches between the chain and the store (spec 6.1 and rule 13's run-time half)
             val objects = done.payload.objects
-            if (objects.isEmpty()) { out.println("reject: process: the chain left no object to store"); return 1 }
             val keys = objects.map { targetKey(route.target, it.name, identity.sourceName, done.attributes, clock) }
-            keys.firstOrNull(::keyLeavesTarget)?.let { out.println("reject: key: $it leaves the target directory"); return 1 }
+            storeRefusal(objects, keys)?.let { out.println("reject: $it"); return 1 }
 
             val target = route.target
             val kind = if (config.objectStores.firstOrNull { it.name == target?.store } is SftpStore) "sftp" else "s3"
