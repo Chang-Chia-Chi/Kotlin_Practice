@@ -4,11 +4,13 @@ import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runTest
 import org.assertj.core.api.Assertions.assertThat
+import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
@@ -280,6 +282,26 @@ class RetrySemanticsTest {
         testScheduler.advanceTimeBy(1.minutes + 1.seconds)
         assertThat(client.exists(FROM)).describedAs("the half-open probe").isTrue()
         assertThat(breakerState()).isZero()
+        assertNothingIsStillOut()
+    }
+
+    /**
+     * Spec 9: the breaker counts recoverable errors and nothing else. The library it is built on
+     * also counts a *slow success* - anything over a minute, by default - and opens on a window
+     * of them, so a pipeline moving large files over a slow link was being throttled by its own
+     * safety mechanism with no failure having occurred (T17 lens 5 H1). Measured on the clock the
+     * connector was given, so the minute passes without being waited for.
+     */
+    @Test
+    fun `a success slower than the library's own minute is not held against the server`() = runTest {
+        val server = fakeServer { call -> if (call.operation == Operation.Stat) delay(61.seconds) }.file(FROM, CONTENT)
+        val client = clientOver(server) { resilience { operationTimeout = 2.minutes; circuitBreaker { slidingWindow = 2 } } }
+
+        repeat(2) { assertTrue(client.exists(FROM)) }
+
+        assertEquals(0, breakerState(), "a breaker of two calls, both slow successes, is still closed")
+        assertTrue(client.exists(FROM), "the third call is not refused")
+        assertEquals(0.0, retries("exists"))
         assertNothingIsStillOut()
     }
 
