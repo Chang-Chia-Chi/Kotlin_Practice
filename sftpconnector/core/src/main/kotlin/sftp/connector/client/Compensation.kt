@@ -64,6 +64,16 @@ internal class RenameTries(
     }
 
     /**
+     * After the last try lost its reply: whether that try's rename landed after all, decided by
+     * one look on [session]. What the next retry would have known, asked once when there is no
+     * next retry, so that a file that moved is never reported as still where it was.
+     */
+    suspend fun landedAfterAll(session: SftpSession): Boolean {
+        val file = listed ?: return false
+        return reachedTheServer && session.landed(file)
+    }
+
+    /**
      * Whether the earlier try's rename landed: the file as it was listed is no longer at the
      * source, and is at the target.
      */

@@ -12,7 +12,9 @@ import org.slf4j.LoggerFactory
 import sftp.connector.config.SftpConnectorConfig
 import sftp.connector.error.Attempt
 import sftp.connector.error.NoSuchFile
+import sftp.connector.error.Retry
 import sftp.connector.error.ServerFailure
+import sftp.connector.error.SftpException
 import sftp.connector.error.UnsafeFileName
 import sftp.connector.pool.SftpPool
 import sftp.connector.resilience.Resilience
@@ -228,12 +230,31 @@ class SftpClient(
      *   there: [from], or [to] when the source is still there and it is the target's location the
      *   server could not find. A missing source after a lost reply is looked into before it is
      *   reported - see [RenameTries] - so it means the file is at neither place.
+     * @throws sftp.connector.error.Recoverable from the wire when the last permitted try lost its
+     *   reply and one look afterwards found the file not at [to]; when that look itself fails,
+     *   the lost reply is reported with the look's failure suppressed under it, and whether the
+     *   file moved is then unknown.
      */
     suspend fun rename(from: String, to: String, overwrite: Overwrite = Overwrite.REFUSE, listed: RemoteFile? = null): Unit =
         meters.timing("rename") {
             require(listed == null || listed.path == from) { "the listed file is ${listed?.path}, not the source $from" }
             val tries = RenameTries(from, to, overwrite, listed)
-            resilience.attempting("rename", from) { session, attempt -> tries.attempt(session, attempt) }
+            try {
+                resilience.attempting("rename", from) { session, attempt -> tries.attempt(session, attempt) }
+            } catch (replyLost: SftpException) {
+                // A reply lost on the last permitted try: the retry that would have looked for
+                // the landed file is not coming, so the look is made once, here, on a fresh
+                // session behind the breaker. Anything the look cannot settle is reported as
+                // the lost reply it was.
+                if (replyLost.disposition.retry != Retry.IMMEDIATELY) throw replyLost
+                val landed = try {
+                    resilience.once("rename") { session -> tries.landedAfterAll(session) }
+                } catch (lookFailed: SftpException) {
+                    replyLost.addSuppressed(lookFailed)
+                    throw replyLost
+                }
+                if (!landed) throw replyLost
+            }
         }
 
     /**

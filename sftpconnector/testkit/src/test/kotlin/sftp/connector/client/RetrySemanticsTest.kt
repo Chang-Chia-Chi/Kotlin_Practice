@@ -143,6 +143,25 @@ class RetrySemanticsTest {
         assertNothingIsStillOut()
     }
 
+    /**
+     * The reply is lost on the last permitted try, so no retry will look for the landed file.
+     * What the retry would have known is not thrown away with it: one look after the last try
+     * decides landed or not, so a file that moved is reported as moved rather than as "still
+     * where it was" (T17 lens 5 M4; I15's bound).
+     */
+    @Test
+    fun `a rename whose reply is lost on the last permitted try is looked into before it is reported`() = runTest {
+        val server = fakeServer { call -> if (call.isFirstOf(Operation.Rename)) landAndLoseTheReply(call) }
+            .file(FROM, CONTENT)
+        val client = clientOver(server) { resilience { retry { maxAttempts = 1 } } }
+
+        client.rename(FROM, TO, Overwrite.REFUSE, server.listed(FROM))
+
+        assertTrue(Call(Operation.Stat, session = 2, path = TO) in server.calls, "the look at the target, on a fresh session: ${server.calls}")
+        assertEquals(0.0, retries("rename"), "no retry was permitted")
+        assertNothingIsStillOut()
+    }
+
     /** A caller that did not list the file pays one round trip to learn the size, once, before the first request. */
     @Test
     fun `I11_a rename with no size given measures the source once before sending anything`() = runTest {
