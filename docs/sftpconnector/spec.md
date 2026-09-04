@@ -401,8 +401,20 @@ sealed interface SftpEvent
   FileGone(file)                 listed, then absent at download time
   PollSkipped(tick, cause)       overlap policy or breaker open
   PollFailed(tick, error)        recoverable error; watch continues
-  PollCompleted(tick, seen, emitted, notReady)
+  PollCompleted(tick, seen, emitted, notReady, inFlight, truncated)
 ```
+
+`PollCompleted` answers the two questions a consumer cannot answer for itself. `inFlight` is every
+file the in-flight set holds at the instant the tick ends - handed over and not yet given back,
+this tick's and earlier ticks' alike, in the order they were handed over. A downstream ledger
+reconciles against it: without it the consumer would keep its own map of every `FileSeen` to know
+what is still out, and two ledgers of one set are two truths (D14). `truncated` is true when the
+listing stopped at `maxFilesPerPoll`, so the directory may hold more than this tick saw. "The drop
+is complete" - every file in the directory has been listed and is either handed over or accounted
+for - is only claimable from a tick that was not truncated; a consumer that guessed it by comparing
+`seen` against the cap in its own configuration was reading the connector's decision second-hand.
+The listing stops *at* the cap and does not look past it, so a directory of exactly the cap reads
+as truncated: "may hold more" is then the honest answer.
 
 ### 7.2 Ack and nack
 

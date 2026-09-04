@@ -24,7 +24,9 @@ import java.util.concurrent.atomic.AtomicReference
 internal class InFlightSet(capacity: Int) {
 
     private val lock = Any()
-    private val inFlight = HashSet<RemoteFile>()
+
+    /** Insertion-ordered, so [outstanding] can say what is out in the order it was handed over. */
+    private val inFlight = LinkedHashSet<RemoteFile>()
     private val excluded = HashSet<RemoteFile>()
     private val room = Semaphore(capacity)
 
@@ -32,6 +34,13 @@ internal class InFlightSet(capacity: Int) {
 
     /** Whether [file] is out with the consumer right now, or was nacked for good. Never waits. */
     fun holds(file: RemoteFile): Boolean = synchronized(lock) { file in inFlight || file in excluded }
+
+    /**
+     * Every file out with the consumer right now, oldest first: handed over and not yet given back,
+     * whichever poll handed it over. One copy taken under the lock, so a caller never iterates the
+     * set while a poll alongside is changing it. Files nacked for good are not out; they are kept out.
+     */
+    fun outstanding(): List<RemoteFile> = synchronized(lock) { inFlight.toList() }
 
     /**
      * Puts [file] in the set and returns its slot, or null when the file is already out or was
