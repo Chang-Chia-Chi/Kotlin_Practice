@@ -226,12 +226,20 @@ private fun staged(local: LocalFile, name: String, mtime: Instant, algorithm: Di
  * at boot. [resolve] turns a [Secret] into its value; reading the environment is the host's
  * (ticket 14). [algorithm] is the route's digest, which becomes the connector's staging digest so
  * that the sum the download already computed is the one the pipeline wants.
+ *
+ * [sessions] and [transfers] are rule 9's arithmetic as a pool: how many places the caller has
+ * budgeted this connector, and how many of them may be carrying bytes at once. They are stated
+ * here rather than applied to the finished configuration, because a connector only exists once the
+ * builder has checked the numbers against each other - transfers that outnumber sessions could
+ * never all run, and are refused at boot instead of quietly capped at the first busy minute.
  */
 fun sftpConnectorConfig(
     store: SftpStore,
     poll: Source.Poll?,
     algorithm: DigestAlgorithm,
     resolve: (Secret) -> String,
+    sessions: Int,
+    transfers: Int,
 ): SftpConnectorConfig = sftpConnector(store.name) {
     endpoint {
         host = store.host.orEmpty()
@@ -243,14 +251,15 @@ fun sftpConnectorConfig(
         HostKey.AcceptAll -> HostKeyPolicy.AcceptAll
     }
     pool {
-        maxSize = store.pool.maxSize
+        maxSize = sessions
+        minIdle = minOf(minIdle, sessions)
         keepAlive = store.keepAlive
         idleTimeout = store.idleTimeout
         idleCutoff = store.idleCutoff
         drainTimeout = store.drainTimeout
         cancelGrace = store.cancelGrace
     }
-    resilience { bulkhead { maxConcurrentTransfers = store.pool.maxConcurrentTransfers } }
+    resilience { bulkhead { maxConcurrentTransfers = transfers } }
     // A store used only as a target or as a subscribed route's `fetch.store` states no `poll`, and
     // then no polling block at all: no directory, no `onAck`, nothing for the start-up probe to
     // check - which is what lets one connector serve every route on such a store (progress 18).
