@@ -37,9 +37,10 @@ internal class InFlightSet(capacity: Int) {
      * Puts [file] in the set and returns its slot, or null when the file is already out or was
      * nacked for good. Suspends while the set is full, until a slot comes back.
      *
-     * A file that would be turned away is turned away before it waits, so a duplicate never
-     * queues for room it will not use. The check is made again once room is taken, because a poll
-     * running alongside may have admitted the same file in the meantime.
+     * A file that would be turned away is turned away before it waits, so a duplicate seldom
+     * queues for room it will not use - it does when the duplicate arrived between the two looks.
+     * The check is made again once room is taken, because a poll running alongside may have
+     * admitted the same file in the meantime, and that second look is what keeps the promise.
      */
     suspend fun admit(file: RemoteFile): InFlightSlot? {
         if (holds(file)) return null
