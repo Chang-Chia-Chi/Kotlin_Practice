@@ -323,7 +323,7 @@ Fixed and recorded by the T17 owner (Fable). The reviewer's text above is unchan
 - **C1 (= lens 2 H1): fixed.** `JschTransport.abort()` now closes the socket JSch dialled - kept
   through a `SocketFactory` set on the session, honoured on the direct path and through `ProxyHTTP`
   alike - before `session.disconnect()`, so a call blocked writing to a dead peer is cut without
-  waiting on the session's write lock. Spec 5.3 and D46 record the new guarantee: all three tiers
+  waiting on the session's write lock. Spec 5.3 and D47 record the new guarantee: all three tiers
   now bound a blocked call, a write as much as a read. Test kit gained `LoopbackConnectProxy`'s
   black-hole fault (`blackHoleClientAfter`, which stops reading from the client); the ladder cut is
   proved by `CancellationLadderTest.a cancelled upload on a tunnel that stopped reading is cut

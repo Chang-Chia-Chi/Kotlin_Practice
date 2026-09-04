@@ -172,7 +172,7 @@ interface SftpConnection : SftpSession {
      *
      * To be a bound on a call blocked *writing* to a dead peer - not only one blocked reading -
      * closing the session must not wait on the SSH library's own write lock, which the blocked
-     * writer holds; the adapter closes the socket directly first (D46).
+     * writer holds; the adapter closes the socket directly first (D47).
      */
     fun abort()
 }

@@ -271,7 +271,7 @@ Fixed and recorded by the T17 owner (Fable). The reviewer's text above is unchan
   waiting on the write lock the writer holds - all three tiers now bound a blocked call, a write as
   much as a read. The socket is kept via a `SocketFactory` set on the session (honoured on the
   direct dial and through `ProxyHTTP`); the factory owns the connect timeout, since setting one
-  bypasses JSch's own timed dial. Spec 5.3 and D46 record it. Test kit gained the black-hole fault
+  bypasses JSch's own timed dial. Spec 5.3 and D47 record it. Test kit gained the black-hole fault
   the report asked for (`LoopbackConnectProxy.blackHoleClientAfter`, which stops reading from the
   client); proved by `CancellationLadderTest.a cancelled upload on a tunnel that stopped reading is
   cut within the grace` and `ShutdownAgainstServerTest.I9_closing while an upload is black-holed on

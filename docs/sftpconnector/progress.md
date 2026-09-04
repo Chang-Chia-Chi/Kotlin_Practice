@@ -2935,7 +2935,7 @@ an `SftpSession`.
   that stopped reading, `disconnect()` hangs up on each channel first - a write behind the session's lock,
   the very lock the blocked writer holds - so a cut would have waited for the kernel's TCP give-up, minutes
   away, and I9's bound was void for that call. T17 makes the sentence literally true: `abort()` now closes
-  the retained socket *before* `disconnect()`, which fails the blocked write and needs no lock (D46), so a
+  the retained socket *before* `disconnect()`, which fails the blocked write and needs no lock (D47), so a
   cut of a write-blocked lease returns as promptly as a cut of a read-blocked one, and I9 holds under a
   black-holed upload (`ShutdownAgainstServerTest.I9_closing while an upload is black-holed ...`).
 - **`close()` cannot be cancelled, and need not be.** It is bounded by construction, and a pool left
