@@ -4979,3 +4979,132 @@ name of its own to each of two things that were sharing one (`close`/`hangUpOn`,
   lambda is not a `CoroutineScope`, deliberately.
 - The two `grep -rn "spec [0-9]"` hits in deviation 1 are the last ones in the module. Whoever
   merges ticket 20 can close that box in two edits.
+
+---
+
+## T25: A listed file can be fetched by its path while it is in flight
+
+Built on `claude-fable-5-1`, decision D50. 74 core tests (one skipped, `StagingSafetyTest`'s
+platform skip, as before) including both Lincheck runs, and 229 testkit tests are green at the end,
+Toxiproxy tier included; 3 were added. `SftpSourceTest` reports 24 for its 24 test functions (1
+added), `SftpWatchTest` 19 for 19 (2 added). `InFlightSetLincheckTest` (1 for 1) is unmodified and
+green against the new lock body. No earlier test was changed. Shuttle: see the acceptance box below.
+
+**Built:** `SftpSource.inFlightAt(path)`: the `SftpEvent.FileSeen` at a path while the file is in
+flight - handed over and not yet given back - or null. The answer is the very instance the poll or
+watch emitted, so a download through it is the download of the file that was listed and an ack
+through it is the same ack as one through the emitted handle: one action, and whichever call comes
+second is the ignored second answer with its one WARN. A path never listed, a path whose file was
+answered and its action run, and a path whose watch ended and gave the file back all answer null;
+a handle looked up before the watch ended and used after it is a late answer like any other. Spec
+7.1 lists it in the source's shape and 7.3 says all of this in its own words; D50 records why it is
+the emitted instance and why it lives on the source. It exists so shuttle can delete the one table
+its ticket 31 left standing - a path-to-`FileSeen` map kept only because its fetcher has a path and
+nothing else.
+
+**Concepts named:**
+
+- **The set's value is the place, not the file.** `InFlightSet.inFlight` is now
+  `LinkedHashMap<String, InFlightSlot>` where it was `<String, RemoteFile>`: the key is still the
+  path (the exclusivity, D48), and the value is the slot that was handed over, so the set can
+  answer a path with what the consumer actually holds rather than with a description of it.
+  `slotAt(path)` is the one new query on the set - one look under its own lock - and `outAt(path)`
+  is now its `.file`. `holds`, `admit`, `outstanding`, `enter` and `exit` keep their signatures and
+  meaning; `exit` still removes only when the slot at the path holds this exact file, so leaving
+  never takes out a namesake. The lock body the model checker runs is unchanged in substance:
+  `enter(file): Boolean` is the Boolean reading of the private `place(file): InFlightSlot?`, which
+  is the same critical section - the second look and the entry - now handing back the place it
+  made instead of a flag for `admit` to make one from.
+- **The slot carries its handle.** `InFlightSlot.handle` is the `FileSeen` the place was handed
+  over on, set once by `handedOverAs` where the tick hands over (`SftpSource.tickOf`), and null in
+  the gap between `admit` returning and the tick building the event. That gap answers null from
+  the lookup, which is the honest answer: the consumer has not received the file either. The
+  alternative - a fresh `FileSeen` over the same slot per lookup - would settle once too (the
+  settlement is the slot's compare-and-set), but the consumer would hold two objects for one file
+  with no reason to prefer either, and the ticket asked for the emitted instance.
+- **The seam is on the source, keyed by path alone.** The ticket offered the watch's flow or the
+  source with the directory. The one caller that needs it (`shuttle`'s `SftpPollSource.fetch`) is
+  outside the collect block, holding the source and a path, so a lookup on the flow's handle would
+  have had to be captured and threaded to it - which is the table this ticket deletes, one level
+  up. The directory adds nothing: a remote path is absolute and the set is one per source. Under
+  the deletion test the lookup earns its keep: without it, every consumer that resumes from a
+  durable record rebuilds the same path-to-handle map, and T31's entry shows what that costs (a
+  `ConcurrentHashMap`, a `remove(path, seen)` so a late answer does not drop a newcomer's handle,
+  and a `finally` per answer). No new type was added; the deletion test on a `FileSeenLookup` or a
+  `HandleTable` type came out as pass-through, so neither exists.
+
+**Acceptance:**
+
+- *Spec 7.1 or 7.3 amended first* - 7.1's shape block gains the `inFlightAt` line; 7.3 gains the
+  paragraph, with the reason (a consumer resuming from its own durable record has a path and nothing
+  else, and must not keep a second ledger); D50 in the decision log.
+- *`InFlightSet` answers the slot at a path under its own lock, in one call* - `InFlightSet.slotAt`,
+  `synchronized(lock) { inFlight[path] }`.
+- *`SftpSource` exposes the lookup, returning the exact `FileSeen` instance handed over; placement
+  decided with the codebase-design vocabulary and recorded* - `SftpSource.inFlightAt(path)`; the
+  third concept above is the placement and its reasons; D50 carries the short form.
+- *Test: a file handed over on tick 1 is answered by path on tick 2; after ack it answers null; a
+  path never listed answers null* - `SftpSourceTest.a file in flight is answered by its path as the
+  handle it was handed over on, and null once answered or never listed`: `isSameAs` the emitted
+  handle after a second poll that handed nothing over; `/drop/never.csv` null; null after the ack
+  with the gauge at zero.
+- *Test: acking through the looked-up handle and then through the emitted one is one ack and one
+  "already settled" WARN, not two actions* - `SftpWatchTest.an ack through the looked-up handle and
+  one through the emitted handle are one action and one ignored second answer`: `isSameAs`, one
+  `Delete` sent for two acks, the lookup null afterwards, exactly one "The ack of /drop/a.csv on
+  fake.example:22 was ignored" in the captured log with "given back as ack" as its reason.
+- *Test: after the watch ends the lookup answers null and a late ack through a previously looked-up
+  handle is "already settled"* - `SftpWatchTest.after the watch ended the lookup answers null, and
+  a handle looked up before it is a late answer`: `cancelAndJoin` the collector, lookup null, the
+  late ack sends no `Delete` and logs "the watch that handed it over had already ended and given it
+  back", and the next poll hands `a.csv` over again.
+- *`InFlightSetLincheckTest` passes unmodified; every earlier test unmodified* - 1 for 1, untouched;
+  `git diff --stat` names no earlier test file but the two that gained tests, and only additions in
+  those.
+- *Shuttle untouched; compiles and its default tier passes against the reinstalled connector* -
+  **shuttle is untouched; the tier ran against the reactor's connector rather than a reinstalled
+  jar, deviation 1.** `mvn -B -o -pl shuttle -am test`: shuttle **271 tests, 0 failures, 0 errors,
+  0 skipped** (`SftpPollSourceTest` 12 for 12, the same total as T31's base), reactor SUCCESS with
+  core (74, 1 platform skip) and testkit (229) green a second time in the same run.
+- *Progress entry appended* - this entry.
+
+**Deviations:**
+
+1. **The connector was not reinstalled into `~/.m2`; shuttle was built and tested with `-pl shuttle
+   -am`, which resolves `sftpconnector-core` from this worktree's reactor.** `install` failed twice
+   with a sharing violation on `~/.m2/repository/dynacache/sftpconnector-core/0.1.0-SNAPSHOT/
+   sftpconnector-core-0.1.0-SNAPSHOT.jar`: two other Maven JVMs and IntelliJ's Maven server (up
+   since 9/3) were running, and one of them holds the jar open. The reactor build is the stronger
+   proof anyway - it is this change's classes on shuttle's classpath by construction, where an
+   installed jar can be overwritten mid-run by another worktree (T31's entry saw exactly that).
+   Whoever merges this reinstalls before running shuttle on its own (`-pl shuttle` without `-am`),
+   or shuttle compiles against whatever jar is in `~/.m2` at that moment.
+2. **The red run was a compile failure, not an assertion.** The three tests were written before the
+   code and cannot compile without `inFlightAt`, so the first run against the old code would have
+   been an unresolved reference rather than a failing assertion; they were run once, green, with the
+   code in place. Each asserts through the new surface and nothing else, so there is no old
+   behaviour they could have passed against.
+3. **Two of the three tests are in `SftpWatchTest`, and the "one WARN" test runs under a watch.**
+   The ticket's second test does not need a watch, but the WARN assertion needs the standard-error
+   capture that only `SftpWatchTest` has, and duplicating the helper into `SftpSourceTest` for one
+   test was not worth the second copy. Under a watch the test is also the shape shuttle runs.
+4. **Size.** About 25 lines of main source that are neither blank nor comment across three files,
+   about 80 in two test files, the spec's three passages. Inside the budget.
+
+**Seams.** None closed, none added. T31's "for the connector" ask is answered; its table is
+shuttle's to delete.
+
+**For the next ticket:**
+
+- **Shuttle (its own ticket, outside `sftpconnector/`):** `SftpPollSource.handles` goes, with the
+  `put` in `events()`, `answering`'s `finally`, and the `ConcurrentHashMap` import. `fetch` becomes
+  `source.inFlightAt(path) ?: throw IOException(...)` - or the `checkNotNull` it has now - and
+  downloads through what it gets. `seenEvent`'s `ack`/`nack` lambdas call the connector directly.
+  The KDoc paragraph beginning "The one thing kept here is a handle table" goes with it.
+- **`InFlightSlot.handle` is null between `admit` and the hand-over.** Anything that admits a slot
+  and does not hand it over - nothing does today - would leave a place the lookup cannot see.
+  `handedOverAs` refuses a second handle with `IllegalStateException`, which the tick's catch and
+  `reportingFailures` treat as a bug that ends the watch.
+- **The lookup is not a claim.** A consumer that reads a handle and holds it does not stop the
+  watch from giving the file back when it ends; T19's rule stands, and the late-answer WARN is what
+  such a consumer reads. `ackWait` (spec 7.2) is still not built and this does not change that.

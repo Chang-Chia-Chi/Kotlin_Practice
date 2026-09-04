@@ -395,6 +395,8 @@ your migration notes describe would apply (D11).
 poll(dir, options): Flow<SftpEvent>          one listing, terminates when the listing is consumed
 watch(dir, every, options): Flow<SftpEvent>  repeats poll on a ticker, never terminates on
                                              recoverable errors
+inFlightAt(path): FileSeen?                  the handle a path was handed over on, while it
+                                             is in flight; null otherwise (Sec 7.3)
 ```
 
 Both are **cold** flows. Collection starts the work, cancellation stops it, and backpressure is
@@ -491,6 +493,20 @@ would be turned away is turned away before it waits for room, and looked for aga
 taken - the second look is what keeps the promise when a tick running alongside admitted it in
 between. This is the backpressure knob that protects the downstream, and it is the only state the
 connector holds about processed files. Persistent idempotency belongs to the application (Sec 8.3).
+
+The set also answers a path. `inFlightAt(path)` on the source is the `FileSeen` at that path while
+one is in flight - handed over and not yet given back - and null otherwise: a path never listed, a
+path whose file has been answered and its action run, a path whose watch has ended and given the
+file back. The answer is the very handle the poll or watch emitted, never a second one over the
+same file, so a download through it is the download of the file that was listed, checked against
+the size the listing saw, and an ack through it is idempotent with an ack through the emitted one:
+one action, and whichever call comes second is the ignored second answer of Sec 7.2. A handle
+looked up before the watch ended and used after it is treated as any late answer is. The reason it
+exists is a consumer that resumes work from its own durable record: it has the path and nothing
+else, the only way to download, ack or nack is the handle the watch handed over earlier, and
+keeping its own path-to-handle table to get back to it is a second ledger of this set (D14, D50).
+It is a lookup, not a claim: nothing is admitted or held by asking, and a consumer that wants a
+file kept in flight keeps the `FileSeen` it was given.
 
 ### 7.4 Listing
 
@@ -930,6 +946,7 @@ table in `progress.md` carries the row.
 | D47 | The forced cancellation tier closes the retained socket before it disconnects the session | Measured against mwiede JSch 2.28.7 (Sec 5.3): `Session.disconnect()` hangs up on every channel before it touches the socket, and a channel hang-up writes a close packet under the session's write lock. A thread blocked writing to a peer that stopped reading TCP holds that lock, so `abort()` alone parks behind it and never reaches the socket close - and the keepalive probe is a write behind the same lock, so neither gentler tier ends the call either. The adapter keeps the socket JSch dialled (a `SocketFactory`, honoured on the direct path and through `ProxyHTTP`) and closes it first, which fails the blocked write and releases the lock. With this all three tiers bound a blocked call - a write as much as a read - and I9 holds under a black-holed upload, closing R1's finding 5 and lens 1 C1 / lens 2 H1 |
 | D48 | The in-flight set's identity is path, size and mtime; its exclusivity is the path alone; and a watch that ends gives back every file it ever handed over | Asked for by shuttle, whose D2 keys its own ledger on the same triple and was doing both jobs itself. Identity is what an ack's idempotency and a nack-for-good need. Exclusivity keyed on the triple let a file re-uploaded under a new size, while the first copy was still being worked, enter the set as a second file at the same name, and shuttle refused it and nacked it back by hand: a consumer must never race itself on two copies of one name. Keyed on the path, the second copy waits for the first to settle and is handed over on a later poll - not lost, only later. And a tick that finished had left its files with the consumer, where only the running tick's cancellation ever gave anything back, so a watch that ended left them in flight for the life of the process and shuttle nacked everything it held in a `finally`; the watch now gives them back itself, with redelivery, on every way it can end (Sec 7.3, 7.6, 11.2) |
 | D49 | `config` names the readiness types and nothing else beneath it; `error` names nothing at all | Sec 3.1 draws the layers and nothing checked them, so two references had grown the wrong way: `config` reached into `client` for the overwrite policy while `client` reached back for its configuration, and `error` reached into `pool` for the counts one failure reports while `pool` raises that failure. Neither is a build failure - Kotlin compiles a package cycle - and both make two packages readable only together. The overwrite policy is something the DSL configures, so it is spelled in `config` (`sftp.connector.config.Overwrite`), and the exhaustion counts are the exception's own fields. Readiness cannot follow, because a check is handed a `RemoteFile` and `transport` names `config` for its connection settings, so moving it would trade this cycle for that one; it stays where it is and the architecture test permits it by name. Two ArchUnit rules keep both true (T22) |
+| D50 | The source answers the `FileSeen` at a path while it is in flight, and the answer is the emitted handle itself | Asked for by shuttle's ticket 31, which had deleted every mirror of the in-flight set but one: a path-to-`FileSeen` table, kept because its pipeline resumes from a stored row that knows the path and nothing else, and the only way to download, ack or nack is the handle the watch handed over. The set already keys exclusivity on the path (D48), so it is the one place that mapping lives, and a copy of it downstream is the second ledger D14 forbids. The handle is the emitted instance and not a fresh one over the same slot because settlement is once per file and the WARN for a second answer names the first; two handles over one slot would settle once too, but the consumer would then hold two objects for one file with no reason to prefer either. The lookup is on the source rather than on the watch's flow because the caller that needs it is outside the collect block, holding the source and a path (Sec 7.1, 7.3) |
 
 D24 and D25 were withdrawn during the design review and are not reused; a citation to either is
 a citation to nothing.

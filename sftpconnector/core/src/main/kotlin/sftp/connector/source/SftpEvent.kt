@@ -22,6 +22,9 @@ sealed interface SftpEvent {
      * of the places that bound how far a poll may run ahead of the consumer. A collector that is
      * cancelled with files still in flight gives them all back as if nacked, so a consumer that
      * wants to ack after the poll has ended lets the poll end rather than cancelling it.
+     *
+     * While the file is in flight, [SftpSource.inFlightAt] answers its path with this very
+     * instance, for a consumer that has the path and nothing else.
      */
     class FileSeen internal constructor(
         val file: RemoteFile,
