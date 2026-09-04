@@ -22,6 +22,7 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertNotEquals
 import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -296,6 +297,30 @@ abstract class StateStoreContract {
         assertEquals(TransferState.STORED, transfer(parent.id).state)
         assertTrue(transfers().filter { it.parentId == parent.id }.all { it.state == TransferState.STORED })
         assertEquals(listOf(parent.id), outbox().map { it.transferId })
+    }
+
+    /**
+     * B3: identity (spec 5.2) is a source row's; a child's is its parent's plus its own name (spec 4.5), so two
+     * parents naming one shared object each expand their own child row and neither is reachable by `find`.
+     */
+    @Test
+    fun B3_two_parents_may_expand_a_child_with_the_same_identity() = runTest {
+        val first = store.seen(identity("set-1.json"), TransferKind.MESSAGE)
+        val second = store.seen(identity("set-2.json"), TransferKind.MESSAGE)
+
+        val one = store.children(first.id, listOf(staged("shared.png"))).single()
+        val other = store.children(second.id, listOf(staged("shared.png"))).single()
+
+        assertEquals(one.identity, other.identity)
+        assertNotEquals(one.id, other.id)
+        assertEquals(listOf(one.id), store.childrenOf(first.id).map { it.id })
+        assertEquals(listOf(other.id), store.childrenOf(second.id).map { it.id })
+        assertNull(store.find(one.identity), "a child is reached through its parent, never by identity")
+
+        store.stored(one.id, ref("a/shared.png"), onStored)
+        store.stored(other.id, ref("b/shared.png"), onStored)
+        assertEquals(TransferState.STORED, transfer(first.id).state)
+        assertEquals(TransferState.STORED, transfer(second.id).state)
     }
 
     @Test

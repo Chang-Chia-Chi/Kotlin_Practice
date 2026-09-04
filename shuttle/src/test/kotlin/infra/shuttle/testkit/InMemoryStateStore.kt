@@ -184,6 +184,10 @@ class InMemoryStateStore(private val clock: Clock) : StateStore {
     private fun insert(identity: SourceIdentity, kind: TransferKind, parent: TransferId? = null, supersedes: TransferId? = null): Transfer {
         val now = clock.instant()
         val row = Transfer(TransferId(nextTransfer++), identity, kind, SEEN, parentId = parent, supersedesId = supersedes, firstSeenAt = now, updatedAt = now)
+        // uq_file_transfer_identity (8.1): one row per identity, revision and parent, an absent parent matching an absent one (D48)
+        check(rows.values.none { it.uniqueKey() == row.uniqueKey() }) {
+            "uq_file_transfer_identity: ${identity.route.value} ${identity.sourceName} revision ${identity.revision} under $parent"
+        }
         rows[row.id] = row
         return row
     }
@@ -220,6 +224,8 @@ class InMemoryStateStore(private val clock: Clock) : StateStore {
     private fun latest(identity: SourceIdentity) =
         rows.values.filter { it.kind != TransferKind.CHILD && it.identity.key() == identity.key() }.maxByOrNull { it.identity.revision }
     private fun SourceIdentity.key() = copy(revision = 1)
+    private fun Transfer.uniqueKey() =
+        listOf(identity.route, identity.sourceRef, identity.sourceName, identity.sourceSize, identity.sourceMtime, identity.revision, parentId)
 
     private companion object {
         val BEFORE_ACKED = setOf(SEEN, FETCHED, PROCESSED, STORED)

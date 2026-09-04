@@ -17,6 +17,7 @@ import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Tag
 import org.junit.jupiter.api.Test
 import org.testcontainers.oracle.OracleContainer
+import java.time.Duration
 
 /**
  * The spec 8.2 contract on a real Oracle. Excluded by default (`excludedGroups=oracle` in the pom);
@@ -29,7 +30,7 @@ class JdbiStateStoreTest : StateStoreContract() {
     companion object {
         // the faststart image takes about 90 s to say ready on a loaded workstation; the log wait's 60 s default never got there
         // (`withStartupTimeoutSeconds` is the JDBC field OracleContainer's own wait strategy ignores)
-        private val container = OracleContainer("gvenzl/oracle-free:23-slim-faststart").withStartupTimeout(java.time.Duration.ofMinutes(4))
+        private val container = OracleContainer("gvenzl/oracle-free:23-slim-faststart").withStartupTimeout(Duration.ofMinutes(10))
         private lateinit var jdbi: Jdbi
 
         @JvmStatic @BeforeAll

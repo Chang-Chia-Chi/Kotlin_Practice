@@ -2847,3 +2847,67 @@ doc comment); tests +58 across the pipeline test, the contract, the fake and the
 
 **For the next ticket:** `AcceptanceFixture`'s Oracle startup timeout (deviation 4); the spec 8.2 listing lag
 (deviation 1).
+
+---
+
+## 26: Fix - a child's identity is scoped to its parent (review finding B3)
+
+**The finding.** Spec 8.1's `uq_file_transfer_identity` keyed a row by its source columns alone
+(`route, source_ref, source_name, source_size, source_mtime, revision`). A child row carries its parent's route
+and source ref with its own name, size and mtime (`JdbiStateStore.children`), so two parents that expand one
+shared name - two manifests naming one image, two archives holding the same entry - produce two rows with the
+same key. Oracle refused the second with `ORA-00001`, the parent walked to FAILED and a re-drive failed the same
+way; the in-memory store, which enforced nothing, allowed it, so no test on the fakes saw it. The same shape of
+adapter drift as D44.
+
+**Built:** `StateStoreContract.B3_two_parents_may_expand_a_child_with_the_same_identity` - two MESSAGE parents,
+one `staged("shared.png")` each; the two child rows have equal identities and different ids, each parent lists
+only its own child, `find` on that identity returns nothing (a child is reached through its parent, never by a
+listing), and both children store so both parents flip to STORED.
+
+**The fix (D48):** `parent_id` closes the identity key, in `StateStoreSchema.DDL` and in spec 8.1's block
+together (`StateStoreSchemaTest` compares them verbatim; the constraint's line and one comment line are the
+whole diff). Spec 4.5 now states the rule the constraint encodes: a child's identity is its parent's with the
+child's own name, size and mtime.
+
+**Why `parent_id` and not "exclude CHILD rows", measured on Oracle:** Oracle compares a null key column equal
+to a null one and leaves out of the index only a wholly null key. Two consequences, both measured here:
+
+1. Every top-level row has `parent_id` null, so appending the column costs the top-level rows nothing - the
+   duplicate insert in `seen_returns_the_existing_row_when_the_unique_identity_constraint_fires` is still
+   refused with `ORA-00001`, and `seen`'s race catch still has the constraint it is written against.
+2. Excluding CHILD rows cannot be done by nulling one key column. The first attempt was a function-based unique
+   index on `CASE kind WHEN 'CHILD' THEN NULL ELSE route END, source_ref, ...`; Oracle refused the second child
+   with `ORA-00001 (SYS_NC00030$:NULL, SOURCE_REF:'sftp:/in', SOURCE_NAME:'shared.png', SOURCE_SIZE:10,
+   SOURCE_MTIME:..., REVISION:1)` - the null matched the null. Doing it that way needs the `CASE` on all six
+   columns, a six-line index in place of a one-line constraint, for the same guarantee.
+
+**The fake mirrors it:** `InMemoryStateStore.insert` now refuses a row whose
+`(route, source_ref, source_name, source_size, source_mtime, revision, parent_id)` is already taken, an absent
+parent matching an absent one, which is what Oracle enforces. Nothing in the suite hits it - `seen` resolves an
+existing identity before inserting, `supersede` inserts the next revision, `children` deletes the old children
+first - so it stands as the fake's copy of the constraint, not a behaviour change.
+
+**Two children of one parent on one key** are still D37's rejection, not the database's: the pipeline's
+cardinality check runs on the resolved keys before `store.children` is called (`TransferPipeline` line 162).
+The constraint would refuse two same-named children of one parent, but nothing reaches it.
+
+**Deviations:**
+
+1. **`JdbiStateStoreTest` gained `withStartupTimeout(Duration.ofMinutes(10))`.** Testcontainers' 60 s default
+   was not enough on a loaded machine: two runs died with "Timed out waiting for log output matching
+   `.*DATABASE IS READY TO USE!.*`" while the container's own log was still at "first database startup,
+   initializing... Database mounted". A container started by hand and watched reached
+   `DATABASE IS READY TO USE!` well past the minute. The wait is longer; no assertion changed.
+2. **Spec 4.5 gained a sentence** and the DDL block gained a comment line beside the constraint. The ticket
+   allows the constraint's definition; the sentence states the rule that made the constraint wrong and the
+   review had to infer.
+3. **`ShuttleHostTest`'s two readiness assertions flap under load on this branch, with and without this
+   change.** Both are "route down, so the pod is not ready" and both come back ready. Stashing the change and
+   running the class twice failed `readiness_follows_the_configured_rule_with_one_route_up_and_one_down` both
+   times; with the change the class failed that one and `S18_a_wrong_password_leaves_the_route_down_...`
+   together, then passed clean inside a full default tier, then failed `S18_...` alone. Which of the two fails
+   is nondeterministic and the store is not in the path (a wrong SFTP password never reaches the ledger). Not
+   this ticket's, but worth a look by whoever owns the readiness tickets.
+
+**Size:** production 2 lines (`StateStoreSchema.DDL`), tests +25, spec +5/-1.

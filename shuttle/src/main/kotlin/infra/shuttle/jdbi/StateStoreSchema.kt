@@ -39,7 +39,8 @@ CREATE TABLE file_transfer (
   CONSTRAINT pk_file_transfer PRIMARY KEY (id),
   CONSTRAINT fk_file_transfer_parent FOREIGN KEY (parent_id) REFERENCES file_transfer (id),
   CONSTRAINT fk_file_transfer_supersedes FOREIGN KEY (supersedes_id) REFERENCES file_transfer (id),
-  CONSTRAINT uq_file_transfer_identity UNIQUE (route, source_ref, source_name, source_size, source_mtime, revision)
+  -- a child's identity is its parent's plus its own name (Sec 4.5), so parent_id closes the key (D48)
+  CONSTRAINT uq_file_transfer_identity UNIQUE (route, source_ref, source_name, source_size, source_mtime, revision, parent_id)
 );
 CREATE INDEX ix_file_transfer_state  ON file_transfer (route, state, updated_at);
 CREATE INDEX ix_file_transfer_parent ON file_transfer (parent_id);

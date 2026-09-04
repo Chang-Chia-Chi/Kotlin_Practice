@@ -239,7 +239,10 @@ extra delivery per channel per event, and never a lost object (I8).
 ### 4.5 Parents and children
 
 A final payload of N objects creates N child rows under the transfer in one transaction, each
-FETCHED with its own staged object, digest and key. Children are stored under the route's
+FETCHED with its own staged object, digest and key. A child's identity is its parent's with the
+child's own name, size and mtime, so the ledger's identity key ends with the parent (D48) and two
+parents may expand a child with the same name: a child is reached through its parent, never by a
+listing's identity (Sec 5.2). Children are stored under the route's
 parallelism like any object. The parent's STORED is written when the last child is STORED;
 the parent's ack is the only ack; the parent's `acked` notification is the only notification; a
 child that reaches `maxAttempts` fails the parent. A child's STORED transition is one statement
@@ -490,7 +493,8 @@ CREATE TABLE file_transfer (
   CONSTRAINT pk_file_transfer PRIMARY KEY (id),
   CONSTRAINT fk_file_transfer_parent FOREIGN KEY (parent_id) REFERENCES file_transfer (id),
   CONSTRAINT fk_file_transfer_supersedes FOREIGN KEY (supersedes_id) REFERENCES file_transfer (id),
-  CONSTRAINT uq_file_transfer_identity UNIQUE (route, source_ref, source_name, source_size, source_mtime, revision)
+  -- a child's identity is its parent's plus its own name (Sec 4.5), so parent_id closes the key (D48)
+  CONSTRAINT uq_file_transfer_identity UNIQUE (route, source_ref, source_name, source_size, source_mtime, revision, parent_id)
 );
 CREATE INDEX ix_file_transfer_state  ON file_transfer (route, state, updated_at);
 CREATE INDEX ix_file_transfer_parent ON file_transfer (parent_id);
@@ -1046,6 +1050,7 @@ poll are appeals to the connector's spec.
 | D45 | The NATS client runs on the unbounded `Dispatchers.IO`, not the module's bounded view | Its pull is a one second long-poll; on a view sized to route parallelism it held a route's whole IO budget at `parallelism: 1`, and every ledger write and fetch waited a second behind it (five seconds per attempt, measured by ticket 20). The connector already owns its own threads for the same reason |
 | D46 | A subscribed transfer's re-drive is triggered by the upstream publishing the message again under the same `Nats-Msg-Id`; the adapter terms a message when its transfer is REJECTED or FAILED | `nak` would redeliver a FAILED row for ever (the consumer's `MaxDeliver` is the operator's, not ours); `term` leaves nothing to redeliver, so the re-drive's trigger has to come from outside. The stream sequence changes on a republish, so only a publisher-set id survives it; the stream's duplicate window (2 min by default) swallows a republish inside it (measured by ticket 20, S29) |
 | D47 | Spec 13.1 corrected by measurement: `fetch.path` is a JSON pointer (`/metadata/path`), `fetch` states a `bucket` on an S3 store (rule 6), and the `downstream` rows that read a target or an mtime are `required: false` | `/metadata.path` names a key literally called `metadata.path` and every message failed at fetch; an S3 declaration is an endpoint, not a bucket; a message parent has no target and no mtime, so the shared body rejected its `acked` notification (ticket 20, S27) |
+| D48 | `uq_file_transfer_identity` ends with `parent_id`: one row per route, source ref, name, size, mtime, revision and parent | A child's identity is its parent's plus its own name (Sec 4.5), but the 8.1 key held the source columns alone, so two parents expanding one shared name made Oracle refuse the second child with ORA-00001 while the in-memory store allowed it (the D44 drift again). Oracle compares a null key column equal to a null one and leaves out only a wholly null key, so every top-level row, all of them `parent_id` null, keeps exactly the uniqueness it had, and `seen`'s race catch with it; excluding CHILD rows instead needs a function-based index over all six columns, a larger change for the same guarantee (measured by ticket 26 on Oracle, B3) |
 
 ---
 
