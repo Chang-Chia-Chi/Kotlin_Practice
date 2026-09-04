@@ -447,13 +447,20 @@ when it throws. It is the documented normal path; manual ack is for pipelines th
 
 ### 7.3 In-flight set and backpressure
 
-The source keeps an in-memory set of in-flight files keyed by path, size and mtime. A file in the
-set is not emitted again by an overlapping or later tick. `maxInFlight` bounds the set; when it
-is full the lister suspends until an ack or nack arrives. A file already in the set is turned
-away before it waits for room, and looked for again once room is taken - the second look is what
-keeps the promise when a tick running alongside admitted it in between. This is the backpressure knob that
-protects the downstream, and it is the only state the connector holds about processed files.
-Persistent idempotency belongs to the application (Sec 8.3).
+The source keeps an in-memory set of in-flight files. Two questions are answered from it, and
+they are keyed differently. *Identity* is path, size and mtime together: it is what makes an ack
+idempotent and what a nack-for-good remembers until restart, so the same name uploaded again
+with a new size or mtime is a different file. *Exclusivity* is the path alone: while any file at
+a path is in flight, a listing of that path admits nothing, whatever its size or mtime, and the
+newer copy is handed over on a later poll once the first has settled (D48). The reason is that a
+consumer working a file must never be racing itself on a second copy at the same name - two
+downloads to one local name, two acks moving over each other - and the second copy is not lost,
+only later. A file in the set is not emitted again by an overlapping or later tick. `maxInFlight`
+bounds the set; when it is full the lister suspends until an ack or nack arrives. A file that
+would be turned away is turned away before it waits for room, and looked for again once room is
+taken - the second look is what keeps the promise when a tick running alongside admitted it in
+between. This is the backpressure knob that protects the downstream, and it is the only state the
+connector holds about processed files. Persistent idempotency belongs to the application (Sec 8.3).
 
 ### 7.4 Listing
 
@@ -495,6 +502,15 @@ second `watch` on the same directory of the same connector is rejected **when co
 cold flow has done nothing at the call, and a claim taken there would leak on a flow nobody
 collects - since one consumer per directory is an assumption of Sec 7.3. The claim is released
 when the collector leaves, however it leaves.
+
+A watch that ends - its collector left, it was cancelled, the connector closed - gives back every
+file it handed over that is still unanswered, with redelivery and never for good, so the next
+watch or the next process lists them again. That is every tick's files, not only the running
+tick's: a tick that finished left its files with the consumer, and before this rule only a tick's
+own cancellation gave anything back, for that tick alone (D48). As for a cancelled collector
+(Sec 7.2) the nack action does not run, and the files are counted
+`sftp_ack_total{outcome=cancelled}`. An ack or nack that arrives after the watch has ended is
+ignored as a second answer, and its WARN line says the watch had already given the file back.
 
 ---
 
@@ -671,8 +687,11 @@ download) is what a *later* try reads; it is not a reason to send one now.
 
 1. The connector's scope is cancelled: watchers and the housekeeper together. No new listing
    starts, a new `watch` claim is refused, and every unacked file is withdrawn as `cancelled`
-   for redelivery. The housekeeper goes here rather than last because a closing pool refuses it
-   rounds anyway, and nothing needs it to outlive the drain.
+   for redelivery - the running tick's by the tick itself, at once, and every earlier tick's by
+   the watch as it ends (Sec 7.6), which is the moment its collector returns from the block it
+   is in; after that nothing a consumer held is still in flight. The
+   housekeeper goes here rather than last because a closing pool refuses it rounds anyway, and
+   nothing needs it to outlive the drain.
 2. The pool stops lending. `acquire` fails fast at the door with `PoolExhausted(closing = true)`,
    with no wait; a caller already queued is refused when room frees. The closing state lives in
    the registry and every decision that reads it is taken under the registry's lock.
@@ -874,6 +893,7 @@ table in `progress.md` carries the row.
 | D27 | `ServerFailure` does not poison the session | A well-formed `SSH_FX_FAILURE` proves the channel parsed the request and answered, so the session is healthy and a per-request refusal is no reason to throw it away. Sec 8.2 expects exactly that status from a server without `posix-rename`, which would otherwise evict a session on every overwrite rename. Real transport breakage arrives with an `IOException` cause and is classified `SessionLost` before this rule is reached |
 | D46 | A rename retried after a lost reply tells its own landed file by the source's size **and** modification time as listed, and reads the listed file still at the source as "not landed" | R2's I11 guidance - "a file of the expected size there is the landed rename" - was written for a `REFUSE` target found free a moment earlier; T11 applied it under `REPLACE`, whose target is expected to be occupied, so a lost reply on the first request adopted yesterday's same-size file, reported the ack as success and left the source to be processed twice (T17 lens 5 H2). A rename keeps the file's mtime, SFTP reports it in whole seconds, and both readings come from the server's stat, so listing-to-rename clock skew does not enter. The source is looked at first because the listed file still there settles it whatever the target holds, and reading a *changed* source as "landed" keeps a new same-name upload in the inbox rather than moving it unprocessed: the coincidences left cost a duplicate, never a loss. `rename` takes the `RemoteFile` as listed, since the source has it and one stat measures both when a caller has none (Sec 6.1, 8.3) |
 | D47 | The forced cancellation tier closes the retained socket before it disconnects the session | Measured against mwiede JSch 2.28.7 (Sec 5.3): `Session.disconnect()` hangs up on every channel before it touches the socket, and a channel hang-up writes a close packet under the session's write lock. A thread blocked writing to a peer that stopped reading TCP holds that lock, so `abort()` alone parks behind it and never reaches the socket close - and the keepalive probe is a write behind the same lock, so neither gentler tier ends the call either. The adapter keeps the socket JSch dialled (a `SocketFactory`, honoured on the direct path and through `ProxyHTTP`) and closes it first, which fails the blocked write and releases the lock. With this all three tiers bound a blocked call - a write as much as a read - and I9 holds under a black-holed upload, closing R1's finding 5 and lens 1 C1 / lens 2 H1 |
+| D48 | The in-flight set's identity is path, size and mtime; its exclusivity is the path alone; and a watch that ends gives back every file it ever handed over | Asked for by shuttle, whose D2 keys its own ledger on the same triple and was doing both jobs itself. Identity is what an ack's idempotency and a nack-for-good need. Exclusivity keyed on the triple let a file re-uploaded under a new size, while the first copy was still being worked, enter the set as a second file at the same name, and shuttle refused it and nacked it back by hand: a consumer must never race itself on two copies of one name. Keyed on the path, the second copy waits for the first to settle and is handed over on a later poll - not lost, only later. And a tick that finished had left its files with the consumer, where only the running tick's cancellation ever gave anything back, so a watch that ended left them in flight for the life of the process and shuttle nacked everything it held in a `finally`; the watch now gives them back itself, with redelivery, on every way it can end (Sec 7.3, 7.6, 11.2) |
 
 D24 and D25 were withdrawn during the design review and are not reused; a citation to either is
 a citation to nothing.

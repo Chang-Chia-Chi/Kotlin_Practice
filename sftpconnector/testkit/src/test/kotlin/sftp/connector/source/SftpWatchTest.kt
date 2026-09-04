@@ -10,6 +10,7 @@ import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -326,6 +327,79 @@ class SftpWatchTest {
         assertThat(failure).isInstanceOf(IllegalStateException::class.java).hasMessage("bad row")
         assertThat(inFlight()).describedAs("places still taken after the failure").isZero()
         assertThat(source.poll("/drop").toList().filterIsInstance<FileSeen>()).describedAs("the directory is watchable again").hasSize(2)
+    }
+
+    /**
+     * A watch that ends gives back everything it ever handed over, not only what the running tick
+     * held. Two ticks each finished and left a file with the consumer; when the collector is
+     * cancelled both come back - counted as cancelled, nothing in flight - and the next watch's
+     * first tick lists both. Before this a file from a finished tick stayed in flight for the life
+     * of the process, and no watch ever listed it again.
+     */
+    @Test
+    fun `a watch that is cancelled gives back the files of every tick it ran, and the next watch lists them`() = runTest {
+        val transport = FakeSftpTransport().directory("/drop").file("/drop/a.csv", "1")
+        val source = sourceOver(transport)
+        val seen = mutableListOf<FileSeen>()
+        val collector = launch { source.watch("/drop", EVERY).collect { if (it is FileSeen) seen += it } }
+        runCurrent()
+        transport.file("/drop/b.csv", "2")
+        advanceTimeBy(EVERY)
+        runCurrent()
+        assertThat(seen.map { it.file.name }).describedAs("one file from each of two finished ticks").containsExactly("a.csv", "b.csv")
+        assertThat(inFlight()).isEqualTo(2)
+
+        collector.cancelAndJoin()
+
+        assertThat(inFlight()).describedAs("files still held after the watch ended").isZero()
+        assertThat(registry.get("sftp_ack_total").tag("outcome", "cancelled").counter().count()).isEqualTo(2.0)
+        val next = mutableListOf<FileSeen>()
+        val again = launch { source.watch("/drop", EVERY).collect { if (it is FileSeen) next += it } }
+        runCurrent()
+        assertThat(next.map { it.file.name }).describedAs("the next watch's first tick").containsExactly("a.csv", "b.csv")
+        again.cancelAndJoin()
+    }
+
+    /**
+     * The collector left on its own terms - it took the tick it wanted and stopped - and that ends
+     * the watch as surely as a cancellation does, so the file the tick handed over comes back. The
+     * abort is a cancellation thrown through `emit`, and it passes untouched: `first` returns.
+     */
+    @Test
+    fun `a collector that leaves after its first tick gives that tick's file back`() = runTest {
+        val source = sourceOver(FakeSftpTransport().directory("/drop").file("/drop/a.csv", "1"))
+
+        val completed = source.watch("/drop", EVERY).first { it is PollCompleted } as PollCompleted
+
+        assertThat(completed.inFlight.map { it.name }).describedAs("held when the tick ended").containsExactly("a.csv")
+        assertThat(inFlight()).describedAs("held after the collector left").isZero()
+        assertThat(source.poll("/drop").toList().filterIsInstance<FileSeen>().map { it.file.name }).containsExactly("a.csv")
+    }
+
+    /**
+     * An answer that arrives after the watch has ended is too late: the watch gave the file back
+     * as it ended, so the ack is a second answer, ignored, and its action does not run. The WARN
+     * says which happened first, because "will be handed over again" is not what a consumer that
+     * just acked expects to read without being told why.
+     */
+    @Test
+    fun `an ack after the watch ended is ignored, and the log says the watch had given the file back`() = runTest {
+        val transport = FakeSftpTransport().directory("/drop").file("/drop/a.csv", "1")
+        val source = sourceOver(transport) { polling { onAck = delete() } }
+        val held = mutableListOf<FileSeen>()
+        val collector = launch { source.watch("/drop", EVERY).collect { if (it is FileSeen) held += it } }
+        runCurrent()
+        collector.cancelAndJoin()
+
+        val logged = capturingStandardError {
+            launch { held.single().ack() }
+            runCurrent()
+        }
+
+        assertThat(transport.calls.count { it.operation == Operation.Delete }).describedAs("ack actions run after the watch ended").isZero()
+        assertThat(inFlight()).isZero()
+        assertTrue(logged.contains("The ack of /drop/a.csv on fake.example:22 was ignored"), "the ignored ack: $logged")
+        assertTrue(logged.contains("the watch that handed it over had already ended and given it back"), "why it was ignored: $logged")
     }
 
     /**

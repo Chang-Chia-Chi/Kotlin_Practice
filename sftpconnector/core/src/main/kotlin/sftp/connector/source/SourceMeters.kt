@@ -30,7 +30,8 @@ internal class SourceMeters(
         Counter.builder("sftp_poll_files").tags("endpoint", endpoint, "state", state).register(meters)
     }
 
-    private val settlements: Map<Settlement, Counter> = listOf(Settlement.ACK, Settlement.NACK, Settlement.CANCELLED)
+    /** Two outcomes share the `cancelled` label, and the registry hands back one counter for one id, so they share the count. */
+    private val settlements: Map<Settlement, Counter> = listOf(Settlement.ACK, Settlement.NACK, Settlement.CANCELLED, Settlement.WATCH_ENDED)
         .associateWith { Counter.builder("sftp_ack_total").tags("endpoint", endpoint, "outcome", it.label).register(meters) }
 
     /** Runs one poll and records how long it took and how it ended. A failure is rethrown untouched. */

@@ -235,6 +235,53 @@ class SftpSourceTest {
     }
 
     /**
+     * Exclusivity is the path. A file uploaded again under a name the consumer is still working -
+     * a new size, so a different file by identity - is not handed over alongside the first, because
+     * a consumer must never be racing itself on two copies of one name. Nor is it lost: once the
+     * first is answered, the next listing hands the newer one over. Meanwhile the tick counts it
+     * neither as emitted nor as not ready.
+     */
+    @Test
+    fun `a file uploaded again under a name still being worked waits for the first to be answered`() = runTest {
+        val transport = FakeSftpTransport().directory("/drop").file("/drop/x.csv", "1")
+        val source = sourceOver(transport) {}
+        val first = source.poll("/drop").toList().filterIsInstance<FileSeen>().single()
+
+        transport.file("/drop/x.csv", "22")
+        val whileWorked = source.poll("/drop").toList()
+        assertThat(whileWorked.filterIsInstance<FileSeen>()).describedAs("a second copy handed over at a name being worked").isEmpty()
+        assertThat(whileWorked.last()).isEqualTo(PollCompleted(2, seen = 1, emitted = 0, notReady = 0, inFlight = listOf(first.file)))
+
+        first.ack()
+        val afterwards = source.poll("/drop").toList().filterIsInstance<FileSeen>().single()
+        assertThat(afterwards.file.size).describedAs("the newer copy, handed over once the first was answered").isEqualTo(2L)
+        assertThat(inFlight()).isEqualTo(1)
+    }
+
+    /**
+     * Identity is still path, size and mtime. The second ack of a file is ignored, and a file
+     * nacked for good is kept out as exactly that file: listed again unchanged it stays out,
+     * uploaded again with a new size it is a different file and is handed over.
+     */
+    @Test
+    fun `identity is unchanged, a second ack is ignored and a file nacked for good is remembered by path, size and mtime`() = runTest {
+        val transport = FakeSftpTransport().directory("/drop").file("/drop/a.csv", "1").file("/drop/b.csv", "2").directory("/drop/temp")
+        val source = sourceOver(transport) { onAck = move("temp/") }
+        val (a, b) = source.poll("/drop").toList().filterIsInstance<FileSeen>()
+
+        a.ack()
+        a.ack()
+        b.nack(IllegalStateException("never again"), redeliver = false)
+
+        assertThat(transport.calls.count { it.operation == Operation.Rename }).describedAs("moves for two acks of one file").isEqualTo(1)
+        assertThat(source.poll("/drop").toList().filterIsInstance<FileSeen>()).describedAs("handed over while nacked for good, unchanged").isEmpty()
+
+        transport.file("/drop/b.csv", "22")
+        val again = source.poll("/drop").toList().filterIsInstance<FileSeen>().single()
+        assertThat(again.file).describedAs("a different file by identity at the same name").isEqualTo(b.file.copy(size = 2))
+    }
+
+    /**
      * The other way a collection ends without an answer: the consumer's own block throws. Nobody
      * is going to ack a file whose processing failed the whole collection, and a place nobody gives
      * back is a place lost until restart.

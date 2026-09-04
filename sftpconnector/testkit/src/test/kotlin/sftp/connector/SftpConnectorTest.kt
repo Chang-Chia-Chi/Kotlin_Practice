@@ -168,6 +168,31 @@ class SftpConnectorTest {
         assertThat(operationAfter).isInstanceOfSatisfying(PoolExhausted::class.java) { assertThat(it.closing).isTrue() }
     }
 
+    /**
+     * The seam T13 left open. A tick that had finished left its file with the consumer, and a close
+     * withdrew only what the running tick held, so the file stayed in flight on a closed connector.
+     * The watch now gives back everything it handed over as it ends, whichever way it ends, and a
+     * close is one of those ways: nothing a consumer holds stays in flight across it.
+     */
+    @Test
+    fun `close gives back a file the consumer held from a tick that had already finished`() = runTest {
+        val transport = FakeSftpTransport().directory("/drop").file("/drop/a.csv", "1")
+        val meters = SimpleMeterRegistry()
+        val connector = start(transport, meters) { directories("/drop"); readiness = ReadinessCheck { _, _ -> Readiness.Ready } }
+        val events = mutableListOf<SftpEvent>()
+        val collector = launch { connector.source.watch("/drop", 1.minutes).collect { events += it } }
+        runCurrent()
+        assertThat(events.last()).describedAs("the tick finished").isInstanceOf(SftpEvent.PollCompleted::class.java)
+        assertThat(meters.get("sftp_inflight").gauge().value()).describedAs("held by the consumer from a finished tick").isEqualTo(1.0)
+
+        connector.close()
+        runCurrent()
+
+        assertThat(collector.isCompleted).describedAs("the collector finished").isTrue()
+        assertThat(meters.get("sftp_inflight").gauge().value()).describedAs("held after the close").isZero()
+        assertThat(meters.get("sftp_ack_total").tag("outcome", "cancelled").counter().count()).isEqualTo(1.0)
+    }
+
     /** A refused start-up gives back the session its checks borrowed, so a host that starts connectors on demand does not leak one per refusal. */
     @Test
     fun `a start-up that was refused leaves no session open`() = runTest {
