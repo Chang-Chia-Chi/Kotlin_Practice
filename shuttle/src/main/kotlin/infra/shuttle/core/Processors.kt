@@ -153,9 +153,8 @@ class ExpandProcessor(private val spec: ProcessorSpec.Expand) : Processor {
 
     override suspend fun process(payload: Payload, ctx: ProcessContext): Outcome {
         val (bytes, where) = when (spec.format) {
-            "json" -> payload.objects.single().let { Files.readAllBytes(it.path) to it.name }
-            "message" -> (ctx.source.body ?: return Outcome.Reject("expand: the message has no body")) to "the message"
-            else -> throw IllegalArgumentException("expand: format ${spec.format} is not json or message")
+            ExpandFormat.Json -> payload.objects.single().let { Files.readAllBytes(it.path) to it.name }
+            ExpandFormat.Message -> (ctx.source.body ?: return Outcome.Reject("expand: the message has no body")) to "the message"
         }
         val (head, tail) = pointer
         val listed = JSON.readTree(bytes).at(head)

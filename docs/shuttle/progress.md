@@ -4073,3 +4073,110 @@ collect (`emitted`) and no fields but its four constructor arguments; every ques
 out, whether a listing was cut short, who gives a file back and which file is in flight at a path is
 the connector's. If a later reviewer wants the class smaller still, the only thing left to move is
 `identityOf`, which is shuttle's vocabulary and belongs here.
+
+---
+
+## 38: A divergent `expand.from` is wired or refused; every channel body is validated; `expand.format` is typed
+
+**Built:** review finding Spec 9 and the two hand-offs that landed on this file since the ticket was written.
+
+- **The `fetchers` map is filled (finding Spec 9).** `TransferPipeline`'s `Context.fetch` uses the run's own
+  fetcher for the route's staging store and asks `fetchers` for anything else; the host passed nothing, so
+  a route whose `expand.from` was not its `fetch.store` failed every transfer at run time with "route X: no
+  fetcher for store Y" - ticket 17's hand-off note, never picked up. `ShuttleHost.fetchersFor(route)` now
+  builds one `S3Fetcher` per divergent `expand.from`, over that store's own (cached) client and the bucket
+  the declaration states, and `start()` hands it to the pipeline. It is `internal` for the reason
+  `fetcherFor` is: a subscribed route's fetcher cannot be reached through a running host without a broker.
+- **`expand.bucket`, the new knob (D53).** An S3 store declaration is an endpoint, not a bucket, so the
+  fetcher for a store the route does not fetch from has no bucket to use; `expand.bucket` states it,
+  mirroring `fetch.bucket` exactly (rule 6's shape). It lands in the YAML grammar
+  (`{ expand: { format, files, from, bucket } }`), in the DSL (`expand(format, files, from, bucket = ...)`),
+  in rule 14's text and in spec 13.1's expand block. An `expand.from` that *is* the route's `fetch.store`
+  states none: the run's own fetcher already carries that store's bucket.
+- **The divergent SFTP case is refused, not wired (rule 14).** There is no by-path fetch on an SFTP store a
+  route does not fetch from. A polled route is the sharp case: its own store's fetcher is the poll source's,
+  which serves the files that poll handed over and answers anything else with "is not a file this poll
+  handed over", so `expand.from: <its own polled store>` could never work either. Rule 14 now says so at
+  validate time, naming the store and why.
+- **Step 3 probes the expand buckets too.** Ticket 35 taught `probeStores` to HEAD every `fetch.bucket`;
+  the same list now carries each `(expand.from store, expand.bucket)` pair, so a bucket nobody created ends
+  the deployment instead of the first expand.
+- **Every channel's body is validated, not only an `http` one** (progress 35's deviation 1). `Rules.channel`
+  opened with `if (channel !is HttpChannel) return`, and the route's rule 17/26 loop narrowed with
+  `as? HttpChannel`. The policy and response checks (rules 7 and 20) now sit under an `is HttpChannel`
+  guard of their own and the body check runs for every declared channel; the route loop reads `channels[it]`.
+  A `nats` body's rows are judged by rules 15, 17, 18, 19, 21 and 26 exactly as an `http` body's are.
+- **`Expand.format` is an enum** (ticket 40's fourth deviation, whose two readers were on that ticket's
+  exclusion list). `ExpandFormat { Json, Message }` sits beside `ExtractFrom`; the YAML word (`json`,
+  `message`) and the DSL spelling are unchanged, and an unknown one is now a load error naming the step,
+  the way the retired rule 16's `field` is. Rule 14 keeps the half a type cannot carry - `message` only on
+  a subscribed route - and `EXPAND_FORMATS` and `ExpandProcessor`'s `else ->` branch are gone.
+
+**Concepts named:**
+
+- **A route fetches by path through exactly one adapter it already has.** That is what makes rule 14's new
+  shape a rule and not a table of cases: the route's `fetch.store` is fetchable because the route fetches
+  through it, another S3 store is fetchable because a client plus a bucket is the whole of an S3 fetcher,
+  and nothing else is. The host's `fetchersFor` is the same sentence in Kotlin, which is why it fits in two
+  lines and cannot drift from the rule.
+- **A knob that only the divergent case needs belongs to the divergent case.** `expand.bucket` is absent
+  from spec 13.1's own image-sets route, because that route expands out of its fetch store; it appears only
+  where the model genuinely lacks the information.
+- **A body is judged wherever it is rendered.** Ticket 35 made every channel render one; validating only the
+  `http` ones left the rest reaching the renderer at delivery time instead of the boot report.
+
+**Acceptance:**
+
+- *A divergent `expand.from` is wired* -
+  `ShuttleHostM2WiringTest.a_route_expanding_from_another_S3_store_is_given_that_stores_fetcher`: a
+  subscribed route fetching from `minio` and expanding from `archive`, one Mockito `S3Client` per store at
+  the AWS boundary. Red before the fix (`expected: <[archive]> but was: <[]>`); green after, and calling the
+  map's fetcher reaches the archive client with the bucket the expand states
+  (`get cold-storage/sets/one.json`), with `verifyNoInteractions` on the fetch store's client.
+- *Rule 14 refuses what cannot be wired* -
+  `RulesTest.rule14_expand_from_a_store_the_route_does_not_fetch_from_is_S3_with_a_bucket`: another S3 store
+  with no bucket is a violation, an SFTP store the route does not fetch from is a violation whose message
+  names the store and the missing fetch, and the same expand on a route that *does* fetch from that store
+  passes. Red before the fix (`expected: <[14]> but was: <[]>`).
+- *A `nats` body is judged at boot* - `RulesTest.rule17_reads_the_body_of_a_nats_channel`: a `nats` channel
+  whose body reads an attribute no processor declares, notified on by the polled route. Red before the fix
+  (`expected: <[17]> but was: <[]>`).
+- *An unknown `expand.format` is a load error* -
+  `YamlLoaderTest.an_unknown_expand_format_is_a_load_error_naming_the_step`: spec 13.1 with `format: lines`
+  fails to load with exactly one error,
+  `shuttle.routes.image-sets.process[1].expand.format: lines is not one of json, message`.
+- *The spec 13.1 baseline still passes every rule* -
+  `YamlLoaderTest.the_spec_13_1_document_loads_passes_every_rule_and_equals_the_dsl_build_for_vendor_drop`
+  is untouched and green: its image-sets route expands out of its own fetch store, so it needs no bucket.
+- *Everything else still holds* - default tier 283 tests, 0 failures (279 before; +4 here).
+
+**Deviations:**
+
+1. **Rule 14 grew a shape check, not just a parse check.** Its spec sentence was "every built-in processor's
+   configuration parses"; "`expand.from` names a store this route can fetch by path from" is about the
+   route around the step, not the step alone. It is the only place the refusal can live at validate time,
+   and spec 13.3's row 14 now says it.
+2. **`expand.bucket` is not forbidden on a same-store expand.** Stating a bucket that equals - or
+   contradicts - the route's `fetch.bucket` is accepted and ignored, because the run's own fetcher is used
+   there. Refusing it is another rule number's worth of text for a knob nobody would write; the model's
+   KDoc says which case needs it.
+3. **The YAML `expand` block reads every key before any of them decides.** The obvious
+   `word("format")?.let { str("files")?.let { ... } }` short-circuits, and `Node.done()` then reports
+   `files` and `from` as unknown keys on top of the real error (seen in the red run: three errors, not one).
+   Every key is read first and the step is assembled after.
+4. **Size:** production 6 files (`ShuttleConfig.kt`, `ShuttleDsl.kt`, `Rules.kt`, `Processors.kt`,
+   `YamlLoader.kt`, `ShuttleHost.kt`), tests 6, one spec rule row, one spec decision row, one spec comment
+   and this entry.
+
+**Addendum, ticket 34's hand-off (done here after merging it in):** `ProcessingChain` gained a third
+constructor argument, `io: CoroutineDispatcher`, defaulting to an unbounded `Dispatchers.IO`;
+`ShuttleHost.chainFor` now passes the host's bounded view, so a chain's processor calls and its per-file
+digests sit inside the budget rule 9's arithmetic assumes rather than beside it. Nothing observes a
+private `chainFor`'s dispatcher cheaply through the host's seams - the chain is reached only through a
+`TransferPipeline` a boot builds - so the guarantee is stated in `chainFor`'s KDoc and here rather than
+asserted: `ProcessingChainTest` already covers what the argument does. Default tier after the merge: 287
+tests, 0 failures.
+
+**For the next ticket:** `shuttle try` (`Commands.kt`) still prints HTTP bodies only - progress 35's
+deviation 2, now the last place where a `nats` body is treated as a lesser kind: its rows are rendered by
+the notifier and judged by the rules, but not shown by validate mode.

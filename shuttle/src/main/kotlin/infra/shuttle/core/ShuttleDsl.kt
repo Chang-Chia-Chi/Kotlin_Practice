@@ -26,7 +26,7 @@ fun zip(): ProcessorSpec = ProcessorSpec.Zip
 fun unzip(maxEntries: Int = 10_000, maxBytes: Long = 10.gib): ProcessorSpec = ProcessorSpec.Unzip(maxEntries, maxBytes)
 fun extract(from: ExtractFrom, regex: String? = null, into: List<String>? = null, json: Map<String, String>? = null): ProcessorSpec =
     ProcessorSpec.Extract(from, regex, into, json)
-fun expand(format: String, files: String, from: StoreRef): ProcessorSpec = ProcessorSpec.Expand(format, files, from.name)
+fun expand(format: ExpandFormat, files: String, from: StoreRef, bucket: String? = null): ProcessorSpec = ProcessorSpec.Expand(format, files, from.name, bucket)
 fun verifyDigest(attribute: String): ProcessorSpec = ProcessorSpec.VerifyDigest(attribute)
 fun custom(name: String, config: Map<String, Any?> = emptyMap()): ProcessorSpec = ProcessorSpec.Custom(name, config)
 infix fun ProcessorSpec.then(next: ProcessorSpec): List<ProcessorSpec> = listOf(this, next)

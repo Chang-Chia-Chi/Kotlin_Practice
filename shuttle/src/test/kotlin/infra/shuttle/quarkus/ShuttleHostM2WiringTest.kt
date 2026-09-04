@@ -15,6 +15,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNotNull
+import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
@@ -23,6 +24,7 @@ import org.junit.jupiter.api.Assertions.fail
 import org.mockito.Mockito
 import sftp.connector.testkit.EmbeddedSftpServer
 import software.amazon.awssdk.services.s3.S3Client
+import software.amazon.awssdk.services.s3.model.GetObjectRequest
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.io.path.createDirectories
@@ -115,6 +117,32 @@ class ShuttleHostM2WiringTest {
         assertEquals(Path.of(System.getProperty("java.io.tmpdir"), "shuttle-staging", "minio"), staging)
     }
 
+    /**
+     * Ticket 17's hand-off, never picked up: `expand.from` may name a store other than the route's
+     * `fetch.store`, and the pipeline asks its `fetchers` map for that store. Nothing filled the map, so
+     * every such transfer died at run time with "no fetcher for store". One fetcher per divergent
+     * declaration, over that store's own client and the `expand.bucket` the declaration states.
+     */
+    @Test
+    fun a_route_expanding_from_another_S3_store_is_given_that_stores_fetcher() = runBlocking {
+        val archive = Mockito.mock(S3Client::class.java)
+        val minio = Mockito.mock(S3Client::class.java)
+        Mockito.`when`(archive.getObject(Mockito.any(GetObjectRequest::class.java))).thenAnswer { call ->
+            (call.arguments[0] as GetObjectRequest).let { throw IllegalStateException("get ${it.bucket()}/${it.key()}") }
+        }
+        val config = config(yaml(imagesExpandingFromArchive, channels = EVENTS))
+        val host = host(config) { if (it.name == "archive") archive else minio }
+
+        val fetchers = host.fetchersFor(config.routes.single())
+
+        assertEquals(setOf("archive"), fetchers.keys, "the route's own fetch store needs no entry; the divergent one does")
+        val fetched = assertThrows(IllegalStateException::class.java) {
+            runBlocking { fetchers.getValue("archive")("sets/one.json", files.resolve("child"), DigestAlgorithm.MD5) }
+        }
+        assertEquals("get cold-storage/sets/one.json", fetched.message, "the archive store's client, the expand's bucket")
+        Mockito.verifyNoInteractions(minio)
+    }
+
     /** Spec 12.3: the target connector is the host's, so shutdown leaves nothing of it on the partner. */
     @Test
     fun close_closes_the_target_connector_and_the_partner_is_left_with_no_session() = runBlocking {
@@ -144,6 +172,14 @@ class ShuttleHostM2WiringTest {
             "      fetch: { store: $store, ${bucket}path: /metadata.path }\n" +
             "      target: { store: partner, directory: /landing }\n"
 
+    /** The image-sets shape again, expanding out of a second S3 store the route does not fetch from. */
+    private val imagesExpandingFromArchive =
+        "    images:\n" +
+            "      source: { subscribe: { channel: events, subject: images.ready, onAck: ack } }\n" +
+            "      fetch: { store: minio, bucket: images, path: /metadata.path }\n" +
+            "      process: [ { expand: { format: json, files: \"/images[*].path\", from: archive, bucket: cold-storage } } ]\n" +
+            "      target: { store: partner, directory: /landing }\n"
+
     private fun yaml(routes: String, channels: String = "") =
         "shuttle:\n" +
             "  drainTimeout: 5s\n" +
@@ -151,11 +187,14 @@ class ShuttleHostM2WiringTest {
             "  supervision: { restartBackoff: { initial: 200ms, max: 15m }, readiness: all-routes-down }\n" +
             "  objectStores:\n" +
             sftpStore("vendor", vendorStaging) + sftpStore("partner", partnerStaging) +
-            "    minio:\n" +
-            "      s3: { endpoint: http://127.0.0.1:1, credentials: { accessKey: \${S3_KEY}, secretKey: \${S3_SECRET} }," +
-            " timeouts: { apiCall: 1s } }\n" +
+            s3Store("minio") + s3Store("archive") +
             (if (channels.isEmpty()) "" else "  channels:\n$channels") +
             "  routes:\n" + routes
+
+    private fun s3Store(name: String) =
+        "    $name:\n" +
+            "      s3: { endpoint: http://127.0.0.1:1, credentials: { accessKey: \${S3_KEY}, secretKey: \${S3_SECRET} }," +
+            " timeouts: { apiCall: 1s } }\n"
 
     private fun sftpStore(name: String, staging: Path) =
         "    $name:\n" +

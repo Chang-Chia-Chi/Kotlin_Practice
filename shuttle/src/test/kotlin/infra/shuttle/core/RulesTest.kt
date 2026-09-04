@@ -4,6 +4,7 @@ import infra.shuttle.core.ExtractFrom.FileName
 import infra.shuttle.core.Field.DIGEST
 import infra.shuttle.core.Field.TRANSFER_ID
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.nio.file.Path
@@ -64,6 +65,11 @@ class RulesTest {
     private fun violated(config: ShuttleConfig, beans: Map<String, Set<String>> = emptyMap()) =
         Rules.validate(config) { beans[it] }.violations.map { it.rule }.distinct()
 
+    private fun reasons(config: ShuttleConfig) = Rules.validate(config).violations.map { it.message }
+
+    /** A nats channel a route may subscribe to, for the cases that need a `fetch`. */
+    private val events: ShuttleBuilder.() -> Unit = { channels { nats("events") { url = "nats://events.internal:4222" } } }
+
     @Test
     fun rule11_every_staging_directory_exists_is_writable_local_and_unshared() =
         assertEquals(listOf(11), violated(config(vendor = { staging { dir = this@RulesTest.staging.resolve("missing") } })))
@@ -98,12 +104,37 @@ class RulesTest {
     fun rule14_every_built_in_processor_configuration_parses() =
         assertEquals(listOf(14), violated(config(vendorDrop = { process = listOf(extract(from = FileName, regex = "(?<orderNumber>\\d+")) })))
 
+    /** An unknown `format` is a load error, not a violation (ticket 38); what is left for rule 14 is where each one may be used. */
     @Test
-    fun rule14_expand_format_is_json_or_message_with_message_only_on_a_subscribed_route_and_files_a_pointer() {
-        assertEquals(listOf(14), violated(config(vendorDrop = { process = process then expand("lines", "/images[*].path", objectStore("minio")) })))
-        assertEquals(listOf(14), violated(config(vendorDrop = { process = process then expand("message", "/images[*].path", objectStore("minio")) })))
-        assertEquals(listOf(14), violated(config(vendorDrop = { process = process then expand("json", "images[*].path", objectStore("minio")) })))
-        assertEquals(emptyList<Int>(), violated(config(vendorDrop = { process = process then expand("json", "/images[*].path", objectStore("minio")) })))
+    fun rule14_expand_format_message_is_only_for_a_subscribed_route_and_files_is_a_pointer() {
+        assertEquals(listOf(14), violated(config(vendorDrop = { process = process then expand(ExpandFormat.Message, "/images[*].path", objectStore("minio"), bucket = "images") })))
+        assertEquals(listOf(14), violated(config(vendorDrop = { process = process then expand(ExpandFormat.Json, "images[*].path", objectStore("minio"), bucket = "images") })))
+        assertEquals(emptyList<Int>(), violated(config(vendorDrop = { process = process then expand(ExpandFormat.Json, "/images[*].path", objectStore("minio"), bucket = "images") })))
+    }
+
+    /**
+     * Ticket 38: the pipeline pulls an expand's children through the route's own fetch store, or through a
+     * fetcher the host builds for the store named. It can build one only for S3, and only with a bucket -
+     * an SFTP store the route does not fetch from offers no fetch by path at all, so the route could never run.
+     */
+    @Test
+    fun rule14_expand_from_a_store_the_route_does_not_fetch_from_is_S3_with_a_bucket() {
+        val fromMinio = ProcessorSpec.Expand(ExpandFormat.Json, "/images[*].path", "minio")
+        assertEquals(listOf(14), violated(config(vendorDrop = { process = process + fromMinio })))
+        assertEquals(listOf(14), violated(config(vendorDrop = { process = process + ProcessorSpec.Expand(ExpandFormat.Json, "/images[*].path", "vendor") })))
+        assertTrue(
+            reasons(config(vendorDrop = { process = process + ProcessorSpec.Expand(ExpandFormat.Json, "/images[*].path", "vendor") }))
+                .any { "vendor" in it && "fetch" in it },
+            "the SFTP case says why it can never work",
+        )
+        assertEquals(
+            emptyList<Int>(),
+            violated(config(more = events, vendorDrop = {
+                source = subscribe(channel("events"), "images.ready") { onAck = AckAction.Ack }
+                fetch(objectStore("minio"), "/metadata.path", bucket = "images")
+                process = process + fromMinio
+            })),
+        )
     }
 
     @Test
@@ -130,6 +161,17 @@ class RulesTest {
             violated(config(
                 more = { channels { http("upstream") { method = HttpMethod.POST; url = "https://upstream.internal/ack"; body = mapping { "orderNumber" fromAttribute "orderNo" } } } },
                 vendorDrop = { source = poll(objectStore("vendor"), directory = "/inbox") { onAck = callback(channel("upstream")) } },
+            )),
+        )
+
+    /** Spec 9.6: a body belongs to the channel, not to its kind, so the body rules read a nats body too (progress 35's deviation 1). */
+    @Test
+    fun rule17_reads_the_body_of_a_nats_channel() =
+        assertEquals(
+            listOf(17),
+            violated(config(
+                more = { channels { nats("events") { url = "nats://events.internal:4222"; subject = "files.stored"; body = mapping { "orderNumber" fromAttribute "orderNo" } } } },
+                vendorDrop = { notify(on = Acked, channel("events")) },
             )),
         )
 

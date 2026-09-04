@@ -98,12 +98,13 @@ object Rules {
             }
         }
 
-        /** Rules 7, 15 (providers), 16, 18, 19, 20, 21. */
+        /** Rules 7, 15 (providers), 18, 19, 20, 21. The body rules read every channel's body, whatever its kind (spec 9.6). */
         fun channel(channel: Channel) {
-            if (channel !is HttpChannel) return
-            if (channel.policy.maxAttempts < 1) fail(7, "channel ${channel.name}: policy.maxAttempts must be >= 1")
-            if (!channel.policy.backoff.initial.isPositive()) fail(7, "channel ${channel.name}: policy.backoff.initial must be > 0")
-            if ((channel.response.success intersect channel.response.retry).isNotEmpty()) fail(20, "channel ${channel.name}: success and retry overlap")
+            if (channel is HttpChannel) {
+                if (channel.policy.maxAttempts < 1) fail(7, "channel ${channel.name}: policy.maxAttempts must be >= 1")
+                if (!channel.policy.backoff.initial.isPositive()) fail(7, "channel ${channel.name}: policy.backoff.initial must be > 0")
+                if ((channel.response.success intersect channel.response.retry).isNotEmpty()) fail(20, "channel ${channel.name}: success and retry overlap")
+            }
             MappingRenderer.check(channel.body, declaredAttributes = null) { beans(it) != null }
                 .forEach { fail(it.rule, "channel ${channel.name} ${it.message}") }
         }
@@ -172,10 +173,10 @@ object Rules {
             route.target?.let { target ->
                 listOfNotNull(target.key, target.directory).forEach { pattern(13, "route $name target", it, placeholders) }
             }
-            route.process.forEach { processor(name, it, source is Source.Subscribe, placeholders) }
+            route.process.forEach { processor(route, it, source is Source.Subscribe, placeholders) }
             val callback = (source?.onAck as? AckAction.Callback)?.channel
             val algorithm = route.digest ?: config.digest
-            (route.notify.map { it.channel } + listOfNotNull(callback)).mapNotNull { channels[it] as? HttpChannel }.distinct().forEach { channel ->
+            (route.notify.map { it.channel } + listOfNotNull(callback)).mapNotNull { channels[it] }.distinct().forEach { channel ->
                 MappingRenderer.check(channel.body, declared) { true }.filter { it.rule == 17 }
                     .forEach { fail(17, "route $name: channel ${channel.name} ${it.message}") }
                 // Rule 26 (D49): one digest per route, so a row asking for another algorithm renders missing for ever.
@@ -210,8 +211,8 @@ object Rules {
         }
 
         /** Rules 14 and 15 (custom processors). */
-        private fun processor(route: String, spec: ProcessorSpec, subscribed: Boolean, placeholders: Set<String>) {
-            val at = "route $route processor ${spec::class.simpleName}"
+        private fun processor(route: Route, spec: ProcessorSpec, subscribed: Boolean, placeholders: Set<String>) {
+            val at = "route ${route.name} processor ${spec::class.simpleName}"
             when (spec) {
                 is ProcessorSpec.Rename -> pattern(14, at, spec.pattern, placeholders)
                 is ProcessorSpec.Extract -> {
@@ -228,9 +229,19 @@ object Rules {
                     if (spec.regex == null && spec.json == null) fail(14, "$at: neither regex nor json")
                 }
                 is ProcessorSpec.Expand -> {
-                    if (spec.from !in stores) fail(14, "$at: from ${spec.from} names no object store")
-                    if (spec.format !in EXPAND_FORMATS) fail(14, "$at: format ${spec.format} is not one of $EXPAND_FORMATS")
-                    if (spec.format == "message" && !subscribed) fail(14, "$at: format message on a route that does not subscribe")
+                    // The children come through the route's own fetch store, or through a fetcher the host builds for the
+                    // store named: it can build one only for S3, and only with a bucket. A polled route has no fetch store
+                    // at all - its source's fetcher knows the files that poll handed over, not a path out of a metadata file.
+                    when (val from = stores[spec.from]) {
+                        null -> fail(14, "$at: from ${spec.from} names no object store")
+                        is S3Store -> if (spec.from != route.fetch?.store && spec.bucket == null) {
+                            fail(14, "$at: from ${spec.from} is not the route's fetch store and states no bucket")
+                        }
+                        is SftpStore -> if (spec.from != route.fetch?.store) {
+                            fail(14, "$at: from ${from.name} is an SFTP store this route does not fetch from; only a fetch store offers a fetch by path")
+                        }
+                    }
+                    if (spec.format == ExpandFormat.Message && !subscribed) fail(14, "$at: format message on a route that does not subscribe")
                     val (head, tail) = expandPointer(spec.files)
                     if (spec.files.isBlank() || !head.isJsonPointer() || !tail.isJsonPointer()) fail(14, "$at: files ${spec.files} is not a JSON pointer with one optional [*]")
                 }
@@ -268,7 +279,6 @@ object Rules {
 
         private fun <T> List<T>.duplicates() = groupingBy { it }.eachCount().filterValues { it > 1 }.keys
         private fun String.isJsonPointer() = isEmpty() || startsWith("/")
-        private val EXPAND_FORMATS = setOf("json", "message")
     }
 
     private val PLACEHOLDER = Regex("""\{([^}]*)}""")

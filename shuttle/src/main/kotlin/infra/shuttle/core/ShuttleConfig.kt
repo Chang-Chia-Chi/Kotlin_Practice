@@ -170,6 +170,9 @@ data class Target(val store: String, val bucket: String? = null, val directory: 
 data class Notify(val on: DeliveryMoment, val channel: String)
 enum class ExtractFrom { FileName, SourcePath, Content, Message }
 
+/** Spec 6.3 `expand`: what the listed paths are read out of. The YAML and DSL words are `json` and `message`. */
+enum class ExpandFormat { Json, Message }
+
 /** Spec 6.3: the chain as data. `produces` is what rule 17 and 22 count as declared attributes. */
 sealed interface ProcessorSpec {
     val produces: Set<String> get() = emptySet()
@@ -192,7 +195,12 @@ sealed interface ProcessorSpec {
             val NAMED_GROUP = Regex("""\(\?<([A-Za-z][A-Za-z0-9]*)>""")
         }
     }
-    data class Expand(val format: String, val files: String, val from: String) : ProcessorSpec
+    /**
+     * Spec 4.5. [from] is the store the listed children are pulled from: the route's own `fetch.store`,
+     * which needs nothing more, or another S3 store, whose [bucket] the host's fetcher needs the way
+     * `fetch.bucket` is needed - a store declaration is an endpoint, not a bucket (rule 14, D53).
+     */
+    data class Expand(val format: ExpandFormat, val files: String, val from: String, val bucket: String? = null) : ProcessorSpec
     data class VerifyDigest(val attribute: String) : ProcessorSpec
     data class Custom(val name: String, val config: Map<String, Any?> = emptyMap()) : ProcessorSpec
 }
