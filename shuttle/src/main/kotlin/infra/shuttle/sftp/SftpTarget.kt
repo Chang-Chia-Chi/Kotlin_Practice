@@ -2,6 +2,7 @@ package infra.shuttle.sftp
 
 import infra.shuttle.core.ObjectStoreTarget
 import infra.shuttle.core.TargetRef
+import infra.shuttle.core.keyLeavesTarget
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.withContext
 import org.jboss.logging.Logger
@@ -65,6 +66,10 @@ class SftpTarget(
      * partner never asked for.
      */
     override suspend fun store(key: String, file: Path, metadata: Map<String, String>): TargetRef = withContext(io) {
+        // rule 13 on the resolved key: pathOf concatenates and the server resolves, so a `..` segment
+        // would write outside the partner's folder. The pipeline rejects such a key first (ticket 25);
+        // this is the last place before the write, and the only one that knows the write is a path.
+        require(!keyLeavesTarget(key)) { "$key leaves the target directory $root" }
         val size = Files.size(file)
         val remote = pathOf(key)
         val partial = "$remote$PARTIAL"

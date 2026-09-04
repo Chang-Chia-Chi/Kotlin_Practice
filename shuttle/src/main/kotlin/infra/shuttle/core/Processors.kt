@@ -55,6 +55,15 @@ fun expandPattern(pattern: String, name: String, sourceName: String, attributes:
         }
     }
 
+/**
+ * Rule 13 at run time. The rule judges the *pattern* at boot, and `{name}` is the one part of a key
+ * that the pattern does not carry: an unzip entry named `../../escaped.txt`, a rename, or an attribute
+ * holding such a segment puts it into the resolved key instead. A `..` segment names a path outside the
+ * target directory, which a file system target would happily write to (an S3 key is opaque, so it is a
+ * no-op there).
+ */
+fun keyLeavesTarget(key: String): Boolean = key.split('/').any { it == ".." }
+
 private val TOKEN = Regex("""\{([^}]+)}""")
 private val DATE = Regex("[yMdHmsS]+")
 
