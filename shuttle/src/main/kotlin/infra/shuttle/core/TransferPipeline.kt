@@ -3,9 +3,11 @@ package infra.shuttle.core
 import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.Tags
 import kotlinx.coroutines.async
+import kotlinx.coroutines.slf4j.MDCContext
 import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.withContext
 import org.jboss.logging.Logger
 import java.nio.file.Files
 import java.nio.file.Path
@@ -65,12 +67,31 @@ class TransferPipeline(
 
         suspend fun execute() {
             try {
-                decide()
+                tagged(null) { decide() }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                failed(e)
+                tagged(row?.id) { failed(e) }
             }
+        }
+
+        /**
+         * Spec 3.2: everything [block] logs, on any thread the coroutine hops to and through every adapter it
+         * calls, carries the route and - once a row is being driven - the transfer id, and nothing outside it
+         * does. `MDCContext` is a `ThreadContextElement`, so it rides the context rather than the thread.
+         */
+        private suspend fun <T> tagged(id: TransferId?, block: suspend () -> T): T {
+            val mdc = buildMap {
+                put(Mdc.ROUTE, route.name)
+                id?.let { put(Mdc.TRANSFER_ID, it.value.toString()) }
+            }
+            return withContext(MDCContext(mdc)) { block() }
+        }
+
+        /** From here the run is driving [transfer]: an error is charged to it and its id is on every line. */
+        private suspend fun driving(transfer: Transfer, block: suspend () -> Unit) {
+            row = transfer
+            tagged(transfer.id, block)
         }
 
         /** Stage 0, the table of spec 4.3. */
@@ -79,15 +100,14 @@ class TransferPipeline(
             when (existing?.state) {
                 TransferState.REJECTED, TransferState.FAILED -> return event.nack(false)
                 TransferState.ACKED, TransferState.DONE -> return finished(existing)
-                TransferState.STORED -> { row = existing; if (verified(existing)) return ack(existing) }
+                TransferState.STORED -> return driving(existing) { if (verified(existing)) ack(existing) else fullRun(existing) }
                 else -> Unit
             }
             fullRun(existing ?: store.seen(event.identity, kind))
         }
 
         /** Stages 1 to 4 on [transfer]. */
-        private suspend fun fullRun(transfer: Transfer) {
-            row = transfer
+        private suspend fun fullRun(transfer: Transfer) = driving(transfer) {
             withFetched(transfer) { staged, dir -> resume(transfer, staged, dir) }
         }
 
@@ -100,21 +120,20 @@ class TransferPipeline(
          * (spec 5.3), so the file stays where it is, and the trigger's place for it comes free at once
          * instead of being guessed back later (ticket 21).
          */
-        private suspend fun finished(transfer: Transfer) {
-            if (!polled) return if (verified(transfer)) reack(transfer) else fullRun(transfer)
+        private suspend fun finished(transfer: Transfer) = tagged(transfer.id) {
+            if (!polled) return@tagged if (verified(transfer)) reack(transfer) else fullRun(transfer)
             val since = java.time.Duration.between(transfer.updatedAt, clock.instant()).toKotlinDuration()
-            if (route.recheckFinished.isPositive() && since < route.recheckFinished) return event.nack(true)
+            if (route.recheckFinished.isPositive() && since < route.recheckFinished) return@tagged event.nack(true)
             withFetched(transfer) { staged, dir ->
                 when {
                     staged.digest != transfer.sourceDigest -> {
                         val next = store.supersede(transfer.id, kind)
                         registry.counter(ShuttleMetrics.SUPERSEDES, "route", route.name).increment()
                         log.infov("route {0}: {1} came back with new content; revision {2} supersedes transfer {3}", route.name, event.identity.sourceName, next.identity.revision, transfer.id.value)
-                        row = next
-                        resume(next, staged, dir)
+                        driving(next) { resume(next, staged, dir) }
                     }
                     verified(transfer) -> reack(transfer)
-                    else -> { row = transfer; resume(transfer, staged, dir) }
+                    else -> driving(transfer) { resume(transfer, staged, dir) }
                 }
             }
         }

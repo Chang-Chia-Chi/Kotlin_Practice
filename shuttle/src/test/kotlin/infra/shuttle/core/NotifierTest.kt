@@ -2,6 +2,7 @@ package infra.shuttle.core
 
 import infra.shuttle.testkit.ClockFixture
 import infra.shuttle.testkit.InMemoryStateStore
+import infra.shuttle.testkit.LogCapture
 import infra.shuttle.testkit.RecordingChannel
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import kotlinx.coroutines.test.TestScope
@@ -330,6 +331,22 @@ class NotifierTest {
         assertEquals(DeliveryState.DELIVERED, store.outbox.single().state, "the sweep after sweepEvery delivers")
         assertEquals(1, channel.events.size)
         assertTrue(job.isActive)
+    }
+
+    @Test
+    fun SPEC4_a_delivery_that_could_not_be_recorded_is_logged_with_the_transfer_id_route_and_channel_in_the_MDC() = runTest {
+        val channel = RecordingChannel("downstream", noJitter, ok)
+        val t = ackedTransfer("a.csv", listOf(downstream))
+        val logs = LogCapture()
+        logs.use {
+            backgroundScope.launch { notifier(channel, store = FailsOnce(store, "delivered")).run() }
+            runCurrent()
+        }
+
+        val warn = logs.warnings().single { it.message.contains("the row stays PENDING") }
+        assertEquals(t.id.value.toString(), warn.mdc[Mdc.TRANSFER_ID], warn.message)
+        assertEquals("drop", warn.mdc[Mdc.ROUTE])
+        assertEquals("downstream", warn.mdc[Mdc.CHANNEL])
     }
 
     @Test

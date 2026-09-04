@@ -12,13 +12,13 @@ outside those scopes. Review findings Spec 4 and Standards 1.
 
 **Nature:** cross-cutting; coroutine context propagation
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `TransferPipelineTest`: a test with a capturing SLF4J appender (or the JBoss log manager's equivalent already on the test classpath) asserts that a WARN emitted by a stage failure inside `run` carries `transferId` and `route`, and that a line logged after `run` returns carries neither; red before the fix
-- [ ] `NotifierTest`: the same for a delivery failure WARN with `transferId`, `route` and `channel`
-- [ ] Propagation uses `kotlinx-coroutines-slf4j`'s `MDCContext` (in `~/.m2`, pick the version the coroutines BOM in the reactor pins; the pom's `dependencyManagement` decides) wrapped once at the pipeline's entry and once around a delivery, not per log call; blocking calls on the bounded IO dispatcher inherit it
-- [ ] `ArchitectureTest` gains a rule or the existing "no logger in Context classes" rule is kept; `sftp-core` and the connector are untouched
-- [ ] Progress entry appended
+- [x] `TransferPipelineTest`: a test with a capturing SLF4J appender (or the JBoss log manager's equivalent already on the test classpath) asserts that a WARN emitted by a stage failure inside `run` carries `transferId` and `route`, and that a line logged after `run` returns carries neither; red before the fix
+- [x] `NotifierTest`: the same for a delivery failure WARN with `transferId`, `route` and `channel`
+- [x] Propagation uses `kotlinx-coroutines-slf4j`'s `MDCContext` (in `~/.m2`, pick the version the coroutines BOM in the reactor pins; the pom's `dependencyManagement` decides) wrapped once at the pipeline's entry and once around a delivery, not per log call; blocking calls on the bounded IO dispatcher inherit it
+- [x] `ArchitectureTest` gains a rule or the existing "no logger in Context classes" rule is kept; `sftp-core` and the connector are untouched
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket; 200-600 lines including tests; no Thread.sleep;
 invariant tests named `I<n>_<description>`, scenario tests by their `S<n>` id, validation tests by `rule<n>_`,

@@ -88,6 +88,10 @@ class ArchitectureTest {
             .check(all)
     }
 
+    /**
+     * Spec 3.2. The first rule is also what keeps `MDCContext` honest: it is constructed with an explicit map,
+     * never from `org.slf4j.MDC.getCopyOfContextMap()`, so `core` still names one logging API.
+     */
     @Test
     fun `logging is jboss logging directly and no context object carries a logger`() {
         noClasses().that().resideInAPackage("infra.shuttle..")

@@ -3496,3 +3496,72 @@ Final run: `-Dtest=RouteRunnerTest` 11 tests, 0 failures; default tier 273 tests
 read `Source.interval` rather than matching on the source kind again. If a subscribed route ever
 gains a cheaper heartbeat than `inProgressEvery`, the ticker's period and the default window are the
 same expression - change `Source.interval` and both follow.
+
+---
+
+## 33: Every log line inside a transfer carries its transfer id and route
+
+**Built:** spec 3.2's MDC sentence, which nothing implemented. `object Mdc` in `Transfer.kt` names the
+three keys (`transferId`, `route`, `channel`). `TransferPipeline.Run` gains `tagged(id, block)`, one
+`withContext(MDCContext(...))`, and `driving(transfer, block)`, which is `row = transfer` plus a `tagged`
+on that row's id: `execute` tags the whole run with the route and re-tags the failure path with the row's
+id, `fullRun`, `decide`'s STORED branch and `finished`'s two resume branches drive through `driving`, and
+`finished` itself is tagged so the re-ack and the deferral lines carry the id too. `Notifier.record` reads
+the delivery's transfer row once, wraps the delivery in `MDCContext(transferId, channel, route)` and hands
+the row on to `deliver`. `kotlinx-coroutines-slf4j` 1.10.1 joins the pom.
+
+**Concepts named:**
+
+- **The MDC rides the coroutine context, not the thread.** `MDCContext` is a `ThreadContextElement`: it
+  is installed on whatever thread resumes the coroutine and removed when it parks, so the keys survive
+  every suspension and every dispatcher hop, the bounded IO view of spec 3.3 included. That is why two
+  wraps per run are enough where a `MDC.put` per log call would be needed otherwise, and why the keys are
+  provably gone the moment `run` returns - `restoreThreadContext` puts back what was there before.
+- **The id enters the MDC where the row becomes known, not where the row becomes the one charged.**
+  `driving` does both; `tagged` does only the first. `finished` uses `tagged`, so an ACKED row that comes
+  back is named on every line it logs while `row` stays null and an error there still counts no attempt
+  against it (spec 4.3). Conflating the two would have quietly changed which row a failure is charged to.
+- **`core` still names one logging API.** `MDCContext` is always constructed with an explicit map, never
+  from `MDC.getCopyOfContextMap()`, so no class in the module references `org.slf4j`. `ArchitectureTest`'s
+  existing "logging is jboss logging directly" rule is what holds that, and its KDoc now says so. The map
+  reaches the JBoss LogManager's MDC through `slf4j-jboss-logmanager`, which the Quarkus runtime already
+  puts on the classpath and which surefire's `java.util.logging.manager` makes the backend under test.
+- **The appender is the real one.** `testkit/LogCapture` adds a `java.util.logging.Handler` to the
+  `infra.shuttle` logger and reads `ExtLogRecord.getMdcCopy()` off the records the production loggers
+  actually emit. No mock, no second backend, no assertion on a formatter's output.
+
+**Tests:** `TransferPipelineTest.SPEC4_a_stage_failure_is_logged_with_the_transfer_id_and_the_route_in_the_MDC_and_neither_key_survives_the_run`
+(red first: the WARN was captured with an empty MDC), `SPEC4_a_line_a_stage_logs_from_the_blocking_dispatcher_carries_the_same_transfer_id_and_route`
+(a processor that logs from `Dispatchers.IO`), and `NotifierTest.SPEC4_a_delivery_that_could_not_be_recorded_is_logged_with_the_transfer_id_route_and_channel_in_the_MDC`
+(red first, on the existing `FailsOnce(store, "delivered")` fixture).
+
+**Final run counts (surefire).** `-Dtest=TransferPipelineTest`: 35 tests, 0 failures, 0 errors.
+`-Dtest=NotifierTest`: 18 tests, 0 failures, 0 errors. Default tier (`mvn -B -o -q -pl shuttle test`):
+30 classes, **274 tests, 0 failures, 0 errors** - ticket 32's 271 plus the three above.
+
+**Deviations:**
+
+1. **`kotlinx-coroutines-slf4j` is pinned in `shuttle`'s own `dependencyManagement`, not taken from the
+   Quarkus BOM.** There is no coroutines BOM in the reactor: `coroutines.version` is a property (1.10.1)
+   and `kotlinx-coroutines-core` is already pinned from it before the BOM import for exactly this reason.
+   Left to the BOM, this one artifact would have run a different coroutines version than `core` does.
+2. **`Notifier.record` reads the transfer row, `deliver` no longer does.** The route is on the transfer,
+   and the WARN that says a delivery could not be recorded is thrown from the transitions *after* the
+   render, so the route has to be in the MDC before that `try`. The row is read once and carried into
+   `deliver` as a `Result`, whose `getOrThrow()` sits where the old `store.byId` sat: a store failure is
+   still a `Retry` outcome and not a rejection, and nothing else about the outcome changes. The one
+   behaviour difference is that a row naming a channel that does not exist now costs one read it did not
+   before; that path ends in `Reject` either way.
+3. **`decide`'s STORED branch is an explicit `if/else` instead of a fall-through.** `row = existing; if
+   (verified) return ack(existing)` falling through to `fullRun(existing)` became
+   `driving(existing) { if (verified(existing)) ack(existing) else fullRun(existing) }` - the same two
+   outcomes, with `verified`'s own failures now inside the tagged scope.
+4. **A third test beyond the two the checklist names.** The dispatcher-hop case is the one thing that
+   could silently regress if someone swapped `MDCContext` for a plain `MDC.put`, so it is asserted rather
+   than reasoned about.
+5. **`ArchitectureTest` gained no rule**, which the checklist allows. Its existing ban on `org.slf4j..`
+   already fails the build if `MDCContext` is ever constructed from the ambient MDC; the KDoc says so now.
+6. **No spec edit.** Spec 3.2 lists `core`'s dependencies as "coroutines"; `kotlinx-coroutines-slf4j` is
+   part of that release train and the sentence it implements is already in 3.2.
+7. **Size:** production +68 / -17 across four files (the pom's 12 lines included); tests +62 plus
+   `LogCapture.kt` at 53; this entry.

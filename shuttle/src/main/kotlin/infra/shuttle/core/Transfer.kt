@@ -68,5 +68,15 @@ object TargetMetadata {
     const val TRANSFER_ID = "transfer-id"
 }
 
+/**
+ * Spec 3.2: the logging MDC keys the pipeline sets around a run and the notifier around a delivery, so every
+ * line either one emits - the adapters called underneath included - can be grepped by transfer or by route.
+ */
+object Mdc {
+    const val TRANSFER_ID = "transferId"
+    const val ROUTE = "route"
+    const val CHANNEL = "channel"
+}
+
 /** The row-side facts of a staged object: everything in spec 6.1 except the local path. */
 data class StagedSummary(val name: String, val size: Long, val mtime: Instant, val digest: Digest, val contentType: String?)

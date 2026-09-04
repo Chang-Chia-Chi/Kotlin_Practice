@@ -7,7 +7,9 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.slf4j.MDCContext
 import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.jboss.logging.Logger
 import java.time.Clock
@@ -99,18 +101,38 @@ class Notifier(
         return due.size == config.batch
     }
 
-    /** A transition the state store fails leaves the row PENDING for a later sweep (spec 11); the worker ends, the loop does not. */
+    /**
+     * A transition the state store fails leaves the row PENDING for a later sweep (spec 11); the worker ends,
+     * the loop does not. Spec 3.2: the whole delivery, this last-resort log included, runs with the transfer,
+     * its route and the channel in the MDC. The route lives on the transfer row, which [deliver] has to read
+     * anyway, so it is read once here; a store failure rides along and is rethrown inside [deliver], where it
+     * is still a `Retry` outcome and not a rejection.
+     */
     private suspend fun record(row: Delivery) {
-        try {
-            deliver(row)
+        val transfer = try {
+            Result.success(store.byId(row.transferId))
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            log.warnv(e, "recording delivery {0} of transfer {1} failed; the row stays PENDING", row.id.value, row.transferId.value)
+            Result.failure(e)
+        }
+        val mdc = buildMap {
+            put(Mdc.TRANSFER_ID, row.transferId.value.toString())
+            put(Mdc.CHANNEL, row.channel.value)
+            transfer.getOrNull()?.let { put(Mdc.ROUTE, it.identity.route.value) }
+        }
+        withContext(MDCContext(mdc)) {
+            try {
+                deliver(row, transfer)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                log.warnv(e, "recording delivery {0} of transfer {1} failed; the row stays PENDING", row.id.value, row.transferId.value)
+            }
         }
     }
 
-    private suspend fun deliver(row: Delivery) {
+    private suspend fun deliver(row: Delivery, loaded: Result<Transfer?>) {
         val attempt = row.attempts + 1
         val started = clock.instant()
         val channel = channels[row.channel]
@@ -118,7 +140,7 @@ class Notifier(
             DeliveryOutcome.Reject(null, "no channel named ${row.channel.value}")
         } else {
             try {
-                val transfer = store.byId(row.transferId) ?: throw MappingFailure("", "transfer ${row.transferId.value} not found")
+                val transfer = loaded.getOrThrow() ?: throw MappingFailure("", "transfer ${row.transferId.value} not found")
                 val body = renderer.render(bodies[row.channel] ?: MappingTable(emptyList()), transfer, row.moment, attempt)
                 channel.deliver(DeliveryEvent(row.transferId, row.moment, row.channel, attempt, body))
             } catch (e: CancellationException) {
