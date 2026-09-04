@@ -262,6 +262,10 @@ At `PollCompleted` with a complete listing, meaning it ended before the connecto
 `maxFilesPerPoll`: every transfer of that route in STORED whose `updated_at` is older than the
 poll's start and whose identity was not listed transitions to ACKED with its deliveries created,
 through the same function stage 4 uses. A truncated listing skips reconciliation and counts it.
+On SFTP, `PollCompleted`'s `listed` is the connector's own `inFlight` - every file out with the
+route at the instant the tick ended, whichever tick handed it over - plus what this tick emitted,
+and `truncated` is the connector's flag; the poll source keeps no copy of the in-flight set and
+reads no cap of its own (ticket 31).
 Subscription sources have no listing and need no reconciliation: their ledger write precedes the
 broker ack (Sec 4.4), so the gap that reconciliation repairs for polled files cannot leave a
 subscribed row behind.
@@ -1018,7 +1022,7 @@ poll are appeals to the connector's spec.
 | ID | Decision | Rationale |
 |---|---|---|
 | D1 | The application owns one durable state store in Oracle; the connector's `SeenRepository` is unused | The connector filters before emitting; a transfer recorded as uploaded but not yet acked would be filtered out and never acked. Two ledgers are two truths |
-| D2 | A polled file's identity is store, directory, name, size, mtime and a revision; a message's is channel, subject, message id | Matches the connector's in-flight key; a re-drop with a new mtime is a new object; a re-drop with the same mtime and different content is a new revision, found by digest after one download, because re-acking it would move corrected content aside unread (v0.3) |
+| D2 | A polled file's identity is store, directory, name, size, mtime and a revision; a message's is channel, subject, message id | Matches the connector's in-flight identity; a re-drop with a new mtime is a new object; a re-drop with the same mtime and different content is a new revision, found by digest after one download, because re-acking it would move corrected content aside unread (v0.3). The connector's in-flight *exclusivity* is the path (its D48): a re-drop with a new mtime while the first is being worked is handed over on a later poll by the connector, once the first is settled, and is refused by nothing in this module (ticket 31) |
 | D3 | Two tables, no attempt table, no payload column; attempts trace by log | One transfer has many deliveries; an attempt history nobody asked to query is a third table |
 | D4 | AWS SDK v2 synchronous, Apache client, checksums when-required, path style | Sequential per-object work gains nothing from async; SDK checksums can fail against older MinIO |
 | D5 | Key is a pure function of the object's name; the S3 target overwrites and never deletes; the bucket's lifecycle rule expires non-current versions | Versioning is bucket-wide; a deterministic key makes retry an overwrite; a GET by key already returns only the current version, so the v0.2 prune bought nothing except the power to delete a copy an earlier transfer had delivered and announced (v0.3) |

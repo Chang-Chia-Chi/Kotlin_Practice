@@ -194,7 +194,7 @@ class SftpPollSourceTest {
             // before a watch existed, and what is under test is a watch that ends on one.
             val config = connectorConfig(server, poll) { "not the password" }
             val pool = SftpPool(JschTransport(config, registry), config, registry)
-            val source = SftpPollSource(SftpSource(SftpClient(pool, config, registry), config, registry), config, RouteName(ROUTE), poll, clock)
+            val source = SftpPollSource(SftpSource(SftpClient(pool, config, registry), config, registry), RouteName(ROUTE), poll, clock)
 
             val events = mutableListOf<RouteEvent>()
             withTimeout(TIMEOUT) { source.events().collect { events += it } }
@@ -209,6 +209,8 @@ class SftpPollSourceTest {
      * Spec 4.6: reconciliation acks every STORED row a complete listing did not name, so a file
      * between its store and its move - in flight, and for that reason not handed over again - has
      * to be in `listed` all the same, or its ledger would say acked while the move had not happened.
+     * `listed` is the connector's own `inFlight` plus what the tick emitted; nothing here keeps a
+     * copy of that set (ticket 31).
      */
     @Test
     fun a_poll_lists_every_identity_still_in_flight_from_an_earlier_poll() = runBlocking {
@@ -242,9 +244,9 @@ class SftpPollSourceTest {
     }
 
     /**
-     * Spec 4.6: a truncated listing skips the repair. The connector reports counts rather than a
-     * flag, so the reading is `seen >= maxFilesPerPoll`: at the cap, the listing stopped where the
-     * cap is and nothing proves the directory held no more.
+     * Spec 4.6: a truncated listing skips the repair. `truncated` is the connector's own flag: its
+     * listing stops at the cap without looking past it, so a directory holding exactly the cap
+     * reads as truncated, and nothing here reads `maxFilesPerPoll` to guess (ticket 31).
      */
     @Test
     fun a_listing_that_reaches_maxFilesPerPoll_completes_truncated() = runBlocking {
@@ -291,13 +293,14 @@ class SftpPollSourceTest {
     }
 
     /**
-     * A route that ends - cancelled, or restarted after `RouteDown` - gives every file it was
-     * holding back. Only the tick that handed a file over withdraws it, so without this the file
-     * below would stay in the connector's in-flight set for the life of the process and no later
-     * poll, on this route or its restart, would ever list it again.
+     * A route that ends - cancelled, or restarted after `RouteDown` - is a watch that ends, and the
+     * connector gives back every file a watch handed over and never had an answer for (connector
+     * ticket 19). The source nacks nothing of its own when its flow ends (ticket 31): the file
+     * below was fetched from an earlier tick and never answered, and it is the connector's
+     * give-back, counted as `cancelled`, that lets the next watch list it again.
      */
     @Test
-    fun a_run_that_ends_gives_back_every_file_it_was_holding_so_the_next_run_lists_them() = runBlocking {
+    fun a_watch_that_ends_gives_back_every_file_it_handed_over_so_the_next_watch_lists_them() = runBlocking {
         val file = seed("first.csv", CONTENT)
 
         withConnector(AckAction.Move("temp/")) { source ->
@@ -305,15 +308,18 @@ class SftpPollSourceTest {
             val collecting = launch {
                 source.events().collect { event ->
                     // Fetched and never answered, so the D40 sweep leaves it alone: the only thing
-                    // that can give this one back is the end of the run.
+                    // that can give this one back is the end of the watch.
                     if (event is RouteEvent.Seen) source.fetcher(event.source.path, routeStage.resolve("copy"), DigestAlgorithm.MD5)
                     if (event is RouteEvent.PollCompleted) completions.send(event)
                 }
             }
             withTimeout(TIMEOUT) { completions.receive() }
-            withTimeout(TIMEOUT) { completions.receive() }
+            val second = withTimeout(TIMEOUT) { completions.receive() }
+            assertEquals(setOf(identityOf(file)), second.listed, "still out with the route on the second poll")
             collecting.cancelAndJoin()
 
+            assertEquals(0.0, registry.get("sftp_inflight").gauge().value(), "the connector gave it back the moment the watch ended")
+            assertEquals(1.0, registry.get("sftp_ack_total").tag("outcome", "cancelled").counter().count(), "as a watch-ended give-back, not a nack")
             val again = withTimeout(TIMEOUT) { source.events().filterIsInstance<RouteEvent.Seen>().first() }
             assertEquals(identityOf(file), again.identity)
         }
@@ -358,13 +364,15 @@ class SftpPollSourceTest {
     }
 
     /**
-     * The other way one path can be handed over twice: the same name uploaded again, with a new
-     * size and mtime, while the first upload is still being worked. The connector sees a different
-     * file and hands it over; the source gives it straight back rather than letting a pipeline
-     * that is fetching or acking the first act on the second.
+     * D2 as amended by ticket 31: the same name uploaded again, with a new size and mtime, while
+     * the first upload is still being worked, is a different identity but the same path, and the
+     * connector's in-flight set is path-exclusive (connector D48): the newer copy is not handed
+     * over until the first is settled, so a pipeline that is fetching or acking the first never
+     * meets the second. The source refuses nothing by hand; what is asserted is the connector's
+     * own gauge and the events it did not send.
      */
     @Test
-    fun a_path_handed_over_again_while_its_first_file_is_still_in_flight_is_given_back_at_once() = runBlocking {
+    fun a_path_uploaded_again_while_its_first_file_is_still_in_flight_is_not_handed_over_until_the_first_is_settled() = runBlocking {
         val file = seed("first.csv", CONTENT)
         val hook = HookDriver().apply { pauseAt(HookPoint.afterFetch) }
 
@@ -395,6 +403,7 @@ class SftpPollSourceTest {
             collecting.cancelAndJoin()
             assertEquals(first.identity, store.transfers.single().identity)
             assertEquals(TransferState.DONE, store.transfers.single().state)
+            assertTrue(seens.isEmpty, "the first's move took the path with it, so the newer copy was never handed over at all")
             assertEquals(0.0, registry.get("sftp_inflight").gauge().value(), "everything given back once the run is over")
         }
     }
@@ -456,7 +465,7 @@ class SftpPollSourceTest {
                 else cappedConnectorConfig(server, poll, maxFilesPerPoll)
             val connector = SftpConnector.start(config, meterRegistry = registry)
             try {
-                coroutineScope { block(SftpPollSource(connector.source, config, RouteName(ROUTE), poll, clock)) }
+                coroutineScope { block(SftpPollSource(connector.source, RouteName(ROUTE), poll, clock)) }
             } finally {
                 connector.close()
             }

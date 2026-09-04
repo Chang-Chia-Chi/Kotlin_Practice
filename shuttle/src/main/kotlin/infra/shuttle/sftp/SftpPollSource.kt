@@ -16,12 +16,9 @@ import infra.shuttle.core.SourceKind
 import infra.shuttle.core.SourceView
 import infra.shuttle.core.StagedObject
 import infra.shuttle.core.of
-import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.flow
-import kotlinx.coroutines.withContext
-import org.jboss.logging.Logger
 import sftp.connector.client.LocalFile
 import sftp.connector.client.SftpClient
 import sftp.connector.config.HostKeyPolicy
@@ -49,19 +46,18 @@ import sftp.connector.config.Digest as ConnectorDigest
  * `RouteEvent` flow, with the connector's per-file ack and nack passed through and its `download`
  * as the route's [Fetcher].
  *
- * The one thing this holds that the connector does not is the map from a file's remote path to the
- * `FileSeen` that carries it, which serves two purposes at once. The fetcher finds the event to
- * download by the path the pipeline hands it (`event.source.path`), and [RouteEvent.PollCompleted]'s
- * `listed` is the identities this poll emitted **plus** every identity still in that map from an
- * earlier poll, because spec 4.6 acks every STORED row a complete listing did not name and a file
- * between its store and its move is exactly such a row.
+ * The connector's in-flight set is the one truth about what is out (spec 4.6, D1): a path in
+ * flight is not handed over again until its file is settled, a watch that ends gives back every
+ * file it handed over, and its `PollCompleted` says what is still out and whether the listing was
+ * cut short. This module decides nothing of its own. [RouteEvent.PollCompleted]'s `listed` is the
+ * connector's `inFlight` plus what this tick emitted, because spec 4.6 acks every STORED row a
+ * complete listing did not name and a file between its store and its move is exactly such a row.
  *
- * Every hand-over is settled by the pipeline it launched and by nothing else: every path out of
- * `TransferPipeline.run` acks or nacks, D40's skip included (ticket 21), so the connector never
- * lists a file again while its pipeline is alive, and a pipeline's fetch and ack always act on the
- * `FileSeen` that launched it. A second hand-over of a path still in the map - the same name
- * uploaded again under a new size or mtime while the first is being worked - is given straight
- * back and handed over on a later poll, so the map never holds two files for one path.
+ * The one thing kept here is a handle table, not a mirror: the `FileSeen` a path was handed over
+ * on, so that the fetcher downloads through the hand-over that launched the pipeline - the
+ * connector checks the bytes against the size it listed, which is what keeps a re-drop between
+ * listing and fetch from landing under the first file's identity. Nothing is decided from the
+ * table; it is written on hand-over and cleared on the answer.
  *
  * The flow never throws (ticket 07 deviation 4): a watch that ends on a failure no tick could
  * survive - a rejected password, a rejected host key - ends with one [RouteEvent.RouteDown] and
@@ -69,55 +65,43 @@ import sftp.connector.config.Digest as ConnectorDigest
  */
 class SftpPollSource(
     private val source: SftpSource,
-    private val config: SftpConnectorConfig,
     private val route: RouteName,
     private val poll: Source.Poll,
     private val clock: Clock,
 ) {
 
-    /** One file out with the pipeline. */
-    private class InFlight(val seen: SftpEvent.FileSeen, val identity: SourceIdentity)
-
-    private val inFlight = ConcurrentHashMap<String, InFlight>()
+    private val handles = ConcurrentHashMap<String, SftpEvent.FileSeen>()
 
     /**
      * The route's events, in the order the watch produces them. `PollStarted` is not an event of
      * its own here: it is where the poll's `startedAt` is read, before the listing, as spec 4.6
-     * needs it. `FileGone` is not one either - the fetcher's own failure answers it.
+     * needs it.
      */
     fun events(): Flow<RouteEvent> = flow {
         var startedAt = clock.instant()
         var emitted = mutableSetOf<SourceIdentity>()
-        try {
-            source.watch(poll.directory, poll.every).collect { event ->
-                when (event) {
-                    is SftpEvent.PollStarted -> {
-                        startedAt = clock.instant()
-                        emitted = mutableSetOf()
-                    }
-                    is SftpEvent.FileSeen -> {
-                        val entry = InFlight(event, identityOf(event.file))
-                        if (inFlight.putIfAbsent(event.file.path, entry) != null) {
-                            log.warnv("route {0}: {1} was listed again while an earlier file at that path is still being worked; given back for a later poll", route.value, event.file.path)
-                            event.nack(StillInFlight(route.value), redeliver = true)
-                        } else {
-                            emitted += entry.identity
-                            emit(seenEvent(entry))
-                        }
-                    }
-                    is SftpEvent.PollCompleted -> emit(
-                        RouteEvent.PollCompleted(
-                            startedAt = startedAt,
-                            listed = emitted + inFlight.values.map { it.identity },
-                            truncated = event.seen >= config.polling.maxFilesPerPoll,
-                        ),
-                    )
-                    is SftpEvent.PollFailed -> emit(RouteEvent.PollFailed(event.error))
-                    is SftpEvent.PollSkipped -> emit(RouteEvent.PollSkipped)
+        source.watch(poll.directory, poll.every).collect { event ->
+            when (event) {
+                is SftpEvent.PollStarted -> {
+                    startedAt = clock.instant()
+                    emitted = mutableSetOf()
                 }
+                is SftpEvent.FileSeen -> {
+                    handles[event.file.path] = event
+                    val identity = identityOf(event.file)
+                    emitted += identity
+                    emit(seenEvent(event, identity))
+                }
+                is SftpEvent.PollCompleted -> emit(
+                    RouteEvent.PollCompleted(
+                        startedAt = startedAt,
+                        listed = emitted + event.inFlight.map(::identityOf),
+                        truncated = event.truncated,
+                    ),
+                )
+                is SftpEvent.PollFailed -> emit(RouteEvent.PollFailed(event.error))
+                is SftpEvent.PollSkipped -> emit(RouteEvent.PollSkipped)
             }
-        } finally {
-            withContext(NonCancellable) { releaseEverythingHeld() }
         }
     }.catch { emit(RouteEvent.RouteDown(it)) }
 
@@ -130,9 +114,9 @@ class SftpPollSource(
     val fetcher: Fetcher = ::fetch
 
     private suspend fun fetch(path: String, into: Path, algorithm: DigestAlgorithm): StagedObject {
-        val entry = checkNotNull(inFlight[path]) { "$path is not a file this poll handed over" }
-        val local = entry.seen.download(into) ?: throw IOException("$path has gone from the server since it was listed")
-        return staged(local, entry.seen.file.name, entry.seen.file.modifiedAt, algorithm)
+        val seen = checkNotNull(handles[path]) { "$path is not a file this poll handed over" }
+        val local = seen.download(into) ?: throw IOException("$path has gone from the server since it was listed")
+        return staged(local, seen.file.name, seen.file.modifiedAt, algorithm)
     }
 
     private fun identityOf(file: RemoteFile) = SourceIdentity(
@@ -147,50 +131,26 @@ class SftpPollSource(
     /**
      * Spec 5.3: the ack is the connector's configured post action - move, delete or none - and the
      * nack is the connector's, which for a polled file is always none: the file stays and the next
-     * poll is its redelivery. Both leave the map whatever the action does, because a file the
-     * connector has settled is no longer one an ack can be waiting on - and only their own entry,
-     * so an answer that lands after the connector has already handed the path over again (the
-     * place comes free inside the connector's ack, a moment before the map is updated) does not
-     * unmap the newcomer.
+     * poll is its redelivery. Both drop the handle whatever the action does - and only their own,
+     * so an answer that lands after the connector has handed the path over again does not drop
+     * the newcomer's.
      */
-    private fun seenEvent(entry: InFlight) = RouteEvent.Seen(
-        identity = entry.identity,
-        source = SourceView(entry.seen.file.path),
-        ack = { answering(entry) { entry.seen.ack() } },
-        nack = { redeliver -> answering(entry) { entry.seen.nack(NackedByRoute(route.value), redeliver) } },
+    private fun seenEvent(seen: SftpEvent.FileSeen, identity: SourceIdentity) = RouteEvent.Seen(
+        identity = identity,
+        source = SourceView(seen.file.path),
+        ack = { answering(seen) { seen.ack() } },
+        nack = { redeliver -> answering(seen) { seen.nack(NackedByRoute(route.value), redeliver) } },
     )
 
-    private suspend fun answering(entry: InFlight, answer: suspend () -> Unit) {
+    private suspend fun answering(seen: SftpEvent.FileSeen, answer: suspend () -> Unit) {
         try {
             answer()
         } finally {
-            inFlight.remove(entry.seen.file.path, entry)
+            handles.remove(seen.file.path, seen)
         }
     }
 
-    /**
-     * The run is over - the watch ended, or the route was cancelled - so every file still out with
-     * it goes back. Only the tick that handed a file over withdraws it, and only when that tick is
-     * cancelled, so a file held from an earlier tick would otherwise stay in the connector's set
-     * for the life of the process and never be listed again, restart of the route or not.
-     *
-     * ponytail: a pipeline still mid-ack when the route ends has its ack ignored as "already
-     * settled", so its file is not moved and the next poll drives the row again from STORED. That
-     * is a wasted cycle against a leak that never heals, and the leak is the worse of the two.
-     */
-    private suspend fun releaseEverythingHeld() {
-        val held = inFlight.values.toList()
-        inFlight.clear()
-        for (entry in held) entry.seen.nack(Abandoned(route.value), redeliver = true)
-    }
-
     private class NackedByRoute(route: String) : RuntimeException("route $route did not process this file this time")
-    private class StillInFlight(route: String) : RuntimeException("route $route is still working an earlier file at this path")
-    private class Abandoned(route: String) : RuntimeException("route $route ended while this file was still out with it")
-
-    private companion object {
-        val log: Logger = Logger.getLogger(SftpPollSource::class.java)
-    }
 }
 
 /**

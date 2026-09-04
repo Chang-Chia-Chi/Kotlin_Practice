@@ -414,7 +414,7 @@ class ShuttleHost(
         )
         val connector = SftpConnector.start(connectorConfig, meterRegistry = registry, clock = clock)
         try {
-            val source = SftpPollSource(connector.source, connectorConfig, RouteName(route.name), poll, clock)
+            val source = SftpPollSource(connector.source, RouteName(route.name), poll, clock)
             sources[route.name] = source
             emitAll(source.events())
         } finally {
