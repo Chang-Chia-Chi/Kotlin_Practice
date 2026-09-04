@@ -11,14 +11,14 @@ permit leaves the unlaunched ids in the in-flight set (spec 9.5). Review finding
 
 **Nature:** concurrency, error handling, RAII on the in-flight set
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `NotifierTest`: a store whose `due` throws once makes the loop log and continue; the next sweep after `sweepEvery` delivers the row; `run` has not returned; red before the fix
-- [ ] The same for an exception thrown by a transition after a delivery (`delivered` or `retryLater`): the row stays PENDING and is delivered on a later sweep, never twice
-- [ ] `CancellationException` is never caught or converted
-- [ ] Cancelling the notifier while a batch waits on the permit semaphore leaves the in-flight set empty; red before the fix
-- [ ] Whether the host should also supervise the notifier (restart with backoff like a route) is decided and recorded; if yes, it is done here with a test, if no, the reason is in the progress entry
-- [ ] Progress entry appended
+- [x] `NotifierTest`: a store whose `due` throws once makes the loop log and continue; the next sweep after `sweepEvery` delivers the row; `run` has not returned; red before the fix
+- [x] The same for an exception thrown by a transition after a delivery (`delivered` or `retryLater`): the row stays PENDING and is delivered on a later sweep, never twice
+- [x] `CancellationException` is never caught or converted
+- [x] Cancelling the notifier while a batch waits on the permit semaphore leaves the in-flight set empty; red before the fix
+- [x] Whether the host should also supervise the notifier (restart with backoff like a route) is decided and recorded; if yes, it is done here with a test, if no, the reason is in the progress entry
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket; 200-600 lines including tests; no Thread.sleep;
 invariant tests named `I<n>_<description>`, scenario tests by their `S<n>` id, validation tests by `rule<n>_`,

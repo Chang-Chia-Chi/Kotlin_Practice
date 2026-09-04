@@ -14,6 +14,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import java.io.IOException
 import java.time.Instant
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.hours
@@ -27,8 +28,18 @@ class NotifierTest {
     private val downstream = ChannelName("downstream")
     private val body = MappingTable(listOf(MappingRow("fileId", field = "TRANSFER_ID"), MappingRow("event", field = "EVENT")))
 
-    private fun notifier(vararg channels: DeliveryChannel, config: NotifierConfig = NotifierConfig(workers = 2, batch = 10, sweepEvery = 30.seconds)) =
+    private fun notifier(vararg channels: DeliveryChannel, config: NotifierConfig = NotifierConfig(workers = 2, batch = 10, sweepEvery = 30.seconds), store: StateStore = this.store) =
         Notifier(store, channels.toList(), channels.associate { it.name to body }, MappingRenderer(), config, registry, clock, kotlin.random.Random(1))
+
+    /** Spec 11's "state store unavailable": the first call of [failing] throws, every other call reaches [inner]. */
+    private class FailsOnce(private val inner: StateStore, private val failing: String) : StateStore by inner {
+        private var failed = false
+        private fun unavailable(method: String) {
+            if (method == failing && !failed) { failed = true; throw IOException("state store unavailable") }
+        }
+        override suspend fun due(now: Instant, excluding: Set<DeliveryId>, limit: Int) = unavailable("due").let { inner.due(now, excluding, limit) }
+        override suspend fun delivered(id: DeliveryId, reference: String?) = unavailable("delivered").let { inner.delivered(id, reference) }
+    }
 
     /** An ACKED transfer with one PENDING `acked` delivery per channel named. */
     private suspend fun ackedTransfer(name: String, channels: List<ChannelName>): Transfer {
@@ -290,5 +301,57 @@ class NotifierTest {
         assertEquals(0, store.outbox.single().attempts)
         assertEquals(0, notifier.inFlightCount)
         assertEquals(0.0, registry.get(ShuttleMetrics.NOTIFIER_INFLIGHT).gauge().value())
+    }
+
+    @Test
+    fun B9_cancellation_while_a_batch_waits_for_a_permit_leaves_the_set_empty() = runTest {
+        val channel = ParkingChannel("downstream")
+        repeat(3) { ackedTransfer("f$it.csv", listOf(downstream)) }
+        val notifier = notifier(channel, config = NotifierConfig(workers = 1, batch = 3, sweepEvery = 30.seconds))
+        val job = launch { notifier.run() }
+        runCurrent()
+        assertEquals(1, channel.arrived.get(), "one worker parked, two rows of the batch wait for a permit")
+        assertEquals(3, notifier.inFlightCount)
+        job.cancel()
+        runCurrent()
+        assertEquals(0, notifier.inFlightCount, "the ids no worker owns leave the set with the cancelled sweep")
+        assertEquals(listOf(DeliveryState.PENDING, DeliveryState.PENDING, DeliveryState.PENDING), store.outbox.map { it.state })
+    }
+
+    @Test
+    fun B2_a_store_failure_during_the_select_is_logged_and_the_next_sweep_delivers() = runTest {
+        val channel = RecordingChannel("downstream", noJitter, ok)
+        ackedTransfer("a.csv", listOf(downstream))
+        val job = backgroundScope.launch { notifier(channel, store = FailsOnce(store, "due")).run() }
+        runCurrent()
+        assertEquals(DeliveryState.PENDING, store.outbox.single().state, "the select threw: nothing delivered")
+        assertTrue(job.isActive, "run survives the failure")
+        tick(30.seconds)
+        assertEquals(DeliveryState.DELIVERED, store.outbox.single().state, "the sweep after sweepEvery delivers")
+        assertEquals(1, channel.events.size)
+        assertTrue(job.isActive)
+    }
+
+    @Test
+    fun B2_a_store_failure_recording_a_delivery_leaves_the_row_PENDING_and_a_later_sweep_records_it_once() = runTest {
+        val channel = RecordingChannel("downstream", noJitter, ok, ok)
+        ackedTransfer("a.csv", listOf(downstream))
+        val notifier = notifier(channel, store = FailsOnce(store, "delivered"))
+        val job = backgroundScope.launch { notifier.run() }
+        runCurrent()
+        assertEquals(1, channel.events.size, "the channel accepted it")
+        assertEquals(DeliveryState.PENDING, store.outbox.single().state, "the transition threw: the row is untouched")
+        assertEquals(0, store.outbox.single().attempts)
+        assertEquals(0, notifier.inFlightCount)
+        assertTrue(job.isActive, "run survives the failure")
+        tick(30.seconds)
+        val row = store.outbox.single()
+        assertEquals(DeliveryState.DELIVERED, row.state, "the next sweep delivers it again (at least once, spec 9.7)")
+        assertEquals(1, row.attempts)
+        assertEquals(2, channel.events.size)
+        assertEquals(1, store.calls.count { it.method == "delivered" }, "recorded once")
+        tick(30.seconds)
+        assertEquals(2, channel.events.size, "never a third call")
+        assertTrue(job.isActive)
     }
 }
