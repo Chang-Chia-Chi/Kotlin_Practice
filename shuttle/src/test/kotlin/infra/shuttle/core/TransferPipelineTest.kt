@@ -4,18 +4,22 @@ import infra.shuttle.testkit.ClockFixture
 import infra.shuttle.testkit.HookDriver
 import infra.shuttle.testkit.InMemoryStateStore
 import infra.shuttle.testkit.InMemoryTarget
+import infra.shuttle.testkit.LogCapture
 import infra.shuttle.testkit.RecordingChannel
 import infra.shuttle.testkit.ScriptedFetcher
 import infra.shuttle.testkit.ScriptedSource
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withContext
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
+import org.jboss.logging.Logger
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.time.Duration.Companion.hours
@@ -784,6 +788,43 @@ class TransferPipelineTest {
     @Test
     fun I20_an_acked_delivery_row_exists_iff_the_ACKED_transition_committed() = runTest {
         I20(DeliveryMoment.ACKED, armAt = HookPoint.afterLedgerStored, previous = TransferState.STORED)
+    }
+
+    @Test
+    fun SPEC4_a_stage_failure_is_logged_with_the_transfer_id_and_the_route_in_the_MDC_and_neither_key_survives_the_run() = runTest {
+        val event = seen()
+        val logs = LogCapture()
+        logs.use {
+            fetcher.failNext = true
+            pipeline().run(event, fetcher)
+            Logger.getLogger("infra.shuttle.probe").warn("after the run")
+        }
+
+        val row = store.transfers.single()
+        val warn = logs.warnings().first { it.message.contains("failed") }
+        assertEquals(row.id.value.toString(), warn.mdc[Mdc.TRANSFER_ID], "the failure names its transfer: ${warn.message}")
+        assertEquals("drop", warn.mdc[Mdc.ROUTE])
+        val after = logs.warnings().last()
+        assertEquals("after the run", after.message)
+        assertEquals(emptyMap<String, String>(), after.mdc, "the keys are gone once run returns")
+    }
+
+    /** Spec 3.3: the blocking work of a stage runs on another dispatcher, and `MDCContext` rides the context, not the thread. */
+    @Test
+    fun SPEC4_a_line_a_stage_logs_from_the_blocking_dispatcher_carries_the_same_transfer_id_and_route() = runTest {
+        val onIo = object : Processor {
+            override val produces = emptySet<String>()
+            override suspend fun process(payload: Payload, ctx: ProcessContext): Outcome {
+                withContext(Dispatchers.IO) { Logger.getLogger("infra.shuttle.probe").warn("from the blocking dispatcher") }
+                return Outcome.Continue(payload)
+            }
+        }
+        val logs = LogCapture()
+        logs.use { pipeline(processors = listOf(onIo)).run(seen(), fetcher) }
+
+        val line = logs.warnings().single { it.message == "from the blocking dispatcher" }
+        assertEquals(store.transfers.single().id.value.toString(), line.mdc[Mdc.TRANSFER_ID])
+        assertEquals("drop", line.mdc[Mdc.ROUTE])
     }
 
     @Test
