@@ -8,6 +8,7 @@ import sftp.connector.source.MinAge
 import sftp.connector.source.ReadinessCheck
 import sftp.connector.source.SizeStable
 import sftp.connector.source.plus
+import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.time.Duration
@@ -482,11 +483,44 @@ class BulkheadBuilder internal constructor() {
 @SftpDsl
 class StagingBuilder internal constructor() {
     /**
-     * The default is the JVM's temp directory, because it is the one local directory that exists
-     * and is writable everywhere the connector can run, so a connector nobody has finished
-     * configuring still works. A deployment names its own, on a filesystem sized for the files it
-     * pulls and cleaned by someone who knows they are there.
+     * The default is a directory of this process's own inside the JVM's temp directory, because
+     * the temp directory is the one place that exists and is writable everywhere the connector can
+     * run - so a connector nobody has finished configuring still works - and because the temp
+     * directory *itself* is shared with every other account on the host. A deployment names its
+     * own, on a filesystem sized for the files it pulls and cleaned by someone who knows they are
+     * there.
      */
-    var dir: Path = Path.of(System.getProperty("java.io.tmpdir"))
+    var dir: Path = privateStagingDirectory
     var digest: Digest = Digest.SHA256
+}
+
+/**
+ * The default staging directory: one per process, made by [Files.createTempDirectory] inside the
+ * JVM's temp directory.
+ *
+ * A download writes `<dir>/<name>.part` under the name the server listed, so on a directory anyone
+ * can write into - `/tmp` is mode 1777 on every Linux - another local account can predict that
+ * path and put something at it first. `createTempDirectory` closes that two ways at once: the
+ * platform makes the directory owner-only where it has permissions to say so, and the name carries
+ * random digits, which is the half that still holds where it has not, because nothing can be
+ * planted at a path nobody can guess.
+ *
+ * One per process rather than one per configuration built: a directory per builder would leave a
+ * trail of them behind and split one connector's staging across two of them. It is registered for
+ * deletion at exit, which takes it away when the application has moved every file out of it and
+ * leaves it alone when it has not - and a staged file nobody collected is not this connector's to
+ * throw away.
+ */
+private val privateStagingDirectory: Path by lazy {
+    try {
+        Files.createTempDirectory("sftp-connector-").also { it.toFile().deleteOnExit() }
+    } catch (unwritable: IOException) {
+        throw ConfigurationError(
+            "no staging directory was configured and one could not be made under " +
+                "${System.getProperty("java.io.tmpdir")}, so a download would have nowhere to land: " +
+                "${unwritable.message}. Name a directory this process can write to with " +
+                "polling { staging { dir = ... } }.",
+            unwritable,
+        )
+    }
 }
