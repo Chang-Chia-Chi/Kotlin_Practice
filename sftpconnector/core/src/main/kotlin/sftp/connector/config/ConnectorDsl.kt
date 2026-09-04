@@ -70,7 +70,10 @@ class SftpConnectorBuilder internal constructor(private val name: String) {
     internal fun build(): SftpConnectorConfig {
         val faults = mutableListOf<String>()
 
-        if (name.isBlank()) faults += "the connector has no name, and its name tags every metric and log line it produces"
+        // Not "tags every metric and log line": meters are tagged by endpoint (spec 13) and most
+        // lines name a path and a server rather than a connector. The name is what a start-up
+        // refusal, a shutdown and every probe message are addressed to, which is where it is read.
+        if (name.isBlank()) faults += "the connector has no name, and its name is how its start-up, shutdown and probe messages say which connector they are about"
 
         val describedEndpoint = endpoint
         if (describedEndpoint == null) {

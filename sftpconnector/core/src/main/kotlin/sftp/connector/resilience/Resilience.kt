@@ -32,6 +32,7 @@ import sftp.connector.transport.SftpSession
 import java.time.Clock
 import java.util.concurrent.TimeoutException
 import kotlin.time.toJavaDuration
+import kotlin.time.toKotlinDuration
 
 /**
  * What stands between a client operation and the pool: the retries, the breaker, the limit on
@@ -70,8 +71,10 @@ internal class Resilience(
     clock: Clock,
 ) {
 
+    private val maxAttempts = settings.retry.maxAttempts
+
     private val retries: RetryConfig = RetryConfig.custom<Any>()
-        .maxAttempts(settings.retry.maxAttempts)
+        .maxAttempts(maxAttempts)
         .intervalFunction(settings.retry.backoff.asIntervals())
         .build()
 
@@ -143,10 +146,18 @@ internal class Resilience(
             RetryConfig.from<Any>(retries).retryOnException { it.worthAnotherTry() && stillWorthRetrying() }.build(),
         )
         retry.eventPublisher.onRetry {
-            LOG.warn("{} failed and is being tried again in {}: {}", operation, it.waitInterval, it.lastThrowable.message)
+            LOG.warn(
+                "{} against {} failed on try {} of {} and is being tried again in {}: {}",
+                operation,
+                endpoint,
+                tries,
+                maxAttempts,
+                it.waitInterval.toKotlinDuration(),
+                it.lastThrowable.message,
+            )
         }
         return retry.executeSuspendFunction {
-            val attempt = Attempt(endpoint, operation, path, ++tries)
+            val attempt = Attempt(endpoint, operation, path, ++tries, maxAttempts)
             if (attempt.number > 1) meters.counter("sftp_retry_total", "endpoint", endpoint, "op", operation).increment()
             withContext(CurrentAttempt(attempt)) {
                 throughTheBreaker(attempt) {
@@ -196,7 +207,8 @@ internal class Resilience(
             currentCoroutineContext().ensureActive()
             throw OperationTimeout(
                 attempt,
-                "no answer within ${limit.timeLimiterConfig.timeoutDuration}; the request may still land, so the session is not kept",
+                "no answer within ${limit.timeLimiterConfig.timeoutDuration.toKotlinDuration()}; " +
+                    "the request may still land, so the session is not kept",
                 ranOut,
             )
         }

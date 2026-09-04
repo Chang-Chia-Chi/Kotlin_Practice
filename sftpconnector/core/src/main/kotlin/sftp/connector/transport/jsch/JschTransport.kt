@@ -46,7 +46,7 @@ class JschTransport(
     meters: MeterRegistry = SimpleMeterRegistry(),
 ) : SftpTransport {
 
-    private val errors = JschErrorMapper(meters)
+    private val errors = JschErrorMapper(meters, config)
 
     private val endpointLabel = config.endpoint.address
 
@@ -97,7 +97,11 @@ class JschTransport(
                 } catch (failure: Exception) {
                     // The cancellation is what the caller is owed, and a hang-up that failed on a
                     // session being written off anyway is no reason to hand them something else.
-                    LOG.warn("Hanging up a session nobody was left to receive failed, and it is being dropped anyway: {}", failure.message)
+                    LOG.warn(
+                        "Hanging up a session to {} that nobody was left to receive failed, and it is being dropped anyway: {}",
+                        endpointLabel,
+                        failure.message,
+                    )
                 }
             }
             throw cancelled

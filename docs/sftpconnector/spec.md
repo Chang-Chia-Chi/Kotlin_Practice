@@ -677,6 +677,18 @@ Tag `endpoint` on everything; never tag by file name or tick number.
 | `sftp_inflight` | gauge | |
 | `sftp_ack_total{outcome}` | counter | outcome: ack, nack, cancelled |
 
+**Absent is not zero.** Some of these are registered on the first use rather than at start-up, so
+the series does not exist at all until the thing it measures happens once - and an alert written
+as `> 0` never fires on a series that is absent, which is exactly the case for the meters whose
+whole value is that they should read zero. Registered lazily, per label value:
+`sftp_pool_evicted_total{reason}`, `sftp_pool_leak_total`, `sftp_retry_total{op}`,
+`sftp_error_unmapped_total`, `sftp_op_seconds{op,result}`, `sftp_poll_seconds{result}`. Registered
+eagerly for every label value, and therefore readable as zero from the first scrape:
+`sftp_poll_files{state}`, `sftp_ack_total{outcome}`, `sftp_inflight`, `sftp_breaker_state`,
+`sftp_pool_active`/`idle`/`pending`, `sftp_pool_acquire_seconds`,
+`sftp_pool_acquire_timeout_total`, `sftp_pool_created_total`. Alert on a lazy one with
+`absent(x) or x > 0`, or with a rate or `increase`, rather than with a bare comparison.
+
 ---
 
 ## 14. Known Limitations and Future Extensions

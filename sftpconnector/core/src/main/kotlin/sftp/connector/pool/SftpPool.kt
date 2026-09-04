@@ -60,9 +60,9 @@ class SftpPool(
 
     private val settings = config.pool
 
-    private val registry = SessionRegistry(settings, clock) { waiting.get() }
-
     private val endpoint = config.endpoint.address
+
+    private val registry = SessionRegistry(settings, endpoint, clock) { waiting.get() }
 
     private val meters = PoolMeters(meterRegistry, endpoint) { registry.lastCount }
 
@@ -300,13 +300,24 @@ class SftpPool(
      */
     suspend fun close(): Unit = withContext(NonCancellable) {
         registry.beginClosing()
-        if (!settled(within = settings.drainTimeout)) {
+        // Counted before the wait, because after it the number is gone and a shutdown nobody can
+        // reconstruct is a shutdown nobody can tell from a hang: a minute of silence reads the
+        // same whether one lease was out or forty, and whether they came back or were cut.
+        val outWhenTheDrainBegan = registry.held().size
+        val drained = settled(within = settings.drainTimeout)
+        if (!drained) {
             cutEverythingHeld()
             settled(within = settings.cancelGrace)
         }
         val retired = registry.closeEverything()
         coroutineScope { retired.forEach { launch { finish(it) } } }
-        LOG.info("The pool to {} is closed.", endpoint)
+        LOG.info(
+            "The pool to {} is closed. {} lease(s) were out when the drain began; it {}; {} session(s) were hung up on.",
+            endpoint,
+            outWhenTheDrainBegan,
+            if (drained) "settled within the ${settings.drainTimeout} allowed" else "did not settle in ${settings.drainTimeout}, so what was still out was cut",
+            retired.size,
+        )
     }
 
     /** Waits, up to [within], for every session to be back on the shelf and every retired one hung up on. */
@@ -528,8 +539,12 @@ class Lease internal constructor(
         if (!handedBack.compareAndSet(false, true)) {
             LOG.warn(
                 "{} was given back twice. The second one is ignored, but the code that did it is " +
-                    "holding a lease it no longer owns and may be using a session lent to someone else.",
+                    "holding a lease it no longer owns and may be using a session lent to someone else. " +
+                    "The stack trace is the second hand-back.",
                 entry,
+                // Nothing is thrown: the stack is the only thing that names the caller, and the
+                // line describes a bug that cannot be found without it.
+                IllegalStateException("$entry was given back a second time here"),
             )
             return
         }

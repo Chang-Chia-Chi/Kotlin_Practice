@@ -9,6 +9,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runTest
 import org.assertj.core.api.Assertions.assertThat
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import sftp.connector.config.HostKeyPolicy
@@ -330,9 +331,13 @@ class RetrySemanticsTest {
             // Numbered the way the real transport numbers its failures: by the try it is inside.
             if (call.operation == Operation.Stat) throw SessionLost(Attempt.inside(ENDPOINT, "stat", FROM), "the tunnel went quiet")
         }.file(FROM, CONTENT)
-        assertThat(failureOf { clientOver(alwaysDown).exists(FROM) })
+        val exhausted = failureOf { clientOver(alwaysDown).exists(FROM) }
+        assertThat(exhausted)
             .isInstanceOf(SessionLost::class.java)
             .hasMessageContaining("attempt=3")
+        // The budget, not only the number: "attempt=3" and "attempt=1" read alike to anyone who
+        // does not know maxAttempts, and "this was the last one" is what decides whether to wait.
+        assertTrue(exhausted.message!!.contains("attempt=3 of 3"), "the try and the budget: ${exhausted.message}")
         assertThat(retries("exists")).isEqualTo(2.0)
 
         val client = clientOver(FakeSftpTransport().file(FROM, CONTENT)) { pool { maxSize = 1; acquireTimeout = 1.seconds } }

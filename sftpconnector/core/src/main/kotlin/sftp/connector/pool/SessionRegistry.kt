@@ -27,6 +27,8 @@ import kotlin.random.Random
  */
 internal class SessionRegistry(
     private val config: PoolConfig,
+    /** Carried only so that every entry - and so every log line naming one - says which server it is to. */
+    private val endpoint: String,
     private val clock: Clock,
     /**
      * How many callers are queued for a session right now. The registry cannot see them - they
@@ -100,7 +102,7 @@ internal class SessionRegistry(
         val now = clock.millis()
         val warm = idle.removeLastOrNull()
         val checkout = if (warm == null) {
-            val fresh = PoolEntry(++sessionsCreated, now + lifetime())
+            val fresh = PoolEntry(++sessionsCreated, endpoint, now + lifetime())
             entries += fresh
             fresh.claimedBy(borrower, now)
             Checkout.Dial(fresh)
@@ -280,7 +282,7 @@ internal class SessionRegistry(
         // because the sessions being counted here are not held by any caller.
         while (spares + toOpen.size < config.minIdle && entries.size < config.maxSize) {
             if (!takeRoom()) break
-            val fresh = PoolEntry(++sessionsCreated, now + lifetime())
+            val fresh = PoolEntry(++sessionsCreated, endpoint, now + lifetime())
             // The pool is holding this one on its own behalf, and from now: a spare left at the
             // beginning of time would look, to the next round, like a lease nobody gave back.
             fresh.borrowedAt = now

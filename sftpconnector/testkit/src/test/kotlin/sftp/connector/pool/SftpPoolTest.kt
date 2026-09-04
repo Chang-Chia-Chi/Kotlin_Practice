@@ -10,6 +10,7 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.yield
 import org.assertj.core.api.Assertions.assertThat
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import sftp.connector.config.HostKeyPolicy
 import sftp.connector.config.SftpConnectorConfig
@@ -21,6 +22,8 @@ import sftp.connector.error.SessionLost
 import sftp.connector.testkit.FakeSftpTransport
 import sftp.connector.testkit.FakeSftpTransport.Operation
 import sftp.connector.transport.SftpSession
+import java.io.ByteArrayOutputStream
+import java.io.PrintStream
 import java.nio.file.Path
 import kotlin.time.Duration.Companion.seconds
 
@@ -74,8 +77,12 @@ class SftpPoolTest {
 
         val lease = pool.acquire()
         lease.release()
-        lease.release()
+        val reported = capturingStandardError { lease.release() }
 
+        // The line describes a bug in the caller, and a bug that names no line cannot be found:
+        // the stack of the second hand-back is the only thing that points at the code.
+        assertTrue(reported.contains("was given back twice"), "the warning: $reported")
+        assertTrue(reported.contains("at sftp.connector.pool.SftpPoolTest"), "the stack of the second hand-back: $reported")
         assertThat(pool.stats().idle).isEqualTo(1)
         pool.acquire()
         assertThat(withTimeoutOrNull(1.seconds) { pool.acquire() }).isNull()
@@ -207,6 +214,19 @@ class SftpPoolTest {
 
         assertThat(transport.calls.map { it.operation })
             .containsExactly(Operation.Connect, Operation.Realpath, Operation.Close)
+    }
+
+    /** The test binding writes to standard error and looks it up on every call. */
+    private suspend fun capturingStandardError(body: suspend () -> Unit): String {
+        val captured = ByteArrayOutputStream()
+        val original = System.err
+        System.setErr(PrintStream(captured, true))
+        try {
+            body()
+        } finally {
+            System.setErr(original)
+        }
+        return captured.toString()
     }
 
     private fun config(maxSize: Int = 2): SftpConnectorConfig = sftpConnector("pool-test") {

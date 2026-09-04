@@ -1,12 +1,17 @@
 package sftp.connector.transport.jsch
 
 import com.jcraft.jsch.ChannelSftp
+import com.jcraft.jsch.JSchChangedHostKeyException
 import com.jcraft.jsch.JSchException
 import com.jcraft.jsch.JSchHostKeyException
 import com.jcraft.jsch.JSchProxyException
+import com.jcraft.jsch.JSchRevokedHostKeyException
 import io.micrometer.core.instrument.Counter
 import io.micrometer.core.instrument.MeterRegistry
 import org.slf4j.LoggerFactory
+import sftp.connector.config.AuthMethod
+import sftp.connector.config.HostKeyPolicy
+import sftp.connector.config.SftpConnectorConfig
 import sftp.connector.error.Attempt
 import sftp.connector.error.AuthenticationFailed
 import sftp.connector.error.ConnectFailed
@@ -40,7 +45,23 @@ import com.jcraft.jsch.SftpException as JschStatusException
  * warns with the raw text and counts itself, so the row gets written from what the server
  * actually said the first time it says it.
  */
-class JschErrorMapper(private val meters: MeterRegistry) {
+class JschErrorMapper(
+    private val meters: MeterRegistry,
+    /**
+     * What the connector was told to dial with. The library's messages describe what the *server*
+     * said; the half an operator needs to act - which account was offered, which file the accepted
+     * keys are kept in, which address is actually being dialled - is only here.
+     */
+    private val config: SftpConnectorConfig,
+) {
+
+    /**
+     * The address a connect failure is really about when there is a proxy. `endpoint=` names the
+     * target, which is not the host that refused, and an operator who pings it finds it healthy.
+     */
+    private val viaProxy: String = config.endpoint.proxy
+        ?.let { " through the HTTP CONNECT proxy at ${it.host}:${it.port}, which is the address the connector dials" }
+        .orEmpty()
 
     /**
      * Runs [block] and lets nothing out of it except a connector failure - or a cancellation,
@@ -70,14 +91,10 @@ class JschErrorMapper(private val meters: MeterRegistry) {
         // Both of these have a type of their own, so they are recognised by what they are rather
         // than by how they read, and a rewording cannot silently reclassify them.
         if (failure is JSchHostKeyException) {
-            return HostKeyRejected(
-                attempt,
-                "the server presented a host key the connector will not accept: ${failure.message}",
-                failure,
-            )
+            return HostKeyRejected(attempt, hostKeyRefusal(failure), failure)
         }
         if (failure is JSchProxyException) {
-            return ConnectFailed(attempt, "the proxy did not open a tunnel: ${failure.message}", failure)
+            return ConnectFailed(attempt, "the proxy did not open a tunnel$viaProxy: ${failure.message}", failure)
         }
 
         // Everything else JSch raises is a JSchException carrying free text and nothing else.
@@ -87,7 +104,13 @@ class JschErrorMapper(private val meters: MeterRegistry) {
         return when {
             // "Auth fail for methods 'password,keyboard-interactive,publickey'"
             message.startsWith("Auth fail") || message.startsWith("Auth cancel") ->
-                AuthenticationFailed(attempt, "the server rejected the credential: $message", failure)
+                AuthenticationFailed(
+                    attempt,
+                    "the server rejected the password of \"${userName()}\"; the connector offers a password and " +
+                        "nothing else, and the methods quoted here are the ones the server offers, not the one " +
+                        "that was tried: $message",
+                    failure,
+                )
 
             // What JSch says when asked to open a channel on a session that has already gone. The
             // one row here that no test stages, because the transport does not yet expose the
@@ -105,7 +128,7 @@ class JschErrorMapper(private val meters: MeterRegistry) {
             // survives. A refused port, an unresolvable name and a handshake that timed out all
             // arrive this way, and all three mean the same thing: no session.
             message.contains(SOCKET_FAILURE_MARKER) ->
-                ConnectFailed(attempt, "the connection could not be established: $message", failure)
+                ConnectFailed(attempt, "the connection could not be established$viaProxy: $message", failure)
 
             // The far side accepted the TCP connection and closed it before its version line: a
             // proxy whose upstream is down behind a port publisher that still accepts, or a
@@ -115,6 +138,38 @@ class JschErrorMapper(private val meters: MeterRegistry) {
 
             else -> unknown(failure, attempt)
         }
+    }
+
+    /**
+     * Which of the three ways a key can be refused, and where the keys it is compared against are
+     * kept. The distinction matters most for the middle one: a key that has *changed* is what a
+     * reinstalled server looks like and equally what something else answering on its address looks
+     * like, and the two have opposite remedies.
+     *
+     * No fingerprint: JSch carries one only into its interactive prompt, never into the exception,
+     * so there is nothing here to print and inventing one would be worse than saying so.
+     */
+    private fun hostKeyRefusal(failure: JSchHostKeyException): String {
+        val reading = when (failure) {
+            is JSchChangedHostKeyException ->
+                "the server presented a host key different from the one recorded for it - which is what a " +
+                    "reinstalled server looks like, and equally what something else answering on its address " +
+                    "looks like, so confirm which before recording the new key"
+
+            is JSchRevokedHostKeyException -> "the server presented a host key that is recorded as revoked"
+            else -> "the server presented a host key that is not recorded for it"
+        }
+        return "$reading. ${whereAcceptedKeysLive()} JSch does not put the key it was offered in this " +
+            "failure, so compare the server's own key with the recorded one. The library said: ${failure.message}"
+    }
+
+    private fun whereAcceptedKeysLive(): String = when (val policy = config.hostKey) {
+        is HostKeyPolicy.Strict -> "The keys the connector accepts are the ones in ${policy.knownHosts}."
+        HostKeyPolicy.AcceptAll -> "The host key policy accepts any key, so this refusal did not come from it."
+    }
+
+    private fun userName(): String = when (val credential = config.auth) {
+        is AuthMethod.Password -> credential.user
     }
 
     private fun fromStatusCode(failure: JschStatusException, attempt: Attempt): SftpException {
@@ -153,11 +208,14 @@ class JschErrorMapper(private val meters: MeterRegistry) {
         LOG.warn(
             "No mapping for this failure, so it is being treated as retryable and the session " +
                 "discarded. Add the wording to the connector's error table so the next occurrence " +
-                "is classified. endpoint={}, op={}, type={}, message: {}",
+                "is classified. endpoint={}, op={}, path={}, attempt={}, type={}, message: {}",
             attempt.endpoint,
             attempt.operation,
+            attempt.path,
+            attempt.number,
             failure.javaClass.name,
             raw,
+            failure,
         )
         Counter.builder(UNMAPPED_ERRORS)
             .tag("endpoint", attempt.endpoint)

@@ -328,7 +328,10 @@ class SftpWatchTest {
             runCurrent()
         }
 
-        assertTrue(logged.contains("The consumer could not process /drop/bad.csv"), "the nack line: $logged")
+        // "Is it polling at all?" and "which server is this line about?" both had no answer in
+        // the log before T17; the watch's own start line carries both.
+        assertTrue(logged.contains("Watching /drop on fake.example:22"), "the line that says the watch started: $logged")
+        assertTrue(logged.contains("The consumer could not process /drop/bad.csv on fake.example:22"), "the nack line: $logged")
         assertTrue(logged.contains("could not parse it"), "what the consumer said: $logged")
         assertTrue(
             logged.contains("at sftp.connector.source.SftpWatchTest"),
