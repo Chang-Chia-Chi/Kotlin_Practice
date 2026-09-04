@@ -244,6 +244,7 @@ because each was correctly deferred by the ticket that found it.
 | `sortBy` is named in spec 7.4 and is not built | T10 deviation 5, promoted by T17 | Whoever first needs a deterministic poll order | The listing is a `channelFlow` that never materialises a directory, and `sortBy` needs materialisation plus a design nobody asked for. Spec 7.4 now says it is not built; without this row the sentence and the reason part company at the next session |
 | `SeenRepository` is not built, and spec 8.3 promised it in the present tense | T10 deviation 10, found by T17's lens 6 | The first caller that cannot move or delete the files it has processed | Spec 8.3 now defers it and spec 14.5 says what such a caller does instead - filter above the source and ack what its own ledger already holds. Building it means a second ledger inside the connector against D14, so whoever needs it owns the persistence design with it |
 | `RenameClaim` is a row in spec 7.5's built-ins table and is not built | T10 deviation 10, promoted by T17 | Whoever builds spec 14.2's claim step | It proves nothing on Linux by spec 7.5's own caveat - a rename succeeds while a writer holds the file open - so as a readiness check it would be a check that passes. Its real use is the multi-consumer claim of spec 14.2, where it stops being a readiness check at all |
+| A second Quarkus host would want a properties mapping | T24 | That host | The adapter T14 built is deleted, so a Quarkus host binds the connector in its own words: build the DSL config, produce the `SftpConnector`, hand it the host's `MeterRegistry`, close it on the shutdown event. Shuttle already does exactly that. The second such host writes it a second time, and that is the moment a shared mapping is worth its weight - T14's entry is the design to read before rebuilding one |
 
 ### C6: spec Sec 5.3 amended - the middle cancellation tier is `keepAlive`
 
@@ -3065,6 +3066,8 @@ that already completed stays in flight across `close()`; a failing assertion bef
 
 ## T14: Quarkus adapter
 
+**This module no longer exists - T24 deleted it. Read this entry as history.**
+
 Built on `claude-opus-5[1m]`. 241 tests were green at the start and 247 are green at the end
 (52 core, 189 testkit, 6 quarkus): 5 in `SftpConnectorPropertiesTest` and 1 `@QuarkusTest` in
 `SftpConnectorAdapterTest`. Nothing in `core` or `testkit` was touched, so the 241 are the same
@@ -3603,3 +3606,97 @@ non-suspending core of a lock-guarded structure, which is what a model checker c
   `@Tag("soak")`. The default reactor excludes both groups through `sftp.excludedGroups`.
 - The reactor is longer again: Tier A adds a minute, Tier B forty seconds, the matrix about two and a
   half minutes with P5's sixty.
+
+---
+
+## T24: Delete the Quarkus adapter
+
+Built on `claude-opus-5[1m]`. Nothing was written. `sftpconnector/quarkus` is gone: two main
+sources, three test sources, one test `application.properties` and a 130-line pom, and with them
+the six tests T14 counted. The connector is now two modules, `core` and `testkit`.
+
+**Built:** the opposite. The adapter spelled every configuration knob a third time - the DSL
+builder, a `@ConfigMapping` interface, and a `toConnectorConfig()` between them - and had no
+consumer. Shuttle is the only Quarkus host in this repository and it builds its connector through
+the core DSL in its own words, importing nothing from the module; the one place the name appeared
+outside the module was a comment. Deleting it makes that third spelling vanish with nothing
+reappearing elsewhere, which is the whole argument. It also retires two standards findings against
+the module - the versions pinned in its own pom, and a KDoc claiming the endpoint tags every log
+line - by removing what they were about rather than by fixing it.
+
+**Concepts named:** none. A deletion ticket that introduces vocabulary has misunderstood itself.
+What it does move is one seam: binding the connector to a Quarkus host is now the host's own
+handful of lines - build the DSL config, produce the `SftpConnector`, hand it the host's
+`MeterRegistry`, close it on the shutdown event - rather than a shared module. Shuttle already
+does exactly that and did not change.
+
+**Acceptance:**
+
+- *`sftpconnector/quarkus/` deleted, and its `<module>` line* - `git rm -r sftpconnector/quarkus`;
+  `sftpconnector/pom.xml` now lists `core` and `testkit`, and the reactor's build order confirms
+  it (twelve modules, the adapter absent).
+- *Parent `pom.xml` `dependencyManagement`: remove only what nothing else uses* - **nothing was
+  removed, and the check is the reason.** The deleted module managed its own Quarkus platform BOM,
+  its own `quarkus.version`, and its own Micrometer and SSHD pins inside its own pom, so the parent
+  never carried a Quarkus entry to begin with. What the parent does manage that the module used -
+  `kotlin-stdlib`, `kotlinx-coroutines-core`, `junit-jupiter`, `assertj-core` - is used by `core`,
+  `testkit`, shuttle and the DynaCache modules. Nothing was orphaned; the parent pom is untouched.
+- *Brief and spec 3.2 say the adapter was deleted and why; D3 stands* - the module table in
+  `implementer-brief.md` is two rows with a paragraph under it, and spec 3.2's table lost its
+  `sftpconnector-quarkus` row for the same paragraph. D3 is unchanged and the spec says so
+  explicitly: Quarkus stays out of `core` either way, there is simply no adapter module until a
+  second host needs one. The brief's stack bullet also stopped naming the deleted directory.
+- *`ShuttleLifecycle.kt`'s comment no longer names a class that does not exist* - one line, the
+  only shuttle edit: "The host's life inside Quarkus, modelled on `SftpConnectorLifecycle`:" is now
+  "The host's life inside Quarkus:". Nothing else in `shuttle/` was touched.
+- *Full reactor green* - `mvn -B -o test` from the root, all twelve modules SUCCESS, 23 m 44 s.
+  `sftpconnector-core` 54 tests in the default execution and 2 in the `lincheck` execution;
+  `sftpconnector-testkit` 206; shuttle 265. Two pre-existing environmental failures are recorded
+  under Deviations below, along with one connector flake that passes on its own.
+- *Shuttle's default tier, because this ticket touches `shuttle/`* - `mvn -B -o -pl shuttle test`
+  in the worktree: **Tests run: 265, Failures: 0, Errors: 0, Skipped: 0**, BUILD SUCCESS. Inside
+  the parallel full reactor the same 265 reported 2 failures, both of them the named readiness
+  flakes - `ShuttleHostTest.readiness_follows_the_configured_rule_with_one_route_up_and_one_down`
+  and `ShuttleHostTest.S18_a_wrong_password_leaves_the_route_down_and_restarted_with_backoff_and_the_process_alive`.
+  Rerun alone they pass. `ShuttleQuarkusTest` did not fail on port 8081 in either run.
+- *Progress entry, T14 pointed here, open-seams row* - this entry; T14's heading now carries
+  "This module no longer exists - T24 deleted it. Read this entry as history." above its first
+  line, and the seams table has the row "A second Quarkus host would want a properties mapping".
+
+**Deviations:**
+
+1. **The parent pom was not edited at all.** The ticket's checkbox anticipates entries to remove
+   and says to leave anything in doubt; the honest answer is that there were none, for the reason
+   in the acceptance list above.
+2. **The brief's stack bullet was reworded too**, one line beyond the module table the ticket
+   named. "Quarkus only in `sftpconnector/quarkus`" pointed at a directory this ticket deletes,
+   which is the same dangling name the shuttle comment had, and the fix is the same size.
+3. **Two reactor modules fail for reasons that predate this ticket and do not involve the
+   connector.** `snapshotcache` loses five tests when the `gvenzl/oracle-free` Testcontainer does
+   not print "DATABASE IS READY TO USE!" inside its wait (`ContainerLaunchException`, about 70 s
+   each), and `etl-host` loses seventeen to `NoSuchMethodError:
+   io.micrometer.common.util.internal.logging.WarnThenDebugLogger.isEnabled()` at Quarkus boot - a
+   Micrometer split between the parent's `micrometer-core` 1.17.1 and the Quarkus platform's
+   `micrometer-commons`. Neither module references the connector in any form; `etl-host/pom.xml`
+   contains no `sftp` at all. The reactor above was run with `-Dmaven.test.failure.ignore=true` so
+   that every module downstream of them would still build and test, which is why its summary reads
+   SUCCESS with those errors logged. The first run, without the flag, stopped at `snapshotcache`
+   for the same Oracle timeout.
+4. **One connector test flaked in the reactor and passes alone.**
+   `PartitionMatrixTest.P3_a rename whose reply is lost to a reset is retried, finds its landed
+   file, and reports success once` threw an NPE at `PartitionMatrixTest.kt:109` under the full
+   parallel build; rerun on its own (`-pl sftpconnector/testkit -Dtest=PartitionMatrixTest`) the
+   class is 5/5 green in 81 s. It is a Toxiproxy timing test and nothing in this ticket touches
+   `core` or `testkit`.
+
+**For the next ticket:**
+
+- The connector no longer produces anything Quarkus-shaped. A host binds it itself; shuttle is the
+  worked example and T14's entry above is the design to read before anyone rebuilds a mapping.
+- T14's ruling that "one connector per application, by construction" is gone with the module that
+  made it true. What survives is the seams row it left: two connectors against one endpoint on one
+  registry still read each other's pool gauges and breaker state, and now nothing at all prevents a
+  host from building the second one.
+- The full reactor is about 24 minutes on this machine with Docker up, and two of its modules fail
+  for environmental reasons unrelated to the connector. Run `-pl sftpconnector/core,sftpconnector/testkit`
+  and `-pl shuttle` when you want a clean read.
