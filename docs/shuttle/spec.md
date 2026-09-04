@@ -901,7 +901,7 @@ Each is public numbering, reported by number in validate mode and at startup.
 | 4 | Route names, store names and channel names are unique; a store and a channel may not share a name |
 | 5 | A route has exactly one `source` and exactly one `target` |
 | 6 | A `subscribe` source has a `fetch` with a store and a path, and a `bucket` when that store is S3; a `poll` source has none |
-| 7 | `parallelism >= 1` (1 when omitted), `maxAttempts >= 1`, `stuckAfter > 0`, `inProgressEvery > 0`, `recheckFinished >= 0` (24 h when omitted), every store's `staging.minFree >= 0` (1 GiB when omitted) |
+| 7 | No knob is set to a value that parks a worker for ever or spins a loop. Per route: `parallelism >= 1` (1 when omitted), `maxAttempts >= 1`, `stuckAfter > 0`, `inProgressEvery > 0`, `poll.every > 0`, `recheckFinished >= 0` (24 h when omitted), and each readiness check's `sizeStable.checks >= 1`, `sizeStable.interval > 0`, `minAge > 0`. Per store: `pool.maxSize >= 1`, `pool.maxConcurrentTransfers >= 1`, `staging.minFree >= 0` (1 GiB when omitted). Per channel: `policy.maxAttempts >= 1`, `policy.backoff.initial > 0`. Process-wide: `notifier.workers >= 1`, `notifier.batch >= 1`, `notifier.sweepEvery > 0`, `supervision.restartBackoff.initial > 0` |
 | 8 | Every `notify.on` is one of `fetched`, `stored`, `acked`; a pair of state and channel appears once per route |
 | 9 | Per object store, the sum of `parallelism` over every route that polls it, fetches from it or targets it, plus one lister per polled directory, is at most `pool.maxSize`, and `maxConcurrentTransfers <= maxSize` |
 | 10 | Every SFTP store's `keepAlive` and `idleTimeout` are below its `idleCutoff` |

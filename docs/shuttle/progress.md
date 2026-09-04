@@ -2705,3 +2705,86 @@ wall-clock race between the test and spec 10's counter placement. Nobody's ticke
   wait (spec 10 says "each restart logged and counted", silent on when) or the test awaits the gauge itself.
 - A flapping store now costs one WARN per failed sweep and one per failed transition, every 30 s at most for
   the sweep; if that is too loud in production, the sweep's log is the place for a once-per-outage guard.
+
+---
+
+## 29: Rule 7 refuses the zero values that hang or loop the process
+
+Review finding B8. Rule 7 already refused `parallelism: 0`, `maxAttempts: 0`, `stuckAfter: 0s`,
+`inProgressEvery: 0s` and a negative `recheckFinished` or `staging.minFree`, but a configuration could
+still park or spin the process with a zero somewhere else. `notifier.workers: 0` builds a zero-permit
+`Semaphore` and the notifier's first `acquire` never returns; `notifier.sweepEvery: 0s` makes
+`withTimeoutOrNull` return at once, so the sweep becomes a hot loop over `delivery_outbox`;
+`poll.every: 0s` makes `SftpSource` throw at construction, so the route is down at every start.
+None of the three was a violation. Now each is, reported as rule 7 with the route or `notifier` named.
+
+Rule 7 keeps its number and grew its predicate; no new rule. Spec 13.3's rule 7 sentence now opens with
+what it means - no knob parks a worker for ever or spins a loop - and lists every knob it covers,
+grouped per route, per store, per channel and process-wide.
+
+**The walk.** Every `Duration` and `Int` in `ShuttleConfig` (and the `DeliveryPolicy` a channel carries),
+with its verdict:
+
+*Added to rule 7 (seven knobs beyond the three the ticket named):*
+
+- `notifier.batch: 0` - `due(...)` claims no rows and `due.size < batch` is false, so the sweep never
+  waits: a hot loop on the state store. Now `>= 1`.
+- `supervision.restartBackoff.initial: 0s` - `wait * factor` is zero however often it doubles, so a
+  route that keeps failing restarts flat out. Now `> 0`. Rule 24 (`initial <= max`) does not catch it:
+  `0s`/`0s` passes rule 24.
+- `pool.maxSize: 0` and `pool.maxConcurrentTransfers: 0` - zero sessions or zero transfer permits park
+  the first acquire. Rule 9 catches this only for a store some route uses (the lister alone makes
+  `sessions >= 1`); a declared but unused store slipped through. Now both `>= 1`.
+- `sizeStable.checks: 0`, `sizeStable.interval: 0s`, `minAge: 0s` - the connector's `SizeStable` and
+  `MinAge` throw `ConfigurationError` at construction, the same failure shape as `poll.every`. Now
+  `>= 1`, `> 0` and `> 0`.
+- `policy.backoff.initial: 0s` - `retryLater(now)` leaves the row due at once, so a failing channel is
+  retried at sweep rate for `giveUpAfter`. Now `> 0`, and `policy.maxAttempts >= 1` alongside it, which
+  is what rule 7 already says about a route's `maxAttempts`.
+
+*Already covered by a rule, named:*
+
+- `drainTimeout: 0s` - rule 3. Every S3 `apiCall`, HTTP `timeout` and SFTP drain-plus-cancel-grace must
+  be below it, and each defaults well above zero, so any store or channel at all reports rule 3.
+- `idleCutoff: 0s` - rule 10, through `keepAlive`/`idleTimeout` not being below it.
+- `unzip.maxEntries: 0`, `unzip.maxBytes: 0` - rule 14.
+- `parallelism`, `maxAttempts`, `stuckAfter`, `inProgressEvery`, `recheckFinished`, `staging.minFree` -
+  rule 7 already.
+
+*Walked, no rule: the zero fails fast and visibly, it does not hang, loop or divide:*
+
+- `S3Timeouts.connect`/`socket`/`apiCall`, `HttpChannel.timeout`, `SftpStore.drainTimeout`/`cancelGrace`,
+  `policy.giveUpAfter`: a zero times out or gives up immediately. The transfer or delivery fails with a
+  reason an operator can read; nothing spins.
+- `SftpStore.keepAlive: 0s` - JSch reads `serverAliveInterval = 0` as keepalive off, and rule 10 already
+  bounds it below `idleCutoff`.
+- `SftpStore.idleTimeout: 0s` - every pooled session is idle-expired on return, so each acquire
+  reconnects. Wasteful, bounded, not a loop.
+- `SftpStore.port: 0` - the transport refuses to connect; the route is down with a connect error.
+- `Backoff.factor` - not settable from YAML or the DSL; always 2.0. Nothing to validate.
+- `attributes`, `response.success`/`retry` sets - counted or ranged, not intervals; rules 20 and 22.
+
+**Tests.** Six `rule7_` cases in `RulesTest`, each bending exactly one knob of spec 13.2's baseline:
+`notifier_workers`, `notifier_sweepEvery`, `notifier_batch`, `poll_every`, `restartBackoff_initial`,
+`pool_sizes`, `readiness_checks_and_intervals`, `delivery_policy_attempts_and_backoff` - eight in all.
+Each asserted `[]` before its check existed. `the_baseline_passes_every_rule` still passes, as do
+`YamlLoaderTest` and `ValidateCommandTest`, so spec 13.1's document still validates clean.
+
+**Deviations:**
+
+1. **`pool_sizes` asserts `[7, 9]` for `maxSize: 0`.** With the vendor store's `maxSize` at zero the
+   baseline's four-parallel route plus its lister also breaks rule 9's arithmetic, and both numbers are
+   worth reporting. The rule 7 checks run before rule 9's in `stores()` so the order is stable. The
+   `maxConcurrentTransfers: 0` case reports rule 7 alone.
+2. **`policy.maxAttempts >= 1` was added although zero does not hang.** Zero means every notification is
+   FAILED without a single send. It rides along because rule 7 already says `maxAttempts >= 1` for a
+   route and the two knobs share a name; splitting them would have read as an oversight.
+3. **Size:** production +19 lines in `Rules.kt`, tests +37, spec one row rewritten. Under the guideline.
+
+**For the next ticket / open:**
+
+- **`policy.backoff.initial > max`** has no rule; supervision's pair has rule 24. Not built - the
+  notifier's `min(max, initial * factor^n)` caps at `max` from the first attempt, so the result is a
+  constant delay, not a hazard.
+- **Zero as "off"** is not a vocabulary the configuration has anywhere. If a knob ever wants it,
+  rule 7 is where that exception has to be written down.

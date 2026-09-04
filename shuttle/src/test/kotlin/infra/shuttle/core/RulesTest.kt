@@ -227,6 +227,59 @@ class RulesTest {
     fun rule7_parallelism_maxAttempts_stuckAfter_and_inProgressEvery_are_positive() =
         assertEquals(listOf(7), violated(config(vendorDrop = { parallelism = 0 })))
 
+    /** B8: a zero-permit semaphore parks the notifier for ever, so validate mode refuses it. */
+    @Test
+    fun rule7_notifier_workers_is_positive() =
+        assertEquals(listOf(7), violated(config(more = { notifier { workers = 0 } })))
+
+    /** B8: a zero sweep interval turns the notifier's wait into a hot loop over the outbox. */
+    @Test
+    fun rule7_notifier_sweepEvery_is_positive() =
+        assertEquals(listOf(7), violated(config(more = { notifier { sweepEvery = 0.seconds } })))
+
+    /** B8: `every = 0s` makes the connector throw, so the route is down at every start. */
+    @Test
+    fun rule7_poll_every_is_positive() =
+        assertEquals(
+            listOf(7),
+            violated(config(vendorDrop = { source = poll(objectStore("vendor"), directory = "/inbox") { every = 0.seconds; onAck = move("temp/") } })),
+        )
+
+    /** B8: a zero batch claims no rows and never waits, so the sweep spins on the outbox. */
+    @Test
+    fun rule7_notifier_batch_is_positive() =
+        assertEquals(listOf(7), violated(config(more = { notifier { batch = 0 } })))
+
+    /** B8: a zero initial delay stays zero however often it doubles, so a failing route restarts flat out. */
+    @Test
+    fun rule7_restartBackoff_initial_is_positive() =
+        assertEquals(listOf(7), violated(config(more = { supervision { restartBackoff(0.seconds, max = 15.minutes) } })))
+
+    /** B8: a pool of zero sessions or zero transfer permits parks the first acquire for ever. */
+    @Test
+    fun rule7_pool_sizes_are_positive() {
+        assertEquals(listOf(7), violated(config(vendor = { pool { maxSize = 20; maxConcurrentTransfers = 0 } })))
+        assertEquals(listOf(7, 9), violated(config(vendor = { pool { maxSize = 0; maxConcurrentTransfers = 0 } })))
+    }
+
+    /** B8: each of these makes the connector's readiness check throw, so the route is down at every start. */
+    @Test
+    fun rule7_readiness_checks_and_intervals_are_positive() {
+        fun polling(vararg checks: FileReadiness): RouteBuilder.() -> Unit =
+            { source = poll(objectStore("vendor"), directory = "/inbox") { every = 1.hours; onAck = move("temp/"); readiness = checks.toList() } }
+        assertEquals(listOf(7), violated(config(vendorDrop = polling(FileReadiness.SizeStable(checks = 0, interval = 10.seconds)))))
+        assertEquals(listOf(7), violated(config(vendorDrop = polling(FileReadiness.SizeStable(checks = 2, interval = 0.seconds)))))
+        assertEquals(listOf(7), violated(config(vendorDrop = polling(FileReadiness.MinAge(0.seconds)))))
+        assertEquals(emptyList<Int>(), violated(config(vendorDrop = polling(FileReadiness.SizeStable(), FileReadiness.MinAge(1.minutes)))))
+    }
+
+    /** B8: a zero first delay leaves every retry due at once, so a failing channel is retried at sweep rate. */
+    @Test
+    fun rule7_delivery_policy_attempts_and_backoff_are_positive() {
+        assertEquals(listOf(7), violated(config(downstream = { policy = DeliveryPolicy(maxAttempts = 0) })))
+        assertEquals(listOf(7), violated(config(downstream = { policy = DeliveryPolicy(backoff = Backoff(initial = 0.seconds, max = 15.minutes)) })))
+    }
+
     @Test
     fun rule7_recheckFinished_is_not_negative() =
         assertEquals(listOf(7), violated(config(vendorDrop = { recheckFinished = (-1).seconds })))

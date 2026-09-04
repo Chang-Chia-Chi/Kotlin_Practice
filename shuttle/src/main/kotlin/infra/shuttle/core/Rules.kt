@@ -33,6 +33,7 @@ object Rules {
         fun all() {
             names()
             timeouts()
+            runtime()
             stores()
             config.channels.forEach { channel(it) }
             secrets()
@@ -45,6 +46,14 @@ object Rules {
             (config.objectStores.map { it.name } + config.channels.map { it.name }).duplicates()
                 .forEach { fail(4, "store or channel name $it is declared twice") }
             config.routes.map { it.name }.duplicates().forEach { fail(4, "route name $it is declared twice") }
+        }
+
+        /** Rule 7: the process-wide knobs whose zero parks or spins a worker (B8). */
+        fun runtime() {
+            if (config.notifier.workers < 1) fail(7, "notifier: workers must be >= 1")
+            if (config.notifier.batch < 1) fail(7, "notifier: batch must be >= 1")
+            if (!config.notifier.sweepEvery.isPositive()) fail(7, "notifier: sweepEvery must be > 0")
+            if (!config.supervision.restartBackoff.initial.isPositive()) fail(7, "supervision: restartBackoff.initial must be > 0")
         }
 
         /** Rule 3. */
@@ -61,12 +70,14 @@ object Rules {
                 .forEach { fail(3, "channel ${it.name}: timeout ${it.timeout} is not below drainTimeout $drain") }
         }
 
-        /** Rules 9, 10, 11. */
+        /** Rules 7, 9, 10, 11. */
         fun stores() {
             val stagings = mutableMapOf<Path, String>()
             for (store in config.objectStores) {
                 val pool = store.pool
                 if (pool != null) {
+                    if (pool.maxSize < 1) fail(7, "store ${store.name}: pool.maxSize must be >= 1")
+                    if (pool.maxConcurrentTransfers < 1) fail(7, "store ${store.name}: pool.maxConcurrentTransfers must be >= 1")
                     if (pool.maxConcurrentTransfers > pool.maxSize) fail(9, "store ${store.name}: maxConcurrentTransfers exceeds maxSize")
                     val sessions = config.routes.sumOf { it.parallelism * it.rolesOn(store.name) } +
                         config.routes.count { (it.source as? Source.Poll)?.store == store.name }
@@ -87,9 +98,11 @@ object Rules {
             }
         }
 
-        /** Rules 15 (providers), 16, 18, 19, 20, 21. */
+        /** Rules 7, 15 (providers), 16, 18, 19, 20, 21. */
         fun channel(channel: Channel) {
             if (channel !is HttpChannel) return
+            if (channel.policy.maxAttempts < 1) fail(7, "channel ${channel.name}: policy.maxAttempts must be >= 1")
+            if (!channel.policy.backoff.initial.isPositive()) fail(7, "channel ${channel.name}: policy.backoff.initial must be > 0")
             if ((channel.response.success intersect channel.response.retry).isNotEmpty()) fail(20, "channel ${channel.name}: success and retry overlap")
             MappingRenderer.check(channel.body, declaredAttributes = null) { beans(it) != null }
                 .forEach { fail(it.rule, "channel ${channel.name} ${it.message}") }
@@ -125,6 +138,8 @@ object Rules {
             when (source) {
                 is Source.Poll -> {
                     reference(name, source.store, "poll", stores) { it is SftpStore }
+                    if (!source.every.isPositive()) fail(7, "route $name: poll every must be > 0")
+                    source.readiness.forEach { readiness(name, it) }
                     if (route.fetch != null) fail(6, "route $name polls and has a fetch")
                     ack(name, source.onAck, source.onNack, (stores[source.store] as? S3Store)?.let { S3_ACKS } ?: SFTP_ACKS, setOf(AckAction.None))
                     val move = source.onAck as? AckAction.Move
@@ -162,6 +177,17 @@ object Rules {
             (route.notify.map { it.channel } + listOfNotNull(callback)).mapNotNull { channels[it] as? HttpChannel }.distinct().forEach { channel ->
                 MappingRenderer.check(channel.body, declared) { true }.filter { it.rule == 17 }
                     .forEach { fail(17, "route $name: channel ${channel.name} ${it.message}") }
+            }
+        }
+
+        /** Rule 7: the connector rejects each of these at construction, so the route would be down at every start (B8). */
+        private fun readiness(route: String, check: FileReadiness) {
+            when (check) {
+                is FileReadiness.SizeStable -> {
+                    if (check.checks < 1) fail(7, "route $route: sizeStable.checks must be >= 1")
+                    if (!check.interval.isPositive()) fail(7, "route $route: sizeStable.interval must be > 0")
+                }
+                is FileReadiness.MinAge -> if (!check.age.isPositive()) fail(7, "route $route: minAge must be > 0")
             }
         }
 

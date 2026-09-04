@@ -9,12 +9,12 @@ connector throws and the route goes down at every start), each with rule 7's num
 
 **Nature:** validation rule coverage
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `RulesTest`: `rule7_` cases for each of the three, reporting rule 7 with the route or the notifier named; `violations` is empty for them today
-- [ ] Any other duration or count in `ShuttleConfig` whose zero would hang, loop or divide (`batch`, `parallelism`, `maxAttempts`, `restartBackoff` bounds, `checks`) is walked and either already covered by a rule (name it in the progress entry) or added under rule 7
-- [ ] Spec 13.3 rule 7's sentence lists what it now covers
-- [ ] Progress entry appended
+- [x] `RulesTest`: `rule7_` cases for each of the three, reporting rule 7 with the route or the notifier named; `violations` is empty for them today
+- [x] Any other duration or count in `ShuttleConfig` whose zero would hang, loop or divide (`batch`, `parallelism`, `maxAttempts`, `restartBackoff` bounds, `checks`) is walked and either already covered by a rule (name it in the progress entry) or added under rule 7
+- [x] Spec 13.3 rule 7's sentence lists what it now covers
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket; 200-600 lines including tests; no Thread.sleep;
 invariant tests named `I<n>_<description>`, scenario tests by their `S<n>` id, validation tests by `rule<n>_`,
