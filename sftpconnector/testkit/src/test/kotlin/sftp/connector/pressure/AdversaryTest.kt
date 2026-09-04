@@ -67,6 +67,20 @@ class AdversaryTest {
         println("adversary: $MAIN_SEQUENCES sequences x $MAIN_OPS ops in ${started.elapsedNow()}")
     }
 
+    /**
+     * I15 under its own id. The invariant is checked after every operation of every sequence the
+     * test above runs - the ledger in [World.reconcile], the landed-move clause in [World.ack] -
+     * which is stronger coverage than any one scenario and is exactly why it had no `I15_` test.
+     * It needs one anyway: spec 17.1 names invariant tests `I<n>_<description>`, so `-Dtest='I15*'`
+     * has to find something, and a broken ledger should fail a test named for what it broke rather
+     * than one named `model_`. One fixed seed of its own, end to end, and the per-operation
+     * assertions stay where they are.
+     */
+    @Test
+    fun `I15_every acked file is at the ack target and no landed move is reported as failed`() {
+        runShrinking(SEED + I15_SEED_OFFSET, index = 0, ops = MAIN_OPS)
+    }
+
     /** One long run: what the world holds at op 1,000 is what it holds at the end, within a band. */
     @Test
     fun `leak_fifty thousand ops on one seed keep sessions, threads and post-GC heap flat`() {
@@ -550,6 +564,9 @@ class AdversaryTest {
         const val SEED = 20260903L
         const val CLOSE_SALT = 0x5EEDL
         const val LEAK_SEED_OFFSET = 1_000_000L
+
+        /** Past the main run's five thousand and past the leak run, so I15 gets a sequence nothing else drives. */
+        const val I15_SEED_OFFSET = 2_000_000L
         const val MAIN_SEQUENCES = 5000
         const val MAIN_OPS = 40
         const val LEAK_OPS = 50_000
