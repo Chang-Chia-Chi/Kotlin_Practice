@@ -12,12 +12,12 @@ columns. Review finding B6.
 
 **Nature:** adapter correctness at the JDBI edge
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `JdbiStateStoreTest` (Oracle): with the default zone set to Europe/Berlin for the test, a row STORED at 2026-10-25T00:30Z is found by `unlisted(olderThan = 01:30Z)` and reads back exactly; red before the fix; the default zone is restored after the test
-- [ ] Binding and reading go through UTC explicitly (a UTC `Calendar` on every bind and read, or `TIMESTAMP WITH TIME ZONE` columns; the first needs no DDL change and is preferred); the choice is a decision entry
-- [ ] The in-memory store is unaffected, and `StateStoreContract` stays green on both
-- [ ] Progress entry appended
+- [x] `JdbiStateStoreTest` (Oracle): with the default zone set to Europe/Berlin for the test, a row STORED at 2026-10-25T00:30Z is found by `unlisted(olderThan = 01:30Z)` and reads back exactly; red before the fix; the default zone is restored after the test
+- [x] Binding and reading go through UTC explicitly (a UTC `Calendar` on every bind and read, or `TIMESTAMP WITH TIME ZONE` columns; the first needs no DDL change and is preferred); the choice is a decision entry
+- [x] The in-memory store is unaffected, and `StateStoreContract` stays green on both
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket; 200-600 lines including tests; no Thread.sleep;
 invariant tests named `I<n>_<description>`, scenario tests by their `S<n>` id, validation tests by `rule<n>_`,

@@ -23,13 +23,17 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.withContext
 import org.jdbi.v3.core.Handle
 import org.jdbi.v3.core.Jdbi
+import org.jdbi.v3.core.argument.Argument
 import org.jdbi.v3.core.statement.UnableToExecuteStatementException
 import java.sql.ResultSet
 import java.sql.SQLIntegrityConstraintViolationException
 import java.sql.Timestamp
+import java.sql.Types
 import java.time.Clock
 import java.time.Instant
 import java.time.temporal.ChronoUnit
+import java.util.Calendar
+import java.util.TimeZone
 
 /**
  * Spec 8.2 on Oracle through JDBI. Every method is one transaction on [dispatcher], the module's
@@ -239,7 +243,7 @@ class JdbiStateStore(private val jdbi: Jdbi, private val dispatcher: CoroutineDi
                 "VALUES (:id, :route, :parent, :kind, :sk, :ref, :name, :size, :mtime, :rev, :sup, 'SEEN', 0, :now, :now)",
         ) {
             bind("id", id).bind("route", identity.route.value).bind("parent", parent?.value).bind("kind", kind.name).bind("sk", identity.sourceKind.name)
-                .bind("ref", identity.sourceRef).bind("name", identity.sourceName).bind("size", identity.sourceSize).bind("mtime", identity.sourceMtime?.ts())
+                .bind("ref", identity.sourceRef).bind("name", identity.sourceName).bind("size", identity.sourceSize).bind("mtime", identity.sourceMtime.ts())
                 .bind("rev", identity.revision).bind("sup", supersedes?.value)
         }
         return transfer(TransferId(id))
@@ -308,13 +312,27 @@ class JdbiStateStore(private val jdbi: Jdbi, private val dispatcher: CoroutineDi
     )
 
     private fun ResultSet.longOrNull(column: String): Long? = getObject(column)?.let { (it as Number).toLong() }
-    private fun ResultSet.instant(column: String): Instant? = getTimestamp(column)?.toInstant()
+    private fun ResultSet.instant(column: String): Instant? = getTimestamp(column, utc())?.toInstant()
 
-    /** Oracle TIMESTAMP keeps six fractional digits; truncating on the way in makes what is read equal what was written. */
-    private fun Instant.ts(): Timestamp = Timestamp.from(truncatedTo(ChronoUnit.MICROS))
+    /**
+     * D50: an instant crosses the JDBC edge as UTC wall time, named on both sides. An 8.1 TIMESTAMP
+     * keeps a date and a time and no offset, so whoever names the zone decides the digits; unnamed,
+     * the driver takes the process default, and a default with DST gives one local time to two
+     * instants an hour apart. Six fractional digits is all the column keeps, so truncating on the way
+     * in makes what is read equal what was written.
+     */
+    private fun Instant?.ts(): Argument = Argument { position, statement, _ ->
+        if (this == null) statement.setNull(position, Types.TIMESTAMP)
+        else statement.setTimestamp(position, Timestamp.from(truncatedTo(ChronoUnit.MICROS)), utc())
+    }
+
     private fun SourceIdentity.key() = copy(revision = 1, sourceMtime = sourceMtime?.truncatedTo(ChronoUnit.MICROS))
 
     private companion object {
         val MAP = object : com.fasterxml.jackson.core.type.TypeReference<Map<String, String>>() {}
+        val UTC: TimeZone = TimeZone.getTimeZone("UTC")
+
+        /** The driver reads and writes the calendar it is handed, so each call gets its own. */
+        fun utc(): Calendar = Calendar.getInstance(UTC)
     }
 }
