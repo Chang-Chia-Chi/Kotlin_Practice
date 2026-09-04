@@ -142,7 +142,9 @@ class SftpClient(
      *   same name - a caller in that position names its own target, and a caller that names its
      *   own target has taken over deciding what is safe to write.
      * @throws sftp.connector.error.UnsafeFileName when no target was given and the listed name is
-     *   not one that can be written under the staging directory.
+     *   not one that can be written under the staging directory, and - whether or not a target was
+     *   given - when something this connector did not write is already sitting at the partial
+     *   file's name, which is a symbolic link somebody else planted or a directory in the way.
      */
     suspend fun download(remote: RemoteFile, localTarget: Path? = null): LocalFile = meters.timing("download") {
         val target = localTarget ?: stagingTargetFor(remote)

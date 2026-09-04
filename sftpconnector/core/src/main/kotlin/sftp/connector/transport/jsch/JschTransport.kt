@@ -23,6 +23,7 @@ import sftp.connector.config.HostKeyPolicy
 import sftp.connector.config.SftpConnectorConfig
 import sftp.connector.error.Attempt
 import sftp.connector.error.ServerFailure
+import sftp.connector.error.onOneLine
 import sftp.connector.transport.Listing
 import sftp.connector.transport.RemoteFile
 import sftp.connector.transport.SftpConnection
@@ -177,7 +178,7 @@ internal class JschConnection(
                 attempt,
                 ChannelSftp.SSH_FX_FAILURE,
                 "the server resolved it to something no path can hold, so nothing was built on it: " +
-                    "'${resolved.readable()}'",
+                    "'${resolved.onOneLine()}'",
             )
         }
         resolved
@@ -239,7 +240,7 @@ internal class JschConnection(
                     "connector would quote back at the server: '{}'",
                 endpoint,
                 this,
-                name.readable(),
+                name.onOneLine(),
             )
             null
         }
@@ -385,22 +386,6 @@ private fun Char.cannotBeInAPath(): Boolean = isISOControl()
 
 /** The same, plus the separator that would make one name into several. */
 private fun Char.cannotBeInAName(): Boolean = this == '/' || cannotBeInAPath()
-
-/**
- * The string as it can be put in a log line or a message without becoming two of them.
- *
- * A file name is the server's word and a newline is a legal character in one on every POSIX
- * filesystem, so a name reaching a plain-text appender unescaped lets whoever can name a file
- * forge a record that reads like one of the connector's own.
- */
-private fun String.readable(): String = buildString(length) {
-    for (character in this@readable) when {
-        character == '\n' -> append("\\n")
-        character == '\r' -> append("\\r")
-        character.isISOControl() -> append("\\u").append(character.code.toString(16).padStart(4, '0'))
-        else -> append(character)
-    }
-}
 
 /**
  * SFTP version 3 counts modification times in whole seconds since the epoch, so a file written

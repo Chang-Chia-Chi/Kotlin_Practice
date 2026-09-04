@@ -39,7 +39,13 @@ sealed interface SftpEvent {
          * event; a download made after the poll has ended has no poll left to say so.
          *
          * @param localTarget where the file lands; by default the staging directory under the
-         *   file's own name, as [sftp.connector.client.SftpClient.download] decides it.
+         *   file's own name, **checked to be a name** before it is joined to that directory, as
+         *   [sftp.connector.client.SftpClient.download] decides it. Naming a target turns that
+         *   check off, and the obvious thing to name - `myDir.resolve(event.file.name)` - is the
+         *   one that needs it most: `file.name` is the *server's* word, and a server that lists
+         *   `..\..\evil.csv` has just chosen a directory two above `myDir` for you. A caller that
+         *   names its own target has taken over deciding what is safe to write, so either leave
+         *   this null or check the name the way [sftp.connector.client.SftpClient] does.
          */
         suspend fun download(localTarget: Path? = null): LocalFile? = handling.download(slot, localTarget)
 

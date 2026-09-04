@@ -35,7 +35,9 @@ import java.io.PrintStream
  * A conforming server cannot send such an entry, which is why this cannot be written against a
  * real server and why the testkit's fake - which drops anything holding a separator before it
  * reports it - is structurally incapable of staging it. So the SSH library's own channel stands in
- * here, and is asked to say the things only a hostile or broken server would say.
+ * here, and is asked to say the things only a hostile or broken server would say. The same
+ * stand-in pins the other half of the same question - how a path this connector chose is spelled
+ * to the library - which had no test under it either.
  */
 class JschListingNamesTest {
 
@@ -99,6 +101,37 @@ class JschListingNamesTest {
         assertTrue("no path can hold" in refused.message.orEmpty(), refused.message)
         assertTrue("""inbound\nWARN""" in refused.message.orEmpty(), refused.message)
     }
+
+    /**
+     * D37's two deliberate exceptions, pinned. JSch reads `*` and `?` in the last component of a
+     * path as a glob for `ls`, `stat`, `get`, `put`, `rename` and `rm` - a delete of `*.csv`
+     * removed every file that matched - so the adapter escapes them before the library sees them.
+     * It does *not* escape them for `mkdir` and `realpath`, because JSch expands neither and an
+     * escape there would be sent to the server as part of the name; the startup probe makes both
+     * of those calls with an operator-supplied path, so the exception is load-bearing and was
+     * resting on a reading of the library's sources with no test under it.
+     *
+     * This pins what the adapter *sends*. What the library then does with it stays where it was,
+     * proved against the embedded server by the escaping tests, because `*` is not a legal
+     * character in a file name on Windows and a test that made one could only ever run on POSIX.
+     */
+    @Test
+    fun `mkdir and realpath are sent the path as written, and everything else is sent it escaped`() =
+        runBlocking<Unit> {
+            val channel = mock(ChannelSftp::class.java)
+            Mockito.`when`(channel.realpath("/drop/star*dir")).thenReturn("/drop/star*dir")
+            val connection = connectionOver(channel)
+
+            connection.mkdir("/drop/star*dir")
+            connection.realpath("/drop/star*dir")
+            connection.delete("/drop/star*.csv")
+            connection.rename("/drop/star*.csv", "/drop/done/one.csv")
+
+            verify(channel).mkdir("/drop/star*dir")
+            verify(channel).realpath("/drop/star*dir")
+            verify(channel).rm("""/drop/star\*.csv""")
+            verify(channel).rename("""/drop/star\*.csv""", "/drop/done/one.csv")
+        }
 
     private fun listing(names: List<String>): ChannelSftp {
         val channel = mock(ChannelSftp::class.java)
