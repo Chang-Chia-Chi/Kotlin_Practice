@@ -13,7 +13,6 @@ import org.junit.jupiter.api.io.TempDir
 import sftp.connector.SftpConnector
 import sftp.connector.config.HostKeyPolicy
 import sftp.connector.config.sftpConnector
-import sftp.connector.source.SftpEvent.FileGone
 import sftp.connector.source.SftpEvent.FileSeen
 import sftp.connector.source.SftpEvent.PollCompleted
 import sftp.connector.testkit.EmbeddedSftpServer
@@ -43,7 +42,7 @@ class SourceAgainstServerTest {
 
     /** S5. The file was listed, and by the time the consumer went for it something else had taken it. */
     @Test
-    fun `S5_a file removed between the listing and the download is gone, not failed`() = runBlocking<Unit> {
+    fun `S5_a file removed between the listing and the download answers null, not an error`() = runBlocking<Unit> {
         remoteRoot.resolve("drop").createDirectories()
         remoteRoot.resolve("drop/ledger.csv").writeText(CONTENT)
 
@@ -54,10 +53,11 @@ class SourceAgainstServerTest {
                 if (event is FileSeen) {
                     Files.delete(remoteRoot.resolve("drop/ledger.csv"))
                     assertThat(event.download()).isNull()
+                    assertThat(inFlight()).describedAs("places taken the instant the null arrived").isZero()
                 }
             }
 
-            assertThat(events.filterIsInstance<FileGone>().map { it.file.name }).containsExactly("ledger.csv")
+            assertThat(events.filterIsInstance<FileSeen>().map { it.file.name }).containsExactly("ledger.csv")
             assertThat(events.last()).isInstanceOf(PollCompleted::class.java)
             assertThat(inFlight()).isZero()
             assertThat(stage.listDirectoryEntries()).isEmpty()

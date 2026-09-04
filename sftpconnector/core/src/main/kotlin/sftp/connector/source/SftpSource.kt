@@ -102,8 +102,8 @@ class SftpSource(
      * A poll is three phases: the listing, whose session is back in the pool before the next
      * begins; the readiness checks, over everything the listing found as one batch, so a check
      * that waits holds nothing while it waits and waits once rather than once per file; and the
-     * handing over. A file the consumer downloads while still collecting is followed by
-     * [SftpEvent.FileGone] if it turned out not to be there.
+     * handing over. A file that has gone by the time the consumer downloads it answers null from
+     * the download and is given back on the spot; no event says so.
      *
      * A collection that ends any way but normally - cancelled, or failed by the listing or by the
      * consumer's own block - gives every file this poll handed over and not yet answered back to
@@ -214,6 +214,12 @@ class SftpSource(
      * returns and nacked when it throws. One file failing never ends the pipeline - the nack says
      * whether it comes round again - and neither does an ack or nack action that could not be
      * carried out: the file is then still where it was, and the next tick hands it over again.
+     *
+     * Only the consumer's own exception is its verdict. One of the connector's own failures out of
+     * the block - a download refused by a full pool, a session lost under it - says nothing about
+     * the file, so it is neither acked nor nacked: it is given back with no action run, the next
+     * tick hands it over again, and the failure is treated as an action's failure is.
+     *
      * What ends the pipeline is what ends a watch, or a bug: an exception that is not one of the
      * connector's own failures out of an ack or a nack.
      */
@@ -226,7 +232,12 @@ class SftpSource(
                 // This collector's own cancellation is not the block failing. Anything else is,
                 // including a timeout the block set for itself.
                 currentCoroutineContext().ensureActive()
-                answering(event) { event.nack(failed) }
+                if (failed is SftpException) {
+                    event.giveBack()
+                    unlessFatal(failed, "The connector failed while the consumer had ${at(event.file.path)}; that is not the consumer's verdict, so it is given back and will be handed over again")
+                } else {
+                    answering(event) { event.nack(failed) }
+                }
                 return@collect
             }
             answering(event) { event.ack() }
@@ -237,13 +248,14 @@ class SftpSource(
         try {
             answer()
         } catch (failed: SftpException) {
-            if (failed.disposition.watch == WatchReaction.STOP) throw failed
-            LOG.warn(
-                "The answer for {} could not be carried out, so it is still where it was and will be handed over again: {}",
-                at(event.file.path),
-                failed.toString(),
-            )
+            unlessFatal(failed, "The answer for ${at(event.file.path)} could not be carried out, so it is still where it was and will be handed over again")
         }
+    }
+
+    /** A connector failure the pipeline goes on from is logged with its [consequence]; one no later tick could survive ends the pipeline. */
+    private fun unlessFatal(failed: SftpException, consequence: String) {
+        if (failed.disposition.watch == WatchReaction.STOP) throw failed
+        LOG.warn("{}: {}", consequence, failed.toString())
     }
 
     /**
@@ -370,7 +382,6 @@ class SftpSource(
                                 handovers?.record(slot)
                                 emitted++
                                 emit(SftpEvent.FileSeen(file, slot, handling))
-                                if (slot.settlement == Settlement.GONE) emit(SftpEvent.FileGone(file))
                             }
                         }
                     }
@@ -519,6 +530,10 @@ class SftpSource(
 
         private fun alreadySettled(call: String, slot: InFlightSlot) {
             val why = when (slot.settlement) {
+                // A file that was gone at download time was never anybody's to answer, and the
+                // null download already said so; an answer after it is the ordinary pipeline
+                // finishing its block, not a second answer worth a warning.
+                Settlement.GONE -> return
                 Settlement.WATCH_ENDED ->
                     "the watch that handed it over had already ended and given it back, so a later poll hands it over again"
                 else -> "the file had already been given back as ${slot.settlement?.label}"

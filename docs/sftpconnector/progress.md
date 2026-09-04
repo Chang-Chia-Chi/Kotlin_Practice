@@ -206,7 +206,7 @@ because each was correctly deferred by the ticket that found it.
 | ~~`PostAction.Delete` and `PostAction.Move.overwrite` have no consumer~~ | T9 | ~~T10~~ | **Closed by T10.** `SftpSource.FileHandling.perform` is the exhaustive `when`: an ack or nack moves with the configured overwrite policy, deletes, or leaves the file alone |
 | ~~`NoSuchFile` from `download` is turned into `FileGone` *outside* the client~~ | T10 | ~~T11~~ | **Closed by T11.** A missing path is never retried inside a call and never counted against the breaker, for every operation: it is the server's answer about the path, and each operation has already said what it means to it by the time the retry sees it (T11 deviations 2 and 3) |
 | ~~`SizeStable` observes across polls, not inside one, so the shipped default is ready on the *second* poll~~ | T10 | ~~The maintainer; spec 7.5 is tier 2~~ | **Closed by C11 and applied by the pre-T11 hotfix.** `SizeStable` batches inside one poll: every candidate is stated, one `interval` elapses, every candidate is stated again, with the listing's session already released (`Readiness.kt:65-100`). The across-poll memory, its cap and its `synchronized` are gone. Spec 7.5 and D36 record it |
-| `FileGone` is an event of the live poll only | T10 | Whoever builds a consumer helper that downloads concurrently | A consumer that downloads inside its collect block sees `FileGone` follow `FileSeen`; one that downloads after the poll has ended gets only `download()`'s null. T12's `consume` is inline and unaffected |
+| ~~`FileGone` is an event of the live poll only~~ | T10 | ~~Whoever builds a consumer helper that downloads concurrently~~ | **Closed by T20, by deletion.** The event could only be right when the download ran inside a `poll`'s collect block; under `watch` the tick's `emit` returns when the channel takes the event, before the consumer downloads, so it lost the race every time. `download()` answering null, with the place already given back, is the one signal every path had, and is now the whole contract (spec 7.1, 8.2) |
 | Readiness constructor faults are not aggregated with the builder's | T10 | Whoever next touches DSL validation | `sizeStable(checks = 0, ...)` raises `ConfigurationError` at the moment the polling block runs, before `build()` collects the rest, so an operator with two faults hears about one at a time |
 | ~~`socketTimeout` is dead configuration~~ | T2 measurement, spec D26 | ~~T8~~ | **Closed by T8, which removed it.** The bound on a hung server is `keepAlive x 2`, the adapter pins `serverAliveCountMax = 1` rather than inheriting it, and `keepAlive`'s own documentation names the bound. Spec 5.2, 5.3, 12 and S2 are reconciled, and D31 records why removing beat repurposing |
 | ~~`Lease.connection` hands a direct `withLease` caller a full `SftpConnection`, so it can call `abort()`~~ | T8 | ~~The ticket that first has cause to close it~~ | **Closed by T13.** `Lease.connection` is an `SftpSession`; neither `close()` nor `abort()` is reachable from a lease. T3's `I2_` test names the type once and was narrowed with it, as R1 anticipated |
@@ -4553,3 +4553,150 @@ second answer, and its WARN says the watch had already given the file back. Spec
   since T17 lens 5 H2 (D46). Nothing here touches `shuttle/`, which is outside this ticket's
   paths; whoever reconciles shuttle with D46 owns the one-line call. The reactor's other modules
   were green here (snapshotcache 215, etl-host's 17 Quarkus start-up errors are its environment).
+
+---
+
+## T20: `FileGone` goes; `consume` knows whose verdict an exception is
+
+Built on `claude-fable-5-1`. 67 core tests (one skipped, `StagingSafetyTest`'s platform skip, as
+before) plus the two Lincheck runs, and 226 testkit tests are green at the end, Toxiproxy tier
+included; 1 was added. `SftpSourceTest` reports 23 for its 23 test functions (one rewritten),
+`SftpWatchTest` 17 for 17 (1 added), `SourceAgainstServerTest` 3 for 3 (one rewritten),
+`AcceptanceScenariosTest` 3 for 3. The shuttle tier could not run: see the acceptance box below.
+
+**Built:** two corrections to the source's contract with its consumer. `SftpEvent.FileGone` is
+deleted rather than fixed: it was emitted only when the slot was already settled gone at the
+instant `emit(FileSeen)` returned, which is after the consumer's block under `poll` but, under
+`watch`, when the channel's receiver took the event and before the consumer had downloaded - so
+the check lost the race on every tick of the one shape a pipeline actually runs. The contract in
+its place is the one every path already had: `download()` answers null, the file's place is
+already given back when the null arrives, and no event follows. And `consume` now tells whose
+verdict an exception out of its block is. One of the connector's own failures - any
+`SftpException`, a download refused by a full pool or lost with its session - is not the
+consumer's: the file is given back with redelivery and no action run, so the next tick lists it
+again rather than filing it under `failed/` for a failure that was not its own, and the failure
+is handled as an ack or nack action's failure is - logged, and the pipeline goes on, unless no
+later tick could survive it. Any other exception is the consumer's verdict and nacks as before.
+Spec 7.1, 7.2 and 8.2 say all of this in their own words.
+
+**Concepts named:**
+
+- **The null download is the whole contract for a file that has gone.** There is no second
+  channel for it. `FileHandling.download` settles the slot `GONE`, counts it with the poll's
+  files (`sftp_poll_files{state=gone}`), and releases the place before the null is returned; a
+  consumer that downloads inside its collect block and one that downloads after the poll has
+  ended read the same signal. The seam that existed only to say it again is gone, and with it
+  the one place the tick inspected a slot's settlement after handing it over.
+- **An answer after gone is not a second answer.** `consume` runs its block, the block reads the
+  null, returns, and `consume` acks - as the ordinary pipeline should, since the block did not
+  fail. `FileHandling.alreadySettled` now returns without a word for a slot settled `GONE`: the
+  null already said everything, and a WARN reading "ignored, given back as gone" on every file
+  another system took first was noise about the normal case. Every other second answer still
+  warns as before.
+- **`FileSeen.giveBack()`** (`internal`) is the seam `consume` needed and the only new surface:
+  the slot withdrawn as `Settlement.CANCELLED` with no action run, which is exactly what the
+  running tick's own catch does for a file whose collector left. Not public: a manual consumer
+  that hits a connector failure has `nack(reason, redeliver = true)` and its own judgement about
+  the nack action, and a public "give back without a verdict" would want spec 7.2 to say when it
+  is the right call before it exists.
+- **`unlessFatal`** is the one error policy `consume` applies to a connector failure, wherever
+  it came from - the block or an action: a failure the watch would stop on (`disposition.watch ==
+  STOP`) ends the pipeline with it, and anything else is a WARN naming the file and the
+  consequence. `answering` was that policy inline; it is now a caller of it, so the two WARN
+  lines share the shape "consequence: failure" and differ only in what happened.
+
+**Acceptance:**
+
+- *`SftpEvent.FileGone` deleted, with the `emit` and every `is FileGone` branch; the "given back
+  as gone" line for a null download goes with it* - the class, its `emit` in `tickOf`, the two
+  test imports and the one shuttle branch are gone; `alreadySettled` returns without logging for
+  `GONE`. `grep -rn FileGone sftpconnector shuttle/src` finds one hit, the stale KDoc sentence in
+  `shuttle/.../SftpPollSource.kt:86`, which is outside this ticket's one permitted shuttle line
+  (deviation 3).
+- *The two FileGone tests rewritten to the replacing contract, names changed, scenario ids kept*
+  - `SftpSourceTest.a file gone at download time answers null, is given back on the spot, and
+  needs no answer`: the null is asserted inside the collect block together with `sftp_inflight`
+  at zero at that instant, the event sequence is pinned to exactly `PollStarted, FileSeen,
+  PollCompleted`, and the `gone` counter reads one. `SourceAgainstServerTest.S5_a file removed
+  between the listing and the download answers null, not an error`: the same two assertions
+  against the embedded server, the staging directory empty, `PollCompleted` last. The acceptance
+  suite's `@SelectMethod` for S5 follows the new name (deviation 2).
+- *`consume`: an `SftpException` out of the block releases the slot with redeliver, runs no
+  action, rethrows to the error policy; test with the fake refusing the download with
+  `PoolExhausted` and `SessionLost`, the file listed again next tick, nothing moved to the nack
+  target* - `SftpWatchTest.consume gives back a file the connector failed on without a verdict,
+  and the next tick hands it over again`: `a.csv`'s read refused with `PoolExhausted`, `b.csv`'s
+  with `SessionLost` (retry budget one, so it surfaces as itself), `onNack = move("failed/")`
+  and `onAck = delete()`; after the first tick no rename and no delete was sent, `nack` counts
+  zero, `cancelled` counts two, `sftp_inflight` is zero and the pipeline is still running; the
+  refusals lifted, the next tick hands both over again and both are deleted by their ack. Seen
+  red first against the old code with the honest symptom: `[actions run for a file nobody
+  answered for] Expecting empty but was: [Call(operation=Rename, session=1, path=/drop/a.csv)`.
+  "Rethrows to the error policy" is read as deviation 1 says.
+- *`consume`: a consumer's own exception still nacks; existing test unmodified* -
+  `SftpWatchTest.consume acks a file its block returns from, nacks one it throws on, and goes on`
+  and `.the consumer's exception is logged with its stack when consume nacks`, both untouched and
+  green.
+- *Shuttle compiles: the one `is SftpEvent.FileGone -> Unit` branch removed; run shuttle's
+  default tier and record the counts* - **the branch is removed; the tier is blocked by a break
+  that predates this ticket.** `mvn -B -o -pl shuttle -am test-compile` on this branch reports
+  exactly one error, `shuttle/src/main/kotlin/infra/shuttle/sftp/SftpTarget.kt:79:59 No
+  parameter with name 'expectedSize' found.` - T17's D46 changed `SftpClient.rename`'s
+  signature and shuttle's call has not followed yet; T19's entry recorded the same break on its
+  base. Kotlin reports every error of a compilation in one pass, and there is no error at
+  `SftpPollSource.kt`, so the branch removal itself compiles; a `FileGone` branch left in place
+  would have been a second, unresolved-reference error. `SftpTarget.kt` was not edited, as
+  instructed; the shuttle owner is reconciling it separately. No shuttle test counts to report.
+- *Progress entry appended; the open-seams row struck through as closed by deletion* - this
+  entry; the row is struck through above.
+
+**Deviations:**
+
+1. **"Rethrows to the error policy" is `consume`'s own policy for connector failures, not a
+   rethrow out of `collect`.** The ticket's box says the exception "rethrows to the error
+   policy" and the spec change says it "still goes to the error policy as today". A rethrow out
+   of the collector would pass the watch's `reportingFailures` untouched - that operator sees
+   only the tick's own failures - and end the watch with `PoolExhausted`, which is what I10
+   forbids and would make "the next tick lists it again" impossible. The only error policy
+   `consume` has today for a connector failure is the one `answering` applied to an action's:
+   `STOP` ends the pipeline with the failure, anything else is logged and the pipeline goes on.
+   That is what a block's `SftpException` now gets, through `unlessFatal`, and spec 7.2 says so in
+   those words. A `UnsafeFileName` from `download(localTarget = ...)` is an `SftpException` and so
+   takes this path too: the file is handed over again every tick until the consumer names a safe
+   target, with a WARN each time. That is the ticket's "any `SftpException`" applied as written;
+   the alternative - treating `ACCEPT_THE_REFUSAL` as the consumer's fault and nacking - would be
+   a class list in `consume`, which T12's design of `reportingFailures` deliberately avoided.
+2. **One earlier test file changed beyond the two the ticket names: `AcceptanceScenarios.kt`'s
+   `@SelectMethod` for S5 now carries the renamed test's name.** The suite pins each scenario's
+   method by name and `AcceptanceScenariosTest` fails when a name does not resolve - which it did,
+   red, on the first run. The ticket mandates the rename, so the selector following it is the
+   rename, not a change to what the suite asserts. C5's shape.
+3. **A stale KDoc sentence names `FileGone` in `shuttle/.../SftpPollSource.kt:86`** ("`FileGone`
+   is not one either - the fetcher's own failure answers it"). The ticket allows exactly one
+   shuttle edit and names the branch, so the sentence stays; whoever next touches that file's
+   `events()` deletes the sentence. It is a comment, and compiles.
+4. **`FileSeen.giveBack()` settles as `CANCELLED`, so the metric label is `cancelled`.** Spec 13
+   fixes `sftp_ack_total{outcome}` to `ack`, `nack`, `cancelled`, and spec 7.2's reasoning for
+   the label - nobody said the file failed - is the same reasoning this ticket applies. No new
+   `Settlement` constant: T19's `WATCH_ENDED` exists for a WARN that a late ack reads, and no ack
+   can follow a give-back here because `consume` owns the event.
+5. **Size.** About 20 lines of main source that are neither blank nor comment changed across two
+   files, about 55 in four test files, the four spec passages and two lines in shuttle and the
+   suite. Inside the budget.
+
+**Seams.** Closed above, struck through: `FileGone` is an event of the live poll only. None
+added.
+
+**For the next ticket:**
+
+- **Shuttle (its own ticket):** `SftpPollSource` can now also drop the sentence about `FileGone`
+  in its KDoc. It never handled the event, and reads `download()` returning null through its
+  fetcher, which is the contract now. T19's notes on its by-hand refusal and `finally` still
+  stand, as does T18's on its `inFlight` map and `truncated` guess.
+- **Shuttle does not compile on `misc/ai_gen` until `SftpTarget.kt:79` follows D46.** This entry
+  is the second to record it; the shuttle tier has not been run by a connector ticket since.
+- **`consume`'s two policies are now visibly two:** a consumer's exception nacks, the connector's
+  gives back. A third kind of failure out of the block - none is known - would be decided in the
+  same `catch`, and `unlessFatal` is the shape a connector failure takes wherever it arrives.
+- **`Settlement.GONE` and `sftp_poll_files{state=gone}` are unchanged.** Only the event is gone;
+  the counter is still how a dashboard sees a directory another system empties first.

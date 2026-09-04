@@ -33,10 +33,10 @@ sealed interface SftpEvent {
          * Fetches the file, or returns null if it has gone from the server since it was listed.
          *
          * Gone is an answer, not a failure: on a directory another system moves files out of, it is
-         * ordinary. The file leaves the in-flight set on the spot - there is nothing to ack - and
-         * the null is the one signal that always arrives. A collector that downloads inside its
-         * own collect block, which is the usual shape, also receives a [FileGone] right after this
-         * event; a download made after the poll has ended has no poll left to say so.
+         * ordinary. The file leaves the in-flight set on the spot - there is nothing to ack, and an
+         * ack or nack that arrives anyway is quietly ignored - and the null is the one signal that
+         * always arrives, whether the download runs inside the collect block or after the poll has
+         * ended. No event follows it.
          *
          * @param localTarget where the file lands; by default the staging directory under the
          *   file's own name, **checked to be a name** before it is joined to that directory, as
@@ -62,11 +62,15 @@ sealed interface SftpEvent {
          */
         suspend fun nack(reason: Throwable, redeliver: Boolean = true) = handling.nack(slot, reason, redeliver)
 
+        /**
+         * The connector, not the consumer, failed while the file was out - a full pool, a lost
+         * session - so there is no verdict to record: the place comes free with no action run, and
+         * the file is handed over again on a later poll.
+         */
+        internal fun giveBack() = handling.withdraw(slot, Settlement.CANCELLED)
+
         override fun toString(): String = "FileSeen(${file.path})"
     }
-
-    /** Listed, and then not there when the consumer went to download it. */
-    data class FileGone(val file: RemoteFile) : SftpEvent
 
     /** A tick of a watch that deliberately sent nothing. Not a fault; the next tick runs as usual. */
     data class PollSkipped(val tick: Long, val cause: SkipCause) : SftpEvent

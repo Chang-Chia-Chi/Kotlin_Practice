@@ -23,7 +23,6 @@ import sftp.connector.config.PollingBuilder
 import sftp.connector.config.sftpConnector
 import sftp.connector.pool.SftpPool
 import sftp.connector.pool.virtualClock
-import sftp.connector.source.SftpEvent.FileGone
 import sftp.connector.source.SftpEvent.FileSeen
 import sftp.connector.source.SftpEvent.PollCompleted
 import sftp.connector.source.SftpEvent.PollStarted
@@ -422,8 +421,9 @@ class SftpSourceTest {
         assertThat(seen).containsExactly("/drop/a.csv", "/drop/sub/b.csv")
     }
 
+    /** The null is the whole answer: the place is already back when it arrives, and no event follows it. */
     @Test
-    fun `a file gone at download time is reported, and needs no answer`() = runTest {
+    fun `a file gone at download time answers null, is given back on the spot, and needs no answer`() = runTest {
         val transport = FakeSftpTransport().directory("/drop").file("/drop/a.csv", "1")
         val source = sourceOver(transport) {}
         val events = mutableListOf<SftpEvent>()
@@ -433,11 +433,11 @@ class SftpSourceTest {
             if (event is FileSeen) {
                 transport.remove(event.file.path)
                 assertThat(event.download()).isNull()
+                assertThat(inFlight()).describedAs("places taken the instant the null arrived").isZero()
             }
         }
 
-        assertThat(events.filterIsInstance<FileGone>().map { it.file.path }).containsExactly("/drop/a.csv")
-        assertThat(events.indexOfFirst { it is FileGone }).isEqualTo(events.indexOfFirst { it is FileSeen } + 1)
+        assertThat(events.map { it::class }).containsExactly(PollStarted::class, FileSeen::class, PollCompleted::class)
         assertThat(inFlight()).isZero()
         assertThat(registry.get("sftp_poll_files").tag("state", "gone").counter().count()).isEqualTo(1.0)
     }

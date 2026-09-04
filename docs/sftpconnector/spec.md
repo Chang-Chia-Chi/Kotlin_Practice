@@ -398,11 +398,19 @@ Events carry metadata, never bytes:
 sealed interface SftpEvent
   PollStarted(tick, dir)
   FileSeen(file: RemoteFile, ack: suspend () -> Unit, nack: suspend (reason, redeliver) -> Unit)
-  FileGone(file)                 listed, then absent at download time
   PollSkipped(tick, cause)       overlap policy or breaker open
   PollFailed(tick, error)        recoverable error; watch continues
   PollCompleted(tick, seen, emitted, notReady, inFlight, truncated)
 ```
+
+A file listed and then absent at download time is not an event. `FileSeen.download()` answers
+null, the file's place in the in-flight set has already been given back by the time the null
+arrives, and no event follows: there is nothing to ack and nothing to nack. The null is the one
+signal every consumer already reads, whether it downloads inside the collect block or after the
+poll has ended. An event after `FileSeen` used to say the same thing, and could only be right when
+the download ran inside the collect block of a `poll`; under `watch` the tick's events cross a
+channel, so `emit` returns when the collector takes the event and before the consumer has
+downloaded, and the event lost that race every time (T20).
 
 `PollCompleted` answers the two questions a consumer cannot answer for itself. `inFlight` is every
 file the in-flight set holds at the instant the tick ends - handed over and not yet given back,
@@ -444,6 +452,16 @@ The ack model gives backpressure, post-processing and redelivery in one mechanis
 
 `consume(dir, every) { file -> ... }` wraps `watch`: it acks when the block returns and nacks
 when it throws. It is the documented normal path; manual ack is for pipelines that commit late.
+
+Which exceptions out of the block are the consumer's verdict. An exception the connector itself
+raised - any `SftpException`, out of `download()` or anything else the block asked of the
+connector - is not a nack: nobody said the file failed, the pool was full or the session died or
+the breaker was open. The file's place is given back with redelivery so the next tick lists it
+again, neither the ack action nor the nack action runs, and it is counted
+`sftp_ack_total{outcome=cancelled}` for the reason the cancellation bullet above gives. The
+failure itself is handled as an ack or nack action's failure is: logged, and the pipeline goes on,
+unless it is a failure no later tick could survive, which ends the pipeline with it. Any other
+exception out of the block is the consumer's verdict and nacks as above (T20).
 
 ### 7.3 In-flight set and backpressure
 
@@ -546,7 +564,7 @@ validator, the probe and the ack executor cannot disagree about which folder `te
   was deleting a healthy target before this rule. When the second rename is refused after the
   target was cleared, the failure says so: the target is now empty, and the caller must not read
   "source untouched" as "target untouched".
-- A file moved between listing and download yields `FileGone`, not an error.
+- A file moved between listing and download makes the download answer null, not an error.
 
 ### 8.3 Idempotency
 
@@ -650,8 +668,8 @@ the request arrived and was understood: the file is not there, the account may n
 operation is refused. Sending it again inside the same call cannot change the answer, and
 counting it against the breaker charges the connector for a healthy server doing its job - on a
 server without the POSIX rename extension every refused overwrite would count. The per-operation
-meaning in Sec 6.1 (`NoSuchFile` after a retry is success for `delete`, is `FileGone` for a
-download) is what a *later* try reads; it is not a reason to send one now.
+meaning in Sec 6.1 (`NoSuchFile` after a retry is success for `delete`, is a null download for
+the source) is what a *later* try reads; it is not a reason to send one now.
 
 ---
 
@@ -1004,7 +1022,7 @@ Tests are named `I<n>_<description>`.
 | S2 | Server stalls past the keepalive ladder | `SessionLost`, poisoned, retried; breaker counts one failure |
 | S3 | Breaker opens | `PollSkipped(BreakerOpen)` each tick until half-open probe succeeds |
 | S4 | Pool exhausted with slow consumer | Acquire waits `acquireTimeout` then `PoolExhausted`; `watch` continues |
-| S5 | File removed between list and download | `FileGone`, no error, no retry |
+| S5 | File removed between list and download | `download()` answers null, no error, no retry |
 | S6 | Move target on another filesystem | Startup probe fails with `ConfigurationError` |
 | S7 | Ack before download | Ack action runs, no transfer occurs |
 | S8 | Previous tick still running under `SKIP` | `PollSkipped(Overlap)`, no second listing |
