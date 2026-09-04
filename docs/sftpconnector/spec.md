@@ -96,11 +96,11 @@ the pool or the flow layer (D2).
 
 | Module | Depends on | Contains |
 |---|---|---|
-| `sftp-core` | kotlin-stdlib, kotlinx-coroutines, JSch (mwiede), resilience4j-kotlin, micrometer-core, slf4j-api | everything in Sec 3.1 |
-| `sftp-quarkus` | `sftp-core`, Quarkus arc, config, micrometer | CDI producer, config mapping to the DSL, shutdown hook, registry binding |
-| `sftp-testkit` | `sftp-core`, Apache MINA SSHD | embedded server, fault hooks, fake transport |
+| `sftpconnector-core` | kotlin-stdlib, kotlinx-coroutines, JSch (mwiede), resilience4j-kotlin, micrometer-core, slf4j-api | everything in Sec 3.1 |
+| `sftpconnector-quarkus` | `sftpconnector-core`, Quarkus arc, config, micrometer | CDI producer, config mapping to the DSL, shutdown hook, registry binding |
+| `sftpconnector-testkit` | `sftpconnector-core`, Apache MINA SSHD | embedded server, fault hooks, fake transport |
 
-ArchUnit enforces: `sftp-core` never imports Quarkus; only the `transport.jsch` package imports
+ArchUnit enforces: `sftpconnector-core` never imports Quarkus; only the `transport.jsch` package imports
 `com.jcraft`. Logging in core is `org.slf4j`, which Quarkus routes into its log manager without
 configuration (D3).
 
@@ -137,7 +137,7 @@ is in `Connecting`, `Validating` or `Evicting` and the lock is not held.
 
 ### 4.2 Acquire
 
-1. Take a permit, waiting at most `acquireTimeout`. Timeout throws `PoolExhaustedException`
+1. Take a permit, waiting at most `acquireTimeout`. Timeout throws `PoolExhausted`
    carrying pool statistics (active, idle, pending) so the log line explains itself.
 2. Under the mutex, pop the most recently used idle entry. If none, register a new entry in
    `Connecting` and release the mutex.
@@ -280,8 +280,12 @@ process.` rather than failing the read.
 
 All JSch errors are mapped in one class into the hierarchy of Sec 10. `SftpException` carries an
 SSH_FX status code and maps by code. `JSchException` carries only a message and maps by a
-maintained table of message prefixes (`Auth fail`, `timeout`, `session is down`,
-`ProxyHTTP`, `UnknownHostKey`, `channel is not opened`). Unmapped messages become
+maintained table of message prefixes (`Auth fail`, `session is down`, `failed to send channel
+request` / `channel is not opened`, `connection is closed by foreign host`) plus the `java.net.`
+marker JSch leaves in a stringified socket failure. The host key and proxy failures have
+exception types of their own in this fork and are matched **by type**, so a rewording cannot
+reclassify them. The measured table in the T2 progress entry is the authority for every row.
+Unmapped messages become
 `Unknown(rawMessage, cause)`, a recoverable and poisoned error, never fatal, so a new message
 wording degrades to a retry rather than to a dead connector. `Unknown` keeps the original JSch
 message and exception verbatim, logs at WARN with the raw text so the wording can be added to
@@ -329,8 +333,10 @@ lease, such as working-directory affinity; it is not needed by the source.
 
 ### 6.3 Download staging
 
-Download writes `<stagingDir>/<name>.part`, verifies the byte count against the listed size,
-then renames atomically to `<name>`. An abort deletes the `.part` file, so no partial file
+Download writes the partial file beside the target, which by default is `<stagingDir>/<name>`,
+verifies the byte count against the listed size, then renames atomically onto the target. Beside
+the target rather than always in the staging directory, so a caller that names its own target
+keeps the rename on one filesystem. An abort deletes the `.part` file, so no partial file
 survives a run. While writing, the client computes a digest of the bytes (algorithm from
 `staging.digest`, default SHA-256, MD5 selectable) and returns it on `LocalFile.digest`. The
 digest costs nothing extra because the bytes are already streaming through, and it is the
@@ -378,7 +384,11 @@ The ack model gives backpressure, post-processing and redelivery in one mechanis
 - `nack(reason, redeliver = true)` runs the nack action, releases the slot and, when
   `redeliver` is true, allows the file to be emitted on a later tick. `redeliver = false`
   excludes it until restart.
-- Cancellation of the collector with unacked files is treated as nack with redelivery.
+- Cancellation of the collector with unacked files makes each of them eligible again on a later
+  tick, as a nack with redelivery would - but **the nack action does not run**: nobody said those
+  files failed, and a configured `move("failed/")` would file every unprocessed message as a
+  failure on every shutdown, inside a cancelled coroutine. They are counted
+  `sftp_ack_total{outcome=cancelled}`, which is what that label is for (T10 deviation 3).
 - Ack is always the consumer's call, after its own work on the file is complete. The
   connector never acks on its own; the `consume` helper below acks only when the consumer's
   block returns normally. The connector also does not require a download to precede an ack:
@@ -399,7 +409,9 @@ when it throws. It is the documented normal path; manual ack is for pipelines th
 
 The source keeps an in-memory set of in-flight files keyed by path, size and mtime. A file in the
 set is not emitted again by an overlapping or later tick. `maxInFlight` bounds the set; when it
-is full the lister suspends until an ack or nack arrives. This is the backpressure knob that
+is full the lister suspends until an ack or nack arrives. A file already in the set is turned
+away before it waits for room, and looked for again once room is taken - the second look is what
+keeps the promise when a tick running alongside admitted it in between. This is the backpressure knob that
 protects the downstream, and it is the only state the connector holds about processed files.
 Persistent idempotency belongs to the application (Sec 8.3).
 
@@ -407,8 +419,9 @@ Persistent idempotency belongs to the application (Sec 8.3).
 
 `SSH_FXP_READDIR` returns entries in batches and JSch's selector sees each entry as it
 arrives, so listing is a `channelFlow` with a bounded buffer and never materializes a
-directory. `maxFilesPerPoll` stops the listing early. `sortBy` requires materialization and is
-honored only together with `maxFilesPerPoll`, as Camel does. Directories are skipped by default;
+directory. `maxFilesPerPoll` stops the listing early. `sortBy` is **not built**: it requires materialization
+and would be honored only together with `maxFilesPerPoll`, as Camel does, and nothing in scope
+asks for it (T10 deviation 5). Directories are skipped by default;
 `recursive` descends but always excludes the ack and nack target folders (Sec 8.2).
 
 ### 7.5 Readiness
@@ -421,7 +434,7 @@ and the clock, and `Readiness` is `Ready`, `NotReady(reason)` or `Skip`. Built-i
 | `SizeStable(checks, interval)` | Size unchanged across `checks` stats `interval` apart, inside one poll, **batched**: every candidate is stated, one `interval` elapses, every candidate is stated again (D36) | A stalled uploader passes |
 | `MinAge(duration)` | mtime older than `duration` | A slow appender fails until it stops |
 | `MarkerFile(suffix)` | `<name><suffix>` exists | Requires producer cooperation; the only deterministic check |
-| `RenameClaim` | Rename to a claim name succeeds | Proves nothing on Linux: rename succeeds while a writer holds the file open |
+| `RenameClaim` | Rename to a claim name succeeds | **Not built; see 14.2.** Proves nothing on Linux: rename succeeds while a writer holds the file open. Its use is the multi-consumer claim step, not readiness |
 | `AllOf(vararg)` | Composite | |
 
 Default: `SizeStable(2, 10.seconds) + MinAge(1.minutes)`. A file that is not ready is counted in
@@ -484,9 +497,9 @@ validator, the probe and the ack executor cannot disagree about which folder `te
 The application ledger is the single source of truth about processed files. The connector
 does not persist anything. This matches Camel and Spring Integration, both of which ship an
 in-memory default and leave persistence to a plugged repository, and both of which document
-move-or-delete after processing as the usual substitute (D14). A `SeenRepository` SPI with an
-in-memory LRU default is provided for callers that cannot move files and want the connector to
-filter; it is not used by the Sec 1.1 pipeline.
+move-or-delete after processing as the usual substitute (D14). A `SeenRepository` SPI for callers
+that cannot move files and want the connector to filter was specified here and is **not built**;
+Sec 14.5 says why and what such a caller does instead.
 
 ---
 
@@ -506,7 +519,7 @@ Retry( CircuitBreaker( Bulkhead( TimeLimiter( transport op ) ) ) )
 | Bulkhead | Per endpoint | `maxConcurrentTransfers`, plus the pool size and the dispatcher | |
 | Time limiter | Per operation | Per-operation timeout | Timeout is recoverable |
 
-When the breaker is open, acquire fails fast with `CircuitOpenException` and `watch` emits
+When the breaker is open, acquire fails fast with `CircuitOpen` and `watch` emits
 `PollSkipped(cause = BreakerOpen)` for that tick. A fatal error short-circuits everything: no
 retry, no breaker count, and `watch` terminates (Sec 10.2).
 
@@ -534,7 +547,15 @@ SftpException (sealed)
   PoolExhausted
   CircuitOpen
   OverwriteRefused     the target is occupied and the policy said not to replace (D30)
+  UnsafeFileName       a listed name that cannot be a local file name under the staging
+                       directory; nothing was sent and no session was borrowed
 ```
+
+`PoolExhausted`, `CircuitOpen`, `OverwriteRefused` and `UnsafeFileName` share a disposition of
+their own, `ACCEPT_THE_REFUSAL` (C8): no retry inside the call, nothing counted against the
+breaker, and the lease - where one was ever taken - returned rather than evicted. Each is the
+connector's own decision, so sending the request again cannot change the answer and the server
+has done nothing to be charged for.
 
 `CancellationException` is never caught or wrapped. Every exception carries endpoint, operation,
 path and attempt number in its message.
@@ -550,6 +571,7 @@ path and attempt number in its message.
 | PoolExhausted | No | Not counted | n/a | Emits `PollFailed`, continues |
 | CircuitOpen | No | n/a | n/a | Emits `PollSkipped`, continues |
 | OverwriteRefused | No | Not counted | Returned | Emits `PollFailed`, continues |
+| UnsafeFileName | No | Not counted | n/a | Raised to whoever called `download`; the poll is untouched |
 
 The split in the second and third rows is the one the retry ladder actually needs (D41). A
 failure the *wire* produced - a lost session, a timed-out call, a short read - says nothing
@@ -579,7 +601,13 @@ download) is what a *later* try reads; it is not a reason to send one now.
    OpenSSH, resolving a path that leads nowhere succeeds and returns the canonical name, and so
    does resolving one that leads to a file. It is a string operation. The `stat` is the check;
    `realpath` only fixes the spelling the rest of the probe uses.
-3. Fill to `minIdle` in the background; readiness does not wait for it.
+3. Fill to `minIdle` in the background on the housekeeper's **first round**, one
+   `housekeepingInterval` after start-up - thirty seconds with the shipped defaults. Readiness
+   waits for neither. Topping up is one of the things the housekeeper does every round (Sec 4.5)
+   and its loop waits before it sweeps, so there is no fill before the first round; a pool that
+   is cold for one interval costs one handshake, which was not worth changing the housekeeper's
+   timing for (T9 deviation 3). `minIdle` defaults to 0, so nothing waits until a deployment
+   sets it.
 
 ### 11.2 Shutdown
 
@@ -652,7 +680,11 @@ sftpConnector("vendor-drop") {
 
 Validation rules: `keepAlive < idleCutoff`, `idleTimeout < idleCutoff`, `minIdle <= maxSize`,
 `maxConcurrentTransfers <= maxSize`, staging directory exists and is writable, action targets
-are not equal to the watched directory.
+are not equal to the watched directory; and `drainTimeout > cancelGrace`, `operationTimeout` and
+`transferTimeout` longer than `acquireTimeout` - so a caller queued for a session is never
+reported as the server timing out and counted against the breaker - `maxLifetimeJitter` in
+`0.0..1.0`, a non-negative `validationBypass`, and every other duration positive.
+`ConnectorDsl.build()` is the authority and reports every fault at once.
 
 ---
 
@@ -683,8 +715,9 @@ Tag `endpoint` on everything; never tag by file name or tick number.
 
 ### 14.1 Streaming and resume
 
-`Connection.openRead` exists on the transport so a streaming download that pins a lease for the
-consumer's read can be added without changing the pool. Resume is the JSch `RESUME` mode plus
+`openRead` is the streaming download: the transport interface has room for it beside `readTo`
+(Sec 5.1), so one that pins a lease for the consumer's read can be added without changing the
+pool. It is **not built**. Resume is the JSch `RESUME` mode plus
 the local `.part` length and a stored remote size and mtime; it is deferred until file sizes
 justify the extra edge cases.
 
@@ -703,6 +736,21 @@ claim step rather than a readiness check.
 The transport interface has one adapter, which by the project's own rule makes it a hypothetical
 seam. It is kept because the cancellation ladder of Sec 5.3 is JSch-specific and the fake
 transport in the testkit is a genuine second implementation.
+
+### 14.5 `SeenRepository`
+
+A `SeenRepository` SPI for callers that cannot move or delete files is **not built**. The
+in-flight set of Sec 7.3 is the only state the connector holds about a file, it is in memory and
+per process, and nothing in it survives a restart - which is precisely what a filtering caller
+would need. An interface with an in-memory LRU default would be a second ledger inside the
+connector against D14, with one implementation, no consumer in the Sec 1.1 pipeline, and no
+answer for the restart that is the whole case for it.
+
+A caller that cannot move files filters above the source: it collects `watch`, asks its own
+ledger about `RemoteFile.path`, size and mtime, and acks the files it has already processed -
+which is exactly the ack-without-a-download that Sec 7.2 permits for crash recovery. Whoever
+needs the connector to do that filtering owns designing the persistence with it; the open-seams
+table in `progress.md` carries the row.
 
 ---
 
@@ -751,7 +799,11 @@ transport in the testkit is a genuine second implementation.
 | D29 | Refusing an overwrite is the connector's decision, never the server's | Measured (Sec 5.2): JSch sends `posix-rename@openssh.com` on its own whenever the server advertised it, so on such a server a rename onto an occupied target destroys the old file and reports success. `Overwrite.REFUSE` is unenforceable at the server and must be a look-then-request in the connector. A writer arriving between the two still wins; on a server without the extension the request itself is refused as well, which closes the race there and only there |
 | D30 | A refused overwrite is `OverwriteRefused`, its own class beside `PoolExhausted` and `CircuitOpen` | It is a deterministic policy decision, so retrying it can never succeed and counting it against the breaker charges the connector for doing what it was told. `ServerFailure` is right about the session and the message but wrong about both of those, and from Sec 9 onward would cost three attempts and a breaker failure per call. The session is untouched - under `REFUSE` nothing was even sent - so the lease is returned and the watch continues |
 | D28 | A byte count that disagrees with the listed size is `IncompleteTransfer`, not `SessionLost` | Every other `Recoverable` class describes a fault the wire reported; this one is the connector's own integrity check failing, and it had no class. Reporting it as `SessionLost` sends an operator to look at the network when the actual evidence is that a file changed size under them - which is precisely the signal open item 1 is waiting on, and the one a stalled uploader produces. It poisons, because a short read and a half-dead session are indistinguishable from here and the safe reading costs one handshake on a rare event |
+| D45 | The shipped readiness default is a heuristic with a stated blind spot, and open item 1 stays open until the upstream team answers | An uploader paused for longer than `minAge` mid-file passes `SizeStable + MinAge`, and no code the connector can write closes that: only the producer's convention can. `markerFile(suffix)` (Sec 7.5) is where the answer lands the day it arrives - it is the one deterministic check - and until then the blind spot is documented in Sec 7.5 and the T15 entry rather than designed around. `IncompleteTransfer` (D28) is the signal a stalled uploader actually produces |
 | D27 | `ServerFailure` does not poison the session | A well-formed `SSH_FX_FAILURE` proves the channel parsed the request and answered, so the session is healthy and a per-request refusal is no reason to throw it away. Sec 8.2 expects exactly that status from a server without `posix-rename`, which would otherwise evict a session on every overwrite rename. Real transport breakage arrives with an `IOException` cause and is classified `SessionLost` before this rule is reached |
+
+D24 and D25 were withdrawn during the design review and are not reused; a citation to either is
+a citation to nothing.
 
 ---
 
@@ -762,9 +814,15 @@ transport in the testkit is a genuine second implementation.
    and rename when finished (rename is atomic, so a half-written file never carries the final
    name), or write a marker file next to the finished file. Ask the upstream team how they
    upload. Until they answer, the default readiness check (Sec 7.5) is a heuristic that a
-   stalled uploader can fool.
-2. **Temp folder ownership** - `createActionTargets` creates it; if the account cannot `mkdir`,
-   ask the upstream to create it and the probe will verify it.
+   stalled uploader can fool. **Still open, and no code can close it** (D45): T15 analysed what
+   the shipped default protects against and what it does not - an uploader paused for longer
+   than `minAge` mid-file, a burst writer, a server clock behind ours - and `markerFile(suffix)`
+   ships as the deterministic answer for the day the upstream team replies.
+2. ~~**Temp folder ownership**~~ - **closed by T9.** The startup probe handles both ownership
+   models and says which one the deployment is in: `createActionTargets = true` runs `mkdir -p`
+   and, when the account cannot create the folder, refuses with the remedy "set it false and ask
+   the upstream to create it"; `createActionTargets = false` insists the folder is already there
+   and refuses naming that setting. `StartupAgainstServerTest` covers all three cases.
 3. ~~**JSch error wording**~~ - **closed by T2.** The table was assembled by staging each real
    condition against mwiede 2.28.7 and reading what came out; every row has an
    embedded-server test, so a wording change fails a test instead of misclassifying an error.
@@ -772,7 +830,9 @@ transport in the testkit is a genuine second implementation.
    own in this fork and are matched by type rather than wording, and both transport breakages
    arrive as `SftpException` with the generic `SSH_FX_FAILURE` code and an `IOException`
    cause - the same type and code the server uses for its own refusals - so the mapper must
-   check the cause before the status code. The measured table is in the T2 progress entry.
+   check the cause before the status code. The measured table is in the T2 progress entry; T15
+   added a tenth wording (`connection is closed by foreign host`) and Sec 5.4 now records which
+   failures are matched by type rather than by wording.
 
 Resolved during review: the proxy imposes no connection cap, so `maxSize` is bounded only by
 the infra team's five sessions (D21).
@@ -810,7 +870,10 @@ implementation is tested rather than the way a library usually is (D34):
    it has few interleavings worth exploring.
 6. **Soak (opt-in).** `watch` for hours behind a random-fault proxy, sampling threads, post-GC
    heap and the `sftp_*` meters every minute; asserts flatness by slope, recovery time by bound,
-   and exactly-once delivery to the temp folder by count.
+   and exactly-once delivery to the temp folder by count. Recovery is measured heal-to-next
+   `PollCompleted` and bounded by `2 x keepAlive + max backoff + interval + waitInOpen`: a watch
+   recovers on its next tick, and a breaker that opened lets nothing through until its wait in
+   open has run (T16).
 
 Performance is measured as *degradation*, not throughput: JSch serialises on one channel and the
 server caps sessions, so throughput is bounded by design and a microbenchmark answers nothing.
@@ -838,7 +901,7 @@ Tests are named `I<n>_<description>`.
 | I12 | Ack and nack are each accepted once per event |
 | I13 | After abort, no `.part` file exists in the staging directory |
 | I14 | `keepAlive < idleCutoff` and `idleTimeout < idleCutoff` are rejected at build time when violated |
-| I15 | At-least-once with no phantom failure: every file that was acked is at the ack target; every file listed and not acked is in flight, not ready, or redelivered; no file is silently gone and no landed move is reported as failed |
+| I15 | At-least-once with no phantom failure: every file that was acked is at the ack target; every file listed and not acked is in flight, not ready, or redelivered; no file is silently gone and no landed move is reported as failed. The phantom-failure clause is bounded by the retry budget and the breaker: a lost reply on the **last permitted** try is reported as a failure while the file sits at the target, and the consumer's WARN line is the only record (T16) |
 
 ### 17.2 Scenario table
 
