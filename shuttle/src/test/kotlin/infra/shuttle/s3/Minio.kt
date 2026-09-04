@@ -14,6 +14,9 @@ object Minio {
     private val container by lazy {
         MinIOContainer(DockerImageName.parse("minio/minio:RELEASE.2024-10-02T17-50-41Z")).also { it.start() }
     }
+    val url: String get() = container.s3URL
+    val user: String get() = container.userName
+    val password: String get() = container.password
     val client: S3Client by lazy {
         S3Target.client(container.s3URL, "us-east-1", pathStyle = true, container.userName, container.password,
             connect = 5.seconds, socket = 30.seconds, apiCall = 45.seconds)

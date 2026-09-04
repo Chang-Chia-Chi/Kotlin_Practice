@@ -20,7 +20,7 @@
         <!-- Container-backed tiers are opt-in: `-DexcludedGroups=none`. A property, not a literal,
              for the reason etl-host/pom.xml gives: a literal in <configuration> beats the user
              property and the documented opt-in would silently run zero tests. -->
-        <excludedGroups>oracle,minio,nats</excludedGroups>
+        <excludedGroups>oracle,minio,nats,acceptance,load</excludedGroups>
         <testcontainers.version>1.20.4</testcontainers.version>
     </properties>
 
