@@ -2,6 +2,7 @@ package sftp.connector.testkit
 
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.single
 import kotlinx.coroutines.flow.take
@@ -13,11 +14,13 @@ import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
+import sftp.connector.client.Overwrite
 import sftp.connector.client.SftpClient
 import sftp.connector.config.HostKeyPolicy
 import sftp.connector.config.SftpConnectorBuilder
 import sftp.connector.config.SftpConnectorConfig
 import sftp.connector.config.sftpConnector
+import sftp.connector.error.OperationTimeout
 import sftp.connector.error.SessionLost
 import sftp.connector.pool.EntryState
 import sftp.connector.pool.SftpPool
@@ -323,6 +326,93 @@ class CancellationLadderTest {
         }
     }
 
+    /**
+     * The rung C1 was about: not a stalled *read* but a blocked *write*. The tunnel stops reading
+     * from the client, so the client's send buffer fills and JSch's upload parks inside the socket
+     * write - holding the session's write lock, which is the lock the keepalive probe and a plain
+     * `disconnect()` both need. So neither of the two gentler tiers can end it, and a forced
+     * disconnect that went through JSch's orderly channel close would park on that same lock. The
+     * fix closes the retained socket first; this proves the cut still lands within the grace.
+     *
+     * Without it this does not fail, it times out: the write, the reader thread and the cutting
+     * thread all wait for the kernel to give up on the connection, minutes away.
+     */
+    @Test
+    fun `a cancelled upload on a tunnel that stopped reading is cut within the grace`() = runBlocking<Unit> {
+        remoteRoot.resolve("drop").createDirectory()
+        val big = stage.resolve("big.bin")
+        big.writeBytes(ByteArray(BLACK_HOLE_FILE_BYTES) { it.toByte() })
+
+        withTunnelledClient({ pool { cancelGrace = GRACE; validationBypass = 1.minutes } }) { client, tunnel ->
+            // Open and park the one session, so the bytes the black hole counts are the upload's.
+            client.exists("/drop")
+
+            val blocked = CompletableDeferred<Unit>()
+            tunnel.blackHoleClientAfter(BLACK_HOLE_AFTER_BYTES) { blocked.complete(Unit) }
+            val upload = launch { client.upload(big, "/drop/big.bin", Overwrite.REPLACE) }
+            blocked.await()
+
+            val waited = TimeSource.Monotonic.markNow()
+            upload.cancel()
+            withTimeout(BEFORE_THE_KEEPALIVE_WOULD) { upload.join() }
+            val bound = waited.elapsedNow()
+
+            assertThat(bound)
+                .describedAs("either the socket close ended the write near the grace, or nothing did and it waited far past it")
+                .isBetween(GRACE, GRACE * 20)
+            assertThat(pool.stats().total).describedAs("the entry the cut session belonged to").isZero()
+            assertThat(evictedAsPoisoned()).isEqualTo(1.0)
+        }
+    }
+
+    /**
+     * Lens 1 H1. A slow collector fills the listing's buffer and the hand-off parks the IO thread.
+     * The time limiter cancels the listing's coroutine - not the collector, which stays alive with
+     * the channel open - so the parked thread is freed only if the hand-off watches that coroutine
+     * as well as the channel. When it does, the selector answers stop within a slice, JSch closes
+     * the handle cleanly, and the session goes back healthy; the caller is told the request timed
+     * out.
+     *
+     * Without the fix the hand-off watches the channel alone, the time limiter cannot reach it, the
+     * wait is the collector's own three seconds, and the grace runs out and cuts a healthy session
+     * apart - so the timing and the poison count are both wrong.
+     */
+    @Test
+    fun `a listing whose collector stalls is stopped by the time limiter without destroying its session`() =
+        runBlocking<Unit> {
+            val drop = remoteRoot.resolve("drop").createDirectory()
+            repeat(LISTING_FILES) { drop.resolve("file-$it.csv").writeText("x") }
+
+            val timeLimited: SftpConnectorBuilder.() -> Unit = {
+                pool { cancelGrace = 200.milliseconds; validationBypass = 1.minutes; acquireTimeout = 100.milliseconds }
+                resilience { transferTimeout = 500.milliseconds; retry { maxAttempts = 1 } }
+            }
+            withTunnelledClient(timeLimited) { client, _ ->
+                val waited = TimeSource.Monotonic.markNow()
+                val failure = runCatching {
+                    var first = true
+                    client.list("/drop").collect {
+                        // Take one, then never take another: the buffer fills, the hand-off parks,
+                        // and only the time limiter can end it - through the coroutine, not the
+                        // channel this collector is keeping open.
+                        if (first) {
+                            first = false
+                            delay(3.seconds)
+                        }
+                    }
+                }.exceptionOrNull()
+                val bound = waited.elapsedNow()
+
+                assertThat(failure).isInstanceOf(OperationTimeout::class.java)
+                assertThat(bound)
+                    .describedAs("the time limiter reached the parked thread, rather than the collector's own 3 s")
+                    .isLessThan(500.milliseconds + 200.milliseconds + 1.seconds)
+                assertThat(evictedAsPoisoned())
+                    .describedAs("a healthy session cut apart because the cancellation never reached it")
+                    .isZero()
+            }
+        }
+
     private fun sessionsOpened(): Double =
         meters.counter("sftp_pool_created_total", "endpoint", endpoint).count()
 
@@ -380,6 +470,13 @@ class CancellationLadderTest {
 
         private const val ENTRIES = 500
         private const val WANTED = 3
+
+        /** Big enough that the whole file cannot buffer before the blocked write is cut. */
+        private const val BLACK_HOLE_FILE_BYTES = 64 * 1024 * 1024
+        private const val BLACK_HOLE_AFTER_BYTES = 1L * 1024 * 1024
+
+        /** More than the listing channel's buffer, so a stalled collector parks the hand-off. */
+        private const val LISTING_FILES = 200
 
         private val KEEPALIVE = 400.milliseconds
         private val GRACE = 300.milliseconds
