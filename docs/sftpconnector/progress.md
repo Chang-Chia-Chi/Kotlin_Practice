@@ -236,7 +236,7 @@ because each was correctly deferred by the ticket that found it.
 | ~~A watch on a connector that has been stopped ends normally, and a collector that restarts it gets another normal end~~ | T12 | ~~T13~~ | **Closed by T13.** The claim is refused with `IllegalStateException` when the scope the ticker would run in is no longer active, which is the first thing `close()` makes true; `SftpConnectorTest.close ends a watch normally, gives every unanswered file back, and refuses what comes after` |
 | A skipped tick's event is handed over on the ticker's own coroutine, so under `SKIP` a busy collector delays the ticker | T12 | Whoever measures it | The ticker sends `PollSkipped(OVERLAP)` on the same rendezvous channel as everything else and waits for the collector to take it; the next interval is counted from then. Under `PROCEED` the ticker sends nothing itself. Harmless on an hourly schedule; a buffer of one for the ticker's own events is the fix if it ever matters |
 | Under `REFUSE`, a retry's window is the backoff | T11 | Whoever has cause | The policy's look ran once, before the first request. A retry after a lost reply first looks for its own landed file at the target and stops there if it finds it; only when it does not does it send a plain rename - and on a server with the POSIX rename extension a stranger's file that arrived at the target during the backoff is then replaced. T7's race, widened from the look to the backoff; the alternative - applying the policy's look again - refuses the retry for its own landed file |
-| A file the consumer holds from a tick that has already completed stays in flight across `close()` | T13 | Whoever builds `ackWait` (spec 7.2), or nobody | A tick still running at close withdraws everything it handed over; a tick that finished left its files with the consumer by T10's design, and nothing enumerates the in-flight set from outside. The process is ending, so the file is listed again on the next start either way; only `sftp_inflight` on a closed connector reads above zero until then |
+| A file the consumer holds from a tick that has already completed stays in flight across `close()` | T13 | ~~Whoever builds `ackWait` (spec 7.2), or nobody~~ T19 | A tick still running at close withdraws everything it handed over; a tick that finished left its files with the consumer by T10's design, and nothing enumerates the in-flight set from outside. The process is ending, so the file is listed again on the next start either way; only `sftp_inflight` on a closed connector reads above zero until then. **T18:** the set is now enumerated from outside - `InFlightSet.outstanding()`, carried on every `PollCompleted.inFlight` - so a consumer can see exactly which files it still holds when the connector closes; T19 closes the seam |
 | A failing assertion before `close()` in a `runTest` that started a connector hangs the test instead of failing it | T9, seen by T13 | Whoever next writes one | The connector's scope shares the test scheduler but is not a child of the test's job, so `runTest` waits for a scheduler the housekeeper's `delay` loop never lets go idle. T13's connector test declares its readiness so the assertion cannot fail that way; a `try`/`catch` that closes the connector before rethrowing is the general shape |
 | ~~The breaker and `sftp_breaker_state` are per `SftpClient`~~ | T11 | ~~T14's binding~~ | **Ruled on by T14, and the same ruling covers R1 finding 6's `PoolMeters`.** The adapter produces one connector per application by construction - one `sftp.connector` prefix, one configuration, one produced bean - so neither collision can arise from it, and no guard was added for a shape the module cannot make. The colliding gauges themselves are untouched: a host that builds a second connector by hand still gets them, and the row below records what that costs |
 | A second connector for one endpoint on one registry silently reads the first one's pool gauges and breaker state | T14, restating T11 and R1 finding 6 | Whoever first hosts two connectors against one server | Registering a gauge whose id already exists returns the existing gauge, and `PoolMeters` and `ClientMeters` identify themselves by endpoint alone. Nothing throws; the numbers lie. The fix is a tag - the connector's name beside the endpoint - which is a change to spec 13's meter identity and therefore the maintainer's, not an adapter's. The adapter's own defence is that it cannot produce the second connector |
@@ -3603,3 +3603,119 @@ non-suspending core of a lock-guarded structure, which is what a model checker c
   `@Tag("soak")`. The default reactor excludes both groups through `sftp.excludedGroups`.
 - The reactor is longer again: Tier A adds a minute, Tier B forty seconds, the matrix about two and a
   half minutes with P5's sixty.
+
+## T18: `PollCompleted` says what is still out and whether the listing was cut short
+
+Built on `claude-fable-5-1`. The ticket was re-scoped by the coordinator mid-flight: the listing-cap
+mechanism (`take()` to `Listing.BREAK`, spec 7.4 and 13, the `sftp_op_seconds{op=list,result=ok}` test)
+went to the other session's T17 lens-1 batch, and this entry covers only what remained. 56 core and 208
+testkit tests are green at the end (206 testkit before; 2 added to `SftpSourceTest`, which reports 19
+for its 19 test functions). `InFlightSetLincheckTest` is unmodified and green (1/1, core).
+
+**Built:** `SftpEvent.PollCompleted` answers the two questions the source's one consumer was answering
+for itself with a private copy of the in-flight set and a read of `maxFilesPerPoll` out of the
+configuration. `inFlight: List<RemoteFile>` is every file out with the consumer at the instant the tick
+ended - handed over and not yet given back, by this tick or an earlier one, in the order handed over.
+`truncated: Boolean` is true when the listing stopped at the cap, so the directory may hold more than
+the tick saw. The tick's closing DEBUG line names both. Spec 7.1 carries the event's new shape and, in
+its own words, why a consumer needs each: a downstream ledger reconciles against the first, and "the
+drop is complete" is only claimable from a tick that was not truncated.
+
+**Concepts named:**
+
+- **`InFlightSet.outstanding()`** is the one new seam: what is out right now, as one copy taken under
+  the set's own lock. The tick never iterates the set; it asks once, and a poll running alongside
+  cannot change the set under the iteration because there is none. The set's backing collection became
+  a `LinkedHashSet` so that the answer is in the order files were handed over - earlier ticks' files
+  first, then this tick's in listing order - which is the order a ledger wants and costs nothing. A
+  file nacked for good is not *out*; it is kept out, and is not in the answer. The set's interface is
+  still `holds`, `admit`, the slot, and now `outstanding`; the three promises T10 named are untouched
+  and the Lincheck wrapper over `enter`/`exit` is unchanged.
+- **"Given back" rather than "unsettled".** The ticket said `inFlight` holds files *unsettled* at the
+  tick's end. The set holds files, not slots, and by T10's design a file acked or nacked leaves the set
+  only once its action has run, so that an overlapping poll cannot hand it over while it is half moved.
+  So the precise reading, and the one the spec and the KDoc give, is "handed over and not yet given
+  back": a file whose ack is still moving it is still in the list. That is the reading a ledger wants
+  too - the file is still in the directory - and it costs nothing, where holding slots in the set would
+  have re-cut the lock body the model checker runs.
+- **`truncated` is the source's word, computed where the tick counts:** `seen >= maxFilesPerPoll`.
+  The listing stops *at* the cap without looking past it - `take(cap)` above, `Listing.STOP` at the
+  cap-th entry below - so reaching the cap is all "there may be more" can mean, and a directory
+  holding exactly the cap reads as truncated. Spec 7.1 and the KDoc say so, in those words, because
+  a consumer that reads `truncated = true` as "certainly more" would be wrong on exactly that
+  directory.
+
+**Acceptance:**
+
+- *`SftpEvent.PollCompleted` gains `inFlight` and `truncated`; `InFlightSet` answers "what is unsettled
+  right now" under its own lock, in one call, so the tick never iterates the set* -
+  `SftpEvent.kt:PollCompleted`, `InFlightSet.outstanding()`, `SftpSource.tickOf` asks once. Both new
+  tests below assert the event by equality.
+- *Test: a directory of N > `maxFilesPerPoll` files gives `truncated = true` and exactly the cap emitted;
+  a directory of exactly the cap gives `truncated = false`* - **first half green, second half not built;
+  deviation 1.** `SftpSourceTest.a completed poll says whether the listing stopped at the cap`: three
+  files under a cap of two hands over exactly two with `truncated = true`; the directory then reduced to
+  one file completes with `truncated = false`.
+- *Test: files handed over on tick 1 and unacked are in tick 2's `PollCompleted.inFlight`; an acked file
+  is not; a file nacked with redeliver is not* - `SftpSourceTest.a completed poll names every file still
+  out, earlier ticks' first`: tick 1 hands over a, b, c and its `inFlight` is `[a, b, c]`; a is acked
+  (deleted), b nacked with redelivery (moved to `failed/`), d arrives; tick 2's `inFlight` is `[c, d]` -
+  c from the earlier tick first, then this tick's own - and neither a nor b is in it.
+- *`InFlightSetLincheckTest` still passes unmodified; every earlier test unmodified* - the Lincheck test
+  is untouched and green. **Seven earlier assertions were made stricter, not modified in any other way;
+  deviation 2.**
+- *Progress entry appended, with the open-seams row annotated* - this entry; the T13 row above carries
+  the T18 note and names T19 as its owner.
+
+**Deviations:**
+
+1. **A directory of exactly the cap reads `truncated = true`; the ticket's box wanted `false`.** Telling
+   exactly-the-cap from more-than-the-cap needs the listing to look one entry past the cap and hand over
+   one fewer than it asked for. That is a change to how the listing stops, which the coordinator's
+   re-scope put with the other session's `Listing.BREAK` work; touching `take()` or the
+   `client.list(maxEntries = ...)` hand-off here would have collided with it. So `truncated` is "the
+   listing stopped at the cap", spec 7.1 says in its own words that exactly-the-cap reads as truncated,
+   and the test proves the two halves it can: over the cap is `true`, under it is `false`. This is debt,
+   and its repayment is one decision inside the listing once the BREAK mechanism has landed: ask for
+   `cap + 1`, hand over `cap`, and `truncated` becomes "the extra one arrived". Until then the reading
+   is conservative in the safe direction - a ledger that reconciles only on an untruncated tick skips
+   one it could have used, and never reconciles against a listing that was cut. The one consumer
+   (`shuttle`'s `SftpPollSource`) computes the same `seen >= cap` today, so nothing downstream changes
+   meaning when it switches to the event's field.
+2. **Seven earlier assertions were made stricter (C5's shape).** `PollCompleted` is a data class the
+   earlier tests compare by equality, so every one of those assertions taken where files are in flight
+   at the tick's end now has to say what is in flight, or it fails - which is the correct behaviour of
+   an honest event type, not a reason to keep `inFlight` out of `equals`. Each changed line gained only
+   `inFlight = ...` naming the files that test already holds; no assertion was loosened, retargeted or
+   removed. The lines: `SftpSourceTest` in `a poll is cold, and reports the listing as events`,
+   `a nacked file is handed over again on a later poll unless told otherwise`, `I7_a file in flight is
+   not handed over by any poll`, `a file that is not ready is counted and looked at again next poll`
+   (the second poll's events were bound to a name to be able to say so), and `a poll pays the size
+   check's interval once for all of its files`; `SftpWatchTest.a watch polls when collected and again
+   every interval, numbering its ticks after the source's polls`; `SourceAgainstServerTest.S12_a file
+   listed again while in flight is handed over once`. The two new constructor parameters carry defaults
+   (`emptyList()`, `false`) so that an assertion taken with nothing in flight and no cap reached is
+   unchanged, which is every other earlier site.
+3. **The ticket's spec amendments to 7.4 and 13 were not made**, per the re-scope: they describe the
+   BREAK mechanism, which is the other session's to land and document.
+4. **`PollCompleted.inFlight` says "handed over and not yet given back", not "unsettled"** - see the
+   second concept above. A file acked whose move is still running is in the list; the spec says so.
+
+**Seen once, not reproduced:** on the first full testkit run, with another session's container up on
+the same Docker at the same moment, `PartitionMatrixTest.P2` counted two `download` retries against an
+expected one and `P3` hit a `NullPointerException` at its line 94. The class re-run alone passed 5/5,
+and the following full testkit run passed 208/208. Neither test reads `PollCompleted`; the tier shares
+Toxiproxy's host ports, and a second connector's traffic through it is the likeliest reason.
+
+**For the next ticket (T19):**
+
+- `inFlight` on the last `PollCompleted` before `close()` is exactly the list of files the T13 seam
+  says stay in flight across the close: a tick that finished left them with the consumer, and the
+  consumer can now name them. Whatever T19 does about them - withdraw on close, or let `ackWait`
+  reclaim - it has the enumeration it needs in `InFlightSet.outstanding()`, which is `internal`.
+- `shuttle`'s `SftpPollSource` still keeps its own `inFlight` map and guesses `truncated` from the
+  config. Switching it to the event's two fields is that module's ticket, outside `sftpconnector/`;
+  when it does, its `truncated` keeps its meaning (deviation 1).
+- When the BREAK mechanism lands, the exactly-the-cap case is one decision in the listing (deviation
+  1's repayment); the test to add is "a directory of exactly the cap completes with `truncated =
+  false`", and the spec sentence to delete is 7.1's last.

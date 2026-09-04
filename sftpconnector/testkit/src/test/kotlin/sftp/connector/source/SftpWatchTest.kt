@@ -81,7 +81,7 @@ class SftpWatchTest {
         val collector = launch { source.watch("/drop", EVERY).collect { events += it } }
         runCurrent()
 
-        assertThat(events).containsExactly(PollStarted(2, "/drop"), PollCompleted(2, seen = 1, emitted = 0, notReady = 0))
+        assertThat(events).containsExactly(PollStarted(2, "/drop"), PollCompleted(2, seen = 1, emitted = 0, notReady = 0, inFlight = listOf(held.file)))
         advanceTimeBy(EVERY)
         runCurrent()
         assertThat(events.filterIsInstance<PollStarted>().map { it.tick }).containsExactly(2L, 3L)

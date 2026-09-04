@@ -316,15 +316,21 @@ class SftpSource(
                         }
                     }
                     meters.listed(seen, emitted, notReady)
+                    // The listing stops at the cap without looking past it, so reaching the cap
+                    // is all "there may be more" can mean here.
+                    val truncated = seen >= polling.maxFilesPerPoll
+                    val outstanding = inFlight.outstanding()
                     LOG.debug(
-                        "Tick {} of {} finished: {} seen, {} handed over, {} not ready yet.",
+                        "Tick {} of {} finished: {} seen{}, {} handed over, {} not ready yet, {} out with the consumer.",
                         tick,
                         at(directory),
                         seen,
+                        if (truncated) " (stopped at the cap of $seen; the directory may hold more)" else "",
                         emitted,
                         notReady,
+                        outstanding.size,
                     )
-                    emit(SftpEvent.PollCompleted(tick, seen, emitted, notReady))
+                    emit(SftpEvent.PollCompleted(tick, seen, emitted, notReady, outstanding, truncated))
                 }
             } catch (ended: Throwable) {
                 // Whatever ended the collection - a cancel, a failed listing, a consumer's block

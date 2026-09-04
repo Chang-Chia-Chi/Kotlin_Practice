@@ -76,8 +76,26 @@ sealed interface SftpEvent {
      * The listing is over. [seen] entries passed through the checks, [emitted] of them were handed
      * over, [notReady] are waiting to pass and will be looked at again next poll. The rest were
      * already in flight or skipped.
+     *
+     * [inFlight] is every file out with the consumer at the instant the tick ended - handed over
+     * and not yet given back, by this tick or an earlier one, in the order they were handed over.
+     * It is here so a ledger downstream reconciles against the connector's own set instead of
+     * keeping a copy of it. A file that was acked or nacked is given back only once its action
+     * has run, so one whose move is still under way is still in this list.
+     *
+     * [truncated] says the listing stopped at `maxFilesPerPoll`, so the directory may hold more
+     * than this tick saw. A tick that was not truncated is the only ground for "everything in the
+     * directory has now been listed". The listing stops at the cap without looking past it, so a
+     * directory holding exactly the cap reads as truncated.
      */
-    data class PollCompleted(val tick: Long, val seen: Int, val emitted: Int, val notReady: Int) : SftpEvent
+    data class PollCompleted(
+        val tick: Long,
+        val seen: Int,
+        val emitted: Int,
+        val notReady: Int,
+        val inFlight: List<RemoteFile> = emptyList(),
+        val truncated: Boolean = false,
+    ) : SftpEvent
 }
 
 /** Why a tick sent nothing. */

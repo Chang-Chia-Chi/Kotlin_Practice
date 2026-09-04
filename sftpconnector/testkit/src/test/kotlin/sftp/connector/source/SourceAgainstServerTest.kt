@@ -103,7 +103,7 @@ class SourceAgainstServerTest {
             val second = connector.source.poll("/drop").toList()
 
             assertThat(second.filterIsInstance<FileSeen>()).describedAs("handed over a second time").isEmpty()
-            assertThat(second.last()).isEqualTo(PollCompleted(2, seen = 1, emitted = 0, notReady = 0))
+            assertThat(second.last()).isEqualTo(PollCompleted(2, seen = 1, emitted = 0, notReady = 0, inFlight = listOf(held.await().file)))
             first.cancelAndJoin()
             assertThat(inFlight()).isZero()
         }

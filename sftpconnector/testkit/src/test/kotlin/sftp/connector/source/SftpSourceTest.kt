@@ -62,7 +62,8 @@ class SftpSourceTest {
 
         assertThat(events.first()).isEqualTo(PollStarted(1, "/drop"))
         assertThat(events.filterIsInstance<FileSeen>().map { it.file.path }).containsExactly("/drop/a.csv", "/drop/b.csv")
-        assertThat(events.last()).isEqualTo(PollCompleted(1, seen = 2, emitted = 2, notReady = 0))
+        assertThat(events.last())
+            .isEqualTo(PollCompleted(1, seen = 2, emitted = 2, notReady = 0, inFlight = events.filterIsInstance<FileSeen>().map { it.file }))
     }
 
     /**
@@ -109,7 +110,8 @@ class SftpSourceTest {
 
         val again = source.poll("/drop").toList()
         assertThat(again.filterIsInstance<FileSeen>().map { it.file.path }).containsExactly("/drop/a.csv")
-        assertThat(again.last()).isEqualTo(PollCompleted(2, seen = 2, emitted = 1, notReady = 0))
+        assertThat(again.last())
+            .isEqualTo(PollCompleted(2, seen = 2, emitted = 1, notReady = 0, inFlight = again.filterIsInstance<FileSeen>().map { it.file }))
     }
 
     /**
@@ -147,7 +149,7 @@ class SftpSourceTest {
         repeat(3) {
             val events = source.poll("/drop").toList()
             assertThat(events.filterIsInstance<FileSeen>()).describedAs("handed over while still in flight").isEmpty()
-            assertThat(events.last()).isEqualTo(PollCompleted(it + 2L, seen = 1, emitted = 0, notReady = 0))
+            assertThat(events.last()).isEqualTo(PollCompleted(it + 2L, seen = 1, emitted = 0, notReady = 0, inFlight = listOf(held.file)))
         }
 
         held.ack()
@@ -262,7 +264,9 @@ class SftpSourceTest {
         assertThat(first.last()).isEqualTo(PollCompleted(1, seen = 1, emitted = 0, notReady = 1))
 
         finished = true
-        assertThat(source.poll("/drop").toList().last()).isEqualTo(PollCompleted(2, seen = 1, emitted = 1, notReady = 0))
+        val second = source.poll("/drop").toList()
+        assertThat(second.last())
+            .isEqualTo(PollCompleted(2, seen = 1, emitted = 1, notReady = 0, inFlight = second.filterIsInstance<FileSeen>().map { it.file }))
     }
 
     /**
@@ -290,7 +294,8 @@ class SftpSourceTest {
 
         assertThat(currentTime).describedAs("virtual time the poll took").isEqualTo(10_000)
         assertThat(events.filterIsInstance<FileSeen>().map { it.file.path }).containsExactly("/drop/a.csv", "/drop/b.csv")
-        assertThat(events.last()).isEqualTo(PollCompleted(1, seen = 2, emitted = 2, notReady = 0))
+        assertThat(events.last())
+            .isEqualTo(PollCompleted(1, seen = 2, emitted = 2, notReady = 0, inFlight = events.filterIsInstance<FileSeen>().map { it.file }))
     }
 
     /** What makes waiting inside the poll affordable: nothing of the pool's is held while a check waits. */
@@ -365,6 +370,54 @@ class SftpSourceTest {
         assertThat(inFlight()).isZero()
         assertThat(registry.meters.filter { it.id.name.startsWith("sftp_poll") || it.id.name in setOf("sftp_inflight", "sftp_ack_total") })
             .allSatisfy { assertThat(it.id.getTag("endpoint")).isEqualTo("fake.example:22") }
+    }
+
+    /**
+     * A listing stopped at the cap says so, because "the drop is complete" is only claimable from
+     * a tick that was not cut short. The cap itself is not this test's to prove: exactly the cap
+     * is handed over, and the cap's own counting is the listing's.
+     */
+    @Test
+    fun `a completed poll says whether the listing stopped at the cap`() = runTest {
+        val transport = FakeSftpTransport().directory("/drop").file("/drop/a.csv", "1").file("/drop/b.csv", "2").file("/drop/c.csv", "3")
+        val source = sourceOver(transport) { maxFilesPerPoll = 2 }
+
+        val cutShort = source.poll("/drop").toList()
+        assertThat(cutShort.filterIsInstance<FileSeen>().map { it.file.path }).containsExactly("/drop/a.csv", "/drop/b.csv")
+        assertThat(cutShort.last()).isEqualTo(
+            PollCompleted(1, seen = 2, emitted = 2, notReady = 0, inFlight = cutShort.filterIsInstance<FileSeen>().map { it.file }, truncated = true),
+        )
+
+        transport.remove("/drop/c.csv")
+        transport.remove("/drop/b.csv")
+        val whole = source.poll("/drop").toList()
+        assertThat((whole.last() as PollCompleted).truncated).describedAs("a listing that ran out before the cap").isFalse()
+    }
+
+    /**
+     * What is still out when a tick ends, so a downstream ledger reconciles against the set rather
+     * than keeping a copy of it: a file the consumer still holds from an earlier tick, then this
+     * tick's own, in the order they were handed over. A file acked or nacked and moved out of the
+     * directory has been given back, and is nowhere in the list.
+     */
+    @Test
+    fun `a completed poll names every file still out, earlier ticks' first`() = runTest {
+        val transport = FakeSftpTransport()
+            .directory("/drop").file("/drop/a.csv", "1").file("/drop/b.csv", "2").file("/drop/c.csv", "3").directory("/drop/failed")
+        val source = sourceOver(transport) { onAck = delete(); onNack = move("failed/") }
+
+        val first = source.poll("/drop").toList()
+        val (a, b, c) = first.filterIsInstance<FileSeen>()
+        assertThat((first.last() as PollCompleted).inFlight).containsExactly(a.file, b.file, c.file)
+
+        a.ack()
+        b.nack(IllegalStateException("could not parse it"), redeliver = true)
+        transport.file("/drop/d.csv", "4")
+
+        val second = source.poll("/drop").toList()
+        val d = second.filterIsInstance<FileSeen>().single()
+        assertThat(second.last()).isEqualTo(PollCompleted(2, seen = 2, emitted = 1, notReady = 0, inFlight = listOf(c.file, d.file), truncated = false))
+        assertThat(inFlight()).isEqualTo(2)
     }
 
     private fun inFlight(): Int = registry.get("sftp_inflight").gauge().value().toInt()
