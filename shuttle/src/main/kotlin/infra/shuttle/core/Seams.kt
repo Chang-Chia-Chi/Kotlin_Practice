@@ -18,6 +18,8 @@ interface StateStore {
     suspend fun childrenOf(id: TransferId): List<Transfer>
     suspend fun stored(id: TransferId, target: TargetRef, events: List<DeliveryRequest>)
     suspend fun acked(id: TransferId, events: List<DeliveryRequest>)
+    /** Spec 4.3's `reacked`: a finished row acked again; `updated_at` advances so D40's window restarts, nothing else changes. */
+    suspend fun reacked(id: TransferId)
     suspend fun rejected(id: TransferId, reason: String)
     suspend fun failedAttempt(id: TransferId, error: String, maxAttempts: Int): Transfer
     suspend fun unlisted(route: RouteName, olderThan: Instant, listed: Set<SourceIdentity>): List<TransferId>

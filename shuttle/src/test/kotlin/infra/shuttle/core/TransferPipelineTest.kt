@@ -277,13 +277,14 @@ class TransferPipelineTest {
         pipeline.run(event, fetcher)
         val done = store.transfers.single()
         target.calls.clear()
+        clock.advance(1.minutes)
 
         pipeline.run(event, fetcher)
 
         assertEquals(2, fetcher.calls.size, "fetched and digested")
         assertEquals(listOf(InMemoryTarget.Call("verify", "a.csv")), target.calls, "no second store")
         assertEquals(listOf(event.identity, event.identity), source.acks)
-        assertEquals(done, store.transfers.single(), "no state write")
+        assertEquals(done.copy(updatedAt = clock.instant()), store.transfers.single(), "no state change beyond the re-ack's updated_at")
         assertTrue(store.outbox.isEmpty(), "no delivery")
         assertEquals(1.0, counter("reacked"))
         stagingIsEmpty()
@@ -333,7 +334,35 @@ class TransferPipelineTest {
         pipeline.run(event, fetcher)
         assertEquals(2, fetcher.calls.size, "fetched and digested outside the window")
         assertEquals(2, source.acks.size)
-        assertEquals(done, store.transfers.single())
+        assertEquals(done.copy(updatedAt = clock.instant()), store.transfers.single(), "the re-ack advances updated_at and nothing else")
+    }
+
+    /** Review finding Spec 2: the window is measured from `updated_at`, so the re-ack must advance it or every poll after the first window fetches. */
+    @Test
+    fun SPEC2_a_finished_identity_is_refetched_at_most_once_per_recheckFinished() = runTest {
+        val event = seen()
+        val pipeline = pipeline(route().copy(recheckFinished = 24.hours))
+        pipeline.run(event, fetcher)
+        val done = store.transfers.single()
+
+        clock.advance(23.hours)
+        pipeline.run(event, fetcher)
+        assertEquals(1, fetcher.calls.size, "23 h: inside the window")
+
+        clock.advance(2.hours)
+        pipeline.run(event, fetcher)
+        assertEquals(2, fetcher.calls.size, "25 h: the window has passed, fetched once")
+        val reacked = store.transfers.single()
+        assertEquals(done.copy(updatedAt = clock.instant()), reacked, "the re-ack advances updated_at, keeps the state, writes no outbox row")
+
+        clock.advance(1.hours)
+        pipeline.run(event, fetcher)
+        assertEquals(2, fetcher.calls.size, "26 h: inside the window measured from the re-ack, not from the first ack")
+        assertEquals(reacked, store.transfers.single())
+        assertEquals(2, source.acks.size)
+        assertTrue(store.outbox.isEmpty())
+        assertEquals(1.0, counter("reacked"), "one re-ack, one count")
+        stagingIsEmpty()
     }
 
     @Test

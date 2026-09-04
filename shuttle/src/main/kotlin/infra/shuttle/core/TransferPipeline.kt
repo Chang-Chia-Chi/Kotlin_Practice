@@ -265,10 +265,16 @@ class TransferPipeline(
             }
         }
 
-        /** The ack action again for a finished row that came back; no ledger write, no new deliveries, and no callback: ACKED proves it succeeded. */
+        /**
+         * The ack action again for a finished row that came back; no state change, no new deliveries, and no callback:
+         * ACKED proves it succeeded. The row's `updated_at` advances after the ack so D40's window restarts from this
+         * check, not from the first ack; without it a file that stays under `none` is downloaded on every poll once the
+         * row is older than `recheckFinished`.
+         */
         private suspend fun reack(transfer: Transfer) {
             log.warnv("route {0}: transfer {1} ({2}) is {3} and came back unchanged; acking again", route.name, transfer.id.value, event.identity.sourceName, transfer.state)
             stage("ack") { event.ack() }; hook.at(HookPoint.afterAck, transfer.id)
+            store.reacked(transfer.id)
             count("reacked")
         }
 

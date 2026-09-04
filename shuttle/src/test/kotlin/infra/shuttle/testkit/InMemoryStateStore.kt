@@ -108,6 +108,11 @@ class InMemoryStateStore(private val clock: Clock) : StateStore {
         finishWhenAllDelivered(id)
     }
 
+    override suspend fun reacked(id: TransferId) = tx("reacked", id) {
+        update(id) { this }
+        Unit
+    }
+
     override suspend fun rejected(id: TransferId, reason: String) = tx("rejected", id, reason) {
         update(id) { copy(state = REJECTED, lastError = reason) }
         Unit
