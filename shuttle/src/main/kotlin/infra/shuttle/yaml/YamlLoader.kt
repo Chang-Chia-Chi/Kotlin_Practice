@@ -176,7 +176,7 @@ object YamlLoader {
                 }
             },
         )
-        n.obj("fetch")?.let { f -> f.str("store")?.let { store -> f.str("path")?.let { path -> fetch(objectStore(store), path) } } }
+        n.obj("fetch")?.let { f -> f.str("store")?.let { store -> f.str("path")?.let { path -> fetch(objectStore(store), path, f.str("bucket")) } } }
         n.items("process")?.let { steps -> process = steps.mapNotNull { it.processor() } }
         n.obj("target")?.let { t ->
             t.str("store")?.let { store -> target = Target(store, t.str("bucket"), t.str("directory"), t.str("key") ?: "{name}") }
