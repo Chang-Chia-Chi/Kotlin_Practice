@@ -98,6 +98,20 @@ internal class Resilience(
 
     init {
         Gauge.builder("sftp_breaker_state") { breaker.state.reading() }.tag("endpoint", endpoint).register(meters)
+        // The gauge says what the state is now, which is no help to anyone reading the log after
+        // the fact: the moment it opened, the moment the probe was let through, the moment it
+        // closed again are all moments that have passed. A breaker that has stopped every call to
+        // a server is the loudest thing this connector does, and it says so once per transition.
+        breaker.eventPublisher.onStateTransition {
+            val to = it.stateTransition.toState
+            LOG.warn(
+                "The circuit breaker for {} went from {} to {}.{}",
+                endpoint,
+                it.stateTransition.fromState.spelling(),
+                to.spelling(),
+                if (to.reading() == 2) " Every call is refused from here, without anything being sent." else "",
+            )
+        }
     }
 
     /**
@@ -199,6 +213,9 @@ internal class Resilience(
 
         private fun Throwable.countsAgainstTheBreaker(): Boolean =
             this is SftpException && disposition.countsAgainstTheBreaker
+
+        /** The library's `HALF_OPEN` in the words spec 9 uses for it, so a log line reads as prose. */
+        private fun CircuitBreaker.State.spelling(): String = name.lowercase().replace('_', '-')
 
         /** 0 closed, 1 half-open, 2 open; the states a breaker is forced or disabled into read as what they act like. */
         private fun CircuitBreaker.State.reading(): Int = when (this) {
