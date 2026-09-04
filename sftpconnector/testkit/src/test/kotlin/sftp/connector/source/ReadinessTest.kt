@@ -119,7 +119,7 @@ class ReadinessTest {
             auth { password("etl", "s3cret") }
             hostKey = HostKeyPolicy.AcceptAll
         }
-        return ReadinessContext(SftpClient(SftpPool(transport, config), config), Clock.fixed(instant, ZoneOffset.UTC))
+        return ReadinessContext(SftpClient(SftpPool(transport, config), config)::stat, Clock.fixed(instant, ZoneOffset.UTC))
     }
 
     private operator fun Instant.plus(duration: kotlin.time.Duration): Instant = plusMillis(duration.inWholeMilliseconds)

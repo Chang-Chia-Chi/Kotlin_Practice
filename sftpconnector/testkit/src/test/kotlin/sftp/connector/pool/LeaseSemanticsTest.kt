@@ -65,7 +65,9 @@ class LeaseSemanticsTest {
 
         val exhausted = turnedAway as PoolExhausted
         assertThat(exhausted.waited).isEqualTo(ACQUIRE_TIMEOUT)
-        assertThat(exhausted.stats).isEqualTo(PoolStats(idle = 0, inUse = 1, connecting = 0, pending = 1))
+        assertThat(listOf(exhausted.idle, exhausted.inUse, exhausted.connecting, exhausted.pending))
+            .describedAs("the pool as the refused caller found it, itself counted among the waiters")
+            .containsExactly(0, 1, 0, 1)
         assertThat(exhausted.disposition.lease).isEqualTo(LeaseFate.NONE_HELD)
 
         // The caller that was refused left nothing behind: no session, and no place in the queue.

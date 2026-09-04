@@ -9,9 +9,9 @@ import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import sftp.connector.client.LocalFile
-import sftp.connector.client.Overwrite
 import sftp.connector.client.SftpClient
 import sftp.connector.config.HostKeyPolicy
+import sftp.connector.config.Overwrite
 import sftp.connector.config.SftpConnectorBuilder
 import sftp.connector.config.SftpConnectorConfig
 import sftp.connector.config.sftpConnector

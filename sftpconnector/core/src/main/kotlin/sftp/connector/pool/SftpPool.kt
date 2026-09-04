@@ -186,7 +186,33 @@ class SftpPool(
         }
     }
 
-    private suspend fun refusedWhileClosing() = PoolExhausted(attempt = queuedAttempt(), stats = stats(), closing = true)
+    private suspend fun refusedWhileClosing() = exhausted(closing = true)
+
+    /**
+     * The refusal, carrying the counts as they are the moment it is built.
+     *
+     * They are copied into the exception rather than referred to from it. What a refused caller
+     * needs is what the pool looked like at the instant it gave up, and by the time the failure is
+     * read the pool has moved on; and a failure that travels up a stack and into a log carrying a
+     * pool type is one that cannot be caught without knowing the pool exists.
+     */
+    private suspend fun exhausted(
+        waited: Duration = Duration.ZERO,
+        roomFreedWhileWaiting: Long = 0,
+        closing: Boolean = false,
+    ): PoolExhausted {
+        val stats = stats()
+        return PoolExhausted(
+            attempt = queuedAttempt(),
+            inUse = stats.inUse,
+            connecting = stats.connecting,
+            idle = stats.idle,
+            pending = stats.pending,
+            waited = waited,
+            roomFreedWhileWaiting = roomFreedWhileWaiting,
+            closing = closing,
+        )
+    }
 
     /** The operation that was queued, when the caller said which; the pool's own name for what it was doing otherwise. */
     private suspend fun queuedAttempt(): Attempt = coroutineContext[CurrentAttempt]?.attempt ?: Attempt(endpoint, "acquire")
@@ -249,9 +275,7 @@ class SftpPool(
                     meters.turnedAway()
                     // Read while this caller still counts among the waiters: the statistics
                     // describe the pool as the refused caller found it, itself included.
-                    throw PoolExhausted(
-                        attempt = queuedAttempt(),
-                        stats = stats(),
+                    throw exhausted(
                         waited = acquireTimeout,
                         roomFreedWhileWaiting = roomFreed.get() - freedBefore,
                     )
