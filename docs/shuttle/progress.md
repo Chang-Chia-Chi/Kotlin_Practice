@@ -3327,3 +3327,106 @@ readiness cases are green on this base.
    (`mvn -o -N install` at the root and at `sftpconnector/pom.xml`) was not needed.
 2. **No test added.** See above; the checklist permits it and asks for the reason to be recorded here.
 3. **Size:** production +6 / -1 lines, five of them the comment. No test change, no spec change.
+
+---
+
+## 31: `SftpPollSource` keeps no ledger of its own
+
+**Built:** `SftpPollSource(source, route, poll, clock)` - the `config` parameter is gone, and with it
+everything the source decided for itself. `RouteEvent.PollCompleted.listed` is now the connector's
+`SftpEvent.PollCompleted.inFlight` mapped to identities, plus what this tick emitted; `truncated` is
+the connector's flag. The `InFlight` class, the path-keyed mirror of the in-flight set, the
+`putIfAbsent` refusal of a second file at a path (`StillInFlight`), the `finally` that nacked
+everything held when the flow ended (`releaseEverythingHeld`, `Abandoned`, `NonCancellable`, the
+logger) and both `ponytail:` comments are deleted. The stale KDoc sentence about `FileGone`
+(connector T20's deviation 3) goes too. The only per-tick state left is `emitted`, reset on
+`PollStarted`, as the ticket asks. `ShuttleHost.polled` drops the argument; nothing else in the
+module built the source.
+
+**Concepts named:**
+
+- **The connector's in-flight set is the one truth** (spec 4.6, D1). Three questions the map used
+  to answer are now the connector's contract: what is still out (`PollCompleted.inFlight`, connector
+  T18), whether the listing was cut short (`PollCompleted.truncated`, T18), and who gives a file back
+  when the route ends (the watch's own `finally`, `Settlement.WATCH_ENDED`, T19). A second copy of the
+  same name under a new size or mtime is not handed over while the first is out - the set is
+  path-exclusive (connector D48) - so ticket 21's hand-made refusal was already dead code; the
+  connector never sends the event it refused.
+- **A handle table is not a mirror.** What survives is `handles: ConcurrentHashMap<String,
+  SftpEvent.FileSeen>`, written on hand-over (`put`, no refusal) and cleared by the answer that
+  settles it (`remove(path, seen)`, so a late answer never drops a newcomer's handle). It exists
+  because the pipeline's `Fetcher` is `(path, into, algorithm)` and the connector offers no way to
+  reach the `FileSeen` a path was handed over on, and it is kept rather than replaced by a
+  `stat`-then-`download` by path because `FileSeen.download` is the connector's download of the
+  file it *listed*: the bytes are checked against the listed size, so a re-drop between listing and
+  fetch fails the fetch instead of landing under the first file's identity. Nothing is decided from
+  the table - `listed`, truncation, exclusivity and the give-back all come from the connector.
+- **`listed` is a union, and the order of its halves does not matter.** `inFlight` is taken at the
+  instant the tick ended, so a file this tick handed over and whose pipeline already acked is in
+  `emitted` and not in `inFlight`; one from an earlier tick still mid-move is in `inFlight` and not in
+  `emitted`. Either half alone would let reconciliation write ACKED for a row whose move had not
+  happened; both together are exactly "what a STORED row may still be".
+
+**Acceptance:**
+
+- [x] Map, `config`, `releaseEverythingHeld`, `StillInFlight`, `Abandoned`, the `finally` and both
+      `ponytail:` comments are gone (`grep -n "ponytail\|Abandoned\|StillInFlight\|releaseEverything\|
+      maxFilesPerPoll" SftpPollSource.kt` finds nothing) - all but the handle table, deviation 1.
+- [x] `listed` and `truncated` come from the connector's event. The two existing cases that pin them
+      stay green with their KDoc rewritten to say so:
+      `a_poll_lists_every_identity_still_in_flight_from_an_earlier_poll` (a second poll that emitted
+      nothing still names the file fetched on the first) and
+      `a_listing_that_reaches_maxFilesPerPoll_completes_truncated` (three files, cap two, through the
+      connector's own DSL). Neither turned red: the connector answers the same as the map did, which is
+      the ticket's whole claim.
+- [x] The route-end give-back is asserted through the connector, not the source. The run-ends case is
+      rewritten as `a_watch_that_ends_gives_back_every_file_it_handed_over_so_the_next_watch_lists_them`:
+      a file fetched on tick 1 and never answered is in tick 2's `listed`; after the collector is
+      cancelled, `sftp_inflight` reads 0 and `sftp_ack_total{outcome=cancelled}` reads 1 (the
+      `WATCH_ENDED` give-back, not a nack from this module), and a fresh watch hands the file over
+      again. It stayed green on the deletion of the `finally` - the same proof of redundancy.
+- [x] The re-drop case is rewritten as
+      `a_path_uploaded_again_while_its_first_file_is_still_in_flight_is_not_handed_over_until_the_first_is_settled`:
+      the first upload paused at `afterFetch`, the file rewritten with a new size and mtime + 5 s, three
+      polls hand nothing over and the gauge shows one place; after the resume the single row is DONE
+      under the first identity, the `Seen` channel is still empty (the first's move took the path with
+      it), the gauge is 0. What it asserts is the connector's gauge and the events it did not send.
+- [x] `S1` x2, `SPEC1` and `B1` pass with their ids unchanged; the wrong-password case still builds its
+      pool by hand (deviation 2). `SftpPollSourceTest`: 12 tests, 0 failures, before and after.
+- [x] Spec: D2's rationale now says exclusivity is the path and this module refuses nothing; 4.6 says
+      `listed` is the connector's `inFlight` plus the tick's emitted files and `truncated` the
+      connector's flag.
+- [x] Progress entry appended: this one.
+
+**Final run counts (surefire).** `-pl shuttle test -Dtest=SftpPollSourceTest`: 12 tests, 0 failures, 0
+errors, before and after the change. Default tier (`mvn -B -o -q -pl shuttle test`): 30 classes, **271
+tests, 0 failures, 0 errors**, the same total as ticket 32's base (two cases rewritten, none added or
+deleted). `M1AcceptanceTest` (`-DexcludedGroups=none -Dtest=M1AcceptanceTest`, Oracle and MinIO in
+containers, the real poll source through the host): **23 tests, 0 failures, 0 errors**, 70 s. The first
+default-tier pass hit `NoClassDefFoundError: SftpConnector$Companion` in `ShuttleHostM2WiringTest` and
+was then killed by the machine's memory watchdog: another worktree's `install` rewrote the connector
+jar in `~/.m2` at 21:17:13, mid-run. The rerun above, with nothing else building, is clean.
+
+**Deviations:**
+
+1. **One map survives, as a handle table.** The checklist says "no map"; the coordinator approved
+   keeping `handles` on the reasoning above (the size check against the listed file is worth more
+   than the last few lines; a `stat`-then-`download` by path would reopen the re-drop identity hole).
+   It is named a handle table in the KDoc, and nothing reads it but the fetcher.
+2. **No test stopped building a pool by hand**, because none did so for the map's sake. The one
+   by-hand build (`a_wrong_password_ends_the_flow_with_RouteDown_as_its_last_event`) exists to skip
+   `SftpConnector.start`'s probe, which would refuse the password before a watch existed; it lost
+   the `config` argument and nothing else.
+3. **Nothing turned red.** The ticket's beat 2 expected the give-back and re-drop cases to fail once
+   the `finally` and the refusal went; they did not, because the connector already guaranteed both
+   (T19, D48) and the deleted code was unreachable or redundant. The rewritten cases were tightened
+   instead - `listed` on the second poll, the connector's gauge and `cancelled` counter, the empty
+   `Seen` channel - so that each now fails if the connector stopped guaranteeing what this module
+   stopped doing.
+4. **Size:** production -86 / +46 in `SftpPollSource.kt` (net -40) and one line in `ShuttleHost`;
+   tests +26 / -17; spec one row and one sentence; the ticket file and this entry.
+
+**For the connector:** the handle table would go entirely if a `FileSeen.download` were reachable by
+path from the in-flight set, or if the connector's event carried a fetch handle the consumer could
+hand on by path (a `download(path, into)` on `SftpSource` that downloads through the slot at that
+path, with the listed size check). The one caller is `SftpPollSource.fetch`.
