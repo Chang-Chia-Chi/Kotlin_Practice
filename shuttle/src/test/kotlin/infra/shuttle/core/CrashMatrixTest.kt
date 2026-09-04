@@ -68,7 +68,7 @@ class CrashMatrixTest {
 
     /** Spec 13.1's image-sets route: the message names a metadata file listing two images, each a child on the target; uploads one at a time. */
     private val imageSets = polled.copy(source = Source.Subscribe("nats", "images", onAck = AckAction.Ack), fetch = Fetch("minio", "/metadata"), parallelism = 1)
-    private val imageChain = ProcessingChain(listOf(processorFor(ProcessorSpec.Expand("json", "/images", "minio")) { null }), DigestAlgorithm.MD5)
+    private val imageChain = ProcessingChain(listOf(processorFor(ProcessorSpec.Expand(ExpandFormat.Json, "/images", "minio")) { null }), DigestAlgorithm.MD5)
     /** One message: the parent's trigger and, replayed, the broker's redelivery of it. */
     private val set: Flow<RouteEvent> by lazy {
         fetcher.file("set.json", """{"images":["img/1.png","img/2.png"]}""".toByteArray()).file("img/1.png", "one".toByteArray()).file("img/2.png", "two".toByteArray())

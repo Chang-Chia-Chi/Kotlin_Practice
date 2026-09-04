@@ -14,13 +14,13 @@ no by-path fetch exists there yet. Review findings Spec 9 and the bug hunt's fir
 
 **Nature:** host wiring plus one rule sharpening
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `RulesTest`: `rule14_` cases: `expand.from` naming an S3 store other than `fetch.store` without a bucket is a violation; naming an SFTP store other than `fetch.store` is a violation with a reason saying why; naming the fetch store itself passes as today
-- [ ] `ShuttleHostM2WiringTest` (or `ShuttleHostTest`): a route with `fetch.store` on one S3 store and `expand.from` on another gets a `fetchers` map with the second store's fetcher, proven through the host's `internal` seam the way the wiring test already proves `fetcherFor`; red before the fix
-- [ ] The new knob (if `expand.bucket` is chosen) lands in YAML, DSL, rule 14's text and spec 13.1's expand block; if the bucket is instead read from the named store's declaration, record why and add nothing
-- [ ] Step 3 probes the expand bucket like the fetch bucket (ticket 35's probe, extended)
-- [ ] Progress entry appended
+- [x] `RulesTest`: `rule14_` cases: `expand.from` naming an S3 store other than `fetch.store` without a bucket is a violation; naming an SFTP store other than `fetch.store` is a violation with a reason saying why; naming the fetch store itself passes as today
+- [x] `ShuttleHostM2WiringTest` (or `ShuttleHostTest`): a route with `fetch.store` on one S3 store and `expand.from` on another gets a `fetchers` map with the second store's fetcher, proven through the host's `internal` seam the way the wiring test already proves `fetcherFor`; red before the fix
+- [x] The new knob (if `expand.bucket` is chosen) lands in YAML, DSL, rule 14's text and spec 13.1's expand block; if the bucket is instead read from the named store's declaration, record why and add nothing
+- [x] Step 3 probes the expand bucket like the fetch bucket (ticket 35's probe, extended)
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket; 200-600 lines including tests; no Thread.sleep;
 invariant tests named `I<n>_<description>`, scenario tests by their `S<n>` id, validation tests by `rule<n>_`,

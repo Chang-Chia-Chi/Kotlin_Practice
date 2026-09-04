@@ -15,6 +15,7 @@ import infra.shuttle.core.Notifier
 import infra.shuttle.core.ObjectStoreTarget
 import infra.shuttle.core.ProcessingChain
 import infra.shuttle.core.Processor
+import infra.shuttle.core.ProcessorSpec
 import infra.shuttle.core.Provider
 import infra.shuttle.core.Route
 import infra.shuttle.core.RouteEvent
@@ -165,6 +166,7 @@ class ShuttleHost(
             val pipeline = TransferPipeline(
                 route, route.digest ?: config.digest, store, routeTargets.getValue(route.name), chainFor(route), bodies,
                 { beans.provider(it) != null }, notifier::wake, hook, clock, registry, stagingFor(route), channels = channels, renderer = renderer,
+                fetchers = fetchersFor(route),
             )
             RouteRunner(route, pipeline, fetcherFor(route), store, notifier::wake, clock, registry)
         }
@@ -309,10 +311,9 @@ class ShuttleHost(
      */
     private suspend fun probeStores(routeTargets: Collection<ObjectStoreTarget>) {
         routeTargets.distinct().forEach { it.probe() }
-        config.routes.mapNotNull { route ->
-            val fetch = route.fetch ?: return@mapNotNull null
-            val bucket = fetch.bucket ?: return@mapNotNull null
-            (storeNamed(fetch.store) as? S3Store)?.let { it to bucket }
+        config.routes.flatMap { route ->
+            val fetch = route.fetch?.bucket?.let { bucket -> (storeNamed(route.fetch.store) as? S3Store)?.let { it to bucket } }
+            listOfNotNull(fetch) + route.divergentExpands()
         }.distinct().forEach { (store, bucket) -> S3Target.headBucket(s3ClientFor(store), bucket, io) }
     }
 
@@ -406,6 +407,21 @@ class ShuttleHost(
         }
         null -> throw IllegalStateException("route ${route.name} has no source")
     }
+
+    /**
+     * Stage 3's other bytes: an `expand` pulls its children from `expand.from`, which may be a store the
+     * route does not fetch from, and the pipeline asks this map for one it is not already holding. Rule 14
+     * leaves only one shape here - an S3 store with an `expand.bucket` - because no other store offers a
+     * fetch by path a route has not fetched through. One client per declaration, shared with every other
+     * role on that store, as `fetcherFor` shares it. `internal` for the same reason `fetcherFor` is.
+     */
+    internal fun fetchersFor(route: Route): Map<String, Fetcher> =
+        route.divergentExpands().associate { (store, bucket) -> store.name to S3Fetcher(s3ClientFor(store), bucket, io).fetcher }
+
+    /** The `expand.from` stores of [route] that its own fetcher does not cover, with the bucket each states (rule 14, D53). */
+    private fun Route.divergentExpands(): List<Pair<S3Store, String>> =
+        process.filterIsInstance<ProcessorSpec.Expand>().filter { it.from != fetch?.store }.distinct()
+            .map { (storeNamed(it.from) as S3Store) to checkNotNull(it.bucket) { "route $name: an expand from S3 store ${it.from} needs a bucket" } }
 
     /** Steps 6 and 7 for one route, run afresh at every supervised start. */
     private fun eventsFor(route: Route): Flow<RouteEvent> = when (val source = route.source) {

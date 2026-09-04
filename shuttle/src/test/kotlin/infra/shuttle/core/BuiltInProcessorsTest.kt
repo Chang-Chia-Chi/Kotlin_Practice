@@ -154,16 +154,16 @@ class BuiltInProcessorsTest {
         fetcher.file("sets/set.json", """{"images":[{"path":"img/1.png"},{"path":"img/2.png"}],"none":[]}""".toByteArray())
             .file("img/1.png", "one".toByteArray()).file("img/2.png", "two".toByteArray())
         ctx().use { ctx ->
-            val done = run(processorFor(ProcessorSpec.Expand("json", "/images[*].path", "minio")) { null }, input("sets/set.json"), ctx) as ChainResult.Done
+            val done = run(processorFor(ProcessorSpec.Expand(ExpandFormat.Json, "/images[*].path", "minio")) { null }, input("sets/set.json"), ctx) as ChainResult.Done
             assertEquals(listOf("1.png", "2.png"), done.payload.objects.map { it.name })
             assertEquals(listOf("one", "two"), done.payload.objects.map { Files.readString(it.path) })
             assertEquals(done.payload.objects.map { it.path }, ctx.createdFiles, "each child is a file the context owns")
             assertEquals(done.payload.objects.map { Digest.of(it.path, DigestAlgorithm.MD5) }, done.payload.objects.map { it.digest })
-            assertEquals(ChainResult.Rejected("expand: /none[*].path lists no paths in set.json"), run(processorFor(ProcessorSpec.Expand("json", "/none[*].path", "minio")) { null }, input("sets/set.json"), ctx))
-            assertEquals(ChainResult.Rejected("expand: /nope is absent from set.json or is not a path"), run(processorFor(ProcessorSpec.Expand("json", "/nope", "minio")) { null }, input("sets/set.json"), ctx))
+            assertEquals(ChainResult.Rejected("expand: /none[*].path lists no paths in set.json"), run(processorFor(ProcessorSpec.Expand(ExpandFormat.Json, "/none[*].path", "minio")) { null }, input("sets/set.json"), ctx))
+            assertEquals(ChainResult.Rejected("expand: /nope is absent from set.json or is not a path"), run(processorFor(ProcessorSpec.Expand(ExpandFormat.Json, "/nope", "minio")) { null }, input("sets/set.json"), ctx))
         }
         messageCtx("""{"paths":["img/2.png"]}""").use { ctx ->
-            val done = run(processorFor(ProcessorSpec.Expand("message", "/paths", "minio")) { null }, input(), ctx) as ChainResult.Done
+            val done = run(processorFor(ProcessorSpec.Expand(ExpandFormat.Message, "/paths", "minio")) { null }, input(), ctx) as ChainResult.Done
             assertEquals(listOf("2.png"), done.payload.objects.map { it.name })
         }
     }

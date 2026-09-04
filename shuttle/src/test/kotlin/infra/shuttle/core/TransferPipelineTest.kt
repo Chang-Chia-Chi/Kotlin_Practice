@@ -63,7 +63,7 @@ class TransferPipelineTest {
     )
     private val imageChain = listOf(
         processorFor(ProcessorSpec.Extract(ExtractFrom.Message, json = mapOf("batchId" to "/batchId"))) { null },
-        processorFor(ProcessorSpec.Expand("json", "/images[*].path", "minio")) { null },
+        processorFor(ProcessorSpec.Expand(ExpandFormat.Json, "/images[*].path", "minio")) { null },
     )
     private suspend fun imageMessage(): RouteEvent.Seen {
         fetcher.file("sets/set.json", """{"images":[{"path":"img/1.png"},{"path":"img/2.png"}]}""".toByteArray())

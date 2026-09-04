@@ -96,6 +96,14 @@ class YamlLoaderTest {
         assertTrue(e.errors.single().startsWith("shuttle.channels.downstream.http.body[9].field: MOMENT is not one of "), e.errors.single())
     }
 
+    /** Ticket 38, the same reading as the retired rule 16: `expand.format` is a word, so an unknown one never becomes a step. */
+    @Test
+    fun an_unknown_expand_format_is_a_load_error_naming_the_step() {
+        val e = assertThrows(YamlLoadException::class.java) { YamlLoader.load(spec131().replace("format: json", "format: lines"), specEnv) }
+        assertEquals(1, e.errors.size, e.errors.toString())
+        assertEquals("shuttle.routes.image-sets.process[1].expand.format: lines is not one of json, message", e.errors.single())
+    }
+
     @Test
     fun durations_byte_sizes_and_status_ranges_parse() {
         val config = YamlLoader.load(

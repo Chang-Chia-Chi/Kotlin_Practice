@@ -8,6 +8,7 @@ import infra.shuttle.core.Backoff
 import infra.shuttle.core.DeliveryMoment
 import infra.shuttle.core.DeliveryPolicy
 import infra.shuttle.core.DigestAlgorithm
+import infra.shuttle.core.ExpandFormat
 import infra.shuttle.core.ExtractFrom
 import infra.shuttle.core.Field
 import infra.shuttle.core.FileReadiness
@@ -223,7 +224,14 @@ object YamlLoader {
                 spec = e.word("from", "fileName" to ExtractFrom.FileName, "sourcePath" to ExtractFrom.SourcePath, "content" to ExtractFrom.Content, "message" to ExtractFrom.Message)
                     ?.let { from -> ProcessorSpec.Extract(from, e.str("regex"), e.items("into")?.mapNotNull { it.scalar() }, e.obj("json")?.entries()?.mapNotNull { (k, v) -> v.scalar()?.let { k to it } }?.toMap()) }
             },
-            "expand" to { x -> spec = x.str("format")?.let { f -> x.str("files")?.let { files -> x.str("from")?.let { ProcessorSpec.Expand(f, files, it) } } } },
+            // Every key is read before any of them decides, so a bad `format` is one error and not three unknown keys.
+            "expand" to { x ->
+                val format = x.word("format", "json" to ExpandFormat.Json, "message" to ExpandFormat.Message)
+                val files = x.str("files")
+                val from = x.str("from")
+                val bucket = x.str("bucket")
+                spec = format?.let { f -> files?.let { fs -> from?.let { ProcessorSpec.Expand(f, fs, it, bucket) } } }
+            },
             "verifyDigest" to { v -> spec = v.str("attribute")?.let(ProcessorSpec::VerifyDigest) },
             "custom" to { c -> spec = c.scalar()?.let { name -> ProcessorSpec.Custom(name, free("config")?.let { yaml.convertValue(it, Map::class.java) }?.mapKeys { it.key.toString() } ?: emptyMap()) } },
         )
