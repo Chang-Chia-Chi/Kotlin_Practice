@@ -5,6 +5,7 @@ import sftp.connector.client.SftpClient
 import sftp.connector.client.makeDirectory
 import sftp.connector.config.SftpConnectorConfig
 import sftp.connector.error.ConfigurationError
+import sftp.connector.error.Disposition
 import sftp.connector.error.NoSuchFile
 import sftp.connector.error.SftpException
 import sftp.connector.transport.RemoteFile
@@ -203,13 +204,27 @@ internal class StartupProbe(
     }
 
     /**
-     * Runs one check, and turns whatever the server says about it into a refusal to start that
+     * Runs one check, and turns whatever the server *says* about it into a refusal to start that
      * names the check, the path and what to do about it.
+     *
+     * Only an answer is evidence about the configuration. A path that is not there, an account
+     * that may not, a rename the server refuses: those arrived, were understood, and were
+     * answered no, and the remedy this check carries is what to change about them. A connection
+     * that broke, a request that ran out of time, a pool with nothing to lend - none of those
+     * reached the server or came back from it, and they say nothing about what was asked. Dressed
+     * up as a configuration fault they would send an operator to respell a path that is spelled
+     * correctly, on a start-up that would have worked a minute later; so they go up as themselves,
+     * and the start-up still refuses, carrying the truth about why.
+     *
+     * That line is exactly the one spec 10.2 already draws, and it is read off the failure rather
+     * than off a list of classes here: "the server answered" is what [Disposition.RETRY_ON_THE_NEXT_TICK]
+     * means.
      */
     private suspend fun <T> checking(trying: String, remedy: String, check: suspend () -> T): T =
         try {
             check()
         } catch (failure: SftpException) {
+            if (failure.disposition != Disposition.RETRY_ON_THE_NEXT_TICK) throw failure
             throw refuse(trying, remedy, failure)
         }
 
