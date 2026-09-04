@@ -274,6 +274,51 @@ class SftpWatchTest {
     }
 
     /**
+     * A failure the connector raised inside the block - the pool was full, the session died - is
+     * nobody's verdict on the file. It is given back for the next tick with neither action run,
+     * where a nack would have filed it under `failed/` for a failure that was not its own.
+     */
+    @Test
+    fun `consume gives back a file the connector failed on without a verdict, and the next tick hands it over again`() = runTest {
+        val refusals = mapOf<String, () -> Throwable>(
+            "/drop/a.csv" to { PoolExhausted(Attempt(ENDPOINT, "read", "/drop/a.csv")) },
+            "/drop/b.csv" to { SessionLost(Attempt(ENDPOINT, "read", "/drop/b.csv"), "the tunnel went quiet") },
+        )
+        var refusing = true
+        val transport = FakeSftpTransport { call ->
+            if (refusing && call.operation == Operation.Read) refusals[call.path]?.let { throw it() }
+        }.directory("/drop").file("/drop/a.csv", "1").file("/drop/b.csv", "2")
+        val source = sourceOver(transport) {
+            polling { onAck = delete(); onNack = move("failed/") }
+            resilience { retry { maxAttempts = 1 } }
+        }
+        val handled = mutableListOf<String>()
+        val pipeline = launch {
+            source.consume("/drop", EVERY) { seen ->
+                handled += seen.file.name
+                seen.download()
+            }
+        }
+        runCurrent()
+
+        assertThat(handled).containsExactly("a.csv", "b.csv")
+        assertThat(transport.calls.filter { it.operation == Operation.Rename || it.operation == Operation.Delete })
+            .describedAs("actions run for a file nobody answered for").isEmpty()
+        assertThat(registry.get("sftp_ack_total").tag("outcome", "nack").counter().count()).isZero()
+        assertThat(registry.get("sftp_ack_total").tag("outcome", "cancelled").counter().count()).isEqualTo(2.0)
+        assertThat(inFlight()).isZero()
+        assertThat(pipeline.isActive).describedAs("the pipeline survives a failure the next tick may not see").isTrue()
+
+        refusing = false
+        advanceTimeBy(EVERY)
+        runCurrent()
+
+        assertThat(handled).containsExactly("a.csv", "b.csv", "a.csv", "b.csv")
+        assertThat(transport.calls.filter { it.operation == Operation.Delete }.map { it.path }).containsExactly("/drop/a.csv", "/drop/b.csv")
+        pipeline.cancelAndJoin()
+    }
+
+    /**
      * A check that times itself out and lets the timeout escape has thrown a cancellation at a
      * tick nobody cancelled. Under a poll that reaches the collector as it is; under a watch the
      * tick is a coroutine of its own, and a cancellation would end it without a word. So it ends

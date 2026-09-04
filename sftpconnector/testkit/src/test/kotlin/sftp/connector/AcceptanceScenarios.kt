@@ -24,7 +24,7 @@ import sftp.connector.testkit.ResilienceAgainstServerTest
 @SelectMethod(type = ResilienceAgainstServerTest::class, name = "S2_a stall past the keepalive poisons the session and the call is retried on a fresh one")
 @SelectMethod(type = WatchUnderOpenBreakerTest::class, name = "S3_an open breaker skips every tick without dialling, until the probe after the wait closes it")
 @SelectMethod(type = SftpWatchTest::class, name = "S4_a full pool fails the tick, and the watch continues")
-@SelectMethod(type = SourceAgainstServerTest::class, name = "S5_a file removed between the listing and the download is gone, not failed")
+@SelectMethod(type = SourceAgainstServerTest::class, name = "S5_a file removed between the listing and the download answers null, not an error")
 @SelectMethod(type = StartupAgainstServerTest::class, name = "S6_a move target on another filesystem stops the connector from starting")
 @SelectMethod(type = SourceAgainstServerTest::class, name = "S7_an ack without a download runs the move and transfers nothing")
 @SelectMethod(type = SftpWatchTest::class, name = "S8_under SKIP a tick that comes round while the last is still running is skipped, and no second listing is sent")

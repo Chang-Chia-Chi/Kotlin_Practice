@@ -114,7 +114,6 @@ class SftpPollSource(
                     )
                     is SftpEvent.PollFailed -> emit(RouteEvent.PollFailed(event.error))
                     is SftpEvent.PollSkipped -> emit(RouteEvent.PollSkipped)
-                    is SftpEvent.FileGone -> Unit
                 }
             }
         } finally {
