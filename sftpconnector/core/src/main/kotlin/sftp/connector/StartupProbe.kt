@@ -1,5 +1,7 @@
 package sftp.connector
 
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 import org.slf4j.LoggerFactory
 import sftp.connector.client.SftpClient
 import sftp.connector.client.makeDirectory
@@ -12,6 +14,15 @@ import sftp.connector.transport.RemoteFile
 import sftp.connector.transport.SftpSession
 import java.io.ByteArrayInputStream
 import java.util.UUID
+
+/**
+ * The prefix every start-up marker carries. It is what the lister skips ([sftp.connector.source]),
+ * so a marker any instance of this connector left behind - a start-up killed mid-check, or one
+ * whose tidy-up met a dead session - is inert to the poll rather than handed over as a file. It is
+ * a class of names, not one name: the random suffix per marker is what keeps two instances from
+ * moving each other's, and the prefix is what makes all of them recognisable.
+ */
+internal const val PROBE_MARKER_PREFIX = ".sftpconnector-probe-"
 
 /**
  * Asks the server, before the connector runs, whether the configuration it was given describes
@@ -42,11 +53,11 @@ internal class StartupProbe(
 
     /**
      * Named so that one found lying about is recognisable as this connector's and as a leftover:
-     * it is deleted on the way out of every path, and survives only a start-up that was killed
-     * mid-check. The random part is because two instances of the same connector may start at once
-     * and must not each move the other's marker.
+     * it is deleted on the way out of every path, and the lister skips its whole prefix so that one
+     * left by a dead session is never handed over. The random part is because two instances of the
+     * same connector may start at once and must not each move the other's marker.
      */
-    private val marker = ".sftpconnector-probe-${config.name}-${UUID.randomUUID()}"
+    private val marker = "$PROBE_MARKER_PREFIX${config.name}-${UUID.randomUUID()}"
 
     suspend fun run() {
         // A connector that watches nothing has nothing to check here, and should not open a
@@ -194,12 +205,20 @@ internal class StartupProbe(
      * Takes the marker away wherever it ended up. Nothing here is allowed to throw: on the failing
      * path a failure raised while clearing up would replace the failure worth reporting with one
      * about a file nobody asked about.
+     *
+     * Under `NonCancellable`, because the likeliest reason the probe is unwinding is that it was
+     * cancelled, and a cancelled `delete` never reaches the server - `withContext(io)` refuses it -
+     * so the marker would be left on a session that is still perfectly alive. A wire failure leaves
+     * it anyway (the session is dead), which is what the lister's prefix skip is for; a cancellation
+     * is the case this closes.
      */
     private suspend fun SftpSession.tidyAway(path: String) {
-        try {
-            delete(path)
-        } catch (failure: SftpException) {
-            LOG.debug("The probe file {} did not need clearing away: {}", path, failure.message)
+        withContext(NonCancellable) {
+            try {
+                delete(path)
+            } catch (failure: SftpException) {
+                LOG.debug("The probe file {} did not need clearing away: {}", path, failure.message)
+            }
         }
     }
 
