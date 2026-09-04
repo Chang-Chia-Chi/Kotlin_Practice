@@ -931,7 +931,7 @@ Each is public numbering, reported by number in validate mode and at startup.
 | 13 | A `key` or `directory` pattern uses only `{name}` (the staged object's name at store time, after the chain), `{sourceName}` (the source object's original name), `{yyyyMMdd}` and attribute names declared in the route, and yields no `..` |
 | 14 | Every built-in processor's configuration parses: patterns compile, pointers are valid, `extract.from` is one of `fileName`, `sourcePath`, `content`, `message` with `message` only on a subscribed route, a regex has named groups or an `into` list whose length equals its group count, `expand.from` names a store, `unzip.maxEntries >= 1` and `unzip.maxBytes > 0` |
 | 15 | Every `custom` processor and every `provider` resolves to a named bean |
-| 16 | Every mapping `field` is in the vocabulary |
+| 16 | *Retired (ticket 40).* A mapping `field` is read into the vocabulary as the document is parsed, so an unknown name is a load error naming the row (Sec 12.2) and no configuration reaches the rules carrying one; the number is not reused |
 | 17 | Every mapping `attribute` is declared by a processor in that route |
 | 18 | Every mapping `select` is a valid JSON pointer and every `format` parses |
 | 19 | A mapping row has exactly one of `field`, `attribute`, `provider`, `value` |

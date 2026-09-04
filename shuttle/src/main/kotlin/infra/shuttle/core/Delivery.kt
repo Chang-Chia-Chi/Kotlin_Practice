@@ -44,19 +44,22 @@ sealed interface DeliveryOutcome {
 /** Exponential backoff from `initial` to `max`; shared by delivery policy (spec 9.3) and supervision (spec 10). */
 data class Backoff(val initial: Duration, val max: Duration, val factor: Double = 2.0)
 
-/** Spec 9.3 defaults. */
+/**
+ * Spec 9.3 defaults. The per-attempt timeout the section names is the channel's own (`HttpChannel.timeout`,
+ * rule 3); the policy carries no second one. [fullJitter] is not a YAML knob: spec 9.3 fixes full jitter as
+ * the behaviour, and the flag is here so a test can ask for the bare ceiling and get a deterministic backoff.
+ */
 data class DeliveryPolicy(
     val maxAttempts: Int = 50,
     val giveUpAfter: Duration = 24.hours,
     val backoff: Backoff = Backoff(initial = 5.seconds, max = 15.minutes),
     val fullJitter: Boolean = true,
-    val timeout: Duration = 10.seconds,
 )
 
 /** Spec 9.6: one row of a channel's body, in the table's own keys so YAML and the DSL meet here. */
 data class MappingRow(
     val path: String,
-    val field: String? = null,
+    val field: Field? = null,
     val attribute: String? = null,
     val provider: String? = null,
     val select: String? = null,

@@ -663,7 +663,7 @@ class TransferPipelineTest {
         I20(DeliveryMoment.FETCHED, armAt = null, previous = TransferState.SEEN) // `seen` inserts nothing, so `fetched` is the next transition
     }
 
-    private val body = MappingTable(listOf(MappingRow("fileId", field = "TRANSFER_ID"), MappingRow("event", field = "EVENT")))
+    private val body = MappingTable(listOf(MappingRow("fileId", field = Field.TRANSFER_ID), MappingRow("event", field = Field.EVENT)))
 
     @Test
     fun a_fetched_delivery_created_before_a_crash_right_after_fetch_is_delivered_by_the_notifier() = runTest {

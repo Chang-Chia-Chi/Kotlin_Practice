@@ -9,6 +9,7 @@ import infra.shuttle.core.DeliveryMoment
 import infra.shuttle.core.DeliveryPolicy
 import infra.shuttle.core.DigestAlgorithm
 import infra.shuttle.core.ExtractFrom
+import infra.shuttle.core.Field
 import infra.shuttle.core.FileReadiness
 import infra.shuttle.core.HostKey
 import infra.shuttle.core.MappingRow
@@ -141,10 +142,10 @@ object YamlLoader {
         n.items("body")?.let { rows -> body = MappingTable(rows.mapNotNull { it.row() }) }
     }
 
-    /** Spec 9.6: one row in the table's own keys; `type` is a word, everything else a string or a flag. */
+    /** Spec 9.6: one row in the table's own keys; `field` and `type` are words, everything else a string or a flag. */
     private fun Node.row(): MappingRow? = str("path")?.let { path ->
         MappingRow(
-            path, str("field"), str("attribute"), str("provider"), str("select"), str("value"),
+            path, word("field", *Field.entries.map { it.name to it }.toTypedArray()), str("attribute"), str("provider"), str("select"), str("value"),
             word("type", *MappingType.entries.map { it.name.lowercase() to it }.toTypedArray()) ?: MappingType.STRING,
             str("format"), str("default"), bool("trim") ?: false, bool("upper") ?: false, bool("lower") ?: false, bool("required") ?: true, str("digest"),
         )

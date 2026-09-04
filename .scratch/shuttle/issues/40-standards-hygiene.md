@@ -10,15 +10,15 @@ rule 7/14 bodies or `ShuttleConfig.kt` beyond `Delivery.kt`, which other tickets
 
 **Nature:** hygiene
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `ShuttleQuarkusTest` drops `org.hamcrest.Matchers` (banned library): RestAssured assertions become `.extract().path(...)` plus JUnit `assertEquals`
-- [ ] `NatsChannel`'s `runCatching { runInterruptible(io) { message.inProgress() } }` no longer swallows `CancellationException`: rethrow it, catch only what the broker can throw; a test on the channel (fake connection or the existing `nats`-tagged class) proves a cancelled in-progress loop ends promptly
-- [ ] Dead or half-wired knobs: `DeliveryPolicy.fullJitter` and `.timeout` either reach the YAML loader with a rule and are read by the delivery path, or are deleted from the DSL and the data class; `ProcessorSpec.Custom.config` reaches the bean it names (spec 6.2) or the decision to drop it is recorded; `S3Target.clock` is removed if unused
-- [ ] Parse-don't-validate: `MappingRow.field` becomes the `Field` type end to end (no name round trip); `Expand.format` becomes the enum beside `ExtractFrom`; YAML and DSL keep their spelling
-- [ ] `MappingRendererTest` and `ProcessingChainTest` use `runTest`, not `runBlocking`
-- [ ] `ArchitectureTest`: the five adapter-package rules (yaml, s3, http, nats, jdbi) get a subject check like core, quarkus and sftp, so a rename cannot pass silently; `allowEmptyShould(true)` is gone where a subject exists
-- [ ] Progress entry appended listing each item as done or deliberately skipped with a reason
+- [x] `ShuttleQuarkusTest` drops `org.hamcrest.Matchers` (banned library): RestAssured assertions become `.extract().path(...)` plus JUnit `assertEquals`
+- [x] `NatsChannel`'s `runCatching { runInterruptible(io) { message.inProgress() } }` no longer swallows `CancellationException`: rethrow it, catch only what the broker can throw; a test on the channel (fake connection or the existing `nats`-tagged class) proves a cancelled in-progress loop ends promptly
+- [x] Dead or half-wired knobs: `DeliveryPolicy.fullJitter` and `.timeout` either reach the YAML loader with a rule and are read by the delivery path, or are deleted from the DSL and the data class; `ProcessorSpec.Custom.config` reaches the bean it names (spec 6.2) or the decision to drop it is recorded; `S3Target.clock` is removed if unused **(partly: timeout deleted; fullJitter kept, custom.config and S3Target.clock deferred - progress deviations 1-3)**
+- [x] Parse-don't-validate: `MappingRow.field` becomes the `Field` type end to end (no name round trip); `Expand.format` becomes the enum beside `ExtractFrom`; YAML and DSL keep their spelling **(partly: MappingRow.field done; Expand.format deferred - progress deviation 4)**
+- [x] `MappingRendererTest` and `ProcessingChainTest` use `runTest`, not `runBlocking`
+- [x] `ArchitectureTest`: the five adapter-package rules (yaml, s3, http, nats, jdbi) get a subject check like core, quarkus and sftp, so a rename cannot pass silently; `allowEmptyShould(true)` is gone where a subject exists
+- [x] Progress entry appended listing each item as done or deliberately skipped with a reason
 
 Ground rules for every ticket: implement only this ticket; 200-600 lines including tests; no Thread.sleep;
 invariant tests named `I<n>_<description>`, scenario tests by their `S<n>` id, validation tests by `rule<n>_`,

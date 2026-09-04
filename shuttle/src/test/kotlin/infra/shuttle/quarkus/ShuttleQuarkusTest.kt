@@ -18,11 +18,9 @@ import jakarta.inject.Singleton
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
-import org.hamcrest.Matchers.containsString
-import org.hamcrest.Matchers.equalTo
-import org.hamcrest.Matchers.hasItem
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNotNull
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Assertions.fail
 import org.junit.jupiter.api.Test
 import sftp.connector.testkit.EmbeddedSftpServer
@@ -101,9 +99,12 @@ class ShuttleQuarkusTest {
     fun readiness_at_the_conventional_path_is_UP_once_the_route_is_up_and_the_meters_are_in_the_scrape() {
         await("the route up") { lifecycle.ready() }
         // Agroal registers its own datasource check beside this one; the host's is found by name.
-        given().get("/q/health/ready").then().statusCode(200).body("status", equalTo("UP")).body("checks.name", hasItem("shuttle-routes"))
+        val ready = given().get("/q/health/ready").then().statusCode(200).extract()
+        assertEquals("UP", ready.path<String>("status"))
+        assertTrue("shuttle-routes" in ready.path<List<String>>("checks.name"), "the host's check is named in ${ready.asString()}")
         assertNotNull(registry.find("shuttle_route_up").tag("route", "mirror").gauge(), "the supervisor's gauge is on the host registry")
-        given().get("/q/metrics").then().statusCode(200).body(containsString("shuttle_route_up"))
+        val scrape = given().get("/q/metrics").then().statusCode(200).extract().asString()
+        assertTrue("shuttle_route_up" in scrape, "the gauge is in the scrape")
     }
 
     @Test
@@ -115,9 +116,14 @@ class ShuttleQuarkusTest {
         await("the file to finish") { memory.transfers.any { it.state == TransferState.DONE } }
         val id = memory.transfers.first().id
 
-        given().get("/admin/shuttle/routes").then().statusCode(200).body("[0].name", equalTo("mirror")).body("[0].up", equalTo(true)).body("[0].counts.DONE", equalTo(1))
-        given().get("/admin/shuttle/transfers?route=mirror&state=done&limit=5").then().statusCode(200).body("[0].id", equalTo(id.value.toInt())).body("[0].state", equalTo("DONE"))
-        given().get("/admin/shuttle/transfers/${id.value}/deliveries").then().statusCode(200).body("size()", equalTo(0))
+        val routes = given().get("/admin/shuttle/routes").then().statusCode(200).extract()
+        assertEquals("mirror", routes.path<String>("[0].name"))
+        assertEquals(true, routes.path<Boolean>("[0].up"))
+        assertEquals(1, routes.path<Int>("[0].counts.DONE"))
+        val transfers = given().get("/admin/shuttle/transfers?route=mirror&state=done&limit=5").then().statusCode(200).extract()
+        assertEquals(id.value.toInt(), transfers.path<Int>("[0].id"))
+        assertEquals("DONE", transfers.path<String>("[0].state"))
+        assertEquals(0, given().get("/admin/shuttle/transfers/${id.value}/deliveries").then().statusCode(200).extract().path<Int>("size()"))
         given().get("/admin/shuttle/transfers/99/deliveries").then().statusCode(404)
 
         given().post("/admin/shuttle/transfers/${id.value}/redrive").then().statusCode(409)

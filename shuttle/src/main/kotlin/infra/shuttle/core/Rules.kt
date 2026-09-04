@@ -13,7 +13,7 @@ data class Report(val violations: List<Violation>, val errors: List<String> = em
 }
 
 /**
- * Spec 13.3: the twenty-six rules, every violation collected and reported with its number.
+ * Spec 13.3: the numbered rules, every violation collected and reported with its number.
  * `beans` answers what a named bean produces, or null when no bean has that name (rules 15 and 17);
  * validate mode passes the host's lookup, tests pass a map.
  */

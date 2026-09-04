@@ -8,7 +8,6 @@ import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertInstanceOf
 import org.junit.jupiter.api.Assertions.assertSame
-import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
@@ -65,7 +64,12 @@ class ProcessingChainTest {
             override suspend fun process(payload: Payload, ctx: ProcessContext): Outcome = throw boom
         }
         ctx().use { ctx ->
-            val error = assertThrows(StageError::class.java) { kotlinx.coroutines.runBlocking { ProcessingChain(listOf(throwing), DigestAlgorithm.MD5).run(input(), ctx) } }
+            val error = try {
+                ProcessingChain(listOf(throwing), DigestAlgorithm.MD5).run(input(), ctx)
+                throw AssertionError("expected a StageError")
+            } catch (e: StageError) {
+                e
+            }
             assertSame(boom, error.cause)
         }
     }

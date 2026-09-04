@@ -238,7 +238,7 @@ fun provider(bean: String, select: String? = null) = ProviderRef(bean, select)
 @ShuttleDsl
 class MappingBuilder {
     internal val rows = mutableListOf<MappingRow>()
-    infix fun String.from(field: Field) = row(MappingRow(this, field = field.name))
+    infix fun String.from(field: Field) = row(MappingRow(this, field = field))
     infix fun String.fromAttribute(attribute: String) = row(MappingRow(this, attribute = attribute))
     infix fun String.by(provider: ProviderRef) = row(MappingRow(this, provider = provider.bean, select = provider.select))
     infix fun String.value(literal: String) = row(MappingRow(this, value = literal))
