@@ -1,6 +1,7 @@
 package sftp.connector.pool
 
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
@@ -238,6 +239,47 @@ class HousekeeperTest {
 
             keeper.cancelAndJoin()
         }
+
+    /**
+     * Lens 1 M2. A round retires a session and, being short of its minimum, opens a spare in the
+     * same pass. The retired session holds no pool place, so its hang-up queues for an IO thread;
+     * the spare it reserved must not sit registered as `Connecting` while that hang-up waits, or a
+     * caller refused meanwhile reads "stuck opening sessions" for a pool that is stuck hanging up.
+     * So the spare is dialled first and parked, and only then is the retired session hung up on -
+     * and while that hang-up is held, nothing is `Connecting`.
+     */
+    @Test
+    fun `a round whose hang-up waits does not hold room it has not dialled`() = runTest {
+        val hangUpReached = CompletableDeferred<Unit>()
+        val letHangUpFinish = CompletableDeferred<Unit>()
+        val transport = FakeSftpTransport {
+            if (it.operation == Operation.Close) {
+                hangUpReached.complete(Unit)
+                letHangUpFinish.await()
+            }
+        }
+        val pool = SftpPool(transport, config(maxSize = 2, minIdle = 1, maxLifetime = 10.minutes), clock = virtualClock())
+
+        // One idle session, aged past its lifetime, so the next round retires it and - now short of
+        // the one spare it keeps - opens a replacement in the same round.
+        pool.acquire().release()
+        advanceTimeBy(10.minutes + 1.milliseconds)
+
+        val keeper = launch { pool.housekeep() }
+        advanceTimeBy(31.seconds)
+        runCurrent()
+
+        assertThat(hangUpReached.isCompleted)
+            .describedAs("the round has dialled its spare and is now hanging up on the retired session")
+            .isTrue()
+        assertThat(pool.stats().connecting)
+            .describedAs("a spare reserved but not dialled, held while the hang-up waits")
+            .isZero()
+        assertThat(pool.stats().idle).describedAs("the spare the round opened, already parked").isEqualTo(1)
+
+        letHangUpFinish.complete(Unit)
+        keeper.cancelAndJoin()
+    }
 
     /**
      * The warning is the deliverable, so the test reads what an operator would read. The test
