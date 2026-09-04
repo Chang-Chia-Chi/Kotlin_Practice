@@ -13,13 +13,13 @@ findings B4 and B5.
 
 **Nature:** payload validation at the process-to-store step; a defensive check in the SFTP target
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `TransferPipelineTest`: a processor returning an empty payload ends the transfer REJECTED with a reason naming the step, nothing stored, the source not acked, and re-drive re-runs from fetch; red before the fix
-- [ ] `TransferPipelineTest`: a zip entry `../../escaped.txt` through the real `UnzipProcessor` ends REJECTED with both the key and the reason, nothing stored; red before the fix. Same for a parent whose expanded child key resolves with `..`
-- [ ] `SftpTargetTest`: `store` with a key containing a `..` segment refuses before any upload; `S3Target` needs no change (a key is opaque there) unless a test shows otherwise
-- [ ] Spec 6.1 or 7.1 gets one sentence for each rule, and the failure model table in spec 11 lists them as Reject
-- [ ] Progress entry appended
+- [x] `TransferPipelineTest`: a processor returning an empty payload ends the transfer REJECTED with a reason naming the step, nothing stored, the source not acked, and re-drive re-runs from fetch; red before the fix
+- [x] `TransferPipelineTest`: a zip entry `../../escaped.txt` through the real `UnzipProcessor` ends REJECTED with both the key and the reason, nothing stored; red before the fix. Same for a parent whose expanded child key resolves with `..`
+- [x] `SftpTargetTest`: `store` with a key containing a `..` segment refuses before any upload; `S3Target` needs no change (a key is opaque there) unless a test shows otherwise
+- [x] Spec 6.1 or 7.1 gets one sentence for each rule, and the failure model table in spec 11 lists them as Reject
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket; 200-600 lines including tests; no Thread.sleep;
 invariant tests named `I<n>_<description>`, scenario tests by their `S<n>` id, validation tests by `rule<n>_`,

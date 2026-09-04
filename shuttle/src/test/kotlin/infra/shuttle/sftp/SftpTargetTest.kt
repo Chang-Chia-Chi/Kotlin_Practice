@@ -124,6 +124,22 @@ class SftpTargetTest : ObjectStoreTargetContract() {
         }
     }
 
+    /**
+     * The pipeline rejects such a key before it ever gets here (ticket 25), but this adapter is the one
+     * place where a `..` segment turns into a write outside the partner's folder, so it refuses for
+     * itself: `pathOf` is plain concatenation and it is the server that resolves the result.
+     */
+    @Test
+    fun B5_store_refuses_a_key_that_leaves_the_target_directory_before_any_upload() = runBlocking {
+        withTimeout(TIMEOUT) {
+            val refused = runCatching { sftpTarget.store("../escaped.csv", file("v1", "one"), emptyMap()) }.exceptionOrNull()
+
+            assertTrue(refused is IllegalArgumentException && refused.message!!.contains("../escaped.csv"), "$refused")
+            assertFalse(Files.exists(remoteRoot.resolve("escaped.csv")), "nothing landed outside the target directory")
+            assertEquals(emptyList<String>(), namesUnder("."), "and no partial file inside it")
+        }
+    }
+
     private fun namesUnder(folder: String): List<String> =
         Files.list(onServer(folder)).use { entries -> entries.map { it.fileName.toString() }.sorted().toList() }
 

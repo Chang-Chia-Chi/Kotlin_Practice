@@ -209,6 +209,32 @@ class TransferPipelineTest {
         assertEquals(TransferState.DONE, store.transfer(row.id).state)
     }
 
+    /** A chain that answers `Continue` with nothing: an archive of directories only, or a filter that dropped everything. */
+    private val emptying = object : Processor {
+        override val produces = emptySet<String>()
+        override suspend fun process(payload: Payload, ctx: ProcessContext): Outcome = Outcome.Continue(Payload(emptyList()))
+    }
+
+    @Test
+    fun B4_an_empty_final_payload_is_rejected_and_the_source_is_not_acked() = runTest {
+        val event = seen()
+        val pipeline = pipeline(processors = listOf(emptying))
+        pipeline.run(event, fetcher)
+
+        val row = store.transfers.single()
+        assertEquals(TransferState.REJECTED, row.state)
+        assertEquals("process: the chain left no object to store", row.lastError)
+        assertTrue(target.calls.isEmpty(), "nothing stored")
+        assertTrue(source.acks.isEmpty(), "the source is not acked: nothing was copied anywhere (I8)")
+        assertEquals(listOf(ScriptedSource.Nack(event.identity, redeliver = false)), source.nacks)
+        stagingIsEmpty()
+
+        store.redrive(row.id)
+        pipeline().run(event, fetcher) // re-drive re-runs from fetch
+        assertEquals(2, fetcher.calls.size)
+        assertEquals(TransferState.DONE, store.transfer(row.id).state)
+    }
+
     @Test
     fun S11_fetch_fails_five_polls_in_a_row_is_FAILED_with_nack_no_redelivery() = runTest {
         val event = seen()
@@ -441,6 +467,41 @@ class TransferPipelineTest {
         assertEquals("cardinality: a/x.csv and b/x.csv both resolve to key a.csv.out", parent.lastError)
         assertTrue(target.calls.isEmpty(), "nothing stored")
         assertEquals(listOf(ScriptedSource.Nack(event.identity, false)), source.nacks)
+        stagingIsEmpty()
+    }
+
+    private fun zipOf(vararg entries: Pair<String, String>): ByteArray = java.io.ByteArrayOutputStream().also { bytes ->
+        java.util.zip.ZipOutputStream(bytes).use { zip ->
+            entries.forEach { (name, body) -> zip.putNextEntry(java.util.zip.ZipEntry(name)); zip.write(body.toByteArray()); zip.closeEntry() }
+        }
+    }.toByteArray()
+
+    @Test
+    fun B5_a_key_with_a_dot_dot_segment_is_rejected_before_any_store() = runTest {
+        fetcher.file("bundle.zip", zipOf("../../escaped.txt" to "pwned"))
+        val event = seen("bundle.zip")
+        pipeline(processors = listOf(processorFor(ProcessorSpec.Unzip()) { null })).run(event, fetcher)
+
+        val row = store.transfers.single()
+        assertEquals(TransferState.REJECTED, row.state)
+        assertEquals("key: ../../escaped.txt leaves the target directory", row.lastError, "both the key and the reason are on the row")
+        assertTrue(target.calls.isEmpty(), "nothing stored")
+        assertTrue(source.acks.isEmpty(), "the source is not acked")
+        assertEquals(listOf(ScriptedSource.Nack(event.identity, redeliver = false)), source.nacks)
+        stagingIsEmpty()
+    }
+
+    @Test
+    fun B5_a_child_key_with_a_dot_dot_segment_is_rejected_before_any_child_row() = runTest {
+        fetcher.file("sets.zip", zipOf("ok.csv" to "1", "../escaped.csv" to "22"))
+        val event = seen("sets.zip")
+        pipeline(processors = listOf(processorFor(ProcessorSpec.Unzip()) { null })).run(event, fetcher)
+
+        val row = store.transfers.single()
+        assertEquals(TransferState.REJECTED, row.state)
+        assertEquals("key: ../escaped.csv leaves the target directory", row.lastError)
+        assertTrue(store.transfers.none { it.parentId != null }, "no child row was created")
+        assertTrue(target.calls.isEmpty(), "the sibling that resolved fine is not stored either")
         stagingIsEmpty()
     }
 

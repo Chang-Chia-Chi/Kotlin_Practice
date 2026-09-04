@@ -3035,3 +3035,81 @@ In the full pass, run while other agents' Maven builds shared the machine, the t
    on a poll, still acked at the broker on a subscribe. Without it the mapping this ticket writes
    is a guess a reader has to re-derive, and the S3 poll will face the same question.
 2. **Size:** production one changed line plus a six-line KDoc; tests +47 / -4; spec +3 lines.
+
+---
+
+## 25: Fix: the pipeline rejects an empty payload and a key that leaves the target directory
+
+**Built:** two guards at the process-to-store step of `TransferPipeline.resume` and one in
+`SftpTarget.store`, plus the one-line predicate they share, `keyLeavesTarget`, next to
+`expandPattern` in `Processors.kt` (rule 13's own neighbourhood).
+
+**What was wrong:**
+
+1. **An empty final payload was acked.** Progress 06's store step branches on `objects.size == 1`,
+   else children. With zero objects the else took `childRows` over an empty list, created no child,
+   awaited nothing, and fell straight through to `ack`: PROCESSED to ACKED, the source moved into
+   `done/` and no copy anywhere. An archive of directories only through `unzip` and a custom
+   processor answering `Continue` with a filtered-out payload both produce that shape. B4 was red
+   with `expected: <REJECTED> but was: <DONE>` - the object was lost, which is what I8 forbids.
+   The guard sits before `checkMappings` and `store.processed`, where a processor `Reject` also
+   lands (S10), so an empty payload is REJECTED terminal-until-re-drive like any other Reject.
+2. **A `..` in the resolved key wrote outside the target.** Rule 13 judges the *pattern* at boot,
+   and `{name}` is the one part of a key the pattern does not carry: `UnzipProcessor` keeps the
+   entry's path as the object's name, so an entry `../../escaped.txt` resolves the key
+   `../../escaped.txt`. On S3 that is an opaque key and needs nothing; on SFTP `pathOf` is plain
+   concatenation and the *server* resolves the result, so the file landed at the server root and
+   `store` answered Success. The pipeline now rejects the whole transfer, naming the key, before
+   any store and before any child row - the sibling that resolved fine is not stored either,
+   because a payload with one poisoned member is not a payload to deliver half of.
+
+**Concepts named:**
+
+- **Rule 13 has a run-time half.** The boot rule refuses a bad *pattern*; the chain fills in
+  `{name}` and attribute values, so the resolved key is judged again at the same rule's wording
+  ("yields no `..`"). Spec 7.1 now says so, and spec 6.1 says what a payload of nothing is.
+- **Defence in depth is one predicate, not two ideas.** `SftpTarget.store` refuses for itself with
+  `require`, because it is the last place before the write and the only one that knows the key is a
+  path there; it calls the same `keyLeavesTarget` the pipeline calls, so the two can never drift.
+  The pipeline's answer is a Reject (a transfer outcome); the target's is an `IllegalArgumentException`
+  (a programming error at that seam), which is the right shape for a guard nothing should ever reach.
+
+**Tests** (all red first, on the real code paths):
+
+- `TransferPipelineTest.B4_an_empty_final_payload_is_rejected_and_the_source_is_not_acked` - a
+  processor answering `Continue(Payload(emptyList()))`: REJECTED with
+  `process: the chain left no object to store`, nothing stored, `source.acks` empty, `nack(redeliver
+  = false)`, staging empty, and a re-drive re-runs from fetch to DONE.
+- `TransferPipelineTest.B5_a_key_with_a_dot_dot_segment_is_rejected_before_any_store` - a real
+  `UnzipProcessor` over a zip holding `../../escaped.txt`: REJECTED with
+  `key: ../../escaped.txt leaves the target directory` (the key and the reason both on the row),
+  nothing stored, not acked.
+- `TransferPipelineTest.B5_a_child_key_with_a_dot_dot_segment_is_rejected_before_any_child_row` -
+  a zip of `ok.csv` and `../escaped.csv`: REJECTED, no child row, and the good sibling not stored.
+  Red with `IllegalArgument: List has more than one element` off `store.transfers.single()`, which
+  is the finding itself: the children existed.
+- `SftpTargetTest.B5_store_refuses_a_key_that_leaves_the_target_directory_before_any_upload` -
+  against the embedded SSHD: `store("../escaped.csv", ...)` throws `IllegalArgumentException`
+  naming the key, nothing lands beside the target directory, and no `.part` file is left inside it.
+  Red with the store succeeding and the file sitting in `remoteRoot`.
+
+**Final run counts (surefire), default tier** (`mvn -B -o -pl shuttle test`): 30 classes, 269 tests
+(248 before, +4 new here; the rest is other tickets merged since), 0 failures and 0 errors except
+the two known-noisy `ShuttleHostTest` readiness cases, which failed while other agents' Maven builds
+shared the machine. Alone the class fails one of the two per run and a *different* one each run
+(`S18_a_wrong_password_leaves_the_route_down_and_restarted_with_backoff_and_the_process_alive`, then
+`readiness_follows_the_configured_rule_with_one_route_up_and_one_down`), which is ticket 30's
+flakiness and touches none of this ticket's code. `ShuttleQuarkusTest` passed both in the full tier
+and alone (4/4). `TransferPipelineTest` 33/33, `SftpTargetTest` 6/6, `BuiltInProcessorsTest` 10/10.
+
+**Deviations:**
+
+1. **No decision-log entry.** Both rules are the existing rule 13 and invariant I8 applied where the
+   value, not the pattern, is known; nothing was traded off that a reader of spec 6.1, 7.1 and the
+   11 table would not already have. D50 was left free for ticket 27.
+2. **`a/../b` is rejected too**, though it resolves back inside the target. Rule 13's wording is
+   "yields no `..`", and a key that needs resolving before you can tell where it lands is not a key
+   anybody meant to configure.
+3. **`S3Target` unchanged**, as the ticket allows: an S3 key is opaque, `..` is a literal name
+   segment there, and a guard would refuse a key the store would have honoured.
+4. **Size:** production +3 lines of guard and +8 of KDoc; tests +62; spec +8 lines.

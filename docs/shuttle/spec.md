@@ -338,6 +338,9 @@ data class StagedObject(
 data class Payload(val objects: List<StagedObject>)
 ```
 
+A payload of no objects is not "the object unchanged": the chain has nothing left to store, so the
+transfer is rejected at the end of processing rather than acked with no copy anywhere (I8).
+
 ### 6.2 The `Processor` seam
 
 ```kotlin
@@ -425,6 +428,10 @@ The key is a pure function of the staged object's name and the route's `key` pat
 retry overwrites instead of creating a sibling, and the target never deletes: what an overwrite
 leaves behind is the bucket's business, not the pipeline's (D5). Metadata carries digest, digest algorithm,
 source mtime, source name, transfer id and the attributes.
+
+Rule 13 judges the `key` pattern at boot, but `{name}` is filled in by the chain, so the resolved key is
+checked too: a key with a `..` segment names a place outside the target and rejects the transfer before
+any store. A file system target refuses such a key for itself as well, because there the key is a path.
 
 ### 7.2 S3 target
 
@@ -680,6 +687,8 @@ event as the same event. The reference it returns is per call and never a dedup 
 | Staging volume below `staging.minFree` | before fetch | deferred: `nack(redeliver = true)`, no attempt counted, `shuttle_staging_deferred_total`; the next trigger retries |
 | `unzip` beyond `maxEntries` or `maxBytes` | process | Reject, REJECTED until re-drive; the limit and the value are in the reason |
 | Processor Reject | process | REJECTED, terminal until re-drive |
+| Final payload with no object | process | Reject, REJECTED until re-drive; the source is not acked (I8) |
+| A resolved key with a `..` segment | process | Reject naming the key, REJECTED until re-drive, before any store; the target refuses it too |
 | Processor throws | process | as recoverable; five throws is FAILED |
 | Missing required mapping input | attribute freeze | FAILED with the row named; no retry until re-drive after a fix |
 | Channel Retry | deliver | backoff per policy |

@@ -157,11 +157,15 @@ class TransferPipeline(
                 is ChainResult.Rejected -> return reject(transfer, result.reason)
                 is ChainResult.Done -> result
             }
+            // spec 6.1: a payload of nothing is not "the object unchanged". Without this the store step sees no
+            // object and no child, and the run acks: the source is moved away with no copy anywhere (I8).
+            if (done.payload.objects.isEmpty()) return reject(transfer, "process: the chain left no object to store")
             ProcessingChain.checkMappings(done.attributes, tables, providerExists)
             store.processed(id, done.attributes)
             hook.at(HookPoint.afterProcess, id)
             val objects = done.payload.objects
             val keys = objects.map { expandPattern(targetKey, it.name, transfer.identity.sourceName, done.attributes, clock) }
+            keys.firstOrNull(::keyLeavesTarget)?.let { return reject(transfer, "key: $it leaves the target directory") }
             keys.withIndex().groupBy({ it.value }, { objects[it.index].name }).entries.firstOrNull { it.value.size > 1 }?.let { (key, names) ->
                 return reject(transfer, "cardinality: ${names.joinToString(" and ")} both resolve to key $key")
             }
