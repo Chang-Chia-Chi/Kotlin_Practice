@@ -236,7 +236,7 @@ because each was correctly deferred by the ticket that found it.
 | ~~A watch on a connector that has been stopped ends normally, and a collector that restarts it gets another normal end~~ | T12 | ~~T13~~ | **Closed by T13.** The claim is refused with `IllegalStateException` when the scope the ticker would run in is no longer active, which is the first thing `close()` makes true; `SftpConnectorTest.close ends a watch normally, gives every unanswered file back, and refuses what comes after` |
 | A skipped tick's event is handed over on the ticker's own coroutine, so under `SKIP` a busy collector delays the ticker | T12 | Whoever measures it | The ticker sends `PollSkipped(OVERLAP)` on the same rendezvous channel as everything else and waits for the collector to take it; the next interval is counted from then. Under `PROCEED` the ticker sends nothing itself. Harmless on an hourly schedule; a buffer of one for the ticker's own events is the fix if it ever matters |
 | Under `REFUSE`, a retry's window is the backoff | T11 | Whoever has cause | The policy's look ran once, before the first request. A retry after a lost reply first looks for its own landed file at the target and stops there if it finds it; only when it does not does it send a plain rename - and on a server with the POSIX rename extension a stranger's file that arrived at the target during the backoff is then replaced. T7's race, widened from the look to the backoff; the alternative - applying the policy's look again - refuses the retry for its own landed file |
-| A file the consumer holds from a tick that has already completed stays in flight across `close()` | T13 | ~~Whoever builds `ackWait` (spec 7.2), or nobody~~ T19 | A tick still running at close withdraws everything it handed over; a tick that finished left its files with the consumer by T10's design, and nothing enumerates the in-flight set from outside. The process is ending, so the file is listed again on the next start either way; only `sftp_inflight` on a closed connector reads above zero until then. **T18:** the set is now enumerated from outside - `InFlightSet.outstanding()`, carried on every `PollCompleted.inFlight` - so a consumer can see exactly which files it still holds when the connector closes; T19 closes the seam |
+| ~~A file the consumer holds from a tick that has already completed stays in flight across `close()`~~ | T13 | ~~Whoever builds `ackWait` (spec 7.2), or nobody~~ ~~T19~~ | **Closed by T19.** A watch gives back every file it ever handed over when it ends - collector left, cancelled, connector closed - with redelivery; `SftpConnectorTest.close gives back a file the consumer held from a tick that had already finished`. What remains is the moment, not the fact: the give-back runs in the watch's own `finally`, on the collector's coroutine, so a collector still inside its block when the connector closes holds the finished ticks' files until it returns from that block; the running tick's own files come back at once, as before |
 | A failing assertion before `close()` in a `runTest` that started a connector hangs the test instead of failing it | T9, seen by T13 | Whoever next writes one | The connector's scope shares the test scheduler but is not a child of the test's job, so `runTest` waits for a scheduler the housekeeper's `delay` loop never lets go idle. T13's connector test declares its readiness so the assertion cannot fail that way; a `try`/`catch` that closes the connector before rethrowing is the general shape |
 | ~~The breaker and `sftp_breaker_state` are per `SftpClient`~~ | T11 | ~~T14's binding~~ | **Ruled on by T14, and the same ruling covers R1 finding 6's `PoolMeters`.** The adapter produces one connector per application by construction - one `sftp.connector` prefix, one configuration, one produced bean - so neither collision can arise from it, and no guard was added for a shape the module cannot make. The colliding gauges themselves are untouched: a host that builds a second connector by hand still gets them, and the row below records what that costs |
 | A second connector for one endpoint on one registry silently reads the first one's pool gauges and breaker state | T14, restating T11 and R1 finding 6; widened by T17 lens 2 M3 and lens 1 L5 | Whoever first hosts two connectors against one server, or one on demand | Registering a gauge whose id already exists returns the existing gauge, and `PoolMeters` and `ClientMeters` identify themselves by endpoint alone. Nothing throws; the numbers lie. The fix is a tag - the connector's name beside the endpoint - which is a change to spec 13's meter identity and therefore the maintainer's, not an adapter's. **T17 adds the sequential path, which is the module's own:** the gauges are registered in `SftpConnector.start` *before* the probe, so a **refused** start leaves them bound to a dead pool, and a host that closes one connector and starts another against the same endpoint on the same registry reads the first pool's numbers for the life of the process. An on-demand host meets this before it ever hosts two. The second fix, available inside the module, is removing the connector's meters in `close()` |
@@ -4368,3 +4368,188 @@ appears to fail for reasons that are not there. Run core and testkit together
 6. **Ticket 16's status line was still `ready-for-agent`** although T16's entry has been in this
    log since before T17 started. Set to `done` with this entry. Its checkboxes are left unticked:
    T16's own entry is the record of what it proved, and this session did not re-verify each box.
+
+---
+
+## T19: One file in flight per path, and a watch that ends gives back everything it handed over
+
+Built on `claude-fable-5-1`, decision D48. 67 core tests (one skipped, `StagingSafetyTest`'s
+platform skip, as before) plus the two Lincheck runs, and 225 testkit tests are green at the end,
+Toxiproxy tier included; 6 were added. `SftpSourceTest` reports 23 for
+its 23 test functions (2 added), `SftpWatchTest` 16 for 16 (3 added), `SftpConnectorTest` 8 for 8
+(1 added). `InFlightSetLincheckTest` (1 for 1) passed unmodified against the new lock body first,
+and then with its model widened, below. One earlier test was changed, in two lines and stricter:
+T16's `AdversaryTest`, whose model encoded the rule this ticket replaced (deviation 6).
+
+**Built:** the two things shuttle was doing for itself with a private copy of the in-flight set.
+The set's *exclusivity* is now the path: while any file at a path is out with the consumer, a
+listing of that path admits nothing, whatever its size or mtime, and the newer copy is handed
+over on a later poll once the first has been answered - the tick counts it neither as emitted nor
+as not ready, and says at DEBUG that it is waiting. The set's *identity* is unchanged: path, size
+and mtime together are what an ack is idempotent on and what a nack-for-good remembers. And a
+watch that ends - its collector left, it was cancelled, the connector closed - gives back every
+file it ever handed over and never had an answer for, with redelivery and never for good, so the
+next watch or the next process lists them again; only the running tick's own cancellation used to
+do this, and only for that tick. An ack that arrives after the watch has ended is ignored as a
+second answer, and its WARN says the watch had already given the file back. Spec 7.3, 7.6 and
+11.2 say all of this in their own words, and D48 names shuttle's D2 as the consumer that asked.
+
+**Concepts named:**
+
+- **Identity and exclusivity are two keys on one set.** `InFlightSet.inFlight` is a
+  `LinkedHashMap<String, RemoteFile>` keyed by path - the exclusivity - and `excluded` stays a set
+  of `RemoteFile` - the identity. `holds(file)` now answers "would this file be turned away right
+  now": a file is out at its path, or this exact file was nacked for good. `enter` refuses by path
+  and `exit` removes by path *and* value (`remove(key, value)`), so leaving never takes out a
+  namesake that entered after - which cannot happen through a slot today and is the case the model
+  checker was given to explore. `outAt(path)` is the one new query, and exists for the DEBUG line:
+  it is how the tick tells "the same file, still out" from "a newer file, waiting". The interface
+  is still `holds`, `admit`, the slot, `outstanding` and now `outAt`; the three promises T10 named
+  are untouched, and the lock body is still two non-suspending functions.
+- **`Handovers`** (private, `SftpSource.kt`) is the watch's ledger: every slot its ticks handed
+  over, recorded where the tick records its own, and given back in one call when the watch ends.
+  It is the deep part of this ticket. Ticks run in the connector's scope and may run alongside
+  each other, so recording is under a lock; a record that arrives after `end()` - a tick still
+  handing over as the collector left, whose `send` is about to fail on the cancelled channel - is
+  given back on the spot, so there is no window in which a slot is in neither the tick's hands
+  nor the watch's; and answered slots are dropped as new ones are recorded, so a watch that runs
+  for months holds only what is out. The give-back runs outside the ledger's lock, because it
+  takes the set's. `tickOf` takes the ledger as a nullable parameter: null for a poll, whose files
+  stay with the consumer when it ends by design (the consumer acks after the poll is over, and
+  nobody speaks for the poll then).
+- **The give-back is the watch's `finally`, before the claim is released.** Every exit path of
+  `watch` - the collector cancelled, the collector's block throwing, an abort thrown through
+  `emit` by `first`/`take`, the channel closed by the connector's scope - runs through it. It is
+  under `withContext(NonCancellable)`: a `withContext` entered from a cancelled coroutine throws
+  before its block runs unless the block is uncancellable, and the usual way a watch ends *is* a
+  cancellation. Nothing inside suspends today; the cancellation is neither caught nor wrapped,
+  and goes on its way once the block has run - `SftpWatchTest.a collector that leaves after its
+  first tick gives that tick's file back` proves it, since `first` only returns if its abort gets
+  through. The give-back precedes `watching.remove(directory)` so the next watch can never claim
+  the directory and list it before the files are back.
+- **`Settlement.WATCH_ENDED`** is how a slot remembers *who* gave it back. It shares the
+  `cancelled` label with `CANCELLED` - the file goes back the same way, for the same reason, and
+  spec 13's labels are fixed - so `SourceMeters` maps both constants to the one counter the
+  registry hands back for that id. Its whole purpose is the WARN: an ack that arrives after the
+  watch ended reads "the watch that handed it over had already ended and given it back, so a
+  later poll hands it over again", where before it would have read "given back as cancelled" for
+  a watch that ended cleanly. `FileHandling.withdraw(slot, how)` takes the settlement, and the
+  running tick's catch passes `CANCELLED` as before; the two may both reach one slot, and the
+  slot's compare-and-set decides.
+
+**Acceptance:**
+
+- *`InFlightSet.admit` refuses a file whose path is in flight regardless of size or mtime; the
+  tick counts it neither as emitted nor as not-ready, and logs at debug that a newer file at the
+  path waits* - `holds` and `enter` key on the path; `tickOf` filters before readiness, so the
+  newer copy is neither emitted, nor not-ready, nor stated, and logs with both files' size and
+  mtime. The DEBUG line itself is not asserted: the test binding prints INFO and above (deviation 3).
+  The rule's other side - `admit`'s second look, under the lock, refusing a namesake that a tick
+  running alongside admitted between the two looks - refuses silently, as it always did for the
+  same file; the tick alongside's own handover is the record of that. Found by the spec review.
+- *Test: file A at `x` handed over and unacked; a listing that shows `x` with a new size emits
+  nothing for `x`; after A is acked, the next listing emits the new file* - `SftpSourceTest.a file
+  uploaded again under a name still being worked waits for the first to be answered`: the second
+  poll's `PollCompleted` is `seen = 1, emitted = 0, notReady = 0, inFlight = [A]` by equality; after
+  the ack the next poll hands over the two-byte file.
+- *Test: identity is unchanged - acking A twice is still "already settled", and a nacked-for-good
+  A is still remembered by path plus size plus mtime* - `SftpSourceTest.identity is unchanged, a
+  second ack is ignored and a file nacked for good is remembered by path, size and mtime`: one
+  move for two acks; the nacked-for-good file listed again unchanged is not handed over, and
+  uploaded again with a new size it is. Green before the code changed, as a pin should be.
+- *A `watch` releases every unsettled slot it ever handed over when it ends, on every exit path:
+  collector left, cancelled, connector closed. Redeliver, never for good* - `Handovers.end()` in
+  the watch's `finally`, calling `withdraw(slot, WATCH_ENDED)`, which releases with `forGood =
+  false` and runs no action. Three tests, one per exit path, next.
+- *Test: two ticks hand over two files, neither acked; the watch is cancelled; the next watch's
+  first tick lists both; `sftp_inflight` reads zero between* - `SftpWatchTest.a watch that is
+  cancelled gives back the files of every tick it ran, and the next watch lists them`: two files
+  from two finished ticks, `cancelAndJoin`, gauge zero, `sftp_ack_total{outcome=cancelled}` at 2,
+  the next watch's first tick hands over both. *Collector left:* `.a collector that leaves after its
+  first tick gives that tick's file back`, through `first { it is PollCompleted }`. *Connector
+  closed:* `SftpConnectorTest.close gives back a file the consumer held from a tick that had already
+  finished` - the exact shape of the T13 seam, a tick finished and its file with the consumer,
+  `close()`, gauge zero, counted `cancelled`.
+- *Test: an ack that arrives after the watch ended is "already settled" and moves nothing; the WARN
+  says the watch had already given the file back* - `SftpWatchTest.an ack after the watch ended is
+  ignored, and the log says the watch had given the file back`: the ack action is a delete and no
+  delete was sent; the captured WARN carries "The ack of /drop/a.csv on fake.example:22 was
+  ignored" and "the watch that handed it over had already ended and given it back".
+- *`InFlightSetLincheckTest` passes unmodified, and gains one operation for the path-exclusive
+  admit if its model needs it* - passed unmodified (1/1) in the first green run against the new
+  lock body. Its model did need widening: its three files had three names, so no interleaving
+  could reach the path rule. It gained a fourth file at the first's name with another size and the
+  generator's range widened to it; see deviation 1 for why a file rather than an operation.
+- *Progress entry appended; the open-seams row struck through as closed by this ticket* - this
+  entry; the T13 row is struck through above, with the one thing that remains stated.
+
+**Deviations:**
+
+1. **The Lincheck model gained a file, not an operation.** With a fourth `RemoteFile` sharing
+   `f0`'s path, every existing operation - `enter`, `exit`, `exclude`, `holds` - exercises the
+   path rule from one side or the other, in every interleaving the checker explores: a namesake
+   entering while the first is out, a namesake's `exit` not taking the first out, a namesake
+   excluded while the first is in flight. One operation added for the purpose would have covered
+   `enter` alone. The test's name, its options and its four operations are unchanged.
+2. **`Settlement.WATCH_ENDED` shares the `cancelled` label with `CANCELLED`.** Spec 13 fixes
+   `sftp_ack_total{outcome}` to `ack`, `nack`, `cancelled`, and the brief forbids a new metric
+   name, so the distinction lives in the slot and the WARN line and not in the counter; the two
+   constants map to one `Counter`. Which of the two a file handed over by the *running* tick gets
+   at watch end is a race between that tick's own catch and the watch's `finally` - both true
+   statements, one counter either way.
+3. **The DEBUG line for a newer copy waiting is not asserted by a test.** `slf4j-simple` prints
+   INFO and above and reads its level once, at first use, so no test in the suite can turn DEBUG
+   on for itself. The line is in `SftpSource.tickOf`, guarded by `outAt(path)` answering a
+   different file from the one listed.
+4. **The give-back runs on the collector's coroutine, so a collector that is busy inside its own
+   block when the connector closes holds the finished ticks' files until it returns.** T13's
+   `close ends a watch normally ...` is exactly that shape and is unchanged: the running tick's
+   files come back at once through the tick's own catch, and the collector's flow ends normally
+   once the consumer lets go. What the seam row said - "for the life of the process" - is now "until
+   the collector returns from the block it is in", which is the moment the watch can end at all.
+   Withdrawing from the connector's scope instead would have needed the source to know every
+   watch's ledger, and would have given the files back while the collector still held the events.
+5. **`Handovers.record` prunes answered slots with a scan.** One pass over what the watch holds
+   per file handed over; the list is bounded by `maxInFlight` plus what was answered since the last
+   handover, so it is small by construction. A callback from the slot when it settles would spare
+   the scan and cost the slot a reference to a ledger it should not know about.
+6. **An earlier test was changed: T16's `AdversaryTest`, in two lines, both stricter.** Its model
+   decided "busy" by identity - `holds(name, size)` - so on the first full run it demanded that a
+   file grown under a name the consumer still held be handed over, which is the old rule (sequence
+   #8 of the fixed seed, `grow_file` on a name in flight, then `poll`). A model that encodes a rule
+   the spec has since changed is wrong about the spec, not about the code, and the ticket that
+   changed the spec is the one that has to say so: `Model.busyAt(name)` now keys the listing's
+   `busy` set on the name, and the per-event I7 assertion drops its size clause, so it now reads
+   "handed over while the consumer still had a file at that name" - D48's exclusivity, checked
+   after every one of the adversary's operations on every one of its 5000 sequences rather than
+   in one scenario. Nothing was loosened: the old check is implied by the new one. The class is
+   green, 3 for 3, with `model_` at 85 s. Reported here rather than silently corrected, for the
+   coordinator to veto.
+7. **Size.** About 75 lines of main source that are neither blank nor comment across four files,
+   about 125 in five test files, and the four spec passages. Inside the budget.
+
+**Seams.** Closed above, struck through: a file held from a finished tick stays in flight across
+`close()`. None added.
+
+**For the next ticket:**
+
+- **Shuttle (its own ticket, outside `sftpconnector/`):** `SftpPollSource` can drop the by-hand
+  refusal of a second copy at a busy name and the `finally` that nacks everything it holds; the
+  connector does both. Its late ack after a restart of its own pipeline is now ignored with the
+  WARN above, which is what it should expect. Its `inFlight` map and `truncated` guess are T18's
+  note, still standing.
+- **`poll()` still leaves its files with the consumer at its end.** That is by design and by test
+  (`I7_a file in flight is not handed over by any poll` acks after the poll has ended). A caller
+  that wants poll's files back gives them back itself, or uses `watch`.
+- **`ackWait` (spec 7.2) is untouched and still not built.** This ticket gives files back when
+  their watch ends; a file held by a live watch whose consumer never answers is still a consumer
+  bug to surface, as spec 7.2 says.
+- **A fifth exit path would go through the same `finally`.** Anything added to `watch` that can
+  end it ends it through that block or it leaks; nothing should return early from inside the
+  `try`.
+- **Shuttle did not compile on this ticket's base (`58639e3`), before and after this change:**
+  `shuttle/src/main/kotlin/infra/shuttle/sftp/SftpTarget.kt:79` still calls
+  `client.rename(..., expectedSize = size)`, and `SftpClient.rename` has taken `listed: RemoteFile?`
+  since T17 lens 5 H2 (D46). Nothing here touches `shuttle/`, which is outside this ticket's
+  paths; whoever reconciles shuttle with D46 owns the one-line call. The reactor's other modules
+  were green here (snapshotcache 215, etl-host's 17 Quarkus start-up errors are its environment).

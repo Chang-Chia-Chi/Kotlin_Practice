@@ -7,6 +7,7 @@ import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.ProducerScope
 import kotlinx.coroutines.channels.consume
@@ -21,6 +22,7 @@ import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.slf4j.LoggerFactory
 import sftp.connector.PROBE_MARKER_PREFIX
 import sftp.connector.client.LocalFile
@@ -134,8 +136,11 @@ class SftpSource(
      *
      * The ticker runs in the connector's own scope, so that stopping the connector stops every
      * watch; the flow then ends normally in its collector. Cancelling the collector stops the
-     * ticker and gives the directory back, and every file the running tick had handed over and not
-     * yet had an answer for goes back to the set, as for [poll].
+     * ticker and gives the directory back. However the watch ends - its collector left, it was
+     * cancelled, the connector closed - every file it handed over and not yet had an answer for
+     * goes back to the set, to be handed over again by the next watch or the next process: the
+     * running tick's, as for [poll], and those of every tick that finished and left its files
+     * with the consumer. An answer that arrives after that is ignored as a second answer.
      *
      * @throws IllegalArgumentException when [directory] is not one the configuration names.
      * @throws IllegalStateException on collection, when another collector is already watching
@@ -157,8 +162,10 @@ class SftpSource(
             // lines are for a tick that failed or was skipped, so a healthy watch and a watch
             // that never started read identically.
             LOG.info("Watching {}, every {}.", at(directory), every)
+            val handling = FileHandling(directory)
+            val handovers = Handovers { handling.withdraw(it, Settlement.WATCH_ENDED) }
             try {
-                val events = background.produce(failedAfterItsCollectorLeft(directory)) { tickEvery(directory, every) }
+                val events = background.produce(failedAfterItsCollectorLeft(directory)) { tickEvery(directory, every, handovers) }
                 events.consume {
                     while (true) {
                         // Only the receive is asked what happened to the producer. What `emit`
@@ -180,6 +187,23 @@ class SftpSource(
                     }
                 }
             } finally {
+                // Whichever way the watch ended, every file it handed over and never had an
+                // answer for goes back now, before the directory is given up, so the next watch
+                // lists them rather than finding them still out. Under `NonCancellable` because
+                // the usual way a watch ends is a cancellation, and a give-back that the same
+                // cancellation could cut short would be the leak it exists to close. The
+                // cancellation itself is neither caught nor wrapped here; it goes on its way
+                // once this has run.
+                withContext(NonCancellable) {
+                    val givenBack = handovers.end()
+                    if (givenBack > 0) {
+                        LOG.info(
+                            "The watch of {} ended with {} file(s) still with the consumer; they are given back and will be listed again.",
+                            at(directory),
+                            givenBack,
+                        )
+                    }
+                }
                 watching.remove(directory)
             }
         }
@@ -238,7 +262,7 @@ class SftpSource(
      * the ticker waits for a collector that is busy, and the interval is counted from then. The
      * overlap decision needs no lock: the ticker is the only coroutine that makes it.
      */
-    private suspend fun ProducerScope<SftpEvent>.tickEvery(directory: String, every: Duration) {
+    private suspend fun ProducerScope<SftpEvent>.tickEvery(directory: String, every: Duration, handovers: Handovers) {
         var latest: Job? = null
         while (true) {
             val tick = ticks.incrementAndGet()
@@ -246,7 +270,7 @@ class SftpSource(
                 LOG.warn("Tick {} of {} is skipped: the tick before it is still running after {}.", tick, at(directory), every)
                 send(SftpEvent.PollSkipped(tick, SkipCause.OVERLAP))
             } else {
-                latest = launch { tickOf(directory, tick).reportingFailures(tick, directory).collect { send(it) } }
+                latest = launch { tickOf(directory, tick, handovers).reportingFailures(tick, directory).collect { send(it) } }
             }
             delay(every)
         }
@@ -295,7 +319,12 @@ class SftpSource(
         }
     }
 
-    private fun tickOf(directory: String, tick: Long): Flow<SftpEvent> {
+    /**
+     * [handovers] is where a watch records what its ticks hand over, so it can give it all back
+     * when it ends. Null for a poll, whose files stay with the consumer when it ends by design:
+     * a consumer acks after the poll is over, and nobody speaks for the poll then.
+     */
+    private fun tickOf(directory: String, tick: Long, handovers: Handovers? = null): Flow<SftpEvent> {
         val handling = FileHandling(directory)
         return flow {
             val handedOver = mutableListOf<InFlightSlot>()
@@ -308,7 +337,24 @@ class SftpSource(
                     val candidates = mutableListOf<RemoteFile>()
                     filesUnder(directory).collect { file ->
                         seen++
-                        if (!inFlight.holds(file)) candidates += file
+                        if (!inFlight.holds(file)) {
+                            candidates += file
+                        } else {
+                            // Neither emitted nor not-ready: a newer copy of a name the consumer
+                            // is still working waits its turn, and is handed over once the copy
+                            // being worked has been answered.
+                            val beingWorked = inFlight.outAt(file.path)
+                            if (beingWorked != null && beingWorked != file) {
+                                LOG.debug(
+                                    "{} has been uploaded again ({} bytes, modified {}) while the copy listed earlier ({} bytes, modified {}) is still with the consumer; it waits for that one to be answered.",
+                                    at(file.path),
+                                    file.size,
+                                    file.modifiedAt,
+                                    beingWorked.size,
+                                    beingWorked.modifiedAt,
+                                )
+                            }
+                        }
                     }
                     val verdicts = polling.readiness.check(candidates, readinessContext)
                     for (file in candidates) {
@@ -321,6 +367,7 @@ class SftpSource(
                             Readiness.Ready -> {
                                 val slot = inFlight.admit(file) ?: continue
                                 handedOver += slot
+                                handovers?.record(slot)
                                 emitted++
                                 emit(SftpEvent.FileSeen(file, slot, handling))
                                 if (slot.settlement == Settlement.GONE) emit(SftpEvent.FileGone(file))
@@ -348,7 +395,7 @@ class SftpSource(
                 // Whatever ended the collection - a cancel, a failed listing, a consumer's block
                 // throwing - the consumer will not be answering for these, and a place nobody
                 // gives back is a place lost until restart.
-                handedOver.forEach { handling.withdraw(it) }
+                handedOver.forEach { handling.withdraw(it, Settlement.CANCELLED) }
                 throw ended
             }
         }
@@ -445,10 +492,14 @@ class SftpSource(
             }
         }
 
-        /** The poll that handed the file over ended without an answer. No action runs: nobody said the file failed. */
-        fun withdraw(slot: InFlightSlot) {
-            if (!slot.settle(Settlement.CANCELLED)) return
-            meters.settled(Settlement.CANCELLED)
+        /**
+         * The poll or the watch that handed the file over ended without an answer - [how] says
+         * which. No action runs: nobody said the file failed. A file already answered is left as
+         * it is, so the running tick and the watch that ends around it may both call this.
+         */
+        fun withdraw(slot: InFlightSlot, how: Settlement) {
+            if (!slot.settle(how)) return
+            meters.settled(how)
             slot.release()
         }
 
@@ -467,17 +518,57 @@ class SftpSource(
         }
 
         private fun alreadySettled(call: String, slot: InFlightSlot) {
-            LOG.warn(
-                "The {} of {} was ignored: the file had already been given back as {}. Each file is answered once.",
-                call,
-                at(slot.file.path),
-                slot.settlement?.label,
-            )
+            val why = when (slot.settlement) {
+                Settlement.WATCH_ENDED ->
+                    "the watch that handed it over had already ended and given it back, so a later poll hands it over again"
+                else -> "the file had already been given back as ${slot.settlement?.label}"
+            }
+            LOG.warn("The {} of {} was ignored: {}. Each file is answered once.", call, at(slot.file.path), why)
         }
     }
 
     private companion object {
         private val LOG = LoggerFactory.getLogger(SftpSource::class.java)
+    }
+}
+
+/**
+ * Every file a watch has handed over and not yet had an answer for, so that the watch can give
+ * all of them back when it ends. The running tick withdraws its own when it is cancelled; this
+ * is for the ticks that finished and left their files with the consumer, which used to stay in
+ * flight for the life of the process once their watch was gone.
+ *
+ * Ticks run in the connector's scope and may run alongside each other, so recording is under a
+ * lock. A slot recorded after the watch has ended is given back on the spot: its tick was still
+ * handing over as the collector left, and its send is about to fail on a cancelled channel.
+ * Answered slots are dropped as new ones are recorded, so a watch that runs for months holds
+ * only what is actually out.
+ */
+private class Handovers(private val giveBack: (InFlightSlot) -> Unit) {
+
+    private val lock = Any()
+    private val slots = mutableListOf<InFlightSlot>()
+    private var ended = false
+
+    fun record(slot: InFlightSlot) {
+        val tooLate = synchronized(lock) {
+            if (!ended) {
+                slots.removeAll { it.settlement != null }
+                slots += slot
+            }
+            ended
+        }
+        if (tooLate) giveBack(slot)
+    }
+
+    /** Gives back every file still unanswered, outside the lock, and returns how many there were. */
+    fun end(): Int {
+        val unanswered = synchronized(lock) {
+            ended = true
+            slots.filter { it.settlement == null }.also { slots.clear() }
+        }
+        unanswered.forEach(giveBack)
+        return unanswered.size
     }
 }
 

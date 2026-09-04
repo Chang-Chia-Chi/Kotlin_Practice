@@ -10,9 +10,10 @@ import java.time.Instant
 
 /**
  * The in-flight set's lock across every interleaving the model checker can reach: a file enters
- * at most once at a time (I7), leaving gives exactly that file's place back (I8), and a file
- * excluded for good never enters again. Linearizability against this class run one thread at a
- * time is the whole specification.
+ * at most once at a time (I7), leaving gives exactly that file's place back (I8), a file
+ * excluded for good never enters again, and a file at a name another file holds never enters
+ * while that one is out - and leaving takes out only the file that entered, never its namesake.
+ * Linearizability against this class run one thread at a time is the whole specification.
  *
  * What is checked is the lock body - `enter` and `exit`, the non-suspending core - and not the
  * suspending `admit` around it, for two reasons found on the way. The set's own design is not
@@ -21,7 +22,7 @@ import java.time.Instant
  * `SftpSourceTest` proves directly. And the checker's verifier failed inside itself on the
  * suspending wrapper, so the room the semaphore keeps is left to the library that keeps it.
  */
-@Param(name = "file", gen = IntGen::class, conf = "0:2")
+@Param(name = "file", gen = IntGen::class, conf = "0:3")
 class InFlightSetLincheckTest {
 
     private val set = InFlightSet(FILES.size)
@@ -54,6 +55,12 @@ class InFlightSetLincheckTest {
     private fun Int.asFile(): Int = mod(FILES.size)
 
     private companion object {
-        val FILES = List(3) { RemoteFile("/drop/f$it.csv", it.toLong(), Instant.EPOCH, isDirectory = false) }
+        /**
+         * Three files at three names, and a fourth at the first's name with another size: the same
+         * name uploaded again while the first is out. Every operation over it is the path rule from
+         * one side or the other, which one operation added for the purpose would not be.
+         */
+        val FILES = List(3) { RemoteFile("/drop/f$it.csv", it.toLong(), Instant.EPOCH, isDirectory = false) } +
+            RemoteFile("/drop/f0.csv", 99, Instant.EPOCH, isDirectory = false)
     }
 }

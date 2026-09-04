@@ -210,19 +210,20 @@ class AdversaryTest {
 
         val inFlight: Int get() = held.count { it.inFlight }
 
-        fun holds(name: String, size: Int): Boolean = held.any { it.inFlight && it.name == name && it.listedSize == size.toLong() }
+        /** A name is busy while any file at it is out with the consumer, whatever size that file was listed at (T19, D48). */
+        fun busyAt(name: String): Boolean = held.any { it.inFlight && it.name == name }
 
         /**
-         * What a listing answered now reports, and which of those files are out with the consumer at
-         * this instant. The client buffers the listing and the tick checks the in-flight set only as
-         * it drains that buffer, so a file busy now may be free by then: it may go either way, while
-         * a file free now must be handed over and a file not listed never is.
+         * What a listing answered now reports, and which of those files are at a name out with the
+         * consumer at this instant. The client buffers the listing and the tick checks the in-flight
+         * set only as it drains that buffer, so a file busy now may be free by then: it may go either
+         * way, while a file free now must be handed over and a file not listed never is.
          */
         class Listing(val listed: List<Pair<String, Int>>, val busy: Set<Pair<String, Int>>)
 
         fun listingView(): Listing {
             val listed = source.entries.map { it.key to it.value }.filter { it !in excluded }
-            return Listing(listed, listed.filter { (name, size) -> holds(name, size) }.toSet())
+            return Listing(listed, listed.filter { (name, _) -> busyAt(name) }.toSet())
         }
 
         fun moved(name: String) {
@@ -349,8 +350,8 @@ class AdversaryTest {
                     connector.source.poll(DROP).collect { event ->
                         when (event) {
                             is FileSeen -> {
-                                assertThat(model.held.filter { it.inFlight && it.name == event.file.name && it.listedSize == event.file.size })
-                                    .describedAs("I7: ${event.file.path} was handed over while the consumer still had it").isEmpty()
+                                assertThat(model.held.filter { it.inFlight && it.name == event.file.name })
+                                    .describedAs("I7: ${event.file.path} was handed over while the consumer still had a file at that name").isEmpty()
                                 Held(++model.ids, event).also { model.held += it; run.handed += it }
                             }
                             is SftpEvent.PollCompleted -> run.completed = event

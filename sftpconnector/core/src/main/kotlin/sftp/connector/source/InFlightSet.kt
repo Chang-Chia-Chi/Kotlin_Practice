@@ -14,8 +14,13 @@ import java.util.concurrent.atomic.AtomicReference
  * ack or a nack makes room - that wait is the whole of the connector's backpressure. And every
  * file comes back exactly once, whichever of ack, nack, gone or a withdrawn poll gives it back.
  *
- * A file is its path, size and modification time together: the same name uploaded again is a
- * different file, and a file nacked for good is remembered by that key until the process ends.
+ * Two things are decided here, and they are keyed differently. A file's *identity* is its path,
+ * size and modification time together: the same name uploaded again with a new size is a
+ * different file, an answer is accepted once per file, and a file nacked for good is remembered
+ * by that key until the process ends. *Exclusivity* is the path alone: while any file at a path
+ * is out with the consumer, nothing else at that path enters, whatever its size or time, because
+ * a consumer working a file must never be racing itself on a second copy of the same name. The
+ * second copy is not lost, only later: it enters once the first has been given back.
  *
  * Nothing slow happens under the lock. Deciding whether a file may enter and recording that it
  * left are the only things done while holding it; waiting for room happens before it is taken and
@@ -25,22 +30,31 @@ internal class InFlightSet(capacity: Int) {
 
     private val lock = Any()
 
-    /** Insertion-ordered, so [outstanding] can say what is out in the order it was handed over. */
-    private val inFlight = LinkedHashSet<RemoteFile>()
+    /**
+     * Keyed by path, which is the exclusivity; insertion-ordered, so [outstanding] can say what
+     * is out in the order it was handed over.
+     */
+    private val inFlight = LinkedHashMap<String, RemoteFile>()
     private val excluded = HashSet<RemoteFile>()
     private val room = Semaphore(capacity)
 
     val size: Int get() = synchronized(lock) { inFlight.size }
 
-    /** Whether [file] is out with the consumer right now, or was nacked for good. Never waits. */
-    fun holds(file: RemoteFile): Boolean = synchronized(lock) { file in inFlight || file in excluded }
+    /**
+     * Whether [file] would be turned away right now: a file is out at its path - this one or
+     * another - or this exact file was nacked for good. Never waits.
+     */
+    fun holds(file: RemoteFile): Boolean = synchronized(lock) { file.path in inFlight || file in excluded }
+
+    /** The file out with the consumer at [path], or null when nothing is. Never waits. */
+    fun outAt(path: String): RemoteFile? = synchronized(lock) { inFlight[path] }
 
     /**
      * Every file out with the consumer right now, oldest first: handed over and not yet given back,
      * whichever poll handed it over. One copy taken under the lock, so a caller never iterates the
      * set while a poll alongside is changing it. Files nacked for good are not out; they are kept out.
      */
-    fun outstanding(): List<RemoteFile> = synchronized(lock) { inFlight.toList() }
+    fun outstanding(): List<RemoteFile> = synchronized(lock) { inFlight.values.toList() }
 
     /**
      * Puts [file] in the set and returns its slot, or null when the file is already out or was
@@ -71,13 +85,21 @@ internal class InFlightSet(capacity: Int) {
      * file entered. Non-suspending on purpose, so the lock can be model-checked on its own.
      */
     internal fun enter(file: RemoteFile): Boolean = synchronized(lock) {
-        if (file in inFlight || file in excluded) false else inFlight.add(file)
+        if (file.path in inFlight || file in excluded) {
+            false
+        } else {
+            inFlight[file.path] = file
+            true
+        }
     }
 
-    /** The lock body of [leave]. Whether the file was in the set. */
+    /**
+     * The lock body of [leave]. Whether the file was in the set - this exact file, so leaving
+     * never takes out another file that holds the same path.
+     */
     internal fun exit(file: RemoteFile, forGood: Boolean): Boolean = synchronized(lock) {
         if (forGood) excluded += file
-        inFlight.remove(file)
+        inFlight.remove(file.path, file)
     }
 }
 
@@ -111,6 +133,13 @@ internal enum class Settlement(val label: String) {
 
     /** The poll that handed the file over was cancelled before the consumer said anything. */
     CANCELLED("cancelled"),
+
+    /**
+     * The watch that handed the file over ended - its collector left, it was cancelled, the
+     * connector closed - before the consumer said anything. Counted with [CANCELLED]: the file
+     * goes back the same way and for the same reason, and the metric's labels are fixed.
+     */
+    WATCH_ENDED("cancelled"),
 
     /** The file was not there to download; there is nothing to act on. */
     GONE("gone"),
