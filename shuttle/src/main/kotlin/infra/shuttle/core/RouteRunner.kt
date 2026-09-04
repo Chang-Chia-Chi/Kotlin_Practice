@@ -3,6 +3,7 @@ package infra.shuttle.core
 import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.Tags
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.transformWhile
 import kotlinx.coroutines.launch
@@ -19,7 +20,8 @@ import kotlin.time.toJavaDuration
  * suspends on the trigger while the route is full and at most `parallelism` pipelines run at once (I19's share
  * of the runner); the permit and the in-flight gauge are released exactly once through `invokeOnCompletion`,
  * whether the pipeline ran, failed or was cancelled before it started. Poll failures and skips are counted and
- * touch no pipeline (spec 11). A complete `PollCompleted` reconciles (spec 4.6) and refreshes the stuck gauge.
+ * touch no pipeline (spec 11). A complete `PollCompleted` reconciles (spec 4.6) and refreshes the stuck gauge; a
+ * subscribed route has no poll, so its gauge rides a ticker in this same scope, beating every `inProgressEvery` (D51).
  * `RouteDown` is the trigger's last word: nothing after it is collected, the in-flight pipelines finish, and
  * [run] throws its cause so the supervisor restarts the route (spec 10). Cancelling [run] cancels the pipelines.
  */
@@ -41,6 +43,9 @@ class RouteRunner(
     suspend fun run(events: Flow<RouteEvent>) {
         var down: Throwable? = null
         supervisorScope {
+            val ticker = (route.source as? Source.Subscribe)?.let { source ->
+                launch { while (true) { delay(source.inProgressEvery); refreshStuck() } }
+            }
             events.transformWhile { emit(it); it !is RouteEvent.RouteDown }.collect { event ->
                 when (event) {
                     is RouteEvent.Seen -> {
@@ -54,8 +59,20 @@ class RouteRunner(
                     is RouteEvent.RouteDown -> down = event.cause
                 }
             }
+            ticker?.cancel()
         }
         down?.let { throw it }
+    }
+
+    /** Spec 11: the stuck gauge. A state store that fails here is logged and left for the next refresh. */
+    private suspend fun refreshStuck() {
+        try {
+            stuck.set(store.stuck(name, clock.instant().minus(route.stuckWindow.toJavaDuration())))
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            log.warnv("route {0}: the stuck gauge could not be refreshed: {1}", route.name, e.toString())
+        }
     }
 
     /**
@@ -77,12 +94,12 @@ class RouteRunner(
                 registry.counter(ShuttleMetrics.RECONCILED, "route", route.name).increment(ids.size.toDouble())
                 if (ids.isNotEmpty() && acked.isNotEmpty()) wake()
             }
-            route.stuckAfter?.let { stuck.set(store.stuck(name, clock.instant().minus(it.toJavaDuration()))) }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             log.warnv("route {0}: end-of-poll repair failed, the next poll retries: {1}", route.name, e.toString())
         }
+        refreshStuck()
     }
 
     private fun poll(result: String) = registry.counter(ShuttleMetrics.POLLS, "route", route.name, "result", result).increment()

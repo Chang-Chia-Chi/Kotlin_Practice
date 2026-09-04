@@ -142,6 +142,15 @@ sealed interface Source {
 /** The ack action of either trigger kind (spec 5.3). */
 val Source.onAck: AckAction? get() = when (this) { is Source.Poll -> onAck; is Source.Subscribe -> onAck }
 
+/** The trigger's own beat (D51): what a poll waits between listings, what a subscription signals in-progress on. */
+val Source.interval: Duration get() = when (this) { is Source.Poll -> every; is Source.Subscribe -> inProgressEvery }
+
+/**
+ * Spec 11: a transfer before ACKED older than this is stuck. `stuckAfter` omitted is three trigger intervals,
+ * so every route has a window and a gauge (D51); rule 5 gives every route that runs a source.
+ */
+val Route.stuckWindow: Duration get() = stuckAfter ?: ((source?.interval ?: 1.minutes) * 3)
+
 /**
  * Spec 5.1: where a subscribed route's object is, and where in the message its path is written.
  * [bucket] is the S3 bucket the key lives in - the store declaration is an endpoint, not a bucket,
