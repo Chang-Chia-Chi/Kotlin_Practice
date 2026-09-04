@@ -601,7 +601,13 @@ download) is what a *later* try reads; it is not a reason to send one now.
    OpenSSH, resolving a path that leads nowhere succeeds and returns the canonical name, and so
    does resolving one that leads to a file. It is a string operation. The `stat` is the check;
    `realpath` only fixes the spelling the rest of the probe uses.
-3. Fill to `minIdle` in the background; readiness does not wait for it.
+3. Fill to `minIdle` in the background on the housekeeper's **first round**, one
+   `housekeepingInterval` after start-up - thirty seconds with the shipped defaults. Readiness
+   waits for neither. Topping up is one of the things the housekeeper does every round (Sec 4.5)
+   and its loop waits before it sweeps, so there is no fill before the first round; a pool that
+   is cold for one interval costs one handshake, which was not worth changing the housekeeper's
+   timing for (T9 deviation 3). `minIdle` defaults to 0, so nothing waits until a deployment
+   sets it.
 
 ### 11.2 Shutdown
 
