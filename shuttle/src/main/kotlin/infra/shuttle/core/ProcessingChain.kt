@@ -1,5 +1,8 @@
 package infra.shuttle.core
 
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.coroutines.cancellation.CancellationException
@@ -21,10 +24,20 @@ sealed interface ChainResult {
  * (the kit proves a processor did not either); nothing leaves staging; every object whose file the
  * chain created gets its digest and size recomputed from the bytes; the final cardinality is the
  * caller's to turn into rows. Rule 22 is enforced on the frozen attributes.
+ *
+ * Spec 3.3 and plan 2.5: [io] is the module's one bounded view of `Dispatchers.IO`, sized to the sum of
+ * route parallelism, and the whole run happens on it - archive writing, the `unzip` and `extract` reads,
+ * and the digest and size recomputed at the end. D52: a processor is *called* on that view and may block
+ * where it stands; a custom processor must not hop to a dispatcher of its own for blocking work, because
+ * rule 9's arithmetic only bounds the module's blocking calls while every one of them is on this view.
  */
-class ProcessingChain(private val processors: List<Processor>, private val algorithm: DigestAlgorithm) {
+class ProcessingChain(
+    private val processors: List<Processor>,
+    private val algorithm: DigestAlgorithm,
+    private val io: CoroutineDispatcher = Dispatchers.IO,
+) {
 
-    suspend fun run(payload: Payload, ctx: ProcessContext): ChainResult {
+    suspend fun run(payload: Payload, ctx: ProcessContext): ChainResult = withContext(io) {
         val inputs = payload.objects.map { it.path }.toSet()
         var current = payload
         for (processor in processors) {
@@ -36,14 +49,14 @@ class ProcessingChain(private val processors: List<Processor>, private val algor
                 throw StageError(processor::class.simpleName ?: "processor", e)
             }
             when (outcome) {
-                is Outcome.Reject -> return ChainResult.Rejected(outcome.reason)
+                is Outcome.Reject -> return@withContext ChainResult.Rejected(outcome.reason)
                 is Outcome.Continue -> current = outcome.payload
             }
         }
         val attributes = java.util.Collections.unmodifiableMap(LinkedHashMap(ctx.attributes)) // frozen (I15)
-        attributeLimitBroken(attributes)?.let { return ChainResult.Rejected(it) }
+        attributeLimitBroken(attributes)?.let { return@withContext ChainResult.Rejected(it) }
         val objects = current.objects.map { if (it.path in inputs) it else it.copy(size = Files.size(it.path), digest = Digest.of(it.path, algorithm)) }
-        return ChainResult.Done(Payload(objects), attributes)
+        ChainResult.Done(Payload(objects), attributes)
     }
 
     /** Rule 22 at run time: at most 32 names, each at most 64 characters, 1 KB in all (spec 6.4). */

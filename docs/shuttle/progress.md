@@ -3774,3 +3774,81 @@ behaviour changed except the swallowed cancellation and the retirement of rule 1
 `S3Target`'s unused `clock` (and its `ShuttleHost` call), `Custom.config` reaching the bean
 (`ShuttleHost` and `Commands` pass `spec`, not `spec.name`), and `Expand.format` as an enum beside
 `ExtractFrom` (`ExpandProcessor` and rule 14's body). Whoever owns those files next should take them.
+
+---
+
+## 34: Fix: archive writing, digests and content reads run on the bounded IO view
+
+**Built:** spec 3.3 and plan 2.5's sentence "blocking calls, ... and archive writing, run on one bounded
+view of `Dispatchers.IO` owned by the module", for the one blocking caller that was not on it.
+`ProcessingChain` takes a third constructor argument, `io: CoroutineDispatcher`, and its whole `run` body
+is now one `withContext(io)`: every processor call, and the size and `Digest.of` recomputed for each file
+the chain created, happen on that view. `zip`'s `ZipOutputStream`, `unzip`'s entry loop, `extract`'s
+`Files.readString` of the content and `expand`'s `readAllBytes` come along with them, because they are
+inside the processors the loop calls. One wrap, not one per step: the dispatcher is passed once and the
+chain hops once per run rather than once per processor.
+
+**Concepts named:**
+
+- **D52, a custom processor is called on the bounded view and blocks where it stands.** The alternative -
+  the chain calls processors on whatever dispatcher the caller is on and each processor switches itself -
+  puts rule 9's arithmetic at the mercy of every processor an operator writes, and a processor that
+  forgets is exactly the bug this ticket fixes. Calling on the view keeps the sum-of-parallelism bound
+  true by construction and leaves a custom processor nothing to remember. Its cost is that a processor
+  doing genuinely CPU-bound work now burns an IO permit; that is the trade spec 3.3 already makes for
+  archive writing. The sentence is in the `Processor` KDoc, in the `ProcessingChain` KDoc, and as a fifth
+  bullet under spec 6.2's four re-run rules.
+- **Progress 14's third sentence is corrected here.** It reads "The bounded view still carries JDBI, S3,
+  the HTTP channel and archive writing." The first three were true; archive writing was not, and had never
+  been: `ZipProcessor` ran wherever the pipeline's coroutine was, which under a running host is
+  `ShuttleHost`'s scope on `Dispatchers.Default`. A route zipping a large file occupied a CPU worker and
+  spent none of the view's budget. From this ticket the sentence is true as written.
+- **The pipeline never held the dispatcher, and still does not.** The ticket expected to find one on
+  `TransferPipeline` for the store step; there is none. The store step reaches the bounded view through
+  the target adapter, which takes its own `io` (`S3Target`, `SftpTarget`), as the fetch adapters and
+  `JdbiStateStore` do. The chain is the one blocking caller that lives in `core` itself, so `core` is
+  where its dispatcher has to be handed in. No pipeline parameter was added.
+- **A real dispatcher hop leaves `runTest`'s scheduler.** Three test classes drive the pipeline through
+  virtual time (`advanceUntilIdle`, `runCurrent`); with the chain hopping to a real dispatcher their
+  `run.isCompleted` assertions became a race, and two `RouteRunnerTest` cases failed at once rather than
+  flaking later. Those chains are constructed with `Dispatchers.Unconfined`, which keeps the hop inside
+  the caller's frame and the tests deterministic - the dispatcher is a constructor argument precisely so a
+  test can say which one it wants.
+
+**Tests:** `ProcessingChainTest.SPEC9_a_zip_step_and_a_custom_processor_both_run_on_the_chains_bounded_io_view`.
+A single-thread `Executors.newSingleThreadExecutor` named `shuttle-io-view-probe`, handed to the chain as
+`asCoroutineDispatcher()`; the chain is `zip` then a test processor. `zip` is observed from inside itself -
+`FakeProcessContext.newStagedFile` records `Thread.currentThread().name`, and `zip` creates its archive
+through that call - and the second step records its own thread. No mock, no sleep, `runTest` throughout.
+Red first, on the archive: `expected: <[shuttle-io-view-probe]> but was: <[main @kotlinx.coroutines.test runner#8]>`.
+
+**Final run counts (surefire).** `-Dtest=ProcessingChainTest`: 5 tests, 0 failures, 0 errors. Default tier
+(`mvn -B -o -q -pl shuttle test`): 31 classes, **280 tests, 0 failures, 0 errors** - ticket 40's 279 plus
+the one above.
+
+**Deviations:**
+
+1. **`io` defaults to `Dispatchers.IO`, and `ShuttleHost` still takes the default.** `chainFor` is in
+   `ShuttleHost.kt`, which ticket 38 owns and this ticket may not edit, so the bounded view cannot be
+   handed to the chain from the host yet. A required third argument would not compile there. The default
+   is the unbounded `Dispatchers.IO`: right for `TryCommand` and every test, and already better than
+   `Dispatchers.Default` for a running host, since a zipping route no longer occupies a CPU worker - but
+   it is not yet bounded by the sum of route parallelism. **Ticket 38 must pass `io` to `ProcessingChain`
+   in `chainFor`**; it is one argument on line 370, and rule 9's arithmetic is not true until it does.
+2. **`TryCommand` was not touched and needed nothing.** It calls `processorFor(...).process` directly
+   inside `runBlocking`, not the chain, so it has no dispatcher to pass. When ticket 37 makes it call the
+   chain it will get the `Dispatchers.IO` default, which is what "a plain dispatcher" means offline.
+3. **`rename` has no blocking call to move.** The checklist allows for "rename's file move if it blocks";
+   `RenameProcessor` copies the object with a new `name` and leaves the file where it is. Nothing to move.
+4. **Three test classes were changed although the ticket named none of them.** `RouteRunnerTest`,
+   `RouteSupervisorTest` and `CrashMatrixTest` construct the chain inside virtual-time tests and now pass
+   `Dispatchers.Unconfined`; `RouteRunnerTest.I19_...` and `..._a_poll_failure_or_skip_...` were failing
+   without it. No assertion changed.
+5. **The digest recompute is not separately observed.** It sits in the same `withContext` block as the
+   processor loop, three lines below the call the test observes; a second mechanism to watch a thread
+   inside `Files.size` would need a `FileSystemProvider` of its own to say something the block already
+   says.
+6. **One spec edit.** Spec 6.2 gains a fifth bullet stating D52. Spec 3.3 needed none: it already said
+   archive writing runs on the view, which is why this was a bug and not a spec change.
+7. **Size:** production +19 / -5 across three files (`ProcessingChain.kt`, `Processing.kt`, spec 6.2);
+   tests +43 / -7 across four files; this entry.

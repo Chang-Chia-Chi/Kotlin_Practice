@@ -3,6 +3,7 @@ package infra.shuttle.core
 import infra.shuttle.testkit.ClockFixture
 import infra.shuttle.testkit.FakeProcessContext
 import infra.shuttle.testkit.ScriptedFetcher
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
@@ -14,6 +15,7 @@ import org.junit.jupiter.api.io.TempDir
 import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Path
+import java.util.concurrent.Executors
 
 /** Spec 6.2: the chain runner and its four re-run rules, against the test kit. */
 class ProcessingChainTest {
@@ -74,6 +76,36 @@ class ProcessingChainTest {
         }
     }
 
+    /**
+     * Spec 3.3 and plan 2.5 (review finding Standards 2): every blocking call the chain makes, archive
+     * writing included, runs on the bounded view of `Dispatchers.IO` handed to the chain - not on the
+     * caller's dispatcher, which for a running route is the host scope's `Dispatchers.Default`. Zip is
+     * observed through the context it creates its archive with; the second step observes itself, which is
+     * the contract D52 gives a custom processor.
+     */
+    @Test
+    fun SPEC9_a_zip_step_and_a_custom_processor_both_run_on_the_chains_bounded_io_view() = runTest {
+        val executor = Executors.newSingleThreadExecutor { r -> Thread(r, IO_VIEW) }
+        try {
+            val observed = mutableListOf<String>()
+            val watching = object : Processor {
+                override val produces = emptySet<String>()
+                override suspend fun process(payload: Payload, ctx: ProcessContext): Outcome {
+                    observed += Thread.currentThread().name
+                    return Outcome.Continue(payload)
+                }
+            }
+            val chain = ProcessingChain(listOf(processorFor(ProcessorSpec.Zip) { null }, watching), DigestAlgorithm.MD5, executor.asCoroutineDispatcher())
+            ctx().use { ctx ->
+                assertInstanceOf(ChainResult.Done::class.java, chain.run(input(), ctx))
+                assertEquals(listOf(IO_VIEW), ctx.stagedFileThreads, "zip wrote its archive off the bounded view")
+                assertEquals(listOf(IO_VIEW), observed, "a custom processor is called on the bounded view (D52)")
+            }
+        } finally {
+            executor.shutdown()
+        }
+    }
+
     @Test
     fun I18_a_processor_never_modifies_an_input_and_every_created_file_is_deleted_with_staging() = runTest {
         val copying = object : Processor {
@@ -109,5 +141,10 @@ class ProcessingChainTest {
         ProcessingChain(listOf(writing), DigestAlgorithm.MD5).run(payload, other)
         assertFalse(other.inputsUntouched(), "the kit detects a processor writing into its input")
         assertInstanceOf(Path::class.java, payload.objects.single().path)
+    }
+
+    private companion object {
+        /** The one thread of the test's stand-in for the module's bounded view of `Dispatchers.IO`. */
+        const val IO_VIEW = "shuttle-io-view-probe"
     }
 }

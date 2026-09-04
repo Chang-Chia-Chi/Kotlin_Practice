@@ -18,7 +18,13 @@ data class StagedObject(
 
 data class Payload(val objects: List<StagedObject>)
 
-/** Spec 6.2: one step of the chain. The built-ins are each other's second implementation. */
+/**
+ * Spec 6.2: one step of the chain. The built-ins are each other's second implementation.
+ *
+ * D52: `process` is called on the module's bounded view of `Dispatchers.IO` (spec 3.3), so a processor
+ * blocks where it stands - reading its file, writing an archive - and must not switch to a dispatcher of
+ * its own to do it. Only then does rule 9's arithmetic bound the module's blocking work.
+ */
 interface Processor {
     val produces: Set<String>
     suspend fun process(payload: Payload, ctx: ProcessContext): Outcome

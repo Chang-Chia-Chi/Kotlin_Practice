@@ -8,6 +8,7 @@ import infra.shuttle.testkit.RecordingChannel
 import infra.shuttle.testkit.ScriptedFetcher
 import infra.shuttle.testkit.ScriptedSource
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
@@ -48,7 +49,8 @@ class CrashMatrixTest {
         target = Target("minio", bucket = "landing"), notify = listOf(Notify(DeliveryMoment.ACKED, "downstream")),
     )
 
-    private val noChain = ProcessingChain(emptyList(), DigestAlgorithm.MD5)
+    // the chain hops to its bounded IO view (spec 3.3); unconfined here keeps the hop inside runTest's scheduler
+    private val noChain = ProcessingChain(emptyList(), DigestAlgorithm.MD5, Dispatchers.Unconfined)
 
     private fun runner(route: Route = polled, chain: ProcessingChain = noChain): RouteRunner {
         val pipeline = TransferPipeline(
@@ -68,7 +70,7 @@ class CrashMatrixTest {
 
     /** Spec 13.1's image-sets route: the message names a metadata file listing two images, each a child on the target; uploads one at a time. */
     private val imageSets = polled.copy(source = Source.Subscribe("nats", "images", onAck = AckAction.Ack), fetch = Fetch("minio", "/metadata"), parallelism = 1)
-    private val imageChain = ProcessingChain(listOf(processorFor(ProcessorSpec.Expand("json", "/images", "minio")) { null }), DigestAlgorithm.MD5)
+    private val imageChain = ProcessingChain(listOf(processorFor(ProcessorSpec.Expand("json", "/images", "minio")) { null }), DigestAlgorithm.MD5, Dispatchers.Unconfined)
     /** One message: the parent's trigger and, replayed, the broker's redelivery of it. */
     private val set: Flow<RouteEvent> by lazy {
         fetcher.file("set.json", """{"images":["img/1.png","img/2.png"]}""".toByteArray()).file("img/1.png", "one".toByteArray()).file("img/2.png", "two".toByteArray())

@@ -28,13 +28,19 @@ class FakeProcessContext(
 ) : ProcessContext, AutoCloseable {
     override val attributes = LinkedHashMap<String, String>()
     val createdFiles = mutableListOf<Path>()
+
+    /** The thread each `newStagedFile` call arrived on: spec 3.3's bounded view, observed from inside the step. */
+    val stagedFileThreads = mutableListOf<String>()
     private var inputs = emptyMap<Path, Pair<Long, String>>()
 
     override fun setAttribute(name: String, value: String) {
         attributes[name] = value
     }
 
-    override fun newStagedFile(name: String): Path = dir.resolve("${createdFiles.size}-$name").also { createdFiles.add(it) }
+    override fun newStagedFile(name: String): Path {
+        stagedFileThreads += Thread.currentThread().name
+        return dir.resolve("${createdFiles.size}-$name").also { createdFiles.add(it) }
+    }
 
     override suspend fun fetch(store: String, path: String): StagedObject = fetcher(path, newStagedFile(path.substringAfterLast('/')), algorithm)
 
