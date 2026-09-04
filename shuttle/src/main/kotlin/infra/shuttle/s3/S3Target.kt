@@ -88,11 +88,7 @@ class S3Target(
     }
 
     override suspend fun probe() = withContext(io) {
-        try {
-            client.headBucket(HeadBucketRequest.builder().bucket(bucket).build())
-        } catch (e: NoSuchBucketException) {
-            throw IllegalStateException("bucket $bucket does not exist; the bucket is never created here (D15)", e)
-        }
+        headBucket(client, bucket, io)
         val expiresNonCurrent = try {
             client.getBucketLifecycleConfiguration(GetBucketLifecycleConfigurationRequest.builder().bucket(bucket).build())
                 .rules().any { it.statusAsString() == "Enabled" && it.noncurrentVersionExpiration() != null }
@@ -108,6 +104,18 @@ class S3Target(
     }
 
     companion object {
+        /**
+         * Spec 12.1 step 3's HEAD on one bucket: it is there or the deployment ends naming it. The host runs
+         * it on its own for a subscribed route's `fetch.bucket`, which has no target adapter to probe (D15).
+         */
+        suspend fun headBucket(client: S3Client, bucket: String, io: CoroutineDispatcher): Unit = withContext(io) {
+            try {
+                client.headBucket(HeadBucketRequest.builder().bucket(bucket).build())
+            } catch (e: NoSuchBucketException) {
+                throw IllegalStateException("bucket $bucket does not exist; the bucket is never created here (D15)", e)
+            }
+        }
+
         /**
          * Spec 7.2 and D4: synchronous, Apache client, endpoint override, path style. SDK 2.29 computes
          * checksums only when an operation requires one, which is D4's "when-required"; the explicit

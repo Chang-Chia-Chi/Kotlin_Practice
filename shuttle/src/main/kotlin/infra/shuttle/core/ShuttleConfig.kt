@@ -80,6 +80,9 @@ data class S3Store(
 
 sealed interface Channel {
     val name: String
+
+    /** Spec 9.6: the body a notification through this channel renders, whatever the channel's kind. */
+    val body: MappingTable
 }
 
 enum class HttpMethod { POST, PUT }
@@ -97,11 +100,17 @@ data class HttpChannel(
     val timeout: Duration = 10.seconds,
     val response: ResponseSpec = ResponseSpec(),
     val policy: DeliveryPolicy = DeliveryPolicy(),
-    val body: MappingTable = MappingTable(emptyList()),
+    override val body: MappingTable = MappingTable(emptyList()),
 ) : Channel
 
 /** `subject` is what `notify` publishes on; a channel used only as a `subscribe` source states none (rule 2). */
-data class NatsChannel(override val name: String, val url: String?, val credentials: Secret? = null, val subject: String? = null) : Channel
+data class NatsChannel(
+    override val name: String,
+    val url: String?,
+    val credentials: Secret? = null,
+    val subject: String? = null,
+    override val body: MappingTable = MappingTable(emptyList()),
+) : Channel
 
 /** Spec 5.3. */
 sealed interface AckAction {

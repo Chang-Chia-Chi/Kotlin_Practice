@@ -3565,3 +3565,101 @@ the row on to `deliver`. `kotlinx-coroutines-slf4j` 1.10.1 joins the pom.
    part of that release train and the sentence it implements is already in 3.2.
 7. **Size:** production +68 / -17 across four files (the pom's 12 lines included); tests +62 plus
    `LogCapture.kt` at 53; this entry.
+
+---
+
+## 35: Fix: the host renders NATS notification bodies and probes every bucket a route reads
+
+**Built:** the two composition-root gaps of review findings Spec 6 and Spec 8, in `ShuttleHost.start()`.
+
+- **A body belongs to the channel, not to its kind.** `bodies` was
+  `config.channels.filterIsInstance<HttpChannel>()...`, so a notification or a callback over a `nats`
+  channel published `{}`. It is now `config.channels.associate { ChannelName(it.name) to it.body }`, with
+  `body: MappingTable` moved up onto the `Channel` interface; no per-kind branch is left in the host.
+  `core.NatsChannel` gained `body` (ticket 16's deviation 3, handed to 14 and never wired), with the YAML
+  key `nats: { ..., body: [ ... ] }` read by the same `Node.row()` the `http` block uses and the DSL
+  property `nats("events") { body = mapping { ... } }`. No new rule number: spec 9.6 already gives a body
+  to a channel of any kind, and rules 16 to 19 are its boot checks (see Deviations for who runs them).
+- **Step 3 probes what a route reads.** A subscribed route's `fetch.bucket` had no probe at all: the
+  store declaration is an endpoint, the bucket is the route's (rule 6), and nothing HEADed it, so a
+  missing bucket surfaced at the first message. `probeStores` now runs the route targets' `probe()` and
+  then `S3Target.headBucket` once per distinct (fetch store, bucket) pair - the same HEAD and the same
+  "bucket X does not exist; the bucket is never created here (D15)" message the target probe raises,
+  lifted into `S3Target`'s companion so there is one of it. An SFTP `fetch.store` needs none:
+  `connectorFor` starts the connector with its own probe.
+- **The probes moved ahead of the channels inside step 3.** Spec 12.1 step 3 is "object stores and
+  channels", in that order; the host built every channel adapter first, so a bucket typo waited behind a
+  NATS dial (7 s of connection refused in the red run of `SPEC8_...`, before its assertion was even
+  reached). Nothing between them depends on the other: `targetFor` reads stores only.
+- **`deliveryChannels`**, the seam the first test needed: a map from channel name to `DeliveryChannel`
+  that `channelFor` returns instead of building one, exactly as `targets` does for a store's target
+  adapter. Nothing in production sets it. A replaced channel has no trigger behind it (`natsChannels`
+  stays empty for it), so a route may not `subscribe` to one; the KDoc says so.
+
+**Concepts named:**
+
+- **The channel's body is the channel's.** The kind decides how bytes leave (an HTTP request, a JetStream
+  publish); the mapping table decides what they say. Putting `body` on `Channel` makes that a fact of the
+  model rather than a habit of the host, and it is why the fix is one line at the composition root.
+- **A probe covers what the deployment reads, not only what it writes.** "Declared store" in spec 12.1
+  step 3 is per bucket, because an S3 declaration is an endpoint. The rule now is: every bucket named
+  anywhere in `routes` - `target.bucket` through the target adapter, `fetch.bucket` through the same HEAD.
+
+**Acceptance:**
+
+- *A route notifying a `nats` channel delivers a rendered body, not `{}`* -
+  `ShuttleHostTest.SPEC6_a_route_notifying_a_nats_channel_delivers_the_rendered_body_not_an_empty_one`:
+  spec 13.1's `events` channel with two `body:` rows, a polled route notifying it `on: acked`, the test
+  kit's `RecordingChannel` where the broker would be. Red before the fix with the message the finding
+  describes ("the mapping table of a nats channel is rendered: {} ==> expected: <1> but was: <null>"); no
+  broker, no Mockito, no `nats` tag.
+- *A missing `fetch.bucket` ends startup naming the bucket* -
+  `ShuttleHostTest.SPEC8_a_boot_with_a_missing_fetch_bucket_fails_naming_the_bucket`, beside
+  `a_boot_with_a_missing_bucket_fails_naming_the_bucket` and with the same Mockito `S3Client` at the AWS
+  boundary; `headBucket` throws `NoSuchBucketException` for the fetch bucket `images` only and answers any
+  other bucket, and the route's target is the in-memory one, so the only HEAD is the fetch bucket's.
+- *The `bodies` map is built once from every channel that carries a mapping table* - the host's line is
+  kind-free; the 273-test default tier stays green (271 before, plus these two).
+- *The knob lands in the YAML grammar and the DSL* -
+  `YamlLoaderTest.a_nats_channel_reads_its_url_credentials_subject_and_body` (the old
+  `..._url_credentials_and_subject`, extended): the document with a `body:` row equals both the expected
+  `NatsChannel` and the DSL build of it.
+- *M2 unbroken by the new HEAD and the new order* - `-DexcludedGroups=none -Dtest=M2AcceptanceTest`:
+  5 tests, 0 failures, 83.9 s, the image-sets route's `fetch.bucket` now HEADed against MinIO at boot.
+- *Progress entry appended* - this entry.
+
+**S30 and M2 implication:** a callback over a `nats` channel (`onAck: { callback: <nats channel> }`) and a
+`notify` through one now carry the channel's rendered body. A deployment that declared a `nats` channel in
+a route's `notify` was publishing `{}` and starts publishing JSON the moment its `body:` rows are written;
+with no `body:` rows the message is `{}` as before, so nothing changes for a channel that has none. The
+same tables now join `TransferPipeline`'s attribute-freeze check (I15, spec 4.1 stage 2): a `required` row
+of a `nats` body whose input is missing fails the transfer at freeze, where before it was silently
+dropped - correct per spec 9.6, and worth knowing before writing rows for a route that is already running.
+
+**Deviations:**
+
+1. **A `nats` body is not checked at boot by rules 16, 18, 19 and 26.** `Rules.channel` opens with
+   `if (channel !is HttpChannel) return`, and the rule 17/26 loop over a route's notify channels reads
+   `channels[it] as? HttpChannel`. Both predate a nats body; neither is this ticket's file (`Rules.kt`
+   belongs to tickets 38 and 40 of this round), so the rows of a `nats` body are rendered but not
+   validated: a `field:` outside the vocabulary or an undeclared `attribute:` reaches the renderer
+   instead of the boot report. Debt with a small repayment - drop the `HttpChannel` narrowing in
+   `Rules.channel` (the policy and response checks inside it need an `is HttpChannel` guard of their own)
+   and widen the `as? HttpChannel` in the route loop to `Channel`. `RulesTest` gains one case per rule.
+2. **`shuttle try` still prints HTTP bodies only.** `Commands.kt` filters
+   `filterIsInstance<HttpChannelConfig>()`, so try mode does not show what a `nats` channel would publish
+   (spec 12.2). `Commands.kt` is ticket 37's file this round; one `filterIsInstance` to widen.
+3. **Spec 13.1's `nats:` key list needs `body:` recorded**, as ticket 16's deviation 1 already asked for
+   `subject:`. This ticket may only touch `shuttle/` and this file.
+4. **No new decision number.** D51 was reserved for this ticket and is not spent: both halves are the
+   spec read as it stands (9.6 gives every channel a body; 12.1 step 3 probes every declared store).
+5. **Size:** production +42 / -13 across five files, tests +72 / -13 across two, plus this entry.
+
+**For the next ticket:**
+
+- **38 and 40 (`Rules.kt`):** deviation 1 is a small change in the file you already own.
+- **37 (`Commands.kt`):** deviation 2, one `filterIsInstance` to widen, and try mode then prints a `nats`
+  channel's body beside the HTTP ones.
+- **Anyone testing the host against a channel:** `deliveryChannels` takes a `RecordingChannel` by channel
+  name, so a delivery can be observed through a real boot with no server and no broker. It replaces the
+  delivery role only - a route that `subscribe`s to a replaced channel will not find its trigger.

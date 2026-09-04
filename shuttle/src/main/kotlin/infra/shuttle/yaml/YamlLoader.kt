@@ -94,7 +94,14 @@ object YamlLoader {
         n.obj("channels")?.entries()?.forEach { (name, channel) ->
             channel.one(
                 "http" to { channels { http(name) { read(it) } } },
-                "nats" to { c -> channels { nats(name) { url = c.str("url"); credentials = c.secret("credentials"); subject = c.str("subject") } } },
+                "nats" to { c ->
+                    channels {
+                        nats(name) {
+                            url = c.str("url"); credentials = c.secret("credentials"); subject = c.str("subject")
+                            c.items("body")?.let { rows -> body = MappingTable(rows.mapNotNull { it.row() }) }
+                        }
+                    }
+                },
             )
         }
         n.obj("routes")?.entries()?.forEach { (name, route) -> route(name) { read(route) } }

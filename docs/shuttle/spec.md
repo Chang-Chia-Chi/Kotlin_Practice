@@ -824,7 +824,7 @@ shuttle:
           - { path: object, field: SOURCE_PATH }
           - { path: md5,    field: SOURCE_DIGEST }
     events:
-      nats: { url: nats://events.internal:4222, credentials: ${NATS_CREDS}, subject: images.done }   # subject: what notify publishes on; optional for a subscribe-only channel
+      nats: { url: nats://events.internal:4222, credentials: ${NATS_CREDS}, subject: images.done }   # subject: what notify publishes on; optional for a subscribe-only channel. `body:` rows as for http (ticket 35)
 
   routes:
     vendor-drop:                               # milestone 1
