@@ -239,11 +239,18 @@ because each was correctly deferred by the ticket that found it.
 | A file the consumer holds from a tick that has already completed stays in flight across `close()` | T13 | ~~Whoever builds `ackWait` (spec 7.2), or nobody~~ T19 | A tick still running at close withdraws everything it handed over; a tick that finished left its files with the consumer by T10's design, and nothing enumerates the in-flight set from outside. The process is ending, so the file is listed again on the next start either way; only `sftp_inflight` on a closed connector reads above zero until then. **T18:** the set is now enumerated from outside - `InFlightSet.outstanding()`, carried on every `PollCompleted.inFlight` - so a consumer can see exactly which files it still holds when the connector closes; T19 closes the seam |
 | A failing assertion before `close()` in a `runTest` that started a connector hangs the test instead of failing it | T9, seen by T13 | Whoever next writes one | The connector's scope shares the test scheduler but is not a child of the test's job, so `runTest` waits for a scheduler the housekeeper's `delay` loop never lets go idle. T13's connector test declares its readiness so the assertion cannot fail that way; a `try`/`catch` that closes the connector before rethrowing is the general shape |
 | ~~The breaker and `sftp_breaker_state` are per `SftpClient`~~ | T11 | ~~T14's binding~~ | **Ruled on by T14, and the same ruling covers R1 finding 6's `PoolMeters`.** The adapter produces one connector per application by construction - one `sftp.connector` prefix, one configuration, one produced bean - so neither collision can arise from it, and no guard was added for a shape the module cannot make. The colliding gauges themselves are untouched: a host that builds a second connector by hand still gets them, and the row below records what that costs |
-| A second connector for one endpoint on one registry silently reads the first one's pool gauges and breaker state | T14, restating T11 and R1 finding 6 | Whoever first hosts two connectors against one server | Registering a gauge whose id already exists returns the existing gauge, and `PoolMeters` and `ClientMeters` identify themselves by endpoint alone. Nothing throws; the numbers lie. The fix is a tag - the connector's name beside the endpoint - which is a change to spec 13's meter identity and therefore the maintainer's, not an adapter's. The adapter's own defence is that it cannot produce the second connector |
+| A second connector for one endpoint on one registry silently reads the first one's pool gauges and breaker state | T14, restating T11 and R1 finding 6; widened by T17 lens 2 M3 and lens 1 L5 | Whoever first hosts two connectors against one server, or one on demand | Registering a gauge whose id already exists returns the existing gauge, and `PoolMeters` and `ClientMeters` identify themselves by endpoint alone. Nothing throws; the numbers lie. The fix is a tag - the connector's name beside the endpoint - which is a change to spec 13's meter identity and therefore the maintainer's, not an adapter's. **T17 adds the sequential path, which is the module's own:** the gauges are registered in `SftpConnector.start` *before* the probe, so a **refused** start leaves them bound to a dead pool, and a host that closes one connector and starts another against the same endpoint on the same registry reads the first pool's numbers for the life of the process. An on-demand host meets this before it ever hosts two. The second fix, available inside the module, is removing the connector's meters in `close()` |
 | `SessionRegistry.lifetime()` draws its jitter from an unseeded `Random`, and the retry's jitter is Resilience4j's | T16 | Whoever next needs a replayable run of the connector | A seeded harness has to set `maxLifetimeJitter = 0.0` and `jitter = false` or its seed does not replay; a `Random` handed in with the clock would keep both the spread and the replay |
 | `sortBy` is named in spec 7.4 and is not built | T10 deviation 5, promoted by T17 | Whoever first needs a deterministic poll order | The listing is a `channelFlow` that never materialises a directory, and `sortBy` needs materialisation plus a design nobody asked for. Spec 7.4 now says it is not built; without this row the sentence and the reason part company at the next session |
 | `SeenRepository` is not built, and spec 8.3 promised it in the present tense | T10 deviation 10, found by T17's lens 6 | The first caller that cannot move or delete the files it has processed | Spec 8.3 now defers it and spec 14.5 says what such a caller does instead - filter above the source and ack what its own ledger already holds. Building it means a second ledger inside the connector against D14, so whoever needs it owns the persistence design with it |
 | `RenameClaim` is a row in spec 7.5's built-ins table and is not built | T10 deviation 10, promoted by T17 | Whoever builds spec 14.2's claim step | It proves nothing on Linux by spec 7.5's own caveat - a rename succeeds while a writer holds the file open - so as a readiness check it would be a check that passes. Its real use is the multi-consumer claim of spec 14.2, where it stops being a readiness check at all |
+| A long read is `IncompleteTransfer` that poisons and is retried, and D28 now says it should not be | T17 lens 5 M1 | The maintainer; `StagingArea`'s check and the class's disposition, one flag | **The spec leads the code on this row.** D28 is amended and spec 10.1 reads "poisons on a short read, answered and kept on a long one"; the code still poisons both. A file that grew since it was listed - an uploader still writing - is therefore downloaded three times on three fresh handshakes and counted three times against the breaker, and ten such files in one tick open it on a healthy server. The change touches T2's `FailureModelTest`, which is why no lens fix made it; the reviewer wrote the test out in `05-failure-semantics.md` |
+| The `.part` name is `<target>.part` and not unique per transfer | T17 lens 3 M1, with lens 2 L1 | The maintainer; needs a ruling against spec 6.3 and 14.1, not a line | A server listing `X.part` beside `X` has the two downloads collide: on POSIX the loser's `finally` deletes the winner's file from under its `Files.move`, so `X` is delivered holding the other file's bytes with a digest computed over bytes that are not on disk; on Windows the second open is a sharing violation, unclassified, and evicts a healthy session. The obvious fix - a random suffix - turns a fragment from a crashed run into litter nothing collects, against spec 6.3, and forecloses 14.1's resume design, which finds the local `.part` by name. Three answers: a random name plus a startup sweep; a deterministic unique name (the remote path digested); or refusing to stage a listed name inside the connector's own `.part` namespace |
+| A listed entry that is a symbolic link is indistinguishable from a regular file | T17 lens 3 M4 | The maintainer; it needs a policy, not just a field | An ordinary vendor can create `inbound/data.csv -> /etc/passwd`: READDIR reports lstat attributes, so it looks small and ordinary, the download follows the link server-side, and the ack moves or deletes the *link*, leaving no trace at the target. `MinAge` then judges the link's mtime while `SizeStable` stats the target's size - one file judged on two objects. `isLink` on `RemoteFile` is the cheap half; what the connector does with a linked entry is a configuration surface. "The server is chrooted and this is the infrastructure team's boundary" is a fine answer and belongs in the decision log, which does not say it |
+| A recursive walk flattens every subdirectory into one action folder and one staging directory | T17 lens 3 M5 | The maintainer; overlaps the T12 refusal seam above | With `recursive = true`, `inbound/a/report.csv` and `inbound/b/report.csv` both move to `inbound/done/report.csv` and both stage onto `<staging>/report.csv`: under `REFUSE` the second is refused for good and re-handed every tick, under `REPLACE` it silently destroys the first. `SftpClient`'s KDoc documents the collision for two *watched directories*; nothing documents it for the subdirectories `recursive` creates by itself |
+| `SftpEvent.FileSeen.download(localTarget)` does not check a caller-given target | T17 lens 3 M2 | Whoever next touches the source's public surface | The KDoc now carries the warning in the place a consumer reads it and names the call that reintroduces the pre-T11 traversal (`myDir.resolve(event.file.name)`), which is the report's "at minimum". Applying `stagingTargetFor`'s check to an explicit target is a behaviour change on a public surface: a caller naming a target outside the staging directory - the documented reason the parameter exists - would start being refused. Deciding whether the parameter means "somewhere else entirely" or "a different name in a safe place" is the decision |
+| The password lives as a `String` for the life of the process | T17 lens 3 L1 | The maintainer, with the next change to the auth surface | It cannot be zeroed, so it sits in the heap and in any heap dump. The transport half is already right: JSch is handed a fresh byte array per connect and zeroes its own copy on disconnect. A `CharArray` or a `() -> String` supplier changes the DSL and `AuthMethod.Password`'s masking together, which is why it is not worth churning for on its own |
+| `PollSkipped(OVERLAP)` is a WARN once per interval for as long as a consumer is slow | T17 lens 4 M9 | Whoever next owns `OverlapPolicy` - the same owner as the ticker-delay row above | Under the default `SKIP` with a consumer slower than the interval this fires every interval, while the breaker skip beside it is INFO. A rate limit needs a policy - once per run of skips, every nth, or a configurable level - which is a knob and not a message. The line is now greppable per endpoint (T17 lens 4 M7), so a limit can be added without changing what it says |
 | A second Quarkus host would want a properties mapping | T24 | That host | The adapter T14 built is deleted, so a Quarkus host binds the connector in its own words: build the DSL config, produce the `SftpConnector`, hand it the host's `MeterRegistry`, close it on the shutdown event. Shuttle already does exactly that. The second such host writes it a second time, and that is the moment a shared mapping is worth its weight - T14's entry is the design to read before rebuilding one |
 
 ### C6: spec Sec 5.3 amended - the middle cancellation tier is `keepAlive`
@@ -3913,3 +3920,451 @@ Toxiproxy's host ports, and a second connector's traffic through it is the likel
 - When the BREAK mechanism lands, the exactly-the-cap case is one decision in the listing (deviation
   1's repayment); the test to add is "a directory of exactly the cap completes with `truncated =
   false`", and the spec sentence to delete is 7.1's last.
+
+---
+
+## T17: Deep review: six perspectives by a session that wrote none of it
+
+Orchestrated on `claude-opus-5[1m]`. The six reviewers were fresh single-lens subagents that had
+written none of the module - four on `claude-fable-5-1` (concurrency, resource lifecycle,
+operational readability, failure semantics) and two on `claude-opus-5[1m]` (security, spec
+conformance). The six reports are in `docs/sftpconnector/review/`, each left exactly as its
+reviewer wrote it with an **Adjudication** section appended by the orchestrator: one row per
+finding, *Fixed* with the commit and the test that found it, *Recorded as a seam* with an owner,
+*Deferred with a decision*, or *Rejected* with a reason. Twenty-four commits on five branches,
+merged by `e9bb80d` (lens 6), `109c1b3` (lens 3), `6dcda68` (lens 4), `75cecb2` (lens 5) and
+`a844daf` (lenses 1 and 2), with `2f71bee` on top.
+
+**What was done:**
+
+Each lens read the whole module against one question, reported every finding with file:line, a
+severity and a reproduction or a failing test, and named an owner for what it did not fix. The
+orchestrator adjudicated: every Critical and High fixed in its own commit with the test the
+reviewer wrote out, run red first; every Medium fixed, recorded as a seam with an owner, or
+deferred with a decision entry; every Low listed with an owner. No earlier ticket's test
+assertion was weakened; two tests changed their *setup* and say so (lens 5 H2).
+
+| Lens | Reviewer | Critical | High | Medium | Low |
+|---|---|---|---|---|---|
+| 1 concurrency and invariants | Fable 5.1 | 1 | 1 | 2 | 6 |
+| 2 resource lifecycle | Fable 5.1 | 0 | 1 | 3 | 7 |
+| 3 security | Opus 5 | 0 | 2 | 6 | 4 |
+| 4 operational readability | Fable 5.1 | 0 | 3 | 13 | 10 |
+| 5 failure semantics | Fable 5.1 | 0 | 2 | 4 | 6 |
+| 6 spec conformance | Opus 5 | 0 | 2 | 9 | 6 |
+| **Raw** | | **1** | **11** | **37** | **39** |
+
+88 findings raw, 83 distinct: five are the same defect seen through two lenses - lens 1 C1 =
+lens 2 H1 (the write-blocked cut), lens 5 M3 = lens 4 H1 (the probe's misreported wire failure),
+lens 3 M6 = lens 4 M1 (`HostKeyRejected` says nothing), lens 3 M3 = lens 4 L6 (log forging),
+lens 1 L3 = lens 2 L5 (`cutLoose` reads `connection` outside the lock).
+
+Dispositions: the one Critical and all eleven Highs **fixed**, each with its own commit and test.
+Of the 37 Mediums, 26 **fixed** (two of those by documentation alone: lens 1 M1 and lens 4 M11),
+8 **recorded** as a seam or deferred with a decision entry, 3 **handled by another lens**. Of the
+39 Lows, 13 **fixed**, 2 **rejected** with a reason (lens 4 L7, the retry WARN stays at WARN;
+lens 4 L5, readiness checks are constructed before any connector exists, so there is no name to
+carry - recorded as a seam instead), 1 no action (lens 4 L10, no citations found in any runtime
+message, which is the intended state), the rest recorded with owners. One further fix was
+**rejected**: lens 1's adjudication judged lens 5's L1 (a cancelled acquire evicting a healthy
+session) not a safe one-liner, because keeping the session would have to exclude a dial that never
+landed and a validation the ladder cut, and T4's `a session that opens into a cancelled caller is
+closed` pins the current behaviour. No finding above Low was judged wrong by any lens.
+
+**The one Critical and the Highs:**
+
+- **C1 (lens 1) = H1 (lens 2): a call blocked writing to a peer that stopped reading TCP was
+  bounded by none of the three cancellation tiers.** `Session._write` encodes and writes inside
+  `synchronized (lock)`; `Session.disconnect()` hangs up on every channel *first*, and each hang-up
+  is a close packet behind that same lock, so `abort()` parked behind the stalled writer and never
+  reached `socket.close()`. The keepalive probe is a write behind the same lock, so tier 2 could
+  not fire either, and tier 1 is never asked because the thread is inside a chunk. Three threads
+  then waited for the kernel's TCP give-up: the io thread, JSch's reader thread, and whoever called
+  `abort()` - which under `cutEverythingHeld` is the closing thread, so `close()` overran I9 and
+  spec 11.2 by minutes. Both reviewers read it off the pinned `jsch-2.28.7-sources.jar` rather than
+  from memory, and both found the same fix inside the library's API. `fc20af6`: the adapter keeps
+  the socket JSch dialled through a `SocketFactory` set on the session - honoured on the direct
+  path and through `ProxyHTTP` alike, and it then owns the connect timeout, since setting a factory
+  bypasses JSch's own timed dial - and `abort()` closes that socket before `session.disconnect()`.
+  The testkit gained the fault that stages it (`LoopbackConnectProxy.blackHoleClientAfter`, which
+  stops reading from the client; `stall()` deliberately kept reading, which is why no T8, T15 or
+  T16 measurement could have found this). Tests: `CancellationLadderTest.a cancelled upload on a
+  tunnel that stopped reading is cut within the grace` and `ShutdownAgainstServerTest.I9_closing
+  while an upload is black-holed on a full send buffer returns within the bound`. Recorded as
+  **D47**; spec 5.3 and T13's "a cut does not wait for anything" amended.
+
+- **H1 (lens 1): a listing's cooperative tier watched the channel, not the coroutine.** `handOn`
+  was `trySendBlocking`, whose inner `runBlocking` observes only the channel; the channel is closed
+  by the *collector* leaving, not by the time limiter cancelling the lease from inside the call. So
+  a slow collector on `SftpClient.list` left the io thread parked, the grace ran out, a healthy
+  session was cut apart and counted `reason=poisoned`, and the collector - not the limiter - was
+  the only bound. `51caf60`: `handOn` also watches the lease's job (captured in the `attempting`
+  block) and parks in 50 ms slices, so a cancelled listing answers `STOP` within a slice and JSch
+  closes the handle cleanly. Test: `CancellationLadderTest.a listing whose collector stalls is
+  stopped by the time limiter without destroying its session`. The same commit folds in ticket 18's
+  request, because it shares `SftpSource.walk`: `filesUnder` caps `maxFilesPerPoll` through a
+  shared `FileBudget` and each listing's own `maxEntries` instead of a `.take`, so a capped
+  listing records `sftp_op_seconds{op=list,result=ok}` rather than `cancelled`
+  (`SftpSourceTest.a recursive poll capped by maxFilesPerPoll records every listing as ok`).
+
+- **M2 (lens 1), the sweep reservation - the one Medium worth reading beside the Highs.**
+  `sweep` reserved room for its spares *before* hanging up on the round's retired sessions, and a
+  retired idle session holds no pool place, so its hang-up could queue for a slot while the
+  reserved spares sat registered as `Connecting` with their permits taken - `sftp_pool_active`
+  counting them and a refused caller reading "most of the pool is stuck opening sessions" about a
+  pool that was stuck hanging up. `ddad234`: dial first, hang up after, both under a
+  `NonCancellable` finally that gives the rooms back before the closes, preserving R1 finding 2.
+  Test: `HousekeeperTest.a round whose hang-up waits does not hold room it has not dialled`.
+
+- **M1 (lens 2), the probe marker.** A start-up whose marker rename lost its reply, or that was
+  cancelled after the marker was written, left `.sftpconnector-probe-<name>-<uuid>` in the watched
+  directory, and the lister had no name filter, so the next start handed it to the consumer as a
+  zero-byte file. `192bd4d`: `tidyAway` runs under `NonCancellable`, and `SftpSource.filesUnder`
+  skips the whole marker prefix, so a marker left by a dead session - whoever left it - is inert.
+  Tests: `StartupProbeMarkerTest.a probe cancelled after the marker is written leaves no marker`
+  and `SftpSourceTest.a marker left by a dead session is never handed to the consumer`.
+
+- **H1 (lens 3): a listed name was never required to be one path component, and the path reached
+  `rename` and `delete` unchecked.** The local join was the best-built guard in the module and the
+  reviewer could not defeat it; twenty lines away the same server-supplied string went back to the
+  server with no check, and the asymmetry was the defect. A server answering READDIR for `inbound/`
+  with `../../../home/etl/.ssh/authorized_keys` had the account's own key file moved into a folder
+  it can read, or unlinked. `ee2f891`: `JschConnection.list` builds an entry's path only when the
+  filename is one segment - not empty, not `.` or `..`, no separator, no control character - and
+  anything else is **skipped with one WARN**, not failed, because failing would cost the whole poll
+  of that directory on every tick and hand the party who names the entry the power to decide when
+  the connector runs (spec 7.4 and 10.2). The same rule reaches `realpath`, whose answer becomes
+  the watched directory every later join is built on. Tested with a Mockito stand-in for
+  `ChannelSftp`: `FakeSftpTransport.list` drops anything holding a separator before it reports it,
+  so no existing test could have caught this (`JschListingNamesTest`).
+
+- **H2 (lens 3): the shipped default staging directory was the shared JVM temp directory, and the
+  partial file followed symlinks.** `<tmpdir>` on Linux is mode 1777 and the `.part` name is the
+  server's choice, so another local account could plant a symlink at a predictable path and have
+  the download written through it. `c42bda0`, both halves: the partial is opened `CREATE_NEW +
+  WRITE + NOFOLLOW_LINKS`, and a `.part` found first is taken away only when reading it *without*
+  following links says it is a regular file - anything else is refused with `UnsafeFileName`
+  (`ACCEPT_THE_REFUSAL`) and **left where it is**, because the connector did not put it there and
+  clearing it would remove the only evidence that somebody did. The default is now one
+  `Files.createTempDirectory("sftp-connector-")` per process: the platform makes it owner-only
+  where it can say so, and the random name is the half that holds where it cannot. No T6 staging
+  test needed its expectation changed - nothing asserted the default *was* `java.io.tmpdir`.
+  `StagingSafetyTest`, four tests, one of which skips off POSIX.
+
+- **M3 (lens 3) = L6 (lens 4), log forging.** A vendor who can name a file can name it with a
+  newline - legal on every POSIX filesystem, no server compromise needed - and forge a record in
+  the connector's log. `6482d1f` guards at the *rendering*, not the input, because the server's own
+  error text goes the same way and there is nothing to refuse it for: `String.onOneLine()` escapes
+  every C0 control as an escape a reader can undo by eye, and two places use it - `Attempt.describe`,
+  the one place a failure's message is assembled (so every class in the hierarchy is covered by one
+  change), and `JschErrorMapper.unknown`'s WARN, the one line that prints text nobody has read.
+  H1 had already closed the listing half at source. `LogForgingTest`.
+
+- **H1 (lens 4) = M3 (lens 5): the start-up probe reported a transient wire failure as a
+  configuration fault with a path-spelling remedy.** `checking` caught every `SftpException`, so a
+  `SessionLost` during `realpath` told the operator to fix the spelling of a path that is fine, as
+  a `Fatal`. `73782e3`: only failures the server *answered* become a `ConfigurationError`, read off
+  `Disposition.RETRY_ON_THE_NEXT_TICK` rather than a class list, so a class added later sorts
+  itself. `ServerFailure` stays converted deliberately - the featureless status is what a
+  cross-filesystem rename is refused with, which is why `proveTheMoveInto` exists. Spec 11.1 and
+  10.2 do not conflict: the start-up still refuses and the pool is still closed on the way out;
+  what changed is that the failure now says why. Test: `SftpConnectorTest.a session lost during the
+  probe is reported as itself, not as a path to respell`.
+
+- **H2 (lens 4): a consumer's exception inside `consume` was swallowed with no stack.**
+  `reason.toString()` went in as a formatted argument, so slf4j printed no trace, and under
+  `redeliver = true` the same stackless line repeated every tick. The nack itself is deliberate
+  (T12, spec 7.2) and is unchanged; `f5c64a7` passes the throwable as the trailing argument. Test:
+  `SftpWatchTest.the consumer's exception is logged with its stack when consume nacks`.
+
+- **H3 (lens 4): circuit-breaker state transitions were never logged.** When the breaker opened,
+  the only traces were the gauge and, if a watch was running, an INFO per skipped tick; a caller
+  using `SftpClient` directly got `CircuitOpen` and silence. `fcb7421`: one WARN per
+  `onStateTransition`, naming the endpoint and both states in spec 9's words ("half-open", not the
+  library's `HALF_OPEN`), with the consequence sentence only for the states that refuse calls.
+  Test: `BreakerTransitionsTest.the breaker names the endpoint and the states it moved between
+  when it opens`.
+
+- **H1 (lens 5): the breaker opened on *slow successes*, which spec 9 never lets it count.**
+  Resilience4j's inherited `DEFAULT_SLOW_CALL_DURATION_THRESHOLD` is 60 s and its slow-call rate
+  threshold is 100 %, so a window of successful transfers each over a minute opened the breaker
+  with no failure having occurred - and the measured span includes the wait for a transfer permit,
+  because the transfer limit runs inside the breaker. A pipeline moving large files on a slow link
+  throttled itself. `1b1acc7`: the slow-call rule is switched off with the longest threshold the
+  library takes rather than tuned to `transferTimeout`, because no finite bound makes "a success is
+  never a failure" true when the span includes a queue spec 9 bounds only by the transfers ahead of
+  it; and the duration is measured on the injected `Clock`, in nanoseconds because
+  `resilience4j-kotlin` 2.4.0 passes `NANOSECONDS` to `onResult` whatever unit the config declares
+  (read off the bytecode - a millisecond timestamp measured every call at microseconds and hid the
+  defect). Test: `RetrySemanticsTest.a success slower than the library's own minute is not held
+  against the server`, on virtual time. Spec 9 is unchanged; the code was brought to it.
+
+- **H2 (lens 5): under `REPLACE`, a retry after a lost reply adopted the file it was meant to
+  replace.** `holdsTheMovedFile(size)` answered yes for *any* file of the expected size, and under
+  `REPLACE` the target is by the policy's own premise usually occupied by yesterday's same-size
+  file. So a lost reply on the first rename reported the ack as success, left the source in the
+  inbox, and the next tick processed it again: one file processed twice, one ack that lied, nothing
+  in the log. `d0e81bf`, recorded as **D46**: the discriminator is the source's size *and*
+  modification time as listed - a rename keeps both, SFTP reports mtime in whole seconds, and both
+  readings are the server's own stat, so listing-to-rename skew does not enter - and the retry
+  looks at the *source* first, because the listed file still there settles it whatever look-alike
+  the target holds. `rename` now takes the `RemoteFile` as listed rather than a bare size; the
+  source passes its own, a caller without one pays the same single stat as before, and every caller
+  in the reactor was moved. Tests: `RetrySemanticsTest.I15_under REPLACE a file already at the
+  target with the source's size is not taken for the landed one` and `..a look-alike at the target
+  does not outweigh the listed file still at the source`. Two tests changed their **setup** and say
+  so (C5's shape, assertions untouched): `PartitionMatrixTest.P3` and
+  `ResilienceAgainstServerTest.I11_..` list the file through the client before arming their faults,
+  since a stat inside the try would have been the request the reset hit.
+
+- **M2 and M4 (lens 5), the two Mediums that were bugs rather than knobs.** `0c9adc9`: `watch`'s
+  catch could not tell a cancelled *producer* from a `CancellationException` the collector's own
+  block threw through `emit`, so a `withTimeout` the consumer let escape ended the pipeline
+  *normally*, logging that the connector had stopped it - and the process exited 0 with the failure
+  lost. Only the receive is inside the catch now (`SftpWatchTest.a timeout the collector lets out
+  of its own block ends the watch with that timeout, not normally`). `5c83999`: a rename whose
+  reply was lost on the **last** permitted try was reported as failed with the knowledge that would
+  settle it thrown away; `SftpClient.rename` now makes the look the next retry would have made,
+  once, on a fresh session behind the breaker through `Resilience.once` - so an open breaker
+  refuses it and the lost reply is reported as it was (`RetrySemanticsTest.a rename whose reply is
+  lost on the last permitted try is looked into before it is reported`).
+
+- **S1 (lens 6): the open-seams table told a maintainer the shipped `SizeStable` waits a whole
+  poll, and asked for a ruling C11 had already made.** The row survived the pre-T11 hotfix that
+  applied it. `bdcc729` strikes it through with what closed it. The reviewer ranked this above
+  every other conformance finding, and the reason is the table's purpose: a stale row on a table
+  that exists to survive session boundaries costs the next maintainer a decision they have already
+  taken, which is worse than an absent row.
+
+- **S2 (lens 6): spec 8.3 promised a `SeenRepository` SPI in the present tense, and there is none,
+  anywhere, with no seam and no deferral.** The only record was one inaccurate clause in T10
+  deviation 10. Not built (`9f9e1f0`): an interface with one implementation, no consumer in the
+  Sec 1.1 pipeline, and an in-memory LRU that filters nothing after the restart that is the whole
+  case for it, would be a second ledger inside the connector against D14. Spec 8.3 now defers it to
+  a new spec **14.5**, which says what such a caller does instead - filter above the source and ack
+  what its own ledger holds, which spec 7.2 already permits - with a seams row owned by *the first
+  caller that cannot move or delete files*.
+
+**Merge decisions made by the orchestrator:**
+
+Three places where two lenses' work met and the orchestrator, not a reviewer, chose.
+
+1. **`JschErrorMapper.unknown` logs `raw.onOneLine()` and then the throwable.** Lens 3's M3 wanted
+   the server's raw text escaped; lens 4's L3 wanted the WARN to carry path, attempt and stack.
+   Both landed on one line, in that order, and `Unknown.rawMessage` stays raw as a property: it is
+   data for a caller, and it was the *rendering* that was the defect.
+2. **`LogForgingTest` asserts on the connector's own line, not on the backend's stack rendering.**
+   A throwable now trails that WARN (lens 4 L3), and a logging backend renders a stack trace over
+   many lines; asserting "no newline in the captured output" would have been an assertion about
+   slf4j's appender. The test pins the connector's message and the escaped text inside it.
+3. **The D46/D47 renumber** (`2f71bee`). Both T17 batches appended a D46 from the same base. The
+   failure-semantics batch merged first and keeps D46 (the rename discriminator); the ladder
+   batch's decision (the forced tier closes the retained socket first) became **D47**, moved after
+   D46 in the log, with its references in spec 5.3, the T13 note, reports 01 and 02 and one KDoc
+   line renumbered.
+
+**Spec and decision-log changes:**
+
+- **D46** (new): a rename retried after a lost reply tells its own landed file by the source's size
+  **and** modification time as listed, and reads the listed file still at the source as "not
+  landed". **D47** (new): the forced cancellation tier closes the retained socket before it
+  disconnects the session, so all three tiers bound a blocked call - a write as much as a read.
+  **D45** (new, from lens 6): the shipped readiness default is a heuristic with a stated blind
+  spot, and spec 16 item 1 stays open until the upstream team answers.
+- **D28 amended** (lens 5 M1, taken as the maintainer's decision): its poisoning argument is true
+  of a short read and not of a long one - a socket cannot deliver bytes the file did not have, so
+  `count > expectedSize` is the server answering honestly about a file that grew since it was
+  listed. A long read is `IncompleteTransfer` with `poisons = false`; only a short read poisons.
+  Spec 10.1's row reads "poisons on a short read, answered and kept on a long one". **The code has
+  not been changed: the spec leads it on that row** (see the maintainer's list).
+- Spec **5.3** carries D47 and says `abort()` runs on the cancelling caller's own thread under
+  `NonCancellable`; spec **5.4** now lists the four message prefixes and the `java.net.` marker the
+  mapper really matches, says the host-key and proxy failures are matched by exception *type*, and
+  points at T2's measured table as the authority (`timeout`, which matched nothing, is gone).
+  Spec **6.1**'s rename row and spec **8.3** carry D46's discriminator. Spec **7.2** says the nack
+  action does not run for a cancelled collector's files, with T10 deviation 3's reason and the
+  `outcome=cancelled` label. Spec **7.4** says `sortBy` is not built and **7.5** marks `RenameClaim`
+  "not built; see 14.2". Spec **10.1** and **10.2** gain `UnsafeFileName` and the paragraph
+  `ACCEPT_THE_REFUSAL` never had; its 10.2 row reads *"Raised to whoever called `download`; the
+  poll is untouched"* rather than the reviewer's proposed "Emits `PollFailed`", because that is
+  what the code does. Spec **11.1** step 3 now says `minIdle` is filled on the housekeeper's first
+  round, one `housekeepingInterval` after start-up, citing T9 deviation 3. Spec **12**'s validation
+  list carries the rules the builder actually enforces and names `ConnectorDsl.build()` as the
+  authority. Spec **13** gains **"Absent is not zero"**: which meters register lazily, which
+  eagerly for every label value, and how to write an alert that fires on an absent series. Spec
+  **14.1** says `openRead` is the streaming download and is not built; **14.5** is new. Spec
+  **15** notes that D24 and D25 were withdrawn during the design review and are not reused.
+- **Spec 16:** item 2 is struck (T9's probe and its three `StartupAgainstServerTest` cases); item
+  3's closure note now points at the amended 5.4 and T15's tenth wording; **item 1 is the only one
+  left open**, and D45 records that no code can close it.
+- **I11**'s wording follows D46 - the target holding the file *as listed*, size and modification
+  time, not size alone. **I15** now bounds its phantom-failure clause by the retry budget and the
+  breaker (T16's wording, applied by lens 6 S8), and lens 5's M4 fix narrows what is left: the look
+  runs on the last try too, so the residual is a lost reply whose *look* also failed or was refused
+  by an open breaker. I15 also finally has its named test - `AdversaryTest.I15_every acked file is
+  at the ack target and no landed move is reported as failed`, one fixed seed end to end, verified
+  red by breaking `reconcile`'s expected ledger (`e04c6bc`); the per-operation assertions stay
+  where they are.
+
+**What the build is, and what it is not:**
+
+It is a module whose builders left a trail, and six independent readings did not find that trail
+wrong. Lens 6 checked every one of the then-42 decisions and found none written down and
+forgotten; every metric name and tag set matches spec 13, every configuration key maps three ways,
+and fourteen of fifteen invariants had a named test before this ticket - fifteen now. R1's and R2's
+fixes all held under re-tracing: the orphan close on a cancelled handshake, the round's reserved
+spares given back in a `finally`, the granted flag in `admit`, the escaping at the transport seam,
+the `REPLACE` clearing rule, `RenameTries`' "reached the server", the loan that ends under
+`NonCancellable`. The permit is released exactly once on every exit path any lens could trace;
+every `catch (Throwable)` rethrows; every `catch (Exception)` is preceded by a cancellation
+rethrow. The failure model is one mechanism - the retry predicate reads the disposition and the
+breaker predicate reads `countsAgainstTheBreaker`, with no class list anywhere - so spec 10.2's
+table is true row by row rather than by coincidence. Secret handling is clean: the password
+reaches no renderer and `Attempt` is structurally incapable of carrying one. Host-key pinning under
+`Strict` is enforced on every reconnect, not just the first connect, and fails closed on a missing
+or empty known-hosts file.
+
+It is not a build that has met a hostile network or a hostile server. The one Critical and the two
+*behavioural* Highs came from reading a library's source or a threat model, not from a test that
+went red on its own: the write-blocked cut needed a fault the testkit did not have until this
+ticket, the traversal needed a server the fake is structurally incapable of simulating, and the
+slow-call rule needed the library's bytecode. What that says about the harness is now recorded:
+`LoopbackConnectProxy.stall()` kept reading by construction, so every T8, T15 and T16 ladder
+measurement was a read-side stall; `FakeSftpTransport.list` drops any name holding a separator;
+the adversary has no socket. The one seam on the table that is still purely theoretical is the
+`MutableStateFlow.value` row - lens 1 grepped main and test and confirmed that nothing collects
+`PoolEntry.state` or `Lease.state`, every reader takes `.value`, so no foreign code runs inside the
+registry's critical section today and the row is a rule for whoever first collects one. It is also
+not a build with a second host: the Quarkus adapter was deleted during this ticket by another
+session (T24), so what a host does with the connector is now written by that host.
+
+**What the maintainer must decide before production:**
+
+1. **`Fingerprint` pinning** (spec 5.2's third policy, the T1 seams row). Lens 3's verdict puts it
+   first, and its argument is about reachability rather than the missing feature: an operator who
+   has the server's fingerprint but no known-hosts file has only `AcceptAll` available, and
+   `AcceptAll` is the configuration under which lens 3's H1 input becomes available to any network
+   attacker rather than requiring a compromised server. Pinning is what keeps that precondition off
+   the table for a deployment that cannot manage a known-hosts file.
+2. **Whether `AcceptAll` needs a gate beyond the build-time WARN** - a separate acknowledgement
+   property, or a refusal outside a named profile. D8 accepted the risk; what D8 did not decide is
+   whether the risk should be one property away from a copy-pasted properties file. Under
+   `AcceptAll` no `HostKeyRejected` can ever be raised, so a server whose key changes mid-run
+   produces no signal at all, at any level. "No gate" is a fine answer; it should be a decision.
+3. **The `reason=poisoned` label covering cut sessions.** A dashboard cannot tell "the server
+   poisoned it" from "we cut it to rescue a thread", and the two have different remedies. Spec 13
+   fixes five labels and the ground rules forbid a sixth, so the WARN line is the only place that
+   distinction lives. The seams row is merged (lens 6 S12) and open.
+4. **`ackWait`** - spec 14.3 says it is "specified but off"; it is **not built**, and the
+   in-flight seam that depends on it ("a file the consumer holds from a completed tick stays in
+   flight across `close()`") is open with the same owner.
+5. **D28's code change for a long read** (lens 5 M1). The decision is recorded and the spec is
+   amended; the code is not, because it touches T2's `FailureModelTest`, which is outside a lens
+   fix. Until it lands, a file that grew since it was listed is retried three times on fresh
+   sessions and counted three times against the breaker, and ten such files in one tick can open
+   the breaker on a healthy server. The change is one flag on `IncompleteTransfer`'s disposition
+   plus `StagingArea`'s check; the reviewer wrote the test out.
+6. **The `.part` naming seam** (lens 3 M1 with lens 2's L1). A server that lists `X.part` beside
+   `X` can substitute the bytes delivered under `X` when both are downloaded concurrently, and the
+   digest is then computed over bytes that are not the ones on disk. This is *not* the one-line fix
+   it looks like: a random partial name turns a fragment from a crashed run into litter nothing
+   collects, against spec 6.3, and forecloses 14.1's resume design, which reads the local `.part`
+   length by name. Three answers are on the table - a random name plus a startup sweep of the
+   staging directory; a deterministic unique name (the remote path digested, which stays findable);
+   or refusing to stage a listed name that collides with the connector's own `.part` namespace,
+   which is one line and the same shape as `stagingTargetFor`'s existing refusals but denies a
+   legitimately named `*.csv.part`.
+7. **Meter identity and gauge shadowing** (lens 2 M3 with lens 1 L5, added to the existing seams
+   row). The row named two *concurrent* connectors; the lenses added the sequential path, which is
+   the module's own: gauges are registered in `SftpConnector.start` before the probe, so a
+   **refused** start leaves gauges bound to a dead pool, and a host that closes one connector and
+   starts another against the same endpoint on the same registry reads the first pool's numbers for
+   the life of the process. An on-demand host hits this first. The fix is a `name` tag beside
+   `endpoint` - spec 13's meter identity, and therefore the maintainer's - or removing the
+   connector's meters in `close()`.
+8. **The `PollSkipped(OVERLAP)` WARN rate** (lens 4 M9). Under the default `SKIP` with a consumer
+   slower than the interval, this fires once per interval for as long as the slowness lasts, while
+   the breaker skip beside it is INFO. Rate-limiting it needs a policy (once per run of skips?
+   every nth? a configurable level?), which is a knob and not a message. The line is at least
+   greppable per endpoint now, so a limit can be added without changing what it says.
+9. **Whether the connector models symbolic links at all** (lens 3 M4). A vendor with ordinary write
+   access can create `inbound/data.csv -> /etc/passwd`; READDIR reports lstat attributes, so it
+   looks like a small ordinary file, the download follows the link server-side, and the ack moves
+   or deletes the *link*. `MinAge` then judges the link's mtime while `SizeStable` stats the
+   target's size - one file judged on two objects. `isLink` on `RemoteFile` is the cheap half; what
+   the connector *does* with a linked entry is a configuration surface. "The server is chrooted and
+   this is the infrastructure team's boundary" is a fine answer and deserves a decision entry,
+   which the spec does not currently have.
+10. **Whether a recursive walk may flatten subdirectories** (lens 3 M5). With `recursive = true`,
+    `inbound/a/report.csv` and `inbound/b/report.csv` both move to `inbound/done/report.csv` and
+    both stage onto `<staging>/report.csv`. Under `REFUSE` the second is refused for good and
+    re-handed every tick (the T12 seam); under `REPLACE` it silently destroys the first. The
+    two-watched-directories case is documented; the subdirectories case that `recursive` creates by
+    itself is not.
+11. **Whether `FileSeen.download(localTarget)` should check a caller-given target** (lens 3 M2).
+    The KDoc now carries the warning in the place a consumer reads it and names the call that
+    reintroduces the defect (`myDir.resolve(event.file.name)`). Applying the check is a behaviour
+    change on a public surface: a caller naming a target outside the staging directory - the
+    documented reason the parameter exists - would start being refused.
+12. **The password as a `String`** (lens 3 L1). It cannot be zeroed, so it sits in the heap and in
+    any heap dump for the life of the process. The transport half is already right: JSch is handed
+    a fresh byte array and zeroes its own copy. A `CharArray` or a `() -> String` changes the DSL
+    and `AuthMethod.Password`'s masking together, so it is worth doing with the next change to the
+    auth surface. (Lens 3's L4, the unmarked SmallRye secret property, went with the Quarkus
+    module.)
+13. **Spec 16 item 1, the producer-side completeness convention** - unchanged by this review and
+    unclosable by code (D45). `markerFile(suffix)` is where the upstream team's answer lands.
+14. **`PartitionMatrixTest.P5`'s 4 s bound.** Observed to miss by tens of milliseconds twice on
+    2026-09-04 while other builds were running on the same machine, and to pass on a quiet one.
+    This is a wall-clock bound on a test that drives a real embedded server through a proxy, so it
+    is a harness tolerance under machine load and **not a code defect**; whoever runs the reactor
+    on a loaded CI box should widen the bound rather than chase it.
+
+Lens 5's remaining Lows are recorded with owners and belong on the same list at a lower altitude:
+`SSH_FX_NO_CONNECTION` and `SSH_FX_CONNECTION_LOST` map to `ServerFailure` where two rows to
+`SessionLost` would cost nothing (L4); a caller's `list` filter that throws is reported as
+`ServerFailure "status 4:"` with an empty message and blames the server for a caller's bug (L3);
+`openForTheShelf` swallows an `Error` where `close(connection)` deliberately lets one through (L2);
+a cancelled acquire evicts the healthy session it had just been given, counted `poisoned` (L1); and
+with the defaults the breaker cannot judge before twenty tries, which reads differently on an
+hourly pipeline than at P5's one second (L5). Lens 4's M12 (a Quarkus boot line describing the
+effective configuration) is **moot**: the module it named was deleted by T24 during this ticket.
+
+**Verification:**
+
+Final counts on the merged tree at `2f71bee`: **core 68 tests, 1 skipped** (the staging symlink
+test needs a privilege Windows does not grant by default, so it carries an assumption; the same
+refusal is staged platform-independently by a directory at the partial file's name, which runs
+everywhere and was red before the fix), **testkit 217 tests**, **0 failures**. The `quarkus`
+module and the six tests T14 counted are gone (T24), so the reactor is two modules.
+
+The trap for whoever runs this next: `-pl sftpconnector/testkit` **alone** compiles the testkit
+against the stale `sftpconnector-core` jar in `~/.m2`, so a core change that a testkit test proves
+appears to fail for reasons that are not there. Run core and testkit together
+(`-pl sftpconnector/core,sftpconnector/testkit`, or the whole reactor).
+
+**Deviations:**
+
+1. **Lens 4's report was not written by this ticket's reviewers.** `04-operational-readability.md`
+   arrived the day before, written by a session this one cannot identify, with no adjudication. It
+   was read, checked against the code, and adjudicated here as if it had been commissioned - every
+   finding answered Fixed, Seam or Rejected in the same form as the other five. Its line numbers
+   differ from lens 3's in one file, which lens 3's report calls out.
+2. **Fable subagents hit an account session limit mid-batch and were relaunched fresh.** No
+   reviewer or fixer resumed a truncated context; each relaunch re-read its report and its files.
+   The dispositions in the reports are what survived, which is why every adjudication row names a
+   commit and a test rather than a conversation.
+3. **The untracked review reports were committed by their fix branches**, not by a separate
+   documentation commit: each report file first appears in its own lens's first fix commit (for
+   example `05-failure-semantics.md` in `1b1acc7`). The Adjudication sections were appended later,
+   by the batch's final commit.
+4. **Lens 1's H1 fix carries work from ticket 18** - the `FileBudget` cap on `maxFilesPerPoll` -
+   because it shares `SftpSource.walk` with lens 2's marker skip and the three would have
+   conflicted. Declared in that commit and here; ticket 18 owns whatever it did not cover.
+5. **Parallel sessions merged connector tickets 21 and 24 into `misc/ai_gen` while T17 was
+   running** (`be11298` and `b3d862a`). Neither is T17's work and neither is described here; T24's
+   deletion of the Quarkus module is the reason lens 4's M12 is moot and the reason the counts
+   above name two modules.
+6. **Ticket 16's status line was still `ready-for-agent`** although T16's entry has been in this
+   log since before T17 started. Set to `done` with this entry. Its checkboxes are left unticked:
+   T16's own entry is the record of what it proved, and this session did not re-verify each box.
