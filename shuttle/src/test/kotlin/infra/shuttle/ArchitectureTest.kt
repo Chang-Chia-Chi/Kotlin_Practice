@@ -37,19 +37,20 @@ class ArchitectureTest {
 
     @Test
     fun `each adapter depends on core and its own technology only`() {
-        adapter("yaml", "com.fasterxml.jackson..")
-        adapter("sftp", "sftp.connector..")
-        adapter("s3", "software.amazon.awssdk..")
-        adapter("http", "java.net.http..")
-        adapter("nats", "io.nats..")
-        adapter("jdbi", "org.jdbi..", "java.sql..", "javax.sql..")
+        adapter("yaml", "YamlLoader", "com.fasterxml.jackson..")
+        adapter("sftp", "SftpPollSource", "sftp.connector..")
+        adapter("s3", "S3Target", "software.amazon.awssdk..")
+        adapter("http", "HttpChannel", "java.net.http..")
+        adapter("nats", "NatsChannel", "io.nats..")
+        adapter("jdbi", "JdbiStateStore", "org.jdbi..", "java.sql..", "javax.sql..")
     }
 
-    private fun adapter(name: String, vararg technology: String) {
+    /** [subject] is a class the package must still hold: a renamed or emptied package would otherwise pass unchecked. */
+    private fun adapter(name: String, subject: String, vararg technology: String) {
+        assertTrue(all.contain("infra.shuttle.$name.$subject"), "the $name adapter's sentence has a subject")
         classes().that().resideInAPackage("infra.shuttle.$name..")
             .should().onlyDependOnClassesThat().resideInAnyPackage("infra.shuttle.$name..", *coreAllowed, *technology)
             .because("an adapter names one technology and core; nothing else")
-            .allowEmptyShould(true)
             .check(all)
     }
 

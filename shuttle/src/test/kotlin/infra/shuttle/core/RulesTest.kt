@@ -119,10 +119,6 @@ class RulesTest {
         assertEquals(listOf(15), violated(config(vendorDrop = { process = process then custom("imageResizer") })))
 
     @Test
-    fun rule16_every_mapping_field_is_in_the_vocabulary() =
-        assertEquals(listOf(16), violated(config(downstream = { body = mapping { row(MappingRow("x", field = "NOPE")) } })))
-
-    @Test
     fun rule17_every_mapping_attribute_is_declared_by_a_processor_in_that_route() =
         assertEquals(listOf(17), violated(config(downstream = { body = mapping { "orderNumber" fromAttribute "orderNo" } })))
 
@@ -146,7 +142,7 @@ class RulesTest {
 
     @Test
     fun rule19_a_mapping_row_has_exactly_one_source() =
-        assertEquals(listOf(19), violated(config(downstream = { body = mapping { row(MappingRow("x", field = "TRANSFER_ID", value = "v")) } })))
+        assertEquals(listOf(19), violated(config(downstream = { body = mapping { row(MappingRow("x", field = Field.TRANSFER_ID, value = "v")) } })))
 
     @Test
     fun rule20_success_and_retry_status_sets_are_disjoint() =
@@ -154,19 +150,19 @@ class RulesTest {
 
     @Test
     fun rule21_digest_is_md5_sha256_or_sha1() =
-        assertEquals(listOf(21), violated(config(downstream = { body = mapping { row(MappingRow("x", field = "DIGEST", digest = "crc32")) } })))
+        assertEquals(listOf(21), violated(config(downstream = { body = mapping { row(MappingRow("x", field = Field.DIGEST, digest = "crc32")) } })))
 
     /** D49: one digest per route, so a row asking for another algorithm can only ever render missing; rule 26 says so at boot. */
     @Test
     fun rule26_a_mapping_digest_row_asks_for_the_algorithm_its_route_computes() =
-        assertEquals(listOf(26), violated(config(downstream = { body = mapping { row(MappingRow("x", field = "DIGEST", digest = "sha256")) } })))
+        assertEquals(listOf(26), violated(config(downstream = { body = mapping { row(MappingRow("x", field = Field.DIGEST, digest = "sha256")) } })))
 
     @Test
     fun rule26_accepts_the_row_when_the_route_overrides_the_process_default() =
         assertEquals(
             emptyList<Int>(),
             violated(config(
-                downstream = { body = mapping { row(MappingRow("x", field = "DIGEST", digest = "sha256")) } },
+                downstream = { body = mapping { row(MappingRow("x", field = Field.DIGEST, digest = "sha256")) } },
                 vendorDrop = { digest = Digest.SHA256 },
             )),
         )

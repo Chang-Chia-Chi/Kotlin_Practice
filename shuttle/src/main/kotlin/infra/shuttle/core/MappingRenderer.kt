@@ -25,7 +25,7 @@ class MappingRenderer(private val providers: (String) -> Provider? = { null }) {
         val provided = HashMap<String, JsonNode>()
         for (row in table.rows) {
             val raw: Any? = when {
-                row.field != null -> field(Field.valueOf(row.field), transfer, moment, attempt, row.digest)
+                row.field != null -> field(row.field, transfer, moment, attempt, row.digest)
                 row.attribute != null -> transfer.attributes[row.attribute]
                 row.provider != null -> provided.getOrPut(row.provider) {
                     providers(row.provider)?.provide(transfer) ?: throw MappingFailure(row.path, "no provider named ${row.provider}")
@@ -104,7 +104,9 @@ class MappingRenderer(private val providers: (String) -> Provider? = { null }) {
         private val mapper = ObjectMapper()
 
         /**
-         * Spec 9.6 boot checks, rules 15 to 19 and 21, one violation per bad row. `declaredAttributes` is the
+         * Spec 9.6 boot checks, rules 15, 17, 18, 19 and 21, one violation per bad row. A `field` is the
+         * [Field] vocabulary by its type, so retired rule 16 has nothing left to judge: an unknown name is
+         * refused by the loader as it reads the document. `declaredAttributes` is the
          * route's frozen attribute names (rule 17); null skips that rule for a table checked outside any route.
          * Called by [Rules] at boot and by the pipeline at attribute freeze (spec 6.4).
          */
@@ -113,7 +115,6 @@ class MappingRenderer(private val providers: (String) -> Provider? = { null }) {
                 val at = "row ${row.path}"
                 fun fail(rule: Int, message: String) = add(Violation(rule, "$at: $message"))
                 if (listOfNotNull(row.field, row.attribute, row.provider, row.value).size != 1) fail(19, "exactly one of field, attribute, provider, value")
-                if (row.field != null && Field.entries.none { it.name == row.field }) fail(16, "${row.field} is not in the vocabulary")
                 if (row.attribute != null && declaredAttributes != null && row.attribute !in declaredAttributes) fail(17, "reads attribute ${row.attribute}, which no processor declares")
                 if (row.provider != null && !providerExists(row.provider)) fail(15, "no bean named ${row.provider}")
                 if (row.select != null && runCatching { com.fasterxml.jackson.core.JsonPointer.compile(row.select) }.isFailure) fail(18, "select ${row.select} is not a JSON pointer")

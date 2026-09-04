@@ -17,7 +17,7 @@ class AttributeFreezeTest {
     @TempDir lateinit var dir: Path
     private val clock = ClockFixture()
     private val fetcher = ScriptedFetcher(clock).file("in/123-order.csv", "a,b\n".toByteArray())
-    private val downstream = MappingTable(listOf(MappingRow("fileId", field = "TRANSFER_ID"), MappingRow("orderNumber", attribute = "orderNumber")))
+    private val downstream = MappingTable(listOf(MappingRow("fileId", field = Field.TRANSFER_ID), MappingRow("orderNumber", attribute = "orderNumber")))
     private suspend fun input() = Payload(listOf(fetcher("in/123-order.csv", dir.resolve("input"), DigestAlgorithm.MD5)))
 
     @Test

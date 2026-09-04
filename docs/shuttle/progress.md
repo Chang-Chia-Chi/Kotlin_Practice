@@ -3663,3 +3663,114 @@ dropped - correct per spec 9.6, and worth knowing before writing rows for a rout
 - **Anyone testing the host against a channel:** `deliveryChannels` takes a `RecordingChannel` by channel
   name, so a delivery can be observed through a real boot with no server and no broker. It replaces the
   delivery role only - a route that `subscribe`s to a replaced channel will not find its trigger.
+
+---
+
+## 40: Standards hygiene from the four-axis review
+
+**Status:** done. The standards axis's small, independent breaches, each fixed where it lives. No
+behaviour changed except the swallowed cancellation and the retirement of rule 16.
+
+**Items, one by one:**
+
+1. **Hamcrest out of `ShuttleQuarkusTest` (done).** `org.hamcrest.Matchers` was the module's only use
+   of a banned assertion library. Every RestAssured `body(matcher)` became `.extract()` plus a JUnit
+   assertion: `path<String>("status")`, `path<Int>("[0].counts.DONE")`, `path<Int>("size()")`, and
+   `extract().asString()` for the metrics scrape. The GPath expressions are the ones the matchers
+   already used, so the same JSON is read; `statusCode(...)` stays where RestAssured is the natural
+   place for it. Four tests, unchanged in what they assert.
+2. **`NatsChannel`'s in-progress loop no longer swallows `CancellationException` (done).**
+   `runCatching { runInterruptible(io) { message.inProgress() } }` caught `Throwable`, the cancel
+   `settle` sends included; it is now the module's usual `try` / `catch (CancellationException) throw`
+   / `catch (Exception) log`, matching `deliver` and the fetch loop, so the class's own KDoc sentence
+   "`CancellationException` is never caught or converted" is true of every call in it. The failure
+   that is expected - a broker that misses one signal - is now logged at debug rather than dropped in
+   silence.
+3. **Dead and half-wired knobs (two done, one deferred, one skipped).**
+   - `DeliveryPolicy.timeout` **deleted**: nothing read it. Spec 9.3's "`timeout` 10 s below the drain
+     (rule 3)" is the channel's own `HttpChannel.timeout`, which rule 3 reads and the 13.1 grammar
+     states at the channel level, not inside `policy`; the policy's copy was a second, unread
+     declaration of the same number. `SurfaceTest` lost the line that asserted it.
+   - `DeliveryPolicy.fullJitter` **kept, not exposed** (deviation 1). It is read by the delivery path
+     (`Notifier`'s backoff) and spec 9.3 fixes full jitter as the behaviour, not as a knob; the flag
+     is the seam three `NotifierTest` cases use to get a deterministic ceiling. Its KDoc now says so,
+     so the next reader does not take it for an unwired knob.
+   - `ProcessorSpec.Custom.config` **deferred** (deviation 2): it is loaded and it is in the DSL, but
+     `processorFor(spec) { beans.processor(it.name) }` in `ShuttleHost` and `Commands` passes the
+     *name* only, so the map never reaches the bean. Wiring it means changing those two files and
+     giving spec 6.2's `Processor` seam a place for configuration it does not have. Both files belong
+     to other tickets of this round, so nothing was changed and nothing was dropped.
+   - `S3Target.clock` **skipped** (deviation 3): unused and it should go, but its only other mention
+     is `ShuttleHost.kt:305`'s call, which this ticket may not touch.
+4. **Parse-don't-validate (one done, one skipped).**
+   - `MappingRow.field` is now `Field?`, end to end: the YAML loader reads it with `word(...)` over
+     `Field.entries` (the same spelling, `TRANSFER_ID`), `MappingBuilder.from` stores the enum instead
+     of its name, and `MappingRenderer.render` calls `field(row.field, ...)` with no `Field.valueOf`
+     round trip. **Rule 16 is retired**: with the type carrying the vocabulary a bad name can no
+     longer reach the rules, and the loader reports it where every other bad word is reported. Spec
+     13.3's row 16 says so and the number is not reused.
+   - `Expand.format` **skipped** (deviation 4): its two readers are `ExpandProcessor` in
+     `Processors.kt` and rule 14's body in `Rules.kt`, both on this ticket's exclusion list.
+5. **`runTest`, not `runBlocking` (done).** `MappingRendererTest`'s `render` helper is a suspending
+   function and its eleven rendering cases are `= runTest { ... }`; the two cases that assert a
+   refusal use a `failureOf` helper, because `assertThrows` cannot take a suspending block.
+   `ProcessingChainTest` had one `kotlinx.coroutines.runBlocking` left inside an `assertThrows`, now a
+   `try` / `catch (StageError)`. Neither file has a `runBlocking` or a `Thread.sleep`.
+6. **`ArchitectureTest` adapter subjects (done).** `adapter(...)` takes the name of a class the package
+   must still hold - `YamlLoader`, `SftpPollSource`, `S3Target`, `HttpChannel`, `NatsChannel`,
+   `JdbiStateStore` - and asserts it was imported before checking the sentence, as the core, quarkus
+   and sftp rules already did. With a subject there is no empty-subject case, so `allowEmptyShould(true)`
+   is gone from that helper: a renamed or emptied adapter package now fails the assertion instead of
+   passing an unchecked rule.
+7. **Progress entry (done):** this one.
+
+**Acceptance:**
+
+- *No banned library* - `grep -ri hamcrest shuttle/src` finds nothing; `ShuttleQuarkusTest` 4 tests, 0
+  failures, in the default tier.
+- *A cancelled in-progress loop ends* -
+  `NatsChannelSignalsTest.a_settled_message_ends_its_in_progress_loop_instead_of_swallowing_the_cancellation`,
+  a new default-tier test over a Mockito connection (no Docker): the loop signals while the transfer
+  runs, and after `seen.ack()` the count does not move for twenty more intervals. `NatsChannelTest`
+  (`-DexcludedGroups=none`), 7 tests against a real broker, still passes, including the D38 case that
+  runs three ack waits on the signals.
+- *An unknown `field` is refused* - `YamlLoaderTest.an_unknown_mapping_field_is_a_load_error_naming_the_row`
+  replaces `RulesTest.rule16_...`: the spec 13.1 document with one `field: MOMENT` fails to load with
+  exactly one error, `shuttle.channels.downstream.http.body[9].field: MOMENT is not one of ...`.
+- *The renderer is unchanged in what it renders* - `MappingRendererTest` 13 tests, 0 failures, with
+  every row now built from the enum.
+- *A renamed adapter package cannot pass silently* - `ArchitectureTest` 9 tests, 0 failures.
+- *Everything else still holds* - default tier 272 tests, 0 failures (271 before: +1 NATS signals, +1
+  YAML load error, -1 retired rule 16 case).
+
+**Deviations:**
+
+1. **`DeliveryPolicy.fullJitter` was neither loaded nor deleted.** The ticket offers those two endings;
+   neither fits. It has a reader, so deleting it means editing `Notifier.kt`, which this ticket may not
+   touch, and losing the determinism three `NotifierTest` cases depend on. Loading it means a new
+   operator-visible knob and a numbered rule for a boolean that has no invalid value, against a spec
+   section that states full jitter as the behaviour. It stays a documented internal default.
+2. **`Custom.config` is deferred, not decided.** No decision number was claimed: nothing was decided
+   against the spec, spec 6.2 still governs, and the change belongs with whoever next opens
+   `ShuttleHost.kt` and `Commands.kt`. What is needed is one line in each - pass the spec, not its
+   name - plus a place in the `Processor` seam (or in the bean's own CDI configuration) for the map.
+3. **`S3Target.clock` was not removed** although it is unused: the parameter's only other mention is
+   the `ShuttleHost` call site, on the exclusion list. One-line follow-up.
+4. **`Expand.format` did not become an enum**: both its readers are on the exclusion list, so the type
+   change could not be made end to end. `MappingRow.field`, whose readers are all in reach, was done
+   in full.
+5. **No red was reachable for the NATS item.** The swallow was masked: after `runCatching` ate the
+   `CancellationException`, the loop's next statement was `delay`, which checks cancellation again and
+   ended the job anyway. The new test was run against the old code and passed. It is kept as a guard on
+   the behaviour the loop must have, and the fix stands on the standard the swallow breached outright.
+6. **Spec 13.3 lost a rule.** Retiring 16 is a spec change the fourth item forces: with `Field` in the
+   type, the rule has nothing left to judge. The row stays in the table, marked retired, so the
+   numbering an operator sees in validate mode does not shift.
+7. **Size:** production 6 files touched, net -3 lines (`Delivery.kt`, `MappingRenderer.kt`,
+   `NatsChannel.kt`, `Rules.kt`, `ShuttleDsl.kt`, `YamlLoader.kt`); tests 9 files, one of them new;
+   one spec row and this entry.
+
+**For the next ticket:** three one-line follow-ups are waiting on files this ticket could not open -
+`S3Target`'s unused `clock` (and its `ShuttleHost` call), `Custom.config` reaching the bean
+(`ShuttleHost` and `Commands` pass `spec`, not `spec.name`), and `Expand.format` as an enum beside
+`ExtractFrom` (`ExpandProcessor` and rule 14's body). Whoever owns those files next should take them.

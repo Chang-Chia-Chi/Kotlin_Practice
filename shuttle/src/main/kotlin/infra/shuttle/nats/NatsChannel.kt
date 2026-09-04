@@ -111,8 +111,14 @@ class NatsChannel(
         val signals = launch {
             while (true) {
                 delay(source.inProgressEvery)
-                // A signal the broker misses costs at worst one redelivery; it never takes the route down.
-                runCatching { runInterruptible(io) { message.inProgress() } }
+                try {
+                    runInterruptible(io) { message.inProgress() }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    // A signal the broker misses costs at worst one redelivery; it never takes the route down.
+                    log.debugf(e, "in-progress signal for %s failed", message.subject)
+                }
             }
         }
         suspend fun settle(action: () -> Unit) {

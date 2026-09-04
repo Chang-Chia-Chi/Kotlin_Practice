@@ -32,6 +32,7 @@ import infra.shuttle.core.then
 import infra.shuttle.core.zip
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertThrows
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.nio.file.Files
@@ -82,6 +83,17 @@ class YamlLoaderTest {
             YamlLoader.load(minimal.replace("target:", "paralellism: 4\n      target:"), env)
         }
         assertEquals(listOf("shuttle.routes.mirror: unknown key shuttle.routes.mirror.paralellism"), e.errors)
+    }
+
+    /**
+     * Retired rule 16: `field` is read into the [infra.shuttle.core.Field] vocabulary as the document is
+     * parsed, so an unknown name never becomes a row and is reported where every other bad word is.
+     */
+    @Test
+    fun an_unknown_mapping_field_is_a_load_error_naming_the_row() {
+        val e = assertThrows(YamlLoadException::class.java) { YamlLoader.load(spec131().replace("field: EVENT", "field: MOMENT"), specEnv) }
+        assertEquals(1, e.errors.size, e.errors.toString())
+        assertTrue(e.errors.single().startsWith("shuttle.channels.downstream.http.body[9].field: MOMENT is not one of "), e.errors.single())
     }
 
     @Test

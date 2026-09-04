@@ -16,7 +16,6 @@ class SurfaceTest {
         assertEquals(24.hours, policy.giveUpAfter)
         assertEquals(Backoff(initial = 5.seconds, max = 15.minutes, factor = 2.0), policy.backoff)
         assertEquals(true, policy.fullJitter)
-        assertEquals(10.seconds, policy.timeout)
 
         val bare = shuttle { route("mirror") {} }
         assertEquals(Backoff(initial = 30.seconds, max = 15.minutes), bare.supervision.restartBackoff)

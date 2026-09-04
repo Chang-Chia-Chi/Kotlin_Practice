@@ -27,7 +27,7 @@ class NotifierTest {
     private val store = InMemoryStateStore(clock)
     private val registry = SimpleMeterRegistry()
     private val downstream = ChannelName("downstream")
-    private val body = MappingTable(listOf(MappingRow("fileId", field = "TRANSFER_ID"), MappingRow("event", field = "EVENT")))
+    private val body = MappingTable(listOf(MappingRow("fileId", field = Field.TRANSFER_ID), MappingRow("event", field = Field.EVENT)))
 
     private fun notifier(vararg channels: DeliveryChannel, config: NotifierConfig = NotifierConfig(workers = 2, batch = 10, sweepEvery = 30.seconds), store: StateStore = this.store) =
         Notifier(store, channels.toList(), channels.associate { it.name to body }, MappingRenderer(), config, registry, clock, kotlin.random.Random(1))
