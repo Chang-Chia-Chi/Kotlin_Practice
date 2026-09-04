@@ -10,13 +10,13 @@ fakes sees it (the same adapter drift D44 found). Review finding B3.
 
 **Nature:** schema and adapter parity at the StateStore seam
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `StateStoreContract` gains the case (two parents, one identical child identity each): green on the in-memory store and on Oracle (`-DexcludedGroups=none -Dtest=JdbiStateStoreTest`); red on Oracle before the fix
-- [ ] The identity constraint distinguishes children by parent (include the parent id, or exclude CHILD rows from it): decide with spec 4.5's "a child's identity is its parent's plus its path" and spec 5.2, and record it as a decision entry
-- [ ] The in-memory store enforces exactly what Oracle enforces
-- [ ] Spec 8.1's DDL block is updated to the new constraint together with `StateStoreSchema.DDL`, keeping `StateStoreSchemaTest`'s verbatim comparison green (this is the one ticket allowed to touch the block, and only for this constraint)
-- [ ] Progress entry appended
+- [x] `StateStoreContract` gains the case (two parents, one identical child identity each): green on the in-memory store and on Oracle (`-DexcludedGroups=none -Dtest=JdbiStateStoreTest`); red on Oracle before the fix
+- [x] The identity constraint distinguishes children by parent (include the parent id, or exclude CHILD rows from it): decide with spec 4.5's "a child's identity is its parent's plus its path" and spec 5.2, and record it as a decision entry
+- [x] The in-memory store enforces exactly what Oracle enforces
+- [x] Spec 8.1's DDL block is updated to the new constraint together with `StateStoreSchema.DDL`, keeping `StateStoreSchemaTest`'s verbatim comparison green (this is the one ticket allowed to touch the block, and only for this constraint)
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket; 200-600 lines including tests; no Thread.sleep;
 invariant tests named `I<n>_<description>`, scenario tests by their `S<n>` id, validation tests by `rule<n>_`,
