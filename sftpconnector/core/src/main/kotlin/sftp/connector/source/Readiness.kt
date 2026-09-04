@@ -1,7 +1,6 @@
 package sftp.connector.source
 
 import kotlinx.coroutines.delay
-import sftp.connector.client.SftpClient
 import sftp.connector.error.ConfigurationError
 import sftp.connector.transport.RemoteFile
 import java.time.Clock
@@ -41,12 +40,19 @@ sealed interface Readiness {
     data object Skip : Readiness
 }
 
-/** What a check may ask of the world: the server, on a session of its own, and the time. */
-class ReadinessContext(private val client: SftpClient, val clock: Clock) {
-
-    /** What the server says about [path] right now, or null when there is nothing there. */
-    suspend fun stat(path: String): RemoteFile? = client.stat(path)
-}
+/**
+ * What a check may ask of the world: what the server says about a path, and the time.
+ *
+ * A stat function rather than the client it comes from, because that one call is the whole of
+ * what a check has ever needed. Handing over the client made every check's world the pool, the
+ * transport and the retry policy behind it, so asking whether a file that grew is turned away
+ * meant standing a server up to be asked - and none of that is what the check is about.
+ */
+class ReadinessContext(
+    /** What the server says about a path right now, or null when there is nothing there. */
+    val stat: suspend (String) -> RemoteFile?,
+    val clock: Clock,
+)
 
 /**
  * Ready once the size has been seen unchanged [checks] times, [interval] apart, within the poll

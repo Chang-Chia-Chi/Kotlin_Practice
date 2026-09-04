@@ -4553,3 +4553,112 @@ second answer, and its WARN says the watch had already given the file back. Spec
   since T17 lens 5 H2 (D46). Nothing here touches `shuttle/`, which is outside this ticket's
   paths; whoever reconciles shuttle with D46 owns the one-line call. The reactor's other modules
   were green here (snapshotcache 215, etl-host's 17 Quarkus start-up errors are its environment).
+
+---
+
+## T22: Readiness checks take a stat function; the package cycles ArchUnit missed are frozen
+
+**Built:**
+
+- `ReadinessContext` holds `stat: suspend (String) -> RemoteFile?` and the clock instead of an
+  `SftpClient`. `SftpSource` supplies `client::stat` at the one place it builds the context;
+  `SizeStable`, `MinAge`, `MarkerFile` and `AllOf` are untouched - every call site was already
+  `ctx.stat(path)`, and a property of function type answers to that spelling unchanged.
+- `Overwrite` moved from `sftp.connector.client` to `sftp.connector.config`. It is what the
+  polling block configures, and `client` now imports it the way it imports everything else in
+  `config`.
+- `PoolExhausted` carries `idle`, `inUse`, `connecting` and `pending` as its own nullable fields
+  instead of a `PoolStats`. `SftpPool.exhausted()` is the one place that copies the counts out of
+  a snapshot, still read at the instant the refused caller gives up and with that caller counted
+  among the waiters. `PoolStats` stays in `pool`; `error` imports nothing.
+- Two ArchUnit rules, and a spec sentence in 3.1 plus D49 saying what they enforce.
+- `sftpconnector/core` gained `kotlinx-coroutines-test` (test scope, version already managed in
+  the parent) so a check that waits can be asked about a map in no time at all.
+
+**Concepts named:**
+
+- **The stat seam.** A readiness check's world is "what the server says about a path, and the
+  time". Naming that as the context's whole content is what made `ReadinessSeamTest` possible in
+  `core`, which by C1's layout has neither the fake transport nor the embedded server. Before it,
+  a check's world was the client, and through it the pool, the transport and the retry ladder.
+- **`config` and `error` sit beside the layer stack, not in it** (spec 3.1, D49). `error` owes
+  nothing to anyone; `config` refers downward exactly once, to the readiness checks, and the
+  architecture test permits that one reference by name rather than by package.
+- The counts a refusal reports are **the exception's own snapshot**, not a reference to the pool.
+  A failure travels further than what raised it, and by the time it is read the pool has moved on.
+
+**Acceptance:**
+
+- *`ReadinessContext` holds a stat function and the clock; `SizeStable` and `MinAge` unchanged* -
+  `Readiness.kt`; `ReadinessTest` (6 tests, testkit) passes with no assertion changed, and
+  `SftpSourceTest` (19) and `SourceAgainstServerTest` (3) cover the source's own construction.
+- *Test through a map-backed stat and a virtual clock, no pool, client or transport* -
+  `core/src/test/.../source/ReadinessSeamTest.kt`, 3 tests. It is in `core` on purpose: that
+  module cannot see the testkit, so the file could not have been written before this seam existed.
+- *`client.Overwrite` moves to `config`* - `sftp/connector/config/Overwrite.kt`; the whole write
+  path proves it still works (`SftpWritePathTest` 16, `WritePathReviewTest` 9,
+  `RetrySemanticsTest` 22, `WritePathAgainstServerTest` 9).
+- *`PoolExhausted` carries the counts; `error` no longer imports `PoolStats`* -
+  `LeaseSemanticsTest.a caller that cannot be served is turned away rather than left queueing`
+  reads the four fields, and `the exhaustion message names which of the three reasons the pool was
+  full` is unchanged and still passes, which is what proves the message did not lose a number.
+- *Both ArchUnit rules red before the moves, green after* - red first, on exactly the two edges:
+  `the DSL names the readiness checks it configures and nothing else beneath it` failed 12 times
+  on `sftp.connector.client.Overwrite` reached from `PostAction.Move` and `PollingBuilder.move`,
+  and `the failure vocabulary depends on nothing, so every layer is free to name it` failed 14
+  times on `sftp.connector.pool.PoolStats` reached from `PoolExhausted` and `explainExhaustion`.
+  After the moves `ArchitectureTest` runs 5 of 5 green.
+- *Shuttle untouched* - **not achieved, see deviations 1 and 2.**
+- *Progress entry recording why readiness did not move into `config`* - below.
+
+**Why readiness did not move into `config`.** It is the obvious deepening and it trades one cycle
+for another. A check is handed a `transport.RemoteFile`, and `transport` imports `config` for its
+connection settings, so `config` holding the checks would make `config` and `transport` mutually
+dependent - the same fault one layer down, and a worse one, because `RemoteFile` is what every
+layer above the transport passes around. So readiness stays in `source` and the reference is
+declared instead: spec 3.1 says `config` may name the checks and nothing else beneath it, D49 says
+why, and the architecture rule permits exactly the types assignable to `ReadinessCheck` and
+`Readiness` (plus the file class carrying the `+` operator). A second downward reference fails the
+build.
+
+**Deviations:**
+
+1. **Shuttle does not compile on `misc/ai_gen`, before and after this ticket, for a reason that is
+   not this ticket's.** `SftpTarget.kt:79` calls `client.rename(partial, remote, Overwrite.REPLACE,
+   expectedSize = size)`; T17 lens 5 renamed that parameter to `listed: RemoteFile?` (D46) and
+   shuttle was never brought along. Verified against the branch tip before any edit of mine:
+   `SftpTarget.kt` there has `expectedSize =` and `SftpClient.rename` there has
+   `listed: RemoteFile? = null`. It is left for whoever owns shuttle's side of D46: `rename`'s
+   KDoc says a caller without the listed file is supported and costs one extra round trip, so
+   `listed` omitted is very likely the answer, but which of the two shuttle wants is that ticket's
+   call and not a build fix to be made in passing.
+2. **Shuttle was edited, in one line.** `SftpTarget.kt`'s `import sftp.connector.client.Overwrite`
+   became `import sftp.connector.config.Overwrite`. The ticket says shuttle is untouched, but that
+   claim is about the readiness types; the overwrite policy moving is a rename of a type shuttle
+   names, and nothing was left behind in `client` to spare it - a deprecated alias for one call
+   site is cruft with a longer life than the ticket. No shuttle behaviour changed.
+3. **`PoolExhausted` carries four counts, not three.** The message an operator reads names in use,
+   still opening, idle *and* waiting-including-this-one, and the last is the one that separates a
+   pool that is merely full from a pool that is short. Dropping it to match the ticket's word
+   would have cost a number T17 lens 4 had just finished polishing.
+4. **`LeaseSemanticsTest`'s stats assertion was rewritten, not weakened.** It compared
+   `exhausted.stats` to a `PoolStats(0, 1, 0, 1)`; it now asserts the same four numbers off the
+   four fields. `ArchitectureTest`'s guard test gained `sftp.connector.error.PoolExhausted` to the
+   list of classes it insists were imported, so the second new rule has a subject.
+5. **`virtualClock()` is spelled a second time**, six lines, privately in `ReadinessSeamTest`.
+   The original is in `testkit/src/test`, which `core` cannot see; that is C1's layout, not a new
+   cost, and a shared copy would mean publishing a test helper from `core` for one caller.
+
+**For the next ticket:**
+
+- Adding a knob to the DSL that names a type in `client`, `pool`, `source` (other than a readiness
+  check), `transport` or `resilience` now fails `ArchitectureTest`. The knob's type belongs in
+  `config`; the layer that acts on it imports it from there.
+- Same for `error`: a failure class that wants to report a pool, transport or client type carries
+  the numbers instead. `PoolExhausted` is the worked example.
+- `ReadinessContext` is constructed in exactly one place in production code
+  (`SftpSource.readinessContext`). A ticket touching `SftpSource` will find it there and nowhere
+  else.
+- Kotlin's incremental compile leaves the old `.class` behind when a file changes package. A stale
+  `core/target/classes/sftp/connector/client/Overwrite.class` made the testkit report a type
+  mismatch between two `Overwrite`s that were the same enum; `clean` is the answer.

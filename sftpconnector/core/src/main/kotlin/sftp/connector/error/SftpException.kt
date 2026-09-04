@@ -1,6 +1,5 @@
 package sftp.connector.error
 
-import sftp.connector.pool.PoolStats
 import kotlin.coroutines.AbstractCoroutineContextElement
 import kotlin.coroutines.CoroutineContext
 import kotlin.coroutines.coroutineContext
@@ -258,8 +257,17 @@ class ConfigurationError(message: String, cause: Throwable? = null) : Fatal(mess
  */
 class PoolExhausted(
     val attempt: Attempt,
-    /** What the pool looked like the instant the wait ran out. Absent when no pool raised this. */
-    val stats: PoolStats? = null,
+    /**
+     * What the pool held the instant the wait ran out, copied out of it rather than referred to.
+     * A failure travels further than the thing that raised it - up a stack, into a log, across a
+     * flow - and a snapshot it owns outright is what lets it be read anywhere. Null throughout
+     * when no pool raised this, which is only ever a hand-built one.
+     */
+    val inUse: Int? = null,
+    val connecting: Int? = null,
+    val idle: Int? = null,
+    /** Callers queued at the door, this one included. Not sessions; the measure of a short pool. */
+    val pending: Int? = null,
     /** The acquire timeout that ran out, which is the whole time this caller queued for. */
     val waited: Duration = Duration.ZERO,
     /** How often room came free while this caller queued. Zero means nothing moved at all. */
@@ -272,7 +280,7 @@ class PoolExhausted(
 ) : SftpException(
     attempt.describe(
         if (closing) "the connector is closing and lends no session, so this was not started"
-        else explainExhaustion(stats, waited, roomFreedWhileWaiting),
+        else explainExhaustion(inUse, connecting, idle, pending, waited, roomFreedWhileWaiting),
     ),
     null,
 ) {
@@ -288,10 +296,17 @@ class PoolExhausted(
  * Room coming free and being taken by somebody else means this caller lost races it kept
  * entering, which is a pool short of what its load asks of it.
  */
-private fun explainExhaustion(stats: PoolStats?, waited: Duration, freed: Long): String {
-    if (stats == null) return "no session became free before the acquire timeout ran out"
+private fun explainExhaustion(
+    inUse: Int?,
+    connecting: Int?,
+    idle: Int?,
+    pending: Int?,
+    waited: Duration,
+    freed: Long,
+): String {
+    if (inUse == null || connecting == null) return "no session became free before the acquire timeout ran out"
     val reading = when {
-        stats.connecting > 0 && stats.connecting >= stats.inUse ->
+        connecting > 0 && connecting >= inUse ->
             "most of the pool is stuck opening sessions, so look at the server and the network rather than at maxSize"
 
         freed == 0L ->
@@ -300,8 +315,8 @@ private fun explainExhaustion(stats: PoolStats?, waited: Duration, freed: Long):
         else ->
             "room came free and other callers took it, so the pool is short of what this load asks of it"
     }
-    return "no session came free in $waited. ${stats.inUse} in use, ${stats.connecting} still opening, " +
-        "${stats.idle} idle, ${stats.pending} waiting including this one, " +
+    return "no session came free in $waited. $inUse in use, $connecting still opening, " +
+        "$idle idle, $pending waiting including this one, " +
         "room came free $freed times while it waited; $reading"
 }
 

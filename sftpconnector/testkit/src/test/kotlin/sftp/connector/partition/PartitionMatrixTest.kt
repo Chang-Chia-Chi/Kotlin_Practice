@@ -13,7 +13,7 @@ import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.Tag
 import org.junit.jupiter.api.Test
 import sftp.connector.SftpConnector
-import sftp.connector.client.Overwrite
+import sftp.connector.config.Overwrite
 import sftp.connector.config.SftpConnectorBuilder
 import sftp.connector.error.ConnectFailed
 import sftp.connector.error.PoolExhausted

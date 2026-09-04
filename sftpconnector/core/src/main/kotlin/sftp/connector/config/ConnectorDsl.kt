@@ -1,7 +1,6 @@
 package sftp.connector.config
 
 import org.slf4j.LoggerFactory
-import sftp.connector.client.Overwrite
 import sftp.connector.error.ConfigurationError
 import sftp.connector.source.MarkerFile
 import sftp.connector.source.MinAge

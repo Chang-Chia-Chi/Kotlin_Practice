@@ -16,6 +16,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.time.Duration.Companion.milliseconds
 import org.slf4j.LoggerFactory
+import sftp.connector.config.Overwrite
 import sftp.connector.config.SftpConnectorConfig
 import sftp.connector.error.Attempt
 import sftp.connector.error.NoSuchFile

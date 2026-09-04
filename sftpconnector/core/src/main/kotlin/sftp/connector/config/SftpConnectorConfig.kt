@@ -1,6 +1,5 @@
 package sftp.connector.config
 
-import sftp.connector.client.Overwrite
 import sftp.connector.source.ReadinessCheck
 import java.nio.file.Path
 import kotlin.time.Duration

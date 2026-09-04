@@ -1,4 +1,4 @@
-package sftp.connector.client
+package sftp.connector.config
 
 /**
  * What an operation does about a file already sitting at the path it is aiming for.

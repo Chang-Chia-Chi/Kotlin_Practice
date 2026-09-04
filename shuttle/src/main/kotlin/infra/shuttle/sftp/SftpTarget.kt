@@ -6,8 +6,8 @@ import infra.shuttle.core.keyLeavesTarget
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.withContext
 import org.jboss.logging.Logger
-import sftp.connector.client.Overwrite
 import sftp.connector.client.SftpClient
+import sftp.connector.config.Overwrite
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.ConcurrentHashMap

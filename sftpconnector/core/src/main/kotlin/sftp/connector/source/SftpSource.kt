@@ -76,7 +76,7 @@ class SftpSource(
 
     private val meters = SourceMeters(meterRegistry, config.endpoint.address) { inFlight.size }
 
-    private val readinessContext = ReadinessContext(client, clock)
+    private val readinessContext = ReadinessContext(client::stat, clock)
 
     private val ticks = AtomicLong()
 

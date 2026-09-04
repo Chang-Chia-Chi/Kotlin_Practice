@@ -1,6 +1,7 @@
 package sftp.connector.client
 
 import org.slf4j.LoggerFactory
+import sftp.connector.config.Overwrite
 import sftp.connector.error.Attempt
 import sftp.connector.error.NoSuchFile
 import sftp.connector.error.OverwriteRefused
