@@ -300,8 +300,8 @@ class SftpWatchTest {
 
     /**
      * The collector's own block let a timeout escape. That is a cancellation thrown *through*
-     * `emit`, not the connector stopping its watchers, and spec 10.1 says a cancellation is never
-     * caught or wrapped: the watch ends with it, so the caller learns its pipeline died, instead
+     * `emit`, not the connector stopping its watchers, and a cancellation is never caught or
+     * wrapped: the watch ends with it, so the caller learns its pipeline died, instead
      * of returning normally with an INFO line saying the connector stopped it (T17 lens 5 M2).
      */
     @Test

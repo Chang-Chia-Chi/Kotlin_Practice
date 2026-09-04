@@ -41,7 +41,7 @@ class StartupProbeMarkerTest {
     lateinit var stage: Path
 
     @Test
-    fun `a probe cancelled after the marker is written leaves no marker`() = runBlocking {
+    fun `a probe cancelled after the marker is written leaves no marker`() = runBlocking<Unit> {
         val markerWritten = CompletableDeferred<Unit>()
         val transport = CancellationAwareServer(onMarkerWritten = { markerWritten.complete(Unit) })
         val config = configWithProbe()

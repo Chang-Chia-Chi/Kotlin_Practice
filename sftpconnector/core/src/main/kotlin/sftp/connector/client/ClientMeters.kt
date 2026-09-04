@@ -24,11 +24,15 @@ internal class ClientMeters(private val meters: MeterRegistry, private val endpo
      * Runs [operation] and records how long it took and how it went. A failure is recorded and
      * then rethrown untouched, so nothing about the caller's error handling changes because the
      * call is being measured.
+     *
+     * The block is handed the name it is being timed under, because the layer underneath needs
+     * the same name to say what the call was doing when it failed. Spelling it twice is how a
+     * meter's `op` tag and a failure's own account of itself come to disagree.
      */
-    suspend fun <T> timing(operation: String, block: suspend () -> T): T {
+    suspend fun <T> timing(operation: String, block: suspend (String) -> T): T {
         val started = Timer.start(meters)
         try {
-            val result = block()
+            val result = block(operation)
             started.stop(timer(operation, ResultLabel.OK))
             return result
         } catch (failure: Throwable) {

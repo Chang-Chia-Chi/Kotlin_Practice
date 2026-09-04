@@ -26,7 +26,7 @@ class JschTransportTest {
     lateinit var localFiles: Path
 
     @Test
-    fun `a session opens, resolves a path and closes`() = runBlocking {
+    fun `a session opens, resolves a path and closes`() = runBlocking<Unit> {
         Files.createDirectory(remoteRoot.resolve("inbox"))
 
         withServer { server ->
@@ -37,7 +37,7 @@ class JschTransportTest {
     }
 
     @Test
-    fun `a session opens through an HTTP CONNECT proxy`() = runBlocking {
+    fun `a session opens through an HTTP CONNECT proxy`() = runBlocking<Unit> {
         Files.createDirectory(remoteRoot.resolve("inbox"))
 
         withServer { server ->
@@ -58,7 +58,7 @@ class JschTransportTest {
      * than on a guessed duration.
      */
     @Test
-    fun `the session's reader thread is gone once the connection is closed`() = runBlocking {
+    fun `the session's reader thread is gone once the connection is closed`() = runBlocking<Unit> {
         withServer { server ->
             val before = readerThreads()
             val connection = JschTransport(configFor(server)).connect()
@@ -82,7 +82,7 @@ class JschTransportTest {
      * arriving here instead would mean the transport seam had let one through.
      */
     @Test
-    fun `a strict host key policy refuses a server whose key it has never seen`() = runBlocking {
+    fun `a strict host key policy refuses a server whose key it has never seen`() = runBlocking<Unit> {
         val emptyKnownHosts = Files.createFile(localFiles.resolve("known_hosts"))
 
         withServer { server ->

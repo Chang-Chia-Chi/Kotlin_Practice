@@ -71,7 +71,7 @@ class AdversaryTest {
      * I15 under its own id. The invariant is checked after every operation of every sequence the
      * test above runs - the ledger in [World.reconcile], the landed-move clause in [World.ack] -
      * which is stronger coverage than any one scenario and is exactly why it had no `I15_` test.
-     * It needs one anyway: spec 17.1 names invariant tests `I<n>_<description>`, so `-Dtest='I15*'`
+     * It needs one anyway: invariant tests are named `I<n>_<description>`, so `-Dtest='I15*'`
      * has to find something, and a broken ledger should fail a test named for what it broke rather
      * than one named `model_`. One fixed seed of its own, end to end, and the per-operation
      * assertions stay where they are.

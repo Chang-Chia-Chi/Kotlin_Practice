@@ -46,7 +46,8 @@ internal class RenameTries(
     private var targetFoundFree = false
     private var reachedTheServer = false
 
-    suspend fun attempt(session: SftpSession, attempt: Attempt) {
+    /** One try of the rename on [session], as the attempt [attempt] describes. */
+    suspend fun tryOnce(session: SftpSession, attempt: Attempt) {
         val file = listed ?: session.stat(from).also { listed = it }
         if (overwrite == Overwrite.REFUSE && !targetFoundFree) {
             if (session.entryAt(to) != null) refuse(attempt, "rename", to)

@@ -252,6 +252,7 @@ because each was correctly deferred by the ticket that found it.
 | The password lives as a `String` for the life of the process | T17 lens 3 L1 | The maintainer, with the next change to the auth surface | It cannot be zeroed, so it sits in the heap and in any heap dump. The transport half is already right: JSch is handed a fresh byte array per connect and zeroes its own copy on disconnect. A `CharArray` or a `() -> String` supplier changes the DSL and `AuthMethod.Password`'s masking together, which is why it is not worth churning for on its own |
 | `PollSkipped(OVERLAP)` is a WARN once per interval for as long as a consumer is slow | T17 lens 4 M9 | Whoever next owns `OverlapPolicy` - the same owner as the ticker-delay row above | Under the default `SKIP` with a consumer slower than the interval this fires every interval, while the breaker skip beside it is INFO. A rate limit needs a policy - once per run of skips, every nth, or a configurable level - which is a knob and not a message. The line is now greppable per endpoint (T17 lens 4 M7), so a limit can be added without changing what it says |
 | A second Quarkus host would want a properties mapping | T24 | That host | The adapter T14 built is deleted, so a Quarkus host binds the connector in its own words: build the DSL config, produce the `SftpConnector`, hand it the host's `MeterRegistry`, close it on the shutdown event. Shuttle already does exactly that. The second such host writes it a second time, and that is the moment a shared mapping is worth its weight - T14's entry is the design to read before rebuilding one |
+| Meters are declared in five files and `source` reads a result label from `client` | T23's standards pass | Whoever next revisits spec 13 | The closed list of what the connector publishes is not in one place. The names live in `client/ClientMeters.kt`, `pool/PoolMeters.kt`, `source/SourceMeters.kt`, `resilience/Resilience.kt` and `transport/jsch/JschErrorMapper.kt`, and `SourceMeters` imports `ResultLabel` and `resultLabelOf` from `client` to label `sftp_poll_seconds` - so the layer that publishes a meter and the layer that owns the vocabulary of its tags are not the same layer. Spec 13 is the list; nothing in the code is, and the ground rule that no ticket adds a metric name is enforced only by review. Whoever reconciles spec 13 next (the eviction-label row above and the second-connector row are both waiting on the same visit) is the one who can decide whether the names belong in one file |
 
 ### C6: spec Sec 5.3 amended - the middle cancellation tier is `keepAlive`
 
@@ -2853,6 +2854,20 @@ told to proceed`.
 7. **Size.** About 135 lines of main source that are neither blank nor comment across five files (all
    but ~15 in `SftpSource`), about 360 in the two new test files and 30 in three earlier ones. Inside
    the budget.
+8. **A `CancellationException` is wrapped in one place, and this is the accepted exception to "never
+   wrapped".** *Recorded by T23; the behaviour is T12's and unchanged.* The stray-timeout guard in
+   `SftpSource.reportingFailures` rethrows a `CancellationException` as the *cause* of an
+   `IllegalStateException` naming the tick. The rule it looks like a breach of is about a
+   cancellation that is the coroutine's own, and this one is provably not: `ensureActive()` runs
+   first and rethrows if the tick is being cancelled, so what reaches the wrap is a timeout raised
+   by something *inside* the tick - a readiness check or an action that let its own `withTimeout`
+   out - while nobody was cancelling the tick. Rethrown as the cancellation it is, it would end the
+   tick's coroutine silently and the watch would carry on with a tick missing and no line in the
+   log; wrapped, it ends the watch with a message naming what has to catch its own timeout. The
+   original is the cause, so nothing is lost. Nowhere else in the connector wraps one, and the
+   `ensureActive()` before it is what makes this safe rather than a precedent -
+   `SftpSource.kt:287-295`, tested by `SftpWatchTest.a cancellation that is nobody's, let out of a
+   check, ends the watch as a bug rather than silently`.
 
 **Seams.** Closed above, struck through: `ServerFailure` counts against the breaker. Added: `consume`
 re-runs its block for a file whose ack keeps being refused; a watch on a stopped connector ends normally
@@ -4662,3 +4677,156 @@ build.
 - Kotlin's incremental compile leaves the old `.class` behind when a file changes package. A stale
   `core/target/classes/sftp/connector/client/Overwrite.class` made the testkit report a type
   mismatch between two `Overwrite`s that were the same enum; `clean` is the answer.
+
+## T23: Standards housekeeping from the whole-module review
+
+Built on Opus 5. 299 tests were green at the start and 299 are green at the end (74 core, of which
+1 is skipped; 225 testkit). Nothing here changes behaviour: every class reports the count it
+reported before, no assertion changed, and every log line and exception message is byte-identical
+to what T17 lens 4 left. The ticket's findings were located by symbol and by quoted text rather
+than by the line numbers it recorded at `6dcda68`, because T17's ladder batch, T17's
+failure-semantics batch and T18, T19 and T22 had all moved them since.
+
+**Two findings were already closed and no change was made for them.** The ticket's items about
+`quarkus/pom.xml` and `SftpConnectorProperties.kt` name files that T24 deleted with the Quarkus
+adapter module (`9c1a94d`, merged as `b3d862a`). There is nothing left there to fix.
+
+**Built:**
+
+Spec amendments, applied first:
+
+- **5.3, the cooperative row's effect on the session.** It said "returned to the pool after
+  validation" and the code shelves the session idle with no probe, revalidating only under the
+  ordinary idle rule (`SessionRegistry.checkOut`, `validationBypass`). The row now says that, and
+  why it is safe: answering no drains the pipelined reads and closes the handle cleanly, so the
+  session is as sound as one a call returned from normally and there is nothing extra to prove.
+- **7.2 and 14.3, `ackWait`.** It was written as a knob that is off by default. There is no knob:
+  it is not built. Both sections now say so in the same words 14.5 uses for `SeenRepository`, and
+  7.2 names what building it would take - the duration in the polling block and the timer that
+  reads it, together.
+- **8.2, an absolute action target under a relative watch.** `PostAction.Move.targetUnder` reads a
+  target as relative to the watched directory unless it starts with `/`, and `walk` excludes a
+  subdirectory by comparing its path - built from the watched directory's own spelling - against
+  that set as strings. So `/drop/done` under a watch of `drop` is not recognised as an action
+  target and is walked into again. One sentence in the move-rules bullet.
+
+Progress notes, also first:
+
+- **Open-seams row:** meters are declared in five files and `source` reads a result label from
+  `client`. Owner: whoever next revisits spec 13, which is already the owner of two other rows.
+- **T12 deviation 8:** the one accepted `CancellationException` wrap, in
+  `SftpSource.reportingFailures`, with the `ensureActive()` that makes it safe and the reason
+  rethrowing it as a cancellation would be worse.
+
+Code, none of it behavioural:
+
+- **Spec-section citations gone from eight places**, each replaced by the reason in its own words:
+  `config/ConnectorDsl.kt`, `resilience/Resilience.kt`, `StartupProbe.kt`,
+  `transport/SftpTransport.kt`, `core/.../client/StagingSafetyTest.kt`,
+  `testkit/.../SftpConnectorTest.kt`, `testkit/.../pressure/AdversaryTest.kt`, and the one comment
+  in `testkit/.../source/SftpWatchTest.kt` the ticket names.
+- **`runBlocking` becomes `runBlocking<Unit>`** on `JschTransportTest`'s four tests, and on
+  `StartupProbeMarkerTest`'s one - see deviation 3.
+- **The duplicate `SftpSession.entryAt` in `StartupProbe` is deleted** and the `internal` one in
+  `client/Compensation.kt` imported. They were character-for-character the same function.
+- **`JschConnection.call(operation, path) { }`** carries the two things every operation does and
+  neither says: the switch onto the bounded IO dispatcher, and the error mapper. Six bodies -
+  `realpath`, `list`, `stat`, `rename`, `delete`, `mkdir` - lost their copy of both. `transferring`
+  and `close` keep theirs, which is the honest boundary of the helper: `transferring` needs the
+  coroutine's own job inside the block, and `close` runs under `NonCancellable`.
+- **`ClientMeters.timing` hands its block the operation name**, so each of the client's eight
+  operations spells its name once instead of once for the timer's `op` tag and again for the
+  attempt a failure will carry. `upload`'s third spelling, in `refuse(attempt, "upload", ...)`,
+  went the same way.
+- **`RenameTries.attempt(session, attempt)` is `tryOnce`**; the verb and the noun no longer collide.
+- **`SftpPool`'s private `close(connection, entry)` is `hangUpOn`**, so the shutdown `close()` and
+  the per-session hang-up are told apart by name rather than by arity. The name matches the log
+  line it already carried ("Hanging up {} failed").
+
+**Concepts named:** none new, which is the point. The ticket removes three spellings of concepts
+that already had one - `entryAt`, the transport's call preamble, an operation's name - and gives a
+name of its own to each of two things that were sharing one (`close`/`hangUpOn`,
+`attempt`/`tryOnce`).
+
+**Acceptance:**
+
+- *Spec citations removed; `grep -rn "spec [0-9]" sftpconnector/` finds nothing* - **two hits
+  remain, both deliberately; see deviation 1.** Everything the ticket named is gone.
+- *`JschTransportTest` `runBlocking<Unit>`, counted before and after* - 4 before, 4 after. The class
+  has exactly four `@Test` functions, so all four were running before as well: each body ended in
+  `withServer { }`, which returns `Unit`. The change is the guard, not a fix.
+- *Duplicate `entryAt` deleted* - `StartupProbe.kt` imports `sftp.connector.client.entryAt`;
+  `StartupAgainstServerTest` (8) and `SftpConnectorTest` (8) cover the probe's branches.
+- *Six transport bodies become one `call` helper* - `JschTransport.kt`; `JschTransportTest` (4),
+  `JschErrorMappingTest` (9), `JschListingNamesTest` (4) and every against-the-server test are
+  unchanged and green. Each attempt is still built in the same place under the same dispatcher, so
+  `Attempt.inside`'s read of `CurrentAttempt` is unchanged.
+- *The operation name spelled once per operation* - `SftpClient.kt` and `ClientMeters.kt`;
+  `SftpClientTest` (16), `SftpWritePathTest` (16), `WritePathReviewTest` (9), `RetrySemanticsTest`
+  (22) and `MeasurementsTest` are unchanged and green, which is what proves no `op` tag moved.
+- *`acquire`/`release`/`releaseAfter` become `internal`* - **not done; the build refuses it, and the
+  ticket's own fallback was taken. See deviation 2.**
+- *`close`/`close` and `RenameTries.attempt` renamed* - `hangUpOn` and `tryOnce`; `PoolShutdownTest`
+  (6), `LeaseSemanticsTest` (6), `WritePathReviewTest` (9) green.
+- *Full reactor green; no test modified except the `runBlocking<Unit>` change* - `mvn -o test
+  -Dmaven.test.failure.ignore=true` from the repo root: BUILD SUCCESS, every module SUCCESS,
+  snapshotcache 215, shuttle 271, sftpconnector core 74 and testkit 225, all with no failure and no
+  error. `etl-host` reports 17 errors, every one of them `java.lang.RuntimeException: Failed to
+  start quarkus` out of `QuarkusTestExtension.throwBootFailureException` before any test body runs -
+  environmental, not this ticket's, and unchanged by it. The only test-file edits here are five
+  `runBlocking<Unit>`s and four comments.
+- *Progress entry appended* - this.
+
+**Deviations:**
+
+1. **Two spec citations are left in the code, on the coordinator's instruction.**
+   `source/SftpSource.kt` ("cancellation included (spec 10.1)", in `watch`'s consume loop) and
+   `testkit/.../source/SftpWatchTest.kt` ("(T12, spec 7.2)", on the consume WARN test) are both
+   inside what ticket 20 is editing in a parallel worktree - `SftpSource.consume` and the source
+   tests - and this session was told to leave `SftpSource.kt` alone entirely and to change exactly
+   one comment in `SftpWatchTest.kt`, so that merge stays clean. Both are one-phrase deletions of
+   the same shape as the eight that were made. **Whoever merges ticket 20 owns them**; until then
+   `grep -rn "spec [0-9]" sftpconnector/` returns those two lines and nothing else.
+2. **`SftpPool.acquire`, `Lease.release` and `Lease.releaseAfter` stay public**, which is the
+   ticket's own fallback. Kotlin's `internal` is per compilation module and `testkit` is a
+   different Maven module from `core`, so making them internal fails the testkit's test compile -
+   measured, not assumed: dozens of errors of the form `Cannot access 'suspend fun acquire():
+   Lease': it is internal in 'sftp/connector/pool/SftpPool'`, across `HousekeeperTest`,
+   `LeaseSemanticsTest`, `PoolShutdownTest`, `SftpPoolTest`, `ValidationOnBorrowTest`,
+   `PoolReviewTest`, `RetrySemanticsTest`, `PoolAgainstServerTest`,
+   `SessionHealthAgainstServerTest`, `AdversaryTest` and `MeasurementsTest`. This is C1's layout
+   showing its price: the pool's invariant tests live one module away from the pool because
+   `testkit` depends on `core`. All three now carry a KDoc line saying `withLease` is the interface
+   and that they are public only because those tests cannot see anything `internal` here. Closing
+   it properly means either the `-Xfriend-paths` compiler flag or moving the pool's tests into
+   `core` behind a fake transport `core` can see - both bigger than a housekeeping ticket, and both
+   an appeal against C1.
+3. **One `runBlocking` beyond the ticket's list was changed.**
+   `core/.../StartupProbeMarkerTest.kt`'s single test is a bare `@Test fun x() = runBlocking { }`,
+   the same hard violation of the brief the ticket's second box exists to fix, added after the
+   ticket was written. Its body already ended in `assertTrue`, so no test was hidden and the count
+   is 1 before and 1 after. Fixing the rule where it is broken rather than only where the ticket
+   pointed is the smaller diff over the life of the file.
+4. **Two spec citations beyond the ticket's list were removed**, for the same reason:
+   `transport/SftpTransport.kt` ("which spec 11.2 routes off an event loop") and
+   `core/.../client/StagingSafetyTest.kt` ("The stale partial file spec 6.3 describes - resume is
+   deferred by 14.1"). Both post-date `6dcda68`, and the acceptance box is the grep being empty,
+   not the ticket's list being exhausted.
+5. **`upload`'s `refuse(attempt, "upload", remote)` now passes the operation name** rather than a
+   third literal. The message is byte-identical, because the value is the same string, and it is
+   the same finding as the meters/resilience pair.
+6. **Decision-log citations (D26, D40, D46, D47) are left alone.** The brief's rule and the
+   ticket's acceptance are both about spec *section* numbers, and the grep that defines the box
+   does not match them. Whether a decision-log id is a citation or a name is a separate question
+   and the maintainer's.
+
+**For the next ticket:**
+
+- `ClientMeters.timing`'s block now takes the operation name (`suspend (String) -> T`). A new
+  client operation is written `meters.timing("thing") { operation -> resilience.attempting(
+  operation, path) { ... } }` and never spells the name twice.
+- `JschConnection.call(operation, path) { }` is where a new transport operation goes. One that
+  needs the coroutine's own job inside the block wants `transferring`'s shape instead: `call`'s
+  lambda is not a `CoroutineScope`, deliberately.
+- The two `grep -rn "spec [0-9]"` hits in deviation 1 are the last ones in the module. Whoever
+  merges ticket 20 can close that box in two edits.

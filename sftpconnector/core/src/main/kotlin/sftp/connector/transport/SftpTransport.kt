@@ -162,7 +162,7 @@ interface SftpConnection : SftpSession {
      * for a bound on something that has none.
      *
      * It runs on the cancelling caller's own thread, under `NonCancellable` - the same as [close],
-     * which spec 11.2 routes off an event loop for that reason: an implementation that closes a
+     * which the shutdown sequence routes off an event loop for that reason: an implementation that closes a
      * socket here does so on whatever thread cancelled the call, which on a reactive host is the
      * event loop. It does not suspend, and implementations must not put it on the connector's IO
      * dispatcher: that dispatcher is exactly as wide as the pool, so the moment it is worth aborting

@@ -89,9 +89,9 @@ class StagingSafetyTest {
     }
 
     /**
-     * The stale partial file spec 6.3 describes - resume is deferred by 14.1, so a `.part` from a
-     * run that died is a fragment nobody will ever finish - still goes, because it is a plain file
-     * this connector wrote. Only what it did not write is refused.
+     * A stale partial file still goes, because it is a plain file this connector wrote: resume is
+     * not built, so a `.part` from a run that died is a fragment nobody will ever finish. Only
+     * what this connector did not write is refused.
      */
     @Test
     fun `a plain partial file an earlier run left behind is replaced`() = runBlocking<Unit> {

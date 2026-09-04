@@ -259,7 +259,7 @@ destroys the session (D9).
 
 | Tier | Mechanism | Effect on the session |
 |---|---|---|
-| Cooperative | Transfers run with a `SftpProgressMonitor` whose `count` returns `false` once the coroutine is cancelled; listings run with an `LsEntrySelector` that returns `BREAK`. JSch closes the remote handle cleanly. | Usable, returned to the pool after validation |
+| Cooperative | Transfers run with a `SftpProgressMonitor` whose `count` returns `false` once the coroutine is cancelled; listings run with an `LsEntrySelector` that returns `BREAK`. JSch closes the remote handle cleanly. | Usable, and shelved idle with no probe on the way back - the same as a session a call returned from normally. Answering no drains the pipelined reads and closes the handle cleanly, so nothing is left half-read on the wire and there is nothing extra to prove; the next borrower validates it only under the ordinary rule, when it has been idle longer than `validationBypass` |
 | Keepalive ladder | The server-alive probes fail one after another and unblock the stalled read with an exception, after `keepAlive x (serverAliveCountMax + 1)`. | Poisoned, evicted |
 | Forced | If neither tier has unblocked the call within `cancelGrace` (default 5 s), the cancellation handler calls `abort()`, which **closes the session's socket and only then** disconnects the session, from another thread. | Poisoned, evicted |
 
@@ -448,9 +448,11 @@ The ack model gives backpressure, post-processing and redelivery in one mechanis
   the messaging model (Kafka offset commit, NATS ack) rather than Camel or Spring Integration,
   which filter before emitting and therefore never move an already-seen file.
 - Each of ack and nack is accepted once; the second call is logged and ignored.
-- `ackWait` (optional) makes an unacked file eligible again after the duration, like NATS.
-  Off by default: with a single consumer, a stuck file is a consumer bug to surface, not to
-  hide.
+- `ackWait` - making an unacked file eligible again after a duration, the way NATS does - is
+  **not built**, and there is no knob for it: it is not off by default, it is absent. With one
+  consumer per directory a stuck file is a consumer bug to surface rather than one to hide, so
+  nothing has needed it yet. Whoever does adds the duration to the polling block and the timer
+  that reads it together. Sec 14.3 carries the deferral.
 
 `consume(dir, every) { file -> ... }` wraps `watch`: it acks when the block returns and nacks
 when it throws. It is the documented normal path; manual ack is for pipelines that commit late.
@@ -545,7 +547,11 @@ validator, the probe and the ack executor cannot disagree about which folder `te
   skips directories by default, and with `recursive` on it excludes the action targets
   automatically, so moved files are never re-listed. Camel's default move target is a hidden
   folder inside the watched directory, and the foot-gun there is users forgetting to exclude it
-  under recursion; excluding automatically removes the foot-gun.
+  under recursion; excluding automatically removes the foot-gun. An action target is read as
+  relative to the watched directory unless it starts with `/`, and the exclusion matches the
+  target's spelling against the subdirectory paths the listing built from the watched directory's
+  own spelling - so an absolute target under a directory watched by a relative path (`/drop/done`
+  under a watch of `drop`) is not recognised as a target and is walked into again.
 - Rename across filesystems fails with the generic `SSH_FX_FAILURE`. The startup probe
   (Sec 11.1) performs a rename into the target and fails fast on this.
 - SFTP version 3 rename fails when the target exists on servers without the POSIX rename
@@ -829,7 +835,8 @@ claim step rather than a readiness check.
 
 ### 14.3 Ack wait and in-progress
 
-`ackWait` is specified but off; an `inProgress()` extension like NATS is not specified.
+`ackWait` is **not built** and has no knob to turn on - Sec 7.2 says what building it would take.
+An `inProgress()` extension like NATS is not specified either.
 
 ### 14.4 Other transports
 
