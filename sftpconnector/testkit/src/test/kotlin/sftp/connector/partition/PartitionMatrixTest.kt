@@ -97,13 +97,14 @@ class PartitionMatrixTest : PartitionTest() {
             remoteRoot.resolve("drop/a.csv").writeText(CONTENT)
 
             withPartitionedClient({ pool { validationBypass = 1.minutes } }) { client, partition ->
-                pool.withLease { it.connection.realpath(".") }
+                // Listed through the client before the faults are armed, which also warms the session.
+                val listed = checkNotNull(client.stat("/drop/a.csv"))
                 partition.damage { latency("hold-the-reply", DOWNSTREAM, REPLY_HOLD.inWholeMilliseconds) }
                 partition.tunnel.onNextClientRequest { partition.damage { resetPeer("reset", DOWNSTREAM, 0) } }
                 var noticedAfter: Duration? = null
                 val healer = launch { noticedAfter = partition.healOnceNoticed() }
 
-                client.rename("/drop/a.csv", "/drop/temp/a.csv", Overwrite.REPLACE, expectedSize = CONTENT.length.toLong())
+                client.rename("/drop/a.csv", "/drop/temp/a.csv", Overwrite.REPLACE, listed)
                 healer.join()
 
                 assertThat(noticedAfter!!).describedAs("the held reply ran into the reset, and the session was written off at once").isLessThan(REPLY_HOLD + HEAL_SLACK)

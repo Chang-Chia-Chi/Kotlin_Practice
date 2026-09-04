@@ -30,6 +30,7 @@ import sftp.connector.error.SftpException
 import sftp.connector.pool.SftpPool
 import sftp.connector.transport.SftpSession
 import java.time.Clock
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
 import kotlin.time.toJavaDuration
 import kotlin.time.toKotlinDuration
@@ -87,7 +88,19 @@ internal class Resilience(
             .minimumNumberOfCalls(settings.circuitBreaker.slidingWindow)
             .waitDurationInOpenState(settings.circuitBreaker.waitInOpen.toJavaDuration())
             .clock(clock)
+            // How long a call took is measured on the same clock as the wait in open, so a
+            // test can see both on virtual time. In nanoseconds, because the library's Kotlin
+            // wrapper reads the timestamp as nanoseconds whatever unit is declared here
+            // (read off resilience4j-kotlin 2.4.0's bytecode: `onResult(elapsed, NANOSECONDS)`).
+            .currentTimestampFunction({ TimeUnit.MILLISECONDS.toNanos(it.millis()) }, TimeUnit.NANOSECONDS)
             .permittedNumberOfCallsInHalfOpenState(1)
+            // Spec 9: the breaker counts recoverable errors and nothing else. Left to itself the
+            // library also counts a success slower than a minute, and opens on a window of them;
+            // a pipeline moving large files over a slow link would then be throttled by its own
+            // safety mechanism with no failure having occurred. No finite bound switches that
+            // off: what is measured here includes the wait for a transfer permit, which is bounded
+            // only by the transfers ahead of it. So the threshold is the longest the library takes.
+            .slowCallDurationThreshold(NEVER_SLOW)
             // Ignored rather than merely not recorded: a failure that is not the server's fault
             // must not count as a success either, or a run of them would hide a failing server.
             .ignoreException { !it.countsAgainstTheBreaker() }
@@ -215,6 +228,9 @@ internal class Resilience(
 
     private companion object {
         private val LOG = LoggerFactory.getLogger(Resilience::class.java)
+
+        /** A success is never a failure, whatever it took; see the breaker's configuration. */
+        private val NEVER_SLOW: java.time.Duration = java.time.Duration.ofNanos(Long.MAX_VALUE)
 
         private fun Backoff.asIntervals(): IntervalFunction =
             if (jitter) IntervalFunction.ofExponentialRandomBackoff(initial.toJavaDuration(), 2.0, 0.5, max.toJavaDuration())

@@ -19,13 +19,17 @@ import sftp.connector.transport.SftpSession
  *  - **whether a try before this one reached the server.** Only then is the target worth
  *    looking at before anything is sent, and only then can a source that is gone mean "my
  *    earlier try moved it"; before any request has gone out it means what it says.
- *  - **the size the file had before the first request.** A file at the target with that size is
- *    the one that was moved there; a file with another size is somebody else's, and a missing
- *    source is then the truth (I11). The size comes from the caller when it listed the file,
- *    and is measured once here when the caller has none. A later try looks for that file
- *    *before* it sends its rename: a rename sent regardless would, on a server that replaces
- *    without being asked, move whatever the uploader had since put at the source over the file
- *    that had already landed.
+ *  - **the file as it was listed before the first request.** A file at the target with the
+ *    size and modification time the source had is the one that was moved there - a rename keeps
+ *    both - and a file of another size or time is somebody else's, so a missing source is then
+ *    the truth (I11). Size alone is not enough: under a replacing policy the target is expected
+ *    to be occupied, by yesterday's file of the same name, and a same-size file there is the
+ *    common case rather than a coincidence (D46). The listing comes from the caller, and is
+ *    measured once here when the caller has none. A later try looks for that file *before* it
+ *    sends its rename: a rename sent regardless would, on a server that replaces without being
+ *    asked, move whatever the uploader had since put at the source over the file that had
+ *    already landed. And it looks at the source first: the listed file still sitting there is a
+ *    rename that did not land, whatever look-alike the target holds.
  *  - **that the target was looked at and found free.** Under a refusing policy the look runs
  *    once, before the first request. Looking again on a later try would find the first try's own
  *    landed file there and refuse the rename for it - a phantom failure with the disposition
@@ -36,36 +40,65 @@ internal class RenameTries(
     private val from: String,
     private val to: String,
     private val overwrite: Overwrite,
-    private var expectedSize: Long?,
+    private var listed: RemoteFile?,
 ) {
     private var targetFoundFree = false
     private var reachedTheServer = false
 
     suspend fun attempt(session: SftpSession, attempt: Attempt) {
-        val size = expectedSize ?: session.stat(from).size.also { expectedSize = it }
+        val file = listed ?: session.stat(from).also { listed = it }
         if (overwrite == Overwrite.REFUSE && !targetFoundFree) {
             if (session.entryAt(to) != null) refuse(attempt, "rename", to)
             targetFoundFree = true
         }
         val anEarlierTryMayHaveLanded = reachedTheServer
-        if (anEarlierTryMayHaveLanded && session.holdsTheMovedFile(size)) return
+        if (anEarlierTryMayHaveLanded && session.landed(file)) return
         reachedTheServer = true
         try {
             if (overwrite == Overwrite.REPLACE) session.moveOnto(from, to) else session.renameNamingWhatIsMissing(from, to)
         } catch (missing: NoSuchFile) {
             // The source vanished between the look and the request: only the earlier try's own
             // rename landing in between could make that a success, so the target is looked at again.
-            if (!anEarlierTryMayHaveLanded || missing.attempt.path != from || !session.holdsTheMovedFile(size)) throw missing
+            if (!anEarlierTryMayHaveLanded || missing.attempt.path != from || !session.holdsTheMovedFile(file)) throw missing
         }
     }
 
-    /** Whether [to] holds a file of the size the source had, which is the earlier try's rename having landed. */
-    private suspend fun SftpSession.holdsTheMovedFile(size: Long): Boolean {
+    /**
+     * After the last try lost its reply: whether that try's rename landed after all, decided by
+     * one look on [session]. What the next retry would have known, asked once when there is no
+     * next retry, so that a file that moved is never reported as still where it was.
+     */
+    suspend fun landedAfterAll(session: SftpSession): Boolean {
+        val file = listed ?: return false
+        return reachedTheServer && session.landed(file)
+    }
+
+    /**
+     * Whether the earlier try's rename landed: the file as it was listed is no longer at the
+     * source, and is at the target.
+     */
+    private suspend fun SftpSession.landed(file: RemoteFile): Boolean {
+        val atSource = entryAt(from)
+        if (atSource != null && atSource.looksLike(file)) return false
+        return holdsTheMovedFile(file)
+    }
+
+    /** Whether [to] holds the file as it was listed, which is the earlier try's rename having landed. */
+    private suspend fun SftpSession.holdsTheMovedFile(file: RemoteFile): Boolean {
         val atTarget = entryAt(to) ?: return false
-        if (atTarget.size != size) return false
-        LOG.info("{} is at {} with the expected {} bytes, so the rename whose reply was lost had landed; reported as success.", from, to, size)
+        if (!atTarget.looksLike(file)) return false
+        LOG.info(
+            "{} is at {} with the expected {} bytes and modification time {}, so the rename whose reply was lost had landed; reported as success.",
+            from,
+            to,
+            file.size,
+            file.modifiedAt,
+        )
         return true
     }
+
+    /** Both come from the server's own stat, in its whole seconds, so no clock but the server's is compared. */
+    private fun RemoteFile.looksLike(file: RemoteFile): Boolean = size == file.size && modifiedAt == file.modifiedAt
 }
 
 /**

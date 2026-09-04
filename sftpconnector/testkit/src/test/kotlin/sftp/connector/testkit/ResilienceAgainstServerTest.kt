@@ -218,12 +218,12 @@ class ResilienceAgainstServerTest {
         remoteRoot.resolve("drop/ledger.csv").writeText(CONTENT)
 
         withTunnelledClient({ pool { keepAlive = KEEPALIVE; validationBypass = 1.minutes } }) { client, tunnel, _ ->
-            client.exists("/drop")
+            val listed = checkNotNull(client.stat("/drop/ledger.csv"))
             // Fires once what the client sent has been passed on, so the request reaches the
             // server and its reply is what the stall swallows.
             tunnel.onNextClientRequest { tunnel.stall() }
 
-            client.rename("/drop/ledger.csv", "/drop/temp/ledger.csv", Overwrite.REPLACE, expectedSize = CONTENT.length.toLong())
+            client.rename("/drop/ledger.csv", "/drop/temp/ledger.csv", Overwrite.REPLACE, listed)
 
             assertThat(remoteRoot.resolve("drop/temp/ledger.csv").readText()).isEqualTo(CONTENT)
             assertThat(remoteRoot.resolve("drop/ledger.csv").exists()).isFalse()

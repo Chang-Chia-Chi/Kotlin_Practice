@@ -4,11 +4,14 @@ import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runTest
 import org.assertj.core.api.Assertions.assertThat
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
@@ -31,6 +34,7 @@ import sftp.connector.testkit.FakeSftpTransport
 import sftp.connector.testkit.FakeSftpTransport.Call
 import sftp.connector.testkit.FakeSftpTransport.Operation
 import java.nio.file.Path
+import java.time.Instant
 import kotlin.io.path.listDirectoryEntries
 import kotlin.io.path.readText
 import kotlin.io.path.writeText
@@ -66,7 +70,7 @@ class RetrySemanticsTest {
             .file(FROM, CONTENT)
         val client = clientOver(server)
 
-        client.rename(FROM, TO, Overwrite.REFUSE, expectedSize = CONTENT.length.toLong())
+        client.rename(FROM, TO, Overwrite.REFUSE, server.listed(FROM))
 
         assertThat(server.calls.filter { it.operation == Operation.Rename })
             .describedAs("the retry found the landed file before it sent anything")
@@ -92,10 +96,69 @@ class RetrySemanticsTest {
         }.file(FROM, CONTENT)
         val client = clientOver(server)
 
-        assertThat(failureOf { client.rename(FROM, TO, expectedSize = CONTENT.length.toLong()) })
+        assertThat(failureOf { client.rename(FROM, TO, listed = server.listed(FROM)) })
             .isInstanceOf(NoSuchFile::class.java)
             .hasMessageContaining("path=$FROM")
             .hasMessageContaining("attempt=2")
+        assertNothingIsStillOut()
+    }
+
+    /**
+     * Under `REPLACE` the target is expected to be occupied - yesterday's file of the same name -
+     * and a file of the same size there is the common case, not a stranger. A retry after a reply
+     * lost before anything landed must not take it for its own landed file: the file it was told
+     * to move is still where it was, and it is moved (T17 lens 5 H2; D46).
+     */
+    @Test
+    fun `I15_under REPLACE a file already at the target with the source's size is not taken for the landed one`() = runTest {
+        val server = fakeServer { call -> if (call.isFirstOf(Operation.Rename)) throw SessionLost(Attempt(ENDPOINT, "rename", FROM), "the tunnel went quiet") }
+            .file(FROM, CONTENT)
+            .file(TO, OTHER_OF_THE_SAME_LENGTH, modifiedAt = Instant.parse("2023-12-31T00:00:00Z"))
+        val client = clientOver(server)
+
+        client.rename(FROM, TO, Overwrite.REPLACE, server.listed(FROM))
+
+        assertFalse(FROM in server.snapshot(), "the source was moved")
+        assertEquals(CONTENT, server.bytesAt(TO)!!.decodeToString(), "the file at the target is the one that was moved")
+        assertNothingIsStillOut()
+    }
+
+    /**
+     * The same, when even the modification time cannot tell the two apart - a file at the target
+     * written in the same second. Then the source decides: the file as it was listed, still at
+     * the source, is a rename that did not land, whatever the target looks like.
+     */
+    @Test
+    fun `I15_under REPLACE a look-alike at the target does not outweigh the listed file still at the source`() = runTest {
+        val server = fakeServer { call -> if (call.isFirstOf(Operation.Rename)) throw SessionLost(Attempt(ENDPOINT, "rename", FROM), "the tunnel went quiet") }
+            .file(FROM, CONTENT)
+            .file(TO, OTHER_OF_THE_SAME_LENGTH)
+        val client = clientOver(server)
+
+        client.rename(FROM, TO, Overwrite.REPLACE, server.listed(FROM))
+
+        assertFalse(FROM in server.snapshot(), "the source was moved")
+        assertEquals(CONTENT, server.bytesAt(TO)!!.decodeToString(), "the file at the target is the one that was moved")
+        assertTrue(Call(Operation.Stat, session = 2, path = FROM) in server.calls, "the retry looked at the source")
+        assertNothingIsStillOut()
+    }
+
+    /**
+     * The reply is lost on the last permitted try, so no retry will look for the landed file.
+     * What the retry would have known is not thrown away with it: one look after the last try
+     * decides landed or not, so a file that moved is reported as moved rather than as "still
+     * where it was" (T17 lens 5 M4; I15's bound).
+     */
+    @Test
+    fun `a rename whose reply is lost on the last permitted try is looked into before it is reported`() = runTest {
+        val server = fakeServer { call -> if (call.isFirstOf(Operation.Rename)) landAndLoseTheReply(call) }
+            .file(FROM, CONTENT)
+        val client = clientOver(server) { resilience { retry { maxAttempts = 1 } } }
+
+        client.rename(FROM, TO, Overwrite.REFUSE, server.listed(FROM))
+
+        assertTrue(Call(Operation.Stat, session = 2, path = TO) in server.calls, "the look at the target, on a fresh session: ${server.calls}")
+        assertEquals(0.0, retries("rename"), "no retry was permitted")
         assertNothingIsStillOut()
     }
 
@@ -126,7 +189,7 @@ class RetrySemanticsTest {
             .file(FROM, CONTENT)
         val client = clientOver(server)
 
-        client.rename(FROM, TO, Overwrite.REFUSE, expectedSize = CONTENT.length.toLong())
+        client.rename(FROM, TO, Overwrite.REFUSE, server.listed(FROM))
 
         assertThat(server.calls.filter { it.operation == Operation.Stat && it.path == TO }.map { it.session })
             .describedAs("the policy's look on the first session, and only the landed-file look on the second")
@@ -280,6 +343,26 @@ class RetrySemanticsTest {
         testScheduler.advanceTimeBy(1.minutes + 1.seconds)
         assertThat(client.exists(FROM)).describedAs("the half-open probe").isTrue()
         assertThat(breakerState()).isZero()
+        assertNothingIsStillOut()
+    }
+
+    /**
+     * Spec 9: the breaker counts recoverable errors and nothing else. The library it is built on
+     * also counts a *slow success* - anything over a minute, by default - and opens on a window
+     * of them, so a pipeline moving large files over a slow link was being throttled by its own
+     * safety mechanism with no failure having occurred (T17 lens 5 H1). Measured on the clock the
+     * connector was given, so the minute passes without being waited for.
+     */
+    @Test
+    fun `a success slower than the library's own minute is not held against the server`() = runTest {
+        val server = fakeServer { call -> if (call.operation == Operation.Stat) delay(61.seconds) }.file(FROM, CONTENT)
+        val client = clientOver(server) { resilience { operationTimeout = 2.minutes; circuitBreaker { slidingWindow = 2 } } }
+
+        repeat(2) { assertTrue(client.exists(FROM)) }
+
+        assertEquals(0, breakerState(), "a breaker of two calls, both slow successes, is still closed")
+        assertTrue(client.exists(FROM), "the third call is not refused")
+        assertEquals(0.0, retries("exists"))
         assertNothingIsStillOut()
     }
 
@@ -454,6 +537,7 @@ class RetrySemanticsTest {
         private const val FROM = "/drop/ledger.csv"
         private const val TO = "/drop/temp/ledger.csv"
         private const val CONTENT = "id,amount\n1,42\n"
+        private const val OTHER_OF_THE_SAME_LENGTH = "id,amount\n1,41\n"
 
         private fun configFor(stage: Path, extra: SftpConnectorBuilder.() -> Unit): SftpConnectorConfig =
             sftpConnector("retry-semantics") {
