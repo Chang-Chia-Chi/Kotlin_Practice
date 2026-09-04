@@ -10,6 +10,7 @@ import kotlinx.coroutines.withTimeout
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
+import sftp.connector.client.Overwrite
 import sftp.connector.config.HostKeyPolicy
 import sftp.connector.config.SftpConnectorConfig
 import sftp.connector.config.sftpConnector
@@ -79,6 +80,50 @@ class ShutdownAgainstServerTest {
             }
         }
 
+    /**
+     * The C1 shutdown case: not a stalled download but an upload black-holed on a full send buffer,
+     * which parks JSch inside a socket write with the session's write lock held. The drain runs out,
+     * the cut has to close the socket before JSch's orderly disconnect needs that lock, and `close()`
+     * has to return within the bound all the same. Without the socket-close-first fix this overruns
+     * by the kernel's give-up time, minutes away, and I9 is void for exactly the call that most needs
+     * it.
+     */
+    @Test
+    fun `I9_closing while an upload is black-holed on a full send buffer returns within the bound`() =
+        runBlocking<Unit> {
+            remoteRoot.resolve("drop").createDirectory()
+            val big = stage.resolve("big.bin")
+            big.writeBytes(ByteArray(BLACK_HOLE_FILE_BYTES) { it.toByte() })
+
+            EmbeddedSftpServer.start(remoteRoot, USER, PASSWORD).use { server ->
+                LoopbackConnectProxy.start().use { tunnel ->
+                    val config = configFor(server, tunnel)
+                    val connector = SftpConnector.start(config, meterRegistry = meters)
+
+                    val blocked = CompletableDeferred<Unit>()
+                    tunnel.blackHoleClientAfter(BLACK_HOLE_AFTER_BYTES) { blocked.complete(Unit) }
+                    val upload = async { runCatching { connector.client.upload(big, "/drop/big.bin", Overwrite.REPLACE) } }
+                    blocked.await()
+
+                    val waited = TimeSource.Monotonic.markNow()
+                    connector.close()
+                    val took = waited.elapsedNow()
+
+                    assertThat(took)
+                        .describedAs("the drain runs out, then the cut closes the socket and hands back well inside the grace")
+                        .isBetween(DRAIN, DRAIN + GRACE + SLACK)
+                    withTimeout(10.seconds) { upload.await() }
+                    assertThat(connector.pool.stats().total).describedAs("sessions the pool still holds").isZero()
+                    assertThat(meters.counter("sftp_pool_evicted_total", "endpoint", config.endpoint.address, "reason", "shutdown").count())
+                        .isEqualTo(1.0)
+                    // Not asserting `server.liveSessions` here: the black hole leaves the proxy's
+                    // own upstream copier parked, so the server-side socket lingers until the
+                    // tunnel is torn down at the end of this block - which is the proxy's business,
+                    // not the connector's bound. The cut, the bound and the eviction above are.
+                }
+            }
+        }
+
     private fun configFor(server: EmbeddedSftpServer, tunnel: LoopbackConnectProxy): SftpConnectorConfig =
         sftpConnector("shutdown-demo") {
             endpoint {
@@ -100,6 +145,10 @@ class ShutdownAgainstServerTest {
         /** Big enough that the transfer is still going long after the hold stops it. */
         private const val FILE_BYTES = 8 * 1024 * 1024
         private const val HOLD_AFTER_BYTES = 64L * 1024
+
+        /** Big enough that the whole file cannot buffer before the black-holed write is cut. */
+        private const val BLACK_HOLE_FILE_BYTES = 64 * 1024 * 1024
+        private const val BLACK_HOLE_AFTER_BYTES = 1L * 1024 * 1024
 
         private val DRAIN: Duration = 1.seconds
         private val GRACE: Duration = 300.milliseconds

@@ -161,11 +161,18 @@ interface SftpConnection : SftpSession {
      * afterwards by design. Whoever calls it is choosing to pay for a new handshake in exchange
      * for a bound on something that has none.
      *
-     * It does not suspend, and implementations must not put it on the connector's IO dispatcher:
-     * that dispatcher is exactly as wide as the pool, so the moment it is worth aborting anything
-     * is the moment every thread on it may already be blocked. It must not throw either - there is
-     * nothing a caller could usefully do about an abort that failed, and it is already the last
-     * resort.
+     * It runs on the cancelling caller's own thread, under `NonCancellable` - the same as [close],
+     * which spec 11.2 routes off an event loop for that reason: an implementation that closes a
+     * socket here does so on whatever thread cancelled the call, which on a reactive host is the
+     * event loop. It does not suspend, and implementations must not put it on the connector's IO
+     * dispatcher: that dispatcher is exactly as wide as the pool, so the moment it is worth aborting
+     * anything is the moment every thread on it may already be blocked. It must not throw either -
+     * there is nothing a caller could usefully do about an abort that failed, and it is already the
+     * last resort.
+     *
+     * To be a bound on a call blocked *writing* to a dead peer - not only one blocked reading -
+     * closing the session must not wait on the SSH library's own write lock, which the blocked
+     * writer holds; the adapter closes the socket directly first (D46).
      */
     fun abort()
 }

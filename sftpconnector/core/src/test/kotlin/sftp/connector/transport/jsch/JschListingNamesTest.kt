@@ -156,6 +156,8 @@ class JschListingNamesTest {
     private fun connectionOver(channel: ChannelSftp) = JschConnection(
         session = mock(Session::class.java),
         channel = channel,
+        // Never dialled through here: this test drives a mocked listing channel and closes nothing.
+        socket = RetainedSocket(0),
         io = Dispatchers.Unconfined,
         errors = JschErrorMapper(SimpleMeterRegistry(), CONFIG),
         endpoint = ENDPOINT,

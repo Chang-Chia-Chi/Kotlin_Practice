@@ -2930,6 +2930,14 @@ an `SftpSession`.
   but one wait for all the cut threads to come back, which they do concurrently on their own coroutines.
   The drain timeout was every lease's grace already. The hang-ups that follow are the part that can wait
   on a peer (R1 finding 5), so those run side by side under `coroutineScope`.
+  **[Amended, T17 lens 1 C1 / lens 2 H1.]** "A cut does not wait for anything" was true only of a call
+  blocked in a *read*. `abort()` was `session.disconnect()`, and on a call blocked *writing* to a peer
+  that stopped reading, `disconnect()` hangs up on each channel first - a write behind the session's lock,
+  the very lock the blocked writer holds - so a cut would have waited for the kernel's TCP give-up, minutes
+  away, and I9's bound was void for that call. T17 makes the sentence literally true: `abort()` now closes
+  the retained socket *before* `disconnect()`, which fails the blocked write and needs no lock (D46), so a
+  cut of a write-blocked lease returns as promptly as a cut of a read-blocked one, and I9 holds under a
+  black-holed upload (`ShutdownAgainstServerTest.I9_closing while an upload is black-holed ...`).
 - **`close()` cannot be cancelled, and need not be.** It is bounded by construction, and a pool left
   half-closed is sockets and threads for the life of the process. `withContext(NonCancellable)` around the
   whole of it also covers a caller that was cancelled before it called: the registry's lock, the delays and

@@ -66,6 +66,56 @@ class SftpSourceTest {
     }
 
     /**
+     * Lens 1 H1, folded in for ticket 18. A poll that hits `maxFilesPerPoll` has completed its
+     * listing normally, not been cancelled, so its meter reads `ok`. The cap used to be a `.take`
+     * around the walk, which stops the flow by cancelling the producer - and a sub-listing cut off
+     * that way recorded `result=cancelled`, counted the same as one the time limiter killed. The
+     * budget caps each listing through its own `maxEntries`, which ends it cleanly.
+     *
+     * Recursive with the files spread over a directory and a subdirectory, because that is where
+     * the old `.take` bit: the parent listing was exhausted and fine, but the child listing was
+     * still producing when the cap landed, so it was the one recorded as cancelled.
+     */
+    @Test
+    fun `a recursive poll capped by maxFilesPerPoll records every listing as ok, not cancelled`() = runTest {
+        val transport = FakeSftpTransport().directory("/drop").directory("/drop/sub")
+        repeat(3) { transport.file("/drop/f$it.csv", "x") }
+        repeat(5) { transport.file("/drop/sub/g$it.csv", "x") }
+        val source = sourceOver(transport) { maxFilesPerPoll = 5; recursive = true }
+
+        val events = source.poll("/drop").toList()
+
+        assertThat(events.filterIsInstance<FileSeen>()).describedAs("the poll handed over exactly its cap").hasSize(5)
+        assertThat(
+            registry.find("sftp_op_seconds").timers()
+                .filter { it.id.getTag("op") == "list" }
+                .map { it.id.getTag("result") },
+        )
+            .describedAs("every listing in a capped poll ends cleanly, never by cancellation")
+            .isNotEmpty()
+            .containsOnly("ok")
+    }
+
+    /**
+     * Lens 2 M1. A start-up marker a dead session left in the watched directory - a probe whose
+     * tidy-up met a wire failure - is this connector's own bookkeeping and never a file the
+     * consumer asked for, so the lister skips its whole prefix. Without that skip the poll would
+     * hand over a zero-byte file with a name no consumer recognises.
+     */
+    @Test
+    fun `a marker left by a dead session is never handed to the consumer`() = runTest {
+        val transport = FakeSftpTransport()
+            .directory("/drop")
+            .file("/drop/real.csv", "1")
+            .file("/drop/.sftpconnector-probe-other-deadbeef", "")
+        val events = sourceOver(transport) {}.poll("/drop").toList()
+
+        assertThat(events.filterIsInstance<FileSeen>().map { it.file.name })
+            .describedAs("the marker skipped, the real file handed over")
+            .containsExactly("real.csv")
+    }
+
+    /**
      * The move an ack performs, against a server without the POSIX rename extension and with the
      * target already occupied, so the whole replace sequence has to run. That the file ends up in
      * the folder and nowhere else is the ack; that the set is empty afterwards is the place coming

@@ -20,9 +20,9 @@ import kotlinx.coroutines.flow.FlowCollector
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flow
-import kotlinx.coroutines.flow.take
 import kotlinx.coroutines.launch
 import org.slf4j.LoggerFactory
+import sftp.connector.PROBE_MARKER_PREFIX
 import sftp.connector.client.LocalFile
 import sftp.connector.client.SftpClient
 import sftp.connector.config.OverlapPolicy
@@ -355,7 +355,12 @@ class SftpSource(
      */
     private fun filesUnder(directory: String): Flow<RemoteFile> {
         val actionTargets = polling.actionTargetsUnder(directory).toSet()
-        return flow { walk(directory, actionTargets) }.take(polling.maxFilesPerPoll)
+        // A shared budget carries the `maxFilesPerPoll` cap through the walk, rather than a `.take`
+        // around it. `.take` stops the flow by throwing a cancellation into the producer, and a
+        // listing capped that way records `sftp_op_seconds{op=list,result=cancelled}` - a poll that
+        // simply reached its limit, counted the same as one the time limiter killed. The budget caps
+        // each listing through its own `maxEntries`, which ends it cleanly and records `ok`.
+        return flow { walk(directory, actionTargets, FileBudget(polling.maxFilesPerPoll)) }
     }
 
     /**
@@ -363,12 +368,21 @@ class SftpSource(
      * listing holds a session for as long as it runs, and walking a subdirectory from inside its
      * parent's listing would hold one session per level of the tree.
      */
-    private suspend fun FlowCollector<RemoteFile>.walk(directory: String, actionTargets: Set<String>) {
+    private suspend fun FlowCollector<RemoteFile>.walk(directory: String, actionTargets: Set<String>, budget: FileBudget) {
         val below = mutableListOf<String>()
-        client.list(directory, maxEntries = polling.maxFilesPerPoll, withDirectories = polling.recursive).collect {
-            if (it.isDirectory) below += it.path else emit(it)
+        client.list(directory, maxEntries = budget.remaining, withDirectories = polling.recursive).collect {
+            when {
+                it.isDirectory -> below += it.path
+                // A start-up marker a dead session left behind is never handed over: whoever wrote
+                // it, it is this connector's own bookkeeping and not a file the consumer asked for.
+                it.name.startsWith(PROBE_MARKER_PREFIX) -> Unit
+                budget.take() -> emit(it)
+            }
         }
-        below.filterNot { it in actionTargets }.forEach { walk(it, actionTargets) }
+        for (sub in below.filterNot { it in actionTargets }) {
+            if (budget.isSpent) break
+            walk(sub, actionTargets, budget)
+        }
     }
 
     /**
@@ -458,5 +472,25 @@ class SftpSource(
 
     private companion object {
         private val LOG = LoggerFactory.getLogger(SftpSource::class.java)
+    }
+}
+
+/**
+ * How many more files one poll may hand on, across the whole of a recursive walk.
+ *
+ * It is what carries `maxFilesPerPoll` through the walk without a `.take` around the flow: each
+ * listing is capped by its own `maxEntries` from what is [remaining], so it ends cleanly rather
+ * than by a cancellation, and the walk stops descending once it [isSpent]. One coroutine walks, so
+ * it needs no synchronisation.
+ */
+private class FileBudget(private var left: Int) {
+    val remaining: Int get() = left
+    val isSpent: Boolean get() = left <= 0
+
+    /** Claims one file's worth of budget, or answers false when there is none left. */
+    fun take(): Boolean {
+        if (left <= 0) return false
+        left--
+        return true
     }
 }

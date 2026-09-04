@@ -251,10 +251,33 @@ destroys the session (D9).
 |---|---|---|
 | Cooperative | Transfers run with a `SftpProgressMonitor` whose `count` returns `false` once the coroutine is cancelled; listings run with an `LsEntrySelector` that returns `BREAK`. JSch closes the remote handle cleanly. | Usable, returned to the pool after validation |
 | Keepalive ladder | The server-alive probes fail one after another and unblock the stalled read with an exception, after `keepAlive x (serverAliveCountMax + 1)`. | Poisoned, evicted |
-| Forced | If neither tier has unblocked the call within `cancelGrace` (default 5 s), the cancellation handler calls `abort()`, which disconnects the session from another thread. | Poisoned, evicted |
+| Forced | If neither tier has unblocked the call within `cancelGrace` (default 5 s), the cancellation handler calls `abort()`, which **closes the session's socket and only then** disconnects the session, from another thread. | Poisoned, evicted |
 
 Resilience4j's `TimeLimiter` on a suspend function is `withTimeout`, which enters this ladder at
-the cooperative tier. The keepalive ladder is what actually bounds a hung server.
+the cooperative tier. The keepalive ladder is what actually bounds a hung server *reading*; the
+forced tier is the only bound on a hung server *writing*, and it has to close the socket itself to
+be one (D46).
+
+**The forced tier closes the socket before it disconnects the session** (D46, measured against
+mwiede JSch 2.28.7). What bounds a call that is blocked in a socket *read* is the keepalive floor:
+a stalled read fails when the probes go unanswered. A call blocked in a socket *write* has no such
+bound. JSch encodes and writes every packet under the session's write lock, and a peer that has
+stopped reading TCP fills the send buffer and parks the writing thread inside that lock with no
+timeout. Both gentler tiers then fail: the cooperative monitor is never asked, because no chunk
+ever completes; and the keepalive probe is itself a write behind the same lock, so the reader
+thread parks too. `Session.disconnect()` hangs up on every channel before it touches the socket,
+and a channel hang-up sends a close packet through that same locked write, so `abort()` on its own
+would park behind the writer and never reach the socket close that frees it. The adapter therefore
+keeps the socket JSch dialled (a `SocketFactory` set on the session, honoured on the direct path
+and through `ProxyHTTP` alike) and closes it first in `abort()`: the blocked write fails at once,
+the lock is released, and JSch's own disconnect then runs to the end. With this, all three tiers
+bound a blocked call - a write as much as a read - and I9's shutdown bound holds under a
+black-holed upload, not only a stalled download.
+
+`abort()` runs on the cancelling caller's own thread, under `NonCancellable` - the same as
+`close()`, which spec 11.2 already routes off an event loop for that reason. It is a socket close,
+not a suspend, so it must never touch the bounded IO dispatcher: the moment it is worth cutting
+anything is the moment every thread there may already be blocked.
 
 **The middle tier is `keepAlive`, not `socketTimeout`** (D26, measured against mwiede JSch
 2.28.7). JSch implements `serverAliveInterval` *by* setting the socket read timeout, so it
@@ -794,6 +817,7 @@ table in `progress.md` carries the row.
 
 | ID | Decision | Rationale |
 |---|---|---|
+| D46 | The forced cancellation tier closes the retained socket before it disconnects the session | Measured against mwiede JSch 2.28.7 (Sec 5.3): `Session.disconnect()` hangs up on every channel before it touches the socket, and a channel hang-up writes a close packet under the session's write lock. A thread blocked writing to a peer that stopped reading TCP holds that lock, so `abort()` alone parks behind it and never reaches the socket close - and the keepalive probe is a write behind the same lock, so neither gentler tier ends the call either. The adapter keeps the socket JSch dialled (a `SocketFactory`, honoured on the direct path and through `ProxyHTTP`) and closes it first, which fails the blocked write and releases the lock. With this all three tiers bound a blocked call - a write as much as a read - and I9 holds under a black-holed upload, closing R1's finding 5 and lens 1 C1 / lens 2 H1 |
 | D1 | Own pool, modelled on HikariCP, not Commons Pool 2 and not a `SharedFlow` or `Channel` container | A `SharedFlow` broadcasts and cannot hand out exclusive items; a `Channel` cannot remove a specific expired entry; Commons Pool 2 blocks a thread on borrow with no cancellation. Mature pools all use a flat registry with per-entry state |
 | D2 | Transport interface with a single JSch adapter | The cancellation ladder and error-message table are JSch-specific and volatile; the testkit fake is a real second implementation |
 | D3 | Framework-free core, Quarkus adapter, slf4j in core | The connector must outlive one host framework; Quarkus routes slf4j without configuration |

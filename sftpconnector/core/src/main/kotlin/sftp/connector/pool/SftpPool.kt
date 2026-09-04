@@ -370,18 +370,29 @@ class SftpPool(
     private suspend fun sweep() {
         val round = registry.sweep(capacity::tryAcquire)
         round.leaking.forEach { report(it) }
-        // What the round decided it carries out, even if this coroutine is cancelled in the
-        // middle - which is what a shutdown does to it. A retired session is already off the
-        // shelf and this list is the last thing holding its connection, so left unclosed it keeps
-        // its socket for the life of the process; and an entry reserved for the shelf holds room
-        // that only being dialled or given back ever frees. giveBack is itself uncancellable, so
-        // the finally hands back whatever is left however this coroutine got there.
+        // The spares the round reserved are dialled before its retired sessions are hung up on,
+        // not after. A retired session holds no pool place - an idle one gave its permit back when
+        // it was shelved - so its hang-up queues for an IO thread behind the leases in flight, and
+        // while it waits the reserved spares would sit registered as `Connecting` with their
+        // permits taken: a caller refused meanwhile would read "most of the pool is stuck opening
+        // sessions" for a pool that is in fact stuck hanging up. Dialling first means the spares
+        // are `Connecting` only while they really are being opened, and the retired hang-ups run
+        // after, when nothing is reserved.
+        //
+        // Both the hang-ups and the reservations have to survive this coroutine being cancelled -
+        // which is what a shutdown does to it - so they run in the finally under NonCancellable: a
+        // retired session left unclosed keeps its socket for the life of the process, and a
+        // reserved spare not dialled holds room that only being given back ever frees. The spares'
+        // rooms are given back first, then the retired sessions are closed, so an Error out of a
+        // hang-up cannot strand a permit.
         val toOpen = ArrayDeque(round.toOpen)
         try {
-            withContext(NonCancellable) { round.retired.forEach { finish(it) } }
             while (toOpen.isNotEmpty()) openForTheShelf(toOpen.removeFirst())
         } finally {
-            toOpen.forEach { giveBack(it, Retirement.POISONED) }
+            withContext(NonCancellable) {
+                toOpen.forEach { giveBack(it, Retirement.POISONED) }
+                round.retired.forEach { finish(it) }
+            }
         }
     }
 

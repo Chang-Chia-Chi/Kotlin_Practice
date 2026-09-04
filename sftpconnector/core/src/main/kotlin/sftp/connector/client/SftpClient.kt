@@ -2,12 +2,19 @@ package sftp.connector.client
 
 import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.channels.ClosedSendChannelException
 import kotlinx.coroutines.channels.SendChannel
-import kotlinx.coroutines.channels.trySendBlocking
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.channelFlow
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.job
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.time.Duration.Companion.milliseconds
 import org.slf4j.LoggerFactory
 import sftp.connector.config.SftpConnectorConfig
 import sftp.connector.error.Attempt
@@ -94,10 +101,15 @@ class SftpClient(
             // remembering which ones would cost the memory this flow exists not to spend. The
             // consumer sees the failure and lists again when it is ready to.
             resilience.attempting("list", dir, unhurried = true, stillWorthRetrying = { handedOn == 0 }) { session, _ ->
+                // The coroutine that owns the lease, so the hand-off below can watch it and not
+                // only the channel: the time limiter cancels this coroutine, not the collector, so
+                // a listing whose collector has stalled the buffer full is unblocked only if the
+                // parked IO thread sees this job go inactive.
+                val listing = currentCoroutineContext().job
                 session.list(dir) { entry ->
                     when {
                         (entry.isDirectory && !withDirectories) || !filter(entry) -> Listing.CONTINUE
-                        !handOn(entry) -> Listing.STOP
+                        !handOn(entry, listing) -> Listing.STOP
                         ++handedOn >= maxEntries -> Listing.STOP
                         else -> Listing.CONTINUE
                     }
@@ -386,5 +398,34 @@ private val LOG = LoggerFactory.getLogger(SftpClient::class.java)
  * was cancelled - leaves nowhere to put an entry, and that is an answer rather than a fault: the
  * listing stops where it is, the server closes the handle, and the session goes back to the pool
  * healthy. That is what a cancelled listing is supposed to do.
+ *
+ * The wait watches [listing] - the coroutine that owns the lease - as well as the channel, because
+ * the two ways a listing ends do not both close the channel. A collector that walked away closes
+ * it, and a full-buffer wait then fails at once. But a cancellation from *inside* the call - the
+ * time limiter's, a shutdown's - cancels [listing] while the collector, and so the channel, is
+ * untouched; a wait watching only the channel would then park this IO thread until the collector
+ * happened to take an entry, defeating the time limiter and leaving the grace to cut a healthy
+ * session apart. So the wait is sliced: each slice re-checks [listing], and a cancelled one answers
+ * stop within a slice, whereupon JSch closes the handle cleanly and the session stays fit.
  */
-private fun SendChannel<RemoteFile>.handOn(entry: RemoteFile): Boolean = trySendBlocking(entry).isSuccess
+private fun SendChannel<RemoteFile>.handOn(entry: RemoteFile, listing: Job): Boolean = runBlocking {
+    while (listing.isActive) {
+        val delivered = withTimeoutOrNull(HANDOFF_SLICE) {
+            try {
+                send(entry)
+                true
+            } catch (closed: ClosedSendChannelException) {
+                false
+            }
+        }
+        if (delivered != null) return@runBlocking delivered
+    }
+    false
+}
+
+/**
+ * How long the hand-off parks before it looks again at whether its listing has been cancelled. Long
+ * enough that a keeping-up consumer is never woken to re-check, short enough that a cancelled
+ * listing frees its IO thread promptly rather than at the collector's pace.
+ */
+private val HANDOFF_SLICE = 50.milliseconds
