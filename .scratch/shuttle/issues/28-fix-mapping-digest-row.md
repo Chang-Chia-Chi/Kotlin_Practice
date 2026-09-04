@@ -10,12 +10,12 @@ so an MD5 hex is delivered labelled sha256. Spec 9.6 asks for a second digest; t
 
 **Nature:** renderer correctness, one row kind
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `MappingRendererTest`: a `digest: sha256` row on a transfer digested with MD5 renders missing (and a `required: true` row fails the render naming the row); the same row on a transfer digested with SHA-256 renders the hex; red before the fix
-- [ ] Decide, against spec 6.5 and 9.6, whether a route may carry two digests (then the pipeline computes the second when a mapping asks) or only one (then the row is validated by a rule at boot: a mapping asking for an algorithm the route does not compute is a violation, numbered, in YAML and DSL); record the decision and implement that one
-- [ ] `ValidateCommandTest` or `RulesTest` covers the boot-time check if that is the choice
-- [ ] Progress entry appended, correcting ticket 04's deviation 4
+- [x] `MappingRendererTest`: a `digest: sha256` row on a transfer digested with MD5 renders missing (and a `required: true` row fails the render naming the row); the same row on a transfer digested with SHA-256 renders the hex; red before the fix
+- [x] Decide, against spec 6.5 and 9.6, whether a route may carry two digests (then the pipeline computes the second when a mapping asks) or only one (then the row is validated by a rule at boot: a mapping asking for an algorithm the route does not compute is a violation, numbered, in YAML and DSL); record the decision and implement that one - **D48: one digest per route, rule 26 at boot**
+- [x] `ValidateCommandTest` or `RulesTest` covers the boot-time check if that is the choice - `RulesTest.rule26_*`, two tests
+- [x] Progress entry appended, correcting ticket 04's deviation 4
 
 Ground rules for every ticket: implement only this ticket; 200-600 lines including tests; no Thread.sleep;
 invariant tests named `I<n>_<description>`, scenario tests by their `S<n>` id, validation tests by `rule<n>_`,

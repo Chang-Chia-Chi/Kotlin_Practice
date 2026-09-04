@@ -139,6 +139,29 @@ class MappingRendererTest {
         assertEquals(mapper.readTree("""{"trimmed":"123","upper":"VENDOR-DROP","lower":"acme","empty":"n/a"}"""), body)
     }
 
+    /**
+     * B7: the row's `digest: <algo>` selects the algorithm, so a row asking for one the transfer does not
+     * carry is missing (spec 9.6, ticket 04's deviation 4). Delivering the MD5 hex under a `sha256` row
+     * would be a wrong answer dressed as a right one.
+     */
+    @Test
+    fun B7_a_digest_row_asking_for_another_algorithm_renders_missing_not_the_wrong_hex() {
+        val body = render(
+            MappingRow("md5", field = "DIGEST", digest = "md5"),
+            MappingRow("any", field = "DIGEST"),
+            MappingRow("sha256", field = "DIGEST", digest = "sha256", required = false),
+        )
+        assertEquals(mapper.readTree("""{"md5":"bb","any":"bb"}"""), body)
+        assertFalse(body.has("sha256"))
+
+        val failure = assertThrows(MappingFailure::class.java) { render(MappingRow("file.sha256", field = "DIGEST", digest = "sha256")) }
+        assertEquals("file.sha256", failure.path)
+
+        val sha = transfer.copy(digest = Digest(DigestAlgorithm.SHA256, "cc"))
+        val hex = runBlocking { MappingRenderer().render(table(MappingRow("sha256", field = "DIGEST", digest = "SHA256")), sha, DeliveryMoment.ACKED) }
+        assertEquals(mapper.readTree("""{"sha256":"cc"}"""), hex)
+    }
+
     @Test
     fun check_rejects_each_bad_row_by_rule_number() {
         val table = table(

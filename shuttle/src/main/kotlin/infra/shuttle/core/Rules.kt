@@ -13,7 +13,7 @@ data class Report(val violations: List<Violation>, val errors: List<String> = em
 }
 
 /**
- * Spec 13.3: the twenty-five rules, every violation collected and reported with its number.
+ * Spec 13.3: the twenty-six rules, every violation collected and reported with its number.
  * `beans` answers what a named bean produces, or null when no bean has that name (rules 15 and 17);
  * validate mode passes the host's lookup, tests pass a map.
  */
@@ -116,7 +116,7 @@ object Rules {
             if (declared.any { it is Secret.Literal }) fail(25, "a secret is given as a literal; use a \${VAR} reference")
         }
 
-        /** Rules 1, 2, 5, 6, 7, 8, 12, 13, 14, 15, 17, 22, 23. */
+        /** Rules 1, 2, 5, 6, 7, 8, 12, 13, 14, 15, 17, 22, 23, 26. */
         fun route(route: Route) {
             val name = route.name
             val source = route.source
@@ -159,9 +159,17 @@ object Rules {
             }
             route.process.forEach { processor(name, it, source is Source.Subscribe, placeholders) }
             val callback = (source?.onAck as? AckAction.Callback)?.channel
+            val algorithm = route.digest ?: config.digest
             (route.notify.map { it.channel } + listOfNotNull(callback)).mapNotNull { channels[it] as? HttpChannel }.distinct().forEach { channel ->
                 MappingRenderer.check(channel.body, declared) { true }.filter { it.rule == 17 }
                     .forEach { fail(17, "route $name: channel ${channel.name} ${it.message}") }
+                // Rule 26 (D48): one digest per route, so a row asking for another algorithm renders missing for ever.
+                channel.body.rows.forEach { row ->
+                    val asked = DigestAlgorithm.entries.firstOrNull { it.name.equals(row.digest, ignoreCase = true) }
+                    if (asked != null && asked != algorithm) {
+                        fail(26, "route $name: channel ${channel.name} row ${row.path} asks for ${asked.name.lowercase()}, which the route does not compute; it digests with ${algorithm.name.lowercase()}")
+                    }
+                }
             }
         }
 

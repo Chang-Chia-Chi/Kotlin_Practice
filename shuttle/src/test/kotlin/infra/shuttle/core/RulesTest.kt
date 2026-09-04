@@ -156,6 +156,21 @@ class RulesTest {
     fun rule21_digest_is_md5_sha256_or_sha1() =
         assertEquals(listOf(21), violated(config(downstream = { body = mapping { row(MappingRow("x", field = "DIGEST", digest = "crc32")) } })))
 
+    /** D48: one digest per route, so a row asking for another algorithm can only ever render missing; rule 26 says so at boot. */
+    @Test
+    fun rule26_a_mapping_digest_row_asks_for_the_algorithm_its_route_computes() =
+        assertEquals(listOf(26), violated(config(downstream = { body = mapping { row(MappingRow("x", field = "DIGEST", digest = "sha256")) } })))
+
+    @Test
+    fun rule26_accepts_the_row_when_the_route_overrides_the_process_default() =
+        assertEquals(
+            emptyList<Int>(),
+            violated(config(
+                downstream = { body = mapping { row(MappingRow("x", field = "DIGEST", digest = "sha256")) } },
+                vendorDrop = { digest = Digest.SHA256 },
+            )),
+        )
+
     @Test
     fun rule22_attribute_names_are_at_most_32_and_64_characters_each() =
         assertEquals(listOf(22), violated(config(vendorDrop = { process = process then extract(from = FileName, regex = "(?<${"a".repeat(65)}>.*)") })))

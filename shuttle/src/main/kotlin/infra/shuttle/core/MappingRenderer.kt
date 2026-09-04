@@ -25,7 +25,7 @@ class MappingRenderer(private val providers: (String) -> Provider? = { null }) {
         val provided = HashMap<String, JsonNode>()
         for (row in table.rows) {
             val raw: Any? = when {
-                row.field != null -> field(Field.valueOf(row.field), transfer, moment, attempt)
+                row.field != null -> field(Field.valueOf(row.field), transfer, moment, attempt, row.digest)
                 row.attribute != null -> transfer.attributes[row.attribute]
                 row.provider != null -> provided.getOrPut(row.provider) {
                     providers(row.provider)?.provide(transfer) ?: throw MappingFailure(row.path, "no provider named ${row.provider}")
@@ -66,7 +66,8 @@ class MappingRenderer(private val providers: (String) -> Provider? = { null }) {
         else -> formatter(format).format(instant.atOffset(ZoneOffset.UTC))
     }
 
-    private fun field(field: Field, t: Transfer, moment: DeliveryMoment, attempt: Int): Any? = when (field) {
+    /** `asked` is the row's `digest: <algo>`: a `DIGEST` row asking for an algorithm the transfer does not carry is missing (spec 9.6, D48). */
+    private fun field(field: Field, t: Transfer, moment: DeliveryMoment, attempt: Int, asked: String?): Any? = when (field) {
         Field.TRANSFER_ID -> t.id.value
         Field.PARENT_ID -> t.parentId?.value
         Field.ROUTE -> t.identity.route.value
@@ -80,7 +81,7 @@ class MappingRenderer(private val providers: (String) -> Provider? = { null }) {
         Field.SOURCE_DIGEST -> t.sourceDigest?.hex
         Field.STORED_NAME -> t.storedName
         Field.STORED_MTIME -> t.storedMtime
-        Field.DIGEST -> t.digest?.hex
+        Field.DIGEST -> t.digest?.takeIf { asked == null || it.algorithm.name.equals(asked, ignoreCase = true) }?.hex
         Field.DIGEST_ALGO -> t.digest?.algorithm?.name?.lowercase()
         Field.TARGET_KIND -> t.target?.kind
         Field.TARGET_LOCATION -> t.target?.location
