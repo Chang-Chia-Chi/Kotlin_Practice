@@ -242,6 +242,7 @@ because each was correctly deferred by the ticket that found it.
 | A second connector for one endpoint on one registry silently reads the first one's pool gauges and breaker state | T14, restating T11 and R1 finding 6 | Whoever first hosts two connectors against one server | Registering a gauge whose id already exists returns the existing gauge, and `PoolMeters` and `ClientMeters` identify themselves by endpoint alone. Nothing throws; the numbers lie. The fix is a tag - the connector's name beside the endpoint - which is a change to spec 13's meter identity and therefore the maintainer's, not an adapter's. The adapter's own defence is that it cannot produce the second connector |
 | `SessionRegistry.lifetime()` draws its jitter from an unseeded `Random`, and the retry's jitter is Resilience4j's | T16 | Whoever next needs a replayable run of the connector | A seeded harness has to set `maxLifetimeJitter = 0.0` and `jitter = false` or its seed does not replay; a `Random` handed in with the clock would keep both the spread and the replay |
 | `sortBy` is named in spec 7.4 and is not built | T10 deviation 5, promoted by T17 | Whoever first needs a deterministic poll order | The listing is a `channelFlow` that never materialises a directory, and `sortBy` needs materialisation plus a design nobody asked for. Spec 7.4 now says it is not built; without this row the sentence and the reason part company at the next session |
+| `SeenRepository` is not built, and spec 8.3 promised it in the present tense | T10 deviation 10, found by T17's lens 6 | The first caller that cannot move or delete the files it has processed | Spec 8.3 now defers it and spec 14.5 says what such a caller does instead - filter above the source and ack what its own ledger already holds. Building it means a second ledger inside the connector against D14, so whoever needs it owns the persistence design with it |
 | `RenameClaim` is a row in spec 7.5's built-ins table and is not built | T10 deviation 10, promoted by T17 | Whoever builds spec 14.2's claim step | It proves nothing on Linux by spec 7.5's own caveat - a rename succeeds while a writer holds the file open - so as a readiness check it would be a check that passes. Its real use is the multi-consumer claim of spec 14.2, where it stops being a readiness check at all |
 
 ### C6: spec Sec 5.3 amended - the middle cancellation tier is `keepAlive`
@@ -1980,8 +1981,10 @@ already finished and given its session back by then.
    already assumes this; it is written down here because a test with `maxSize = 1` would find it
    the hard way.
 10. **`RenameClaim`, `ackWait` and `SeenRepository` are not built.** The first proves nothing on
-    Linux by spec 7.5's own row and is spec 14.2's seam; the other two are off by default and not
-    in this ticket.
+    Linux by spec 7.5's own row and is spec 14.2's seam. `ackWait` is specified and off by
+    default, which spec 14.3 already says. `SeenRepository` is not "off by default" - it does not
+    exist at all, and spec 8.3 promised it in the present tense; T17 corrected this clause, moved
+    the promise to spec 14.5 as an honest deferral, and put a row on the open-seams table.
 11. **Three review findings were declined.** The cap applied twice - `maxEntries` on each listing
     and `take` on the walk - stays: the first is what T6's S11 pins at the server, the second is the
     only total under recursion, and they are one knob. `SftpSource`'s constructor defaults for the

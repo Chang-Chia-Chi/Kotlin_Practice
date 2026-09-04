@@ -484,9 +484,9 @@ validator, the probe and the ack executor cannot disagree about which folder `te
 The application ledger is the single source of truth about processed files. The connector
 does not persist anything. This matches Camel and Spring Integration, both of which ship an
 in-memory default and leave persistence to a plugged repository, and both of which document
-move-or-delete after processing as the usual substitute (D14). A `SeenRepository` SPI with an
-in-memory LRU default is provided for callers that cannot move files and want the connector to
-filter; it is not used by the Sec 1.1 pipeline.
+move-or-delete after processing as the usual substitute (D14). A `SeenRepository` SPI for callers
+that cannot move files and want the connector to filter was specified here and is **not built**;
+Sec 14.5 says why and what such a caller does instead.
 
 ---
 
@@ -703,6 +703,21 @@ claim step rather than a readiness check.
 The transport interface has one adapter, which by the project's own rule makes it a hypothetical
 seam. It is kept because the cancellation ladder of Sec 5.3 is JSch-specific and the fake
 transport in the testkit is a genuine second implementation.
+
+### 14.5 `SeenRepository`
+
+A `SeenRepository` SPI for callers that cannot move or delete files is **not built**. The
+in-flight set of Sec 7.3 is the only state the connector holds about a file, it is in memory and
+per process, and nothing in it survives a restart - which is precisely what a filtering caller
+would need. An interface with an in-memory LRU default would be a second ledger inside the
+connector against D14, with one implementation, no consumer in the Sec 1.1 pipeline, and no
+answer for the restart that is the whole case for it.
+
+A caller that cannot move files filters above the source: it collects `watch`, asks its own
+ledger about `RemoteFile.path`, size and mtime, and acks the files it has already processed -
+which is exactly the ack-without-a-download that Sec 7.2 permits for crash recovery. Whoever
+needs the connector to do that filtering owns designing the persistence with it; the open-seams
+table in `progress.md` carries the row.
 
 ---
 
