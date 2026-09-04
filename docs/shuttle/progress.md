@@ -1026,6 +1026,8 @@ ScriptedSourceTest 2, YamlLoaderTest 10; 151 tests, 0 failures, 0 errors (`oracl
 4. **Inside D40's window the trigger is told nothing**: no ack, no nack. Spec 4.3 says skipped "with
    no fetch and no state write"; a polled file under `none` stays listed whatever we say, and the
    runner (07) owns whatever the connector needs to release the in-flight entry.
+   *Superseded by ticket 21:* the skip now nacks with redelivery (still no fetch, no state write);
+   the trigger-side guess it left behind was review finding B1.
 5. **A finished polled row whose copy is gone and whose digest is unchanged re-runs on the same row**
    (spec is silent): `fetched` moves the DONE row back to FETCHED and the run stores, acks and creates
    `acked` deliveries again. I10 over a duplicate notification.
@@ -1543,6 +1545,12 @@ tag and stays in the default tier, like the connector's own server-backed classe
    file released early, and its later ack is the connector's "already settled", so the move does not
    happen and the next poll drives the row again from ACKED or STORED. Nothing is lost. The clean
    upgrade is a completion callback on `RouteRunner`, which is a core change and was not made.
+   *Corrected by ticket 21:* "nothing is lost" was wrong. The early release let the next tick hand
+   the same path over again while the old pipeline was alive; the old pipeline fetched on the new
+   hand-over, acked the old one ("already settled"), and unmapped the new one, which was then never
+   settled - DONE in the ledger, the file still in the directory, one connector place gone until
+   restart (review finding B1). The release and its `ponytail:` comment are gone; the pipeline now
+   nacks the D40 skip itself, so every hand-over is settled by the pipeline that launched it.
 5. **The flow's `finally` nacks every file still held, under `NonCancellable`.** A pipeline caught
    mid-ack by a route ending has its ack ignored and its file driven again next poll; that is a
    wasted cycle, against a leak that never heals, and the leak is the worse of the two.
@@ -2499,3 +2507,112 @@ M2AcceptanceTest 5 tests, 0 failures, 58 s; JdbiStateStoreTest 21 tests, 0 failu
 - **A `.part` after a refused rename** (deviation 9): a sweep or an ops note.
 - **Running M2 alone costs about 60 s** of container start (Oracle dominates) plus 58 s of scenarios; with M1 in the
   same JVM MinIO and NATS are shared and Oracle is started once per class.
+
+---
+
+## 21: Fix: the poll source's give-back never hands one file over twice
+
+**Built:** the D40 skip in `TransferPipeline.finished` now answers the trigger - `event.nack(true)`,
+still no fetch and no state write - and `SftpPollSource` lost `releaseAbandoned`, the `tick` and
+`fetchStarted` fields and the `ponytail:` comment that said its ceiling lost nothing. What remains
+in the source is one map from remote path to the hand-over (`FileSeen` plus identity) that the
+fetcher and `listed` read; `answering` removes only its own entry (`remove(path, entry)`), and a
+`FileSeen` for a path already in the map is nacked with redelivery on the spot and never emitted.
+Spec 4.3's D40 sentence says the nack; progress 06 deviation 4 and 13 deviation 4 carry a
+correction note.
+
+**What was wrong, the interleaving:** `releaseAbandoned` nacked every entry from an earlier tick
+whose fetcher had not been called, reading "not fetched yet" as "the pipeline returned saying
+nothing". Under a backlog the two are indistinguishable: a pipeline waiting on the runner's permit
+or inside `store.find` for longer than `every` looks abandoned. Tick 1 hands `c.csv` over (slot A);
+its pipeline sits in `find`; tick 2 nacks A and re-lists `c.csv` (slot B), overwriting the map
+entry; the old pipeline fetches through B, stores, acks A ("already settled", nothing moved),
+writes ACKED, and its `answering` removes B from the map; the pipeline launched for B finds DONE
+inside `recheckFinished`, returns saying nothing, and B is never settled. Ledger DONE, file still in
+the drop directory, one connector place gone until restart; after `maxInFlight` of these the route
+hands over nothing.
+
+**Concepts named:**
+
+- **A hand-over is settled by the pipeline it launched, and by nothing else.** Every path out of
+  `TransferPipeline.run` now acks or nacks - the D40 skip was the one that did not. So the
+  connector never lists a file again while its pipeline is alive (its in-flight set promises that),
+  a pipeline's fetch and ack always act on the `FileSeen` that launched it, and the source has no
+  guess to make. The only give-back the source still owns is the run ending
+  (`releaseEverythingHeld`, unchanged).
+- **The map never holds two files for one path.** The one remaining way a path is handed over twice
+  is the same name uploaded again with a new size or mtime while the first is being worked: the
+  connector sees a different file. `putIfAbsent` refuses it and the newcomer is nacked with
+  redelivery at once, unemitted; it is listed again once the first is settled. Under `move` or
+  `delete` the first pipeline's ack then acts on whatever is at that path, which is SFTP's own
+  listing-versus-fact gap (spec 5.2) and not new.
+- **D40's nack is `none` on the server.** Spec 5.3: a polled file's nack action is `none`, so the
+  skip costs one no-op nack and one WARN line from the connector per poll for a finished file that
+  stays under `none` - the same line the old release logged.
+
+**Acceptance:**
+
+- [x] The interleaving on the embedded SSHD, red before and green after -
+  `SftpPollSourceTest.B1_a_file_whose_pipeline_outlasts_the_poll_interval_is_still_moved_once_and_holds_no_place_afterwards`
+  (three files, `every` 200 ms, `parallelism` 1, a `StateStore by store` whose `find` delays
+  3 x `every`, `RouteRunner.run` over `source.events()`, one `HookDriver` arrival at
+  `afterLedgerAcked` per file; asserts all three DONE, no `*.csv` left in `drop`, all three in
+  `drop/temp`, the connector's `sftp_inflight` gauge at 0, and a fresh watch's first
+  `PollCompleted` listing nothing). Red on the unfixed code with exactly the ticket's symptom:
+  `c.csv` DONE and still in `drop`.
+- [x] Fetch and ack act on the hand-over that launched them -
+  `a_path_handed_over_again_while_its_first_file_is_still_in_flight_is_given_back_at_once` (the
+  first upload paused at `afterFetch`, the file rewritten with a new size and mtime + 5 s; three
+  more polls hand nothing over, the gauge shows the first's place only, and after the resume the
+  single row is DONE under the first identity with the gauge at 0), plus the D40 case below.
+- [x] The existing cases stay green: the run-ends case
+  `a_run_that_ends_gives_back_every_file_it_was_holding_so_the_next_run_lists_them` unchanged; the
+  D40 give-back case rewritten as
+  `a_finished_file_skipped_inside_recheckFinished_is_given_back_and_handed_over_again` (it used to
+  collect `Seen`s and answer none of them, which is exactly the guess that is gone; it now runs the
+  real pipeline under `none` on the server: the first hand-over reaches DONE, the second and third
+  are the same identity, `reacked` is 0, the file is untouched). The other eight unchanged.
+  `TransferPipelineTest.D40_...` now asserts one `Nack(identity, true)` where it asserted none.
+- [x] The `ponytail:` comment is deleted with the function; progress 13 deviation 4 and 06
+  deviation 4 carry the correction; spec 4.3 says the skip nacks.
+- [x] Progress entry appended: this one.
+
+**Final run counts (surefire), default tier** (`mvn -B -o -q -pl shuttle test`): 30 classes, 247 tests,
+0 failures, 0 errors (245 before, +2 net: two new `SftpPollSourceTest` cases, one rewritten). Per class:
+ArchitectureTest 9, AttributeFreezeTest 4, BuiltInProcessorsTest 10, CrashMatrixTest 12, MappingRendererTest 12,
+NotifierTest 13, ProcessingChainTest 4, RouteRunnerTest 9, RouteSupervisorTest 4, RulesTest 37, SurfaceTest 3,
+TransferPipelineTest 29, HttpChannelTest 8, StateStoreSchemaTest 2, ShuttleHostM2WiringTest 4, ShuttleHostTest 9,
+ShuttleQuarkusTest 4, TryCommandTest 4, ValidateCommandTest 4, SftpConnectorConfigTest 6, SftpPollSourceTest 11,
+SftpTargetTest 5, ClockFixtureTest 1, FakeProcessContextTest 2, HookDriverTest 3, InMemoryStateStoreTest 20,
+InMemoryTargetTest 3, RecordingChannelTest 2, ScriptedSourceTest 2, YamlLoaderTest 11. In the first full pass,
+run while three other agents' Maven builds shared the machine, `ShuttleQuarkusTest` could not bind port 8081
+(another worktree's Quarkus test held it) and two `ShuttleHostTest` readiness cases timed out under the load;
+both classes pass alone (`-Dtest=ShuttleHostTest,ShuttleQuarkusTest`, then `-Dtest=ShuttleQuarkusTest`
+once the port was free), and neither touches this ticket's code.
+
+**Deviations:**
+
+1. **The fix is in `TransferPipeline`, not only in the source.** The ticket's three shapes all
+   keep the source guessing when a pipeline is done, which it cannot know without a completion
+   signal from `RouteRunner` (a core change). Making the pipeline answer on every path is a
+   one-token change at the D40 skip, deletes the guess, and keeps the connector's slot accounting
+   exact: settled once, by the owner. No seam changed.
+2. **Spec 4.3 amended** to say the D40 skip nacks with redelivery; "no fetch and no state write"
+   still holds. Progress 06 deviation 4 is superseded, noted in place.
+3. **The rewritten D40 test costs three polls (about 2.8 s)**; the class is now 11 tests in about
+   25 s, of which the pre-existing wrong-password case is 8 s (JSch's three attempts). Still no
+   group tag, still the default tier.
+4. **Size:** production -24 lines net (`SftpPollSource` 89 changed, `TransferPipeline` 5), tests
+   +105 / -2; spec one sentence; progress two notes and this entry.
+
+**For later tickets:**
+
+- **22 and 23 (D40's neighbours):** the skip branch is now `return event.nack(true)`; a re-ack that
+  writes `updated_at` (23) or calls the callback (22) lives in `reack`, below it, and neither needs
+  the source to release anything.
+- **15's "poll interval has to exceed one pipeline's Seen-to-fetch latency"** is no longer true:
+  the acceptance fixture's 5 s interval and cold-pool warmup were working around this bug and can
+  be tightened when convenient; nothing in the fixture depends on them now.
+- **Log noise under `none`:** a finished file that stays is one connector WARN per poll ("could
+  not process ... will be handed over again"). If that matters, the connector's nack log level is
+  the knob, not the source.

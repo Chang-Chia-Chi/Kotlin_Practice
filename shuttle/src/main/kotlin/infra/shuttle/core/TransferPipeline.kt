@@ -96,11 +96,14 @@ class TransferPipeline(
          * is fetched and digested at most once per `recheckFinished` from `updated_at` (D40): the row's own
          * source digest means the same file came back (verify, re-ack, `reacked`), another digest is new
          * content under an old identity and gets the next revision through `supersede` (I24, S12).
+         * Inside the window the file is given back with a nack: the poll vocabulary's nack is `none`
+         * (spec 5.3), so the file stays where it is, and the trigger's place for it comes free at once
+         * instead of being guessed back later (ticket 21).
          */
         private suspend fun finished(transfer: Transfer) {
             if (!polled) return if (verified(transfer)) reack(transfer) else fullRun(transfer)
             val since = java.time.Duration.between(transfer.updatedAt, clock.instant()).toKotlinDuration()
-            if (route.recheckFinished.isPositive() && since < route.recheckFinished) return
+            if (route.recheckFinished.isPositive() && since < route.recheckFinished) return event.nack(true)
             withFetched(transfer) { staged, dir ->
                 when {
                     staged.digest != transfer.sourceDigest -> {

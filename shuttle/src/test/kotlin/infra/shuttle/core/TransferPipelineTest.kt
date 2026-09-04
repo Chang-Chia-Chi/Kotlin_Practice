@@ -327,7 +327,7 @@ class TransferPipelineTest {
         assertEquals(1, fetcher.calls.size, "no fetch inside the window")
         assertEquals(listOf("find"), store.calls.map { it.method }, "no state write")
         assertEquals(1, source.acks.size)
-        assertTrue(source.nacks.isEmpty())
+        assertEquals(listOf(ScriptedSource.Nack(event.identity, true)), source.nacks, "given back for the next poll, so the trigger holds no place for it (ticket 21)")
 
         clock.advance(2.hours)
         pipeline.run(event, fetcher)

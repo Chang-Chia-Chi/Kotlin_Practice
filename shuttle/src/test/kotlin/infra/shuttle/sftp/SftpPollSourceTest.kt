@@ -13,10 +13,12 @@ import infra.shuttle.core.RouteName
 import infra.shuttle.core.RouteRunner
 import infra.shuttle.core.Secret
 import infra.shuttle.core.SftpStore
+import infra.shuttle.core.ShuttleMetrics
 import infra.shuttle.core.Source
 import infra.shuttle.core.SourceIdentity
 import infra.shuttle.core.SourceKind
 import infra.shuttle.core.Staging
+import infra.shuttle.core.StateStore
 import infra.shuttle.core.Target
 import infra.shuttle.core.TransferPipeline
 import infra.shuttle.core.TransferState
@@ -31,6 +33,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -55,6 +58,7 @@ import java.nio.file.Path
 import java.time.temporal.ChronoUnit
 import kotlin.io.path.createDirectories
 import kotlin.io.path.exists
+import kotlin.io.path.listDirectoryEntries
 import kotlin.io.path.writeText
 import kotlin.time.Duration.Companion.milliseconds
 
@@ -250,23 +254,30 @@ class SftpPollSourceTest {
     }
 
     /**
-     * D40 (ticket 06 deviation 4): a finished row that came back inside `recheckFinished` leaves the
-     * pipeline without an ack or a nack. Nothing else would ever give the connector that file's
-     * place back, so a later poll does, and the file is handed over again as it would be after a
-     * restart.
+     * D40: a finished file that stays under `none` comes back every poll and, inside
+     * `recheckFinished`, is skipped without a fetch or a write. The skip gives the file back with a
+     * nack (ticket 21), so the connector's place for it comes free and the next poll hands it over
+     * again; nothing on the server moves.
      */
     @Test
-    fun a_Seen_the_route_neither_answered_nor_fetched_is_given_back_and_handed_over_again() = runBlocking {
+    fun a_finished_file_skipped_inside_recheckFinished_is_given_back_and_handed_over_again() = runBlocking {
         seed("first.csv", CONTENT)
 
-        withConnector(AckAction.Move("temp/")) { source ->
+        withConnector(AckAction.None) { source ->
+            val pipeline = pipelineFor(routeOf(AckAction.None))
             val seens = Channel<RouteEvent.Seen>(Channel.UNLIMITED)
-            val collecting = launch { source.events().collect { if (it is RouteEvent.Seen) seens.send(it) } }
+            val collecting = launch {
+                source.events().collect { if (it is RouteEvent.Seen) { pipeline.run(it, source.fetcher); seens.send(it) } }
+            }
 
             val first = withTimeout(TIMEOUT) { seens.receive() }
             val again = withTimeout(TIMEOUT) { seens.receive() }
+            val once_more = withTimeout(TIMEOUT) { seens.receive() }
 
             assertEquals(first.identity, again.identity, "the same file, because D40's window costs no place for ever")
+            assertEquals(again.identity, once_more.identity)
+            assertEquals(TransferState.DONE, store.transfers.single().state, "one row, finished on the first hand-over")
+            assertEquals(0.0, registry.counter(ShuttleMetrics.TRANSFERS, "route", ROUTE, "outcome", "reacked").count(), "and never fetched again inside the window")
             assertTrue(remoteRoot.resolve("drop/first.csv").exists(), "and the nack that freed it left the file alone")
             collecting.cancelAndJoin()
         }
@@ -298,6 +309,86 @@ class SftpPollSourceTest {
 
             val again = withTimeout(TIMEOUT) { source.events().filterIsInstance<RouteEvent.Seen>().first() }
             assertEquals(identityOf(file), again.identity)
+        }
+    }
+
+    /**
+     * Review finding B1. Under a backlog - the pipeline slower than `every`, `parallelism` 1 - the
+     * D40 give-back used to nack a file whose pipeline had only just started; the next tick handed
+     * it over again, the old pipeline fetched on the new hand-over and acked the old one ("already
+     * settled", nothing moved), and the new hand-over was never settled: DONE in the ledger, still
+     * in the drop directory, and one of the connector's places gone until restart.
+     */
+    @Test
+    fun B1_a_file_whose_pipeline_outlasts_the_poll_interval_is_still_moved_once_and_holds_no_place_afterwards() = runBlocking {
+        val files = listOf("a.csv", "b.csv", "c.csv").map { seed(it, CONTENT) }
+        val slow = object : StateStore by store {
+            override suspend fun find(identity: SourceIdentity) = delay(EVERY * 3).let { store.find(identity) }
+        }
+        val hook = HookDriver().apply { pauseAt(HookPoint.afterLedgerAcked) }
+
+        withConnector(AckAction.Move("temp/")) { source ->
+            val route = routeOf(AckAction.Move("temp/"))
+            val pipeline = TransferPipeline(
+                route, DigestAlgorithm.MD5, slow, target, ProcessingChain(emptyList(), DigestAlgorithm.MD5),
+                emptyMap(), { true }, { wakes++ }, hook, clock, registry, Staging(routeStage), usableSpace = { 10.gib },
+            )
+            val run = launch { RouteRunner(route, pipeline, source.fetcher, slow, { wakes++ }, clock, registry).run(source.events()) }
+            repeat(files.size) {
+                withTimeout(TIMEOUT) { hook.awaitArrival(HookPoint.afterLedgerAcked) }
+                hook.resume(HookPoint.afterLedgerAcked)
+                hook.pauseAt(HookPoint.afterLedgerAcked)
+            }
+            run.cancelAndJoin()
+
+            assertEquals(files.map { TransferState.DONE }, store.transfers.map { it.state })
+            assertEquals(emptyList<Path>(), remoteRoot.resolve("drop").listDirectoryEntries("*.csv"), "every DONE file left the drop directory")
+            assertEquals(files.map { it.fileName.toString() }.toSet(), remoteRoot.resolve("drop/temp").listDirectoryEntries().map { it.fileName.toString() }.toSet())
+            assertEquals(0.0, registry.get("sftp_inflight").gauge().value(), "and the connector holds no place for any of them")
+            val fresh = withTimeout(TIMEOUT) { source.events().filterIsInstance<RouteEvent.PollCompleted>().first() }
+            assertEquals(emptySet<SourceIdentity>(), fresh.listed, "a fresh watch has nothing left to hand over")
+        }
+    }
+
+    /**
+     * The other way one path can be handed over twice: the same name uploaded again, with a new
+     * size and mtime, while the first upload is still being worked. The connector sees a different
+     * file and hands it over; the source gives it straight back rather than letting a pipeline
+     * that is fetching or acking the first act on the second.
+     */
+    @Test
+    fun a_path_handed_over_again_while_its_first_file_is_still_in_flight_is_given_back_at_once() = runBlocking {
+        val file = seed("first.csv", CONTENT)
+        val hook = HookDriver().apply { pauseAt(HookPoint.afterFetch) }
+
+        withConnector(AckAction.Move("temp/")) { source ->
+            val pipeline = pipelineFor(routeOf(AckAction.Move("temp/")), hook)
+            val seens = Channel<RouteEvent.Seen>(Channel.UNLIMITED)
+            val completions = Channel<RouteEvent.PollCompleted>(Channel.UNLIMITED)
+            val collecting = launch {
+                source.events().collect { event ->
+                    when (event) {
+                        is RouteEvent.Seen -> { seens.send(event); launch { pipeline.run(event, source.fetcher) } }
+                        is RouteEvent.PollCompleted -> completions.send(event)
+                        else -> Unit
+                    }
+                }
+            }
+            val first = withTimeout(TIMEOUT) { seens.receive() }
+            withTimeout(TIMEOUT) { hook.awaitArrival(HookPoint.afterFetch) }
+            file.writeText(CONTENT + "2,7\n")
+            Files.setLastModifiedTime(file, java.nio.file.attribute.FileTime.from(Files.getLastModifiedTime(file).toInstant().plusSeconds(5)))
+
+            repeat(3) { withTimeout(TIMEOUT) { completions.receive() } }
+            assertTrue(seens.isEmpty, "the second upload was not handed over while the first is in flight")
+            assertEquals(1.0, registry.get("sftp_inflight").gauge().value(), "and the connector holds a place for the first only")
+
+            hook.resume(HookPoint.afterFetch)
+            withTimeout(TIMEOUT) { completions.receive() }
+            collecting.cancelAndJoin()
+            assertEquals(first.identity, store.transfers.single().identity)
+            assertEquals(TransferState.DONE, store.transfers.single().state)
+            assertEquals(0.0, registry.get("sftp_inflight").gauge().value(), "everything given back once the run is over")
         }
     }
 
