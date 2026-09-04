@@ -3180,3 +3180,75 @@ both readiness cases, `ShuttleQuarkusTest` 4/4 on the random port.
    uncommitted attempt at this ticket (another worktree) was read as prior art; its supervisor
    test was re-derived here with the in-flow assertion replaced by a recorded sample, and its
    widening of S18's backoff to 1 s was not taken.
+
+---
+
+## 27: Fix: ledger timestamps are bound and read in UTC (review finding B6)
+
+**Built:** two changes in `JdbiStateStore`, both in the four lines where an instant crosses the JDBC
+edge. `Instant?.ts()` stopped returning a bare `Timestamp` and now returns a JDBI `Argument` that
+calls `setTimestamp(pos, ts, utc())` (or `setNull` for a null mtime); `ResultSet.instant(column)`
+now calls `getTimestamp(column, utc())`. Every one of the nine 8.1 TIMESTAMP columns already went
+through exactly those two helpers - `source_mtime`, `stored_mtime`, `first_seen_at`, `updated_at`,
+`acked_at`, `completed_at`, `next_attempt_at`, `created_at`, `delivered_at` - so naming the zone once
+on each side covered all of them, and the DDL is untouched.
+
+**What was wrong:** an Oracle TIMESTAMP keeps a date and a time and no offset, so somebody has to
+name the zone that turns an instant into those digits. `Timestamp.from(instant)` names nobody, and
+the driver then takes the process default at bind and at read. Measured: with `Europe/Berlin` as the
+default, a row written at `2026-10-25T00:30Z` reads back as `2026-10-25T01:30Z` - Berlin puts local
+02:30 on the clock twice that morning, once on CEST and again an hour later on CET, and the read
+resolves the ambiguity to the standard offset. Everything that compares those columns is then an hour
+off: reconciliation's `unlisted`, the stuck gauge, D40's `recheckFinished` window, and `source_mtime`
+identity, where the two passes of the fall-back hour collapse into one identity and a re-dropped file
+is silently taken for the one already stored. The bug is not confined to the DST hour - any default
+zone shifts the round trip whenever the offset at write differs from the offset at read - but the
+fall-back hour is where it survives a same-zone round trip, which is why it is the regression test.
+
+**Concepts named:**
+
+- **The zone is named at the edge, not in the schema.** The seam (`StateStore`) speaks `Instant`, and
+  the in-memory store never had this bug because nothing serialises there. The zone is lost exactly
+  once, in the adapter, so that is the only place it has to be restored. D50 records the choice of a
+  UTC `Calendar` over `TIMESTAMP WITH TIME ZONE`: same correctness, no DDL migration, spec 8.1 and
+  `StateStoreSchemaTest` untouched.
+- **Measured, not assumed: the driver reads the JVM zone per call, not per connection.** The
+  container and the `Jdbi` are built in `@BeforeAll`, before the test changes the default; both cases
+  were still red, so no `ALTER SESSION` or per-test connection was needed and the test does not open
+  one.
+
+**Tests:** two cases on the Oracle container, both in `JdbiStateStoreTest`, both measured red against
+the unfixed store with the same failure (`expected: <2026-10-25T00:30:00Z> but was:
+<2026-10-25T01:30:00Z>`) and green after.
+
+- `B6_a_dst_fall_back_hour_does_not_shift_updated_at_on_oracle` - a transfer stored at 00:30Z reads
+  its own `updatedAt` back, is returned by `unlisted(route, 01:30Z, emptySet())` and is counted by
+  `stuck(route, 01:30Z)`. The `unlisted` and `stuck` assertions are the ones that fail even when the
+  round trip happens to be symmetric: both instants bind to the same local digits, so `updated_at <
+  :t` is false and the row is invisible to reconciliation.
+- `B6_source_mtime_identity_separates_the_two_passes_of_the_fall_back_hour` - mtimes 00:30Z and
+  01:30Z are two identities: the stored row reads its own mtime back, `find` matches the early one,
+  `find` returns null for the late one, and `seen` of the late one creates a second row.
+
+Both run through `inZone(zone) { ... }`, which sets `TimeZone.setDefault` and restores the previous
+default in a `finally`, inside `runTest` so a failing assertion still restores it. No `Thread.sleep`.
+
+**Final run counts (surefire).** Oracle class (`-DexcludedGroups=none -Dtest=JdbiStateStoreTest`):
+25 tests, 0 failures, 0 errors (23 before, +2). Default tier (`mvn -B -o -pl shuttle test`): 265
+tests, 2 failures - the two known-noisy `ShuttleHostTest` readiness cases
+(`S18_a_wrong_password_leaves_the_route_down_and_restarted_with_backoff_and_the_process_alive`,
+`readiness_follows_the_configured_rule_with_one_route_up_and_one_down`), which ticket 30 fixes and
+which neither touch this ticket's code. Rerun alone: `ShuttleHostTest` 9/9 green, `ShuttleQuarkusTest`
+4/4 green.
+
+**Deviations:**
+
+1. **The B6 cases live only on the Oracle class, not in `StateStoreContract`.** The contract runs on
+   both stores and the in-memory one cannot fail this: it holds `Instant`s in a map, so a zone-shifted
+   assertion there would test `java.time`, not the store. `StateStoreContract` is unchanged and stays
+   green on both.
+2. **`B6_a_dst...` asserts on `unlisted` and `stuck` as well as `updatedAt`.** The round trip alone is
+   the narrower symptom; the two range queries are what the finding actually breaks, and they fail
+   even where a bind and a read cancel out.
+3. **Size:** production +22 / -4 lines (two helpers and their KDoc, one `?.` dropped at a call site);
+   tests +46; spec one D50 row.
