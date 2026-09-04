@@ -2616,3 +2616,92 @@ once the port was free), and neither touches this ticket's code.
 - **Log noise under `none`:** a finished file that stays is one connector WARN per poll ("could
   not process ... will be handed over again"). If that matters, the connector's nack log level is
   the knob, not the source.
+
+---
+
+## 24: Fix: the notifier survives a state-store failure and releases its in-flight set on cancel
+
+**Built:** `Notifier.run` now ends only by cancellation. Each pass is one `sweep(permits)`: the select, the
+hand-off of every due row to a worker, the gauge refresh. A sweep the state store fails (`due` or
+`outboxPending` throwing, spec 11's "state store unavailable") is logged at WARN with the exception and the
+loop waits for the next wake or `sweepEvery` exactly as after an empty select; the row it would have selected
+is still PENDING and the next sweep takes it. A worker whose transition throws (`delivered`, `retryLater`,
+`deliveryFailed`) logs at WARN naming the delivery and the transfer, and ends; the row is untouched, so it is
+PENDING with its old `attempts` and `next_attempt_at`, and a later sweep sends it again and records it once.
+`CancellationException` is rethrown first in both catches, as `deliver` already did. The in-flight set is now
+released by the worker's job, `launch { record(delivery) }.invokeOnCompletion { inFlight -= id; permits.release() }`,
+which fires whether the body ran or the job was cancelled before it started, and the sweep's own `finally`
+drops every id of the batch no worker took, so a cancel while `permits.acquire()` waits leaves the set empty.
+
+**Concepts named:**
+
+- **A sweep** is one pass of spec 9.4 as a private function returning whether the batch was full; the loop's
+  only job is to call it, log its failure and wait. Before, the select, the hand-off and the wait were one
+  `while` body with no place for a failure to land.
+- **Owned versus unowned ids.** Between the select and the `launch`, an id belongs to the sweep; from the
+  `launch` on, to the worker's job. The sweep's `finally` releases what it still owns (`due.drop(handed)`); the
+  job's completion handler releases what it owns. Every id has exactly one owner at every moment (I4), and both
+  owners release on every exit path (spec 9.5).
+- **Recorded once, sent at least once.** A transition that throws after the channel accepted the event means
+  the downstream saw it and the ledger did not; the next sweep sends it again (spec 9.7's at-least-once, the
+  reference is never a dedup key) and one `delivered` is recorded. The id stays in the set until the handler runs,
+  so no other worker can take the row meanwhile.
+
+**Acceptance:**
+
+- *A store whose `due` throws once: log, continue, deliver on the next sweep, `run` alive; red before the fix* -
+  `NotifierTest.B2_a_store_failure_during_the_select_is_logged_and_the_next_sweep_delivers`: red with
+  "run survives the failure: expected true, was false" (`run` had ended), green after the loop's catch.
+- *A transition that throws after a delivery: PENDING, delivered on a later sweep, recorded once* -
+  `B2_a_store_failure_recording_a_delivery_leaves_the_row_PENDING_and_a_later_sweep_records_it_once`: `delivered`
+  throws once after the channel returned `Delivered`; the row is PENDING with `attempts` 0 and the set empty,
+  30 s later DELIVERED with `attempts` 1, two channel calls in all, one `delivered` recorded in the inner store,
+  no third call 30 s later still. Red before the fix (the worker's exception cancelled `coroutineScope`).
+- *`CancellationException` never caught or converted* - both new catches rethrow it before `Exception`; the
+  existing `cancellation_mid_delivery_leaves_the_row_PENDING_and_the_set_empty` still passes through the
+  completion handler.
+- *Cancelling while a batch waits on the permit semaphore leaves the set empty; red before the fix* -
+  `B9_cancellation_while_a_batch_waits_for_a_permit_leaves_the_set_empty`: workers 1, batch 3, three rows, one
+  parked, the loop suspended in `acquire()`; before the fix two ids stayed ("expected 0, was 2"), after it zero
+  and all three rows PENDING.
+- *Host supervision decided* - **no**, see deviations.
+- *Progress entry appended* - this entry.
+
+The injected failure is `FailsOnce(inner, method)`, a `StateStore by inner` delegate in the test whose first
+call of the named method throws `IOException`; every other call reaches `InMemoryStateStore`, so its `calls`
+still count what the notifier recorded. No mock.
+
+**Deviations:**
+
+1. **The host does not supervise the notifier.** After this ticket the only way out of `Notifier.run` is
+   cancellation: every `Exception` from the select, the gauges or a transition is caught inside, and the wait
+   before the next attempt is `sweepEvery` (30 s), which is what spec 11 means by "as recoverable" for the
+   notifier, since the next sweep is the retry. A restart-with-backoff wrapper in `ShuttleHost` would wrap a
+   function that never returns to it, and a second copy of `RouteSupervisor`'s loop for one coroutine is the
+   kind of code that only looks like safety. What it would not cover either: an `Error` (out of memory, stack
+   overflow) still ends `run`, and a supervisor restarting a process that just ran out of memory is not a
+   remedy; that stays with the pod's liveness. `ShuttleHost.kt` is untouched.
+2. **Spec 9.5 says "removed in `finally`"; the worker's removal is `Job.invokeOnCompletion`.** A `finally` inside
+   the launched body does not run when the job is cancelled before its body starts (a cancel that lands between
+   `acquire()` returning and the coroutine's first dispatch on `Dispatchers.Default`), so that id and its permit
+   would leak. The completion handler runs on every completion of the job; the observable rule of 9.5, released
+   on every exit path, holds with one fewer hole. The sweep's unowned ids still leave in a literal `finally`.
+3. **`retryLater` and `deliveryFailed` throwing are covered by the same catch as `delivered`** and are not given
+   their own tests: the three transitions share one call site in `deliver` and the catch is above it.
+
+**Final run counts (surefire).** Default tier (`mvn -B -o -q -pl shuttle test`): 30 classes, 248 tests,
+2 failures, 0 errors; NotifierTest 16 (was 13), 0 failures. The two failures are
+`ShuttleHostTest.readiness_follows_the_configured_rule_with_one_route_up_and_one_down` and
+`ShuttleHostTest.S18_a_wrong_password_leaves_the_route_down_and_restarted_with_backoff_and_the_process_alive`,
+both "expected false, was true" on `ready()` with a route down; both fail identically on `misc/ai_gen` at
+25fc874 with this ticket's changes stashed (run twice each way, the class alone), so they are not this
+ticket's and not touched by it. Their shape: `await { restarts(route) >= n }` fires after `RouteSupervisor`
+increments the counter, which is after the backoff wait, when the route's gauge is already 1 again; a
+wall-clock race between the test and spec 10's counter placement. Nobody's ticket among 21 to 29 names it.
+
+**For the next ticket:**
+
+- The two `ShuttleHostTest` readiness failures above need an owner: either the counter increments before the
+  wait (spec 10 says "each restart logged and counted", silent on when) or the test awaits the gauge itself.
+- A flapping store now costs one WARN per failed sweep and one per failed transition, every 30 s at most for
+  the sweep; if that is too loud in production, the sweep's log is the place for a once-per-outage guard.
