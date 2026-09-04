@@ -4073,3 +4073,114 @@ collect (`emitted`) and no fields but its four constructor arguments; every ques
 out, whether a listing was cut short, who gives a file back and which file is in flight at a path is
 the connector's. If a later reviewer wants the class smaller still, the only thing left to move is
 `identityOf`, which is shuttle's vocabulary and belongs here.
+
+---
+
+## 37: `shuttle try` runs the pipeline's own chain, context and key
+
+**Built:** D35's promise, kept. `TryCommand` builds a `ProcessingChain` from the route's `process` list
+and runs it once inside `runBlocking`, watching each step through the chain's new `StepObserver`, over
+the same `ProcessContext` implementation a running route uses and with the same key function. Three
+things left `Commands.kt`:
+
+1. **Its own step loop** - `for ((i, spec) in route.process.withIndex()) { ... processorFor(spec).process(payload, ctx) ... }`,
+   one `runBlocking` per step. Everything the chain does around the loop is now judged offline too:
+   rule 22 on the frozen attributes, and the size and digest recomputed from the bytes for every file
+   the chain created (an `expand`ed child's body carries its own digest, not the metadata file's).
+2. **Its own key expansion** - `target.key.takeIf { bucket != null } ?: "$directory/${target.key}"`.
+   For an SFTP target that printed `directory/key`, which is not what the pipeline stores under: a
+   `directory` is *where* the store puts the object, never part of the key. Both callers now ask
+   `targetKey(target, name, sourceName, attributes, clock)`, next to `expandPattern` in `Processors.kt`.
+3. **The third `ProcessContext`**, whose `fetch` threw `NotImplementedError("try mode fetches nothing;
+   expand is ticket 17")`, so a route with `expand` could not be tried at all. `TransferPipeline`'s
+   private inner `Context` moved out as `StagingContext` in `Processing.kt`; the pipeline and try mode
+   both construct it, and the pipeline's `targetKey` field went with the function.
+
+Two verdicts the pipeline reaches *between* the chain and the store are printed here as well (ticket 25):
+an empty final payload and a resolved key with a `..` segment, each with the pipeline's own wording under
+a `reject:` prefix. And a body is rendered per object rather than for the first one only, so an
+`expand`ed set prints one key and one body per child.
+
+**Concepts named:**
+
+- **Observation is a run parameter, not a second chain.** `run(payload, ctx, observe: StepObserver = NOTHING)`;
+  the pipeline's call site is unchanged and the chain gained no mode flag or debug field. What the
+  observer is handed is exactly what try mode prints - the step's index, the attributes it set or
+  changed (diffed against the context before the call), and its `Outcome` - so a step's REJECT keeps its
+  step number, while a reject the chain reaches after the loop (rule 22) has none and prints `reject: ...`.
+  The observer sees `Outcome`, not `Processor`: the word in `step 1 extract` is the *spec's*, and only the
+  caller holds the specs, which is also what keeps `custom` printing as `custom`.
+- **A store name is the only thing `expand` needs from the world.** `StagingContext` takes a
+  `Map<String, Fetcher>` and nothing else; the pipeline hands it `fetchers + (stagingStore to fetch)` -
+  the route's own fetcher wins for its own store, exactly the `if (store == stagingStore) own else ...`
+  it replaced - and try mode hands it every declared store mapped to one local fetcher over the sample
+  files. Neither knows the other exists.
+- **Try mode's samples sit beside `--content`.** A metadata file lists server paths (`/inbox/a.png`); the
+  offline fetcher takes the last segment and looks for it in the directory the sample content came from,
+  copies it into the temp directory and digests it with the route's algorithm. No new option: the gesture
+  is "here is the metadata and the files it names", one folder, and a path with nothing beside it says
+  `error: ExpandProcessor: no sample file <path> for <listed path>` and exits 1.
+- **The printed shape is stable.** For a route with one object and a bucket target - the quickstart's,
+  which `shuttle/README.md` shows - every line is byte-identical to ticket 14's. What is new is only
+  what could not be printed before: further `key:`/`body` pairs, and `reject:`/`error:` lines.
+
+**Tests** (`TryCommandTest`, 5 new; 9 in the class):
+
+- `SPEC7_a_route_with_expand_prints_one_key_and_one_body_per_child_fetched_from_the_sample_files` -
+  spec 13.1's `image-sets` shape over a polled route: a metadata file listing `/inbox/a.png` and
+  `/inbox/b.png`, both sitting beside it. Two keys, two bodies, and each body carries that child's own
+  MD5. **The ticket's first red**, on the old code: `kotlin.NotImplementedError: try mode fetches
+  nothing; expand is ticket 17`.
+- `SPEC7_the_printed_key_is_the_one_the_pipeline_would_store_under` - the same route, whose target is a
+  `directory` with `key: "sets/{name}"`. The expected key is `targetKey(target, ...)` called by the test
+  on the config it loaded, not a string the test spells out; `/incoming` appears nowhere in the output.
+- `rule22_an_attribute_name_over_64_characters_is_rejected_in_try_mode_too` - a 65-character regex group
+  name and the mapping that reads it: `reject: rule 22: attribute name ooo... is longer than 64
+  characters`. Rule 22 was simply not evaluated in try mode before, because there was no chain.
+- `SPEC7_a_chain_that_leaves_no_object_is_the_verdict_the_pipeline_would_reach` (an empty zip through
+  `unzip`) and `SPEC7_a_key_that_leaves_the_target_directory_is_the_verdict_the_pipeline_would_reach`
+  (a zip holding `../escaped.csv`): the wording of B4 and B5 on the row, printed.
+- The four ticket-14 tests are untouched and keep their ids, `S31_...` included.
+
+**Final run counts (surefire).** `-Dtest=TryCommandTest`: 9 tests, 0 failures, 0 errors. Default tier
+(`mvn -B -o -pl shuttle test`): 31 classes, **288 tests, 0 failures, 0 errors** - ticket 42's 283 plus
+the five above. `TransferPipelineTest` (33), `ProcessingChainTest` (5) and
+`ArchitectureTest` green and unchanged.
+
+**Deviations:**
+
+1. **Only the first test was red against the deleted code**; the other four are red by construction -
+   every string they assert (`reject: rule 22:`, `reject: process:`, `reject: key:`, a key without the
+   target directory) is printed by code that did not exist, and the old key line for that route was
+   `key: /incoming/sets/a.png`. The empty-payload case did not even reach an assertion on the old code:
+   `keys.first()` threw `NoSuchElementException`.
+2. **The two post-chain verdicts are duplicated, not shared.** `TransferPipeline` may only give up its
+   context and its key here, so try mode repeats the pipeline's two literal reasons rather than calling
+   one predicate. Ticket 38, which may edit the pipeline, should lift them into a
+   `storeRefusal(objects, keys): String?` beside `keyLeavesTarget` and have both call it; the strings are
+   asserted in `TransferPipelineTest` (B4, B5) and now in `TryCommandTest`, so a drift is a red test.
+3. **No `--samples` option.** The sample directory is `--content`'s parent (or `--message`'s, or the
+   working directory when neither is given). An explicit flag is the upgrade if an operator turns out to
+   keep the metadata and the children apart. No new decision number was taken; D54 is still free.
+4. **`StagingContext` is public in `core`,** not `internal`: `infra.shuttle.quarkus` constructs it, and
+   spec 3.2 already lets the composition root reach into `core`.
+5. **The digest a body renders is the object's own** (`stored.digest`), where try mode used to recompute
+   `Digest.of(stored.path, algorithm)` for the first object. Same value - the chain recomputes exactly
+   the files it created - one fewer read, and correct for every object rather than only the first.
+6. **A `StageError` is caught and printed** as `error: <stage>: <message>` with exit 1. The old loop had
+   no wrapper, so a processor throwing left a stack trace on the console; a missing sample file is an
+   ordinary operator mistake and now reads as one.
+7. **Docs:** spec 12.2 gains a sentence naming the shared chain and context and where `expand`'s children
+   come from; `shuttle/README.md`'s `try` row the same. The quickstart's printed output needed no edit.
+8. **Size:** production +100/-63 across four files (`Commands.kt` net -3, `Processing.kt` +27,
+   `ProcessingChain.kt` +16/-4, `TransferPipeline.kt` -21/+8, `Processors.kt` +8); tests +147/-6; docs
+   +11/-5; this entry.
+
+**Seams.** `Processor` and `ProcessContext` are untouched. `ProcessingChain.run` gained a third
+parameter with a default, so every existing call site compiles unchanged. `StagingContext` and
+`targetKey` are new public names in `core` with two callers each - the second caller is what made them
+seams rather than helpers.
+
+**For the next ticket:** deviation 2 is ticket 38's to close if it wants it. `StepObserver` has exactly
+one implementation (try mode's printer); if a future ticket wants per-step timings or a debug log on a
+running route, that is the parameter to pass, not a new hook.

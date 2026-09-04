@@ -735,9 +735,12 @@ build and without a deployment.
 
 `shuttle try --route <name> --file-name <name> [--source-path <path>] [--content <file>]
 [--message <file>]` goes one step further for one route: it validates, then runs the route's
-processing chain over the sample inputs with a fake context in a temp directory, and prints the
-attributes each step set, the key the target would use, and the rendered body for every channel
-the route notifies. It connects to nothing and stores nothing. This is where a user finds that a
+processing chain - the same `ProcessingChain` and the same `ProcessContext` a running route uses -
+over the sample inputs in a temp directory, and prints the attributes each step set, the key the
+target would use, and the rendered body for every channel the route notifies. `expand` works
+offline too: every store's fetcher reads the sample files sitting beside `--content`, so a
+metadata file and its children are tried together and each child gets its own key and body. It
+connects to nothing and stores nothing. This is where a user finds that a
 regex group is named `orderNo` while the mapping says `orderNumber`, the way Logstash's grok
 debugger or Benthos's mapping evaluator would show it, before any deployment (D35). Custom
 processors run too, so one that reads a network would fail here first, which is the rule

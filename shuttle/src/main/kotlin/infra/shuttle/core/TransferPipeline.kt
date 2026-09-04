@@ -48,7 +48,6 @@ class TransferPipeline(
     private val name = RouteName(route.name)
     private val polled = route.source is Source.Poll
     private val kind = if (polled) TransferKind.OBJECT else TransferKind.MESSAGE
-    private val targetKey = route.target?.key ?: "{name}"
     /** Spec 5.3: a `callback` ack names a channel the pipeline calls itself; rule 12 guarantees it is declared, the host must provide it. */
     private val callbackChannel = (route.source?.onAck as? AckAction.Callback)
         ?.let { checkNotNull(channels[ChannelName(it.channel)]) { "route ${route.name}: callback channel ${it.channel} was not provided" } }
@@ -171,7 +170,10 @@ class TransferPipeline(
             val id = transfer.id
             ledger(DeliveryMoment.FETCHED) { store.fetched(id, staged.summary, it) }
             hook.at(HookPoint.afterFetch, id)
-            val ctx = Context(TransferView(id, name, transfer.identity, event.source.path, transfer.firstSeenAt, transfer.parentId), event.source, dir, fetch)
+            val ctx = StagingContext(
+                TransferView(id, name, transfer.identity, event.source.path, transfer.firstSeenAt, transfer.parentId),
+                event.source, dir, clock, algorithm, fetchers + (stagingStore to fetch),
+            )
             val done = when (val result = stage("process") { chain.run(Payload(listOf(staged)), ctx) }) {
                 is ChainResult.Rejected -> return reject(transfer, result.reason)
                 is ChainResult.Done -> result
@@ -183,7 +185,7 @@ class TransferPipeline(
             store.processed(id, done.attributes)
             hook.at(HookPoint.afterProcess, id)
             val objects = done.payload.objects
-            val keys = objects.map { expandPattern(targetKey, it.name, transfer.identity.sourceName, done.attributes, clock) }
+            val keys = objects.map { targetKey(route.target, it.name, transfer.identity.sourceName, done.attributes, clock) }
             keys.firstOrNull(::keyLeavesTarget)?.let { return reject(transfer, "key: $it leaves the target directory") }
             keys.withIndex().groupBy({ it.value }, { objects[it.index].name }).entries.firstOrNull { it.value.size > 1 }?.let { (key, names) ->
                 return reject(transfer, "cardinality: ${names.joinToString(" and ")} both resolve to key $key")
@@ -351,19 +353,6 @@ class TransferPipeline(
         ?: store.childrenOf(row.id).let { children -> children.isNotEmpty() && children.all { c -> c.target?.let { target.verify(it) } ?: false } }
 
     private fun count(outcome: String) = registry.counter(ShuttleMetrics.TRANSFERS, "route", route.name, "outcome", outcome).increment()
-
-    /** Spec 6.2 over the run's staging directory; `fetch` pulls `expand`'s children into it, so they die with the run (I9). */
-    private inner class Context(override val transfer: TransferView, override val source: SourceView, private val dir: Path, private val own: Fetcher) : ProcessContext {
-        override val attributes = LinkedHashMap<String, String>()
-        override val clock: Clock get() = this@TransferPipeline.clock
-        private var created = 0
-        override fun setAttribute(name: String, value: String) { attributes[name] = value }
-        override fun newStagedFile(name: String): Path = dir.resolve("${created++}-${name.substringAfterLast('/')}")
-        override suspend fun fetch(store: String, path: String): StagedObject {
-            val fetcher = if (store == stagingStore) own else fetchers[store] ?: throw IllegalStateException("route ${route.name}: no fetcher for store $store")
-            return fetcher(path, newStagedFile(path), algorithm)
-        }
-    }
 
     private companion object {
         val log: Logger = Logger.getLogger(TransferPipeline::class.java)

@@ -220,7 +220,7 @@ command mode never starts the host.
 | Mode | Command | Does |
 |---|---|---|
 | `validate` | `java -jar ... validate <files>` | Startup steps 1 and 5 only: loads the YAML, judges all 26 rules, resolves every named bean. Prints `rule <n>: <message>` per violation, exits 1 on any. Connects to nothing. |
-| `try` | `java -jar ... try <files> --route <name> --file-name <name> [--source-path <path>] [--content <file>] [--message <file>]` | Validates, then runs that route's chain over the sample in a temp directory: the attributes each step set, the key the target would use, the body rendered for every channel the route notifies. Connects to nothing, stores nothing. |
+| `try` | `java -jar ... try <files> --route <name> --file-name <name> [--source-path <path>] [--content <file>] [--message <file>]` | Validates, then runs that route's own chain and context over the sample in a temp directory: the attributes each step set, the key the target would use, the body rendered for every channel the route notifies. `expand` reads the sample files sitting beside `--content`, one key and one body per child. Connects to nothing, stores nothing. |
 | serve | `java -jar ...` (no argument) | Spec 12.1 in order: state store, store and channel probes, staging emptied, named beans, then the notifier and every route. Readiness at `/q/health/ready`, the scrape at `/q/metrics`, the admin endpoints below. |
 
 ## Admin endpoints (spec 14.1)

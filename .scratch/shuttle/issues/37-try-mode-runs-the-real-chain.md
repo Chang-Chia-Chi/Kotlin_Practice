@@ -13,14 +13,14 @@ Spec 7, Standards 4, Architecture C4.
 
 **Nature:** deepening; one chain, one context, one key function
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `TryCommandTest`: a route with `expand` over a sample metadata file and sample children prints one key and one body per child; red before the fix (today: `NotImplementedError`)
-- [ ] `TryCommandTest`: the key printed equals the key `TransferPipeline` would store under for the same inputs (assert through the shared key function, not by duplicating its rule in the test)
-- [ ] `ProcessingChain` exposes per-step observation (attributes set, objects after the step) as a parameter with a no-op default; `TransferPipeline` passes nothing and is otherwise untouched
-- [ ] The third `ProcessContext` implementation is deleted; try mode uses the same one the pipeline uses, in a temp directory, with a fetcher map over the sample files
-- [ ] Rule 22 and the digest are judged in try mode as in serve mode; S31's tests stay green with their ids
-- [ ] Progress entry appended
+- [x] `TryCommandTest`: a route with `expand` over a sample metadata file and sample children prints one key and one body per child; red before the fix (today: `NotImplementedError`)
+- [x] `TryCommandTest`: the key printed equals the key `TransferPipeline` would store under for the same inputs (assert through the shared key function, not by duplicating its rule in the test)
+- [x] `ProcessingChain` exposes per-step observation (attributes set, objects after the step) as a parameter with a no-op default; `TransferPipeline` passes nothing and is otherwise untouched
+- [x] The third `ProcessContext` implementation is deleted; try mode uses the same one the pipeline uses, in a temp directory, with a fetcher map over the sample files
+- [x] Rule 22 and the digest are judged in try mode as in serve mode; S31's tests stay green with their ids
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket; 200-600 lines including tests; no Thread.sleep;
 invariant tests named `I<n>_<description>`, scenario tests by their `S<n>` id, validation tests by `rule<n>_`,
