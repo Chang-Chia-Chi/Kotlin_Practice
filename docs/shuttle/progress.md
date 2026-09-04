@@ -3035,3 +3035,70 @@ In the full pass, run while other agents' Maven builds shared the machine, the t
    on a poll, still acked at the broker on a subscribe. Without it the mapping this ticket writes
    is a guess a reader has to re-derive, and the S3 poll will face the same question.
 2. **Size:** production one changed line plus a six-line KDoc; tests +47 / -4; spec +3 lines.
+
+---
+
+## 30: Fix: the supervisor's restart count and the route gauge agree at every instant
+
+**Built:** `RouteSupervisor` increments `shuttle_route_restarts_total{route}` the instant the route
+goes down - right after the gauge drops to 0 and before the backoff wait - instead of after the
+wait, when the gauge was about to be 1 again. One moved line plus a comment. The test profile
+(`shuttle/src/test/resources/application.properties`) gained `quarkus.http.test-port=0`, so
+`ShuttleQuarkusTest` binds a random port (this run: 57619) and parallel worktree builds no longer
+collide on 8081; RestAssured follows the port Quarkus chose, nothing in the test names one.
+
+**What was wrong:** `ShuttleHostTest.S18_...` and `readiness_follows_the_configured_rule_...` await
+`restarts(route) >= n` and then read `ready()`. The counter moved at the *end* of the wait, so a
+reader that saw the n-th restart counted was reading at the one instant the route was coming back
+up: `ready()` said true for a route the spec calls down. A wall-clock race between the test and the
+counter's placement, not the readiness rule; it fired under a loaded machine and never on the
+virtual clock, because nothing on the virtual clock had sampled the two meters *between* transitions.
+
+**Concepts named:**
+
+- **A restart is counted when it is scheduled, not when it runs.** Spec 10's "each restart logged
+  and counted" now happens at one instant: gauge to 0, the WARN naming the cause and the delay,
+  the counter. So `restarts == runs ended` at every instant, and a reader that sees the n-th
+  restart is guaranteed the gauge at 0 for the whole of that wait. `shuttle_route_restarts_total`
+  still means one increment per restart; only the instant it is observable moved earlier.
+
+**Acceptance:**
+
+- [x] *A virtual-clock test that observes counter and gauge at every transition, red before the
+  fix* - `RouteSupervisorTest.the_restart_counter_and_the_route_gauge_never_disagree_about_a_route_being_down`:
+  one route that dies at once, sampled inside every run and at every second for 200 s of the
+  virtual clock; every sample must satisfy `restarts == starts - up`. Red before the fix with 200
+  disagreements (`0.0 restarts counted, 1.0 runs ended` from 0 ms on, `2.0 counted, 3.0 ended` at
+  the end); green after. The sampler records mismatches rather than asserting inside the flow,
+  because the supervisor's `runCatching` would swallow an `AssertionError` thrown by the trigger.
+  Two existing expectations moved with the counter: `I21_...` counts 8, not 7 (the eighth run
+  died at 2730 s and is in its wait at 3000 s), and `restart_cancels_the_current_run_...` counts 2
+  after the operator's restart and the second run's immediate death, not 1.
+- [x] *S18 ten times in a row under CPU load* - a PowerShell `for` loop over
+  `-Dtest=ShuttleHostTest#S18*` with a second Maven build (`-pl sftpconnector/core test
+  -Dtest=ArchitectureTest`, a separate `target/`, looped 8 + 5 + 2 times) providing load throughout:
+  **10/10 passed**, 2.4 to 8.3 s each. The scenario's `backoff` stayed at the class default of
+  200 ms: the fix is the ordering, not a wider window. The loop is not committed. The test gained
+  one comment line saying why the read after `restarts >= 2` cannot race.
+- [x] *`ShuttleQuarkusTest` binds a random port* - `quarkus.http.test-port=0` in the test profile;
+  the surefire XML shows `Listening on: http://localhost:57619`.
+- [x] Progress entry appended - this entry.
+
+**Final run counts (surefire), default tier** (`mvn -B -o -q -pl shuttle test`): 30 classes,
+266 tests, 0 failures, 0 errors. `RouteSupervisorTest` 5 (was 4), `ShuttleHostTest` 9/9 including
+both readiness cases, `ShuttleQuarkusTest` 4/4 on the random port.
+
+**Deviations:**
+
+1. **A restart cut short by shutdown has been counted.** A route in its backoff wait when the
+   process stops has one more restart counted than runs started. Spec 10 counts restarts, not
+   runs; the count of runs is `starts`, which the metric never claimed to be. Accepted as the price
+   of the invariant above.
+2. **The load for the ten-run check came from `sftpconnector/core`, not a second `shuttle`
+   build.** Two Maven builds of one module in one worktree write the same `target/classes` while
+   the other JVM is loading from it; a different module's build gives the same CPU load without
+   that hazard.
+3. **Size:** production +2 / -1 lines; tests +28 / -2; test resources +4. The previous agent's
+   uncommitted attempt at this ticket (another worktree) was read as prior art; its supervisor
+   test was re-derived here with the in-flow assertion replaced by a recorded sample, and its
+   widening of S18's backoff to 1 s was not taken.

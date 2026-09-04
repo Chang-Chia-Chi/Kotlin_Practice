@@ -16,12 +16,12 @@ parallel worktree builds is a separate nuisance: give the test profile a random 
 
 **Nature:** ordering between a counter, a gauge and a readiness probe; test determinism
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `RouteSupervisorTest`: a test on the virtual clock that observes the restart counter and the gauge at every transition and asserts they never disagree about whether the route is down; red before the fix
-- [ ] `ShuttleHostTest.S18_...` passes ten times in a row under a concurrent CPU load (run it in a loop while another Maven build runs, or with `-Dsurefire.rerunFailingTestsCount=0` and a stress thread inside the test class only if no other way exists); the loop is a one-off check, not a committed test
-- [ ] `ShuttleQuarkusTest` binds a random port in the test profile and no longer collides with a parallel worktree build
-- [ ] Progress entry appended
+- [x] `RouteSupervisorTest`: a test on the virtual clock that observes the restart counter and the gauge at every transition and asserts they never disagree about whether the route is down; red before the fix
+- [x] `ShuttleHostTest.S18_...` passes ten times in a row under a concurrent CPU load (run it in a loop while another Maven build runs, or with `-Dsurefire.rerunFailingTestsCount=0` and a stress thread inside the test class only if no other way exists); the loop is a one-off check, not a committed test
+- [x] `ShuttleQuarkusTest` binds a random port in the test profile and no longer collides with a parallel worktree build
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket; 200-600 lines including tests; no Thread.sleep;
 invariant tests named `I<n>_<description>`, scenario tests by their `S<n>` id, validation tests by `rule<n>_`,
