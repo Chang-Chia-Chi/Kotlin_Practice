@@ -6,6 +6,7 @@ import infra.shuttle.testkit.InMemoryTarget
 import infra.shuttle.testkit.ScriptedFetcher
 import infra.shuttle.testkit.ScriptedSource
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
@@ -32,7 +33,7 @@ class RouteSupervisorTest {
 
     private fun runner(name: String): RouteRunner {
         val route = Route(name = name, source = Source.Poll("sftp", "/in", 1.minutes, onAck = AckAction.Move("done")), target = Target("minio", bucket = "landing"))
-        val pipeline = TransferPipeline(route, DigestAlgorithm.MD5, store, target, ProcessingChain(emptyList(), DigestAlgorithm.MD5), emptyMap(), { true }, {}, Hook.None, clock, registry, Staging(staging), usableSpace = { 10.gib })
+        val pipeline = TransferPipeline(route, DigestAlgorithm.MD5, store, target, ProcessingChain(emptyList(), DigestAlgorithm.MD5, Dispatchers.Unconfined), emptyMap(), { true }, {}, Hook.None, clock, registry, Staging(staging), usableSpace = { 10.gib })
         return RouteRunner(route, pipeline, fetcher, store, {}, clock, registry)
     }
 

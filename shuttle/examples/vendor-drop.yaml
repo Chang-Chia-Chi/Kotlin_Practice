@@ -1,0 +1,82 @@
+# Spec 13.1's `vendor-drop` and `mirror` routes, trimmed to the local stack in docker-compose.yml.
+# Every secret is a `${VAR}` (rule 25); the README's environment block sets them.
+#
+#   shuttle validate shuttle/examples/vendor-drop.yaml
+#   shuttle try      shuttle/examples/vendor-drop.yaml --route vendor-drop --file-name 123-order.csv
+
+shuttle:
+  shuttleStateStore:
+    oracle: { datasource: shuttle }          # names the Quarkus datasource `quarkus.datasource.shuttle.*`
+  notifier: { workers: 2, batch: 50, sweepEvery: 5s }   # sweepEvery is how fast a due delivery is picked up
+  supervision:
+    restartBackoff: { initial: 10s, max: 2m }           # a route that dies is restarted on this backoff
+    readiness: all-routes-down                          # /q/health/ready is DOWN only when every route is down
+  digest: md5                                # process default; a route may override
+  drainTimeout: 60s                          # shutdown's bound; every timeout below must fit inside it (rule 3),
+                                             # including the SFTP store's own drain (30s) plus cancel grace (5s)
+
+  objectStores:
+    vendor:                                  # the SFTP server in docker-compose.yml
+      sftp:
+        host: localhost
+        port: 2222
+        auth: { user: ${SFTP_USER}, password: ${SFTP_PASSWORD} }
+        hostKey: acceptAll                   # a throwaway local server; a deployment states knownHosts instead
+        idleCutoff: 5m                       # keepAlive (30s) and idleTimeout (4m) must stay below it (rule 10)
+        pool: { maxSize: 6, maxConcurrentTransfers: 4 }  # rule 9: 2 (vendor-drop) + 1 (mirror) + 2 listers = 5
+        staging:
+          dir: "${SHUTTLE_STAGE_DIR}/vendor" # local disk fetches land in; must exist and be writable (rule 11)
+          minFree: 256m                      # below this a fetch is deferred rather than filling the volume
+    minio:                                   # the object store; an S3 endpoint, not a bucket (rule 6)
+      s3:
+        endpoint: http://localhost:9000
+        region: us-east-1
+        pathStyle: true                      # MinIO addresses buckets by path, not by sub-domain
+        credentials: { accessKey: ${S3_ACCESS_KEY}, secretKey: ${S3_SECRET_KEY} }
+        timeouts: { connect: 5s, socket: 20s, apiCall: 25s }   # apiCall below drainTimeout (rule 3)
+
+  channels:
+    downstream:                              # the echo server; stands in for the downstream API
+      http:
+        method: POST
+        url: http://localhost:8081/api/files
+        auth: { bearer: ${DOWNSTREAM_TOKEN} }
+        timeout: 10s                         # below drainTimeout (rule 3)
+        response: { success: [200-299], retry: [408, 429, 500-599] }   # no `reference`: the echo server returns no id
+        policy: { maxAttempts: 10, giveUpAfter: 1h, backoff: { initial: 5s, max: 1m } }
+        body:                                # spec 9.6's mapping table: one row per JSON path
+          - { path: fileId,          field: TRANSFER_ID }
+          - { path: file.name,       field: STORED_NAME }
+          - { path: file.size,       field: TARGET_SIZE,     required: false }
+          - { path: file.md5,        field: DIGEST }
+          - { path: location.bucket, field: TARGET_LOCATION, required: false }
+          - { path: location.key,    field: TARGET_KEY,      required: false }
+          - { path: receivedAt,      field: SOURCE_MTIME,    format: ISO_INSTANT, required: false }
+          - { path: orderNumber,     attribute: orderNumber }   # set by the extract step below (rule 17)
+          - { path: event,           field: EVENT }             # fetched | stored | acked
+          - { path: source,          value: vendor-drop }       # a constant, so the receiver knows who called
+
+  routes:
+    vendor-drop:
+      source:
+        poll:
+          store: vendor
+          directory: /drop                   # the vendor user is chrooted, so this is /home/vendor/drop
+          every: 15s                         # 1h in production; short here so the walkthrough finishes
+          readiness: [ { sizeStable: { checks: 2, interval: 2s } }, { minAge: 5s } ]  # only complete files
+          onAck: { move: temp/ }             # the done folder, relative to the polled directory (rule 23)
+      process:
+        - { extract: { from: fileName, regex: "(?<orderNumber>\\d+)-.*\\.csv" } }   # names the attribute
+        - { rename: { pattern: "{yyyyMMdd}-{name}" } }
+        - { zip: {} }
+      target: { store: minio, bucket: landing, key: "vendor/{name}" }   # {name} is the name after the chain
+      notify:
+        - { on: acked, channel: downstream } # one delivery per transfer, once the source has been acked
+      parallelism: 2                         # transfers in flight for this route
+      maxAttempts: 5                         # attempts before the transfer is FAILED
+      stuckAfter: 1h                         # a transfer before ACKED older than this raises the stuck gauge
+      recheckFinished: 24h                   # a finished file still listed is digested again at most this often
+
+    mirror:                                  # move A to B, tell nobody
+      source: { poll: { store: vendor, directory: /outbound, every: 60s, onAck: delete } }
+      target: { store: minio, bucket: landing, key: "mirror/{name}" }

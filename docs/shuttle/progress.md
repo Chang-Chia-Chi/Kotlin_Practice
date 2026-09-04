@@ -3777,6 +3777,305 @@ behaviour changed except the swallowed cancellation and the retirement of rule 1
 
 ---
 
+## 34: Fix: archive writing, digests and content reads run on the bounded IO view
+
+**Built:** spec 3.3 and plan 2.5's sentence "blocking calls, ... and archive writing, run on one bounded
+view of `Dispatchers.IO` owned by the module", for the one blocking caller that was not on it.
+`ProcessingChain` takes a third constructor argument, `io: CoroutineDispatcher`, and its whole `run` body
+is now one `withContext(io)`: every processor call, and the size and `Digest.of` recomputed for each file
+the chain created, happen on that view. `zip`'s `ZipOutputStream`, `unzip`'s entry loop, `extract`'s
+`Files.readString` of the content and `expand`'s `readAllBytes` come along with them, because they are
+inside the processors the loop calls. One wrap, not one per step: the dispatcher is passed once and the
+chain hops once per run rather than once per processor.
+
+**Concepts named:**
+
+- **D52, a custom processor is called on the bounded view and blocks where it stands.** The alternative -
+  the chain calls processors on whatever dispatcher the caller is on and each processor switches itself -
+  puts rule 9's arithmetic at the mercy of every processor an operator writes, and a processor that
+  forgets is exactly the bug this ticket fixes. Calling on the view keeps the sum-of-parallelism bound
+  true by construction and leaves a custom processor nothing to remember. Its cost is that a processor
+  doing genuinely CPU-bound work now burns an IO permit; that is the trade spec 3.3 already makes for
+  archive writing. The sentence is in the `Processor` KDoc, in the `ProcessingChain` KDoc, and as a fifth
+  bullet under spec 6.2's four re-run rules.
+- **Progress 14's third sentence is corrected here.** It reads "The bounded view still carries JDBI, S3,
+  the HTTP channel and archive writing." The first three were true; archive writing was not, and had never
+  been: `ZipProcessor` ran wherever the pipeline's coroutine was, which under a running host is
+  `ShuttleHost`'s scope on `Dispatchers.Default`. A route zipping a large file occupied a CPU worker and
+  spent none of the view's budget. From this ticket the sentence is true as written.
+- **The pipeline never held the dispatcher, and still does not.** The ticket expected to find one on
+  `TransferPipeline` for the store step; there is none. The store step reaches the bounded view through
+  the target adapter, which takes its own `io` (`S3Target`, `SftpTarget`), as the fetch adapters and
+  `JdbiStateStore` do. The chain is the one blocking caller that lives in `core` itself, so `core` is
+  where its dispatcher has to be handed in. No pipeline parameter was added.
+- **A real dispatcher hop leaves `runTest`'s scheduler.** Three test classes drive the pipeline through
+  virtual time (`advanceUntilIdle`, `runCurrent`); with the chain hopping to a real dispatcher their
+  `run.isCompleted` assertions became a race, and two `RouteRunnerTest` cases failed at once rather than
+  flaking later. Those chains are constructed with `Dispatchers.Unconfined`, which keeps the hop inside
+  the caller's frame and the tests deterministic - the dispatcher is a constructor argument precisely so a
+  test can say which one it wants.
+
+**Tests:** `ProcessingChainTest.SPEC9_a_zip_step_and_a_custom_processor_both_run_on_the_chains_bounded_io_view`.
+A single-thread `Executors.newSingleThreadExecutor` named `shuttle-io-view-probe`, handed to the chain as
+`asCoroutineDispatcher()`; the chain is `zip` then a test processor. `zip` is observed from inside itself -
+`FakeProcessContext.newStagedFile` records `Thread.currentThread().name`, and `zip` creates its archive
+through that call - and the second step records its own thread. No mock, no sleep, `runTest` throughout.
+Red first, on the archive: `expected: <[shuttle-io-view-probe]> but was: <[main @kotlinx.coroutines.test runner#8]>`.
+
+**Final run counts (surefire).** `-Dtest=ProcessingChainTest`: 5 tests, 0 failures, 0 errors. Default tier
+(`mvn -B -o -q -pl shuttle test`): 31 classes, **280 tests, 0 failures, 0 errors** - ticket 40's 279 plus
+the one above.
+
+**Deviations:**
+
+1. **`io` defaults to `Dispatchers.IO`, and `ShuttleHost` still takes the default.** `chainFor` is in
+   `ShuttleHost.kt`, which ticket 38 owns and this ticket may not edit, so the bounded view cannot be
+   handed to the chain from the host yet. A required third argument would not compile there. The default
+   is the unbounded `Dispatchers.IO`: right for `TryCommand` and every test, and already better than
+   `Dispatchers.Default` for a running host, since a zipping route no longer occupies a CPU worker - but
+   it is not yet bounded by the sum of route parallelism. **Ticket 38 must pass `io` to `ProcessingChain`
+   in `chainFor`**; it is one argument on line 370, and rule 9's arithmetic is not true until it does.
+2. **`TryCommand` was not touched and needed nothing.** It calls `processorFor(...).process` directly
+   inside `runBlocking`, not the chain, so it has no dispatcher to pass. When ticket 37 makes it call the
+   chain it will get the `Dispatchers.IO` default, which is what "a plain dispatcher" means offline.
+3. **`rename` has no blocking call to move.** The checklist allows for "rename's file move if it blocks";
+   `RenameProcessor` copies the object with a new `name` and leaves the file where it is. Nothing to move.
+4. **Three test classes were changed although the ticket named none of them.** `RouteRunnerTest`,
+   `RouteSupervisorTest` and `CrashMatrixTest` construct the chain inside virtual-time tests and now pass
+   `Dispatchers.Unconfined`; `RouteRunnerTest.I19_...` and `..._a_poll_failure_or_skip_...` were failing
+   without it. No assertion changed.
+5. **The digest recompute is not separately observed.** It sits in the same `withContext` block as the
+   processor loop, three lines below the call the test observes; a second mechanism to watch a thread
+   inside `Files.size` would need a `FileSystemProvider` of its own to say something the block already
+   says.
+6. **One spec edit.** Spec 6.2 gains a fifth bullet stating D52. Spec 3.3 needed none: it already said
+   archive writing runs on the view, which is why this was a bug and not a spec change.
+7. **Size:** production +19 / -5 across three files (`ProcessingChain.kt`, `Processing.kt`, spec 6.2);
+   tests +43 / -7 across four files; this entry.
+
+---
+
+## 42: A runnable quickstart - SFTP drop to MinIO with an HTTP callback, verified end to end
+
+**Built:** `shuttle/README.md` and `shuttle/examples/` - documentation and example assets only; nothing under
+`shuttle/src/main` changed. The README is five sentences on what shuttle is, a ten-step quickstart, the three
+modes as a table, spec 14.1's seven admin endpoints with a curl each, spec 14.2's metric names, and where the
+spec, plan, progress log and tickets live. The examples are `vendor-drop.yaml` (spec 13.1's `vendor-drop` and
+`mirror` routes trimmed to the local stack, every secret a `${VAR}`, one comment per knob),
+`docker-compose.yml` (five `shuttle-example-` containers: `atmoz/sftp` with `/drop`, `/drop/temp` and
+`/outbound`; `minio/minio:RELEASE.2024-10-02T17-50-41Z` with a versioned `landing` bucket; a `minio/mc`
+container that makes the bucket and then stays alive as the MinIO command line;
+`gvenzl/oracle-free:23-slim-faststart` with spec 8.1's DDL applied at first start; `mendhak/http-https-echo:31`
+printing every request body), `schema.sql` (spec 8.1's block, verbatim), `oracle-init.sh`, `seed.ps1` /
+`seed.sh`, and `sample/123-order.csv`. The images and settings are the acceptance fixture's (progress 15)
+wherever it had one. One test was added: `StateStoreSchemaTest.the_example_schema_file_is_the_same_DDL`, so
+the example cannot drift from the spec.
+
+**Concepts named:**
+
+- **The quickstart is the acceptance suite with the assertions taken out.** Same MinIO tag, same Oracle image,
+  same versioned bucket, same loopback HTTP endpoint - so what a reader sees on their laptop is what the
+  `acceptance` tier proves, and a difference between them is a bug in one of the two, not in the reader's
+  setup.
+- **Two verification points, one file.** `validate` answers "is this configuration legal" and `try` answers
+  "is this configuration what I meant", both with no client of any kind in the process. The README puts them
+  before `serve` because that is the order an operator will actually use them in.
+- **The DDL is copied, never re-typed.** `examples/schema.sql` was extracted from spec 8.1's fenced block and
+  is now compared against `StateStoreSchema.DDL` by a test, so the example, the constant and the spec are one
+  text or the build fails.
+
+**Acceptance:**
+
+- [x] The whole walkthrough was run once end to end on a clean stack (`down -v`, then `up -d`), following the
+  README's own commands in its own order. Observed:
+  - **The object:** `mc ls --recursive --versions local/landing` shows
+    `[2026-09-04 21:46:13 UTC] 196B STANDARD e27d8880-6387-4e8c-94c6-2444388ad884 v1 PUT vendor/20260904-123-order.csv.zip`
+    - the chain's rename and zip in the key, and a version id because the bucket is versioned.
+  - **The moved file:** `/home/vendor/drop` holds only `temp/`, and `/home/vendor/drop/temp/123-order.csv` is
+    the original 44 bytes - `onAck: { move: temp/ }`.
+  - **The callback the echo server logged:**
+    `{"fileId":"1","file":{"name":"123-order.csv","size":"196","md5":"0e9718918ba07ef546ab6002768ef1c5"},`
+    `"location":{"bucket":"landing","key":"vendor/20260904-123-order.csv.zip"},`
+    `"receivedAt":"2026-09-04T21:35:27Z","orderNumber":"123","event":"acked","source":"vendor-drop"}`,
+    with `authorization: Bearer local-token` among the headers it echoed back. `file.name` and `file.md5`
+    being the source's rather than the stored archive's is D43, unchanged and now called out in the README.
+  - **The admin answer:** `GET /admin/shuttle/transfers?route=vendor-drop` returns one row, `state DONE`,
+    `attributes {"orderNumber":"123"}`, `target {kind s3, location landing,
+    key vendor/20260904-123-order.csv.zip, ref e27d8880-..., size 196}`, `ackedAt 21:46:13.924Z`,
+    `completedAt 21:46:14.810Z`; `/transfers/1/deliveries` one DELIVERED row at attempt 1. A redrive or an
+    ack on that DONE row is 409, an anonymous call 401, `POST /routes/vendor-drop/restart` 200
+    `{"state":"done"}`.
+  - **One metric line:** `shuttle_transfers_total{outcome="done",route="vendor-drop"} 1.0`; the scrape also
+    carries `shuttle_route_up`, `shuttle_poll_total`, `shuttle_stage_seconds_*` per stage,
+    `shuttle_delivery_total{channel="downstream",event="acked",outcome="delivered"}` and
+    `shuttle_staging_free_bytes{store="vendor"}`. `/q/health/ready` is UP with both the datasource and the
+    `shuttle-routes` check.
+  - **The mirror route:** a file in `/outbound` becomes `mirror/123-order.csv` (44 B, ref
+    `56b29dbc-fde1-47db-a55c-106fe670b9b4`), the source is deleted (`onAck: delete`), and its transfer row
+    has no deliveries.
+  - Timing, drop to delivered: about 21 s (a 15 s poll plus the readiness checks).
+- [x] `validate` on the example prints `ok:`; `try` prints the three steps, the key and the rendered body.
+- [x] `mvn -pl shuttle test -Dtest=ValidateCommandTest,StateStoreSchemaTest`: 7 tests, 0 failures, 0 errors.
+
+**Corrections the run forced on the README and the examples:**
+
+1. **`SHUTTLE_CONFIG` and `SHUTTLE_STAGE_DIR` need forward slashes.** These reach the process through
+   MicroProfile Config, whose expression syntax treats `\` as an escape, so
+   `shuttle\examples\vendor-drop.yaml` arrived at `Files.readString` as `shuttleexamplesvendor-drop.yaml`
+   and the boot died with `NoSuchFileException`. The README says so where the block is set.
+2. **Spec 8.1's DDL cannot be dropped straight into gvenzl's `initdb.d`.** Two problems, both observed: a
+   plain `.sql` there runs as SYSDBA, so the tables would not belong to the user shuttle connects as; and
+   SQL*Plus does not end a statement on a `;` that has a `-- comment` after it on the same line, which the
+   DDL's first line has - `CREATE SEQUENCE file_transfer_seq` ran into the next statement and **both**
+   sequences failed with `ORA-03405` while the tables and indexes were created, a half-applied schema that
+   would have failed at the first insert. `oracle-init.sh` now pipes the file through `sed 's/--.*$//'` with
+   `SET SQLBLANKLINES ON` into a session as the application user; the DDL file itself is untouched.
+3. **`drainTimeout: 30s` broke rule 3.** An SFTP store's own drain (30 s) plus cancel grace (5 s) is not
+   below it, and `validate` said so by number. The example carries spec 13.1's `60s`.
+4. **The staging directory has to exist before `validate`, not just before `serve`** (rule 11 checks it in
+   both), so the `New-Item` is inside the environment block rather than a later step.
+5. **`mc` inside the MinIO container cannot list the bucket** - its preconfigured `local` alias is
+   unauthenticated (`Access Denied`). The one-shot `minio-init` container became a long-lived `mc` service
+   that sets a credentialled alias, makes the bucket and then `tail -f /dev/null`s, so every listing in the
+   README is one `docker exec`.
+6. **`validate` echoes the path back with the platform's separators** (`ok: shuttle\examples\vendor-drop.yaml`
+   on Windows, even when the argument used `/`); the transcript in the README matches what was printed.
+7. **`mvn -pl shuttle quarkus:run` is not what the README tells the reader to use.** The plugin artifacts it
+   needs were not in this machine's `~/.m2` and the environment is offline, so the README uses
+   `mvn -pl shuttle -am package -DskipTests` and `java -jar shuttle/target/quarkus-app/quarkus-run.jar`,
+   both of which were run.
+
+**Deviations:**
+
+1. **The mirror route targets S3, not a second SFTP store.** Spec 13.1's `mirror` writes to the `partner`
+   SFTP server; a second SFTP store needs its own staging directory (rule 11) and a second account on the
+   local server for no teaching value, so the example mirrors to a `mirror/` key prefix of the same bucket -
+   the same choice ticket 15's fixture made (its deviation 2).
+2. **No `provider` row and no `response.reference` in the example's mapping table.** `provider: orderDetails`
+   needs a named CDI bean, which this repository has none of outside tests (rule 15 would fail validate), and
+   the echo server returns no id for `reference` to point at. Both are called out in the YAML's comments
+   rather than silently dropped.
+3. **`examples/oracle-init.sh` is a file the ticket did not ask for.** Correction 2 above is why; the
+   alternative was editing spec 8.1's DDL, which is forbidden and would be wrong anyway.
+4. **`seed.sh` is unverified.** Only `seed.ps1` was run, as the ticket allows; the shell twin is a
+   line-for-line translation and says so in its header.
+5. **One file under `shuttle/src/test` changed**, the schema-parity test the ticket permits:
+   `StateStoreSchemaTest` gained `the_example_schema_file_is_the_same_DDL` and its `specFile()` helper became
+   `fileAbove(relative)`. No production code and no `application.properties` were touched.
+6. **The example's poll intervals are demo scale**, not spec scale: `every: 15s` instead of `1h` for
+   vendor-drop and `60s` instead of `15m` for mirror, with readiness `sizeStable(2 x 2s)` and `minAge 5s`
+   instead of the spec's `10s` / `1m`, so the walkthrough finishes while a reader is watching. Each is
+   commented as such in the YAML.
+
+**Not verified:** README step 10's Ctrl-C. The host process was run detached, so the interactive interrupt
+was not exercised; the bounded shutdown behind it is I12 in `ShuttleHostTest` and every acceptance crash
+scenario. `seed.sh` (deviation 4). Nothing else in the README is unrun.
+
+**For the next ticket:** the quickstart is the cheapest place to see a wiring change break. Anything that
+adds a YAML key, a rule, an admin endpoint or a metric should be reflected in
+`shuttle/examples/vendor-drop.yaml` and `shuttle/README.md` in the same ticket; `StateStoreSchemaTest` now
+guards the schema half of that automatically, and `shuttle validate shuttle/examples/vendor-drop.yaml` is a
+ten-second check that the example still loads.
+
+---
+
+## 41: `SftpPollSource` keeps no handle table either
+
+**Built:** the last map in the poll source is gone. `handles: ConcurrentHashMap<String,
+SftpEvent.FileSeen>`, its import, the `put` on hand-over and the `answering` wrapper whose only body
+was a `finally` that removed the entry are deleted; `fetch` is
+`source.inFlightAt(path) ?: throw IOException("$path is not a file this poll has in flight")`, and
+`seenEvent`'s `ack` and `nack` call the connector's handle directly. `emitted`, reset on
+`PollStarted`, is the only state the class holds. 13 lines of code removed, 3 added (net -10
+non-comment lines; -27/+18 with the KDoc rewritten). Nothing else in shuttle changed.
+
+**Concepts named:**
+
+- **The connector answers the path, so nobody else has to.** Connector ticket 25 (spec 7.1 and 7.3,
+  D50) added `SftpSource.inFlightAt(path): SftpEvent.FileSeen?`: the very handle the watch emitted
+  for the file in flight at that path, or null - never listed, already answered and its action run,
+  or given back when the watch ended, and null too in the gap between a tick admitting a file and
+  handing it over. That is exactly the question ticket 31's table existed to answer, and the answer
+  is now one lookup on the module that owns the in-flight set. Under the deletion test the table
+  was pure duplication once the lookup existed: it decided nothing, and every property it had -
+  the emitted instance, so the download carries the listed size; only-its-own removal, so a late
+  answer never drops a newcomer's handle - is a property of the connector's set instead.
+- **The size check is what had to survive, and it does.** `FileSeen.download` is the connector's
+  download of the file it *listed*: the bytes are counted against `remote.size` and a mismatch is
+  `IncompleteTransfer`, so a re-drop between listing and fetch fails the fetch rather than landing
+  under the first file's identity. Because `inFlightAt` returns the emitted handle rather than a
+  fresh one over the same slot, going through the lookup and going through the emitted event are
+  the same download. That is what progress 31 deviation 1 was protecting and why the alternative it
+  rejected - `stat` the path and download what comes back - is still the wrong answer.
+- **A missing handle is a stage error, not a bug.** The table's absence was `checkNotNull`, an
+  `IllegalStateException` that read as "this cannot happen". It can: a path answered, or given back
+  by a watch that ended, is a path the pipeline may still call the fetcher for. It is the same
+  situation as a file gone from the server, so it is the same `IOException` - the pipeline charges
+  an attempt, nacks, and the connector logs the nack as the no-op it is.
+
+**Acceptance:**
+
+- [x] *A fetch after the handle was looked up keeps the connector's size check* -
+      `a_file_re_dropped_with_a_different_size_between_the_listing_and_the_fetch_is_refused`: the
+      file is listed at 15 bytes, rewritten to 19 while the watch holds it, and the pipeline run
+      leaves the row SEEN with 1 attempt, nothing in the target under the first identity and the run's
+      staging directory gone. The connector's own line is the proof: "the transfer ended after 19
+      bytes where the listing said the file had 15".
+- [x] *A fetch for a path with nothing in flight is an `IOException`* -
+      `a_fetch_for_a_path_nothing_is_in_flight_at_is_a_stage_error_naming_the_path`: `IOException`
+      naming `/drop/never-listed.csv`. **This is the assertion that was red** (`Unexpected type,
+      expected: <java.io.IOException> but was: <java.lang.IllegalStateException>`) and green after.
+      The size-check case was green both times, deviation 1.
+- [x] *No map, no `ConcurrentHashMap` import, only `emitted` per tick* -
+      `grep -n "handles\|ConcurrentHashMap\|answering" SftpPollSource.kt` finds nothing.
+- [x] *Every `S<n>`, `SPEC1` and `B1` test keeps its id and passes* - `S1` x2, `SPEC1` and `B1`
+      untouched and green; no earlier test was edited at all (`git diff` on the test file is
+      additions only).
+- [x] *The KDoc's "handle table" paragraph is superseded* - the class KDoc now says nothing about a
+      file is kept here either, and names `inFlightAt` and the listed-size check; `fetch`'s KDoc names
+      both ways it answers `IOException`; `seenEvent`'s KDoc says the connector settles the handle
+      once and a second answer from a lookup is its ignored one. **Progress 31 deviation 1 is
+      superseded by this entry**: the coordinator-approved table is gone, and its reasoning is now
+      the connector's contract.
+- [x] *Default tier green; `M1AcceptanceTest` green* - counts below.
+- [x] *Progress entry appended* - this one.
+
+**Final run counts (surefire).** `-pl shuttle test -Dtest=SftpPollSourceTest`: **14 tests, 0
+failures, 0 errors** (12 before, +2). Red run before the deletion: 14 tests, 1 failure, the
+`IOException` assertion. Default tier (`mvn -B -o -q -pl shuttle test`): 31 classes, **281 tests, 0
+failures, 0 errors, 0 skipped** - 279 at ticket 40's base plus this ticket's two.
+`M1AcceptanceTest` (`-DexcludedGroups=none -Dtest=M1AcceptanceTest`, Oracle and MinIO in containers,
+the real poll source through the host): **23 tests, 0 failures, 0 errors**, 91 s. No test was
+retried and nothing was flaky; one Maven build at a time throughout.
+
+**Deviations:**
+
+1. **Only one of the two tests was ever red.** The ticket asked for red "for whichever assertion the
+   table's absence changes", and that is the `IOException` one: `checkNotNull` threw
+   `IllegalStateException`. The size-check case passed against the table too, which is the point -
+   the table and `inFlightAt` hand back the same instance, so the fetch is byte-for-byte the same
+   download. It is kept because it is the assertion that fails if a later ticket ever "simplifies"
+   the fetcher into a `stat`-then-`download` by path, which is the identity hole progress 31
+   deviation 1 was guarding against and the only reason the table was allowed to survive.
+2. **`answering` went with the table.** The ticket names the `finally`; with the `finally` deleted
+   the wrapper's whole body was `answer()`, so the two lambdas call `seen.ack()` and `seen.nack(...)`
+   directly, as connector 25's "for the next ticket" paragraph said they would. No behaviour changed:
+   the connector's `answering` on its own side still swallows a non-fatal `SftpException`.
+3. **Size:** production -27/+18 in one file (13 code lines out, 3 in); tests +52, additions only;
+   the ticket file and this entry. Well inside the budget - this is a deletion ticket.
+
+**Seams.** None changed. `SftpPollSource`'s interface to the pipeline (`events()`, `fetcher`) is
+untouched; what changed is that its implementation now asks the connector a question instead of
+remembering the answer.
+
+**For the next ticket:** nothing is left over. `SftpPollSource` now holds one mutable local per
+collect (`emitted`) and no fields but its four constructor arguments; every question about what is
+out, whether a listing was cut short, who gives a file back and which file is in flight at a path is
+the connector's. If a later reviewer wants the class smaller still, the only thing left to move is
+`identityOf`, which is shuttle's vocabulary and belongs here.
+
+---
+
 ## 38: A divergent `expand.from` is wired or refused; every channel body is validated; `expand.format` is typed
 
 **Built:** review finding Spec 9 and the two hand-offs that landed on this file since the ticket was written.

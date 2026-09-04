@@ -11,13 +11,13 @@ the claim is corrected. Review finding Standards 2.
 
 **Nature:** dispatcher discipline
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] A test proves that a processor's blocking work runs on the bounded view: a chain with a zip step run under a pipeline whose `io` is a one-thread named dispatcher asserts the thread name inside the step (through the `ProcessContext` or a test processor), red before the fix
-- [ ] `ProcessingChain`'s built-in processors (zip, unzip, digest, extract's content read, rename's file move if it blocks) and `Digest.of` run under `withContext(io)`; the dispatcher is passed once (to the chain or the context), not per step
-- [ ] Custom processors keep the contract spec 6.2 gives them (document in the KDoc whether a custom processor is called on the bounded view or must switch itself; choose the one that keeps rule 9 true and record it)
-- [ ] `TryCommand` (which runs the chain offline) still works with a plain dispatcher
-- [ ] Progress entry appended, correcting progress 14's sentence about archive writing
+- [x] A test proves that a processor's blocking work runs on the bounded view: a chain with a zip step run under a pipeline whose `io` is a one-thread named dispatcher asserts the thread name inside the step (through the `ProcessContext` or a test processor), red before the fix
+- [x] `ProcessingChain`'s built-in processors (zip, unzip, digest, extract's content read, rename's file move if it blocks) and `Digest.of` run under `withContext(io)`; the dispatcher is passed once (to the chain or the context), not per step
+- [x] Custom processors keep the contract spec 6.2 gives them (document in the KDoc whether a custom processor is called on the bounded view or must switch itself; choose the one that keeps rule 9 true and record it)
+- [x] `TryCommand` (which runs the chain offline) still works with a plain dispatcher
+- [x] Progress entry appended, correcting progress 14's sentence about archive writing
 
 Ground rules for every ticket: implement only this ticket; 200-600 lines including tests; no Thread.sleep;
 invariant tests named `I<n>_<description>`, scenario tests by their `S<n>` id, validation tests by `rule<n>_`,

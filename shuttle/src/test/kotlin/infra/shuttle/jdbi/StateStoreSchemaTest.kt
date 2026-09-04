@@ -11,10 +11,17 @@ class StateStoreSchemaTest {
 
     @Test
     fun the_DDL_text_matches_spec_8_1_verbatim() {
-        val spec = Files.readString(specFile()).replace("\r\n", "\n") // the checkout may be CRLF; the constant is not
+        val spec = Files.readString(fileAbove("docs/shuttle/spec.md")).replace("\r\n", "\n") // the checkout may be CRLF; the constant is not
         val section = spec.substringAfter("### 8.1 Tables").substringBefore("### 8.2")
         val block = section.substringAfter("```sql\n").substringBefore("\n```")
         assertEquals(block.trimEnd(), StateStoreSchema.DDL.trimEnd())
+    }
+
+    /** The quickstart's Oracle container applies this file at first start; it is the same DDL or the example lies. */
+    @Test
+    fun the_example_schema_file_is_the_same_DDL() {
+        val schema = Files.readString(fileAbove("shuttle/examples/schema.sql")).replace("\r\n", "\n")
+        assertEquals(StateStoreSchema.DDL.trimEnd(), schema.trimEnd())
     }
 
     @Test
@@ -26,13 +33,13 @@ class StateStoreSchemaTest {
         assertTrue(s[2].startsWith("CREATE TABLE file_transfer"))
     }
 
-    private fun specFile(): Path {
+    private fun fileAbove(relative: String): Path {
         var dir: Path? = Paths.get("").toAbsolutePath()
         while (dir != null) {
-            val candidate = dir.resolve("docs/shuttle/spec.md")
+            val candidate = dir.resolve(relative)
             if (Files.exists(candidate)) return candidate
             dir = dir.parent
         }
-        error("docs/shuttle/spec.md not found above ${Paths.get("").toAbsolutePath()}")
+        error("$relative not found above ${Paths.get("").toAbsolutePath()}")
     }
 }

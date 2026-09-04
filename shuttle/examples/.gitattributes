@@ -1,0 +1,4 @@
+# oracle-init.sh runs inside a Linux container: a CRLF checkout on Windows breaks its shebang and every
+# command in it. seed.sh has the same problem on a POSIX shell. Keep them LF whatever core.autocrlf says.
+*.sh text eol=lf
+schema.sql text eol=lf

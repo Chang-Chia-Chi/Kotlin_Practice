@@ -376,6 +376,8 @@ again (I18):
 - Digests are the pipeline's job: every object in the final payload has its digest computed if
   its file is new. `DIGEST` is the stored object's; `SOURCE_DIGEST` is what was received.
 - Cardinality decides rows: one object is the transfer, N objects are N children (Sec 4.5).
+- `process` is called on the bounded view of `Dispatchers.IO` of Sec 3.3, so a processor blocks where it
+  stands and must not switch to a dispatcher of its own (D52).
 
 ### 6.3 Built-in processors
 

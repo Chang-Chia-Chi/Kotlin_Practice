@@ -60,6 +60,7 @@ import sftp.connector.source.SftpSource
 import sftp.connector.testkit.EmbeddedSftpServer
 import sftp.connector.transport.jsch.JschTransport
 import sftp.connector.config.Digest as ConnectorDigest
+import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Path
 import java.time.temporal.ChronoUnit
@@ -177,6 +178,57 @@ class SftpPollSourceTest {
             assertTrue(target.keys.isEmpty(), "and nothing stored")
             assertTrue(Files.list(routeStage).use { it.findAny().isEmpty }, "the run's staging directory is gone")
             collecting.cancelAndJoin()
+        }
+    }
+
+    /**
+     * Ticket 41: the handle the fetcher downloads through is the connector's answer to "what is in
+     * flight at this path" ([SftpSource.inFlightAt]), and it is the very `FileSeen` the watch
+     * emitted - so the connector still checks the bytes against the size *the listing* saw. A file
+     * re-dropped at the same path with a different size between the listing and the fetch is
+     * refused: the row stays SEEN with one attempt charged, and nothing lands in the target under
+     * the first file's identity. This is what the lookup had to preserve when the source's own
+     * path-to-handle table went (progress 31 deviation 1).
+     */
+    @Test
+    fun a_file_re_dropped_with_a_different_size_between_the_listing_and_the_fetch_is_refused() = runBlocking {
+        val file = seed("first.csv", CONTENT)
+
+        withConnector(AckAction.Move("temp/")) { source ->
+            // As above: the watch has to stay alive, or the file is given back before it is fetched.
+            val seens = Channel<RouteEvent.Seen>(Channel.UNLIMITED)
+            val collecting = launch { source.events().collect { if (it is RouteEvent.Seen) seens.send(it) } }
+            val seen = withTimeout(TIMEOUT) { seens.receive() }
+            file.writeText(CONTENT + "2,7\n")
+            assertEquals(CONTENT.length.toLong(), seen.identity.sourceSize, "the identity is the file as it was listed")
+            assertTrue(Files.size(file) > CONTENT.length, "and the same path now holds a bigger one")
+
+            pipelineFor(routeOf(AckAction.Move("temp/"))).run(seen, source.fetcher)
+
+            val row = store.transfers.single()
+            assertEquals(TransferState.SEEN, row.state, "what arrived is not the file the listing described")
+            assertEquals(1, row.attempts)
+            assertTrue(target.keys.isEmpty(), "so nothing was stored under the first file's identity")
+            assertTrue(Files.list(routeStage).use { it.findAny().isEmpty }, "the run's staging directory is gone")
+            collecting.cancelAndJoin()
+        }
+    }
+
+    /**
+     * Ticket 41: a path nothing is in flight at - never listed, already answered, or given back when
+     * a watch ended - has no handle to download through. That is the same stage error a file gone
+     * from the server gives, so the pipeline charges an attempt and nacks, rather than the
+     * `IllegalStateException` a missing entry in a table of the source's own used to be.
+     */
+    @Test
+    fun a_fetch_for_a_path_nothing_is_in_flight_at_is_a_stage_error_naming_the_path() = runBlocking {
+        withConnector(AckAction.Move("temp/")) { source ->
+            val failed = runCatching {
+                source.fetcher("/drop/never-listed.csv", routeStage.resolve("copy"), DigestAlgorithm.MD5)
+            }.exceptionOrNull()
+
+            val refused = assertInstanceOf(IOException::class.java, failed, "nothing in flight at the path is a stage error")
+            assertTrue("/drop/never-listed.csv" in refused.message.orEmpty(), "which names it: ${refused.message}")
         }
     }
 
