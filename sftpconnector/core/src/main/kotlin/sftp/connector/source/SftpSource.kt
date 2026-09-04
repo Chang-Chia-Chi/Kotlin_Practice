@@ -377,11 +377,14 @@ class SftpSource(
 
         suspend fun nack(slot: InFlightSlot, reason: Throwable, redeliver: Boolean) {
             if (!slot.settle(Settlement.NACK)) return alreadySettled("nack", slot)
+            // The throwable itself, not its `toString()`: `consume` nacks and goes on, so this
+            // line is the only record the consumer's failure ever leaves, and without the stack
+            // an operator is left with a class name and nothing to open.
             LOG.warn(
-                "The consumer could not process {} and it will {}: {}",
+                "The consumer could not process {} and it will {}.",
                 slot.file.path,
                 if (redeliver) "be handed over again on a later poll" else "not be handed over again until restart",
-                reason.toString(),
+                reason,
             )
             try {
                 perform(polling.onNack, slot.file)

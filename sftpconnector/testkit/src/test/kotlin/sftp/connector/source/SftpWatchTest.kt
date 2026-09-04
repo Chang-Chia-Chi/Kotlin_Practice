@@ -19,6 +19,7 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeout
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.AfterEach
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import sftp.connector.client.SftpClient
@@ -40,6 +41,8 @@ import sftp.connector.source.SftpEvent.PollSkipped
 import sftp.connector.source.SftpEvent.PollStarted
 import sftp.connector.testkit.FakeSftpTransport
 import sftp.connector.testkit.FakeSftpTransport.Operation
+import java.io.ByteArrayOutputStream
+import java.io.PrintStream
 import java.nio.file.Path
 import kotlin.time.Duration.Companion.minutes
 import kotlin.time.Duration.Companion.seconds
@@ -305,6 +308,48 @@ class SftpWatchTest {
         assertThat(failure).isInstanceOf(IllegalStateException::class.java).hasMessage("bad row")
         assertThat(inFlight()).describedAs("places still taken after the failure").isZero()
         assertThat(source.poll("/drop").toList().filterIsInstance<FileSeen>()).describedAs("the directory is watchable again").hasSize(2)
+    }
+
+    /**
+     * `consume` nacks the consumer's exception and goes on (T12, spec 7.2), so this WARN is the
+     * only record that failure ever leaves. Rendered from `toString()` it is a class name and a
+     * sentence, and the frame that actually threw - the parse, the mapper, the row - is nowhere:
+     * an operator reading it at three in the morning has nothing to open. So the throwable itself
+     * goes to the logger, and the stack goes with it.
+     */
+    @Test
+    fun `the consumer's exception is logged with its stack when consume nacks`() = runTest {
+        val source = sourceOver(FakeSftpTransport().directory("/drop").file("/drop/bad.csv", "2"))
+
+        val logged = capturingStandardError {
+            val pipeline = launch { source.consume("/drop", EVERY) { throw IllegalStateException("could not parse it") } }
+            runCurrent()
+            pipeline.cancel()
+            runCurrent()
+        }
+
+        assertTrue(logged.contains("The consumer could not process /drop/bad.csv"), "the nack line: $logged")
+        assertTrue(logged.contains("could not parse it"), "what the consumer said: $logged")
+        assertTrue(
+            logged.contains("at sftp.connector.source.SftpWatchTest"),
+            "the frame that threw, which is only there when the throwable itself was logged: $logged",
+        )
+    }
+
+    /**
+     * The line is the deliverable, so the test reads what an operator would read. The test binding
+     * writes to standard error and looks it up on every call, so swapping the stream is enough.
+     */
+    private fun capturingStandardError(body: () -> Unit): String {
+        val captured = ByteArrayOutputStream()
+        val original = System.err
+        System.setErr(PrintStream(captured, true))
+        try {
+            body()
+        } finally {
+            System.setErr(original)
+        }
+        return captured.toString()
     }
 
     private fun inFlight(): Int = registry.get("sftp_inflight").gauge().value().toInt()
