@@ -44,8 +44,8 @@ private val VARIABLE = Regex("[A-Z][A-Z0-9_]*")
  * The host's life inside Quarkus: built and started on the startup event
  * unless the process was launched in a command mode, closed on the shutdown event. The Quarkus datasource named
  * by `shuttleStateStore.oracle.datasource` becomes the JDBI store; a `StateStore` bean, when one exists, replaces
- * it (the test kit's in-memory store, through a test-tree producer), a `StoreReads` bean its read side, and an
- * `ObjectStoreTarget` bean named after a store replaces that store's target adapter. Nothing else is swapped.
+ * it (the test kit's in-memory store, through a test-tree producer), and an `ObjectStoreTarget` bean named after
+ * a store replaces that store's target adapter. Nothing else is swapped.
  */
 @Singleton
 class ShuttleLifecycle(
@@ -54,7 +54,6 @@ class ShuttleLifecycle(
     private val registry: MeterRegistry,
     private val clock: Clock,
     private val stores: Instance<StateStore>,
-    private val reads: Instance<StoreReads>,
     @Any private val targets: InjectableInstance<ObjectStoreTarget>,
 ) {
     // `final`: all-open opens every @Singleton class for CDI, and Kotlin forbids a private setter on an open property.
@@ -70,15 +69,12 @@ class ShuttleLifecycle(
         val beans = cdiBeans()
         val config = ShuttleHost.load(files.map { Path.of(it.trim()) }, env, beans)
         val io = ShuttleHost.ioDispatcher(config)
-        val (store, storeReads) = if (stores.isResolvable) {
-            stores.get() to checkNotNull(reads.takeIf { it.isResolvable }?.get()) { "a StateStore bean needs a StoreReads bean beside it" }
-        } else {
+        val store = if (stores.isResolvable) stores.get() else {
             val name = checkNotNull(config.stateStore?.datasource) { "shuttleStateStore.oracle.datasource is not set" }
-            val jdbi = Jdbi.create(AgroalDataSourceUtil.dataSourceInstance(name).get())
-            JdbiStateStore(jdbi, io, clock).let { it to StoreReads(it::transfers, it::outbox) }
+            JdbiStateStore(Jdbi.create(AgroalDataSourceUtil.dataSourceInstance(name).get()), io, clock)
         }
         val overrides = targets.handles().mapNotNull { h -> h.bean.name?.let { it to h.get() } }.toMap()
-        host = ShuttleHost(config, env::get, beans, store, storeReads, registry, clock, targets = overrides, io = io).also { it.start() }
+        host = ShuttleHost(config, env::get, beans, store, registry, clock, targets = overrides, io = io).also { it.start() }
     }
 
     /** Spec 12.3 from the shutdown event; the datasource is Quarkus's and closes after every observer has run. */

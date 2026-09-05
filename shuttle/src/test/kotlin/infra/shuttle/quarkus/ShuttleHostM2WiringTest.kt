@@ -245,7 +245,7 @@ class ShuttleHostM2WiringTest {
         beans: NamedBeans = NamedBeans.none,
         s3Client: (S3Store) -> S3Client = { ShuttleHost.s3ClientFor(it, env::get) },
     ) =
-        ShuttleHost(config, env::get, beans, store, StoreReads({ store.transfers }, { store.outbox }), registry, clock, s3Client = s3Client)
+        ShuttleHost(config, env::get, beans, store, registry, clock, s3Client = s3Client)
             .also { hosts += it }
 
     private fun seed(name: String) = remoteRoot.resolve("drop").resolve(name).also { it.writeText(CONTENT) }

@@ -79,7 +79,6 @@ class HostResource : QuarkusTestResourceLifecycleManager {
 @Singleton
 class TestKitBeans {
     @Produces @Singleton fun store(clock: Clock): StateStore = InMemoryStateStore(clock)
-    @Produces @Singleton fun reads(store: StateStore): StoreReads = (store as InMemoryStateStore).let { StoreReads({ it.transfers }, { it.outbox }) }
     @Produces @Singleton @Named("minio") fun target(): ObjectStoreTarget = InMemoryTarget("landing")
 }
 

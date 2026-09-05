@@ -2,6 +2,7 @@ package infra.shuttle.testkit
 
 import infra.shuttle.core.ChannelName
 import infra.shuttle.core.Delivery
+import infra.shuttle.core.DeliveryId
 import infra.shuttle.core.DeliveryMoment
 import infra.shuttle.core.DeliveryRequest
 import infra.shuttle.core.DeliveryState
@@ -378,5 +379,70 @@ abstract class StateStoreContract {
         assertEquals(outbox().filter { it.state == DeliveryState.PENDING }.map { it.id }.toSet(), pending.map { it.id }.toSet())
         assertEquals(1, pending.size)
         assertTrue(pending.none { it.id == delivered.id })
+    }
+
+    /**
+     * Spec 14.1's transfers listing on the seam (D57): the store filters by route and state, caps the parents
+     * at `limit`, hands them back newest first and folds each parent's children under it in id order. A child
+     * is never a listed row of its own (spec 4.5).
+     */
+    @Test
+    fun transfers_lists_the_newest_parents_of_a_route_and_state_with_their_children_folded() = runTest {
+        val other = storedTransfer("x", route = RouteName("other"))
+        val stored = storedTransfer("a")
+        val rejected = store.seen(identity("b"), TransferKind.OBJECT).also { store.rejected(it.id, "no") }
+        val parent = store.seen(identity("set.json"), TransferKind.MESSAGE)
+        val children = store.children(parent.id, listOf(staged("c1"), staged("c2")))
+
+        val all = store.transfers(null, null, 10)
+        assertEquals(listOf(parent.id, rejected.id, stored.id, other.id), all.map { it.first.id }, "newest first, parents only")
+        assertEquals(children.map { it.id }, all.first().second.map { it.id }, "the children fold under their parent")
+        assertTrue(all.drop(1).all { it.second.isEmpty() }, "a row without children folds nothing")
+        assertEquals(listOf(parent.id, rejected.id, stored.id), store.transfers(route, null, 10).map { it.first.id })
+        assertEquals(listOf(rejected.id), store.transfers(route, TransferState.REJECTED, 10).map { it.first.id })
+        assertEquals(listOf(parent.id, rejected.id), store.transfers(route, null, 2).map { it.first.id }, "the limit caps the parents")
+        assertEquals(emptyList<TransferId>(), store.transfers(RouteName("nobody"), null, 10).map { it.first.id })
+    }
+
+    /** Spec 14.1's `/transfers/{id}/deliveries`: this transfer's outbox rows, in id order, and nobody else's. */
+    @Test
+    fun deliveries_are_one_transfers_outbox_rows_in_id_order() = runTest {
+        val a = storedTransfer("a", onStored)
+        val b = storedTransfer("b", onStored)
+        store.acked(a.id, onAcked)
+        val quiet = store.seen(identity("c"), TransferKind.OBJECT)
+
+        val mine = store.deliveries(a.id)
+        assertEquals(outbox().filter { it.transferId == a.id }, mine)
+        assertEquals(listOf(DeliveryMoment.STORED, DeliveryMoment.ACKED), mine.map { it.moment })
+        assertEquals(listOf(DeliveryMoment.STORED), store.deliveries(b.id).map { it.moment })
+        assertEquals(emptyList<Delivery>(), store.deliveries(quiet.id))
+        assertEquals(emptyList<Delivery>(), store.deliveries(TransferId(quiet.id.value + 1000)))
+    }
+
+    /** Spec 14.1's delivery re-drive reads the row first: one outbox row by id, whatever state it is in. */
+    @Test
+    fun delivery_returns_one_outbox_row_by_id_and_null_for_an_unknown_id() = runTest {
+        storedTransfer("a", onStored)
+        val row = outbox().single()
+
+        assertEquals(row, store.delivery(row.id))
+        store.deliveryFailed(row.id, "500", "boom")
+        assertEquals(DeliveryState.FAILED, store.delivery(row.id)!!.state)
+        assertNull(store.delivery(DeliveryId(row.id.value + 1000)))
+    }
+
+    /** Spec 14.1's `/routes` counts by state: one route's rows, children counted with them. */
+    @Test
+    fun countsByState_counts_one_routes_rows_by_state() = runTest {
+        store.seen(identity("a"), TransferKind.OBJECT)
+        storedTransfer("b")
+        val parent = store.seen(identity("set.json"), TransferKind.MESSAGE)
+        store.children(parent.id, listOf(staged("c1"), staged("c2")))
+        storedTransfer("x", route = RouteName("other"))
+
+        assertEquals(mapOf(TransferState.SEEN to 2, TransferState.STORED to 1, TransferState.FETCHED to 2), store.countsByState(route))
+        assertEquals(mapOf(TransferState.STORED to 1), store.countsByState(RouteName("other")))
+        assertEquals(emptyMap<TransferState, Int>(), store.countsByState(RouteName("nobody")))
     }
 }

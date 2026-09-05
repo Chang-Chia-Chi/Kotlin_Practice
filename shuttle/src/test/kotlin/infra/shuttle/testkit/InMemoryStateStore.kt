@@ -167,6 +167,21 @@ class InMemoryStateStore(private val clock: Clock) : StateStore {
         rows.values.count { it.identity.route == route && it.state in BEFORE_ACKED && it.updatedAt < olderThan }
     }
 
+    override suspend fun transfers(route: RouteName?, state: TransferState?, limit: Int) = tx("transfers", route, state, limit) {
+        rows.values.filter { it.parentId == null && (route == null || it.identity.route == route) && (state == null || it.state == state) }
+            .sortedByDescending { it.id.value }.take(limit).map { it to kidsOf(it.id) }
+    }
+
+    override suspend fun deliveries(transfer: TransferId) = tx("deliveries", transfer) {
+        outboxRows.values.filter { it.transferId == transfer }.sortedBy { it.id.value }
+    }
+
+    override suspend fun delivery(id: DeliveryId) = tx("delivery", id) { outboxRows[id] }
+
+    override suspend fun countsByState(route: RouteName) = tx("countsByState", route) {
+        rows.values.filter { it.identity.route == route }.groupingBy { it.state }.eachCount()
+    }
+
     // ponytail: whole-table snapshot per transaction; fine for test-sized tables, an undo log if they ever grow.
     private suspend fun <T> tx(method: String, vararg args: Any?, block: () -> T): T = mutex.withLock {
         calls += Call(method, args.toList())

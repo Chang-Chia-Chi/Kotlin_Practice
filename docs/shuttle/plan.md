@@ -79,6 +79,12 @@ Five seams, all in `core`, exactly as spec 3.4: `StateStore`, `ObjectStoreTarget
 `DeliveryChannel`, `Processor`, `Hook`. `Provider` is a one-method interface for named beans and
 `RouteEvent` a sealed class, `Fetcher` a function type. Everything else is a concrete class.
 
+The exception the owner granted (D57, ticket 47): `StateStore` grew spec 14.1's admin reads -
+`transfers(route, state, limit)`, `deliveries(transfer)`, `delivery(id)` and `countsByState(route)` -
+so the database filters, orders and limits instead of the host reading both tables whole. The
+seam count and the other four seams are unchanged; no further read joins them without the same
+kind of decision.
+
 ### 2.4 Do-not-build list
 
 - A Quarkus `@Scheduled` anything; the notifier and the triggers are coroutine loops.

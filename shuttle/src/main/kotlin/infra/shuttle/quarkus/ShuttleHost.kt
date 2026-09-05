@@ -97,13 +97,6 @@ class NamedBeans(private val lookup: (String) -> Any?) {
 }
 
 /**
- * Spec 14.1's read side, which the `StateStore` seam deliberately lacks: the whole of both tables. The
- * Oracle store and the test kit's store both offer these views off the seam (ticket 10's merge note).
- */
-// ponytail: whole-table reads filtered in memory; a WHERE clause on the store's view when a table outgrows one admin page.
-class StoreReads(val transfers: suspend () -> List<Transfer>, val outbox: suspend () -> List<Delivery>)
-
-/**
  * The running application (spec 12): every adapter constructed from one `ShuttleConfig`, started in the order
  * of 12.1 and stopped in the order of 12.3 inside `drainTimeout`, and the operations of 14.1 on top. It imports
  * no Quarkus: `ShuttleLifecycle` hands it the host's registry, clock and datasource, and a test hands it the
@@ -119,7 +112,6 @@ class ShuttleHost(
     private val env: (String) -> String?,
     private val beans: NamedBeans,
     private val store: StateStore,
-    private val reads: StoreReads,
     private val registry: MeterRegistry,
     private val clock: Clock,
     private val targets: Map<String, ObjectStoreTarget> = emptyMap(),
@@ -204,34 +196,24 @@ class ShuttleHost(
     enum class Outcome { DONE, NOT_FOUND, WRONG_STATE }
 
     /** Per route: up or down, last trigger, restart count, counts by state. */
-    suspend fun routes(): List<Map<String, Any?>> {
-        val byRoute = reads.transfers().groupBy { it.identity.route.value }
-        return config.routes.map { route ->
-            mapOf(
-                "name" to route.name,
-                "up" to (registry.find(ShuttleMetrics.ROUTE_UP).tag("route", route.name).gauge()?.value() == 1.0),
-                "lastTrigger" to lastTrigger[route.name]?.toString(),
-                "restarts" to (registry.find(ShuttleMetrics.ROUTE_RESTARTS).tag("route", route.name).counter()?.count() ?: 0.0).toLong(),
-                "counts" to byRoute[route.name].orEmpty().groupingBy { it.state.name }.eachCount(),
-            )
-        }
+    suspend fun routes(): List<Map<String, Any?>> = config.routes.map { route ->
+        mapOf(
+            "name" to route.name,
+            "up" to (registry.find(ShuttleMetrics.ROUTE_UP).tag("route", route.name).gauge()?.value() == 1.0),
+            "lastTrigger" to lastTrigger[route.name]?.toString(),
+            "restarts" to (registry.find(ShuttleMetrics.ROUTE_RESTARTS).tag("route", route.name).counter()?.count() ?: 0.0).toLong(),
+            "counts" to store.countsByState(RouteName(route.name)).mapKeys { it.key.name },
+        )
     }
 
-    /** Transfer rows, newest first, children folded under their parents. */
-    suspend fun transfers(route: String?, state: TransferState?, limit: Int): List<Map<String, Any?>> {
-        val all = reads.transfers()
-        val children = all.filter { it.parentId != null }.groupBy { it.parentId!! }
-        return all.asSequence()
-            .filter { it.parentId == null && (route == null || it.identity.route.value == route) && (state == null || it.state == state) }
-            .sortedByDescending { it.id.value }.take(limit)
-            .map { row(it) + ("children" to children[it.id].orEmpty().map(::row)) }
-            .toList()
-    }
+    /** Transfer rows, newest first, children folded under their parents; the store filters and limits (D57). */
+    suspend fun transfers(route: String?, state: TransferState?, limit: Int): List<Map<String, Any?>> =
+        store.transfers(route?.let(::RouteName), state, limit).map { (parent, children) -> row(parent) + ("children" to children.map(::row)) }
 
     /** The outbox rows of one transfer; null when there is no such transfer. */
     suspend fun deliveries(id: TransferId): List<Map<String, Any?>>? {
         store.byId(id) ?: return null
-        return reads.outbox().filter { it.transferId == id }.map { d ->
+        return store.deliveries(id).map { d ->
             mapOf(
                 "id" to d.id.value, "event" to d.moment.name.lowercase(), "channel" to d.channel.value, "state" to d.state.name,
                 "attempts" to d.attempts, "lastStatus" to d.lastStatus, "lastError" to d.lastError, "reference" to d.reference,
@@ -260,7 +242,7 @@ class ShuttleHost(
 
     /** FAILED to PENDING; the notifier is woken. */
     suspend fun redriveDelivery(id: DeliveryId): Outcome {
-        val row = reads.outbox().firstOrNull { it.id == id } ?: return Outcome.NOT_FOUND
+        val row = store.delivery(id) ?: return Outcome.NOT_FOUND
         if (row.state != DeliveryState.FAILED) return Outcome.WRONG_STATE
         store.redriveDelivery(id)
         notifier.wake()

@@ -4617,3 +4617,94 @@ opened (tickets 44 and 45 own them); `Rules.kt` was not edited at all.
 `Map`. If a bean ever needs to refuse a bad config at boot rather than at first use, the place is
 `configured`, whose exception surfaces while the chain is built; a validate-time version of the same check
 would go in rule 15's neighbourhood.
+
+---
+
+## 47: The admin's reads live on the state store, and Oracle does the filtering
+
+**Built:** spec 14.1's read side moved from the host's memory into the two `StateStore` adapters (D57,
+finding Architecture C5). `StoreReads` - the second head that handed the host both whole tables through two
+function references - is gone, and with it the host's filtering, sorting, `take(limit)` and
+`firstOrNull { it.id == id }` over rows the database had already sent. The seam gained four reads:
+
+```kotlin
+suspend fun transfers(route: RouteName?, state: TransferState?, limit: Int): List<Pair<Transfer, List<Transfer>>>
+suspend fun deliveries(transfer: TransferId): List<Delivery>
+suspend fun delivery(id: DeliveryId): Delivery?
+suspend fun countsByState(route: RouteName): Map<TransferState, Int>
+```
+
+On Oracle each is a statement the schema of 8.1 can answer with an index: the listing is
+`WHERE parent_id IS NULL [AND route =] [AND state =] ORDER BY id DESC FETCH FIRST :limit ROWS ONLY`
+followed by one `WHERE parent_id IN (<ids>) ORDER BY id` for the page's children (a second query, not a
+join: the parents are already mapped, the children fold onto them in Kotlin, and no parent row is repeated
+across its children); `deliveries` is `WHERE file_transfer_id = :id ORDER BY id`; `delivery` is
+`WHERE id = :id`; `countsByState` is `SELECT state, COUNT(*) ... WHERE route = :r GROUP BY state`. The
+in-memory store answers all four the same way, under the same contract cases.
+
+The host's admin operations now read nothing they do not render: `routes()` asks the store for one route's
+counts, `transfers()` hands the store the filter it was given and maps what comes back, `deliveries()`
+keeps its `byId` existence check (a transfer with no rows is `[]`, an unknown id is `null` - the endpoint's
+404) and `redriveDelivery()` reads its one row by id. `ShuttleLifecycle` wires one bean again: a
+`StateStore` bean when a test tree produces one, the JDBI store otherwise, and the `checkNotNull` that made
+a `StateStore` bean demand a `StoreReads` bean beside it is deleted.
+
+**Concepts named:**
+
+- **A page is the database's answer, not a slice of one.** The old `transfers()` read every row of
+  `file_transfer`, sorted it and took ten. At the spec's own load (thousands of files per poll) the ten the
+  operator asked for cost the whole ledger over the wire, every time.
+- **A child is never a listed row.** Spec 4.5's rule now lives in one `WHERE parent_id IS NULL` per adapter
+  rather than in the caller's filter, and the contract asserts it for both.
+- **The count is the one read a listing cannot do.** `/routes` states counts by state; counting through a
+  listing read means fetching the rows to count them, which is the thing this ticket removes. Hence the
+  fourth method (deviation 1).
+
+**Tests:**
+
+- `StateStoreContract` gained four cases, red on the fake first (`NotImplementedError` from the four stubs,
+  27 run / 4 errors), then green: `transfers_lists_the_newest_parents_of_a_route_and_state_with_their_children_folded`
+  (newest first, parents only, children folded in id order, route filter, state filter, the limit capping
+  parents, an unknown route empty), `deliveries_are_one_transfers_outbox_rows_in_id_order`,
+  `delivery_returns_one_outbox_row_by_id_and_null_for_an_unknown_id` and
+  `countsByState_counts_one_routes_rows_by_state` (children counted with their parent's route).
+  `InMemoryStateStoreTest` 27/27 green.
+- `ShuttleHostTest.the_admin_operations_change_exactly_what_spec_14_1_says` is unchanged and green: the same
+  ids, the same `mapOf("STORED" to 1)` counts, the same `NOT_FOUND` for `DeliveryId(99)` and
+  `TransferId(99)` - the assertions that prove the seam answers what the memory filtering answered.
+- `ShuttleQuarkusTest` 4/4 green over HTTP with one bean in `TestKitBeans` instead of two.
+- Default tier: **309 tests, 0 failures** (305 before, plus the four contract cases; `ShuttleHostTest` 11,
+  `ShuttleHostM2WiringTest` 6, `ShuttleQuarkusTest` 4, acceptance unchanged).
+
+**Deviations:**
+
+1. **Four reads, not the ticket's three.** `/admin/shuttle/routes` states counts by state (spec 14.1), and
+   the ticket's three cannot answer it without reading the rows to count them - which would have left the
+   whole-table read the ticket exists to remove, in the one operation an operator scrapes most often.
+   `countsByState(route)` is one `GROUP BY` and joins the other three under the same decision. D57 is
+   recorded for all four.
+2. **`JdbiStateStoreTest` was not run in this worktree.** The Docker engine on this machine answered
+   Internal Server Error on every API route for the whole ticket, so the Oracle container could not start
+   (the orchestrator confirmed it and said not to wait). The four SQL statements are unrun here; the
+   orchestrator runs `-DexcludedGroups=none -Dtest=JdbiStateStoreTest` on the merged tree. The risk is
+   narrow and named: the bind inside `FETCH FIRST :limit ROWS ONLY`, and JDBI's `<ids>` list rendering in
+   the children query. Both come from the earlier agent's version of this change, which it reported green
+   on Oracle at 30 tests.
+3. **The whole-table views stayed on both adapters.** `JdbiStateStore.transfers()/outbox()` and
+   `InMemoryStateStore.transfers/outbox` are what `StateStoreContract` reads to check the store from
+   outside, so they could not move to the fakes alone; their comment now says "for the tests", and no
+   production caller is left (`grep StoreReads` finds nothing).
+4. **Size:** production +63/-41 across four files, tests +87/-9 across six; spec 8.2's seam block and its
+   closing sentence, D57, plan 2.3's exception paragraph.
+
+**Seams.** `StateStore` gained the four reads and lost nothing. `ObjectStoreTarget`, `DeliveryChannel`,
+`Processor`, `Hook` and `Fetcher` are untouched; `Notifier.kt`, `TransferPipeline.kt`, `Ledger.kt`,
+`MappingRenderer.kt`, `Commands.kt`, `Rules.kt` and `Processing.kt` were not opened. In `ShuttleHost.kt`
+only the admin operations, the deleted `StoreReads` class and the deleted constructor parameter changed
+(ticket 46 owns the pipeline and notifier construction in that file). `AdminResource` is byte-for-byte
+what it was: the HTTP shape did not move.
+
+**For the next ticket:** the seam's read side is now the place a new admin question goes - a filter, an
+order or a count belongs in the SQL beside these four, never in a caller that read rows to narrow them. If
+a listing ever needs a cursor, `transfers` is where it goes (`id < :before` beside the `WHERE`), and the
+contract case above is the one to extend.

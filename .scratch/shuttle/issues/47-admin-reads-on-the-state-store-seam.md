@@ -15,13 +15,13 @@ readers. Record it as decision D57. Review finding Architecture C5.
 
 **Nature:** seam growth by three reads; deletion of a shallow second head
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `StateStoreContract` gains three cases (transfers by route/state/limit with children folded; deliveries of a transfer; one delivery by id), green on the in-memory store and on Oracle (`-DexcludedGroups=none -Dtest=JdbiStateStoreTest`); red on both before the methods exist
-- [ ] `StoreReads` and the host's whole-table filtering are deleted; `ShuttleHost`'s admin operations call the seam; `ShuttleLifecycle` no longer needs a second bean; `ShuttleHostTest.the_admin_operations_change_exactly_what_spec_14_1_says` and `ShuttleQuarkusTest`'s endpoint tests stay green with their ids
-- [ ] The whole-table views `transfers()`/`outbox()` remain only where the test kit and tests need them (progress 10 says production must not need them); if production no longer calls them, they leave the adapters and stay on the fakes
-- [ ] Spec 8.2 lists the three reads; plan 2.3's frozen-surface sentence gains the exception; D57 recorded
-- [ ] Progress entry appended
+- [x] `StateStoreContract` gains three cases (transfers by route/state/limit with children folded; deliveries of a transfer; one delivery by id), green on the in-memory store and on Oracle (`-DexcludedGroups=none -Dtest=JdbiStateStoreTest`); red on both before the methods exist
+- [x] `StoreReads` and the host's whole-table filtering are deleted; `ShuttleHost`'s admin operations call the seam; `ShuttleLifecycle` no longer needs a second bean; `ShuttleHostTest.the_admin_operations_change_exactly_what_spec_14_1_says` and `ShuttleQuarkusTest`'s endpoint tests stay green with their ids
+- [x] The whole-table views `transfers()`/`outbox()` remain only where the test kit and tests need them (progress 10 says production must not need them); if production no longer calls them, they leave the adapters and stay on the fakes
+- [x] Spec 8.2 lists the three reads; plan 2.3's frozen-surface sentence gains the exception; D57 recorded
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket; 200-600 lines including tests; no Thread.sleep;
 invariant tests named `I<n>_<description>`, scenario tests by their `S<n>` id, validation tests by `rule<n>_`,

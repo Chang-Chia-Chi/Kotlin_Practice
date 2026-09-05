@@ -33,6 +33,19 @@ interface StateStore {
     suspend fun redrive(id: TransferId)
     suspend fun redriveDelivery(id: DeliveryId)
     suspend fun stuck(route: RouteName, olderThan: Instant): Int
+
+    // Spec 14.1's admin reads (D57): the store filters, orders and limits; the admin renders what it is handed.
+    /**
+     * The `limit` newest parent rows of [route] in [state] (null for any), each with its children in id order.
+     * A child is never a listed row of its own: it is only ever folded under its parent (spec 4.5).
+     */
+    suspend fun transfers(route: RouteName?, state: TransferState?, limit: Int): List<Pair<Transfer, List<Transfer>>>
+    /** One transfer's outbox rows in id order; empty for a transfer with none and for an id no row has. */
+    suspend fun deliveries(transfer: TransferId): List<Delivery>
+    /** One outbox row by id in whatever state it is in, null when no row has the id. */
+    suspend fun delivery(id: DeliveryId): Delivery?
+    /** How many of [route]'s rows sit in each state, children counted; a state with no row is absent. */
+    suspend fun countsByState(route: RouteName): Map<TransferState, Int>
 }
 
 /** Spec 7.1. After `store`, the current object at `key` is the one just written; nothing is ever deleted. */

@@ -14,7 +14,6 @@ import infra.shuttle.jdbi.JdbiStateStore
 import infra.shuttle.jdbi.StateStoreSchema
 import infra.shuttle.quarkus.NamedBeans
 import infra.shuttle.quarkus.ShuttleHost
-import infra.shuttle.quarkus.StoreReads
 import infra.shuttle.s3.Minio
 import infra.shuttle.testkit.ClockFixture
 import infra.shuttle.testkit.HookDriver
@@ -237,7 +236,7 @@ abstract class AcceptanceFixture {
         registry = SimpleMeterRegistry()
         val io = ShuttleHost.ioDispatcher(config)
         val store = JdbiStateStore(jdbi, io, clock)
-        return ShuttleHost(config, env::get, beans, store, StoreReads(store::transfers, store::outbox), registry, clock, s3Client = s3, hook = hook, io = io)
+        return ShuttleHost(config, env::get, beans, store, registry, clock, s3Client = s3, hook = hook, io = io)
             .also { hosts += it; it.start() }
     }
 

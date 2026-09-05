@@ -130,7 +130,7 @@ class ShuttleHostTest {
         channels: Map<String, DeliveryChannel> = emptyMap(),
     ) =
         ShuttleHost(
-            config, env::get, NamedBeans.none, store, StoreReads({ store.transfers }, { store.outbox }), registry, clock,
+            config, env::get, NamedBeans.none, store, registry, clock,
             targets = mapOf("minio" to target), deliveryChannels = channels, hook = hook,
         ).also { hosts += it }
 
@@ -238,7 +238,7 @@ class ShuttleHostTest {
     fun a_boot_with_a_missing_table_fails_naming_the_DDL() {
         val jdbi = Jdbi.create("jdbc:h2:mem:shuttle-${System.nanoTime()};DB_CLOSE_DELAY=-1")
         val empty = JdbiStateStore(jdbi, Dispatchers.IO, clock)
-        val host = ShuttleHost(config(yaml(route())), env::get, NamedBeans.none, empty, StoreReads({ empty.transfers() }, { empty.outbox() }), registry, clock, targets = mapOf("minio" to target))
+        val host = ShuttleHost(config(yaml(route())), env::get, NamedBeans.none, empty, registry, clock, targets = mapOf("minio" to target))
 
         val failure = assertThrows(IllegalStateException::class.java) { host.start() }
 
@@ -250,7 +250,7 @@ class ShuttleHostTest {
     fun a_boot_with_a_missing_bucket_fails_naming_the_bucket() {
         val s3 = Mockito.mock(S3Client::class.java)
         Mockito.`when`(s3.headBucket(any(HeadBucketRequest::class.java))).thenThrow(NoSuchBucketException.builder().message("no").build())
-        val host = ShuttleHost(config(yaml(route())), env::get, NamedBeans.none, store, StoreReads({ store.transfers }, { store.outbox }), registry, clock, s3Client = { s3 })
+        val host = ShuttleHost(config(yaml(route())), env::get, NamedBeans.none, store, registry, clock, s3Client = { s3 })
 
         val failure = assertThrows(IllegalStateException::class.java) { host.start() }
 
@@ -294,7 +294,7 @@ class ShuttleHostTest {
         }
         val config = config(yaml(imageSets, channels = NATS_EVENTS))
         val host = ShuttleHost(
-            config, env::get, NamedBeans.none, store, StoreReads({ store.transfers }, { store.outbox }), registry, clock,
+            config, env::get, NamedBeans.none, store, registry, clock,
             targets = mapOf("minio" to target), s3Client = { s3 },
         ).also { hosts += it }
 
