@@ -14,13 +14,13 @@ last unconfirmed item.
 
 **Nature:** seam wiring for the one processor kind that takes configuration
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `ShuttleHostTest` (or `ShuttleHostM2WiringTest`): a `custom` step with a config map is built with that map and the bean sees it (a test bean recording what it was given, through `NamedBeans`); red before the fix
-- [ ] `YamlLoaderTest` and `RulesTest`: `${VAR}` inside `custom.config` expands from the environment; a missing variable is a numbered violation naming the step (extend rule 25 or the rule the loader already uses for secrets; do not invent a second mechanism)
-- [ ] `TryCommandTest`: try mode hands the same config to the bean
-- [ ] Spec 6.2 and 13.3 state the contract in one sentence each if they did not already
-- [ ] Progress entry appended
+- [x] `ShuttleHostTest` (or `ShuttleHostM2WiringTest`): a `custom` step with a config map is built with that map and the bean sees it (a test bean recording what it was given, through `NamedBeans`); red before the fix
+- [x] `YamlLoaderTest` and `RulesTest`: `${VAR}` inside `custom.config` expands from the environment; a missing variable is a numbered violation naming the step (extend rule 25 or the rule the loader already uses for secrets; do not invent a second mechanism)
+- [x] `TryCommandTest`: try mode hands the same config to the bean
+- [x] Spec 6.2 and 13.3 state the contract in one sentence each if they did not already
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket; 200-600 lines including tests; no Thread.sleep;
 invariant tests named `I<n>_<description>`, scenario tests by their `S<n>` id, validation tests by `rule<n>_`,

@@ -28,6 +28,13 @@ data class Payload(val objects: List<StagedObject>)
 interface Processor {
     val produces: Set<String>
     suspend fun process(payload: Payload, ctx: ProcessContext): Outcome
+
+    /**
+     * Spec 6.2's `config` (D58): the bean answers the processor that map configures - itself when it takes
+     * no configuration, which is why every built-in inherits this. Called once per `custom` step while the
+     * chain is built, so `process` stays config-free and a bean two routes share is never mutated by either.
+     */
+    fun configured(config: Map<String, Any?>): Processor = this
 }
 
 sealed interface Outcome {

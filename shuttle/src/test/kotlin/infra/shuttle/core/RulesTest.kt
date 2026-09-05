@@ -149,6 +149,23 @@ class RulesTest {
     fun rule15_every_custom_processor_and_provider_resolves_to_a_bean() =
         assertEquals(listOf(15), violated(config(vendorDrop = { process = process then custom("imageResizer") })))
 
+    /**
+     * D58: a step's `config` shapes what the bean does, never what it declares - `produces` is read off the
+     * bean itself - so a mapping on an attribute the bean declares passes rule 17 whatever the step configures.
+     */
+    @Test
+    fun rule15_and_17_read_a_custom_step_that_carries_a_config() =
+        assertEquals(
+            emptyList<Int>(),
+            violated(
+                config(
+                    downstream = { body = mapping { "width" fromAttribute "renderedWidth" } },
+                    vendorDrop = { process = process then custom("imageResizer", mapOf("maxWidth" to 2048)) },
+                ),
+                beans = mapOf("imageResizer" to setOf("renderedWidth")),
+            ),
+        )
+
     @Test
     fun rule17_every_mapping_attribute_is_declared_by_a_processor_in_that_route() =
         assertEquals(listOf(17), violated(config(downstream = { body = mapping { "orderNumber" fromAttribute "orderNo" } })))

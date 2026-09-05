@@ -351,6 +351,7 @@ transfer is rejected at the end of processing rather than acked with no copy any
 interface Processor {
     val produces: Set<String>                                   // attribute names it may set; checked at boot
     suspend fun process(payload: Payload, ctx: ProcessContext): Outcome
+    fun configured(config: Map<String, Any?>): Processor = this  // a `custom` step's config, at boot (D58)
 }
 sealed interface Outcome {
     data class Continue(val payload: Payload) : Outcome         // same, changed, longer or shorter list
@@ -392,8 +393,13 @@ again (I18):
 | `custom` | anything | anything | what it declares in `produces` |
 
 A custom processor is a Kotlin class implementing the seam, registered as a named CDI bean,
-referenced by name with an optional `config` map handed to its constructor. Unknown names fail
-boot (rule 15).
+referenced by name with an optional `config` map. The bean is asked for the processor that map
+configures - `configured(config)`, which answers the bean itself when it takes none - once per step
+while the chain is built, so a bean two routes share is never mutated by either and `process` stays
+config-free (D58). Every `${VAR}` inside `config` is expanded by the loader like any other value, so
+a secret reaches the bean as its value and a variable that is not set is a load error naming the step
+(Sec 12.2, rule 25). Unknown names fail boot (rule 15); `produces` is read off the bean, not off what
+its config makes of it.
 
 ### 6.4 Attributes
 
@@ -723,7 +729,7 @@ one), refreshed at every `PollCompleted` and, for a subscribed route, every `inP
 2. State store: one round trip per table. A missing table ends startup naming the DDL.
 3. Object stores and channels: `probe()` each declared one; nothing is created.
 4. Staging directories emptied (D17).
-5. Named beans resolved: every `custom` processor and `provider`.
+5. Named beans resolved: every `custom` processor, built with its step's `config` (Sec 6.2), and every `provider`.
 6. Connectors started, with their own probes (marker rename into every ack target).
 7. Notifier started, then every route.
 
@@ -947,7 +953,7 @@ Each is public numbering, reported by number in validate mode and at startup.
 | 22 | Attribute limits: a route's declared attribute names number at most 32 and each name is at most 64 characters |
 | 23 | A `move` ack target is not the polled directory itself; the connector excludes it from listing |
 | 24 | `readiness` is `all-routes-down` or `any-route-down`; `restartBackoff.initial <= max` |
-| 25 | A secret appears only as a `${VAR}` reference, never as a literal |
+| 25 | A secret appears only as a `${VAR}` reference, never as a literal. A reference is expanded wherever it stands, `custom.config` included, and one naming a variable that is not set is a load error naming its path (Sec 12.2), because a document with an unresolved reference never became a configuration |
 | 26 | A mapping row's `digest: <algo>` names the algorithm its route computes, `digest` or the process default (D49) |
 
 ---
@@ -1079,6 +1085,7 @@ poll are appeals to the connector's spec.
 | D49 | A transfer carries one digest, the route's; a mapping row's `digest: <algo>` selects rather than requests, so the renderer leaves the row missing when the algorithms differ and rule 26 refuses the mismatch at boot | v0.4's "a second digest is computed during the same stream" has no home: 8.1's row has one `digest`/`digest_algo` pair and the DDL is frozen, so a second algorithm would have to be recomputed per notification, off the object's bytes, at send time. The renderer must not answer a `sha256` row with the MD5 hex (finding B7); with one digest per route the only honest answers are the hex and nothing, and a mismatch is a configuration mistake the operator should hear about at boot, not a silently absent field per delivery (ticket 28) |
 | D50 | Every instant the Oracle store binds or reads crosses the JDBC edge through an explicit UTC `Calendar`; 8.1's columns stay `TIMESTAMP` | A `TIMESTAMP` keeps a date and a time and no offset, so whoever names the zone decides the digits; unnamed, the driver takes the process default, and a default with DST gives one local time to two instants an hour apart. With Europe/Berlin as the default, a row written at 2026-10-25T00:30Z read back as 01:30Z, so reconciliation, the stuck gauge, D40's re-check window and mtime identity all read an hour off (finding B6). Naming UTC on both sides fixes it in the adapter, where the zone is lost, and needs no DDL change, so 8.1 and `StateStoreSchemaTest` are untouched; `TIMESTAMP WITH TIME ZONE` would buy the same correctness at the price of a frozen-DDL migration (measured by ticket 27 on Oracle) |
 | D51 | The stuck gauge of a subscribed route is refreshed by a ticker in the route's own run scope, beating every `inProgressEvery`, and `stuckAfter` omitted is three trigger intervals | Sec 11 hung the subscription refresh on the notifier's `sweepEvery`, a process-wide knob no route can see: reaching it would have meant threading `NotifierConfig` through every `RouteRunner` for a number unrelated to the route. The trigger's own beat is already the route's, is what the polled half uses, and gives one rule for both kinds - refresh every interval, call a transfer stuck after three of them - so a route that states no `stuckAfter` still gets a gauge instead of a flat 0 (finding Spec 5, ticket 36). The ticker is a child of the run's scope, so it stops with the route and restarts with it |
+| D58 | A `custom` step's `config` reaches the bean through `Processor.configured(config)`, called once per step while the chain is built; the bean answers the processor that map configures, itself by default | Sec 6.2 said "handed to its constructor", and a CDI bean's constructor is CDI's, not the host's: the host resolves a name to an instance that already exists, so the map had nowhere to go and was dropped (progress 02 left it unexpanded for the same reason). A parameter on `process` was refused - it would put per-step configuration in every call of the hottest seam, for every built-in that has none. A separate `ProcessorFactory` bean type was refused too: it splits the seam in two, and `NamedBeans.produces` (rules 15 and 17) would then be reading a bean that is not a `Processor` and could not say what it declares without building one. A defaulted method on the seam keeps one bean type, leaves every built-in and every existing bean compiling untouched, and lets a configured processor be a new instance rather than a mutated singleton, which is what makes a bean two routes reference with different configs safe. Its cost: `produces` is the bean's own, so a processor whose attributes depend on its config declares their union (ticket 43) |
 | D53 | An `expand.from` that is not the route's `fetch.store` names an S3 store and states its own `expand.bucket`; any other divergent store is a rule 14 violation | The children of an `expand` are pulled by path, and only two adapters can do that: the route's own fetch store, which already has its bucket (rule 6), and another S3 store, which has none - a store declaration is an endpoint, not a bucket (D15), so the host can only be told. Borrowing the bucket from another route's `fetch.bucket` would make one route's configuration depend on another's. The divergent SFTP case has no adapter at all: a polled store's fetcher serves the files that poll handed over ("is not a file this poll handed over"), and giving it a second, by-path role would mean a second connector on a store whose pool rule 9 has already budgeted. Refusing it at validate time is the whole of the fix (ticket 38, finding Spec 9) |
 
 ---

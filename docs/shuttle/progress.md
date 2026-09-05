@@ -4377,3 +4377,91 @@ is a class with three callers and one fake behind it (the store's); it is not a 
 **For the next ticket:** `ShuttleHost.ack` answers NOT_FOUND for a row whose route left the configuration,
 as before; the row is still the store's. If an admin operation ever needs a ledger for a route the host no
 longer runs, that is a `Ledger(store, emptyList(), notifier::wake)`, not a new path.
+
+---
+
+## 43: A custom processor receives its `config`, with `${VAR}` expanded
+
+**Built:** spec 13.1's own `custom: imageResizer, config: { maxWidth: 2048 }` now reaches the bean. Two
+halves, each one line of production code behind a sentence of contract:
+
+1. **The seam takes the map.** `Processor` gains `fun configured(config: Map<String, Any?>): Processor =
+   this` (D58). `processorFor`'s `Custom` branch becomes `(custom(spec) ?: throw ...).configured(spec.config)`,
+   so the bean answers the processor that map configures - itself when it takes none, which is why every
+   built-in and every bean written before this ticket compiles and behaves unchanged. `process`'s signature
+   is byte-for-byte what it was. Nothing in `ShuttleHost` or `Commands` changed: both build the chain
+   through `processorFor`, so the host's `chainFor` (step 5, once at boot) and try mode's chain both got it
+   for free - ticket 37's "try mode builds the chain the same way the host does" paying off.
+2. **The loader expands the map.** `Node.free("config")` walks the subtree it hands over and puts every
+   textual leaf - at the top, inside a list, inside a nested mapping - through the same `resolve` every
+   other scalar in the document goes through. Progress 02 left `custom.config` free-form *and* unexpanded;
+   only the first half was ever the point. The keys inside `config` are still the bean's, and `done()`
+   still asks nothing of them.
+
+**Concepts named:**
+
+- **The keys are the bean's, the values are the operator's.** That is the whole rule for `custom.config`:
+  the loader must not know what `maxWidth` means, and must know what `${RESIZE_TOKEN}` means. Anything else
+  would have made `config` the one place in the document where a secret is written in clear.
+- **Configuring is not processing.** A `custom` step's map is answered once, while the chain is built, and
+  never carried into `process`. That keeps per-step configuration out of the hottest seam, and it is what
+  makes a bean two routes reference with different configs safe: the bean answers an instance, it is never
+  mutated.
+- **`produces` is the bean's own.** Rules 15 and 17 read `NamedBeans.produces(name)`, which is the
+  registered bean, not the configured copy - so a processor whose attributes depend on its config declares
+  their union. Stated in spec 6.2 and D58; `RulesTest` pins it.
+
+**Tests:**
+
+- `TryCommandTest.SPEC6_try_mode_hands_a_custom_step_its_config_to_the_bean`: the ticket's first red -
+  `expected: <[{maxWidth=2048, token=t}]> but was: <[]>`, the bean recording nothing - and then, once
+  `processorFor` called the seam, the second red was the loader half alone: `token=${TOKEN}`.
+- `YamlLoaderTest.a_custom_configs_environment_references_expand_like_every_other_value` and
+  `a_missing_environment_variable_in_a_custom_config_is_a_load_error_naming_the_step`: a config with a
+  reference at the top, one inside a list and one inside a nested mapping; and the one that is not set,
+  `shuttle.routes.mirror.process[0]: ${RESIZE_TOKEN} is not set in the environment`.
+- `ShuttleHostM2WiringTest.SPEC6_a_custom_step_is_built_with_its_config_once_at_boot_and_the_bean_sees_it`:
+  the real host over the embedded SSHD, two files polled, exactly one recorded config - built at boot, not
+  per transfer. Verified red by reverting `processorFor` alone (`expected: <[{maxWidth=2048, token=t0ken}]>
+  but was: <[]>`).
+- `RulesTest.rule15_and_17_read_a_custom_step_that_carries_a_config`: a mapping on the attribute the bean
+  declares still passes when the step carries a config - the D58 constraint above, as a regression guard.
+- New `quarkus/RecordingProcessor.kt` (19 lines): the test bean both quarkus tests resolve through
+  `NamedBeans`. No mock; it answers itself so the test can read what the chain was given.
+
+**Final run counts (surefire).** Default tier (`mvn -B -o -pl shuttle test`): **301 tests, 0 failures,
+0 errors** - ticket 39's 296 plus the five above. The acceptance tier was not run: nothing here touches a
+container, and `M2AcceptanceTest`'s `imageResizer` bean takes no config, so `configured` defaults to `this`
+for it.
+
+**Deviations:**
+
+1. **A missing `${VAR}` in `custom.config` is a load error, not a numbered violation.** The ticket asked
+   for "a numbered violation naming the step". Spec 12.2 reserves rule numbers for a document that became a
+   configuration and reports load errors alone otherwise, and the loader's existing missing-variable report
+   - fixed for secrets by `a_missing_environment_variable_is_a_load_error_naming_it` since ticket 02 - is
+   exactly that mechanism. `Rules` is handed no environment and could not answer the question anyway. So
+   the ticket's "do not invent a second mechanism" won over its "numbered": one mechanism, the loader's,
+   and the error names the step's YAML path (`...process[0]`) rather than a rule. Rule 25's row in 13.3 now
+   says so. Validate mode still reports it: `ValidateCommand` prints load errors and exits non-zero.
+2. **`RulesTest` got a guard, not a rule.** Following from 1, there was no new rule to test there. The test
+   added instead pins what D58 costs (`produces` is the bean's own), which is the thing a later ticket could
+   break silently.
+3. **D58 taken** (D54 and D55 are tickets 44 and 45; D56 and D57 are free). It departs from spec 6.2's
+   "handed to its constructor": a CDI bean's constructor belongs to CDI, so the host, which resolves a name
+   to an instance that already exists, had nowhere to put the map. 6.2 now states `configured` instead. The
+   alternatives - a parameter on `process`, a separate `ProcessorFactory` bean type - and why each was
+   refused are in D58's second column.
+4. **Size:** production +33/-4 across four files; tests +133/-10 across four files plus
+   `RecordingProcessor.kt`; spec 6.2, 12.1 step 5, the `Processor` sketch, rule 25's row and D58.
+
+**Seams.** `Processor` gained one defaulted method and no caller of `process` changed. `StateStore`,
+`ObjectStoreTarget`, `DeliveryChannel`, `Hook` and `Fetcher` are untouched. `HttpChannel.kt`, `Delivery.kt`,
+`S3Target.kt`, `Notifier.kt`, `TransferPipeline.kt`, `Ledger.kt` and the `StateStore` adapters were not
+opened (tickets 44 and 45 own them); `Rules.kt` was not edited at all.
+
+**For the next ticket:** a bean that wants a *typed* config parses the map itself - `config` is
+`Map<String, Any?>` as Jackson read the YAML: whole numbers are `Int`, lists are `List`, nested mappings are
+`Map`. If a bean ever needs to refuse a bad config at boot rather than at first use, the place is
+`configured`, whose exception surfaces while the chain is built; a validate-time version of the same check
+would go in rule 15's neighbourhood.

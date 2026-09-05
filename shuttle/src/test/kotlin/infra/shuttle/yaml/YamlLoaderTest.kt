@@ -266,6 +266,30 @@ class YamlLoaderTest {
 
     private val stageDir get() = stage.toString().replace('\\', '/')
 
+    /**
+     * Spec 6.2 and 13.1's own `custom: imageResizer, config: { maxWidth: 2048 }`. The keys inside `config`
+     * are the bean's, but the values in them are the operator's: a `${VAR}` there is the same reference as
+     * anywhere else in the document, and it never reaches the bean literal (ticket 43).
+     */
+    @Test
+    fun a_custom_configs_environment_references_expand_like_every_other_value() {
+        val config = YamlLoader.load(withResizer, env + ("RESIZE_TOKEN" to "t0ken"))
+
+        assertEquals(
+            ProcessorSpec.Custom(
+                "imageResizer",
+                mapOf("maxWidth" to 2048, "token" to "t0ken", "sizes" to listOf("small", "u"), "nested" to mapOf("of" to "u")),
+            ),
+            config.routes.single().process.single(),
+        )
+    }
+
+    @Test
+    fun a_missing_environment_variable_in_a_custom_config_is_a_load_error_naming_the_step() {
+        val e = assertThrows(YamlLoadException::class.java) { YamlLoader.load(withResizer, env) }
+        assertEquals(listOf("shuttle.routes.mirror.process[0]: \${RESIZE_TOKEN} is not set in the environment"), e.errors)
+    }
+
     private val minimal = """
         shuttle:
           shuttleStateStore:
@@ -278,4 +302,11 @@ class YamlLoaderTest {
               source: { poll: { store: vendor, directory: /outbound, every: 1h, onAck: delete } }
               target: { store: vendor, directory: /incoming }
     """.trimIndent()
+
+    /** A `custom` step whose config carries a reference at the top, inside a list and inside a nested mapping. */
+    private val withResizer = minimal.replace(
+        "      target:",
+        "      process: [ { custom: imageResizer, config: { maxWidth: 2048, token: \${RESIZE_TOKEN}," +
+            " sizes: [ small, \${SFTP_USER} ], nested: { of: \${SFTP_USER} } } } ]\n      target:",
+    )
 }
