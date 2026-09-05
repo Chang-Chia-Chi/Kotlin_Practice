@@ -2,6 +2,7 @@ package infra.shuttle.sftp
 
 import infra.shuttle.core.AckAction
 import infra.shuttle.core.ChannelName
+import infra.shuttle.core.Deliverer
 import infra.shuttle.core.DeliveryChannel
 import infra.shuttle.core.DeliveryMoment
 import infra.shuttle.core.DigestAlgorithm
@@ -397,7 +398,7 @@ class SftpPollSourceTest {
             val ledger = Ledger(slow, route.notify) {}
             val pipeline = TransferPipeline(
                 route, DigestAlgorithm.MD5, ledger, target, ProcessingChain(emptyList(), DigestAlgorithm.MD5),
-                emptyMap(), { true }, hook, clock, registry, Staging(routeStage), usableSpace = { 10.gib },
+                Deliverer(slow, emptyList(), emptyMap()), hook, clock, registry, Staging(routeStage), usableSpace = { 10.gib },
             )
             val run = launch { RouteRunner(route, pipeline, source.fetcher, ledger, clock, registry).run(source.events()) }
             repeat(files.size) {
@@ -551,8 +552,7 @@ class SftpPollSourceTest {
 
     private fun pipelineFor(route: Route, hook: Hook = Hook.None, channels: Map<ChannelName, DeliveryChannel> = emptyMap(), ledger: Ledger = Ledger(store, route.notify) {}) = TransferPipeline(
         route, DigestAlgorithm.MD5, ledger, target, ProcessingChain(emptyList(), DigestAlgorithm.MD5),
-        emptyMap(), { true }, hook, clock, registry, Staging(routeStage),
-        usableSpace = { 10.gib }, channels = channels,
+        Deliverer(store, channels.values, emptyMap()), hook, clock, registry, Staging(routeStage), usableSpace = { 10.gib },
     )
 
     /** The host's mapping, with this one route holding the whole of the store's budget. */

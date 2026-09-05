@@ -40,7 +40,7 @@ class CrashMatrixTest {
     private val hook = HookDriver()
     private val downstream = RecordingChannel("downstream")
     private val notifier by lazy {
-        Notifier(store, listOf(downstream), emptyMap(), MappingRenderer(), NotifierConfig(workers = 1, batch = 10, sweepEvery = 30.seconds), registry, clock, hook = hook)
+        Notifier(store, Deliverer(store, listOf(downstream), emptyMap()), NotifierConfig(workers = 1, batch = 10, sweepEvery = 30.seconds), registry, clock, hook = hook)
     }
 
     private val file = ScriptedSource.identity("a.csv")
@@ -55,7 +55,7 @@ class CrashMatrixTest {
     private fun runner(route: Route = polled, chain: ProcessingChain = noChain): RouteRunner {
         val ledger = Ledger(store, route.notify) { notifier.wake() }
         val pipeline = TransferPipeline(
-            route, DigestAlgorithm.MD5, ledger, target, chain, emptyMap(), { true },
+            route, DigestAlgorithm.MD5, ledger, target, chain, Deliverer(store, emptyList(), emptyMap()),
             hook, clock, registry, Staging(staging), usableSpace = { 10.gib },
         )
         return RouteRunner(route, pipeline, fetcher, ledger, clock, registry)
@@ -319,7 +319,7 @@ class CrashMatrixTest {
         assertEquals(1, downstream.events.size)
         assertEquals(0, notifier.inFlightCount, "the in-flight set died with the process")
 
-        val restarted = Notifier(store, listOf(downstream), emptyMap(), MappingRenderer(), NotifierConfig(workers = 1, batch = 10, sweepEvery = 30.seconds), registry, clock)
+        val restarted = Notifier(store, Deliverer(store, listOf(downstream), emptyMap()), NotifierConfig(workers = 1, batch = 10, sweepEvery = 30.seconds), registry, clock)
         backgroundScope.launch { restarted.run() }
         runCurrent()
 

@@ -20,6 +20,9 @@ class MappingFailure(val path: String, detail: String) : RuntimeException("mappi
  */
 class MappingRenderer(private val providers: (String) -> Provider? = { null }) {
 
+    /** Rule 15's question, answered by the same resolution [render] uses. */
+    fun hasProvider(name: String): Boolean = providers(name) != null
+
     suspend fun render(table: MappingTable, transfer: Transfer, moment: DeliveryMoment, attempt: Int = 1): JsonNode {
         val root = mapper.createObjectNode()
         val provided = HashMap<String, JsonNode>()

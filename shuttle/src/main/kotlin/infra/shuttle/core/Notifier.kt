@@ -7,9 +7,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.slf4j.MDCContext
 import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.jboss.logging.Logger
 import java.time.Clock
@@ -33,20 +31,17 @@ import kotlin.time.toKotlinDuration
  * A [wake] follows every transaction that creates rows; the sweep every `sweepEvery` is the guarantee.
  * Cancelling [run] leaves rows PENDING and the set empty. A state store failure, in the select or in a
  * transition, is logged and the row waits for a later sweep (spec 11); only cancellation ends [run].
- * The body is rendered at send time from the transfer row (D19); `CancellationException` is never an outcome.
+ * The body is rendered at send time from the transfer row (D19) by the [Deliverer]; `CancellationException` is never an outcome.
  */
 class Notifier(
     private val store: StateStore,
-    channels: Collection<DeliveryChannel>,
-    private val bodies: Map<ChannelName, MappingTable>,
-    private val renderer: MappingRenderer,
+    private val deliverer: Deliverer,
     private val config: NotifierConfig,
     private val registry: MeterRegistry,
     private val clock: Clock,
     private val random: Random = Random.Default,
     private val hook: Hook = Hook.None,
 ) {
-    private val channels = channels.associateBy { it.name }
     private val inFlight: MutableSet<DeliveryId> = ConcurrentHashMap.newKeySet()
     private val wake = Channel<Unit>(Channel.CONFLATED)
     private val pendingGauge = HashMap<ChannelName, AtomicLong>()
@@ -56,7 +51,7 @@ class Notifier(
 
     init {
         registry.gauge(ShuttleMetrics.NOTIFIER_INFLIGHT, inFlight) { it.size.toDouble() }
-        for (name in this.channels.keys) {
+        for (name in deliverer.channels.keys) {
             pendingGauge[name] = registry.gauge(ShuttleMetrics.OUTBOX_PENDING, Tags.of("channel", name.value), AtomicLong())!!
             oldestGauge[name] = registry.gauge(ShuttleMetrics.OUTBOX_OLDEST_SECONDS, Tags.of("channel", name.value), AtomicLong())!!
         }
@@ -102,28 +97,17 @@ class Notifier(
     }
 
     /**
-     * A transition the state store fails leaves the row PENDING for a later sweep (spec 11); the worker ends,
-     * the loop does not. Spec 3.2: the whole delivery, this last-resort log included, runs with the transfer,
-     * its route and the channel in the MDC. The route lives on the transfer row, which [deliver] has to read
-     * anyway, so it is read once here; a store failure rides along and is rethrown inside [deliver], where it
-     * is still a `Retry` outcome and not a rejection.
+     * The [Deliverer] renders, sends and classifies inside the MDC of spec 3.2 (transfer, route, channel), and
+     * this recording runs inside it too, this last-resort log included. A transition the state store fails
+     * leaves the row PENDING for a later sweep (spec 11); the worker ends, the loop does not.
      */
     private suspend fun record(row: Delivery) {
-        val transfer = try {
-            Result.success(store.byId(row.transferId))
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            Result.failure(e)
-        }
-        val mdc = buildMap {
-            put(Mdc.TRANSFER_ID, row.transferId.value.toString())
-            put(Mdc.CHANNEL, row.channel.value)
-            transfer.getOrNull()?.let { put(Mdc.ROUTE, it.identity.route.value) }
-        }
-        withContext(MDCContext(mdc)) {
+        val attempt = row.attempts + 1
+        val started = clock.instant()
+        deliverer.deliver(row.transferId, row.channel, row.moment, attempt) { outcome ->
             try {
-                deliver(row, transfer)
+                hook.at(HookPoint.afterDeliverySent, row.transferId)
+                transition(row, attempt, started, outcome)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -132,27 +116,9 @@ class Notifier(
         }
     }
 
-    private suspend fun deliver(row: Delivery, loaded: Result<Transfer?>) {
-        val attempt = row.attempts + 1
-        val started = clock.instant()
-        val channel = channels[row.channel]
-        val outcome: DeliveryOutcome = if (channel == null) {
-            DeliveryOutcome.Reject(null, "no channel named ${row.channel.value}")
-        } else {
-            try {
-                val transfer = loaded.getOrThrow() ?: throw MappingFailure("", "transfer ${row.transferId.value} not found")
-                val body = renderer.render(bodies[row.channel] ?: MappingTable(emptyList()), transfer, row.moment, attempt)
-                channel.deliver(DeliveryEvent(row.transferId, row.moment, row.channel, attempt, body))
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: MappingFailure) {
-                DeliveryOutcome.Reject(null, e.message ?: "mapping failure")
-            } catch (e: Exception) {
-                DeliveryOutcome.Retry(null, e.toString())
-            }
-        }
-        hook.at(HookPoint.afterDeliverySent, row.transferId)
-        val policy = channel?.policy ?: DeliveryPolicy()
+    /** Spec 9.3 on one outcome: DELIVERED, FAILED (a Reject, or a Retry past the policy) or PENDING again after the backoff. */
+    private suspend fun transition(row: Delivery, attempt: Int, started: Instant, outcome: DeliveryOutcome) {
+        val policy = deliverer.channels[row.channel]?.policy ?: DeliveryPolicy()
         val now = clock.instant()
         val tag = when (outcome) {
             is DeliveryOutcome.Delivered -> { store.delivered(row.id, outcome.reference); "delivered" }

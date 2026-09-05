@@ -4617,3 +4617,100 @@ opened (tickets 44 and 45 own them); `Rules.kt` was not edited at all.
 `Map`. If a bean ever needs to refuse a bad config at boot rather than at first use, the place is
 `configured`, whose exception surfaces while the chain is built; a validate-time version of the same check
 would go in rule 15's neighbourhood.
+
+---
+
+## 46: One deliverer renders and delivers a moment for the notifier and the callback
+
+**Status:** done. Review finding Architecture C3.
+
+**Built:** `core/Deliverer`, one per process, holding the state store, the channels by name, the mapping tables
+by channel and the renderer. Its surface is three members: `channels`, `deliver(id, channel, moment, attempt) { outcome -> ... }`
+and `checkAttributes(attributes, channels)`. `deliver` reads the row once, builds the MDC of spec 3.2 (transfer,
+channel, route when the row was read), renders `bodies[channel]` at send time (D19), calls the channel and classifies
+what stopped the call - a `MappingFailure` or a vanished row is a `Reject`, anything else that threw a `Retry`, a store
+failure reading the row a `Retry` as well - then runs the caller's block on the outcome inside the same MDC, so what the
+caller logs about the outcome names the transfer, its route and the channel. `checkAttributes` is spec 6.4's freeze
+check over the named channels' tables, asking the renderer whether a provider resolves (`MappingRenderer.hasProvider`,
+new) instead of a separate lambda.
+
+`Notifier` keeps its loop, batch, in-flight set, policy and backoff: `record` is now `deliverer.deliver(...) { outcome ->
+hook; transition(...) }` with the last-resort WARN inside the block, and `transition` is the old classification of the
+outcome against the channel's policy, unchanged. `TransferPipeline` holds the deliverer alone: the callback is
+`deliverer.deliver(id, channel, ACKED, attempt) { it }` followed by the same `Delivered`/`Retry`/`Reject` judgement, and
+the freeze check is `deliverer.checkAttributes(done.attributes, notified)` over the route's notified channels plus the
+callback's. `ShuttleHost.start` builds one `Deliverer` from the channel adapters, ticket 35's `bodies` map (now built in
+place, every declared channel with its body) and the renderer over `beans::provider`, and hands it to the notifier and
+to every pipeline.
+
+**Parameters removed.** From `TransferPipeline`: `bodies`, `providerExists`, `channels`, `renderer` (four out, `deliverer`
+in; 15 constructor parameters become 12). From `Notifier`: `channels`, `bodies`, `renderer` (three out, `deliverer` in).
+Nothing in the five seams changed.
+
+**Concepts named:**
+
+- **The block is how the MDC reaches the recording.** `MDCContext` sets the whole map on resume, so a nested wrap with
+  fewer keys would drop the outer ones, and the notifier's "the row stays PENDING" WARN is thrown from the transitions
+  *after* the channel call. Returning the outcome and having the notifier re-wrap would need the route, which only the
+  row the deliverer read has. Running the caller's block inside the deliverer's context keeps one read, one MDC map and
+  the SPEC4 tests of ticket 33 unchanged; the pipeline, already tagged with route and transfer, passes `{ it }`.
+- **One classification, two callers.** The notifier and the callback ack now agree on what an exception, a missing row
+  and an unknown channel are; only the notifier goes on to apply a policy, only the pipeline turns anything but
+  `Delivered` into a stage error. That is D56.
+- **The freeze check and the boot check ask the same question.** `providerExists` was a second lambda that happened to
+  be built from the same bean lookup as the renderer's `providers`; a test could hand `{ true }` next to a renderer that
+  resolves nothing. `hasProvider` makes the freeze-time answer the renderer's own.
+
+**Tests:**
+
+- `DelivererTest` (new, 5, on the fakes; red first against a class that did not exist): a moment rendered from the row
+  and delivered with its attempt; `Retry` and `Reject` returned as answered; an exception a `Retry`, a missing required
+  row, an unknown channel and a vanished transfer each a `Reject` with nothing reaching the channel; the channel call and
+  the caller's block both logging with `transferId`, `route` and `channel` in the MDC (`LogCapture`); `checkAttributes`
+  judging only the named channels' tables, a missing attribute and an unresolved provider each a `FreezeFailure`, and a
+  renderer that resolves the provider passing.
+- Changed, construction only (every id kept, every assertion untouched): `NotifierTest` (helper and S22),
+  `CrashMatrixTest` (notifier twice, pipeline once), `TransferPipelineTest` (helper and the S32 notifier), `RouteRunnerTest`
+  (two sites), `RouteSupervisorTest`, `SftpPollSourceTest` (two sites). Deleted: none.
+- Green by id after each step: `NotifierTest` 17, `CrashMatrixTest` 12 after the notifier moved; `TransferPipelineTest` 36
+  (S30, the two other callback tests, both SPEC4 MDC tests), `RouteRunnerTest` 11, `RouteSupervisorTest` 5,
+  `AttributeFreezeTest` 4 after the pipeline moved.
+
+**Final run counts (surefire).** Default tier (`mvn -B -o -q -pl shuttle test`): 33 classes, **305 tests, 0 failures,
+0 errors** (ticket 45's 300 plus the five above). `-DexcludedGroups=none -Dtest=M1AcceptanceTest,M2AcceptanceTest`: **not run** - both classes errored in
+`AcceptanceFixture.<init>` with "Could not find a valid Docker environment": Docker Desktop was running but its engine
+answered Internal Server Error on every API route and did not come back; the orchestrator runs both classes on the
+merged tree (deviation 6).
+
+**Acceptance:**
+
+- [x] `DelivererTest` on the fakes: render-and-deliver, the four outcome classifications, the MDC, the freeze check; red first
+- [x] `Notifier` and `TransferPipeline` call the deliverer; the pipeline loses `bodies`, `channels`, `renderer`, `providerExists`;
+  every existing test keeps its id and passes, S30 and the ticket 33 MDC tests included
+- [x] `ShuttleHost` builds one deliverer; ticket 35's `bodies` map is built for it in place
+- [ ] Both acceptance classes green - not run here, the Docker engine was down; run by the orchestrator on the merged tree
+- [x] Progress entry appended; D56 recorded, since two behaviours changed (below)
+
+**Deviations:**
+
+1. **D56, two behaviour changes on the callback path.** A callback channel that throws was a bare stage error carrying
+   the exception; it is now a `Retry` outcome from the deliverer and the stage error reads `callback <channel> answered
+   Retry null: <exception>`. A row that vanished before its callback was `checkNotNull`'s `IllegalStateException`; it is
+   now a `Reject` with the same sentence shape. Both were and are stage errors retried with the stage, and
+   `a_callback_answering_Reject_or_throwing_is_a_stage_error_and_FAILED_at_maxAttempts` passes unchanged because its
+   fifth call, the one whose reason lands on the row, is the `Reject`.
+2. **The callback's attempt is the run's row's `attempts + 1`, not a re-read's.** The deliverer reads the row for the body;
+   reading it again for the attempt would be a second `byId` per callback. Nothing increments `attempts` between the run's
+   read and its ack, so the number is the same (S30 still sees 1 then 2).
+3. **`checkMappings` stays on `ProcessingChain`.** `AttributeFreezeTest` calls it directly with a lambda, and the deliverer
+   is the one caller that supplies the tables; moving the function would have been churn in a ticket-43-adjacent file
+   for no depth. `Commands.kt` and `Rules.kt` were not edited: `try` mode still renders with its own `MappingRenderer(beans::provider)`.
+4. **`Deliverer.deliver` takes a block rather than returning the outcome.** See the first concept above; the alternative
+   was a second `withContext(MDCContext(...))` in the notifier fed by a route the deliverer would have to hand back.
+5. **Size:** production `Deliverer.kt` 65 lines new, `MappingRenderer` +3, `Notifier` +14/-48, `TransferPipeline` +16/-20,
+   `ShuttleHost` +6/-7; tests `DelivererTest` 111 lines new and 14 construction-only lines changed in six files; this entry and D56.
+6. **The acceptance classes were not run in this worktree.** The Docker engine returned Internal Server Error on every
+   API route for the whole of the ticket and Testcontainers could not start a container; the default tier is green at 305
+   and the acceptance classes construct nothing this ticket changed (they go through `ShuttleHost`, which the default
+   tier's `ShuttleHostTest` exercises). The orchestrator runs `-DexcludedGroups=none -Dtest=M1AcceptanceTest,M2AcceptanceTest`
+   on the merged tree.

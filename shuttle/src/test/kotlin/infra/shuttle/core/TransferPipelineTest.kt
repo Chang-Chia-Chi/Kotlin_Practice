@@ -46,8 +46,8 @@ class TransferPipelineTest {
         route: Route = route(), processors: List<Processor> = emptyList(), hook: Hook = Hook.None,
         channels: Map<ChannelName, DeliveryChannel> = emptyMap(), bodies: Map<ChannelName, MappingTable> = emptyMap(),
     ) = TransferPipeline(
-        route, DigestAlgorithm.MD5, Ledger(store, route.notify) {}, target, ProcessingChain(processors, DigestAlgorithm.MD5), bodies, { true },
-        hook, clock, registry, Staging(staging), { freeBytes }, channels,
+        route, DigestAlgorithm.MD5, Ledger(store, route.notify) {}, target, ProcessingChain(processors, DigestAlgorithm.MD5),
+        Deliverer(store, channels.values, bodies), hook, clock, registry, Staging(staging), { freeBytes },
     )
 
     private suspend fun seen(name: String = "a.csv"): RouteEvent.Seen =
@@ -705,7 +705,7 @@ class TransferPipelineTest {
 
         val channel = RecordingChannel("downstream")
         val config = NotifierConfig(workers = 1, batch = 10, sweepEvery = 30.seconds)
-        backgroundScope.launch { Notifier(store, listOf(channel), mapOf(channel.name to body), MappingRenderer(), config, registry, clock).run() }
+        backgroundScope.launch { Notifier(store, Deliverer(store, listOf(channel), mapOf(channel.name to body)), config, registry, clock).run() }
         runCurrent()
 
         val delivery = store.outbox.single()
