@@ -293,3 +293,16 @@ name, an id or a key.
 - **Progress log**: `docs/shuttle/progress.md` - one entry per ticket, each recording what was built, the
   concepts it named, its acceptance evidence and every deviation from the spec.
 - **Tickets**: `.scratch/shuttle/issues/`.
+
+## Docker Desktop 4.5x and the container tiers
+
+Docker Desktop with engine 29 or later refuses API versions below 1.40, and the Testcontainers 1.20 client used by
+the `oracle`, `minio`, `nats`, `acceptance` and `load` tiers still asks for 1.32, so every container start fails
+with `client version 1.32 is too old`. Until Testcontainers is upgraded, pin the client's API version once per
+machine:
+
+```
+echo api.version=1.44 > %USERPROFILE%\.docker-java.properties
+```
+
+The default tier needs no Docker at all.
