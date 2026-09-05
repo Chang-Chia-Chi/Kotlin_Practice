@@ -213,7 +213,38 @@ class JdbiStateStore(private val jdbi: Jdbi, private val dispatcher: CoroutineDi
             .bind("r", route.value).bind("t", olderThan.ts()).mapTo(Int::class.java).one()
     }
 
-    /** Read side for the admin surface and the tests; not part of the seam. */
+    /**
+     * Spec 14.1's listing (D57), two statements: the page of parents, then their children in one `IN` read.
+     * Oracle does the filtering and the paging; nothing whole-table crosses the seam.
+     */
+    override suspend fun transfers(route: RouteName?, state: TransferState?, limit: Int) = tx { h ->
+        val where = listOfNotNull("parent_id IS NULL", route?.let { "route = :route" }, state?.let { "state = :state" }).joinToString(" AND ")
+        val parents = h.createQuery("SELECT * FROM file_transfer WHERE $where ORDER BY id DESC FETCH FIRST :limit ROWS ONLY")
+            .bind("limit", limit)
+            .apply { route?.let { bind("route", it.value) }; state?.let { bind("state", it.name) } }
+            .map { rs, _ -> transferRow(rs) }.list()
+        val children = if (parents.isEmpty()) emptyList() else {
+            h.createQuery("SELECT * FROM file_transfer WHERE parent_id IN (<ids>) ORDER BY id")
+                .bindList("ids", parents.map { it.id.value }).map { rs, _ -> transferRow(rs) }.list()
+        }
+        parents.map { parent -> parent to children.filter { it.parentId == parent.id } }
+    }
+
+    override suspend fun deliveries(transfer: TransferId) = tx { h ->
+        h.createQuery("SELECT * FROM delivery_outbox WHERE file_transfer_id = :id ORDER BY id").bind("id", transfer.value)
+            .map { rs, _ -> deliveryRow(rs) }.list()
+    }
+
+    override suspend fun delivery(id: DeliveryId): Delivery? = tx { h ->
+        h.createQuery("SELECT * FROM delivery_outbox WHERE id = :id").bind("id", id.value).map { rs, _ -> deliveryRow(rs) }.findOne().orElse(null)
+    }
+
+    override suspend fun countsByState(route: RouteName) = tx { h ->
+        h.createQuery("SELECT state, COUNT(*) AS n FROM file_transfer WHERE route = :r GROUP BY state").bind("r", route.value)
+            .map { rs, _ -> TransferState.valueOf(rs.getString("state")) to rs.getInt("n") }.list().toMap()
+    }
+
+    /** Read side for the tests; not part of the seam, and production reads nothing whole-table (progress 10). */
     suspend fun transfer(id: TransferId): Transfer = tx { it.transfer(id) }
     suspend fun transfers(): List<Transfer> = tx { it.createQuery("SELECT * FROM file_transfer ORDER BY id").map { rs, _ -> transferRow(rs) }.list() }
     suspend fun outbox(): List<Delivery> = tx { it.createQuery("SELECT * FROM delivery_outbox ORDER BY id").map { rs, _ -> deliveryRow(rs) }.list() }
