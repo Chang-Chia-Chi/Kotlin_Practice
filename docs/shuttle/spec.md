@@ -606,9 +606,15 @@ interface DeliveryChannel {
 ### 9.3 Policy
 
 Per channel: `maxAttempts` 50, `giveUpAfter` 24 h, exponential backoff from 5 s, factor 2, cap
-15 min, full jitter, `timeout` 10 s below the drain (rule 3). A FAILED delivery never changes
-the transfer's state: the object is safe; the transfer stays ACKED with a metric and a log line
-naming the delivery (D9).
+15 min, full jitter, `timeout` 10 s below the drain (rule 3). Full jitter is behaviour, not a
+knob: there is no `fullJitter` flag in the grammar or the model, and the delay is always drawn
+uniformly from zero to the ceiling. A FAILED delivery never changes the transfer's state: the
+object is safe; the transfer stays ACKED with a metric and a log line naming the delivery (D9).
+
+A channel that declares no `response:` block classifies by the default of D54: `success` is
+200-299, `retry` is every 5xx and 429, and any other status - every other 4xx included - is a
+Reject. A stated `response.retry` replaces that set rather than adding to it, so a channel that
+wants nothing retried writes `retry: []`.
 
 ### 9.4 Notifier
 
@@ -622,8 +628,9 @@ ride a `SharedFlow` (D7).
 ### 9.5 The notifier's in-flight set
 
 A concurrent set of delivery ids selected and not yet recorded, added at select and removed in
-`finally` on every exit path, bounded by `batch + workers`, empty when idle (I4, I5). It holds
-ids only and must not survive a restart. A state-store claim is the second-replica seam (Sec
+`finally` on every exit path, bounded by `batch + workers`, empty when idle (I4, I5). `due`
+excludes it with an `IN` list, which Oracle caps at 1000 expressions (ORA-01795), so rule 7
+refuses a `batch + workers` above that. It holds ids only and must not survive a restart. A state-store claim is the second-replica seam (Sec
 15.1).
 
 ### 9.6 Body: the mapping table
@@ -804,7 +811,7 @@ shuttle:
         url: https://downstream.internal/api/files
         auth: { bearer: ${DOWNSTREAM_TOKEN} }
         timeout: 10s
-        response: { success: [200-299], retry: [408, 429, 500-599], reference: /requestId }
+        response: { success: [200-299], retry: [408, 429, 500-599], reference: /requestId }   # omitted, D54 retries every 5xx and 429 and rejects any other 4xx
         policy: { maxAttempts: 50, giveUpAfter: 24h, backoff: { initial: 5s, max: 15m } }
         body:
           - { path: fileId,          field: TRANSFER_ID }
@@ -929,7 +936,7 @@ Each is public numbering, reported by number in validate mode and at startup.
 | 4 | Route names, store names and channel names are unique; a store and a channel may not share a name |
 | 5 | A route has exactly one `source` and exactly one `target` |
 | 6 | A `subscribe` source has a `fetch` with a store and a path, and a `bucket` when that store is S3; a `poll` source has none |
-| 7 | No knob is set to a value that parks a worker for ever or spins a loop. Per route: `parallelism >= 1` (1 when omitted), `maxAttempts >= 1`, `stuckAfter > 0` (three trigger intervals when omitted), `inProgressEvery > 0`, `poll.every > 0`, `recheckFinished >= 0` (24 h when omitted), and each readiness check's `sizeStable.checks >= 1`, `sizeStable.interval > 0`, `minAge > 0`. Per store: `pool.maxSize >= 1`, `pool.maxConcurrentTransfers >= 1`, `staging.minFree >= 0` (1 GiB when omitted). Per channel: `policy.maxAttempts >= 1`, `policy.backoff.initial > 0`. Process-wide: `notifier.workers >= 1`, `notifier.batch >= 1`, `notifier.sweepEvery > 0`, `supervision.restartBackoff.initial > 0` |
+| 7 | No knob is set to a value that parks a worker for ever or spins a loop. Per route: `parallelism >= 1` (1 when omitted), `maxAttempts >= 1`, `stuckAfter > 0` (three trigger intervals when omitted), `inProgressEvery > 0`, `poll.every > 0`, `recheckFinished >= 0` (24 h when omitted), and each readiness check's `sizeStable.checks >= 1`, `sizeStable.interval > 0`, `minAge > 0`. Per store: `pool.maxSize >= 1`, `pool.maxConcurrentTransfers >= 1`, `staging.minFree >= 0` (1 GiB when omitted). Per channel: `policy.maxAttempts >= 1`, `policy.backoff.initial > 0`. Process-wide: `notifier.workers >= 1`, `notifier.batch >= 1`, `notifier.batch + notifier.workers <= 1000`, because that sum bounds the in-flight set `due` excludes with an `IN` list and Oracle caps an `IN` list at 1000 expressions (ORA-01795), `notifier.sweepEvery > 0`, `supervision.restartBackoff.initial > 0` |
 | 8 | Every `notify.on` is one of `fetched`, `stored`, `acked`; a pair of state and channel appears once per route |
 | 9 | Per object store, the sum of `parallelism` over every route that polls it, fetches from it or targets it, plus one lister per polled directory, is at most `pool.maxSize`, and `maxConcurrentTransfers <= maxSize` |
 | 10 | Every SFTP store's `keepAlive` and `idleTimeout` are below its `idleCutoff` |
@@ -1080,6 +1087,7 @@ poll are appeals to the connector's spec.
 | D50 | Every instant the Oracle store binds or reads crosses the JDBC edge through an explicit UTC `Calendar`; 8.1's columns stay `TIMESTAMP` | A `TIMESTAMP` keeps a date and a time and no offset, so whoever names the zone decides the digits; unnamed, the driver takes the process default, and a default with DST gives one local time to two instants an hour apart. With Europe/Berlin as the default, a row written at 2026-10-25T00:30Z read back as 01:30Z, so reconciliation, the stuck gauge, D40's re-check window and mtime identity all read an hour off (finding B6). Naming UTC on both sides fixes it in the adapter, where the zone is lost, and needs no DDL change, so 8.1 and `StateStoreSchemaTest` are untouched; `TIMESTAMP WITH TIME ZONE` would buy the same correctness at the price of a frozen-DDL migration (measured by ticket 27 on Oracle) |
 | D51 | The stuck gauge of a subscribed route is refreshed by a ticker in the route's own run scope, beating every `inProgressEvery`, and `stuckAfter` omitted is three trigger intervals | Sec 11 hung the subscription refresh on the notifier's `sweepEvery`, a process-wide knob no route can see: reaching it would have meant threading `NotifierConfig` through every `RouteRunner` for a number unrelated to the route. The trigger's own beat is already the route's, is what the polled half uses, and gives one rule for both kinds - refresh every interval, call a transfer stuck after three of them - so a route that states no `stuckAfter` still gets a gauge instead of a flat 0 (finding Spec 5, ticket 36). The ticker is a child of the run's scope, so it stops with the route and restarts with it |
 | D53 | An `expand.from` that is not the route's `fetch.store` names an S3 store and states its own `expand.bucket`; any other divergent store is a rule 14 violation | The children of an `expand` are pulled by path, and only two adapters can do that: the route's own fetch store, which already has its bucket (rule 6), and another S3 store, which has none - a store declaration is an endpoint, not a bucket (D15), so the host can only be told. Borrowing the bucket from another route's `fetch.bucket` would make one route's configuration depend on another's. The divergent SFTP case has no adapter at all: a polled store's fetcher serves the files that poll handed over ("is not a file this poll handed over"), and giving it a second, by-path role would mean a second connector on a store whose pool rule 9 has already budgeted. Refusing it at validate time is the whole of the fix (ticket 38, finding Spec 9) |
+| D54 | A channel that declares no `response:` block retries every 5xx and 429 and rejects any other status; `DeliveryPolicy.fullJitter` and `S3Target.clock` are deleted rather than wired | The empty `retry` default made a 503 a permanent Reject: a downstream restarting behind a load balancer answered 503, the delivery went FAILED on the first attempt, and the whole retry policy - 50 attempts over 24 h, the backoff, the jitter - never ran, so the one failure mode webhook practice exists for was the one the default did not survive. 5xx and 429 are what every webhook sender retries and what every 4xx below them is not: a 400 is the sender's bug and repeating it is noise. A stated `retry` replaces the set rather than adding to it, so an endpoint that wants a 503 to be terminal still says so with `retry: []`. `fullJitter` was a boolean no document could set, read only to let one test ask for the bare ceiling - a knob in the model that spec 9.3 states as behaviour; a `Random` that draws the top of the range buys the same determinism without a public flag. `S3Target.clock` was never read at all (ticket 44, finding Standards 6 and 8) |
 
 ---
 

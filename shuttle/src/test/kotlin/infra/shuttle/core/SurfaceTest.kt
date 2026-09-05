@@ -15,7 +15,9 @@ class SurfaceTest {
         assertEquals(50, policy.maxAttempts)
         assertEquals(24.hours, policy.giveUpAfter)
         assertEquals(Backoff(initial = 5.seconds, max = 15.minutes, factor = 2.0), policy.backoff)
-        assertEquals(true, policy.fullJitter)
+        // D54: a channel that states no `response:` block still retries every 5xx and 429 and rejects any other 4xx.
+        assertEquals((500..599).toSet() + 429, ResponseSpec().retry)
+        assertEquals((200..299).toSet(), ResponseSpec().success)
 
         val bare = shuttle { route("mirror") {} }
         assertEquals(Backoff(initial = 30.seconds, max = 15.minutes), bare.supervision.restartBackoff)

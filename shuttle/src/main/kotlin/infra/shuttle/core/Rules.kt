@@ -53,6 +53,10 @@ object Rules {
             if (config.notifier.workers < 1) fail(7, "notifier: workers must be >= 1")
             if (config.notifier.batch < 1) fail(7, "notifier: batch must be >= 1")
             if (!config.notifier.sweepEvery.isPositive()) fail(7, "notifier: sweepEvery must be > 0")
+            // Spec 9.5 bounds the in-flight set by batch + workers, and `due` excludes it with an IN list Oracle caps at 1000 (ORA-01795).
+            if (config.notifier.batch + config.notifier.workers > IN_LIST_LIMIT) {
+                fail(7, "notifier: batch ${config.notifier.batch} plus workers ${config.notifier.workers} exceeds $IN_LIST_LIMIT, Oracle's limit on the IN list that excludes the in-flight set")
+            }
             if (!config.supervision.restartBackoff.initial.isPositive()) fail(7, "supervision: restartBackoff.initial must be > 0")
         }
 
@@ -280,6 +284,9 @@ object Rules {
         private fun <T> List<T>.duplicates() = groupingBy { it }.eachCount().filterValues { it > 1 }.keys
         private fun String.isJsonPointer() = isEmpty() || startsWith("/")
     }
+
+    /** Oracle's ORA-01795 ceiling on the expressions of an `IN` list, which `due` builds from the in-flight set. */
+    private const val IN_LIST_LIMIT = 1000
 
     private val PLACEHOLDER = Regex("""\{([^}]*)}""")
     private val PLACEHOLDERS = setOf("name", "sourceName", "yyyyMMdd")

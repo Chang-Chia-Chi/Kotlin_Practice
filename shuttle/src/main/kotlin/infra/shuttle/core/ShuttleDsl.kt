@@ -211,8 +211,8 @@ class HttpChannelBuilder(private val name: String) {
 
     @ShuttleDsl
     class Response {
-        var success: Iterable<Int> = 200..299
-        var retry: Iterable<Int> = emptySet()
+        var success: Iterable<Int> = ResponseSpec().success
+        var retry: Iterable<Int> = ResponseSpec().retry
         var reference: String? = null
     }
 

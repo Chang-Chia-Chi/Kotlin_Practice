@@ -13,13 +13,13 @@ findings Standards 6 and 8 (remainder), the bug hunt's third and fourth unconfir
 
 **Nature:** defaults and deletions
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `HttpChannelTest`: a channel with no `response:` block answers `Retry` to 503 and 429 and `Reject` to 400; red before the fix; spec 9.3 states the default and D54 records it
-- [ ] `RulesTest`: `rule7_notifier_batch_plus_workers_stays_under_the_IN_list_limit` (or the ceiling you choose, with the Oracle limit named in the message)
-- [ ] `fullJitter` gone from `DeliveryPolicy`, the DSL and the YAML grammar (a document still naming it is an unknown-key load error, as the loader treats every unknown key); the notifier always jitters
-- [ ] `S3Target` loses its `clock` parameter; the host's construction follows
-- [ ] Progress entry appended
+- [x] `HttpChannelTest`: a channel with no `response:` block answers `Retry` to 503 and 429 and `Reject` to 400; red before the fix; spec 9.3 states the default and D54 records it
+- [x] `RulesTest`: `rule7_notifier_batch_plus_workers_stays_under_the_IN_list_limit` (or the ceiling you choose, with the Oracle limit named in the message)
+- [x] `fullJitter` gone from `DeliveryPolicy`, the DSL and the YAML grammar (a document still naming it is an unknown-key load error, as the loader treats every unknown key); the notifier always jitters
+- [x] `S3Target` loses its `clock` parameter; the host's construction follows
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket; 200-600 lines including tests; no Thread.sleep;
 invariant tests named `I<n>_<description>`, scenario tests by their `S<n>` id, validation tests by `rule<n>_`,

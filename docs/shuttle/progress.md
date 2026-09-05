@@ -4377,3 +4377,87 @@ is a class with three callers and one fake behind it (the store's); it is not a 
 **For the next ticket:** `ShuttleHost.ack` answers NOT_FOUND for a row whose route left the configuration,
 as before; the row is still the store's. If an admin operation ever needs a ledger for a route the host no
 longer runs, that is a `Ledger(store, emptyList(), notifier::wake)`, not a new path.
+
+---
+
+## 44: A 5xx retries by default, the notifier batch is bounded, `fullJitter` and `S3Target.clock` go
+
+**What changed.** Three items in the delivery path, one per red test.
+
+**(a) The default response classification (D54).** `ResponseSpec.retry` defaulted to `emptySet()`, so an
+`http` channel that declared no `response:` block sent every non-2xx down the `else` branch of
+`HttpChannel.classify` and rejected it. A downstream restarting behind a load balancer answers 503; the
+delivery went FAILED on its first attempt and the policy the same channel carries - 50 attempts over 24 h,
+the backoff, the jitter - never ran. The default is now `(500..599) + 429`, so 5xx and 429 are `Retry` and
+every other status, every other 4xx included, is `Reject`. A stated `response.retry` still replaces the set
+rather than adding to it (the loader assigns only when the key is present), so an endpoint that wants a 503
+terminal writes `retry: []`. The DSL's `Response.success` and `.retry` now read their defaults off
+`ResponseSpec()` rather than restating them, so the two forms cannot drift. Rule 20 (success and retry
+disjoint) is satisfied by the pair. Spec 9.3 states the default; D54 records it; spec 13.1's `downstream`
+block gains the one-line note.
+
+**(b) Rule 7 gains the IN-list ceiling.** `due` excludes the in-flight set with `AND id NOT IN (<ex>)`,
+and spec 9.5 bounds that set by `batch + workers`; Oracle refuses an `IN` list past 1000 expressions
+(ORA-01795). Nothing stopped `notifier: { workers: 4, batch: 2000 }` from loading and then failing on the
+first sweep that filled up, at runtime, on the customer's database. Rule 7 now fails a `batch + workers`
+above 1000 with the reason and the number in the message. The ceiling is conservative on purpose: the
+exclusion list can only reach `batch`, but `batch + workers` is the bound spec 9.5 already publishes, and
+one number that is stated in two places beats a tighter one that is stated in neither.
+
+**(c) Two dead knobs deleted.** `DeliveryPolicy.fullJitter` was a boolean no YAML document could set (the
+loader's `policy` block never read it, so a document naming it was already an unknown-key error) and no
+production caller flipped; it existed so `NotifierTest` could ask for a deterministic backoff. Spec 9.3
+states full jitter as behaviour, so the flag is gone and `Notifier.backoff` always draws. The tests that
+assert an exact `next_attempt_at` now hand the notifier a `Random` that returns the top of the range - the
+`random` seam was already a constructor parameter, so nothing new was opened. `S3Target.clock` was
+constructed, stored and never read; it is gone, and `ShuttleHost`'s one construction line and
+`S3TargetTest`'s fixture follow. Ticket 40's deviations 1 and 3 are closed.
+
+**Tests:**
+
+- `HttpChannelTest.a channel with no response block retries every 5xx and 429 and rejects any other 4xx`
+  (new, the ticket's first red: `status 500 gave Reject(status=500, reason=busy)`). Loopback JDK server as
+  the rest of the class uses; 500, 503 and 429 assert `Retry`, 400 and 404 assert `Reject`.
+- `RulesTest.rule7_notifier_batch_plus_workers_stays_under_the_IN_list_limit` (new, red as `expected: <[7]>
+  but was: <[]>`). `batch = 1000, workers = 4` violates only rule 7; `batch = 996, workers = 4` is clean, so
+  the test pins the boundary as well as the refusal.
+- `SurfaceTest.defaults_of_spec_9_3_and_10`: the `policy.fullJitter` assertion is replaced by the two
+  `ResponseSpec()` assertions D54 fixes.
+- `NotifierTest`: `noJitter` (a `DeliveryPolicy(fullJitter = false)`) becomes `spec93`, a plain
+  `DeliveryPolicy()`; the `notifier(...)` helper gains a defaulted `random` parameter; `S7` and `S9`, the
+  two tests that assert an exact instant, pass `atCeiling`, a `Random` whose `nextDouble(from, until)`
+  returns `until - 1`. `backoff_follows_spec_9_3_with_full_jitter_below_the_ceiling_and_the_cap_at_max`
+  keeps the seeded `Random(1)` and keeps proving the draw. Every `I<n>_` and `S<n>_` id is unchanged.
+- `S3TargetTest`: the `clock` fixture and its three imports go; four construction sites lose an argument.
+
+**Final run counts (surefire).** Default tier (`mvn -B -o -pl shuttle test`): 32 classes, **298 tests, 0
+failures, 0 errors** - ticket 39's 296 plus the two new ones. Spec 13.1's baseline document still loads and
+passes every rule (`YamlLoaderTest`, `RulesTest`), with `notifier: { workers: 4, batch: 50 }` at 54 of the
+new ceiling's 1000.
+
+**Deviations:**
+
+1. **The ceiling is `batch + workers <= 1000`, not `batch <= 1000`.** The exclusion list is built from
+   `inFlight.toSet()` at the top of `sweep`, and a sweep hands every selected row to a worker before the
+   next `due`, so the set at select time can only hold the previous sweep's un-finished rows - at most
+   `batch`. `batch + workers` is therefore looser than the real bound by `workers`. It is the number spec
+   9.5 already states, checking it needs no second invariant, and the difference is four rows on the
+   default configuration.
+2. **The default retry set is `(500..599) + 429`, not `+ 408`.** Spec 13.1's sample writes
+   `[408, 429, 500-599]` and 408 is a defensible retry, but it is a *request* timeout the client caused;
+   D54's default retries what the server said it could not do now. A channel that wants 408 back states it,
+   as the sample does.
+3. **`ResponseSpec.retry` was not made nullable to distinguish "omitted" from "empty".** The three-state
+   version would let a future default change reach documents that had already opted out; nothing asked for
+   that, and `retry: []` says "nothing is retried" in one keystroke.
+4. **Size:** production +14/-9 across five files, tests +20/-14 across five files, spec +5 lines and one
+   decision row, this entry.
+
+**Seams.** `DeliveryChannel`, `ObjectStoreTarget`, `StateStore`, `Hook`, `Processor`: untouched.
+`Notifier`'s `random` parameter was already there; this ticket only made it the way a test asks for a
+deterministic delay, which is what a seam is for.
+
+**For the next ticket:** `Rules.IN_LIST_LIMIT` is the only place the 1000 lives on the validation side;
+`JdbiStateStore.due` builds the list and names ORA-02014 in its own comment but not ORA-01795. If a second
+`IN` list is ever bound from a caller-sized collection, it wants the same rule and the constant should move
+next to the query rather than be copied.

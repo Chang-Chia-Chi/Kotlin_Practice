@@ -322,7 +322,7 @@ class ShuttleHost(
         val target = checkNotNull(route.target) { "route ${route.name} has no target" }
         targets[target.store]?.let { return it }
         return when (val declared = storeNamed(target.store)) {
-            is S3Store -> S3Target(s3ClientFor(declared), checkNotNull(target.bucket) { "route ${route.name}: an S3 target needs a bucket" }, io, clock)
+            is S3Store -> S3Target(s3ClientFor(declared), checkNotNull(target.bucket) { "route ${route.name}: an S3 target needs a bucket" }, io)
             is SftpStore -> SftpTarget(
                 connectorFor(declared).client,
                 checkNotNull(target.directory) { "route ${route.name}: an SFTP target needs a directory" },

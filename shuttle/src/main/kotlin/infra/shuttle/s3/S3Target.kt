@@ -23,7 +23,6 @@ import software.amazon.awssdk.services.s3.model.S3Exception
 import java.net.URI
 import java.nio.file.Files
 import java.nio.file.Path
-import java.time.Clock
 import java.util.Base64
 import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.time.Duration
@@ -43,7 +42,6 @@ class S3Target(
     private val client: S3Client,
     private val bucket: String,
     private val io: CoroutineDispatcher,
-    private val clock: Clock,
     private val betweenPutAndHead: suspend () -> Unit = {},
 ) : ObjectStoreTarget {
     private val log = Logger.getLogger(S3Target::class.java)
