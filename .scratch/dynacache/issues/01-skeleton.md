@@ -11,14 +11,14 @@ types with byte-array equality), the binary-safe hash-tag-aware `Key`, `Partitio
 
 **Nature:** scaffold and frozen surface (Opus)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache cbe9df2)
 
-- [ ] `mvn package` green from `DynaCache/`; one passing test per module
-- [ ] No pom mentions AssertJ; Mockito core is a test dependency of every module
-- [ ] `Reply.Bulk(null)` and `Reply.Bulk(bytes)` compare by content; `Key` equality is by bytes
-- [ ] `Key("{user1}.a")` and `Key("{user1}.b")` hash alike; a key without braces hashes whole
-- [ ] `CommandEngine.submit` and `atomically` exist with the signatures of plan 2.3 and throw NotImplementedError
-- [ ] Progress entry appended
+- [x] `mvn package` green from `DynaCache/`; one passing test per module
+- [x] No pom mentions AssertJ; Mockito core is a test dependency of every module
+- [x] `Reply.Bulk(null)` and `Reply.Bulk(bytes)` compare by content; `Key` equality is by bytes
+- [x] `Key("{user1}.a")` and `Key("{user1}.b")` hash alike; a key without braces hashes whole
+- [x] `CommandEngine.submit` and `atomically` exist with the signatures of plan 2.3 and throw NotImplementedError
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket, stubs throwing NotImplementedError
 for later seams; 200 to 600 lines including tests; JUnit 5 + Mockito only, no AssertJ or MockK;
