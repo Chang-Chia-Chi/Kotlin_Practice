@@ -68,47 +68,32 @@ Every row is a test (spec 18.2, S2 to S5).
 
 ### The whole system in one picture
 
-The framework, not a deployment. Object stores and channels are declared once; a route gives
-each a role where it uses it: a store is polled, fetched from or stored into, a channel is
-subscribed to or notified. Every route is its own supervised loop; all routes share the state
-store, the stores' session pools and one notifier. The routes and the notifier never talk to
-each other except through the state store and one wake signal.
+Shuttle knows three kinds of things: places where files live, channels where news goes, and a
+notebook. A route is one sentence: from this place, do this to each file, put it in that
+place, then tell these people. Everything else in the spec is how that sentence is kept true.
 
 ```mermaid
 flowchart LR
-    subgraph decl["declared once · roles given at the route"]
-        OS[("object store · SFTP, S3<br/>roles: poll · fetch · target")]
-        CH["channel · HTTP, NATS<br/>roles: subscribe · notify"]
+    FROM["from a place<br/>SFTP folder · S3 bucket<br/>or a message that says go"] --> S1
+    subgraph R["the shuttle · one route"]
+        direction LR
+        S1["1 pick up"] --> S2["2 work on it"] --> S3["3 drop off"] --> S4["4 stamp · tell"]
     end
-
-    subgraph proc["shuttle process · one replica · Kotlin + Quarkus"]
-        subgraph route["route · one per YAML entry · supervised"]
-            TR["trigger<br/>poll a store, or subscribe a channel<br/>onAck: move · delete · ack · callback"] --> PL["pipeline × parallelism<br/>fetch → process → store → ack<br/>a crash resumes from the row's state"]
-            PL -.- PC["process chain · pure Processors<br/>attributes out, mappings checked before store"]
-        end
-        NOT["notifier · one cold Flow · workers<br/>in-flight ids · memory"]
-        STG[("staging · local disk · wiped at boot")]
-    end
-
-    subgraph ora["shuttle state store · Oracle · the only truth"]
-        FT[("file_transfer · state · revision")]
-        DO[("delivery_outbox · on_state · notification_state")]
-    end
-
-    OS -- "poll: list · readiness" --> TR
-    CH -- "subscribe: message · ack / nak" --> TR
-    OS <-- "fetch bytes into staging · store then verify · overwrite, never delete" --> PL
-    PL == "one txn per transition" ==> FT
-    PL == "one row per moment × channel" ==> DO
-    PL -. "wake" .-> NOT
-    NOT == "select due · DELIVERED / retry / FAILED" ==> DO
-    NOT -- "notify: body from the mapping table · on fetched, stored, acked" --> CH
+    S4 -- "the copy" --> TO["to a place<br/>SFTP folder · S3 bucket"]
+    S4 -- "the news" --> TELL["tell someone<br/>HTTP · NATS · or nobody"]
+    R == "write each step · after a crash: read, carry on" ==> NB[("the notebook · Oracle")]
 ```
 
-Thick edges are the durable commit path; dotted edges are signals; the two memory boxes,
-staging and the notifier's id set, are the only state that must not survive a restart. The
-five seams sit on the arrows: `StateStore`, `ObjectStoreTarget`, `DeliveryChannel`,
-`Processor`, `Hook`.
+Places and channels are named once and reused by every route. The notebook is why nothing is
+lost: a step that is not written down did not happen, and a step that is written down is never
+done twice by mistake. For the engineer, the same picture in its own words:
+
+- A place is an `objectStore`, a channel is a `channel`, the notebook is the `shuttleStateStore`.
+  Each is declared once; a route gives it a role where it uses it.
+- Pick up is fetch into staging, work on it is the pure process chain, drop off is store then
+  verify with no delete, stamp is the ack action, tell is an outbox row the notifier sends.
+- One coroutine per file, at most `parallelism` per route; every route supervised on its own;
+  routes and the notifier share nothing but the state store and one wake signal.
 
 ### One item's journey, and the states it leaves behind
 
