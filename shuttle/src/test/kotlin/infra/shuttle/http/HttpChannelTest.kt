@@ -99,6 +99,22 @@ class HttpChannelTest {
         assertTrue(outcome is DeliveryOutcome.Reject && outcome.status == "400", "status 400 gave $outcome")
     }
 
+    /** D54: a channel that declares no `response:` block still retries what is worth retrying (spec 9.3). */
+    @Test
+    fun `a channel with no response block retries every 5xx and 429 and rejects any other 4xx`() = runBlocking {
+        val bare = channel(config(response = ResponseSpec()))
+        for (status in listOf(500, 503, 429)) {
+            respond = { it.answer(status, "busy") }
+            val outcome = bare.deliver(event())
+            assertTrue(outcome is DeliveryOutcome.Retry && outcome.status == status.toString(), "status $status gave $outcome")
+        }
+        for (status in listOf(400, 404)) {
+            respond = { it.answer(status, """{"error":"bad"}""") }
+            val outcome = bare.deliver(event())
+            assertTrue(outcome is DeliveryOutcome.Reject && outcome.status == status.toString(), "status $status gave $outcome")
+        }
+    }
+
     @Test
     fun `connection refused yields Retry`() = runBlocking {
         val closedPort = ServerSocket(0).use { it.localPort }

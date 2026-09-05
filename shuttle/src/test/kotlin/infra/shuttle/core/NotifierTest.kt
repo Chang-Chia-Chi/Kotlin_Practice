@@ -29,8 +29,21 @@ class NotifierTest {
     private val downstream = ChannelName("downstream")
     private val body = MappingTable(listOf(MappingRow("fileId", field = Field.TRANSFER_ID), MappingRow("event", field = Field.EVENT)))
 
-    private fun notifier(vararg channels: DeliveryChannel, config: NotifierConfig = NotifierConfig(workers = 2, batch = 10, sweepEvery = 30.seconds), store: StateStore = this.store) =
-        Notifier(store, channels.toList(), channels.associate { it.name to body }, MappingRenderer(), config, registry, clock, kotlin.random.Random(1))
+    private fun notifier(
+        vararg channels: DeliveryChannel,
+        config: NotifierConfig = NotifierConfig(workers = 2, batch = 10, sweepEvery = 30.seconds),
+        store: StateStore = this.store,
+        random: kotlin.random.Random = kotlin.random.Random(1),
+    ) = Notifier(store, channels.toList(), channels.associate { it.name to body }, MappingRenderer(), config, registry, clock, random)
+
+    /**
+     * Full jitter is unconditional (D54's neighbour: spec 9.3 states it as behaviour, not a knob), so a test
+     * that wants the bare ceiling says so by drawing the top of the range rather than by turning jitter off.
+     */
+    private val atCeiling = object : kotlin.random.Random() {
+        override fun nextBits(bitCount: Int) = 0
+        override fun nextDouble(from: Double, until: Double) = until - 1
+    }
 
     /** Spec 11's "state store unavailable": the first call of [failing] throws, every other call reaches [inner]. */
     private class FailsOnce(private val inner: StateStore, private val failing: String) : StateStore by inner {
@@ -81,16 +94,17 @@ class NotifierTest {
         assertEquals("acked", event.body.get("event").asText())
     }
 
-    private val noJitter = DeliveryPolicy(fullJitter = false)
+    /** Spec 9.3's defaults, the policy every channel here uses unless the test bends one number. */
+    private val spec93 = DeliveryPolicy()
     private val retry503 = DeliveryOutcome.Retry("503", "unavailable")
     private val ok = DeliveryOutcome.Delivered("ref")
 
     @Test
     fun S7_downstream_503_twice_then_200() = runTest {
-        val channel = RecordingChannel("downstream", noJitter, retry503, retry503, ok)
+        val channel = RecordingChannel("downstream", spec93, retry503, retry503, ok)
         val t = ackedTransfer("a.csv", listOf(downstream))
         val start = clock.instant()
-        backgroundScope.launch { notifier(channel).run() }
+        backgroundScope.launch { notifier(channel, random = atCeiling).run() }
         runCurrent()
         assertEquals(start.plusSeconds(5), store.outbox.single().nextAttemptAt, "attempt 1 retries after initial 5 s")
         tick(30.seconds)
@@ -106,7 +120,7 @@ class NotifierTest {
 
     @Test
     fun S8_downstream_400() = runTest {
-        val channel = RecordingChannel("downstream", noJitter, DeliveryOutcome.Reject("400", "bad request"))
+        val channel = RecordingChannel("downstream", spec93, DeliveryOutcome.Reject("400", "bad request"))
         val t = ackedTransfer("a.csv", listOf(downstream))
         backgroundScope.launch { notifier(channel).run() }
         runCurrent()
@@ -119,10 +133,10 @@ class NotifierTest {
 
     @Test
     fun S9_downstream_down_past_giveUpAfter() = runTest {
-        val policy = DeliveryPolicy(giveUpAfter = 10.seconds, fullJitter = false)
+        val policy = DeliveryPolicy(giveUpAfter = 10.seconds)
         val channel = RecordingChannel("downstream", policy, retry503, retry503, retry503, ok)
         val t = ackedTransfer("a.csv", listOf(downstream))
-        backgroundScope.launch { notifier(channel, config = NotifierConfig(workers = 2, batch = 10, sweepEvery = 5.seconds)).run() }
+        backgroundScope.launch { notifier(channel, config = NotifierConfig(workers = 2, batch = 10, sweepEvery = 5.seconds), random = atCeiling).run() }
         runCurrent()
         tick(5.seconds)
         tick(5.seconds)
@@ -142,7 +156,7 @@ class NotifierTest {
 
     @Test
     fun maxAttempts_flips_a_delivery_to_FAILED_with_gave_up() = runTest {
-        val channel = RecordingChannel("downstream", DeliveryPolicy(maxAttempts = 2, fullJitter = false), retry503)
+        val channel = RecordingChannel("downstream", DeliveryPolicy(maxAttempts = 2), retry503)
         ackedTransfer("a.csv", listOf(downstream))
         backgroundScope.launch { notifier(channel).run() }
         runCurrent()
@@ -172,7 +186,7 @@ class NotifierTest {
     /** A channel that parks every delivery until [release] completes; the boundary a cancellation or an in-flight test needs. */
     private class ParkingChannel(name: String) : DeliveryChannel {
         override val name = ChannelName(name)
-        override val policy = DeliveryPolicy(fullJitter = false)
+        override val policy = DeliveryPolicy()
         val release = CompletableDeferred<Unit>()
         val arrived = AtomicInteger()
         override suspend fun deliver(event: DeliveryEvent): DeliveryOutcome {
@@ -224,8 +238,8 @@ class NotifierTest {
 
     @Test
     fun I13_two_channels_on_one_event_are_delivered_independently() = runTest {
-        val a = RecordingChannel("a", noJitter, ok)
-        val b = RecordingChannel("b", noJitter, ok)
+        val a = RecordingChannel("a", spec93, ok)
+        val b = RecordingChannel("b", spec93, ok)
         val t = ackedTransfer("a.csv", listOf(ChannelName("a"), ChannelName("b")))
         backgroundScope.launch { notifier(a, b).run() }
         runCurrent()
@@ -237,8 +251,8 @@ class NotifierTest {
 
     @Test
     fun S17_two_channels_on_acked_one_always_503() = runTest {
-        val a = RecordingChannel("a", noJitter, retry503)
-        val b = RecordingChannel("b", noJitter, ok)
+        val a = RecordingChannel("a", spec93, retry503)
+        val b = RecordingChannel("b", spec93, ok)
         val t = ackedTransfer("a.csv", listOf(ChannelName("a"), ChannelName("b")))
         backgroundScope.launch { notifier(a, b).run() }
         runCurrent()
@@ -260,7 +274,7 @@ class NotifierTest {
             MappingRow("order.name", provider = "orderDetails", select = "/name"),
             MappingRow("order.total", provider = "orderDetails", select = "/total"),
         ))
-        val channel = RecordingChannel("downstream", noJitter, ok)
+        val channel = RecordingChannel("downstream", spec93, ok)
         ackedTransfer("a.csv", listOf(downstream))
         val notifier = Notifier(store, listOf(channel), mapOf(downstream to table), MappingRenderer { provider }, NotifierConfig(), registry, clock)
         assertEquals(0, invocations.get(), "nothing is rendered before send time")
@@ -275,7 +289,7 @@ class NotifierTest {
 
     @Test
     fun a_wake_causes_a_select_before_the_sweep_interval_elapses() = runTest {
-        val channel = RecordingChannel("downstream", noJitter, ok)
+        val channel = RecordingChannel("downstream", spec93, ok)
         val notifier = notifier(channel)
         backgroundScope.launch { notifier.run() }
         runCurrent()
@@ -321,7 +335,7 @@ class NotifierTest {
 
     @Test
     fun B2_a_store_failure_during_the_select_is_logged_and_the_next_sweep_delivers() = runTest {
-        val channel = RecordingChannel("downstream", noJitter, ok)
+        val channel = RecordingChannel("downstream", spec93, ok)
         ackedTransfer("a.csv", listOf(downstream))
         val job = backgroundScope.launch { notifier(channel, store = FailsOnce(store, "due")).run() }
         runCurrent()
@@ -335,7 +349,7 @@ class NotifierTest {
 
     @Test
     fun SPEC4_a_delivery_that_could_not_be_recorded_is_logged_with_the_transfer_id_route_and_channel_in_the_MDC() = runTest {
-        val channel = RecordingChannel("downstream", noJitter, ok)
+        val channel = RecordingChannel("downstream", spec93, ok)
         val t = ackedTransfer("a.csv", listOf(downstream))
         val logs = LogCapture()
         logs.use {
@@ -351,7 +365,7 @@ class NotifierTest {
 
     @Test
     fun B2_a_store_failure_recording_a_delivery_leaves_the_row_PENDING_and_a_later_sweep_records_it_once() = runTest {
-        val channel = RecordingChannel("downstream", noJitter, ok, ok)
+        val channel = RecordingChannel("downstream", spec93, ok, ok)
         ackedTransfer("a.csv", listOf(downstream))
         val notifier = notifier(channel, store = FailsOnce(store, "delivered"))
         val job = backgroundScope.launch { notifier.run() }

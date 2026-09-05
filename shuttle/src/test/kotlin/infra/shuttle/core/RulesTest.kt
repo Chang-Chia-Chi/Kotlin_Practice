@@ -303,6 +303,16 @@ class RulesTest {
     fun rule7_notifier_batch_is_positive() =
         assertEquals(listOf(7), violated(config(more = { notifier { batch = 0 } })))
 
+    /**
+     * The notifier excludes its in-flight ids from `due` by an `IN` list, and Oracle refuses one longer than
+     * 1000 expressions (ORA-01795); spec 9.5 bounds that set by `batch + workers`, so the sum is the ceiling.
+     */
+    @Test
+    fun rule7_notifier_batch_plus_workers_stays_under_the_IN_list_limit() {
+        assertEquals(listOf(7), violated(config(more = { notifier { workers = 4; batch = 1000 } })))
+        assertEquals(emptyList<Int>(), violated(config(more = { notifier { workers = 4; batch = 996 } })))
+    }
+
     /** B8: a zero initial delay stays zero however often it doubles, so a failing route restarts flat out. */
     @Test
     fun rule7_restartBackoff_initial_is_positive() =

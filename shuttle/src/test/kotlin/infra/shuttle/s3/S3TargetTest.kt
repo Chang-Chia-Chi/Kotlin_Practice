@@ -32,21 +32,17 @@ import software.amazon.awssdk.services.s3.model.PutBucketLifecycleConfigurationR
 import software.amazon.awssdk.services.s3.model.S3Exception
 import software.amazon.awssdk.services.s3.model.ServerSideEncryption
 import java.security.MessageDigest
-import java.time.Clock
-import java.time.Instant
-import java.time.ZoneOffset
 
 @Tag("minio")
 class S3TargetTest : ObjectStoreTargetContract() {
     private val client get() = Minio.client
 
-    private val clock: Clock = Clock.fixed(Instant.parse("2026-09-03T10:00:00Z"), ZoneOffset.UTC)
     private lateinit var bucket: String
     private lateinit var target: S3Target
 
     @BeforeEach fun bucket() {
         bucket = Minio.versionedBucket()
-        target = S3Target(client, bucket, Dispatchers.IO, clock)
+        target = S3Target(client, bucket, Dispatchers.IO)
     }
 
     override fun target(): ObjectStoreTarget = target
@@ -66,7 +62,7 @@ class S3TargetTest : ObjectStoreTargetContract() {
     fun I6_three_stores_read_back_the_newest_by_key_a_crash_between_PUT_and_HEAD_is_repaired_by_the_next_store_and_nothing_is_deleted() = runTest {
         val spy = spy(client)
         var crash = false
-        val target = S3Target(spy, bucket, Dispatchers.IO, clock) {
+        val target = S3Target(spy, bucket, Dispatchers.IO) {
             if (crash) { crash = false; throw CancellationException("process died between PUT and HEAD") }
         }
         target.store("in/a.csv", file("1", "v1"), md5("v1"))
@@ -93,7 +89,7 @@ class S3TargetTest : ObjectStoreTargetContract() {
             val real = call.callRealMethod() as HeadObjectResponse
             real.toBuilder().serverSideEncryption(ServerSideEncryption.AES256).eTag("\"not-an-md5\"").build()
         }.`when`(spy).headObject(any(HeadObjectRequest::class.java))
-        val target = S3Target(spy, bucket, Dispatchers.IO, clock)
+        val target = S3Target(spy, bucket, Dispatchers.IO)
         val ref = target.store("in/c.csv", file("c", "cipher"), md5("cipher"))
         assertEquals(6, ref.size)
         assertEquals(1, target.warnings.size)
@@ -122,7 +118,7 @@ class S3TargetTest : ObjectStoreTargetContract() {
         target.probe()
         assertTrue(target.warnings.isEmpty())
 
-        val missing = S3Target(client, "no-such-bucket", Dispatchers.IO, clock)
+        val missing = S3Target(client, "no-such-bucket", Dispatchers.IO)
         val error = runCatching { missing.probe() }.exceptionOrNull()
         assertTrue(error is IllegalStateException && error.message!!.contains("no-such-bucket"), "$error")
     }

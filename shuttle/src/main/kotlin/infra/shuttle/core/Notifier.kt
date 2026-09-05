@@ -178,8 +178,7 @@ class Notifier(
     private fun backoff(policy: DeliveryPolicy, attempt: Int): Duration {
         val b = policy.backoff
         val ceiling = min(b.max.inWholeMilliseconds.toDouble(), b.initial.inWholeMilliseconds * b.factor.pow(attempt - 1))
-        val millis = if (policy.fullJitter) random.nextDouble(0.0, ceiling + 1) else ceiling
-        return millis.toLong().milliseconds
+        return random.nextDouble(0.0, ceiling + 1).toLong().milliseconds
     }
 
     // ponytail: a full PENDING scan per pass; an aggregate query if the outbox ever grows past what a sweep should read.

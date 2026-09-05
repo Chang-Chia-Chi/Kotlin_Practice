@@ -46,14 +46,13 @@ data class Backoff(val initial: Duration, val max: Duration, val factor: Double 
 
 /**
  * Spec 9.3 defaults. The per-attempt timeout the section names is the channel's own (`HttpChannel.timeout`,
- * rule 3); the policy carries no second one. [fullJitter] is not a YAML knob: spec 9.3 fixes full jitter as
- * the behaviour, and the flag is here so a test can ask for the bare ceiling and get a deterministic backoff.
+ * rule 3); the policy carries no second one. Full jitter is behaviour, not a knob: the notifier always draws
+ * the delay uniformly below the ceiling, and a test that wants the bare ceiling hands it a `Random` that says so.
  */
 data class DeliveryPolicy(
     val maxAttempts: Int = 50,
     val giveUpAfter: Duration = 24.hours,
     val backoff: Backoff = Backoff(initial = 5.seconds, max = 15.minutes),
-    val fullJitter: Boolean = true,
 )
 
 /** Spec 9.6: one row of a channel's body, in the table's own keys so YAML and the DSL meet here. */

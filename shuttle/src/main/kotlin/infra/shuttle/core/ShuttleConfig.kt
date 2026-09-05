@@ -91,7 +91,15 @@ sealed interface HttpAuth {
     data class Basic(val user: Secret, val password: Secret) : HttpAuth
     data class Header(val name: String, val value: Secret) : HttpAuth
 }
-data class ResponseSpec(val success: Set<Int> = (200..299).toSet(), val retry: Set<Int> = emptySet(), val reference: String? = null)
+/**
+ * Spec 9.3, D54: a channel that declares no `response:` block retries every 5xx and 429 and rejects any
+ * other 4xx, so a 503 is not a permanent rejection; a stated `retry` replaces this set rather than adding to it.
+ */
+data class ResponseSpec(
+    val success: Set<Int> = (200..299).toSet(),
+    val retry: Set<Int> = (500..599).toSet() + 429,
+    val reference: String? = null,
+)
 data class HttpChannel(
     override val name: String,
     val method: HttpMethod = HttpMethod.POST,
