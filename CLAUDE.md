@@ -1,141 +1,59 @@
-# DynaCache — Project Instructions
+# DynaCache
 
-## What This Is
+A Dynamo-style AP distributed cache in Kotlin speaking the Redis wire protocol, plus a
+Raft-backed CP subsystem (MicroRaft) for linearizable primitives on the `cp:*` namespace.
+A learning project built ticket by ticket by subagents under an orchestrator.
 
-A **learning project** — building a distributed cache from scratch in Kotlin. Redis-compatible data structures and wire protocol. Primary engine is Dynamo-style AP; a Raft-backed CP subsystem (via MicroRaft) provides linearizable primitives (locks, counters, semaphores, latches, CAS) on the `cp:*` namespace — usable as a safe distributed lock service. Goal: deep understanding of both AP and CP distributed systems, not just getting code done.
+## Documents of authority
 
-**Specs:**
-- `docs/design-spec.md` — AP engine constraints, invariants, semantics. Source of truth for P1–P4.
-- `docs/design-spec-cp.md` — CP subsystem constraints, invariants, semantics. Source of truth for P5.
+All under the parent repository's `docs/dynamiccache/`:
 
-**Learning guide:** `docs/LEARNING-GUIDE.md` — phase-by-phase path with papers to read per concept.
-**Implementation plans:** `docs/plans/` — P1 through P5, has code reference snippets if needed, but the user writes their own implementation.
+- `design-spec.md` (AP engine: C1 to C15, I1 to I12) and `design-spec-cp.md` (CP: C16 to C23,
+  I13 to I22). The spec wins over a ticket unless `progress.md` records a deviation.
+- `plan.md` (ground rules, module graph, seams, ticket DAG, model routing, orchestrator
+  protocol) and `plans/p1..p5` (one entry per ticket).
+- `progress.md`: one entry per finished ticket.
+- Tickets: `.scratch/dynacache/issues/NN-<slug>.md` in the parent repository.
 
-## Collaboration Model
+In this repository: `CONTEXT.md` is the glossary (use its words in code and tests);
+`docs/adr/` holds the architecture decisions.
 
-**Learn first, build second. The agent writes code, but ONLY after the user demonstrates understanding.**
+## How work happens
 
-### The Gate: Concept Quiz Before Implementation
+The orchestrator writes no code. Every ticket runs in a fresh subagent that follows the Matt
+Pocock `implement` shape: `tdd` at the seams the plan entry names (red before green, one
+vertical slice at a time), `codebase-design` vocabulary for any new interface, a
+`code-review` pass, then a commit. See `plan.md` section 6.
 
-Before starting ANY sub-phase implementation, you MUST:
-
-1. **Present the concept** — explain what the sub-phase teaches, referencing the paper/reading material
-2. **Quiz the user** — ask 3-5 targeted questions that test understanding of the core concept (not trivia, but "could you design this?" level)
-3. **Score the answers** — rate each answer and give an overall score out of 10
-4. **Gate decision:**
-   - **Score >= 7/10:** PASS — proceed to implementation. Explain the "why" as you write code.
-   - **Score < 7/10:** FAIL — identify gaps, explain what's missing, suggest what to re-read. Do NOT start implementation. Quiz again when the user is ready.
-
-### Quiz Design Principles
-
-- Questions should test *understanding*, not memorization
-- "Why does X work this way?" > "What is X called?"
-- "What happens if Y fails?" > "List the steps of Y"
-- "How would you handle Z edge case?" > "What paper describes Z?"
-- Include at least one question that requires the user to reason about a scenario not directly covered in the reading
-
-### After Passing the Gate
-
-- The agent writes the implementation following the plan in `docs/plans/`
-- Explain the "why" at key decision points as you code
-- The user reviews, asks questions, and learns from the implementation
-- When reviewing: focus on whether the invariants from the spec hold, not style nitpicks
-
-## 5-Phase Structure
-
-| Phase | Theme | Key concepts | End state |
-|---|---|---|---|
-| **P1** | Data Engine + Single Node | Skip list, timer wheel, W-TinyLFU, RESP, Lua, SCAN + custom hash table | `redis-cli` works against single node |
-| **P2** | Distribution | Consistent hashing, SWIM gossip, DVVs, quorum R/W | 3-node cluster, minority-failure tolerant |
-| **P3** | Fault Tolerance | Sloppy quorum, hinted handoff, read repair, Merkle anti-entropy, conflict merge | Partition → heal → converge |
-| **P4** | Persistence + Snapshots | RDB serialization, WAL (write-ahead log), Chandy-Lamport algorithm | Warm restart + WAL durability + distributed snapshots |
-| **P5** | CP Subsystem (Raft via MicroRaft) | Linearizability, Raft state machines, fencing tokens, session lifecycle, TTL-in-Raft | Distributed locks, atomic counters, semaphores, latches, CAS on `cp:*` keys |
-
-Each phase has sub-phases (1A, 1B, ...) that teach one concept each. The rhythm is: **read paper → write tests → build → verify key insight**.
-
-## Current Progress
-
-- [x] Project scaffolded — 3 Maven modules, builds clean
-- [ ] **P1A:** Command model + basic GET/SET — NOT STARTED
-- [ ] P1B: String completion + Hash + List + SCAN (custom hash table + reverse binary iteration)
-- [ ] P1C: Skip list + Sorted Set
-- [ ] P1D: Hierarchical timer wheel + TTL
-- [ ] P1E: Eviction — LRU + W-TinyLFU
-- [ ] P1F: RESP server + MULTI/EXEC + Lua
-- [ ] P2A–P2D: Distribution (hashing, gossip, DVVs, replication)
-- [ ] P3A–P3D: Fault tolerance (handoff, repair, anti-entropy, convergence)
-- [ ] P4A: RDB snapshots
-- [ ] P4B: Write-Ahead Log (WAL) — fsync policies, group commit, checkpoint, crash recovery
-- [ ] P4C: Chandy-Lamport distributed snapshots
-- [ ] P5A: MicroRaft integration + AtomicLong state machine
-- [ ] P5B: FencedLock + fencing tokens + lease TTL
-- [ ] P5C: Sessions + session-tied resource release
-- [ ] P5D: Semaphore + CountDownLatch + AtomicReference
-- [ ] P5E: Command dispatcher + Redis-compat routing (`cp:*` namespace)
-- [ ] P5F: Chaos tests + invariant verification (I13–I22)
-
-**Update this checklist as phases complete.**
-
-## Tech Stack
-
-- **Language:** Kotlin 2.2.x, JDK 21
-- **Build:** Maven 3.9.8 — always use `/c/Users/maxch/.m2/wrapper/dists/apache-maven-3.9.8/af622e91/bin/mvn`
-- **Test:** JUnit 5 + AssertJ
-- **Server:** Netty 4.1.x (RESP protocol)
-- **Cluster:** gRPC-Kotlin + Protobuf (inter-node)
-- **Scripting:** LuaJ 3.0.x (embedded Lua)
-- **Consensus (CP subsystem, P5):** MicroRaft (embedded Raft library, Java)
-- **No framework** — pure Kotlin + coroutines, no Quarkus/Spring/Ktor
-
-## Module Boundaries (compile-time enforced)
+## Module graph (Maven-enforced)
 
 ```
-dynacache-engine   → kotlin-stdlib ONLY (pure, no I/O)
-dynacache-cluster  → engine + coroutines + gRPC
-dynacache-cp       → cluster + MicroRaft                     (added in P5)
-dynacache-server   → cp + Netty + LuaJ
+dynacache-engine   kotlin-stdlib only; JDK executors allowed; no I/O, no coroutines
+dynacache-cluster  engine + kotlinx-coroutines + grpc-kotlin + protobuf
+dynacache-cp       cluster + MicroRaft                     (from ticket 38)
+dynacache-server   cp (cluster until ticket 38) + Netty + LuaJ
 ```
 
-If the engine module imports Netty or gRPC, the build should fail. This is intentional.
+## Tech stack
 
-## Key Design Decisions (locked)
+Kotlin 2.2, JDK 21, Maven. Netty for RESP2, gRPC-Kotlin and protobuf between nodes, LuaJ for
+`EVAL`, MicroRaft for consensus. No framework.
 
-- **AP core + CP subsystem** — Primary engine is Dynamo-style AP (no consensus; conflicts detected by DVVs, resolved by merge rules). A Raft-backed CP subsystem (MicroRaft) handles linearizable primitives on `cp:*` keys for safe distributed locks, atomic counters, etc. The two engines share nothing except the RESP dispatcher and gRPC transport. See `docs/design-spec-cp.md`.
-- **DVVs, not vector clocks** — bounded by cluster size, not client count.
-- **Timer wheel, not random sampling** — O(1) insert/cancel/expire for TTL.
-- **W-TinyLFU** — Caffeine-style eviction with Count-Min Sketch admission filter.
-- **RESP2** — Redis wire protocol so `redis-cli` and existing clients work.
-- **LuaJ** — embedded Lua for atomic scripting, not a custom interpreter.
-- **Chandy-Lamport** — distributed snapshots for cluster-wide consistent state capture.
-- **Small fixed cluster (3–7 nodes)** — no dynamic membership.
+## Tests
 
-## Papers (reference list)
+JUnit 5 + Mockito only. No AssertJ, MockK, Kotest or Hamcrest. Mocks only at true boundaries
+(sockets, clock, randomness, filesystem). No sleeps: time is an injected `java.time.Clock`.
+Spec-named tests keep the spec's name; constraint tests are `C<n>_<description>`, invariant
+tests `I<n>_<description>`.
 
-| Paper | For which phase |
-|---|---|
-| Dynamo (DeCandia et al., 2007) | P2, P3 |
-| SWIM (Das et al., 2002) | P2B |
-| Skip Lists (Pugh, 1990) | P1C |
-| Timer Wheels (Varghese & Lauck, 1987) | P1D |
-| TinyLFU (Einziger et al., 2017) | P1E |
-| Redis `dict.c` — `dictScan()` + incremental rehashing | P1B (SCAN) |
-| DVVs (Preguica et al., 2012) | P2C |
-| ARIES (Mohan et al., 1992) — sections 1-6 | P4B (WAL) |
-| Chandy-Lamport (1985) | P4C |
-| Raft (Ongaro & Ousterhout, 2014) | P5A–P5B |
-| Kleppmann — "How to do distributed locking" (2016) | P5B (fencing tokens) |
-| ZooKeeper (Hunt et al., 2010) | P5C (session model) |
-| DDIA Ch. 5-6, 9 (Kleppmann) | Background (Ch. 9 for P5) |
-
-## Build & Test Commands
+## Build
 
 ```bash
-# Build
 /c/Users/maxch/.m2/wrapper/dists/apache-maven-3.9.8/af622e91/bin/mvn package
-
-# Test all
-/c/Users/maxch/.m2/wrapper/dists/apache-maven-3.9.8/af622e91/bin/mvn test
-
-# Test single module
 /c/Users/maxch/.m2/wrapper/dists/apache-maven-3.9.8/af622e91/bin/mvn test -pl dynacache-engine
 ```
+
+## Git
+
+This directory is its own repository (branch `misc/ai_gen`), nested inside `Kotlin_Practice`,
+which ignores it. Commit code here; commit docs and tickets in the parent.
