@@ -172,143 +172,77 @@
     <div class="part-head">
       <div class="eyebrow">Part 2</div>
       <h2>The whole system in one picture</h2>
-      <p>One process, one replica. Object stores and channels are declared once, and a route gives each a role where it uses it. Every route is its own supervised loop; all routes share the state store, the stores' session pools and one notifier. Routes and the notifier never talk to each other except through the state store and one wake signal.</p>
+      <p>Shuttle knows three kinds of things: places where files live, channels where news goes, and a notebook. A route is one sentence: from this place, do this to each file, put it in that place, then tell these people. Everything else is how that sentence is kept true. Every route is its own supervised loop; all routes share the state store, the stores' session pools and one notifier. Routes and the notifier never talk to each other except through the state store and one wake signal.</p>
     </div>
 
     <figure>
       <div class="frame">
-        <svg viewBox="0 0 1090 720" role="img" aria-label="The shuttle process holds two supervised routes and one notifier. The vendor-drop route polls an SFTP store and stores into MinIO; the image-sets route is triggered by NATS, fetches from MinIO and stores onto a partner SFTP server; both write the Oracle state store and wake the notifier, which posts to HTTP channels.">
+        <svg viewBox="0 0 900 380" role="img" aria-label="Shuttle in five boxes: something arrives from a place or a message; one route picks it up, works on it, drops it off and stamps it; the copy goes to a place, the news goes to a channel, and every step is written in the Oracle notebook first so a crash is continued, not restarted.">
           <defs>
             <marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/></marker>
             <marker id="a2g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="var(--green)"/></marker>
           </defs>
 
-          <!-- left externals -->
-          <rect x="8" y="100" width="168" height="52" rx="6" fill="var(--paper)" stroke="currentColor" stroke-width="1.5"/>
-          <text x="92" y="121" text-anchor="middle" font-size="13" font-weight="600" fill="currentColor">vendor</text>
-          <text x="92" y="139" text-anchor="middle" font-size="9.5" fill="var(--muted)">objectStore · SFTP · pool 20</text>
-          <rect x="8" y="230" width="168" height="52" rx="6" fill="var(--paper)" stroke="currentColor" stroke-width="1.5"/>
-          <text x="92" y="251" text-anchor="middle" font-size="13" font-weight="600" fill="currentColor">events</text>
-          <text x="92" y="269" text-anchor="middle" font-size="9.5" fill="var(--muted)">channel · NATS · images.ready</text>
+          <!-- from -->
+          <rect x="20" y="95" width="160" height="80" rx="8" fill="var(--paper)" stroke="currentColor" stroke-width="1.5"/>
+          <text x="100" y="121" text-anchor="middle" font-size="14" font-weight="600" fill="currentColor">from a place</text>
+          <text x="100" y="140" text-anchor="middle" font-size="10.5" fill="var(--muted)">SFTP folder · S3 bucket</text>
+          <text x="100" y="157" text-anchor="middle" font-size="10.5" fill="var(--muted)">or a message that says "go"</text>
 
-          <!-- right externals -->
-          <rect x="910" y="100" width="168" height="52" rx="6" fill="var(--paper)" stroke="currentColor" stroke-width="1.5"/>
-          <text x="994" y="121" text-anchor="middle" font-size="13" font-weight="600" fill="currentColor">minio</text>
-          <text x="994" y="139" text-anchor="middle" font-size="9.5" fill="var(--muted)">objectStore · S3 · versioned</text>
-          <rect x="910" y="310" width="168" height="52" rx="6" fill="var(--paper)" stroke="currentColor" stroke-width="1.5"/>
-          <text x="994" y="331" text-anchor="middle" font-size="13" font-weight="600" fill="currentColor">partner</text>
-          <text x="994" y="349" text-anchor="middle" font-size="9.5" fill="var(--muted)">objectStore · SFTP · /incoming</text>
-          <rect x="910" y="420" width="168" height="52" rx="6" fill="var(--paper)" stroke="currentColor" stroke-width="1.5"/>
-          <text x="994" y="441" text-anchor="middle" font-size="13" font-weight="600" fill="currentColor">downstream</text>
-          <text x="994" y="459" text-anchor="middle" font-size="9.5" fill="var(--muted)">channel · HTTP · dedupes on id</text>
-          <rect x="910" y="500" width="168" height="52" rx="6" fill="var(--paper)" stroke="currentColor" stroke-width="1.5"/>
-          <text x="994" y="521" text-anchor="middle" font-size="13" font-weight="600" fill="currentColor">upstream-receipt</text>
-          <text x="994" y="539" text-anchor="middle" font-size="9.5" fill="var(--muted)">channel · HTTP · on: fetched</text>
-
-          <!-- process -->
-          <rect x="250" y="40" width="590" height="560" rx="8" fill="none" stroke="currentColor" stroke-width="1.2" stroke-dasharray="6 4"/>
-          <text x="264" y="62" font-size="13" font-weight="700" fill="currentColor">shuttle process · one replica · Kotlin + Quarkus</text>
-
-          <!-- route 1 -->
-          <rect x="270" y="80" width="550" height="100" rx="6" fill="var(--paper)" stroke="currentColor" stroke-width="1.2"/>
-          <text x="283" y="98" font-size="12" font-weight="600" fill="currentColor">route vendor-drop · supervised · restart with backoff</text>
-          <rect x="285" y="108" width="200" height="62" rx="4" fill="none" stroke="currentColor" stroke-width="1"/>
-          <text x="385" y="132" text-anchor="middle" font-size="10.5" fill="currentColor">poll vendor:/inbox · every 1h</text>
-          <text x="385" y="150" text-anchor="middle" font-size="10" fill="var(--muted)">readiness · onAck: move temp/</text>
-          <rect x="510" y="108" width="295" height="62" rx="4" fill="var(--green-soft)" stroke="var(--green)" stroke-width="1"/>
-          <text x="657" y="125" text-anchor="middle" font-size="10.5" fill="currentColor">pipelines ×4 · fetch → process → store → ack</text>
-          <text x="657" y="141" text-anchor="middle" font-size="10" fill="var(--muted)">extract · rename · zip</text>
-          <text x="657" y="157" text-anchor="middle" font-size="10" fill="var(--muted)" class="svgmono">key {vendor}/{orderNumber}/{storedName}</text>
-          <line x1="485" y1="139" x2="508" y2="139" stroke="currentColor" stroke-width="1" marker-end="url(#a2)"/>
-
-          <!-- route 2 -->
-          <rect x="270" y="210" width="550" height="100" rx="6" fill="var(--paper)" stroke="currentColor" stroke-width="1.2"/>
-          <text x="283" y="228" font-size="12" font-weight="600" fill="currentColor">route image-sets · supervised</text>
-          <rect x="285" y="238" width="200" height="62" rx="4" fill="none" stroke="currentColor" stroke-width="1"/>
-          <text x="385" y="262" text-anchor="middle" font-size="10.5" fill="currentColor">subscribe events:images.ready</text>
-          <text x="385" y="280" text-anchor="middle" font-size="10" fill="var(--muted)">fetch from minio · onAck: ack</text>
-          <rect x="510" y="238" width="295" height="62" rx="4" fill="var(--green-soft)" stroke="var(--green)" stroke-width="1"/>
-          <text x="657" y="255" text-anchor="middle" font-size="10.5" fill="currentColor">pipelines ×2 · fetch → expand → store N → ack</text>
-          <text x="657" y="271" text-anchor="middle" font-size="10" fill="var(--muted)">one child per image · parent acked once,</text>
-          <text x="657" y="286" text-anchor="middle" font-size="10" fill="var(--muted)">after every child is stored</text>
-          <line x1="485" y1="269" x2="508" y2="269" stroke="currentColor" stroke-width="1" marker-end="url(#a2)"/>
-
-          <!-- notifier -->
-          <rect x="270" y="350" width="330" height="110" rx="6" fill="var(--paper)" stroke="currentColor" stroke-width="1.2"/>
-          <text x="435" y="372" text-anchor="middle" font-size="13" font-weight="600" fill="currentColor">notifier</text>
-          <text x="435" y="389" text-anchor="middle" font-size="10" fill="var(--muted)">one cold Flow · buffer · workers ×4</text>
-          <text x="435" y="403" text-anchor="middle" font-size="10" fill="var(--muted)">woken by every ack · swept every 30 s</text>
-          <rect x="345" y="410" width="180" height="22" rx="3" fill="none" stroke="currentColor" stroke-width="0.8" stroke-dasharray="3 2"/>
-          <text x="435" y="425" text-anchor="middle" font-size="11" fill="currentColor">in-flight ids · memory</text>
-          <text x="435" y="449" text-anchor="middle" font-size="10" fill="var(--muted)">Delivered · Retry with backoff · Reject → FAILED</text>
-
-          <!-- staging -->
-          <rect x="630" y="350" width="190" height="52" rx="6" fill="var(--paper)" stroke="currentColor" stroke-width="1" stroke-dasharray="4 3"/>
-          <text x="725" y="371" text-anchor="middle" font-size="11" font-weight="600" fill="currentColor">staging · local disk</text>
-          <text x="725" y="388" text-anchor="middle" font-size="10" fill="var(--muted)">per store · wiped at boot</text>
-
-          <!-- supervisor / modes, in the left column -->
-          <g font-size="10.5" fill="var(--muted)">
-            <text x="8" y="340" font-size="11" font-weight="600" fill="currentColor">route supervisor</text>
-            <text x="8" y="356">a dead route restarts with backoff</text>
-            <text x="8" y="371">30 s → 15 min · readiness is false</text>
-            <text x="8" y="386">only when every route is down</text>
-            <text x="8" y="414" font-size="11" font-weight="600" fill="currentColor">shuttle validate · shuttle try</text>
-            <text x="8" y="430">the 25 rules, then sample renderings</text>
-            <text x="8" y="445">of key, body and metadata, offline</text>
+          <!-- the shuttle -->
+          <rect x="220" y="50" width="460" height="200" rx="10" fill="var(--paper)" stroke="currentColor" stroke-width="1.5"/>
+          <text x="450" y="76" text-anchor="middle" font-size="14" font-weight="700" fill="currentColor">the shuttle · one route</text>
+          <g font-size="12" font-weight="600" fill="currentColor">
+            <rect x="235" y="98" width="95" height="72" rx="6" fill="var(--green-soft)" stroke="var(--green)" stroke-width="1"/>
+            <text x="282" y="122" text-anchor="middle">1 pick up</text>
+            <text x="282" y="140" text-anchor="middle" font-size="9.5" font-weight="400" fill="var(--muted)">into a local</text>
+            <text x="282" y="153" text-anchor="middle" font-size="9.5" font-weight="400" fill="var(--muted)">staging folder</text>
+            <rect x="348" y="98" width="95" height="72" rx="6" fill="var(--green-soft)" stroke="var(--green)" stroke-width="1"/>
+            <text x="395" y="122" text-anchor="middle">2 work on it</text>
+            <text x="395" y="140" text-anchor="middle" font-size="9.5" font-weight="400" fill="var(--muted)">rename · zip</text>
+            <text x="395" y="153" text-anchor="middle" font-size="9.5" font-weight="400" fill="var(--muted)">check · or nothing</text>
+            <rect x="461" y="98" width="95" height="72" rx="6" fill="var(--green-soft)" stroke="var(--green)" stroke-width="1"/>
+            <text x="508" y="122" text-anchor="middle">3 drop off</text>
+            <text x="508" y="140" text-anchor="middle" font-size="9.5" font-weight="400" fill="var(--muted)">copy it, then</text>
+            <text x="508" y="153" text-anchor="middle" font-size="9.5" font-weight="400" fill="var(--muted)">check the copy</text>
+            <rect x="574" y="98" width="95" height="72" rx="6" fill="var(--green-soft)" stroke="var(--green)" stroke-width="1"/>
+            <text x="621" y="122" text-anchor="middle">4 stamp · tell</text>
+            <text x="621" y="140" text-anchor="middle" font-size="9.5" font-weight="400" fill="var(--muted)">mark the source</text>
+            <text x="621" y="153" text-anchor="middle" font-size="9.5" font-weight="400" fill="var(--muted)">done, then tell</text>
           </g>
+          <g stroke="currentColor" stroke-width="1.2" marker-end="url(#a2)">
+            <line x1="330" y1="134" x2="346" y2="134"/><line x1="443" y1="134" x2="459" y2="134"/><line x1="556" y1="134" x2="572" y2="134"/>
+          </g>
+          <text x="450" y="200" text-anchor="middle" font-size="10.5" fill="var(--muted)">a few files at a time · a bad file never blocks the others</text>
+          <text x="450" y="220" text-anchor="middle" font-size="10.5" fill="var(--muted)">as many routes as you like, each restarted on its own if it dies</text>
 
-          <!-- Oracle -->
-          <rect x="270" y="630" width="550" height="64" rx="6" fill="var(--green-soft)" stroke="var(--green)" stroke-width="1.5"/>
-          <text x="545" y="652" text-anchor="middle" font-size="13" font-weight="600" fill="var(--green)">shuttle state store · Oracle · the only truth</text>
-          <text x="545" y="677" text-anchor="middle" font-size="10.5" fill="currentColor" class="svgmono">file_transfer · state   |   delivery_outbox · on_state · notification_state</text>
+          <!-- to, tell -->
+          <rect x="720" y="70" width="160" height="70" rx="8" fill="var(--paper)" stroke="currentColor" stroke-width="1.5"/>
+          <text x="800" y="96" text-anchor="middle" font-size="14" font-weight="600" fill="currentColor">to a place</text>
+          <text x="800" y="115" text-anchor="middle" font-size="10.5" fill="var(--muted)">SFTP folder · S3 bucket</text>
+          <text x="800" y="130" text-anchor="middle" font-size="10.5" fill="var(--muted)">the same kinds, named once</text>
+          <rect x="720" y="170" width="160" height="70" rx="8" fill="var(--paper)" stroke="currentColor" stroke-width="1.5"/>
+          <text x="800" y="196" text-anchor="middle" font-size="14" font-weight="600" fill="currentColor">tell someone</text>
+          <text x="800" y="215" text-anchor="middle" font-size="10.5" fill="var(--muted)">HTTP call · NATS message</text>
+          <text x="800" y="230" text-anchor="middle" font-size="10.5" fill="var(--muted)">or nobody</text>
+
+          <!-- notebook -->
+          <rect x="220" y="300" width="460" height="64" rx="8" fill="var(--green-soft)" stroke="var(--green)" stroke-width="1.5"/>
+          <text x="450" y="324" text-anchor="middle" font-size="14" font-weight="600" fill="var(--green)">the notebook · Oracle</text>
+          <text x="450" y="346" text-anchor="middle" font-size="10.5" fill="currentColor">every step is written down before the next one starts</text>
 
           <!-- arrows -->
-          <line x1="176" y1="126" x2="285" y2="136" stroke="currentColor" stroke-width="1.2" marker-start="url(#a2)" marker-end="url(#a2)"/>
-          <text x="226" y="114" text-anchor="middle" font-size="9" fill="var(--muted)">connector</text>
-          <text x="226" y="154" text-anchor="middle" font-size="9" fill="currentColor">list · get · rename</text>
-
-          <line x1="805" y1="130" x2="910" y2="126" stroke="currentColor" stroke-width="1.2" marker-end="url(#a2)"/>
-          <text x="857" y="116" text-anchor="middle" font-size="9" fill="currentColor">store</text>
-          <text x="857" y="146" text-anchor="middle" font-size="9" fill="var(--muted)">never deletes</text>
-
-          <line x1="176" y1="256" x2="285" y2="266" stroke="currentColor" stroke-width="1.2" marker-start="url(#a2)" marker-end="url(#a2)"/>
-          <text x="230" y="244" text-anchor="middle" font-size="9.5" fill="currentColor">message</text>
-          <text x="230" y="284" text-anchor="middle" font-size="9.5" fill="var(--muted)">ack · nak</text>
-
-          <path d="M 960 152 L 960 250 L 807 250" fill="none" stroke="currentColor" stroke-width="1.2" marker-end="url(#a2)"/>
-          <text x="868" y="241" text-anchor="middle" font-size="9" fill="currentColor">fetch manifest + images</text>
-
-          <line x1="805" y1="282" x2="910" y2="332" stroke="currentColor" stroke-width="1.2" marker-end="url(#a2)"/>
-          <text x="895" y="292" text-anchor="middle" font-size="9.5" fill="currentColor">upload .part · rename</text>
-
-          <line x1="615" y1="310" x2="615" y2="630" stroke="var(--green)" stroke-width="1.4" marker-end="url(#a2g)"/>
-          <text transform="translate(627 540) rotate(-90)" text-anchor="middle" font-size="10" fill="var(--green)" font-weight="600">JDBI · one txn per state</text>
-
-          <line x1="545" y1="310" x2="545" y2="350" stroke="currentColor" stroke-width="1" stroke-dasharray="4 3" marker-end="url(#a2)"/>
-          <text x="553" y="334" font-size="10" fill="var(--muted)">wake</text>
-
-          <line x1="435" y1="460" x2="435" y2="630" stroke="var(--green)" stroke-width="1.4" marker-start="url(#a2g)" marker-end="url(#a2g)"/>
-          <text x="443" y="540" font-size="10" fill="var(--green)" font-weight="600">select due</text>
-          <text x="443" y="554" font-size="10" fill="var(--green)" font-weight="600">DELIVERED / retry / FAILED</text>
-
-          <line x1="600" y1="430" x2="910" y2="446" stroke="currentColor" stroke-width="1.2" marker-end="url(#a2)"/>
-          <text x="755" y="420" text-anchor="middle" font-size="9.5" fill="currentColor">POST body from the mapping table · on: acked</text>
-          <line x1="600" y1="445" x2="910" y2="526" stroke="currentColor" stroke-width="1.2" marker-end="url(#a2)"/>
-          <text x="760" y="502" text-anchor="middle" font-size="9.5" fill="currentColor">POST on: fetched</text>
-
-          <!-- legend -->
-          <g font-size="10" fill="var(--muted)">
-            <rect x="8" y="600" width="14" height="10" rx="2" fill="none" stroke="currentColor" stroke-width="0.8" stroke-dasharray="3 2"/>
-            <text x="28" y="609">dashed box · memory, lost on restart</text>
-            <line x1="8" y1="630" x2="22" y2="630" stroke="var(--green)" stroke-width="1.6"/>
-            <text x="28" y="634">green · the durable commit path</text>
-            <line x1="8" y1="652" x2="22" y2="652" stroke="currentColor" stroke-width="1" stroke-dasharray="4 3"/>
-            <text x="28" y="656">dashed arrow · signal, never data</text>
-          </g>
+          <line x1="180" y1="135" x2="233" y2="135" stroke="currentColor" stroke-width="1.5" marker-end="url(#a2)"/>
+          <line x1="680" y1="105" x2="718" y2="105" stroke="currentColor" stroke-width="1.5" marker-end="url(#a2)"/>
+          <text x="699" y="91" text-anchor="middle" font-size="9.5" fill="currentColor">the copy</text>
+          <line x1="680" y1="205" x2="718" y2="205" stroke="currentColor" stroke-width="1.5" marker-end="url(#a2)"/>
+          <text x="699" y="226" text-anchor="middle" font-size="9.5" fill="currentColor">the news</text>
+          <line x1="450" y1="250" x2="450" y2="298" stroke="var(--green)" stroke-width="1.6" marker-start="url(#a2g)" marker-end="url(#a2g)"/>
+          <text x="460" y="270" font-size="10" fill="var(--green)" font-weight="600">write each step</text>
+          <text x="460" y="284" font-size="10" fill="var(--green)" font-weight="600">after a crash: read, carry on</text>
         </svg>
       </div>
-      <figcaption>Every arrow is a call or a signal, and the adapter that implements it lives in a package named for it: the SFTP connector, the AWS S3 SDK, jnats, JDBI, the JDK HTTP client. The same MinIO store is a target for one route and a fetch location for the other; the role is given at the route, not at the declaration.</figcaption>
+      <figcaption>Places and channels are named once and reused by every route; a route only says which one it takes from, which one it drops at, and whom it tells. The notebook is why nothing is lost: a step that is not written down did not happen, and a step that is written down is never done twice by mistake.</figcaption>
     </figure>
 
     <div class="block">
