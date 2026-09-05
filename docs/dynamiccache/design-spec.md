@@ -3,7 +3,7 @@
 **Date:** 2026-04-12
 **Project:** DynaCache (standalone, sibling to WorkFlow)
 **Target location:** `~/GitHub/Kotlin_Practice/DynaCache/`
-**Status:** Design locked, pending implementation plan
+**Status:** Design locked; plan in `plan.md`, tickets in `.scratch/dynacache/issues/` (spec revised 2026-09-06: I11, SSCAN, AOF non-goal)
 
 ---
 
@@ -47,7 +47,7 @@ Build a Dynamo-style AP distributed cache in Kotlin that implements Redis-compat
 - Redis Cluster protocol (`-MOVED` / `-ASK` slot migration) — we use Dynamo partitioning, not hash slots
 - Redis Streams, HyperLogLog, Bitmap, Geospatial — future extensions
 - Redis pub/sub — different system, different design
-- Disk-backed storage (AOF) — this is a cache, not a database
+- A database-grade storage engine: the WAL of section 2.8 exists only so a restart recovers acknowledged writes; no compaction, no rewrite, no multi-file log management
 - Jepsen / formal verification
 - Performance benchmarking (correctness first)
 
@@ -79,9 +79,9 @@ Commands: `EXPIRE`, `PEXPIRE`, `EXPIREAT`, `TTL`, `PTTL`, `PERSIST`.
 
 **Server** — introspection and management.
 
-Commands: `PING`, `INFO`, `DBSIZE`, `FLUSHDB`, `COMMAND`, `DEL`, `EXISTS`, `TYPE`, `KEYS` (pattern match), `RANDOMKEY`, `SCAN` (cursor-based iteration), `HSCAN`, `SSCAN`, `ZSCAN`.
+Commands: `PING`, `INFO`, `DBSIZE`, `FLUSHDB`, `COMMAND`, `DEL`, `EXISTS`, `TYPE`, `KEYS` (pattern match), `RANDOMKEY`, `SCAN` (cursor-based iteration), `HSCAN`, `ZSCAN`.
 
-**SCAN** — cursor-based key iteration using reverse binary iteration over a custom hash table with incremental rehashing. Stateless cursor, non-blocking, handles rehash mid-scan. Guarantees: every key present for the entire scan is returned at least once; may return duplicates (client deduplicates). `HSCAN`/`SSCAN`/`ZSCAN` are per-key variants for Hash, Set, and Sorted Set respectively. Pattern filtering via `MATCH` parameter.
+**SCAN** — cursor-based key iteration using reverse binary iteration over a custom hash table with incremental rehashing. Stateless cursor, non-blocking, handles rehash mid-scan. Guarantees: every key present for the entire scan is returned at least once; may return duplicates (client deduplicates). `HSCAN`/`ZSCAN` are per-key variants for Hash and Sorted Set (there is no Set type, so no `SSCAN`). Pattern filtering via `MATCH` parameter.
 
 ### 2.2 Atomic Execution
 
@@ -89,7 +89,7 @@ Commands: `PING`, `INFO`, `DBSIZE`, `FLUSHDB`, `COMMAND`, `DEL`, `EXISTS`, `TYPE
 
 **EVAL (Lua)** — embedded LuaJ interpreter. Script runs atomically on a single partition (same as Redis). `redis.call()` and `redis.pcall()` bridge Lua into the command engine. `KEYS[]` / `ARGV[]` convention. All keys must hash to same partition — enforced before execution.
 
-Atomicity guarantee: the command engine processes one command (or one script / one MULTI-EXEC batch) at a time per partition. No interleaving. This is the single-threaded-per-partition invariant.
+Atomicity guarantee: the command engine processes one command (or one script / one MULTI-EXEC batch) at a time per partition. No interleaving. This is the single-threaded-per-partition invariant. A multi-key command whose keys sit on different partitions (`MGET`, `MSET`, multi-key `DEL` and `EXISTS`) is executed partition by partition and joined; it is not atomic across partitions (DynaCache/docs/adr/0002). Atomicity across keys requires a batch with hash tags.
 
 ### 2.3 Wire Protocol
 
@@ -223,7 +223,7 @@ Properties that must hold at all times. Every invariant maps to at least one tes
 | **I8** | **Gossip protocol convergence.** A membership change (node death or recovery) propagates to all live nodes within O(log N) gossip rounds. | Simulate node failure, count gossip rounds until all nodes agree |
 | **I9** | **Hinted handoff completeness.** After a partitioned node rejoins and all hints drain, its data matches what it would have had if it were never partitioned. | Partition node → write K keys → heal → drain hints → compare with reference replica |
 | **I10** | **Lua determinism.** The same script with the same KEYS/ARGV against the same cache state produces the same result on every node. | Execute identical script on two replicas with synchronized state, assert identical results |
-| **I11** | **MULTI/EXEC atomicity.** If any command in a MULTI/EXEC batch fails, no commands in the batch take effect (all-or-nothing). | MULTI → SET a → deliberate error → SET b → EXEC → verify neither a nor b changed |
+| **I11** | **MULTI/EXEC isolation.** No command from outside a MULTI/EXEC batch runs on the batch's partition between the batch's first and last command, so no reader observes a partially applied batch. A failing command inside the batch does not undo its neighbours (section 5.6, Redis semantics). | A reader on the same partition during EXEC sees the pre-batch or the post-batch state, never a state in between; MULTI, SET a, a failing command, SET b, EXEC leaves both a and b set with the error in the reply array |
 | **I12** | **Chandy-Lamport recoverability.** A cluster restored from a Chandy-Lamport snapshot behaves identically to the cluster at the moment of the snapshot for all subsequent reads. | Take snapshot → continue writes → restore snapshot → verify reads return snapshot-time values, not post-snapshot values |
 
 ---

@@ -3,7 +3,7 @@
 **Date:** 2026-04-19
 **Project:** DynaCache — CP subsystem addition
 **Complements:** `docs/design-spec.md` (the Dynamo-style AP spec — unchanged)
-**Status:** Design pending user approval
+**Status:** Design locked; plan in `plan.md` (P5, T38 to T46); spec revised 2026-09-06 (10.9 cites C20)
 
 ---
 
@@ -469,7 +469,7 @@ Organized by area. Every milestone keeps all prior tests green.
 | `invariant_fencing_token_monotonic_under_chaos` | I14 — across leader changes, kills, snapshots |
 | `invariant_mutual_exclusion_under_chaos` | I13 — two clients never both hold the same lock |
 | `invariant_session_release_complete` | I15 — no orphaned resources after session death |
-| `invariant_linearizable_ops` | I20 — Jepsen-style checker confirms linearizability (simple case; no full Jepsen) |
+| `invariant_linearizable_ops` | C20 — Jepsen-style checker confirms linearizability (simple case; no full Jepsen) |
 
 ---
 
@@ -503,7 +503,7 @@ Organized by area. Every milestone keeps all prior tests green.
 
 ## 12. Milestones (P5 Sketch)
 
-Detailed sub-phase plan lives in `docs/plans/p5-cp-subsystem.md` (written separately via the writing-plans skill). High-level shape:
+Detailed ticket entries live in `plans/p5-cp-subsystem.md` (T38 to T46). High-level shape:
 
 | M | Theme | Exit criteria |
 |---|---|---|
