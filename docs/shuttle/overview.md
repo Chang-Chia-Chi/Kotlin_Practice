@@ -68,55 +68,47 @@ Every row is a test (spec 18.2, S2 to S5).
 
 ### The whole system in one picture
 
-One process, one replica. Object stores and channels are declared once; a route gives each a
-role. Every route is its own supervised loop; all routes share the state store, the stores'
-session pools and one notifier. The routes and the notifier never talk to each other except
-through the state store and one wake signal.
+The framework, not a deployment. Object stores and channels are declared once; a route gives
+each a role where it uses it: a store is polled, fetched from or stored into, a channel is
+subscribed to or notified. Every route is its own supervised loop; all routes share the state
+store, the stores' session pools and one notifier. The routes and the notifier never talk to
+each other except through the state store and one wake signal.
 
 ```mermaid
 flowchart LR
-    subgraph stores["objectStores · declared once"]
-        VEN[("vendor · SFTP")]
-        PAR[("partner · SFTP")]
-        MIN[("minio · S3, versioned")]
-    end
-    subgraph chans["channels · declared once"]
-        HTTP["downstream · HTTP"]
-        UP["upstream-receipt · HTTP"]
-        NATS["events · NATS"]
+    subgraph decl["declared once · roles given at the route"]
+        OS[("object store · SFTP, S3<br/>roles: poll · fetch · target")]
+        CH["channel · HTTP, NATS<br/>roles: subscribe · notify"]
     end
 
     subgraph proc["shuttle process · one replica · Kotlin + Quarkus"]
-        subgraph r1["route vendor-drop · supervised"]
-            T1["poll vendor:/inbox every 1h"] --> P1["pipeline ×4: fetch → process → store → ack"]
+        subgraph route["route · one per YAML entry · supervised"]
+            TR["trigger<br/>poll a store, or subscribe a channel<br/>onAck: move · delete · ack · callback"] --> PL["pipeline × parallelism<br/>fetch → process → store → ack<br/>a crash resumes from the row's state"]
+            PL -.- PC["process chain · pure Processors<br/>attributes out, mappings checked before store"]
         end
-        subgraph r2["route image-sets · supervised"]
-            T2["subscribe events:images.ready"] --> P2["pipeline ×2: fetch → expand → store children → ack"]
-        end
-        NOT["notifier · cold Flow · workers ×4<br/>in-flight ids · memory"]
+        NOT["notifier · one cold Flow · workers<br/>in-flight ids · memory"]
         STG[("staging · local disk · wiped at boot")]
     end
 
     subgraph ora["shuttle state store · Oracle · the only truth"]
-        FT[("file_transfer · state")]
+        FT[("file_transfer · state · revision")]
         DO[("delivery_outbox · on_state · notification_state")]
     end
 
-    VEN -- "list · download · rename (connector, pool 20)" --> T1
-    P1 -- "store: PUT · Content-MD5 · HEAD, never delete" --> MIN
-    NATS -- "message · ack / nak" --> T2
-    MIN -- "fetch metadata + images" --> P2
-    P2 -- "store: upload .part · rename" --> PAR
-    P1 & P2 == "SEEN … STORED · ACKED + rows" ==> FT
-    P1 & P2 == "one row per on: state × channel" ==> DO
-    P1 & P2 -. "wake" .-> NOT
+    OS -- "poll: list · readiness" --> TR
+    CH -- "subscribe: message · ack / nak" --> TR
+    OS <-- "fetch bytes into staging · store then verify · overwrite, never delete" --> PL
+    PL == "one txn per transition" ==> FT
+    PL == "one row per moment × channel" ==> DO
+    PL -. "wake" .-> NOT
     NOT == "select due · DELIVERED / retry / FAILED" ==> DO
-    NOT -- "POST body from the mapping table" --> HTTP
-    NOT -- "POST on: fetched" --> UP
+    NOT -- "notify: body from the mapping table · on fetched, stored, acked" --> CH
 ```
 
 Thick edges are the durable commit path; dotted edges are signals; the two memory boxes,
-staging and the notifier's id set, are the only state that must not survive a restart.
+staging and the notifier's id set, are the only state that must not survive a restart. The
+five seams sit on the arrows: `StateStore`, `ObjectStoreTarget`, `DeliveryChannel`,
+`Processor`, `Hook`.
 
 ### One item's journey, and the states it leaves behind
 
