@@ -49,7 +49,7 @@ class ShuttleHostM2WiringTest {
     private val clock = ClockFixture()
     private val store = InMemoryStateStore(clock)
     private val registry = SimpleMeterRegistry()
-    private val env = mapOf("SFTP_USER" to USER, "SFTP_PASSWORD" to PASSWORD, "S3_KEY" to "k", "S3_SECRET" to "s")
+    private val env = mapOf("SFTP_USER" to USER, "SFTP_PASSWORD" to PASSWORD, "S3_KEY" to "k", "S3_SECRET" to "s", "RESIZE_TOKEN" to "t0ken")
     private val hosts = mutableListOf<ShuttleHost>()
 
     @BeforeEach
@@ -156,7 +156,34 @@ class ShuttleHostM2WiringTest {
         await("every session to be gone from the partner") { server.liveSessions == 0 }
     }
 
+    /**
+     * Spec 6.2 and 13.1's `custom: imageResizer, config: { maxWidth: 2048 }` (ticket 43): the host resolves the
+     * bean and hands it the step's config once, while it builds the chain at boot - not once per transfer -
+     * and a `${VAR}` in the map is the expanded value, never the reference.
+     */
+    @Test
+    fun SPEC6_a_custom_step_is_built_with_its_config_once_at_boot_and_the_bean_sees_it() = runBlocking {
+        val resizer = RecordingProcessor()
+        val beans = NamedBeans { if (it == "imageResizer") resizer else null }
+        val host = host(config(yaml(resizeToPartner), beans), beans)
+
+        host.start()
+        seed("first.csv")
+        seed("second.csv")
+
+        await("both rows to finish") { store.transfers.count { it.state == TransferState.DONE } == 2 }
+        assertEquals(listOf(mapOf("maxWidth" to 2048, "token" to "t0ken")), resizer.configs)
+    }
+
     // ---- the fixture: spec 13.1's shape at test scale ----
+
+    /** The mirror again, with spec 13.1's own `custom` step in front of the target. */
+    private val resizeToPartner =
+        "    mirror:\n" +
+            "      source: { poll: { store: vendor, directory: /drop, every: 200ms," +
+            " readiness: [ { sizeStable: { checks: 1, interval: 1ms } } ], onAck: delete } }\n" +
+            "      process: [ { custom: imageResizer, config: { maxWidth: 2048, token: \${RESIZE_TOKEN} } } ]\n" +
+            "      target: { store: partner, directory: /landing }\n"
 
     /** A poll on `vendor` whose target is the partner SFTP store's `/landing` (spec 7.3). */
     private val mirrorToPartner =
@@ -207,14 +234,18 @@ class ShuttleHostM2WiringTest {
             "        cancelGrace: 500ms\n" +
             "        staging: { dir: $staging }\n"
 
-    private fun config(text: String): ShuttleConfig {
+    private fun config(text: String, beans: NamedBeans = NamedBeans.none): ShuttleConfig {
         val file = files.resolve("shuttle.yaml")
         Files.writeString(file, text)
-        return ShuttleHost.load(listOf(file), env, NamedBeans.none)
+        return ShuttleHost.load(listOf(file), env, beans)
     }
 
-    private fun host(config: ShuttleConfig, s3Client: (S3Store) -> S3Client = { ShuttleHost.s3ClientFor(it, env::get) }) =
-        ShuttleHost(config, env::get, NamedBeans.none, store, StoreReads({ store.transfers }, { store.outbox }), registry, clock, s3Client = s3Client)
+    private fun host(
+        config: ShuttleConfig,
+        beans: NamedBeans = NamedBeans.none,
+        s3Client: (S3Store) -> S3Client = { ShuttleHost.s3ClientFor(it, env::get) },
+    ) =
+        ShuttleHost(config, env::get, beans, store, StoreReads({ store.transfers }, { store.outbox }), registry, clock, s3Client = s3Client)
             .also { hosts += it }
 
     private fun seed(name: String) = remoteRoot.resolve("drop").resolve(name).also { it.writeText(CONTENT) }

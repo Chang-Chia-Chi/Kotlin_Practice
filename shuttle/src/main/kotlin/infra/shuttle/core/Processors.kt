@@ -14,6 +14,7 @@ internal val JSON = ObjectMapper()
 /**
  * Spec 6.3: configuration to behaviour. `custom` resolves through the injected lookup (CDI in the host,
  * a map in tests); an unknown name is a configuration error here, which rule 15 has already refused at boot.
+ * The named bean is then handed the step's `config` (spec 6.2, D58) and answers the processor it configures.
  */
 fun processorFor(spec: ProcessorSpec, custom: (ProcessorSpec.Custom) -> Processor?): Processor = when (spec) {
     ProcessorSpec.Quality -> QualityProcessor { if (Files.size(it.path) == 0L) "${it.name} is empty" else null }
@@ -23,7 +24,7 @@ fun processorFor(spec: ProcessorSpec, custom: (ProcessorSpec.Custom) -> Processo
     is ProcessorSpec.Extract -> ExtractProcessor(spec)
     is ProcessorSpec.Expand -> ExpandProcessor(spec)
     is ProcessorSpec.VerifyDigest -> VerifyDigestProcessor(spec)
-    is ProcessorSpec.Custom -> custom(spec) ?: throw IllegalArgumentException("no custom processor named ${spec.name}")
+    is ProcessorSpec.Custom -> (custom(spec) ?: throw IllegalArgumentException("no custom processor named ${spec.name}")).configured(spec.config)
 }
 
 /** Spec 6.3 `quality` (D11): the check answers a reason to reject, or null to pass. */

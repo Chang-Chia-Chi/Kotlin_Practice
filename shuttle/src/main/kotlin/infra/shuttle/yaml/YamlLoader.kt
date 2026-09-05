@@ -1,7 +1,9 @@
 package infra.shuttle.yaml
 
 import com.fasterxml.jackson.databind.JsonNode
+import com.fasterxml.jackson.databind.node.ArrayNode
 import com.fasterxml.jackson.databind.node.ObjectNode
+import com.fasterxml.jackson.databind.node.TextNode
 import com.fasterxml.jackson.dataformat.yaml.YAMLMapper
 import infra.shuttle.core.AckAction
 import infra.shuttle.core.Backoff
@@ -284,8 +286,25 @@ private class Node(private val json: JsonNode, private val path: String, private
         }
     }
 
-    /** A free-form subtree the bean owns (`custom.config`): taken whole, no key of it is unknown. */
-    fun free(key: String): JsonNode? = json.get(key)?.also { used += key }
+    /**
+     * A free-form subtree the bean owns (`custom.config`): taken whole, no key of it is unknown. The keys are
+     * the bean's, but the values in them are the operator's, so every `${VAR}` in it is expanded here like any
+     * other value and a missing one is this step's load error (spec 6.2, ticket 43).
+     */
+    fun free(key: String): JsonNode? = json.get(key)?.also { used += key; expandReferences(it) }
+
+    /** Every textual leaf of [node], in place: Jackson's nodes are mutable and this subtree is nobody else's. */
+    private fun expandReferences(node: JsonNode) {
+        when (node) {
+            is ObjectNode -> node.fields().asSequence().toList().forEach { (name, value) ->
+                if (value.isTextual) resolve(value.asText())?.let { node.put(name, it) } else expandReferences(value)
+            }
+            is ArrayNode -> node.forEachIndexed { i, value ->
+                if (value.isTextual) resolve(value.asText())?.let { node.set(i, TextNode.valueOf(it)) } else expandReferences(value)
+            }
+            else -> Unit
+        }
+    }
     fun scalar(): String? = if (json.isValueNode) resolve(json.asText()) else fail("expected a value")
     fun durSelf(): Duration? = scalar()?.let { s -> Duration.parseOrNull(s) ?: fail("$s is not a duration such as 30s, 15m or 1h") }
     fun str(key: String): String? = child(key)?.scalar()

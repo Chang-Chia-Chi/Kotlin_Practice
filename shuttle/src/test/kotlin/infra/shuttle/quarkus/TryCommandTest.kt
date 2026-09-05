@@ -56,9 +56,15 @@ class TryCommandTest {
         )
     }
 
-    private fun run(file: Path, route: String = "vendor-drop", fileName: String = "123-order.csv", content: Path? = null): Pair<Int, String> {
+    private fun run(
+        file: Path,
+        route: String = "vendor-drop",
+        fileName: String = "123-order.csv",
+        content: Path? = null,
+        beans: NamedBeans = NamedBeans.none,
+    ): Pair<Int, String> {
         val bytes = ByteArrayOutputStream()
-        val code = TryCommand(listOf(file), env, NamedBeans.none, PrintStream(bytes, true), clock, route, fileName, content = content).run()
+        val code = TryCommand(listOf(file), env, beans, PrintStream(bytes, true), clock, route, fileName, content = content).run()
         return code to bytes.toString()
     }
 
@@ -217,6 +223,40 @@ class TryCommandTest {
 
         assertEquals(1, code)
         assertTrue(out.contains("reject: process: the chain left no object to store"), out)
+    }
+
+    /**
+     * Spec 13.1's own `custom: imageResizer, config: { maxWidth: 2048 }` (ticket 43): what an operator tries
+     * offline is the configured bean the route runs, `${VAR}` expanded by the loader like every other value.
+     */
+    private fun resizeDrop() = dir.resolve("resize.yaml").also {
+        Files.writeString(
+            it,
+            """
+            shuttle:
+              objectStores:
+                vendor:
+                  sftp: { host: sftp.example, auth: { user: ${'$'}{SFTP_USER}, password: ${'$'}{SFTP_PASSWORD} }, staging: { dir: $dir } }
+                minio:
+                  s3: { endpoint: https://minio.internal, credentials: { accessKey: ${'$'}{S3_KEY}, secretKey: ${'$'}{S3_SECRET} } }
+              routes:
+                resize:
+                  source: { poll: { store: vendor, directory: /inbox, every: 1h, onAck: delete } }
+                  process:
+                    - { custom: imageResizer, config: { maxWidth: 2048, token: ${'$'}{TOKEN} } }
+                  target: { store: minio, bucket: landing, key: "vendor/{name}" }
+            """.trimIndent(),
+        )
+    }
+
+    @Test
+    fun SPEC6_try_mode_hands_a_custom_step_its_config_to_the_bean() {
+        val resizer = RecordingProcessor()
+
+        val (code, out) = run(resizeDrop(), route = "resize", fileName = "photo.png", beans = NamedBeans { if (it == "imageResizer") resizer else null })
+
+        assertEquals(0, code, out)
+        assertEquals(listOf(mapOf("maxWidth" to 2048, "token" to "t")), resizer.configs)
     }
 
     /** Rule 13's run-time half (ticket 25): a resolved key with a `..` segment is refused before any store. */
