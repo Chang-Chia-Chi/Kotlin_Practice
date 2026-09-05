@@ -98,9 +98,10 @@ class RouteRunnerTest {
     /** A row parked at STORED, as a crash after the move but before the ACKED ledger write leaves it (S4). */
     private suspend fun storedRow(name: String): Transfer {
         val t = store.seen(id(name), TransferKind.OBJECT)
-        store.fetched(t.id, StagedSummary(name, 1, clock.instant(), Digest(DigestAlgorithm.MD5, "d"), null), emptyList())
+        val staged = StagedSummary(name, 1, clock.instant(), Digest(DigestAlgorithm.MD5, "d"), null)
+        store.fetched(t.id, staged, emptyList())
         store.processed(t.id, emptyMap())
-        store.stored(t.id, TargetRef("memory", "landing", name, "v1", 1), emptyList())
+        store.stored(t.id, TargetRef("memory", "landing", name, "v1", 1), staged, emptyList())
         return store.transfer(t.id)
     }
 

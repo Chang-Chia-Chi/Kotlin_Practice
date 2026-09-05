@@ -24,7 +24,7 @@ class LedgerTest {
         val t = store.seen(ScriptedSource.identity("a.csv"), TransferKind.OBJECT)
         store.fetched(t.id, staged, emptyList())
         store.processed(t.id, emptyMap())
-        store.stored(t.id, ref, emptyList())
+        store.stored(t.id, ref, staged, emptyList())
         return t.id
     }
 
@@ -50,7 +50,7 @@ class LedgerTest {
         assertTrue(store.outbox.isEmpty(), "nobody listens to fetched")
         assertEquals(0, wakes)
 
-        ledger.stored(id, ref)
+        ledger.stored(id, ref, staged)
         assertEquals(TransferState.STORED, store.transfer(id).state)
         assertEquals(listOf(DeliveryMoment.STORED to ChannelName("audit")), store.outbox.map { it.moment to it.channel })
         assertEquals(1, wakes)

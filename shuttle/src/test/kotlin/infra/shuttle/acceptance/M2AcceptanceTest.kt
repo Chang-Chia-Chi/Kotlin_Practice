@@ -178,7 +178,7 @@ class M2AcceptanceTest : AcceptanceFixture() {
     /**
      * S27, I10, I16, I20 on real adapters: one message, one metadata file, N images. The parent is FETCHED and told
      * upstream, the children land on the partner in parallel, the parent is acked once at the broker and downstream
-     * told once, with D43's source name and digest in the body.
+     * told once, with the metadata file's name and digest in the body (a parent stores nothing itself; ticket 45).
      */
     @Test
     fun S27_image_sets_happy_path_children_stored_on_the_partner_message_acked_once_fetched_and_acked_delivered_once_each() = runBlocking {
@@ -212,9 +212,10 @@ class M2AcceptanceTest : AcceptanceFixture() {
         assertEquals("acked", acked.get("event").asText())
         assertEquals("b-1", acked.get("batchId").asText())
         assertEquals("message", acked.get("kind").asText())
-        // D43: the row's stored_name and digest are the fetched source object's, the metadata file.
+        // Ticket 45: a parent stores nothing itself, so its stored_name and digest stay the fetched metadata file's; each child carries its own.
         assertEquals("b-1.json", acked.get("file").get("name").asText())
         assertEquals(parent.sourceDigest!!.hex, acked.get("file").get("md5").asText())
+        assertEquals(listOf("1.png", "2.png", "3.png"), children.mapNotNull { it.storedName }.sorted(), "each child's stored_name is the image it stored")
         assertTrue(acked.get("location") == null, "a parent has no target of its own; TARGET_* rows are required: false")
     }
 

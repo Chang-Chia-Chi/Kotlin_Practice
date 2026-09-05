@@ -97,10 +97,11 @@ class M1AcceptanceTest : AcceptanceFixture() {
         assertEquals("123", metadata["attr-ordernumber"])
         assertEquals(row.id.value.toString(), metadata["transfer-id"])
 
-        // D43 (see progress): the ledger row keeps the SOURCE name and digest (written at FETCHED, never updated by
-        // the chain), so the notification renders them; the stored object's true name and digest live on the object.
-        assertEquals("123-order.csv", row.storedName, "D43: the row's stored_name is the source name")
-        assertEquals(row.sourceDigest, row.digest, "D43: the row's digest is the source digest")
+        // Ticket 45 (closes D43): the row carries the STORED object's name and digest; the source's stay under source_*.
+        assertEquals("20260101-123-order.csv.zip", row.storedName, "the row's stored_name is the archive's name")
+        assertEquals(md5Hex(bytes), row.digest!!.hex, "the row's digest is the archive's own")
+        assertEquals("123-order.csv", row.identity.sourceName)
+        assertTrue(row.sourceDigest != row.digest, "SOURCE_DIGEST and DIGEST differ after zip")
 
         assertTrue(inbox.resolve("temp/123-order.csv").exists(), "the source file was moved to temp/ (D6, after the store)")
         assertTrue(!inbox.resolve("123-order.csv").exists())
@@ -115,6 +116,8 @@ class M1AcceptanceTest : AcceptanceFixture() {
         assertEquals("acked", request.body.get("event").asText())
         assertEquals(key, request.body.at("/location/key").asText())
         assertEquals(bucket, request.body.at("/location/bucket").asText())
+        assertEquals("20260101-123-order.csv.zip", request.body.at("/file/name").asText(), "STORED_NAME in the body is the archive's name (ticket 45)")
+        assertEquals(md5Hex(bytes), request.body.at("/file/md5").asText(), "DIGEST in the body is the archive's own")
     }
 
     private fun zipEntryNames(bytes: ByteArray): List<String> =
@@ -347,6 +350,8 @@ class M1AcceptanceTest : AcceptanceFixture() {
         val storedDigest = head(key).metadata().mapKeys { it.key.lowercase() }["digest"]
         assertEquals(md5Hex(bytes), storedDigest, "the object carries the archive's own digest")
         assertTrue(storedDigest != row.sourceDigest!!.hex, "SOURCE_DIGEST and the stored object's DIGEST differ")
+        assertEquals(storedDigest, row.digest!!.hex, "the row's digest is the archive's own (ticket 45)")
+        assertEquals("20260101-data.csv.zip", row.storedName, "the row's stored_name is the archive's name")
     }
 
     /** S21: an attribute extracted from the file name is carried in the body; a mapping naming an undeclared attribute is rejected by rule 17 at load. */

@@ -87,8 +87,8 @@ class InMemoryStateStore(private val clock: Clock) : StateStore {
     override suspend fun childrenOf(id: TransferId) = tx("childrenOf", id) { kidsOf(id) }
 
     /** One update on the row, then the conditional parent update that fires when no sibling is left unstored (D42). */
-    override suspend fun stored(id: TransferId, target: TargetRef, events: List<DeliveryRequest>) = tx("stored", id, target, events) {
-        val row = update(id) { copy(state = STORED, target = target) }
+    override suspend fun stored(id: TransferId, target: TargetRef, stored: StagedSummary, events: List<DeliveryRequest>) = tx("stored", id, target, stored, events) {
+        val row = update(id) { copy(state = STORED, target = target, digest = stored.digest, storedName = stored.name, storedMtime = stored.mtime) }
         val parent = row.parentId
         when {
             parent == null -> insertDeliveries(id, events)

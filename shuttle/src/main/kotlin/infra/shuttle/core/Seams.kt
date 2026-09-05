@@ -16,7 +16,8 @@ interface StateStore {
     suspend fun children(id: TransferId, staged: List<StagedSummary>): List<Transfer>
     /** A parent's child rows in id order, empty for a row without children; what `verify` and S28 read (spec 4.3). */
     suspend fun childrenOf(id: TransferId): List<Transfer>
-    suspend fun stored(id: TransferId, target: TargetRef, events: List<DeliveryRequest>)
+    /** [stored] is the object as it went to the target: after a rename or zip the row's `stored_name`, `digest` and `stored_mtime` are its, not the source's (ticket 45). */
+    suspend fun stored(id: TransferId, target: TargetRef, stored: StagedSummary, events: List<DeliveryRequest>)
     suspend fun acked(id: TransferId, events: List<DeliveryRequest>)
     /** Spec 4.3's `reacked`: a finished row acked again; `updated_at` advances so D40's window restarts, nothing else changes. */
     suspend fun reacked(id: TransferId)
