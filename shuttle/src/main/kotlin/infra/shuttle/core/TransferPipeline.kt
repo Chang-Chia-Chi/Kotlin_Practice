@@ -33,15 +33,12 @@ class TransferPipeline(
     private val ledger: Ledger,
     private val target: ObjectStoreTarget,
     private val chain: ProcessingChain,
-    bodies: Map<ChannelName, MappingTable>,
-    private val providerExists: (String) -> Boolean,
+    private val deliverer: Deliverer,
     private val hook: Hook,
     private val clock: Clock,
     private val registry: MeterRegistry,
     private val staging: Staging,
     private val usableSpace: (Path) -> Long = { Files.getFileStore(it).usableSpace },
-    channels: Map<ChannelName, DeliveryChannel> = emptyMap(),
-    private val renderer: MappingRenderer = MappingRenderer(),
     /** `expand` fetching from a store other than the one `run` was handed; the route's own fetch store needs no entry. */
     private val fetchers: Map<String, Fetcher> = emptyMap(),
 ) {
@@ -50,10 +47,10 @@ class TransferPipeline(
     private val polled = route.source is Source.Poll
     private val kind = if (polled) TransferKind.OBJECT else TransferKind.MESSAGE
     /** Spec 5.3: a `callback` ack names a channel the pipeline calls itself; rule 12 guarantees it is declared, the host must provide it. */
-    private val callbackChannel = (route.source?.onAck as? AckAction.Callback)
-        ?.let { checkNotNull(channels[ChannelName(it.channel)]) { "route ${route.name}: callback channel ${it.channel} was not provided" } }
-    private val callbackBody = callbackChannel?.let { bodies[it.name] } ?: MappingTable(emptyList())
-    private val tables = (route.notify.map { ChannelName(it.channel) } + listOfNotNull(callbackChannel?.name)).distinct().mapNotNull { bodies[it] }
+    private val callbackChannel = (route.source?.onAck as? AckAction.Callback)?.let { ChannelName(it.channel) }
+        ?.also { check(it in deliverer.channels) { "route ${route.name}: callback channel ${it.value} was not provided" } }
+    /** Spec 6.4: the channels whose tables are checked at attribute freeze, the callback's among them. */
+    private val notified = (route.notify.map { ChannelName(it.channel) } + listOfNotNull(callbackChannel)).distinct()
     private val stagingStore = route.fetch?.store ?: (route.source as? Source.Poll)?.store ?: route.name
     private val freeBytes = registry.gauge(ShuttleMetrics.STAGING_FREE_BYTES, Tags.of("store", stagingStore), AtomicLong())!!
     /** Spec 4.5: uploads of this route, single objects and children alike, never exceed `parallelism` (rule 9's arithmetic). */
@@ -179,7 +176,7 @@ class TransferPipeline(
                 is ChainResult.Rejected -> return reject(transfer, result.reason)
                 is ChainResult.Done -> result
             }
-            ProcessingChain.checkMappings(done.attributes, tables, providerExists)
+            deliverer.checkAttributes(done.attributes, notified)
             store.processed(id, done.attributes)
             hook.at(HookPoint.afterProcess, id)
             val objects = done.payload.objects
@@ -260,7 +257,7 @@ class TransferPipeline(
          */
         private suspend fun ack(transfer: Transfer) {
             val id = transfer.id
-            if (callbackChannel != null) stage("ack") { callback(callbackChannel, id) }
+            if (callbackChannel != null) stage("ack") { callback(callbackChannel, transfer) }
             if (polled) {
                 stage("ack") { event.ack() }; hook.at(HookPoint.afterAck, id)
                 ledger.acked(id); hook.at(HookPoint.afterLedgerAcked, id)
@@ -272,20 +269,19 @@ class TransferPipeline(
         }
 
         /**
-         * The `callback` ack: the channel's body rendered from the row as the notifier would for `acked`, one synchronous
-         * call, no outbox row. Anything but `Delivered` is a stage error, retried with the stage (spec 11); a
+         * The `callback` ack: the [Deliverer] renders the channel's body from the current row as the notifier would for
+         * `acked` and makes one synchronous call, no outbox row; the attempt is this run's on the transfer. Anything but
+         * `Delivered`, a channel that threw included (D56), is a stage error, retried with the stage (spec 11); a
          * `CancellationException` passes through untouched.
          */
-        private suspend fun callback(channel: DeliveryChannel, id: TransferId) {
-            val current = checkNotNull(store.byId(id)) { "transfer ${id.value} vanished before its callback" }
-            val attempt = current.attempts + 1
-            val body = renderer.render(callbackBody, current, DeliveryMoment.ACKED, attempt)
-            val outcome = channel.deliver(DeliveryEvent(id, DeliveryMoment.ACKED, channel.name, attempt, body))
-            log.infov("callback transfer={0} channel={1} attempt={2} outcome={3}", id.value, channel.name.value, attempt, outcome)
+        private suspend fun callback(channel: ChannelName, transfer: Transfer) {
+            val attempt = transfer.attempts + 1
+            val outcome = deliverer.deliver(transfer.id, channel, DeliveryMoment.ACKED, attempt) { it }
+            log.infov("callback transfer={0} channel={1} attempt={2} outcome={3}", transfer.id.value, channel.value, attempt, outcome)
             when (outcome) {
                 is DeliveryOutcome.Delivered -> Unit
-                is DeliveryOutcome.Retry -> throw IllegalStateException("callback ${channel.name.value} answered Retry ${outcome.status}: ${outcome.reason}")
-                is DeliveryOutcome.Reject -> throw IllegalStateException("callback ${channel.name.value} answered Reject ${outcome.status}: ${outcome.reason}")
+                is DeliveryOutcome.Retry -> throw IllegalStateException("callback ${channel.value} answered Retry ${outcome.status}: ${outcome.reason}")
+                is DeliveryOutcome.Reject -> throw IllegalStateException("callback ${channel.value} answered Reject ${outcome.status}: ${outcome.reason}")
             }
         }
 

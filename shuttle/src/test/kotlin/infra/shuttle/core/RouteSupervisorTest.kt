@@ -34,7 +34,7 @@ class RouteSupervisorTest {
     private fun runner(name: String): RouteRunner {
         val route = Route(name = name, source = Source.Poll("sftp", "/in", 1.minutes, onAck = AckAction.Move("done")), target = Target("minio", bucket = "landing"))
         val ledger = Ledger(store, route.notify) {}
-        val pipeline = TransferPipeline(route, DigestAlgorithm.MD5, ledger, target, ProcessingChain(emptyList(), DigestAlgorithm.MD5, Dispatchers.Unconfined), emptyMap(), { true }, Hook.None, clock, registry, Staging(staging), usableSpace = { 10.gib })
+        val pipeline = TransferPipeline(route, DigestAlgorithm.MD5, ledger, target, ProcessingChain(emptyList(), DigestAlgorithm.MD5, Dispatchers.Unconfined), Deliverer(store, emptyList(), emptyMap()), Hook.None, clock, registry, Staging(staging), usableSpace = { 10.gib })
         return RouteRunner(route, pipeline, fetcher, ledger, clock, registry)
     }
 

@@ -2,6 +2,7 @@ package infra.shuttle.quarkus
 
 import infra.shuttle.core.Channel
 import infra.shuttle.core.ChannelName
+import infra.shuttle.core.Deliverer
 import infra.shuttle.core.Delivery
 import infra.shuttle.core.DeliveryChannel
 import infra.shuttle.core.DeliveryId
@@ -158,17 +159,15 @@ class ShuttleHost(
         probeStores(routeTargets.values)
         val channels = config.channels.associate { ChannelName(it.name) to channelFor(it) }
         emptyStaging()
-        val renderer = MappingRenderer(beans::provider)
-        // Spec 9.6: a body belongs to the channel, not to its kind, so every declared channel is in the map (SPEC6).
-        val bodies = config.channels.associate { ChannelName(it.name) to it.body }
-        notifier = Notifier(store, channels.values, bodies, renderer, config.notifier, registry, clock, hook = hook)
+        // Spec 9.6: a body belongs to the channel, not to its kind, so every declared channel has one here (SPEC6); one deliverer per process (ticket 46).
+        val deliverer = Deliverer(store, channels.values, config.channels.associate { ChannelName(it.name) to it.body }, MappingRenderer(beans::provider))
+        notifier = Notifier(store, deliverer, config.notifier, registry, clock, hook = hook)
         ledgers = config.routes.associate { it.name to Ledger(store, it.notify, notifier::wake) }
         val runners = config.routes.map { route ->
             val ledger = ledgers.getValue(route.name)
             val pipeline = TransferPipeline(
-                route, route.digest ?: config.digest, ledger, routeTargets.getValue(route.name), chainFor(route), bodies,
-                { beans.provider(it) != null }, hook, clock, registry, stagingFor(route), channels = channels, renderer = renderer,
-                fetchers = fetchersFor(route),
+                route, route.digest ?: config.digest, ledger, routeTargets.getValue(route.name), chainFor(route), deliverer,
+                hook, clock, registry, stagingFor(route), fetchers = fetchersFor(route),
             )
             RouteRunner(route, pipeline, fetcherFor(route), ledger, clock, registry)
         }

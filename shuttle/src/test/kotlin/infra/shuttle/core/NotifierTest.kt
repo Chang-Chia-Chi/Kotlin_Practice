@@ -34,7 +34,7 @@ class NotifierTest {
         config: NotifierConfig = NotifierConfig(workers = 2, batch = 10, sweepEvery = 30.seconds),
         store: StateStore = this.store,
         random: kotlin.random.Random = kotlin.random.Random(1),
-    ) = Notifier(store, channels.toList(), channels.associate { it.name to body }, MappingRenderer(), config, registry, clock, random)
+    ) = Notifier(store, Deliverer(store, channels.toList(), channels.associate { it.name to body }), config, registry, clock, random)
 
     /**
      * Full jitter is unconditional (D54's neighbour: spec 9.3 states it as behaviour, not a knob), so a test
@@ -277,7 +277,7 @@ class NotifierTest {
         ))
         val channel = RecordingChannel("downstream", spec93, ok)
         ackedTransfer("a.csv", listOf(downstream))
-        val notifier = Notifier(store, listOf(channel), mapOf(downstream to table), MappingRenderer { provider }, NotifierConfig(), registry, clock)
+        val notifier = Notifier(store, Deliverer(store, listOf(channel), mapOf(downstream to table), MappingRenderer { provider }), NotifierConfig(), registry, clock)
         assertEquals(0, invocations.get(), "nothing is rendered before send time")
         backgroundScope.launch { notifier.run() }
         runCurrent()

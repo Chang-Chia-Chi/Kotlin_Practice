@@ -44,7 +44,7 @@ class RouteRunnerTest {
     private fun runner(route: Route = route(), hook: Hook = Hook.None): RouteRunner {
         // the chain hops to its bounded IO view (spec 3.3); unconfined here keeps the hop inside runTest's scheduler
         val ledger = Ledger(store, route.notify) {}
-        val pipeline = TransferPipeline(route, DigestAlgorithm.MD5, ledger, target, ProcessingChain(emptyList(), DigestAlgorithm.MD5, Dispatchers.Unconfined), emptyMap(), { true }, hook, clock, registry, Staging(staging), usableSpace = { 10.gib })
+        val pipeline = TransferPipeline(route, DigestAlgorithm.MD5, ledger, target, ProcessingChain(emptyList(), DigestAlgorithm.MD5, Dispatchers.Unconfined), Deliverer(store, emptyList(), emptyMap()), hook, clock, registry, Staging(staging), usableSpace = { 10.gib })
         return RouteRunner(route, pipeline, fetcher, ledger, clock, registry)
     }
 
@@ -242,7 +242,7 @@ class RouteRunnerTest {
         val flaky = Unavailable(store).apply { down = true }
         val route = route(parallelism = 2).copy(stuckAfter = 3.minutes)
         val ledger = Ledger(flaky, route.notify) {}
-        val pipeline = TransferPipeline(route, DigestAlgorithm.MD5, ledger, target, ProcessingChain(emptyList(), DigestAlgorithm.MD5, Dispatchers.Unconfined), emptyMap(), { true }, Hook.None, clock, registry, Staging(staging), usableSpace = { 10.gib })
+        val pipeline = TransferPipeline(route, DigestAlgorithm.MD5, ledger, target, ProcessingChain(emptyList(), DigestAlgorithm.MD5, Dispatchers.Unconfined), Deliverer(store, emptyList(), emptyMap()), Hook.None, clock, registry, Staging(staging), usableSpace = { 10.gib })
         val runner = RouteRunner(route, pipeline, fetcher, ledger, clock, registry)
         val poll = source.seen(id("a.csv")).seen(id("b.csv")).pollCompleted(setOf(id("a.csv"), id("b.csv"))).events()
 
