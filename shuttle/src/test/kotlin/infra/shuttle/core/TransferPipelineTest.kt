@@ -181,6 +181,31 @@ class TransferPipelineTest {
         stagingIsEmpty()
     }
 
+    /** Ticket 45 (closes D43): a `stored` body names the object that was stored; the `SOURCE_*` rows keep the source's. */
+    @Test
+    fun a_rename_then_zip_routes_stored_body_carries_the_archives_name_and_digest_and_the_sources_under_the_SOURCE_rows() = runTest {
+        fetcher.file("data.csv", "a,b\n".toByteArray())
+        val chain = listOf(processorFor(ProcessorSpec.Rename("{yyyyMMdd}-{name}")) { null }, processorFor(ProcessorSpec.Zip) { null })
+        val body = MappingTable(
+            listOf(
+                MappingRow("file.name", field = Field.STORED_NAME), MappingRow("file.md5", field = Field.DIGEST),
+                MappingRow("source.name", field = Field.SOURCE_NAME), MappingRow("source.md5", field = Field.SOURCE_DIGEST),
+            ),
+        )
+        val event = seen("data.csv")
+        pipeline(route(notify = listOf(Notify(DeliveryMoment.STORED, "downstream"))), chain, bodies = mapOf(ChannelName("downstream") to body)).run(event, fetcher)
+
+        val delivery = store.outbox.single { it.moment == DeliveryMoment.STORED }
+        val rendered = MappingRenderer().render(body, store.transfer(delivery.transferId), DeliveryMoment.STORED)
+        val archive = "20260101-data.csv.zip"
+        assertEquals(archive, rendered.at("/file/name").asText(), "STORED_NAME is the archive's name")
+        assertEquals(md5(target.bytes(archive)), rendered.at("/file/md5").asText(), "DIGEST is the archive's own digest")
+        assertEquals("data.csv", rendered.at("/source/name").asText())
+        assertEquals(md5("a,b\n".toByteArray()), rendered.at("/source/md5").asText(), "SOURCE_DIGEST is the fetched bytes' digest")
+    }
+
+    private fun md5(bytes: ByteArray) = java.security.MessageDigest.getInstance("MD5").digest(bytes).joinToString("") { "%02x".format(it) }
+
     private val rejecting = object : Processor {
         override val produces = emptySet<String>()
         override suspend fun process(payload: Payload, ctx: ProcessContext): Outcome = Outcome.Reject("quality: bad header")
@@ -258,9 +283,10 @@ class TransferPipelineTest {
     /** A row parked at STORED, as a crash after `afterLedgerStored` leaves it; [ref] is what the row points at. */
     private suspend fun storedRow(event: RouteEvent.Seen, ref: TargetRef): Transfer {
         val t = store.seen(event.identity, TransferKind.OBJECT)
-        store.fetched(t.id, StagedSummary("a.csv", 4, clock.instant(), Digest(DigestAlgorithm.MD5, "d"), null), emptyList())
+        val staged = StagedSummary("a.csv", 4, clock.instant(), Digest(DigestAlgorithm.MD5, "d"), null)
+        store.fetched(t.id, staged, emptyList())
         store.processed(t.id, emptyMap())
-        store.stored(t.id, ref, emptyList())
+        store.stored(t.id, ref, staged, emptyList())
         return store.transfer(t.id)
     }
 

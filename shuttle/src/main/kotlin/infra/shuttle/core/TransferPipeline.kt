@@ -189,8 +189,9 @@ class TransferPipeline(
                 return reject(transfer, "cardinality: ${names.joinToString(" and ")} both resolve to key $key")
             }
             if (objects.size == 1) {
-                val ref = uploads.withPermit { stage("store") { storeOne(id, objects.single(), keys.single(), done.attributes) } }
-                ledger.stored(id, ref)
+                val o = objects.single()
+                val ref = uploads.withPermit { stage("store") { storeOne(id, o, keys.single(), done.attributes) } }
+                ledger.stored(id, ref, o.summary)
                 hook.at(HookPoint.afterLedgerStored, id)
             } else {
                 val children = childRows(id, objects)
@@ -226,7 +227,7 @@ class TransferPipeline(
             try {
                 uploads.withPermit {
                     val ref = stage("store") { storeOne(child.id, o, key, attributes) }
-                    ledger.stored(child.id, ref)
+                    ledger.stored(child.id, ref, o.summary)
                     hook.at(HookPoint.afterLedgerStored, child.id)
                 }
             } catch (e: CancellationException) {

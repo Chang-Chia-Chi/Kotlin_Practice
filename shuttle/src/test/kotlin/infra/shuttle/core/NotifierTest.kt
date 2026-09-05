@@ -45,9 +45,10 @@ class NotifierTest {
     /** An ACKED transfer with one PENDING `acked` delivery per channel named. */
     private suspend fun ackedTransfer(name: String, channels: List<ChannelName>): Transfer {
         val t = store.seen(SourceIdentity(RouteName("drop"), SourceKind.SFTP, "sftp:/in", name, 10, Instant.EPOCH), TransferKind.OBJECT)
-        store.fetched(t.id, StagedSummary(name, 10, Instant.EPOCH, Digest(DigestAlgorithm.MD5, "d"), null), emptyList())
+        val staged = StagedSummary(name, 10, Instant.EPOCH, Digest(DigestAlgorithm.MD5, "d"), null)
+        store.fetched(t.id, staged, emptyList())
         store.processed(t.id, emptyMap())
-        store.stored(t.id, TargetRef("memory", "bucket", name, "v1", 10), emptyList())
+        store.stored(t.id, TargetRef("memory", "bucket", name, "v1", 10), staged, emptyList())
         store.acked(t.id, channels.map { DeliveryRequest(DeliveryMoment.ACKED, it) })
         return store.transfer(t.id)
     }

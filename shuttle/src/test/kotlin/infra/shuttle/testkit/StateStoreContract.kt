@@ -60,7 +60,7 @@ abstract class StateStoreContract {
         val t = store.seen(identity(name, route), TransferKind.OBJECT)
         store.fetched(t.id, staged(name), emptyList())
         store.processed(t.id, mapOf("k" to "v"))
-        store.stored(t.id, ref(name), events)
+        store.stored(t.id, ref(name), staged(name), events)
         return transfer(t.id)
     }
 
@@ -91,16 +91,33 @@ abstract class StateStoreContract {
         assertTrue(outbox().all { it.state == DeliveryState.PENDING && it.transferId == t.id })
     }
 
+    /** Ticket 45 (closes D43): `stored` writes the stored object's name, digest and mtime over the fetched one's; `source_digest` stays. */
+    @Test
+    fun stored_persists_the_stored_objects_name_digest_and_mtime_and_keeps_the_source_digest() = runTest {
+        val t = store.seen(identity("a.csv"), TransferKind.OBJECT)
+        store.fetched(t.id, staged("a.csv"), emptyList())
+        store.processed(t.id, emptyMap())
+        val archive = StagedSummary("20260101-a.csv.zip", 44, Instant.EPOCH.plusSeconds(90), Digest(DigestAlgorithm.MD5, "d-archive"), "application/zip")
+        store.stored(t.id, ref("20260101-a.csv.zip"), archive, emptyList())
+
+        val row = store.byId(t.id)!!
+        assertEquals("20260101-a.csv.zip", row.storedName)
+        assertEquals(Digest(DigestAlgorithm.MD5, "d-archive"), row.digest)
+        assertEquals(Instant.EPOCH.plusSeconds(90), row.storedMtime)
+        assertEquals(Digest(DigestAlgorithm.MD5, "d-a.csv"), row.sourceDigest, "the source digest is the fetched one's still")
+        assertEquals("a.csv", row.identity.sourceName)
+    }
+
     @Test
     fun I11_a_failing_delivery_insert_leaves_the_transfer_state_unchanged() = runTest {
         val t = store.seen(identity("a"), TransferKind.OBJECT)
         store.fetched(t.id, staged("a"), emptyList())
-        assertInjectedFailure(runCatching { store.stored(t.id, ref("a"), poisonedEvents()) }.exceptionOrNull())
+        assertInjectedFailure(runCatching { store.stored(t.id, ref("a"), staged("a"), poisonedEvents()) }.exceptionOrNull())
         assertEquals(TransferState.FETCHED, transfer(t.id).state)
         assertNull(transfer(t.id).target)
         assertTrue(outbox().isEmpty())
         // the retry commits both
-        store.stored(t.id, ref("a"), onStored)
+        store.stored(t.id, ref("a"), staged("a"), onStored)
         assertEquals(TransferState.STORED, transfer(t.id).state)
         assertEquals(1, outbox().size)
     }
@@ -116,7 +133,7 @@ abstract class StateStoreContract {
         assertEquals(listOf(DeliveryMoment.FETCHED), outbox().map { it.moment })
 
         store.processed(t.id, emptyMap())
-        store.stored(t.id, ref("a"), emptyList())
+        store.stored(t.id, ref("a"), staged("a"), emptyList())
         assertInjectedFailure(runCatching { store.acked(t.id, poisonedEvents()) }.exceptionOrNull())
         assertEquals(TransferState.STORED, transfer(t.id).state)
         assertEquals(1, outbox().size)
@@ -259,10 +276,10 @@ abstract class StateStoreContract {
         assertEquals(2, transfers().count { it.parentId == parent.id })
         assertTrue(children.all { it.kind == TransferKind.CHILD && it.state == TransferState.FETCHED })
 
-        store.stored(children[0].id, ref("c1"), onStored)
+        store.stored(children[0].id, ref("c1"), staged("c1"), onStored)
         assertEquals(TransferState.FETCHED, transfer(parent.id).state)
         assertTrue(outbox().isEmpty())
-        store.stored(children[1].id, ref("c2"), onStored)
+        store.stored(children[1].id, ref("c2"), staged("c2"), onStored)
         assertEquals(TransferState.STORED, transfer(parent.id).state)
         assertEquals(listOf(parent.id), outbox().map { it.transferId })
 
@@ -281,7 +298,7 @@ abstract class StateStoreContract {
         assertEquals(emptyList<Transfer>(), store.childrenOf(parent.id))
         assertEquals(emptyList<Transfer>(), store.childrenOf(single.id))
         val children = store.children(parent.id, listOf(staged("c2"), staged("c1")))
-        store.stored(children[0].id, ref("c2"), emptyList())
+        store.stored(children[0].id, ref("c2"), staged("c2"), emptyList())
         assertEquals(listOf("c2", "c1"), store.childrenOf(parent.id).map { it.identity.sourceName })
         assertEquals(listOf(TransferState.STORED, TransferState.FETCHED), store.childrenOf(parent.id).map { it.state })
         assertEquals(ref("c2"), store.childrenOf(parent.id).first().target)
@@ -293,7 +310,7 @@ abstract class StateStoreContract {
     fun D42_children_completing_concurrently_leave_exactly_one_parent_STORED_write() = runTest {
         val parent = store.seen(identity("set.json"), TransferKind.MESSAGE)
         val children = store.children(parent.id, (1..8).map { staged("c$it") })
-        coroutineScope { children.map { c -> async { store.stored(c.id, ref(c.identity.sourceName), onStored) } }.awaitAll() }
+        coroutineScope { children.map { c -> async { store.stored(c.id, ref(c.identity.sourceName), staged(c.identity.sourceName), onStored) } }.awaitAll() }
         assertEquals(TransferState.STORED, transfer(parent.id).state)
         assertTrue(transfers().filter { it.parentId == parent.id }.all { it.state == TransferState.STORED })
         assertEquals(listOf(parent.id), outbox().map { it.transferId })
@@ -317,8 +334,8 @@ abstract class StateStoreContract {
         assertEquals(listOf(other.id), store.childrenOf(second.id).map { it.id })
         assertNull(store.find(one.identity), "a child is reached through its parent, never by identity")
 
-        store.stored(one.id, ref("a/shared.png"), onStored)
-        store.stored(other.id, ref("b/shared.png"), onStored)
+        store.stored(one.id, ref("a/shared.png"), staged("a/shared.png"), onStored)
+        store.stored(other.id, ref("b/shared.png"), staged("b/shared.png"), onStored)
         assertEquals(TransferState.STORED, transfer(first.id).state)
         assertEquals(TransferState.STORED, transfer(second.id).state)
     }

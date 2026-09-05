@@ -156,15 +156,15 @@ The callback the echo server received:
 docker logs shuttle-example-echo
 ```
 ```json
-{"fileId":"1","file":{"name":"123-order.csv","size":"196","md5":"0e9718918ba07ef546ab6002768ef1c5"},
+{"fileId":"1","file":{"name":"20260904-123-order.csv.zip","size":"196","md5":"<the archive's md5>"},
  "location":{"bucket":"landing","key":"vendor/20260904-123-order.csv.zip"},
  "receivedAt":"2026-09-04T21:35:27Z","orderNumber":"123","event":"acked","source":"vendor-drop"}
 ```
 
 `orderNumber` came from the extract step, `location.key` from the target, `source` is a constant in the
-mapping table. Note that `file.name` and `file.md5` are the **source** object's, not the stored archive's -
-the ledger row records what was fetched (progress log D43); the stored object's own name and digest are in
-its S3 metadata.
+mapping table. `file.name` and `file.md5` are the stored archive's own name and digest (the row is written
+again at STORED with the object that went to the target; spec 8.1); the source's are the `SOURCE_NAME` and
+`SOURCE_DIGEST` fields, and the same name and digest are on the object's S3 metadata.
 
 The transfer, through the admin endpoint:
 

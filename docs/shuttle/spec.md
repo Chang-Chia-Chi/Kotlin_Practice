@@ -536,8 +536,11 @@ CREATE TABLE delivery_outbox (
 CREATE INDEX ix_delivery_due ON delivery_outbox (notification_state, next_attempt_at);
 ```
 
-`stored_name`, `digest` and `stored_mtime` are the fetched source object's, written at FETCHED and not
-updated by the chain; the processed name and digest live on the target object's metadata (D43).
+`stored_name`, `digest` and `stored_mtime` are written twice: at FETCHED with the fetched source object's
+values, and at STORED with the object that went to the target (its name after a rename, its digest after a
+zip), so from STORED on a notification names what downstream can fetch. `source_digest` is written once, at
+FETCHED. A parent row stores nothing itself, so its three columns keep the fetched values and each child
+row carries its own (D43, closed by ticket 45). The same values are on the target object's metadata (7.1).
 
 Two tables because a transfer has many deliveries, each with its own attempts, retry time and
 reference (D3). No payload column: the body is rendered at send time from the row (D19). No
@@ -553,7 +556,7 @@ interface StateStore {
     suspend fun fetched(id: TransferId, staged: StagedSummary, events: List<DeliveryRequest>)   // + FETCHED rows, 1 txn
     suspend fun processed(id: TransferId, attributes: Map<String, String>)
     suspend fun children(id: TransferId, staged: List<StagedSummary>): List<Transfer>          // 1 txn
-    suspend fun stored(id: TransferId, target: TargetRef, events: List<DeliveryRequest>)     // + STORED rows; parent when last child
+    suspend fun stored(id: TransferId, target: TargetRef, stored: StagedSummary, events: List<DeliveryRequest>)  // + STORED rows; parent when last child; `stored` is the object as it went to the target
     suspend fun acked(id: TransferId, events: List<DeliveryRequest>)                           // ACKED (+ children) + DONE rows; DONE when none
     suspend fun rejected(id: TransferId, reason: String)
     suspend fun failedAttempt(id: TransferId, error: String, maxAttempts: Int): Transfer
@@ -646,6 +649,13 @@ Vocabulary: `TRANSFER_ID`, `PARENT_ID`, `ROUTE`, `KIND`, `SOURCE_KIND`, `SOURCE_
 `SOURCE_NAME`, `SOURCE_PATH`, `SOURCE_SIZE`, `SOURCE_MTIME`, `SOURCE_DIGEST`, `STORED_NAME`,
 `STORED_MTIME`, `DIGEST`, `DIGEST_ALGO`, `TARGET_KIND`, `TARGET_LOCATION`, `TARGET_KEY`,
 `TARGET_REF`, `TARGET_SIZE`, `FIRST_SEEN_AT`, `ACKED_AT`, `EVENT`, `ATTEMPT`.
+
+What the three families carry: `SOURCE_*` is the source object as listed and fetched (`SOURCE_DIGEST` is
+the digest of the fetched bytes); `STORED_NAME`, `STORED_MTIME`, `DIGEST` and `DIGEST_ALGO` are the object
+that went to the target once the row is STORED (the archive's name and digest after rename and zip), and
+the fetched object's before that, in a `fetched` body; `TARGET_*` is the target's reference to it. A parent
+row has no target and stores nothing itself, so its `STORED_*` and `DIGEST` stay the fetched object's and
+its `TARGET_*` rows are missing (8.1, ticket 45).
 
 Boot checks: every `field` is in the vocabulary; every `provider` resolves to a bean; every
 `attribute` is declared by a processor in that route; every
@@ -1070,7 +1080,7 @@ poll are appeals to the connector's spec.
 | D40 | A finished polled identity is re-digested at most once per `recheckFinished`, measured from the row's `updated_at`; inside the window it is skipped without a fetch or a write | Identity carries mtime, so a file that stays under `none` is the same identity on every poll and D2's digest check would download the whole directory every interval; the row's own timestamp throttles it with no new column and no in-memory memory (v0.4) |
 | D41 | Staging is bounded in bytes: `staging.minFree` defers a fetch below the watermark without counting an attempt; `unzip` rejects beyond `maxEntries` or `maxBytes` | Parallelism bounds pipelines, not bytes; an archive that expands past the volume evicts the pod, and a deferral is disk pressure, not the object's fault, so it must not walk the object to FAILED (v0.4) |
 | D42 | A child's STORED is one statement on its own row plus a conditional parent update; no `FOR UPDATE`, no lock across I/O, the parent row touched so the last two children order their tails | N children of one parent store under the route's parallelism; the uploads must not serialise, but a lock-free conditional flip loses the last child under read committed, so the row writes queue on the parent for a moment (v0.4, amended by ticket 10) |
-| D43 | The row's `stored_name`, `digest` and `stored_mtime` are the fetched source object's, written at FETCHED and not updated by the chain; the target object alone carries the processed name and digest, in its metadata. `STORED_NAME` and `DIGEST` in a notification therefore render the source values | The `stored`/`processed` seam methods carry only a `TargetRef` (key, size), not the processed object's summary, and the seam is frozen; the S3 metadata (`source-name`, `digest`) is written by the pipeline from the final object, so downstream can read the true stored name and digest off the object. The clean fix is to thread the processed `StagedSummary` into `stored` — a frozen-seam change deferred to a follow-up (measured by ticket 15, S1 and S20 on real adapters) |
+| D43 | The `stored` transition carries the object as it went to the target (`StagedSummary`: name, size, mtime, digest) and writes `stored_name`, `digest`, `digest_algo` and `stored_mtime` over the FETCHED values; `source_digest` stays. `STORED_NAME` and `DIGEST` in a notification therefore render the stored object's values from STORED on, `SOURCE_NAME` and `SOURCE_DIGEST` the source's | Ticket 15 measured the gap on real adapters (S1, S20): `stored` carried only a `TargetRef`, so after rename+zip a body told downstream the source's name and digest, and only the target metadata had the true ones. Ticket 45 widened the seam by one parameter - the summary the pipeline already had in hand - rather than adding columns (8.1 has them) or a second transition. A parent stores nothing itself, so its row keeps the fetched values and each child carries its own; `size` needs no column of its own, `target_size` is the same number |
 | D44 | An outbox insert is idempotent on (transfer, `on_state`, channel): a transition that runs again after a crash keeps the row it created, whatever its notification state | Spec 4.4's "next trigger does a full run" repeats the FETCHED transition on the same row; the 8.1 index allows one row per transfer, state and channel, so on Oracle the second insert failed the run five times to FAILED while the fake appended a second row. The key is what makes a notification at-least-once rather than once-per-run (measured by ticket 20, S28) |
 | D45 | The NATS client runs on the unbounded `Dispatchers.IO`, not the module's bounded view | Its pull is a one second long-poll; on a view sized to route parallelism it held a route's whole IO budget at `parallelism: 1`, and every ledger write and fetch waited a second behind it (five seconds per attempt, measured by ticket 20). The connector already owns its own threads for the same reason |
 | D46 | A subscribed transfer's re-drive is triggered by the upstream publishing the message again under the same `Nats-Msg-Id`; the adapter terms a message when its transfer is REJECTED or FAILED | `nak` would redeliver a FAILED row for ever (the consumer's `MaxDeliver` is the operator's, not ours); `term` leaves nothing to redeliver, so the re-drive's trigger has to come from outside. The stream sequence changes on a republish, so only a publisher-set id survives it; the stream's duplicate window (2 min by default) swallows a republish inside it (measured by ticket 20, S29) |
@@ -1184,7 +1194,7 @@ expand with children, the SFTP target, `fetched` notifications, callback acks.
 | S17 | Two channels on `acked`, one always 503 | The other delivers; transfer ACKED; pending gauge shows one |
 | S18 | Wrong SFTP password | Route down; supervised restarts with backoff; readiness per rule; process alive |
 | S19 | Mirror route, no notifications | ACKED to DONE in one transaction; no outbox row |
-| S20 | Rename then zip | One archive stored under the renamed key; the stored object's own name and digest (on its metadata) differ from the source's. The ledger row's `stored_name` and `digest` remain the source object's, so the notification's `STORED_NAME`/`DIGEST` render the source values (D43); the target metadata carries the processed `source-name` and `digest` |
+| S20 | Rename then zip | One archive stored under the renamed key; the ledger row's `stored_name` and `digest` are the archive's, so the notification's `STORED_NAME`/`DIGEST` render them and `SOURCE_NAME`/`SOURCE_DIGEST` the source's (D43, ticket 45); the target metadata carries the same `source-name` and `digest` |
 | S21 | An attribute extracted from the file name used by the mapping | Body carries it; a route whose mapping names an undeclared attribute fails validation by rule 17 |
 | S22 | One provider selected by three rows | One invocation; three paths filled |
 | S23 | Two routes, one dead | The other keeps completing; readiness true under `all-routes-down` |

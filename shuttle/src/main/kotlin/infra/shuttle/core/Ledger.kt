@@ -15,7 +15,7 @@ class Ledger(val store: StateStore, notify: List<Notify>, private val wake: () -
 
     suspend fun fetched(id: TransferId, staged: StagedSummary) = transition(DeliveryMoment.FETCHED) { store.fetched(id, staged, it) }
 
-    suspend fun stored(id: TransferId, target: TargetRef) = transition(DeliveryMoment.STORED) { store.stored(id, target, it) }
+    suspend fun stored(id: TransferId, target: TargetRef, stored: StagedSummary) = transition(DeliveryMoment.STORED) { store.stored(id, target, stored, it) }
 
     suspend fun acked(id: TransferId) = transition(DeliveryMoment.ACKED) { store.acked(id, it) }
 

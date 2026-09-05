@@ -4377,3 +4377,71 @@ is a class with three callers and one fake behind it (the store's); it is not a 
 **For the next ticket:** `ShuttleHost.ack` answers NOT_FOUND for a row whose route left the configuration,
 as before; the row is still the store's. If an admin operation ever needs a ledger for a route the host no
 longer runs, that is a `Ledger(store, emptyList(), notifier::wake)`, not a new path.
+
+---
+
+## 45: A notification carries the stored object's name and digest, not the source's
+
+**Built:** `StateStore.stored` takes the object as it went to the target - `stored(id, target, stored: StagedSummary,
+events)` - and writes `stored_name`, `digest`, `digest_algo` and `stored_mtime` over the FETCHED values in the same
+transaction as the STORED flip; `source_digest` is untouched. `Ledger.stored(id, target, summary)` passes it through;
+the pipeline hands the `StagedObject` it just uploaded (`o.summary`) for a single object and for each child. Both
+adapters (`InMemoryStateStore`, `JdbiStateStore`) implement it under the widened contract. The renderer, the field
+vocabulary and the `Transfer` row are unchanged: `STORED_NAME`, `DIGEST`, `STORED_MTIME` read the same columns, which
+now hold the stored object from STORED on. A `fetched` body still renders the fetched object under those fields,
+because that is what the row holds at FETCHED. D43 is closed and amended in place; spec 8.1's prose under the DDL
+(the block itself untouched, `StateStoreSchemaTest` still verbatim), 8.2's signature, 9.6's field families and the
+S20 row say what each field carries. The README's quickstart no longer calls the source name a known limitation.
+
+**Concepts named:** none new. The three field families of 9.6 are now stated: `SOURCE_*` the object as listed and
+fetched, `STORED_*`/`DIGEST` the object that went to the target, `TARGET_*` the target's reference to it.
+
+**Acceptance:**
+
+- [x] `TransferPipelineTest.a_rename_then_zip_routes_stored_body_carries_the_archives_name_and_digest_and_the_sources_under_the_SOURCE_rows`:
+  red before the fix (`expected: <20260101-data.csv.zip> but was: <data.csv>`), green after; `STORED_NAME`/`DIGEST`
+  are the archive's name and MD5 (computed independently over the bytes the fake target holds), `SOURCE_NAME`/
+  `SOURCE_DIGEST` the source's.
+- [x] `StateStoreContract.stored_persists_the_stored_objects_name_digest_and_mtime_and_keeps_the_source_digest`, run
+  through `InMemoryStateStoreTest` (23) and `JdbiStateStoreTest` on the Oracle container (26, 67 s); `byId` reads
+  the stored summary back and `source_digest` still holds the fetched one's. The 8.1 columns already existed;
+  `size` needs none, `target_size` is the same number.
+- [x] `Ledger.stored` and the pipeline's two calls carry the summary. `CrashMatrixTest` was not edited and stays
+  green with its ids (the 4.4 rows "store, before ledger" and "ledger STORED" are unchanged: the write is one
+  UPDATE, the same transaction, one more set of columns).
+- [x] Spec 9.6 (field families paragraph), 8.1 prose, 8.2 signature, D43 and the S20 row amended in place.
+- [x] `-DexcludedGroups=none -Dtest=M1AcceptanceTest,M2AcceptanceTest`: M1 23 tests, M2 5 tests, 0 failures.
+  S1's row and body assertions now expect the archive's name and MD5 and check `SOURCE_DIGEST != DIGEST`; S20
+  additionally asserts the row's `digest` equals the object's metadata digest; S27 asserts each child's
+  `stored_name` is its image.
+- [x] Progress entry appended: this one.
+
+Default tier: 298 tests, 0 failures (296 plus the two above).
+
+**Deviations:**
+
+1. **D43 amended in place, no D55.** The fix is exactly the plan D43 recorded - thread the processed
+   `StagedSummary` into `stored` - so the row now says what landed and why the seam widened by one parameter
+   rather than by new columns or a second transition.
+2. **A parent row keeps the fetched values.** A parent stores nothing itself (no `TargetRef`, `TARGET_*` rows
+   are missing for it); its `stored_name` and `digest` stay the metadata file's and each child row carries its
+   own image's. The ticket text says S27's body assertions "expect stored values": for a parent those are the
+   fetched values, so S27's body assertions are unchanged in substance and the comment says why; a new
+   assertion covers the children's `stored_name`. Rendering null or a child's value on the parent were both
+   considered and rejected: null breaks every `required` `STORED_NAME` row on a parent route, and a parent has
+   N children with no single name.
+3. **`digest_algo` is written at STORED as well.** The column is shared by `source_digest` and `digest`
+   (spec 6.5, D49: a transfer carries one algorithm); the chain digests with the route's algorithm, so the
+   value is the same and the write matches `fetched`'s shape. If a processor ever digested with another
+   algorithm the column would have to split; nothing does today.
+4. **README sample.** The quickstart's echoed callback was captured before this ticket; its `file.name` now
+   shows the archive's name and `file.md5` a placeholder rather than a hex nobody re-measured. Re-running the
+   quickstart replaces it.
+5. **Compiler-forced test edits only** in `LedgerTest`, `NotifierTest`, `RouteRunnerTest`, `StateStoreContract`'s
+   existing tests and `TransferPipelineTest.storedRow`: each passes the summary it already fetched with. No
+   file of tickets 43 or 44 was touched.
+
+**For the next ticket:** `Commands.kt`'s `try` mode builds its `Transfer` by hand with `digest = stored.digest,
+storedName = stored.name`, which was already the stored object's; it now agrees with the ledger. The `fetched`
+moment still renders `STORED_NAME` as the fetched name; if a downstream ever wants that field absent before
+STORED, that is a renderer change, not a store change.

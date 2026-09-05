@@ -101,10 +101,14 @@ class JdbiStateStore(private val jdbi: Jdbi, private val dispatcher: CoroutineDi
      * see the other unstored, leaving the parent FETCHED for ever. The lock never spans I/O: the upload
      * happened before this call.
      */
-    override suspend fun stored(id: TransferId, target: TargetRef, events: List<DeliveryRequest>) = tx { h ->
+    override suspend fun stored(id: TransferId, target: TargetRef, stored: StagedSummary, events: List<DeliveryRequest>) = tx { h ->
         h.update(
-            "UPDATE file_transfer SET state = 'STORED', target_kind = :tk, target_location = :tl, target_key = :key, target_ref = :ref, target_size = :size, updated_at = :now WHERE id = :id",
-        ) { bind("tk", target.kind).bind("tl", target.location).bind("key", target.key).bind("ref", target.ref).bind("size", target.size).bind("id", id.value) }
+            "UPDATE file_transfer SET state = 'STORED', digest = :d, digest_algo = :algo, stored_name = :name, stored_mtime = :mtime, " +
+                "target_kind = :tk, target_location = :tl, target_key = :key, target_ref = :ref, target_size = :size, updated_at = :now WHERE id = :id",
+        ) {
+            bind("d", stored.digest.hex).bind("algo", stored.digest.algorithm.name).bind("name", stored.name).bind("mtime", stored.mtime.ts())
+                .bind("tk", target.kind).bind("tl", target.location).bind("key", target.key).bind("ref", target.ref).bind("size", target.size).bind("id", id.value)
+        }
         val parent = h.transfer(id).parentId
         if (parent == null) {
             h.insertDeliveries(id, events)
