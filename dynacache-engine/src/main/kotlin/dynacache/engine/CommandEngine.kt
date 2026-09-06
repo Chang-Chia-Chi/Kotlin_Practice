@@ -1,6 +1,7 @@
 package dynacache.engine
 
 import java.time.Clock
+import java.util.Random
 import java.util.concurrent.CompletableFuture
 
 /**
@@ -37,11 +38,18 @@ interface PartitionContext {
 
 /**
  * The Dynamo-style AP engine: a fixed number of partitions, each with its own executor and
- * store, chosen by `key.hash % partitionCount`. Keyless commands run on partition 0.
+ * store, chosen by `key.hash % partitionCount`. Keyless commands run on partition 0, except the
+ * ones that need every partition's answer. [random] is injected so a test can seed it.
  */
-class ApEngine(partitionCount: Int, clock: Clock) : CommandEngine {
+class ApEngine(
+    partitionCount: Int,
+    clock: Clock,
+    private val random: Random = Random(),
+) : CommandEngine {
 
-    private val partitions = List(partitionCount) { Partition(PartitionId(it), clock) }
+    // Each partition draws from its own stream, seeded from the engine's, so one injected seed
+    // makes the whole engine reproducible even though the partitions run on their own threads.
+    private val partitions = List(partitionCount) { Partition(PartitionId(it), clock, Random(random.nextLong())) }
 
     /** The partition [key] lives on; keys sharing a hash tag share a partition (C12). */
     fun partitionOf(key: Key): PartitionId = PartitionId(key.hash % partitions.size)
@@ -49,7 +57,21 @@ class ApEngine(partitionCount: Int, clock: Clock) : CommandEngine {
     override fun submit(command: Command): CompletableFuture<Reply> = when (command) {
         is Command.Keyed -> partitions[partitionOf(command.key).index].submit(command)
         is Command.Fanned -> fanOut(command)
-        is Command.Ping -> partitions[0].submit(command)
+        is Command.EveryPartition -> everyPartition(command)
+        is Command.Ping, is Command.CommandTable -> partitions[0].submit(command)
+    }
+
+    /**
+     * A keyless command run on every partition, one after the previous one finished, and joined
+     * in partition order. Sequential for the same reason fan-out is: a caller sees the same
+     * partition-by-partition view either way, and no partition is asked to know about another.
+     */
+    private fun everyPartition(command: Command.EveryPartition): CompletableFuture<Reply> {
+        var replies = CompletableFuture.completedFuture(emptyList<Reply>())
+        for (partition in partitions) {
+            replies = replies.thenCompose { soFar -> partition.submit(command).thenApply { soFar + it } }
+        }
+        return replies.thenApply { command.join(it, random) }
     }
 
     /**
