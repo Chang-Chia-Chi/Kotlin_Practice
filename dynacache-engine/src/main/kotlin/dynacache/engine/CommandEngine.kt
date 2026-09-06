@@ -50,6 +50,11 @@ class ApEngine(partitionCount: Int, clock: Clock) : CommandEngine {
         is Command.Keyed -> partitions[partitionOf(command.key).index].submit(command)
         is Command.Fanned -> fanOut(command)
         is Command.Ping -> partitions[0].submit(command)
+        // C16: a cp:* key never belongs here. The dispatcher (T44) routes it away; if one still
+        // arrives, the spec's answer is -NOTCP, not a partition write.
+        is Command.Cp -> CompletableFuture.completedFuture(
+            Reply.Error("NOTCP", "${'$'}{command.key} is a CP key; the AP engine does not serve it")
+        )
     }
 
     /**
