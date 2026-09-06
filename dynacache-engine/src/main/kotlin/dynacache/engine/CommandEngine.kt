@@ -50,12 +50,25 @@ class ApEngine(
      * [tick] removes it (C7). The server's scheduler reads this to set its own period.
      */
     val tickMillis: Long = 1000,
+    /**
+     * The node's memory threshold (spec 2.7), split evenly across the partitions. Each partition
+     * evicts its own keys to stay under its share and coordinates with no other (spec 5.5). Null,
+     * the default, means the node holds everything it is given.
+     */
+    maxMemoryBytes: Long? = null,
 ) : CommandEngine {
 
     // Each partition draws from its own stream, seeded from the engine's, so one injected seed
     // makes the whole engine reproducible even though the partitions run on their own threads.
-    private val partitions =
-        List(partitionCount) { Partition(PartitionId(it), clock, Random(random.nextLong()), tickMillis) }
+    private val partitions = List(partitionCount) {
+        Partition(
+            PartitionId(it),
+            clock,
+            Random(random.nextLong()),
+            tickMillis,
+            maxMemoryBytes?.let { bytes -> bytes / partitionCount } ?: Long.MAX_VALUE,
+        )
+    }
 
     /**
      * Advances every partition's timer wheel to the clock's current reading, deleting the keys

@@ -40,6 +40,33 @@ internal sealed class Value(val kind: Kind) {
     class ZSet(val order: SkipList) : Value(Kind.ZSET) {
         val scores = HashTable<String, Double>()
     }
+
+    /**
+     * What this value costs, near enough for spec 2.7 to decide when to evict: the payload's own
+     * bytes plus [ELEMENT_BYTES] per element of an aggregate, standing for the node, the pointers
+     * and the object header a JVM spends on holding one element. A score is a `Double`, so it
+     * counts as eight. Field and member names are ISO-8859-1, one character to the byte.
+     *
+     * Approximate by design and by name, as Redis's own `used_memory` is: an exact count would
+     * mean walking the JVM's object graph.
+     *
+     * ponytail: O(elements), so the cost of measuring a big aggregate is the aggregate's size.
+     * [Partition] calls it once per command on the one key that command touched, which is the
+     * same order as the command's own work for a String and more than it for one field of a big
+     * hash. Per-element deltas threaded through every mutation site would make it O(1) and cost
+     * a running total in every structure.
+     */
+    fun approximateBytes(): Long = when (this) {
+        is Str -> bytes.size.toLong()
+        is Hash -> fields.entries().sumOf { it.key.length + it.value.size + ELEMENT_BYTES }
+        is List -> items.sumOf { it.size + ELEMENT_BYTES }
+        is ZSet -> scores.entries().sumOf { it.key.length + Long.SIZE_BYTES + ELEMENT_BYTES }
+    }
+
+    internal companion object {
+        /** What one element of an aggregate costs beyond its own bytes. */
+        const val ELEMENT_BYTES = 16L
+    }
 }
 
 /** The error Redis answers when an argument that should be a score is not one. */
