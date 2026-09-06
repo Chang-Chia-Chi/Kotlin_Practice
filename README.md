@@ -72,7 +72,7 @@ advance of an injected clock.
 | Module | Tests | Roughly |
 |---|---|---|
 | `dynacache-engine` | 144 | 3 s |
-| `dynacache-cluster` | 80 | 4 s |
+| `dynacache-cluster` | 83 | 5 s |
 | `dynacache-cp` | 89 | 30 s |
 | `dynacache-server` | 83 | 12 s |
 
