@@ -4615,3 +4615,79 @@ the targeted runs never saw it -- only a run with the rest of the suite ahead of
 - The README now carries the running instructions, the test tiers and their timings, and the five
   known debts of the last five progress entries. It is the first document a reader meets, so a
   ticket that repays one of those debts should strike it from there as well as recording it here.
+
+---
+
+## T48: WAL logs nothing for a refused conditional ZADD
+
+**Built:** a `ZADD` carries its `NX`/`XX` condition into its WAL entry and is replayed under it,
+so a warm restart reproduces exactly the effect the live command had (C14, spec 2.8). Before
+this ticket `WalCodec.encode` dropped `ZAdd.condition`: a `ZADD NX` on a member already there
+and a `ZADD XX` on one that was not both answered `:0`, were logged as plain `ZADD`s, and moved
+or created the member on the next boot.
+
+`WalCodec` gains one symmetrical pair, `DataOutputStream.condition` and
+`DataInputStream.condition`, alongside the `end` pair it already had and fixed by the format the
+same way: `0` none, `1` `NX`, `2` `XX`, so reordering `Command.Set.Condition` cannot change a
+file's meaning. The `ZADD` payload is now `key, pairs, condition`; `decode` rebuilds
+`Command.ZAdd(key, entries, condition)`. `CH` is not logged -- it changes only the reply's count,
+never the store. Nothing else moved: the entry header, the op codes, the RDB, `Partition`'s
+command semantics and the engine hook are all untouched.
+
+**The mixed case.** `ZADD NX 5 a 2 b` with `a` present and `b` missing takes `b` only. The
+ticket offered two ways to log that: the taken subset as a plain `ZADD b 2`, or the condition
+carried and replayed. Carried, because the taken subset is not derivable inside the seam this
+ticket owns -- `encode` sees `(command, reply, now)` and nothing of the store, and which members
+a condition admitted depends on the state *before* the command, which only `Partition` holds.
+Logging the subset would have meant returning it out of `Partition.run`, i.e. changing the hook
+and the command path for one command's benefit. Carrying the condition is one byte in the `ZADD`
+payload, no new op code, no header change, and replay is exact because replay reaches that entry
+in the same state the live command saw.
+
+**Correcting T35's wording.** T35's entry says: "What is logged is what changed: an error reply,
+a refused conditional `SET` and an empty `POP` (both nil) log nothing, and a conditional `SET`
+that took is logged as a plain one." That is true as written, of `SET`. What is not true, and
+what the codec's file comment did imply by closing on "what is logged is what changed, not what
+was asked", is that the *reply's shape* settles every conditional command. It settles `SET`
+only: a refused `SET` answers nil, which no successful `SET` answers, so the entry is dropped by
+shape. A `ZADD` answers an integer, and `:0` is what both a full refusal and a score moved
+without `CH` answer -- and one call can be part refused and part taken, which no single count can
+express. The old entry is left as it stands; the codec's comment is rewritten to say which
+commands the reply shape settles and why `ZADD` is settled by its condition instead.
+
+**Tests** (`WalRecoveryTest`, the engine's own recovery seam; nothing here reads the log's
+layout, which stays `WalTest`'s):
+
+- `C14_refused_conditional_zadd_replays_nothing`: `ZADD NX` on a present member and `ZADD XX` on
+  a missing one, then a crash (no save, no close) and recovery from the log alone -- the score is
+  where it was and the refused member is still absent. Red before the fix on the score.
+- `C14_taken_conditional_zadd_replays_as_taken`: an `XX` that moved one of two members replays
+  with that one change only.
+- `C14_partly_refused_conditional_zadd_replays_only_the_taken_members`: `ZADD NX 5 a 2 b` with
+  `a` present replays as `a=1, b=2`. Red before the fix on `a`.
+
+The parked red test from the review worktree (`BugHuntWalTest`) is folded into the first of these
+and is not carried over under its own name. Engine module: 144 tests before, 147 after, all green
+offline; `WalRecoveryTest` 9 of 9.
+
+**Deviations:**
+
+- A refused conditional `ZADD` still *appends* an entry; what it no longer does is change
+  anything on replay. The ticket's title reads "logs nothing", and that literal form is not
+  reachable from the encode seam: `:0` does not distinguish a refusal from a move without `CH`,
+  so dropping on `:0` would silently lose a real score change, and a part-refused call must log
+  its taken half regardless. The ticket names carrying the condition as an accepted answer.
+- `CH` is deliberately not logged. It is a reply-shape flag; a replay ignores replies.
+- The `ZADD` payload grew a trailing byte, so a log file written before this ticket ends its
+  `ZADD` entries one byte short and its recovery now fails loudly (`EOFException`) instead of
+  replaying the wrong thing. The entry header and op codes are unchanged and the format carries
+  no version field to bump (T35 did not give it one), so there was nothing to version; a pre-1.0
+  log is not a compatibility contract, and a loud failure is the right shape of one anyway.
+
+**For the next ticket:** `SET` and `ZADD` are the only commands in `Command.kt` carrying a
+condition today (grep `condition`), and both are now correct, so the WAL's rule holds across the
+whole command set. If `EXPIRE` ever gains Redis's `NX`/`XX`/`GT`/`LT` flags it joins `ZADD`'s
+class, not `SET`'s -- its refusal answers `:0` -- and must carry them into the log the same way.
+More generally: `encode` sees only `(command, reply, now)`. Any future rule that needs the state
+*before* the command has to move the decision into `Partition`, where the condition is evaluated;
+that is a hook change, and worth doing once rather than per command.
