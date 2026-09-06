@@ -28,6 +28,14 @@
             <type>test-jar</type>
             <scope>test</scope>
         </dependency>
+        <!-- The shared MutableClock (T58), which the CP test kit hands back from `clock`. -->
+        <dependency>
+            <groupId>dynacache</groupId>
+            <artifactId>dynacache-engine</artifactId>
+            <version>${project.version}</version>
+            <type>test-jar</type>
+            <scope>test</scope>
+        </dependency>
         <dependency>
             <groupId>org.jetbrains.kotlinx</groupId>
             <artifactId>kotlinx-coroutines-core</artifactId>

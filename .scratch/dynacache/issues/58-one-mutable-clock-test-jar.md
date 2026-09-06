@@ -12,15 +12,15 @@ the prefactor for ticket 59, which needs the clock double from the server module
 
 **Nature:** test kit (Opus)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache cab7126e, merged into misc/ai_gen)
 
-- [ ] The engine module produces a test-jar; cluster, cp and server declare a test-scoped
+- [x] The engine module produces a test-jar; cluster, cp and server declare a test-scoped
       dependency on it; the reactor builds offline from a clean state
-- [ ] Exactly one `MutableClock` class exists in DynaCache; `RecordingClock` is either folded
+- [x] Exactly one `MutableClock` class exists in DynaCache; `RecordingClock` is either folded
       into it or deleted
-- [ ] Both `ModuleGraphTest`s are deleted and the progress entry says why
-- [ ] Test count is unchanged apart from the two deleted tests; every test passes
-- [ ] Progress entry appended
+- [x] Both `ModuleGraphTest`s are deleted and the progress entry says why
+- [x] Test count is unchanged apart from the two deleted tests; every test passes
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket; 200 to 600 lines including tests;
 JUnit 5 + Mockito only, no AssertJ or MockK; no sleeps, time is an injected Clock; spec-named

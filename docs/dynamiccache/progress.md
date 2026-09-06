@@ -5394,3 +5394,244 @@ One intermediate run saw `ReadRepairTest.read_repair_does_not_delay_reply` error
 reached node-3". That test is in the cluster module, which this ticket does not touch, and it
 passed on both the run before it and the run after; it is a timing flake under three parallel
 Maven builds on the machine. The final run is clean.
+
+---
+
+## T51 - A node's dot counter survives restart
+
+**Built:** a node's `DotCounter` now resumes above everything it ever handed out, restart
+included (C2), which is what makes a restarted coordinator's first write new to every replica
+and closes the acknowledged-write loss the bug hunt found (I2). The counter reserves dots a
+block at a time: crossing its reserved ceiling persists the next ceiling (`(counter / block + 1)
+* block`, block 1000) through a new seam BEFORE the crossing dot is handed out, so the write
+path pays one fsync per 1000 writes and nothing otherwise, and a crash wastes at most one block.
+On start the counter takes the higher of two floors: the persisted ceiling and the highest own
+counter in the local-data scan T21 already had (empty on every node today, ticket 67's floor
+once versions persist).
+
+The seam is `dynacache.engine.persist.DotCeilingStore { load(): Long; reserve(ceiling: Long) }`,
+in the engine's persist package because that is the one package besides cp allowed
+`java.nio.file` (plan 2.2); the cluster module still does no file I/O. Two adapters, both in the
+same file as companion factories: `inFile(path)` writes the ceiling as decimal text to
+`<path>.tmp`, fsyncs, and renames it over `<path>` atomically (the snapshot engine's own idiom),
+and answers 0 for a missing file while a file it cannot parse fails loudly rather than starting
+over at 0; `inMemory()` is what a node with no data directory and every test uses. `ClusterNode`
+wires `inFile(dataDir/dots)` when it has a data directory and `inMemory()` otherwise; the file
+adapter creates the directory itself because the counter is built before the snapshot engine
+creates it. Inside the counter, `next()` stays an `AtomicLong` increment; only a dot past the
+ceiling enters the `@Synchronized` reservation, the first arrival writes and the rest re-check
+and go, and a reservation that throws leaves the ceiling where it was so the dot is never
+handed out and the next caller retries.
+
+The in-process test kit gained `restart(node)`: it cancels the node's router and handoff loops
+and rebuilds `Replication`, `AntiEntropy` and `Router` over the same engine, the same transport
+endpoint and the node's own `DotCeilingStore` (one in-memory store per node lives in the kit),
+so the version table empties and the counter resumes from the persisted ceiling exactly as a
+process restart does while the engine restores from disk. Node construction moved into one
+`start(node)` the constructor and `restart` share.
+
+**Acceptance:**
+- `C2_dot_counter_never_reuses_a_dot_across_restart` (`DvvTest`, block 4 against a recording
+  store): the first dot reserves 4 before it is out, dots 2 to 4 reserve nothing, dot 5 reserves
+  8; then 41 restarts dying after 0 to 40 dots each, and every restarted counter's first dot is
+  above everything handed out before; the recorded ceilings only rise.
+- `I2_acknowledged_write_survives_coordinator_restart` (`ReplicationTest`): v1 and v2 written
+  through the coordinator, replicas hold `(coord, 2)`; `restart(coordinator)`; v3 is written with
+  W acks and its dot is above 2; a quorum read through a replica answers v3; after read repair
+  drains every replica holds v3; `assertConverged` passes. Red at HEAD before the fix on the dot
+  assertion (the reused `(coord, 1)`), which is the mechanism the parked bug-hunt test named.
+- `dvv_no_counter_reuse` keeps its T21 assertions and is extended across a restart with no local
+  data (the persisted ceiling is the floor) and with local data above the ceiling (the higher
+  floor wins).
+- `DotCeilingStoreTest` (engine, `@TempDir`): a fresh node loads 0; the last of two reservations
+  is what a new instance loads and the temp file is gone; an unparseable file throws
+  `NumberFormatException`; the in-memory store survives only its own instance.
+- Every existing replication, hint, read-repair, anti-entropy and convergence test passes; the
+  P4 acceptance test restarts real nodes over data directories and now reads `dots` back.
+- Counts: engine 144 -> 148, cluster 83 -> 85, cp 89 -> 89, server 83 -> 83. Diff: 7 files,
+  about 300 lines including tests, inside the budget.
+
+**Deviations:** none against the spec or the plan entry. Three judgement calls.
+1. The seam lives in the engine's persist package, not the cluster, because the cluster depends
+   on the engine and not the reverse; its vocabulary ("dot") is the cluster's, and the KDoc says
+   where the word comes from. `inMemory()` is main code rather than test code because a node with
+   no data directory needs it.
+2. The reservation is a `@Synchronized` block holding an fsync, on the caller's thread, inside
+   `Replication.write`'s `versions.compute`. Once per 1000 writes on one key's map bin; the
+   plan's lock rule (2.5) is about the engine's data structures and this is the cluster module.
+   If a measurement ever shows the once-per-block stall, reserve the next block ahead of time on
+   a background coroutine; the seam does not change.
+3. The ceiling is rewritten whole (write, fsync, atomic rename) rather than appended to the WAL:
+   the WAL format is frozen for this ticket and a 20-byte file has nothing to gain from a log.
+
+**For the next ticket:**
+- Ticket 67 (persist the version table) should hand the restored versions to
+  `DotCounter.of(node, localData, ceilings)` as the scan floor it already takes; the ceiling
+  store stays as the guard for versions that were handed out but never reached the RDB. Do not
+  drop the ceiling in favour of the scan: the scan only sees what was persisted, and a write's dot
+  is handed out before the write is durable.
+- A restarted node's version table is still empty until ticket 67, so its own reads of keys it
+  wrote before the restart answer with no version and lose to any replica's; read repair then
+  refills it. Correct, and one round trip per key.
+- `InProcessCluster.restart(node)` restarts only the replication layer; the network's own
+  `kill`/`restart` stays separate, and a chaos run that wants "process restart" should call both.
+
+---
+
+## T58 - One MutableClock in an engine test-jar; drop the two ModuleGraphTests
+
+Five hand-written clock doubles became one. The engine module now publishes a test-jar and the
+other three modules depend on it for tests only, so plan rule 1.5 (time is an injected `Clock`)
+has a single implementation to point at instead of four copies that had already drifted apart.
+
+### The one clock
+
+`DynaCache/dynacache-engine/src/test/kotlin/dynacache/engine/testkit/MutableClock.kt`:
+
+```kotlin
+class MutableClock(@Volatile var now: Instant, private val record: Boolean = false) : Clock() {
+    val readers: List<String>            // the thread behind each read, in order
+    fun advance(by: Duration)
+    override fun instant(): Instant
+    override fun getZone(): ZoneId       // UTC
+    override fun withZone(zone: ZoneId): Clock
+}
+```
+
+`now` is public and settable, which covers both spellings already in use: absolute
+(`clock.now = deadline`) and relative (`clock.now += Duration.ofMillis(6)`). `advance` is the CP
+kit's spelling of the relative form and is kept so its two call sites are untouched. `now` stays
+`@Volatile` because every copy it replaces was: the engine's partition threads, the WAL writer's
+appender pool, the cluster's hint sweeper and MicroRaft all read the clock off the test thread.
+
+`record` is the one addition. `RecordingClock` named the thread behind every read into a
+synchronized list; the merged class does that only when asked, and defaults to off. Always
+recording would cost a retained string per clock read in suites that run thousands of commands
+(T59 is about to move the acceptance tests onto this clock), and the synchronized list would add
+contention to exactly the threads that `wal_group_commit_amortizes` and
+`eviction_runs_on_the_partition_thread` are measuring. `readers` is exposed as a read-only
+`List<String>` view over the backing list, so `readers.size` and `readers.toSet()` read the same
+as they did on `RecordingClock`.
+
+### What each copy needed
+
+| Copy | Needed | Notes |
+|---|---|---|
+| `CommandEngineTest.MutableClock` | `now` get/set | private nested; the file's other two ad-hoc clocks (`ParkingClock` and an anonymous gate) stay, they park and count rather than tell the time |
+| `CommandEngineTest.RecordingClock` | `now`, `readers` | folded in behind `record = true`; its one construction is now `MutableClock(clock.now, record = true)` |
+| `WalFsyncTest.MutableClock` | `now` get/set | private nested, byte-identical to the engine copy |
+| `HintedHandoffTest.MutableClock` | `now` get/set | private nested, byte-identical to the engine copy |
+| `CpTestKit.MutableClock` | `now`, `advance` | the only copy that was public, because the server module's `CpRoutingTest` reaches it through `kit.clock(member)` |
+
+No test name and no assertion changed; only the double each test constructs. The `record = true`
+construction is the single call-site edit.
+
+### The poms
+
+- `dynacache-engine/pom.xml`: `maven-jar-plugin` 3.4.1 with the `test-jar` goal, copied from the
+  wiring `dynacache-cp` has carried since the CP test kit was published for the server module.
+  The module's zero-runtime-dependency constraint is untouched, this is test output only.
+- `dynacache-cluster`, `dynacache-cp`, `dynacache-server`: a `dynacache-engine` dependency with
+  `<type>test-jar</type>` and `<scope>test</scope>`. Test scope means plan 2.2's module graph is
+  unchanged; the server needs its own declaration because a test-scoped dependency of the cp
+  test-jar is not transitive.
+
+The fixed contract held: no `install` was needed. `mvn -o clean test -pl dynacache-server -am`
+from a clean state resolves the engine test-jar out of the reactor (Maven substitutes the
+module's `target/test-classes` when the artifact has not been packaged), and the Kotlin plugin's
+`test-compile` execution puts the test kit there. Verified green from `clean`, offline.
+
+### Why the ModuleGraphTests went
+
+Both asserted that a module can see a type from a module it depends on: the cluster one compared
+two `Key` hashes and two `Reply.Bulk`s, the server one pinged an `ApEngine`. Neither can fail
+while the code compiles, because a missing dependency is a compile error in the same Maven run
+that would have executed the test. They restate the dependency direction that
+`dynacache-cluster/pom.xml` and `dynacache-server/pom.xml` already declare and that Maven already
+enforces, so they cost a build slot and buy nothing.
+
+### Test counts
+
+Measured on a pristine `git archive` of HEAD (`073cc162`) against the worktree, same command.
+The parent brief's baseline (engine 147, cluster 85, cp 89, server 90) was stale for the server
+module; its true baseline is 93.
+
+| Module | Before | After |
+|---|---|---|
+| engine | 147 | 147 |
+| cluster | 85 | 84 |
+| cp | 89 | 89 |
+| server | 93 | 92 |
+| total | 414 | 412 |
+
+Minus two, both of them a deleted `ModuleGraphTest`, and the two modules that lost one are the
+two that held one. Every remaining test passes.
+
+### Deviations
+
+- The size budget was 200 to 600 lines. The change is 84 added against 91 deleted, net negative,
+  because the ticket is a fold rather than a build. Nothing was left out.
+- `advance` and `now +=` both survive as ways to move time forward. Collapsing to one would have
+  edited call sites the ticket asked to leave alone; the ticket's own wording ("settable,
+  tickable") wants both.
+
+---
+
+## T60 - CP.LONG.GETADD
+
+**Built:** `CP.LONG.GETADD K d` (CP spec 3.2 `LONG_GETADD`, 6.2 `-> :old`), the verb T38's
+deviation 1 deferred and T44 never picked up. One new command, `Command.Cp.LongGetAdd(key, delta)`
+under `Command.Cp.AtomicLong`; one parser row, `"cp.long.getadd" -> exactly(name, args, 2)`, beside
+`cp.long.add` and `cp.long.cas`; **wire tag 34** in `CpWire` (31 to 33 went to T54's reference TTL
+verbs), written and read exactly as `CMD_INCR_BY` is, a key and a signed long; and one branch in
+`AtomicLongStateMachine.apply`.
+
+The state machine's private `add` already did everything GETADD needs except answer the old value,
+so it now returns the old value instead of a `Reply`, and the INCR family goes through a new
+one-line `added(key, delta, now)` that adds the delta back on for its `:new` reply. That keeps the
+counter's read and its write in one map write inside one applied entry, so GETADD is atomic for the
+same reason `LongCas` is (I21) and costs one lookup, not two. Missing counters count as 0 as they do
+for INCR, and the key keeps its TTL. Main-code diff: 3 lines in `Command.kt`, 1 in `CommandParser.kt`,
+3 in `CpWire.kt`, 15 in `AtomicLongStateMachine.kt`; 54 lines of tests.
+
+**The chaos checker is verb-generic, so GETADD joined it.** `CounterOp` gained `GetAdd(delta)` and
+`CounterSpec` the row `(state + delta) to state` - the model's output is the state the operation
+came in with, which is the whole of GETADD's semantics. `ChaosDriver.counterHistory` now draws one
+of three operations per client per round (`Get`, `GetAdd(1)`, `IncrBy(1)`) instead of one of two, so
+`invariant_linearizable_ops` linearizes GETADD histories across a leader kill and a restart on all
+five seeds. An unanswered GETADD under chaos is recorded with a null output like any other, and the
+checker is free to place it or drop it.
+
+**Acceptance:**
+- `long_getadd_returns_old_value_and_adds` (`CpEngineTest`, a three-member group through the
+  leader's engine): a missing counter answers `:0` and is left holding 5; the next GETADD of -2
+  answers `:5`, not `:3`, and `CP.LONG.GET` reads 3.
+- `long_getadd_concurrent_linearizable` (same class): 50 GETADDs of 1 in flight at once over 4
+  client threads; the old values they answer are exactly the set 0..49, one each, and the counter
+  ends at 50.
+- `C16_cp_engine_rejects_a_non_cp_key` gained a GETADD line: `LongGetAdd(Key("plain-key"), 1)` is
+  `-NOTCP`, the rejection every CP verb gets before a primitive sees it.
+- `cp_op_round_trips_with_its_stamp` (`CpWireTest`) round-trips `CpOp(8, LongGetAdd(cp:counter:c, -3))`,
+  so a follower decodes tag 34 as what the leader replicated, negative deltas included.
+- `the CP verbs of CP spec 6` table (`CommandParserTest`) gained the row
+  `CP.LONG.GETADD cp:counter:k -5`, asserting the parsed delta.
+- Offline `test -pl dynacache-server -am`: engine 147, cluster 85, cp 91 (89 + 2), server 93 (92 + 1),
+  all green. The server module holds 92 tests at this base, not the 90 the ticket brief predicted;
+  the parser table gained exactly one row (98 to 99), which is the whole of this ticket's + 1.
+
+**Deviations:**
+1. **No `-CAPACITY` limit, as the ticket directs.** GETADD can carry a counter past any bound a
+   future capacity rule would set, exactly as `CP.LONG.ADD` can today. The deferral stays recorded
+   in ticket 62, which owns the `-CAPACITY` line of the ledger; this ticket adds nothing new to it.
+2. **87 lines changed against a 200 to 600 budget.** The verb is one data class, one parser row, one
+   wire tag and one state-machine branch, and the checker was already generic over `CounterOp`, so
+   there was nothing else to write. Turning `add` into an old-value function rather than duplicating
+   its body is where the shape decision was.
+3. **No Redis-compat spelling.** `GETSET`-style compat on `cp:counter:` keys is not re-targeted to
+   GETADD; CP spec 6.2 gives the row no Redis column ("-"), so the verb is reachable only as
+   `CP.LONG.GETADD`, the way `CP.LONG.CAS` is.
+
+**For the next ticket:** ticket 62 deletes `LongDecrBy` as dead; it now goes through `added` with a
+negated delta like the other three, so the deletion is still one variant, one wire arm and one
+branch. If a `-CAPACITY` rule is ever built, `add` is the single place both the INCR family and
+GETADD pass through.

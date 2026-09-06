@@ -30,10 +30,12 @@ class AtomicLongStateMachine {
         }
         is Command.Cp.LongGet ->
             valueOf(command.key, now)?.let(Reply::Integer) ?: Reply.Bulk(null)
-        is Command.Cp.LongIncr -> add(command.key, 1, now)
-        is Command.Cp.LongDecr -> add(command.key, -1, now)
-        is Command.Cp.LongIncrBy -> add(command.key, command.delta, now)
-        is Command.Cp.LongDecrBy -> add(command.key, -command.delta, now)
+        is Command.Cp.LongIncr -> added(command.key, 1, now)
+        is Command.Cp.LongDecr -> added(command.key, -1, now)
+        is Command.Cp.LongIncrBy -> added(command.key, command.delta, now)
+        is Command.Cp.LongDecrBy -> added(command.key, -command.delta, now)
+        // The read and the add are one applied entry, so no one sees a value between them (I21).
+        is Command.Cp.LongGetAdd -> Reply.Integer(add(command.key, command.delta, now))
         is Command.Cp.LongCas -> {
             // A counter that was never written reads as 0, as INCR treats it (I21: the compare
             // and the swap happen in one applied entry, so no reader sees a half state).
@@ -80,12 +82,18 @@ class AtomicLongStateMachine {
         return Reply.Integer(1)
     }
 
-    /** As in Redis, INCR and friends keep the key's TTL. */
-    private fun add(key: Key, delta: Long, now: Long): Reply {
+    /** INCR and friends answer the new value; GETADD answers the old one [add] returns. */
+    private fun added(key: Key, delta: Long, now: Long): Reply = Reply.Integer(add(key, delta, now) + delta)
+
+    /**
+     * Adds [delta] to [key], answering what the counter held before; a counter that was never
+     * written counts as 0. As in Redis, the key keeps its TTL.
+     */
+    private fun add(key: Key, delta: Long, now: Long): Long {
         val current = live(key, now)
-        val counter = Counter((current?.value ?: 0L) + delta, current?.expiresAt)
-        counters[key] = counter
-        return Reply.Integer(counter.value)
+        val old = current?.value ?: 0L
+        counters[key] = Counter(old + delta, current?.expiresAt)
+        return old
     }
 
     private fun live(key: Key, now: Long): Counter? = counters[key]?.takeUnless { it.expired(now) }

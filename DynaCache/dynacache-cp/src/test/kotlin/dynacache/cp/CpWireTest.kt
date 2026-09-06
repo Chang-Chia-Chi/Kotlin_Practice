@@ -78,6 +78,8 @@ class CpWireTest {
             CpOp(7, Command.Cp.LongExpire(Key("cp:counter:c"), Duration.ofMillis(1500))),
             roundTrip(CpOp(7, Command.Cp.LongExpire(Key("cp:counter:c"), Duration.ofMillis(1500)))),
         )
+        val getAdd = CpOp(8, Command.Cp.LongGetAdd(Key("cp:counter:c"), -3))
+        assertEquals(getAdd, roundTrip(getAdd))
     }
 
     /** A conditional SET carries its `NX`/`XX` into the log, so a follower applies the same rule. */
