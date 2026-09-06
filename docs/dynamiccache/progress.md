@@ -6120,3 +6120,149 @@ and it is testable without a cluster: `ApEngine.atomically` with two hash-tagged
 `MGET` over both. Whoever takes it should note that `Batch.execute`'s `else` is currently doing
 two jobs -- refusing what spans partitions and refusing what this partition cannot interpret --
 and only the first is about keys.
+
+---
+
+## T69 - CP primitives tested at the state machine, without Raft
+
+The five primitive suites (lock, session, semaphore, latch, reference) no longer start a Raft
+member. Each drives the composite `CpStateMachine` directly through one small test fixture,
+`Primitives`, and the tests that genuinely need a log moved to three clearly named kit-backed
+classes. No production file changed: the seam was already there, in `CpStateMachine.runOperation`
+taking a stamped `CpOp`, so the ticket's "small test-facing constructor or entry point on
+`CpStateMachine`" allowance was not needed.
+
+### The fixture's interface
+
+`DynaCache/dynacache-cp/src/test/kotlin/dynacache/cp/Primitives.kt`, 53 lines, no production
+dependency beyond the state machine and the engine test kit's `MutableClock`:
+
+- `apply(command: Command.Cp): Reply` - stamps the command the way `RaftRuntime.stamp` does
+  (`max(clock now, last applied ts + 1, last stamped + 1)`, CP spec 5) and applies it, answering
+  the composite's reply.
+- `advance(by: Duration)` - moves the fixture's clock; no entry carries the new time until the
+  next `apply` or `tick`.
+- `tick(after: Duration = ZERO)` - advances, then appends what a leader appends when the group is
+  idle: one `TtlTick`, then one `SessionClosed` per session `lapsedSessions()` reports. This is
+  the same order `RaftRuntime.tick` uses, so a lease or a session expires here exactly as it does
+  on a real leader.
+
+The stamp rule is what lets the moved assertions stay verbatim: with the clock standing still a
+stamp climbs by one millisecond per entry, in the fixture as in a group, so `remaining =
+LEASE.toMillis() - 2` still means "two entries after the TRY". The fixture starts on the kit's
+epoch (2026-09-06T00:00:00Z) for the same reason - a stamp printed by a failing assertion means
+the same in both worlds.
+
+### Moved to the state machine (25 tests, 5 suites, no Raft member)
+
+- `FencedLockTest` (9): `lock_try_acquire_release_roundtrip`, `lock_fencing_token_monotonic`,
+  `lock_reentrant_same_session`, `lock_unlock_wrong_session_rejected`,
+  `lock_unlock_wrong_token_rejected`, `lock_ttl_expires` (CP spec 10.1), `lock_ttl_renew`,
+  `lock_renew_by_non_holder_rejected`, `lock_force_unlock_overrides`.
+- `SessionTest` (5): `session_create_heartbeat_close`, `session_op_without_session_rejected`
+  (10.6), `session_timeout_closes` (10.6), `session_heartbeat_keeps_alive`, and one new test,
+  below.
+- `SemaphoreTest` (6): `sem_init_acquire_release`, `sem_over_acquire_fails`,
+  `sem_over_release_rejected`, `sem_session_death_releases`, `sem_drain`,
+  `sem_drain_of_unknown_key_leaves_it_initialisable`.
+- `CountDownLatchTest` (3): `latch_set_down_get`, `latch_down_at_zero_stays_zero`,
+  `latch_reset_only_at_zero`.
+- `AtomicReferenceTest` (3): `ref_set_get_roundtrip`, `ref_cas_byte_equality`, `ref_ttl_expires`.
+
+Every spec-named test kept its name verbatim.
+
+### New (1 test)
+
+`SessionTest.C18_close_releases_every_lock_and_permit_in_one_entry` - the direct session-close
+cascade the ticket asks for (C18, I15): one session holds two locks and two semaphore permits,
+and the single applied `SESSION_CLOSE` entry gives back all three. The kit could only ever show
+this as a commit-index count; at the state machine the "one entry" claim is the assertion itself,
+and it is the only test covering the semaphore leg of the CLOSE path (the lapse leg was already
+covered by `sem_session_death_releases`).
+
+### Kept on the kit (12 tests, 3 new classes)
+
+- `FencedLockFailoverTest` (4), from `FencedLockTest`: `cp_leader_failover_preserves_state`
+  (10.7), `I18_lock_held_across_leader_failover`,
+  `I19_lease_expires_late_never_early_across_failover`,
+  `C17_lease_expires_after_skewed_failover` (the T50 skew case). A lock across a leader change is
+  a fact about the log, not about the primitive.
+- `SessionLogTest` (3), from `SessionTest`: `I15_no_lock_owned_after_session_closed_index`
+  (asserts the index the close landed on and that two members applied it),
+  `C18_release_is_one_log_entry` (asserts the commit index moved by exactly one),
+  `C18_session_lapses_after_skewed_failover` (the T50 skew case, a lapse on a successor's own
+  idle ticks).
+- `CpConcurrencyTest` (5), one from each of four suites: `lock_mutual_exclusion` (I13),
+  `sem_concurrent_acquire_exactly_permits_succeed`, `latch_concurrent_down_correct_count`,
+  `ref_concurrent_cas_exactly_one_wins`, `I21_concurrent_cas_exactly_one_wins`. What these test
+  is that the log puts simultaneous clients in an order; applied one at a time to a state machine
+  they would assert nothing. The four private `race` helpers they used to carry are now one.
+
+`CpEngineTest`, `CpSnapshotTest`, `ChaosInvariantTest`, `CpWireTest` and `GrpcCpTest` are
+untouched.
+
+### Wall time (surefire `time`, same machine, three other Maven builds running alongside)
+
+The five primitive suites:
+
+| suite | before | after |
+| --- | --- | --- |
+| FencedLockTest | 6.043 s | 0.012 s |
+| SessionTest | 1.257 s | 0.016 s |
+| AtomicReferenceTest | 0.160 s | 0.094 s |
+| SemaphoreTest | 0.032 s | 0.011 s |
+| CountDownLatchTest | 0.029 s | 0.015 s |
+| **total** | **7.521 s** | **0.148 s** |
+
+Under the one-second acceptance bar by a factor of about fifty. The three new kit-backed classes
+carry the elections that used to sit inside the primitive suites: `FencedLockFailoverTest`
+5.332 s, `SessionLogTest` 1.481 s, `CpConcurrencyTest` 0.154 s. The point of the ticket was never
+the total, which is roughly unchanged; it is that a primitive-semantics test now costs
+milliseconds and a reader can see at a glance which twelve tests need a log.
+
+`mvn test -pl dynacache-cp -am` is green: engine 151, cluster 86, cp 96. The brief's expected
+base of engine 148 and cluster 84 is stale for those two modules, which this ticket does not
+touch; cp is the 95 the brief named, plus the one new cascade test.
+
+### Red before green
+
+The moved tests were checked against two deliberate mutations of production code, then reverted:
+
+- `FencedLockStateMachine.Lock.at(now)` made to never expire a lease - `lock_ttl_expires` failed.
+- `CpStateMachine.closeSession` made to skip `semaphores.releaseAllOf(session)` -
+  `sem_session_death_releases` and `C18_close_releases_every_lock_and_permit_in_one_entry`
+  failed.
+
+Three failures out of the 26 tests then in the five direct suites, each the test that should
+notice. `session_timeout_closes` correctly did not fail on the lease mutation: the lock it checks
+is released by the session cascade, not by lease expiry.
+
+### Deviations
+
+- **No production entry point added.** The ticket allowed a small test-facing constructor or
+  entry point on `CpStateMachine`; none was needed, since `runOperation(commitIndex, CpOp)` is
+  already public and already the seam. Zero production lines changed.
+- **A third kit-backed class.** The ticket named the failover cases; the concurrency races needed
+  a home too, since they test the log rather than a primitive. `CpConcurrencyTest` is that home.
+- **`lock_mutual_exclusion` now races through one shared helper** rather than two hand-written
+  `submit` calls. Same assertions, same property, one fewer bespoke fixture.
+- **Net diff +141 lines** (95 added and 397 removed across the five suites, 443 added in the four
+  new files), against a 200-600 budget. A move of five suites is mostly deletion; the raw diff is
+  935 lines touched. Test count in `dynacache-cp` rises by one, from 95 to 96, for the new C18
+  cascade test.
+- **Merge with T62 expected.** T62 edits `FencedLockStateMachine` (the UNLOCK reply) and
+  `FencedLockTest` in parallel. The unlock assertions were carried over verbatim into the new
+  `FencedLockTest` and `FencedLockFailoverTest`, so the conflict is a move, not a rewrite: T62's
+  changed expectations land on whichever of the two files now holds each test.
+
+### For the next ticket (T70, each CP primitive owns its snapshot bytes)
+
+- `Primitives` gives T70 a snapshot round trip with no group: build state through `apply`, take
+  `CpStateMachine.state`, restore into a second machine, compare. Only
+  `cp_snapshot_install_preserves_tokens_and_sessions` and the install-through-Raft cases need
+  `CpSnapshotTest` and the kit.
+- `CpStateMachine.takeSnapshot`/`installSnapshot` and the `Snapshot` data class are unchanged by
+  this ticket, so T70 starts from the shape recorded in the spec (10.7).
+- The fixture deliberately exposes no accessor for the state machine itself. T70 will want one
+  (to read `state` and to install a snapshot); adding a single `val stateMachine` to `Primitives`
+  is the smallest change, and was left out here under YAGNI rather than guessed at.

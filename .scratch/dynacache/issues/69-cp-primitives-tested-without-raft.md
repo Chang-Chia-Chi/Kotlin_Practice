@@ -12,14 +12,14 @@ time, failover, snapshot install, chaos), and the spec-named tests keep their na
 
 **Nature:** the interface is the test surface (Opus)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache fa9eecc5 plus merge fixes, merged into misc/ai_gen)
 
-- [ ] The five primitive suites construct a state machine and call it with stamped operations;
+- [x] The five primitive suites construct a state machine and call it with stamped operations;
       none of them starts a Raft member
-- [ ] Every spec-named primitive test (CP spec 10.1 to 10.5) keeps its name and passes; the
+- [x] Every spec-named primitive test (CP spec 10.1 to 10.5) keeps its name and passes; the
       session-close cascade (C18, I15) has a direct test through the state machine
-- [ ] The five suites together run in under one second; the kit-backed suites are unchanged
-- [ ] Progress entry appended
+- [x] The five suites together run in under one second; the kit-backed suites are unchanged
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket; 200 to 600 lines including tests;
 JUnit 5 + Mockito only, no AssertJ or MockK; no sleeps, time is an injected Clock; spec-named
