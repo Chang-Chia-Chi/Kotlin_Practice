@@ -3084,3 +3084,124 @@ the lock are.
   `cp:latch:*` key are different maps in different primitives, and nothing checks that a key is
   used as only one kind. The dispatcher routes on the verb, so a `CP.LATCH.GET cp:sem:s` would
   silently read an empty latch. Worth a ticket if the namespace convention is ever to be enforced.
+
+## T22: Replication and quorum
+
+**Built:** `dynacache.cluster.Replication` is the second decorator of the `CommandEngine` seam,
+wrapped by the router: a node is `Router(Replication(ApEngine))`, so the router hands every
+command this node coordinates to replication and nothing downstream learns that replicas exist.
+`Replication` owns the node's `DotCounter` and its `versions` side table (`Key -> Dvv`,
+a `ConcurrentHashMap` next to the engine; the engine module learns nothing about DVVs), the
+coordinator's write (spec 5.1 steps 4 to 6 and 8) and read (spec 5.2 steps 1 to 4), and the
+replica's half of both. A write bumps the key's version under `compute` so two writes racing on
+one key chain rather than fork, applies locally, and unless the engine refused it (or a
+conditional `SET` did not apply) ships a `Replicate` (the command's tokens with NX/XX and the
+TTL already decided, the DVV, `expires_at_millis` as an absolute instant per spec 5.4) to the
+live successors of the preference list, then waits for W-1 acks from distinct nodes or the
+deadline and answers the engine's reply or `Reply.Error("ERR", "quorum not reached: write needs
+W of N nodes, k answered within 1s")`. A read runs locally, ships a `Read` (the read's tokens)
+to the live successors, waits for R-1 `ReadReply`s (reply plus DVV), and answers the reply whose
+version dominates; two concurrent versions fall to T29's last-writer rule, now `lastWriter`
+in `Merge.kt` and shared. Divergence among the R answers is counted in `divergentReads` and not
+pushed (T26). A replica applies a `Replicate` whose version dominates what it holds, ignores one
+that is dominated or equal, applies a concurrent one under `held.merge(remote, counter)`, and
+acks in every case it could read. `ReplicationConfig(n, w, r)` checks `w in 1..n`, `r in 1..n`
+and `r + w > n` at construction; `Replication` checks `n <= ring.nodes.size`.
+
+`Router.submit` splits a `Command.Fanned` (`MGET`, `MSET`, variadic `DEL`, `EXISTS`) into its
+single-key parts, routes each like a single-key command one after the other, and joins in
+argument order (ADR 0002 across nodes); `Fanned.single` and `Fanned.join` are public for it.
+`cluster.proto` gains `Replicate`, `ReplicateAck`, `Read` and `ReadReply` (fields 15 to 18) and
+`GrpcTransportTest` round-trips all four. `InProcessCluster(nodeCount, n, w, r)` builds a
+`ReplicationConfig`, one `ScriptedMembership` every node reads, a `Replication` per node and
+wires the router's `others` hook to `Replication.receive` before gossip; it gains `seed(node,
+key, value, dvv)` (a `Replicate` from an endpoint no node owns, so a test makes replicas
+disagree) and `replication(node)`. `TokenCodec` learned `EXISTS` and the `PX` spelling of a
+`SET` TTL. `mvn -B -o -q clean package` offline: engine 125, cluster 61, cp 47, server 35.
+Eleven files plus CONTEXT.md and ADR 0003; 615 insertions, 34 deletions.
+
+**Concepts named:** A **replica** is any node of a key's preference list, the coordinator
+included; it applies what the coordinator ships and answers its reads, and never decides. A
+**quorum** is how many distinct replicas must answer, W for a write and R for a read, the
+coordinator counting as one, and a quorum that does not form within the deadline is an error
+reply, never a hang. A **version** is the DVV a stored value carries, held in the replication
+layer's side table rather than in the engine. All three are new CONTEXT.md entries. ADR 0003
+records that replication ships the command, not the value: the engine hands out replies, not
+values, so a replica re-runs the command through its own engine. The `Gather` is one request's
+answers by node, which is what makes "distinct" a property of the data structure rather than a
+check. No new seam: `Replication` is concrete and its second adapter is the engine it wraps.
+
+**Acceptance:**
+- `write_read_quorum`: N=3, W=2, R=2; a write through node-1 is read through node-2; every
+  replica holds the value under the coordinator's dot 1; a `SET ... PX 10000` through a
+  forwarding contact answers `PTTL` 10000 on all three replicas (the absolute instant crossed).
+- `minority_failure_available`: the key's last replica is network-killed and marked dead;
+  write through one survivor, read through the other, the victim holds nothing.
+- `majority_failure_unavailable`: both non-coordinators network-killed, gossip silent; the
+  write and the read answer the quorum error after the deadline in virtual time.
+- `C4_write_needs_w_distinct_acks`: W=3 on a `Replication` whose two replicas are bare
+  endpoints; two acks from one of them leave the write pending and it ends in the quorum
+  error, one ack from each answers OK. Checked by mutation: counting acks instead of nodes
+  fails it.
+- `C4_read_returns_highest_dvv`: the coordinator seeded with an older version than both
+  replicas, then a newer one than they hold; each read answers the dominating version's value
+  through a forwarding contact, and both reads are counted as divergent.
+- `quorum_config_rejects_r_plus_w_not_above_n`: (3,1,2), w=0 and w>n rejected; (3,2,2) fine.
+- `fanned_command_splits_by_coordinator`: one key per coordinator; `MSET` through node-1,
+  `MGET` (plus a missing key) through node-2 in argument order, `EXISTS` and `DEL` through
+  node-3, `EXISTS` 0 through node-1. Red first: the engine's own fan-out answered all nils.
+- Every earlier test green; `RouterTest.router_forwards_to_coordinator` now runs at N=1 so the
+  contact is no replica and its empty engine still proves the forward.
+- This entry.
+
+**Deviations:**
+1. **Replication ships the command, not the value** (ADR 0003). Spec 5.3's concurrent case is
+   therefore not T29's type merge: the replica applies the remote command over its local value
+   under `held.merge(remote, counter)`, a version descending from both. Before T25 no replica
+   can hold a concurrent version, since one coordinator writes each key. Debt: a `Value` codec
+   (T31) and an engine install hook would let replicas take values and call `merge`.
+2. **A forward now runs on its own coroutine** (T19's deviation 7 repaid, and forced): the
+   coordinator's quorum reads its acks through the same demux that was awaiting the forwarded
+   command, which deadlocked until the forward deadline. Cost, marked `ponytail:` in `Router`:
+   two forwards from one contact may run out of order at the coordinator. A per-sender queue of
+   forwards is the repair if a pipelining client observes it.
+3. **A write reported as failed may still be stored.** The coordinator applies locally and
+   sends every `Replicate` before it learns the quorum did not form; the error tells the client
+   the write is not durable to W, not that it did not happen. Dynamo's own semantics.
+4. **The replication deadline is 1s, the forward deadline 2s**, so a contact reports the
+   coordinator's quorum error and not its own timeout. Both are constructor parameters.
+5. **Batches are not replicated.** `Replication.atomically` runs on the local engine alone;
+   `MULTI/EXEC` and `EVAL` writes reach no replica. Debt for whoever wires the router into the
+   server (T24): a batch's writes need to be shipped after it commits.
+6. **Reads are a list, not a flag on `Command`.** `isRead` in `Replication.kt` names the read
+   variants; an unlisted variant is treated as a write, which costs one needless replication
+   round and never loses data. A `mutates` property on `Command.Keyed` would be the engine's
+   own answer; `Command` is frozen, so not touched.
+7. **A dead coordinator makes its keys unavailable.** Without sloppy quorum (T25) the contact
+   forwards to the preference list's first node regardless of membership, so
+   `minority_failure_available` kills a replica, not the coordinator. Spec 5.1 step 7 is T25's.
+8. **`InProcessCluster.drainMessages` is now a fixpoint with an engine barrier**: it drains,
+   yields, submits `DBSIZE` to every engine and blocks on it (no virtual time passes), yields,
+   and repeats while anything is in flight. That removes the real-time race between a partition
+   thread's completion and `settle`'s round bound that T19 lived with.
+9. The plan entry's "highest node id breaks a true tie" is T29's `lastWriter` made total (node
+   name, then counter), lifted from `Merge.kt` as an `internal` comparator over `Dvv`.
+10. Line budget: 615 insertions and 34 deletions including tests and proto, slightly over the
+    600 ceiling counting insertions, under it net.
+
+**For the next ticket:** T25 (sloppy quorum and hints) has its seam in `Replication.gather`:
+`replicas` is the preference list's live successors, and the next healthy node on the ring
+joins that list when one is dead; the hint is the `Replicate` envelope itself (C5: key, value
+as tokens, DVV, TTL as an instant), stored on the substitute and replayed by sending it. The
+replica side already accepts a `Replicate` from any node, which `InProcessCluster.seed` relies
+on. T26 (read repair) hooks where `divergentReads` is incremented in `Replication.read`: the
+winner's `(reply, dvv)` and the losers' nodes are both in hand there, and a repair is a
+`Replicate` to each loser carrying the winner's version, but the coordinator has only the
+winner's *reply*, not its value or tokens, so a repair of a hash or a list needs the value path
+ADR 0003 defers. T28 (anti-entropy) will want `Replication.version(key)` and the same install
+path. `Gather` is generic over the envelope, so a third fan-out (repair, hint replay) reuses it.
+`ScriptedMembership` is shared by every node of an `InProcessCluster`; a test that wants nodes
+to disagree about membership needs one per node. `InMemoryTransport.inFlight` is public. The
+demux still awaits `Replicate` and `Read` handling inline (an engine hop each, no reply waited
+on), so it cannot deadlock but a slow engine delays gossip behind it. `RecordingEngine` answers
+every command with one canned reply, which is what made the C4 write test need no engine.

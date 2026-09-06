@@ -11,13 +11,13 @@ Sloppy quorum is ticket 25 and read repair ticket 26.
 
 **Nature:** quorum protocol, C4 (Fable)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache 8e02141, merged into misc/ai_gen)
 
-- [ ] `write_read_quorum`, `minority_failure_available`, `majority_failure_unavailable`
-- [ ] `C4_write_needs_w_distinct_acks`, `C4_read_returns_highest_dvv`
-- [ ] `quorum_config_rejects_r_plus_w_not_above_n`
-- [ ] Every fan-out is bounded by N and a deadline
-- [ ] Progress entry appended
+- [x] `write_read_quorum`, `minority_failure_available`, `majority_failure_unavailable`
+- [x] `C4_write_needs_w_distinct_acks`, `C4_read_returns_highest_dvv`
+- [x] `quorum_config_rejects_r_plus_w_not_above_n`
+- [x] Every fan-out is bounded by N and a deadline
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket, stubs throwing NotImplementedError
 for later seams; 200 to 600 lines including tests; JUnit 5 + Mockito only, no AssertJ or MockK;
