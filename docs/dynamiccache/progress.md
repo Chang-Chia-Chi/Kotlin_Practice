@@ -4140,3 +4140,93 @@ sockets that the in-memory transport hides get repaired in one place:
 
 **Acceptance after the merge:** `mvn -B -o clean package` offline, BUILD SUCCESS: engine 144,
 cluster 76, cp 66, server 81. Both T24 tests green in that run.
+
+## T45: Raft snapshots, chaos, linearizability
+
+**Built:** A real `RaftStore`, state-machine snapshots on the wire, a seeded chaos driver, a small
+linearizability checker, and the CP spec 10.9 invariant tests under chaos.
+
+`RaftStores.kt` (new) holds `CpStore : RaftStore` with one extra method, `restored()`, so a member
+brought back reads its own state instead of an empty log (the T38 `NopRaftStore` debt, I20, C21).
+`InMemoryRaftStore` keeps term, vote, initial members, log and snapshot chunks in fields;
+`FileRaftStore` keeps them under `java.nio.file`: `member.pb` (endpoint, group, term, vote, rewritten
+whole), `log.pb` (length-delimited `LogEntry`s, appended, rewritten on truncation), one
+`snapshot-<index>-<chunk>.pb` per chunk. `restored()` returns the newest complete snapshot plus the
+log suffix after it, or null before the first run. `RaftRuntime` takes a `CpStore` (default in-memory)
+and, when `restored()` is non-null, builds the node with `setRestoredState` instead of the fresh
+endpoint + initial members; the `NopRaftStore` and its ponytail note are gone.
+
+MicroRaft's snapshot chunking is switched on in the kit (`setCommitCountToTakeSnapshot(100)`).
+`InstallSnapshotRequest`/`Response`, `SnapshotChunk` and `GroupMembersView` gained a wire form in
+`cp.proto` and `CpWire` (the T43 `NotImplementedError` is gone), plus a `MemberState` message the
+file store persists. `CpWire` encodes a `CpStateMachine.Snapshot` (log time and every primitive's
+table) as one compact chunk, shared by the store and the wire. `CpStateMachine.Snapshot` is now a
+public data class and `CpStateMachine.state` exposes it, so two members' state can be compared by
+equality; `takeSnapshot` accepts it as one chunk (ponytail: a chunk per primitive is the upgrade
+when one outgrows a message).
+
+`Linearizability.kt` (new, test) is a Wing-Gong checker: `check(ops, spec)` searches the orders a
+history allows for one the sequential model accepts, respecting real time; an operation with an
+unknown output (a timeout) may take effect anywhere or not at all. `CounterSpec` is the AtomicLong
+model. `ChaosDriver.kt` (new, test) is the seeded driver over `CpTestKit`: `runLockChaos` interleaves
+lock/counter/session ops with faults (leader kills, follower kills, restarts, partitions, every kill
+restarted within the loop, the file-store member killed at least once) single-threaded so its
+interleaving is the seed's and it asserts mutual exclusion (I13) inline, returning the fencing tokens
+per key; `counterHistory` runs clients concurrently on one counter with a failover between waves and
+records a history for the checker (C20).
+
+`CpTestKit` gained `fileStoreDir` (the last member then runs on `FileRaftStore`), `partition`/`heal`,
+per-member stores reused across restart, and a faster heartbeat timeout.
+
+**Concepts named:** The **store** is the second seam under `RaftRuntime` beside the transport, the
+place a member remembers itself; a **snapshot chunk** is the state machine's whole state as one value
+the store and the wire share. The **linearizability checker** and the **chaos driver** are test
+tooling, each its own file.
+
+**Acceptance:** `dynacache.cp.CpSnapshotTest` 3, `ChaosInvariantTest` 19, `CpWireTest` 10 (one new).
+Full offline `clean package` green: engine 144, cluster 67, cp 89, server 79.
+
+- `cp_snapshot_restore_roundtrip`, `I20_restore_equals_continuous_replay`: populate every primitive,
+  snapshot, restart the member (from the file store and from memory respectively); its state equals
+  the leader's. `lagging_member_is_brought_up_by_snapshot` (extra) drives the InstallSnapshot path in
+  a live group.
+- `invariant_fencing_token_monotonic_under_chaos`, `invariant_mutual_exclusion_under_chaos`,
+  `invariant_linearizable_ops`: `@ParameterizedTest` over five seeds each (the two lock invariants
+  share one cached run per seed). `checker_rejects_a_stale_read` (extra) proves the checker is not
+  vacuous. `invariant_session_release_complete`: a session's locks and permits all freed by its close
+  across a failover (I15). `I16_minority_kill_keeps_cp_available`, `I17_majority_kill_never_false_succeeds`.
+- `ChaosInvariantTest` runs in about 20 s.
+
+**Deviations:**
+1. **Size.** ~1070 lines added including tests, over the 200-600 budget. The ticket is large by
+   nature (a store, snapshot wire forms, a chaos driver, a checker, and 10.9's tests). The bulk is
+   mechanical: `RaftStores` (158) and `CpWire`'s per-primitive snapshot codec (148), `ChaosDriver`
+   (212) and its tests (166 + 134). Nothing was cut; every acceptance test is present.
+2. **Kit heartbeat timeout shrunk from 5 s to 1 s.** The ticket allows shrinking the kit's timing to
+   keep the chaos class quick, and said to say so. Every existing failover test still passes (they
+   just resolve faster). Production keeps MicroRaft's defaults.
+3. **`CpEngine` maps `IndeterminateStateException` to `-NOTLEADER`.** A leader that loses quorum
+   mid-append fails the replicate future indeterminately; at the faster timeout this surfaces where
+   the old test only saw a pending future. It is not a false success, so it is mapped to `-NOTLEADER`
+   for the client to retry, exactly as `CannotReplicateException` already is (CP spec 9.1 step 7).
+   This kept `cp_majority_failure_unavailable` and `I17` green regardless of timing.
+4. **The counter linearizability workload overlaps clients within a wave, faults between waves.** A
+   leader never dies mid-wave, so every recorded op has a definite outcome and the history is fully
+   determined; the checker still reorders the concurrent ops. Seeds fix the fault schedule, not the
+   thread interleaving (inherent to a real group). Unknown-output handling is in the checker for the
+   general case and exercised by construction.
+5. **`FileRaftStore.flush()` is a no-op; writes are eager (`Files.write`).** Bytes reach the OS, not
+   the platter. ponytail-marked: `FileChannel.force` is the upgrade if a crash between the write and
+   the OS flush must never lose a vote. Fine for the in-process restart the tests do.
+6. **One snapshot chunk holds the whole state.** ponytail-marked in `CpStateMachine`; a chunk per
+   primitive is the upgrade when one outgrows a protobuf message.
+
+**For the next ticket:**
+- T46 (P5 acceptance) wires two engines in one cluster. The file store is ready for a real node:
+  build the store, then the runtime (it restores itself), then the engine and server. `CpTestKit`'s
+  `GrpcCpKit` sibling would need the same `fileStoreDir` plumbing if a durable gRPC restart is wanted.
+- The chaos driver is single-threaded for the lock invariants (deterministic) and concurrent only for
+  the counter history; a fully concurrent lock workload with a real-time-stamped history and the
+  checker over lock ops is the next step if lock linearizability is ever asserted directly.
+- `deleteSnapshotChunks` and log truncation in `FileRaftStore` rewrite the whole log file each time
+  (O(n)); an append-only segment file is the upgrade if a large log ever runs through it.

@@ -10,13 +10,13 @@ permutations for histories of a few dozen operations); the four CP spec 10.9 tes
 
 **Nature:** invariants under chaos, C20, I13 to I17, I20 (Fable)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache 3162cd1, merged into misc/ai_gen)
 
-- [ ] `cp_snapshot_restore_roundtrip`, `I20_restore_equals_continuous_replay`
-- [ ] `invariant_fencing_token_monotonic_under_chaos`, `invariant_mutual_exclusion_under_chaos`, `invariant_session_release_complete`, `invariant_linearizable_ops`
-- [ ] `I16_minority_kill_keeps_cp_available`, `I17_majority_kill_never_false_succeeds`
-- [ ] Five seeds green in the default tier
-- [ ] Progress entry appended
+- [x] `cp_snapshot_restore_roundtrip`, `I20_restore_equals_continuous_replay`
+- [x] `invariant_fencing_token_monotonic_under_chaos`, `invariant_mutual_exclusion_under_chaos`, `invariant_session_release_complete`, `invariant_linearizable_ops`
+- [x] `I16_minority_kill_keeps_cp_available`, `I17_majority_kill_never_false_succeeds`
+- [x] Five seeds green in the default tier
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket, stubs throwing NotImplementedError
 for later seams; 200 to 600 lines including tests; JUnit 5 + Mockito only, no AssertJ or MockK;
