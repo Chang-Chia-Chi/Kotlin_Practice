@@ -10,17 +10,17 @@ part in the linearizability checking the chaos test already does for the other c
 
 **Nature:** command semantics, CP spec 3.2 (Opus)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache f1e1d816, merged into misc/ai_gen)
 
-- [ ] `long_getadd_returns_old_value_and_adds`: on a missing key answers `:0` and leaves `d`;
+- [x] `long_getadd_returns_old_value_and_adds`: on a missing key answers `:0` and leaves `d`;
       on an existing value answers it and adds
-- [ ] `long_getadd_concurrent_linearizable`: N clients each GETADD 1 concurrently; the
+- [x] `long_getadd_concurrent_linearizable`: N clients each GETADD 1 concurrently; the
       returned old values are a permutation of 0..N-1 and the final value is N
-- [ ] The verb round-trips through the CP wire encoding and is rejected with `-NOTCP` on a
+- [x] The verb round-trips through the CP wire encoding and is rejected with `-NOTCP` on a
       non-`cp:` key like every other CP verb
-- [ ] A `-CAPACITY` style limit is not built; the progress entry notes the deferral stays
+- [x] A `-CAPACITY` style limit is not built; the progress entry notes the deferral stays
       recorded in ticket 62
-- [ ] Progress entry appended
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket; 200 to 600 lines including tests;
 JUnit 5 + Mockito only, no AssertJ or MockK; no sleeps, time is an injected Clock; spec-named

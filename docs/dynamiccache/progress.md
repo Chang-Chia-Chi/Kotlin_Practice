@@ -5574,3 +5574,64 @@ two that held one. Every remaining test passes.
 - `advance` and `now +=` both survive as ways to move time forward. Collapsing to one would have
   edited call sites the ticket asked to leave alone; the ticket's own wording ("settable,
   tickable") wants both.
+
+---
+
+## T60 - CP.LONG.GETADD
+
+**Built:** `CP.LONG.GETADD K d` (CP spec 3.2 `LONG_GETADD`, 6.2 `-> :old`), the verb T38's
+deviation 1 deferred and T44 never picked up. One new command, `Command.Cp.LongGetAdd(key, delta)`
+under `Command.Cp.AtomicLong`; one parser row, `"cp.long.getadd" -> exactly(name, args, 2)`, beside
+`cp.long.add` and `cp.long.cas`; **wire tag 34** in `CpWire` (31 to 33 went to T54's reference TTL
+verbs), written and read exactly as `CMD_INCR_BY` is, a key and a signed long; and one branch in
+`AtomicLongStateMachine.apply`.
+
+The state machine's private `add` already did everything GETADD needs except answer the old value,
+so it now returns the old value instead of a `Reply`, and the INCR family goes through a new
+one-line `added(key, delta, now)` that adds the delta back on for its `:new` reply. That keeps the
+counter's read and its write in one map write inside one applied entry, so GETADD is atomic for the
+same reason `LongCas` is (I21) and costs one lookup, not two. Missing counters count as 0 as they do
+for INCR, and the key keeps its TTL. Main-code diff: 3 lines in `Command.kt`, 1 in `CommandParser.kt`,
+3 in `CpWire.kt`, 15 in `AtomicLongStateMachine.kt`; 54 lines of tests.
+
+**The chaos checker is verb-generic, so GETADD joined it.** `CounterOp` gained `GetAdd(delta)` and
+`CounterSpec` the row `(state + delta) to state` - the model's output is the state the operation
+came in with, which is the whole of GETADD's semantics. `ChaosDriver.counterHistory` now draws one
+of three operations per client per round (`Get`, `GetAdd(1)`, `IncrBy(1)`) instead of one of two, so
+`invariant_linearizable_ops` linearizes GETADD histories across a leader kill and a restart on all
+five seeds. An unanswered GETADD under chaos is recorded with a null output like any other, and the
+checker is free to place it or drop it.
+
+**Acceptance:**
+- `long_getadd_returns_old_value_and_adds` (`CpEngineTest`, a three-member group through the
+  leader's engine): a missing counter answers `:0` and is left holding 5; the next GETADD of -2
+  answers `:5`, not `:3`, and `CP.LONG.GET` reads 3.
+- `long_getadd_concurrent_linearizable` (same class): 50 GETADDs of 1 in flight at once over 4
+  client threads; the old values they answer are exactly the set 0..49, one each, and the counter
+  ends at 50.
+- `C16_cp_engine_rejects_a_non_cp_key` gained a GETADD line: `LongGetAdd(Key("plain-key"), 1)` is
+  `-NOTCP`, the rejection every CP verb gets before a primitive sees it.
+- `cp_op_round_trips_with_its_stamp` (`CpWireTest`) round-trips `CpOp(8, LongGetAdd(cp:counter:c, -3))`,
+  so a follower decodes tag 34 as what the leader replicated, negative deltas included.
+- `the CP verbs of CP spec 6` table (`CommandParserTest`) gained the row
+  `CP.LONG.GETADD cp:counter:k -5`, asserting the parsed delta.
+- Offline `test -pl dynacache-server -am`: engine 147, cluster 85, cp 91 (89 + 2), server 93 (92 + 1),
+  all green. The server module holds 92 tests at this base, not the 90 the ticket brief predicted;
+  the parser table gained exactly one row (98 to 99), which is the whole of this ticket's + 1.
+
+**Deviations:**
+1. **No `-CAPACITY` limit, as the ticket directs.** GETADD can carry a counter past any bound a
+   future capacity rule would set, exactly as `CP.LONG.ADD` can today. The deferral stays recorded
+   in ticket 62, which owns the `-CAPACITY` line of the ledger; this ticket adds nothing new to it.
+2. **87 lines changed against a 200 to 600 budget.** The verb is one data class, one parser row, one
+   wire tag and one state-machine branch, and the checker was already generic over `CounterOp`, so
+   there was nothing else to write. Turning `add` into an old-value function rather than duplicating
+   its body is where the shape decision was.
+3. **No Redis-compat spelling.** `GETSET`-style compat on `cp:counter:` keys is not re-targeted to
+   GETADD; CP spec 6.2 gives the row no Redis column ("-"), so the verb is reachable only as
+   `CP.LONG.GETADD`, the way `CP.LONG.CAS` is.
+
+**For the next ticket:** ticket 62 deletes `LongDecrBy` as dead; it now goes through `added` with a
+negated delta like the other three, so the deletion is still one variant, one wire arm and one
+branch. If a `-CAPACITY` rule is ever built, `add` is the single place both the INCR family and
+GETADD pass through.
