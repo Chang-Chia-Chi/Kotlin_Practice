@@ -26,6 +26,8 @@ message RaftEnvelope {
     AppendEntriesSuccess append_entries_success = 15;
     AppendEntriesFailure append_entries_failure = 16;
     Candidacy trigger_leader_election = 17;
+    InstallSnapshotRequest install_snapshot_request = 18;
+    InstallSnapshotResponse install_snapshot_response = 19;
   }
 }
 
@@ -67,6 +69,55 @@ message AppendEntriesFailure {
   int64 expected_next_index = 1;
   int64 query_sequence_number = 2;
   int64 flow_control_sequence_number = 3;
+}
+
+// The group as a snapshot, or a member's store, remembers it (fixed at startup, CP spec 2.2).
+message GroupMembersView {
+  int64 log_index = 1;
+  repeated string members = 2;
+  repeated string voting_members = 3;
+}
+
+// One chunk of a state machine snapshot; `operation` is the chunk in the hand encoding of `CpWire`.
+message SnapshotChunk {
+  int64 index = 1;
+  int32 term = 2;
+  bytes operation = 3;
+  int32 chunk_index = 4;
+  int32 chunk_count = 5;
+  GroupMembersView members = 6;
+}
+
+// A chunk offered to a member that fell behind the log's tail (CP spec 10.7, I20). The first
+// request of an install carries no chunk: it announces the snapshot and asks which chunks the
+// member wants, and the response names one.
+message InstallSnapshotRequest {
+  bool sender_leader = 1;
+  int32 snapshot_term = 2;
+  int64 snapshot_index = 3;
+  int32 total_chunk_count = 4;
+  SnapshotChunk chunk = 5;
+  repeated string snapshotted_members = 6;
+  GroupMembersView members = 7;
+  int64 query_sequence_number = 8;
+  int64 flow_control_sequence_number = 9;
+}
+
+message InstallSnapshotResponse {
+  int64 snapshot_index = 1;
+  int32 requested_chunk_index = 2;
+  int64 query_sequence_number = 3;
+  int64 flow_control_sequence_number = 4;
+}
+
+// What a member's store keeps besides its log and snapshot: who it is, the group it started with,
+// and the term and vote Raft must not forget across a restart.
+message MemberState {
+  string endpoint = 1;
+  bool voting = 2;
+  GroupMembersView initial_members = 3;
+  int32 term = 4;
+  string voted_for = 5;
 }
 
 // Handle's acknowledgement: a Raft message carries no reply of its own, the answer is another
