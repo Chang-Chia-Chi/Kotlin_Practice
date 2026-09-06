@@ -1,7 +1,9 @@
 package dynacache.engine
 
 import dynacache.engine.ds.HashTable
+import dynacache.engine.ds.TimerWheel
 import java.time.Clock
+import java.time.Duration
 import java.time.Instant
 import java.util.Random
 import java.util.concurrent.CompletableFuture
@@ -11,7 +13,12 @@ import java.util.concurrent.Executors
  * One partition: a single-thread executor and the store only that thread touches (C1 by
  * construction, ADR 0001). Everything below [submit] runs on the partition executor.
  */
-internal class Partition(id: PartitionId, private val clock: Clock, private val random: Random) {
+internal class Partition(
+    id: PartitionId,
+    private val clock: Clock,
+    private val random: Random,
+    private val tickMillis: Long,
+) {
 
     private class Entry(val value: Value, val expiresAt: Instant?) {
         /** The String bytes, safe to read once the kind check in [execute] has passed. */
@@ -26,8 +33,30 @@ internal class Partition(id: PartitionId, private val clock: Clock, private val 
         Thread(r, "partition-${id.index}").apply { isDaemon = true }
     }
 
+    /**
+     * The active half of spec 5.4's belt and braces: the partition's own wheel deletes a key as
+     * its deadline falls due, so nothing has to be read to be removed. Only ever touched from
+     * this executor -- by [write] and [drop] on the command path, and by [tick] -- so its
+     * callback needs no synchronisation of its own.
+     *
+     * Null until the first TTL, and born from that command's own reading of the clock: the
+     * engine reads the clock once per command and never outside one, so a wheel cannot be built
+     * in the constructor. A partition that has never held a TTL has no wheel to advance.
+     */
+    private var wheel: TimerWheel<Key>? = null
+
+    private fun wheel(now: Instant): TimerWheel<Key> =
+        wheel ?: TimerWheel<Key>(now, tickMillis) { key -> store.remove(key) }.also { wheel = it }
+
     fun submit(command: Command): CompletableFuture<Reply> =
         CompletableFuture.supplyAsync({ execute(command) }, executor)
+
+    /**
+     * Advances the wheel to the clock's current reading. The server owns the scheduler that
+     * calls this once per tick; the engine holds no thread of its own beyond the executors.
+     */
+    fun tick(): CompletableFuture<Void> =
+        CompletableFuture.runAsync({ wheel?.advanceTo(clock.instant()) }, executor)
 
     /** One partition's share of a fanned-out command: one task, so those keys see no interleaving. */
     fun submitAll(commands: List<Command>): CompletableFuture<List<Reply>> =
@@ -76,7 +105,7 @@ internal class Partition(id: PartitionId, private val clock: Clock, private val 
                 if (rejected) {
                     NIL
                 } else {
-                    store.put(command.key, Entry(Value.Str(command.value), command.ttl?.let(now::plus)))
+                    write(command.key, now, Entry(Value.Str(command.value), command.ttl?.let(now::plus)))
                     OK
                 }
             }
@@ -89,14 +118,14 @@ internal class Partition(id: PartitionId, private val clock: Clock, private val 
                     } catch (overflow: ArithmeticException) {
                         return NOT_AN_INTEGER
                     }
-                    store.put(command.key, Entry(Value.Str(next.toString().toByteArray()), current?.expiresAt))
+                    write(command.key, now, Entry(Value.Str(next.toString().toByteArray()), current?.expiresAt))
                     Reply.Integer(next)
                 }
             }
             is Command.Append -> {
                 val current = live(command.key, now)
                 val joined = (current?.str ?: EMPTY) + command.value
-                store.put(command.key, Entry(Value.Str(joined), current?.expiresAt))
+                write(command.key, now, Entry(Value.Str(joined), current?.expiresAt))
                 Reply.Integer(joined.size.toLong())
             }
             is Command.StrLen -> Reply.Integer((live(command.key, now)?.str?.size ?: 0).toLong())
@@ -110,7 +139,7 @@ internal class Partition(id: PartitionId, private val clock: Clock, private val 
             is Command.HDel -> {
                 val fields = hash(command.key, now)
                 val removed = fields?.let { command.fields.count { f -> it.remove(fieldName(f)) != null } } ?: 0
-                if (fields != null && fields.size == 0) store.remove(command.key)
+                if (fields != null && fields.size == 0) drop(command.key)
                 Reply.Integer(removed.toLong())
             }
             is Command.HGetAll -> Reply.Array(
@@ -139,7 +168,7 @@ internal class Partition(id: PartitionId, private val clock: Clock, private val 
             is Command.Scan -> error("SCAN runs through Partition.scan, which hands the engine the cursor")
 
             is Command.Push -> {
-                val items = items(command.key, now) ?: Value.List().also { store.put(command.key, Entry(it, null)) }.items
+                val items = items(command.key, now) ?: Value.List().also { write(command.key, now, Entry(it, null)) }.items
                 for (value in command.values) if (command.end == Command.End.HEAD) items.addFirst(value) else items.addLast(value)
                 Reply.Integer(items.size.toLong())
             }
@@ -189,17 +218,66 @@ internal class Partition(id: PartitionId, private val clock: Clock, private val 
                 Reply.Bulk(store.randomKey(random)?.bytes)
             }
             is Command.FlushDb -> {
+                // Every key goes, so every deadline goes: the wheel is dropped whole.
+                wheel = null
                 store.clear()
                 OK
             }
 
             is Command.Del -> if (live(command.key, now) == null) ZERO else {
-                store.remove(command.key)
+                drop(command.key)
                 ONE
             }
             is Command.Exists -> if (live(command.key, now) == null) ZERO else ONE
             is Command.Type -> Reply.Simple(live(command.key, now)?.value?.kind?.text ?: "none")
+
+            is Command.Expire -> {
+                val entry = live(command.key, now) ?: return ZERO
+                write(command.key, now, Entry(entry.value, command.deadline))
+                ONE
+            }
+            is Command.Persist -> {
+                val entry = live(command.key, now)
+                if (entry?.expiresAt == null) ZERO else {
+                    write(command.key, now, Entry(entry.value, null))
+                    ONE
+                }
+            }
+            is Command.Ttl -> {
+                val entry = live(command.key, now)
+                val deadline = entry?.expiresAt
+                when {
+                    entry == null -> NO_SUCH_KEY_TTL
+                    deadline == null -> NO_TTL
+                    else -> {
+                        // Never negative: the key is still readable at its deadline, so the last
+                        // millisecond of its life reports 0 rather than counting past it.
+                        val millis = Duration.between(now, deadline).toMillis().coerceAtLeast(0L)
+                        // Redis rounds seconds half up, so 9500 ms left is 10 and 9499 ms is 9.
+                        Reply.Integer(if (command.precision == Command.Ttl.Precision.MILLIS) millis else (millis + 500) / 1000)
+                    }
+                }
+            }
         }
+    }
+
+    /**
+     * The one way an entry enters the store, and with it the one place a TTL reaches the wheel.
+     * Every write goes through here, so no command can leave a deadline behind that would later
+     * fire against a value it was never meant for.
+     */
+    private fun write(key: Key, now: Instant, entry: Entry) {
+        store.put(key, entry)
+        val deadline = entry.expiresAt
+        // A write that carries no TTL clears the one the key had, wheel entry and all; a key
+        // with no wheel entry has nothing to cancel, and so needs no wheel to be built.
+        if (deadline == null) wheel?.cancel(key) else wheel(now).schedule(key, deadline)
+    }
+
+    /** The one way an entry leaves the store: its pending deadline leaves with it. */
+    private fun drop(key: Key) {
+        store.remove(key)
+        wheel?.cancel(key)
     }
 
     /**
@@ -209,7 +287,7 @@ internal class Partition(id: PartitionId, private val clock: Clock, private val 
     private fun live(key: Key, now: Instant): Entry? {
         val entry = store.get(key) ?: return null
         if (entry.expired(now)) {
-            store.remove(key)
+            drop(key)
             return null
         }
         return entry
@@ -223,11 +301,15 @@ internal class Partition(id: PartitionId, private val clock: Clock, private val 
      * The lazy check of [live], applied to the whole store at once: what a keyspace-wide command
      * sees afterwards is exactly the live keys, with no copy of the key set to filter.
      *
-     * ponytail: O(n) in the keyspace, so `DBSIZE` costs a walk that Redis answers in O(1). T09's
-     * wheel removes expired keys as they fall due, and then this sweep can go.
+     * ponytail: O(n) in the keyspace, so `DBSIZE` costs a walk that Redis answers in O(1). The
+     * wheel does not replace it: it removes a key at the first tick after its deadline, and a
+     * keyspace-wide command asked in the gap before that tick must still not see the key. Only
+     * a store that can find its expired keys without a walk would let this go.
      */
     private fun purgeExpired(now: Instant) {
-        store.entries().filter { it.value.expired(now) }.map { it.key }.toList().forEach(store::remove)
+        // Collected before anything is removed: the table must not be mutated while its
+        // entries are being walked.
+        store.entries().filter { it.value.expired(now) }.map { it.key }.toList().forEach(::drop)
     }
 
     /**
@@ -289,12 +371,12 @@ internal class Partition(id: PartitionId, private val clock: Clock, private val 
 
     /** Redis keeps no empty aggregate: the last element taken out takes the key with it. */
     private fun dropIfEmpty(key: Key, items: ArrayDeque<ByteArray>) {
-        if (items.isEmpty()) store.remove(key)
+        if (items.isEmpty()) drop(key)
     }
 
     /** Writes [entries] into [key]'s hash, creating it when absent; replies how many were new. */
     private fun put(key: Key, now: Instant, entries: List<Pair<ByteArray, ByteArray>>): Long {
-        val fields = hash(key, now) ?: Value.Hash().also { store.put(key, Entry(it, null)) }.fields
+        val fields = hash(key, now) ?: Value.Hash().also { write(key, now, Entry(it, null)) }.fields
         return entries.count { (field, value) -> fields.put(fieldName(field), value) == null }.toLong()
     }
 
@@ -321,5 +403,9 @@ internal class Partition(id: PartitionId, private val clock: Clock, private val 
         val NIL = Reply.Bulk(null)
         val ZERO = Reply.Integer(0)
         val ONE = Reply.Integer(1)
+
+        /** Redis's two answers to `TTL` and `PTTL` that are not durations. */
+        val NO_SUCH_KEY_TTL = Reply.Integer(-2)
+        val NO_TTL = Reply.Integer(-1)
     }
 }
