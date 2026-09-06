@@ -10,11 +10,11 @@ is the acceptance tier's only real time, awaited with deadlines.
 
 **Nature:** acceptance (Opus)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache 717f5c2 + merge abd4e0f, merged into misc/ai_gen)
 
-- [ ] `P2_acceptance_three_nodes_quorum_and_minority_failure` green
-- [ ] Every P1 and P2 test green in the same run
-- [ ] Progress entry appended
+- [x] `P2_acceptance_three_nodes_quorum_and_minority_failure` green
+- [x] Every P1 and P2 test green in the same run
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket, stubs throwing NotImplementedError
 for later seams; 200 to 600 lines including tests; JUnit 5 + Mockito only, no AssertJ or MockK;

@@ -3969,3 +3969,174 @@ alone), `installValue` is the place and `AntiEntropy.reconcile` the model. The C
 "the reply is done before X" under `runTest`, since `InProcessCluster.drainMessages` is a
 fixpoint that delivers the repair too. `seed(node, write, dvv)` takes any keyed write the
 test kit's `TokenCodec` knows; `HGET` was added, `HGETALL` and `HSET` already were.
+
+## T24: P2 acceptance
+
+**Built:** the node, the wire form it forwards in, and the demo that proves the three of them
+work together.
+
+`ClusterNode` (server module) is one node of a cluster with everything a client can reach on it:
+an `ApEngine`, a `GrpcTransport`, a `Ring` built from the fixed node set, a `Swim` with its
+`run()` loop, a `Replication` and a `Router`, wired as plan 2.3 draws them --
+`Router(Replication(ApEngine))` -- and handed to `DynaCacheServer` as the `CommandEngine` its
+pipeline submits to. It presents the `CommandEngine` shape itself, so the handler that served one
+engine now serves a cluster without knowing it. `start()` opens the RESP socket and launches the
+node's three loops (the router's demux, gossip, hint handoff); `close()` stops the socket, cancels
+the scope, closes the transport and then the engine. `addresses` is read at send time (T23), so
+three nodes on ephemeral gRPC ports are built first and told each other's ports afterwards, while
+`nodes` -- the ring -- is known up front because a node id is not an address.
+
+`commandToTokens` (own file, beside the parser) is the real `(Command) -> List<ByteArray>` T19
+asked for: an exhaustive `when` over `Command.Keyed`, all 38 variants, so a variant added to the
+engine stops the build rather than failing a forward at runtime. Where the wire has several
+spellings of one meaning it writes the one that carries everything the variant holds: an absolute
+deadline goes out as `PEXPIREAT` (T16's row, which is why it had to exist), a `Set`'s TTL as
+`PX <millis>` since the `Duration` no longer knows which spelling it arrived as, and `TTL`/`PTTL`,
+`LPUSH`/`RPUSH`, `ZRANGE`/`ZREVRANGE` and `ZRANK`/`ZREVRANK` are each chosen off the flag that
+distinguishes them.
+
+`INFO` gains a `# Cluster` section: node id, quorum, the membership view one `member_<node>` line
+per node with state and incarnation, and the pending hint count `Replication.hintCount` reports.
+`main` gains a cluster mode behind `--peers=id=host:port,...` (`--node`, `--grpc`, `--quorum=n/w/r`);
+without `--peers` it is the single node it always was and the positional arguments mean the same
+in both modes. `DynaCacheServer` was touched at the construction site only: a `commands:
+CommandEngine = engine` parameter that the handler submits to, `engine` staying the local one the
+scheduler ticks, and four lines in `main`.
+
+**Concepts named:** No new vocabulary and no new seam; every name in the wiring is CONTEXT.md's
+already. The one idea worth recording is that **a node is an assembly, not a layer**: nothing in
+`ClusterNode` decides anything about a command except which section `INFO` ends with. The router
+decides the coordinator, replication decides the quorum, SWIM decides who is alive, and the
+assembly's whole content is the order they are stacked in and the fact that they all share one
+transport and one scope.
+
+That sharing needed one small adapter, `NodeTransport`, which is where two facts about real
+sockets that the in-memory transport hides get repaired in one place:
+
+- **A send to a node that is gone is a dropped envelope, not a throw.** gRPC reports a down peer
+  out of `send` (T23's own note) and nothing above it has an error path: gossip's `tick` would die
+  with the exception and stop detecting the very failure it had just seen, and a quorum's fan-out
+  would fail the write rather than wait for the replicas that are up. The in-memory adapter every
+  cluster test was written against simply drops; this makes gRPC agree. `CancellationException` is
+  rethrown, so cancelling the node's scope still works.
+- **One channel needs one reader.** T19 deviation 5 left this for whoever ran gossip and
+  forwarding on one node: the router's `run()` owns the inbound loop and hands gossip envelopes to
+  `Swim.deliver`, so the copy of the transport SWIM holds is deaf -- its `inbound` is a channel
+  nothing is ever written to, and `tick`'s own `tryReceive` finds it empty instead of racing the
+  demux for a forwarded command.
+
+**Acceptance:**
+- `P2_acceptance_three_nodes_quorum_and_minority_failure` (server): three `ClusterNode`s in one
+  JVM, ephemeral RESP and gRPC ports, real gossip over real sockets, N=3 W=2 R=2, driven by
+  unmodified Jedis (C8). `INFO`'s `# Cluster` section names all three alive; `SET foo bar EX 60`
+  through node-1 reads back through node-3 with its TTL intact across the quorum; a key the ring
+  gives to node-2 is written through node-1 and read through node-3; a `MULTI` of two `{acct}`
+  keys commits through the tag's coordinator and is refused elsewhere; node-2 is closed; node-1's
+  `INFO` shows it dead inside a 30-second deadline (about a second in practice at a 100 ms
+  period), with node-3 still alive; reads and writes on keys whose coordinator survived still
+  succeed, the value written before the failure included. Every wait is a poll to a deadline;
+  there is no sleep anywhere.
+- `tokens_roundtrip_every_keyed_command` (server): 50 canonical wire rows, at least one per
+  `Command.Keyed` variant, asserting `tokens(parse(row)) == row`.
+- Mutation-checked three ways. Dropping `Set`'s value from its wire form fails the round trip at
+  `SET k v` **and** fails the acceptance test at its first write, with the client reading
+  `-ERR quorum not reached: write needs 2 of 3 nodes, 1 answered within 1s`: a replica that cannot
+  parse a `Replicate` does not ack. Making `Router.submit` always run locally fails the acceptance
+  test twice over, at the batch step and at the dead coordinator step. Both mutations were
+  reverted and the full build re-run.
+- `mvn -B -o clean package` offline, BUILD SUCCESS: engine 144, cluster 67, cp 66, server 68
+  (66 before). Every P1 and P2 test green in the same run.
+- This entry.
+
+**Deviations:** Seven, two of them worth carrying.
+
+1. **Forwarding is barely client-visible at N=3 on three nodes**, which cost the acceptance test
+   a step. Every node is a replica of every key, so a contact that wrongly ran a forwarded command
+   locally would still answer correctly: it applies the write, replicates it to the preference
+   list's successors, and the reader is a replica too. The one thing a client can see that local
+   execution could not produce is the failure: after node-2 is killed, a key node-2 coordinates
+   answers `-ERR forward timeout after 2s waiting for node-2`, because the router forwards to the
+   preference list's first node whether or not gossip has buried it (T22 deviation 7), and T25's
+   sloppy quorum needs a fourth node to have a substitute. `whatTheDeadNodeCoordinated` asserts
+   exactly that, so the forward has teeth; it is also the ticket's "reads and writes still
+   succeed" stated precisely -- they succeed for every key whose coordinator is alive, which is
+   two thirds of the keyspace, and the last third is spec 5.1 step 7's business.
+2. **Batches are not replicated, recorded not fixed** (T22 deviation 5), and what a `MULTI`
+   through the cluster does today is now asserted rather than described. Through the coordinator
+   of its keys it commits and answers `[OK, OK]`; through any other node `EXEC` answers
+   `-ERR <key> is coordinated by <node>, not <self>`, because `Router.atomically` refuses a span
+   this node does not coordinate and a batch is a caller's block, which cannot be forwarded
+   (T19 deviation 4). Keys sharing a hash tag share a coordinator, so `{tag}` is how a client gets
+   a batch to work at all. Underneath that, `Replication.atomically` is one line -- `engine
+   .atomically(...)` -- so the writes land on the coordinator's engine, bump no DVV and reach no
+   replica; a client cannot see it today because the coordinator answers every read of those keys,
+   and it becomes visible the moment that coordinator is lost. `EVAL` takes the same path.
+3. **Size: 672 lines including tests and KDoc, 454 of code**, against the ticket's 200 to 600.
+   Reported rather than silently exceeded. Everything the ticket lists landed, so nothing was cut;
+   the overrun is comment density at this project's usual ratio.
+4. **`clusterMain` has no test.** It is fifteen lines of argument shuffling around a constructor
+   the acceptance test drives directly, and the test cannot go through it because it needs
+   ephemeral ports. The `require` that `--peers` names this node is its only check.
+5. **`ClusterNode` decorates `INFO` rather than the engine answering the cluster's part.**
+   `Command.Info` is an `EveryPartition` command joined inside the engine, and the engine is
+   cluster-unaware by the module graph, so the section is appended above the router. The
+   membership table's key set is fixed at construction (dynamic membership is on the do-not-build
+   list), so reading it from the RESP thread while the gossip coroutine updates a row cannot
+   restructure the map underneath; if membership ever becomes dynamic, that read needs a snapshot.
+6. **The gossip period is a constructor parameter, defaulting to SWIM's own 1 s.** The acceptance
+   test runs at 100 ms, which puts detection at about a second rather than about ten. Nothing
+   about the protocol changed; the test simply cannot wait ten seconds for each of its assertions.
+7. **`commandToTokens` throws on a command that is not `Command.Keyed`.** Nothing forwards or
+   replicates anything else -- the router runs keyless commands, `Scan` and `Command.Cp` locally
+   (T19), and replication ships only single-key writes and reads -- so the throw is a claim about
+   callers rather than a case to handle. `Router.coordinate` catches it either way.
+
+**For the next ticket:**
+
+- **`ClusterNode` is where a node is assembled**, so anything that needs to exist once per node
+  (T26's read repair coroutine, T28's anti-entropy loop, T37's snapshot marker) is a field and a
+  `scope.launch` in `start()`, next to the three loops already there. `NodeTransport` is the place
+  to put any other difference between a real socket and the in-memory adapter; today it drops a
+  failed send and blinds every reader but the router's.
+- **`commandToTokens` is now the real wire form**, so the cluster module's `TokenCodec` is only
+  the test kit's stand-in and the two can disagree. Anything that puts a new kind of command on
+  the wire adds a branch here, and the round-trip test is one row.
+- **Two things a P3 acceptance tier will want that this one does not have.** Restarting a node
+  needs a fresh `ClusterNode` on the same id at a higher SWIM incarnation, which is what a real
+  restart is (T20's note); `ClusterNode` takes the incarnation from `Swim`'s default of 0 today,
+  so replaying hints into a returned node needs that parameter threaded through. And nothing here
+  reads a node's stored value directly: every assertion goes through a client, which is the tier's
+  point, so a test that must see what one replica holds needs the cluster module's kit, not this.
+- **`DynaCacheServer(port, engine, commands, tick)`** is the construction site. T44 owns
+  `CommandHandler` and `CommandParser`; the only change made to the handler here is that it takes
+  a `CommandEngine` rather than an `ApEngine`, which it never needed.
+- The acceptance test names keys by asking the ring which node coordinates them
+  (`keyCoordinatedBy`), because with a dead coordinator the answer decides whether a key is
+  available at all. Any cluster test with a failure in it wants the same helper.
+
+**Deviations (merge of misc/ai_gen into t24, commit abd4e0f1):** three more.
+
+8. **The cluster is behind T44's dispatcher, not beside it.** `DynaCacheServer`'s `commands`
+   parameter became `ap: CommandEngine = engine`, which is what `CommandDispatcher(ap, cp, clock)`
+   sends everything that is not a `cp:` key to; `ClusterNode` passes itself there. So a `cp:` key
+   on a cluster node reaches the CP engine (or `-NOTCP`) without touching the ring, and every AP
+   key goes through the router, which is CP spec 9.5's order with a cluster underneath it. The
+   handler takes the dispatcher, as T44 wrote it.
+9. **The AP cluster is named by flags, the CP group by position.** `main` keeps T44's
+   `dynacache [port] [partitions] [dir] [fsync] [cp-self] [cp-members]` exactly, and the cluster
+   adds `--peers=id=host:port,...`, `--node`, `--grpc` and `--quorum=n/w/r`. Four more positional
+   arguments after `cp-members` would have made the seventh through tenth argument unreadable, and
+   the flags are already parsed out before the positional list is built, so both modes read the
+   same six positions.
+10. **`AntiEntropy.run()` is launched, and its envelopes reach it.** T28 left the node wiring
+    open. It is one more `scope.launch` in `start()`, one more `AntiEntropy` field sharing the
+    node's `DotCounter` with `Replication` (hoisted to a field for it), and one more link in the
+    demux chain -- `replication.receive` first, then `antiEntropy.receive`, then gossip -- since a
+    loop nobody delivers to would compare Merkle roots and never hear an answer. `INFO`'s
+    `# Cluster` section reports `cluster_ranges_compared` and `cluster_keys_synced`. The default
+    interval is 60 s, so nothing fires inside the acceptance test; it is launched, not exercised.
+    `DistributedSnapshot` (T36) is still not wired: `Router`'s `snapshots` parameter defaults to
+    false here, and whoever wants a marker to reach a real node adds the field the same way.
+
+**Acceptance after the merge:** `mvn -B -o clean package` offline, BUILD SUCCESS: engine 144,
+cluster 76, cp 66, server 81. Both T24 tests green in that run.
