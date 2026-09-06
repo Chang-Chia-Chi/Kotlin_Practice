@@ -11,6 +11,7 @@ import java.time.Duration
 import java.time.Instant
 import java.util.Random
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.CyclicBarrier
 import java.util.concurrent.Executors
 
 /**
@@ -30,6 +31,11 @@ internal class Partition(
     private val maxBytes: Long,
     /** Which key this partition gives up when it is over [maxBytes]; see [coldest]. */
     private val policy: EvictionPolicy,
+    /**
+     * The engine's write-ahead log hook: called with every command's reply, it answers the
+     * durability of the entry it appended, or null when the command changed nothing (C14).
+     */
+    private val log: (Command, Reply, Instant) -> CompletableFuture<*>?,
 ) {
 
     private class Entry(val value: Value, val expiresAt: Instant?) {
@@ -90,8 +96,24 @@ internal class Partition(
     private fun wheel(now: Instant): TimerWheel<Key> =
         wheel ?: TimerWheel<Key>(now, tickMillis) { key -> forget(key) }.also { wheel = it }
 
-    fun submit(command: Command): CompletableFuture<Reply> =
-        CompletableFuture.supplyAsync({ execute(command) }, executor)
+    /**
+     * What the current task's appends still owe the disk. Reset by [task], grown by [execute];
+     * only the executor touches it, so a task's reply waits for exactly its own entries.
+     */
+    private var durable: CompletableFuture<*> = DONE
+
+    /**
+     * One task on this partition's thread, whose future completes with [work]'s answer only once
+     * every entry the task logged is durable: the reply-after-durable rule of C14.
+     */
+    private fun <R> task(work: () -> R): CompletableFuture<R> =
+        CompletableFuture.supplyAsync({
+            durable = DONE
+            val result = work()
+            durable.thenApply { result }
+        }, executor).thenCompose { it }
+
+    fun submit(command: Command): CompletableFuture<Reply> = task { execute(command) }
 
     /**
      * Advances the wheel to the clock's current reading. The server owns the scheduler that
@@ -105,11 +127,10 @@ internal class Partition(
      * commands with nothing interleaved. C1 needs nothing more -- the executor is the one
      * thread, so a task that runs many commands already has the exclusion a batch asks for.
      */
-    fun <R> inOneTask(work: () -> R): CompletableFuture<R> = CompletableFuture.supplyAsync(work, executor)
+    fun <R> inOneTask(work: () -> R): CompletableFuture<R> = task(work)
 
     /** One partition's share of a fanned-out command: one task, so those keys see no interleaving. */
-    fun submitAll(commands: List<Command>): CompletableFuture<List<Reply>> =
-        CompletableFuture.supplyAsync({ commands.map(::execute) }, executor)
+    fun submitAll(commands: List<Command>): CompletableFuture<List<Reply>> = task { commands.map(::execute) }
 
     fun close() = executor.shutdown()
 
@@ -119,9 +140,11 @@ internal class Partition(
      * entries are copied, not referenced: a Hash, List or Sorted Set is mutated in place by the
      * next command, and the writer serializes off this thread. A String's bytes are shared,
      * since no command mutates that array. The DVV is empty until replication stamps one (T22).
+     * The task waits at [cut] first, so every partition's view is taken at the same moment.
      */
-    fun snapshotView(now: Instant): CompletableFuture<List<RdbEntry>> =
+    fun snapshotView(now: Instant, cut: CyclicBarrier): CompletableFuture<List<RdbEntry>> =
         CompletableFuture.supplyAsync({
+            cut.await()
             store.entries().filterNot { it.value.expired(now) }
                 .map { RdbEntry(it.key, frozen(it.value.value), it.value.expiresAt, EMPTY) }
                 .toList()
@@ -168,6 +191,7 @@ internal class Partition(
             if (held != null && held.kind != command.needs) return WRONG_TYPE
         }
         val reply = run(command, now)
+        log(command, reply, now)?.let { durable = CompletableFuture.allOf(durable, it) }
         // A command that grew or shrank an aggregate in place never passed through [write], so
         // one recount of the key it touched is what keeps the running total level with the store.
         if (command is Command.Keyed) {
@@ -309,8 +333,24 @@ internal class Partition(
                     (parseScore(score) ?: return NOT_A_FLOAT) to member
                 }
                 if (scored.isEmpty()) return ZERO
-                val zset = zset(command.key, now) ?: newZSet(command.key, now)
-                Reply.Integer(scored.count { (score, member) -> zset.writeScore(score, member) }.toLong())
+                // XX writes only members that are already there, so on a missing key it writes
+                // nothing -- and must not leave an empty sorted set behind for having looked.
+                val zset = zset(command.key, now)
+                    ?: if (command.condition == Command.Set.Condition.XX) return ZERO
+                    else newZSet(command.key, now)
+                var added = 0
+                var moved = 0
+                for ((score, member) in scored) {
+                    val previous = zset.scores.get(fieldName(member))
+                    when (command.condition) {
+                        Command.Set.Condition.NX -> if (previous != null) continue
+                        Command.Set.Condition.XX -> if (previous == null) continue
+                        null -> {}
+                    }
+                    if (zset.writeScore(score, member)) added++ else if (previous != score) moved++
+                }
+                // CH counts what changed; without it Redis counts only what is new.
+                Reply.Integer((if (command.changed) added + moved else added).toLong())
             }
             is Command.ZScore ->
                 Reply.Bulk(scoreOf(command.key, now, command.member)?.let { scoreText(it).toByteArray() })
@@ -692,6 +732,9 @@ internal class Partition(
         const val MAX_EVICTIONS = 32
 
         val EMPTY = ByteArray(0)
+
+        /** A task that logged nothing owes the disk nothing. */
+        val DONE: CompletableFuture<*> = CompletableFuture.completedFuture(null)
         val OK = Reply.Simple("OK")
         val NO_SUCH_KEY = Reply.Error("ERR", "no such key")
         val INDEX_OUT_OF_RANGE = Reply.Error("ERR", "index out of range")

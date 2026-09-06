@@ -38,6 +38,9 @@ message Replicate {
   bytes dvv = 3;
   // Unix millis; 0 when the key has no TTL.
   int64 expires_at_millis = 4;
+  // Sloppy quorum (spec 2.4, T25): set when the receiver stands in for this dead preference-list
+  // node. It stores the whole message as a hint instead of applying it, and acks toward W.
+  string hint_for = 5;
 }
 
 // A replica's acknowledgement of a Replicate, under the same id; one per node counts (C4).

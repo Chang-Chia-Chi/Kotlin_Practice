@@ -81,6 +81,15 @@ sealed class Command {
         }
 
         /**
+         * The introspection verbs (CP spec 6.7). They ask a member what it can see of the group,
+         * so they are answered from its own report and never become a log entry; like [Session]
+         * they name no key of their own and carry the namespace's own key for C16.
+         */
+        sealed class Introspection : Cp() {
+            override val key: Key get() = NAMESPACE
+        }
+
+        /**
          * A command done on behalf of a session: the CP state machine answers `-NOSESSION` for a
          * session that expired or was never created before the primitive sees the command.
          */
@@ -112,8 +121,14 @@ sealed class Command {
         /** `EXPIRE` or `PEXPIRE cp:counter:K`: 1 when the counter exists and now has [ttl], else 0. */
         data class LongExpire(override val key: Key, val ttl: Duration) : AtomicLong()
 
-        /** `TTL cp:counter:K`: seconds left rounded as Redis rounds, -1 without a TTL, -2 when missing. */
-        data class LongTtl(override val key: Key) : AtomicLong()
+        /**
+         * `TTL` or `PTTL cp:counter:K`: what is left in [precision]'s unit, seconds rounded the
+         * way Redis rounds them, -1 without a TTL and -2 when the counter is missing.
+         */
+        data class LongTtl(
+            override val key: Key,
+            val precision: Ttl.Precision = Ttl.Precision.SECONDS,
+        ) : AtomicLong()
 
         /** `PERSIST cp:counter:K`: 1 when a TTL was removed, 0 when there was none to remove. */
         data class LongPersist(override val key: Key) : AtomicLong()
@@ -205,8 +220,15 @@ sealed class Command {
         /** `CP.SESSION.CLOSE sid`: `+OK`, and every lock it held is released in this same entry (C18). */
         data class SessionClose(override val session: Long) : Session(), Sessioned
 
+        /** `CP.INFO`: `[leader, members, log_size, applied_index, snapshot_index]` (CP spec 6.7). */
+        data object Info : Introspection()
+
+        /** `CP.MEMBERS`: the member ids of the group, which is fixed at startup (CP spec 2.2). */
+        data object Members : Introspection()
+
         private companion object {
             val REGISTRY = Key("cp:session")
+            val NAMESPACE = Key("cp:")
         }
     }
 
@@ -416,12 +438,21 @@ sealed class Command {
     class LRem(override val key: Key, val count: Long, val value: ByteArray) : Keyed(Value.Kind.LIST)
 
     /**
-     * `ZADD key score member [score member ...]`. Scores travel as the client's own bytes because
-     * Redis parses them inside the command: every score is read before any is written, so one
-     * unparseable score leaves the sorted set untouched. Replies with how many members were new.
+     * `ZADD key [NX|XX] [CH] score member [score member ...]`. Scores travel as the client's own
+     * bytes because Redis parses them inside the command: every score is read before any is
+     * written, so one unparseable score leaves the sorted set untouched.
+     *
+     * [condition] is `SET`'s, and means here what it means there: `NX` writes only a member that
+     * is not in the sorted set, `XX` only one that is. [changed] switches the reply from Redis's
+     * default count of new members to its count of members new **or** moved, which is what `CH`
+     * asks for.
      */
-    class ZAdd(override val key: Key, val entries: List<Pair<ByteArray, ByteArray>>) :
-        Keyed(Value.Kind.ZSET)
+    class ZAdd(
+        override val key: Key,
+        val entries: List<Pair<ByteArray, ByteArray>>,
+        val condition: Set.Condition? = null,
+        val changed: Boolean = false,
+    ) : Keyed(Value.Kind.ZSET)
 
     /** `ZSCORE key member`: the score as Redis writes it, nil when the member is not there. */
     class ZScore(override val key: Key, val member: ByteArray) : Keyed(Value.Kind.ZSET)

@@ -23,6 +23,7 @@ import io.microraft.model.message.RaftMessage
 import io.microraft.model.message.TriggerLeaderElectionRequest
 import io.microraft.model.message.VoteRequest
 import io.microraft.model.message.VoteResponse
+import io.microraft.report.RaftNodeReport
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.DataInputStream
@@ -211,7 +212,9 @@ object CpWire {
                 writeLong(command.new)
             }
             is Command.Cp.LongExpire -> tagged(CMD_EXPIRE, command.key) { writeLong(command.ttl.toMillis()) }
-            is Command.Cp.LongTtl -> tagged(CMD_TTL, command.key) {}
+            is Command.Cp.LongTtl -> tagged(CMD_TTL, command.key) {
+                writeBoolean(command.precision == Command.Ttl.Precision.MILLIS)
+            }
             is Command.Cp.LongPersist -> tagged(CMD_PERSIST, command.key) {}
             is Command.Cp.LockTry -> tagged(CMD_LOCK_TRY, command.key) {
                 writeLong(command.session)
@@ -255,6 +258,9 @@ object CpWire {
             is Command.Cp.SessionCreate -> tagged(CMD_SESSION_CREATE, command.key) { writeLong(command.timeout.toMillis()) }
             is Command.Cp.SessionHeartbeat -> tagged(CMD_SESSION_HEARTBEAT, command.key) { writeLong(command.session) }
             is Command.Cp.SessionClose -> tagged(CMD_SESSION_CLOSE, command.key) { writeLong(command.session) }
+            // CP spec 6.7 is answered from the member's own report (see CpEngine), so an
+            // introspection verb never reaches the log and has no encoding to reach it by.
+            is Command.Cp.Introspection -> error("$command is answered locally, never replicated")
         }
     }
 
@@ -271,7 +277,10 @@ object CpWire {
             CMD_DECR_BY -> Command.Cp.LongDecrBy(key, readLong())
             CMD_CAS -> Command.Cp.LongCas(key, readLong(), readLong())
             CMD_EXPIRE -> Command.Cp.LongExpire(key, Duration.ofMillis(readLong()))
-            CMD_TTL -> Command.Cp.LongTtl(key)
+            CMD_TTL -> Command.Cp.LongTtl(
+                key,
+                if (readBoolean()) Command.Ttl.Precision.MILLIS else Command.Ttl.Precision.SECONDS,
+            )
             CMD_PERSIST -> Command.Cp.LongPersist(key)
             CMD_LOCK_TRY -> Command.Cp.LockTry(key, readLong(), Duration.ofMillis(readLong()))
             CMD_LOCK_UNLOCK -> Command.Cp.LockUnlock(key, readLong(), readLong())
@@ -336,6 +345,16 @@ object CpWire {
         REPLY_ARRAY -> Reply.Array(List(readInt()) { readReply() })
         else -> error("unknown reply tag $tag")
     }
+
+    /** What a member can see of the group (CP spec 6.7), read from its own MicroRaft report. */
+    fun info(report: RaftNodeReport): CpInfo = CpInfo.newBuilder()
+        .setLeader(report.term.leaderEndpoint?.id?.toString().orEmpty())
+        // CP membership is fixed at startup (CP spec 2.2), so the initial members are the group.
+        .addAllMembers(report.initialMembers.members.map { it.id.toString() })
+        .setLogSize(report.log.lastLogOrSnapshotIndex - report.log.lastSnapshotIndex)
+        .setAppliedIndex(report.log.commitIndex)
+        .setSnapshotIndex(report.log.lastSnapshotIndex)
+        .build()
 
     /** `CP.INFO` (CP spec 6.7): leader, members, log size, applied index, snapshot index. */
     fun infoReply(info: CpInfo): Reply = Reply.Array(

@@ -53,6 +53,54 @@ class ZSetCommandTest {
         assertEquals(Reply.Integer(2), run(Command.ZCard(Key("board"))))
     }
 
+    private fun bytes(text: String) = text.toByteArray(Charsets.ISO_8859_1)
+
+    /** `ZADD key [NX|XX] [CH] score member ...`, the flagged form. */
+    private fun zadd(
+        key: String,
+        condition: Command.Set.Condition?,
+        changed: Boolean,
+        vararg pairs: Pair<String, String>,
+    ): Reply = run(
+        Command.ZAdd(Key(key), pairs.map { bytes(it.first) to bytes(it.second) }, condition, changed),
+    )
+
+    private fun zscore(key: String, member: String): Reply = run(Command.ZScore(Key(key), bytes(member)))
+
+    @Test
+    fun zadd_nx_xx_ch_flags() {
+        val nx = Command.Set.Condition.NX
+        val xx = Command.Set.Condition.XX
+
+        // XX on a key that is not there writes nothing, and must leave no empty sorted set
+        // behind for having looked.
+        assertEquals(Reply.Integer(0), zadd("board", xx, false, "1" to "alice"))
+        assertEquals(Reply.Integer(0), run(Command.Exists(Key("board"))))
+
+        // NX creates the key, then refuses to move a member it already scored.
+        assertEquals(Reply.Integer(1), zadd("board", nx, false, "1" to "alice"))
+        assertEquals(Reply.Integer(0), zadd("board", nx, false, "9" to "alice"))
+        assertEquals(bulk("1"), zscore("board", "alice"))
+
+        // One ZADD, two members: NX adds the new one and leaves the old one where it was.
+        assertEquals(Reply.Integer(1), zadd("board", nx, false, "9" to "alice", "2" to "bob"))
+        assertEquals(bulk("1"), zscore("board", "alice"))
+        assertEquals(bulk("2"), zscore("board", "bob"))
+
+        // XX is the mirror: it moves the member that is there and ignores the one that is not.
+        assertEquals(Reply.Integer(0), zadd("board", xx, false, "5" to "alice", "7" to "carol"))
+        assertEquals(bulk("5"), zscore("board", "alice"))
+        assertEquals(bulk(null), zscore("board", "carol"))
+        assertEquals(Reply.Integer(2), run(Command.ZCard(Key("board"))))
+
+        // CH counts members new or moved, where the plain reply counts only the new ones.
+        assertEquals(Reply.Integer(2), zadd("board", null, true, "6" to "alice", "3" to "carol"))
+        assertEquals(Reply.Integer(1), zadd("board", null, false, "4" to "dave"))
+        // A write that changes no score changes nothing to count, CH or not.
+        assertEquals(Reply.Integer(0), zadd("board", null, true, "6" to "alice"))
+        assertEquals(Reply.Integer(4), run(Command.ZCard(Key("board"))))
+    }
+
     @Test
     fun zadd_rejects_a_score_that_is_not_a_float_and_writes_nothing() {
         assertEquals(

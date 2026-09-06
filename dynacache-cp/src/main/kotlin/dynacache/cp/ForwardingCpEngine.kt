@@ -54,6 +54,14 @@ class ForwardingCpEngine(
         if (!command.key.isCp()) {
             return CompletableFuture.completedFuture(Reply.Error("NOTCP", "${command.key} is not a cp: key"))
         }
+        // CP spec 6.7 is a report, not a log entry: CP.INFO asks the leader for one and
+        // CP.MEMBERS is answered from the fixed membership this node was configured with.
+        if (command is Command.Cp.Info) return info()
+        if (command is Command.Cp.Members) {
+            return CompletableFuture.completedFuture(
+                Reply.Array(cpMembers.map { Reply.Bulk(it.name.toByteArray()) }),
+            )
+        }
         val request = CpRequest.newBuilder().setCommand(ByteString.copyFrom(CpWire.encode(command))).build()
         return scope.future { withTimeout(deadline.toMillis()) { forward(request) } }
     }

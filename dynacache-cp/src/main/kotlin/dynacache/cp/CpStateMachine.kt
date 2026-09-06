@@ -52,6 +52,8 @@ class CpStateMachine(
                 is Command.Cp.AtomicReference -> references.apply(command, lastAppliedTs)
                 is Command.Cp.SessionClose -> { closeSession(command.session); Reply.Simple("OK") }
                 is Command.Cp.Session -> sessions.apply(command, lastAppliedTs)
+                // CP spec 6.7 asks a member what it can see, which is not state the log carries.
+                is Command.Cp.Introspection -> error("$command is answered locally, never replicated")
             }
         }
         is SessionClosed -> {

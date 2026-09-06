@@ -20,9 +20,9 @@ import kotlinx.coroutines.yield
  * The test kit's cluster: [nodeCount] nodes named `node-1..N`, one shared immutable [Ring]
  * (a pure function of the node set, T17), one scripted [membership] every node reads, and per
  * node one [ApEngine], one endpoint on one [InMemoryTransport], one [Replication] wrapping the
- * engine, one [DistributedSnapshot] and one [Router] wrapping that, whose inbound loop runs on
- * [scope]. [config] is the quorum: [n] replicas, [w] acks per write, [r] answers per read.
- * [snapshotDir] is the one directory every node's snapshot part lands in (T36).
+ * engine, one [DistributedSnapshot] and one [Router] wrapping that, whose inbound loop and hint
+ * handoff run on [scope]. [config] is the quorum: [n] replicas, [w] acks per write, [r] answers
+ * per read. [snapshotDir] is the one directory every node's snapshot part lands in (T36).
  *
  * `writeVia` and `readVia` go through the contact node's router, so a key the contact does not
  * coordinate crosses the network (T19) and every write reaches its replicas (T22).
@@ -85,6 +85,7 @@ class InProcessCluster(
 
     init {
         routers.values.forEach { router -> scope.launch { router.run() } }
+        replications.values.forEach { replication -> scope.launch { replication.runHandoff() } }
     }
 
     fun engine(node: NodeId): ApEngine = engines.getValue(node)
@@ -109,6 +110,15 @@ class InProcessCluster(
             engines.values.forEach { it.submit(Command.DbSize).get() }
             yield()
         } while (network.inFlight)
+    }
+
+    /** Drives the network until no node holds a hint, or gives up after the settle bound. */
+    suspend fun drainHints() {
+        repeat(SETTLE_ROUNDS) {
+            if (replications.values.all { it.hintCount == 0 }) return
+            drainMessages()
+            yield()
+        }
     }
 
     suspend fun writeVia(node: NodeId, key: Key, value: ByteArray): Reply =

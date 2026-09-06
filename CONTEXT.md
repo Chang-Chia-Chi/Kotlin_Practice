@@ -16,8 +16,17 @@ _Avoid_: data engine, store, service
 
 **Dispatcher**:
 The router in front of both engines that sends a command to the AP or the CP engine by the
-namespace rules of the CP spec. It routes; it never translates.
-_Avoid_: gateway, front controller
+namespace rules of the CP spec. The one thing it does to a command is **re-target** it: a Redis
+command of the compat set on a `cp:` key becomes the CP verb it means, so `INCR cp:counter:x` and
+`CP.LONG.INCR cp:counter:x` are one command by the time an engine sees them. It never rewrites a
+reply and never sends one command to both engines.
+_Avoid_: gateway, front controller, translator
+
+**Redis-compat set**:
+The Redis commands the `cp:` namespace answers (`SET`, `GET`, the `INCR` family, `SETEX` and the
+TTL commands), each re-targeted onto a CP verb. Anything else on a `cp:` key is `-NOTCP`, which
+is what keeps the namespace the CP engine's alone (C16).
+_Avoid_: aliases, compatibility layer
 
 **Partition**:
 The unit of single-writer execution on one node: a fixed-count local hash bucket that owns an
@@ -126,6 +135,14 @@ Every node's part of one Chandy-Lamport snapshot: its state file plus one log pe
 channel, under `<dir>/<id>/<node>/`. Consistent as a whole (C10); restored as a whole (I12);
 deleted as a whole when a node's deadline passes with a channel still open.
 _Avoid_: backup, dump (that is the single-node RDB file)
+**Hint**:
+A write held by a node that is not one of the key's replicas, because the replica it was meant
+for was dead when the coordinator wrote (sloppy quorum). It is the whole write, unchanged: key,
+tokens, version and TTL as an instant (C5). The holder's ack counts toward W like a replica's,
+and when gossip sees the replica alive the holder replays the hint to it as an ordinary
+replication write and forgets it on the ack (**handoff**, I9). A hint whose TTL has passed is
+dropped instead.
+_Avoid_: pending write, queued replica, backlog
 
 ### CP
 
