@@ -1,6 +1,7 @@
 package dynacache.server
 
 import dynacache.engine.ApEngine
+import dynacache.engine.Key
 import dynacache.engine.Reply
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -19,6 +20,13 @@ private fun bulk(text: String) = Reply.Bulk(text.toByteArray(Charsets.ISO_8859_1
  */
 class DynaCacheServerTest {
 
+    /** The engine under the running server, for a test that has to know where a key lives. */
+    private lateinit var running: ApEngine
+
+    /** A key the running engine puts on a partition other than [key]'s. */
+    private fun otherPartitionThan(key: String): String =
+        (0..99).map { "z$it" }.first { running.partitionOf(Key(it)) != running.partitionOf(Key(key)) }
+
     /**
      * A server on an ephemeral port with a real engine, torn down whatever the body does. With no
      * [onTick] the server schedules the engine's own tick, which is what production runs.
@@ -31,6 +39,7 @@ class DynaCacheServerTest {
     ) {
         val clock = Clock.fixed(Instant.ofEpochSecond(1_000_000), ZoneOffset.UTC)
         val engine = ApEngine(partitionCount, clock, tickMillis = tickMillis)
+        running = engine
         val server =
             if (onTick == null) DynaCacheServer(port = 0, engine = engine)
             else DynaCacheServer(port = 0, engine = engine, tick = onTick)
@@ -40,6 +49,133 @@ class DynaCacheServerTest {
         } finally {
             server.close()
             engine.close()
+        }
+    }
+
+    @Test
+    fun server_multi_exec_roundtrip() {
+        withServer { server ->
+            RespClient(server.boundPort).use { client ->
+                RespClient(server.boundPort).use { onlooker ->
+                    client.send("MULTI")
+                    assertEquals(Reply.Simple("OK"), client.read())
+                    listOf(
+                        arrayOf("SET", "{t}.a", "1"),
+                        arrayOf("INCR", "{t}.a"),
+                        arrayOf("GET", "{t}.a"),
+                    ).forEach { words ->
+                        client.send(*words)
+                        assertEquals(Reply.Simple("QUEUED"), client.read(), words.joinToString(" "))
+                    }
+
+                    // Buffered, not executed: another connection cannot see the key yet.
+                    onlooker.send("GET", "{t}.a")
+                    assertEquals(Reply.Bulk(null), onlooker.read())
+
+                    client.send("EXEC")
+                    assertEquals(
+                        Reply.Array(listOf(Reply.Simple("OK"), Reply.Integer(2), bulk("2"))),
+                        client.read(),
+                        "one array, one reply per queued command, in order",
+                    )
+                    onlooker.send("GET", "{t}.a")
+                    assertEquals(bulk("2"), onlooker.read(), "and now the whole batch is visible")
+                }
+            }
+        }
+    }
+
+    @Test
+    fun multi_exec_cross_partition_rejected() {
+        withServer { server ->
+            val here = "a"
+            val elsewhere = otherPartitionThan(here)
+            RespClient(server.boundPort).use { client ->
+                client.send("MULTI")
+                assertEquals(Reply.Simple("OK"), client.read())
+                client.send("SET", here, "1")
+                assertEquals(Reply.Simple("QUEUED"), client.read())
+                client.send("SET", elsewhere, "2")
+                assertEquals(Reply.Simple("QUEUED"), client.read())
+
+                client.send("EXEC")
+                assertEquals(
+                    Reply.Error("CROSSSLOT", "Keys in request don't hash to the same slot"),
+                    client.read(),
+                )
+                client.send("GET", here)
+                assertEquals(Reply.Bulk(null), client.read(), "the span was refused before anything ran")
+                client.send("GET", elsewhere)
+                assertEquals(Reply.Bulk(null), client.read(), "the span was refused before anything ran")
+            }
+        }
+    }
+
+    @Test
+    fun discard_clears_buffer() {
+        withServer { server ->
+            RespClient(server.boundPort).use { client ->
+                client.send("SET", "k", "before")
+                assertEquals(Reply.Simple("OK"), client.read())
+                client.send("MULTI")
+                assertEquals(Reply.Simple("OK"), client.read())
+                client.send("SET", "k", "after")
+                assertEquals(Reply.Simple("QUEUED"), client.read())
+
+                client.send("DISCARD")
+                assertEquals(Reply.Simple("OK"), client.read())
+                client.send("GET", "k")
+                assertEquals(bulk("before"), client.read(), "the buffered SET never ran")
+                client.send("EXEC")
+                assertEquals(Reply.Error("ERR", "EXEC without MULTI"), client.read(), "and the buffer is gone")
+            }
+        }
+    }
+
+    @Test
+    fun `a parse error while queued makes EXEC abort the whole transaction`() {
+        withServer { server ->
+            RespClient(server.boundPort).use { client ->
+                client.send("MULTI")
+                assertEquals(Reply.Simple("OK"), client.read())
+                client.send("SET", "k", "v")
+                assertEquals(Reply.Simple("QUEUED"), client.read())
+
+                // Redis names the bad command straight away and refuses the lot at EXEC.
+                client.send("NOSUCH", "x")
+                assertEquals(
+                    Reply.Error("ERR", "unknown command 'nosuch', with args beginning with: 'x', "),
+                    client.read(),
+                )
+                client.send("EXEC")
+                assertEquals(
+                    Reply.Error("EXECABORT", "Transaction discarded because of previous errors."),
+                    client.read(),
+                )
+                client.send("GET", "k")
+                assertEquals(Reply.Bulk(null), client.read(), "the queued SET never ran")
+                client.send("MULTI")
+                assertEquals(Reply.Simple("OK"), client.read(), "and the connection starts clean")
+            }
+        }
+    }
+
+    @Test
+    fun `MULTI does not nest, and EXEC and DISCARD need one`() {
+        withServer { server ->
+            RespClient(server.boundPort).use { client ->
+                client.send("EXEC")
+                assertEquals(Reply.Error("ERR", "EXEC without MULTI"), client.read())
+                client.send("DISCARD")
+                assertEquals(Reply.Error("ERR", "DISCARD without MULTI"), client.read())
+
+                client.send("MULTI")
+                assertEquals(Reply.Simple("OK"), client.read())
+                client.send("MULTI")
+                assertEquals(Reply.Error("ERR", "MULTI calls can not be nested"), client.read())
+                client.send("EXEC")
+                assertEquals(Reply.Array(emptyList()), client.read(), "the refused MULTI left the first one alone")
+            }
         }
     }
 
