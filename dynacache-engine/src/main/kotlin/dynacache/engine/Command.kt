@@ -50,6 +50,36 @@ sealed class Command {
     data object Ping : Command()
 
     /**
+     * A CP command: linearizable work on a `cp:*` key, replicated through the Raft log and
+     * applied by a CP state machine (CP spec 2.1, 6.2). Never reaches a partition executor;
+     * the AP engine answers `-NOTCP` if one ever arrives there (C16).
+     */
+    sealed class Cp : Command() {
+        abstract val key: Key
+
+        /** `CP.LONG.SET K n`. */
+        data class LongSet(override val key: Key, val value: Long) : Cp()
+
+        /** `CP.LONG.GET K`: the value, or nil when the counter was never written. */
+        data class LongGet(override val key: Key) : Cp()
+
+        /** `CP.LONG.INCR K`: the new value; a missing counter counts as 0. */
+        data class LongIncr(override val key: Key) : Cp()
+
+        /** `CP.LONG.DECR K`: the new value; a missing counter counts as 0. */
+        data class LongDecr(override val key: Key) : Cp()
+
+        /** `CP.LONG.ADD K d`, the `INCRBY` form: the new value. */
+        data class LongIncrBy(override val key: Key, val delta: Long) : Cp()
+
+        /** `CP.LONG.ADD K -d`, the `DECRBY` form: the new value. */
+        data class LongDecrBy(override val key: Key, val delta: Long) : Cp()
+
+        /** `CP.LONG.CAS K expected new`: 1 when the swap happened, 0 when it did not. */
+        data class LongCas(override val key: Key, val expected: Long, val new: Long) : Cp()
+    }
+
+    /**
      * `COMMAND`: Redis's command table. Minimal here, an empty array; a client that asks in order
      * to discover arity gets no answer it can act on, which is the ceiling this ticket accepted.
      */
@@ -190,6 +220,18 @@ sealed class Command {
 
     /** `HVALS key`: the field values. */
     data class HVals(override val key: Key) : Keyed(Value.Kind.HASH)
+
+    /**
+     * `SCAN cursor [MATCH pattern] [COUNT n]`: a stateless walk of the keyspace, one partition
+     * per call. The cursor carries the partition in its high 32 bits and that partition's own
+     * cursor in the low 32; 0 starts the walk and 0 comes back when it is over (C15). The
+     * fourth command shape: no key names a partition, and every partition at once is too many.
+     */
+    class Scan(val cursor: Long, val pattern: ByteArray? = null, val count: Int = 10) : Command()
+
+    /** `HSCAN key cursor [MATCH pattern] [COUNT n]`: the same walk over one hash's fields. */
+    class HScan(override val key: Key, val cursor: Long, val pattern: ByteArray? = null, val count: Int = 10) :
+        Keyed(Value.Kind.HASH)
 
     /** `HLEN key`: how many fields, 0 when the key is absent. */
     data class HLen(override val key: Key) : Keyed(Value.Kind.HASH)

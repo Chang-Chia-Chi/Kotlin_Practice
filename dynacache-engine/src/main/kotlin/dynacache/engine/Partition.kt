@@ -1,5 +1,6 @@
 package dynacache.engine
 
+import dynacache.engine.ds.HashTable
 import dynacache.engine.ds.TimerWheel
 import java.time.Clock
 import java.time.Duration
@@ -27,7 +28,7 @@ internal class Partition(
         fun expired(now: Instant): Boolean = expiresAt != null && now.isAfter(expiresAt)
     }
 
-    private val store = HashMap<Key, Entry>()
+    private val store = HashTable<Key, Entry>()
     private val executor = Executors.newSingleThreadExecutor { r ->
         Thread(r, "partition-${id.index}").apply { isDaemon = true }
     }
@@ -63,6 +64,21 @@ internal class Partition(
 
     fun close() = executor.shutdown()
 
+    /**
+     * This partition's share of a `SCAN`: the keys its walk found from [command]'s cursor, and
+     * the cursor to continue from, 0 once the walk wrapped. The engine folds the partition into
+     * the cursor the client sees.
+     */
+    fun scan(command: Command.Scan): CompletableFuture<Pair<Long, List<Reply>>> =
+        CompletableFuture.supplyAsync({
+            val now = clock.instant()
+            val found = ArrayList<Reply>()
+            val next = walk(store, command.cursor, command.count, { _, entry -> !entry.expired(now) }) { key, _ ->
+                if (matches(command.pattern, key.bytes)) found += Reply.Bulk(key.bytes)
+            }
+            next to found
+        }, executor)
+
     /** The clock is read exactly once per command, so a command sees one instant throughout. */
     private fun execute(command: Command): Reply {
         val now = clock.instant()
@@ -74,6 +90,7 @@ internal class Partition(
         }
         return when (command) {
             is Command.Fanned -> error("a partition never sees a multi-key command; ApEngine fans it out")
+            is Command.Cp -> error("a partition never sees a CP command; the CP engine replicates it")
             is Command.Ping -> Reply.Simple("PONG")
             is Command.CommandTable -> Reply.Array(emptyList())
 
@@ -122,23 +139,33 @@ internal class Partition(
             is Command.HDel -> {
                 val fields = hash(command.key, now)
                 val removed = fields?.let { command.fields.count { f -> it.remove(fieldName(f)) != null } } ?: 0
-                if (fields != null && fields.isEmpty()) drop(command.key)
+                if (fields != null && fields.size == 0) drop(command.key)
                 Reply.Integer(removed.toLong())
             }
             is Command.HGetAll -> Reply.Array(
-                hash(command.key, now).orEmpty().flatMap { (field, value) ->
-                    listOf(Reply.Bulk(fieldBytes(field)), Reply.Bulk(value))
-                },
+                hash(command.key, now)?.entries().orEmpty().flatMap {
+                    listOf(Reply.Bulk(fieldBytes(it.key)), Reply.Bulk(it.value))
+                }.toList(),
             )
             is Command.HMGet -> {
                 val fields = hash(command.key, now)
                 Reply.Array(command.fields.map { Reply.Bulk(fields?.get(fieldName(it))) })
             }
             is Command.HExists ->
-                if (hash(command.key, now)?.containsKey(fieldName(command.field)) == true) ONE else ZERO
-            is Command.HKeys -> Reply.Array(hash(command.key, now).orEmpty().keys.map { Reply.Bulk(fieldBytes(it)) })
-            is Command.HVals -> Reply.Array(hash(command.key, now).orEmpty().values.map { Reply.Bulk(it) })
+                if (hash(command.key, now)?.get(fieldName(command.field)) != null) ONE else ZERO
+            is Command.HKeys -> Reply.Array(hash(command.key, now)?.entries().orEmpty().map { Reply.Bulk(fieldBytes(it.key)) }.toList())
+            is Command.HVals -> Reply.Array(hash(command.key, now)?.entries().orEmpty().map { Reply.Bulk(it.value) }.toList())
             is Command.HLen -> Reply.Integer((hash(command.key, now)?.size ?: 0).toLong())
+            is Command.HScan -> {
+                val fields = hash(command.key, now) ?: return scanReply(0, emptyList())
+                val found = ArrayList<Reply>()
+                val next = walk(fields, command.cursor, command.count, { field, _ -> matches(command.pattern, fieldBytes(field)) }) { field, value ->
+                    found += Reply.Bulk(fieldBytes(field))
+                    found += Reply.Bulk(value)
+                }
+                scanReply(next, found)
+            }
+            is Command.Scan -> error("SCAN runs through Partition.scan, which hands the engine the cursor")
 
             is Command.Push -> {
                 val items = items(command.key, now) ?: Value.List().also { write(command.key, now, Entry(it, null)) }.items
@@ -184,11 +211,11 @@ internal class Partition(
             }
             is Command.Keys -> {
                 purgeExpired(now)
-                Reply.Array(store.keys.filter { globMatches(command.pattern, it.bytes) }.map { Reply.Bulk(it.bytes) })
+                Reply.Array(store.entries().map { it.key }.filter { globMatches(command.pattern, it.bytes) }.map { Reply.Bulk(it.bytes) }.toList())
             }
             is Command.RandomKey -> {
                 purgeExpired(now)
-                Reply.Bulk(if (store.isEmpty()) null else store.keys.elementAt(random.nextInt(store.size)).bytes)
+                Reply.Bulk(store.randomKey(random)?.bytes)
             }
             is Command.FlushDb -> {
                 // Every key goes, so every deadline goes: the wheel is dropped whole.
@@ -240,7 +267,7 @@ internal class Partition(
      * fire against a value it was never meant for.
      */
     private fun write(key: Key, now: Instant, entry: Entry) {
-        store[key] = entry
+        store.put(key, entry)
         val deadline = entry.expiresAt
         // A write that carries no TTL clears the one the key had, wheel entry and all; a key
         // with no wheel entry has nothing to cancel, and so needs no wheel to be built.
@@ -258,7 +285,7 @@ internal class Partition(
      * access (spec 5.4's lazy check). A key is readable through its deadline and gone after it.
      */
     private fun live(key: Key, now: Instant): Entry? {
-        val entry = store[key] ?: return null
+        val entry = store.get(key) ?: return null
         if (entry.expired(now)) {
             drop(key)
             return null
@@ -267,7 +294,7 @@ internal class Partition(
     }
 
     /** The fields under [key], or null when the key is absent. */
-    private fun hash(key: Key, now: Instant): LinkedHashMap<String, ByteArray>? =
+    private fun hash(key: Key, now: Instant): HashTable<String, ByteArray>? =
         (live(key, now)?.value as Value.Hash?)?.fields
 
     /**
@@ -280,13 +307,30 @@ internal class Partition(
      * a store that can find its expired keys without a walk would let this go.
      */
     private fun purgeExpired(now: Instant) {
-        store.entries.removeIf { (key, entry) ->
-            if (!entry.expired(now)) false else {
-                wheel?.cancel(key)
-                true
-            }
-        }
+        // Collected before anything is removed: the table must not be mutated while its
+        // entries are being walked.
+        store.entries().filter { it.value.expired(now) }.map { it.key }.toList().forEach(::drop)
     }
+
+    /**
+     * Redis's `SCAN` loop: buckets are walked until at least [count] entries came out of them or
+     * the walk wrapped, then [keep] filters what came out. So a call may answer few keys, or
+     * none, with a cursor that is not 0; the client keeps calling until it is.
+     */
+    private fun <K, V> walk(table: HashTable<K, V>, cursor: Long, count: Int, keep: (K, V) -> Boolean, emit: (K, V) -> Unit): Long {
+        var next = cursor
+        var visited = 0
+        do {
+            next = table.scan(next) { key, value ->
+                visited++
+                if (keep(key, value)) emit(key, value)
+            }
+        } while (next != 0L && visited < count)
+        return next
+    }
+
+    /** `MATCH`: no pattern matches everything. */
+    private fun matches(pattern: ByteArray?, bytes: ByteArray): Boolean = pattern == null || globMatches(pattern, bytes)
 
     /** The elements under [key], or null when the key is absent. */
     private fun items(key: Key, now: Instant): ArrayDeque<ByteArray>? =
@@ -345,7 +389,11 @@ internal class Partition(
         return if (text.startsWith("+")) null else text.toLongOrNull()
     }
 
-    private companion object {
+    internal companion object {
+        /** The `SCAN` family's reply: the cursor as a bulk, then the array of what was found. */
+        fun scanReply(cursor: Long, found: List<Reply>): Reply =
+            Reply.Array(listOf(Reply.Bulk(cursor.toString().toByteArray()), Reply.Array(found)))
+
         val EMPTY = ByteArray(0)
         val OK = Reply.Simple("OK")
         val NO_SUCH_KEY = Reply.Error("ERR", "no such key")

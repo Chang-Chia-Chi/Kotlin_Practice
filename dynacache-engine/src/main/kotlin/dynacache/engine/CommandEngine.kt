@@ -74,8 +74,32 @@ class ApEngine(
         is Command.Fanned -> fanOut(command)
         is Command.EveryPartition -> everyPartition(command)
         is Command.Ping, is Command.CommandTable -> partitions[0].submit(command)
+        is Command.Scan -> scan(command)
+        // C16: a cp:* key never belongs here. The dispatcher (T44) routes it away; if one still
+        // arrives, the spec's answer is -NOTCP, not a partition write.
+        is Command.Cp -> CompletableFuture.completedFuture(
+            Reply.Error("NOTCP", "${command.key} is a CP key; the AP engine does not serve it")
+        )
     }
 
+    /**
+     * One partition per call: the cursor's high 32 bits pick it, the low 32 are its own cursor.
+     * A partition that hands back 0 is done, so the next call starts the next partition at 0,
+     * and the last partition's 0 is the walk's. A cursor past the last partition is done too.
+     */
+    private fun scan(command: Command.Scan): CompletableFuture<Reply> {
+        val index = (command.cursor ushr 32).toInt()
+        if (index !in partitions.indices) return CompletableFuture.completedFuture(Partition.scanReply(0, emptyList()))
+        val inner = Command.Scan(command.cursor and 0xFFFF_FFFFL, command.pattern, command.count)
+        return partitions[index].scan(inner).thenApply { (next, found) ->
+            val cursor = when {
+                next != 0L -> (index.toLong() shl 32) or next
+                index + 1 < partitions.size -> (index + 1L) shl 32
+                else -> 0L
+            }
+            Partition.scanReply(cursor, found)
+        }
+    }
     /**
      * A keyless command run on every partition, one after the previous one finished, and joined
      * in partition order. Sequential for the same reason fan-out is: a caller sees the same
