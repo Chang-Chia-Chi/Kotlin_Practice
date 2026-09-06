@@ -4,7 +4,12 @@ import dynacache.cluster.proto.Ack
 import dynacache.cluster.proto.Envelope
 import dynacache.cluster.proto.Forward
 import dynacache.cluster.proto.ForwardReply
+import dynacache.cluster.proto.KeySync
+import dynacache.cluster.proto.KeySyncReply
+import dynacache.cluster.proto.Leaf
 import dynacache.cluster.proto.Marker
+import dynacache.cluster.proto.MerkleRoot
+import dynacache.cluster.proto.MerkleRootReply
 import dynacache.cluster.proto.Ping
 import dynacache.cluster.proto.PingReq
 import dynacache.cluster.proto.Read
@@ -12,6 +17,7 @@ import dynacache.cluster.proto.ReadReply
 import dynacache.cluster.proto.Replicate
 import dynacache.cluster.proto.ReplicateAck
 import dynacache.cluster.proto.ReplyMsg
+import dynacache.cluster.proto.Version
 import com.google.protobuf.ByteString
 import io.grpc.StatusException
 import java.net.ServerSocket
@@ -101,10 +107,26 @@ class GrpcTransportTest {
                 ReadReply.newBuilder().setId(7).setReply(ReplyMsg.newBuilder().setSimple("OK")).setDvv(ByteString.copyFromUtf8("dvv"))
             )
             Envelope.BodyCase.MARKER -> envelope.setMarker(Marker.newBuilder().setSnapshotId("s7"))
+            Envelope.BodyCase.MERKLE_ROOT -> envelope.setMerkleRoot(
+                MerkleRoot.newBuilder().setId(7).setVnode(3).setRoot(ByteString.copyFromUtf8("root"))
+            )
+            Envelope.BodyCase.MERKLE_ROOT_REPLY -> envelope.setMerkleRootReply(
+                MerkleRootReply.newBuilder().setId(7).setRoot(ByteString.copyFromUtf8("root")).addLeaf(
+                    Leaf.newBuilder().setKey(ByteString.copyFromUtf8("k")).setValueHash(ByteString.copyFromUtf8("h")).setDvv(ByteString.copyFromUtf8("dvv"))
+                )
+            )
+            Envelope.BodyCase.KEY_SYNC -> envelope.setKeySync(
+                KeySync.newBuilder().setId(7).addKey(ByteString.copyFromUtf8("k")).addVersion(version())
+            )
+            Envelope.BodyCase.KEY_SYNC_REPLY -> envelope.setKeySyncReply(KeySyncReply.newBuilder().setId(7).addVersion(version()))
             Envelope.BodyCase.BODY_NOT_SET -> throw AssertionError("BODY_NOT_SET is not a message type")
         }
         return withBody.build()
     }
+
+    private fun version(): Version.Builder = Version.newBuilder()
+        .setKey(ByteString.copyFromUtf8("k")).setValue(ByteString.copyFromUtf8("v"))
+        .setDvv(ByteString.copyFromUtf8("dvv")).setExpiresAtMillis(9)
 
     private companion object {
         const val LOCALHOST = "localhost"

@@ -26,7 +26,56 @@ message Envelope {
     Read read = 17;
     ReadReply read_reply = 18;
     Marker marker = 19;
+    MerkleRoot merkle_root = 20;
+    MerkleRootReply merkle_root_reply = 21;
+    KeySync key_sync = 22;
+    KeySyncReply key_sync_reply = 23;
   }
+}
+
+// Anti-entropy's first exchange (spec 2.4, T28): the sender's Merkle root over one vnode range,
+// named by its index in the ring both sides share.
+message MerkleRoot {
+  int64 id = 1;
+  int32 vnode = 2;
+  bytes root = 3;
+}
+
+// The receiver's root over the same range and, only when the roots differ, every leaf of its
+// tree so the sender can diff and name the divergent keys.
+message MerkleRootReply {
+  int64 id = 1;
+  bytes root = 2;
+  repeated Leaf leaf = 3;
+}
+
+// One key's contribution to a Merkle tree: what MerkleLeaf holds, on the wire.
+message Leaf {
+  bytes key = 1;
+  bytes value_hash = 2;
+  bytes dvv = 3;
+}
+
+// One key's version as replicas exchange it: the engine's value encoding, the DVV, and the TTL
+// as an absolute instant (0: none), the same rule Replicate follows.
+message Version {
+  bytes key = 1;
+  bytes value = 2;
+  bytes dvv = 3;
+  int64 expires_at_millis = 4;
+}
+
+// The divergent keys of one range, and the sender's version of each one it holds. The receiver
+// applies spec 5.3 to each and answers with what it still holds of its own.
+message KeySync {
+  int64 id = 1;
+  repeated bytes key = 2;
+  repeated Version version = 3;
+}
+
+message KeySyncReply {
+  int64 id = 1;
+  repeated Version version = 2;
 }
 
 // The coordinator's write to one replica (spec 5.1 step 5): the command's tokens with NX/XX
