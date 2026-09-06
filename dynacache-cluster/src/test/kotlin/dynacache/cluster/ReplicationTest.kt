@@ -127,8 +127,8 @@ class ReplicationTest {
             clock = Clock.fixed(Instant.EPOCH, ZoneOffset.UTC),
             tokens = TokenCodec::tokens,
             parse = TokenCodec::command,
-            export = { CompletableFuture.completedFuture(null) },
-            install = { _, _, _ -> CompletableFuture.completedFuture(Unit) },
+            view = { CompletableFuture.completedFuture(null) },
+            install = { CompletableFuture.completedFuture(null) },
             scope = backgroundScope,
         )
         backgroundScope.launch { for (envelope in network.endpoint(coordinator).inbound) replication.receive(envelope) }

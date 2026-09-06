@@ -7,15 +7,19 @@ import dynacache.cluster.proto.ReadReply
 import dynacache.cluster.proto.Repair
 import dynacache.cluster.proto.Replicate
 import dynacache.cluster.proto.ReplicateAck
-import dynacache.cluster.proto.ReplicateValue
+import dynacache.cluster.proto.Version
 import dynacache.engine.Command
 import dynacache.engine.CommandEngine
 import dynacache.engine.Key
 import dynacache.engine.PartitionContext
 import dynacache.engine.Reply
+import dynacache.engine.Stored
+import dynacache.engine.persist.decodeValue
+import dynacache.engine.persist.encodeValue
 import java.time.Clock
 import java.time.Instant
 import java.util.concurrent.CompletableFuture
+import java.util.Random
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.time.Duration
@@ -49,12 +53,13 @@ data class ReplicationConfig(val n: Int, val w: Int, val r: Int) {
  * node on the ring instead, which keeps it as a hint in [hints] and hands it back when the
  * replica returns (spec 2.4 sloppy quorum, spec 5.1 step 7). A read that finds a replica behind
  * the winning version has the winner push its value there afterwards (spec 5.2 step 5): the
- * value crosses as bytes through [export] and [install], the engine's own value path, and a
- * version concurrent with the winner's is left alone.
+ * value crosses as the engine encodes it, through [view] and [install], and a version
+ * concurrent with the winner's is left alone.
  *
  * @param membership the gossip's view; a replica it holds dead is not asked.
- * @param export the engine's value under a key as bytes with its deadline, null when absent.
- * @param install puts such bytes under a key on the engine; null removes the key.
+ * @param view the engine's live copy of one key, null when absent (`ApEngine.view`).
+ * @param install puts such a copy on the engine (`ApEngine.install`, not WAL-logged); a repair
+ * that removes a key goes through a `DEL` on [engine] instead.
  * @param deadline how long a quorum may take to form. Shorter than the router's forward
  * deadline, so a contact reports the quorum error and not its own timeout.
  * @param replayBatch how many hints one handoff round sends before waiting for their acks.
@@ -70,8 +75,8 @@ class Replication(
     private val clock: Clock,
     private val tokens: (Command) -> List<ByteArray>,
     private val parse: (List<ByteArray>) -> Command,
-    private val export: (Key) -> CompletableFuture<Pair<ByteArray, Instant?>?>,
-    private val install: (Key, ByteArray?, Instant?) -> CompletableFuture<*>,
+    private val view: (Key) -> CompletableFuture<Stored?>,
+    private val install: (Stored) -> CompletableFuture<*>,
     private val scope: CoroutineScope,
     private val deadline: Duration = 1.seconds,
     private val replayBatch: Int = 64,
@@ -97,6 +102,9 @@ class Replication(
 
     /** The version this node holds for [key], null when it never stored one. */
     fun version(key: Key): Dvv? = versions[key]
+
+    /** Anti-entropy's install (T28): [dvv] is now the version held for [key]; the value itself goes through the engine. */
+    fun installVersion(key: Key, dvv: Dvv) { versions[key] = dvv }
 
     override fun submit(command: Command): CompletableFuture<Reply> = when {
         command !is Command.Keyed -> engine.submit(command)
@@ -175,27 +183,29 @@ class Replication(
      */
     private suspend fun push(key: Key, targets: Collection<NodeId>) {
         val before = versions[key] ?: return
-        val held = export(key).await()
+        val held = view(key).await()
         if (versions[key] != before) return
-        val body = ReplicateValue.newBuilder().setKey(ByteString.copyFrom(key.bytes)).setDvv(ByteString.copyFrom(before.encode()))
-            .setValue(held?.first?.let(ByteString::copyFrom) ?: ByteString.EMPTY)
-            .setExpiresAtMillis(held?.second?.toEpochMilli() ?: 0L)
+        val body = Version.newBuilder().setKey(ByteString.copyFrom(key.bytes)).setDvv(ByteString.copyFrom(before.encode()))
+            .setValue(held?.let { ByteString.copyFrom(encodeValue(it.value)) } ?: ByteString.EMPTY)
+            .setExpiresAtMillis(held?.expiresAt?.toEpochMilli() ?: 0L)
         for (target in targets) send(target, Envelope.newBuilder().setReplicateValue(body))
     }
 
     /**
      * The receiving end of a repair: taken only when its version dominates what is held (spec
-     * 5.3), so a sibling stays. Bytes the engine cannot decode put the version back as it was.
+     * 5.3), so a sibling stays. A tombstone, or a value already past its deadline, deletes the
+     * key; bytes that do not decode are ignored whole, version included.
      */
-    private suspend fun installValue(request: ReplicateValue) {
+    private suspend fun installValue(request: Version) {
         val key = Key(request.key.toByteArray())
         val remote = runCatching { Dvv.decode(request.dvv.toByteArray()) }.getOrNull() ?: return
+        val expiresAt = if (request.expiresAtMillis == 0L) null else Instant.ofEpochMilli(request.expiresAtMillis)
+        val gone = request.value.isEmpty || (expiresAt != null && clock.instant().isAfter(expiresAt))
+        val value = if (gone) null else (runCatching { decodeValue(request.value.toByteArray(), Random(remote.dot.counter)) }.getOrNull() ?: return)
         val held = versions[key]
         if (held != null && !remote.dominates(held)) return
         versions[key] = remote
-        val expiresAt = if (request.expiresAtMillis == 0L) null else Instant.ofEpochMilli(request.expiresAtMillis)
-        runCatching { install(key, if (request.value.isEmpty) null else request.value.toByteArray(), expiresAt).await() }
-            .onFailure { if (held == null) versions.remove(key, remote) else versions.replace(key, remote, held) }
+        if (value == null) engine.submit(Command.Del(key)).await() else install(Stored(key, value, expiresAt)).await()
     }
 
     private fun newer(candidate: Dvv?, best: Dvv?): Boolean = when {

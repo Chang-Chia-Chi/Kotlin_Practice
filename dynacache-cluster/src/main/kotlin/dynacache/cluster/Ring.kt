@@ -39,10 +39,18 @@ class Ring private constructor(
      * The [n] distinct nodes met walking clockwise from the key's position; the first is the
      * coordinator. Fails when [n] asks for more nodes than the ring has.
      */
-    fun preferenceList(key: Key, n: Int): List<NodeId> {
+    fun preferenceList(key: Key, n: Int): List<NodeId> = preferenceListFrom(successorOf(positionOf(key)), n)
+
+    /**
+     * The [n] distinct nodes met walking clockwise from [vnode] itself: every key in its range
+     * has this preference list, so these are the range's replicas (T28).
+     */
+    fun preferenceList(vnode: Vnode, n: Int): List<NodeId> = preferenceListFrom(successorOf(vnode.position), n)
+
+    private fun preferenceListFrom(start: Int, n: Int): List<NodeId> {
         require(n in 1..nodes.size) { "a preference list of $n needs 1..${nodes.size} nodes" }
         val chosen = ArrayList<NodeId>(n)
-        var at = successorOf(positionOf(key))
+        var at = start
         repeat(vnodes.size) {
             val owner = vnodes[at].owner
             if (owner !in chosen) {

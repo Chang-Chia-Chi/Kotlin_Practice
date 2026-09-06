@@ -6,7 +6,6 @@ import dynacache.engine.ds.HashTable
 import dynacache.engine.ds.SkipList
 import dynacache.engine.ds.TimerWheel
 import dynacache.engine.persist.RdbEntry
-import dynacache.engine.persist.ValueCodec
 import java.time.Clock
 import java.time.Duration
 import java.time.Instant
@@ -151,26 +150,32 @@ internal class Partition(
                 .toList()
         }, executor)
 
+    /**
+     * Frozen copies of the live keys [holds] selects, as one task on the executor: what a
+     * replica hashes and ships for one ring range (T28). A walk of the whole store, since keys
+     * are not indexed by ring position; a range is a small slice of it.
+     */
+    fun view(holds: (Key) -> Boolean): CompletableFuture<List<Stored>> =
+        CompletableFuture.supplyAsync({
+            val now = clock.instant()
+            store.entries().filter { holds(it.key) && !it.value.expired(now) }
+                .map { Stored(it.key, frozen(it.value.value), it.value.expiresAt) }
+                .toList()
+        }, executor)
+
+    /** Frozen copies of the live keys among [keys], as one task on the executor. */
+    fun view(keys: Collection<Key>): CompletableFuture<List<Stored>> =
+        CompletableFuture.supplyAsync({
+            val now = clock.instant()
+            keys.mapNotNull { key -> store.get(key)?.takeUnless { it.expired(now) }?.let { Stored(key, frozen(it.value), it.expiresAt) } }
+        }, executor)
+
     /** Writes restored [entries] in, through the same funnel a command uses, skipping the already expired. */
     fun restore(entries: List<RdbEntry>): CompletableFuture<Void> =
         CompletableFuture.runAsync({
             val now = clock.instant()
             for (entry in entries) if (!entry.expired(now)) write(entry.key, now, Entry(entry.value, entry.expiresAt))
         }, executor)
-
-    /** The live value under [key] as [ValueCodec] writes it, with its deadline; null when there is none. */
-    fun export(key: Key): CompletableFuture<Pair<ByteArray, Instant?>?> =
-        task { live(key, clock.instant())?.let { ValueCodec.encode(it.value) to it.expiresAt } }
-
-    /**
-     * Puts a value another node exported under [key], through the same funnel a command uses;
-     * null, or a deadline already past, removes the key instead. Not logged (see [ApEngine.install]).
-     */
-    fun install(key: Key, value: ByteArray?, expiresAt: Instant?): CompletableFuture<Unit> = task {
-        val now = clock.instant()
-        if (value == null || (expiresAt != null && now.isAfter(expiresAt))) drop(key)
-        else write(key, now, Entry(ValueCodec.decode(value, random), expiresAt))
-    }
 
     private fun frozen(value: Value): Value = when (value) {
         is Value.Str -> value
@@ -348,8 +353,24 @@ internal class Partition(
                     (parseScore(score) ?: return NOT_A_FLOAT) to member
                 }
                 if (scored.isEmpty()) return ZERO
-                val zset = zset(command.key, now) ?: newZSet(command.key, now)
-                Reply.Integer(scored.count { (score, member) -> zset.writeScore(score, member) }.toLong())
+                // XX writes only members that are already there, so on a missing key it writes
+                // nothing -- and must not leave an empty sorted set behind for having looked.
+                val zset = zset(command.key, now)
+                    ?: if (command.condition == Command.Set.Condition.XX) return ZERO
+                    else newZSet(command.key, now)
+                var added = 0
+                var moved = 0
+                for ((score, member) in scored) {
+                    val previous = zset.scores.get(fieldName(member))
+                    when (command.condition) {
+                        Command.Set.Condition.NX -> if (previous != null) continue
+                        Command.Set.Condition.XX -> if (previous == null) continue
+                        null -> {}
+                    }
+                    if (zset.writeScore(score, member)) added++ else if (previous != score) moved++
+                }
+                // CH counts what changed; without it Redis counts only what is new.
+                Reply.Integer((if (command.changed) added + moved else added).toLong())
             }
             is Command.ZScore ->
                 Reply.Bulk(scoreOf(command.key, now, command.member)?.let { scoreText(it).toByteArray() })

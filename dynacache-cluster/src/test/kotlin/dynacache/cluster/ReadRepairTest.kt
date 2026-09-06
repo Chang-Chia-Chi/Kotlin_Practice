@@ -6,6 +6,8 @@ import dynacache.engine.ApEngine
 import dynacache.engine.Command
 import dynacache.engine.Key
 import dynacache.engine.Reply
+import dynacache.engine.install
+import dynacache.engine.view
 import java.time.Clock
 import java.time.Instant
 import java.time.ZoneOffset
@@ -134,7 +136,7 @@ class ReadRepairTest {
             clock = Clock.fixed(Instant.EPOCH, ZoneOffset.UTC),
             tokens = TokenCodec::tokens,
             parse = TokenCodec::command,
-            export = engine::export,
+            view = { key -> engine.view(listOf(key)).thenApply { it.firstOrNull() } },
             install = engine::install,
             scope = backgroundScope,
         )

@@ -7,6 +7,9 @@ import dynacache.engine.ApEngine
 import dynacache.engine.Command
 import dynacache.engine.Key
 import dynacache.engine.Reply
+import dynacache.engine.view
+import dynacache.engine.install
+import java.nio.file.Path
 import java.time.Clock
 import java.time.Instant
 import java.time.ZoneOffset
@@ -19,8 +22,9 @@ import kotlinx.coroutines.yield
  * The test kit's cluster: [nodeCount] nodes named `node-1..N`, one shared immutable [Ring]
  * (a pure function of the node set, T17), one scripted [membership] every node reads, and per
  * node one [ApEngine], one endpoint on one [InMemoryTransport], one [Replication] wrapping the
- * engine and one [Router] wrapping that, whose inbound loop and hint handoff run on [scope].
- * [config] is the quorum: [n] replicas, [w] acks per write, [r] answers per read.
+ * engine, one [DistributedSnapshot] and one [Router] wrapping that, whose inbound loop and hint
+ * handoff run on [scope]. [config] is the quorum: [n] replicas, [w] acks per write, [r] answers
+ * per read. [snapshotDir] is the one directory every node's snapshot part lands in (T36).
  *
  * `writeVia` and `readVia` go through the contact node's router, so a key the contact does not
  * coordinate crosses the network (T19) and every write reaches its replicas (T22).
@@ -30,9 +34,10 @@ class InProcessCluster(
     n: Int,
     w: Int,
     r: Int,
-    scope: CoroutineScope,
+    private val scope: CoroutineScope,
     clock: Clock = Clock.fixed(Instant.EPOCH, ZoneOffset.UTC),
     partitionsPerNode: Int = 8,
+    snapshotDir: Path = Path.of("target", "snapshots"),
 ) {
     val nodes: List<NodeId> = List(nodeCount) { NodeId("node-${it + 1}") }
     val ring: Ring = Ring.of(nodes.toSet())
@@ -43,6 +48,7 @@ class InProcessCluster(
     private val engines = nodes.associateWith { ApEngine(partitionsPerNode, clock) }
     private val transports = nodes.associateWith { network.endpoint(it) }
     private val gossiped = nodes.associateWith { mutableListOf<Envelope>() }
+    private val counters = nodes.associateWith { DotCounter.of(it, emptyList()) }
     private val replications = nodes.associateWith { node ->
         Replication(
             self = node,
@@ -51,16 +57,35 @@ class InProcessCluster(
             engine = engines.getValue(node),
             transport = transports.getValue(node),
             membership = membership,
-            counter = DotCounter.of(node, emptyList()),
+            counter = counters.getValue(node),
             clock = clock,
             tokens = TokenCodec::tokens,
             parse = TokenCodec::command,
-            export = engines.getValue(node)::export,
+            view = { key -> engines.getValue(node).view(listOf(key)).thenApply { it.firstOrNull() } },
             install = engines.getValue(node)::install,
             scope = scope,
         )
     }
-    private val routers = nodes.associateWith { node ->
+    private val antiEntropies = nodes.associateWith { node ->
+        AntiEntropy(
+            self = node,
+            ring = ring,
+            n = n,
+            engine = engines.getValue(node),
+            replication = replications.getValue(node),
+            transport = transports.getValue(node),
+            membership = membership,
+            counter = counters.getValue(node),
+        )
+    }
+    private val snapshots: Map<NodeId, DistributedSnapshot> = nodes.associateWith { node ->
+        DistributedSnapshot(
+            node, nodes - node, engines.getValue(node), transports.getValue(node), snapshotDir, clock,
+            demux = { routers.getValue(node).receive(it) },
+            scope = scope,
+        )
+    }
+    private val routers: Map<NodeId, Router> = nodes.associateWith { node ->
         Router(
             self = node,
             ring = ring,
@@ -70,7 +95,10 @@ class InProcessCluster(
             tokens = TokenCodec::tokens,
             parse = TokenCodec::command,
             scope = scope,
-            others = { if (!replications.getValue(node).receive(it)) gossiped.getValue(node).add(it) },
+            others = {
+                if (!replications.getValue(node).receive(it) && !antiEntropies.getValue(node).receive(it)) gossiped.getValue(node).add(it)
+            },
+            snapshots = snapshots.getValue(node)::receive,
         )
     }
 
@@ -83,6 +111,22 @@ class InProcessCluster(
     fun transport(node: NodeId): Transport = transports.getValue(node)
     fun replication(node: NodeId): Replication = replications.getValue(node)
     fun router(node: NodeId): Router = routers.getValue(node)
+    fun antiEntropy(node: NodeId): AntiEntropy = antiEntropies.getValue(node)
+
+    /** One anti-entropy step on [node], the network driven until the step has its answers. */
+    suspend fun antiEntropyStep(node: NodeId) {
+        val step = scope.launch { antiEntropy(node).tick() }
+        repeat(SETTLE_ROUNDS) {
+            if (step.isCompleted) return
+            drainMessages()
+            yield()
+        }
+        step.join()
+    }
+
+    /** One full anti-entropy cycle on [node]: every range it replicates, once. */
+    suspend fun antiEntropyCycle(node: NodeId) = repeat(antiEntropy(node).ranges.size) { antiEntropyStep(node) }
+    fun snapshot(node: NodeId): DistributedSnapshot = snapshots.getValue(node)
 
     /** What the demux on [node] handed to gossip: the envelopes SWIM would have answered. */
     fun gossipOn(node: NodeId): List<Envelope> = gossiped.getValue(node)
