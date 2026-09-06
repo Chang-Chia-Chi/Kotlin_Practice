@@ -103,7 +103,7 @@ class SnapshotEngine(
         for (log in logs()) {
             val scan = WalReader(log).readAll()
             for (entry in scan.entries) if (entry.seq > applied) {
-                WalCodec.decode(entry.op, entry.payload).forEach { engine.submit(it).join() }
+                CommandCodec.decode(entry.op, entry.payload).forEach { engine.submit(it).join() }
                 applied = entry.seq
             }
             FileChannel.open(log, WRITE).use { it.truncate(scan.stoppedAt) }

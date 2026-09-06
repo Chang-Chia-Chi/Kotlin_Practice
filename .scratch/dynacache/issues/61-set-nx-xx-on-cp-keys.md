@@ -15,16 +15,16 @@ free; the compat path is what is fixed.
 
 **Nature:** routing and conditional-set semantics, C16, I21 (Opus)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache 0d374ddc, merged into misc/ai_gen)
 
-- [ ] `compat_set_nx_on_ref_key_acquires_once`: N clients race `SET cp:ref:lock v NX`;
+- [x] `compat_set_nx_on_ref_key_acquires_once`: N clients race `SET cp:ref:lock v NX`;
       exactly one gets `+OK`, the rest nil, and the reference holds the winner's bytes
-- [ ] `compat_set_nx_px_expires_on_log_time`: the lease runs on log time and the key is
+- [x] `compat_set_nx_px_expires_on_log_time`: the lease runs on log time and the key is
       absent after a tick past it, so a second `SET NX` then succeeds
-- [ ] `compat_set_xx_on_missing_key_is_nil` and `compat_set_xx_on_present_key_replaces`
-- [ ] The same four behaviours on a `cp:counter:` key with a numeric value
-- [ ] `I22_namespaces_never_cross` and every existing dispatcher and compat test pass
-- [ ] Progress entry appended
+- [x] `compat_set_xx_on_missing_key_is_nil` and `compat_set_xx_on_present_key_replaces`
+- [x] The same four behaviours on a `cp:counter:` key with a numeric value
+- [x] `I22_namespaces_never_cross` and every existing dispatcher and compat test pass
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket; 200 to 600 lines including tests;
 JUnit 5 + Mockito only, no AssertJ or MockK; no sleeps, time is an injected Clock; spec-named

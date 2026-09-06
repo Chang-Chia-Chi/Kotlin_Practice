@@ -11,6 +11,8 @@ import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import java.time.Duration
 import java.time.Instant
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
 /**
@@ -178,6 +180,167 @@ class CpRoutingTest {
             assertEquals(Reply.Bulk(null), client.read())
             client.send("TTL", "cp:ref:y")
             assertEquals(Reply.Integer(-2), client.read())
+        }
+    }
+
+    /**
+     * T61, CP spec 1 and 9.5: the Redis lock idiom on the CP namespace. The log serializes the
+     * entries, so of N clients racing `SET cp:ref:lock v NX` exactly one is told `+OK` and the
+     * rest nil, and the reference holds the winner's bytes and nobody else's (I21).
+     */
+    @Test
+    fun compat_set_nx_on_ref_key_acquires_once() {
+        val answers = race(9) { client, n ->
+            client.send("SET", "cp:ref:lock", "owner-$n", "NX")
+            client.read()
+        }
+        val winners = answers.filterValues { it == Reply.Simple("OK") }.keys
+        assertEquals(1, winners.size, "one +OK among $answers")
+        assertTrue(
+            answers.filterKeys { it !in winners }.values.all { it == Reply.Bulk(null) },
+            "the losers are nil, got $answers",
+        )
+        RespClient(server.boundPort).use { client ->
+            client.send("GET", "cp:ref:lock")
+            assertEquals(bulk("owner-${winners.single()}"), client.read(), "the winner's bytes")
+        }
+    }
+
+    /** The lease of a `SET NX PX` runs on log time, and the lock is free again a tick past it. */
+    @Test
+    fun compat_set_nx_px_expires_on_log_time() {
+        val leader = kit.leader()
+        val clock = kit.clock(leader.config.nodeId)
+        RespClient(server.boundPort).use { client ->
+            client.send("SET", "cp:ref:lease", "first", "NX", "PX", "30000")
+            assertEquals(Reply.Simple("OK"), client.read())
+            client.send("SET", "cp:ref:lease", "second", "NX", "PX", "30000")
+            assertEquals(Reply.Bulk(null), client.read(), "the lease is still held")
+            client.send("PTTL", "cp:ref:lease")
+            assertTrue((client.read() as Reply.Integer).value in 29_900..30_000, "the lease was applied")
+
+            // Log time only moves when the leader's clock does; the tick past the deadline is what
+            // removes the reference, and the lock is then there to be taken again.
+            clock.advance(Duration.ofSeconds(31))
+            leader.tick().get(5, TimeUnit.SECONDS)
+            client.send("GET", "cp:ref:lease")
+            assertEquals(Reply.Bulk(null), client.read(), "the lease ran out")
+            client.send("SET", "cp:ref:lease", "second", "NX", "PX", "30000")
+            assertEquals(Reply.Simple("OK"), client.read())
+            client.send("GET", "cp:ref:lease")
+            assertEquals(bulk("second"), client.read())
+        }
+    }
+
+    /** `XX` refuses what is not there, and Redis's nil is what the client sees. */
+    @Test
+    fun compat_set_xx_on_missing_key_is_nil() {
+        RespClient(server.boundPort).use { client ->
+            client.send("SET", "cp:ref:absent", "v", "XX")
+            assertEquals(Reply.Bulk(null), client.read())
+            client.send("GET", "cp:ref:absent")
+            assertEquals(Reply.Bulk(null), client.read(), "the refusal wrote nothing")
+        }
+    }
+
+    /** `XX` over a live reference replaces its bytes, and its lease with them, as Redis does. */
+    @Test
+    fun compat_set_xx_on_present_key_replaces() {
+        RespClient(server.boundPort).use { client ->
+            client.send("SET", "cp:ref:held", "first", "PX", "30000")
+            assertEquals(Reply.Simple("OK"), client.read())
+            client.send("SET", "cp:ref:held", "second", "XX")
+            assertEquals(Reply.Simple("OK"), client.read())
+            client.send("GET", "cp:ref:held")
+            assertEquals(bulk("second"), client.read())
+            client.send("TTL", "cp:ref:held")
+            assertEquals(Reply.Integer(-1), client.read(), "a plain SET clears the lease it replaces")
+        }
+    }
+
+    /** The counter answers the same four behaviours: NX takes once, over a numeric value. */
+    @Test
+    fun compat_set_nx_on_counter_key_acquires_once() {
+        val answers = race(9) { client, n ->
+            client.send("SET", "cp:counter:lock", n.toString(), "NX")
+            client.read()
+        }
+        val winners = answers.filterValues { it == Reply.Simple("OK") }.keys
+        assertEquals(1, winners.size, "one +OK among $answers")
+        assertTrue(
+            answers.filterKeys { it !in winners }.values.all { it == Reply.Bulk(null) },
+            "the losers are nil, got $answers",
+        )
+        RespClient(server.boundPort).use { client ->
+            client.send("GET", "cp:counter:lock")
+            assertEquals(Reply.Integer(winners.single().toLong()), client.read(), "the winner's value")
+        }
+    }
+
+    /** The counter's lease runs on log time too, so its NX lock frees itself the same way. */
+    @Test
+    fun compat_set_nx_px_on_counter_expires_on_log_time() {
+        val leader = kit.leader()
+        val clock = kit.clock(leader.config.nodeId)
+        RespClient(server.boundPort).use { client ->
+            client.send("SET", "cp:counter:lease", "1", "NX", "PX", "30000")
+            assertEquals(Reply.Simple("OK"), client.read())
+            client.send("SET", "cp:counter:lease", "2", "NX", "PX", "30000")
+            assertEquals(Reply.Bulk(null), client.read(), "the lease is still held")
+
+            clock.advance(Duration.ofSeconds(31))
+            leader.tick().get(5, TimeUnit.SECONDS)
+            client.send("GET", "cp:counter:lease")
+            assertEquals(Reply.Bulk(null), client.read(), "the lease ran out")
+            client.send("SET", "cp:counter:lease", "2", "NX")
+            assertEquals(Reply.Simple("OK"), client.read())
+            client.send("GET", "cp:counter:lease")
+            assertEquals(Reply.Integer(2), client.read())
+        }
+    }
+
+    /** And `XX` on a counter: nil for one that is not there, a replacement for one that is. */
+    @Test
+    fun compat_set_xx_on_counter_key_is_nil_then_replaces() {
+        RespClient(server.boundPort).use { client ->
+            client.send("SET", "cp:counter:c", "7", "XX")
+            assertEquals(Reply.Bulk(null), client.read())
+            client.send("GET", "cp:counter:c")
+            assertEquals(Reply.Bulk(null), client.read(), "the refusal wrote nothing")
+
+            client.send("SET", "cp:counter:c", "7")
+            assertEquals(Reply.Simple("OK"), client.read())
+            client.send("SET", "cp:counter:c", "8", "XX")
+            assertEquals(Reply.Simple("OK"), client.read())
+            client.send("GET", "cp:counter:c")
+            assertEquals(Reply.Integer(8), client.read())
+
+            // A counter's value is a number whatever the condition says, so this is -ERR and not nil.
+            client.send("SET", "cp:counter:c", "banana", "NX")
+            assertEquals("ERR", (client.read() as Reply.Error).kind)
+        }
+    }
+
+    /**
+     * [clients] connections send at once and their replies come back by client number. The threads
+     * are released together by a latch rather than by a sleep, so the race is a real one.
+     */
+    private fun race(clients: Int, exchange: (RespClient, Int) -> Reply): Map<Int, Reply> {
+        val pool = Executors.newFixedThreadPool(clients)
+        val start = CountDownLatch(1)
+        return try {
+            val replies = (1..clients).associateWith { n ->
+                pool.submit<Reply> {
+                    RespClient(server.boundPort).use { client ->
+                        start.await()
+                        exchange(client, n)
+                    }
+                }
+            }
+            start.countDown()
+            replies.mapValues { (_, reply) -> reply.get(20, TimeUnit.SECONDS) }
+        } finally {
+            pool.shutdownNow()
         }
     }
 }

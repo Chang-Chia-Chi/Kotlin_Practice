@@ -97,8 +97,17 @@ sealed class Command {
             val session: Long
         }
 
-        /** `CP.LONG.SET K n`, or `SET cp:counter:K n [EX|PX]`: a [ttl] runs on log time (CP spec 9.4). */
-        data class LongSet(override val key: Key, val value: Long, val ttl: Duration? = null) : AtomicLong()
+        /**
+         * `CP.LONG.SET K n [NX|XX]`, or `SET cp:counter:K n [EX|PX] [NX|XX]`: a [ttl] runs on log
+         * time (CP spec 9.4). A [condition] makes the write conditional on the counter's presence,
+         * and the state machine applies it with the value and the TTL in the one entry (I21).
+         */
+        data class LongSet(
+            override val key: Key,
+            val value: Long,
+            val ttl: Duration? = null,
+            val condition: Set.Condition? = null,
+        ) : AtomicLong()
 
         /** `CP.LONG.GET K`: the value, or nil when the counter was never written. */
         data class LongGet(override val key: Key) : AtomicLong()
@@ -114,6 +123,9 @@ sealed class Command {
 
         /** `CP.LONG.ADD K -d`, the `DECRBY` form: the new value. */
         data class LongDecrBy(override val key: Key, val delta: Long) : AtomicLong()
+
+        /** `CP.LONG.GETADD K d`: the value the counter held before [delta] was added (CP spec 3.2). */
+        data class LongGetAdd(override val key: Key, val delta: Long) : AtomicLong()
 
         /** `CP.LONG.CAS K expected new`: 1 when the swap happened, 0 when it did not. */
         data class LongCas(override val key: Key, val expected: Long, val new: Long) : AtomicLong()
@@ -179,16 +191,26 @@ sealed class Command {
         data class LatchReset(override val key: Key, val count: Int) : CountDownLatch()
 
         /**
-         * `CP.REF.SET K v`, or `SET cp:ref:K v [EX|PX]`: a [ttl] runs on log time (CP spec 9.4).
-         * A reference is bytes, so these two compare by byte content, as [Key] does.
+         * `CP.REF.SET K v [NX|XX]`, or `SET cp:ref:K v [EX|PX] [NX|XX]`: a [ttl] runs on log time
+         * (CP spec 9.4) and a [condition] makes the write conditional on the reference's presence,
+         * which is the Redis lock idiom on `cp:ref:*`. A reference is bytes, so these two compare
+         * by byte content, as [Key] does.
          */
-        class RefSet(override val key: Key, val value: ByteArray, val ttl: Duration? = null) : AtomicReference() {
+        class RefSet(
+            override val key: Key,
+            val value: ByteArray,
+            val ttl: Duration? = null,
+            val condition: Set.Condition? = null,
+        ) : AtomicReference() {
             override fun equals(other: Any?): Boolean = this === other ||
-                (other is RefSet && key == other.key && value.contentEquals(other.value) && ttl == other.ttl)
+                (other is RefSet && key == other.key && value.contentEquals(other.value) &&
+                    ttl == other.ttl && condition == other.condition)
 
-            override fun hashCode(): Int = 31 * (31 * key.hashCode() + value.contentHashCode()) + ttl.hashCode()
+            override fun hashCode(): Int =
+                31 * (31 * (31 * key.hashCode() + value.contentHashCode()) + ttl.hashCode()) + condition.hashCode()
 
-            override fun toString(): String = "RefSet($key, ${value.toString(Charsets.ISO_8859_1)}, $ttl)"
+            override fun toString(): String =
+                "RefSet($key, ${value.toString(Charsets.ISO_8859_1)}, $ttl, $condition)"
         }
 
         /** `CP.REF.GET K`: the bytes, or nil when the reference was never set or has expired. */
@@ -330,7 +352,22 @@ sealed class Command {
         val ttl: Duration? = null,
     ) : Keyed(null) {
         /** `NX`: only when the key is absent. `XX`: only when it exists. */
-        enum class Condition { NX, XX }
+        enum class Condition {
+            NX,
+            XX,
+            ;
+
+            /**
+             * True when a key whose presence is [exists] refuses this write: `NX` writes only what
+             * is absent and `XX` only what is present. Redis answers a refused conditional SET with
+             * nil. The CP state machines read the rule from here; the AP partition still spells the
+             * same three lines out in its own `SET` branch.
+             */
+            fun refuses(exists: Boolean): Boolean = when (this) {
+                NX -> exists
+                XX -> !exists
+            }
+        }
     }
 
     /** One key's `DEL`; the variadic form is [DelKeys], which fans out to these. */

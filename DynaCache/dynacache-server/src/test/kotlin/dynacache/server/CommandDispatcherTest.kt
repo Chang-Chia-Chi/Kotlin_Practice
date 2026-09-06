@@ -175,16 +175,44 @@ class CommandDispatcherTest {
 
     @Test
     fun `a cp key outside the compat set is NOTCP`() {
-        // DEL, EXISTS and TYPE are Redis commands no CP primitive answers yet, and a conditional
-        // SET has no CP counterpart; each is a rejection rather than a silent trip to AP.
+        // DEL, EXISTS and TYPE are Redis commands no CP primitive answers yet; each is a
+        // rejection rather than a silent trip to AP.
         assertEquals("NOTCP", errorKind(Command.Del(Key("cp:counter:x"))))
         assertEquals("NOTCP", errorKind(Command.Exists(Key("cp:counter:x"))))
         assertEquals("NOTCP", errorKind(Command.Type(Key("cp:counter:x"))))
         assertEquals("NOTCP", errorKind(Command.StrLen(Key("cp:counter:x"))))
-        assertEquals("NOTCP", errorKind(Command.Set(Key("cp:counter:x"), bytes("1"), Command.Set.Condition.NX)))
-        // A counter's value is a number; anything else is the error Redis gives for one.
+        // A counter's value is a number; anything else is the error Redis gives for one, and NX
+        // does not excuse it: the value is read before the condition is.
         assertEquals("ERR", errorKind(Command.Set(Key("cp:counter:x"), bytes("banana"))))
+        assertEquals(
+            "ERR",
+            errorKind(Command.Set(Key("cp:counter:x"), bytes("banana"), Command.Set.Condition.NX)),
+        )
         assertTrue(cp.seen.isEmpty(), "the CP engine saw ${cp.seen}")
+    }
+
+    /**
+     * CP spec 1 and 9.5: `SET ... NX|XX` on a `cp:` key is the compat set's, and it re-targets to
+     * the conditional form of the SET verb the key's kind names (T61). The condition and the TTL
+     * ride on that one command, so the state machine applies both in one committed entry (I21).
+     */
+    @Test
+    fun compat_conditional_set_retargets_to_the_kinds_set_verb() {
+        val counter = Key("cp:counter:x")
+        val reference = Key("cp:ref:r")
+        val expected = listOf<Pair<Command, Command>>(
+            Command.Set(counter, bytes("5"), Command.Set.Condition.NX) to
+                Command.Cp.LongSet(counter, 5, condition = Command.Set.Condition.NX),
+            Command.Set(counter, bytes("5"), Command.Set.Condition.XX, ttl = Duration.ofSeconds(30)) to
+                Command.Cp.LongSet(counter, 5, Duration.ofSeconds(30), Command.Set.Condition.XX),
+            Command.Set(reference, bytes("v"), Command.Set.Condition.NX, ttl = Duration.ofMillis(30_000)) to
+                Command.Cp.RefSet(reference, bytes("v"), Duration.ofMillis(30_000), Command.Set.Condition.NX),
+            Command.Set(reference, bytes("v"), Command.Set.Condition.XX) to
+                Command.Cp.RefSet(reference, bytes("v"), condition = Command.Set.Condition.XX),
+        )
+        expected.forEach { (sent, _) -> dispatcher.submit(sent).get() }
+        assertEquals(expected.map { it.second }, cp.seen)
+        assertTrue(ap.seen.isEmpty(), "the AP engine saw ${ap.seen}")
     }
 
     @Test

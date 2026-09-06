@@ -65,6 +65,39 @@ class CpEngineTest {
         assertEquals(Reply.Integer(5), submit(Command.Cp.LongGet(counter)))
     }
 
+    /**
+     * CP spec 3.2 and 6.2: GETADD answers the old value and adds, in one committed entry (I21), so a
+     * missing counter answers 0 and is left holding the delta.
+     */
+    @Test
+    fun long_getadd_returns_old_value_and_adds() {
+        assertEquals(Reply.Integer(0), submit(Command.Cp.LongGetAdd(counter, 5)), "a missing counter reads as 0")
+        assertEquals(Reply.Integer(5), submit(Command.Cp.LongGet(counter)))
+        assertEquals(Reply.Integer(5), submit(Command.Cp.LongGetAdd(counter, -2)), "the old value, not the new one")
+        assertEquals(Reply.Integer(3), submit(Command.Cp.LongGet(counter)))
+    }
+
+    /** N GETADDs of 1 at once: the old values they answer are 0..N-1 once each and the counter ends at N. */
+    @Test
+    fun long_getadd_concurrent_linearizable() {
+        val engine = kit.leaderEngine()
+        val clients = Executors.newFixedThreadPool(CLIENT_THREADS)
+        try {
+            val added = (1..CONCURRENT_INCREMENTS).map {
+                CompletableFuture.supplyAsync(
+                    { engine.submit(Command.Cp.LongGetAdd(counter, 1)).get(REPLY_TIMEOUT_SECS, SECONDS) },
+                    clients,
+                )
+            }
+            val olds = added.map { (it.get(REPLY_TIMEOUT_SECS, SECONDS) as Reply.Integer).value }
+
+            assertEquals((0L until CONCURRENT_INCREMENTS).toSet(), olds.toSet(), "each GETADD saw a distinct old value")
+            assertEquals(Reply.Integer(CONCURRENT_INCREMENTS), submit(Command.Cp.LongGet(counter)))
+        } finally {
+            clients.shutdownNow()
+        }
+    }
+
     /** N increments in flight at once land in the log one after another, so the sum is exactly N. */
     @Test
     fun long_concurrent_incr_linearizable() {
@@ -140,6 +173,7 @@ class CpEngineTest {
         val reply = submit(Command.Cp.LongIncr(Key("plain-key")))
 
         assertEquals("NOTCP", (reply as Reply.Error).kind)
+        assertEquals("NOTCP", (submit(Command.Cp.LongGetAdd(Key("plain-key"), 1)) as Reply.Error).kind)
     }
 
     /**

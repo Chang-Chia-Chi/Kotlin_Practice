@@ -1,9 +1,10 @@
 package dynacache.engine
 
+import dynacache.engine.persist.CommandCodec
 import dynacache.engine.persist.RdbEntry
 import dynacache.engine.persist.RdbSnapshot
-import dynacache.engine.persist.WalCodec
 import dynacache.engine.persist.WalWriter
+import dynacache.engine.persist.whatChanged
 import java.time.Clock
 import java.time.Instant
 import java.util.Random
@@ -129,7 +130,8 @@ class ApEngine(
     /** The partition hook: one entry per command that changed a store, answering when it is durable. */
     private fun log(command: Command, reply: Reply, now: Instant): CompletableFuture<*>? {
         val wal = wal ?: return null
-        val (op, payload) = WalCodec.encode(command, reply, now) ?: return null
+        val changed = whatChanged(command, reply) ?: return null
+        val (op, payload) = CommandCodec.encode(changed, now)
         return wal.append(op, payload).durable
     }
 
