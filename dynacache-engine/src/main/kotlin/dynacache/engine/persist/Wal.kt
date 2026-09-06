@@ -5,6 +5,11 @@ import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption
+import java.time.Clock
+import java.time.Instant
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.zip.CRC32
 
 /*
@@ -60,13 +65,28 @@ enum class WalStop {
  */
 class WalScan(val entries: List<WalEntry>, val stop: WalStop, val stoppedAt: Long)
 
-/**
- * Appends entries to one log file, handing each a sequence number one higher than the last.
- *
- * This is the `NEVER` fsync policy and only that: writes reach the file, the operating system
- * decides when they reach the disk. The other policies and group commit are ticket 34.
- */
-class WalWriter(path: Path, firstSeq: Long) : AutoCloseable {
+/** When an appended entry is forced to disk (spec 2.8). */
+enum class FsyncPolicy {
+    /** Every append is fsynced before its future completes. */
+    ALWAYS,
+
+    /** Fsynced by the first [WalWriter.tick] at least one second after the last fsync. */
+    EVERY_SECOND,
+
+    /** Never fsynced by the writer; the operating system decides. The future completes on write. */
+    NEVER,
+}
+
+/** Where the log's bytes go: written, then forced to disk. The filesystem is a true boundary. */
+interface WalSink : AutoCloseable {
+    /** Writes every remaining byte of [bytes]. */
+    fun write(bytes: ByteBuffer)
+
+    fun fsync()
+}
+
+/** The real sink: one file opened for append. */
+class FileChannelSink(path: Path) : WalSink {
 
     private val channel: FileChannel = FileChannel.open(
         path,
@@ -75,24 +95,144 @@ class WalWriter(path: Path, firstSeq: Long) : AutoCloseable {
         StandardOpenOption.APPEND,
     )
 
+    override fun write(bytes: ByteBuffer) {
+        while (bytes.hasRemaining()) channel.write(bytes)
+    }
+
+    override fun fsync() = channel.force(true)
+
+    override fun close() = channel.close()
+}
+
+/**
+ * One append: the [seq] it was given at once, and [durable], which completes when the policy
+ * says the entry is on disk.
+ */
+class WalAppend(val seq: Long, val durable: CompletableFuture<Unit>)
+
+/**
+ * Appends entries to one log, handing each a sequence number one higher than the last, and
+ * makes them durable per [policy].
+ *
+ * Group commit: an append encodes its entry and enqueues it, then the first appender to find no
+ * flusher running becomes the flusher. It drains everything enqueued so far into one write and,
+ * under `ALWAYS`, one fsync, completes those appends, and repeats while the queue refills. No
+ * thread is owned here, and the engine's rule of no timers holds: `EVERY_SECOND` is forced by
+ * the caller's [tick].
+ */
+class WalWriter(
+    private val sink: WalSink,
+    firstSeq: Long,
+    private val policy: FsyncPolicy,
+    private val clock: Clock,
+) : AutoCloseable {
+
+    constructor(
+        path: Path,
+        firstSeq: Long,
+        policy: FsyncPolicy = FsyncPolicy.NEVER,
+        clock: Clock = Clock.systemUTC(),
+    ) : this(FileChannelSink(path), firstSeq, policy, clock)
+
+    private class Pending(val record: ByteBuffer, val durable: CompletableFuture<Unit>)
+
     private var nextSeq: Long = firstSeq
 
-    /** Appends one entry and returns the sequence number it was given. */
-    @Synchronized
-    fun append(op: Byte, payload: ByteArray): Long {
-        val seq = nextSeq++
+    /** Enqueued under the writer's monitor in seq order, so a FIFO drain is file order. */
+    private val pending = ConcurrentLinkedQueue<Pending>()
+    private val flushing = AtomicBoolean(false)
+
+    /** Written but not yet forced; only `EVERY_SECOND` fills it. Guarded by itself. */
+    private val awaitingFsync = ArrayList<CompletableFuture<Unit>>()
+
+    @Volatile
+    private var lastFsync: Instant = clock.instant()
+
+    /** Enqueues one entry, returns its seq at once, and flushes if nobody else is. */
+    fun append(op: Byte, payload: ByteArray): WalAppend {
+        val durable = CompletableFuture<Unit>()
+        val seq = synchronized(this) {
+            val seq = nextSeq++
+            pending.add(Pending(encode(seq, op, payload), durable))
+            seq
+        }
+        flushIfIdle()
+        return WalAppend(seq, durable)
+    }
+
+    /**
+     * The caller's clock tick: under `EVERY_SECOND`, forces everything written since the last
+     * fsync once a second has passed, and completes those appends. A no-op otherwise.
+     */
+    fun tick() {
+        if (clock.instant() < lastFsync.plusSeconds(1)) return
+        val batch = takeAwaiting()
+        if (batch.isNotEmpty()) fsyncAndComplete(batch)
+    }
+
+    private fun flushIfIdle() {
+        // Re-check after releasing the flag: an entry enqueued between the drain and the release
+        // would otherwise sit with nobody flushing it.
+        while (pending.peek() != null) {
+            if (!flushing.compareAndSet(false, true)) return
+            try {
+                writeBatch()
+            } finally {
+                flushing.set(false)
+            }
+        }
+    }
+
+    private fun writeBatch() {
+        val batch = generateSequence { pending.poll() }.toList()
+        if (batch.isEmpty()) return
+        val bytes = ByteBuffer.allocate(batch.sumOf { it.record.remaining() })
+        batch.forEach { bytes.put(it.record) }
+        val waiters = batch.map { it.durable }
+        try {
+            sink.write(bytes.flip())
+        } catch (e: IOException) {
+            waiters.forEach { it.completeExceptionally(e) }
+            return
+        }
+        when (policy) {
+            FsyncPolicy.ALWAYS -> fsyncAndComplete(waiters)
+            FsyncPolicy.NEVER -> waiters.forEach { it.complete(Unit) }
+            FsyncPolicy.EVERY_SECOND -> synchronized(awaitingFsync) { awaitingFsync.addAll(waiters) }
+        }
+    }
+
+    private fun takeAwaiting(): List<CompletableFuture<Unit>> = synchronized(awaitingFsync) {
+        ArrayList(awaitingFsync).also { awaitingFsync.clear() }
+    }
+
+    private fun fsyncAndComplete(batch: List<CompletableFuture<Unit>>) {
+        try {
+            sink.fsync()
+            lastFsync = clock.instant()
+            batch.forEach { it.complete(Unit) }
+        } catch (e: IOException) {
+            batch.forEach { it.completeExceptionally(e) }
+        }
+    }
+
+    private fun encode(seq: Long, op: Byte, payload: ByteArray): ByteBuffer {
         val record = ByteBuffer.allocate(HEADER_BYTES + payload.size)
         record.position(CRC_BYTES)
         record.putInt(payload.size).putLong(seq).put(op).put(payload)
         val crc = CRC32()
         crc.update(record.array(), CRC_BYTES, record.position() - CRC_BYTES)
         record.putInt(0, crc.value.toInt())
-        record.flip()
-        while (record.hasRemaining()) channel.write(record)
-        return seq
+        return record.flip()
     }
 
-    override fun close() = channel.close()
+    /** Writes what is still queued, forces what is still waiting, then closes the sink. */
+    override fun close() {
+        flushIfIdle()
+        val left = takeAwaiting()
+        if (left.isNotEmpty()) fsyncAndComplete(left)
+        sink.close()
+    }
 }
 
 /** Reads one log file back, entry by entry, in the order they were appended. */
