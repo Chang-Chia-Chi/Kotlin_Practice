@@ -9,11 +9,11 @@ lands, then merged); interval configurable; one coroutine per node.
 
 **Nature:** background convergence protocol (Fable)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache f893954 + merge 04a1d15, merged into misc/ai_gen)
 
-- [ ] `anti_entropy_heals_divergence`: one replica silently corrupted, one cycle, every replica equal
-- [ ] `anti_entropy_step_is_bounded` (one range per step), `anti_entropy_noop_when_equal`
-- [ ] Progress entry appended
+- [x] `anti_entropy_heals_divergence`: one replica silently corrupted, one cycle, every replica equal
+- [x] `anti_entropy_step_is_bounded` (one range per step), `anti_entropy_noop_when_equal`
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket, stubs throwing NotImplementedError
 for later seams; 200 to 600 lines including tests; JUnit 5 + Mockito only, no AssertJ or MockK;

@@ -3771,3 +3771,99 @@ id already open throws; a second snapshot with a fresh id while one is open is f
 channel log is per id. `SnapshotEngine` is constructed with `fsync = null` here, so a node's
 part carries no WAL: the snapshot is the view at the moment `save()` ran, which is what the cut
 wants. `InMemoryTransport.sent` is public and grows for the life of the hub.
+
+## T28: Anti-entropy sync
+
+**Built:** `dynacache.cluster.AntiEntropy` (its own file): the node's anti-entropy step
+`tick()` and its one coroutine `run()` (tick, `delay(interval)`, default 60 s; not yet launched
+by the server, which does not wire `Replication` either). `ranges` is the list of vnodes whose
+preference list holds this node, in ring order; a tick takes the next one round-robin and one
+live replica of it (rotating through the replicas once per full pass), scans the range through
+the engine, builds the `MerkleTree` (T27) over `(key, SHA-256 of the value encoding, DVV)`,
+sends `MerkleRoot{id, vnode index, root}`, and on a root mismatch builds the peer's tree from
+the leaves in the `MerkleRootReply`, `diff`s, and sends `KeySync{id, divergent keys, this
+node's Version of each it holds}`; the peer applies spec 5.3 per key and answers
+`KeySyncReply{id, its versions of what it still holds}`, to which the sender applies 5.3 in
+turn. A `Version` is `(key, encoded value, DVV, expires_at_millis)`. Every request is awaited
+under a 1 s deadline (constructor parameter). `rangesCompared` (roots exchanged) and
+`keysSynced` (installs on this node) are the counters. `receive(envelope): Boolean` is the
+demux hook, wired after `Replication.receive` in `InProcessCluster`.
+
+Engine, `CommandEngine` interface untouched: `Stored(key, value, expiresAt)` with
+`ApEngine.view(holds: (Key) -> Boolean)`, `ApEngine.view(keys)` and `ApEngine.install(stored)`
+in `Stored.kt`, over new `Partition.view` overloads (frozen copies as one task per executor) and
+the existing `Partition.restore`, so an install goes through `Partition.write` on the executor
+and replaces value and TTL. **An install is not WAL-logged**: `restore` bypasses `execute` and
+its hook. `persist/ValueCodec.kt`: public `encodeValue(value)` = RDB type byte + `RdbWriter`'s
+value bytes, `decodeValue(bytes, seeds)`; four `Rdb.kt` members went `private` to `internal`
+for it. `ApEngine.partitions` is `internal` so the entry points live in their own file.
+`Ring.preferenceList(vnode, n)` shares the walk of `preferenceList(key, n)`.
+`Replication.installVersion(key, dvv)` is the only `Replication.kt` edit; `version(key)`
+already existed. `cluster.proto`: bodies 20..23 (`Marker` took 19 in T36), messages `MerkleRoot`,
+`MerkleRootReply`, `Leaf`, `Version`, `KeySync`, `KeySyncReply`; `GrpcTransportTest` round-trips
+all four. `InProcessCluster` gains an `AntiEntropy` per node sharing the node's `DotCounter`,
+`antiEntropy(node)`, `antiEntropyStep(node)` (launch `tick`, drain until done) and
+`antiEntropyCycle(node)` (one step per range). Twelve files, 544 insertions, 10 deletions
+before the merge. `mvn -B -o -q clean package` offline after merging misc/ai_gen: engine 144,
+cluster 76, cp 66, server 79, all green. Commits `f893954` (ticket) and the merge on `t28`.
+
+**Concepts named:** A **range** here is one vnode's key range, the unit compared; a node
+**replicates** a range when it is in the range's preference list, which `Ring.preferenceList
+(vnode, n)` now answers directly since every key in a range shares one list. A **leaf** is the
+key's `(value hash, version)`, the value hash being SHA-256 over the engine's one value
+encoding, which is also the wire form of a shipped value. **Held** (private) is a key as this
+node has it: value, encoding, version, deadline. A **step** is one range against one peer, at
+most two round trips. No new seam: `AntiEntropy` is concrete and tested at `tick()` through the
+test kit's cluster, as the plan entry names.
+
+**Acceptance:**
+- `anti_entropy_heals_divergence`: three nodes, N=3, W=3; a string, a hash and a second string
+  written; on one replica the first two are deleted and the third overwritten straight on the
+  engine (same version, different bytes); one cycle on that replica; every replica answers the
+  healthy values, `HGETALL` compared as a map, and each key has one version cluster-wide. Red
+  first (the test kit had no step). The rotted-value branch was checked by mutation: flipping
+  the tiebreak fails exactly this test.
+- `anti_entropy_step_is_bounded`: a key lost on a replica whose range sits at index `at > 0` of
+  the replica's ranges; `at` steps compare `at` ranges, sync no key and leave it missing; the
+  next step compares one more, syncs one key, and the key is back.
+- `anti_entropy_noop_when_equal`: equal replicas; steps up to the key's range compare that many
+  ranges, no node's `keysSynced` moves, every version and value is as before.
+- `anti_entropy_merges_concurrent_siblings`: two sibling string versions seeded (the second on
+  both other replicas, so any peer choice is a merge); one step; the merged version dominates
+  both, the value is the last writer's, the peer holds the same version, one key synced.
+- Every earlier test green, `GrpcTransportTest` included. Tests 2 to 4 were green on their first
+  run: the first slice already had to carry the whole protocol.
+
+**Deviations:**
+1. **Equal versions, different bytes**: spec 5.3 has no branch for a value that rotted under an
+   unchanged DVV, and a pairwise exchange has no third opinion; both sides keep the greater
+   encoding by unsigned byte order (Cassandra's tiebreak), so they converge. Which side was
+   right is unknowable here; a majority check across all N replicas would repay it.
+2. **Keys without a version are invisible**: a key the replication side table holds no DVV for
+   (an engine-only write, or everything after an RDB restore, since the RDB carries empty DVVs)
+   builds no leaf and is never shipped; the peer's versioned copy is installed over it on the
+   next mismatch. Persisting versions (T35's own note) repays it.
+3. **Nothing deletes**: there are no tombstones; a key one side lost is handed back. A deleted
+   key that a lagging replica still holds is resurrected by anti-entropy, Dynamo's own gap.
+4. **A merged value's TTL** is the later deadline, and none if either side had none; the spec
+   says nothing.
+5. **Installs skip the WAL** (documented on `ApEngine.install`): a restore path, so a node that
+   recovers from its log lacks what anti-entropy gave it until the next round hands it back.
+6. **The whole range's leaves ride on one reply** rather than a level-by-level descent; T27's
+   `diff` is in-process over two whole trees and has no per-level accessor. Bounded by a range
+   (1/(128·nodes) of the keyspace), and both scans walk the partition store since keys are not
+   indexed by ring position.
+7. **The rotation's peer choice is deterministic** (`step / ranges.size` mod peers), not random;
+   the plan asked for no randomness and tests need none.
+8. Test 1's cycle is run on the corrupted replica itself: a healthy node's cycle picks one peer
+   per range and may not meet the corrupt one in a single pass.
+
+**For the next ticket:** `AntiEntropy.run()` needs launching by whoever wires the node (T24 /
+T30 acceptance), next to `runHandoff`, and `rangesCompared` / `keysSynced` belong in `INFO`.
+T26 (read repair) can install a winner's value with `ApEngine.install(Stored(...))` plus
+`Replication.installVersion`, and ship one with `encodeValue`; both are public now, which
+removes ADR 0003's stated reason for shipping commands. `tick()` and `answerSync` on one node
+can install the same key concurrently with a `Replicate`, the same unguarded pair T22 lives
+with (version set, then value written). `ranges` is computed once from the immutable ring.
+`InProcessCluster.antiEntropyStep` launches `tick` on the cluster scope and drains; a full
+cycle at N=3 is 384 steps and ran in about a second with two partitions per node.
