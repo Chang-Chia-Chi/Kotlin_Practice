@@ -24,6 +24,7 @@ import dynacache.engine.install
 import dynacache.engine.persist.FsyncPolicy
 import dynacache.engine.persist.SnapshotEngine
 import dynacache.engine.view
+import io.microraft.RaftConfig
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -71,6 +72,21 @@ class ClusterNode(
     /** This node's memory threshold and the policy it sheds keys by (spec 2.7); a node's own. */
     maxMemoryBytes: Long? = null,
     policy: EvictionPolicy = EvictionPolicy.LRU,
+    /**
+     * The CP group (CP spec 2.2), empty on a node with no CP subsystem at all. This node holds the
+     * replicated log when [cpMembers] names it and forwards to whoever leads when it does not, so
+     * an AP-only node is the same constructor with a group that leaves it out.
+     */
+    cpMembers: List<NodeId> = emptyList(),
+    /** Where the CP members listen, read at send time exactly as [addresses] is. */
+    cpAddresses: Map<NodeId, HostPort> = emptyMap(),
+    cpPort: Int = 0,
+    /**
+     * MicroRaft's timings, defaulted to its own. A calibration knob rather than a constant: a
+     * failover takes as long as a heartbeat timeout, and how long that should be is an operator's
+     * call about a real network, not something this assembly can know (T45).
+     */
+    cpRaft: RaftConfig = RaftConfig.DEFAULT_RAFT_CONFIG,
 ) : CommandEngine, AutoCloseable {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -161,14 +177,29 @@ class ClusterNode(
         SnapshotEngine(engine, it, clock, fsync = fsync)
     }
 
-    private val server = DynaCacheServer(respPort, engine, ap = this, clock = clock) {
+    /**
+     * This node's CP subsystem, or null when it was given no group. The two engines are siblings
+     * here: the same three nodes hold the AP ring and the replicated log, and the dispatcher in
+     * front of them is what decides which one a command was for (CP spec 2.1, 9.5).
+     */
+    private val cp = cpMembers
+        .takeIf { it.isNotEmpty() }
+        ?.let { cpNode(self, it, cpAddresses, cpPort, dataDir?.resolve(CP_DIR), clock, cpRaft) }
+
+    private val server = DynaCacheServer(respPort, engine, cp = cp?.engine, ap = this, clock = clock) {
         engine.tick()
         engine.wal?.tick()
+        // The leader's TTL tick (CP spec 5): log time moves on, and a session past its timeout is
+        // closed with everything it held. A follower's tick does nothing.
+        cp?.runtime?.tick()
         snapshots?.maybeSave(clock.instant())
     }
 
     /** The gRPC port this node listens on; the only way to learn an ephemeral one. */
     val grpcPort: Int get() = wire.boundPort
+
+    /** The CP gRPC port this member listens on; 0 on a node that runs no Raft member. */
+    val cpPort: Int get() = cp?.cpPort ?: 0
 
     /** The RESP port this node listens on. Reads only after [start]. */
     val respPort: Int get() = server.boundPort
@@ -176,6 +207,9 @@ class ClusterNode(
     /** Restores what this node persisted, opens the RESP socket and starts its four loops. */
     fun start() {
         snapshots?.restore()
+        // The Raft member joins its group before the port opens, so the first client to arrive
+        // finds an engine that is already electing rather than one that has not begun.
+        cp?.runtime?.start()
         server.start()
         scope.launch { router.run() }
         scope.launch { swim.run() }
@@ -223,6 +257,7 @@ class ClusterNode(
     override fun close() {
         server.close()
         scope.cancel()
+        cp?.close()
         wire.close()
         // The shutdown save (spec 2.8), while the engine is still open and nothing submits.
         snapshots?.let { runCatching(it::close) }
@@ -302,6 +337,10 @@ private class NodeTransport(private val wire: Transport, private val reads: Bool
  * already takes -- [dataDir] and [fsync] mean here exactly what they mean on a single node, and
  * the snapshot sets this node takes part in live under it, since a marker may arrive from any
  * peer and a node with nowhere to put its part cannot answer one.
+ *
+ * [cpGroup] is `main`'s last positional argument, `id@host:port,...`: the CP members of CP spec
+ * 2.2, or nothing at all for a cluster that runs the AP engine alone. Which entry this node is
+ * `--node` already says, so the single node's `cp-self` argument has nothing to add here.
  */
 internal fun clusterMain(
     flags: Map<String, String>,
@@ -309,6 +348,7 @@ internal fun clusterMain(
     partitionCount: Int,
     dataDir: Path? = null,
     fsync: FsyncPolicy = FsyncPolicy.EVERY_SECOND,
+    cpGroup: String? = null,
 ) {
     val addresses = flags.getValue("peers").split(",").associate { peer ->
         val (id, address) = peer.split("=", limit = 2)
@@ -318,6 +358,7 @@ internal fun clusterMain(
     val self = NodeId(flags.getValue("node"))
     require(self in addresses) { "--peers must name every node including $self" }
     val (n, w, r) = (flags["quorum"] ?: "3/2/2").split("/").map(String::toInt)
+    val cp = cpAddressBook(cpGroup)
     val node = ClusterNode(
         self = self,
         nodes = addresses.keys,
@@ -329,8 +370,15 @@ internal fun clusterMain(
         dataDir = dataDir,
         fsync = fsync,
         snapshotDir = dataDir?.resolve("snapshots"),
+        cpMembers = cp.keys.toList(),
+        cpAddresses = cp,
+        cpPort = cp[self]?.port ?: 0,
     )
     Runtime.getRuntime().addShutdownHook(Thread(node::close))
     node.start()
     println("DynaCache $self listening on ${node.respPort}, cluster on ${node.grpcPort}, N=$n W=$w R=$r")
+    if (cp.isNotEmpty()) {
+        val here = if (self in cp) "a member on ${node.cpPort}" else "forwarding"
+        println("CP group ${cp.keys.joinToString()}, $self is $here")
+    }
 }
