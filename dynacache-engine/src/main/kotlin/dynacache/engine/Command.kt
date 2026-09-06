@@ -56,8 +56,8 @@ sealed class Command {
     sealed class Cp : Command() {
         abstract val key: Key
 
-        /** `CP.LONG.SET K n`. */
-        data class LongSet(override val key: Key, val value: Long) : Cp()
+        /** `CP.LONG.SET K n`, or `SET cp:counter:K n [EX|PX]`: a [ttl] runs on log time (CP spec 9.4). */
+        data class LongSet(override val key: Key, val value: Long, val ttl: Duration? = null) : Cp()
 
         /** `CP.LONG.GET K`: the value, or nil when the counter was never written. */
         data class LongGet(override val key: Key) : Cp()
@@ -76,6 +76,15 @@ sealed class Command {
 
         /** `CP.LONG.CAS K expected new`: 1 when the swap happened, 0 when it did not. */
         data class LongCas(override val key: Key, val expected: Long, val new: Long) : Cp()
+
+        /** `EXPIRE` or `PEXPIRE cp:counter:K`: 1 when the counter exists and now has [ttl], else 0. */
+        data class LongExpire(override val key: Key, val ttl: Duration) : Cp()
+
+        /** `TTL cp:counter:K`: seconds left rounded as Redis rounds, -1 without a TTL, -2 when missing. */
+        data class LongTtl(override val key: Key) : Cp()
+
+        /** `PERSIST cp:counter:K`: 1 when a TTL was removed, 0 when there was none to remove. */
+        data class LongPersist(override val key: Key) : Cp()
     }
 
     /**

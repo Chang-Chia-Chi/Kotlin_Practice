@@ -3,6 +3,7 @@ package dynacache.cp
 import dynacache.cluster.NodeId
 import io.microraft.RaftConfig
 import io.microraft.RaftEndpoint
+import java.time.Clock
 import java.time.Duration
 
 /**
@@ -28,6 +29,10 @@ data class CpConfig(
     val raft: RaftConfig = RaftConfig.DEFAULT_RAFT_CONFIG,
     /** How long a caller waits for a leader to be elected before giving up. */
     val leaderElectionTimeout: Duration = Duration.ofSeconds(10),
+    /** This member's wall clock; only a leader reads it, and only to stamp log entries (CP spec 5). */
+    val clock: Clock = Clock.systemUTC(),
+    /** How long the log may go without an entry before the leader's [RaftRuntime.tick] appends one. */
+    val tickInterval: Duration = Duration.ofMillis(100),
 ) {
     init {
         require(cpMembers.size >= 3) { "a CP group needs at least 3 members, got ${cpMembers.size}" }
