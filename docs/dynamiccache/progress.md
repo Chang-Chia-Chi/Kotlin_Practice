@@ -6266,3 +6266,91 @@ is released by the session cascade, not by lease expiry.
 - The fixture deliberately exposes no accessor for the state machine itself. T70 will want one
   (to read `state` and to install a snapshot); adding a single `val stateMachine` to `Primitives`
   is the smallest change, and was left out here under YAGNI rather than guessed at.
+
+---
+
+## T64 - A forward carries codec bytes
+
+The RESP spelling of a command no longer crosses the cluster seam. A `Forward` carries the engine
+command codec's bytes, and the coordinator decodes them with the same codec, so the two ends of a
+forward are one encoding rather than a writer in the server module and a reader in the parser.
+
+**The envelope.** `Forward`'s `repeated bytes token = 2` is gone and `bytes command = 3` replaces
+it; tag 2 and the name `token` are `reserved`. The field was removed rather than deprecated
+because nothing persists a `Forward` and both ends of the wire are this repository: a forward
+lives for one round trip between two nodes of the same build. A new tag rather than a reuse of
+tag 2, so a stale peer's tokens decode as an absent field rather than as a corrupt command.
+
+**The router.** `Router`'s constructor lost `tokens: (Command) -> List<ByteArray>` and
+`parse: (List<ByteArray>) -> Command`; nothing is injected in their place. Two private companion
+functions hold the framing T63 specified: `encode` is `CommandCodec.encode(command)` with no `now`
+(so a `SET`'s TTL crosses as the duration the client wrote and the coordinator decides its
+deadline), framed as `byteArrayOf(op) + body`; `decode` is
+`CommandCodec.decode(bytes[0], bytes.copyOfRange(1, bytes.size)).single()`. `single` is not a bet:
+only a `SET` the log wrote with a decided deadline decodes to two commands, and a forward passes
+no `now`.
+
+`coordinate`'s `runCatching` stayed. An unreadable forward is now impossible between peers of this
+build - the codec wrote it, so the codec reads it - but a corrupted envelope or an older peer's
+tokens still arrive as an empty or unknown-op `command` field, and a throw on the demux would
+leave `run` dead and take the node's gossip down with its forwarding. The guard is cheap and the
+failure it prevents is the whole node.
+
+**What was deleted, and what was not.** Deleted: the two constructor parameters and the two
+arguments at each of the three call sites (`ClusterNode`, the kit's `InProcessCluster`,
+`RouterTest`).
+
+**`commandToTokens` is still alive, and its remaining caller is `Replication`.** The ticket allowed
+either deletion or a named caller; this is the named caller.
+`dynacache-server/.../ClusterNode.kt` still passes `tokens = ::commandToTokens, parse = ::parse` to
+the `Replication` constructor, and `Replication` still spells a `Replicate` and a `Read` in RESP
+tokens (`Replication.kt:131` and `:154`). The same holds for the test kit's `TokenCodec`: the kit's
+`InProcessCluster` still hands it to `Replication` and to `seed`, and `DistributedSnapshotTest`,
+`ReadRepairTest` and `ReplicationTest` still use it. T65 moves replicates onto the codec and both
+files go then. `CommandTokensTest` in the server module is untouched and still passes.
+
+**Tests.** `forward_round_trips_every_keyed_variant` in
+`dynacache-cluster/src/test/kotlin/dynacache/cluster/RouterTest.kt`: 38 keyed variants and all 4
+fanned ones, run in an order that builds the string, hash, list and sorted-set keys before it
+reads them, each once through the key's coordinator and once through a node that has to forward,
+asserted equal. The conditional `SET` with a TTL is the first sample; the multi-key read is
+`MGET`. Two guards keep the equality from being vacuous: the direct run must not answer an error
+(two matching "unreadable forwarded command" replies would otherwise pass), and a fanned sample's
+keys must all share a coordinator, which the `{multi}` hash tag gives them, so the direct run
+forwards nothing at all. A `classify` function with a `when` exhaustive over `Command` stops the
+build when a variant is added to the engine.
+
+Counts: engine 158, cluster 86 to 87, cp 95, server 100, all green. Diff 6 files, +233/-27.
+
+**Deviation 1: the round-trip test builds its own routers rather than using `InProcessCluster`.**
+The kit puts `Replication` under every router, and `Replication.write` calls `tokens(...)`
+eagerly, before the quorum, so even at n=1/w=1 a forwarded `APPEND`, `PERSIST`, `HMSET`, `HDEL`,
+`LSET`, `LREM`, `POP`, `ZINCRBY` or `ZREM` dies in the test kit's `TokenCodec`, which knows six
+writes. Growing that codec to 38 variants is exactly the RESP re-encoding this ticket removes and
+T65 deletes, so the test builds three routers straight over three `ApEngine`s on one
+`InMemoryTransport` instead - about 35 lines, an inner class in `RouterTest`. That is also the
+honest seam for this ticket: what it asserts is the forward's own round trip, with nothing under
+it. The four existing router tests still run through the kit, unchanged.
+
+**Deviation 2: `router_unreadable_forward_is_an_error_and_the_node_lives` changed its garbage.**
+It sent the RESP token `NOSUCH`, which no longer has a field to sit in. It now sends op code 99,
+which no command has. The test's name, shape and claim are unchanged; only the spelling of
+"unreadable" moved with the envelope.
+
+**Also touched:** `GrpcTransportTest`'s one-envelope-per-oneof-case fixture built its `Forward`
+with `addAllToken`; it now carries `GET k` as the codec writes it. No assertion changed.
+
+**For the next ticket (T65).**
+
+- `Replication`'s `tokens`/`parse` parameters and `Replication.decided()` are what is left. The
+  same two-line framing this ticket put in `Router`'s companion (`byteArrayOf(op) + body`, and
+  `decode(bytes[0], rest).single()`) is what a `Replicate` and a `Read` need. When T65 writes the
+  second copy, lifting both onto `CommandCodec` as a framed pair is worth it; one copy did not
+  justify it.
+- A `Replicate` differs from a forward in one way that matters: it passes `encode` the
+  coordinator's `now`, which is the same decision as the message's `expiresAtMillis` field, and a
+  `SET` with a deadline then decodes to two commands, so `single()` is wrong there and the list is
+  the point.
+- Deleting `commandToTokens` (`dynacache-server/.../CommandTokens.kt`) and its
+  `CommandTokensTest`, and the kit's `TokenCodec.kt`, falls out of T65 once `Replication` and
+  `InProcessCluster.seed` stop calling them. Nothing else references either file.

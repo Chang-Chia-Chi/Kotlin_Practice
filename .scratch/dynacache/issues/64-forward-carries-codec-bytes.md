@@ -11,17 +11,17 @@ migrate step after ticket 63's expand; replicates follow in ticket 65.
 
 **Nature:** routing adapter, spec 5.1 steps 1 to 3 (Opus)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache 27f63ad3, merged into misc/ai_gen)
 
-- [ ] The `Forward` envelope carries codec bytes; the router's constructor takes no
+- [x] The `Forward` envelope carries codec bytes; the router's constructor takes no
       tokens/parse functions and the server's wiring and the in-process cluster stop passing
       them for forwards
-- [ ] `forward_round_trips_every_keyed_variant`: every keyed command, including a conditional
+- [x] `forward_round_trips_every_keyed_variant`: every keyed command, including a conditional
       `SET` with a TTL and a multi-key read, forwards and answers as if run locally
-- [ ] Every existing router, forwarding and P2 acceptance test passes unchanged
-- [ ] The server's command-to-tokens encoder is deleted, or the progress entry names its
+- [x] Every existing router, forwarding and P2 acceptance test passes unchanged
+- [x] The server's command-to-tokens encoder is deleted, or the progress entry names its
       remaining caller
-- [ ] Progress entry appended
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket; 200 to 600 lines including tests;
 JUnit 5 + Mockito only, no AssertJ or MockK; no sleeps, time is an injected Clock; spec-named
