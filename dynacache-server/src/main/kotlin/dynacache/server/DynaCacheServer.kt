@@ -5,6 +5,7 @@ import dynacache.engine.Command
 import dynacache.engine.CrossPartitionBatch
 import dynacache.engine.Key
 import dynacache.engine.Reply
+import dynacache.engine.persist.FsyncPolicy
 import dynacache.engine.persist.SnapshotEngine
 import io.netty.bootstrap.ServerBootstrap
 import io.netty.buffer.ByteBuf
@@ -253,20 +254,24 @@ private fun CompletableFuture<Reply>.replyNow(): Reply =
     }
 
 /**
- * `dynacache [port] [partitions] [dir]`, defaulting to Redis's own port and sixteen partitions.
- * With a [dir], the last snapshot there is restored before the port opens, one is saved on the
- * engine's default interval from the tick thread, and one more at shutdown (spec 2.8).
- * The engine outlives nothing here: the shutdown hook closes both in order.
+ * `dynacache [port] [partitions] [dir] [ALWAYS|EVERY_SECOND|NEVER]`, defaulting to Redis's own
+ * port, sixteen partitions and `EVERY_SECOND`. With a [dir], the last snapshot there and the log
+ * after it are restored before the port opens, a snapshot is saved on the engine's default
+ * interval from the tick thread (which is also the log's checkpoint), the log is forced by the
+ * same thread once a second, and one more snapshot is saved at shutdown (spec 2.8). The engine
+ * outlives nothing here: the shutdown hook closes the socket, then the log, then the engine.
  */
 fun main(args: Array<String>) {
     val port = args.getOrNull(0)?.toInt() ?: 6379
     val partitionCount = args.getOrNull(1)?.toInt() ?: 16
+    val fsync = args.getOrNull(3)?.let(FsyncPolicy::valueOf) ?: FsyncPolicy.EVERY_SECOND
     val clock = Clock.systemUTC()
     val engine = ApEngine(partitionCount, clock)
-    val snapshots = args.getOrNull(2)?.let { SnapshotEngine(engine, Path.of(it), clock) }
+    val snapshots = args.getOrNull(2)?.let { SnapshotEngine(engine, Path.of(it), clock, fsync = fsync) }
     snapshots?.restore()
     val server = DynaCacheServer(port, engine) {
         engine.tick()
+        engine.wal?.tick()
         snapshots?.maybeSave(clock.instant())
     }
     Runtime.getRuntime().addShutdownHook(

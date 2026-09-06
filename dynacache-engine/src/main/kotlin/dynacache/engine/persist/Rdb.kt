@@ -22,7 +22,10 @@ import java.util.zip.CheckedOutputStream
 /*
  * The RDB snapshot codec: one file holding a point-in-time copy of a partition's keys (spec 2.8).
  *
- *     [magic:7][version:u8][count:u32] [entry]* [crc32:u32]
+ *     [magic:7][version:u8][wal_seq:i64][count:u32] [entry]* [crc32:u32]
+ *
+ * `wal_seq` is the checkpoint: the last WAL sequence number the snapshot already holds, so
+ * recovery replays the log from the entry after it (spec 2.8). 0 for a node without a log.
  *
  * and one entry, big-endian throughout as the WAL is:
  *
@@ -41,7 +44,7 @@ import java.util.zip.CheckedOutputStream
 internal const val RDB_MAGIC = "DYNARDB"
 
 /** The one format this codec writes and the only one it reads. */
-internal const val RDB_VERSION: Byte = 1
+internal const val RDB_VERSION: Byte = 2
 
 /** Why a file was refused. */
 internal enum class RdbFault(val detail: String) {
@@ -86,10 +89,13 @@ internal class RdbEntry(
     fun expired(now: Instant): Boolean = expiresAt != null && now.isAfter(expiresAt)
 }
 
+/** What a snapshot file holds: its keys, and the WAL seq it was cut at. */
+internal class RdbSnapshot(val walSeq: Long, val entries: List<RdbEntry>)
+
 /** Writes a snapshot, skipping the keys that have already expired at [now] (spec 5.4). */
 internal object RdbWriter {
 
-    fun write(sink: OutputStream, entries: Iterable<RdbEntry>, now: Instant) {
+    fun write(sink: OutputStream, entries: Iterable<RdbEntry>, now: Instant, walSeq: Long = 0) {
         // The header names the count, so the live entries are settled before the first byte goes
         // out. Only the references are held; no value is serialized until its turn comes.
         val live = entries.filterNot { it.expired(now) }
@@ -97,6 +103,7 @@ internal object RdbWriter {
         val out = DataOutputStream(CheckedOutputStream(sink, crc))
         out.write(RDB_MAGIC.toByteArray(Charsets.US_ASCII))
         out.writeByte(RDB_VERSION.toInt())
+        out.writeLong(walSeq)
         out.writeInt(live.size)
         for (entry in live) writeEntry(out, entry)
         // Read before the checksum itself goes through the checked stream, so it covers only
@@ -163,20 +170,21 @@ internal object RdbWriter {
  */
 internal class RdbReader(private val seeds: Random) {
 
-    fun read(source: InputStream): List<RdbEntry> {
+    fun read(source: InputStream): RdbSnapshot {
         val crc = CRC32()
         val input = DataInputStream(CheckedInputStream(source, crc))
         try {
             val magic = input.readNBytes(RDB_MAGIC.length).toString(Charsets.US_ASCII)
             if (magic != RDB_MAGIC) throw RdbFormatException(RdbFault.NOT_AN_RDB)
             if (input.readByte() != RDB_VERSION) throw RdbFormatException(RdbFault.UNSUPPORTED_VERSION)
+            val walSeq = input.readLong()
             val count = input.readInt()
             if (count < 0) throw RdbFormatException(RdbFault.TRUNCATED)
             val entries = ArrayList<RdbEntry>(minOf(count, 1024))
             repeat(count) { entries.add(readEntry(input)) }
             val computed = crc.value.toInt()
             if (input.readInt() != computed) throw RdbFormatException(RdbFault.CHECKSUM_MISMATCH)
-            return entries
+            return RdbSnapshot(walSeq, entries)
         } catch (cut: EOFException) {
             throw RdbFormatException(RdbFault.TRUNCATED)
         }
