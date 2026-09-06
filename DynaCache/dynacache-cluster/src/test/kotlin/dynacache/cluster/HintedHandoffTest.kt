@@ -3,11 +3,9 @@ package dynacache.cluster
 import dynacache.engine.Command
 import dynacache.engine.Key
 import dynacache.engine.Reply
-import java.time.Clock
+import dynacache.engine.testkit.MutableClock
 import java.time.Duration
 import java.time.Instant
-import java.time.ZoneId
-import java.time.ZoneOffset
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNull
@@ -148,12 +146,6 @@ class HintedHandoffTest {
         assertEquals(0, cluster.replication(holder).hintCount, "an expired hint is dropped")
         assertNull(cluster.replication(victim).version(key), "$victim never received the write")
         cluster.close()
-    }
-
-    private class MutableClock(@Volatile var now: Instant) : Clock() {
-        override fun instant(): Instant = now
-        override fun getZone(): ZoneId = ZoneOffset.UTC
-        override fun withZone(zone: ZoneId): Clock = this
     }
 
     /** The first [count] keys `k1, k2, ...` that [node] replicates without coordinating. */

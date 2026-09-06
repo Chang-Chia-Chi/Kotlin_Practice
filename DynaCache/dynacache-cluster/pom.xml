@@ -16,6 +16,14 @@
             <artifactId>dynacache-engine</artifactId>
             <version>${project.version}</version>
         </dependency>
+        <!-- The shared MutableClock (T58); test scope only, so the module graph is unchanged. -->
+        <dependency>
+            <groupId>dynacache</groupId>
+            <artifactId>dynacache-engine</artifactId>
+            <version>${project.version}</version>
+            <type>test-jar</type>
+            <scope>test</scope>
+        </dependency>
         <dependency>
             <groupId>org.jetbrains.kotlinx</groupId>
             <artifactId>kotlinx-coroutines-core</artifactId>
