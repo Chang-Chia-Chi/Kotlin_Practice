@@ -222,7 +222,7 @@ class FencedLockTest {
     fun C17_lease_expires_after_skewed_failover() {
         val old = kit.leader()
         kit.clock(old.config.nodeId).advance(SKEW)
-        assertEquals(granted(1), tryLock(session = 7, ttl = Duration.ofSeconds(1)))
+        assertEquals(granted(1), tryLock(session = 7, lease = Duration.ofSeconds(1)))
 
         kit.killMember(old.config.nodeId)
         val successor = kit.leader()
