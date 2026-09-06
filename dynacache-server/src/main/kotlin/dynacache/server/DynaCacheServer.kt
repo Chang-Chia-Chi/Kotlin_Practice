@@ -2,6 +2,7 @@ package dynacache.server
 
 import dynacache.engine.ApEngine
 import dynacache.engine.Command
+import dynacache.engine.CommandEngine
 import dynacache.engine.CrossPartitionBatch
 import dynacache.engine.Key
 import dynacache.engine.Reply
@@ -35,10 +36,15 @@ import java.util.concurrent.TimeUnit
  * [tick] is what the server's scheduler runs once per the engine's `tickMillis`, so the timer
  * wheel is advanced by the one thread the plan gives that job. It defaults to the engine's own
  * tick and is a parameter so a test can watch the schedule without watching the clock.
+ *
+ * [commands] is what a client's commands are submitted to. It defaults to [engine], which is the
+ * single node; a [ClusterNode] passes itself, so the same pipeline serves a cluster without
+ * knowing it (T24). [engine] stays the local one either way: it is what the scheduler ticks.
  */
 class DynaCacheServer(
     private val port: Int,
     private val engine: ApEngine,
+    private val commands: CommandEngine = engine,
     private val tick: () -> Unit = { engine.tick() },
 ) : AutoCloseable {
 
@@ -60,7 +66,7 @@ class DynaCacheServer(
             .channel(NioServerSocketChannel::class.java)
             .childHandler(object : ChannelInitializer<SocketChannel>() {
                 override fun initChannel(ch: SocketChannel) {
-                    ch.pipeline().addLast(RespFrameDecoder(), CommandHandler(engine))
+                    ch.pipeline().addLast(RespFrameDecoder(), CommandHandler(commands))
                 }
             })
             .bind(port).sync().channel()
@@ -110,7 +116,7 @@ private class RespFrameDecoder : ByteToMessageDecoder() {
  * handler is already per-connection and already single-threaded on the event loop, so the buffer
  * needs no lock either.
  */
-private class CommandHandler(private val engine: ApEngine) : ChannelInboundHandlerAdapter() {
+private class CommandHandler(private val engine: CommandEngine) : ChannelInboundHandlerAdapter() {
 
     // ponytail: the queue is unbounded, so a client that pipelines without reading grows it
     // until the heap says no; Redis caps its own output buffer. A limit that closes the
@@ -260,14 +266,23 @@ private fun CompletableFuture<Reply>.replyNow(): Reply =
  * interval from the tick thread (which is also the log's checkpoint), the log is forced by the
  * same thread once a second, and one more snapshot is saved at shutdown (spec 2.8). The engine
  * outlives nothing here: the shutdown hook closes the socket, then the log, then the engine.
+ *
+ * `--peers=id=host:port,...` with `--node=<id>` starts one node of a cluster instead (T24, see
+ * [clusterMain]); `--grpc=<port>` and `--quorum=n/w/r` are its other two knobs. Without
+ * `--peers` this is the single node it always was, and the positional arguments mean the same
+ * in both modes.
  */
 fun main(args: Array<String>) {
-    val port = args.getOrNull(0)?.toInt() ?: 6379
-    val partitionCount = args.getOrNull(1)?.toInt() ?: 16
-    val fsync = args.getOrNull(3)?.let(FsyncPolicy::valueOf) ?: FsyncPolicy.EVERY_SECOND
+    val flags = args.filter { it.startsWith("--") }
+        .associate { it.removePrefix("--").substringBefore('=') to it.substringAfter('=', "") }
+    val positional = args.filterNot { it.startsWith("--") }
+    val port = positional.getOrNull(0)?.toInt() ?: 6379
+    val partitionCount = positional.getOrNull(1)?.toInt() ?: 16
+    if ("peers" in flags) return clusterMain(flags, port, partitionCount)
+    val fsync = positional.getOrNull(3)?.let(FsyncPolicy::valueOf) ?: FsyncPolicy.EVERY_SECOND
     val clock = Clock.systemUTC()
     val engine = ApEngine(partitionCount, clock)
-    val snapshots = args.getOrNull(2)?.let { SnapshotEngine(engine, Path.of(it), clock, fsync = fsync) }
+    val snapshots = positional.getOrNull(2)?.let { SnapshotEngine(engine, Path.of(it), clock, fsync = fsync) }
     snapshots?.restore()
     val server = DynaCacheServer(port, engine) {
         engine.tick()
