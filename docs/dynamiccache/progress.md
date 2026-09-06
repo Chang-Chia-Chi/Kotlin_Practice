@@ -3205,3 +3205,113 @@ to disagree about membership needs one per node. `InMemoryTransport.inFlight` is
 demux still awaits `Replicate` and `Read` handling inline (an engine hop each, no reply waited
 on), so it cannot deadlock but a slow engine delays gossip behind it. `RecordingEngine` answers
 every command with one canned reply, which is what made the C4 write test need no engine.
+
+## T35: WAL in the write path, checkpoint, recovery
+
+**Built:** the write-ahead log is in the command path (C14), the RDB save is its checkpoint,
+and startup recovery is snapshot then log.
+
+`ApEngine` gains `wal: WalWriter?` (null by default, setter module-internal): the log a node
+appends to, attached by recovery once the state it continues is in place. Every `Partition`
+takes a hook, `(Command, Reply, Instant) -> CompletableFuture<*>?`, that `execute` calls with
+each command's reply; the engine's hook encodes the command through `WalCodec` and appends it,
+answering the append's `durable`. The hook is inside `execute`, so every path is covered with
+one line: `submit`, a fanned command's `submitAll`, and a batch's `PartitionContext.execute`.
+A batch is logged as one entry per mutating command, in order. What is logged is what changed:
+an error reply, a refused conditional `SET` and an empty `POP` (both nil) log nothing, and a
+conditional `SET` that took is logged as a plain one. A TTL travels as the absolute instant the
+engine settled on, never the client's duration. Reads log nothing (`wal_reads_append_nothing`).
+
+The reply waits without the partition thread waiting: `Partition.submit`, `submitAll` and
+`inOneTask` now run through one `task` helper that resets a per-task `durable` future, runs the
+work, and completes the task's future with the answer only once every entry the task appended
+is durable (`allOf`, so an append that fails exceptionally fails the reply). Under
+`EVERY_SECOND` the partition therefore keeps executing while a hundred replies wait for the
+next tick; under `ALWAYS` the group commit of T34 forms across partitions.
+
+`WalCodec` in `persist`: the entry's op byte is the command's kind (sixteen mutating variants,
+`HMSET` shares `HSET`'s), the payload its arguments, length-prefixed big-endian as the RDB is.
+`decode` answers the commands that redo one entry: a `SET` with a TTL is a `SET` then an
+`EXPIRE` at the stored instant.
+
+`SnapshotEngine(engine, dir, clock, interval, seeds, sink, fsync: FsyncPolicy? = null)`: with a
+policy it owns the log files `<dir>/wal.<seq>`, where `wal.<n>` holds only entries after `n`.
+`save()` answers the checkpoint's seq. The cut is exact: `ApEngine.snapshotView(now, cut)` parks
+every partition's view task at a `CyclicBarrier` and runs `cut` as the barrier action, while
+all partitions are parked and so nothing is appending; `cut` reads `wal.lastSeq`, rotates the
+writer to a fresh `wal.<seq>` (`WalWriter.rotate`: forces what `EVERY_SECOND` still holds,
+closes the old sink, swaps in the new), and answers the seq. The RDB header now carries that
+seq (`[magic][version][wal_seq:i64][count]`, `RDB_VERSION` 2, `RdbReader.read` answers an
+`RdbSnapshot(walSeq, entries)`), and once the rename has landed the log files below the seq
+are deleted. `restore()` loads the snapshot, then replays every log file oldest first, every
+entry with seq above the last applied through `engine.submit`, so accounting, the wheel and
+the kind checks all apply; truncates each file at its scan's `stoppedAt` so nothing is ever
+appended after a torn tail; opens the writer on the newest file at `applied + 1`; attaches it.
+`close()` saves, then closes the writer. The server's `main` takes the policy as a fourth
+argument (default `EVERY_SECOND`) and its tick thread calls `engine.wal?.tick()` between
+`engine.tick()` and `maybeSave`; the shutdown hook's order is socket, log, engine as before.
+
+Six tests in `WalRecoveryTest`, JUnit 5 only, `@TempDir`, latches, `NEVER` for the recovery
+tests so a dropped engine's bytes are already written, no sleeps. `RdbTest` changed by one
+`.entries`; every other test untouched. Engine 136, cluster 54, cp 47, server 35, all green.
+
+**Concepts named:** the **cut** is the moment a checkpoint is taken at, one seq for the whole
+node, made exact by a barrier across the partition view tasks rather than by a lock: while
+every partition is parked no thread can append, so "the writer's last seq" and "every view"
+agree. Without the barrier a per-partition seq would either replay an entry one partition's
+view already holds or lose an entry another's does not. The **checkpoint seq** lives in the
+snapshot, not beside it: the RDB rename is the one atomic step, and a crash between it and the
+old log files' deletion is only recoverable if the snapshot itself says where the log resumes.
+**Redo is by seq, not by bytes**: recovery skips any entry at or below the last it applied,
+the ARIES rule, which is what `wal_replay_idempotent` pins by holding the log's bytes twice.
+**Attach after replay**: the log is a `var` on the engine set by recovery, because a writer
+present during replay would log every redone entry again and double-apply it next time.
+
+**Acceptance:**
+- `wal_checkpoint_truncates`: two writes, `save()` answers 2, the directory is exactly
+  `dump.rdb` and `wal.2`, and `wal.2` holds only seq 3 after a third write; a second save
+  answers 3 and leaves `wal.3`; a fresh engine restores the third key.
+- `wal_full_recovery`: two sets and an `INCRBY`, save, a set, a set with a 90 s TTL, another
+  `INCRBY` and a `DEL`, the engine dropped without `close`; a fresh engine restores every key
+  with its value, the deleted one absent, `TTL` 90, the counter 10.
+- `wal_replay_idempotent`: `INCRBY` and `RPUSH`, the log file's bytes appended to itself, a
+  fresh engine restores the counter at 1 and the list one long.
+- `C14_reply_only_after_durable_append`: a sink holding its first fsync; the `SET`'s future is
+  not done while it holds, a `GET` on another partition completes meanwhile, and the reply is
+  `OK` once released.
+- `wal_reads_append_nothing`: three writes then eight reads, a refused `SET NX` and an empty
+  `POP`; the writer's `lastSeq` is still 3.
+- `wal_batch_is_replayed_as_written`: an `atomically` batch of two `SET`s and an `INCRBY` on
+  hash-tagged keys, the engine dropped, a fresh engine restores both keys with the batch's
+  final values.
+- Mutation check: turning the seq filter off and the deletion off failed `wal_full_recovery`,
+  `wal_replay_idempotent` and `wal_checkpoint_truncates` respectively; restored.
+- Progress entry: this file.
+
+**Deviations:** the RDB format gained an eight-byte `wal_seq` header field and its version is 2;
+`RdbReader.read` answers `RdbSnapshot` rather than the entry list. Spec 2.8 says "replay WAL
+entries after checkpoint sequence number" without saying where the checkpoint seq lives, and
+a sidecar cannot move atomically with the rename; no file written before this ticket is in
+service, so no migration. Not a deviation but a choice the ticket left open: the log is
+attached to the engine by `SnapshotEngine.restore` (a `var`, not a constructor parameter),
+for the reason under Concepts. Truncation is a new file per checkpoint and the old deleted,
+never a rewrite. The spec's "before the in-memory state is updated" reads as "before the reply"
+here, as the plan's C14 wording does: the store is updated on the partition thread and the
+reply waits; a crash between the two loses an unacknowledged write, which C14 permits.
+
+**For the next ticket:** `ApEngine.snapshotView` now parks every partition at a barrier, so a
+save issued after `close()` leaves the submitted view tasks parked on daemon threads (before,
+it failed fast); the server never does that. T36 (Chandy-Lamport) gets the same exact cut for
+free: `snapshotView(now, cut)` runs `cut` with every partition parked, which is where a local
+state record plus outgoing markers belongs, and `RdbWriter.write` takes the seq to stamp.
+Replay is sequential `submit(...).join()` per entry, one command at a time; a long log recovers
+slowly and a per-partition pipeline is the repair. `FLUSHDB` is logged once per partition and
+each replay of it fans out to every partition again, harmless and idempotent. `WalWriter.rotate`
+has a precondition (no append in flight) checked by `check`, met only under the barrier. Replay
+never reaches the kind check's `WRONGTYPE` because the log holds only commands that succeeded
+against the state they ran on. `ApEngine.wal` under `EVERY_SECOND` needs the scheduler's
+`tick()` or no reply ever completes: a test that attaches a writer with that policy must tick.
+The RDB's seq is 0 for a node without a log, and a node that later gains one replays from 0,
+which is right since its log starts empty. Keys under T22's DVV stamping should go into the
+entry payload alongside the command when replication lands, so a replayed write carries its
+version; the codec's op table is the place.

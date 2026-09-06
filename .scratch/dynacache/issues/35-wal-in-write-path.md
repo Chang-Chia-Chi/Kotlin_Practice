@@ -10,12 +10,12 @@ recovery loads the RDB and replays entries after the checkpoint; replay is idemp
 
 **Nature:** write-ahead ordering, C14 (Fable)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache bd6ddff + merge 622de9c, merged into misc/ai_gen)
 
-- [ ] `wal_checkpoint_truncates`
-- [ ] `wal_full_recovery`: write, snapshot, write more, crash, restore from RDB plus WAL, every key present
-- [ ] `wal_replay_idempotent`, `C14_reply_only_after_durable_append` (a stalled sink delays the reply)
-- [ ] Progress entry appended
+- [x] `wal_checkpoint_truncates`
+- [x] `wal_full_recovery`: write, snapshot, write more, crash, restore from RDB plus WAL, every key present
+- [x] `wal_replay_idempotent`, `C14_reply_only_after_durable_append` (a stalled sink delays the reply)
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket, stubs throwing NotImplementedError
 for later seams; 200 to 600 lines including tests; JUnit 5 + Mockito only, no AssertJ or MockK;
