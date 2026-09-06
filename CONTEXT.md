@@ -16,8 +16,17 @@ _Avoid_: data engine, store, service
 
 **Dispatcher**:
 The router in front of both engines that sends a command to the AP or the CP engine by the
-namespace rules of the CP spec. It routes; it never translates.
-_Avoid_: gateway, front controller
+namespace rules of the CP spec. The one thing it does to a command is **re-target** it: a Redis
+command of the compat set on a `cp:` key becomes the CP verb it means, so `INCR cp:counter:x` and
+`CP.LONG.INCR cp:counter:x` are one command by the time an engine sees them. It never rewrites a
+reply and never sends one command to both engines.
+_Avoid_: gateway, front controller, translator
+
+**Redis-compat set**:
+The Redis commands the `cp:` namespace answers (`SET`, `GET`, the `INCR` family, `SETEX` and the
+TTL commands), each re-targeted onto a CP verb. Anything else on a `cp:` key is `-NOTCP`, which
+is what keeps the namespace the CP engine's alone (C16).
+_Avoid_: aliases, compatibility layer
 
 **Partition**:
 The unit of single-writer execution on one node: a fixed-count local hash bucket that owns an

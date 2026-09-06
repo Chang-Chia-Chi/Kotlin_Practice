@@ -130,6 +130,77 @@ class CommandParserTest {
                 assertEquals(Command.Ttl.Precision.MILLIS, (it as Command.Ttl).precision)
             },
             row("PERSIST k", Command.Persist::class),
+            // The CP verbs of CP spec 6 (T44). A CP key stays whole on the wire, and a lock or
+            // semaphore verb carries no session: the connection owns that (CP spec 4), so the
+            // parser leaves it unset and the handler fills it in.
+            row("CP.LONG.SET cp:counter:k 5", Command.Cp.LongSet::class) {
+                assertEquals(5L, (it as Command.Cp.LongSet).value)
+                assertEquals("cp:counter:k", it.key.toString())
+                assertNull(it.ttl)
+            },
+            row("CP.LONG.GET cp:counter:k", Command.Cp.LongGet::class),
+            row("CP.LONG.INCR cp:counter:k", Command.Cp.LongIncr::class),
+            row("CP.LONG.DECR cp:counter:k", Command.Cp.LongDecr::class),
+            row("CP.LONG.ADD cp:counter:k -5", Command.Cp.LongIncrBy::class) {
+                assertEquals(-5L, (it as Command.Cp.LongIncrBy).delta)
+            },
+            row("CP.LONG.CAS cp:counter:k 1 2", Command.Cp.LongCas::class) {
+                assertEquals(1L, (it as Command.Cp.LongCas).expected)
+                assertEquals(2L, it.new)
+            },
+            row("CP.LOCK.TRY cp:lock:k 30000", Command.Cp.LockTry::class) {
+                assertEquals(Duration.ofSeconds(30), (it as Command.Cp.LockTry).ttl)
+                assertEquals(NO_SESSION, it.session)
+            },
+            row("CP.LOCK.UNLOCK cp:lock:k 7", Command.Cp.LockUnlock::class) {
+                assertEquals(7L, (it as Command.Cp.LockUnlock).token)
+                assertEquals(NO_SESSION, it.session)
+            },
+            row("CP.LOCK.RENEW cp:lock:k 7 30000", Command.Cp.LockRenew::class) {
+                assertEquals(7L, (it as Command.Cp.LockRenew).token)
+                assertEquals(Duration.ofSeconds(30), it.ttl)
+            },
+            row("CP.LOCK.STATE cp:lock:k", Command.Cp.LockState::class),
+            row("CP.LOCK.FORCE_UNLOCK cp:lock:k", Command.Cp.LockForceUnlock::class),
+            row("CP.SEM.INIT cp:sem:k 3", Command.Cp.SemInit::class) {
+                assertEquals(3, (it as Command.Cp.SemInit).permits)
+            },
+            row("CP.SEM.ACQUIRE cp:sem:k 2", Command.Cp.SemAcquire::class) {
+                assertEquals(2, (it as Command.Cp.SemAcquire).permits)
+                assertEquals(NO_SESSION, it.session)
+            },
+            row("CP.SEM.RELEASE cp:sem:k 2", Command.Cp.SemRelease::class) {
+                assertEquals(2, (it as Command.Cp.SemRelease).permits)
+            },
+            row("CP.SEM.AVAILABLE cp:sem:k", Command.Cp.SemAvailable::class),
+            row("CP.SEM.DRAIN cp:sem:k", Command.Cp.SemDrain::class) {
+                assertEquals(NO_SESSION, (it as Command.Cp.SemDrain).session)
+            },
+            row("CP.LATCH.SET cp:latch:k 4", Command.Cp.LatchSet::class) {
+                assertEquals(4, (it as Command.Cp.LatchSet).count)
+            },
+            row("CP.LATCH.DOWN cp:latch:k", Command.Cp.LatchDown::class),
+            row("CP.LATCH.GET cp:latch:k", Command.Cp.LatchGet::class),
+            row("CP.LATCH.RESET cp:latch:k 4", Command.Cp.LatchReset::class) {
+                assertEquals(4, (it as Command.Cp.LatchReset).count)
+            },
+            row("CP.REF.SET cp:ref:k v", Command.Cp.RefSet::class) {
+                assertEquals("v", (it as Command.Cp.RefSet).value.text())
+            },
+            row("CP.REF.GET cp:ref:k", Command.Cp.RefGet::class),
+            row("CP.REF.CAS cp:ref:k a b", Command.Cp.RefCas::class) {
+                assertEquals("a", (it as Command.Cp.RefCas).expected.text())
+                assertEquals("b", it.new.text())
+            },
+            row("CP.SESSION.CREATE", Command.Cp.SessionCreate::class),
+            row("CP.SESSION.HEARTBEAT 5", Command.Cp.SessionHeartbeat::class) {
+                assertEquals(5L, (it as Command.Cp.SessionHeartbeat).session)
+            },
+            row("CP.SESSION.CLOSE 5", Command.Cp.SessionClose::class) {
+                assertEquals(5L, (it as Command.Cp.SessionClose).session)
+            },
+            row("CP.INFO", Command.Cp.Info::class),
+            row("CP.MEMBERS", Command.Cp.Members::class),
         )
 
         for (case in table) {
