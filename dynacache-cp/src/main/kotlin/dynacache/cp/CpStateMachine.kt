@@ -88,19 +88,21 @@ class CpStateMachine(
 
     override fun getNewTermOperation(): Any = NewTerm(currentTerm())
 
-    /** One chunk holding everything; chunking a large state is T45's business. */
-    override fun takeSnapshot(commitIndex: Long, chunkConsumer: Consumer<Any>) =
-        chunkConsumer.accept(
-            Snapshot(
-                lastAppliedTs,
-                longs.snapshot(),
-                locks.snapshot(),
-                semaphores.snapshot(),
-                latches.snapshot(),
-                references.snapshot(),
-                sessions.snapshot(),
-            ),
+    /** Everything this member holds at its applied index, as one value two members can be compared by. */
+    val state: Snapshot
+        get() = Snapshot(
+            lastAppliedTs,
+            longs.snapshot(),
+            locks.snapshot(),
+            semaphores.snapshot(),
+            latches.snapshot(),
+            references.snapshot(),
+            sessions.snapshot(),
         )
+
+    // ponytail: one chunk holding everything, since the whole state is a few maps; a chunk per
+    // primitive is the upgrade when one primitive outgrows a message.
+    override fun takeSnapshot(commitIndex: Long, chunkConsumer: Consumer<Any>) = chunkConsumer.accept(state)
 
     override fun installSnapshot(commitIndex: Long, chunks: List<Any>) {
         chunks.forEach {
@@ -115,7 +117,8 @@ class CpStateMachine(
         }
     }
 
-    private data class Snapshot(
+    /** The snapshot chunk (CP spec 10.7): log time and every primitive's table; `CpWire` gives it a byte form. */
+    data class Snapshot(
         val lastAppliedTs: Long,
         val counters: Map<Key, AtomicLongStateMachine.Counter>,
         val locks: Map<Key, FencedLockStateMachine.Lock>,

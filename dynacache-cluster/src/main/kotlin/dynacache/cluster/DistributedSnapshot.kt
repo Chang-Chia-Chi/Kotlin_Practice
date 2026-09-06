@@ -100,9 +100,12 @@ class DistributedSnapshot(
 
     private suspend fun start(id: String) {
         require(!open.containsKey(id)) { "snapshot $id already started on $self" }
-        open[id] = peers.toMutableSet()
+        // The directory before the channels, not after: `open` is what tells the demux -- another
+        // coroutine on a real node, where `initiate` runs on the node's scope -- that it may start
+        // appending in here, so a channel published first is a file with nowhere to go (T37).
         val mine = part(dir, id)
         Files.createDirectories(mine)
+        open[id] = peers.toMutableSet()
         SnapshotEngine(engine, mine, clock).save()
         val marker = Envelope.newBuilder().setFrom(self.name).setMarker(Marker.newBuilder().setSnapshotId(id))
         for (peer in peers) transport.send(peer, marker.setTo(peer.name).build())

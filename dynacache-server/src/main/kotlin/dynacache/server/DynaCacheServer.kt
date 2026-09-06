@@ -346,11 +346,12 @@ fun main(args: Array<String>) {
     val positional = args.filterNot { it.startsWith("--") }
     val port = positional.getOrNull(0)?.toInt() ?: 6379
     val partitionCount = positional.getOrNull(1)?.toInt() ?: 16
-    if ("peers" in flags) return clusterMain(flags, port, partitionCount)
+    val dir = positional.getOrNull(2)?.let(Path::of)
     val fsync = positional.getOrNull(3)?.let(FsyncPolicy::valueOf) ?: FsyncPolicy.EVERY_SECOND
+    if ("peers" in flags) return clusterMain(flags, port, partitionCount, dir, fsync)
     val clock = Clock.systemUTC()
     val engine = ApEngine(partitionCount, clock)
-    val snapshots = positional.getOrNull(2)?.let { SnapshotEngine(engine, Path.of(it), clock, fsync = fsync) }
+    val snapshots = dir?.let { SnapshotEngine(engine, it, clock, fsync = fsync) }
     snapshots?.restore()
     val cp = cpNode(positional.getOrNull(4), positional.getOrNull(5), clock)
     val server = DynaCacheServer(port, engine, cp?.engine, clock = clock) {
