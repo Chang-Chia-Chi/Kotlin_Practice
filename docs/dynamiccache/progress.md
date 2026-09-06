@@ -3867,3 +3867,105 @@ can install the same key concurrently with a `Replicate`, the same unguarded pai
 with (version set, then value written). `ranges` is computed once from the immutable ring.
 `InProcessCluster.antiEntropyStep` launches `tick` on the cluster scope and drains; a full
 cycle at N=3 is 384 steps and ran in about a second with two partitions per node.
+
+## T26: Read repair
+
+**Built:** Spec 5.2 step 5 inside `Replication`, at the hook T22 left where `divergentReads`
+is incremented. `read` now keeps its R answers by node; after the winner is chosen, every
+answer whose version is null or dominated by the winner's is *behind*, and the repair for
+those nodes is launched on the node's `scope` after the reply is decided, so the client never
+waits for it. The repair is the winner's job, since only the winner holds the value (the
+coordinator has just a reply): when the winner is the coordinator it `push`es directly; when
+it is another replica the coordinator sends it a `Repair` (`cluster.proto` field 25: key and
+target nodes) and that node pushes. `push` reads the key's version, takes the engine's live
+copy through `view` (T28's `ApEngine.view(keys)`), re-reads the version and gives up if it
+moved (a write bumps the version first and applies second, so a moved version means the pair
+may not match and that write's own `Replicate` carries the fresh one), then sends one
+`Version` (T28's message, reused as the `replicate_value` oneof case, field 24) per target:
+key, the value as `encodeValue` writes it, the DVV, the TTL as an instant. An empty value is a
+tombstone (the winner holds a version and no value: a `DEL` the target missed). The receiving
+end, `installValue`, decodes first (bytes that do not decode are dropped whole), applies spec
+5.3's rule (taken only when the remote version dominates what is held; equal, older and
+concurrent are left alone), stores the version, then installs through T28's
+`ApEngine.install(Stored)` or, for a tombstone or a value already past its deadline, a `DEL`
+through the wrapped engine. `Replication` gains two constructor lambdas, `view` and `install`,
+because it wraps a `CommandEngine` and the value path is `ApEngine`'s; `InProcessCluster`
+wires them to the node's engine. Counters: `divergentReads` (unchanged) and `repairsSent`
+(replicas a read on this coordinator found behind, counted when the repair is decided).
+`Replication.receive` demuxes `REPLICATE_VALUE` and `REPAIR`. Test kit: `seed(node, write,
+dvv)` overload taking any keyed write (so a replica can hold a hash under a version),
+`TokenCodec` learned `HGET`, `GrpcTransportTest` round-trips both new cases. CONTEXT.md gains
+"read repair" (with "sibling"). Net against `misc/ai_gen` after the merge: 8 files, 288
+insertions, 10 deletions; `mvn -B -o -q clean package` offline green: engine 144, cluster 80,
+cp 66, server 79.
+
+**Concepts named:** **Read repair** is what a coordinator does after a quorum read whose
+answers did not all carry the winning version: the replica that holds the winner pushes its
+value and version to every replica the winner dominates, after the client has its reply and
+never in its way. A replica whose version is concurrent with the winner's is a **sibling** and
+is left alone for the merge. A **tombstone** is a version with no value under it. No new seam:
+the value path is the engine's own (`view`/`install`, T28), reached through two lambdas the
+way `tokens` and `parse` already are; the second adapter of those lambdas is the C4 test's
+stub over `RecordingEngine`.
+
+**Acceptance:**
+- `read_repair_fixes_stale`: N=3, W=1, R=3 (R = N so the stale replica is certain to be among
+  the answers); the coordinator and one replica seeded "fresh" under the newer version, the
+  other replica "stale" under the older; a read through the stale replica's contact answers
+  "fresh" (red first: after the drain the stale replica still held "stale"); after
+  `drainMessages` all three hold "fresh" under the newer version, `divergentReads` 1,
+  `repairsSent` 1.
+- `read_repair_skips_concurrent_siblings`: one replica seeded under a dot of its own, the
+  other two under the coordinator's; the read answers the `lastWriter` winner; after the drain
+  every node holds exactly what it was seeded, `repairsSent` 0. Green on first run; checked by
+  mutation (treating "not dominated by" as behind fails it, count 3).
+- `read_repair_repairs_a_hash`: the winner is a replica holding `HSET f1 new f2 added` under
+  the newer version, the coordinator and the third node hold `HSET f1 old` under the older; an
+  `HGET f1` through the third node answers "new" (red first: the test kit had no wire form for
+  `HGET`, then the field order of a rebuilt hash differed, compared as a map since); after the
+  drain all three answer the same fields and version, `repairsSent` 2. This is the `Repair`
+  path: the coordinator asked the winner to push.
+- `read_repair_does_not_delay_reply`: the C4 harness, N=2, W=1, R=2: the coordinator runs
+  `Replication` over a real `ApEngine`, its one replica is a bare endpoint that answers the read
+  holding nothing and never acknowledges anything; the reply is done at virtual time zero right
+  after that answer (checked by mutation: an inline repair with a `delay(deadline)` fails it),
+  and the `Version` then reaches the endpoint under the coordinator's version.
+- Every earlier test green, `GrpcTransportTest` included.
+- This entry.
+
+**Deviations:**
+1. **Value path (a), by way of T28.** This branch first built its own path (`ValueCodec`
+   object, `ApEngine.export`/`install(key, bytes?, expiresAt)` through `Partition.write`, a
+   `ReplicateValue` message). The merge of `misc/ai_gen` brought T28's `encodeValue`/
+   `decodeValue` (same encoding, same file name, add/add conflict), `Stored`,
+   `ApEngine.view`/`install` and the `Version` message, all the same thing; the merge commit
+   keeps T28's and drops mine, so the engine is untouched by T26 after the merge and one value
+   path exists. `Version` doubles as the repair body; only `Repair` is a message of T26's own.
+2. **An installed value is not WAL-logged** (T28's `install` is a restore-shaped write; a
+   node that recovers from its log is handed it again by the next read or anti-entropy round).
+   A tombstone repair is a `DEL` through the engine and is logged. Debt: a value op in
+   `WalCodec` would make the two alike.
+3. **The value is decoded with `Random(dvv.dot.counter)`** as T28 does, so a restored sorted
+   set's skip-list levels are the same on every node that installs the same version.
+4. **`repairsSent` counts at the coordinator when the repair is decided**, not when a
+   `Version` leaves; with a remote winner the coordinator sends one `Repair` and the winner
+   sends the `Version`s. `INFO` is not wired (as with `hintCount`, T25).
+5. **A repair that arrives expired, or a tombstone, deletes the loser's key** rather than
+   leaving a stale value under the new version. A value whose bytes do not decode is ignored
+   with its version, so a bad peer cannot bump a version over a value it did not deliver.
+6. **`push` re-reads the version after taking the value** and gives up if it moved, rather
+   than taking value and version in one engine task (the engine does not hold versions). The
+   same window exists in `answer` and in `read`'s local answer since T22 and is not widened.
+7. `read_repair_skips_concurrent_siblings` was green on its first run and is recorded as
+   such with its mutation check, rather than a faked red.
+
+**For the next ticket:** the repair has no ack and waits for nothing: a lost `Version` is
+repaired by the next divergent read or by anti-entropy (T28), so a repair counter on the
+receiving side does not exist. T30's chaos driver can read `repairsSent` per node. Read repair
+and anti-entropy now share `Version`, `encodeValue`/`decodeValue` and `ApEngine.install`; if
+T29's merge is ever applied on the repair path (a concurrent `Version` merged instead of left
+alone), `installValue` is the place and `AntiEntropy.reconcile` the model. The C4 harness in
+`ReadRepairTest` (a `Replication` over a real engine with bare endpoints) is the way to observe
+"the reply is done before X" under `runTest`, since `InProcessCluster.drainMessages` is a
+fixpoint that delivers the repair too. `seed(node, write, dvv)` takes any keyed write the
+test kit's `TokenCodec` knows; `HGET` was added, `HGETALL` and `HSET` already were.

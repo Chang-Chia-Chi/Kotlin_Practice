@@ -8,11 +8,11 @@ repair fan-out is bounded and never delays the client reply.
 
 **Nature:** asynchronous convergence step, spec 5.2 step 5 (Fable)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache d20d27e + merge 47434e7, merged into misc/ai_gen)
 
-- [ ] `read_repair_fixes_stale`: one replica forced stale, a read, then every replica equal
-- [ ] `read_repair_does_not_delay_reply`, `read_repair_skips_concurrent_siblings`
-- [ ] Progress entry appended
+- [x] `read_repair_fixes_stale`: one replica forced stale, a read, then every replica equal
+- [x] `read_repair_does_not_delay_reply`, `read_repair_skips_concurrent_siblings`
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket, stubs throwing NotImplementedError
 for later seams; 200 to 600 lines including tests; JUnit 5 + Mockito only, no AssertJ or MockK;
