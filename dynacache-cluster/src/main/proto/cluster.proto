@@ -30,6 +30,10 @@ message Envelope {
     MerkleRootReply merkle_root_reply = 21;
     KeySync key_sync = 22;
     KeySyncReply key_sync_reply = 23;
+    // Read repair (T26): the winning Version pushed to a replica behind it; an empty value is a
+    // tombstone (the winner holds nothing under that version).
+    Version replicate_value = 24;
+    Repair repair = 25;
   }
 }
 
@@ -115,6 +119,14 @@ message ReadReply {
 // record its state and send its own markers; every one closes the channel it arrived on.
 message Marker {
   string snapshot_id = 1;
+}
+
+// Read repair (spec 5.2 step 5, T26): the coordinator's request to the replica that won a read
+// to push its Version of `key` to `target`, the replicas the read found behind. Only the winner
+// holds the value, so it sends; a replica applies a Version only when it dominates what it holds.
+message Repair {
+  bytes key = 1;
+  repeated string target = 2;
 }
 
 // A command a contact node hands to the key's coordinator (spec 5.1 step 3). The tokens are

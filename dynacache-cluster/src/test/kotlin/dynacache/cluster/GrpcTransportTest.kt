@@ -14,6 +14,7 @@ import dynacache.cluster.proto.Ping
 import dynacache.cluster.proto.PingReq
 import dynacache.cluster.proto.Read
 import dynacache.cluster.proto.ReadReply
+import dynacache.cluster.proto.Repair
 import dynacache.cluster.proto.Replicate
 import dynacache.cluster.proto.ReplicateAck
 import dynacache.cluster.proto.ReplyMsg
@@ -119,6 +120,10 @@ class GrpcTransportTest {
                 KeySync.newBuilder().setId(7).addKey(ByteString.copyFromUtf8("k")).addVersion(version())
             )
             Envelope.BodyCase.KEY_SYNC_REPLY -> envelope.setKeySyncReply(KeySyncReply.newBuilder().setId(7).addVersion(version()))
+            Envelope.BodyCase.REPLICATE_VALUE -> envelope.setReplicateValue(version())
+            Envelope.BodyCase.REPAIR -> envelope.setRepair(
+                Repair.newBuilder().setKey(ByteString.copyFromUtf8("k")).addTarget("charlie")
+            )
             Envelope.BodyCase.BODY_NOT_SET -> throw AssertionError("BODY_NOT_SET is not a message type")
         }
         return withBody.build()

@@ -9,6 +9,7 @@ import java.time.Clock
 import java.time.Duration
 import java.time.Instant
 import java.time.ZoneOffset
+import java.util.concurrent.CompletableFuture
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.yield
@@ -126,6 +127,8 @@ class ReplicationTest {
             clock = Clock.fixed(Instant.EPOCH, ZoneOffset.UTC),
             tokens = TokenCodec::tokens,
             parse = TokenCodec::command,
+            view = { CompletableFuture.completedFuture(null) },
+            install = { CompletableFuture.completedFuture(null) },
             scope = backgroundScope,
         )
         backgroundScope.launch { for (envelope in network.endpoint(coordinator).inbound) replication.receive(envelope) }

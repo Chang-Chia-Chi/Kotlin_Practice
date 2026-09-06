@@ -4,16 +4,22 @@ import com.google.protobuf.ByteString
 import dynacache.cluster.proto.Envelope
 import dynacache.cluster.proto.Read
 import dynacache.cluster.proto.ReadReply
+import dynacache.cluster.proto.Repair
 import dynacache.cluster.proto.Replicate
 import dynacache.cluster.proto.ReplicateAck
+import dynacache.cluster.proto.Version
 import dynacache.engine.Command
 import dynacache.engine.CommandEngine
 import dynacache.engine.Key
 import dynacache.engine.PartitionContext
 import dynacache.engine.Reply
+import dynacache.engine.Stored
+import dynacache.engine.persist.decodeValue
+import dynacache.engine.persist.encodeValue
 import java.time.Clock
 import java.time.Instant
 import java.util.concurrent.CompletableFuture
+import java.util.Random
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.time.Duration
@@ -21,6 +27,7 @@ import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.future.future
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 
 /** Spec 2.4's quorum settings, checked once so C4's arithmetic holds for every request. */
@@ -44,9 +51,15 @@ data class ReplicationConfig(val n: Int, val w: Int, val r: Int) {
  * and answers with the version that dominates (C4). Plan 2.5: every fan-out goes to at most N-1
  * nodes and waits at most [deadline]. A write whose replica is dead goes to the next healthy
  * node on the ring instead, which keeps it as a hint in [hints] and hands it back when the
- * replica returns (spec 2.4 sloppy quorum, spec 5.1 step 7). Read repair is T26.
+ * replica returns (spec 2.4 sloppy quorum, spec 5.1 step 7). A read that finds a replica behind
+ * the winning version has the winner push its value there afterwards (spec 5.2 step 5): the
+ * value crosses as the engine encodes it, through [view] and [install], and a version
+ * concurrent with the winner's is left alone.
  *
  * @param membership the gossip's view; a replica it holds dead is not asked.
+ * @param view the engine's live copy of one key, null when absent (`ApEngine.view`).
+ * @param install puts such a copy on the engine (`ApEngine.install`, not WAL-logged); a repair
+ * that removes a key goes through a `DEL` on [engine] instead.
  * @param deadline how long a quorum may take to form. Shorter than the router's forward
  * deadline, so a contact reports the quorum error and not its own timeout.
  * @param replayBatch how many hints one handoff round sends before waiting for their acks.
@@ -62,6 +75,8 @@ class Replication(
     private val clock: Clock,
     private val tokens: (Command) -> List<ByteArray>,
     private val parse: (List<ByteArray>) -> Command,
+    private val view: (Key) -> CompletableFuture<Stored?>,
+    private val install: (Stored) -> CompletableFuture<*>,
     private val scope: CoroutineScope,
     private val deadline: Duration = 1.seconds,
     private val replayBatch: Int = 64,
@@ -79,8 +94,11 @@ class Replication(
     /** How many hints this node holds for others: what `INFO` reports. */
     val hintCount: Int get() = hints.size
 
-    /** Reads whose R replies did not all carry the winning version: what read repair (T26) pushes on. */
+    /** Reads whose R replies did not all carry the winning version. */
     val divergentReads = AtomicLong()
+
+    /** Replicas a read on this coordinator found behind and had the winning version sent to (spec 5.2 step 5). */
+    val repairsSent = AtomicLong()
 
     /** The version this node holds for [key], null when it never stored one. */
     fun version(key: Key): Dvv? = versions[key]
@@ -127,7 +145,8 @@ class Replication(
     /**
      * Spec 5.2 steps 1 to 4: this node's answer and R-1 replicas' answers, each with the version
      * it came from; the dominating version wins, and two concurrent ones fall to spec 2.5's
-     * tiebreak ([lastWriter]). Divergence is counted, not repaired (T26).
+     * tiebreak ([lastWriter]). Step 5: every replica the winner's version dominates is repaired
+     * on its own coroutine, so the reply never waits for it; a concurrent sibling is not.
      */
     private suspend fun read(command: Command.Keyed): Reply {
         val mine = engine.submit(command).await() to versions[command.key]
@@ -135,12 +154,58 @@ class Replication(
         val body = Read.newBuilder().addAllToken(tokens(command).map(ByteString::copyFrom))
         val replies = gather(command.key, config.r - 1, sloppy = false) { id, _ -> Envelope.newBuilder().setRead(body.setId(id)) }
         if (replies.size < config.r - 1) return quorumError("read", config.r, replies.size + 1)
-        val answers = listOf(mine) + replies.values.map { it.readReply }.map {
+        val answers = mapOf(self to mine) + replies.mapValues { (_, envelope) ->
+            val it = envelope.readReply
             ReplyWire.decode(it.reply) to (if (it.dvv.isEmpty) null else Dvv.decode(it.dvv.toByteArray()))
         }
-        val winner = answers.reduce { best, next -> if (newer(next.second, best.second)) next else best }
-        if (answers.any { it.second != winner.second }) divergentReads.incrementAndGet()
-        return winner.first
+        val (winner, best) = answers.entries.reduce { best, next -> if (newer(next.value.second, best.value.second)) next else best }
+        val top = best.second
+        if (answers.values.any { it.second != top }) divergentReads.incrementAndGet()
+        val behind = answers.filterValues { (_, held) -> top != null && (held == null || top.dominates(held)) }.keys
+        if (behind.isNotEmpty()) {
+            repairsSent.addAndGet(behind.size.toLong())
+            scope.launch { repair(command.key, winner, behind) }
+        }
+        return best.first
+    }
+
+    /** Spec 5.2 step 5: the winner pushes its value to [behind]; asked to, when the winner is another node. */
+    private suspend fun repair(key: Key, winner: NodeId, behind: Collection<NodeId>) {
+        if (winner == self) push(key, behind)
+        else send(winner, Envelope.newBuilder().setRepair(Repair.newBuilder().setKey(ByteString.copyFrom(key.bytes)).addAllTarget(behind.map { it.name })))
+    }
+
+    /**
+     * Ships this node's value under [key] with its version to [targets]. The version is read
+     * before and after the engine hands the value out: a write bumps the version first and
+     * applies second, so a version that moved means the two may not match, and that write's
+     * own replication carries the fresh pair anyway. No value under a version is a tombstone.
+     */
+    private suspend fun push(key: Key, targets: Collection<NodeId>) {
+        val before = versions[key] ?: return
+        val held = view(key).await()
+        if (versions[key] != before) return
+        val body = Version.newBuilder().setKey(ByteString.copyFrom(key.bytes)).setDvv(ByteString.copyFrom(before.encode()))
+            .setValue(held?.let { ByteString.copyFrom(encodeValue(it.value)) } ?: ByteString.EMPTY)
+            .setExpiresAtMillis(held?.expiresAt?.toEpochMilli() ?: 0L)
+        for (target in targets) send(target, Envelope.newBuilder().setReplicateValue(body))
+    }
+
+    /**
+     * The receiving end of a repair: taken only when its version dominates what is held (spec
+     * 5.3), so a sibling stays. A tombstone, or a value already past its deadline, deletes the
+     * key; bytes that do not decode are ignored whole, version included.
+     */
+    private suspend fun installValue(request: Version) {
+        val key = Key(request.key.toByteArray())
+        val remote = runCatching { Dvv.decode(request.dvv.toByteArray()) }.getOrNull() ?: return
+        val expiresAt = if (request.expiresAtMillis == 0L) null else Instant.ofEpochMilli(request.expiresAtMillis)
+        val gone = request.value.isEmpty || (expiresAt != null && clock.instant().isAfter(expiresAt))
+        val value = if (gone) null else (runCatching { decodeValue(request.value.toByteArray(), Random(remote.dot.counter)) }.getOrNull() ?: return)
+        val held = versions[key]
+        if (held != null && !remote.dominates(held)) return
+        versions[key] = remote
+        if (value == null) engine.submit(Command.Del(key)).await() else install(Stored(key, value, expiresAt)).await()
     }
 
     private fun newer(candidate: Dvv?, best: Dvv?): Boolean = when {
@@ -238,6 +303,8 @@ class Replication(
             Envelope.BodyCase.READ -> answer(NodeId(envelope.from), envelope.read)
             Envelope.BodyCase.REPLICATE_ACK -> gathers[envelope.replicateAck.id]?.offer(NodeId(envelope.from), envelope)
             Envelope.BodyCase.READ_REPLY -> gathers[envelope.readReply.id]?.offer(NodeId(envelope.from), envelope)
+            Envelope.BodyCase.REPLICATE_VALUE -> installValue(envelope.replicateValue)
+            Envelope.BodyCase.REPAIR -> push(Key(envelope.repair.key.toByteArray()), envelope.repair.targetList.map(::NodeId))
             else -> return false
         }
         return true

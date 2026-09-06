@@ -23,6 +23,7 @@ object TokenCodec {
         is Command.Exists -> listOf(name("EXISTS"), command.key.bytes)
         is Command.IncrBy -> listOf(name("INCRBY"), command.key.bytes, name(command.delta.toString()))
         is Command.HSet -> listOf(name("HSET"), command.key.bytes) + command.entries.flatMap { listOf(it.first, it.second) }
+        is Command.HGet -> listOf(name("HGET"), command.key.bytes, command.field)
         is Command.HGetAll -> listOf(name("HGETALL"), command.key.bytes)
         else -> throw IllegalArgumentException("the test kit's codec has no wire form for $command")
     }
@@ -40,6 +41,7 @@ object TokenCodec {
             "EXISTS" -> Command.Exists(Key(tokens[1]))
             "INCRBY" -> Command.IncrBy(Key(tokens[1]), tokens[2].decodeToString().toLong())
             "HSET" -> Command.HSet(Key(tokens[1]), tokens.drop(2).chunked(2).map { it[0] to it[1] })
+            "HGET" -> Command.HGet(Key(tokens[1]), tokens[2])
             "HGETALL" -> Command.HGetAll(Key(tokens[1]))
             else -> throw IllegalArgumentException("the test kit's codec does not know $verb")
         }
