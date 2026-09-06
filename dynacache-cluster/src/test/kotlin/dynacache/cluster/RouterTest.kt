@@ -43,9 +43,10 @@ class RouterTest {
         assertEquals(1, engine.submitted.size)
     }
 
+    /** N = 1 so the contact is no replica of the key: what lands on its engine got there by not forwarding. */
     @Test
     fun router_forwards_to_coordinator() = runTest {
-        val cluster = InProcessCluster(nodeCount = 3, n = N, w = 2, r = 2, scope = backgroundScope)
+        val cluster = InProcessCluster(nodeCount = 3, n = 1, w = 1, r = 1, scope = backgroundScope)
         val coordinator = cluster.ring.preferenceList(key, N).first()
         val contact = cluster.nodes.first { it != coordinator }
 
