@@ -9,12 +9,12 @@ partition plus the inner cursor, and `HSCAN`. `ZSCAN` waits for ticket 07.
 
 **Nature:** iteration under mutation, C15 (Fable)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache 72089fd + merge 71692db, merged into misc/ai_gen)
 
-- [ ] `scan_returns_all_keys`, `scan_cursor_zero_terminates`, `scan_match_filters`, `scan_during_rehash_no_miss`, `scan_may_duplicate`, `incremental_rehash_no_block`, `hashtable_put_get_remove`
-- [ ] `C15_scan_completeness`: a seeded insert and delete storm during a scan; every key present throughout is returned at least once
-- [ ] No single operation migrates more than one bucket
-- [ ] Progress entry appended
+- [x] `scan_returns_all_keys`, `scan_cursor_zero_terminates`, `scan_match_filters`, `scan_during_rehash_no_miss`, `scan_may_duplicate`, `incremental_rehash_no_block`, `hashtable_put_get_remove`
+- [x] `C15_scan_completeness`: a seeded insert and delete storm during a scan; every key present throughout is returned at least once
+- [x] No single operation migrates more than one bucket
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket, stubs throwing NotImplementedError
 for later seams; 200 to 600 lines including tests; JUnit 5 + Mockito only, no AssertJ or MockK;

@@ -1154,3 +1154,98 @@ Full `clean package` is green: engine 54, cluster 33, cp 11, server 16.
 - `CpTestKit.leader()` waits on the leadership futures of the members alive at the time. It is
   correct for a first election; T40's failover tests will want it to notice a *new* leader after
   the old one is killed, which means resetting the future rather than reusing a completed one.
+
+## T05: Hash table with incremental rehash, SCAN family
+
+**Built:** `dynacache.engine.ds.HashTable<K, V>`, a hand-built open hash table after Redis's
+`dict.c`: power-of-two bucket arrays with chaining, `get`, `put` (answers the replaced value),
+`remove`, `size`, `clear`, `entries()` (a lazy sequence over both arrays), `scan(cursor, visit)`
+and `randomKey(random)`. Growth starts when the load factor passes 1 and shrink when it falls
+under 1/8 (never below four buckets): a second array is allotted and every following `get`,
+`put` or `remove` migrates exactly one bucket of the old array into it (`_dictRehashStep`),
+the last one swapping the arrays. A lookup meanwhile reads both arrays; an insert of a new key
+lands in the new one. `scan` is `dictScan`'s reverse binary iteration over both arrays, so
+growing or shrinking mid-walk never skips a bucket, and it neither mutates nor steps the rehash.
+`randomKey` samples a random bucket of a random array and a random node of its chain (Redis's
+own bias, named in the doc). The table replaces the `HashMap<Key, Entry>` behind every
+partition store and the `LinkedHashMap` behind `Value.Hash`.
+
+`Command.Scan(cursor, pattern?, count)` and `Command.HScan(key, cursor, pattern?, count)`.
+`SCAN` walks one partition per call: the cursor carries the partition index in its high 32 bits
+and that partition's own cursor in the low 32, 0 starts, a partition that hands back 0 is done
+and the next call starts the next partition, the last partition's 0 is the walk's, and a
+cursor past the last partition answers done. Each call walks buckets until at least `COUNT`
+entries came out or the partition wrapped, then `MATCH` (T04's `globMatches`) filters, exactly
+Redis's loop, so a call may answer few or no keys with a non-zero cursor. Expired keys are
+skipped, not deleted, during a walk. `HSCAN` is the same walk over one hash's field table,
+replying `[cursor, [field, value, ...]]`; a missing key is `["0", []]`; a String key is
+`WRONGTYPE` through the existing C13 check. `ZSCAN` waits for T07.
+
+**Concepts named:** `HashTable` is the engine's own key map; `rehashProgress` is its one piece
+of public rehash state (`NOT_REHASHING` or the next bucket to migrate), there so a test can
+prove the one-bucket-per-operation rule from outside. `scan`'s contract is C15 in one sentence:
+every key present for the whole walk is visited at least once, a shrink may repeat one, the
+table keeps nothing between calls. `Command.Scan` is the fourth command shape T04 predicted:
+not `Keyed`, not `Fanned`, not `EveryPartition`, because it visits one partition per call, so
+`ApEngine.scan` splits the cursor and `Partition.scan` hands back `(nextCursor, found)` rather
+than a `Reply` the engine would have to parse. `Partition.walk` is the Redis `COUNT` loop,
+shared by `SCAN` and `HSCAN`; `Partition.scanReply` is the family's reply shape. Seams
+unchanged: `CommandEngine`, `PartitionContext`, `Reply`, `Key`, `PartitionId` are exactly T01's.
+
+**Acceptance:**
+- `hashtable_put_get_remove` (HashTableTest): new key answers null, overwrite answers the old
+  value, remove twice removes once, entries and clear.
+- `incremental_rehash_no_block` (HashTableTest): fill until `rehashProgress` becomes 0, then
+  each read is one step and `rehashProgress` equals the number of reads so far; every key is
+  reachable mid-rehash and after the swap; the rehash took more than one operation.
+- `no_single_operation_migrates_more_than_one_bucket` (HashTableTest): a seeded 20,000-op
+  put/remove storm against a shadow `HashMap`; after every op the progress is unchanged,
+  finished, freshly started at 0, or exactly one more than before.
+- `scan_during_rehash_no_miss` (HashTableTest): 100 keys, then ten inserts between every two
+  scan calls so growth runs mid-walk; all 100 come out.
+- `scan_may_duplicate` (HashTableTest): 1,024 keys, the first call deletes all but 16 so the
+  table shrinks mid-walk; every survivor comes out, at least one comes out twice, and nothing
+  else does.
+- `scan_returns_all_keys`, `scan_cursor_zero_terminates`, `scan_match_filters`
+  (CommandEngineTest): 200 keys across all four partitions, an expired key absent; COUNT 5
+  takes several calls and COUNT 1,000 takes one per partition; `Long.MAX_VALUE` is done; MATCH
+  with `*`, `?` and a pattern matching nothing.
+- `C15_scan_completeness` (CommandEngineTest): 300 stable keys plus 500 churn keys, and between
+  every two `SCAN COUNT 3` calls a seeded storm of 40 random `SET`/`DEL` over 2,000 churn
+  names; the walk took over 50 calls, every stable key came out, and no key that was never
+  written did.
+- `HSCAN walks one hash, MATCH and COUNT included` (CommandEngineTest).
+- No single operation migrates more than one bucket: the two HashTableTest rehash tests above,
+  through `rehashProgress`.
+- Every T01 to T04 test still green. `mvn -o clean package`: engine 76, cluster 39, server 16.
+- This entry.
+
+**Deviations:** None against the spec, the ticket or the frozen types. Five judgement calls.
+1. **`HGETALL`, `HKEYS` and `HVALS` tests compare as sets now.** The field map is the bucket
+   table, so fields come out in bucket order, which is what Redis does too (it defines no order
+   for the three). The three assertions in `hash_getall_complete` and the `HMSET, HMGET, ...`
+   test were rewritten with the reason in a comment; nothing else in those tests changed.
+2. **A rehash step migrates one bucket whether or not it is empty**, where Redis skips up to
+   ten empty buckets per step. That makes "one bucket per operation" exact and testable through
+   `rehashProgress` (it advances by exactly one), at the cost of a rehash of N buckets taking N
+   operations rather than fewer.
+3. **An empty partition still costs one `SCAN` call**: the walk of an empty keyspace on four
+   partitions is four calls. Redis answers in one. Walking on into the next partition inside one
+   call is the repair if a client ever minds; it needs the engine to chain partition futures.
+4. **`randomKey` is bucket-sampled**, so a key in a short chain is likelier than one in a long
+   chain, Redis's own bias; T04's `RANDOMKEY` was O(n) uniform per partition, this is O(1)
+   expected. The T04 tests (`randomkey_nil_when_empty` and its companion) still pass unchanged.
+5. **`purgeExpired` collects the doomed keys first and then removes them**, since the table's
+   `entries()` must not be mutated while walked; the sweep is still the T04 ponytail ceiling
+   that T09's wheel retires.
+
+**For the next ticket:** `Partition.execute` answers `error(...)` for `Command.Scan`, because
+`SCAN` runs through `Partition.scan` (it needs the cursor back, not a `Reply`); T14's
+`PartitionContext.execute` must not be handed a `Scan`, and a batch has no reason to. T07's
+`ZSCAN` should be one more branch beside `HScan` using `walk` over the sorted set's member
+table with the score as the value. T09: `Partition.scan` reads the clock once and skips expired
+entries with `Entry.expired(now)` without deleting them; when the wheel removes expired keys
+this filter can stay as the lazy backstop. `HashTable.entries()` is lazy and the table must not
+be mutated during it. Keep an eye on `HashTable.spread`: it is `hashCode` with the high bits
+folded down, so a `Key` hashes by its whole bytes (not by hash tag), which is right for a
+per-partition table. `atomically` is still `TODO("T14: batches")`.
