@@ -21,6 +21,7 @@ import dynacache.engine.Key
 import dynacache.engine.PartitionContext
 import dynacache.engine.Reply
 import dynacache.engine.install
+import dynacache.engine.persist.DotCeilingStore
 import dynacache.engine.persist.FsyncPolicy
 import dynacache.engine.persist.SnapshotEngine
 import dynacache.engine.view
@@ -95,7 +96,15 @@ class ClusterNode(
 
     private val engine = ApEngine(partitionCount, clock, maxMemoryBytes = maxMemoryBytes, policy = policy)
     private val wire = GrpcTransport(self, addresses, grpcPort)
-    private val counter = DotCounter.of(self, emptyList())
+    /**
+     * This node's dots resume above the ceiling it last reserved at `<dataDir>/dots` (T51), so a
+     * restart never re-stamps a write with a dot its replicas already hold. A node with no data
+     * directory forgets its ceiling as it forgets its keys; the version table itself is not
+     * persisted yet, so the scan the counter also takes as a floor is empty here.
+     */
+    private val counter = DotCounter.of(
+        self, emptyList(), dataDir?.let { DotCeilingStore.inFile(it.resolve(DOT_CEILING_FILE)) } ?: DotCeilingStore.inMemory(),
+    )
 
     private val swim = Swim(
         self = self,
@@ -293,6 +302,7 @@ class ClusterNode(
 
     private companion object {
         const val CRLF = "\r\n"
+        const val DOT_CEILING_FILE = "dots"
     }
 }
 
