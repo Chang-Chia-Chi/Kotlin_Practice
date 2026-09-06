@@ -853,3 +853,88 @@ the inbox, in that order, so an in-flight `deliver` is not cut off by a closed c
 `cluster.proto` will break `GrpcTransportTest` compilation by design: add the branch, do not
 add an `else`. `HostPort` is deliberately plain; if a node ever needs TLS or a name rather than
 an address, that is where it goes, and `Grpc.newChannelBuilder` already takes credentials.
+
+## T20: SWIM gossip membership
+
+**Built:** `dynacache.cluster.Membership` is the seam: `members: Map<NodeId, Member>` where
+`Member(node, state, incarnation)` and `MemberState` is `ALIVE`, `SUSPECT`, `DEAD`; `alive`,
+`suspect` and `dead` are derived sets; `changes: Flow<Member>` emits every row that changes.
+`dynacache.cluster.Swim(self, peers, transport, random, incarnation, period, k, rttTicks,
+suspectTicks)` is the one production adapter: a per-node SWIM failure detector and table driven
+by `tick()`, one protocol period per call, and `run()` for production (tick, delay a period,
+forever, on the node's one gossip coroutine). `cluster.proto` gains `Ack { seq }`,
+`PingReq { seq, target }` in the `oneof body` (fields 11, 12; a comment reserves 100 and above)
+and `repeated MembershipEntry membership = 3` on `Envelope` (node, state, incarnation).
+`ScriptedMembership(nodes)` in the cluster module's test sources is the test kit's adapter:
+every node alive until `set(node, state, incarnation)`. Six tests in `SwimTest`. `mvn clean
+package` offline green: engine 44, cluster 31, server 16. Five files, 392 lines including the
+proto and tests.
+
+**Concepts named:** A **tick** is one protocol period. Each tick a node first handles what
+arrived (merges the piggyback, acks pings, relays ping-reqs, forwards relayed acks), then
+escalates its open **probes**: a direct ping with no ack after `rttTicks` becomes a **ping-req**
+through `k` random intermediaries, and no ack after `2 * rttTicks` more (the indirect path is
+two hops each way) makes the target **suspect**; a suspect not refuted within `suspectTicks`
+is **dead**; then it pings one random non-dead peer. A probe records the incarnation it was
+aimed at, and its suspicion names that incarnation, so a stale probe never re-suspects a node
+that has re-incarnated since. The **piggyback** is the whole table on every envelope
+(ponytail: a recency-bounded set if N grows). **Merge** is the ticket's rule as a comparator:
+higher incarnation wins, at equal incarnation dead > suspect > alive, and a losing or equal row
+is ignored, so an alive rumour never clears a suspicion at the same incarnation. Hearing itself
+suspect or dead at an incarnation at or above its own, a node **refutes** by taking that
+incarnation plus one; the next envelope it sends carries the refutation. Each node runs its own
+suspect timer from the moment it learns of a suspicion, whether by its own probe or by gossip.
+The `Membership` seam has its two adapters (SWIM and the scripted fake), exactly plan 2.3.
+
+**Acceptance:**
+- `gossip_detects_failure`: 5 nodes, the last one killed (network `kill` and no more ticks);
+  every survivor holds it dead at incarnation 0 within `(N-1) + 3*rtt + T + 4*log2(N)` rounds
+  (a round is a tick on every live node then a full network drain), nobody holds a suspect, and
+  node-1's change flow saw exactly suspect then dead.
+- `gossip_detects_recovery`: after that, `restart` on the network and a new `Swim` at
+  incarnation 1 on the same endpoint; every node holds it alive at incarnation 1 within
+  `4*log2(N)` rounds and every node's alive set is the whole cluster.
+- `I8_membership_change_reaches_all_within_log_n_rounds`: 5 and 7 nodes, seeded by N, c = 4
+  (`C` in the test). Death: rounds from the first survivor holding the victim dead until all do,
+  measured 1 (N=5) and 2 (N=7) against bounds 10 and 12. Recovery, which starts at exactly one
+  node and so measures dissemination alone: 3 (N=5) and 5 (N=7) against the same bounds.
+- `gossip_suspect_refuted_by_incarnation`: 3 nodes, T = 10; an envelope from the witness's
+  endpoint carrying "accused suspect at 0" reaches the accuser, who adopts it; within T-1 rounds
+  every node holds the accused alive at incarnation 1 and no one holds a suspect or a dead.
+  Checked by mutation: with self-refutation disabled the test fails.
+- `gossip_ping_req_masks_one_lost_link`: 3 nodes, k = 1, a network partition with the two
+  overlapping sides `{left, bridge}` and `{right, bridge}` (the left-right link is gone, the
+  bridge reaches both); after `4 * (3*rtt + T)` rounds everyone holds everyone alive at
+  incarnation 0. Checked by mutation: with k = 0 both ends declare each other dead and refute
+  in a loop.
+- `scripted_membership_answers_what_the_test_set`: the fake's view and change flow.
+- This entry.
+
+**Deviations:**
+- The membership piggyback is a repeated field on `Envelope`, not in the `oneof body` (a
+  repeated field cannot live in a oneof, and "on every message" means every envelope, so a
+  T19 `Forward` can carry it too once something reads it there).
+- The RTT bound is in ticks, as the ticket says, and the true request-reply RTT under explicit
+  stepping is 2 ticks (ping delivered in one drain, the ack sent on the target's next tick and
+  seen on the requester's tick after that), so `rttTicks = 2` is the tight setting and the
+  default. The indirect deadline is `2 * rttTicks` after the ping-req, not another `rttTicks`,
+  because the relayed path is two hops each way. `run()` acks inbound only when it ticks, so in
+  production the RTT bound is measured in periods too; a select loop that answers inbound as
+  it arrives would let it drop, and is the debt if a 1s period proves too slow to detect.
+- Tests drive `InMemoryTransport` directly rather than `InProcessCluster`: gossip needs
+  endpoints, not engines, and `InProcessCluster` builds an `ApEngine` per node.
+- `changes` is a `MutableSharedFlow` with a 1024 buffer that drops the oldest change on
+  overflow (marked `ponytail:`); the view is authoritative, so a reader that falls behind
+  re-reads `members`. A subscriber must be collecting before the change it wants to see.
+
+**For the next ticket:** T22 and T25 take a `Membership`; in tests `ScriptedMembership(nodes)`
+then `set(node, DEAD)` flips a replica out of `alive`. `Swim.tick()` reads the node's
+`Transport.inbound` with `tryReceive` and answers gossip bodies; anything else in the oneof it
+merges the piggyback of and drops, so the ticket that first puts two consumers on one inbound
+(T19's router and SWIM) owns the demux: hand gossip envelopes to a `Swim` method and the rest to
+the router. Kill a node in tests by `network.kill` and by no longer ticking it; restart it with
+`network.restart` and a fresh `Swim` at a higher incarnation, which is what a real restart is.
+Suspect and dead rows stay in the table (dead ones are never pinged), so a recovery is
+detected by the incarnation, not by re-adding; dynamic membership stays on the do-not-build
+list. `Swim.members` includes `self`. Value classes cannot be varargs, which is why the fake
+takes a `Collection<NodeId>`.

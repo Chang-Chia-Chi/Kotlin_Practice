@@ -10,12 +10,12 @@ coroutine per node in production, step-driven in tests.
 
 **Nature:** failure-detector state machine, I8 (Fable)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache 076b684 + merge 37735ce, merged into misc/ai_gen)
 
-- [ ] `gossip_detects_failure`, `gossip_detects_recovery`
-- [ ] `I8_membership_change_reaches_all_within_log_n_rounds` on 5 and 7 nodes, seeded
-- [ ] `gossip_suspect_refuted_by_incarnation`, `gossip_ping_req_masks_one_lost_link`
-- [ ] Progress entry appended
+- [x] `gossip_detects_failure`, `gossip_detects_recovery`
+- [x] `I8_membership_change_reaches_all_within_log_n_rounds` on 5 and 7 nodes, seeded
+- [x] `gossip_suspect_refuted_by_incarnation`, `gossip_ping_req_masks_one_lost_link`
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket, stubs throwing NotImplementedError
 for later seams; 200 to 600 lines including tests; JUnit 5 + Mockito only, no AssertJ or MockK;
