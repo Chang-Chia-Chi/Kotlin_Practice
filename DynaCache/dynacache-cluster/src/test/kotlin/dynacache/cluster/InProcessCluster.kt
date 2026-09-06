@@ -106,8 +106,6 @@ class InProcessCluster(
             n = n,
             local = replication,
             transport = transport,
-            tokens = TokenCodec::tokens,
-            parse = TokenCodec::command,
             scope = scope,
             others = { if (!replication.receive(it) && !antiEntropy.receive(it)) gossiped.getValue(node).add(it) },
             snapshots = snapshots.getValue(node)::receive,

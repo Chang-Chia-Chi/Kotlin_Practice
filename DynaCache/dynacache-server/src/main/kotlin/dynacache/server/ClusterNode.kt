@@ -151,8 +151,6 @@ class ClusterNode(
         n = config.n,
         local = replication,
         transport = NodeTransport(wire, reads = true),
-        tokens = ::commandToTokens,
-        parse = ::parse,
         scope = scope,
         others = { if (!replication.receive(it) && !antiEntropy.receive(it)) swim.deliver(it) },
         snapshots = { distributed?.receive(it) ?: false },
