@@ -220,6 +220,13 @@ class LuaTest {
         }
     }
 
+    /**
+     * I10 under its own name: the same script with the same KEYS and ARGV against the same state
+     * answers the same on every node. [lua_deterministic] runs it on two replicas and compares.
+     */
+    @Test
+    fun I10_the_same_script_answers_the_same_on_every_node() = lua_deterministic()
+
     @Test
     fun lua_deterministic() {
         val script = """

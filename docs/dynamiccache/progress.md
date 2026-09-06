@@ -5746,3 +5746,377 @@ is ever added for the condition.
   engines, where Redis's `SETNX` answers 1/0. That divergence is the parser's and predates T61; it
   is now reachable on `cp:` keys as well as AP ones.
 - **T60's wire tag** does not collide: this ticket added no tag and used no number at 40 or above.
+
+---
+
+## T63 - The engine's command codec encodes every keyed command
+
+The WAL codec became the engine's command codec. `WalCodec.kt` is now
+`persist/CommandCodec.kt`; the object is public (`internal` would have hidden it from the server
+and cluster modules that T64 and T65 move onto it).
+
+**The interface.** Two names, both in `dynacache.engine.persist`:
+
+- `CommandCodec.encode(command: Command, now: Instant? = null): Pair<Byte, ByteArray>` - the
+  command's op code and the body of its arguments.
+- `CommandCodec.decode(op: Byte, body: ByteArray): List<Command>` - the commands that encoding
+  redoes, in order.
+- `whatChanged(command: Command, reply: Reply): Command?` - the command the log should hold, or
+  null when nothing changed. A top-level function, not a member: it is the log's decision about a
+  reply, not part of the encoding.
+
+`CommandEngine.log` is now `whatChanged(command, reply)?.let { CommandCodec.encode(it, now) }` and
+appends exactly as before. `SnapshotEngine` replays through `CommandCodec.decode`, unchanged
+otherwise. `Wal.kt` was not touched at all: the writer already took `(op, payload)`.
+
+**Coverage.** Total over `Command.Keyed` minus `Cp`, plus every `Command.Fanned`, plus `FlushDb`
+(the log has always held it). That is 22 reads, 17 writes and the 4 fanned commands, 43 op codes.
+Op codes 1 to 16 and their bodies are exactly what they were; 17 to 43 are new and are never
+written to the log (`HMSET`, every read, the four fanned commands). `Command.Cp` is out of scope:
+it is CpWire's business (CP spec 6.2) and `encode` throws for it, as it does for `Ping`,
+`CommandTable`, `Scan` and the other `EveryPartition` commands, which the router runs on the node
+the client reached and never forwards. The `when` in `encode` is exhaustive over `Command`, so a
+variant added without a codec case stops the main build, not only the test.
+
+**The what-changed function.** An error or a nil (a refused `SET`, an empty `POP`) changed nothing;
+so did a read and so did a fanned command, which reaches the log as the single-key parts it splits
+into. A taken `SET` is logged with its condition decided away; `HMSET` is logged as the `HSET` it
+is; `ZADD` keeps its condition (T48: `:0` is a refusal and a moved score alike) and loses `CH`,
+which changes only the reply.
+
+**Deviation: `whatChanged` takes no `now`.** The ticket's signature is (command, reply, now). No
+`Command` can carry a decided deadline - `Command.Set` holds a `Duration` and only `Command.Expire`
+holds an `Instant` - so a what-changed that returned "the command to log" with the TTL already
+absolute would have to return two commands, which the WAL would log as two entries. That is a
+durability regression: a crash between them restores the value without its expiry, where today one
+entry is all-or-nothing. So the instant stays in the encoding, where it already lived: `now` is
+`encode`'s parameter, and the deadline and the asked duration are one field read two ways.
+
+**The format decision.** One encoding, one op code per command, and the WAL entry header wraps it:
+the header carries the op code and the payload carries the body. A forward carries the same two
+concatenated, op code first (T64 writes those two lines of framing; nothing here needs them yet).
+
+**A pre-existing WAL still reads.** No entry header, op code or body changed. The two fields the
+wire needs and the log never did are written only when they are not their default - `SET`'s
+condition and asked duration, `ZADD`'s `CH` - so an entry an older build wrote has no tail, and no
+tail is what it always meant. `codec_reads_the_entries_written_before_the_reads_were_added` builds
+both old bodies by hand and decodes them. Nothing about a pre-existing log is version-gated, so no
+format version was bumped and none was needed.
+
+**Tests.** `dynacache-engine/src/test/kotlin/dynacache/engine/persist/CommandCodecTest.kt`, 7 tests:
+
+- `command_codec_round_trips_every_keyed_variant` - one sample of every variant through an
+  exhaustive `when`, each asserting both answers: does it cross, and does the log hold it. Byte
+  exactness is `encode(decode(encode(c))) == encode(c)` plus the decoded variant's own class.
+- `codec_round_trips_conditions_and_both_ttl_forms`
+- `codec_reads_the_entries_written_before_the_reads_were_added`
+- `what_changed_logs_nothing_for_an_error_or_a_refused_write`
+- `what_changed_decides_the_condition_of_a_set_it_took`
+- `what_changed_keeps_the_condition_of_a_conditional_zadd`
+- `what_changed_logs_an_hmset_as_the_hset_it_is`
+
+Engine suite 151 before, 158 after, all green; every WAL, recovery and fsync test passes unchanged,
+`wal_reads_append_nothing` included. (The brief's expected base of 148 was three low; nothing
+existing was renamed or removed, and only the codec's own file was added to.) `dynacache-server
+-am` green downstream: cluster 86, cp 94, server 92 -- the brief's 84 and 98 for those two were
+off in both directions, and no test outside the engine was touched.
+
+**Known ceiling.** The exhaustive `when` stops the build when a variant is added, but the samples
+list is a list: a new variant folded into an existing branch group compiles without a sample. The
+engine is kotlin-stdlib only, so `sealedSubclasses` was not available to close that gap, and a
+reflection dependency for one assertion was not worth it. `whatChanged`'s `else -> null` has the
+same shape: the test's `when` is what forces the author of a new mutating variant to classify it.
+
+**For the next ticket.**
+
+- T64 (forwards): `CommandCodec.encode(command)` with no `now`, framed as `byteArrayOf(op) + body`;
+  the other side is `CommandCodec.decode(bytes[0], bytes.copyOfRange(1, bytes.size)).single()`.
+  `single()` is safe for a forward: only a logged `SET` with a deadline decodes to two commands, and
+  a forward passes no `now`, so it never carries one. `commandToTokens` in the server and
+  `TokenCodec` in the cluster test kit both become dead once the router carries bytes.
+- T65 (replicates): `whatChanged(command, reply)` is `Replication.decided()`'s replacement, and it
+  is stricter - it also drops `ZADD`'s `CH` and turns `HMSET` into `HSET`. It answers null for
+  exactly the writes `Replication.write` currently refuses to replicate (an error, a refused
+  conditional `SET`), so the `if (reply is Reply.Error || ...)` check there becomes the null. The
+  replicate's `expiresAtMillis` field is the same decision as `encode`'s `now`: pass the
+  coordinator's instant and the TTL travels absolute.
+
+---
+
+## T59 - Acceptance tests run on the injected clock
+
+Plan rule 1.5 at the acceptance tier. No test in the repository constructs `Clock.systemUTC()`
+or `Clock.systemDefaultZone()` any more, and the four acceptance tests no longer spin on wall
+time except where the thing being waited for is another thread that reads no clock at all.
+
+Test sources only; no production file changed. Six files, +110 / -41.
+
+### What changed, per test
+
+**`P1AcceptanceTest`** - the engine was built on `Clock.systemUTC()` and `aTtlThatFires` spun on
+`System.nanoTime()` for up to five seconds. It now holds one `MutableClock` at
+`2026-09-06T00:00:00Z` and hands the same instance to the engine *and* to the server, which is
+the shape T52 gave `DynaCacheServerTest.withServer`: the parser works out a `PX` deadline from
+the server's clock and the engine compares it against its own, so the two must be one clock.
+`aTtlThatFires` advances 201 ms past the `PX 200` and calls `engine.tick().join()` - the tick the
+server's scheduler would otherwise have run - then asserts as before. Every assertion and the
+test's name are unchanged.
+
+**`CpRoutingTest`** and **`CpSessionLifecycleTest`** - both built the AP engine on
+`Clock.systemUTC()`; the ticket names only the first, but the acceptance criterion is about every
+test, so both are on a `MutableClock` now, shared with the server as in P1. The clock never
+moves. This is safe across the CP boundary because a lease is measured on log time, which only a
+CP member's own (kit) clock moves, and `EXPIRE`'s absolute deadline is turned straight back into
+a span by `CommandDispatcher` using the same clock the parser built it from - so the AP clock and
+the CP clocks never need to agree on what the date is. Freezing it also removes a small real
+wobble: `TTL` on a 100 s reference lease used to lose the milliseconds spent between the parser
+and the dispatcher.
+
+**`P2AcceptanceTest`** - the three `ClusterNode`s take the shared `MutableClock`, so the TTL that
+crosses the quorum is measured against a "now" the test sets. The gossip wait stays (below).
+
+**`P4AcceptanceTest`** - every generation of nodes, including the single node the memory-pressure
+section builds, takes one `MutableClock` that survives the restarts as the data dirs do. Three
+changes follow from it:
+
+- `aMixedKeyspaceThroughJedis` no longer answers `System.nanoTime()`, and `everyKeyCameBack` no
+  longer subtracts the seconds spent restarting. No clock time passes across the restart, so the
+  restored TTL is asserted exactly: `assertEquals(60L, three.ttl("sess:1"))` where it used to be
+  `in 1L..(60L - spent)`.
+- the `blink` key's 300 ms deadline is reached by advancing 301 ms rather than by polling. The
+  restart now costs no clock time at all, which is what lets the test assert `blink` is *still
+  there* when the node comes back before advancing past its deadline.
+- `aTtlFiresOnAClusterNode` advances 201 ms instead of polling for up to ten seconds.
+
+The snapshot wait stays (below).
+
+**`P5AcceptanceTest`** - the three nodes take the shared `MutableClock`. P5 constructed no system
+clock, so this is not required by the acceptance criterion; it is here because
+`SET cp:counter:x 5 EX 10` was a live wall-clock dependency, and a run slow enough under CI load
+could have let that lease lapse between the `SET` and the `INCR` that reads it back. The election
+wait stays (below).
+
+### Bounded waits that remain (plan rule 1.7)
+
+Each waits for a thread that consults no clock, so there is nothing a test could advance to bring
+it forward. All three are bounded polls; none sleeps.
+
+1. `P2AcceptanceTest.gossipSeesTheDeadNode`, 30 s. Waits for **SWIM's own gossip coroutine** on
+   `Dispatchers.Default`, and the gRPC transport it probes over. `Swim` takes no `Clock` at all -
+   it counts its own gossip periods through `delay` - so a burial cannot be brought forward by
+   moving the injected clock.
+2. `P4AcceptanceTest.awaitUntil`, one remaining call ("the snapshot completed on every node"),
+   20 s. Waits for the **gRPC transport threads and each node's router coroutine** to carry the
+   Chandy-Lamport markers past the envelopes in flight. No clock is read anywhere on that path.
+3. `P5AcceptanceTest.awaitValue` in `cpLeader()`, 20 s. Waits for **MicroRaft's election timer
+   threads** on the three members. MicroRaft runs its own scheduler and takes no injected clock -
+   the same reason the CP kit's waits were recorded at T45 and T46.
+
+Already recorded elsewhere and cited rather than re-recorded: `CpTestKit.awaitApplied` and
+`ChaosDriver`'s submit deadline (T38, T43, T45, T46 deviations). Both stand unchanged.
+
+### The two flakes
+
+**`ReadRepairTest.read_repair_does_not_delay_reply`** - reproduced once here, on the first full
+reactor run of this ticket, as `IllegalStateException: no READ reached node-3` at
+`ReadRepairTest.kt:150`. It is **not** a real-time wait and not a clock read, so it is left alone
+per the ticket. `arrived()` does `repeat(10) { network.drain(); yield(); tryReceive() }` inside
+`runTest`, on a `TestDispatcher`. The READ envelope it is looking for is sent only after
+`Replication.submit(Command.Get)`'s local `engine.view` future completes, and that future
+completes on an **`ApEngine` partition executor thread**, outside the test dispatcher. `yield()`
+only reschedules within the dispatcher; it does not wait for the partition thread, so all ten
+iterations can run before the view completes. Converting it means awaiting the engine's future
+(or a real bounded wait) - a logic change, not a clock injection - so it is out of this ticket.
+
+**`CpEngineTest.C23_every_member_agrees_on_expiry_at_same_index`** - already on the injected
+clock: it drives the expiry with `kit.clock(leader).advance(Duration.ofSeconds(2))` and an
+explicit `leader.tick()`. Its only real-time wait is `CpTestKit.awaitApplied`, which polls a
+member's MicroRaft `report` until the commit index arrives, waiting on **MicroRaft's replication
+and heartbeat threads**. That is the already-recorded T45/T46 deviation and no clock advance
+reaches it. Nothing changed; it passed on every run here.
+
+### Wall time
+
+Four acceptance classes, run on their own (`-Dtest=P1,P2,P4,P5AcceptanceTest`), seconds. Two other
+Maven builds were running on the machine throughout, so run-to-run noise is roughly +/- 0.7 s on
+an 11 s total. The first baseline sample was taken under lighter load than everything after it;
+samples 2 and 3 were taken by reverting the six files in place, so they share the load of the
+"after" runs.
+
+| Run | P1 | P2 | P4 | P5 | total |
+| --- | --- | --- | --- | --- | --- |
+| before, sample 1 (light load) | 1.144 | 4.485 | 1.513 | 3.304 | 10.446 |
+| before, sample 2 | 1.627 | 4.699 | 1.939 | 3.357 | 11.622 |
+| before, sample 3 | 1.509 | 4.750 | 1.671 | 3.279 | 11.209 |
+| after, sample 1 (fresh compile) | 1.830 | 4.795 | 1.909 | 3.401 | 11.935 |
+| after, sample 2 | 1.524 | 4.724 | 1.667 | 3.372 | 11.287 |
+
+Flat within the noise: 11.21 before against 11.29 after, comparing the two samples taken under
+the same load. Inside the full reactor run, where P1 is no longer the first class to pay the JVM
+and Netty warm-up, P1 falls from about 1.5 s to 0.38 s.
+
+Suite totals unchanged, as no test was added or removed: engine 151, cluster 86, cp 92, server
+92, **421 total**, green.
+
+### Deviations
+
+1. Three bounded real-time waits remain, named above with the thread each waits for (rule 1.7).
+2. `P4AcceptanceTest` gained one assertion, `assertEquals("gone", three.get("blink"))`, against
+   the brief's "keep every assertion" (it says keep, not freeze). It is here because the frozen
+   clock is what makes "the key is still alive when the node comes back" checkable at all, and
+   without it the `assertNull` that follows would go green on a key the RDB had dropped entirely.
+3. `P4AcceptanceTest`'s restored TTL assertion was tightened from `in 1L..(60L - spent)` to
+   `assertEquals(60L, ...)`, for the same reason: the elapsed-time slack it allowed no longer
+   exists.
+4. Two tests beyond the four the ticket names were changed: `CpSessionLifecycleTest` also built
+   its AP engine on `Clock.systemUTC()`, and the acceptance criterion covers every test, so it was
+   fixed alongside `CpRoutingTest`.
+5. `P5AcceptanceTest`'s nodes were put on the injected clock although P5 constructed no system
+   clock, to remove the `EX 10` lease's dependency on how slow the machine is.
+
+---
+
+## T62 - Reply shapes and the spec ledger
+
+**Built:** four small gaps between the code and the specs closed, and the three that stay
+recorded below. Nothing new was designed; every change is a reply the spec already fixed, or a
+row the spec never asked for.
+
+`-NOTLEADER` **carries the member id alone.** `CpEngine.notLeader` wrote
+`leader is ${leader.id}`, so a client taking the first token of CP spec 6.8's `-NOTLEADER
+<hint>` read the word `leader`. It now writes `runtime.node.term.leaderEndpoint?.id`, and a
+member that knows of no leader writes no hint at all rather than a sentence a client would
+parse as an id. Nothing consumed the old wording: `ForwardingCpEngine` recognises a
+`-NOTLEADER` by its kind and rediscovers the leader through `GetInfo`, so the hint is for a
+real client, not for us.
+
+`LOCK_UNLOCK` **answers `:1` for every accepted unlock.** CP spec 3.1 makes the op an `ok:
+Bool` that "decrements reentrance; releases at 0", and 6.8 gives the rejection its own error,
+`-REENTRANCE`. The state machine already answered `-REENTRANCE` for a non-holder and `:1` for a
+release, but `:0` for a reentrant decrement -- a third answer the spec's boolean has no room
+for. A reentrant decrement is an accepted unlock, so it answers `:1` now, and `:0` is no longer
+produced by this verb at all. See deviation 3.
+
+`Command.Cp.LongDecrBy` **deleted, wire tag 6 retired.** Nothing produced the variant but the
+wire decoder: the dispatcher folds Redis's `DECRBY` into `Command.IncrBy` with a negative delta
+and then into `Command.Cp.LongIncrBy`, and the parser has no `cp.long.decrby` row, because CP
+spec 6.2 maps `INCRBY` to `ADD` and gives `DECRBY` no verb. The variant, its encoder row and
+its state-machine row are gone. The tag constant stays as `CMD_DECR_BY_RETIRED = 6` with a
+decode branch that names it, so the number is never reused and a peer replaying an old entry
+is told what it sent rather than reading "unknown tag".
+
+`EXAT`, `PXAT` **and** `PSETEX` **deleted.** No spec line asks for them: spec 2.1 gives `SET`
+the flags `NX`, `XX`, `EX` and `PX`, and the Redis-compat-for-CP set (CP spec 6.2, and 2.1's
+routing table) names `SETEX` without its millisecond twin. Nothing forwards them and the test
+kit does not reach for them -- checked by grep across all four modules before deleting -- so the
+`psetex` row, the two `SET` flags, the `TTL_FLAGS` entries and the now-dead `until(...)` helper
+T52 left behind all go. **Kept, with the reason:** `SETEX` (the CP compat set names it) and
+`PEXPIREAT` (`CommandTokens` writes every `Command.Expire` as one, since a forwarded deadline
+is an absolute instant however the client spelled it -- T16, T24; T13 deviation 3 first noted
+the row had no spec line of its own, and this is the reason it earned one).
+
+**The six missing constraint and invariant names.** Each asserts its constraint by delegating
+to the spec-named test that already covers the behaviour, so the constraint breaks the named
+test as well as the original:
+
+- `C17_fencing_tokens_never_repeat` (`FencedLockTest`) -- a successful `LOCK_TRY`'s token is
+  strictly greater than every token the key ever returned; delegates to
+  `lock_fencing_token_monotonic` (100 acquire/release cycles). The across-a-failover half of
+  C17 is `I18_lock_held_across_leader_failover` and `C17_lease_expires_after_skewed_failover`,
+  which already carried the prefix.
+- `I13_at_most_one_session_holds_a_lock` (`FencedLockTest`) -- delegates to
+  `lock_mutual_exclusion`: two sessions race, exactly one is granted and one denied.
+- `I14_a_later_acquire_gets_a_greater_token` (`FencedLockTest`) -- delegates to
+  `lock_fencing_token_monotonic`.
+- `C20_committed_cp_operations_are_linearizable` (`ChaosInvariantTest`) -- delegates to
+  `invariant_linearizable_ops(seed = 1)`: the Wing-Gong checker accepts a counter history
+  recorded across leader kills and restarts.
+- `C22_no_cross_engine_state_leakage` (`CommandDispatcherTest`) -- delegates to
+  `I22_namespaces_never_cross`: one key name written on both sides of the `cp:` boundary, each
+  engine seeing only its own.
+- `I10_the_same_script_answers_the_same_on_every_node` (`LuaTest`) -- delegates to
+  `lua_deterministic`: one script on two replicas with the same seed state, replies equal.
+
+**Concepts named:** nothing new. The only idea the ticket adds is that a **retired wire tag** is
+a constant that decodes to an error, not a hole in a `when`: the number carries meaning for as
+long as an old log entry can exist, so deleting the variant is not deleting the tag.
+
+**Acceptance:**
+- `notleader_hint_is_the_leader_id` (`CpEngineTest`): a follower's reply, and `NodeId(message)`
+  equals the leader's own id -- the whole message, not a token of it. Red first
+  (`expected: <cp1> but was: <leader is cp1>`).
+- `lock_unlock_reply_shape` (`FencedLockTest`): a lock held twice; a non-holder's unlock is
+  `-REENTRANCE`, the reentrant decrement is `:1` and `LOCK_STATE` still shows the holder with
+  one hold, the release is `:1`, and the lock is then unowned. Red first
+  (`expected: <Integer(value=1)> but was: <Integer(value=0)>`).
+- `lock_reentrant_same_session` keeps its name and now expects `:1` for the decrement.
+- `the_retired_decrby_tag_is_refused` (`CpWireTest`): an `ADD` encoding with its first byte set
+  to 6 throws, and the message names both the tag and `DECRBY`. Red first (nothing was thrown).
+- `EXAT PXAT and PSETEX are not commands here` (`CommandParserTest`): the two flags are a syntax
+  error, `psetex` is Redis's unknown-command reply word for word, and `PEXPIREAT` still parses.
+  Red first (the parse succeeded).
+- `C17_`, `C20_`, `C22_`, `I10_`, `I13_`, `I14_` as listed above, all green.
+- `mvn -o test -pl dynacache-server -am`: engine 151, cluster 86, cp 92 -> 99, server 92 -> 95.
+  Every earlier test green. (The brief's baseline of `cp 92, server 97` was right for cp and
+  stale for the server module, whose true baseline is 92, the number T58 recorded.)
+- This entry.
+
+**Deviations:** Six. The first three are the ledger entries the ticket asks for.
+
+1. **`-CAPACITY` is not built.** CP spec 6.8 lists `-CAPACITY` ("state machine at max-entries
+   cap") among the new RESP error prefixes, and no state machine has a cap: `AtomicLong`,
+   `FencedLock`, `Semaphore`, `CountDownLatch`, `AtomicReference` and `SessionRegistry` all grow
+   with the keys the log gives them, bounded only by the snapshot size and the heap. The error
+   string appears nowhere in the source. Building the cap is not this ticket's (it needs a
+   per-state-machine limit, a place to configure it, and a decision about what happens to an
+   entry already committed when the cap is hit -- a Raft-level question, since refusing at apply
+   time must be deterministic on every member). Recorded here so the next reader finds it named
+   rather than missing.
+
+2. **A fanned command inside a batch is refused even when its keys share the partition.** In
+   `ApEngine`'s `Batch` context, `Command.Keyed` runs when the batch declared its key and
+   everything else falls to `Reply.Error("ERR", "this command spans partitions and cannot run
+   inside a batch")`. `Command.Fanned` -- `MGET`, `MSET`, multi-key `DEL` and `EXISTS` -- is in
+   that "everything else", by definition rather than by measurement: the refusal does not look
+   at the keys. So `MULTI; MGET {t}.a {t}.b; EXEC` on two hash-tagged keys, which land on the
+   one declared partition and which spec 2.2's "atomicity across keys requires a batch with hash
+   tags" invites, is refused here and answered by Redis. T14 describes the rule; it was never
+   recorded as a divergence from Redis, and it is one. The repair is one branch -- a `Fanned`
+   whose every key is in `declared` runs key by key on this partition -- and it is a batch
+   semantics change, which this ticket's seams exclude.
+
+3. **The reentrancy reply shape, where CP spec 6.1 is ambiguous.** 6.1's table gives
+   `CP.LOCK.UNLOCK` the replies `:1` / `:0`, while 3.1 makes the op an `ok: Bool` that "rejects
+   if session/token mismatch" and 6.8 gives that rejection `-REENTRANCE`. Read together, `:0`
+   is the rejection 6.8 turned into an error, and the spec never says what a reentrant decrement
+   answers. Decided, per the ticket: every accepted unlock answers `:1`, released or not, and
+   `:0` is unreachable from this verb. A client that must know whether it still holds the lock
+   reads `CP.LOCK.STATE`'s reentrance count, which 6.1 already gives it. Redis has no
+   `LOCK.UNLOCK`, so there is no Redis behaviour to diverge from.
+
+4. **`-NOTLEADER` with no hint has a trailing space on the wire.** `RespEncoder` writes
+   `"-" + kind + " " + message`, so a member that knows of no leader sends `-NOTLEADER ` rather
+   than `-NOTLEADER`. It decodes back to the same `Reply.Error` either way and Redis clients
+   split on the first space, so this is cosmetic; fixing it means touching the encoder for every
+   error, which is outside this ticket.
+
+5. **`ChaosDriver` reads the lock owner back after an accepted unlock.** Changing the reply
+   broke `invariant_mutual_exclusion_under_chaos` and
+   `invariant_fencing_token_monotonic_under_chaos`, and the failure was not the reply: the
+   driver retries a `LockTry` after a lost reply (at-least-once, as `ForwardingCpEngine`'s own
+   note says), so a retry can take a second reentrant hold the driver never saw. The old `:0`
+   hid that -- the driver kept believing the lock held -- and `:1` exposed it as "denied to 4 but
+   belief says null". The driver now reads the new owner from `LOCK_STATE` after an accepted
+   unlock instead of guessing it from the reply, which is exact whatever the retries did.
+   Confirmed against a clean checkout of the base commit that the two tests were green before
+   the reply change, so this is a driver model that was always approximate, not a new bug.
+
+6. **Size:** 159 lines added against 64 deleted across sixteen files, inside the 200-to-600
+   budget. Two other things the ticket names were deliberately not touched: the AP engine, and
+   the dispatcher's routing.
+
+**For the next ticket:** the deviation-2 branch is the smallest real gap left in the batch path,
+and it is testable without a cluster: `ApEngine.atomically` with two hash-tagged keys and an
+`MGET` over both. Whoever takes it should note that `Batch.execute`'s `else` is currently doing
+two jobs -- refusing what spans partitions and refusing what this partition cannot interpret --
+and only the first is about keys.

@@ -118,11 +118,11 @@ sealed class Command {
         /** `CP.LONG.DECR K`: the new value; a missing counter counts as 0. */
         data class LongDecr(override val key: Key) : AtomicLong()
 
-        /** `CP.LONG.ADD K d`, the `INCRBY` form: the new value. */
+        /**
+         * `CP.LONG.ADD K d`: the new value. CP spec 6.2 maps `INCRBY` to `ADD` and gives `DECRBY`
+         * no verb of its own, so a `DECRBY` is this with a negative delta.
+         */
         data class LongIncrBy(override val key: Key, val delta: Long) : AtomicLong()
-
-        /** `CP.LONG.ADD K -d`, the `DECRBY` form: the new value. */
-        data class LongDecrBy(override val key: Key, val delta: Long) : AtomicLong()
 
         /** `CP.LONG.GETADD K d`: the value the counter held before [delta] was added (CP spec 3.2). */
         data class LongGetAdd(override val key: Key, val delta: Long) : AtomicLong()
@@ -148,7 +148,7 @@ sealed class Command {
         /** `CP.LOCK.TRY K lease_ms`: `[ok, token]`; a holder trying again holds once more with the same token. */
         data class LockTry(override val key: Key, override val session: Long, val lease: Duration) : FencedLock(), Sessioned
 
-        /** `CP.LOCK.UNLOCK K token`: 1 when released, 0 when still held reentrantly, `-REENTRANCE` for a non-holder. */
+        /** `CP.LOCK.UNLOCK K token`: 1 when accepted -- released or still held reentrantly -- `-REENTRANCE` otherwise. */
         data class LockUnlock(override val key: Key, override val session: Long, val token: Long) : FencedLock(), Sessioned
 
         /** `CP.LOCK.RENEW K token lease_ms`: 1 when the holder's lease now runs [lease] from here, `-REENTRANCE` otherwise. */

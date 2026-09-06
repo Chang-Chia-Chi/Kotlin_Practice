@@ -33,7 +33,6 @@ class AtomicLongStateMachine {
         is Command.Cp.LongIncr -> added(command.key, 1, now)
         is Command.Cp.LongDecr -> added(command.key, -1, now)
         is Command.Cp.LongIncrBy -> added(command.key, command.delta, now)
-        is Command.Cp.LongDecrBy -> added(command.key, -command.delta, now)
         // The read and the add are one applied entry, so no one sees a value between them (I21).
         is Command.Cp.LongGetAdd -> Reply.Integer(add(command.key, command.delta, now))
         is Command.Cp.LongCas -> {
