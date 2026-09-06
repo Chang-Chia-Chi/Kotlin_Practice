@@ -5475,3 +5475,102 @@ process restart does while the engine restores from disk. Node construction move
   refills it. Correct, and one round trip per key.
 - `InProcessCluster.restart(node)` restarts only the replication layer; the network's own
   `kill`/`restart` stays separate, and a chaos run that wants "process restart" should call both.
+
+---
+
+## T58 - One MutableClock in an engine test-jar; drop the two ModuleGraphTests
+
+Five hand-written clock doubles became one. The engine module now publishes a test-jar and the
+other three modules depend on it for tests only, so plan rule 1.5 (time is an injected `Clock`)
+has a single implementation to point at instead of four copies that had already drifted apart.
+
+### The one clock
+
+`DynaCache/dynacache-engine/src/test/kotlin/dynacache/engine/testkit/MutableClock.kt`:
+
+```kotlin
+class MutableClock(@Volatile var now: Instant, private val record: Boolean = false) : Clock() {
+    val readers: List<String>            // the thread behind each read, in order
+    fun advance(by: Duration)
+    override fun instant(): Instant
+    override fun getZone(): ZoneId       // UTC
+    override fun withZone(zone: ZoneId): Clock
+}
+```
+
+`now` is public and settable, which covers both spellings already in use: absolute
+(`clock.now = deadline`) and relative (`clock.now += Duration.ofMillis(6)`). `advance` is the CP
+kit's spelling of the relative form and is kept so its two call sites are untouched. `now` stays
+`@Volatile` because every copy it replaces was: the engine's partition threads, the WAL writer's
+appender pool, the cluster's hint sweeper and MicroRaft all read the clock off the test thread.
+
+`record` is the one addition. `RecordingClock` named the thread behind every read into a
+synchronized list; the merged class does that only when asked, and defaults to off. Always
+recording would cost a retained string per clock read in suites that run thousands of commands
+(T59 is about to move the acceptance tests onto this clock), and the synchronized list would add
+contention to exactly the threads that `wal_group_commit_amortizes` and
+`eviction_runs_on_the_partition_thread` are measuring. `readers` is exposed as a read-only
+`List<String>` view over the backing list, so `readers.size` and `readers.toSet()` read the same
+as they did on `RecordingClock`.
+
+### What each copy needed
+
+| Copy | Needed | Notes |
+|---|---|---|
+| `CommandEngineTest.MutableClock` | `now` get/set | private nested; the file's other two ad-hoc clocks (`ParkingClock` and an anonymous gate) stay, they park and count rather than tell the time |
+| `CommandEngineTest.RecordingClock` | `now`, `readers` | folded in behind `record = true`; its one construction is now `MutableClock(clock.now, record = true)` |
+| `WalFsyncTest.MutableClock` | `now` get/set | private nested, byte-identical to the engine copy |
+| `HintedHandoffTest.MutableClock` | `now` get/set | private nested, byte-identical to the engine copy |
+| `CpTestKit.MutableClock` | `now`, `advance` | the only copy that was public, because the server module's `CpRoutingTest` reaches it through `kit.clock(member)` |
+
+No test name and no assertion changed; only the double each test constructs. The `record = true`
+construction is the single call-site edit.
+
+### The poms
+
+- `dynacache-engine/pom.xml`: `maven-jar-plugin` 3.4.1 with the `test-jar` goal, copied from the
+  wiring `dynacache-cp` has carried since the CP test kit was published for the server module.
+  The module's zero-runtime-dependency constraint is untouched, this is test output only.
+- `dynacache-cluster`, `dynacache-cp`, `dynacache-server`: a `dynacache-engine` dependency with
+  `<type>test-jar</type>` and `<scope>test</scope>`. Test scope means plan 2.2's module graph is
+  unchanged; the server needs its own declaration because a test-scoped dependency of the cp
+  test-jar is not transitive.
+
+The fixed contract held: no `install` was needed. `mvn -o clean test -pl dynacache-server -am`
+from a clean state resolves the engine test-jar out of the reactor (Maven substitutes the
+module's `target/test-classes` when the artifact has not been packaged), and the Kotlin plugin's
+`test-compile` execution puts the test kit there. Verified green from `clean`, offline.
+
+### Why the ModuleGraphTests went
+
+Both asserted that a module can see a type from a module it depends on: the cluster one compared
+two `Key` hashes and two `Reply.Bulk`s, the server one pinged an `ApEngine`. Neither can fail
+while the code compiles, because a missing dependency is a compile error in the same Maven run
+that would have executed the test. They restate the dependency direction that
+`dynacache-cluster/pom.xml` and `dynacache-server/pom.xml` already declare and that Maven already
+enforces, so they cost a build slot and buy nothing.
+
+### Test counts
+
+Measured on a pristine `git archive` of HEAD (`073cc162`) against the worktree, same command.
+The parent brief's baseline (engine 147, cluster 85, cp 89, server 90) was stale for the server
+module; its true baseline is 93.
+
+| Module | Before | After |
+|---|---|---|
+| engine | 147 | 147 |
+| cluster | 85 | 84 |
+| cp | 89 | 89 |
+| server | 93 | 92 |
+| total | 414 | 412 |
+
+Minus two, both of them a deleted `ModuleGraphTest`, and the two modules that lost one are the
+two that held one. Every remaining test passes.
+
+### Deviations
+
+- The size budget was 200 to 600 lines. The change is 84 added against 91 deleted, net negative,
+  because the ticket is a fold rather than a build. Nothing was left out.
+- `advance` and `now +=` both survive as ways to move time forward. Collapsing to one would have
+  edited call sites the ticket asked to leave alone; the ticket's own wording ("settable,
+  tickable") wants both.
