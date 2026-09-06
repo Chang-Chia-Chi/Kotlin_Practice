@@ -117,6 +117,24 @@ that one entry (C18, I15). A command on behalf of a session that lapsed, closed 
 existed answers `-NOSESSION` before any primitive sees it.
 _Avoid_: client, connection (a session may outlive one), lease (that is a lock's word)
 
+**Permit**:
+The unit a Semaphore hands out. A key's permits are either **available** or held, and every
+held permit belongs to a session, so a session's death gives its permits back in the entry
+that ends it (C18, I15). A session may only release what it holds; asking for more than is
+available fails without blocking, and **draining** takes whatever is available at that entry.
+_Avoid_: lock, slot, token (a token is a lock's fencing number)
+
+**Latch**:
+A CountDownLatch: a count that only ever falls, and stops at zero. It is armed only from
+zero, so a latch parties are still counting down cannot be moved under them; a latch that
+has run out may be armed again.
+_Avoid_: barrier, gate, semaphore
+
+**Reference**:
+An AtomicReference: opaque bytes under a `cp:ref:*` key, swapped by a compare-and-set that
+matches on byte content and nothing else (I21). Its TTL, like a counter's, runs on log time.
+_Avoid_: value, object, string (the bytes are never decoded)
+
 ## Example dialogue
 
 **Dev:** The Netty handler got a `SET`; do I need a lock before calling the engine?

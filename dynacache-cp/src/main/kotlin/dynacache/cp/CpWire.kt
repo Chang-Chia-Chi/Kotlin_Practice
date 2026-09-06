@@ -228,6 +228,30 @@ object CpWire {
             }
             is Command.Cp.LockForceUnlock -> tagged(CMD_LOCK_FORCE_UNLOCK, command.key) {}
             is Command.Cp.LockState -> tagged(CMD_LOCK_STATE, command.key) {}
+            is Command.Cp.SemInit -> tagged(CMD_SEM_INIT, command.key) { writeInt(command.permits) }
+            is Command.Cp.SemAcquire -> tagged(CMD_SEM_ACQUIRE, command.key) {
+                writeLong(command.session)
+                writeInt(command.permits)
+            }
+            is Command.Cp.SemRelease -> tagged(CMD_SEM_RELEASE, command.key) {
+                writeLong(command.session)
+                writeInt(command.permits)
+            }
+            is Command.Cp.SemAvailable -> tagged(CMD_SEM_AVAILABLE, command.key) {}
+            is Command.Cp.SemDrain -> tagged(CMD_SEM_DRAIN, command.key) { writeLong(command.session) }
+            is Command.Cp.LatchSet -> tagged(CMD_LATCH_SET, command.key) { writeInt(command.count) }
+            is Command.Cp.LatchDown -> tagged(CMD_LATCH_DOWN, command.key) {}
+            is Command.Cp.LatchGet -> tagged(CMD_LATCH_GET, command.key) {}
+            is Command.Cp.LatchReset -> tagged(CMD_LATCH_RESET, command.key) { writeInt(command.count) }
+            is Command.Cp.RefSet -> tagged(CMD_REF_SET, command.key) {
+                writeBlob(command.value)
+                writeLong(command.ttl?.toMillis() ?: NO_TTL)
+            }
+            is Command.Cp.RefGet -> tagged(CMD_REF_GET, command.key) {}
+            is Command.Cp.RefCas -> tagged(CMD_REF_CAS, command.key) {
+                writeBlob(command.expected)
+                writeBlob(command.new)
+            }
             is Command.Cp.SessionCreate -> tagged(CMD_SESSION_CREATE, command.key) { writeLong(command.timeout.toMillis()) }
             is Command.Cp.SessionHeartbeat -> tagged(CMD_SESSION_HEARTBEAT, command.key) { writeLong(command.session) }
             is Command.Cp.SessionClose -> tagged(CMD_SESSION_CLOSE, command.key) { writeLong(command.session) }
@@ -254,6 +278,19 @@ object CpWire {
             CMD_LOCK_RENEW -> Command.Cp.LockRenew(key, readLong(), readLong(), Duration.ofMillis(readLong()))
             CMD_LOCK_FORCE_UNLOCK -> Command.Cp.LockForceUnlock(key)
             CMD_LOCK_STATE -> Command.Cp.LockState(key)
+            CMD_SEM_INIT -> Command.Cp.SemInit(key, readInt())
+            CMD_SEM_ACQUIRE -> Command.Cp.SemAcquire(key, readLong(), readInt())
+            CMD_SEM_RELEASE -> Command.Cp.SemRelease(key, readLong(), readInt())
+            CMD_SEM_AVAILABLE -> Command.Cp.SemAvailable(key)
+            CMD_SEM_DRAIN -> Command.Cp.SemDrain(key, readLong())
+            CMD_LATCH_SET -> Command.Cp.LatchSet(key, readInt())
+            CMD_LATCH_DOWN -> Command.Cp.LatchDown(key)
+            CMD_LATCH_GET -> Command.Cp.LatchGet(key)
+            CMD_LATCH_RESET -> Command.Cp.LatchReset(key, readInt())
+            CMD_REF_SET ->
+                Command.Cp.RefSet(key, readBlob(), readLong().takeIf { it != NO_TTL }?.let(Duration::ofMillis))
+            CMD_REF_GET -> Command.Cp.RefGet(key)
+            CMD_REF_CAS -> Command.Cp.RefCas(key, readBlob(), readBlob())
             CMD_SESSION_CREATE -> Command.Cp.SessionCreate(Duration.ofMillis(readLong()))
             CMD_SESSION_HEARTBEAT -> Command.Cp.SessionHeartbeat(readLong())
             CMD_SESSION_CLOSE -> Command.Cp.SessionClose(readLong())
@@ -357,6 +394,18 @@ object CpWire {
     private const val CMD_SESSION_CREATE = 16
     private const val CMD_SESSION_HEARTBEAT = 17
     private const val CMD_SESSION_CLOSE = 18
+    private const val CMD_SEM_INIT = 19
+    private const val CMD_SEM_ACQUIRE = 20
+    private const val CMD_SEM_RELEASE = 21
+    private const val CMD_SEM_AVAILABLE = 22
+    private const val CMD_SEM_DRAIN = 23
+    private const val CMD_LATCH_SET = 24
+    private const val CMD_LATCH_DOWN = 25
+    private const val CMD_LATCH_GET = 26
+    private const val CMD_LATCH_RESET = 27
+    private const val CMD_REF_SET = 28
+    private const val CMD_REF_GET = 29
+    private const val CMD_REF_CAS = 30
     private const val NO_TTL = -1L
 
     private const val REPLY_SIMPLE = 1

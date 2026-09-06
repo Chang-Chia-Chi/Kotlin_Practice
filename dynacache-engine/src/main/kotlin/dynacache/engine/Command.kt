@@ -63,6 +63,15 @@ sealed class Command {
         /** The FencedLock verbs (CP spec 3.1, 6.1), each over a `cp:lock:*` key. */
         sealed class FencedLock : Cp()
 
+        /** The Semaphore verbs (CP spec 3.3, 6.3), each over a `cp:sem:*` key. */
+        sealed class Semaphore : Cp()
+
+        /** The CountDownLatch verbs (CP spec 3.4, 6.4), each over a `cp:latch:*` key. */
+        sealed class CountDownLatch : Cp()
+
+        /** The AtomicReference verbs (CP spec 3.5, 6.5), each over a `cp:ref:*` key. */
+        sealed class AtomicReference : Cp()
+
         /**
          * The session verbs (CP spec 4, 6.6). A session is not a key's state, so these share one
          * `cp:` key for the namespace rule (C16) and are answered by the session registry.
@@ -123,6 +132,69 @@ sealed class Command {
 
         /** `CP.LOCK.STATE K`: `[owner or nil, token, ttl_remaining_ms, reentrance]`. */
         data class LockState(override val key: Key) : FencedLock()
+
+        /** `CP.SEM.INIT K permits`: `+OK`; a semaphore that already exists keeps the permits it has. */
+        data class SemInit(override val key: Key, val permits: Int) : Semaphore()
+
+        /** `CP.SEM.ACQUIRE K n`: 1 when [permits] were taken for the session, 0 when too few were available. */
+        data class SemAcquire(override val key: Key, override val session: Long, val permits: Int) : Semaphore(), Sessioned
+
+        /** `CP.SEM.RELEASE K n`: `+OK`, or `-ERR` when the session holds fewer than [permits]. */
+        data class SemRelease(override val key: Key, override val session: Long, val permits: Int) : Semaphore(), Sessioned
+
+        /** `CP.SEM.AVAILABLE K`: how many permits are free right now. */
+        data class SemAvailable(override val key: Key) : Semaphore()
+
+        /** `CP.SEM.DRAIN K`: takes every free permit for the session and answers how many that was. */
+        data class SemDrain(override val key: Key, override val session: Long) : Semaphore(), Sessioned
+
+        /**
+         * `CP.LATCH.SET K count`: `+OK`, or `-ERR` while the latch is still counting down. A latch
+         * nobody has set counts 0, so the first SET always takes.
+         */
+        data class LatchSet(override val key: Key, val count: Int) : CountDownLatch()
+
+        /** `CP.LATCH.DOWN K`: the new count; a latch already at zero stays there. */
+        data class LatchDown(override val key: Key) : CountDownLatch()
+
+        /** `CP.LATCH.GET K`: what is left to count down. */
+        data class LatchGet(override val key: Key) : CountDownLatch()
+
+        /** `CP.LATCH.RESET K count`: the same rule as [LatchSet], under the name the spec gives re-arming. */
+        data class LatchReset(override val key: Key, val count: Int) : CountDownLatch()
+
+        /**
+         * `CP.REF.SET K v`, or `SET cp:ref:K v [EX|PX]`: a [ttl] runs on log time (CP spec 9.4).
+         * A reference is bytes, so these two compare by byte content, as [Key] does.
+         */
+        class RefSet(override val key: Key, val value: ByteArray, val ttl: Duration? = null) : AtomicReference() {
+            override fun equals(other: Any?): Boolean = this === other ||
+                (other is RefSet && key == other.key && value.contentEquals(other.value) && ttl == other.ttl)
+
+            override fun hashCode(): Int = 31 * (31 * key.hashCode() + value.contentHashCode()) + ttl.hashCode()
+
+            override fun toString(): String = "RefSet($key, ${value.toString(Charsets.ISO_8859_1)}, $ttl)"
+        }
+
+        /** `CP.REF.GET K`: the bytes, or nil when the reference was never set or has expired. */
+        data class RefGet(override val key: Key) : AtomicReference()
+
+        /**
+         * `CP.REF.CAS K expected new`: 1 when the reference held exactly [expected]'s bytes and now
+         * holds [new]'s, 0 otherwise. A reference that was never set matches no expected bytes.
+         */
+        class RefCas(override val key: Key, val expected: ByteArray, val new: ByteArray) : AtomicReference() {
+            override fun equals(other: Any?): Boolean = this === other || (
+                other is RefCas && key == other.key &&
+                    expected.contentEquals(other.expected) && new.contentEquals(other.new)
+                )
+
+            override fun hashCode(): Int =
+                31 * (31 * key.hashCode() + expected.contentHashCode()) + new.contentHashCode()
+
+            override fun toString(): String = "RefCas($key, ${expected.toString(Charsets.ISO_8859_1)}, " +
+                new.toString(Charsets.ISO_8859_1) + ")"
+        }
 
         /** `CP.SESSION.CREATE`: the new session's id; it dies after [timeout] of log time without a heartbeat. */
         data class SessionCreate(val timeout: Duration = Duration.ofSeconds(15)) : Session()
