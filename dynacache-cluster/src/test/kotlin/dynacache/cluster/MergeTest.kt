@@ -174,13 +174,4 @@ class MergeTest {
         is Value.List -> value.items.map { String(it) }.sorted()
         else -> canon(value)
     }
-
-    /** A value as plain data, so two values compare by content: what a client would read back. */
-    private fun canon(value: Value): Any = when (value) {
-        is Value.Str -> value.bytes.toList()
-        is Value.Hash -> value.fields.entries().associate { (name, bytes) -> name to bytes.toList() }
-        is Value.List -> value.items.map { it.toList() }
-        is Value.ZSet -> value.order.forward().map { it.member.toList() to it.score }.toList() to
-            value.scores.entries().associate { (member, score) -> member to score }
-    }
 }

@@ -25,6 +25,11 @@ object TokenCodec {
         is Command.HSet -> listOf(name("HSET"), command.key.bytes) + command.entries.flatMap { listOf(it.first, it.second) }
         is Command.HGet -> listOf(name("HGET"), command.key.bytes, command.field)
         is Command.HGetAll -> listOf(name("HGETALL"), command.key.bytes)
+        is Command.Push -> listOf(name(if (command.end == Command.End.HEAD) "LPUSH" else "RPUSH"), command.key.bytes) + command.values
+        is Command.LRange -> listOf(name("LRANGE"), command.key.bytes, name(command.start.toString()), name(command.stop.toString()))
+        is Command.ZAdd -> listOf(name("ZADD"), command.key.bytes) + command.entries.flatMap { listOf(it.first, it.second) }
+        is Command.ZRange -> listOf(name("ZRANGE"), command.key.bytes, name(command.start.toString()), name(command.stop.toString())) +
+            (if (command.withScores) listOf(name("WITHSCORES")) else emptyList())
         else -> throw IllegalArgumentException("the test kit's codec has no wire form for $command")
     }
 
@@ -43,6 +48,11 @@ object TokenCodec {
             "HSET" -> Command.HSet(Key(tokens[1]), tokens.drop(2).chunked(2).map { it[0] to it[1] })
             "HGET" -> Command.HGet(Key(tokens[1]), tokens[2])
             "HGETALL" -> Command.HGetAll(Key(tokens[1]))
+            "LPUSH" -> Command.Push(Key(tokens[1]), tokens.drop(2), Command.End.HEAD)
+            "RPUSH" -> Command.Push(Key(tokens[1]), tokens.drop(2), Command.End.TAIL)
+            "LRANGE" -> Command.LRange(Key(tokens[1]), tokens[2].decodeToString().toLong(), tokens[3].decodeToString().toLong())
+            "ZADD" -> Command.ZAdd(Key(tokens[1]), tokens.drop(2).chunked(2).map { it[0] to it[1] })
+            "ZRANGE" -> Command.ZRange(Key(tokens[1]), tokens[2].decodeToString().toLong(), tokens[3].decodeToString().toLong(), withScores = tokens.size > 4)
             else -> throw IllegalArgumentException("the test kit's codec does not know $verb")
         }
 
