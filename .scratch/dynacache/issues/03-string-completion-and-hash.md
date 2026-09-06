@@ -11,14 +11,14 @@ take the same path.
 
 **Nature:** command semantics (Opus)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache 3777e40, merged into misc/ai_gen)
 
-- [ ] `string_incr_atomic` (11 from "10", error on non-integer, 1 on missing)
-- [ ] `hash_field_independence`, `hash_getall_complete`
-- [ ] `mget_spans_partitions`: keys on two partitions, one array in argument order with nil for missing
-- [ ] `mget_across_partitions_is_not_atomic`: a write parked between two partitions of one `MGET` is visible in the result (pins ADR 0002)
-- [ ] Every reply matches the Redis shape for that command
-- [ ] Progress entry appended
+- [x] `string_incr_atomic` (11 from "10", error on non-integer, 1 on missing)
+- [x] `hash_field_independence`, `hash_getall_complete`
+- [x] `mget_spans_partitions`: keys on two partitions, one array in argument order with nil for missing
+- [x] `mget_across_partitions_is_not_atomic`: a write parked between two partitions of one `MGET` is visible in the result (pins ADR 0002)
+- [x] Every reply matches the Redis shape for that command
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket, stubs throwing NotImplementedError
 for later seams; 200 to 600 lines including tests; JUnit 5 + Mockito only, no AssertJ or MockK;

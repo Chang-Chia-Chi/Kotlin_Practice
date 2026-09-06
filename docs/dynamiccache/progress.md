@@ -605,3 +605,160 @@ reads them. The protoc launcher lands in `target/protoc-plugins`, so `clean` reb
 from the cached artifacts (no network). Kotlin sources see the generated Java because Maven's
 compiler plugin runs before the Kotlin plugin in this reactor and the generated protobuf never
 references Kotlin code.
+
+## T27: Merkle tree per vnode range
+
+**Built:** `dynacache.cluster.MerkleLeaf(key, valueHash, dvv)`, `MerkleTree` and
+`DivergentRange(from, to, keys)`. `MerkleTree.of(leaves, fanout = MerkleTree.FANOUT)` builds one
+vnode range's tree: leaf hashes are SHA-256 over a tagged, length-prefixed encoding of
+`key.bytes`, `valueHash` and `dvv.encode()`; each level above is the fan-out-way chunking of the
+one below, node hashes SHA-256 over the concatenated children under a different tag. `root` is
+the single hash of the top level. `diff(other)` compares roots, descends only into subtree pairs
+whose hashes disagree, groups the leaf indices it lands on into contiguous spans and returns one
+`DivergentRange` per span that really contains a difference. Six tests in `MerkleTreeTest`.
+`mvn clean package` green: engine 44, cluster 24, server 16. Two new files, 265 lines including
+tests; nothing else touched.
+
+**Concepts named:** A **leaf** is one key's contribution to the tree, the `(key, value hash, DVV)`
+triple of spec 2.4, and the tree hashes it without knowing what a value hash is: the caller
+computes that, and no value is stored. A **divergent range** is one span of leaves whose subtree
+hashes disagreed, carrying the keys inside it that really differ - present on one side only, or
+holding a different value hash or a different DVV. That is what T28 exchanges. No seam: the tree
+is concrete, tested through its own public methods, exactly as plan 2.3 lists it beside `Ring`,
+`Dvv` and `HintStore`. Key order is unsigned byte order via `java.util.Arrays.compareUnsigned`,
+the order keys are exchanged in, and `of` **sorts** its input rather than requiring sorted input,
+so C6 holds whatever order a node's local scan yields. Duplicate keys are refused: a vnode range
+holds a key once. Leaf and node hashes carry different one-byte tags and every leaf field is
+length-prefixed, so no leaf hash can be read as a node hash and no two different triples can
+collide by concatenation.
+
+The descent is index-aligned, which is the honest consequence of the ticket's contract that a
+leaf is a key rather than a hash sub-range. Two ranges holding the same keys line up level by
+level, so a single changed value opens one subtree per level and nothing else; a range that has
+gained or lost a key shifts every leaf after it, so the descent suspects the whole tail, and
+trees of different height do not line up at all and every leaf becomes suspect. To keep the
+answer exact in those cases, each suspect span is verified key by key against the other tree by
+binary search, and a span with nothing really wrong in it is dropped. So `diff` never
+over-reports: it only spends more of the descent's saving when the two ranges differ in shape.
+That is safe by construction - a subtree pair whose hashes match holds byte-identical contents,
+so no divergent key can hide inside one.
+
+**Acceptance:**
+- `C6_identical_data_identical_root`: 40 leaves supplied in list order and in a seeded shuffle
+  produce the same root.
+- `merkle_one_changed_key_changes_root`: rewriting one leaf's value hash changes the root.
+- `merkle_dvv_change_alone_changes_root`: same value hash, a different dot, root changes.
+- `merkle_empty_range_has_stable_root`: two empty trees agree and differ from a one-leaf tree.
+- `merkle_diff_names_only_divergent_ranges`: a tree against itself diffs to the empty list; one
+  rewritten key among 40 yields exactly `DivergentRange(key17, key17, [key17])`, and the diff is
+  symmetric.
+- `merkle_diff_detects_missing_key_on_one_side`: a key dropped from the middle yields the tail
+  span `key17..key39` naming only `key17`; a key dropped from the end yields only `key39`; and
+  17 leaves against 16, whose trees differ in height, yield only `key16`.
+
+**Deviations:** None against the spec or the plan. Two choices the documents left open, recorded
+here: `of` sorts its input rather than requiring sorted input (the ticket allowed either), and
+`diff` verifies each suspect span key by key so the result is exact rather than a superset.
+`fanout` is a private constructor parameter with the public default `MerkleTree.FANOUT = 16`;
+`diff` refuses two trees built at different fan-outs.
+
+**For the next ticket:** T28 gets `root: ByteArray` for the first exchange and
+`diff(other): List<DivergentRange>` for the descent, and nothing else - there is no wire form for
+a tree yet, no level-by-level exchange protocol and no `Ring` or `Vnode` coupling. The tree takes
+whatever leaves it is handed, so T28 owns choosing the vnode range, scanning the local data for
+it and deciding what a value hash is. `diff` is an in-process comparison of two whole trees; a
+real anti-entropy round that ships one level at a time will need a per-level accessor, which is
+deliberately not there yet. Hash arrays are held, not copied, the same convention `Key.bytes`
+follows: a caller must not mutate `root` or a leaf's `valueHash`. The descent's saving depends on
+the two ranges holding the same key set; after a range gains or loses keys, a `diff` costs a full
+leaf scan while staying exact, which matters only if a future measurement shows it.
+
+## T03: String completion and Hash
+
+**Built:** The String set of spec 2.1 is complete and the Hash type exists. `Command` gains
+`IncrBy(key, delta)` (one variant for `INCR`, `DECR`, `INCRBY` and `DECRBY`; the parser signs
+the delta), `Append`, `StrLen`, the ten Hash variants (`HGet`, `HSet`, `HMSet`, `HDel`,
+`HGetAll`, `HMGet`, `HExists`, `HKeys`, `HVals`, `HLen`), and four fanned variants `MGet`,
+`MSet`, `DelKeys`, `ExistsKeys`. `Entry.value` is now a sealed `Value` (`Str(bytes)` or
+`Hash(fields)`) instead of a bare `ByteArray`, and `TYPE` reports `string` or `hash` from
+`Value.Kind.text`. `ApEngine.submit` routes on the command's shape and fans multi-key commands
+out; `Partition` gained `submitAll`, one task for one partition's share of a fanned command.
+
+**Concepts named:** `Command.Keyed(needs: Value.Kind?)` is the intermediate T02 asked us to
+consider: it carries the one key and the kind that key must hold, which deleted `ApEngine.keyOf`
+(a `when` that would now have eighteen arms) and gave C13 one place to live. `Command.Fanned`
+is the other half: it knows its `keys`, the `single(index)` command for each argument, and how
+to `join` the per-argument replies. Fan-out is therefore three lines in `ApEngine` and one line
+per fanned command, and a partition still only ever sees `Keyed` or `Ping` (a `Fanned` reaching
+`Partition.execute` is an `error`). `Value` is the stored cell's type; `Value.Kind` is the word
+`TYPE` reports and the word a command names when it needs a kind. Hash field names are held as
+ISO-8859-1 text, a lossless byte round trip, so the JDK's `LinkedHashMap` does the hashing and
+the iteration order is stable for tests. Seams unchanged: `CommandEngine`, `PartitionContext`,
+`Reply`, `Key`, `PartitionId` are exactly T01's.
+
+**Acceptance:**
+- `string_incr_atomic`: 11 from "10", the stored value becomes "11", 1 on a missing key, -1 for
+  a negative delta, `-ERR value is not an integer or out of range` on "abc" with the value
+  intact afterwards.
+- `hash_field_independence`: two new fields count 2, an overwrite counts 0, the other field is
+  untouched, a missing field and a missing key are both nil.
+- `hash_getall_complete`: a missing hash is an empty array; a two-field hash is the flat array
+  `[a, 1, b, 2]`.
+- `mget_spans_partitions`: two keys found on different partitions via `partitionOf` plus a
+  missing one, one array in argument order with nil in the middle.
+- `mget_across_partitions_is_not_atomic`: pins ADR 0002. A `ParkingClock` parks the first
+  command on one named partition thread; that is the MGET's first part, and the fan-out has not
+  reached the other partition yet, so a whole `MSET` (keys given in the other partition's order)
+  lands there in the gap. The reply is `[old, new]`, which neither an atomic MGET nor an atomic
+  MSET could produce. Mutation-checked: switching `fanOut` to submit the parts together and
+  gather with `allOf` makes it fail with `[old, old]`.
+- Redis shapes: `MSET writes every key and DEL and EXISTS count across partitions`,
+  `APPEND extends the value and replies with the new length, STRLEN measures it`,
+  `HDEL removes fields and the key goes with its last field`,
+  `HMSET, HMGET, HEXISTS, HKEYS, HVALS and HLEN reply in Redis shapes`.
+- C13 mechanism: `a command meant for another kind is refused without touching the key` (HGET
+  and HSET on a String key, GET/INCRBY/APPEND/STRLEN on a Hash key, all `-WRONGTYPE ...`, both
+  values intact afterwards; `TYPE`, `EXISTS` and `SET` work on any kind). T04 owns the named
+  `C13_wrongtype_leaves_value_intact`.
+- Every T01 and T02 test still green. `mvn -o clean package`: engine 37, cluster 10, server 1.
+- This entry.
+
+**Deviations:** None against the spec, the ticket, ADR 0002 or the frozen types. Six judgement
+calls:
+1. **Fan-out is sequential, partition by partition** (spec 2.2's own words), not concurrent.
+   Concurrent parts would be faster but make the interleaving non-deterministic: with every
+   part enqueued back to back from the caller thread, per-partition FIFO orders the reader
+   before the writer on *every* partition, and the MGET comes out atomic-looking, so
+   `mget_across_partitions_is_not_atomic` cannot be written without a sleep or a race. This is
+   a deliberate ceiling, named in the code: fan-out latency is the sum over partitions, and the
+   repair is to submit the parts together and gather with `allOf` (which is exactly the
+   mutation the pinning test catches, so that repair needs a different test).
+2. **Both single-key and variadic `DEL`/`EXISTS` exist.** `Del(key)` and `Exists(key)` are what
+   a partition runs; `DelKeys(keys)` and `ExistsKeys(keys)` are the wire forms that fan out to
+   them. Naming them `MDel`/`MExists` would invent Redis verbs that do not exist, and folding
+   them into one variadic type would leave the partition with a multi-key command to unpack.
+3. **`Command.Keyed` and `Command.Fanned` intermediates** inside the sealed `Command` root, the
+   change T02 flagged. The root, `Reply`, `Key`, `PartitionId` and the `CommandEngine` and
+   `PartitionContext` signatures are untouched.
+4. **`MGET` answers nil, not `WRONGTYPE`, for a key holding a Hash**, which is Redis's
+   documented behaviour; `MGet.join` maps an error element to nil. Single-key `GET` still
+   errors. `MSET`, `DEL` and `EXISTS` work on any kind, so they cannot produce one.
+5. **One clock read per executed command, not per submitted command.** A fanned command's part
+   reads the clock once per key it covers, so an `MGET` of three keys reads it three times. C1's
+   rule ("the clock is read exactly once per command") still holds for what a partition runs.
+6. **`INCRBY` rejects a leading `+`** (Redis's `string2ll` takes only an optional `-`), and
+   overflow is caught with `Math.addExact` and answered with the same
+   `ERR value is not an integer or out of range`; Redis says "increment or decrement would
+   overflow" there, which is a different string this ticket did not name.
+
+**For the next ticket:** `Partition.execute`'s `when` is grouped String, Hash, key management,
+and the C13 kind check sits above it: T04's List adds `Value.List` plus `Value.Kind.LIST` and
+its variants declare `needs = LIST`; nothing else moves. `Entry.str` casts to `Value.Str` and is
+only safe *after* that check, so any new String branch must declare `needs`. `HSET`/`HMSET`
+create the hash with no TTL and leave an existing key's TTL alone, and `HDEL` removes the key
+with its last field, both as Redis does. Hash fields are `LinkedHashMap<String, ByteArray>` keyed
+by ISO-8859-1 text (`fieldName`/`fieldBytes` in `Value.kt`); T05's `HSCAN` iterates that map and
+T05's hand-built table replaces the `HashMap` store, not the field maps, unless it wants to.
+Multi-key fan-out lives entirely in `ApEngine.fanOut`, so T04's `KEYS`, `DBSIZE` and `FLUSHDB`
+compose the same way but need a different shape: they have no keys to group by, so they want a
+"every partition" variant rather than a `Fanned`. `atomically` is still `TODO("T14: batches")`.

@@ -8,11 +8,11 @@ the divergent leaf ranges and their keys; deterministic across nodes with identi
 
 **Nature:** deterministic structure, C6 (Opus)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache b26d7a8, merged into misc/ai_gen)
 
-- [ ] `C6_identical_data_identical_root`, `merkle_one_changed_key_changes_root`
-- [ ] `merkle_diff_names_only_divergent_ranges`, `merkle_empty_range_has_stable_root`
-- [ ] Progress entry appended
+- [x] `C6_identical_data_identical_root`, `merkle_one_changed_key_changes_root`
+- [x] `merkle_diff_names_only_divergent_ranges`, `merkle_empty_range_has_stable_root`
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket, stubs throwing NotImplementedError
 for later seams; 200 to 600 lines including tests; JUnit 5 + Mockito only, no AssertJ or MockK;
