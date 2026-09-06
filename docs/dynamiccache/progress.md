@@ -5746,3 +5746,97 @@ is ever added for the condition.
   engines, where Redis's `SETNX` answers 1/0. That divergence is the parser's and predates T61; it
   is now reachable on `cp:` keys as well as AP ones.
 - **T60's wire tag** does not collide: this ticket added no tag and used no number at 40 or above.
+
+---
+
+## T63 - The engine's command codec encodes every keyed command
+
+The WAL codec became the engine's command codec. `WalCodec.kt` is now
+`persist/CommandCodec.kt`; the object is public (`internal` would have hidden it from the server
+and cluster modules that T64 and T65 move onto it).
+
+**The interface.** Two names, both in `dynacache.engine.persist`:
+
+- `CommandCodec.encode(command: Command, now: Instant? = null): Pair<Byte, ByteArray>` - the
+  command's op code and the body of its arguments.
+- `CommandCodec.decode(op: Byte, body: ByteArray): List<Command>` - the commands that encoding
+  redoes, in order.
+- `whatChanged(command: Command, reply: Reply): Command?` - the command the log should hold, or
+  null when nothing changed. A top-level function, not a member: it is the log's decision about a
+  reply, not part of the encoding.
+
+`CommandEngine.log` is now `whatChanged(command, reply)?.let { CommandCodec.encode(it, now) }` and
+appends exactly as before. `SnapshotEngine` replays through `CommandCodec.decode`, unchanged
+otherwise. `Wal.kt` was not touched at all: the writer already took `(op, payload)`.
+
+**Coverage.** Total over `Command.Keyed` minus `Cp`, plus every `Command.Fanned`, plus `FlushDb`
+(the log has always held it). That is 22 reads, 17 writes and the 4 fanned commands, 43 op codes.
+Op codes 1 to 16 and their bodies are exactly what they were; 17 to 43 are new and are never
+written to the log (`HMSET`, every read, the four fanned commands). `Command.Cp` is out of scope:
+it is CpWire's business (CP spec 6.2) and `encode` throws for it, as it does for `Ping`,
+`CommandTable`, `Scan` and the other `EveryPartition` commands, which the router runs on the node
+the client reached and never forwards. The `when` in `encode` is exhaustive over `Command`, so a
+variant added without a codec case stops the main build, not only the test.
+
+**The what-changed function.** An error or a nil (a refused `SET`, an empty `POP`) changed nothing;
+so did a read and so did a fanned command, which reaches the log as the single-key parts it splits
+into. A taken `SET` is logged with its condition decided away; `HMSET` is logged as the `HSET` it
+is; `ZADD` keeps its condition (T48: `:0` is a refusal and a moved score alike) and loses `CH`,
+which changes only the reply.
+
+**Deviation: `whatChanged` takes no `now`.** The ticket's signature is (command, reply, now). No
+`Command` can carry a decided deadline - `Command.Set` holds a `Duration` and only `Command.Expire`
+holds an `Instant` - so a what-changed that returned "the command to log" with the TTL already
+absolute would have to return two commands, which the WAL would log as two entries. That is a
+durability regression: a crash between them restores the value without its expiry, where today one
+entry is all-or-nothing. So the instant stays in the encoding, where it already lived: `now` is
+`encode`'s parameter, and the deadline and the asked duration are one field read two ways.
+
+**The format decision.** One encoding, one op code per command, and the WAL entry header wraps it:
+the header carries the op code and the payload carries the body. A forward carries the same two
+concatenated, op code first (T64 writes those two lines of framing; nothing here needs them yet).
+
+**A pre-existing WAL still reads.** No entry header, op code or body changed. The two fields the
+wire needs and the log never did are written only when they are not their default - `SET`'s
+condition and asked duration, `ZADD`'s `CH` - so an entry an older build wrote has no tail, and no
+tail is what it always meant. `codec_reads_the_entries_written_before_the_reads_were_added` builds
+both old bodies by hand and decodes them. Nothing about a pre-existing log is version-gated, so no
+format version was bumped and none was needed.
+
+**Tests.** `dynacache-engine/src/test/kotlin/dynacache/engine/persist/CommandCodecTest.kt`, 7 tests:
+
+- `command_codec_round_trips_every_keyed_variant` - one sample of every variant through an
+  exhaustive `when`, each asserting both answers: does it cross, and does the log hold it. Byte
+  exactness is `encode(decode(encode(c))) == encode(c)` plus the decoded variant's own class.
+- `codec_round_trips_conditions_and_both_ttl_forms`
+- `codec_reads_the_entries_written_before_the_reads_were_added`
+- `what_changed_logs_nothing_for_an_error_or_a_refused_write`
+- `what_changed_decides_the_condition_of_a_set_it_took`
+- `what_changed_keeps_the_condition_of_a_conditional_zadd`
+- `what_changed_logs_an_hmset_as_the_hset_it_is`
+
+Engine suite 151 before, 158 after, all green; every WAL, recovery and fsync test passes unchanged,
+`wal_reads_append_nothing` included. (The brief's expected base of 148 was three low; nothing
+existing was renamed or removed, and only the codec's own file was added to.) `dynacache-server
+-am` green downstream: cluster 86, cp 94, server 92 -- the brief's 84 and 98 for those two were
+off in both directions, and no test outside the engine was touched.
+
+**Known ceiling.** The exhaustive `when` stops the build when a variant is added, but the samples
+list is a list: a new variant folded into an existing branch group compiles without a sample. The
+engine is kotlin-stdlib only, so `sealedSubclasses` was not available to close that gap, and a
+reflection dependency for one assertion was not worth it. `whatChanged`'s `else -> null` has the
+same shape: the test's `when` is what forces the author of a new mutating variant to classify it.
+
+**For the next ticket.**
+
+- T64 (forwards): `CommandCodec.encode(command)` with no `now`, framed as `byteArrayOf(op) + body`;
+  the other side is `CommandCodec.decode(bytes[0], bytes.copyOfRange(1, bytes.size)).single()`.
+  `single()` is safe for a forward: only a logged `SET` with a deadline decodes to two commands, and
+  a forward passes no `now`, so it never carries one. `commandToTokens` in the server and
+  `TokenCodec` in the cluster test kit both become dead once the router carries bytes.
+- T65 (replicates): `whatChanged(command, reply)` is `Replication.decided()`'s replacement, and it
+  is stricter - it also drops `ZADD`'s `CH` and turns `HMSET` into `HSET`. It answers null for
+  exactly the writes `Replication.write` currently refuses to replicate (an error, a refused
+  conditional `SET`), so the `if (reply is Reply.Error || ...)` check there becomes the null. The
+  replicate's `expiresAtMillis` field is the same decision as `encode`'s `now`: pass the
+  coordinator's instant and the TTL travels absolute.
