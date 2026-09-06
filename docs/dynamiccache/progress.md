@@ -1043,3 +1043,114 @@ and not `EveryPartition` either, since it visits one partition per call rather t
 `EveryPartition` is the wrong parent for it. `Value.List.items` is a `kotlin.collections.ArrayDeque`
 and T05's table replaces the key map, not the list backing. `atomically` is still
 `TODO("T14: batches")`.
+
+## T38: CP module, MicroRaft runtime, AtomicLong
+
+**Built:** A fourth Maven module, `dynacache-cp`, between cluster and server (parent `modules`
+plus a `microraft.version` 0.7 property); `dynacache-server` now depends on cp instead of
+cluster, and reaches the cluster's types transitively. MicroRaft 0.7 was not in `~/.m2`; one
+online `dependency:get` cached it, and every build since has been `-o`.
+
+In the engine module, `Command.Cp` is a nested sealed class under `Command` carrying the
+AtomicLong verbs of CP spec 6.2: `LongSet`, `LongGet`, `LongIncr`, `LongDecr`, `LongIncrBy`,
+`LongDecrBy`, `LongCas(expected, new)`, each over a `cp:*` `Key`. It is a sibling of `Keyed` and
+`Fanned`, not a `Keyed`, so a CP command can never be routed to a partition executor: `ApEngine`
+answers `Reply.Error("NOTCP", ...)` and `Partition` treats one as a programming error (C16).
+
+In `dynacache.cp`: `CpEndpoint(nodeId)` is the cluster's `NodeId` wearing MicroRaft's
+`RaftEndpoint`; `CpConfig(nodeId, cpMembers, groupId, raft, leaderElectionTimeout)` rejects an
+even or under-three member list at construction (CP spec 2.2) and knows whether this node is a
+CP member; `RaftRuntime` builds one member's `RaftNode` over an injected MicroRaft `Transport`
+and `AtomicLongStateMachine`, exposes a synchronous `isLeader` from `node.term.leaderEndpoint`,
+and completes a `leadership` future from MicroRaft's own report listener when it wins an
+election; `AtomicLongStateMachine` applies `Command.Cp` values and returns ordinary `Reply`s;
+`CpEngine : CommandEngine` replicates through the leader and completes with the applied reply.
+
+**Concepts named:** The **CP engine** of CONTEXT.md now exists next to the AP engine, presenting
+the same command engine shape. Its seam is `CpEngine.submit`, and every test drives it. The
+**Raft runtime** is one CP member's node, log and state machine; the MicroRaft `Transport` is
+the seam under it, which is why the test kit passes an in-memory adapter and T43 can pass a gRPC
+one without the runtime changing. The state machine's operations *are* `Command.Cp` values and
+its results *are* `Reply` values, so nothing translates between the log and the wire: no `CpOp`
+type was introduced (plan 2.2 names one; it would have had the same content as `Command.Cp`).
+Replies follow the ticket: `+OK` for SET, an integer for a counter read or a new value, a nil
+bulk for a GET of a counter never written, `:1`/`:0` for CAS, `-NOTLEADER <leader>` when a
+non-leader is asked, `-NOTCP` for a non-CP command or a non-`cp:` key. `atomically` throws
+`NotImplementedError`: the Raft log already serializes every entry, so CP has no batches.
+
+`CpTestKit` is the three-member in-process kit: an in-memory MicroRaft transport that hands a
+message straight to the target member's node and drops anything to or from a killed member,
+plus `engine(member)`, `runtime(member)`, `live()`, `leader()`, `leaderEngine()`, `killMember`
+and `restartMember`. It sleeps nowhere: an election is awaited on the members' leadership
+futures with a deadline, a committed apply on the engine's own future with a deadline.
+
+**Acceptance:** all in `dynacache.cp.CpEngineTest`, 11 tests, all green.
+
+- `long_set_get_roundtrip`, `long_incr_decr`, `long_cas_success`, `long_cas_failure` — the four
+  verb slices through the leader's engine. `long_get_missing_is_nil` pins the nil bulk.
+- `long_concurrent_incr_linearizable` — 50 `INCR`s in flight from a bounded pool of 4 client
+  threads; the replies are exactly the set 1..50 (each increment saw a distinct value) and the
+  final `GET` is 50.
+- `cp_minority_failure_available` — one follower killed of three, `INCR` and `GET` still answer.
+- `cp_majority_failure_unavailable` — both followers killed, the lone leader's `INCR` is still
+  pending after two seconds; the assertion admits only a pending future or `-NOTLEADER`, never
+  an applied value.
+- `C21_success_implies_majority_commit` — after the reply, the leader's commit index is read and
+  the members whose log already reaches it are counted; at least a majority hold the entry, and
+  the leader's state machine holds the value.
+- `cp_follower_answers_notleader` and `C16_cp_engine_rejects_a_non_cp_key` cover the two error
+  kinds the engine can answer with.
+
+Full `clean package` is green: engine 54, cluster 33, cp 11, server 16.
+
+**Deviations:**
+
+1. **No `LONG_GETADD`.** CP spec 3.2 and 6.2 list a `GETADD` returning the old value; the
+   ticket's enumeration of `Command.Cp` variants does not, and the engine's `Command` root is
+   shared with T44's parser. Debt, one data class and one branch: add it with the `CP.LONG.*`
+   verbs in T44.
+2. **`INCR`, `DECR`, `INCRBY` and `DECRBY` are four variants, not one signed delta.** The AP
+   engine collapses them into a single `Command.IncrBy(key, delta)`. The ticket names four, and
+   T44 maps verbs one to one, so the ticket won. If T44 finds the duplication annoying, one
+   `LongAdd(key, delta)` replaces all four.
+3. **No `CpOp` type.** Plan 2.2 says the CP engine applies `CpOp`s; the commands are replicated
+   as themselves instead. A distinct type buys nothing until the log entries must be serialized
+   for gRPC, which is T43 — that is where a proto-backed operation type belongs, if anywhere.
+4. **No `RaftStore`: `NopRaftStore` and no restored state.** `restartMember` therefore brings a
+   member back empty and it catches up from the leader's log rather than from its own disk. Real
+   Raft would need persisted term and vote for that to be safe. Debt, marked in `RaftRuntime`:
+   T45 owns snapshots and restore (I20) and should bring an in-memory `RaftStore` with it.
+5. **MicroRaft ships no in-memory transport in its main jar.** `io.microraft.impl.local` is in
+   the project's test sources, and no `microraft:0.7:tests` artifact is published to Central, so
+   the kit has its own 20-line `Transport` as the ticket allowed. No test-scope MicroRaft
+   artifact was added.
+6. **TDD granularity.** The first slice (`long_set_get_roundtrip`) was red-then-green at the
+   `CpEngine.submit` seam, but the state machine's `when` over the sealed `Command.Cp` is
+   exhaustive, so the compiler forced every verb's branch in that one slice. The later verb
+   tests were therefore written against code that already existed. The failure semantics
+   (`NOTLEADER`, `NOTCP`, minority, majority, C21) were red first.
+7. **Real-time waits.** No `Thread.sleep` anywhere. Two waits are real time all the same:
+   `cp_majority_failure_unavailable` deliberately waits two seconds to observe that the entry
+   never commits, and the test kit's `RaftConfig` shortens the election timeout to 200 ms
+   (heartbeat period 1 s, heartbeat timeout 5 s) so an election resolves quickly. Production
+   keeps MicroRaft's defaults. The CP test class runs in about 2.2 seconds, nearly all of it the
+   deliberate two-second wait.
+
+**For the next ticket:**
+
+- **T39 (log-carried time)** has nowhere to put a timestamp yet: entries are bare `Command.Cp`
+  values and `AtomicLongStateMachine.runOperation` ignores its `commitIndex`. Wrapping the
+  command in a stamped envelope at the leader is the natural move, and it is also where the
+  `CpOp` type of plan 2.2 would finally earn its keep.
+- **T40 to T42** add state machines beside `AtomicLongStateMachine`. A `RaftRuntime` currently
+  takes exactly one, typed; that parameter wants to become the composite state machine that
+  dispatches by command type. `takeSnapshot` and `installSnapshot` are implemented, not stubbed,
+  but as one chunk holding the whole map; chunking is T45's.
+- **T43** replaces the kit's in-memory `Transport` with a gRPC one and needs `CpEndpoint` to map
+  to a peer address. The endpoint's id is the `NodeId` name, so the cluster's existing address
+  book is the only thing missing. Forwarding replaces the `-NOTLEADER` reply that `CpEngine`
+  gives today; the hint it carries is `node.term.leaderEndpoint`, already there.
+- **T44** parses the `CP.LONG.*` verbs into these variants and must decide deviations 1 and 2.
+- `CpTestKit.leader()` waits on the leadership futures of the members alive at the time. It is
+  correct for a first election; T40's failover tests will want it to notice a *new* leader after
+  the old one is killed, which means resetting the future rather than reusing a completed one.

@@ -13,12 +13,12 @@ DECRBY and CAS; a three-member in-process CP test kit with `killMember`, `restar
 
 **Nature:** library integration and the first primitive (Opus)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache 5eed891 + merge bd7a8be, merged into misc/ai_gen)
 
-- [ ] `long_set_get_roundtrip`, `long_incr_decr`, `long_cas_success`, `long_cas_failure`, `long_concurrent_incr_linearizable`
-- [ ] `cp_minority_failure_available`, `cp_majority_failure_unavailable`
-- [ ] `C21_success_implies_majority_commit`
-- [ ] Progress entry appended
+- [x] `long_set_get_roundtrip`, `long_incr_decr`, `long_cas_success`, `long_cas_failure`, `long_concurrent_incr_linearizable`
+- [x] `cp_minority_failure_available`, `cp_majority_failure_unavailable`
+- [x] `C21_success_implies_majority_commit`
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket, stubs throwing NotImplementedError
 for later seams; 200 to 600 lines including tests; JUnit 5 + Mockito only, no AssertJ or MockK;
