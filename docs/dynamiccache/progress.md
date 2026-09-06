@@ -452,3 +452,73 @@ useful: `ZADD` must reject a non-float argument with Redis's own error before re
 hand out the list's own member array, so nothing may mutate it after an insert. The log-n margin
 is 9 percent, 30.35 against 33.22: a future change to the seed or the branch probability should
 re-read that number rather than assume headroom.
+
+## T21: Dotted Version Vectors
+
+**Built:** `dynacache.cluster.Dvv(dot, context)` and `Dot(node, counter)` as data classes,
+with `dominates`, `isConcurrent`, `bump(counter)`, `merge(other, counter)`, `encode()` and
+`Dvv.decode(bytes)`; `dynacache.cluster.DotCounter`, the one source of dots a node hands out,
+built by `DotCounter.of(node, localData: Iterable<Dvv>)` and advanced by `next()`. Eight tests
+in `DvvTest`. `mvn clean package` green: engine 35, cluster 18, server 1. Three new files,
+271 lines including tests; nothing else touched.
+
+**Concepts named:** A **dot** is the event that created one version, `(node, counter)`. A
+DVV's **context** is `node -> highest counter seen`, and dot plus context stand for a set of
+dots: the dot itself and, per context entry, every counter up to it. `dominates` and
+`isConcurrent` are set inclusion over those dots, so a version whose dot fills a gap its
+context never saw stays concurrent with a version that did see the gap (the paper's reason for
+keeping the dot outside the vector). `bump` is the next write built on a version: a fresh dot
+over the version's context with its own dot folded in. `merge` is the clock half of spec 5.3's
+concurrent case: a fresh dot over the pointwise max of both contexts, raised to cover both
+dots, so the result strictly dominates both inputs; what to do with the two values is T29.
+`DotCounter` is the per-node C2 guarantee: an `AtomicLong` seeded from the highest own counter
+in a scan of local data (own dots and own context entries alike), so a restart resumes above
+everything that reached disk. No new seam: the counter is concrete, and the "local data" scan
+is an `Iterable<Dvv>` argument until P4 supplies a real one. The wire form is hand-rolled:
+length-prefixed UTF-8 node names and unsigned LEB128 varints, context entries sorted by node
+so equal DVVs encode to equal bytes; a one-entry DVV with short names is 8 bytes. It lives in
+the cluster module for now; T31 may lift it into the engine, which is why it uses only
+`java.io.ByteArrayOutputStream` and the stdlib.
+
+**Acceptance:**
+- `dvv_dominance_detection`: B built on A's dot dominates A; A does not dominate B or itself.
+- `dvv_concurrent_detection`: independent first writes on two nodes are concurrent both ways;
+  a version is not concurrent with itself; a descendant is not concurrent with its ancestor.
+- `dvv_merge_preserves_causality`: the merge of two concurrent versions dominates both, takes
+  the coordinator's next dot, and its context is the max per node covering both dots.
+- `dvv_bounded_size`: 10,000 seeded writes from 100 clients through 3 nodes on one key, each
+  client writing on what it last saw or on a read from a random node, each node replacing on
+  dominance and merging on concurrency; every written and stored context has at most 3
+  entries.
+- `dvv_no_counter_reuse`: a counter rebuilt from five own dots and a remote version whose
+  context saw own counter 7 resumes at 8; a counter for a node whose dot 9 appears in local
+  data resumes at 10.
+- `I4_later_write_dominates`: a 20-link chain alternating between two nodes; every link
+  strictly dominates every earlier link and none dominates a later one.
+- `C2_counter_strictly_increases`: a counter restored above 41 hands out 42 next, and over
+  1,000 rounds interleaved with merges of foreign versions every dot is strictly higher than
+  the last.
+- `dvv_encoding_roundtrip`: 202 DVVs (edge cases plus seeded random ones over four node names
+  including non-ASCII) decode to equal values and re-encode to identical bytes; the 8-byte
+  minimal case; a trailing byte is rejected with `IllegalArgumentException`.
+- This entry.
+
+**Deviations:** None against the spec or the plan entry. Two judgement calls. The plan entry
+writes `bump(nodeId)`; the code takes the node's `DotCounter` instead, because a node's next
+counter is a fact about the node's history, not something a DVV can compute from its own
+context: two concurrent writes at one node from clients with stale contexts would both derive
+the same `context[node] + 1` and reuse it, which is exactly what C2 forbids. `merge` takes the
+counter for the same reason. Second, `dominates` uses dot-set inclusion (the paper's semantics)
+rather than a bare pointwise comparison of contexts, which costs one extra condition in
+`coversUpTo` and is what makes the "dot fills a gap" case come out concurrent.
+
+**For the next ticket:** T22's read path picks "the value with the highest DVV" (C4) with
+`dominates`; when two replies are concurrent the merge rule is T29's, and until then T22 can
+keep both or pick deterministically and say so. T22's coordinator owns one `DotCounter` per
+node and calls `bump` on the version the client read, or constructs `Dvv(counter.next(),
+emptyMap())` for a first write. `encode`/`decode` are ready for the transport envelope and the
+RDB codec; the format has no version byte, so T31 should add one if it lifts it into the
+engine. Equal DVVs neither dominate nor are concurrent: a replica receiving the version it
+already holds should treat that as "keep local". `DotCounter.of` reads only the dots and
+context entries for its own node; a node that loses its local data entirely can reuse counters,
+which is the known DVV limitation P4's persistence closes.

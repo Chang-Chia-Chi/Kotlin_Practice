@@ -9,12 +9,12 @@ RDB codec. The type-specific merge of values is ticket 29; this ticket is the cl
 
 **Nature:** causal ordering, C2 and I4 (Fable)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache 5997afc, merged into misc/ai_gen)
 
-- [ ] `dvv_dominance_detection`, `dvv_concurrent_detection`, `dvv_merge_preserves_causality`
-- [ ] `dvv_bounded_size`: 10,000 writes from 100 clients through 3 nodes, size at most 3
-- [ ] `dvv_no_counter_reuse`, `I4_later_write_dominates`, `C2_counter_strictly_increases`
-- [ ] Progress entry appended
+- [x] `dvv_dominance_detection`, `dvv_concurrent_detection`, `dvv_merge_preserves_causality`
+- [x] `dvv_bounded_size`: 10,000 writes from 100 clients through 3 nodes, size at most 3
+- [x] `dvv_no_counter_reuse`, `I4_later_write_dominates`, `C2_counter_strictly_increases`
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket, stubs throwing NotImplementedError
 for later seams; 200 to 600 lines including tests; JUnit 5 + Mockito only, no AssertJ or MockK;
