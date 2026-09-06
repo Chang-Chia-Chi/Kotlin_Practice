@@ -6,8 +6,10 @@ import dynacache.engine.Reply
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNotEquals
+import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import java.time.Duration
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit.SECONDS
@@ -155,6 +157,98 @@ class CpEngineTest {
 
         assertTrue(holders >= kit.members.size / 2 + 1) { "$holders of ${kit.members.size} members hold entry $committed" }
         assertEquals(42L, leader.stateMachine.valueOf(counter))
+    }
+
+    /** CP spec 10.2: the TTL runs on log time, so the leader's clock moving 2s expires a 1s counter. */
+    @Test
+    fun long_ttl_expires() {
+        assertEquals(Reply.Simple("OK"), submit(Command.Cp.LongSet(counter, 5, ttl = Duration.ofSeconds(1))))
+        assertEquals(Reply.Integer(5), submit(Command.Cp.LongGet(counter)))
+
+        kit.clock(kit.leader().config.nodeId).advance(Duration.ofSeconds(2))
+
+        assertEquals(Reply.Bulk(null), submit(Command.Cp.LongGet(counter)))
+    }
+
+    /** CP spec 9.4: EXPIRE, TTL and PERSIST on a counter answer as Redis does, measured on log time. */
+    @Test
+    fun long_expire_ttl_persist() {
+        val clock = kit.clock(kit.leader().config.nodeId)
+        assertEquals(Reply.Integer(-2), submit(Command.Cp.LongTtl(counter)), "TTL of a missing counter")
+        submit(Command.Cp.LongSet(counter, 5))
+        assertEquals(Reply.Integer(-1), submit(Command.Cp.LongTtl(counter)), "TTL of a counter without one")
+        assertEquals(Reply.Integer(0), submit(Command.Cp.LongExpire(Key("cp:counter:missing"), Duration.ofSeconds(10))))
+        assertEquals(Reply.Integer(1), submit(Command.Cp.LongExpire(counter, Duration.ofSeconds(10))))
+
+        clock.advance(Duration.ofSeconds(4))
+        assertEquals(Reply.Integer(6), submit(Command.Cp.LongTtl(counter)), "seconds left, rounded as Redis rounds")
+        assertEquals(Reply.Integer(1), submit(Command.Cp.LongPersist(counter)))
+        assertEquals(Reply.Integer(0), submit(Command.Cp.LongPersist(counter)), "already persistent")
+
+        clock.advance(Duration.ofSeconds(10))
+        assertEquals(Reply.Integer(5), submit(Command.Cp.LongGet(counter)), "PERSIST outlived the old TTL")
+    }
+
+    /** CP spec 5: with no user traffic only a tick carries time, so the counter expires on the tick. */
+    @Test
+    fun ttl_tick_advances_time_when_idle() {
+        val leader = kit.leader()
+        submit(Command.Cp.LongSet(counter, 5, ttl = Duration.ofSeconds(1)))
+        kit.clock(leader.config.nodeId).advance(Duration.ofSeconds(2))
+        assertEquals(5L, leader.stateMachine.valueOf(counter), "the clock moved but log time did not")
+
+        leader.tick().get(REPLY_TIMEOUT_SECS, SECONDS)
+
+        assertNull(leader.stateMachine.valueOf(counter))
+    }
+
+    /**
+     * C23: expiry is decided by the stamp carried in the log, so members that have applied the
+     * same index agree on it. The followers' clocks never move; only the leader's does.
+     */
+    @Test
+    fun C23_every_member_agrees_on_expiry_at_same_index() {
+        val leader = kit.leader()
+        submit(Command.Cp.LongSet(counter, 5, ttl = Duration.ofSeconds(1)))
+        val setIndex = leader.node.report().log.commitIndex
+        kit.live().forEach { member ->
+            kit.awaitApplied(member, setIndex)
+            assertEquals(5L, kit.runtime(member).stateMachine.valueOf(counter), "$member at index $setIndex")
+        }
+
+        kit.clock(leader.config.nodeId).advance(Duration.ofSeconds(2))
+        val tickIndex = leader.tick().get(REPLY_TIMEOUT_SECS, SECONDS)
+
+        assertTrue(tickIndex > setIndex, "the tick landed at $tickIndex, after $setIndex")
+        kit.live().forEach { member ->
+            kit.awaitApplied(member, tickIndex)
+            assertNull(kit.runtime(member).stateMachine.valueOf(counter), "$member at index $tickIndex")
+        }
+    }
+
+    /**
+     * C19: the old leader's clock runs an hour ahead of its successor's. The successor's stamps
+     * still climb past everything the old leader committed, so log time never turns back.
+     */
+    @Test
+    fun C19_log_timestamps_monotonic_across_leader_change() {
+        val old = kit.leader()
+        kit.clock(old.config.nodeId).advance(Duration.ofHours(1))
+        submit(Command.Cp.LongSet(counter, 1))
+        submit(Command.Cp.LongIncr(counter))
+        val lastByOld = old.stateMachine.lastAppliedTs
+
+        kit.killMember(old.config.nodeId)
+        val successor = kit.leader()
+        val stamps = (1..3).map {
+            submit(Command.Cp.LongIncr(counter))
+            successor.stateMachine.lastAppliedTs
+        }
+
+        assertNotEquals(old.config.nodeId, successor.config.nodeId)
+        assertTrue(stamps[0] > lastByOld, "the successor's first stamp ${stamps[0]} is past the old leader's $lastByOld")
+        assertEquals(stamps, stamps.distinct().sorted(), "stamps climb strictly: $stamps")
+        assertTrue(stamps[0] > kit.clock(successor.config.nodeId).millis(), "log time runs ahead of the successor's own clock")
     }
 
     private fun io.microraft.RaftNode.report() = getReport().get(REPLY_TIMEOUT_SECS, SECONDS).result

@@ -80,6 +80,21 @@ _Avoid_: cluster state, topology, peer list
 A split in the transport where two sets of nodes cannot reach each other. Always say
 "network partition" in full; a bare "partition" is the execution unit above.
 
+### CP
+
+**Log time**:
+The time a CP state machine lives in: the stamp of the last entry it applied. The leader
+stamps every entry with `max(its clock, last committed stamp + 1)` (C19), so log time only
+moves forward across leader changes, and every member reads the same log time at the same
+index (C23). A TTL, a lease or a session timeout is measured against it, never against a
+member's own clock.
+_Avoid_: wall time, current time, `clock.now()` in a state machine
+
+**TTL tick**:
+The entry a leader appends when nothing else has been appended for a tick interval, so log
+time keeps moving while the group is idle.
+_Avoid_: heartbeat (that is Raft's own, and carries no time)
+
 ## Example dialogue
 
 **Dev:** The Netty handler got a `SET`; do I need a lock before calling the engine?
