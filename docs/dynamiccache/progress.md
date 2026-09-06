@@ -261,3 +261,65 @@ hook: T09 schedules on the wheel in the `Set` branch and cancels in `Del`. The e
 daemon threads; `close()` is `shutdown()`, not `shutdownNow()`, so queued commands still
 complete. `atomically` (T14) should run `block` via the same executor with a `PartitionContext`
 that calls `execute` directly.
+
+## T08: Hierarchical timer wheel
+
+**Built:** `TimerWheel<K>` in `dynacache.engine.ds`, kotlin-stdlib only. Constructor takes the
+starting `Instant`, the tick in milliseconds (default 1000), the slot count per level (default
+256) and the fire callback `(K) -> Unit`. Three levels whose slot widths are tick, tick x slots
+and tick x slots^2 (the spec's 1 s x 256, 256 s x 256, ~18 h x 256 at the defaults) plus an
+overflow list for anything past the third level's horizon (194 days at the defaults).
+`schedule(key, deadline)`, `reschedule(key, deadline)`, `cancel(key): Boolean`,
+`advanceTo(now)`. A key map onto intrusive doubly linked slot lists makes schedule, reschedule
+and cancel O(1) with no scan and no lingering cancelled entries. `advanceTo` walks every tick
+between the last position and `now`, cascades level 2 and level 1 (and the overflow) when the
+tick crosses one of their slot boundaries, and fires the level-0 slot sorted by deadline; when
+the wheel is empty it jumps straight to the target. No thread, no clock read: time enters only
+through the constructor and `advanceTo`. Eight tests, all in `TimerWheelTest`.
+
+**Concepts named:** A deadline is rounded up to the next tick boundary and fires when the wheel
+has advanced through that boundary, so it never fires early and fires at most one tick late
+provided the driver advances at least once per tick; that is C7 at the structure level. Within
+a tick the slot is sorted by the exact millisecond deadline, so fire order never inverts even
+below tick resolution (I7). A deadline already in the past when scheduled fires on the first
+tick after it was scheduled, never synchronously inside `schedule`. `schedule` on a key that
+already has an entry replaces it; `reschedule` is the same call under the name the re-EXPIRE
+path will reach for, so no caller can leave two entries for one key. The callback runs on the
+thread calling `advanceTo` and may schedule or cancel freely, since the slot being fired is
+detached first. The wheel is not thread-safe by design: one partition executor owns one wheel
+(plan 2.5). `K` is a generic type parameter rather than `Key`: the wheel only needs hash and
+equality, keeping `dynacache.engine.ds` a pure data-structure package, and letting the
+million-entry test use `Int` keys; T09 instantiates `TimerWheel<Key>`.
+
+**Acceptance:**
+- `wheel_fires_on_time`: deadline 5 s is not fired at 4999 ms and is fired at 5000 ms, once.
+- `wheel_no_early_fire`: deadline 10 s is still pending at 9999 ms.
+- `wheel_cancel_prevents_fire`: `cancel` returns true then false, and only the other key fires.
+- `wheel_replace_ttl`: 2 s rescheduled to 8 s fires exactly once at 8 s; nothing at 2 s.
+- `wheel_ordering`: 3 s, 1 s, 2 s scheduled out of order fire as 1 s, 2 s, 3 s.
+- `wheel_high_volume`: 1,000,000 seeded deadlines uniform over three days (exercising the 256 s
+  and 65536 s levels), advanced one tick at a time; every key fires at a `now` with
+  deadline <= now < deadline + tick. About one second.
+- `I7_fire_order_never_inverts`: 5,000 seeded deadlines sharing ticks fire in non-decreasing
+  deadline order.
+- `C7_never_fires_before_deadline`: four slots per level and a 1 ms tick (64 ms horizon) with
+  deadlines spread over 3 s, scheduled both up front and mid-run, some already past, plus a
+  reschedule; every key fires within one tick of its due tick, through every level and the
+  overflow.
+- `mvn -o clean package` green: engine 22, cluster 1, server 1.
+- This entry.
+
+**Deviations:** None. Judgement calls: the third level is followed by an overflow list rather
+than an error, so a TTL past 194 days is legal and merely waits; slot widths derive from one
+tick and one slot count rather than three independent widths, which is what makes the cascade
+arithmetic a pair of modulo operations; a deadline in the past fires on the next tick rather
+than at once inside `schedule`, so a callback never runs from a command path.
+
+**For the next ticket:** T09 constructs one `TimerWheel<Key>(clock.instant(), tickMillis, 256)
+{ key -> delete it }` per partition and calls `advanceTo(clock.instant())` from the server's
+scheduler coroutine on that partition's executor; the callback runs on the executor, so the
+delete needs no extra synchronisation. `SET EX/PX`, `EXPIRE` and friends call `schedule` (it
+replaces), `PERSIST` calls `cancel`, and a deleted key must also be cancelled or its stale
+callback will run against a fresh value. C7 at the command level follows from the structure's
+guarantee only if the scheduler advances at least once per tick; the lazy check on access
+covers the gap between deadline and the next tick.

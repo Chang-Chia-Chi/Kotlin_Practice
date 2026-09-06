@@ -9,12 +9,12 @@ read inside the wheel. Ticket 09 wires it to the TTL commands.
 
 **Nature:** timing invariants, C7 and I7 (Fable)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache 8995a15, merged into misc/ai_gen)
 
-- [ ] `wheel_fires_on_time`, `wheel_no_early_fire`, `wheel_cancel_prevents_fire`, `wheel_replace_ttl`, `wheel_ordering`
-- [ ] `wheel_high_volume`: 1,000,000 seeded deadlines, each fires within one tick of its deadline
-- [ ] `I7_fire_order_never_inverts`, `C7_never_fires_before_deadline`
-- [ ] Progress entry appended
+- [x] `wheel_fires_on_time`, `wheel_no_early_fire`, `wheel_cancel_prevents_fire`, `wheel_replace_ttl`, `wheel_ordering`
+- [x] `wheel_high_volume`: 1,000,000 seeded deadlines, each fires within one tick of its deadline
+- [x] `I7_fire_order_never_inverts`, `C7_never_fires_before_deadline`
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket, stubs throwing NotImplementedError
 for later seams; 200 to 600 lines including tests; JUnit 5 + Mockito only, no AssertJ or MockK;
