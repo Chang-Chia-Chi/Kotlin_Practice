@@ -9,12 +9,12 @@ ticket 13 puts Netty in front.
 
 **Nature:** codec, C8 at the byte level (Opus)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache 718dd49, merged into misc/ai_gen)
 
-- [ ] `resp_encode_decode_roundtrip`, `resp_bulk_string_nil`, `resp_error_format`, `resp_inline_command`
-- [ ] `resp_fuzz_no_crash`: 10,000 seeded byte sequences, every one an error or a valid parse
-- [ ] `C8_reply_bytes_match_redis`: a golden table of reply bytes from real Redis for every reply type
-- [ ] Progress entry appended
+- [x] `resp_encode_decode_roundtrip`, `resp_bulk_string_nil`, `resp_error_format`, `resp_inline_command`
+- [x] `resp_fuzz_no_crash`: 10,000 seeded byte sequences, every one an error or a valid parse
+- [x] `C8_reply_bytes_match_redis`: a golden table of reply bytes from real Redis for every reply type
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket, stubs throwing NotImplementedError
 for later seams; 200 to 600 lines including tests; JUnit 5 + Mockito only, no AssertJ or MockK;

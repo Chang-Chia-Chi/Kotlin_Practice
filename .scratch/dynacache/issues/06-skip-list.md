@@ -9,12 +9,12 @@ wiring; ticket 07 wires it.
 
 **Nature:** data-structure craft with a sequential spec (Opus)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache a0ef941, merged into misc/ai_gen)
 
-- [ ] `skiplist_insert_order`, `skiplist_delete_preserves_order`, `skiplist_range_query`, `skiplist_rank_correct`, `skiplist_duplicate_score_lex_order`
-- [ ] `skiplist_log_n_property`: 100,000 inserts, average comparisons per search at most 2 log2 N
-- [ ] Level generation takes an injected seed so the log-n test is reproducible
-- [ ] Progress entry appended
+- [x] `skiplist_insert_order`, `skiplist_delete_preserves_order`, `skiplist_range_query`, `skiplist_rank_correct`, `skiplist_duplicate_score_lex_order`
+- [x] `skiplist_log_n_property`: 100,000 inserts, average comparisons per search at most 2 log2 N
+- [x] Level generation takes an injected seed so the log-n test is reproducible
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket, stubs throwing NotImplementedError
 for later seams; 200 to 600 lines including tests; JUnit 5 + Mockito only, no AssertJ or MockK;

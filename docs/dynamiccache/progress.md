@@ -323,3 +323,132 @@ replaces), `PERSIST` calls `cancel`, and a deleted key must also be cancelled or
 callback will run against a fresh value. C7 at the command level follows from the structure's
 guarantee only if the scheduler advances at least once per tick; the lazy check on access
 covers the gap between deadline and the next tick.
+
+## T12: RESP2 codec
+
+**Built:** `dynacache-server` gains its first main source, `dynacache.server.Resp.kt`:
+`encodeReply(Reply): ByteArray` renders all five RESP2 shapes, and `RespDecoder` reads bytes
+incrementally with no socket and no Netty in sight. The decoder buffers what it is fed and
+tries a whole frame from the last complete one, rewinding when the frame is short, so a frame
+split across any number of `feed` calls resumes. `RespProtocolException` carries Redis's own
+wording for malformed input.
+
+**Concepts named:** The decoder has two entry points because Redis reads the two directions
+differently. `nextCommand()` reads a client stream: a frame starting with `*` is an array of
+bulk strings, anything else is an inline command, and an empty frame (`*0`, `*-1`, a blank
+line) is skipped the way Redis skips it rather than surfacing as a command with no name.
+`nextReply()` reads a server stream, where every value carries its type byte, and returns a
+`Reply`; that is what `resp_encode_decode_roundtrip` closes the loop with and what T13's
+test-kit client will read. Both share one try-parse-and-rewind core, so partial-frame resume is
+written once. The seams are exactly the two the plan entry names: bytes in and frames out,
+`Reply` in and bytes out. No new interface was introduced: there is one implementation of each
+direction, so a seam would have been an abstraction with nothing behind it.
+
+**Acceptance:**
+- `resp_encode_decode_roundtrip`: thirteen replies covering every shape, including a bulk of
+  non-text bytes, a nil bulk, an empty array and a nested array, survive encode then decode.
+- `resp_bulk_string_nil`: `$-1\r\n` decodes to `Reply.Bulk(null)`.
+- `resp_error_format`: `ERR`, `WRONGTYPE` and `EXECABORT` each render as
+  `-<KIND> <message>\r\n` and start with `-`.
+- `resp_inline_command`: `PING\r\n` parses, runs of spaces collapse, and an inline argument of
+  bytes that are not text survives intact.
+- `resp_fuzz_no_crash`: 10,000 seeded sequences (`Random(20260906)`) built from well-formed
+  frames and junk, fed in random chunks of one to eight bytes, drained alternately through
+  `nextCommand` and `nextReply`. Every one yields frames or a `RespProtocolException`; the test
+  also asserts the fuzzer produced both, so it cannot pass vacuously.
+- `C8_reply_bytes_match_redis`: a sixteen-row golden table written from the RESP2
+  specification, one row per reply shape.
+- Supporting tests: partial resume byte by byte, pipelined frames in order, empty frames
+  skipped, five malformed inputs with their Redis wording, an unterminated inline line refused
+  at 64 KB, and deep nesting refused rather than overflowing the stack.
+- This entry.
+
+**Deviations:** Three, all forced by frozen contracts or deliberate.
+1. `Reply` has no nil-array shape, so `*-1\r\n` cannot be encoded, and `nextReply` treats a
+   negative multibulk length as `invalid multibulk length`. The ticket made representing it
+   optional. `nextCommand` instead skips `*-1` and `*0` with no command, which is what the real
+   Redis server does.
+2. `feed` takes a `ByteArray` only, not a `java.nio.ByteBuffer`. The ticket allowed either;
+   T13 will hand it `ByteBufUtil.getBytes`.
+3. A line must end `\r\n`. Real Redis also accepts a bare `\n` on inline input from a raw
+   telnet session. Debt, cheap to repay in `readLine` if a raw-telnet test ever wants it.
+   Also debt: an inline command splits on spaces only, without Redis's quoting rules from
+   `sdssplitargs`, which is enough for the ticket's space-separated form.
+
+**For the next ticket:** T13 owns the Netty pipeline and the token-to-`Command` parser. Notes
+it will want. `nextCommand` never returns an empty token list, so the parser always has a
+command name. A `RespProtocolException` poisons the stream: the decoder discards its buffer and
+T13 should reply `-ERR Protocol error: <message>` and close the connection, which is Redis's
+behaviour; the exception message is the bare wording with no `Protocol error:` prefix, so T13
+adds it. The limits are constructor parameters with Redis's defaults (64 KB inline, 1M
+multibulk elements, 512 MB bulk, 32 levels of nesting), so a test can shrink them. `feed`
+copies the whole buffer each call, marked with a `ponytail:` comment; it is O(n^2) on a frame
+delivered byte by byte, and the place to fix it is Netty's `ByteBuf` in T13, not here.
+`encodeReply` returns a fresh `ByteArray`, so T13 wraps it with `Unpooled.wrappedBuffer`.
+
+## T06: Skip list
+
+**Built:** `dynacache-engine` gains its first data structure, `dynacache.engine.ds`: `SkipList`
+and the `Entry` it hands back. The list is keyed by (score, member), ascending by score with the
+member bytes as an unsigned lexicographic tiebreak, and carries `insert`, `remove`,
+`updateScore`, `rangeByScore` (inclusive by default, exclusive bounds and the infinities as
+parameters), `rangeByRank` (0-based, inclusive, clamped), `rank`, `forward()`, `backward()`,
+`size` and `comparisons`. Level generation is a `kotlin.random.Random` handed to the
+constructor, with a `SkipList(seed: Long)` convenience beside it. Nine tests. No engine wiring:
+nothing outside the package knows the list exists yet.
+
+**Concepts named:** An **entry** is one element of a sorted set, a score and the member bytes
+scored by it, and it is the only type the list hands out; it holds the list's own array rather
+than a copy, exactly as `Key` holds its bytes. The key of the list is the pair, not the member:
+two entries with the same member at different scores are different entries, so member
+uniqueness is not this structure's job but the score map's beside it in T07. Three pieces of
+node state carry the ticket's six operations: `next` with a **span** per level (how many entries
+that pointer steps over) turns rank into arithmetic on the same walk a search already does, and
+a level-0 `backward` pointer makes reverse traversal a step rather than a reversed copy. One
+private `pathTo` walk serves insert, remove and rank, which is why `comparisons` counts in one
+place, `precedes`. No lock anywhere: the partition executor owns the list and runs one command
+at a time (C1).
+
+**Acceptance:**
+- `skiplist_insert_order`: 500 seeded random scores, forward traversal equals the same scores
+  through `sorted()`.
+- `skiplist_delete_preserves_order`: 300 entries, a third removed, the survivors still match an
+  independently sorted model; a second remove of the same entry and a remove of an absent one
+  both return false.
+- `skiplist_range_query`: inclusive `[lo, hi]`, the exclusive form, both infinities as bounds,
+  an inverted range and an empty one, each against a filtered sorted model.
+- `skiplist_rank_correct`: 400 inserts and 80 removes, every survivor's rank equals its position
+  in the sorted model; an absent score, an absent member and an absent pair all give -1.
+- `skiplist_duplicate_score_lex_order`: eight members at one score, including bytes 0x01 and
+  0xff, come back in unsigned byte order, so 0xff sorts last rather than first.
+- `skiplist_log_n_property`: 100,000 seeded inserts, 2,000 seeded searches, 30.35 comparisons
+  per search against the bound of 2 log2 N = 33.22.
+- Level generation takes an injected seed: `SkipList(seed = 42)` throughout, and the
+  100,000-entry measurement is byte-identical run to run.
+- Beyond the ticket's list: `range_by_rank_reads_positions_and_reverse_traversal_reads_them_backwards`
+  and `I3_ranks_and_order_survive_an_interleaved_insert_and_remove_storm` (3,000 seeded mixed
+  operations against a sorted model, checking order, both traversals, every rank and
+  `rangeByRank` every 250 steps).
+- `mvn clean package` green: engine 23, cluster 1, server 1.
+- This entry.
+
+**Deviations:** None against the ticket, the plan entry or spec 6.2. Four judgement calls worth
+recording. `updateScore` is a remove followed by an insert rather than the in-place relink Redis
+does when the move crosses no neighbour; it costs one extra walk and no complexity class, and it
+is why the operation is three lines. `rank` walks through the same `pathTo` as insert and
+remove, so a read allocates the two 32-slot path arrays a write needs; one dedicated read-only
+walk would avoid it, and a profile, not taste, should decide that. `rangeByRank` clamps its
+bounds and takes only non-negative positions: Redis's negative indices are a command-layer
+convention and belong in T07, not in the structure. The branch probability is Redis's 0.25 with
+a maximum of 32 levels.
+
+**For the next ticket:** T07 owns the dual index. The list gives it order and rank;
+member-to-score must live in the T05 hash table beside it, because `insert` treats
+(score, member) as the key and will happily hold one member at two scores if the caller lets it.
+`ZADD` on an existing member is `updateScore(oldScore, member, newScore)`, and the old score has
+to come from the score map. The list takes any `Double`, NaN included, and NaN sorts nowhere
+useful: `ZADD` must reject a non-float argument with Redis's own error before reaching here.
+`-0.0` and `0.0` are one score everywhere in the structure, `Entry.hashCode` included. Entries
+hand out the list's own member array, so nothing may mutate it after an insert. The log-n margin
+is 9 percent, 30.35 against 33.22: a future change to the seed or the branch probability should
+re-read that number rather than assume headroom.
