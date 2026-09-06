@@ -141,6 +141,15 @@ private class CommandHandler(private val engine: ApEngine) : ChannelInboundHandl
                 else -> exec()
             }
         }
+        // EVAL is connection-level for the same reason MULTI is: it is not one command the
+        // engine runs but a batch of them, so it never becomes a Command and never queues.
+        if (name == "eval") {
+            if (buffered != null) {
+                spoiled = true
+                return done(Reply.Error("ERR", "EVAL inside MULTI is not supported"))
+            }
+            return evalScript(engine, parser, tokens.drop(1))
+        }
         return when (val parsed = parser.parse(tokens)) {
             is Parsed.Ok -> buffered?.let { it += parsed.command; done(QUEUED) } ?: engine.submit(parsed.command)
             // Redis answers the error the moment the bad frame arrives and refuses the whole
@@ -179,10 +188,7 @@ private class CommandHandler(private val engine: ApEngine) : ChannelInboundHandl
             .atomically<Reply>(commands.flatMap(::declaredKeys).distinct()) { ctx ->
                 Reply.Array(commands.map(ctx::execute))
             }
-            .exceptionally { failure ->
-                val span = failure as? CrossPartitionBatch ?: failure.cause as? CrossPartitionBatch
-                span?.error ?: Reply.Error("ERR", failure.cause?.message ?: failure.message ?: "internal error")
-            }
+            .orBatchError()
     }
 
     private fun forget() {
@@ -219,7 +225,17 @@ private val OK = Reply.Simple("OK")
 private val QUEUED = Reply.Simple("QUEUED")
 private val TRANSACTION = setOf("multi", "exec", "discard")
 
-private fun done(reply: Reply): CompletableFuture<Reply> = CompletableFuture.completedFuture(reply)
+internal fun done(reply: Reply): CompletableFuture<Reply> = CompletableFuture.completedFuture(reply)
+
+/**
+ * A batch's answer, with C12's refusal turned back into the reply it carries. Both batches --
+ * `EXEC` and `EVAL` -- end this way: `atomically` answers whatever its block returned, so a span
+ * that was never allowed to run can only arrive as the future's failure.
+ */
+internal fun CompletableFuture<Reply>.orBatchError(): CompletableFuture<Reply> = exceptionally { failure ->
+    val span = failure as? CrossPartitionBatch ?: failure.cause as? CrossPartitionBatch
+    span?.error ?: Reply.Error("ERR", failure.cause?.message ?: failure.message ?: "internal error")
+}
 
 /** The keys a buffered command names, so EXEC declares the whole batch's span in one list. */
 private fun declaredKeys(command: Command): List<Key> = when (command) {
