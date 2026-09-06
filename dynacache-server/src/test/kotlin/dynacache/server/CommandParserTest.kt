@@ -3,6 +3,7 @@ package dynacache.server
 import dynacache.engine.Command
 import dynacache.engine.Reply
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
@@ -39,8 +40,7 @@ class CommandParserTest {
     /**
      * One row per command name the engine has today (spec 2.1, tickets T02 to T09). The variant
      * proves the name is wired; the probe proves the meaning wherever two names share a variant.
-     * Sorted Set arrives with T07 and its rows (`ZADD`, `ZREM`, `ZRANGE`, `ZREVRANGE`,
-     * `ZRANGEBYSCORE`, `ZRANK`, `ZREVRANK`, `ZSCORE`, `ZCARD`, `ZINCRBY`, `ZSCAN`) belong here.
+     * Every command name the engine has is here, Sorted Set included (T16).
      */
     @Test
     fun parser_maps_every_command() {
@@ -129,7 +129,133 @@ class CommandParserTest {
             row("PTTL k", Command.Ttl::class) {
                 assertEquals(Command.Ttl.Precision.MILLIS, (it as Command.Ttl).precision)
             },
+            row("PEXPIREAT k ${FIXED_CLOCK.instant().toEpochMilli() + 10_000}", Command.Expire::class) {
+                assertEquals(at(10), (it as Command.Expire).deadline)
+            },
             row("PERSIST k", Command.Persist::class),
+            // Sorted Set (T07's eleven names, in nine variants: ZRANGE/ZREVRANGE and
+            // ZRANK/ZREVRANK are each one command read from the other end)
+            row("ZADD k 1 a", Command.ZAdd::class) {
+                assertEquals(1, (it as Command.ZAdd).entries.size)
+                assertNull(it.condition)
+                assertFalse(it.changed)
+            },
+            row("ZADD k NX CH 1 a 2 b", Command.ZAdd::class) {
+                assertEquals(2, (it as Command.ZAdd).entries.size)
+                assertEquals(Command.Set.Condition.NX, it.condition)
+                assertTrue(it.changed)
+            },
+            row("ZADD k XX 1 a", Command.ZAdd::class) {
+                assertEquals(Command.Set.Condition.XX, (it as Command.ZAdd).condition)
+            },
+            row("ZREM k a b", Command.ZRem::class) { assertEquals(2, (it as Command.ZRem).members.size) },
+            row("ZRANGE k 0 -1", Command.ZRange::class) {
+                assertEquals(0L, (it as Command.ZRange).start)
+                assertEquals(-1L, it.stop)
+                assertFalse(it.withScores)
+                assertFalse(it.reverse)
+            },
+            row("ZRANGE k 0 -1 WITHSCORES", Command.ZRange::class) {
+                assertTrue((it as Command.ZRange).withScores)
+                assertFalse(it.reverse)
+            },
+            row("ZREVRANGE k 0 -1", Command.ZRange::class) { assertTrue((it as Command.ZRange).reverse) },
+            row("ZRANGEBYSCORE k (1 +inf", Command.ZRangeByScore::class) {
+                assertEquals("(1", (it as Command.ZRangeByScore).min.text())
+                assertEquals("+inf", it.max.text())
+                assertFalse(it.withScores)
+                assertEquals(0L, it.offset)
+                assertEquals(-1L, it.count)
+            },
+            row("ZRANGEBYSCORE k -inf 5 WITHSCORES LIMIT 2 3", Command.ZRangeByScore::class) {
+                assertTrue((it as Command.ZRangeByScore).withScores)
+                assertEquals(2L, it.offset)
+                assertEquals(3L, it.count)
+            },
+            row("ZRANK k m", Command.ZRank::class) { assertFalse((it as Command.ZRank).reverse) },
+            row("ZREVRANK k m", Command.ZRank::class) { assertTrue((it as Command.ZRank).reverse) },
+            row("ZSCORE k m", Command.ZScore::class) { assertEquals("m", (it as Command.ZScore).member.text()) },
+            row("ZCARD k", Command.ZCard::class),
+            row("ZINCRBY k 5 m", Command.ZIncrBy::class) {
+                assertEquals("5", (it as Command.ZIncrBy).delta.text())
+                assertEquals("m", it.member.text())
+            },
+            row("ZSCAN k 3 MATCH m* COUNT 7", Command.ZScan::class) {
+                assertEquals(3L, (it as Command.ZScan).cursor)
+                assertEquals("m*", it.pattern!!.text())
+                assertEquals(7, it.count)
+            },
+            // The CP verbs of CP spec 6 (T44). A CP key stays whole on the wire, and a lock or
+            // semaphore verb carries no session: the connection owns that (CP spec 4), so the
+            // parser leaves it unset and the handler fills it in.
+            row("CP.LONG.SET cp:counter:k 5", Command.Cp.LongSet::class) {
+                assertEquals(5L, (it as Command.Cp.LongSet).value)
+                assertEquals("cp:counter:k", it.key.toString())
+                assertNull(it.ttl)
+            },
+            row("CP.LONG.GET cp:counter:k", Command.Cp.LongGet::class),
+            row("CP.LONG.INCR cp:counter:k", Command.Cp.LongIncr::class),
+            row("CP.LONG.DECR cp:counter:k", Command.Cp.LongDecr::class),
+            row("CP.LONG.ADD cp:counter:k -5", Command.Cp.LongIncrBy::class) {
+                assertEquals(-5L, (it as Command.Cp.LongIncrBy).delta)
+            },
+            row("CP.LONG.CAS cp:counter:k 1 2", Command.Cp.LongCas::class) {
+                assertEquals(1L, (it as Command.Cp.LongCas).expected)
+                assertEquals(2L, it.new)
+            },
+            row("CP.LOCK.TRY cp:lock:k 30000", Command.Cp.LockTry::class) {
+                assertEquals(Duration.ofSeconds(30), (it as Command.Cp.LockTry).ttl)
+                assertEquals(NO_SESSION, it.session)
+            },
+            row("CP.LOCK.UNLOCK cp:lock:k 7", Command.Cp.LockUnlock::class) {
+                assertEquals(7L, (it as Command.Cp.LockUnlock).token)
+                assertEquals(NO_SESSION, it.session)
+            },
+            row("CP.LOCK.RENEW cp:lock:k 7 30000", Command.Cp.LockRenew::class) {
+                assertEquals(7L, (it as Command.Cp.LockRenew).token)
+                assertEquals(Duration.ofSeconds(30), it.ttl)
+            },
+            row("CP.LOCK.STATE cp:lock:k", Command.Cp.LockState::class),
+            row("CP.LOCK.FORCE_UNLOCK cp:lock:k", Command.Cp.LockForceUnlock::class),
+            row("CP.SEM.INIT cp:sem:k 3", Command.Cp.SemInit::class) {
+                assertEquals(3, (it as Command.Cp.SemInit).permits)
+            },
+            row("CP.SEM.ACQUIRE cp:sem:k 2", Command.Cp.SemAcquire::class) {
+                assertEquals(2, (it as Command.Cp.SemAcquire).permits)
+                assertEquals(NO_SESSION, it.session)
+            },
+            row("CP.SEM.RELEASE cp:sem:k 2", Command.Cp.SemRelease::class) {
+                assertEquals(2, (it as Command.Cp.SemRelease).permits)
+            },
+            row("CP.SEM.AVAILABLE cp:sem:k", Command.Cp.SemAvailable::class),
+            row("CP.SEM.DRAIN cp:sem:k", Command.Cp.SemDrain::class) {
+                assertEquals(NO_SESSION, (it as Command.Cp.SemDrain).session)
+            },
+            row("CP.LATCH.SET cp:latch:k 4", Command.Cp.LatchSet::class) {
+                assertEquals(4, (it as Command.Cp.LatchSet).count)
+            },
+            row("CP.LATCH.DOWN cp:latch:k", Command.Cp.LatchDown::class),
+            row("CP.LATCH.GET cp:latch:k", Command.Cp.LatchGet::class),
+            row("CP.LATCH.RESET cp:latch:k 4", Command.Cp.LatchReset::class) {
+                assertEquals(4, (it as Command.Cp.LatchReset).count)
+            },
+            row("CP.REF.SET cp:ref:k v", Command.Cp.RefSet::class) {
+                assertEquals("v", (it as Command.Cp.RefSet).value.text())
+            },
+            row("CP.REF.GET cp:ref:k", Command.Cp.RefGet::class),
+            row("CP.REF.CAS cp:ref:k a b", Command.Cp.RefCas::class) {
+                assertEquals("a", (it as Command.Cp.RefCas).expected.text())
+                assertEquals("b", it.new.text())
+            },
+            row("CP.SESSION.CREATE", Command.Cp.SessionCreate::class),
+            row("CP.SESSION.HEARTBEAT 5", Command.Cp.SessionHeartbeat::class) {
+                assertEquals(5L, (it as Command.Cp.SessionHeartbeat).session)
+            },
+            row("CP.SESSION.CLOSE 5", Command.Cp.SessionClose::class) {
+                assertEquals(5L, (it as Command.Cp.SessionClose).session)
+            },
+            row("CP.INFO", Command.Cp.Info::class),
+            row("CP.MEMBERS", Command.Cp.Members::class),
         )
 
         for (case in table) {
@@ -205,8 +331,8 @@ class CommandParserTest {
             error("foo", "a", "b"),
         )
         assertEquals(
-            Reply.Error("ERR", "unknown command 'zadd', with args beginning with: 'k', '1', 'm', "),
-            error("ZADD", "k", "1", "m"),
+            Reply.Error("ERR", "unknown command 'zrevrangebyscore', with args beginning with: 'k', '5', '1', "),
+            error("ZREVRANGEBYSCORE", "k", "5", "1"),
         )
     }
 

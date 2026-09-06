@@ -95,12 +95,69 @@ class CommandParser(private val clock: Clock = Clock.systemUTC()) {
         "expire" -> exactly(name, args, 2).let { Command.Expire(Key(it[0]), now().plusSeconds(integer(it[1]))) }
         "pexpire" -> exactly(name, args, 2).let { Command.Expire(Key(it[0]), now().plusMillis(integer(it[1]))) }
         "expireat" -> exactly(name, args, 2).let { Command.Expire(Key(it[0]), Instant.ofEpochSecond(integer(it[1]))) }
+        "pexpireat" -> exactly(name, args, 2).let { Command.Expire(Key(it[0]), Instant.ofEpochMilli(integer(it[1]))) }
         "ttl" -> Command.Ttl(key(name, args, 1), Command.Ttl.Precision.SECONDS)
         "pttl" -> Command.Ttl(key(name, args, 1), Command.Ttl.Precision.MILLIS)
         "persist" -> Command.Persist(key(name, args, 1))
 
-        // The Sorted Set rows (ZADD, ZREM, ZRANGE, ZREVRANGE, ZRANGEBYSCORE, ZRANK, ZREVRANK,
-        // ZSCORE, ZCARD, ZINCRBY, ZSCAN) belong here, and arrive with their variants in T07.
+        // Sorted Set. ZRANGE/ZREVRANGE and ZRANK/ZREVRANK are each one command read from the
+        // other end, which is why eleven names make nine rows here.
+        "zadd" -> zadd(args)
+        "zrem" -> Command.ZRem(Key(atLeast(name, args, 2)[0]), args.drop(1))
+        "zrange" -> zrange(name, args, reverse = false)
+        "zrevrange" -> zrange(name, args, reverse = true)
+        "zrangebyscore" -> zrangeByScore(args)
+        "zrank" -> exactly(name, args, 2).let { Command.ZRank(Key(it[0]), it[1]) }
+        "zrevrank" -> exactly(name, args, 2).let { Command.ZRank(Key(it[0]), it[1], reverse = true) }
+        "zscore" -> exactly(name, args, 2).let { Command.ZScore(Key(it[0]), it[1]) }
+        "zcard" -> Command.ZCard(key(name, args, 1))
+        "zincrby" -> exactly(name, args, 3).let { Command.ZIncrBy(Key(it[0]), it[1], it[2]) }
+        "zscan" -> atLeast(name, args, 2).let {
+            options(it.drop(2)).run { Command.ZScan(Key(it[0]), cursor(it[1]), pattern, count) }
+        }
+
+        // The CP verbs of CP spec 6. A CP key stays whole -- `cp:counter:x`, not `x` -- so the
+        // dispatcher reads the same key the CP engine keys its state by (C16). A lock or
+        // semaphore verb takes no session on the wire: the connection owns one (CP spec 4) and
+        // the handler puts it in on the way to the engine, so the parser leaves it [NO_SESSION].
+        "cp.long.set" -> exactly(name, args, 2).let { Command.Cp.LongSet(Key(it[0]), integer(it[1])) }
+        "cp.long.get" -> Command.Cp.LongGet(key(name, args, 1))
+        "cp.long.incr" -> Command.Cp.LongIncr(key(name, args, 1))
+        "cp.long.decr" -> Command.Cp.LongDecr(key(name, args, 1))
+        "cp.long.add" -> exactly(name, args, 2).let { Command.Cp.LongIncrBy(Key(it[0]), integer(it[1])) }
+        "cp.long.cas" -> exactly(name, args, 3).let {
+            Command.Cp.LongCas(Key(it[0]), integer(it[1]), integer(it[2]))
+        }
+        "cp.lock.try" -> exactly(name, args, 2).let { Command.Cp.LockTry(Key(it[0]), NO_SESSION, millis(it[1])) }
+        "cp.lock.unlock" -> exactly(name, args, 2).let {
+            Command.Cp.LockUnlock(Key(it[0]), NO_SESSION, integer(it[1]))
+        }
+        "cp.lock.renew" -> exactly(name, args, 3).let {
+            Command.Cp.LockRenew(Key(it[0]), NO_SESSION, integer(it[1]), millis(it[2]))
+        }
+        "cp.lock.state" -> Command.Cp.LockState(key(name, args, 1))
+        "cp.lock.force_unlock" -> Command.Cp.LockForceUnlock(key(name, args, 1))
+        "cp.sem.init" -> exactly(name, args, 2).let { Command.Cp.SemInit(Key(it[0]), counted(it[1])) }
+        "cp.sem.acquire" -> exactly(name, args, 2).let {
+            Command.Cp.SemAcquire(Key(it[0]), NO_SESSION, counted(it[1]))
+        }
+        "cp.sem.release" -> exactly(name, args, 2).let {
+            Command.Cp.SemRelease(Key(it[0]), NO_SESSION, counted(it[1]))
+        }
+        "cp.sem.available" -> Command.Cp.SemAvailable(key(name, args, 1))
+        "cp.sem.drain" -> Command.Cp.SemDrain(key(name, args, 1), NO_SESSION)
+        "cp.latch.set" -> exactly(name, args, 2).let { Command.Cp.LatchSet(Key(it[0]), counted(it[1])) }
+        "cp.latch.down" -> Command.Cp.LatchDown(key(name, args, 1))
+        "cp.latch.get" -> Command.Cp.LatchGet(key(name, args, 1))
+        "cp.latch.reset" -> exactly(name, args, 2).let { Command.Cp.LatchReset(Key(it[0]), counted(it[1])) }
+        "cp.ref.set" -> exactly(name, args, 2).let { Command.Cp.RefSet(Key(it[0]), it[1]) }
+        "cp.ref.get" -> Command.Cp.RefGet(key(name, args, 1))
+        "cp.ref.cas" -> exactly(name, args, 3).let { Command.Cp.RefCas(Key(it[0]), it[1], it[2]) }
+        "cp.session.create" -> exactly(name, args, 0).let { Command.Cp.SessionCreate() }
+        "cp.session.heartbeat" -> Command.Cp.SessionHeartbeat(integer(exactly(name, args, 1)[0]))
+        "cp.session.close" -> Command.Cp.SessionClose(integer(exactly(name, args, 1)[0]))
+        "cp.info" -> exactly(name, args, 0).let { Command.Cp.Info }
+        "cp.members" -> exactly(name, args, 0).let { Command.Cp.Members }
 
         else -> unknown(name, args)
     }
@@ -135,6 +192,62 @@ class CommandParser(private val clock: Clock = Clock.systemUTC()) {
             at += if (takesArgument) 2 else 1
         }
         return Command.Set(Key(args[0]), args[1], condition, ttl)
+    }
+
+    /**
+     * `ZADD key [NX|XX] [CH] score member [score member ...]`. The flags stop at the first token
+     * that is not one, which is the score: a member may be spelled `nx` and still be a member.
+     */
+    private fun zadd(args: List<ByteArray>): Command.ZAdd {
+        if (args.isEmpty()) wrongArity("zadd")
+        var condition: Command.Set.Condition? = null
+        var changed = false
+        var at = 1
+        while (at < args.size) {
+            val flag = args[at].text().lowercase()
+            when (flag) {
+                "nx", "xx" -> {
+                    if (condition != null) syntaxError()
+                    condition = if (flag == "nx") Command.Set.Condition.NX else Command.Set.Condition.XX
+                }
+                "ch" -> changed = true
+                else -> break
+            }
+            at++
+        }
+        return Command.ZAdd(Key(args[0]), pairs("zadd", args, from = at), condition, changed)
+    }
+
+    /** `ZRANGE`/`ZREVRANGE key start stop [WITHSCORES]`: one window read from either end. */
+    private fun zrange(name: String, args: List<ByteArray>, reverse: Boolean): Command.ZRange {
+        within(name, args, 3, 4)
+        if (args.size == 4 && args[3].text().lowercase() != "withscores") syntaxError()
+        return Command.ZRange(Key(args[0]), integer(args[1]), integer(args[2]), args.size == 4, reverse)
+    }
+
+    /** `ZRANGEBYSCORE key min max [WITHSCORES] [LIMIT offset count]`; the bounds stay bytes. */
+    private fun zrangeByScore(args: List<ByteArray>): Command.ZRangeByScore {
+        if (args.size < 3) wrongArity("zrangebyscore")
+        var withScores = false
+        var offset = 0L
+        var count = -1L
+        var at = 3
+        while (at < args.size) {
+            when (args[at].text().lowercase()) {
+                "withscores" -> {
+                    withScores = true
+                    at += 1
+                }
+                "limit" -> {
+                    if (at + 2 >= args.size) syntaxError()
+                    offset = integer(args[at + 1])
+                    count = integer(args[at + 2])
+                    at += 3
+                }
+                else -> syntaxError()
+            }
+        }
+        return Command.ZRangeByScore(Key(args[0]), args[1], args[2], withScores, offset, count)
     }
 
     /** `[MATCH pattern] [COUNT n]`, the tail both `SCAN` and `HSCAN` end with. */
@@ -184,6 +297,10 @@ class CommandParser(private val clock: Clock = Clock.systemUTC()) {
 
     private fun syntaxError(): Nothing = reject("syntax error")
 
+    /** A permit or latch count: an integer that fits in one and is not negative. */
+    private fun counted(token: ByteArray): Int =
+        integer(token).let { if (it < 0 || it > Int.MAX_VALUE) reject("value is out of range") else it.toInt() }
+
     private fun integer(token: ByteArray): Long =
         token.text().toLongOrNull() ?: reject("value is not an integer or out of range")
 
@@ -225,6 +342,12 @@ class CommandParser(private val clock: Clock = Clock.systemUTC()) {
         const val DEFAULT_SCAN_COUNT = 10
     }
 }
+
+/**
+ * The session a lock or semaphore verb carries before the connection's own is put in. Session ids
+ * start at 1 (CP spec 4), so nothing the CP engine hands out is ever mistaken for this.
+ */
+internal const val NO_SESSION = 0L
 
 /**
  * A token as text. ISO-8859-1 is a bijection over the 256 byte values, so a token that is not

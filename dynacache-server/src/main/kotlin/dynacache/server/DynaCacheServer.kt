@@ -1,7 +1,16 @@
 package dynacache.server
 
+import dynacache.cluster.HostPort
+import dynacache.cluster.NodeId
+import dynacache.cp.CpConfig
+import dynacache.cp.CpEngine
+import dynacache.cp.CpGrpcServer
+import dynacache.cp.ForwardingCpEngine
+import dynacache.cp.GrpcRaftTransport
+import dynacache.cp.RaftRuntime
 import dynacache.engine.ApEngine
 import dynacache.engine.Command
+import dynacache.engine.CommandEngine
 import dynacache.engine.CrossPartitionBatch
 import dynacache.engine.Key
 import dynacache.engine.Reply
@@ -35,12 +44,21 @@ import java.util.concurrent.TimeUnit
  * [tick] is what the server's scheduler runs once per the engine's `tickMillis`, so the timer
  * wheel is advanced by the one thread the plan gives that job. It defaults to the engine's own
  * tick and is a parameter so a test can watch the schedule without watching the clock.
+ *
+ * [cp] is this node's CP engine, or null on a node with no CP subsystem; the [CommandDispatcher]
+ * in front of both is what a connection actually submits to. [clock] is what "now" means to the
+ * parser and to the dispatcher's one conversion, `EXPIRE`'s deadline into the CP verb's span.
  */
 class DynaCacheServer(
     private val port: Int,
     private val engine: ApEngine,
+    cp: CommandEngine? = null,
+    private val clock: Clock = Clock.systemUTC(),
     private val tick: () -> Unit = { engine.tick() },
 ) : AutoCloseable {
+
+    /** Where every connection submits: the AP engine, the CP engine, and CP spec 9.5 between. */
+    private val dispatcher = CommandDispatcher(engine, cp, clock)
 
     private val acceptors = NioEventLoopGroup(1)
     private val workers = NioEventLoopGroup()
@@ -60,7 +78,7 @@ class DynaCacheServer(
             .channel(NioServerSocketChannel::class.java)
             .childHandler(object : ChannelInitializer<SocketChannel>() {
                 override fun initChannel(ch: SocketChannel) {
-                    ch.pipeline().addLast(RespFrameDecoder(), CommandHandler(engine))
+                    ch.pipeline().addLast(RespFrameDecoder(), CommandHandler(dispatcher, clock))
                 }
             })
             .bind(port).sync().channel()
@@ -110,13 +128,23 @@ private class RespFrameDecoder : ByteToMessageDecoder() {
  * handler is already per-connection and already single-threaded on the event loop, so the buffer
  * needs no lock either.
  */
-private class CommandHandler(private val engine: ApEngine) : ChannelInboundHandlerAdapter() {
+private class CommandHandler(
+    private val engine: CommandEngine,
+    clock: Clock,
+) : ChannelInboundHandlerAdapter() {
 
     // ponytail: the queue is unbounded, so a client that pipelines without reading grows it
     // until the heap says no; Redis caps its own output buffer. A limit that closes the
     // connection past N pending replies is the repair when a real client misbehaves.
-    private val parser = CommandParser()
+    private val parser = CommandParser(clock)
     private val pending = ArrayDeque<CompletableFuture<Reply>>()
+
+    /**
+     * This connection's CP session (CP spec 4), as the reply that created it: the first
+     * session-bearing CP verb makes one and every later verb on this connection uses it. Only the
+     * event loop reads or writes it, so it needs no lock.
+     */
+    private var session: CompletableFuture<Reply>? = null
 
     /** The commands buffered since MULTI, or null when this connection is not in one. */
     private var buffered: MutableList<Command>? = null
@@ -152,7 +180,7 @@ private class CommandHandler(private val engine: ApEngine) : ChannelInboundHandl
             return evalScript(engine, parser, tokens.drop(1))
         }
         return when (val parsed = parser.parse(tokens)) {
-            is Parsed.Ok -> buffered?.let { it += parsed.command; done(QUEUED) } ?: engine.submit(parsed.command)
+            is Parsed.Ok -> buffered?.let { it += parsed.command; done(QUEUED) } ?: submit(parsed.command)
             // Redis answers the error the moment the bad frame arrives and refuses the whole
             // transaction later, so the client learns which command was wrong.
             is Parsed.Failed -> {
@@ -161,6 +189,36 @@ private class CommandHandler(private val engine: ApEngine) : ChannelInboundHandl
             }
         }
     }
+
+    /**
+     * The command on its way to the dispatcher, with this connection's session put in where a CP
+     * verb takes one. `CP.SESSION.CREATE` names the connection's session rather than making a
+     * second, so a client that asks explicitly and one that never asks hold the same one.
+     */
+    private fun submit(command: Command): CompletableFuture<Reply> = when {
+        command is Command.Cp.SessionCreate -> session()
+        // CP.SESSION.HEARTBEAT and CP.SESSION.CLOSE name their session on the wire (CP spec 6.6);
+        // every other session-bearing verb takes the connection's.
+        command is Command.Cp.Sessioned && command !is Command.Cp.Session -> onSession(command as Command.Cp)
+        else -> engine.submit(command)
+    }
+
+    /**
+     * This connection's session, created on the first verb that needs one. A creation that failed
+     * (no CP engine here, or no leader yet) is not remembered, so the next verb tries again.
+     */
+    private fun session(): CompletableFuture<Reply> {
+        val existing = session
+        val usable = existing != null && !existing.isCompletedExceptionally &&
+            (!existing.isDone || existing.getNow(null) is Reply.Integer)
+        if (usable) return checkNotNull(existing)
+        return engine.submit(Command.Cp.SessionCreate()).also { session = it }
+    }
+
+    private fun onSession(command: Command.Cp): CompletableFuture<Reply> =
+        session().thenCompose { created ->
+            if (created is Reply.Integer) engine.submit(command.withSession(created.value)) else done(created)
+        }
 
     private fun multi(): Reply {
         if (buffered != null) return Reply.Error("ERR", "MULTI calls can not be nested")
@@ -186,7 +244,7 @@ private class CommandHandler(private val engine: ApEngine) : ChannelInboundHandl
         forget()
         if (refused) return done(Reply.Error("EXECABORT", "Transaction discarded because of previous errors."))
         return engine
-            .atomically<Reply>(commands.flatMap(::declaredKeys).distinct()) { ctx ->
+            .atomically<Reply>(commands.flatMap(::keysOf).distinct()) { ctx ->
                 Reply.Array(commands.map(ctx::execute))
             }
             .orBatchError()
@@ -222,6 +280,20 @@ private class CommandHandler(private val engine: ApEngine) : ChannelInboundHandl
     }
 }
 
+/**
+ * [command] with the connection's session in it. The lock and semaphore verbs are the ones that
+ * hold a resource on a session's behalf (CP spec 4), and none of them names it on the wire.
+ */
+private fun Command.Cp.withSession(id: Long): Command.Cp = when (this) {
+    is Command.Cp.LockTry -> copy(session = id)
+    is Command.Cp.LockUnlock -> copy(session = id)
+    is Command.Cp.LockRenew -> copy(session = id)
+    is Command.Cp.SemAcquire -> copy(session = id)
+    is Command.Cp.SemRelease -> copy(session = id)
+    is Command.Cp.SemDrain -> copy(session = id)
+    else -> error("$this does not take the connection's session")
+}
+
 private val OK = Reply.Simple("OK")
 private val QUEUED = Reply.Simple("QUEUED")
 private val TRANSACTION = setOf("multi", "exec", "discard")
@@ -238,13 +310,6 @@ internal fun CompletableFuture<Reply>.orBatchError(): CompletableFuture<Reply> =
     span?.error ?: Reply.Error("ERR", failure.cause?.message ?: failure.message ?: "internal error")
 }
 
-/** The keys a buffered command names, so EXEC declares the whole batch's span in one list. */
-private fun declaredKeys(command: Command): List<Key> = when (command) {
-    is Command.Keyed -> listOf(command.key)
-    is Command.Fanned -> command.keys
-    else -> emptyList()
-}
-
 /** The reply of a future already known to be done; a failed one answers rather than throwing. */
 private fun CompletableFuture<Reply>.replyNow(): Reply =
     try {
@@ -254,12 +319,15 @@ private fun CompletableFuture<Reply>.replyNow(): Reply =
     }
 
 /**
- * `dynacache [port] [partitions] [dir] [ALWAYS|EVERY_SECOND|NEVER]`, defaulting to Redis's own
- * port, sixteen partitions and `EVERY_SECOND`. With a [dir], the last snapshot there and the log
- * after it are restored before the port opens, a snapshot is saved on the engine's default
- * interval from the tick thread (which is also the log's checkpoint), the log is forced by the
- * same thread once a second, and one more snapshot is saved at shutdown (spec 2.8). The engine
- * outlives nothing here: the shutdown hook closes the socket, then the log, then the engine.
+ * `dynacache [port] [partitions] [dir] [ALWAYS|EVERY_SECOND|NEVER] [cp-self] [cp-members]`,
+ * defaulting to Redis's own port, sixteen partitions and `EVERY_SECOND`. With a [dir], the last
+ * snapshot there and the log after it are restored before the port opens, a snapshot is saved on
+ * the engine's default interval from the tick thread (which is also the log's checkpoint), the
+ * log is forced by the same thread once a second, and one more snapshot is saved at shutdown
+ * (spec 2.8). With a CP group named, this node either holds the replicated log or forwards to
+ * whoever leads it; without one it has no CP engine and every `cp:` key answers `-NOTCP`. The
+ * engine outlives nothing here: the shutdown hook closes the socket, then the log, then the
+ * engine.
  */
 fun main(args: Array<String>) {
     val port = args.getOrNull(0)?.toInt() ?: 6379
@@ -269,18 +337,57 @@ fun main(args: Array<String>) {
     val engine = ApEngine(partitionCount, clock)
     val snapshots = args.getOrNull(2)?.let { SnapshotEngine(engine, Path.of(it), clock, fsync = fsync) }
     snapshots?.restore()
-    val server = DynaCacheServer(port, engine) {
+    val cp = cpNode(args.getOrNull(4), args.getOrNull(5), clock)
+    val server = DynaCacheServer(port, engine, cp?.engine, clock) {
         engine.tick()
         engine.wal?.tick()
+        cp?.runtime?.tick()
         snapshots?.maybeSave(clock.instant())
     }
     Runtime.getRuntime().addShutdownHook(
         Thread {
             server.close()
+            cp?.close()
             snapshots?.close()
             engine.close()
         },
     )
+    cp?.runtime?.start()
     server.start()
     println("DynaCache listening on ${server.boundPort} with $partitionCount partitions")
+}
+
+/**
+ * This node's part in the CP subsystem: the [engine] a connection submits CP work to, and the
+ * [runtime] when this node holds the replicated log itself rather than forwarding to it.
+ */
+private class CpNode(
+    val engine: CommandEngine,
+    val runtime: RaftRuntime?,
+    private val grpc: CpGrpcServer?,
+) : AutoCloseable {
+    override fun close() {
+        grpc?.close()
+        engine.close()
+    }
+}
+
+/**
+ * The CP subsystem this node was configured for, or null when it was given none. [members] names
+ * the group as `id@host:port` entries in the same order on every node, since CP membership is
+ * fixed at startup (CP spec 2.2); [self] says which entry this node is. A node in the group runs
+ * a MicroRaft member and serves the others over gRPC; a node outside it forwards (CP spec 2.4).
+ */
+private fun cpNode(self: String?, members: String?, clock: Clock): CpNode? {
+    if (self == null || members.isNullOrBlank()) return null
+    val addresses = members.split(",").filter(String::isNotBlank).associate { entry ->
+        val (id, address) = entry.split('@', limit = 2)
+        NodeId(id) to HostPort(address.substringBeforeLast(':'), address.substringAfterLast(':').toInt())
+    }
+    val node = NodeId(self)
+    val group = addresses.keys.toList()
+    if (node !in addresses) return CpNode(ForwardingCpEngine(group, addresses), null, null)
+    val runtime = RaftRuntime(CpConfig(node, group, clock = clock), GrpcRaftTransport(node, addresses))
+    val engine = CpEngine(runtime)
+    return CpNode(engine, runtime, CpGrpcServer(runtime, engine, addresses.getValue(node).port))
 }

@@ -7,6 +7,7 @@ import dynacache.cluster.proto.ForwardReply
 import dynacache.cluster.proto.KeySync
 import dynacache.cluster.proto.KeySyncReply
 import dynacache.cluster.proto.Leaf
+import dynacache.cluster.proto.Marker
 import dynacache.cluster.proto.MerkleRoot
 import dynacache.cluster.proto.MerkleRootReply
 import dynacache.cluster.proto.Ping
@@ -105,6 +106,7 @@ class GrpcTransportTest {
             Envelope.BodyCase.READ_REPLY -> envelope.setReadReply(
                 ReadReply.newBuilder().setId(7).setReply(ReplyMsg.newBuilder().setSimple("OK")).setDvv(ByteString.copyFromUtf8("dvv"))
             )
+            Envelope.BodyCase.MARKER -> envelope.setMarker(Marker.newBuilder().setSnapshotId("s7"))
             Envelope.BodyCase.MERKLE_ROOT -> envelope.setMerkleRoot(
                 MerkleRoot.newBuilder().setId(7).setVnode(3).setRoot(ByteString.copyFromUtf8("root"))
             )
