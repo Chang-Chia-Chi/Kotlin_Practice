@@ -48,6 +48,7 @@ class AtomicLongStateMachine {
                 when {
                     counter == null -> -2
                     counter.expiresAt == null -> -1
+                    command.precision == Command.Ttl.Precision.MILLIS -> counter.expiresAt - now
                     else -> (counter.expiresAt - now + 500) / 1000
                 },
             )

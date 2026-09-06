@@ -21,6 +21,8 @@ class CpEngine(private val runtime: RaftRuntime) : CommandEngine {
         // C16 at the engine's edge: CP work only, and only on the cp: namespace.
         if (command !is Command.Cp) return answer(Reply.Error("NOTCP", "$command is not a CP command"))
         if (!command.key.isCp()) return answer(Reply.Error("NOTCP", "${command.key} is not a cp: key"))
+        // CP spec 6.7 asks this member what it can see, which every member can answer.
+        if (command is Command.Cp.Introspection) return introspect(command)
         if (!runtime.isLeader) return answer(notLeader())
 
         return runtime.replicate(command).handle { committed, failure ->
@@ -39,6 +41,16 @@ class CpEngine(private val runtime: RaftRuntime) : CommandEngine {
         throw NotImplementedError("CP has no batches: the Raft log already serializes every entry")
 
     override fun close() = runtime.close()
+
+    /** `CP.INFO` and `CP.MEMBERS` off this member's own report; neither becomes a log entry. */
+    private fun introspect(command: Command.Cp.Introspection): CompletableFuture<Reply> =
+        runtime.node.report.thenApply { ordered ->
+            val info = CpWire.info(ordered.result)
+            when (command) {
+                Command.Cp.Info -> CpWire.infoReply(info)
+                Command.Cp.Members -> Reply.Array(info.membersList.map { Reply.Bulk(it.toByteArray()) })
+            }
+        }
 
     private fun notLeader(): Reply {
         val leader = runtime.node.term.leaderEndpoint

@@ -44,17 +44,7 @@ class CpGrpcServer(
     val boundPort: Int get() = server.port
 
     /** The `CP.INFO` data this member can see (CP spec 6.7); empty leader when it knows of none. */
-    suspend fun info(): CpInfo {
-        val report = runtime.node.getReport().await().result
-        return CpInfo.newBuilder()
-            .setLeader(report.term.leaderEndpoint?.id?.toString().orEmpty())
-            // CP membership is fixed at startup (CP spec 2.2), so the initial members are the group.
-            .addAllMembers(report.initialMembers.members.map { it.id.toString() })
-            .setLogSize(report.log.lastLogOrSnapshotIndex - report.log.lastSnapshotIndex)
-            .setAppliedIndex(report.log.commitIndex)
-            .setSnapshotIndex(report.log.lastSnapshotIndex)
-            .build()
-    }
+    suspend fun info(): CpInfo = CpWire.info(runtime.node.getReport().await().result)
 
     override fun close() {
         server.shutdownNow().awaitTermination(SHUTDOWN_SECONDS, TimeUnit.SECONDS)
