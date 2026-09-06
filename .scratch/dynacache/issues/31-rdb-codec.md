@@ -9,11 +9,11 @@ injected clock; the checksum verified at read.
 
 **Nature:** codec, spec 2.8 RDB format (Opus)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache c74d77c, merged into misc/ai_gen)
 
-- [ ] `rdb_save_restore_roundtrip` at codec level: every type, TTLs and DVVs intact
-- [ ] `rdb_excludes_expired`, `rdb_bad_checksum_rejected`, `rdb_truncated_file_rejected`
-- [ ] Progress entry appended
+- [x] `rdb_save_restore_roundtrip` at codec level: every type, TTLs and DVVs intact
+- [x] `rdb_excludes_expired`, `rdb_bad_checksum_rejected`, `rdb_truncated_file_rejected`
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket, stubs throwing NotImplementedError
 for later seams; 200 to 600 lines including tests; JUnit 5 + Mockito only, no AssertJ or MockK;

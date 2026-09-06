@@ -1867,3 +1867,100 @@ Full `clean package` green: engine 82, cluster 39, cp 38, server 16.
   everything the chunk holds.
 - `CpTestKit.leader()` after `killMember` returned a stamping successor in all three failover
   tests without change; the T39 reset works.
+
+## T31: RDB codec
+
+**Built:** `dynacache.engine.persist.Rdb.kt` (231 lines) holds the whole snapshot format and
+nothing else. `RdbWriter.write(sink, entries, now)` streams a snapshot to any `OutputStream`
+(a `FileChannel` reaches it through `Channels.newOutputStream`); `RdbReader(seeds).read(source)`
+reads one back from any `InputStream` and returns the entries in file order. The file is
+
+```
+[magic:7 "DYNARDB"][version:u8 = 1][count:u32] [entry]* [crc32:u32]
+```
+
+and one entry is
+
+```
+[key_len:u32][key][type:u8][dvv_len:u32][dvv][ttl_abs:i64][value_len:u32][value]
+```
+
+big-endian throughout, as the WAL of T33 is. `ttl_abs` is epoch millis and `-1` means no
+deadline. The value bytes are type-specific: a String is its bytes; a Hash writes its field
+count then length-prefixed field/value pairs; a List writes its element count then
+length-prefixed elements; a Sorted Set writes its member count then, per member, the score as
+IEEE-754 bits (`Double.toRawBits`) followed by the length-prefixed member. Score-as-bits is what
+round-trips the infinities, which `scoreText` would not. The CRC32 covers every byte before it;
+`java.util.zip.CheckedOutputStream`/`CheckedInputStream` accumulate it, so neither side walks
+the bytes twice.
+
+`writeScore` moved off `Partition` and onto `Value.ZSet` as a method. It is the single writer of
+a sorted set's dual index (T07), and a restore has to go through it, so the command path and the
+codec now share the one writer and the score map and the skip list cannot drift apart (I3). The
+two `Partition` call sites became `zset.writeScore(...)`; nothing else changed there.
+
+**Concepts named:** **RDB entry** (`RdbEntry`): one key as a snapshot holds it - key, value,
+absolute `expiresAt` or null, and the opaque DVV bytes. **RDB fault** (`RdbFault`): why a file
+was refused - `NOT_AN_RDB`, `UNSUPPORTED_VERSION`, `TRUNCATED`, `CHECKSUM_MISMATCH` - carried by
+`RdbFormatException`, which is the same shape of vocabulary as T33's `WalStop` but an exception
+rather than a result, because a snapshot is all-or-nothing where a log is read as far as it
+goes. Seam: the writer and reader public interface, exactly as the plan entry names it; the
+tests never read the file layout except the two that are about the layout (the version byte and
+the corruptions).
+
+The type byte is a code fixed by the format (`KIND_BY_CODE`), not `Value.Kind.ordinal`.
+Reordering the enum must not silently change what an already-written file means.
+
+**Acceptance:** all in `dynacache-engine/src/test/kotlin/dynacache/engine/persist/RdbTest.kt`,
+7 tests, JUnit 5 only, no Mockito needed (in-memory streams are the whole boundary), no sleeps.
+
+- `rdb_save_restore_roundtrip` - all four types in one file, TTLs and DVV bytes intact, binary
+  bytes in the key, the value, the field name and the DVV; the sorted set is compared on both
+  of its indexes and on member order, so a restore that filled one and not the other fails.
+- `rdb_excludes_expired` - two dead keys dropped, and the key expiring exactly at `now` kept,
+  because spec 5.4 says a key is readable through its deadline.
+- `rdb_bad_checksum_rejected` - one flipped bit in the body gives `CHECKSUM_MISMATCH`.
+- `rdb_truncated_file_rejected` - cut mid-entry and cut inside the checksum, both `TRUNCATED`,
+  and neither yields the entries that did survive.
+- `rdb_empty_snapshot_roundtrip`, `rdb_version_byte_present` (the byte is where it should be
+  *and* a file claiming version 2 is refused rather than guessed at).
+- Extra: `rdb_not_an_rdb_rejected` - a foreign file is refused on the magic.
+
+The three tests that could not be written red-first (they need a working writer to corrupt its
+output) were verified by mutation instead: disabling the checksum comparison and the expiry
+filter fails exactly those three and nothing else.
+
+**Deviations:**
+
+1. **The codec carries its own entry record, not `Partition.Entry`.** The ticket says the writer
+   takes `(Key, Entry, dvvBytes)`, but `Entry` is `private` inside `Partition` and unwrapping it
+   would be a refactor of the command path that this ticket does not need. `RdbEntry` is that
+   triple plus the value, and serves both directions. T32 maps the partition's store to it.
+2. **`writeScore` moved from `Partition` to `Value.ZSet`.** Additive to `Value.kt` as the ticket
+   allows, but it is a move, not a copy: the private `Partition.writeScore` is gone and its two
+   call sites now go through the value. This is the only way a restore can use the engine's own
+   construction path without duplicating the dual-index rule.
+3. **The whole codec is `internal`.** `RdbEntry` names `Value`, which is `internal` to the engine
+   module, so the codec cannot be more public than the values it encodes. Everything that needs
+   it (T32's snapshot engine) lives in the engine module. Not debt; if the cluster module ever
+   needs a snapshot it should go through an engine-level API, not the codec.
+4. **The writer materialises the live entries before writing.** The header carries the entry
+   count and an `OutputStream` cannot be seeked back to patch it, so `entries.filterNot { expired }`
+   runs first. Only references are held - no value is serialized until its turn - so the memory
+   cost is the caller's snapshot, which already exists. If a partition ever grows past what a
+   list of references costs, the repair is a count of `-1` meaning "read until the checksum",
+   not a second pass over the data.
+5. **No `FileChannel` overload.** `Channels.newOutputStream`/`newInputStream` already adapt one.
+
+**For the next ticket (T32):** the codec is pure and holds no file, no path and no clock - the
+caller passes `now`, and file naming, atomic rename, the interval and the shutdown hook are all
+T32's. `RdbReader` takes a `java.util.Random` for the skip-list levels of a restored sorted set,
+the one piece of a value the file does not carry; pass the partition's own generator to keep a
+restore reproducible the way `newZSet` does. The reader returns a list, not a stream: a snapshot
+is all-or-nothing, so there is nothing useful to hand back before the checksum has been checked.
+A `Value.ZSet` never has zero members (T07), so a zero-member sorted set in a file means the
+file is wrong, not that the set is empty - T32 may want to say so out loud when it restores.
+Nothing was stubbed and nothing throws `NotImplementedError`.
+
+**Build:** `mvn -B -o -q clean package` offline, green. Engine 107 tests, cluster 39, cp 24,
+server 16; 0 failures, 0 errors, 0 skipped. Commit `c74d77c` on branch `t31`.
