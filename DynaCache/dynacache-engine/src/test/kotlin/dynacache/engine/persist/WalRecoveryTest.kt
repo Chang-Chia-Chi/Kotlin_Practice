@@ -167,6 +167,68 @@ class WalRecoveryTest {
         assertEquals("3", after.get("{u}.b"))
     }
 
+    private fun zadd(name: String, vararg entries: Pair<String, String>, condition: Command.Set.Condition? = null) =
+        Command.ZAdd(key(name), entries.map { (score, member) -> bytes(score) to bytes(member) }, condition)
+
+    private fun ApEngine.score(name: String, member: String): String? =
+        (run(Command.ZScore(key(name), bytes(member))) as Reply.Bulk).bytes?.decodeToString()
+
+    /**
+     * A conditional `ZADD` the engine refused changed nothing, so replay must change nothing:
+     * `NX` on a member already there and `XX` on one that is not both answer `:0`, and a plain
+     * `ZADD` in the log would move the score on the next boot.
+     */
+    @Test
+    fun C14_refused_conditional_zadd_replays_nothing() {
+        val before = engine()
+        persistence(before).restore()
+        assertEquals(Reply.Integer(1), before.run(zadd("z", "1" to "a")))
+        assertEquals(Reply.Integer(0), before.run(zadd("z", "5" to "a", condition = Command.Set.Condition.NX)))
+        assertEquals(Reply.Integer(0), before.run(zadd("z", "7" to "b", condition = Command.Set.Condition.XX)))
+        assertEquals("1", before.score("z", "a"))
+        assertEquals(Reply.Integer(1), before.run(Command.ZCard(key("z"))))
+        // The crash: no save and no close, so recovery is the log alone.
+
+        val after = engine()
+        persistence(after).restore()
+        assertEquals("1", after.score("z", "a"), "a refused ZADD NX must not move the score on replay")
+        assertEquals(Reply.Integer(1), after.run(Command.ZCard(key("z"))), "a refused ZADD XX must not add the member on replay")
+    }
+
+    /** The other half of the rule: what the condition took is replayed with exactly that effect. */
+    @Test
+    fun C14_taken_conditional_zadd_replays_as_taken() {
+        val before = engine()
+        persistence(before).restore()
+        before.run(zadd("z", "1" to "a", "2" to "b"))
+        before.run(zadd("z", "9" to "b", condition = Command.Set.Condition.XX))
+        assertEquals("1", before.score("z", "a"))
+        assertEquals("9", before.score("z", "b"))
+
+        val after = engine()
+        persistence(after).restore()
+        assertEquals("1", after.score("z", "a"))
+        assertEquals("9", after.score("z", "b"))
+    }
+
+    /** One call may be part refused and part taken; only the taken half survives the restart. */
+    @Test
+    fun C14_partly_refused_conditional_zadd_replays_only_the_taken_members() {
+        val before = engine()
+        persistence(before).restore()
+        before.run(zadd("z", "1" to "a"))
+        assertEquals(
+            Reply.Integer(1),
+            before.run(zadd("z", "5" to "a", "2" to "b", condition = Command.Set.Condition.NX)),
+            "NX takes the missing member and leaves the present one",
+        )
+
+        val after = engine()
+        persistence(after).restore()
+        assertEquals("1", after.score("z", "a"))
+        assertEquals("2", after.score("z", "b"))
+    }
+
     private fun names(): List<String> = Files.list(dir).use { it.map { p -> p.fileName.toString() }.toList() }.sorted()
 
     /** The filesystem is a true boundary: this adapter holds the first fsync until the test lets it go. */
