@@ -170,6 +170,18 @@ sealed class Command {
     /** `HVALS key`: the field values. */
     data class HVals(override val key: Key) : Keyed(Value.Kind.HASH)
 
+    /**
+     * `SCAN cursor [MATCH pattern] [COUNT n]`: a stateless walk of the keyspace, one partition
+     * per call. The cursor carries the partition in its high 32 bits and that partition's own
+     * cursor in the low 32; 0 starts the walk and 0 comes back when it is over (C15). The
+     * fourth command shape: no key names a partition, and every partition at once is too many.
+     */
+    class Scan(val cursor: Long, val pattern: ByteArray? = null, val count: Int = 10) : Command()
+
+    /** `HSCAN key cursor [MATCH pattern] [COUNT n]`: the same walk over one hash's fields. */
+    class HScan(override val key: Key, val cursor: Long, val pattern: ByteArray? = null, val count: Int = 10) :
+        Keyed(Value.Kind.HASH)
+
     /** `HLEN key`: how many fields, 0 when the key is absent. */
     data class HLen(override val key: Key) : Keyed(Value.Kind.HASH)
 
