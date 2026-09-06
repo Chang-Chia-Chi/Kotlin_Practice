@@ -3,13 +3,14 @@ package dynacache.server
 import dynacache.cp.CpTestKit
 import dynacache.engine.ApEngine
 import dynacache.engine.Reply
+import dynacache.engine.testkit.MutableClock
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
-import java.time.Clock
 import java.time.Duration
+import java.time.Instant
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -22,11 +23,18 @@ import java.util.concurrent.TimeUnit
 class CpRoutingTest {
 
     private val kit = CpTestKit()
-    private val ap = ApEngine(partitionCount = 4, clock = Clock.systemUTC())
+
+    // Plan rule 1.5: the AP engine and the socket in front of it read a clock the test owns, so
+    // nothing here is measured against wall time. It never moves. The CP members keep their own
+    // clocks (the kit's), which is what a lease is measured on, and `EXPIRE`'s absolute deadline
+    // is turned back into a span by the same clock the parser built it from, so the two never
+    // need to agree on what the date is.
+    private val clock = MutableClock(Instant.parse("2026-09-06T00:00:00Z"))
+    private val ap = ApEngine(partitionCount = 4, clock = clock)
 
     // The leader is the member that may replicate; a follower would answer -NOTLEADER and the
     // client would retry there, which is CP spec 9.1 step 3 and not this test's subject.
-    private val server = DynaCacheServer(port = 0, engine = ap, cp = kit.leaderEngine())
+    private val server = DynaCacheServer(port = 0, engine = ap, cp = kit.leaderEngine(), clock = clock)
 
     @BeforeEach
     fun start() = server.start()

@@ -1,6 +1,7 @@
 package dynacache.server
 
 import dynacache.engine.ApEngine
+import dynacache.engine.testkit.MutableClock
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNull
@@ -10,8 +11,8 @@ import redis.clients.jedis.Jedis
 import redis.clients.jedis.params.ScanParams
 import redis.clients.jedis.params.SetParams
 import redis.clients.jedis.params.ZAddParams
-import java.time.Clock
 import java.time.Duration
+import java.time.Instant
 
 /**
  * Spec 9's single-node demo, driven by a Redis client that has never heard of DynaCache: Jedis,
@@ -21,12 +22,19 @@ import java.time.Duration
  * expectation the server itself could have taught the test.
  *
  * The seam is the socket. Nothing below it is addressed: the engine is the default one, the
- * scheduler is the server's own, and the port is whatever 0 was given.
+ * scheduler is the server's own, and the port is whatever 0 was given. Time is the exception:
+ * plan rule 1.5 puts the tier on an injected clock, so the one deadline this test cares about
+ * arrives when the test says so rather than when the machine gets round to it.
  */
 class P1AcceptanceTest {
 
-    private val engine = ApEngine(partitionCount = 16, clock = Clock.systemUTC())
-    private val server = DynaCacheServer(0, engine).apply { start() }
+    private val clock = MutableClock(Instant.parse("2026-09-06T00:00:00Z"))
+    private val engine = ApEngine(partitionCount = 16, clock = clock)
+
+    // The server reads the same clock as the engine under it, as `main` gives it in production
+    // (T52): a PX deadline the parser works out is otherwise measured from a different "now"
+    // than the one the engine compares it against.
+    private val server = DynaCacheServer(0, engine, clock = clock).apply { start() }
 
     @AfterEach
     fun stop() {
@@ -115,17 +123,16 @@ class P1AcceptanceTest {
     }
 
     /**
-     * The one place this tier awaits real time. The timer wheel is advanced by the server's own
-     * scheduler thread, so no test can move it; a deadline bounds the wait and there is no sleep.
-     * The read before the deadline is C7's other half: a key stays readable until its TTL elapses.
+     * C7 from outside, on the test's own clock (plan rule 1.5): the read before the deadline is
+     * C7's other half, a key stays readable until its TTL elapses, and the read after it sees the
+     * key gone. The wheel is advanced here by the tick the server's scheduler would otherwise have
+     * run, so the deadline falls due because the test moved time and not because the machine did.
      */
     private fun aTtlThatFires(redis: Jedis) {
         assertEquals("OK", redis.set("expiring", "v", SetParams.setParams().px(200)))
         assertEquals("v", redis.get("expiring"))
-        val giveUpAt = System.nanoTime() + Duration.ofSeconds(5).toNanos()
-        while (redis.get("expiring") != null) {
-            assertTrue(System.nanoTime() < giveUpAt, "the TTL had not fired five seconds after PX 200")
-        }
+        clock.advance(Duration.ofMillis(201))
+        engine.tick().join()
         assertNull(redis.get("expiring"))
         assertEquals(-2L, redis.ttl("expiring"))
     }
