@@ -23,7 +23,7 @@ class CpEngine(private val runtime: RaftRuntime) : CommandEngine {
         if (!command.key.isCp()) return answer(Reply.Error("NOTCP", "${command.key} is not a cp: key"))
         if (!runtime.isLeader) return answer(notLeader())
 
-        return runtime.node.replicate<Reply>(command).handle { committed, failure ->
+        return runtime.replicate(command).handle { committed, failure ->
             when {
                 failure == null -> committed.result
                 // Leadership moved (or was never here) between the check and the append. The

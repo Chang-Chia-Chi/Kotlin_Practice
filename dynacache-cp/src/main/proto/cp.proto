@@ -1,0 +1,119 @@
+syntax = "proto3";
+
+package dynacache.cp.proto;
+
+option java_package = "dynacache.cp.proto";
+option java_multiple_files = true;
+
+// ---------------------------------------------------------------------------
+// RaftService: MicroRaft's inter-member traffic (CP spec 2.4).
+// ---------------------------------------------------------------------------
+
+// Every MicroRaft message carries a group, a sender and a term; the oneof is the rest of it.
+// A per-message mapping, not a bytes blob, so a wire dump reads as Raft rather than as base64.
+// The one place bytes survives is a log entry's operation, which is a `Command.Cp` (or one of
+// MicroRaft's own internal no-ops) and belongs to the engine, not to Raft.
+message RaftEnvelope {
+  string group_id = 1;
+  string sender = 2;
+  int32 term = 3;
+  oneof body {
+    Candidacy pre_vote_request = 10;
+    Granted pre_vote_response = 11;
+    Candidacy vote_request = 12;
+    Granted vote_response = 13;
+    AppendEntriesRequest append_entries_request = 14;
+    AppendEntriesSuccess append_entries_success = 15;
+    AppendEntriesFailure append_entries_failure = 16;
+    Candidacy trigger_leader_election = 17;
+  }
+}
+
+// A member offering itself as leader: pre-vote, vote and the leadership-transfer trigger all
+// name the same thing, the tip of the candidate's log. `sticky` is only read on a vote request.
+message Candidacy {
+  int32 last_log_term = 1;
+  int64 last_log_index = 2;
+  bool sticky = 3;
+}
+
+message Granted {
+  bool granted = 1;
+}
+
+message AppendEntriesRequest {
+  int32 previous_log_term = 1;
+  int64 previous_log_index = 2;
+  int64 commit_index = 3;
+  int64 query_sequence_number = 4;
+  int64 flow_control_sequence_number = 5;
+  repeated LogEntry entries = 6;
+}
+
+message LogEntry {
+  int64 index = 1;
+  int32 term = 2;
+  // The replicated operation, in the hand encoding of `CpWire`.
+  bytes operation = 3;
+}
+
+message AppendEntriesSuccess {
+  int64 last_log_index = 1;
+  int64 query_sequence_number = 2;
+  int64 flow_control_sequence_number = 3;
+}
+
+message AppendEntriesFailure {
+  int64 expected_next_index = 1;
+  int64 query_sequence_number = 2;
+  int64 flow_control_sequence_number = 3;
+}
+
+// Handle's acknowledgement: a Raft message carries no reply of its own, the answer is another
+// message. Mirrors the cluster's `Delivered` (T23).
+message Accepted {}
+
+service RaftService {
+  rpc Handle(RaftEnvelope) returns (Accepted);
+}
+
+// ---------------------------------------------------------------------------
+// CpService: what a node asks the CP members for (CP spec 2.4).
+// ---------------------------------------------------------------------------
+
+// A `Command.Cp` and the `Reply` it produced, both in the hand encoding of `CpWire`. Protobuf
+// messages for the command hierarchy would have to be re-cut every time a ticket adds a verb;
+// the encoding is one `when` in one file instead.
+message CpRequest {
+  bytes command = 1;
+}
+
+message CpResponse {
+  bytes reply = 1;
+}
+
+message InfoRequest {}
+
+// `CP.INFO` (CP spec 6.7). `leader` is empty when the member knows of none.
+message CpInfo {
+  string leader = 1;
+  repeated string members = 2;
+  int64 log_size = 3;
+  int64 applied_index = 4;
+  int64 snapshot_index = 5;
+}
+
+message HeartbeatRequest {
+  string session_id = 1;
+}
+
+message HeartbeatResponse {
+  bool ok = 1;
+}
+
+service CpService {
+  rpc Apply(CpRequest) returns (CpResponse);
+  rpc GetInfo(InfoRequest) returns (CpInfo);
+  // Session keepalive. The session registry is T41; this member answers nothing useful yet.
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+}

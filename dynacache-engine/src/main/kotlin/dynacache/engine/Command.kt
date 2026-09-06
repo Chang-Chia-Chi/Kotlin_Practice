@@ -1,6 +1,7 @@
 package dynacache.engine
 
 import java.time.Duration
+import java.time.Instant
 import java.util.Random
 
 /**
@@ -56,8 +57,8 @@ sealed class Command {
     sealed class Cp : Command() {
         abstract val key: Key
 
-        /** `CP.LONG.SET K n`. */
-        data class LongSet(override val key: Key, val value: Long) : Cp()
+        /** `CP.LONG.SET K n`, or `SET cp:counter:K n [EX|PX]`: a [ttl] runs on log time (CP spec 9.4). */
+        data class LongSet(override val key: Key, val value: Long, val ttl: Duration? = null) : Cp()
 
         /** `CP.LONG.GET K`: the value, or nil when the counter was never written. */
         data class LongGet(override val key: Key) : Cp()
@@ -76,6 +77,15 @@ sealed class Command {
 
         /** `CP.LONG.CAS K expected new`: 1 when the swap happened, 0 when it did not. */
         data class LongCas(override val key: Key, val expected: Long, val new: Long) : Cp()
+
+        /** `EXPIRE` or `PEXPIRE cp:counter:K`: 1 when the counter exists and now has [ttl], else 0. */
+        data class LongExpire(override val key: Key, val ttl: Duration) : Cp()
+
+        /** `TTL cp:counter:K`: seconds left rounded as Redis rounds, -1 without a TTL, -2 when missing. */
+        data class LongTtl(override val key: Key) : Cp()
+
+        /** `PERSIST cp:counter:K`: 1 when a TTL was removed, 0 when there was none to remove. */
+        data class LongPersist(override val key: Key) : Cp()
     }
 
     /**
@@ -160,6 +170,26 @@ sealed class Command {
     data class Exists(override val key: Key) : Keyed(null)
 
     data class Type(override val key: Key) : Keyed(null)
+
+    /**
+     * `EXPIRE`, `PEXPIRE` and `EXPIREAT` in one variant. The three differ only in how the wire
+     * spells the [deadline] -- seconds from now, milliseconds from now, or an absolute Unix
+     * time -- and the parser reduces all three to the instant the engine stores (spec 5.4).
+     * Replies 1 when the TTL was set, 0 when the key is not there.
+     */
+    data class Expire(override val key: Key, val deadline: Instant) : Keyed(null)
+
+    /** `PERSIST key`: drops the TTL. 1 when there was one, 0 when the key had none or is absent. */
+    data class Persist(override val key: Key) : Keyed(null)
+
+    /**
+     * `TTL` and `PTTL` in one variant, differing only in the [unit] they answer in. Redis's two
+     * negative answers are not TTLs: -2 is "no such key" and -1 is "no TTL on this key".
+     */
+    data class Ttl(override val key: Key, val precision: Precision) : Keyed(null) {
+        /** `TTL` answers in [SECONDS], `PTTL` in [MILLIS]. */
+        enum class Precision { SECONDS, MILLIS }
+    }
 
     /**
      * `INCR`, `DECR`, `INCRBY` and `DECRBY` in one variant: they differ only in [delta], which

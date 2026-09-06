@@ -1,5 +1,8 @@
 package dynacache.cp
 
+import dynacache.engine.Command
+import dynacache.engine.Reply
+import io.microraft.Ordered
 import io.microraft.RaftNode
 import io.microraft.RaftRole
 import io.microraft.persistence.NopRaftStore
@@ -12,11 +15,7 @@ import java.util.concurrent.TimeUnit
  * transport it reaches the other members through. The transport is the seam (plan 2.3) — tests
  * pass an in-memory one, T43 passes the gRPC one — and this class knows nothing about either.
  */
-class RaftRuntime(
-    val config: CpConfig,
-    transport: Transport,
-    val stateMachine: AtomicLongStateMachine = AtomicLongStateMachine(),
-) : AutoCloseable {
+class RaftRuntime(val config: CpConfig, transport: Transport) : AutoCloseable {
 
     init {
         require(config.isCpMember) { "${config.nodeId} is not a CP member of ${config.cpMembers}" }
@@ -24,8 +23,15 @@ class RaftRuntime(
 
     val endpoint = CpEndpoint(config.nodeId)
 
-    /** Completes the first time this member wins an election. */
-    private val leadership = CompletableFuture<RaftRuntime>()
+    /** Completes when this member leads and may stamp; replaced once it stops leading. */
+    @Volatile
+    private var leadership = CompletableFuture<RaftRuntime>()
+
+    /** The last term whose first entry this member applied. */
+    @Volatile
+    private var appliedTerm = 0
+
+    val stateMachine = AtomicLongStateMachine(currentTerm = { node.term.term }, onTermApplied = ::termApplied)
 
     val node: RaftNode = RaftNode.newBuilder()
         .setGroupId(config.groupId)
@@ -38,12 +44,52 @@ class RaftRuntime(
         // its own disk. Snapshot and restore are T45 (I20); a RaftStore lands with them.
         .setStore(NopRaftStore())
         .setRaftNodeReportListener { report ->
-            if (report.role == RaftRole.LEADER) leadership.complete(this)
+            if (report.role != RaftRole.LEADER && leadership.isDone) leadership = CompletableFuture()
         }
         .build()
 
-    /** True when this member is the one that may replicate; every other member answers NOTLEADER. */
-    val isLeader: Boolean get() = endpoint == node.term.leaderEndpoint
+    /**
+     * True when this member is the one that may replicate; every other member answers NOTLEADER.
+     * A fresh leader counts only once its term's first entry is applied: until then its applied
+     * time may trail what the old leader committed, and a stamp taken from it could turn time
+     * back (C19).
+     */
+    val isLeader: Boolean get() = endpoint == node.term.leaderEndpoint && appliedTerm == node.term.term
+
+    private fun termApplied(term: Int) {
+        appliedTerm = term
+        if (isLeader) leadership.complete(this)
+    }
+
+    /** The stamp of the last entry this leader appended; guarded by [appendLock]. */
+    private var lastStampedTs = 0L
+    private val appendLock = Any()
+
+    /**
+     * Appends [command] to the log stamped with log time. The stamp and the append happen under
+     * one lock, so entries carry strictly increasing stamps in log order (C19) however many
+     * client threads submit at once.
+     */
+    fun replicate(command: Command.Cp): CompletableFuture<Ordered<Reply>> =
+        synchronized(appendLock) { node.replicate(CpOp(stamp(), command)) }
+
+    /**
+     * The TTL tick (CP spec 5): when this member leads and nothing has been appended for a tick
+     * interval of its clock, appends a [TtlTick] so log time moves on every member. A caller runs
+     * it every tick interval in production and step by step in a test; a non-leader does nothing.
+     * Completes with the tick's log index once it is committed, or with 0 when none was appended.
+     */
+    fun tick(): CompletableFuture<Long> = synchronized(appendLock) {
+        val idle = config.clock.millis() >= lastStampedTs + config.tickInterval.toMillis()
+        if (isLeader && idle) node.replicate<Any?>(TtlTick(stamp())).thenApply { it.commitIndex }
+        else CompletableFuture.completedFuture(0L)
+    }
+
+    /** CP spec 5: `max(clock_now, last_committed_ts + 1)`, and past whatever this leader stamped already. */
+    private fun stamp(): Long {
+        lastStampedTs = maxOf(config.clock.millis(), stateMachine.lastAppliedTs + 1, lastStampedTs + 1)
+        return lastStampedTs
+    }
 
     fun start(): RaftRuntime = apply { node.start().join() }
 
