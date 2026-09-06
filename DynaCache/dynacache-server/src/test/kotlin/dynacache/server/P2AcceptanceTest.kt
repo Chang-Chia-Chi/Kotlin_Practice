@@ -6,6 +6,7 @@ import dynacache.cluster.ReplicationConfig
 import dynacache.cluster.Ring
 import dynacache.engine.Key
 import dynacache.engine.Reply
+import dynacache.engine.testkit.MutableClock
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNotEquals
@@ -15,6 +16,7 @@ import org.junit.jupiter.api.Test
 import redis.clients.jedis.Jedis
 import redis.clients.jedis.params.SetParams
 import java.time.Duration
+import java.time.Instant
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.time.Duration.Companion.milliseconds
 
@@ -24,12 +26,17 @@ import kotlin.time.Duration.Companion.milliseconds
  * client never learns that a cluster exists -- it writes through one node, reads through
  * another, and neither knows nor cares which node coordinates a key.
  *
- * This tier is the only one with real time in it: gossip periods and quorum deadlines are wall
- * clock, so every wait here is a poll to a deadline and there is no sleep anywhere.
+ * Every node reads one clock the test owns (plan rule 1.5), so a TTL that crosses the quorum is
+ * measured against a "now" this test sets rather than against the machine's. SWIM is the one
+ * thing left on real time: it counts its own gossip periods and reads no clock at all, so the
+ * one wait here is a bounded poll for its coroutine and there is no sleep anywhere.
  */
 class P2AcceptanceTest {
 
     private val ids = List(3) { NodeId("node-${it + 1}") }
+
+    /** The one clock all three nodes read; it never moves, so no deadline here arrives by itself. */
+    private val clock = MutableClock(Instant.parse("2026-09-06T00:00:00Z"))
 
     /** The same ring every node builds, so the test can say which node coordinates a key. */
     private val ring = Ring.of(ids.toSet())
@@ -54,6 +61,7 @@ class P2AcceptanceTest {
             grpcPort = 0,
             config = ReplicationConfig(n = 3, w = 2, r = 2),
             partitionCount = 4,
+            clock = clock,
             // Fast enough that a death is detected inside a test's patience, slow enough to gossip.
             gossipPeriod = 100.milliseconds,
         )
@@ -146,7 +154,12 @@ class P2AcceptanceTest {
         assertEquals("100", one.get("$tag.balance"))
     }
 
-    /** Real gossip over real sockets: node-1 hears nothing from node-2 and buries it. */
+    /**
+     * Real gossip over real sockets: node-1 hears nothing from node-2 and buries it. The one wait
+     * this tier keeps (plan rule 1.7): SWIM counts gossip periods on its own coroutine and reads
+     * no clock, so there is no clock a test could advance to bring the burial forward. The wait is
+     * for that coroutine, bounded, and it polls rather than sleeps.
+     */
     private fun gossipSeesTheDeadNode(one: Jedis) {
         val giveUpAt = System.nanoTime() + Duration.ofSeconds(30).toNanos()
         var fields = clusterSection(one)

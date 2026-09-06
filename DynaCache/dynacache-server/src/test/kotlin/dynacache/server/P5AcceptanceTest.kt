@@ -4,6 +4,7 @@ import dynacache.cluster.HostPort
 import dynacache.cluster.NodeId
 import dynacache.cluster.ReplicationConfig
 import dynacache.engine.Reply
+import dynacache.engine.testkit.MutableClock
 import io.microraft.RaftConfig
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -13,6 +14,7 @@ import redis.clients.jedis.Jedis
 import redis.clients.jedis.Protocol
 import redis.clients.jedis.params.SetParams
 import java.time.Duration
+import java.time.Instant
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.time.Duration.Companion.milliseconds
 
@@ -20,10 +22,18 @@ import kotlin.time.Duration.Companion.milliseconds
  * CP spec 12's exit criterion: both engines in one cluster, reached by an unmodified client.
  * The three nodes of P2 and P4 are also the three CP members, so one process holds an AP
  * partition and a Raft member and a client cannot tell which one it is talking to.
+ *
+ * Every node reads one clock the test owns (plan rule 1.5) and it never moves, so the lease on
+ * the counter and the timeout on the session outlive the test by construction rather than by
+ * being longer than the machine is slow. MicroRaft keeps its own timers, which is why the one
+ * wait here is for an election.
  */
 class P5AcceptanceTest {
 
     private val ids = List(3) { NodeId("node-${it + 1}") }
+
+    /** The one clock all three nodes read; it never moves, so no lease here lapses by itself. */
+    private val clock = MutableClock(Instant.parse("2026-09-06T00:00:00Z"))
 
     /** Read at send time by both transports, so ephemeral ports are filled in after binding. */
     private val addresses = ConcurrentHashMap<NodeId, HostPort>()
@@ -138,6 +148,7 @@ class P5AcceptanceTest {
                 grpcPort = 0,
                 config = ReplicationConfig(n = 3, w = 2, r = 2),
                 partitionCount = 4,
+                clock = clock,
                 gossipPeriod = 100.milliseconds,
                 cpMembers = ids,
                 cpAddresses = cpAddresses,
@@ -158,6 +169,10 @@ class P5AcceptanceTest {
      * one a little before it may replicate, since a fresh leader has to apply its own term's first
      * entry before its stamps can be trusted (C19). Until then it names itself and refuses itself,
      * which is a `-NOTLEADER` a real client rides out by retrying (CP spec 9.1 step 3).
+     *
+     * This is the wait this tier keeps (plan rule 1.7), for the same reason the CP kit's do (T45,
+     * T46): MicroRaft runs its election timers on its own scheduler and reads no injected clock,
+     * so a test cannot advance time to make a leader appear.
      */
     private fun cpLeader(): ClusterNode = awaitValue("a CP member led and would replicate") {
         nodes.firstNotNullOfOrNull(::leaderAccordingTo)?.takeIf(::replicatesNow)
@@ -192,7 +207,7 @@ class P5AcceptanceTest {
         nodes = emptyList()
     }
 
-    /** Real time, so every wait is a poll to a deadline; nothing here sleeps for a fixed span. */
+    /** A bounded poll for MicroRaft's own threads; nothing here sleeps for a fixed span. */
     private fun <T : Any> awaitValue(what: String, within: Duration = Duration.ofSeconds(20), value: () -> T?): T {
         val giveUpAt = System.nanoTime() + within.toNanos()
         while (true) {
