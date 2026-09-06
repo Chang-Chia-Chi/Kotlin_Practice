@@ -8,8 +8,10 @@ contracts and fixed assertions, so implementations may vary but assertions may n
 
 Tickets are `T01` to `T46`, grouped into phases `P1` to `P5` (one file per phase under
 `plans/`). Ticket files live in `.scratch/dynacache/issues/NN-<slug>.md`. The progress log is
-`docs/dynamiccache/progress.md`. This directory is the authority; `DynaCache/docs/` holds the
-April copies and is superseded.
+`docs/dynamiccache/progress.md`. This directory is the authority for spec, plan and progress;
+`DynaCache/CONTEXT.md` is the glossary and `DynaCache/docs/adr/` holds the architecture
+decisions. `DynaCache/` is an ordinary directory of this repository (folded in on 2026-09-06
+from the `dynacache` branch, which remains as a backup).
 
 ---
 
