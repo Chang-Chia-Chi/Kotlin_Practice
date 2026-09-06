@@ -15,3 +15,8 @@ the non-atomic behaviour so nobody "fixes" it into a global lock.
 Considered and rejected: `-CROSSSLOT` (needs cluster-aware clients, which are on the
 do-not-build list); ordered locking of all involved executors (a cross-partition lock in the
 engine).
+
+The rejection is about fan-out commands only. A batch (MULTI/EXEC or EVAL) still answers
+`-CROSSSLOT keys of a batch must share a partition (use a hash tag)` when its keys span
+partitions (C12): the kind is what client libraries switch on, and unlike `MGET` a batch
+genuinely cannot run, so there is nothing to fan out.

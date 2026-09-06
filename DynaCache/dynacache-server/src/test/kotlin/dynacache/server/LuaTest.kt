@@ -173,7 +173,10 @@ class LuaTest {
                 val elsewhere = otherPartitionThan("here")
                 client.send("EVAL", "redis.call('SET', KEYS[1], 'ran') return 1", "2", "here", elsewhere)
 
-                assertEquals(Reply.Error("CROSSSLOT", "Keys in request don't hash to the same slot"), client.read())
+                assertEquals(
+                    Reply.Error("CROSSSLOT", "keys of a batch must share a partition (use a hash tag)"),
+                    client.read(),
+                )
 
                 // Rejected before execution (C12): not a line of the script ran.
                 client.send("GET", "here")
