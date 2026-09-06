@@ -61,6 +61,7 @@ internal class Partition(id: PartitionId, private val clock: Clock, private val 
         }
         return when (command) {
             is Command.Fanned -> error("a partition never sees a multi-key command; ApEngine fans it out")
+            is Command.Cp -> error("a partition never sees a CP command; the CP engine replicates it")
             is Command.Ping -> Reply.Simple("PONG")
             is Command.CommandTable -> Reply.Array(emptyList())
 
