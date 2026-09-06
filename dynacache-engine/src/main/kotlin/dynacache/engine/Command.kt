@@ -120,20 +120,27 @@ sealed class Command {
 
     /**
      * `INFO`: one bulk string of `field:value` lines in Redis's section layout. Minimal here: the
-     * version and the keyspace size, which is what the node's own tests and `redis-cli` look for.
+     * version, the memory the node holds and the keyspace size, which is what the node's own tests
+     * and `redis-cli` look for. Each partition answers with its live key count and its used bytes.
      */
     data object Info : EveryPartition() {
-        override fun join(replies: List<Reply>, random: Random): Reply =
-            Reply.Bulk(
+        override fun join(replies: List<Reply>, random: Random): Reply {
+            val perPartition = replies.map { (it as Reply.Array).items }
+            fun total(at: Int) = perPartition.sumOf { (it[at] as Reply.Integer).value }
+            return Reply.Bulk(
                 listOf(
                     "# Server",
                     "dynacache_version:$VERSION",
                     "",
+                    "# Memory",
+                    "used_memory:${total(1)}",
+                    "",
                     "# Keyspace",
-                    "db0:keys=${(sum(replies) as Reply.Integer).value}",
+                    "db0:keys=${total(0)}",
                     "",
                 ).joinToString(CRLF).toByteArray(),
             )
+        }
     }
 
     /** `DBSIZE`: how many live keys the node holds. */

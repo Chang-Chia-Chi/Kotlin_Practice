@@ -37,9 +37,14 @@ class CommandEngineTest {
     @AfterEach
     fun close() = engine.close()
 
-    private fun run(command: Command): Reply = engine.submit(command).get()
+    private fun run(command: Command, on: ApEngine = engine): Reply = on.submit(command).get()
 
-    private fun info(): String = (run(Command.Info) as Reply.Bulk).bytes!!.toString(Charsets.ISO_8859_1)
+    private fun info(on: ApEngine = engine): String =
+        (run(Command.Info, on) as Reply.Bulk).bytes!!.toString(Charsets.ISO_8859_1)
+
+    /** The bytes `INFO` says the node holds, summed over its partitions. */
+    private fun usedMemory(on: ApEngine = engine): Long =
+        info(on).lineSequence().first { it.startsWith(USED_MEMORY) }.removePrefix(USED_MEMORY).toLong()
 
     /** The keys `KEYS pattern` answers with, as text; a set, since the order is unspecified. */
     private fun keys(pattern: String): Set<String> {
@@ -605,6 +610,254 @@ class CommandEngineTest {
         assertTrue(info().contains("db0:keys=2\r\n"), "INFO counts every partition: " + info())
     }
 
+    /**
+     * The last step is the only direct observation that the wheel deletes (T09's note): nothing
+     * reads `c` between its deadline and the tick, so if the wheel's removal did not give the
+     * bytes back, `INFO`'s own sweep would find nothing left to give back either and the total
+     * would stay at two keys forever.
+     */
+    @Test
+    fun info_reports_used_memory() {
+        val value = "v".repeat(100).toByteArray()
+        assertEquals(0L, usedMemory(), "an empty node holds nothing")
+        run(Command.Set(Key("a"), value))
+        val one = usedMemory()
+        assertTrue(one >= 100, "a 100-byte value costs at least its bytes: $one")
+        run(Command.Set(Key("b"), value))
+        assertEquals(2 * one, usedMemory(), "two keys of the same shape cost twice as much, across partitions")
+        run(Command.Del(Key("a")))
+        assertEquals(one, usedMemory(), "DEL gives the bytes back")
+        run(Command.Set(Key("c"), value, ttl = Duration.ofSeconds(5)))
+        assertEquals(2 * one, usedMemory())
+        clock.now += Duration.ofSeconds(6)
+        tick()
+        assertEquals(one, usedMemory(), "the wheel's own removal gives the bytes back too")
+    }
+
+    /** Key number [i], always the same length, so every seeded entry costs the same. */
+    private fun evictKey(i: Int) = Key("k%03d".format(i))
+
+    /** Key number [i]'s own value: 100 bytes like every other, and unlike every other. */
+    private fun evictValue(i: Int) = "value-%03d".format(i).padEnd(100, '.').toByteArray()
+
+    /**
+     * Writes key number [i] on [on]. The clock moves first: a real one always has, and two keys
+     * written at the very same instant are equally recently used, which leaves LRU nothing to
+     * choose between.
+     */
+    private fun seed(i: Int, on: ApEngine, ttl: Duration? = null): Reply {
+        clock.now += Duration.ofMillis(1)
+        return run(Command.Set(evictKey(i), evictValue(i), ttl = ttl), on)
+    }
+
+    /**
+     * What one seeded entry costs, read back through `INFO` on a node with no threshold. The
+     * eviction tests then size their budgets in entries rather than in a byte count copied from
+     * the formula, which would only ever agree with itself.
+     */
+    private val entryBytes: Long by lazy {
+        val probe = ApEngine(partitionCount = 1, clock = clock)
+        try {
+            seed(0, probe)
+            usedMemory(probe)
+        } finally {
+            probe.close()
+        }
+    }
+
+    /**
+     * A node of one partition whose threshold holds exactly [entries] seeded entries. One
+     * partition because the threshold is split evenly across them, so a budget of three entries
+     * over four partitions would be a budget of none.
+     */
+    private fun capped(entries: Int) =
+        ApEngine(partitionCount = 1, clock = clock, random = Random(10), maxMemoryBytes = entries * entryBytes)
+
+    @Test
+    fun eviction_respects_max_memory() {
+        val node = capped(3)
+        try {
+            repeat(20) { seed(it, node) }
+            assertTrue(usedMemory(node) <= 3 * entryBytes, "still over the threshold: ${usedMemory(node)}")
+            assertEquals(Reply.Integer(3), run(Command.DbSize, node), "three entries is what the threshold holds")
+            assertEquals(Reply.Bulk(evictValue(19)), run(Command.Get(evictKey(19)), node), "the last write survived it")
+        } finally {
+            node.close()
+        }
+    }
+
+    @Test
+    fun lru_evicts_oldest_access() {
+        val node = capped(3)
+        try {
+            repeat(3) { seed(it, node) }
+            clock.now += Duration.ofMillis(1)
+            assertEquals(
+                Reply.Bulk(evictValue(0)),
+                run(Command.Get(evictKey(0)), node),
+                "reading key 0 makes it the freshest of the three, though it was written first",
+            )
+            seed(3, node)
+            assertEquals(Reply.Integer(0), run(Command.Exists(evictKey(1)), node), "key 1 had gone longest unread")
+            listOf(0, 2, 3).forEach {
+                assertEquals(Reply.Integer(1), run(Command.Exists(evictKey(it)), node), "key $it was used more recently")
+            }
+            // A second round, with a different key left cold: one eviction could agree with the
+            // access order by accident of the table's bucket order, two in a row could not.
+            listOf(3, 0).forEach {
+                clock.now += Duration.ofMillis(1)
+                run(Command.Get(evictKey(it)), node)
+            }
+            seed(4, node)
+            assertEquals(Reply.Integer(0), run(Command.Exists(evictKey(2)), node), "key 2 was now the one left unread")
+            listOf(0, 3, 4).forEach {
+                assertEquals(Reply.Integer(1), run(Command.Exists(evictKey(it)), node), "key $it was used more recently")
+            }
+        } finally {
+            node.close()
+        }
+    }
+
+    @Test
+    fun eviction_prefers_expired() {
+        val node = capped(3)
+        try {
+            seed(0, node)
+            seed(1, node, ttl = Duration.ofSeconds(60))
+            seed(2, node)
+            // Nothing reads key 1 between its deadline and the write that crosses the threshold,
+            // so the eviction step is the first thing to notice it is gone.
+            clock.now += Duration.ofSeconds(61)
+            seed(3, node)
+            assertEquals(Reply.Integer(0), run(Command.Exists(evictKey(1)), node), "the expired key paid for the new one")
+            assertEquals(
+                Reply.Bulk(evictValue(0)),
+                run(Command.Get(evictKey(0)), node),
+                "so key 0 stayed, though it was the coldest live key and LRU's victim otherwise",
+            )
+        } finally {
+            node.close()
+        }
+    }
+
+    /**
+     * I6 at pressure: a node full to its threshold, half of it expired, and one more write. Every
+     * expired key goes and no live key does, whatever the policy would have said about them.
+     */
+    @Test
+    fun I6_expired_evicted_before_live() {
+        val node = capped(10)
+        try {
+            (0 until 5).forEach { seed(it, node) }
+            (10 until 15).forEach { seed(it, node, ttl = Duration.ofSeconds(60)) }
+            assertEquals(Reply.Integer(10), run(Command.DbSize, node), "full to the threshold, not over it")
+            clock.now += Duration.ofSeconds(61)
+            seed(99, node)
+            (0 until 5).forEach {
+                assertEquals(Reply.Integer(1), run(Command.Exists(evictKey(it)), node), "live key $it was never touched")
+            }
+            (10 until 15).forEach {
+                assertEquals(Reply.Integer(0), run(Command.Exists(evictKey(it)), node), "expired key $it went first")
+            }
+        } finally {
+            node.close()
+        }
+    }
+
+    @Test
+    fun eviction_does_not_corrupt() {
+        val node = capped(5)
+        try {
+            repeat(40) { seed(it, node) }
+            val survivors = (0 until 40).filter { run(Command.Exists(evictKey(it)), node) == Reply.Integer(1) }
+            assertEquals(5, survivors.size, "the threshold holds five: $survivors")
+            survivors.forEach {
+                assertEquals(Reply.Bulk(evictValue(it)), run(Command.Get(evictKey(it)), node), "key $it kept its own value")
+            }
+            assertEquals(Reply.Integer(5), run(Command.DbSize, node), "and the store counts exactly those")
+        } finally {
+            node.close()
+        }
+    }
+
+    /**
+     * One write can leave a partition far over its share, and paying the whole bill at once would
+     * make that one command wait for a keyspace-sized walk. The step stops at 32 and the commands
+     * that follow finish the job. `DBSIZE` sees the store as the step left it: a command's reply
+     * is settled before its own crossing starts the next step.
+     */
+    @Test
+    fun eviction_step_is_bounded() {
+        val node = capped(40)
+        try {
+            repeat(40) { seed(it, node) }
+            clock.now += Duration.ofMillis(1)
+            // Worth 35 entries and change, so no one step of 32 evictions can cover it.
+            val big = ByteArray((35 * entryBytes).toInt()) { 'b'.code.toByte() }
+            run(Command.Set(Key("big"), big), node)
+            assertEquals(Reply.Integer(41 - 32), run(Command.DbSize, node), "one step evicted 32 keys and no more")
+            assertTrue(usedMemory(node) <= 40 * entryBytes, "the steps that followed finished the job")
+        } finally {
+            node.close()
+        }
+    }
+
+    /** Records who read the clock and how often. */
+    private class RecordingClock(@Volatile var now: Instant) : Clock() {
+        val readers = Collections.synchronizedList(mutableListOf<String>())
+
+        override fun instant(): Instant {
+            readers += Thread.currentThread().name
+            return now
+        }
+
+        override fun getZone(): ZoneId = ZoneOffset.UTC
+        override fun withZone(zone: ZoneId): Clock = this
+    }
+
+    /**
+     * The C1 technique of T02, pointed at eviction: the engine reads the clock once per command
+     * and never outside one, so twenty writes that evict are still twenty reads, all of them on
+     * the one partition thread. An eviction step on a thread of its own, or one reading the clock
+     * for itself, would show up as a reader this count does not allow.
+     */
+    @Test
+    fun eviction_runs_on_the_partition_thread() {
+        val recording = RecordingClock(clock.now)
+        val node = ApEngine(partitionCount = 1, clock = recording, random = Random(10), maxMemoryBytes = 3 * entryBytes)
+        try {
+            repeat(20) {
+                recording.now += Duration.ofMillis(1)
+                run(Command.Set(evictKey(it), evictValue(it)), node)
+            }
+            assertEquals(Reply.Integer(3), run(Command.DbSize, node), "the writes did evict")
+            assertEquals(21, recording.readers.size, "one clock read per command, the eviction step included")
+            assertEquals(setOf("partition-0"), recording.readers.toSet(), "and every one on the partition's own thread")
+        } finally {
+            node.close()
+        }
+    }
+
+    /**
+     * A field added to a hash never reaches `write`, so nothing charges for it there; the recount
+     * after the command is what keeps the total level with a store that grew in place.
+     */
+    @Test
+    fun used_memory_follows_an_aggregate_grown_in_place() {
+        val h = Key("h")
+        val field = "f".toByteArray()
+        run(Command.HSet(h, listOf(field to "v".repeat(100).toByteArray())))
+        val oneField = usedMemory()
+        run(Command.HSet(h, listOf("g".toByteArray() to "v".repeat(100).toByteArray())))
+        assertTrue(usedMemory() > oneField, "a second field costs more than one: ${usedMemory()} vs $oneField")
+        run(Command.HDel(h, listOf("g".toByteArray())))
+        assertEquals(oneField, usedMemory(), "and the bytes come back when the field goes")
+        run(push(Key("l"), Command.End.TAIL, "a"))
+        val oneItem = usedMemory() - oneField
+        run(push(Key("l"), Command.End.TAIL, "b"))
+        assertTrue(usedMemory() - oneField > oneItem, "a list grown in place is charged for too")
+    }
+
     private fun ttl(key: Key, precision: Command.Ttl.Precision = Command.Ttl.Precision.SECONDS): Long =
         (run(Command.Ttl(key, precision)) as Reply.Integer).value
 
@@ -877,6 +1130,7 @@ class CommandEngineTest {
     private fun set(key: Key, value: String): Command = Command.Set(key, value.toByteArray())
 
     private companion object {
+        const val USED_MEMORY = "used_memory:"
         val EMPTY_ARRAY = Reply.Array(emptyList<Reply>())
         val NO_SUCH_KEY = Reply.Error("ERR", "no such key")
         val INDEX_OUT_OF_RANGE = Reply.Error("ERR", "index out of range")

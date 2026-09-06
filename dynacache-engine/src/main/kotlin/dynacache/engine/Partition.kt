@@ -21,17 +21,40 @@ internal class Partition(
     private val clock: Clock,
     private val random: Random,
     private val tickMillis: Long,
+    /**
+     * This partition's even share of the node's memory threshold. `Long.MAX_VALUE` is a node with
+     * no threshold: a share nothing can cross is a partition that never evicts, with no second
+     * branch to say so.
+     */
+    private val maxBytes: Long,
 ) {
 
     private class Entry(val value: Value, val expiresAt: Instant?) {
         /** The String bytes, safe to read once the kind check in [execute] has passed. */
         val str: ByteArray get() = (value as Value.Str).bytes
 
+        /**
+         * When a command last read or wrote this entry, from that command's own reading of the
+         * clock. The sampling policy of spec 2.7 evicts the oldest of the keys it draws.
+         */
+        var lastAccess: Instant = Instant.EPOCH
+
+        /** What this entry last contributed to [usedBytes]; see [account]. */
+        var accounted: Long = 0
+
         /** The one expiry rule: a key is readable through its deadline and gone after it. */
         fun expired(now: Instant): Boolean = expiresAt != null && now.isAfter(expiresAt)
     }
 
     private val store = HashTable<Key, Entry>()
+
+    /**
+     * What the store holds, by the estimate of [Value.approximateBytes]: the sum over the live
+     * entries of the key's own bytes, [ENTRY_BYTES] for the entry itself and the value's payload.
+     * Kept as a running total rather than recounted, so `INFO` costs nothing and [execute] can ask
+     * after every command whether the partition is over its share.
+     */
+    private var usedBytes = 0L
     private val executor = Executors.newSingleThreadExecutor { r ->
         Thread(r, "partition-${id.index}").apply { isDaemon = true }
     }
@@ -49,7 +72,7 @@ internal class Partition(
     private var wheel: TimerWheel<Key>? = null
 
     private fun wheel(now: Instant): TimerWheel<Key> =
-        wheel ?: TimerWheel<Key>(now, tickMillis) { key -> store.remove(key) }.also { wheel = it }
+        wheel ?: TimerWheel<Key>(now, tickMillis) { key -> forget(key) }.also { wheel = it }
 
     fun submit(command: Command): CompletableFuture<Reply> =
         CompletableFuture.supplyAsync({ execute(command) }, executor)
@@ -98,6 +121,18 @@ internal class Partition(
             val held = live(command.key, now)?.value
             if (held != null && held.kind != command.needs) return WRONG_TYPE
         }
+        val reply = run(command, now)
+        // A command that grew or shrank an aggregate in place never passed through [write], so
+        // one recount of the key it touched is what keeps the running total level with the store.
+        if (command is Command.Keyed) account(command.key)
+        // Spec 5.5: eviction runs when memory crosses the threshold, on the partition's own
+        // thread, after the command that crossed it has finished with the store.
+        if (usedBytes > maxBytes) evict(now)
+        return reply
+    }
+
+    /** The command itself, once [execute] has settled the instant it runs at and its kind. */
+    private fun run(command: Command, now: Instant): Reply {
         return when (command) {
             is Command.Fanned -> error("a partition never sees a multi-key command; ApEngine fans it out")
             is Command.Cp -> error("a partition never sees a CP command; the CP engine replicates it")
@@ -291,9 +326,14 @@ internal class Partition(
                 Reply.Integer((if (command.reverse) zset.order.size - 1 - rank else rank).toLong())
             }
 
-            is Command.DbSize, is Command.Info -> {
+            is Command.DbSize -> {
                 purgeExpired(now)
                 Reply.Integer(store.size.toLong())
+            }
+            // The two numbers INFO joins across partitions: live keys, and the bytes they hold.
+            is Command.Info -> {
+                purgeExpired(now)
+                Reply.Array(listOf(Reply.Integer(store.size.toLong()), Reply.Integer(usedBytes)))
             }
             is Command.Keys -> {
                 purgeExpired(now)
@@ -307,6 +347,7 @@ internal class Partition(
                 // Every key goes, so every deadline goes: the wheel is dropped whole.
                 wheel = null
                 store.clear()
+                usedBytes = 0
                 OK
             }
 
@@ -353,7 +394,10 @@ internal class Partition(
      * fire against a value it was never meant for.
      */
     private fun write(key: Key, now: Instant, entry: Entry) {
-        store.put(key, entry)
+        entry.lastAccess = now
+        // The displaced entry's bytes leave with it; [account] then charges for what replaced it.
+        usedBytes -= store.put(key, entry)?.accounted ?: 0
+        account(key)
         val deadline = entry.expiresAt
         // A write that carries no TTL clears the one the key had, wheel entry and all; a key
         // with no wheel entry has nothing to cancel, and so needs no wheel to be built.
@@ -362,8 +406,58 @@ internal class Partition(
 
     /** The one way an entry leaves the store: its pending deadline leaves with it. */
     private fun drop(key: Key) {
-        store.remove(key)
+        forget(key)
         wheel?.cancel(key)
+    }
+
+    /**
+     * Takes the entry out of the store and its bytes off the total. The one accounting line the
+     * wheel's own removal shares with [drop]: the wheel has already dropped its own entry by the
+     * time its callback runs, so it cannot go through [drop], but the bytes still have to go.
+     */
+    private fun forget(key: Key): Entry? = store.remove(key)?.also { usedBytes -= it.accounted }
+
+    /**
+     * Charges [usedBytes] for what the entry under [key] costs now. Idempotent: it books the
+     * difference from what the entry was last charged, so calling it after a command that grew or
+     * shrank an aggregate in place is what keeps the total honest without a third store path.
+     */
+    private fun account(key: Key) {
+        val entry = store.get(key) ?: return
+        val size = key.bytes.size + ENTRY_BYTES + entry.value.approximateBytes()
+        usedBytes += size - entry.accounted
+        entry.accounted = size
+    }
+
+    /**
+     * One bounded eviction step, spec 5.5's order: every expired key goes first, and only then do
+     * live keys, so no live key is ever taken while an expired one is still there (I6). The live
+     * ones go by the sampling LRU of spec 2.7 -- [SAMPLE] keys drawn at random, the one accessed
+     * longest ago evicted -- until the partition is back under its share or the store is empty.
+     *
+     * At most [MAX_EVICTIONS] keys go in one step, so no single command stalls on a threshold it
+     * cannot reach in one pass; the command after it runs the next step. Eviction is local to this
+     * partition and to this thread: nothing here reads or writes another partition.
+     */
+    private fun evict(now: Instant) {
+        purgeExpired(now)
+        var evicted = 0
+        while (usedBytes > maxBytes && store.size > 0 && evicted < MAX_EVICTIONS) {
+            drop(coldest() ?: return)
+            evicted++
+        }
+    }
+
+    /**
+     * The least recently accessed of [SAMPLE] keys drawn at random. A store no larger than the
+     * sample is taken whole: drawing with replacement from it could only miss a key that sampling
+     * "K random keys" was meant to include.
+     */
+    private fun coldest(): Key? {
+        val drawn =
+            if (store.size <= SAMPLE) store.entries().map { it.key }.toList()
+            else List(SAMPLE) { store.randomKey(random) ?: return null }
+        return drawn.minByOrNull { store.get(it)!!.lastAccess }
     }
 
     /**
@@ -376,6 +470,9 @@ internal class Partition(
             drop(key)
             return null
         }
+        // Every read of an entry funnels through here, so this is where "recently used" is
+        // written down, from the reading command's own instant.
+        entry.lastAccess = now
         return entry
     }
 
@@ -512,6 +609,15 @@ internal class Partition(
         /** The `SCAN` family's reply: the cursor as a bulk, then the array of what was found. */
         fun scanReply(cursor: Long, found: List<Reply>): Reply =
             Reply.Array(listOf(Reply.Bulk(cursor.toString().toByteArray()), Reply.Array(found)))
+
+        /** What an entry costs beyond its key's bytes and its value's: the entry, the table's node, the deadline. */
+        const val ENTRY_BYTES = 48L
+
+        /** Spec 2.7's K: how many keys one eviction draws before taking the coldest of them. */
+        const val SAMPLE = 5
+
+        /** The bound on one eviction step, so no one write pays for a whole keyspace. */
+        const val MAX_EVICTIONS = 32
 
         val EMPTY = ByteArray(0)
         val OK = Reply.Simple("OK")
