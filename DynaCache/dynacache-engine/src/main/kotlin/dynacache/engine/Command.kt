@@ -133,19 +133,19 @@ sealed class Command {
         /** `PERSIST cp:counter:K`: 1 when a TTL was removed, 0 when there was none to remove. */
         data class LongPersist(override val key: Key) : AtomicLong()
 
-        /** `CP.LOCK.TRY K ttl_ms`: `[ok, token]`; a holder trying again holds once more with the same token. */
-        data class LockTry(override val key: Key, override val session: Long, val ttl: Duration) : FencedLock(), Sessioned
+        /** `CP.LOCK.TRY K lease_ms`: `[ok, token]`; a holder trying again holds once more with the same token. */
+        data class LockTry(override val key: Key, override val session: Long, val lease: Duration) : FencedLock(), Sessioned
 
         /** `CP.LOCK.UNLOCK K token`: 1 when released, 0 when still held reentrantly, `-REENTRANCE` for a non-holder. */
         data class LockUnlock(override val key: Key, override val session: Long, val token: Long) : FencedLock(), Sessioned
 
-        /** `CP.LOCK.RENEW K token ttl_ms`: 1 when the holder's lease now runs [ttl] from here, `-REENTRANCE` otherwise. */
-        data class LockRenew(override val key: Key, override val session: Long, val token: Long, val ttl: Duration) : FencedLock(), Sessioned
+        /** `CP.LOCK.RENEW K token lease_ms`: 1 when the holder's lease now runs [lease] from here, `-REENTRANCE` otherwise. */
+        data class LockRenew(override val key: Key, override val session: Long, val token: Long, val lease: Duration) : FencedLock(), Sessioned
 
         /** `CP.LOCK.FORCE_UNLOCK K`: the admin override, `+OK` whether or not anyone held it. */
         data class LockForceUnlock(override val key: Key) : FencedLock()
 
-        /** `CP.LOCK.STATE K`: `[owner or nil, token, ttl_remaining_ms, reentrance]`. */
+        /** `CP.LOCK.STATE K`: `[owner or nil, token, lease_remaining_ms, reentrance]`. */
         data class LockState(override val key: Key) : FencedLock()
 
         /** `CP.SEM.INIT K permits`: `+OK`; a semaphore that already exists keeps the permits it has. */

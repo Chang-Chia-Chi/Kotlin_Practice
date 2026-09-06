@@ -38,7 +38,7 @@ class FencedLockTest {
     private fun submit(command: Command): Reply =
         kit.leaderEngine().submit(command).get(REPLY_TIMEOUT_SECS, SECONDS)
 
-    private fun tryLock(session: Long, ttl: Duration = LEASE) = submit(Command.Cp.LockTry(lock, session, ttl))
+    private fun tryLock(session: Long, lease: Duration = LEASE) = submit(Command.Cp.LockTry(lock, session, lease))
 
     private fun state() = submit(Command.Cp.LockState(lock))
 
@@ -120,7 +120,7 @@ class FencedLockTest {
     @Test
     fun lock_ttl_expires() {
         val leader = kit.leader()
-        assertEquals(granted(1), tryLock(session = 7, ttl = Duration.ofSeconds(1)))
+        assertEquals(granted(1), tryLock(session = 7, lease = Duration.ofSeconds(1)))
 
         kit.clock(leader.config.nodeId).advance(Duration.ofSeconds(2))
         leader.tick().get(REPLY_TIMEOUT_SECS, SECONDS)
@@ -132,8 +132,8 @@ class FencedLockTest {
     @Test
     fun lock_ttl_renew() {
         val leader = kit.leader()
-        assertEquals(granted(1), tryLock(session = 7, ttl = Duration.ofSeconds(1)))
-        assertEquals(Reply.Integer(1), submit(Command.Cp.LockRenew(lock, session = 7, token = 1, ttl = Duration.ofSeconds(5))))
+        assertEquals(granted(1), tryLock(session = 7, lease = Duration.ofSeconds(1)))
+        assertEquals(Reply.Integer(1), submit(Command.Cp.LockRenew(lock, session = 7, token = 1, lease = Duration.ofSeconds(5))))
 
         kit.clock(leader.config.nodeId).advance(Duration.ofSeconds(2))
         leader.tick().get(REPLY_TIMEOUT_SECS, SECONDS)
@@ -143,9 +143,9 @@ class FencedLockTest {
 
     @Test
     fun lock_renew_by_non_holder_rejected() {
-        assertEquals(granted(1), tryLock(session = 7, ttl = Duration.ofSeconds(1)))
+        assertEquals(granted(1), tryLock(session = 7, lease = Duration.ofSeconds(1)))
 
-        val renewed = submit(Command.Cp.LockRenew(lock, session = 8, token = 1, ttl = Duration.ofSeconds(5)))
+        val renewed = submit(Command.Cp.LockRenew(lock, session = 8, token = 1, lease = Duration.ofSeconds(5)))
 
         assertEquals("REENTRANCE", (renewed as Reply.Error).kind)
         assertEquals(heldBy(session = 7, token = 1, remaining = Duration.ofSeconds(1).toMillis() - 2), state(), "lease unchanged")
@@ -199,7 +199,7 @@ class FencedLockTest {
     fun I19_lease_expires_late_never_early_across_failover() {
         val old = kit.leader()
         val lease = Duration.ofSeconds(30)
-        assertEquals(granted(1), tryLock(session = 7, ttl = lease))
+        assertEquals(granted(1), tryLock(session = 7, lease = lease))
         kit.clock(old.config.nodeId).advance(lease.dividedBy(3))
         assertEquals(heldBy(session = 7, token = 1, remaining = lease.toMillis() * 2 / 3), state())
 

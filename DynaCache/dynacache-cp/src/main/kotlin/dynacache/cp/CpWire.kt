@@ -244,7 +244,7 @@ object CpWire {
         writeTable(snapshot.locks) {
             writeLong(it.owner ?: NO_OWNER)
             writeLong(it.token)
-            writeLong(it.expiresAt)
+            writeLong(it.leaseUntil)
             writeInt(it.holds)
         }
         writeTable(snapshot.semaphores) { semaphore ->
@@ -353,7 +353,7 @@ object CpWire {
             is Command.Cp.LongPersist -> tagged(CMD_PERSIST, command.key) {}
             is Command.Cp.LockTry -> tagged(CMD_LOCK_TRY, command.key) {
                 writeLong(command.session)
-                writeLong(command.ttl.toMillis())
+                writeLong(command.lease.toMillis())
             }
             is Command.Cp.LockUnlock -> tagged(CMD_LOCK_UNLOCK, command.key) {
                 writeLong(command.session)
@@ -362,7 +362,7 @@ object CpWire {
             is Command.Cp.LockRenew -> tagged(CMD_LOCK_RENEW, command.key) {
                 writeLong(command.session)
                 writeLong(command.token)
-                writeLong(command.ttl.toMillis())
+                writeLong(command.lease.toMillis())
             }
             is Command.Cp.LockForceUnlock -> tagged(CMD_LOCK_FORCE_UNLOCK, command.key) {}
             is Command.Cp.LockState -> tagged(CMD_LOCK_STATE, command.key) {}
