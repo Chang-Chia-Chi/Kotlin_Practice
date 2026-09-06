@@ -17,8 +17,10 @@ import java.time.ZoneOffset
 import java.util.Collections
 import java.util.Random
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.ExecutionException
 import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 class CommandEngineTest {
 
@@ -766,13 +768,113 @@ class CommandEngineTest {
     }
 
     @Test
-    fun `atomically is a stub until the partition executors arrive`() {
-        assertThrows(NotImplementedError::class.java) {
-            engine.atomically(listOf(Key("{user1}.a"), Key("{user1}.b"))) { ctx ->
-                ctx.execute(Command.Ping)
-            }
-        }
+    fun multi_exec_hash_tags_allow_two_keys() {
+        val a = Key("{user1}.a")
+        val b = Key("{user1}.b")
+        assertEquals(engine.partitionOf(a), engine.partitionOf(b), "the hash tag is what puts them together")
+        val replies = batch(listOf(a, b)) { ctx -> listOf(ctx.execute(set(a, "1")), ctx.execute(set(b, "2"))) }
+        assertEquals(listOf(Reply.Simple("OK"), Reply.Simple("OK")), replies)
+        assertEquals(Reply.Bulk("1".toByteArray()), run(Command.Get(a)))
+        assertEquals(Reply.Bulk("2".toByteArray()), run(Command.Get(b)))
     }
+
+    @Test
+    fun multi_exec_atomic() {
+        val a = Key("{t}.a")
+        val b = Key("{t}.b")
+        run(set(a, "before"))
+        run(set(b, "before"))
+        val midway = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        // The block is the batch, and it runs on the partition thread, so holding it here is
+        // holding the partition. Nothing sleeps: the latches are the schedule.
+        val batch = engine.atomically(listOf(a, b)) { ctx ->
+            ctx.execute(set(a, "after"))
+            midway.countDown()
+            check(release.await(5, TimeUnit.SECONDS)) { "never released" }
+            ctx.execute(set(b, "after"))
+        }
+        assertTrue(midway.await(5, TimeUnit.SECONDS), "the batch reached its middle")
+
+        // Between the batch's first and last command, a holds "after" and b still holds
+        // "before". A reader that ran now would see exactly the half-applied state I11 forbids.
+        val readA = engine.submit(Command.Get(a))
+        val readB = engine.submit(Command.Get(b))
+        assertFalse(readA.isDone, "no read runs while the batch holds its partition")
+        assertFalse(readB.isDone, "no read runs while the batch holds its partition")
+
+        release.countDown()
+        batch.get(5, TimeUnit.SECONDS)
+        assertEquals(Reply.Bulk("after".toByteArray()), readA.get(5, TimeUnit.SECONDS), "the post-batch state")
+        assertEquals(Reply.Bulk("after".toByteArray()), readB.get(5, TimeUnit.SECONDS), "the post-batch state")
+    }
+
+    @Test
+    fun I11_failing_command_does_not_undo_neighbours() {
+        val a = Key("{t}.a")
+        val b = Key("{t}.b")
+        val replies = batch(listOf(a, b)) { ctx ->
+            listOf(
+                ctx.execute(set(a, "abc")),
+                ctx.execute(Command.IncrBy(a, 1)),
+                ctx.execute(set(b, "2")),
+            )
+        }
+        assertEquals(listOf(Reply.Simple("OK"), NOT_AN_INTEGER, Reply.Simple("OK")), replies, "the error is in place")
+        assertEquals(Reply.Bulk("abc".toByteArray()), run(Command.Get(a)), "the failing command undid nothing")
+        assertEquals(Reply.Bulk("2".toByteArray()), run(Command.Get(b)), "and its neighbour still ran")
+    }
+
+    @Test
+    fun C12_atomically_rejects_span_before_running() {
+        val here = Key("{t}.a")
+        val elsewhere = otherPartitionThan(here)
+        val ran = AtomicBoolean(false)
+        val rejected = engine.atomically(listOf(here, elsewhere)) { ctx ->
+            ran.set(true)
+            ctx.execute(set(here, "1"))
+        }
+        val failure = assertThrows(ExecutionException::class.java) { rejected.get(5, TimeUnit.SECONDS) }
+        val cause = failure.cause
+        assertTrue(cause is CrossPartitionBatch, "the span is what refused it, got $cause")
+        assertEquals(CROSS_SLOT, (cause as CrossPartitionBatch).error)
+        assertFalse(ran.get(), "the block never ran")
+        assertEquals(Reply.Bulk(null), run(Command.Get(here)), "so nothing was written")
+    }
+
+    @Test
+    fun C12_undeclared_key_inside_batch_is_an_error() {
+        val declared = Key("{t}.a")
+        // Same partition, so only the declaration keeps it out; the check is not the span check.
+        val undeclared = Key("{t}.b")
+        val replies = batch(listOf(declared)) { ctx ->
+            listOf(ctx.execute(set(undeclared, "1")), ctx.execute(set(declared, "2")))
+        }
+        assertEquals(Reply.Error("ERR", "{t}.b was not declared by this batch"), replies[0])
+        assertEquals(Reply.Simple("OK"), replies[1], "the batch continues past it")
+        assertEquals(Reply.Bulk(null), run(Command.Get(undeclared)), "and the undeclared key was not written")
+    }
+
+    @Test
+    fun `a batch refuses a command that does not run on one partition`() {
+        val a = Key("{t}.a")
+        val spanning = Reply.Error("ERR", "this command spans partitions and cannot run inside a batch")
+        val replies = batch(listOf(a)) { ctx ->
+            listOf(
+                ctx.execute(Command.MGet(listOf(a))),
+                ctx.execute(Command.Scan(0)),
+                ctx.execute(Command.DbSize),
+                ctx.execute(Command.Ping),
+            )
+        }
+        assertEquals(listOf(spanning, spanning, spanning, Reply.Simple("PONG")), replies)
+    }
+
+    /** A batch run to completion, with the wait every batch test shares. */
+    private fun <R> batch(keys: List<Key>, block: (PartitionContext) -> R): R =
+        engine.atomically(keys, block).get(5, TimeUnit.SECONDS)
+
+    private fun set(key: Key, value: String): Command = Command.Set(key, value.toByteArray())
 
     private companion object {
         val EMPTY_ARRAY = Reply.Array(emptyList<Reply>())
@@ -780,6 +882,7 @@ class CommandEngineTest {
         val INDEX_OUT_OF_RANGE = Reply.Error("ERR", "index out of range")
         val NOT_AN_INTEGER = Reply.Error("ERR", "value is not an integer or out of range")
         val WRONG_TYPE = Reply.Error("WRONGTYPE", "Operation against a key holding the wrong kind of value")
+        val CROSS_SLOT = Reply.Error("CROSSSLOT", "Keys in request don't hash to the same slot")
     }
 
     @Test

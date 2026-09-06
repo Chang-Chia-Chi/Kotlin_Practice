@@ -61,6 +61,13 @@ internal class Partition(
     fun tick(): CompletableFuture<Void> =
         CompletableFuture.runAsync({ wheel?.advanceTo(clock.instant()) }, executor)
 
+    /**
+     * Runs [work] as one task on this partition's thread: the batch of CONTEXT.md, several
+     * commands with nothing interleaved. C1 needs nothing more -- the executor is the one
+     * thread, so a task that runs many commands already has the exclusion a batch asks for.
+     */
+    fun <R> inOneTask(work: () -> R): CompletableFuture<R> = CompletableFuture.supplyAsync(work, executor)
+
     /** One partition's share of a fanned-out command: one task, so those keys see no interleaving. */
     fun submitAll(commands: List<Command>): CompletableFuture<List<Reply>> =
         CompletableFuture.supplyAsync({ commands.map(::execute) }, executor)
@@ -83,7 +90,7 @@ internal class Partition(
         }, executor)
 
     /** The clock is read exactly once per command, so a command sees one instant throughout. */
-    private fun execute(command: Command): Reply {
+    fun execute(command: Command): Reply {
         val now = clock.instant()
         // C13: the kind is checked in front of every branch, so a wrong-type command answers
         // without a branch ever reaching the entry it would have corrupted.

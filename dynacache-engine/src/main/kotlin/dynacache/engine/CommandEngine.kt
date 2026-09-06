@@ -29,6 +29,20 @@ interface CommandEngine {
     fun close()
 }
 
+/**
+ * C12: the declared keys did not all live on one partition, so nothing ran. The batch's answer
+ * is a [Reply], but `atomically` answers whatever the block returns, so the refusal travels as
+ * the failure of the returned future and the caller writes [error] back.
+ */
+class CrossPartitionBatch(keys: List<Key>, spanned: List<PartitionId>) :
+    RuntimeException("keys span ${spanned.size} partitions: $keys") {
+
+    val error: Reply.Error = Reply.Error(
+        "CROSSSLOT",
+        "Keys in request don't hash to the same slot",
+    )
+}
+
 /** The one partition a batch runs on, for the duration of that batch. */
 interface PartitionContext {
 
@@ -134,8 +148,38 @@ class ApEngine(
         return parts.thenApply { command.join(joined.map { it!! }) }
     }
 
-    override fun <R> atomically(keys: List<Key>, block: (PartitionContext) -> R): CompletableFuture<R> =
-        TODO("T14: batches")
+    /**
+     * C12: the span is checked here, before anything is submitted, so a rejected batch leaves
+     * the partition untouched. A batch with no key at all runs on partition 0, where every
+     * other keyless command runs.
+     */
+    override fun <R> atomically(keys: List<Key>, block: (PartitionContext) -> R): CompletableFuture<R> {
+        val spanned = keys.map(::partitionOf).distinct()
+        if (spanned.size > 1) return CompletableFuture.failedFuture(CrossPartitionBatch(keys, spanned))
+        val partition = partitions[spanned.singleOrNull()?.index ?: 0]
+        val batch = Batch(partition, keys.toSet())
+        return partition.inOneTask { block(batch) }
+    }
+
+    /**
+     * The declared keys' partition, for as long as the block runs on its thread. A command
+     * naming a key the batch did not declare is refused rather than run: it would touch a key
+     * the C12 span check never saw, and on a batch of two keys that is a key on another
+     * partition. The batch continues either way (I11, Redis semantics).
+     */
+    private class Batch(private val partition: Partition, private val declared: Set<Key>) : PartitionContext {
+
+        override fun execute(command: Command): Reply = when (command) {
+            is Command.Keyed ->
+                if (command.key in declared) partition.execute(command)
+                else Reply.Error("ERR", "${command.key} was not declared by this batch")
+            // Keyless and partition-local: they read nothing outside this partition's store.
+            is Command.Ping, is Command.CommandTable -> partition.execute(command)
+            // Everything else spans partitions by definition -- a fan-out, a keyspace walk, a
+            // SCAN cursor, a CP key -- and so cannot run inside one partition's task.
+            else -> Reply.Error("ERR", "this command spans partitions and cannot run inside a batch")
+        }
+    }
 
     override fun close() = partitions.forEach { it.close() }
 

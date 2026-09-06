@@ -1,6 +1,9 @@
 package dynacache.server
 
 import dynacache.engine.ApEngine
+import dynacache.engine.Command
+import dynacache.engine.CrossPartitionBatch
+import dynacache.engine.Key
 import dynacache.engine.Reply
 import io.netty.bootstrap.ServerBootstrap
 import io.netty.buffer.ByteBuf
@@ -98,6 +101,11 @@ private class RespFrameDecoder : ByteToMessageDecoder() {
  * behind them finish in whatever order their partitions get to them: a command's future joins a
  * queue when the command arrives, and the queue is drained from the front only while its head is
  * done. The queue is touched from the channel's event loop and nowhere else, so it needs no lock.
+ *
+ * MULTI, EXEC and DISCARD live here rather than in [CommandParser] because they are not commands
+ * at all: they are this connection's state, and they say what the parser's answers are for. The
+ * handler is already per-connection and already single-threaded on the event loop, so the buffer
+ * needs no lock either.
  */
 private class CommandHandler(private val engine: ApEngine) : ChannelInboundHandlerAdapter() {
 
@@ -107,15 +115,77 @@ private class CommandHandler(private val engine: ApEngine) : ChannelInboundHandl
     private val parser = CommandParser()
     private val pending = ArrayDeque<CompletableFuture<Reply>>()
 
+    /** The commands buffered since MULTI, or null when this connection is not in one. */
+    private var buffered: MutableList<Command>? = null
+
+    /** Whether a frame that failed to parse arrived while buffering; EXEC refuses the lot. */
+    private var spoiled = false
+
     override fun channelRead(ctx: ChannelHandlerContext, message: Any) {
         @Suppress("UNCHECKED_CAST")
         val tokens = message as List<ByteArray>
-        val answer = when (val parsed = parser.parse(tokens)) {
-            is Parsed.Ok -> engine.submit(parsed.command)
-            is Parsed.Failed -> CompletableFuture.completedFuture<Reply>(parsed.error)
-        }
+        val answer = answer(tokens)
         pending.addLast(answer)
         answer.whenComplete { _, _ -> ctx.channel().eventLoop().execute { drain(ctx) } }
+    }
+
+    private fun answer(tokens: List<ByteArray>): CompletableFuture<Reply> {
+        val name = tokens[0].toString(Charsets.ISO_8859_1).lowercase()
+        if (name in TRANSACTION) {
+            if (tokens.size != 1) return done(Reply.Error("ERR", "wrong number of arguments for '$name' command"))
+            return when (name) {
+                "multi" -> done(multi())
+                "discard" -> done(discard())
+                else -> exec()
+            }
+        }
+        return when (val parsed = parser.parse(tokens)) {
+            is Parsed.Ok -> buffered?.let { it += parsed.command; done(QUEUED) } ?: engine.submit(parsed.command)
+            // Redis answers the error the moment the bad frame arrives and refuses the whole
+            // transaction later, so the client learns which command was wrong.
+            is Parsed.Failed -> {
+                if (buffered != null) spoiled = true
+                done(parsed.error)
+            }
+        }
+    }
+
+    private fun multi(): Reply {
+        if (buffered != null) return Reply.Error("ERR", "MULTI calls can not be nested")
+        buffered = mutableListOf()
+        return OK
+    }
+
+    private fun discard(): Reply {
+        if (buffered == null) return Reply.Error("ERR", "DISCARD without MULTI")
+        forget()
+        return OK
+    }
+
+    /**
+     * The buffer, run in order as one batch. The keys every buffered command names are declared
+     * together, so the engine can refuse a span before anything runs (C12); that refusal reaches
+     * here as the batch future's failure, since the batch's own answer is the reply array.
+     * Errors inside the array stand where they happened and undo nothing (I11).
+     */
+    private fun exec(): CompletableFuture<Reply> {
+        val commands = buffered ?: return done(Reply.Error("ERR", "EXEC without MULTI"))
+        val refused = spoiled
+        forget()
+        if (refused) return done(Reply.Error("EXECABORT", "Transaction discarded because of previous errors."))
+        return engine
+            .atomically<Reply>(commands.flatMap(::declaredKeys).distinct()) { ctx ->
+                Reply.Array(commands.map(ctx::execute))
+            }
+            .exceptionally { failure ->
+                val span = failure as? CrossPartitionBatch ?: failure.cause as? CrossPartitionBatch
+                span?.error ?: Reply.Error("ERR", failure.cause?.message ?: failure.message ?: "internal error")
+            }
+    }
+
+    private fun forget() {
+        buffered = null
+        spoiled = false
     }
 
     override fun channelReadComplete(ctx: ChannelHandlerContext) = drain(ctx)
@@ -141,6 +211,19 @@ private class CommandHandler(private val engine: ApEngine) : ChannelInboundHandl
             ctx.writeAndFlush(Unpooled.wrappedBuffer(encodeReply(error))).addListener(ChannelFutureListener.CLOSE)
         }
     }
+}
+
+private val OK = Reply.Simple("OK")
+private val QUEUED = Reply.Simple("QUEUED")
+private val TRANSACTION = setOf("multi", "exec", "discard")
+
+private fun done(reply: Reply): CompletableFuture<Reply> = CompletableFuture.completedFuture(reply)
+
+/** The keys a buffered command names, so EXEC declares the whole batch's span in one list. */
+private fun declaredKeys(command: Command): List<Key> = when (command) {
+    is Command.Keyed -> listOf(command.key)
+    is Command.Fanned -> command.keys
+    else -> emptyList()
 }
 
 /** The reply of a future already known to be done; a failed one answers rather than throwing. */
