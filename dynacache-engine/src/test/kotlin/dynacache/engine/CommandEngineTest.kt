@@ -15,6 +15,7 @@ import java.time.Instant
 import java.time.ZoneId
 import java.time.ZoneOffset
 import java.util.Collections
+import java.util.Random
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
@@ -29,12 +30,28 @@ class CommandEngineTest {
     }
 
     private val clock = MutableClock(Instant.parse("2026-09-06T00:00:00Z"))
-    private val engine = ApEngine(partitionCount = 4, clock = clock)
+    private val engine = ApEngine(partitionCount = 4, clock = clock, random = Random(20260906))
 
     @AfterEach
     fun close() = engine.close()
 
     private fun run(command: Command): Reply = engine.submit(command).get()
+
+    private fun info(): String = (run(Command.Info) as Reply.Bulk).bytes!!.toString(Charsets.ISO_8859_1)
+
+    /** The keys `KEYS pattern` answers with, as text; a set, since the order is unspecified. */
+    private fun keys(pattern: String): Set<String> {
+        val items = (run(Command.Keys(pattern.toByteArray())) as Reply.Array).items
+        val names = items.map { (it as Reply.Bulk).bytes!!.toString(Charsets.ISO_8859_1) }
+        assertEquals(names.size, names.toSet().size, "KEYS reports each key once")
+        return names.toSet()
+    }
+
+    private fun bulks(vararg values: String): Reply =
+        Reply.Array(values.map { Reply.Bulk(it.toByteArray()) })
+
+    private fun push(key: Key, end: Command.End, vararg values: String): Command =
+        Command.Push(key, values.map { it.toByteArray() }, end)
 
     /** A key the engine puts on a different partition than [key]. */
     private fun otherPartitionThan(key: Key, of: ApEngine = engine): Key =
@@ -317,6 +334,172 @@ class CommandEngineTest {
     }
 
     @Test
+    fun list_push_pop_order() {
+        assertEquals(Reply.Integer(3), run(push(Key("l"), Command.End.HEAD, "a", "b", "c")))
+        assertEquals(Reply.Bulk("a".toByteArray()), run(Command.Pop(Key("l"), Command.End.TAIL)), "LPUSH a b c leaves a at the tail")
+        assertEquals(Reply.Bulk("c".toByteArray()), run(Command.Pop(Key("l"), Command.End.HEAD)), "and c at the head")
+        assertEquals(Reply.Simple("list"), run(Command.Type(Key("l"))))
+        assertEquals(Reply.Bulk("b".toByteArray()), run(Command.Pop(Key("l"), Command.End.HEAD)))
+        assertEquals(Reply.Bulk(null), run(Command.Pop(Key("l"), Command.End.HEAD)), "an empty list is a missing key")
+        assertEquals(Reply.Simple("none"), run(Command.Type(Key("l"))), "the last pop took the key with it")
+    }
+
+    @Test
+    fun list_lrange_bounds() {
+        run(push(Key("l"), Command.End.TAIL, "a", "b", "c"))
+        assertEquals(bulks("a", "b", "c"), run(Command.LRange(Key("l"), 0, -1)))
+        assertEquals(bulks("a", "b", "c"), run(Command.LRange(Key("l"), -100, 100)), "both ends clamp, neither errors")
+        assertEquals(bulks("b", "c"), run(Command.LRange(Key("l"), 1, 5)))
+        assertEquals(bulks("c"), run(Command.LRange(Key("l"), -1, -1)), "negative indices count from the tail")
+        assertEquals(EMPTY_ARRAY, run(Command.LRange(Key("l"), 2, 1)), "start past stop is empty")
+        assertEquals(EMPTY_ARRAY, run(Command.LRange(Key("l"), 5, 9)), "start past the end is empty")
+        assertEquals(EMPTY_ARRAY, run(Command.LRange(Key("missing"), 0, -1)), "a missing key is an empty list")
+    }
+
+    @Test
+    fun wrongtype_rejected() {
+        run(Command.Set(Key("s"), "v".toByteArray()))
+        assertEquals(WRONG_TYPE, run(push(Key("s"), Command.End.HEAD, "x")))
+        assertEquals(Reply.Simple("string"), run(Command.Type(Key("s"))), "the key is still a String")
+        run(push(Key("l"), Command.End.HEAD, "a"))
+        assertEquals(WRONG_TYPE, run(Command.Get(Key("l"))), "and the refusal runs both ways")
+        assertEquals(WRONG_TYPE, run(Command.HGet(Key("l"), "f".toByteArray())))
+        assertEquals(WRONG_TYPE, run(Command.LLen(Key("s"))))
+        assertEquals(Reply.Integer(1), run(Command.Exists(Key("l"))), "EXISTS, TYPE and DEL work on any kind")
+        assertEquals(Reply.Integer(1), run(Command.Del(Key("l"))))
+    }
+
+    @Test
+    fun C13_wrongtype_leaves_value_intact() {
+        run(Command.Set(Key("s"), "original".toByteArray()))
+        assertEquals(WRONG_TYPE, run(push(Key("s"), Command.End.HEAD, "a", "b")))
+        assertEquals(Reply.Bulk("original".toByteArray()), run(Command.Get(Key("s"))))
+        assertEquals(WRONG_TYPE, run(Command.Pop(Key("s"), Command.End.TAIL)))
+        assertEquals(WRONG_TYPE, run(Command.LSet(Key("s"), 0, "b".toByteArray())))
+        assertEquals(WRONG_TYPE, run(Command.LRem(Key("s"), 0, "original".toByteArray())))
+        assertEquals(WRONG_TYPE, run(Command.LRange(Key("s"), 0, -1)))
+        assertEquals(WRONG_TYPE, run(Command.LIndex(Key("s"), 0)))
+        assertEquals(Reply.Bulk("original".toByteArray()), run(Command.Get(Key("s"))), "no List branch ever reached the entry")
+        assertEquals(Reply.Simple("string"), run(Command.Type(Key("s"))))
+    }
+
+    @Test
+    fun `LLEN and LINDEX read the list without changing it`() {
+        assertEquals(Reply.Integer(0), run(Command.LLen(Key("missing"))))
+        assertEquals(Reply.Bulk(null), run(Command.LIndex(Key("missing"), 0)))
+        run(push(Key("l"), Command.End.TAIL, "a", "b", "c"))
+        assertEquals(Reply.Integer(3), run(Command.LLen(Key("l"))))
+        assertEquals(Reply.Bulk("a".toByteArray()), run(Command.LIndex(Key("l"), 0)))
+        assertEquals(Reply.Bulk("c".toByteArray()), run(Command.LIndex(Key("l"), -1)), "negative counts from the tail")
+        assertEquals(Reply.Bulk(null), run(Command.LIndex(Key("l"), 3)), "past the end is nil, not an error")
+        assertEquals(Reply.Bulk(null), run(Command.LIndex(Key("l"), -4)))
+        assertEquals(Reply.Integer(3), run(Command.LLen(Key("l"))), "reads leave the list alone")
+    }
+
+    @Test
+    fun `LSET replaces an element and errors outside the list`() {
+        assertEquals(NO_SUCH_KEY, run(Command.LSet(Key("missing"), 0, "x".toByteArray())))
+        run(push(Key("l"), Command.End.TAIL, "a", "b", "c"))
+        assertEquals(Reply.Simple("OK"), run(Command.LSet(Key("l"), 1, "B".toByteArray())))
+        assertEquals(Reply.Simple("OK"), run(Command.LSet(Key("l"), -1, "C".toByteArray())))
+        assertEquals(bulks("a", "B", "C"), run(Command.LRange(Key("l"), 0, -1)))
+        assertEquals(INDEX_OUT_OF_RANGE, run(Command.LSet(Key("l"), 3, "x".toByteArray())))
+        assertEquals(INDEX_OUT_OF_RANGE, run(Command.LSet(Key("l"), -4, "x".toByteArray())))
+        assertEquals(bulks("a", "B", "C"), run(Command.LRange(Key("l"), 0, -1)), "a rejected LSET changed nothing")
+    }
+
+    @Test
+    fun lrem_count_semantics() {
+        fun seed() {
+            run(Command.Del(Key("l")))
+            run(push(Key("l"), Command.End.TAIL, "a", "x", "b", "x", "c", "x"))
+        }
+        seed()
+        assertEquals(Reply.Integer(2), run(Command.LRem(Key("l"), 2, "x".toByteArray())), "a positive count works from the head")
+        assertEquals(bulks("a", "b", "c", "x"), run(Command.LRange(Key("l"), 0, -1)))
+        seed()
+        assertEquals(Reply.Integer(2), run(Command.LRem(Key("l"), -2, "x".toByteArray())), "a negative count works from the tail")
+        assertEquals(bulks("a", "x", "b", "c"), run(Command.LRange(Key("l"), 0, -1)))
+        seed()
+        assertEquals(Reply.Integer(3), run(Command.LRem(Key("l"), 0, "x".toByteArray())), "zero removes every match")
+        assertEquals(bulks("a", "b", "c"), run(Command.LRange(Key("l"), 0, -1)))
+        seed()
+        assertEquals(Reply.Integer(3), run(Command.LRem(Key("l"), 9, "x".toByteArray())), "a count past the matches removes them all")
+        assertEquals(Reply.Integer(0), run(Command.LRem(Key("l"), 0, "gone".toByteArray())), "a value that is not there goes uncounted")
+        assertEquals(Reply.Integer(0), run(Command.LRem(Key("missing"), 0, "x".toByteArray())))
+        run(Command.Del(Key("l")))
+        run(push(Key("l"), Command.End.TAIL, "x", "x"))
+        assertEquals(Reply.Integer(2), run(Command.LRem(Key("l"), 0, "x".toByteArray())))
+        assertEquals(Reply.Simple("none"), run(Command.Type(Key("l"))), "an emptied list takes its key with it")
+    }
+
+    @Test
+    fun dbsize_and_flushdb_span_partitions() {
+        val here = Key("k")
+        val elsewhere = otherPartitionThan(here)
+        assertNotEquals(engine.partitionOf(here), engine.partitionOf(elsewhere), "the two keys are on different partitions")
+        assertEquals(Reply.Integer(0), run(Command.DbSize))
+        run(Command.Set(here, "1".toByteArray()))
+        run(Command.Set(elsewhere, "2".toByteArray()))
+        assertEquals(Reply.Integer(2), run(Command.DbSize), "DBSIZE counts every partition")
+        run(Command.Set(here, "1".toByteArray(), ttl = Duration.ofMillis(5)))
+        clock.now += Duration.ofMillis(6)
+        assertEquals(Reply.Integer(1), run(Command.DbSize), "an expired key is not counted")
+        assertEquals(Reply.Simple("OK"), run(Command.FlushDb))
+        assertEquals(Reply.Integer(0), run(Command.DbSize), "FLUSHDB emptied every partition")
+        assertEquals(Reply.Bulk(null), run(Command.Get(elsewhere)))
+    }
+
+    @Test
+    fun keys_glob_patterns() {
+        val seeded = listOf("user:1", "user:2", "user:10", "admin", "a", "b", "c[x]")
+        seeded.forEach { run(Command.Set(Key(it), "v".toByteArray())) }
+        assertTrue(seeded.map(::Key).map(engine::partitionOf).toSet().size > 1, "the keys span partitions")
+        assertEquals(seeded.toSet(), keys("*"))
+        assertEquals(setOf("user:1", "user:2"), keys("user:?"), "? is exactly one byte")
+        assertEquals(setOf("user:1", "user:2", "user:10"), keys("user:*"))
+        assertEquals(setOf("a", "b"), keys("[ab]"))
+        assertEquals(setOf("admin", "a", "b", "c[x]"), keys("[a-c]*"), "a range inside a class")
+        assertEquals(setOf("a", "b"), keys("[^c]"), "^ negates the class")
+        assertEquals(setOf("c[x]"), keys("c\\[x]"), "a backslash escapes the class")
+        assertEquals(emptySet<String>(), keys("nothing*"))
+        run(Command.Set(Key("fleeting"), "v".toByteArray(), ttl = Duration.ofMillis(5)))
+        clock.now += Duration.ofMillis(6)
+        assertEquals(seeded.toSet(), keys("*"), "an expired key is not in KEYS")
+    }
+
+    @Test
+    fun randomkey_nil_when_empty() {
+        assertEquals(Reply.Bulk(null), run(Command.RandomKey), "an empty keyspace has no random key")
+        run(Command.Set(Key("only"), "v".toByteArray()))
+        assertEquals(Reply.Bulk("only".toByteArray()), run(Command.RandomKey), "one key is the only answer")
+        run(Command.Del(Key("only")))
+        assertEquals(Reply.Bulk(null), run(Command.RandomKey), "and nil again once the last key goes")
+    }
+
+    @Test
+    fun `RANDOMKEY draws from every partition and never from an expired key`() {
+        val seeded = (0..19).map { Key("k$it") }
+        assertTrue(seeded.map(engine::partitionOf).toSet().size > 1, "the keys span partitions")
+        seeded.forEach { run(Command.Set(it, "v".toByteArray())) }
+        run(Command.Set(Key("fleeting"), "v".toByteArray(), ttl = Duration.ofMillis(5)))
+        clock.now += Duration.ofMillis(6)
+        val drawn = (1..200).map { (run(Command.RandomKey) as Reply.Bulk).bytes!!.toString(Charsets.ISO_8859_1) }.toSet()
+        assertTrue(seeded.map(Key::toString).containsAll(drawn), "every draw is a live key, never the expired one")
+        assertTrue(drawn.map { engine.partitionOf(Key(it)) }.toSet().size > 1, "the draws come from more than one partition")
+    }
+
+    @Test
+    fun `COMMAND and INFO answer in Redis shapes`() {
+        assertEquals(EMPTY_ARRAY, run(Command.CommandTable), "COMMAND is minimal: an empty table")
+        assertTrue(info().contains("dynacache_version:"), info())
+        assertTrue(info().contains("db0:keys=0\r\n"), info())
+        run(Command.Set(Key("a"), "v".toByteArray()))
+        run(Command.Set(otherPartitionThan(Key("a")), "v".toByteArray()))
+        assertTrue(info().contains("db0:keys=2\r\n"), "INFO counts every partition: " + info())
+    }
+
+    @Test
     fun `PING replies PONG`() {
         assertEquals(Reply.Simple("PONG"), run(Command.Ping))
     }
@@ -372,6 +555,9 @@ class CommandEngineTest {
     }
 
     private companion object {
+        val EMPTY_ARRAY = Reply.Array(emptyList<Reply>())
+        val NO_SUCH_KEY = Reply.Error("ERR", "no such key")
+        val INDEX_OUT_OF_RANGE = Reply.Error("ERR", "index out of range")
         val NOT_AN_INTEGER = Reply.Error("ERR", "value is not an integer or out of range")
         val WRONG_TYPE = Reply.Error("WRONGTYPE", "Operation against a key holding the wrong kind of value")
     }

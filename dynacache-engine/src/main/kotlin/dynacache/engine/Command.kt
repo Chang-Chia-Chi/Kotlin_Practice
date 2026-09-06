@@ -1,6 +1,7 @@
 package dynacache.engine
 
 import java.time.Duration
+import java.util.Random
 
 /**
  * A command a client asked the engine to run. Sealed and frozen as a root (plan 2.3); each
@@ -29,6 +30,20 @@ sealed class Command {
 
         /** Joins the per-argument [replies], already in argument order. */
         internal abstract fun join(replies: List<Reply>): Reply
+    }
+
+    /**
+     * A command with no key at all: every partition answers for its own share and the engine
+     * joins the replies. Nothing is atomic across partitions (ADR 0002), so the answer is a
+     * running view of the keyspace, not a snapshot of it.
+     */
+    sealed class EveryPartition : Command() {
+
+        /**
+         * Joins the [replies], one per partition in partition order. [random] is the engine's
+         * own source of randomness, for the one command that has to choose.
+         */
+        internal abstract fun join(replies: List<Reply>, random: Random): Reply
     }
 
     data object Ping : Command()
@@ -63,6 +78,63 @@ sealed class Command {
         data class LongCas(override val key: Key, val expected: Long, val new: Long) : Cp()
     }
 
+    /**
+     * `COMMAND`: Redis's command table. Minimal here, an empty array; a client that asks in order
+     * to discover arity gets no answer it can act on, which is the ceiling this ticket accepted.
+     */
+    data object CommandTable : Command()
+
+    /**
+     * `INFO`: one bulk string of `field:value` lines in Redis's section layout. Minimal here: the
+     * version and the keyspace size, which is what the node's own tests and `redis-cli` look for.
+     */
+    data object Info : EveryPartition() {
+        override fun join(replies: List<Reply>, random: Random): Reply =
+            Reply.Bulk(
+                listOf(
+                    "# Server",
+                    "dynacache_version:$VERSION",
+                    "",
+                    "# Keyspace",
+                    "db0:keys=${(sum(replies) as Reply.Integer).value}",
+                    "",
+                ).joinToString(CRLF).toByteArray(),
+            )
+    }
+
+    /** `DBSIZE`: how many live keys the node holds. */
+    data object DbSize : EveryPartition() {
+        override fun join(replies: List<Reply>, random: Random): Reply = sum(replies)
+    }
+
+    /**
+     * `KEYS pattern`: every live key matching the Redis glob [pattern], in no defined order.
+     * O(n) over the keyspace, exactly as Redis's own `KEYS` is.
+     */
+    class Keys(val pattern: ByteArray) : EveryPartition() {
+        override fun join(replies: List<Reply>, random: Random): Reply =
+            Reply.Array(replies.flatMap { (it as Reply.Array).items })
+    }
+
+    /**
+     * `RANDOMKEY`: one live key of the node, nil when there is none. Each partition offers one of
+     * its own and the join takes one of those.
+     *
+     * ponytail: a partition with few keys is over-represented, since the draw is per partition
+     * rather than over the keyspace; Redis's own RANDOMKEY is approximate too. Weighting the
+     * choice by each partition's key count is the repair if a caller ever needs a uniform draw.
+     */
+    data object RandomKey : EveryPartition() {
+        override fun join(replies: List<Reply>, random: Random): Reply {
+            val offered = replies.filter { (it as Reply.Bulk).bytes != null }
+            return if (offered.isEmpty()) Reply.Bulk(null) else offered[random.nextInt(offered.size)]
+        }
+    }
+
+    /** `FLUSHDB`: every partition drops every key. Always `+OK`. */
+    data object FlushDb : EveryPartition() {
+        override fun join(replies: List<Reply>, random: Random): Reply = Reply.Simple("OK")
+    }
 
     data class Get(override val key: Key) : Keyed(Value.Kind.STRING)
 
@@ -131,6 +203,43 @@ sealed class Command {
     /** `HLEN key`: how many fields, 0 when the key is absent. */
     data class HLen(override val key: Key) : Keyed(Value.Kind.HASH)
 
+    /** Which end of a list a command works on. `LPUSH`/`LPOP` are [HEAD], `RPUSH`/`RPOP` [TAIL]. */
+    enum class End { HEAD, TAIL }
+
+    /**
+     * `LPUSH`/`RPUSH key value [value ...]`: each value in turn onto [end], so `LPUSH a b c`
+     * leaves `c b a`. Creates the list when the key is absent; replies with the new length.
+     */
+    class Push(override val key: Key, val values: List<ByteArray>, val end: End) :
+        Keyed(Value.Kind.LIST)
+
+    /** `LPOP`/`RPOP key`: one value off [end], nil when there is none. An empty list is deleted. */
+    data class Pop(override val key: Key, val end: End) : Keyed(Value.Kind.LIST)
+
+    /**
+     * `LRANGE key start stop`: the elements from [start] to [stop] inclusive. A negative index
+     * counts from the tail, and both ends clamp to the list rather than erroring.
+     */
+    data class LRange(override val key: Key, val start: Long, val stop: Long) : Keyed(Value.Kind.LIST)
+
+    /** `LLEN key`: how many elements, 0 when the key is absent. */
+    data class LLen(override val key: Key) : Keyed(Value.Kind.LIST)
+
+    /** `LINDEX key index`: the element at [index], nil when the index is outside the list. */
+    data class LIndex(override val key: Key, val index: Long) : Keyed(Value.Kind.LIST)
+
+    /**
+     * `LSET key index value`: replaces the element at [index]. Redis errors here rather than
+     * growing the list: `no such key` when the key is absent, `index out of range` beyond it.
+     */
+    class LSet(override val key: Key, val index: Long, val value: ByteArray) : Keyed(Value.Kind.LIST)
+
+    /**
+     * `LREM key count value`: removes elements equal to [value]. A positive [count] takes that
+     * many working from the head, a negative one that many from the tail, and zero takes them all.
+     */
+    class LRem(override val key: Key, val count: Long, val value: ByteArray) : Keyed(Value.Kind.LIST)
+
     /**
      * `MGET key [key ...]`: one array of bulks in argument order, nil for a missing key. A key
      * holding something other than a String is nil too, as in Redis, not a `WRONGTYPE` error.
@@ -160,6 +269,12 @@ sealed class Command {
     }
 
     private companion object {
+        /** The node's own version; the pom's, without the snapshot suffix. */
+        const val VERSION = "0.1.0"
+
+        /** Every INFO line ends the way every RESP line does. */
+        const val CRLF = "\r\n"
+
         fun sum(replies: List<Reply>): Reply =
             Reply.Integer(replies.sumOf { (it as Reply.Integer).value })
     }
