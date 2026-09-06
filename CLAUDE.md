@@ -49,9 +49,17 @@ tests `I<n>_<description>`.
 ## Build
 
 ```bash
-/c/Users/maxch/.m2/wrapper/dists/apache-maven-3.9.8/af622e91/bin/mvn package
-/c/Users/maxch/.m2/wrapper/dists/apache-maven-3.9.8/af622e91/bin/mvn test -pl dynacache-engine
+export JAVA_HOME=/c/Users/maxch/.jdks/openjdk-22.0.1
+/c/Users/maxch/.m2/wrapper/dists/apache-maven-3.9.8/af622e91/bin/mvn -o package
+/c/Users/maxch/.m2/wrapper/dists/apache-maven-3.9.8/af622e91/bin/mvn -o test -pl dynacache-engine
 ```
+
+`protoc` (run by the protobuf Maven plugin in `dynacache-cluster`) cannot open paths that
+contain the non-ASCII `文件` directory, and Maven canonicalizes junctions, so a build in this
+checkout fails at protobuf generation. Build from a git worktree on an ASCII path instead:
+`git worktree add -b <name> /c/Users/maxch/dynacache-wt/<name> misc/ai_gen`. The orchestrator
+keeps `/c/Users/maxch/dynacache-wt/verify` (branch `verify`, reset to `misc/ai_gen` before every
+verification run) for that purpose.
 
 ## Git
 
