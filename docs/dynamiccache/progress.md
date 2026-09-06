@@ -1554,3 +1554,90 @@ the command encoding carries `LongSet.ttl` (-1 for none) plus `LongExpire`, `Lon
 `LongPersist`. Both functions became `internal` so `CpWireTest` (3 round-trip tests) can drive
 them directly. `GrpcCpTest`'s five tests pass over real gRPC with stamped entries. The T43 note
 in **For the next ticket** above is therefore done; nothing else in the entry changed.
+
+## T07: Sorted Set commands
+
+**Built:** `Value.ZSet`, the dual index of spec 2.1: a T05 `HashTable<String, Double>` from
+member bytes to score beside the T06 `SkipList` for order, written together on every change.
+`Value.Kind.ZSET` joins the C13 kind check, so `TYPE` reports `zset` and a String key refuses a
+zset command before a branch can reach it. Eleven commands, in nine `Partition` branches:
+`ZADD`, `ZREM`, `ZRANGE`/`ZREVRANGE`, `ZRANGEBYSCORE`, `ZRANK`/`ZREVRANK`, `ZSCORE`, `ZCARD`,
+`ZINCRBY`, `ZSCAN`. Three helpers in `Value.kt` carry the score vocabulary: `parseScore`,
+`parseBound` with its `ScoreBound`, and `scoreText`. Eighteen tests in a new
+`ZSetCommandTest`, all through `CommandEngine.submit`. 265 lines of main, 316 of test.
+
+**Concepts named:** The **dual index** is one value, not two collaborating ones: `Value.ZSet`
+holds both halves and `Partition.writeScore` is the only place a member's score is written, so
+"the map and the list agree" is a property of one function rather than a rule callers must keep.
+The map owns **member uniqueness** (the list keys on `(score, member)` and would hold one member
+at two scores, exactly as T06 warned); the list owns **order** and **rank**. A **score** is what
+`parseScore` accepts and `scoreText` writes: a client's bytes in, Redis's spelling out, with NaN
+refused at the door so it never reaches a comparator. A **bound** is a score plus whether the
+entry sitting exactly on it is in, which is what the `(` prefix decides.
+
+`ZRANGE` and `ZREVRANGE` are one `Command.ZRange` with a `reverse` flag, and `ZRANK`/`ZREVRANK`
+one `Command.ZRank` the same way: each pair reads the same ordering from the other end, so a
+second variant would have been the same branch written twice. `ZRANGE`'s window is `LRANGE`'s:
+the existing `Partition.span` is the one place a negative index is read, for lists and sorted
+sets both. `ZSCAN` is one more branch beside `HScan` over the same `Partition.walk`, exactly as
+T05 predicted. No seam moved: `CommandEngine`, `PartitionContext`, `Reply`, `Key` and
+`PartitionId` are untouched, and `Partition`'s only edits are the new branches, the kind entry
+and six private helpers (`members`, `limit`, `zset`, `newZSet`, `scoreOf`, `writeScore`).
+
+**Acceptance:**
+- `zset_ordering_invariant`: 1,500 seeded `ZADD`/`ZREM` operations over 60 members, and every
+  25 steps `ZRANGE 0 -1 WITHSCORES` is compared with a `HashMap` model sorted by score then
+  member; `ZCARD` matches the model's size at the end.
+- `zset_rank_consistency`: 300 seeded adds and 60 removes, then every member's `ZRANK` equals
+  its position in `ZRANGE` and its `ZREVRANK` equals the position counted from the other end.
+- `zset_score_update`: `ZADD` on an existing member answers 0, moves it up and then back down,
+  leaves `ZCARD` unchanged and re-orders both times.
+- `I3_zrange_sorted_with_lex_tiebreak`: six members at one score, including 0x01 and 0xff, come
+  back in unsigned byte order between a lower- and a higher-scored member, and `ZRANK` agrees.
+- `zscan_returns_all_members`: 200 members walked with `COUNT 7` and with `COUNT 1000`, both
+  complete; `MATCH` with a literal and with `?`; a missing key answers `["0", []]`.
+- Beyond the ticket's list, thirteen command tests: `ZSCORE`/`ZCARD`/`TYPE` after `ZADD`, the
+  new-member count, `ZADD` refusing a non-float and writing nothing, missing-key answers,
+  `ZRANGE` forwards and backwards with negative indices, `WITHSCORES` both directions, `ZREM`
+  emptying the key, `ZRANK` nil for an absent member, `ZRANGEBYSCORE` inclusive/exclusive/
+  infinite bounds, `LIMIT`, the bad-bound error, `ZINCRBY` creating and moving, `ZINCRBY`
+  refusing a NaN result, and `WRONGTYPE` on a String key.
+- `mvn -o clean package` green: engine 94 (was 76), cluster 39, cp 11, server 16.
+- This entry.
+
+**Deviations:** None against the spec, the ticket or the frozen types. Six judgement calls.
+1. **`ZADD` has no `NX`, `XX`, `CH` or `INCR` flag**, which the ticket allows if they are not
+   cheap.
+   Main plus tests came to 581 lines against a 600-line budget, so they did not fit.
+   `ZINCRBY` already covers what `INCR` does; the other three are a condition and a counting
+   rule around the existing `writeScore`, perhaps fifteen lines, and belong wherever the RESP
+   command parser lands (T13). Debt, and small.
+2. **Scores and range bounds are carried as the client's bytes, not as parsed numbers**, unlike
+   `IncrBy`'s `Long` and `Set`'s `Duration`. Redis parses them inside the command proc, and that
+   is observable: `ZADD k 1 a banana b` must add nothing. Parsing at the partition is what makes
+   that testable through `submit` in this ticket, before a parser exists. It also gives
+   `ZRANGEBYSCORE` its `(`/`-inf` syntax somewhere honest to live.
+3. **The C13 kind check runs before the argument parse.** `ZADD stringkey banana m` answers
+   `WRONGTYPE` where Redis answers `ERR value is not a valid float`, because the kind check sits
+   in front of every branch by design. Moving it per-command would cost C13 its one place.
+4. **`scoreText` writes Kotlin's shortest round-trip form past 2^53**, so a score of 1e17 comes
+   back as `1.0E17` where Redis's `%.17Lg` writes `1e+17`. Whole numbers below that, the
+   infinities and ordinary decimals all match Redis. A formatter of its own is the repair if the
+   T16 RESP acceptance minds.
+5. **`parseScore` guards the characters before calling `toDoubleOrNull`**, because Kotlin's
+   parser accepts `1.0f`, `NaN`, `0x1p3` and surrounding whitespace that Redis's `strtod` does
+   not. `-0.0` and `0.0` stay one score everywhere, as they are in the skip list.
+6. **`ZREVRANGEBYSCORE` is not built**; neither the ticket nor spec 2.1 lists it.
+
+**For the next ticket:** T09 owns `SET`/`DEL` and the partition's construction; this ticket
+touched neither, only adding branches after the List ones and a `ZSET` entry to `Value.Kind`,
+so the merge is the branch list and the enum. A sorted set is created with
+`Partition.newZSet`, which draws the skip list's level seed from the partition's own `Random`:
+one seed on `ApEngine` still makes every list in it reproducible, and a new construction path
+must keep doing that or the log-n margin T06 measured stops meaning anything. The store never
+holds an empty sorted set: `ZREM` drops the key with the last member, `ZADD` with no entries
+creates nothing, and a `ZINCRBY` refused for NaN creates nothing, so T10's eviction and T31's
+RDB codec can assume a `Value.ZSet` has at least one member. `writeScore` is the single writer
+of the pair; anything that has to change a score (T29's element-level merge, T31's load) should
+go through it rather than touching `scores` and `order` separately. The skip list holds the
+command's own member array, so nothing may mutate a `ByteArray` after handing it to `ZADD`.

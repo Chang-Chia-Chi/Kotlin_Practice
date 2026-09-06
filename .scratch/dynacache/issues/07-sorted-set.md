@@ -9,12 +9,12 @@ table, order in the ticket 06 skip list, both updated together; `ZADD`, `ZREM`, 
 
 **Nature:** command semantics on a dual index (Opus)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache ebfd853 + merge 2b51602, merged into misc/ai_gen)
 
-- [ ] `zset_ordering_invariant` (seeded ZADD and ZREM storm), `zset_rank_consistency`, `zset_score_update`
-- [ ] `I3_zrange_sorted_with_lex_tiebreak`
-- [ ] `zscan_returns_all_members`
-- [ ] Progress entry appended
+- [x] `zset_ordering_invariant` (seeded ZADD and ZREM storm), `zset_rank_consistency`, `zset_score_update`
+- [x] `I3_zrange_sorted_with_lex_tiebreak`
+- [x] `zscan_returns_all_members`
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket, stubs throwing NotImplementedError
 for later seams; 200 to 600 lines including tests; JUnit 5 + Mockito only, no AssertJ or MockK;
