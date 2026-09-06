@@ -48,17 +48,22 @@ import java.util.concurrent.TimeUnit
  * [cp] is this node's CP engine, or null on a node with no CP subsystem; the [CommandDispatcher]
  * in front of both is what a connection actually submits to. [clock] is what "now" means to the
  * parser and to the dispatcher's one conversion, `EXPIRE`'s deadline into the CP verb's span.
+ *
+ * [ap] is the dispatcher's AP side. It defaults to [engine], which is the single node; a
+ * [ClusterNode] passes its router, so the same pipeline serves a cluster without knowing it
+ * (T24). [engine] stays the local one either way: it is what the scheduler ticks.
  */
 class DynaCacheServer(
     private val port: Int,
     private val engine: ApEngine,
     cp: CommandEngine? = null,
+    ap: CommandEngine = engine,
     private val clock: Clock = Clock.systemUTC(),
     private val tick: () -> Unit = { engine.tick() },
 ) : AutoCloseable {
 
     /** Where every connection submits: the AP engine, the CP engine, and CP spec 9.5 between. */
-    private val dispatcher = CommandDispatcher(engine, cp, clock)
+    private val dispatcher = CommandDispatcher(ap, cp, clock)
 
     private val acceptors = NioEventLoopGroup(1)
     private val workers = NioEventLoopGroup()
@@ -328,17 +333,27 @@ private fun CompletableFuture<Reply>.replyNow(): Reply =
  * whoever leads it; without one it has no CP engine and every `cp:` key answers `-NOTCP`. The
  * engine outlives nothing here: the shutdown hook closes the socket, then the log, then the
  * engine.
+ *
+ * The AP cluster is named by flags rather than by more positional arguments, since it has four
+ * knobs of its own: `--peers=id=host:port,...` with `--node=<id>` starts one node of a cluster
+ * (T24, see [clusterMain]), `--grpc=<port>` and `--quorum=n/w/r` are the other two. Without
+ * `--peers` this is the single node it always was, and every positional argument above means
+ * the same in both modes.
  */
 fun main(args: Array<String>) {
-    val port = args.getOrNull(0)?.toInt() ?: 6379
-    val partitionCount = args.getOrNull(1)?.toInt() ?: 16
-    val fsync = args.getOrNull(3)?.let(FsyncPolicy::valueOf) ?: FsyncPolicy.EVERY_SECOND
+    val flags = args.filter { it.startsWith("--") }
+        .associate { it.removePrefix("--").substringBefore('=') to it.substringAfter('=', "") }
+    val positional = args.filterNot { it.startsWith("--") }
+    val port = positional.getOrNull(0)?.toInt() ?: 6379
+    val partitionCount = positional.getOrNull(1)?.toInt() ?: 16
+    if ("peers" in flags) return clusterMain(flags, port, partitionCount)
+    val fsync = positional.getOrNull(3)?.let(FsyncPolicy::valueOf) ?: FsyncPolicy.EVERY_SECOND
     val clock = Clock.systemUTC()
     val engine = ApEngine(partitionCount, clock)
-    val snapshots = args.getOrNull(2)?.let { SnapshotEngine(engine, Path.of(it), clock, fsync = fsync) }
+    val snapshots = positional.getOrNull(2)?.let { SnapshotEngine(engine, Path.of(it), clock, fsync = fsync) }
     snapshots?.restore()
-    val cp = cpNode(args.getOrNull(4), args.getOrNull(5), clock)
-    val server = DynaCacheServer(port, engine, cp?.engine, clock) {
+    val cp = cpNode(positional.getOrNull(4), positional.getOrNull(5), clock)
+    val server = DynaCacheServer(port, engine, cp?.engine, clock = clock) {
         engine.tick()
         engine.wal?.tick()
         cp?.runtime?.tick()
