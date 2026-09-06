@@ -9,11 +9,11 @@ fire; the memory-pressure and W-TinyLFU line exercised with a small threshold.
 
 **Nature:** acceptance (Opus)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache a98e5e6, merged into misc/ai_gen)
 
-- [ ] `P4_acceptance_success_signal` green
-- [ ] Every P1 to P4 test green in the same run
-- [ ] Progress entry appended
+- [x] `P4_acceptance_success_signal` green
+- [x] Every P1 to P4 test green in the same run
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket, stubs throwing NotImplementedError
 for later seams; 200 to 600 lines including tests; JUnit 5 + Mockito only, no AssertJ or MockK;

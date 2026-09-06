@@ -4230,3 +4230,164 @@ Full offline `clean package` green: engine 144, cluster 67, cp 89, server 79.
   checker over lock ops is the next step if lock linearizability is ever asserted directly.
 - `deleteSnapshotChunks` and log truncation in `FileRaftStore` rewrite the whole log file each time
   (O(n)); an append-only segment file is the upgrade if a large log ever runs through it.
+
+## T37: P4 acceptance
+
+**Built:** the four wiring gaps between a cluster node and P4's machinery, and the demo that
+drives all of them through a socket.
+
+`ClusterNode` gains what single-node `main` already had and a cluster node did not:
+
+- **Its own `SnapshotEngine`**, from `dataDir` and `fsync`. `start()` restores the last snapshot
+  and the log after it *before* the RESP port opens, the server's tick lambda (previously the
+  default `{ engine.tick() }`) now also runs `engine.wal?.tick()` and `snapshots?.maybeSave(now)`,
+  and `close()` takes the shutdown save between cancelling the scope and closing the engine, so
+  the save runs while the engine is open and nothing submits. The node creates the directory
+  itself, which single-node `main` does not; a cluster is started as three processes and the
+  operator should not have to `mkdir` three times.
+- **Its part of a snapshot set.** `DistributedSnapshot` is a field built from `snapshotDir`, and
+  `Router`'s `snapshots` hook -- `false` since T24 -- is now `distributed?.receive(it) ?: false`.
+  The two are mutually recursive (the router consults the snapshot, the snapshot replays through
+  the router's demux), which the Kotlin compiler reports as "type checking has run into a
+  recursive problem" until the field carries an explicit `DistributedSnapshot?` type.
+- **A trigger, as a method rather than a verb.** `snapshot(id)` launches `initiate` on the node's
+  scope, `snapshotComplete(id)` is this node's step 4, `restoreSnapshot(id)` is `restoreFrom` under
+  `runBlocking`. Nothing a Redis client asks for takes a distributed cut, so this is an operator's
+  control and not a `SNAPSHOT` command at the handler: the ticket offered either, and a verb would
+  have to be a connection-level case beside `MULTI` (it is not a `Command`, it does not queue, it
+  has no reply shape Redis defines) for a caller that does not exist.
+- **`maxMemoryBytes` and `EvictionPolicy`**, straight through to `ApEngine`.
+
+`clusterMain` now passes the `[dir]` and `[fsync]` positional arguments it was already being
+handed and dropped on the floor, so `--peers` mode persists like every other mode, with the
+snapshot sets under `<dir>/snapshots`. A node with nowhere to put its part cannot answer a marker
+from a peer, so the snapshot root follows the data dir rather than needing a flag of its own.
+
+**One bug in T36, fixed at the root.** `DistributedSnapshot.start` published the snapshot's
+channels into `open` and *then* created `<dir>/<id>/<self>/`. On T36's in-process kit `initiate`
+runs on the test's own coroutine, so nothing else could look at `open` in that window; on a real
+node `initiate` runs on the node's scope while the demux runs the router's inbound loop, and an
+envelope arriving in the window was appended to a file in a directory that did not exist yet.
+The `NoSuchFileException` propagated out of `Router.run`, killing the node's one inbound loop --
+so the first symptom was not a lost record but a node that stopped answering anything. The
+directory is now created before the channels are published.
+
+**Concepts named:** none new. The vocabulary is T36's (**channel**, **marker**, **snapshot set**)
+and T32's (**checkpoint**), and the only idea this ticket adds is where each of them attaches to
+the assembly T24 named: a node is still an assembly, and persistence is three more fields and one
+more thing the tick does.
+
+**Acceptance:**
+- `P4_acceptance_success_signal` (server), one method, the sequence end to end on T24's harness --
+  three nodes in one JVM, ephemeral RESP and gRPC ports, real gossip, N=3 W=2 R=2, Jedis
+  unmodified, `@TempDir` data dirs -- in about 3 seconds:
+  - **(a)** a mixed keyspace written through node-1: a string with `EX 60`, a hash, a list, a
+    sorted set, and a `PX 300` key. All three nodes closed, three fresh nodes started on the same
+    data dirs (new ephemeral ports, the shared address map updated, which the ticket allows). Read
+    back through node-3: every value intact, the `EX 60` key's TTL still inside its remaining
+    window, and the short-lived key's restored deadline falling due.
+  - **(b)** `BEFORE` written, a second Jedis client writing on its own thread as fast as the
+    cluster will take it, `nodes[0].snapshot("s1")`, a poll until all three report complete, the
+    writer stopped and its failure asserted null, then `AFTER` written. The cluster is closed and
+    three fresh nodes started **with no data dir at all** and the same snapshot root, each
+    `restoreSnapshot("s1")`. Through every one of the three: `BEFORE` reads its value and `AFTER`
+    reads nil (I12 at the socket).
+  - **(c)** `SET tick:fires v PX 200` on node-1, polled to nil through node-3 inside a deadline,
+    then `TTL` = -2.
+  - **(d)** one node (`nodes = {node-1}`, N=W=R=1, four partitions) with a 256 KB threshold and
+    `W_TINYLFU`: twelve 1 KB hot keys, then 1200 cold 1 KB keys in batches of 100 with the hot set
+    read between batches. `INFO` reports `maxmemory_policy:w-tinylfu` and `used_memory` at or under
+    the threshold, and every hot key is still there.
+- Mutation-checked four ways, each reverted and the build re-run:
+  1. `maxMemoryBytes` forced to null: the node holds 1,309,016 bytes against the 256 KB threshold.
+  2. `snapshots?.restore()` removed from `start()`: the restarted cluster answers nil for the first
+     key.
+  3. the router's snapshot hook forced to `false`: no node completes, and the test fails on its
+     20-second deadline rather than on a missing file -- the markers never reach the protocol.
+  4. the shutdown save removed: caught by the assertion that node-1 wrote a `dump.rdb`. Worth
+     recording that *every value assertion still passed* in that run, which is how this ticket can
+     say which path a key came through: with a snapshot on disk the restart is the RDB's (the save
+     is the last thing a graceful close does, so the log after the checkpoint is empty), and with
+     no snapshot at all the WAL replay alone carried the whole keyspace back, collections included.
+- `mvn -B -o clean package` offline, BUILD SUCCESS: engine 144, cluster 80, cp 89, server 82. Every
+  P1 to P4 test green in the same run.
+- `git merge misc/ai_gen`: already up to date, so T30 had not landed and there was nothing to
+  resolve.
+- Size: 400 insertions in 4 files -- 302 lines of test, 97 in `ClusterNode`, 5 in
+  `DistributedSnapshot`, 5 in `DynaCacheServer`. Inside the budget.
+- Re-run three times over: 2.8 to 3.1 seconds, green every time. One flake was found and removed
+  during the work: the `PX 300` key of (a) was first asserted absent outright, and a restart that
+  takes under 300 ms leaves it alive, so it is now polled to its deadline.
+
+**Deviations:** six.
+
+1. **The snapshot trigger is a method, not a command** (above). `snapshot(id)` returns nothing and
+   launches on the node's scope, so a second `initiate` for an id already open throws into the
+   scope's uncaught handler rather than back to the caller; the caller learns what happened from
+   `snapshotComplete` and its own deadline. A `Job` back from `snapshot` would fix that the day
+   something needs it.
+2. **The restart uses fresh ports, not the same ones.** The ticket allows either. Ephemeral ports
+   cannot be re-requested, and rebinding a fixed port a closed node has just released races the OS;
+   the shared address map is read at send time (T23), so a new generation only has to write its own
+   row before starting. What this does not exercise is a node returning to a cluster that is still
+   up: all three restart together, so nobody has a stale address, and no SWIM incarnation has to
+   rise (T20, T24's note).
+3. **(c) asserts the client-visible half of a TTL, not the wheel.** At the socket, the wheel's
+   deletion and the lazy check a read makes on the way past are the same nil, and every
+   keyspace-wide command (`DBSIZE`, `INFO`'s `db0`) purges expired keys itself before answering,
+   so no client-visible number separates them either. The scheduler is real and running -- it is
+   the server's own, on the real clock -- and that it advances the wheel is T09's and T32's at the
+   engine tier. Not debt, a limit of the seam.
+4. **(d) is one node, not three.** Eviction is a node's own decision under spec 5.5 and coordinates
+   with nothing, so three replicas of every key would ask the same question three times; worse, a
+   key evicted on one replica and kept on another turns the assertion into a question about read
+   repair. The single-node cluster still goes through the whole `ClusterNode` assembly -- ring,
+   replication at N=W=R=1, router, RESP -- so the wiring under test is the wiring that ships.
+5. **The eviction knobs are not on the command line.** `maxMemoryBytes` and `policy` are
+   constructor parameters only, because single-node `main` has no flag for them either; adding one
+   for the cluster alone would put the two modes out of step. `clusterMain` did get `dir` and
+   `fsync`, which it was already being handed.
+6. **A `runCatching` around the shutdown save.** `close()` must go on to close the engine even if
+   the save throws (a full disk, a directory pulled out from under a test), and a node closed
+   twice, or closed after a failed start, must not throw out of `close`.
+
+**Debt hit, recorded not fixed:**
+
+- **A value a node holds only as a replica is not in its log.** `Replication.install` reaches the
+  engine through `ApEngine.install` -> `Partition.restore`, which is the RDB's own load path and
+  does not run the command path, so the WAL hook never sees it (`ApEngine.log` is called from the
+  partition's command step). The same is true of anything anti-entropy or read repair installs.
+  Today a graceful shutdown hides it completely, because the shutdown save writes the whole
+  keyspace including replica copies; a node that dies without one comes back holding only the keys
+  it coordinated, and the read quorum covers that as long as each key's coordinator recovers. It
+  stops being covered when a coordinator's disk is the one that was lost. Repaying it means either
+  logging installs (they are not commands, so `WalCodec` would need an install entry) or accepting
+  that a crashed node is repaired by anti-entropy rather than by its own log -- which is a real
+  design position, and the one to state in the spec if it is taken.
+- **The router's inbound loop dies on any exception a handler throws** (found the hard way, above).
+  One loop demuxes forwards, replication, anti-entropy, gossip and now snapshots, so a bug in any
+  of them silently stops all of them; the node keeps its socket open and answers nothing that needs
+  a peer. A `try`/`catch` per envelope inside `Router.run`, logging and continuing, is the repair.
+- **Restoring a snapshot set into a live cluster is still unsupported** (T36 deviation 6), so
+  `restoreSnapshot` is documented as startup-only and the test calls it on nodes that have started
+  their transports but served no client. Nothing enforces that.
+- **The state file is still written on the demux's coroutine** (T36 deviation 4). Under this
+  ticket's traffic it did not stall a quorum -- the writer completed every write with no failure --
+  but the keyspace was small; `withContext(Dispatchers.IO)` remains the repair if a measurement
+  shows it.
+
+**For the next ticket:**
+
+- **`ClusterNode`'s constructor is now the node's whole configuration**: `dataDir`, `fsync`,
+  `snapshotDir`, `maxMemoryBytes` and `policy` beside the cluster's own. Anything else that is a
+  node's private decision belongs there and nowhere else.
+- **The P4 harness is `startCluster(dirs)` / `stopCluster()`**, and the generation of nodes is a
+  `var`. A test that needs a cluster to die and come back should copy that shape rather than the
+  `@BeforeEach` one P2 uses: the address map outlives the nodes, and only the row of a restarted
+  node changes.
+- **A distributed snapshot needs `snapshotDir` on every node, not just the initiator.** A node
+  without one has a null hook, so a marker falls through the demux to gossip and is dropped, the
+  initiator waits out its 30-second deadline and the whole set is deleted. That failure looks like
+  a timeout, not a misconfiguration.
+- **`restoreSnapshot` is `runBlocking`**, so it must not be called from a coroutine on the node's
+  own dispatcher. From a test thread or a `main`, it is fine.
