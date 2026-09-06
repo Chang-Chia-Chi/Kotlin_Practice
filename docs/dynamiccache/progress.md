@@ -2169,3 +2169,138 @@ router that replaces what `answer` does with a parsed command has one call site 
 Nothing new is marked with a `ponytail:` ceiling. The pending queue's existing one, noted in
 T13, is untouched: a `MULTI` buffer is bounded by nothing either, so a client that queues
 forever grows it, and the same output-buffer limit repairs both.
+
+## T10: Memory accounting and LRU eviction
+
+**Built:** Every entry now knows what it costs and every partition knows what it holds.
+`Value.approximateBytes()` is the payload half of the formula: a String is its bytes, and a Hash,
+List or Sorted Set is the sum over its elements of the element's own bytes plus `ELEMENT_BYTES`
+(16) for the node, pointers and object header a JVM spends holding one; a member's score counts as
+eight, and field and member names are ISO-8859-1, one character to the byte. `Partition` adds the
+key's bytes and `ENTRY_BYTES` (48) for the entry, its table node and its deadline, so one entry
+costs `key.bytes.size + 48 + value.approximateBytes()`.
+
+The running total `Partition.usedBytes` is maintained at exactly the places T09's note named. A new
+`forget(key)` takes an entry out of the store and its bytes off the total; `drop` is now `forget`
+plus the wheel cancel, and the wheel's fire callback -- the one removal that cannot go through
+`drop` -- calls `forget` too, so the two share one accounting line rather than owning two. `write`
+subtracts the entry it displaced and then charges for what replaced it through `account(key)`, which
+recomputes an entry's size and books only the difference from what it was last charged. Because
+`account` is idempotent, `execute` calls it once more on the key a keyed command touched: `HSET` on
+an existing hash, `RPUSH`, `ZADD` and `LREM` never reach `write`, and that one recount is what keeps
+the total level with a store that grew or shrank in place. `FLUSHDB` zeroes the total with the
+store.
+
+`ApEngine` gains a fifth, defaulted constructor parameter `maxMemoryBytes: Long? = null`, split
+evenly across the partitions; a partition with no threshold gets `Long.MAX_VALUE`, so "never evicts"
+is a share nothing can cross rather than a second branch. After every command, `execute` asks
+whether the partition is over its share and runs `evict(now)` if it is -- on the partition's own
+thread, from the command's own reading of the clock, after the command has finished with the store.
+The step is spec 5.5's order: `purgeExpired(now)` takes every expired key first, then sampling LRU
+takes live ones -- `coldest()` draws `SAMPLE` (5) random keys through the table's `randomKey` and
+evicts the one whose `lastAccess` is oldest -- until the partition is under its share or the store is
+empty, and at most `MAX_EVICTIONS` (32) keys go in one step. `Entry` gains `lastAccess`, written by
+`live()` on every read and by `write` on every write, both from the command's single clock read.
+
+`INFO` reports `used_memory` in a `# Memory` section. Each partition now answers `Command.Info` with
+an array of two integers, its live key count and its used bytes, and `Info.join` sums both; `DBSIZE`
+keeps its own branch and its plain integer.
+
+**Concepts named:** **`usedBytes`** is what a partition holds and **`account`/`forget`** are the only
+two verbs that change it, which is what makes "the total agrees with the store" true at one place
+each way rather than at every mutation site. **`coldest()`** is the sampling policy in one function:
+it names what spec 2.7's "sample K, evict the least recently used" actually asks for, and nothing
+else in the partition knows the policy, so T11 can swap it for W-TinyLFU without touching the step
+around it. **`evict`** is the bounded step and **`MAX_EVICTIONS`** its ceiling; **`maxBytes`** is a
+partition's share, and the even split lives in `ApEngine` so a partition never learns there are
+others. `Partition.execute` was split: it settles the instant and the kind, calls a new private
+`run(command, now)` for the command itself, then recounts and evicts, so no early return inside the
+command can skip the accounting. Seams unchanged: `CommandEngine`, `PartitionContext`, `Reply`,
+`Key`, `PartitionId` are exactly T01's, and the `Value` change is purely additive (T31 reads the same
+types).
+
+**Acceptance:**
+- `eviction_respects_max_memory`: a one-partition node budgeted at three entries takes twenty
+  writes and ends at three keys, under the threshold, with the last write still readable.
+- `eviction_prefers_expired`: budget three, one key expired but never read since its deadline; the
+  write that crosses the threshold takes the expired key, and the coldest live key -- LRU's victim
+  otherwise -- stays.
+- `lru_evicts_oldest_access`: budget three, key 0 read to make it the freshest, and the write that
+  crosses takes key 1. Then a second round with a different key left cold, so one eviction agreeing
+  with the access order by accident of bucket order cannot carry the test.
+- `eviction_does_not_corrupt`: budget five, forty writes with a distinct value each; exactly five
+  survive, each returning its own value, and `DBSIZE` counts those five.
+- `I6_expired_evicted_before_live`: a node full to a ten-entry threshold, five of it expired, and
+  one more write. All five expired keys go and all five live keys stay.
+- `info_reports_used_memory`: zero on an empty node, rising with each write, summed across
+  partitions, falling after `DEL`, and falling after a tick past a TTL. That last step is the first
+  direct observation that the wheel deletes (T09's note): nothing reads the key between its deadline
+  and the tick, so a wheel removal that did not give the bytes back would leave `INFO`'s own sweep
+  with nothing left to give back either.
+- `eviction_step_is_bounded`: forty entries at the threshold, then one value worth 35 entries; the
+  step stops at 32 evictions, `DBSIZE` reports the nine that remain, and the commands after it
+  finish the job.
+- `eviction_runs_on_the_partition_thread`: T02's C1 clock technique. Twenty evicting writes and a
+  `DBSIZE` are twenty-one clock reads, every one of them on `partition-0`. An eviction step on a
+  thread of its own, or one reading the clock for itself, shows up as a reader the count forbids.
+- `used_memory_follows_an_aggregate_grown_in_place`: a hash field and a list item added in place are
+  charged for, and the bytes come back when the field goes.
+- Mutation-checked, seven ways: never evicting fails five tests; dropping `purgeExpired` from the
+  step fails `eviction_prefers_expired` and I6; taking any sampled key instead of the coldest fails
+  `lru_evicts_oldest_access`; the wheel removing without accounting fails `info_reports_used_memory`;
+  deleting the post-command recount fails the in-place test; raising `MAX_EVICTIONS` fails the bound
+  test; and eviction reading the clock for itself fails the thread test.
+- Every existing test still green. `mvn -B -o clean package`: engine 109, cluster 39, cp 24,
+  server 16.
+- This entry.
+
+**Deviations:** None against the spec, the ticket, the frozen types or ADR 0002. Five judgement
+calls.
+
+1. **Eviction is checked after every command, not only after a write.** The ticket says "after any
+   write that crosses the threshold". The check is `usedBytes > maxBytes` at the end of `execute`,
+   which only a write can make true, so the trigger is the same; what it adds is that a read after a
+   bounded step that did not finish continues the work instead of leaving the partition over its
+   share until the next write. `eviction_step_is_bounded` depends on exactly that.
+2. **The step runs after the command, not inside `write`.** A command may write and then keep
+   mutating what it wrote (`RPUSH` creates the list, then fills it), so evicting from inside `write`
+   could take the key the command is still holding. Running at the end of `execute` is still the
+   partition's own thread and the command's own instant.
+3. **A store no larger than the sample is taken whole.** `coldest()` draws five random keys only
+   when the store holds more than five; below that it considers every key. Drawing with replacement
+   from four keys can miss one that "K random keys" was meant to include, so this is a better
+   approximation of the spec's sampling, not a departure from it, and it makes the small-keyspace
+   tests deterministic without seeding around the draw.
+4. **`approximateBytes()` is O(elements), and the recount after a keyed command pays it once per
+   command.** For a String that is the command's own order of work; for one field of a very large
+   hash it is more. The `ponytail:` comment on it names the ceiling and the repayment: per-element
+   deltas threaded through every aggregate mutation site would make it O(1) at the cost of a running
+   total inside every structure. Debt, deliberately not taken on in this ticket.
+5. **The WRONGTYPE early return skips the recount and the step.** A refused command mutates nothing,
+   and the lazy expiry check in front of it can only lower `usedBytes`, so nothing is missed beyond
+   a partition already over its share waiting one more command for its next step.
+
+**For the next ticket:** T11 (Count-Min Sketch and W-TinyLFU) is the direct consumer. `coldest()` is
+the whole policy and the only thing T11 has to replace: `evict` decides *when* and *how many*, and
+knows nothing about *which*, so a policy parameter on `ApEngine` selects between two implementations
+of that one function and the step, the bound, the expired-first order and every accounting line stay
+as they are. `Entry.lastAccess` is there for LRU; a frequency counter belongs beside it, and the
+sketch belongs on the partition, not on the entry.
+
+`usedBytes` is exact against the formula, not against the JVM: `ENTRY_BYTES` (48) and
+`ELEMENT_BYTES` (16) are estimates, so a test that wants a budget of N entries must measure one entry
+through `INFO` rather than compute it. `CommandEngineTest.entryBytes` does that with a throwaway
+probe engine and is the helper to reuse.
+
+Two things about the test clock matter for any later eviction test. Every seeded write advances it,
+because two keys written at the very same instant are equally recently used and LRU has nothing to
+choose between them -- the first version of `eviction_respects_max_memory` evicted the key it had
+just written for exactly that reason. And `EXISTS`, `GET` and `TYPE` all go through `live()`, so an
+assertion that reads a key refreshes it; a test that checks survivors and then wants to keep
+evicting must move the clock between the two.
+
+`Command.Info`'s per-partition reply is now `Reply.Array(keys, usedBytes)` rather than a plain
+integer. Nothing outside the engine reads it today, but T13's `INFO` over RESP and T44's dispatcher
+see only the joined bulk string, whose `# Memory` and `# Keyspace` sections are unchanged in shape.
+`atomically` is still `TODO("T14: batches")`; a batch will reach `execute` per command and so gets
+the accounting and the eviction step for free.

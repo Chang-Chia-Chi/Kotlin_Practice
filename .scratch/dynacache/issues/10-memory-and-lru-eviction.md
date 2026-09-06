@@ -10,12 +10,12 @@ access times come from the injected clock; `INFO` reports used memory.
 
 **Nature:** eviction semantics, spec 5.5 and I6 (Opus)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache 4655294, merged into misc/ai_gen)
 
-- [ ] `eviction_respects_max_memory`, `eviction_prefers_expired`, `lru_evicts_oldest_access`, `eviction_does_not_corrupt`
-- [ ] `I6_expired_evicted_before_live`
-- [ ] The eviction step is bounded and never runs off the partition's executor
-- [ ] Progress entry appended
+- [x] `eviction_respects_max_memory`, `eviction_prefers_expired`, `lru_evicts_oldest_access`, `eviction_does_not_corrupt`
+- [x] `I6_expired_evicted_before_live`
+- [x] The eviction step is bounded and never runs off the partition's executor
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket, stubs throwing NotImplementedError
 for later seams; 200 to 600 lines including tests; JUnit 5 + Mockito only, no AssertJ or MockK;
