@@ -283,6 +283,75 @@ sealed class Command {
     class LRem(override val key: Key, val count: Long, val value: ByteArray) : Keyed(Value.Kind.LIST)
 
     /**
+     * `ZADD key score member [score member ...]`. Scores travel as the client's own bytes because
+     * Redis parses them inside the command: every score is read before any is written, so one
+     * unparseable score leaves the sorted set untouched. Replies with how many members were new.
+     */
+    class ZAdd(override val key: Key, val entries: List<Pair<ByteArray, ByteArray>>) :
+        Keyed(Value.Kind.ZSET)
+
+    /** `ZSCORE key member`: the score as Redis writes it, nil when the member is not there. */
+    class ZScore(override val key: Key, val member: ByteArray) : Keyed(Value.Kind.ZSET)
+
+    /** `ZCARD key`: how many members, 0 when the key is absent. */
+    data class ZCard(override val key: Key) : Keyed(Value.Kind.ZSET)
+
+    /**
+     * `ZRANGE`/`ZREVRANGE key start stop [WITHSCORES]`: the members between two positions, both
+     * inclusive and both counting from the tail when negative, exactly as `LRANGE` does. The two
+     * commands are one variant because they differ only in [reverse]: the window is read off the
+     * same ordering, from the other end.
+     */
+    data class ZRange(
+        override val key: Key,
+        val start: Long,
+        val stop: Long,
+        val withScores: Boolean = false,
+        val reverse: Boolean = false,
+    ) : Keyed(Value.Kind.ZSET)
+
+    /** `ZREM key member [member ...]`: how many went. The last member takes the key with it. */
+    class ZRem(override val key: Key, val members: List<ByteArray>) : Keyed(Value.Kind.ZSET)
+
+    /**
+     * `ZRANK`/`ZREVRANK key member`: the member's 0-based position, nil when it is not there.
+     * [reverse] counts from the highest score down; the two commands are one variant for the
+     * reason [ZRange]'s are.
+     */
+    class ZRank(override val key: Key, val member: ByteArray, val reverse: Boolean = false) :
+        Keyed(Value.Kind.ZSET)
+
+    /**
+     * `ZRANGEBYSCORE key min max [WITHSCORES] [LIMIT offset count]`. The bounds are the client's
+     * own bytes because their syntax is Redis's, not a number's: a bare score is inclusive, a
+     * leading `(` makes it exclusive, and `-inf` and `+inf` are the open ends. [count] below zero
+     * is Redis's "everything from [offset] on".
+     */
+    class ZRangeByScore(
+        override val key: Key,
+        val min: ByteArray,
+        val max: ByteArray,
+        val withScores: Boolean = false,
+        val offset: Long = 0,
+        val count: Long = -1,
+    ) : Keyed(Value.Kind.ZSET)
+
+    /**
+     * `ZINCRBY key increment member`: the member's new score, as Redis writes it. A member that
+     * was not there starts at 0, so the increment becomes its score.
+     */
+    class ZIncrBy(override val key: Key, val delta: ByteArray, val member: ByteArray) :
+        Keyed(Value.Kind.ZSET)
+
+    /**
+     * `ZSCAN key cursor [MATCH pattern] [COUNT n]`: the [HScan] walk over the sorted set's score
+     * map, answering member then score. The map is the dual index's hash half, so the walk is
+     * C15's the same way `HSCAN`'s is; nothing about the order is promised.
+     */
+    class ZScan(override val key: Key, val cursor: Long, val pattern: ByteArray? = null, val count: Int = 10) :
+        Keyed(Value.Kind.ZSET)
+
+    /**
      * `MGET key [key ...]`: one array of bulks in argument order, nil for a missing key. A key
      * holding something other than a String is nil too, as in Redis, not a `WRONGTYPE` error.
      */
