@@ -59,7 +59,7 @@ class SessionTest {
 
         assertEquals("NOSESSION", kindOf(tryLock(session)), "closed")
         assertEquals("NOSESSION", kindOf(submit(Command.Cp.LockUnlock(lock, session, token = 1))))
-        assertEquals("NOSESSION", kindOf(submit(Command.Cp.LockRenew(lock, session, token = 1, ttl = LEASE))))
+        assertEquals("NOSESSION", kindOf(submit(Command.Cp.LockRenew(lock, session, token = 1, lease = LEASE))))
     }
 
     /** CP spec 10.6: "wait > timeout" is the leader's clock moving and a tick carrying it into the log. */

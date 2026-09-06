@@ -206,7 +206,7 @@ class CommandParserTest {
                 assertEquals(2L, it.new)
             },
             row("CP.LOCK.TRY cp:lock:k 30000", Command.Cp.LockTry::class) {
-                assertEquals(Duration.ofSeconds(30), (it as Command.Cp.LockTry).ttl)
+                assertEquals(Duration.ofSeconds(30), (it as Command.Cp.LockTry).lease)
                 assertEquals(NO_SESSION, it.session)
             },
             row("CP.LOCK.UNLOCK cp:lock:k 7", Command.Cp.LockUnlock::class) {
@@ -215,7 +215,7 @@ class CommandParserTest {
             },
             row("CP.LOCK.RENEW cp:lock:k 7 30000", Command.Cp.LockRenew::class) {
                 assertEquals(7L, (it as Command.Cp.LockRenew).token)
-                assertEquals(Duration.ofSeconds(30), it.ttl)
+                assertEquals(Duration.ofSeconds(30), it.lease)
             },
             row("CP.LOCK.STATE cp:lock:k", Command.Cp.LockState::class),
             row("CP.LOCK.FORCE_UNLOCK cp:lock:k", Command.Cp.LockForceUnlock::class),

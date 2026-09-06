@@ -181,7 +181,7 @@ private class CommandHandler(
 
     private fun answer(tokens: List<ByteArray>): CompletableFuture<Reply> {
         val name = tokens[0].toString(Charsets.ISO_8859_1).lowercase()
-        if (name in TRANSACTION) {
+        if (name in BATCH) {
             if (tokens.size != 1) return done(Reply.Error("ERR", "wrong number of arguments for '$name' command"))
             return when (name) {
                 "multi" -> done(multi())
@@ -201,7 +201,7 @@ private class CommandHandler(
         return when (val parsed = parser.parse(tokens)) {
             is Parsed.Ok -> buffered?.let { it += parsed.command; done(QUEUED) } ?: submit(parsed.command)
             // Redis answers the error the moment the bad frame arrives and refuses the whole
-            // transaction later, so the client learns which command was wrong.
+            // batch later, so the client learns which command was wrong.
             is Parsed.Failed -> {
                 if (buffered != null) spoiled = true
                 done(parsed.error)
@@ -350,7 +350,7 @@ private fun Reply?.isNoSession(): Boolean = this is Reply.Error && kind == "NOSE
 
 private val OK = Reply.Simple("OK")
 private val QUEUED = Reply.Simple("QUEUED")
-private val TRANSACTION = setOf("multi", "exec", "discard")
+private val BATCH = setOf("multi", "exec", "discard")
 
 internal fun done(reply: Reply): CompletableFuture<Reply> = CompletableFuture.completedFuture(reply)
 
