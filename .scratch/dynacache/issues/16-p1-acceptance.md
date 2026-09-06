@@ -11,12 +11,12 @@ the progress log.
 
 **Nature:** acceptance (Opus)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache ba09459, merged into misc/ai_gen)
 
-- [ ] `P1_acceptance_redis_client_unmodified` green
-- [ ] Every test of tickets 02 to 15 green in the same run
-- [ ] `redis-cli` transcript in the progress entry
-- [ ] Progress entry appended
+- [x] `P1_acceptance_redis_client_unmodified` green
+- [x] Every test of tickets 02 to 15 green in the same run
+- [x] `redis-cli` transcript in the progress entry
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket, stubs throwing NotImplementedError
 for later seams; 200 to 600 lines including tests; JUnit 5 + Mockito only, no AssertJ or MockK;

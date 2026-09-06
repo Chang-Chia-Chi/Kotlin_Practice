@@ -3407,3 +3407,186 @@ to `changes` on the first yield after construction, so an `ALIVE` emitted before
 point is missed (a `MutableSharedFlow` without replay); every test drains before it rejoins.
 `InMemoryTransport.networkPartition` plus `membership.set(DEAD)` is the "partition away" pair,
 `heal` plus `set(ALIVE)` the rejoin; a node killed with `kill` needs `restart` first.
+
+## T16: P1 acceptance
+
+**Built:** the last three things P1 owed, and then the demo that proves the lot.
+
+`CommandParser` gained the eleven Sorted Set names T13 left a marked place for -- `ZADD`,
+`ZREM`, `ZRANGE`, `ZREVRANGE`, `ZRANGEBYSCORE`, `ZRANK`, `ZREVRANK`, `ZSCORE`, `ZCARD`,
+`ZINCRBY`, `ZSCAN` -- in nine rows and three private helpers (`zadd`, `zrange`,
+`zrangeByScore`), plus the `PEXPIREAT` row T13 listed as its third deviation. Every `Command`
+variant the engine has now has a row in `parser_maps_every_command`, checked mechanically: the
+table's 70 rows name every variant declared in `Command.kt`.
+
+`Command.ZAdd` gained `condition` and `changed`, and the `Partition` branch behind them, which
+is the debt T07 recorded as its first deviation and sized at about fifteen lines. It came to
+twenty. `condition` is `Command.Set.Condition`, not a second enum: `NX` and `XX` mean here
+exactly what they mean on `SET`, so a second spelling of the same two words would have been a
+second thing to keep in step.
+
+`P1AcceptanceTest` is the tier the ticket exists for: Jedis 5.2.0, in test scope of the server
+module only, unmodified and unconfigured, driving spec 9's single-node demo over a real socket
+against a `DynaCacheServer` on an ephemeral port with the default engine.
+
+**Concepts named:** No new vocabulary and no new seam. The acceptance tier's one idea is that
+**the client is the assertion**. Every value the test compares came back through Jedis's own
+parsers, so a reply that is not Redis-shaped fails as a `NumberFormatException` or a wrong
+value rather than as a byte string a test author copied out of the server. That is C8 stated as
+a test rather than as a comparison, and it is why the ticket forbids using Jedis as an assertion
+library: its job is to disagree, not to help.
+
+The parser change is the same idea T13 named, extended: the wire's several spellings of one
+meaning collapse here and nowhere else. `ZRANGE`/`ZREVRANGE` and `ZRANK`/`ZREVRANK` reach the
+engine as one variant each with a `reverse` flag, exactly as T07 froze them, so eleven names
+make nine rows. `PEXPIREAT` joins `EXPIRE`, `PEXPIRE` and `EXPIREAT` as a fourth spelling of one
+absolute deadline.
+
+The `ZADD` flags kept the dual index's single-writer rule: `writeScore` is still the only place
+a member's score is written, and `NX`, `XX` and `CH` are a condition in front of it and a second
+counter beside it. `XX` on a missing key returns before `newZSet`, so a refused write leaves no
+empty sorted set for T10's eviction or T31's codec to trip over.
+
+Seams unchanged: `Reply`, `Key`, `CommandEngine`, `PartitionContext` and `CrossPartitionBatch`
+are exactly as T01 and T14 froze them. `DynaCacheServer.kt` was not touched at all, so T35's
+scheduler change merges clean.
+
+**Acceptance:**
+- `P1_acceptance_redis_client_unmodified` (server): one Jedis connection runs, in order,
+  `PING`; `SET foo bar EX 60`, `GET foo` and a `TTL` between 1 and 60; the leaderboard
+  `ZADD leaderboard 100 alice 200 bob` read back with `ZRANGE 0 -1 WITHSCORES` sorted, plus
+  `ZCARD`, `ZRANK`, `ZSCORE` and the new flags through Jedis's own `ZAddParams().nx()` and
+  `.xx().ch()`; spec 9's counter script verbatim through `EVAL`, twice, then read from outside;
+  1,000 `SET`s and a full `SCAN` cursor walk with `MATCH` and `COUNT 64` collecting every key at
+  least once (C15); a `MULTI`/`EXEC` of two keys sharing the hash tag `{account}`;
+  `SET expiring v PX 200` followed by a `GET` poll to a five-second deadline until nil, with the
+  value asserted readable first (C7) and `TTL` answering -2 after; and `INFO` parsed into its
+  `field:value` sections, its key count checked against `DBSIZE`. Mutation-checked: with the
+  parser dropping `WITHSCORES`, the test fails inside Jedis's own tuple parser with
+  `NumberFormatException: For input string: "bob"` -- the client noticing, not the test.
+- `parser_maps_every_command` (server): 70 rows, up from 54. Every `Command` variant declared in
+  `Command.kt` has one; the sixteen new rows are the Sorted Set names, `ZADD`'s three flag forms,
+  and `PEXPIREAT` landing on the same instant `EXPIREAT` does.
+- `zadd_nx_xx_ch_flags` (engine): `XX` on a missing key writes nothing and creates nothing
+  (`EXISTS` is 0); `NX` creates, then refuses to move a member it already scored, and in a
+  two-member `ZADD` adds the new one while leaving the old one where it was; `XX` mirrors it;
+  `CH` counts members new or moved where the plain reply counts only the new. Mutation-checked
+  three ways: dropping the `NX` guard, dropping the `CH` count, and dropping the `XX` creation
+  guard each fail it, at three different assertions.
+- `mvn -B -o clean package`: BUILD SUCCESS, engine 138, cluster 54, cp 47, server 66. Every test
+  from T02 to T15 green in the same run.
+- The transcript below.
+- This entry.
+
+**redis-cli:** not on this machine. `which redis-cli`, `where.exe redis-cli`,
+`C:\Program Files\*edis*`, `C:\Program Files (x86)\*edis*`, `C:\ProgramData\chocolatey\bin`,
+the scoop shims, `%LOCALAPPDATA%\Programs` and WSL all came back empty, and the ticket forbids
+installing anything. The transcript below is therefore the same session driven through T13's
+`RespClient`, rendered the way `redis-cli` renders a reply: a simple string bare, a bulk quoted,
+an integer as `(integer) n`, nil as `(nil)`, an array numbered, and `INFO`'s multi-line bulk
+verbatim.
+
+```
+127.0.0.1:55340> PING
+PONG
+127.0.0.1:55340> SET foo bar EX 60
+OK
+127.0.0.1:55340> GET foo
+"bar"
+127.0.0.1:55340> TTL foo
+(integer) 60
+127.0.0.1:55340> ZADD leaderboard 100 alice 200 bob
+(integer) 2
+127.0.0.1:55340> ZRANGE leaderboard 0 -1 WITHSCORES
+1) "alice"
+2) "100"
+3) "bob"
+4) "200"
+127.0.0.1:55340> ZADD leaderboard XX CH 150 alice
+(integer) 1
+127.0.0.1:55340> ZSCORE leaderboard alice
+"150"
+127.0.0.1:55340> ZRANK leaderboard bob
+(integer) 1
+127.0.0.1:55340> SET counter 0
+OK
+127.0.0.1:55340> EVAL "redis.call('SET', KEYS[1], redis.call('GET', KEYS[1]) + 1); return redis.call('GET', KEYS[1])" 1 counter
+"1"
+127.0.0.1:55340> EVAL "redis.call('SET', KEYS[1], redis.call('GET', KEYS[1]) + 1); return redis.call('GET', KEYS[1])" 1 counter
+"2"
+127.0.0.1:55340> GET counter
+"2"
+127.0.0.1:55340> MULTI
+OK
+127.0.0.1:55340> SET {account}.balance 100
+QUEUED
+127.0.0.1:55340> SET {account}.owner alice
+QUEUED
+127.0.0.1:55340> EXEC
+1) OK
+2) OK
+127.0.0.1:55340> MGET {account}.balance {account}.owner
+1) "100"
+2) "alice"
+127.0.0.1:55340> SET ephemeral v PX 200
+OK
+127.0.0.1:55340> GET ephemeral
+"v"
+127.0.0.1:55340> GET ephemeral
+(nil)                 # the TTL fired; awaited with a deadline
+127.0.0.1:55340> DBSIZE
+(integer) 5
+127.0.0.1:55340> KEYS *
+1) "foo"
+2) "counter"
+3) "{account}.balance"
+4) "leaderboard"
+5) "{account}.owner"
+127.0.0.1:55340> INFO
+# Server
+dynacache_version:0.1.0
+
+# Memory
+used_memory:361
+maxmemory_policy:lru
+
+# Keyspace
+db0:keys=5
+```
+
+**Deviations:** Three, none against a fixed contract.
+
+1. **`ZADD` has no `INCR` flag.** The ticket asked for it "if trivial". It is not: `INCR`
+   changes the reply from an integer count to a bulk score, and combined with `NX` or `XX` it
+   has to answer the nil bulk when the condition refuses the write, which is a third reply shape
+   in a branch that had one. `ZINCRBY` already covers the increment itself. Debt, and small: a
+   boolean on `ZAdd`, an entry-count check in the parser, and about six lines in the branch,
+   whenever a client wants the flag.
+2. **`ZADD`'s `GT` and `LT` flags are not built**, and neither is `ZREVRANGEBYSCORE`. None of the
+   three is in spec 2.1's command list, and T07 already recorded the last one. `ZADD k GT 1 a` is
+   an arity error here rather than Redis's own answer, because the flag loop stops at the first
+   token it does not know and `GT` then counts as a score.
+3. **The `redis-cli` transcript is a `RespClient` transcript**, for the reason above. It is the
+   same bytes on the same socket; only the renderer is ours, and it renders replies it was handed
+   rather than replies it chose, so a wrong reply would still show.
+
+**For the next ticket:**
+
+- **Jedis is now available in the server module's test scope** (`redis.clients:jedis:5.2.0`,
+  pulling `commons-pool2` and `org.json`; `slf4j-api` was already in the local repository). It is
+  the right client for any later acceptance tier -- T22's cluster demo especially -- and it must
+  stay in test scope: nothing in `src/main` may import it, or C8 stops meaning anything. Jedis's
+  `CLIENT SETINFO` handshake asks for a command this server does not have and swallows the error,
+  so no `CLIENT` row was needed; a client that does not swallow it would need one.
+- **`INFO` is parsed by a real client now**, so its section format is load-bearing: `# Section`
+  headers, `field:value` lines, CRLF endings. Anything added to it must keep that shape or the
+  acceptance test's `associate` picks up junk.
+- The acceptance test polls `GET` to a deadline for the TTL. What the client observes there may
+  be lazy expiry on the read rather than the timer wheel's own sweep -- both delete the key and
+  the client cannot tell them apart, which is the point of testing at this seam. The wheel's own
+  correctness is T08's `TimerWheelTest` and T09's active expiry, under an injected clock. If a
+  later ticket wants the sweep pinned from outside, `DBSIZE` after a tick with no intervening
+  read is the observation to use.
+- `scoreText`'s exponent form (T07's fourth deviation, `1.0E17` where Redis writes `1e+17`)
+  never came up: Jedis parses scores with `Double.parseDouble`, which accepts both. It stays a
+  difference from Redis's bytes, and a client that reads the score as text would still see it.
