@@ -2,6 +2,7 @@ package dynacache.engine
 
 import java.time.Clock
 import java.time.Instant
+import java.util.Random
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executors
 
@@ -9,11 +10,14 @@ import java.util.concurrent.Executors
  * One partition: a single-thread executor and the store only that thread touches (C1 by
  * construction, ADR 0001). Everything below [submit] runs on the partition executor.
  */
-internal class Partition(id: PartitionId, private val clock: Clock) {
+internal class Partition(id: PartitionId, private val clock: Clock, private val random: Random) {
 
     private class Entry(val value: Value, val expiresAt: Instant?) {
         /** The String bytes, safe to read once the kind check in [execute] has passed. */
         val str: ByteArray get() = (value as Value.Str).bytes
+
+        /** The one expiry rule: a key is readable through its deadline and gone after it. */
+        fun expired(now: Instant): Boolean = expiresAt != null && now.isAfter(expiresAt)
     }
 
     private val store = HashMap<Key, Entry>()
@@ -42,6 +46,7 @@ internal class Partition(id: PartitionId, private val clock: Clock) {
         return when (command) {
             is Command.Fanned -> error("a partition never sees a multi-key command; ApEngine fans it out")
             is Command.Ping -> Reply.Simple("PONG")
+            is Command.CommandTable -> Reply.Array(emptyList())
 
             is Command.Get -> Reply.Bulk(live(command.key, now)?.str)
             is Command.Set -> {
@@ -106,6 +111,61 @@ internal class Partition(id: PartitionId, private val clock: Clock) {
             is Command.HVals -> Reply.Array(hash(command.key, now).orEmpty().values.map { Reply.Bulk(it) })
             is Command.HLen -> Reply.Integer((hash(command.key, now)?.size ?: 0).toLong())
 
+            is Command.Push -> {
+                val items = items(command.key, now) ?: Value.List().also { store[command.key] = Entry(it, null) }.items
+                for (value in command.values) if (command.end == Command.End.HEAD) items.addFirst(value) else items.addLast(value)
+                Reply.Integer(items.size.toLong())
+            }
+            is Command.Pop -> {
+                val items = items(command.key, now)
+                if (items.isNullOrEmpty()) NIL else {
+                    val popped = if (command.end == Command.End.HEAD) items.removeFirst() else items.removeLast()
+                    dropIfEmpty(command.key, items)
+                    Reply.Bulk(popped)
+                }
+            }
+
+            is Command.LRange -> {
+                val items = items(command.key, now).orEmpty()
+                Reply.Array(span(command.start, command.stop, items.size).map { Reply.Bulk(items[it]) })
+            }
+            is Command.LLen -> Reply.Integer((items(command.key, now)?.size ?: 0).toLong())
+            is Command.LIndex -> {
+                val items = items(command.key, now).orEmpty()
+                Reply.Bulk(items.getOrNull(at(command.index, items.size)))
+            }
+            is Command.LSet -> {
+                val items = items(command.key, now) ?: return NO_SUCH_KEY
+                val position = at(command.index, items.size)
+                if (position !in items.indices) INDEX_OUT_OF_RANGE else {
+                    items[position] = command.value
+                    OK
+                }
+            }
+            is Command.LRem -> {
+                val items = items(command.key, now)
+                val removed = items?.let { remove(it, command.count, command.value) } ?: 0
+                if (items != null) dropIfEmpty(command.key, items)
+                Reply.Integer(removed.toLong())
+            }
+
+            is Command.DbSize, is Command.Info -> {
+                purgeExpired(now)
+                Reply.Integer(store.size.toLong())
+            }
+            is Command.Keys -> {
+                purgeExpired(now)
+                Reply.Array(store.keys.filter { globMatches(command.pattern, it.bytes) }.map { Reply.Bulk(it.bytes) })
+            }
+            is Command.RandomKey -> {
+                purgeExpired(now)
+                Reply.Bulk(if (store.isEmpty()) null else store.keys.elementAt(random.nextInt(store.size)).bytes)
+            }
+            is Command.FlushDb -> {
+                store.clear()
+                OK
+            }
+
             is Command.Del -> if (live(command.key, now) == null) ZERO else {
                 store.remove(command.key)
                 ONE
@@ -121,7 +181,7 @@ internal class Partition(id: PartitionId, private val clock: Clock) {
      */
     private fun live(key: Key, now: Instant): Entry? {
         val entry = store[key] ?: return null
-        if (entry.expiresAt != null && now.isAfter(entry.expiresAt)) {
+        if (entry.expired(now)) {
             store.remove(key)
             return null
         }
@@ -131,6 +191,59 @@ internal class Partition(id: PartitionId, private val clock: Clock) {
     /** The fields under [key], or null when the key is absent. */
     private fun hash(key: Key, now: Instant): LinkedHashMap<String, ByteArray>? =
         (live(key, now)?.value as Value.Hash?)?.fields
+
+    /**
+     * The lazy check of [live], applied to the whole store at once: what a keyspace-wide command
+     * sees afterwards is exactly the live keys, with no copy of the key set to filter.
+     *
+     * ponytail: O(n) in the keyspace, so `DBSIZE` costs a walk that Redis answers in O(1). T09's
+     * wheel removes expired keys as they fall due, and then this sweep can go.
+     */
+    private fun purgeExpired(now: Instant) {
+        store.entries.removeIf { (_, entry) -> entry.expired(now) }
+    }
+
+    /** The elements under [key], or null when the key is absent. */
+    private fun items(key: Key, now: Instant): ArrayDeque<ByteArray>? =
+        (live(key, now)?.value as Value.List?)?.items
+
+    /**
+     * A Redis list index as a position: a negative one counts back from the tail. An index the
+     * list does not reach clamps to just outside it, which every caller treats as "not there";
+     * the clamp is what keeps a wire-sized index inside an `Int`.
+     */
+    private fun at(index: Long, size: Int): Int =
+        (if (index < 0) size + index else index).coerceIn(-1L, size.toLong()).toInt()
+
+    /**
+     * Redis's `LRANGE` bounds: a negative index counts back from the tail, a start before the
+     * list starts at 0 and a stop past the end stops at the last element, so nothing errors.
+     */
+    private fun span(start: Long, stop: Long, size: Int): IntRange {
+        val from = (if (start < 0) size + start else start).coerceAtLeast(0)
+        val to = (if (stop < 0) size + stop else stop).coerceAtMost(size - 1L)
+        return if (from > to) IntRange.EMPTY else from.toInt()..to.toInt()
+    }
+
+    /**
+     * `LREM`'s count: the matches are collected in the direction the sign asks for and dropped
+     * back to front, so the positions found stay valid while they are removed.
+     */
+    private fun remove(items: ArrayDeque<ByteArray>, count: Long, value: ByteArray): Int {
+        val order = if (count < 0) items.indices.reversed() else items.indices
+        // Zero means every match, and so does any magnitude the list cannot reach; clamping to
+        // the size also disarms Long.MIN_VALUE, whose absolute value does not fit in a Long.
+        val everyMatch = count == 0L || count >= items.size || count <= -items.size.toLong()
+        val limit = if (everyMatch) items.size else Math.abs(count).toInt()
+        val doomed = order.filter { items[it].contentEquals(value) }.take(limit)
+        doomed.sortedDescending().forEach(items::removeAt)
+        return doomed.size
+    }
+
+    /** Redis keeps no empty aggregate: the last element taken out takes the key with it. */
+    private fun dropIfEmpty(key: Key, items: ArrayDeque<ByteArray>) {
+        if (items.isEmpty()) store.remove(key)
+    }
 
     /** Writes [entries] into [key]'s hash, creating it when absent; replies how many were new. */
     private fun put(key: Key, now: Instant, entries: List<Pair<ByteArray, ByteArray>>): Long {
@@ -150,6 +263,8 @@ internal class Partition(id: PartitionId, private val clock: Clock) {
     private companion object {
         val EMPTY = ByteArray(0)
         val OK = Reply.Simple("OK")
+        val NO_SUCH_KEY = Reply.Error("ERR", "no such key")
+        val INDEX_OUT_OF_RANGE = Reply.Error("ERR", "index out of range")
         val NOT_AN_INTEGER = Reply.Error("ERR", "value is not an integer or out of range")
         val WRONG_TYPE = Reply.Error("WRONGTYPE", "Operation against a key holding the wrong kind of value")
         val NIL = Reply.Bulk(null)
