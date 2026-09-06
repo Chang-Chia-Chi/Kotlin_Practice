@@ -4912,3 +4912,204 @@ taken once per inbound non-marker envelope and is uncontended except during an i
 save. `Lone` and `Gate` in `DistributedSnapshotTest` are the shape for any test that needs the
 initiator interleaved with its own demux; T58's `MutableClock` does not replace `Gate`, which
 parks a thread rather than moving time.
+
+---
+
+## T52 - An invalid expiry answers -ERR, never drops the connection
+
+**Built:** `CommandParser` gained the one place it does time arithmetic, and every expiry-taking
+row now goes through it. `deadline(name) { ... }` runs the arithmetic an argument asks for and
+turns the two things `java.time` throws -- `ArithmeticException` from an overflowing sum,
+`DateTimeException` from an instant that does not exist -- into `Rejected`, so the client reads
+`-ERR invalid expire time in '<command>' command` and keeps its socket. `span(name, ttl)` adds
+the `SET` family's own rule on top: a zero or negative relative TTL is refused outright, and the
+sum the engine will later compute as `now + ttl` is checked here while it can still be a reply.
+`until(name) { ... }` is the old `EXAT`/`PXAT` helper with the same guard plus Redis's
+at-or-before-the-epoch refusal. Nothing else moved: `Command`, the engine, the dispatcher's
+routing and the RESP codec are untouched, and the connection handler needed no change because
+the parser is now total.
+
+**The rule, and which values are invalid.** The bound is the deadline as epoch milliseconds in a
+signed 64-bit. That is not `Instant`'s own range -- `Instant` reaches year ±1,000,000,000 -- but
+it is the bound Redis itself checks (`when > LLONG_MAX - basetime` in `expireGenericCommand`)
+and the one the engine's own WAL writes a deadline in (`WalCodec` calls
+`command.deadline.toEpochMilli()`, which throws past roughly year 292,278,994). Using the wider
+`Instant` range would have moved the crash from the parser into the WAL rather than removing it.
+
+Redis splits its expiry commands in two, and so does this:
+
+- `EXPIRE`, `PEXPIRE`, `EXPIREAT`, `PEXPIREAT` take **any** value they can hold. Zero and
+  negative are deadlines already past, which delete the key; Redis's own source says so in as
+  many words ("EXPIRE allows negative numbers"). Only an unrepresentable deadline is an error --
+  `EXPIRE k Long.MAX_VALUE`, `EXPIRE k Long.MIN_VALUE`, `PEXPIRE k Long.MAX_VALUE`,
+  `EXPIREAT k 99999999999999999`. `PEXPIREAT` cannot overflow at all: every `Long` is a
+  representable epoch-milli deadline, `Long.MAX_VALUE` exactly so, and a larger argument is
+  refused one step earlier as the integer it is too big to be.
+- `SET EX`/`PX`, `SETEX`, `PSETEX` refuse a **non-positive** span as well: zero, negative and
+  `Long.MIN_VALUE` are all `invalid expire time`, under the name the client typed (`'set'`,
+  `'setex'`, `'psetex'`).
+- `SET EXAT`/`PXAT` name an absolute time, so they refuse only at or before the epoch. A
+  deadline merely in the past is a deadline: the key is set and expires at once, as in Redis.
+
+**Acceptance:**
+- `C8_invalid_expire_answers_err_not_disconnect` (`DynaCacheServerTest`): thirteen bad expiry
+  arguments over one socket -- the four `EXPIRE` spellings out of range, and `SET EX`, `SET PX`
+  and `SETEX` at zero, negative and `Long.MAX_VALUE` -- each answer the exact Redis error, and
+  afterwards the same connection still answers `PING` and still holds the key untouched. It then
+  sends `EXPIRE k -1` and sees `:1` and a key that is gone, which is what the error must not
+  swallow.
+- `an unrepresentable expiry is Redis's error, not an exception` and `a non-positive TTL on the
+  SET family is Redis's error` (`CommandParserTest`): the two halves of the rule, message for
+  message.
+- `the EXPIRE family accepts zero and negative, as Redis does`: the boundary the ticket and
+  Redis disagree about, pinned to Redis.
+- `no expiry argument escapes the parser as an exception`: 2,000 random arguments -- uniform
+  `Long`, deep negatives, the four corners, small values -- across all ten expiry-taking shapes,
+  20,000 parses, none of which may throw.
+- `resp_fuzz_no_crash` extended: the fuzzer now emits well-formed expiry commands, and every
+  frame it decodes as a command is handed to a real `CommandParser`, so the decoder's fuzz is
+  the parser's fuzz too.
+- `mvn -o test -pl dynacache-server -am`: engine 147, cluster 83, cp 89, server 88 (was 83).
+  Every earlier test green.
+- This entry.
+
+**Deviations:** Four.
+1. **The ticket's first criterion is wrong about `EXPIRE`, and the spec wins.** It asks for the
+   error on zero and negative for all seven commands. Redis answers `:1` and deletes the key for
+   `EXPIRE k 0` and `EXPIRE k -1`; C8 is "byte-identical to what Redis returns", and the
+   ticket's own note already says a past absolute time is not invalid. Refusing them would also
+   have thrown away behaviour the engine has today and the ticket asks to keep. Implemented
+   Redis's split instead, and pinned it with a named test so the disagreement is visible rather
+   than silent.
+2. **`PEXPIREAT` has no error case**, for the same reason: its argument is already the unit the
+   bound is measured in. The socket test asserts the reply it does give, the not-an-integer
+   error, rather than pretending there is an expire-time error there.
+3. **One test-helper fix outside the parser.** `DynaCacheServerTest.withServer` built its engine
+   on a fixed clock but let `DynaCacheServer` default to `Clock.systemUTC()`, so the parser's
+   "now" and the engine's "now" were fifty-six years apart. No test had noticed, because none
+   had asserted anything about a deadline over the socket. It now passes the one clock, which is
+   what `main` does in production. No main-source change; every server test still green.
+4. **Size:** 270 lines added across four files, within the 200-to-600 budget.
+
+**For the next ticket:** two things this deliberately left alone. `cp.lock.try` and
+`cp.lock.renew` still take their lease through the bare `millis()` helper, so a zero or negative
+lease is accepted; that is CP lease semantics, not key expiry, and belongs with the CP verbs.
+And ticket 62 may delete `EXAT`/`PXAT` -- they are validated here on the same code path as the
+rest, so removing them removes two `until` call sites and nothing else.
+
+---
+
+## T53 - A connection's session cache clears on CLOSE
+
+**Built:** `CommandHandler` now forgets its memoised CP session once the group no longer has it,
+so a connection that closes its session and creates another gets a fresh one instead of the
+closed id (CP spec 4, bug 4 of the P6 review). Two places drop the cache, and only those two:
+`CP.SESSION.CLOSE sid` when `sid` is this connection's own session and the close answered `+OK`
+or `-NOSESSION` (`closeSession`, a new branch of `submit` ahead of the `Sessioned` one, since
+`SessionClose` is a `Command.Cp.Session` and used to fall straight through to the engine), and a
+session-bearing verb whose reply is `-NOSESSION`, meaning the session lapsed at a TTL tick
+between its creation and this verb (`onSession`). Both forget through `forgetSession`, which
+hops to the connection's event loop (`loop`, taken from `ctx.executor()` in `handlerAdded`) and
+compares the cached future by identity, so the field keeps its invariant -- only the event loop
+reads or writes it -- and a session created in between is left alone. The hop is enqueued from
+the `whenComplete` that wraps each reply, which is registered before `channelRead`'s drain hop,
+so the cache is cleared before the reply reaches the client and therefore before the client's
+next command is read. `session()`'s `usable` check is untouched: it still refuses to remember a
+create that failed. Nothing in the CP engine, the session registry, the dispatcher, the wire or
+the parser moved. Main-code diff: 51 lines in `DynaCacheServer.kt`.
+
+**Acceptance** (`CpSessionLifecycleTest`, the `CpRoutingTest` arrangement: a real `ApEngine`, a
+real three-member `CpTestKit` group, the socket in front of both, raw `RespClient`):
+- `session_create_after_close_returns_a_new_session`: CREATE, CLOSE, CREATE on one connection
+  gives two different ids and `CP.LOCK.TRY` on the second is granted. Red before the fix:
+  `CREATE after CLOSE handed back the closed session ==> expected: not equal but was: <1>`.
+- `session_verbs_after_close_use_the_new_session`: after the second CREATE, `CP.LOCK.TRY` is
+  taken and `CP.LOCK.STATE` reports the second session as the owner. Red before: the lock verb
+  answered `Reply.Error` (`-NOSESSION`) instead of the granted array.
+- `session_lapse_clears_the_cache`: the leader's `MutableClock` is advanced past the 15 s default
+  session timeout and `leader.tick()` is driven once, so the session lapses in log time (CP spec
+  5); the next `CP.LOCK.TRY` answers `-NOSESSION` once, the next CREATE gives a new id, and the
+  lock is then granted. No sleeps; the kit's injected clock does the waiting.
+- Offline `test -pl dynacache-server -am`: engine, cluster, cp 89, server 86 (83 + 3), all green.
+
+**Deviations:**
+1. **The lapse test runs at the socket, not at a stubbed seam.** The ticket allowed a
+   dispatcher-level stub if a server-level test could not reach a member's clock. It can:
+   `CpTestKit.clock(kit.leader().config.nodeId)` and `RaftRuntime.tick()` are both public and the
+   server under test is built on `kit.leaderEngine()`, so the real lapse path is exercised end to
+   end. No stub was needed.
+2. **`BugHuntCpCompatTest` was not copied over.** Its `session_create_after_close_...` case is
+   reproduced as the first named test above; the `cp:ref:` TTL case in the same file belongs to
+   T54 and was left where it is.
+3. **A CLOSE that answers something else leaves the cache standing.** `-NOTLEADER` (a leader that
+   moved mid-close) does not end the session, so forgetting it there would orphan a live session
+   holding locks until it lapsed. The client retries the close against the new leader, which then
+   answers `+OK` and clears the cache.
+
+**Known limitation, not fixed here:** a `CP.SESSION.CLOSE` inside `MULTI` does not clear the
+cache. Buffered commands run through `atomically` and never pass `submit`, so the handler never
+sees the close. The repair is to check the buffer for a `SessionClose` on the way out of `exec`,
+and it is worth doing only if CP verbs inside transactions become a supported combination.
+
+**For the next ticket:** T44's debt is still open and this ticket does not touch it -- a
+connection's CP session is still never closed when the socket closes, only left to expire by
+heartbeat timeout. Closing it on `channelInactive` would make `sem_session_death_releases`
+deterministic (T44) and would let P5 kill the holder's connection and watch the lock fall free
+(T46 deviation 2). It is a separate concern from this one: T53 is about the handler's cache while
+the connection lives, `channelInactive` is about the session outliving the connection. The two
+would meet in the same field, so whoever takes it should reuse `forgetSession` for the clearing
+half. The README's known-debts list still carries the `channelInactive` entry and should keep it.
+
+---
+
+## T56 - Settle the batch cross-partition error
+
+**Decision, and why the kind stays.** A batch whose keys span partitions now answers
+`-CROSSSLOT keys of a batch must share a partition (use a hash tag)`. The error KIND is
+unchanged and deliberately so: `CROSSSLOT` is what Redis client libraries switch on, and the
+"considered and rejected" line in ADR 0002 rejected `-CROSSSLOT` for fan-out commands like
+`MGET`, which DynaCache serves by fanning out to the partitions involved. A batch is the
+opposite case: it declares its keys, it must run on one executor with nothing interleaved
+(C12), and when the keys span partitions there is genuinely nothing to fan out, so the refusal
+is real. Only the message text was wrong. It spoke Redis Cluster's vocabulary ("hash to the
+same slot") in a project whose glossary bans "slot" and whose remedy is a hash tag, so it named
+neither the real constraint nor the fix. The new wording is the glossary's own: partition, and
+hash tag.
+
+**What changed.** One source of truth, so one edit reached all three paths. The message lives
+in `CrossPartitionBatch.error` in
+`DynaCache/dynacache-engine/src/main/kotlin/dynacache/engine/CommandEngine.kt`; the engine fails
+the batch future with that exception, and `orBatchError()` in `DynaCacheServer.kt` unwraps it
+for both the MULTI/EXEC path and the EVAL path (`Lua.kt` calls the same helper). No Lua bridge
+line re-renders the text: an EVAL that spans partitions is refused before the script starts, so
+the reply never round-trips through a Lua table. The round-trip was checked anyway for the
+`redis.call` path, where `Reply.Error` becomes `err = "$kind $message"` and is split back at the
+first space -- the new message has no leading space and no format character, so kind and message
+survive intact. Three comment lines above the error record why the kind stays. ADR 0002 gained a
+paragraph saying the rejection covers fan-out commands only and that a batch still answers the
+kind. Three pinned tests updated: `CommandEngineTest` (the constant, renamed `CROSS_SLOT` to
+`CROSS_PARTITION`, plus its one use), `DynaCacheServerTest.multi_exec_cross_partition_rejected`,
+`LuaTest.lua_cross_partition_rejected`.
+
+**Grep proof, with one honest deviation.** `grep -rni slot` under `DynaCache/` for `.kt`, `.md`,
+`.lua`, `.java` and `.xml`, excluding `CROSSSLOT`, leaves no use of "slot" in the partition
+sense. What remains is three unrelated senses, and the ticket's box as literally worded ("the
+word slot appears nowhere") cannot be met without changes the seams forbid:
+
+- `CONTEXT.md` lines 35 and 198: `_Avoid_: shard, slot, bucket`. This is the glossary declaring
+  the ban; deleting the word would delete the rule.
+- `ds/TimerWheel.kt` and `ds/CountMinSketch.kt`: a timer-wheel bucket and a sketch counter cell.
+  "Slot" is the standard name in both data structures and has nothing to do with partitions.
+  Renaming a `slots` constructor parameter is a code change outside this ticket's seams.
+- `CommandParserTest.kt:467` and `RespFuzzTest.kt:11`: "the slot a random expiry argument goes
+  in", meaning an argument position.
+
+Since the literal box is unreachable while `TimerWheel` keeps its slots, partially chasing it
+would add diff without satisfying it, so nothing outside the partition sense was touched. Read
+as the glossary means it, the box is met: "slot" now names a partition nowhere in DynaCache.
+
+**Tests.** Red first: the `CommandEngineTest` pin was updated ahead of the engine and failed on
+the old text (`Tests run: 63, Failures: 1`), then passed once `CrossPartitionBatch.error` was
+reworded. Full run `-pl dynacache-server -am`: engine 147, cluster 85, cp 89, server 91, all
+green, counts unchanged as required -- this was wording only, so no test was added or removed.
+Diff is 4 files, well inside the size budget.

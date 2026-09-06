@@ -12,16 +12,16 @@ session when that session is closed through it, and also when the CP engine answ
 
 **Nature:** session lifecycle, CP spec 4 (Opus)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache 485b5bc0, merged into misc/ai_gen)
 
-- [ ] `session_create_after_close_returns_a_new_session`: CREATE, CLOSE, CREATE on one
+- [x] `session_create_after_close_returns_a_new_session`: CREATE, CLOSE, CREATE on one
       connection yields two different ids and the second is usable
-- [ ] `session_verbs_after_close_use_the_new_session`: a lock taken after the second CREATE
+- [x] `session_verbs_after_close_use_the_new_session`: a lock taken after the second CREATE
       is held by the new session, and STATE reports it
-- [ ] `session_lapse_clears_the_cache`: after the session lapses at a TTL tick, the next verb
+- [x] `session_lapse_clears_the_cache`: after the session lapses at a TTL tick, the next verb
       answers `-NOSESSION` once and the next CREATE succeeds
-- [ ] Every existing session and P5 acceptance test passes
-- [ ] Progress entry appended
+- [x] Every existing session and P5 acceptance test passes
+- [x] Progress entry appended
 
 A red test for this exists in the review worktree `kp-wt/review` under the server module's
 test tree (`BugHuntCpCompatTest`); reuse it if present, otherwise rewrite it from the first

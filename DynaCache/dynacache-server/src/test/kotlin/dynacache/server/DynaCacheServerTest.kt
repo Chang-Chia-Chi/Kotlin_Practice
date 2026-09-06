@@ -103,7 +103,7 @@ class DynaCacheServerTest {
 
                 client.send("EXEC")
                 assertEquals(
-                    Reply.Error("CROSSSLOT", "Keys in request don't hash to the same slot"),
+                    Reply.Error("CROSSSLOT", "keys of a batch must share a partition (use a hash tag)"),
                     client.read(),
                 )
                 client.send("GET", here)

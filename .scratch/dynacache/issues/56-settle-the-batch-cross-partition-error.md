@@ -14,14 +14,14 @@ only. The three tests pinning the old message are updated.
 
 **Nature:** batch semantics, C12 (Opus)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache 5cf48fd7, merged into misc/ai_gen)
 
-- [ ] The engine, the server and the Lua bridge all answer the new message for a batch that
+- [x] The engine, the server and the Lua bridge all answer the new message for a batch that
       spans partitions; the pinned tests assert the new wording and the kind
-- [ ] ADR 0002's "Considered and rejected" paragraph gains the one-line clarification
-- [ ] The word "slot" appears nowhere in DynaCache main sources, tests or CONTEXT.md except
+- [x] ADR 0002's "Considered and rejected" paragraph gains the one-line clarification
+- [x] The word "slot" appears nowhere in DynaCache main sources, tests or CONTEXT.md except
       inside the `CROSSSLOT` error kind itself
-- [ ] Progress entry appended
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket; 200 to 600 lines including tests;
 JUnit 5 + Mockito only, no AssertJ or MockK; no sleeps, time is an injected Clock; spec-named

@@ -1207,7 +1207,7 @@ class CommandEngineTest {
         val failure = assertThrows(ExecutionException::class.java) { rejected.get(5, TimeUnit.SECONDS) }
         val cause = failure.cause
         assertTrue(cause is CrossPartitionBatch, "the span is what refused it, got $cause")
-        assertEquals(CROSS_SLOT, (cause as CrossPartitionBatch).error)
+        assertEquals(CROSS_PARTITION, (cause as CrossPartitionBatch).error)
         assertFalse(ran.get(), "the block never ran")
         assertEquals(Reply.Bulk(null), run(Command.Get(here)), "so nothing was written")
     }
@@ -1253,7 +1253,7 @@ class CommandEngineTest {
         val INDEX_OUT_OF_RANGE = Reply.Error("ERR", "index out of range")
         val NOT_AN_INTEGER = Reply.Error("ERR", "value is not an integer or out of range")
         val WRONG_TYPE = Reply.Error("WRONGTYPE", "Operation against a key holding the wrong kind of value")
-        val CROSS_SLOT = Reply.Error("CROSSSLOT", "Keys in request don't hash to the same slot")
+        val CROSS_PARTITION = Reply.Error("CROSSSLOT", "keys of a batch must share a partition (use a hash tag)")
     }
 
     @Test
