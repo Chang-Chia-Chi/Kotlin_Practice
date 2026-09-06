@@ -1,0 +1,209 @@
+syntax = "proto3";
+
+package dynacache.cluster.proto;
+
+option java_package = "dynacache.cluster.proto";
+option java_multiple_files = true;
+
+// The one message that crosses the Transport seam. Later tickets add their own bodies to
+// the oneof (T19 Forward/ForwardReply, T22 replication); the generated classes are the
+// cluster's message model and no codec exists (CONTEXT.md "transport").
+// Body field numbers 10..99 are taken ticket by ticket; 100 and above are reserved for
+// later tickets.
+message Envelope {
+  string from = 1;
+  string to = 2;
+  // SWIM piggyback (T20): the sender's whole membership table rides on every message.
+  repeated MembershipEntry membership = 3;
+  oneof body {
+    Ping ping = 10;
+    Ack ack = 11;
+    PingReq ping_req = 12;
+    Forward forward = 13;
+    ForwardReply forward_reply = 14;
+    Replicate replicate = 15;
+    ReplicateAck replicate_ack = 16;
+    Read read = 17;
+    ReadReply read_reply = 18;
+    Marker marker = 19;
+    MerkleRoot merkle_root = 20;
+    MerkleRootReply merkle_root_reply = 21;
+    KeySync key_sync = 22;
+    KeySyncReply key_sync_reply = 23;
+    // Read repair (T26): the winning Version pushed to a replica behind it; an empty value is a
+    // tombstone (the winner holds nothing under that version).
+    Version replicate_value = 24;
+    Repair repair = 25;
+  }
+}
+
+// Anti-entropy's first exchange (spec 2.4, T28): the sender's Merkle root over one vnode range,
+// named by its index in the ring both sides share.
+message MerkleRoot {
+  int64 id = 1;
+  int32 vnode = 2;
+  bytes root = 3;
+}
+
+// The receiver's root over the same range and, only when the roots differ, every leaf of its
+// tree so the sender can diff and name the divergent keys.
+message MerkleRootReply {
+  int64 id = 1;
+  bytes root = 2;
+  repeated Leaf leaf = 3;
+}
+
+// One key's contribution to a Merkle tree: what MerkleLeaf holds, on the wire.
+message Leaf {
+  bytes key = 1;
+  bytes value_hash = 2;
+  bytes dvv = 3;
+}
+
+// One key's version as replicas exchange it: the engine's value encoding, the DVV, and the TTL
+// as an absolute instant (0: none), the same rule Replicate follows.
+message Version {
+  bytes key = 1;
+  bytes value = 2;
+  bytes dvv = 3;
+  int64 expires_at_millis = 4;
+}
+
+// The divergent keys of one range, and the sender's version of each one it holds. The receiver
+// applies spec 5.3 to each and answers with what it still holds of its own.
+message KeySync {
+  int64 id = 1;
+  repeated bytes key = 2;
+  repeated Version version = 3;
+}
+
+message KeySyncReply {
+  int64 id = 1;
+  repeated Version version = 2;
+}
+
+// The coordinator's write to one replica (spec 5.1 step 5): the command's tokens with NX/XX
+// and the TTL already decided by the coordinator, the version the write created, and the TTL
+// as an absolute instant so clock skew between replicas cannot shorten or stretch it (spec 5.4).
+message Replicate {
+  int64 id = 1;
+  repeated bytes token = 2;
+  bytes dvv = 3;
+  // Unix millis; 0 when the key has no TTL.
+  int64 expires_at_millis = 4;
+  // Sloppy quorum (spec 2.4, T25): set when the receiver stands in for this dead preference-list
+  // node. It stores the whole message as a hint instead of applying it, and acks toward W.
+  string hint_for = 5;
+}
+
+// A replica's acknowledgement of a Replicate, under the same id; one per node counts (C4).
+message ReplicateAck {
+  int64 id = 1;
+}
+
+// The coordinator's read on one replica (spec 5.2 step 2): the read command's tokens, run
+// there as they are, so every read command replicates without a per-type message.
+message Read {
+  int64 id = 1;
+  repeated bytes token = 2;
+}
+
+// A replica's answer to a Read: its reply and the version it answered from (empty: none held).
+message ReadReply {
+  int64 id = 1;
+  ReplyMsg reply = 2;
+  bytes dvv = 3;
+}
+
+// A Chandy-Lamport marker (spec 2.8): the first one a node sees for `snapshot_id` makes it
+// record its state and send its own markers; every one closes the channel it arrived on.
+message Marker {
+  string snapshot_id = 1;
+}
+
+// Read repair (spec 5.2 step 5, T26): the coordinator's request to the replica that won a read
+// to push its Version of `key` to `target`, the replicas the read found behind. Only the winner
+// holds the value, so it sends; a replica applies a Version only when it dominates what it holds.
+message Repair {
+  bytes key = 1;
+  repeated string target = 2;
+}
+
+// A command a contact node hands to the key's coordinator (spec 5.1 step 3). The tokens are
+// the client's own frame, so the coordinator's parser reads them exactly as the contact's
+// would have and no second encoding of a command exists.
+message Forward {
+  // Unique per sending router; the ForwardReply carries it back so the request finds its future.
+  int64 id = 1;
+  repeated bytes token = 2;
+}
+
+// The coordinator's answer to a Forward, under the same id.
+message ForwardReply {
+  int64 id = 1;
+  ReplyMsg reply = 2;
+}
+
+// A `Reply` on the wire, in exactly the five RESP2 shapes the engine answers in. A structured
+// message rather than a RESP blob: RESP lives in the server module, and protobuf is the
+// cluster's message model (ADR 0001).
+message ReplyMsg {
+  oneof kind {
+    string simple = 1;
+    ErrorReply error = 2;
+    int64 integer = 3;
+    BulkReply bulk = 4;
+    ArrayReply array = 5;
+  }
+}
+
+message ErrorReply {
+  string kind = 1;
+  string message = 2;
+}
+
+// `nil` tells a nil bulk from an empty one, which proto3 cannot do with `bytes` alone.
+message BulkReply {
+  bool nil = 1;
+  bytes value = 2;
+}
+
+message ArrayReply {
+  repeated ReplyMsg item = 1;
+}
+
+message Ping {
+  int64 seq = 1;
+}
+
+message Ack {
+  int64 seq = 1;
+}
+
+// "Ping `target` for me and ack back under `seq`" (SWIM indirect probe).
+message PingReq {
+  int64 seq = 1;
+  string target = 2;
+}
+
+message MembershipEntry {
+  enum State {
+    ALIVE = 0;
+    SUSPECT = 1;
+    DEAD = 2;
+  }
+  string node = 1;
+  State state = 2;
+  int64 incarnation = 3;
+}
+
+// The cluster-facing service (spec 2.3). Unary rather than client-streaming: one call carries
+// one envelope and its acceptance, which is all the Transport seam promises, and a stream would
+// add a lifecycle and a reconnect policy that nothing yet asks for.
+service ClusterService {
+  rpc Deliver(Envelope) returns (Delivered);
+}
+
+// Deliver's acknowledgement. The transport carries no reply of its own; a reply to an envelope
+// is another envelope (T19).
+message Delivered {}

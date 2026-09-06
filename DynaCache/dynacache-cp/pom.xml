@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+    <modelVersion>4.0.0</modelVersion>
+    <parent>
+        <groupId>dynacache</groupId>
+        <artifactId>dynacache-parent</artifactId>
+        <version>0.1.0-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>dynacache-cp</artifactId>
+    <name>DynaCache CP (Raft-backed linearizable primitives)</name>
+
+    <dependencies>
+        <dependency>
+            <groupId>dynacache</groupId>
+            <artifactId>dynacache-cluster</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>io.microraft</groupId>
+            <artifactId>microraft</artifactId>
+            <version>${microraft.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.mockito</groupId>
+            <artifactId>mockito-core</artifactId>
+        </dependency>
+    </dependencies>
+    <build>
+        <extensions>
+            <extension>
+                <groupId>kr.motd.maven</groupId>
+                <artifactId>os-maven-plugin</artifactId>
+                <version>1.7.1</version>
+            </extension>
+        </extensions>
+        <plugins>
+            <!-- The CP test kit (a three-member in-process group) is what the server module's
+                 routing tests run a real CP engine on, so the tests are published as a jar. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <version>3.4.1</version>
+                <executions>
+                    <execution>
+                        <goals><goal>test-jar</goal></goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <!-- Same generator wiring as the cluster module (T23): protoc plus the grpc-java
+                 generator, with the jar-based grpc-kotlin generator launched inside the
+                 protobuf-java execution so the coroutine stubs land next to the messages. -->
+            <plugin>
+                <groupId>org.xolstice.maven.plugins</groupId>
+                <artifactId>protobuf-maven-plugin</artifactId>
+                <version>0.6.1</version>
+                <configuration>
+                    <protocArtifact>com.google.protobuf:protoc:${protobuf.version}:exe:${os.detected.classifier}</protocArtifact>
+                    <protocPlugins>
+                        <protocPlugin>
+                            <id>grpc-kotlin</id>
+                            <groupId>io.grpc</groupId>
+                            <artifactId>protoc-gen-grpc-kotlin</artifactId>
+                            <version>${grpc-kotlin.version}</version>
+                            <classifier>jdk8</classifier>
+                            <mainClass>io.grpc.kotlin.generator.GeneratorRunner</mainClass>
+                            <winJvmDataModel>64</winJvmDataModel>
+                        </protocPlugin>
+                    </protocPlugins>
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>protobuf-java</id>
+                        <goals><goal>compile</goal></goals>
+                    </execution>
+                    <execution>
+                        <id>grpc-java</id>
+                        <goals><goal>compile-custom</goal></goals>
+                        <configuration>
+                            <pluginId>grpc-java</pluginId>
+                            <pluginArtifact>io.grpc:protoc-gen-grpc-java:${grpc.version}:exe:${os.detected.classifier}</pluginArtifact>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>

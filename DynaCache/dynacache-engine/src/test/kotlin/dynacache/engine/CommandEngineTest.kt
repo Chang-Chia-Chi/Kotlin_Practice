@@ -1,0 +1,1264 @@
+package dynacache.engine
+
+import org.junit.jupiter.api.AfterEach
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNotEquals
+import org.junit.jupiter.api.Assertions.assertNotSame
+import org.junit.jupiter.api.Assertions.assertSame
+import org.junit.jupiter.api.Assertions.assertThrows
+import org.junit.jupiter.api.Assertions.assertTrue
+import org.junit.jupiter.api.Test
+import org.junit.jupiter.params.ParameterizedTest
+import org.junit.jupiter.params.provider.EnumSource
+import java.time.Clock
+import java.time.Duration
+import java.time.Instant
+import java.time.ZoneId
+import java.time.ZoneOffset
+import java.util.Collections
+import java.util.Random
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.Semaphore
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+
+class CommandEngineTest {
+
+    /** Time moves only when a test says so; the partition thread reads it, hence volatile. */
+    private class MutableClock(@Volatile var now: Instant) : Clock() {
+        override fun instant(): Instant = now
+        override fun getZone(): ZoneId = ZoneOffset.UTC
+        override fun withZone(zone: ZoneId): Clock = this
+    }
+
+    private val clock = MutableClock(Instant.parse("2026-09-06T00:00:00Z"))
+    private val engine = ApEngine(partitionCount = 4, clock = clock, random = Random(20260906))
+
+    @AfterEach
+    fun close() = engine.close()
+
+    private fun run(command: Command, on: ApEngine = engine): Reply = on.submit(command).get()
+
+    private fun info(on: ApEngine = engine): String =
+        (run(Command.Info, on) as Reply.Bulk).bytes!!.toString(Charsets.ISO_8859_1)
+
+    /** The bytes `INFO` says the node holds, summed over its partitions. */
+    private fun usedMemory(on: ApEngine = engine): Long =
+        info(on).lineSequence().first { it.startsWith(USED_MEMORY) }.removePrefix(USED_MEMORY).toLong()
+
+    /** The keys `KEYS pattern` answers with, as text; a set, since the order is unspecified. */
+    private fun keys(pattern: String): Set<String> {
+        val items = (run(Command.Keys(pattern.toByteArray())) as Reply.Array).items
+        val names = items.map { (it as Reply.Bulk).bytes!!.toString(Charsets.ISO_8859_1) }
+        assertEquals(names.size, names.toSet().size, "KEYS reports each key once")
+        return names.toSet()
+    }
+
+    private fun bulks(vararg values: String): Reply =
+        Reply.Array(values.map { Reply.Bulk(it.toByteArray()) })
+
+    private fun push(key: Key, end: Command.End, vararg values: String): Command =
+        Command.Push(key, values.map { it.toByteArray() }, end)
+
+    /** A key the engine puts on a different partition than [key]. */
+    private fun otherPartitionThan(key: Key, of: ApEngine = engine): Key =
+        (0..99).map { Key("z$it") }.first { of.partitionOf(it) != of.partitionOf(key) }
+
+    @Test
+    fun string_set_get_roundtrip() {
+        assertEquals(Reply.Simple("OK"), run(Command.Set(Key("k"), "v".toByteArray())))
+        assertEquals(Reply.Bulk("v".toByteArray()), run(Command.Get(Key("k"))))
+    }
+
+    @Test
+    fun string_set_nx_rejects_existing() {
+        run(Command.Set(Key("k"), "old".toByteArray()))
+        assertEquals(Reply.Bulk(null), run(Command.Set(Key("k"), "new".toByteArray(), Command.Set.Condition.NX)))
+        assertEquals(Reply.Bulk("old".toByteArray()), run(Command.Get(Key("k"))))
+    }
+
+    @Test
+    fun string_set_xx_rejects_missing() {
+        assertEquals(Reply.Bulk(null), run(Command.Set(Key("k"), "v".toByteArray(), Command.Set.Condition.XX)))
+        assertEquals(Reply.Bulk(null), run(Command.Get(Key("k"))))
+    }
+
+    @Test
+    fun string_set_ex_expires() {
+        run(Command.Set(Key("k"), "v".toByteArray(), ttl = Duration.ofSeconds(1)))
+        clock.now += Duration.ofMillis(999)
+        tick()
+        assertEquals(Reply.Bulk("v".toByteArray()), run(Command.Get(Key("k"))))
+        clock.now += Duration.ofMillis(2)
+        tick()
+        assertEquals(Reply.Bulk(null), run(Command.Get(Key("k"))))
+    }
+
+    @Test
+    fun string_incr_atomic() {
+        run(Command.Set(Key("n"), "10".toByteArray()))
+        assertEquals(Reply.Integer(11), run(Command.IncrBy(Key("n"), 1)))
+        assertEquals(Reply.Bulk("11".toByteArray()), run(Command.Get(Key("n"))), "the stored value is the new number")
+        assertEquals(Reply.Integer(1), run(Command.IncrBy(Key("fresh"), 1)), "a missing key counts as 0")
+        assertEquals(Reply.Integer(-1), run(Command.IncrBy(Key("down"), -1)))
+        run(Command.Set(Key("s"), "abc".toByteArray()))
+        assertEquals(NOT_AN_INTEGER, run(Command.IncrBy(Key("s"), 1)))
+        assertEquals(Reply.Bulk("abc".toByteArray()), run(Command.Get(Key("s"))), "the rejected INCR left the value alone")
+    }
+
+    @Test
+    fun `APPEND extends the value and replies with the new length, STRLEN measures it`() {
+        assertEquals(Reply.Integer(0), run(Command.StrLen(Key("k"))), "a missing key is empty")
+        assertEquals(Reply.Integer(2), run(Command.Append(Key("k"), "he".toByteArray())))
+        assertEquals(Reply.Integer(5), run(Command.Append(Key("k"), "llo".toByteArray())))
+        assertEquals(Reply.Bulk("hello".toByteArray()), run(Command.Get(Key("k"))))
+        assertEquals(Reply.Integer(5), run(Command.StrLen(Key("k"))))
+    }
+
+    @Test
+    fun mget_spans_partitions() {
+        val here = Key("a")
+        val elsewhere = otherPartitionThan(here)
+        assertNotEquals(engine.partitionOf(here), engine.partitionOf(elsewhere))
+        run(Command.Set(here, "va".toByteArray()))
+        run(Command.Set(elsewhere, "vb".toByteArray()))
+        assertEquals(
+            Reply.Array(listOf(Reply.Bulk("va".toByteArray()), Reply.Bulk(null), Reply.Bulk("vb".toByteArray()))),
+            run(Command.MGet(listOf(here, Key("missing"), elsewhere))),
+            "one array in argument order, nil for the missing key",
+        )
+    }
+
+    @Test
+    fun `MSET writes every key and DEL and EXISTS count across partitions`() {
+        val here = Key("a")
+        val elsewhere = otherPartitionThan(here)
+        assertEquals(Reply.Simple("OK"), run(Command.MSet(listOf(here to "va".toByteArray(), elsewhere to "vb".toByteArray()))))
+        assertEquals(Reply.Bulk("va".toByteArray()), run(Command.Get(here)))
+        assertEquals(Reply.Bulk("vb".toByteArray()), run(Command.Get(elsewhere)))
+        assertEquals(Reply.Integer(2), run(Command.ExistsKeys(listOf(here, elsewhere, Key("missing")))))
+        assertEquals(Reply.Integer(2), run(Command.DelKeys(listOf(here, elsewhere, Key("missing")))))
+        assertEquals(Reply.Integer(0), run(Command.ExistsKeys(listOf(here, elsewhere))))
+    }
+
+    /** Parks the first command that runs on one named partition thread, until [release]. */
+    private class ParkingClock : Clock() {
+        val entered = Semaphore(0)
+        private val gate = CountDownLatch(1)
+
+        @Volatile
+        private var parked: String? = null
+
+        fun park(threadName: String) {
+            parked = threadName
+        }
+
+        fun release() = gate.countDown()
+
+        override fun instant(): Instant {
+            if (Thread.currentThread().name == parked) {
+                parked = null
+                entered.release()
+                check(gate.await(5, TimeUnit.SECONDS)) { "never released" }
+            }
+            return Instant.EPOCH
+        }
+
+        override fun getZone(): ZoneId = ZoneOffset.UTC
+        override fun withZone(zone: ZoneId): Clock = this
+    }
+
+    /**
+     * Pins ADR 0002. The gate parks the MGET's first part, and the fan-out has not reached the
+     * other partition yet, so a whole MSET lands there in the gap. The reply then mixes the
+     * value of one key from before that write with the other from after it: an outcome neither
+     * an atomic MGET nor an atomic MSET could produce.
+     */
+    @Test
+    fun mget_across_partitions_is_not_atomic() {
+        val gate = ParkingClock()
+        val engine = ApEngine(partitionCount = 2, clock = gate)
+        try {
+            val x = Key("x")
+            val y = otherPartitionThan(x, engine)
+            engine.submit(Command.MSet(listOf(x to "old".toByteArray(), y to "old".toByteArray()))).get()
+
+            gate.park("partition-${engine.partitionOf(x).index}")
+            val read = engine.submit(Command.MGet(listOf(x, y)))
+            assertTrue(gate.entered.tryAcquire(5, TimeUnit.SECONDS), "the MGET parked on x's partition")
+
+            // y first, so this write reaches y's partition while the MGET is still parked on x's.
+            val write = engine.submit(Command.MSet(listOf(y to "new".toByteArray(), x to "new".toByteArray())))
+            assertEquals(
+                Reply.Bulk("new".toByteArray()),
+                engine.submit(Command.Get(y)).get(5, TimeUnit.SECONDS),
+                "the write reached y's partition",
+            )
+            assertFalse(read.isDone, "the MGET has not reached y's partition yet")
+
+            gate.release()
+            assertEquals(
+                Reply.Array(listOf(Reply.Bulk("old".toByteArray()), Reply.Bulk("new".toByteArray()))),
+                read.get(5, TimeUnit.SECONDS),
+                "x from before the write, y from after it",
+            )
+            write.get(5, TimeUnit.SECONDS)
+        } finally {
+            engine.close()
+        }
+    }
+
+    @Test
+    fun hash_field_independence() {
+        val h = Key("h")
+        assertEquals(
+            Reply.Integer(2),
+            run(Command.HSet(h, listOf("a".toByteArray() to "1".toByteArray(), "b".toByteArray() to "2".toByteArray()))),
+            "both fields are new",
+        )
+        assertEquals(
+            Reply.Integer(0),
+            run(Command.HSet(h, listOf("a".toByteArray() to "9".toByteArray()))),
+            "an overwrite adds no new field",
+        )
+        assertEquals(Reply.Bulk("9".toByteArray()), run(Command.HGet(h, "a".toByteArray())))
+        assertEquals(Reply.Bulk("2".toByteArray()), run(Command.HGet(h, "b".toByteArray())), "the other field is untouched")
+        assertEquals(Reply.Bulk(null), run(Command.HGet(h, "c".toByteArray())), "a missing field is nil")
+        assertEquals(Reply.Bulk(null), run(Command.HGet(Key("none"), "a".toByteArray())), "a missing key is nil")
+    }
+
+    @Test
+    fun hash_getall_complete() {
+        val h = Key("h")
+        assertEquals(Reply.Array(emptyList()), run(Command.HGetAll(h)), "a missing hash is an empty array")
+        run(Command.HSet(h, listOf("a".toByteArray() to "1".toByteArray(), "b".toByteArray() to "2".toByteArray())))
+        // Redis defines no order for HGETALL, and the T05 table walks its buckets, so the pairs
+        // are compared as a set.
+        val flat = (run(Command.HGetAll(h)) as Reply.Array).items
+        assertEquals(
+            setOf(bulks("a", "1"), bulks("b", "2")),
+            flat.chunked(2).map { Reply.Array(it) }.toSet(),
+            "every field and its value, flat and in one array",
+        )
+    }
+
+    @Test
+    fun `HDEL removes fields and the key goes with its last field`() {
+        val h = Key("h")
+        run(Command.HSet(h, listOf("a".toByteArray() to "1".toByteArray(), "b".toByteArray() to "2".toByteArray())))
+        assertEquals(
+            Reply.Integer(1),
+            run(Command.HDel(h, listOf("a".toByteArray(), "gone".toByteArray()))),
+            "only the field that was there counts",
+        )
+        assertEquals(Reply.Simple("hash"), run(Command.Type(h)), "the hash is still here with one field left")
+        assertEquals(Reply.Integer(1), run(Command.HDel(h, listOf("b".toByteArray()))))
+        assertEquals(Reply.Simple("none"), run(Command.Type(h)), "the empty hash is gone, as in Redis")
+        assertEquals(Reply.Integer(0), run(Command.HDel(h, listOf("a".toByteArray()))), "a missing key deletes nothing")
+    }
+
+    @Test
+    fun `HMSET, HMGET, HEXISTS, HKEYS, HVALS and HLEN reply in Redis shapes`() {
+        val h = Key("h")
+        val a = "a".toByteArray()
+        val b = "b".toByteArray()
+        val gone = "gone".toByteArray()
+        assertEquals(Reply.Integer(0), run(Command.HLen(h)), "a missing key has no fields")
+        assertEquals(Reply.Array(listOf(Reply.Bulk(null))), run(Command.HMGet(h, listOf(a))), "one nil per field asked for")
+        assertEquals(
+            Reply.Simple("OK"),
+            run(Command.HMSet(h, listOf(a to "1".toByteArray(), b to "2".toByteArray()))),
+        )
+        assertEquals(Reply.Integer(2), run(Command.HLen(h)))
+        assertEquals(Reply.Integer(1), run(Command.HExists(h, a)))
+        assertEquals(Reply.Integer(0), run(Command.HExists(h, gone)))
+        assertEquals(
+            Reply.Array(listOf(Reply.Bulk("1".toByteArray()), Reply.Bulk(null), Reply.Bulk("2".toByteArray()))),
+            run(Command.HMGet(h, listOf(a, gone, b))),
+            "in the order the fields were asked for",
+        )
+        // HKEYS and HVALS come out in the table's bucket order, which Redis leaves undefined too.
+        assertEquals(setOf(Reply.Bulk(a), Reply.Bulk(b)), (run(Command.HKeys(h)) as Reply.Array).items.toSet())
+        assertEquals(
+            setOf(Reply.Bulk("1".toByteArray()), Reply.Bulk("2".toByteArray())),
+            (run(Command.HVals(h)) as Reply.Array).items.toSet(),
+        )
+    }
+
+    /** The C13 mechanism; T04's `C13_wrongtype_leaves_value_intact` names it for List. */
+    @Test
+    fun `a command meant for another kind is refused without touching the key`() {
+        val s = Key("s")
+        val h = Key("h")
+        run(Command.Set(s, "v".toByteArray()))
+        assertEquals(WRONG_TYPE, run(Command.HGet(s, "f".toByteArray())))
+        assertEquals(WRONG_TYPE, run(Command.HSet(s, listOf("f".toByteArray() to "1".toByteArray()))))
+        assertEquals(Reply.Bulk("v".toByteArray()), run(Command.Get(s)), "the String is intact")
+
+        run(Command.HSet(h, listOf("f".toByteArray() to "1".toByteArray())))
+        assertEquals(WRONG_TYPE, run(Command.Get(h)))
+        assertEquals(WRONG_TYPE, run(Command.IncrBy(h, 1)))
+        assertEquals(WRONG_TYPE, run(Command.Append(h, "x".toByteArray())))
+        assertEquals(WRONG_TYPE, run(Command.StrLen(h)))
+        assertEquals(Reply.Simple("hash"), run(Command.Type(h)), "TYPE answers for any kind")
+        assertEquals(Reply.Integer(1), run(Command.Exists(h)), "EXISTS answers for any kind")
+        assertEquals(Reply.Bulk("1".toByteArray()), run(Command.HGet(h, "f".toByteArray())), "the Hash is intact")
+        assertEquals(
+            Reply.Array(listOf(Reply.Bulk(null))),
+            run(Command.MGet(listOf(h))),
+            "MGET answers nil for a key that is not a String, as Redis does, rather than an error",
+        )
+        assertEquals(Reply.Simple("OK"), run(Command.Set(h, "v".toByteArray())), "SET replaces a key of any kind")
+    }
+
+    @Test
+    fun keys_with_same_hash_tag_share_a_partition() {
+        assertEquals(engine.partitionOf(Key("{user1}.a")), engine.partitionOf(Key("{user1}.b")))
+        assertEquals(engine.partitionOf(Key("{user1}")), engine.partitionOf(Key("x{user1}y")))
+    }
+
+    @Test
+    fun `DEL replies 1 for a deleted key and 0 for a missing one`() {
+        run(Command.Set(Key("k"), "v".toByteArray()))
+        assertEquals(Reply.Integer(1), run(Command.Del(Key("k"))))
+        assertEquals(Reply.Integer(0), run(Command.Del(Key("k"))))
+        assertEquals(Reply.Bulk(null), run(Command.Get(Key("k"))))
+    }
+
+    @Test
+    fun `EXISTS replies 1 for a live key and 0 for a missing or expired one`() {
+        assertEquals(Reply.Integer(0), run(Command.Exists(Key("k"))))
+        run(Command.Set(Key("k"), "v".toByteArray(), ttl = Duration.ofMillis(5)))
+        assertEquals(Reply.Integer(1), run(Command.Exists(Key("k"))))
+        clock.now += Duration.ofMillis(6)
+        assertEquals(Reply.Integer(0), run(Command.Exists(Key("k"))))
+    }
+
+    @Test
+    fun `TYPE replies string for a String key and none for a missing one`() {
+        run(Command.Set(Key("k"), "v".toByteArray()))
+        assertEquals(Reply.Simple("string"), run(Command.Type(Key("k"))))
+        assertEquals(Reply.Simple("none"), run(Command.Type(Key("missing"))))
+    }
+
+    @Test
+    fun list_push_pop_order() {
+        assertEquals(Reply.Integer(3), run(push(Key("l"), Command.End.HEAD, "a", "b", "c")))
+        assertEquals(Reply.Bulk("a".toByteArray()), run(Command.Pop(Key("l"), Command.End.TAIL)), "LPUSH a b c leaves a at the tail")
+        assertEquals(Reply.Bulk("c".toByteArray()), run(Command.Pop(Key("l"), Command.End.HEAD)), "and c at the head")
+        assertEquals(Reply.Simple("list"), run(Command.Type(Key("l"))))
+        assertEquals(Reply.Bulk("b".toByteArray()), run(Command.Pop(Key("l"), Command.End.HEAD)))
+        assertEquals(Reply.Bulk(null), run(Command.Pop(Key("l"), Command.End.HEAD)), "an empty list is a missing key")
+        assertEquals(Reply.Simple("none"), run(Command.Type(Key("l"))), "the last pop took the key with it")
+    }
+
+    @Test
+    fun list_lrange_bounds() {
+        run(push(Key("l"), Command.End.TAIL, "a", "b", "c"))
+        assertEquals(bulks("a", "b", "c"), run(Command.LRange(Key("l"), 0, -1)))
+        assertEquals(bulks("a", "b", "c"), run(Command.LRange(Key("l"), -100, 100)), "both ends clamp, neither errors")
+        assertEquals(bulks("b", "c"), run(Command.LRange(Key("l"), 1, 5)))
+        assertEquals(bulks("c"), run(Command.LRange(Key("l"), -1, -1)), "negative indices count from the tail")
+        assertEquals(EMPTY_ARRAY, run(Command.LRange(Key("l"), 2, 1)), "start past stop is empty")
+        assertEquals(EMPTY_ARRAY, run(Command.LRange(Key("l"), 5, 9)), "start past the end is empty")
+        assertEquals(EMPTY_ARRAY, run(Command.LRange(Key("missing"), 0, -1)), "a missing key is an empty list")
+    }
+
+    @Test
+    fun wrongtype_rejected() {
+        run(Command.Set(Key("s"), "v".toByteArray()))
+        assertEquals(WRONG_TYPE, run(push(Key("s"), Command.End.HEAD, "x")))
+        assertEquals(Reply.Simple("string"), run(Command.Type(Key("s"))), "the key is still a String")
+        run(push(Key("l"), Command.End.HEAD, "a"))
+        assertEquals(WRONG_TYPE, run(Command.Get(Key("l"))), "and the refusal runs both ways")
+        assertEquals(WRONG_TYPE, run(Command.HGet(Key("l"), "f".toByteArray())))
+        assertEquals(WRONG_TYPE, run(Command.LLen(Key("s"))))
+        assertEquals(Reply.Integer(1), run(Command.Exists(Key("l"))), "EXISTS, TYPE and DEL work on any kind")
+        assertEquals(Reply.Integer(1), run(Command.Del(Key("l"))))
+    }
+
+    @Test
+    fun C13_wrongtype_leaves_value_intact() {
+        run(Command.Set(Key("s"), "original".toByteArray()))
+        assertEquals(WRONG_TYPE, run(push(Key("s"), Command.End.HEAD, "a", "b")))
+        assertEquals(Reply.Bulk("original".toByteArray()), run(Command.Get(Key("s"))))
+        assertEquals(WRONG_TYPE, run(Command.Pop(Key("s"), Command.End.TAIL)))
+        assertEquals(WRONG_TYPE, run(Command.LSet(Key("s"), 0, "b".toByteArray())))
+        assertEquals(WRONG_TYPE, run(Command.LRem(Key("s"), 0, "original".toByteArray())))
+        assertEquals(WRONG_TYPE, run(Command.LRange(Key("s"), 0, -1)))
+        assertEquals(WRONG_TYPE, run(Command.LIndex(Key("s"), 0)))
+        assertEquals(Reply.Bulk("original".toByteArray()), run(Command.Get(Key("s"))), "no List branch ever reached the entry")
+        assertEquals(Reply.Simple("string"), run(Command.Type(Key("s"))))
+    }
+
+    @Test
+    fun `LLEN and LINDEX read the list without changing it`() {
+        assertEquals(Reply.Integer(0), run(Command.LLen(Key("missing"))))
+        assertEquals(Reply.Bulk(null), run(Command.LIndex(Key("missing"), 0)))
+        run(push(Key("l"), Command.End.TAIL, "a", "b", "c"))
+        assertEquals(Reply.Integer(3), run(Command.LLen(Key("l"))))
+        assertEquals(Reply.Bulk("a".toByteArray()), run(Command.LIndex(Key("l"), 0)))
+        assertEquals(Reply.Bulk("c".toByteArray()), run(Command.LIndex(Key("l"), -1)), "negative counts from the tail")
+        assertEquals(Reply.Bulk(null), run(Command.LIndex(Key("l"), 3)), "past the end is nil, not an error")
+        assertEquals(Reply.Bulk(null), run(Command.LIndex(Key("l"), -4)))
+        assertEquals(Reply.Integer(3), run(Command.LLen(Key("l"))), "reads leave the list alone")
+    }
+
+    @Test
+    fun `LSET replaces an element and errors outside the list`() {
+        assertEquals(NO_SUCH_KEY, run(Command.LSet(Key("missing"), 0, "x".toByteArray())))
+        run(push(Key("l"), Command.End.TAIL, "a", "b", "c"))
+        assertEquals(Reply.Simple("OK"), run(Command.LSet(Key("l"), 1, "B".toByteArray())))
+        assertEquals(Reply.Simple("OK"), run(Command.LSet(Key("l"), -1, "C".toByteArray())))
+        assertEquals(bulks("a", "B", "C"), run(Command.LRange(Key("l"), 0, -1)))
+        assertEquals(INDEX_OUT_OF_RANGE, run(Command.LSet(Key("l"), 3, "x".toByteArray())))
+        assertEquals(INDEX_OUT_OF_RANGE, run(Command.LSet(Key("l"), -4, "x".toByteArray())))
+        assertEquals(bulks("a", "B", "C"), run(Command.LRange(Key("l"), 0, -1)), "a rejected LSET changed nothing")
+    }
+
+    @Test
+    fun lrem_count_semantics() {
+        fun seed() {
+            run(Command.Del(Key("l")))
+            run(push(Key("l"), Command.End.TAIL, "a", "x", "b", "x", "c", "x"))
+        }
+        seed()
+        assertEquals(Reply.Integer(2), run(Command.LRem(Key("l"), 2, "x".toByteArray())), "a positive count works from the head")
+        assertEquals(bulks("a", "b", "c", "x"), run(Command.LRange(Key("l"), 0, -1)))
+        seed()
+        assertEquals(Reply.Integer(2), run(Command.LRem(Key("l"), -2, "x".toByteArray())), "a negative count works from the tail")
+        assertEquals(bulks("a", "x", "b", "c"), run(Command.LRange(Key("l"), 0, -1)))
+        seed()
+        assertEquals(Reply.Integer(3), run(Command.LRem(Key("l"), 0, "x".toByteArray())), "zero removes every match")
+        assertEquals(bulks("a", "b", "c"), run(Command.LRange(Key("l"), 0, -1)))
+        seed()
+        assertEquals(Reply.Integer(3), run(Command.LRem(Key("l"), 9, "x".toByteArray())), "a count past the matches removes them all")
+        assertEquals(Reply.Integer(0), run(Command.LRem(Key("l"), 0, "gone".toByteArray())), "a value that is not there goes uncounted")
+        assertEquals(Reply.Integer(0), run(Command.LRem(Key("missing"), 0, "x".toByteArray())))
+        run(Command.Del(Key("l")))
+        run(push(Key("l"), Command.End.TAIL, "x", "x"))
+        assertEquals(Reply.Integer(2), run(Command.LRem(Key("l"), 0, "x".toByteArray())))
+        assertEquals(Reply.Simple("none"), run(Command.Type(Key("l"))), "an emptied list takes its key with it")
+    }
+
+    @Test
+    fun dbsize_and_flushdb_span_partitions() {
+        val here = Key("k")
+        val elsewhere = otherPartitionThan(here)
+        assertNotEquals(engine.partitionOf(here), engine.partitionOf(elsewhere), "the two keys are on different partitions")
+        assertEquals(Reply.Integer(0), run(Command.DbSize))
+        run(Command.Set(here, "1".toByteArray()))
+        run(Command.Set(elsewhere, "2".toByteArray()))
+        assertEquals(Reply.Integer(2), run(Command.DbSize), "DBSIZE counts every partition")
+        run(Command.Set(here, "1".toByteArray(), ttl = Duration.ofMillis(5)))
+        clock.now += Duration.ofMillis(6)
+        assertEquals(Reply.Integer(1), run(Command.DbSize), "an expired key is not counted")
+        assertEquals(Reply.Simple("OK"), run(Command.FlushDb))
+        assertEquals(Reply.Integer(0), run(Command.DbSize), "FLUSHDB emptied every partition")
+        assertEquals(Reply.Bulk(null), run(Command.Get(elsewhere)))
+    }
+
+    @Test
+    fun keys_glob_patterns() {
+        val seeded = listOf("user:1", "user:2", "user:10", "admin", "a", "b", "c[x]")
+        seeded.forEach { run(Command.Set(Key(it), "v".toByteArray())) }
+        assertTrue(seeded.map(::Key).map(engine::partitionOf).toSet().size > 1, "the keys span partitions")
+        assertEquals(seeded.toSet(), keys("*"))
+        assertEquals(setOf("user:1", "user:2"), keys("user:?"), "? is exactly one byte")
+        assertEquals(setOf("user:1", "user:2", "user:10"), keys("user:*"))
+        assertEquals(setOf("a", "b"), keys("[ab]"))
+        assertEquals(setOf("admin", "a", "b", "c[x]"), keys("[a-c]*"), "a range inside a class")
+        assertEquals(setOf("a", "b"), keys("[^c]"), "^ negates the class")
+        assertEquals(setOf("c[x]"), keys("c\\[x]"), "a backslash escapes the class")
+        assertEquals(emptySet<String>(), keys("nothing*"))
+        run(Command.Set(Key("fleeting"), "v".toByteArray(), ttl = Duration.ofMillis(5)))
+        clock.now += Duration.ofMillis(6)
+        assertEquals(seeded.toSet(), keys("*"), "an expired key is not in KEYS")
+    }
+
+    @Test
+    fun randomkey_nil_when_empty() {
+        assertEquals(Reply.Bulk(null), run(Command.RandomKey), "an empty keyspace has no random key")
+        run(Command.Set(Key("only"), "v".toByteArray()))
+        assertEquals(Reply.Bulk("only".toByteArray()), run(Command.RandomKey), "one key is the only answer")
+        run(Command.Del(Key("only")))
+        assertEquals(Reply.Bulk(null), run(Command.RandomKey), "and nil again once the last key goes")
+    }
+
+    @Test
+    fun `RANDOMKEY draws from every partition and never from an expired key`() {
+        val seeded = (0..19).map { Key("k$it") }
+        assertTrue(seeded.map(engine::partitionOf).toSet().size > 1, "the keys span partitions")
+        seeded.forEach { run(Command.Set(it, "v".toByteArray())) }
+        run(Command.Set(Key("fleeting"), "v".toByteArray(), ttl = Duration.ofMillis(5)))
+        clock.now += Duration.ofMillis(6)
+        val drawn = (1..200).map { (run(Command.RandomKey) as Reply.Bulk).bytes!!.toString(Charsets.ISO_8859_1) }.toSet()
+        assertTrue(seeded.map(Key::toString).containsAll(drawn), "every draw is a live key, never the expired one")
+        assertTrue(drawn.map { engine.partitionOf(Key(it)) }.toSet().size > 1, "the draws come from more than one partition")
+    }
+
+    /** One `SCAN` call: the next cursor and the keys as text, duplicates kept. */
+    private fun scanOnce(cursor: Long, pattern: String? = null, count: Int = 10): Pair<Long, List<String>> {
+        val reply = run(Command.Scan(cursor, pattern?.toByteArray(), count)) as Reply.Array
+        val next = (reply.items[0] as Reply.Bulk).bytes!!.toString(Charsets.ISO_8859_1).toLong()
+        val keys = (reply.items[1] as Reply.Array).items.map { (it as Reply.Bulk).bytes!!.toString(Charsets.ISO_8859_1) }
+        return next to keys
+    }
+
+    /** A full `SCAN` walk, cursor 0 to 0; [between] runs after every call with the call's index. */
+    private fun scanAll(pattern: String? = null, count: Int = 10, between: (Int) -> Unit = {}): List<String> {
+        val seen = ArrayList<String>()
+        var cursor = 0L
+        var calls = 0
+        do {
+            val (next, keys) = scanOnce(cursor, pattern, count)
+            seen += keys
+            cursor = next
+            between(calls++)
+            assertTrue(calls < 100_000, "SCAN never terminated")
+        } while (cursor != 0L)
+        return seen
+    }
+
+    @Test
+    fun scan_returns_all_keys() {
+        val seeded = (0 until 200).map { "k$it" }
+        seeded.forEach { run(Command.Set(Key(it), "v".toByteArray())) }
+        assertTrue(seeded.map(::Key).map(engine::partitionOf).toSet().size == 4, "the keys span every partition")
+        assertEquals(seeded.toSet(), scanAll().toSet())
+        run(Command.Set(Key("fleeting"), "v".toByteArray(), ttl = Duration.ofMillis(5)))
+        clock.now += Duration.ofMillis(6)
+        assertEquals(seeded.toSet(), scanAll().toSet(), "an expired key is not in SCAN")
+    }
+
+    @Test
+    fun scan_cursor_zero_terminates() {
+        assertEquals(emptyList<String>(), scanAll(), "an empty keyspace is a walk that ends with nothing found")
+        (0 until 50).forEach { run(Command.Set(Key("k$it"), "v".toByteArray())) }
+        var calls = 0
+        val seen = scanAll(count = 5) { calls++ }
+        assertTrue(calls > 1, "COUNT 5 over 50 keys takes several calls: $calls")
+        assertEquals(50, seen.toSet().size)
+        var wide = 0
+        scanAll(count = 1_000) { wide++ }
+        assertEquals(4, wide, "a COUNT past the keyspace takes one call per partition and no more")
+        assertEquals(0L to emptyList<String>(), scanOnce(Long.MAX_VALUE), "a cursor past the last partition is done")
+    }
+
+    @Test
+    fun scan_match_filters() {
+        listOf("user:1", "user:2", "user:10", "admin", "a", "b").forEach { run(Command.Set(Key(it), "v".toByteArray())) }
+        assertEquals(setOf("user:1", "user:2", "user:10"), scanAll("user:*").toSet())
+        assertEquals(setOf("user:1", "user:2"), scanAll("user:?", count = 1).toSet())
+        assertEquals(emptySet<String>(), scanAll("nothing*").toSet())
+    }
+
+    @Test
+    fun C15_scan_completeness() {
+        val random = Random(15)
+        val stable = (0 until 300).map { "stable$it" }
+        stable.forEach { run(Command.Set(Key(it), "v".toByteArray())) }
+        val churn = (0 until 2_000).map { "churn$it" }
+        churn.take(500).forEach { run(Command.Set(Key(it), "v".toByteArray())) }
+        var storms = 0
+        val seen = scanAll(count = 3) {
+            // A seeded insert and delete storm between every two SCAN calls: enough churn to
+            // grow and shrink the partitions' tables while the walk is under way.
+            repeat(40) {
+                val key = Key(churn[random.nextInt(churn.size)])
+                if (random.nextBoolean()) run(Command.Set(key, "v".toByteArray())) else run(Command.Del(key))
+            }
+            storms++
+        }
+        assertTrue(storms > 50, "the walk took many calls, so the storm ran alongside it: $storms")
+        assertTrue(seen.containsAll(stable), "keys present throughout were missed: ${stable - seen.toSet()}")
+        assertTrue(seen.all { it in stable || it in churn }, "SCAN never invents a key")
+    }
+
+    @Test
+    fun `HSCAN walks one hash, MATCH and COUNT included`() {
+        val h = Key("h")
+        fun hscan(pattern: String? = null, count: Int = 10): Map<String, String> {
+            val seen = HashMap<String, String>()
+            var cursor = 0L
+            var calls = 0
+            do {
+                val reply = run(Command.HScan(h, cursor, pattern?.toByteArray(), count)) as Reply.Array
+                cursor = (reply.items[0] as Reply.Bulk).bytes!!.toString(Charsets.ISO_8859_1).toLong()
+                val flat = (reply.items[1] as Reply.Array).items.map { (it as Reply.Bulk).bytes!!.toString(Charsets.ISO_8859_1) }
+                flat.chunked(2).forEach { (field, value) -> seen[field] = value }
+                assertTrue(calls++ < 1_000, "HSCAN never terminated")
+            } while (cursor != 0L)
+            return seen
+        }
+        assertEquals(emptyMap<String, String>(), hscan(), "a missing key is an empty walk that ends at once")
+        val fields = (0 until 100).map { "f$it" to "$it" }
+        run(Command.HSet(h, fields.map { (f, v) -> f.toByteArray() to v.toByteArray() }))
+        assertEquals(fields.toMap(), hscan(count = 7))
+        assertEquals(fields.toMap().filterKeys { it.startsWith("f9") }, hscan("f9*"))
+        run(Command.Set(Key("s"), "v".toByteArray()))
+        assertEquals(WRONG_TYPE, run(Command.HScan(Key("s"), 0)), "HSCAN on a String is refused")
+    }
+
+    @Test
+    fun `COMMAND and INFO answer in Redis shapes`() {
+        assertEquals(EMPTY_ARRAY, run(Command.CommandTable), "COMMAND is minimal: an empty table")
+        assertTrue(info().contains("dynacache_version:"), info())
+        assertTrue(info().contains("db0:keys=0\r\n"), info())
+        run(Command.Set(Key("a"), "v".toByteArray()))
+        run(Command.Set(otherPartitionThan(Key("a")), "v".toByteArray()))
+        assertTrue(info().contains("db0:keys=2\r\n"), "INFO counts every partition: " + info())
+    }
+
+    /**
+     * The last step is the only direct observation that the wheel deletes (T09's note): nothing
+     * reads `c` between its deadline and the tick, so if the wheel's removal did not give the
+     * bytes back, `INFO`'s own sweep would find nothing left to give back either and the total
+     * would stay at two keys forever.
+     */
+    @Test
+    fun info_reports_used_memory() {
+        val value = "v".repeat(100).toByteArray()
+        assertEquals(0L, usedMemory(), "an empty node holds nothing")
+        run(Command.Set(Key("a"), value))
+        val one = usedMemory()
+        assertTrue(one >= 100, "a 100-byte value costs at least its bytes: $one")
+        run(Command.Set(Key("b"), value))
+        assertEquals(2 * one, usedMemory(), "two keys of the same shape cost twice as much, across partitions")
+        run(Command.Del(Key("a")))
+        assertEquals(one, usedMemory(), "DEL gives the bytes back")
+        run(Command.Set(Key("c"), value, ttl = Duration.ofSeconds(5)))
+        assertEquals(2 * one, usedMemory())
+        clock.now += Duration.ofSeconds(6)
+        tick()
+        assertEquals(one, usedMemory(), "the wheel's own removal gives the bytes back too")
+    }
+
+    @Test
+    fun info_reports_the_eviction_policy() {
+        assertTrue(info().contains("maxmemory_policy:lru"), "LRU is the default:\n${info()}")
+        val tiny = ApEngine(partitionCount = 2, clock = clock, policy = EvictionPolicy.W_TINYLFU)
+        try {
+            assertTrue(
+                info(tiny).contains("maxmemory_policy:w-tinylfu"),
+                "a node built W-TinyLFU says so:\n${info(tiny)}",
+            )
+        } finally {
+            tiny.close()
+        }
+    }
+
+    /** Key number [i], always the same length, so every seeded entry costs the same. */
+    private fun evictKey(i: Int) = Key("k%03d".format(i))
+
+    /** Key number [i]'s own value: 100 bytes like every other, and unlike every other. */
+    private fun evictValue(i: Int) = "value-%03d".format(i).padEnd(100, '.').toByteArray()
+
+    /**
+     * Writes key number [i] on [on]. The clock moves first: a real one always has, and two keys
+     * written at the very same instant are equally recently used, which leaves LRU nothing to
+     * choose between.
+     */
+    private fun seed(i: Int, on: ApEngine, ttl: Duration? = null): Reply {
+        clock.now += Duration.ofMillis(1)
+        return run(Command.Set(evictKey(i), evictValue(i), ttl = ttl), on)
+    }
+
+    /**
+     * What one seeded entry costs, read back through `INFO` on a node with no threshold. The
+     * eviction tests then size their budgets in entries rather than in a byte count copied from
+     * the formula, which would only ever agree with itself.
+     */
+    private val entryBytes: Long by lazy {
+        val probe = ApEngine(partitionCount = 1, clock = clock)
+        try {
+            seed(0, probe)
+            usedMemory(probe)
+        } finally {
+            probe.close()
+        }
+    }
+
+    /**
+     * A node of one partition whose threshold holds exactly [entries] seeded entries. One
+     * partition because the threshold is split evenly across them, so a budget of three entries
+     * over four partitions would be a budget of none.
+     */
+    private fun capped(entries: Int, policy: EvictionPolicy = EvictionPolicy.LRU) =
+        ApEngine(
+            partitionCount = 1,
+            clock = clock,
+            random = Random(10),
+            maxMemoryBytes = entries * entryBytes,
+            policy = policy,
+        )
+
+    /** The threshold is the threshold whichever policy chooses the victims under it. */
+    @ParameterizedTest
+    @EnumSource(EvictionPolicy::class)
+    fun eviction_respects_max_memory(policy: EvictionPolicy) {
+        val node = capped(3, policy)
+        try {
+            repeat(20) { seed(it, node) }
+            assertTrue(usedMemory(node) <= 3 * entryBytes, "still over the threshold: ${usedMemory(node)}")
+            assertEquals(Reply.Integer(3), run(Command.DbSize, node), "three entries is what the threshold holds")
+            assertEquals(Reply.Bulk(evictValue(19)), run(Command.Get(evictKey(19)), node), "the last write survived it")
+        } finally {
+            node.close()
+        }
+    }
+
+    /**
+     * Spec 2.7's admission rule, end to end. Key 0 is read until the sketch rates it far above
+     * anything else, so when the window overflows and offers it to the main space it is taken;
+     * every one-hit key after it loses the same comparison and never gets in. Under sampling LRU
+     * key 0 would have gone early -- it is read once and then never again while thirty writes go
+     * past it -- so the survival is the policy's doing and not the clock's.
+     */
+    @Test
+    fun tinylfu_admits_frequent() {
+        val node = capped(6, EvictionPolicy.W_TINYLFU)
+        try {
+            seed(0, node)
+            repeat(10) {
+                clock.now += Duration.ofMillis(1)
+                assertEquals(Reply.Bulk(evictValue(0)), run(Command.Get(evictKey(0)), node))
+            }
+            // Key 1 is read exactly as often as any of the churn keys that follow it: once.
+            seed(1, node)
+            repeat(30) { seed(it + 2, node) }
+
+            assertEquals(
+                Reply.Bulk(evictValue(0)),
+                run(Command.Get(evictKey(0)), node),
+                "the frequent key was admitted to the main space and survived the churn",
+            )
+            assertEquals(Reply.Integer(0), run(Command.Exists(evictKey(1)), node), "the one-hit key was not")
+            assertEquals(Reply.Integer(6), run(Command.DbSize, node), "the threshold still holds six entries")
+        } finally {
+            node.close()
+        }
+    }
+
+    /** A Zipf key: five characters wide whatever its number, so every entry costs the same. */
+    private fun zipfKey(i: Int) = Key("z%04d".format(i))
+
+    /**
+     * A seeded Zipf trace over [keys] keys: key `i` is drawn with probability proportional to
+     * `1/(i+1)`, the skew a cache is for. The cumulative weights are built once and the draw is a
+     * binary search into them, so the trace costs nothing next to replaying it.
+     */
+    private fun zipfTrace(accesses: Int, keys: Int, seed: Long): IntArray {
+        val cumulative = DoubleArray(keys)
+        var total = 0.0
+        for (i in 0 until keys) {
+            total += 1.0 / (i + 1)
+            cumulative[i] = total
+        }
+        val draw = Random(seed)
+        return IntArray(accesses) {
+            val at = java.util.Arrays.binarySearch(cumulative, draw.nextDouble() * total)
+            (if (at >= 0) at else -at - 1).coerceIn(0, keys - 1)
+        }
+    }
+
+    /**
+     * Replays [trace] against a node of [policy] holding about two hundred entries, reading each
+     * key and writing it back on a miss, and answers with how many reads hit. The clock moves on
+     * every access, hit or miss: recency is what LRU has, and a trace that stood still would take
+     * it away from the policy this comparison is meant to beat.
+     */
+    private fun hitsUnder(policy: EvictionPolicy, trace: IntArray): Int {
+        val node = capped(200, policy)
+        try {
+            var hits = 0
+            val value = ByteArray(100) { '.'.code.toByte() }
+            for (i in trace) {
+                clock.now += Duration.ofMillis(1)
+                if (run(Command.Get(zipfKey(i)), node) != Reply.Bulk(null)) hits++
+                else run(Command.Set(zipfKey(i), value), node)
+            }
+            return hits
+        } finally {
+            node.close()
+        }
+    }
+
+    /**
+     * The reason W-TinyLFU is in the spec at all: on a skewed trace it keeps the keys that are
+     * asked for often, where sampling LRU keeps the keys that were asked for last. Both policies
+     * see the identical trace and the identical budget, so the difference is the policy.
+     */
+    @Test
+    fun tinylfu_hit_ratio_beats_lru_on_zipf() {
+        val trace = zipfTrace(accesses = 20_000, keys = 2_000, seed = 20260906)
+        val lru = hitsUnder(EvictionPolicy.LRU, trace)
+        val tiny = hitsUnder(EvictionPolicy.W_TINYLFU, trace)
+        assertTrue(
+            tiny > lru,
+            "over ${trace.size} accesses to ${2_000} keys with room for about 200: " +
+                "W-TinyLFU hit $tiny times, LRU hit $lru times",
+        )
+    }
+
+    @Test
+    fun lru_evicts_oldest_access() {
+        val node = capped(3)
+        try {
+            repeat(3) { seed(it, node) }
+            clock.now += Duration.ofMillis(1)
+            assertEquals(
+                Reply.Bulk(evictValue(0)),
+                run(Command.Get(evictKey(0)), node),
+                "reading key 0 makes it the freshest of the three, though it was written first",
+            )
+            seed(3, node)
+            assertEquals(Reply.Integer(0), run(Command.Exists(evictKey(1)), node), "key 1 had gone longest unread")
+            listOf(0, 2, 3).forEach {
+                assertEquals(Reply.Integer(1), run(Command.Exists(evictKey(it)), node), "key $it was used more recently")
+            }
+            // A second round, with a different key left cold: one eviction could agree with the
+            // access order by accident of the table's bucket order, two in a row could not.
+            listOf(3, 0).forEach {
+                clock.now += Duration.ofMillis(1)
+                run(Command.Get(evictKey(it)), node)
+            }
+            seed(4, node)
+            assertEquals(Reply.Integer(0), run(Command.Exists(evictKey(2)), node), "key 2 was now the one left unread")
+            listOf(0, 3, 4).forEach {
+                assertEquals(Reply.Integer(1), run(Command.Exists(evictKey(it)), node), "key $it was used more recently")
+            }
+        } finally {
+            node.close()
+        }
+    }
+
+    @Test
+    fun eviction_prefers_expired() {
+        val node = capped(3)
+        try {
+            seed(0, node)
+            seed(1, node, ttl = Duration.ofSeconds(60))
+            seed(2, node)
+            // Nothing reads key 1 between its deadline and the write that crosses the threshold,
+            // so the eviction step is the first thing to notice it is gone.
+            clock.now += Duration.ofSeconds(61)
+            seed(3, node)
+            assertEquals(Reply.Integer(0), run(Command.Exists(evictKey(1)), node), "the expired key paid for the new one")
+            assertEquals(
+                Reply.Bulk(evictValue(0)),
+                run(Command.Get(evictKey(0)), node),
+                "so key 0 stayed, though it was the coldest live key and LRU's victim otherwise",
+            )
+        } finally {
+            node.close()
+        }
+    }
+
+    /**
+     * I6 at pressure: a node full to its threshold, half of it expired, and one more write. Every
+     * expired key goes and no live key does, whatever the policy would have said about them.
+     */
+    @Test
+    fun I6_expired_evicted_before_live() {
+        val node = capped(10)
+        try {
+            (0 until 5).forEach { seed(it, node) }
+            (10 until 15).forEach { seed(it, node, ttl = Duration.ofSeconds(60)) }
+            assertEquals(Reply.Integer(10), run(Command.DbSize, node), "full to the threshold, not over it")
+            clock.now += Duration.ofSeconds(61)
+            seed(99, node)
+            (0 until 5).forEach {
+                assertEquals(Reply.Integer(1), run(Command.Exists(evictKey(it)), node), "live key $it was never touched")
+            }
+            (10 until 15).forEach {
+                assertEquals(Reply.Integer(0), run(Command.Exists(evictKey(it)), node), "expired key $it went first")
+            }
+        } finally {
+            node.close()
+        }
+    }
+
+    @Test
+    fun eviction_does_not_corrupt() {
+        val node = capped(5)
+        try {
+            repeat(40) { seed(it, node) }
+            val survivors = (0 until 40).filter { run(Command.Exists(evictKey(it)), node) == Reply.Integer(1) }
+            assertEquals(5, survivors.size, "the threshold holds five: $survivors")
+            survivors.forEach {
+                assertEquals(Reply.Bulk(evictValue(it)), run(Command.Get(evictKey(it)), node), "key $it kept its own value")
+            }
+            assertEquals(Reply.Integer(5), run(Command.DbSize, node), "and the store counts exactly those")
+        } finally {
+            node.close()
+        }
+    }
+
+    /**
+     * One write can leave a partition far over its share, and paying the whole bill at once would
+     * make that one command wait for a keyspace-sized walk. The step stops at 32 and the commands
+     * that follow finish the job. `DBSIZE` sees the store as the step left it: a command's reply
+     * is settled before its own crossing starts the next step.
+     */
+    @Test
+    fun eviction_step_is_bounded() {
+        val node = capped(40)
+        try {
+            repeat(40) { seed(it, node) }
+            clock.now += Duration.ofMillis(1)
+            // Worth 35 entries and change, so no one step of 32 evictions can cover it.
+            val big = ByteArray((35 * entryBytes).toInt()) { 'b'.code.toByte() }
+            run(Command.Set(Key("big"), big), node)
+            assertEquals(Reply.Integer(41 - 32), run(Command.DbSize, node), "one step evicted 32 keys and no more")
+            assertTrue(usedMemory(node) <= 40 * entryBytes, "the steps that followed finished the job")
+        } finally {
+            node.close()
+        }
+    }
+
+    /** Records who read the clock and how often. */
+    private class RecordingClock(@Volatile var now: Instant) : Clock() {
+        val readers = Collections.synchronizedList(mutableListOf<String>())
+
+        override fun instant(): Instant {
+            readers += Thread.currentThread().name
+            return now
+        }
+
+        override fun getZone(): ZoneId = ZoneOffset.UTC
+        override fun withZone(zone: ZoneId): Clock = this
+    }
+
+    /**
+     * The C1 technique of T02, pointed at eviction: the engine reads the clock once per command
+     * and never outside one, so twenty writes that evict are still twenty reads, all of them on
+     * the one partition thread. An eviction step on a thread of its own, or one reading the clock
+     * for itself, would show up as a reader this count does not allow.
+     */
+    @Test
+    fun eviction_runs_on_the_partition_thread() {
+        val recording = RecordingClock(clock.now)
+        val node = ApEngine(partitionCount = 1, clock = recording, random = Random(10), maxMemoryBytes = 3 * entryBytes)
+        try {
+            repeat(20) {
+                recording.now += Duration.ofMillis(1)
+                run(Command.Set(evictKey(it), evictValue(it)), node)
+            }
+            assertEquals(Reply.Integer(3), run(Command.DbSize, node), "the writes did evict")
+            assertEquals(21, recording.readers.size, "one clock read per command, the eviction step included")
+            assertEquals(setOf("partition-0"), recording.readers.toSet(), "and every one on the partition's own thread")
+        } finally {
+            node.close()
+        }
+    }
+
+    /**
+     * A field added to a hash never reaches `write`, so nothing charges for it there; the recount
+     * after the command is what keeps the total level with a store that grew in place.
+     */
+    @Test
+    fun used_memory_follows_an_aggregate_grown_in_place() {
+        val h = Key("h")
+        val field = "f".toByteArray()
+        run(Command.HSet(h, listOf(field to "v".repeat(100).toByteArray())))
+        val oneField = usedMemory()
+        run(Command.HSet(h, listOf("g".toByteArray() to "v".repeat(100).toByteArray())))
+        assertTrue(usedMemory() > oneField, "a second field costs more than one: ${usedMemory()} vs $oneField")
+        run(Command.HDel(h, listOf("g".toByteArray())))
+        assertEquals(oneField, usedMemory(), "and the bytes come back when the field goes")
+        run(push(Key("l"), Command.End.TAIL, "a"))
+        val oneItem = usedMemory() - oneField
+        run(push(Key("l"), Command.End.TAIL, "b"))
+        assertTrue(usedMemory() - oneField > oneItem, "a list grown in place is charged for too")
+    }
+
+    private fun ttl(key: Key, precision: Command.Ttl.Precision = Command.Ttl.Precision.SECONDS): Long =
+        (run(Command.Ttl(key, precision)) as Reply.Integer).value
+
+    @Test
+    fun ttl_reports_remaining_and_minus_values() {
+        assertEquals(-2L, ttl(Key("k")), "Redis answers -2 for a key that is not there")
+        run(Command.Set(Key("k"), "v".toByteArray()))
+        assertEquals(-1L, ttl(Key("k")), "and -1 for a key with no TTL")
+        run(Command.Set(Key("k"), "v".toByteArray(), ttl = Duration.ofSeconds(10)))
+        assertEquals(10L, ttl(Key("k")))
+        assertEquals(10_000L, ttl(Key("k"), Command.Ttl.Precision.MILLIS), "PTTL reports milliseconds")
+        // Redis rounds TTL half up: 9500 ms is 10 s, 9499 ms is 9 s.
+        clock.now += Duration.ofMillis(500)
+        assertEquals(10L, ttl(Key("k")))
+        assertEquals(9_500L, ttl(Key("k"), Command.Ttl.Precision.MILLIS))
+        clock.now += Duration.ofMillis(1)
+        assertEquals(9L, ttl(Key("k")))
+        clock.now += Duration.ofMillis(9_499)
+        assertEquals(0L, ttl(Key("k")), "the key is readable through its deadline")
+        assertEquals(0L, ttl(Key("k"), Command.Ttl.Precision.MILLIS))
+        clock.now += Duration.ofMillis(1)
+        assertEquals(-2L, ttl(Key("k")), "and gone after it")
+    }
+
+    /** What the server's scheduler will call once per tick: every partition advances its wheel. */
+    private fun tick() {
+        engine.tick().get(5, TimeUnit.SECONDS)
+    }
+
+    /**
+     * C7 at the command level: never early, at most one tick late. The lazy check on access
+     * covers the gap between the deadline and the tick that follows it, so both halves of spec
+     * 5.4 answer the same at every instant a client can look.
+     */
+    @Test
+    fun C7_key_readable_until_deadline_then_absent() {
+        val key = Key("k")
+        val deadline = clock.now + Duration.ofSeconds(10)
+        run(Command.Set(key, "v".toByteArray(), ttl = Duration.ofSeconds(10)))
+        clock.now = deadline - Duration.ofMillis(1)
+        tick()
+        assertEquals(Reply.Bulk("v".toByteArray()), run(Command.Get(key)), "never early")
+        assertEquals(Reply.Integer(1), run(Command.DbSize), "and DBSIZE agrees the key is there")
+        clock.now = deadline + Duration.ofMillis(engine.tickMillis)
+        tick()
+        assertEquals(Reply.Bulk(null), run(Command.Get(key)), "gone at most one tick after the deadline")
+        assertEquals(Reply.Integer(0), run(Command.DbSize), "and DBSIZE agrees it is gone")
+    }
+
+    @Test
+    fun expire_replaces_wheel_entry() {
+        val key = Key("k")
+        // SET EX puts a deadline on the wheel; the re-EXPIRE has to take it off again, or the
+        // tick below fires the old one and deletes a key that should have 80 s left.
+        run(Command.Set(key, "v".toByteArray(), ttl = Duration.ofSeconds(10)))
+        run(Command.Expire(key, clock.now + Duration.ofSeconds(100)))
+        clock.now += Duration.ofSeconds(20)
+        tick()
+        assertEquals(
+            Reply.Bulk("v".toByteArray()),
+            run(Command.Get(key)),
+            "the replaced deadline was cancelled, so the wheel had nothing to fire at 10 s",
+        )
+        assertEquals(80L, ttl(key))
+        run(Command.Expire(key, clock.now + Duration.ofSeconds(5)))
+        clock.now += Duration.ofSeconds(6)
+        tick()
+        assertEquals(-2L, ttl(key), "a shortened TTL takes the key at its new deadline")
+    }
+
+    @Test
+    fun persist_cancels_expiry() {
+        val key = Key("k")
+        assertEquals(Reply.Integer(0), run(Command.Persist(key)), "a missing key has no TTL to drop")
+        run(Command.Set(key, "v".toByteArray(), ttl = Duration.ofSeconds(5)))
+        assertEquals(Reply.Integer(1), run(Command.Persist(key)))
+        assertEquals(Reply.Integer(0), run(Command.Persist(key)), "and 0 again: there is no TTL left")
+        assertEquals(-1L, ttl(key))
+        clock.now += Duration.ofSeconds(30)
+        tick()
+        assertEquals(Reply.Bulk("v".toByteArray()), run(Command.Get(key)), "PERSIST cancelled the wheel entry")
+        assertEquals(Reply.Integer(1), run(Command.DbSize))
+    }
+
+    @Test
+    fun del_cancels_wheel_entry_so_a_new_value_survives() {
+        val key = Key("k")
+        run(Command.Set(key, "old".toByteArray(), ttl = Duration.ofSeconds(5)))
+        assertEquals(Reply.Integer(1), run(Command.Del(key)))
+        run(Command.Set(key, "new".toByteArray()))
+        clock.now += Duration.ofSeconds(30)
+        tick()
+        assertEquals(
+            Reply.Bulk("new".toByteArray()),
+            run(Command.Get(key)),
+            "the deleted key's deadline cannot reach the value that replaced it",
+        )
+        assertEquals(Reply.Integer(1), run(Command.DbSize))
+    }
+
+    @Test
+    fun expireat_absolute() {
+        val key = Key("k")
+        val deadline = clock.now + Duration.ofSeconds(30)
+        assertEquals(Reply.Integer(0), run(Command.Expire(key, deadline)), "a missing key takes no TTL")
+        run(Command.Set(key, "v".toByteArray()))
+        assertEquals(Reply.Integer(1), run(Command.Expire(key, deadline)))
+        assertEquals(30L, ttl(key))
+        // The deadline is an instant, not a duration: it does not move when the clock does.
+        clock.now += Duration.ofSeconds(10)
+        assertEquals(20L, ttl(key))
+        assertEquals(Reply.Bulk("v".toByteArray()), run(Command.Get(key)))
+        run(Command.Expire(key, clock.now - Duration.ofSeconds(1)))
+        assertEquals(Reply.Bulk(null), run(Command.Get(key)), "a deadline already past takes the key at once")
+    }
+
+    @Test
+    fun `PING replies PONG`() {
+        assertEquals(Reply.Simple("PONG"), run(Command.Ping))
+    }
+
+    /**
+     * Proof of C1 without Lincheck. Every command reads the clock once on its partition thread,
+     * so a clock that records the caller and blocks until released is a probe into the executor
+     * without a test-only command: it says which thread ran, and holds a partition busy at will.
+     */
+    @Test
+    fun C1_one_command_at_a_time_per_partition() {
+        val ranOn = Collections.synchronizedList(mutableListOf<Thread>())
+        val entered = Semaphore(0)
+        val release = CountDownLatch(1)
+        val gate = object : Clock() {
+            override fun instant(): Instant {
+                ranOn += Thread.currentThread()
+                entered.release()
+                check(release.await(5, TimeUnit.SECONDS)) { "never released" }
+                return Instant.EPOCH
+            }
+            override fun getZone(): ZoneId = ZoneOffset.UTC
+            override fun withZone(zone: ZoneId): Clock = this
+        }
+        val engine = ApEngine(partitionCount = 2, clock = gate)
+        val a1 = Key("{p}.1")
+        val a2 = Key("{p}.2")
+        val other = (0..99).map { Key("q$it") }.first { engine.partitionOf(it) != engine.partitionOf(a1) }
+        try {
+            val first = engine.submit(Command.Get(a1))
+            assertTrue(entered.tryAcquire(5, TimeUnit.SECONDS), "the first command runs")
+            val queued = engine.submit(Command.Get(a2))
+            val elsewhere = engine.submit(Command.Get(other))
+            assertTrue(entered.tryAcquire(5, TimeUnit.SECONDS), "another partition runs while this one is busy")
+            assertFalse(queued.isDone, "the same partition waits")
+            release.countDown()
+            listOf(first, queued, elsewhere).forEach { it.get(5, TimeUnit.SECONDS) }
+        } finally {
+            engine.close()
+        }
+        assertEquals(3, ranOn.size)
+        assertSame(ranOn[0], ranOn[2], "the queued command ran on the busy partition's one thread, after it")
+        assertNotSame(ranOn[0], ranOn[1], "the other partition ran on its own thread, concurrently")
+    }
+
+    @Test
+    fun multi_exec_hash_tags_allow_two_keys() {
+        val a = Key("{user1}.a")
+        val b = Key("{user1}.b")
+        assertEquals(engine.partitionOf(a), engine.partitionOf(b), "the hash tag is what puts them together")
+        val replies = batch(listOf(a, b)) { ctx -> listOf(ctx.execute(set(a, "1")), ctx.execute(set(b, "2"))) }
+        assertEquals(listOf(Reply.Simple("OK"), Reply.Simple("OK")), replies)
+        assertEquals(Reply.Bulk("1".toByteArray()), run(Command.Get(a)))
+        assertEquals(Reply.Bulk("2".toByteArray()), run(Command.Get(b)))
+    }
+
+    @Test
+    fun multi_exec_atomic() {
+        val a = Key("{t}.a")
+        val b = Key("{t}.b")
+        run(set(a, "before"))
+        run(set(b, "before"))
+        val midway = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        // The block is the batch, and it runs on the partition thread, so holding it here is
+        // holding the partition. Nothing sleeps: the latches are the schedule.
+        val batch = engine.atomically(listOf(a, b)) { ctx ->
+            ctx.execute(set(a, "after"))
+            midway.countDown()
+            check(release.await(5, TimeUnit.SECONDS)) { "never released" }
+            ctx.execute(set(b, "after"))
+        }
+        assertTrue(midway.await(5, TimeUnit.SECONDS), "the batch reached its middle")
+
+        // Between the batch's first and last command, a holds "after" and b still holds
+        // "before". A reader that ran now would see exactly the half-applied state I11 forbids.
+        val readA = engine.submit(Command.Get(a))
+        val readB = engine.submit(Command.Get(b))
+        assertFalse(readA.isDone, "no read runs while the batch holds its partition")
+        assertFalse(readB.isDone, "no read runs while the batch holds its partition")
+
+        release.countDown()
+        batch.get(5, TimeUnit.SECONDS)
+        assertEquals(Reply.Bulk("after".toByteArray()), readA.get(5, TimeUnit.SECONDS), "the post-batch state")
+        assertEquals(Reply.Bulk("after".toByteArray()), readB.get(5, TimeUnit.SECONDS), "the post-batch state")
+    }
+
+    @Test
+    fun I11_failing_command_does_not_undo_neighbours() {
+        val a = Key("{t}.a")
+        val b = Key("{t}.b")
+        val replies = batch(listOf(a, b)) { ctx ->
+            listOf(
+                ctx.execute(set(a, "abc")),
+                ctx.execute(Command.IncrBy(a, 1)),
+                ctx.execute(set(b, "2")),
+            )
+        }
+        assertEquals(listOf(Reply.Simple("OK"), NOT_AN_INTEGER, Reply.Simple("OK")), replies, "the error is in place")
+        assertEquals(Reply.Bulk("abc".toByteArray()), run(Command.Get(a)), "the failing command undid nothing")
+        assertEquals(Reply.Bulk("2".toByteArray()), run(Command.Get(b)), "and its neighbour still ran")
+    }
+
+    @Test
+    fun C12_atomically_rejects_span_before_running() {
+        val here = Key("{t}.a")
+        val elsewhere = otherPartitionThan(here)
+        val ran = AtomicBoolean(false)
+        val rejected = engine.atomically(listOf(here, elsewhere)) { ctx ->
+            ran.set(true)
+            ctx.execute(set(here, "1"))
+        }
+        val failure = assertThrows(ExecutionException::class.java) { rejected.get(5, TimeUnit.SECONDS) }
+        val cause = failure.cause
+        assertTrue(cause is CrossPartitionBatch, "the span is what refused it, got $cause")
+        assertEquals(CROSS_SLOT, (cause as CrossPartitionBatch).error)
+        assertFalse(ran.get(), "the block never ran")
+        assertEquals(Reply.Bulk(null), run(Command.Get(here)), "so nothing was written")
+    }
+
+    @Test
+    fun C12_undeclared_key_inside_batch_is_an_error() {
+        val declared = Key("{t}.a")
+        // Same partition, so only the declaration keeps it out; the check is not the span check.
+        val undeclared = Key("{t}.b")
+        val replies = batch(listOf(declared)) { ctx ->
+            listOf(ctx.execute(set(undeclared, "1")), ctx.execute(set(declared, "2")))
+        }
+        assertEquals(Reply.Error("ERR", "{t}.b was not declared by this batch"), replies[0])
+        assertEquals(Reply.Simple("OK"), replies[1], "the batch continues past it")
+        assertEquals(Reply.Bulk(null), run(Command.Get(undeclared)), "and the undeclared key was not written")
+    }
+
+    @Test
+    fun `a batch refuses a command that does not run on one partition`() {
+        val a = Key("{t}.a")
+        val spanning = Reply.Error("ERR", "this command spans partitions and cannot run inside a batch")
+        val replies = batch(listOf(a)) { ctx ->
+            listOf(
+                ctx.execute(Command.MGet(listOf(a))),
+                ctx.execute(Command.Scan(0)),
+                ctx.execute(Command.DbSize),
+                ctx.execute(Command.Ping),
+            )
+        }
+        assertEquals(listOf(spanning, spanning, spanning, Reply.Simple("PONG")), replies)
+    }
+
+    /** A batch run to completion, with the wait every batch test shares. */
+    private fun <R> batch(keys: List<Key>, block: (PartitionContext) -> R): R =
+        engine.atomically(keys, block).get(5, TimeUnit.SECONDS)
+
+    private fun set(key: Key, value: String): Command = Command.Set(key, value.toByteArray())
+
+    private companion object {
+        const val USED_MEMORY = "used_memory:"
+        val EMPTY_ARRAY = Reply.Array(emptyList<Reply>())
+        val NO_SUCH_KEY = Reply.Error("ERR", "no such key")
+        val INDEX_OUT_OF_RANGE = Reply.Error("ERR", "index out of range")
+        val NOT_AN_INTEGER = Reply.Error("ERR", "value is not an integer or out of range")
+        val WRONG_TYPE = Reply.Error("WRONGTYPE", "Operation against a key holding the wrong kind of value")
+        val CROSS_SLOT = Reply.Error("CROSSSLOT", "Keys in request don't hash to the same slot")
+    }
+
+    @Test
+    fun `a partition is identified by its index`() {
+        assertEquals(PartitionId(3), PartitionId(3))
+        assertNotEquals(PartitionId(3), PartitionId(4))
+    }
+}
