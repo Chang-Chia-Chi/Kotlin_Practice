@@ -14,13 +14,13 @@ existing CP-kit entries already do.
 
 **Nature:** deterministic time in tests, plan rule 1.5 (Opus)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache 6fe45626, merged into misc/ai_gen)
 
-- [ ] No test constructs `Clock.systemUTC()` or `Clock.systemDefaultZone()`
-- [ ] The four acceptance tests' real-time spins are replaced by clock advances, or each
+- [x] No test constructs `Clock.systemUTC()` or `Clock.systemDefaultZone()`
+- [x] The four acceptance tests' real-time spins are replaced by clock advances, or each
       remaining bounded wait is named in the progress entry with the thread it waits for
-- [ ] Every acceptance test passes and total suite wall time does not grow
-- [ ] Progress entry appended
+- [x] Every acceptance test passes and total suite wall time does not grow
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket; 200 to 600 lines including tests;
 JUnit 5 + Mockito only, no AssertJ or MockK; no sleeps, time is an injected Clock; spec-named

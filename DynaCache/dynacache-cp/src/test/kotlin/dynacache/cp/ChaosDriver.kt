@@ -117,8 +117,16 @@ class ChaosDriver(seed: Long, fileStoreDir: Path? = null) : AutoCloseable {
             repeat(rounds) { round ->
                 val wave = (0 until clients).map { client ->
                     CompletableFuture.runAsync({
-                        val op: CounterOp = if (rnd.nextInt(3) == 0) CounterOp.Get else CounterOp.IncrBy(1)
-                        val command = if (op is CounterOp.Get) Command.Cp.LongGet(counter) else Command.Cp.LongIncr(counter)
+                        val op: CounterOp = when (rnd.nextInt(4)) {
+                            0 -> CounterOp.Get
+                            1 -> CounterOp.GetAdd(1)
+                            else -> CounterOp.IncrBy(1)
+                        }
+                        val command = when (op) {
+                            is CounterOp.Get -> Command.Cp.LongGet(counter)
+                            is CounterOp.GetAdd -> Command.Cp.LongGetAdd(counter, op.delta)
+                            else -> Command.Cp.LongIncr(counter)
+                        }
                         val call = clock.getAndIncrement()
                         val reply = try {
                             kit.leaderEngine().submit(command).get(REPLY_TIMEOUT_SECS, SECONDS)

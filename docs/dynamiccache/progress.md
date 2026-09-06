@@ -5574,3 +5574,402 @@ two that held one. Every remaining test passes.
 - `advance` and `now +=` both survive as ways to move time forward. Collapsing to one would have
   edited call sites the ticket asked to leave alone; the ticket's own wording ("settable,
   tickable") wants both.
+
+---
+
+## T60 - CP.LONG.GETADD
+
+**Built:** `CP.LONG.GETADD K d` (CP spec 3.2 `LONG_GETADD`, 6.2 `-> :old`), the verb T38's
+deviation 1 deferred and T44 never picked up. One new command, `Command.Cp.LongGetAdd(key, delta)`
+under `Command.Cp.AtomicLong`; one parser row, `"cp.long.getadd" -> exactly(name, args, 2)`, beside
+`cp.long.add` and `cp.long.cas`; **wire tag 34** in `CpWire` (31 to 33 went to T54's reference TTL
+verbs), written and read exactly as `CMD_INCR_BY` is, a key and a signed long; and one branch in
+`AtomicLongStateMachine.apply`.
+
+The state machine's private `add` already did everything GETADD needs except answer the old value,
+so it now returns the old value instead of a `Reply`, and the INCR family goes through a new
+one-line `added(key, delta, now)` that adds the delta back on for its `:new` reply. That keeps the
+counter's read and its write in one map write inside one applied entry, so GETADD is atomic for the
+same reason `LongCas` is (I21) and costs one lookup, not two. Missing counters count as 0 as they do
+for INCR, and the key keeps its TTL. Main-code diff: 3 lines in `Command.kt`, 1 in `CommandParser.kt`,
+3 in `CpWire.kt`, 15 in `AtomicLongStateMachine.kt`; 54 lines of tests.
+
+**The chaos checker is verb-generic, so GETADD joined it.** `CounterOp` gained `GetAdd(delta)` and
+`CounterSpec` the row `(state + delta) to state` - the model's output is the state the operation
+came in with, which is the whole of GETADD's semantics. `ChaosDriver.counterHistory` now draws one
+of three operations per client per round (`Get`, `GetAdd(1)`, `IncrBy(1)`) instead of one of two, so
+`invariant_linearizable_ops` linearizes GETADD histories across a leader kill and a restart on all
+five seeds. An unanswered GETADD under chaos is recorded with a null output like any other, and the
+checker is free to place it or drop it.
+
+**Acceptance:**
+- `long_getadd_returns_old_value_and_adds` (`CpEngineTest`, a three-member group through the
+  leader's engine): a missing counter answers `:0` and is left holding 5; the next GETADD of -2
+  answers `:5`, not `:3`, and `CP.LONG.GET` reads 3.
+- `long_getadd_concurrent_linearizable` (same class): 50 GETADDs of 1 in flight at once over 4
+  client threads; the old values they answer are exactly the set 0..49, one each, and the counter
+  ends at 50.
+- `C16_cp_engine_rejects_a_non_cp_key` gained a GETADD line: `LongGetAdd(Key("plain-key"), 1)` is
+  `-NOTCP`, the rejection every CP verb gets before a primitive sees it.
+- `cp_op_round_trips_with_its_stamp` (`CpWireTest`) round-trips `CpOp(8, LongGetAdd(cp:counter:c, -3))`,
+  so a follower decodes tag 34 as what the leader replicated, negative deltas included.
+- `the CP verbs of CP spec 6` table (`CommandParserTest`) gained the row
+  `CP.LONG.GETADD cp:counter:k -5`, asserting the parsed delta.
+- Offline `test -pl dynacache-server -am`: engine 147, cluster 85, cp 91 (89 + 2), server 93 (92 + 1),
+  all green. The server module holds 92 tests at this base, not the 90 the ticket brief predicted;
+  the parser table gained exactly one row (98 to 99), which is the whole of this ticket's + 1.
+
+**Deviations:**
+1. **No `-CAPACITY` limit, as the ticket directs.** GETADD can carry a counter past any bound a
+   future capacity rule would set, exactly as `CP.LONG.ADD` can today. The deferral stays recorded
+   in ticket 62, which owns the `-CAPACITY` line of the ledger; this ticket adds nothing new to it.
+2. **87 lines changed against a 200 to 600 budget.** The verb is one data class, one parser row, one
+   wire tag and one state-machine branch, and the checker was already generic over `CounterOp`, so
+   there was nothing else to write. Turning `add` into an old-value function rather than duplicating
+   its body is where the shape decision was.
+3. **No Redis-compat spelling.** `GETSET`-style compat on `cp:counter:` keys is not re-targeted to
+   GETADD; CP spec 6.2 gives the row no Redis column ("-"), so the verb is reachable only as
+   `CP.LONG.GETADD`, the way `CP.LONG.CAS` is.
+
+**For the next ticket:** ticket 62 deletes `LongDecrBy` as dead; it now goes through `added` with a
+negated delta like the other three, so the deletion is still one variant, one wire arm and one
+branch. If a `-CAPACITY` rule is ever built, `add` is the single place both the INCR family and
+GETADD pass through.
+
+---
+
+## T61 - SET NX and SET XX on cp: keys
+
+**Built:** the Redis lock idiom now works on the CP namespace. `SET cp:ref:lock v NX PX 30000`
+takes the reference only when nothing live holds it, with the lease applied in the same committed
+entry, and `SET ... XX` writes only what is already there; the same on a `cp:counter:` key with a
+numeric value. Four changes, in the order the command travels:
+
+1. **The model.** `Command.Cp.LongSet` and `Command.Cp.RefSet` each gain a trailing
+   `condition: Set.Condition? = null`, reusing the enum `Command.Set` already has rather than
+   inventing a second vocabulary for NX/XX. That was the smaller of the two shapes the ticket
+   offered (an optional condition versus a sibling conditional variant): every existing call site
+   compiles unchanged, the `when` in `CpWire` and in both state machines keeps one arm per verb,
+   and nothing else in the CP hierarchy grows a variant. `RefSet`'s hand-written
+   `equals`/`hashCode`/`toString` include the condition.
+2. **The rule.** `Command.Set.Condition.refuses(exists: Boolean)` says what NX and XX mean in one
+   place: NX refuses a key that exists, XX refuses one that does not. Both CP state machines read
+   it; the AP partition still spells the same three lines out in its own `SET` branch, because the
+   AP engine is outside this ticket's seams (noted below).
+3. **The dispatcher.** `CommandDispatcher.compat`'s `SET` branch no longer refuses a conditional
+   SET with `-NOTCP`. It passes `command.condition` into the SET verb of the kind the key names,
+   exactly as it already passed the TTL. The counter arm still reads the value as a number first,
+   so `SET cp:counter:x banana NX` is `-ERR value is not an integer or out of range` and not nil:
+   the value is parsed before the condition is looked at.
+4. **The state machines.** `AtomicLongStateMachine` and `AtomicReferenceStateMachine` each test the
+   condition against the key's presence at that entry's log time and answer `Reply.Bulk(null)` when
+   it refuses, otherwise write the value and the TTL as before. Condition, value and TTL are one
+   applied entry, so no reader sees a half state (I21), and nothing reads a clock, so a lease still
+   runs on log time (CP spec 5, 9.4).
+
+Diff: 310 insertions, 28 deletions over eight files. Main code is 99 of those insertions - 43 in
+`Command.kt` (most of it the two KDoc blocks and `refuses`), 30 in `CpWire.kt`, 9 in
+`CommandDispatcher.kt`, 9 in `AtomicReferenceStateMachine.kt`, 8 in `AtomicLongStateMachine.kt` -
+and 211 are tests: 163 in `CpRoutingTest.kt`, 32 in `CommandDispatcherTest.kt`, 16 in
+`CpWireTest.kt`.
+
+**Encoding and wire tags:** no new wire tag. The condition rides on the two existing SET tags,
+`CMD_SET` (1) and `CMD_REF_SET` (28), as one byte written after the TTL, so nothing collides with
+T60's new CP tag or with anything at 40 and above. The byte is spelled out
+(`NO_CONDITION` 0, `CONDITION_NX` 1, `CONDITION_XX` 2) in a `when` rather than taken from the enum's
+ordinal, because a log entry outlives the declaration order of a Kotlin enum, and an unknown byte is
+an `error(...)` the way an unknown tag already is. A `readTtl()` helper was pulled out while both
+SET decoders were being touched, since three call sites spelled the same `takeIf { it != NO_TTL }`
+out.
+
+**Reply shapes:** the compat path answers Redis's shapes exactly - `+OK` when the conditional SET
+takes, nil bulk when it is refused - and the dispatcher rewrites nothing, so the CP verb has the
+same two shapes. There is no second shape to record: the reply is produced once, in the state
+machine, and the `CP.LONG.SET`/`CP.REF.SET` spelling would answer the same `+OK`/nil if a parser row
+is ever added for the condition.
+
+**Acceptance (all in a real three-member CP group behind the RESP socket, `CpRoutingTest`):**
+- `compat_set_nx_on_ref_key_acquires_once`: nine clients on nine connections, released together by
+  a `CountDownLatch` and not a sleep, race `SET cp:ref:lock owner-N NX`; exactly one reads `+OK`,
+  the other eight read nil, and `GET` returns the winner's bytes.
+- `compat_set_nx_px_expires_on_log_time`: `SET ... NX PX 30000` takes, a second `NX` is nil, `PTTL`
+  reads the lease; the leader's clock 31 s on and one `tick()` past the deadline, `GET` is nil and
+  the next `SET ... NX` takes.
+- `compat_set_xx_on_missing_key_is_nil` (and the refusal wrote nothing) and
+  `compat_set_xx_on_present_key_replaces` (bytes replaced, and `TTL` is -1 because a plain SET
+  clears the lease it replaces, as Redis does).
+- The same four behaviours on a counter, over three tests rather than four:
+  `compat_set_nx_on_counter_key_acquires_once`, `compat_set_nx_px_on_counter_expires_on_log_time`,
+  `compat_set_xx_on_counter_key_is_nil_then_replaces` (which also holds the `-ERR` for a
+  non-numeric value under `NX`).
+- `compat_conditional_set_retargets_to_the_kinds_set_verb` (`CommandDispatcherTest`): the four
+  conditional spellings reach the CP engine as `LongSet`/`RefSet` carrying the condition and the
+  TTL, and the AP engine sees none of them. The old row asserting `-NOTCP` for a conditional SET is
+  gone from `a cp key outside the compat set is NOTCP`, which now also asserts that `NX` does not
+  excuse a non-numeric counter value; `I22_namespaces_never_cross` is untouched and passes.
+- `conditional_set_commands_round_trip` (`CpWireTest`): both kinds, both conditions, with and
+  without a TTL, so a follower applies the rule the leader replicated.
+- Red before green: the dispatcher slice failed to compile against the old model, then passed. For
+  the end-to-end slice, `refuses` was temporarily stubbed to prove the tests are load-bearing -
+  NX disabled fails 4 of them, XX disabled fails the other 2 - and then restored.
+- Offline `test -pl dynacache-server -am`: engine 147, cluster 85, cp 93 (92 + 1), server 101
+  (93 + 8), all green. The server base is 93 and not the 91 the briefing expected; the eight new
+  tests are one in `CommandDispatcherTest` and seven in `CpRoutingTest`.
+
+**Deviations:**
+1. **The counter's four behaviours are three tests, not four.** The acceptance list names four test
+   names for the reference and says "the same four behaviours" for the counter without naming them;
+   the two XX behaviours on a counter share one test because they share one session, which is one
+   less three-member Raft group to start.
+2. **No `NX`/`XX` on the `CP.LONG.SET` / `CP.REF.SET` spelling.** The ticket calls exposing it free,
+   not required, and the fix asked for is the compat path. The commands carry the condition, so a
+   parser row is two lines whenever a ticket wants the CP spelling; the parser's command rows are
+   outside this ticket's seams anyway.
+3. **The NX/XX rule is stated twice in the tree.** `Condition.refuses` is the one statement of it,
+   but `Partition.run`'s `SET` branch still has its own three-line `when`, because the AP engine is
+   outside this ticket's seams. Folding that call site is a one-line change whenever the AP engine
+   is open.
+4. **Two Kotlin warnings sit on a re-wrapped line.** The compiler reports
+   "identity-sensitive operation on an instance of value type `Duration?`" twice at
+   `RefSet.equals`'s `ttl == other.ttl`. The diff only re-wrapped that expression to fit the new
+   `condition` term beside it; the comparison itself is unchanged from T42.
+5. **The namespace rule is still the key prefix.** `compat` reads `cp:ref:` to pick the kind, as it
+   has since T44 and T54. Ticket 71 folds it.
+
+**For the next ticket:**
+- **Ticket 71** folds the kind lookup: `compat` now branches on `reference` in five arms (`GET`,
+  `SET`, `EXPIRE`, `TTL`, `PERSIST`), and the conditional SET added here is inside the existing
+  `SET` arm, so it costs 71 nothing extra. Its `compat_set_matches_cp_spec_9_5` should assert that
+  `SET` with a condition is in the compat set, which it now is.
+- **Ticket 62**, the reply-shape ledger, has one thing to record that this ticket did not
+  introduce: `SETNX k v` parses to `Command.Set(..., NX)` and therefore answers `+OK`/nil on both
+  engines, where Redis's `SETNX` answers 1/0. That divergence is the parser's and predates T61; it
+  is now reachable on `cp:` keys as well as AP ones.
+- **T60's wire tag** does not collide: this ticket added no tag and used no number at 40 or above.
+
+---
+
+## T63 - The engine's command codec encodes every keyed command
+
+The WAL codec became the engine's command codec. `WalCodec.kt` is now
+`persist/CommandCodec.kt`; the object is public (`internal` would have hidden it from the server
+and cluster modules that T64 and T65 move onto it).
+
+**The interface.** Two names, both in `dynacache.engine.persist`:
+
+- `CommandCodec.encode(command: Command, now: Instant? = null): Pair<Byte, ByteArray>` - the
+  command's op code and the body of its arguments.
+- `CommandCodec.decode(op: Byte, body: ByteArray): List<Command>` - the commands that encoding
+  redoes, in order.
+- `whatChanged(command: Command, reply: Reply): Command?` - the command the log should hold, or
+  null when nothing changed. A top-level function, not a member: it is the log's decision about a
+  reply, not part of the encoding.
+
+`CommandEngine.log` is now `whatChanged(command, reply)?.let { CommandCodec.encode(it, now) }` and
+appends exactly as before. `SnapshotEngine` replays through `CommandCodec.decode`, unchanged
+otherwise. `Wal.kt` was not touched at all: the writer already took `(op, payload)`.
+
+**Coverage.** Total over `Command.Keyed` minus `Cp`, plus every `Command.Fanned`, plus `FlushDb`
+(the log has always held it). That is 22 reads, 17 writes and the 4 fanned commands, 43 op codes.
+Op codes 1 to 16 and their bodies are exactly what they were; 17 to 43 are new and are never
+written to the log (`HMSET`, every read, the four fanned commands). `Command.Cp` is out of scope:
+it is CpWire's business (CP spec 6.2) and `encode` throws for it, as it does for `Ping`,
+`CommandTable`, `Scan` and the other `EveryPartition` commands, which the router runs on the node
+the client reached and never forwards. The `when` in `encode` is exhaustive over `Command`, so a
+variant added without a codec case stops the main build, not only the test.
+
+**The what-changed function.** An error or a nil (a refused `SET`, an empty `POP`) changed nothing;
+so did a read and so did a fanned command, which reaches the log as the single-key parts it splits
+into. A taken `SET` is logged with its condition decided away; `HMSET` is logged as the `HSET` it
+is; `ZADD` keeps its condition (T48: `:0` is a refusal and a moved score alike) and loses `CH`,
+which changes only the reply.
+
+**Deviation: `whatChanged` takes no `now`.** The ticket's signature is (command, reply, now). No
+`Command` can carry a decided deadline - `Command.Set` holds a `Duration` and only `Command.Expire`
+holds an `Instant` - so a what-changed that returned "the command to log" with the TTL already
+absolute would have to return two commands, which the WAL would log as two entries. That is a
+durability regression: a crash between them restores the value without its expiry, where today one
+entry is all-or-nothing. So the instant stays in the encoding, where it already lived: `now` is
+`encode`'s parameter, and the deadline and the asked duration are one field read two ways.
+
+**The format decision.** One encoding, one op code per command, and the WAL entry header wraps it:
+the header carries the op code and the payload carries the body. A forward carries the same two
+concatenated, op code first (T64 writes those two lines of framing; nothing here needs them yet).
+
+**A pre-existing WAL still reads.** No entry header, op code or body changed. The two fields the
+wire needs and the log never did are written only when they are not their default - `SET`'s
+condition and asked duration, `ZADD`'s `CH` - so an entry an older build wrote has no tail, and no
+tail is what it always meant. `codec_reads_the_entries_written_before_the_reads_were_added` builds
+both old bodies by hand and decodes them. Nothing about a pre-existing log is version-gated, so no
+format version was bumped and none was needed.
+
+**Tests.** `dynacache-engine/src/test/kotlin/dynacache/engine/persist/CommandCodecTest.kt`, 7 tests:
+
+- `command_codec_round_trips_every_keyed_variant` - one sample of every variant through an
+  exhaustive `when`, each asserting both answers: does it cross, and does the log hold it. Byte
+  exactness is `encode(decode(encode(c))) == encode(c)` plus the decoded variant's own class.
+- `codec_round_trips_conditions_and_both_ttl_forms`
+- `codec_reads_the_entries_written_before_the_reads_were_added`
+- `what_changed_logs_nothing_for_an_error_or_a_refused_write`
+- `what_changed_decides_the_condition_of_a_set_it_took`
+- `what_changed_keeps_the_condition_of_a_conditional_zadd`
+- `what_changed_logs_an_hmset_as_the_hset_it_is`
+
+Engine suite 151 before, 158 after, all green; every WAL, recovery and fsync test passes unchanged,
+`wal_reads_append_nothing` included. (The brief's expected base of 148 was three low; nothing
+existing was renamed or removed, and only the codec's own file was added to.) `dynacache-server
+-am` green downstream: cluster 86, cp 94, server 92 -- the brief's 84 and 98 for those two were
+off in both directions, and no test outside the engine was touched.
+
+**Known ceiling.** The exhaustive `when` stops the build when a variant is added, but the samples
+list is a list: a new variant folded into an existing branch group compiles without a sample. The
+engine is kotlin-stdlib only, so `sealedSubclasses` was not available to close that gap, and a
+reflection dependency for one assertion was not worth it. `whatChanged`'s `else -> null` has the
+same shape: the test's `when` is what forces the author of a new mutating variant to classify it.
+
+**For the next ticket.**
+
+- T64 (forwards): `CommandCodec.encode(command)` with no `now`, framed as `byteArrayOf(op) + body`;
+  the other side is `CommandCodec.decode(bytes[0], bytes.copyOfRange(1, bytes.size)).single()`.
+  `single()` is safe for a forward: only a logged `SET` with a deadline decodes to two commands, and
+  a forward passes no `now`, so it never carries one. `commandToTokens` in the server and
+  `TokenCodec` in the cluster test kit both become dead once the router carries bytes.
+- T65 (replicates): `whatChanged(command, reply)` is `Replication.decided()`'s replacement, and it
+  is stricter - it also drops `ZADD`'s `CH` and turns `HMSET` into `HSET`. It answers null for
+  exactly the writes `Replication.write` currently refuses to replicate (an error, a refused
+  conditional `SET`), so the `if (reply is Reply.Error || ...)` check there becomes the null. The
+  replicate's `expiresAtMillis` field is the same decision as `encode`'s `now`: pass the
+  coordinator's instant and the TTL travels absolute.
+
+---
+
+## T59 - Acceptance tests run on the injected clock
+
+Plan rule 1.5 at the acceptance tier. No test in the repository constructs `Clock.systemUTC()`
+or `Clock.systemDefaultZone()` any more, and the four acceptance tests no longer spin on wall
+time except where the thing being waited for is another thread that reads no clock at all.
+
+Test sources only; no production file changed. Six files, +110 / -41.
+
+### What changed, per test
+
+**`P1AcceptanceTest`** - the engine was built on `Clock.systemUTC()` and `aTtlThatFires` spun on
+`System.nanoTime()` for up to five seconds. It now holds one `MutableClock` at
+`2026-09-06T00:00:00Z` and hands the same instance to the engine *and* to the server, which is
+the shape T52 gave `DynaCacheServerTest.withServer`: the parser works out a `PX` deadline from
+the server's clock and the engine compares it against its own, so the two must be one clock.
+`aTtlThatFires` advances 201 ms past the `PX 200` and calls `engine.tick().join()` - the tick the
+server's scheduler would otherwise have run - then asserts as before. Every assertion and the
+test's name are unchanged.
+
+**`CpRoutingTest`** and **`CpSessionLifecycleTest`** - both built the AP engine on
+`Clock.systemUTC()`; the ticket names only the first, but the acceptance criterion is about every
+test, so both are on a `MutableClock` now, shared with the server as in P1. The clock never
+moves. This is safe across the CP boundary because a lease is measured on log time, which only a
+CP member's own (kit) clock moves, and `EXPIRE`'s absolute deadline is turned straight back into
+a span by `CommandDispatcher` using the same clock the parser built it from - so the AP clock and
+the CP clocks never need to agree on what the date is. Freezing it also removes a small real
+wobble: `TTL` on a 100 s reference lease used to lose the milliseconds spent between the parser
+and the dispatcher.
+
+**`P2AcceptanceTest`** - the three `ClusterNode`s take the shared `MutableClock`, so the TTL that
+crosses the quorum is measured against a "now" the test sets. The gossip wait stays (below).
+
+**`P4AcceptanceTest`** - every generation of nodes, including the single node the memory-pressure
+section builds, takes one `MutableClock` that survives the restarts as the data dirs do. Three
+changes follow from it:
+
+- `aMixedKeyspaceThroughJedis` no longer answers `System.nanoTime()`, and `everyKeyCameBack` no
+  longer subtracts the seconds spent restarting. No clock time passes across the restart, so the
+  restored TTL is asserted exactly: `assertEquals(60L, three.ttl("sess:1"))` where it used to be
+  `in 1L..(60L - spent)`.
+- the `blink` key's 300 ms deadline is reached by advancing 301 ms rather than by polling. The
+  restart now costs no clock time at all, which is what lets the test assert `blink` is *still
+  there* when the node comes back before advancing past its deadline.
+- `aTtlFiresOnAClusterNode` advances 201 ms instead of polling for up to ten seconds.
+
+The snapshot wait stays (below).
+
+**`P5AcceptanceTest`** - the three nodes take the shared `MutableClock`. P5 constructed no system
+clock, so this is not required by the acceptance criterion; it is here because
+`SET cp:counter:x 5 EX 10` was a live wall-clock dependency, and a run slow enough under CI load
+could have let that lease lapse between the `SET` and the `INCR` that reads it back. The election
+wait stays (below).
+
+### Bounded waits that remain (plan rule 1.7)
+
+Each waits for a thread that consults no clock, so there is nothing a test could advance to bring
+it forward. All three are bounded polls; none sleeps.
+
+1. `P2AcceptanceTest.gossipSeesTheDeadNode`, 30 s. Waits for **SWIM's own gossip coroutine** on
+   `Dispatchers.Default`, and the gRPC transport it probes over. `Swim` takes no `Clock` at all -
+   it counts its own gossip periods through `delay` - so a burial cannot be brought forward by
+   moving the injected clock.
+2. `P4AcceptanceTest.awaitUntil`, one remaining call ("the snapshot completed on every node"),
+   20 s. Waits for the **gRPC transport threads and each node's router coroutine** to carry the
+   Chandy-Lamport markers past the envelopes in flight. No clock is read anywhere on that path.
+3. `P5AcceptanceTest.awaitValue` in `cpLeader()`, 20 s. Waits for **MicroRaft's election timer
+   threads** on the three members. MicroRaft runs its own scheduler and takes no injected clock -
+   the same reason the CP kit's waits were recorded at T45 and T46.
+
+Already recorded elsewhere and cited rather than re-recorded: `CpTestKit.awaitApplied` and
+`ChaosDriver`'s submit deadline (T38, T43, T45, T46 deviations). Both stand unchanged.
+
+### The two flakes
+
+**`ReadRepairTest.read_repair_does_not_delay_reply`** - reproduced once here, on the first full
+reactor run of this ticket, as `IllegalStateException: no READ reached node-3` at
+`ReadRepairTest.kt:150`. It is **not** a real-time wait and not a clock read, so it is left alone
+per the ticket. `arrived()` does `repeat(10) { network.drain(); yield(); tryReceive() }` inside
+`runTest`, on a `TestDispatcher`. The READ envelope it is looking for is sent only after
+`Replication.submit(Command.Get)`'s local `engine.view` future completes, and that future
+completes on an **`ApEngine` partition executor thread**, outside the test dispatcher. `yield()`
+only reschedules within the dispatcher; it does not wait for the partition thread, so all ten
+iterations can run before the view completes. Converting it means awaiting the engine's future
+(or a real bounded wait) - a logic change, not a clock injection - so it is out of this ticket.
+
+**`CpEngineTest.C23_every_member_agrees_on_expiry_at_same_index`** - already on the injected
+clock: it drives the expiry with `kit.clock(leader).advance(Duration.ofSeconds(2))` and an
+explicit `leader.tick()`. Its only real-time wait is `CpTestKit.awaitApplied`, which polls a
+member's MicroRaft `report` until the commit index arrives, waiting on **MicroRaft's replication
+and heartbeat threads**. That is the already-recorded T45/T46 deviation and no clock advance
+reaches it. Nothing changed; it passed on every run here.
+
+### Wall time
+
+Four acceptance classes, run on their own (`-Dtest=P1,P2,P4,P5AcceptanceTest`), seconds. Two other
+Maven builds were running on the machine throughout, so run-to-run noise is roughly +/- 0.7 s on
+an 11 s total. The first baseline sample was taken under lighter load than everything after it;
+samples 2 and 3 were taken by reverting the six files in place, so they share the load of the
+"after" runs.
+
+| Run | P1 | P2 | P4 | P5 | total |
+| --- | --- | --- | --- | --- | --- |
+| before, sample 1 (light load) | 1.144 | 4.485 | 1.513 | 3.304 | 10.446 |
+| before, sample 2 | 1.627 | 4.699 | 1.939 | 3.357 | 11.622 |
+| before, sample 3 | 1.509 | 4.750 | 1.671 | 3.279 | 11.209 |
+| after, sample 1 (fresh compile) | 1.830 | 4.795 | 1.909 | 3.401 | 11.935 |
+| after, sample 2 | 1.524 | 4.724 | 1.667 | 3.372 | 11.287 |
+
+Flat within the noise: 11.21 before against 11.29 after, comparing the two samples taken under
+the same load. Inside the full reactor run, where P1 is no longer the first class to pay the JVM
+and Netty warm-up, P1 falls from about 1.5 s to 0.38 s.
+
+Suite totals unchanged, as no test was added or removed: engine 151, cluster 86, cp 92, server
+92, **421 total**, green.
+
+### Deviations
+
+1. Three bounded real-time waits remain, named above with the thread each waits for (rule 1.7).
+2. `P4AcceptanceTest` gained one assertion, `assertEquals("gone", three.get("blink"))`, against
+   the brief's "keep every assertion" (it says keep, not freeze). It is here because the frozen
+   clock is what makes "the key is still alive when the node comes back" checkable at all, and
+   without it the `assertNull` that follows would go green on a key the RDB had dropped entirely.
+3. `P4AcceptanceTest`'s restored TTL assertion was tightened from `in 1L..(60L - spent)` to
+   `assertEquals(60L, ...)`, for the same reason: the elapsed-time slack it allowed no longer
+   exists.
+4. Two tests beyond the four the ticket names were changed: `CpSessionLifecycleTest` also built
+   its AP engine on `Clock.systemUTC()`, and the acceptance criterion covers every test, so it was
+   fixed alongside `CpRoutingTest`.
+5. `P5AcceptanceTest`'s nodes were put on the injected clock although P5 constructed no system
+   clock, to remove the `EX 10` lease's dependency on how slow the machine is.

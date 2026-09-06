@@ -336,11 +336,13 @@ object CpWire {
             is Command.Cp.LongSet -> tagged(CMD_SET, command.key) {
                 writeLong(command.value)
                 writeLong(command.ttl?.toMillis() ?: NO_TTL)
+                writeCondition(command.condition)
             }
             is Command.Cp.LongGet -> tagged(CMD_GET, command.key) {}
             is Command.Cp.LongIncr -> tagged(CMD_INCR, command.key) {}
             is Command.Cp.LongDecr -> tagged(CMD_DECR, command.key) {}
             is Command.Cp.LongIncrBy -> tagged(CMD_INCR_BY, command.key) { writeLong(command.delta) }
+            is Command.Cp.LongGetAdd -> tagged(CMD_GET_ADD, command.key) { writeLong(command.delta) }
             is Command.Cp.LongCas -> tagged(CMD_CAS, command.key) {
                 writeLong(command.expected)
                 writeLong(command.new)
@@ -383,6 +385,7 @@ object CpWire {
             is Command.Cp.RefSet -> tagged(CMD_REF_SET, command.key) {
                 writeBlob(command.value)
                 writeLong(command.ttl?.toMillis() ?: NO_TTL)
+                writeCondition(command.condition)
             }
             is Command.Cp.RefGet -> tagged(CMD_REF_GET, command.key) {}
             is Command.Cp.RefCas -> tagged(CMD_REF_CAS, command.key) {
@@ -408,13 +411,14 @@ object CpWire {
     private fun DataInputStream.readCommandBody(tag: Int): Command.Cp {
         val key = Key(readBlob())
         return when (tag) {
-            CMD_SET -> Command.Cp.LongSet(key, readLong(), readLong().takeIf { it != NO_TTL }?.let(Duration::ofMillis))
+            CMD_SET -> Command.Cp.LongSet(key, readLong(), readTtl(), readCondition())
             CMD_GET -> Command.Cp.LongGet(key)
             CMD_INCR -> Command.Cp.LongIncr(key)
             CMD_DECR -> Command.Cp.LongDecr(key)
             CMD_INCR_BY -> Command.Cp.LongIncrBy(key, readLong())
             CMD_DECR_BY_RETIRED ->
                 error("CP command tag $tag is the retired DECRBY: a DECRBY is an ADD with a negative delta")
+            CMD_GET_ADD -> Command.Cp.LongGetAdd(key, readLong())
             CMD_CAS -> Command.Cp.LongCas(key, readLong(), readLong())
             CMD_EXPIRE -> Command.Cp.LongExpire(key, Duration.ofMillis(readLong()))
             CMD_TTL -> Command.Cp.LongTtl(
@@ -436,8 +440,7 @@ object CpWire {
             CMD_LATCH_DOWN -> Command.Cp.LatchDown(key)
             CMD_LATCH_GET -> Command.Cp.LatchGet(key)
             CMD_LATCH_RESET -> Command.Cp.LatchReset(key, readInt())
-            CMD_REF_SET ->
-                Command.Cp.RefSet(key, readBlob(), readLong().takeIf { it != NO_TTL }?.let(Duration::ofMillis))
+            CMD_REF_SET -> Command.Cp.RefSet(key, readBlob(), readTtl(), readCondition())
             CMD_REF_GET -> Command.Cp.RefGet(key)
             CMD_REF_CAS -> Command.Cp.RefCas(key, readBlob(), readBlob())
             CMD_REF_EXPIRE -> Command.Cp.RefExpire(key, Duration.ofMillis(readLong()))
@@ -535,6 +538,32 @@ object CpWire {
         return value
     }
 
+    private fun DataInputStream.readTtl(): Duration? = readLong().takeIf { it != NO_TTL }?.let(Duration::ofMillis)
+
+    /**
+     * A SET's `NX`/`XX`, as one byte after its TTL: both SET verbs carry it, so it rides on their
+     * existing tags rather than doubling them. The byte is spelled out rather than taken from the
+     * enum's ordinal, because a log entry outlives the declaration order of a Kotlin enum.
+     */
+    private fun DataOutputStream.writeCondition(condition: Command.Set.Condition?) = writeByte(
+        when (condition) {
+            null -> NO_CONDITION
+            Command.Set.Condition.NX -> CONDITION_NX
+            Command.Set.Condition.XX -> CONDITION_XX
+        },
+    )
+
+    private fun DataInputStream.readCondition(): Command.Set.Condition? = when (val byte = readByte().toInt()) {
+        NO_CONDITION -> null
+        CONDITION_NX -> Command.Set.Condition.NX
+        CONDITION_XX -> Command.Set.Condition.XX
+        else -> error("unknown SET condition $byte")
+    }
+
+    private const val NO_CONDITION = 0
+    private const val CONDITION_NX = 1
+    private const val CONDITION_XX = 2
+
     private const val OP_INTERNAL = 0
     private const val OP_CP_OP = 1
     private const val OP_TICK = 2
@@ -575,6 +604,7 @@ object CpWire {
     private const val CMD_REF_EXPIRE = 31
     private const val CMD_REF_TTL = 32
     private const val CMD_REF_PERSIST = 33
+    private const val CMD_GET_ADD = 34
     private const val NO_TTL = -1L
     private const val NO_OWNER = -1L
 

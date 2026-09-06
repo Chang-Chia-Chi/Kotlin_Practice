@@ -3,14 +3,15 @@ package dynacache.server
 import dynacache.cp.CpTestKit
 import dynacache.engine.ApEngine
 import dynacache.engine.Reply
+import dynacache.engine.testkit.MutableClock
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertInstanceOf
 import org.junit.jupiter.api.Assertions.assertNotEquals
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
-import java.time.Clock
 import java.time.Duration
+import java.time.Instant
 import java.util.concurrent.TimeUnit
 
 /**
@@ -23,8 +24,13 @@ import java.util.concurrent.TimeUnit
 class CpSessionLifecycleTest {
 
     private val kit = CpTestKit()
-    private val ap = ApEngine(partitionCount = 4, clock = Clock.systemUTC())
-    private val server = DynaCacheServer(port = 0, engine = ap, cp = kit.leaderEngine())
+
+    // Plan rule 1.5, as in [CpRoutingTest]: the AP engine and the socket read a clock the test
+    // owns and that never moves. A session's timeout is log time, which only the leader's own
+    // clock moves, and [session_lapse_clears_the_cache] is what moves it.
+    private val clock = MutableClock(Instant.parse("2026-09-06T00:00:00Z"))
+    private val ap = ApEngine(partitionCount = 4, clock = clock)
+    private val server = DynaCacheServer(port = 0, engine = ap, cp = kit.leaderEngine(), clock = clock)
 
     @BeforeEach
     fun start() = server.start()

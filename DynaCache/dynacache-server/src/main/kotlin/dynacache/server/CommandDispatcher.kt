@@ -87,12 +87,15 @@ class CommandDispatcher(
         val reference = key.toString().startsWith(REFERENCE_PREFIX)
         return when (command) {
             is Command.Get -> if (reference) Command.Cp.RefGet(key) else Command.Cp.LongGet(key)
-            is Command.Set -> when {
-                // SET NX and SET XX have no CP counterpart: a counter is set or it is not.
-                command.condition != null -> refuse(command)
-                reference -> Command.Cp.RefSet(key, command.value, command.ttl)
-                else -> Command.Cp.LongSet(key, command.value.asLong() ?: notAnInteger(), command.ttl)
-            }
+            // SET NX and SET XX are the compat set's too (CP spec 1, 9.5): they re-target to the
+            // conditional form of the kind's SET verb, which applies the condition, the value and
+            // the TTL in one committed entry.
+            is Command.Set ->
+                if (reference) {
+                    Command.Cp.RefSet(key, command.value, command.ttl, command.condition)
+                } else {
+                    Command.Cp.LongSet(key, command.value.asLong() ?: notAnInteger(), command.ttl, command.condition)
+                }
             is Command.IncrBy -> when (command.delta) {
                 1L -> Command.Cp.LongIncr(key)
                 -1L -> Command.Cp.LongDecr(key)

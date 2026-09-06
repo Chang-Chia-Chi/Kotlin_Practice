@@ -134,6 +134,7 @@ class CommandParser(private val clock: Clock = Clock.systemUTC()) {
         "cp.long.incr" -> Command.Cp.LongIncr(key(name, args, 1))
         "cp.long.decr" -> Command.Cp.LongDecr(key(name, args, 1))
         "cp.long.add" -> exactly(name, args, 2).let { Command.Cp.LongIncrBy(Key(it[0]), integer(it[1])) }
+        "cp.long.getadd" -> exactly(name, args, 2).let { Command.Cp.LongGetAdd(Key(it[0]), integer(it[1])) }
         "cp.long.cas" -> exactly(name, args, 3).let {
             Command.Cp.LongCas(Key(it[0]), integer(it[1]), integer(it[2]))
         }

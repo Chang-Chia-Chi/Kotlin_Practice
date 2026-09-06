@@ -14,17 +14,17 @@ changes yet; forwards move to bytes in ticket 64 and replicates in ticket 65.
 
 **Nature:** codec, C8 and C14 at the byte level (Opus)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache 50fb069f, merged into misc/ai_gen)
 
-- [ ] `command_codec_round_trips_every_keyed_variant`: one test whose exhaustive `when` over
+- [x] `command_codec_round_trips_every_keyed_variant`: one test whose exhaustive `when` over
       the command hierarchy stops the build when a variant is added without a codec case
-- [ ] Reads, conditional writes with their condition, and TTLs as both duration and instant
+- [x] Reads, conditional writes with their condition, and TTLs as both duration and instant
       round-trip byte-exact
-- [ ] The what-changed function has its own tests, including the refused conditional `ZADD`
+- [x] The what-changed function has its own tests, including the refused conditional `ZADD`
       of ticket 48 and the refused conditional `SET`
-- [ ] Every existing WAL, recovery and fsync test passes unchanged; `wal_reads_append_nothing`
+- [x] Every existing WAL, recovery and fsync test passes unchanged; `wal_reads_append_nothing`
       still holds
-- [ ] Progress entry appended
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket; 200 to 600 lines including tests;
 JUnit 5 + Mockito only, no AssertJ or MockK; no sleeps, time is an injected Clock; spec-named
