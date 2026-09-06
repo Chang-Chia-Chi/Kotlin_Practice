@@ -115,6 +115,9 @@ sealed class Command {
         /** `CP.LONG.ADD K -d`, the `DECRBY` form: the new value. */
         data class LongDecrBy(override val key: Key, val delta: Long) : AtomicLong()
 
+        /** `CP.LONG.GETADD K d`: the value the counter held before [delta] was added (CP spec 3.2). */
+        data class LongGetAdd(override val key: Key, val delta: Long) : AtomicLong()
+
         /** `CP.LONG.CAS K expected new`: 1 when the swap happened, 0 when it did not. */
         data class LongCas(override val key: Key, val expected: Long, val new: Long) : AtomicLong()
 

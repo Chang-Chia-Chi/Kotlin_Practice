@@ -342,6 +342,7 @@ object CpWire {
             is Command.Cp.LongDecr -> tagged(CMD_DECR, command.key) {}
             is Command.Cp.LongIncrBy -> tagged(CMD_INCR_BY, command.key) { writeLong(command.delta) }
             is Command.Cp.LongDecrBy -> tagged(CMD_DECR_BY, command.key) { writeLong(command.delta) }
+            is Command.Cp.LongGetAdd -> tagged(CMD_GET_ADD, command.key) { writeLong(command.delta) }
             is Command.Cp.LongCas -> tagged(CMD_CAS, command.key) {
                 writeLong(command.expected)
                 writeLong(command.new)
@@ -415,6 +416,7 @@ object CpWire {
             CMD_DECR -> Command.Cp.LongDecr(key)
             CMD_INCR_BY -> Command.Cp.LongIncrBy(key, readLong())
             CMD_DECR_BY -> Command.Cp.LongDecrBy(key, readLong())
+            CMD_GET_ADD -> Command.Cp.LongGetAdd(key, readLong())
             CMD_CAS -> Command.Cp.LongCas(key, readLong(), readLong())
             CMD_EXPIRE -> Command.Cp.LongExpire(key, Duration.ofMillis(readLong()))
             CMD_TTL -> Command.Cp.LongTtl(
@@ -574,6 +576,7 @@ object CpWire {
     private const val CMD_REF_EXPIRE = 31
     private const val CMD_REF_TTL = 32
     private const val CMD_REF_PERSIST = 33
+    private const val CMD_GET_ADD = 34
     private const val NO_TTL = -1L
     private const val NO_OWNER = -1L
 
