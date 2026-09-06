@@ -7,7 +7,7 @@ import dynacache.engine.ds.SkipList
  * What a key holds. A key is one kind and never another, and a command declares the [Kind]
  * it needs so a wrong-type command is refused before it can touch the entry (C13).
  */
-internal sealed class Value(val kind: Kind) {
+sealed class Value(val kind: Kind) {
 
     /** The word `TYPE` reports, and what a command names when it needs a kind. */
     enum class Kind(val text: String) {
@@ -39,6 +39,22 @@ internal sealed class Value(val kind: Kind) {
      */
     class ZSet(val order: SkipList) : Value(Kind.ZSET) {
         val scores = HashTable<String, Double>()
+
+        /**
+         * Writes one (member, score) into both indexes at once, answering whether the member was
+         * new. The score map holds the member's one score, so an existing member is a move in the
+         * list rather than a second entry; that pairing is what makes the dual index a single
+         * value, and this is its only writer.
+         */
+        fun write(score: Double, member: ByteArray): Boolean {
+            val previous = scores.put(fieldName(member), score)
+            if (previous == null) {
+                order.insert(score, member)
+                return true
+            }
+            if (previous != score) order.updateScore(previous, member, score)
+            return false
+        }
     }
 }
 
@@ -97,4 +113,4 @@ private const val NUMERIC = "0123456789.eE+-"
 internal fun fieldName(field: ByteArray): String = field.toString(Charsets.ISO_8859_1)
 
 /** The bytes of a field name the store keyed by [fieldName]. */
-internal fun fieldBytes(name: String): ByteArray = name.toByteArray(Charsets.ISO_8859_1)
+fun fieldBytes(name: String): ByteArray = name.toByteArray(Charsets.ISO_8859_1)

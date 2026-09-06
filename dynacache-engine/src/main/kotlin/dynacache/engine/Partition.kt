@@ -216,7 +216,7 @@ internal class Partition(
                 }
                 if (scored.isEmpty()) return ZERO
                 val zset = zset(command.key, now) ?: newZSet(command.key, now)
-                Reply.Integer(scored.count { (score, member) -> writeScore(zset, score, member) }.toLong())
+                Reply.Integer(scored.count { (score, member) -> zset.write(score, member) }.toLong())
             }
             is Command.ZScore ->
                 Reply.Bulk(scoreOf(command.key, now, command.member)?.let { scoreText(it).toByteArray() })
@@ -242,7 +242,7 @@ internal class Partition(
                 // inf + -inf: the one sum of two legal scores that is no score at all. Checked
                 // before the key is created, so a refused increment leaves no empty sorted set.
                 if (moved.isNaN()) return NAN_SCORE
-                writeScore(zset ?: newZSet(command.key, now), moved, command.member)
+                (zset ?: newZSet(command.key, now)).write(moved, command.member)
                 Reply.Bulk(scoreText(moved).toByteArray())
             }
             is Command.ZRangeByScore -> {
@@ -447,21 +447,6 @@ internal class Partition(
     /** What [member] scores in [key]'s sorted set, or null when either is absent. */
     private fun scoreOf(key: Key, now: Instant, member: ByteArray): Double? =
         zset(key, now)?.scores?.get(fieldName(member))
-
-    /**
-     * Writes one (member, score) into both indexes at once, answering whether the member was new.
-     * The score map holds the member's one score, so an existing member is a move in the list
-     * rather than a second entry; that pairing is what makes the dual index a single value.
-     */
-    private fun writeScore(zset: Value.ZSet, score: Double, member: ByteArray): Boolean {
-        val previous = zset.scores.put(fieldName(member), score)
-        if (previous == null) {
-            zset.order.insert(score, member)
-            return true
-        }
-        if (previous != score) zset.order.updateScore(previous, member, score)
-        return false
-    }
 
     /**
      * A Redis list index as a position: a negative one counts back from the tail. An index the
