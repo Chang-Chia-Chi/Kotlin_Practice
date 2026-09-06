@@ -4691,3 +4691,224 @@ class, not `SET`'s -- its refusal answers `:0` -- and must carry them into the l
 More generally: `encode` sees only `(command, reply, now)`. Any future rule that needs the state
 *before* the command has to move the decision into `Partition`, where the condition is evaluated;
 that is a hook change, and worth doing once rather than per command.
+
+## T47: Single-node benchmark with redis-benchmark
+
+**Built:** `DynaCache/bench/single-node.sh`, a Git Bash script that builds the jars if they are
+missing, starts one DynaCache node in single-node mode (`dynacache 6390 16 %TEMP%\dynacache-bench\data`),
+waits for `PING` through a `redis:7` container, runs four `redis-benchmark` passes against it,
+then starts a `redis:7` container on 6391 and runs the identical four passes against that. It
+starts and stops both itself, writes every CSV under `%TEMP%\dynacache-bench\`, times out each
+pass and exits non-zero on any failure. `DynaCache/bench/.gitattributes` pins `*.sh` to LF,
+because the repository has `core.autocrlf=true` and a CRLF checkout breaks the shebang.
+`docs/dynamiccache/benchmarks/2026-09-06-single-node.md` holds the environment, the node's
+arguments, four tables with a DynaCache column and a Redis column, the skipped list and four
+anomaly paragraphs. Nothing under `src/main` or `src/test` changed. The server is launched with
+`java -cp` over the module jars plus a runtime classpath emitted by `dependency:build-classpath`
+in the same reactor invocation as `package`, which is the only way the sibling modules resolve
+offline; the script does that itself.
+
+**Concepts named:** No new domain vocabulary. Two operational terms the report uses: the
+**plain pass** (`-c 50 -n 100000 -d 3`), which on this machine measures the Docker round trip
+rather than either engine, since Redis answers every command in it at 19 to 24 thousand
+requests per second regardless of which command it is; and the **spread pass** (`-r 100000`),
+which exists because `redis-benchmark` leaves `__rand_int__` in the command literally unless
+`-r` is given, so without it every `SET`, `GET` and `INCR` names one key and `MSET (10 keys)`
+names that same key ten times, and no multi-key fan-out is exercised at all.
+
+**Acceptance:**
+- Script starts a node, waits for `PING`, runs the ticket's thirteen tests at `-c 50 -n 100000
+  -d 3`, again with `-P 16`, once with `-d 1024`, and stops the node: done, plus a fourth pass
+  with `-r 100000` and a short `EVERY_SECOND` pass.
+- The same passes against a `redis:7` container, same flags, so every DynaCache number sits
+  next to a Redis number: done, `redis-plain`, `redis-pipelined`, `redis-1024b`, `redis-spread`.
+- Report with tables, environment and one paragraph per anomaly naming the code path: done,
+  four anomalies.
+- Every unsupported test listed as skipped with the reason: `SADD`, `SPOP` (no Set type),
+  `ZPOPMIN` (no `zpopmin` in the parser), `XADD` (no Stream type), and `LRANGE_300/500/600`
+  (supported, left out by the ticket's list).
+- Progress entry: this.
+
+**Headline numbers** (requests per second, DynaCache then redis:7):
+
+| | plain | pipelined `-P 16` |
+|---|---|---|
+| SET | 26483.05 / 23702.30 | 145348.83 / 313479.62 |
+| GET | 27654.87 / 24189.65 | 389105.06 / 320512.81 |
+| INCR | 27225.70 / 23917.72 | 139275.77 / 294117.66 |
+| MSET (10 keys) | 13877.33 / 20559.21 | 17540.78 / 176991.16 |
+
+Worst cases: `RPUSH` 1072.78 against 22841.48 plain (5 percent) and 1351.39 against 362318.84
+pipelined (0.4 percent). `SET` under `EVERY_SECOND`: 53.30 rps, p50 1014.783 ms.
+
+**Deviations:**
+- **The node runs with fsync `NEVER`, not `EVERY_SECOND` as the ticket says.** DynaCache answers
+  a write only once its WAL entry is durable (C14), so under `EVERY_SECOND` every write waits for
+  the next second's fsync and throughput is exactly clients per fsync interval: measured at 53.30
+  requests per second. A 100,000-request `SET` pass would take half an hour and the nine write
+  tests together most of a day. The `redis:7` container has no append-only file and never makes a
+  reply wait for the disk, so `NEVER` is the setting that compares like with like.
+  `EVERY_SECOND`'s cost is measured on its own in the script and is the report's first anomaly.
+  This is not a shortcut to repay; it is what the comparison requires.
+- **A fourth pass and two extra measurements beyond the ticket.** The spread pass (`-r 100000`)
+  was added because without it the plan's named fan-out ceiling is never exercised. A four-round
+  `LPUSH` growth pass was added to confirm the list anomaly's cause. Both run on both targets or
+  on DynaCache alone as appropriate and are in the script.
+- The node is not restarted between its passes, and neither is the container, so `mylist` is
+  about 200,000 elements long when the pipelined pass starts. Symmetric across the two engines,
+  so the side-by-side columns are fair, but DynaCache's own plain-to-pipelined ratio for a list
+  command compares two different list lengths, and the report says so.
+- DynaCache writes a WAL record per mutating command even under `NEVER`; the default `redis:7`
+  writes nothing per command. That asymmetry is against DynaCache and is not corrected for.
+- **Every table was taken under contention and no pass has a load reading behind it.** Another
+  orchestrator session was running Maven builds and test suites in the `kp-wt/t48` to `kp-wt/t51`
+  worktrees during all three runs. The ticket asked for the number of other Java processes and
+  the CPU idle percentage per pass; neither was recorded, which is the omission that makes the
+  factor-of-two spread unattributable at the time it happened. Sampled afterwards, the machine
+  was carrying three other Java processes at 25 percent CPU idle. The script now gates every pass
+  on ten consecutive seconds with no `java.exe` but its own node and at least 70 percent CPU
+  idle, and writes what it saw per pass to `load.txt`. The follow-up is a rerun in a quiet
+  window; the tables stand as provisional until then. The four anomalies are DynaCache-against-
+  Redis ratios measured on the same machine at the same moment and held in all three runs, so
+  contention is not expected to overturn them.
+
+**Nothing failed under load.** No crash, no hang, no error reply. Neither node log contains an
+exception. The only stderr in any DynaCache pass is `WARNING: Could not fetch server CONFIG`,
+because the parser has no `config` command; it changes no measurement.
+
+**For the next ticket:** four follow-ups, in the order the numbers rank them.
+
+1. **The `EVERY_SECOND` write path is unusable as it stands.** `Partition.execute` adds the log
+   hook's future to the task's `durable` and `Partition.task` completes the reply only after it;
+   under `EVERY_SECOND`, `WalWriter.writeBatch` parks the waiter on `awaitingFsync` and
+   `forceAwaiting` releases the set once per tick. Redis's own `appendfsync everysec` replies
+   immediately and fsyncs behind the reply. A ticket should measure group commit: keep
+   reply-after-durable, force on a one-to-five-millisecond deadline or as soon as a batch is
+   ready, and find the deadline that buys back most of `NEVER`'s throughput.
+2. **`Partition.account` recounts the whole aggregate after every keyed command**, including
+   reads, via `Value.approximateBytes()`, which for a list is `items.sumOf { it.size + 16 }`.
+   Push and pop on an `ArrayDeque` are O(1), so the recount is the only length-dependent work.
+   The four list tests run back to back on one growing key and their rates trace its length in a
+   U shape (2842.93, 1072.78, 1284.11, 3618.08), which separates length from the command. The
+   `ponytail:` comment on `approximateBytes` already names the repair: per-element size deltas
+   at the mutation sites, making `account` O(1). Measure `RPUSH` on a 200,000-element list
+   before and after.
+3. **Writes pipeline at about a third of Redis's gain and reads do not.** `GET` gained 14.1x
+   from `-P 16` against Redis's 13.2x; `SET` gained 5.5x against 13.2x, `HSET` 4.8x against
+   14.6x. The only difference between the two paths is the WAL append. A ticket should run the
+   pipelined pass against a node with no data directory and one with, and attribute the gap;
+   what is left over is DynaCache's own two thread handoffs per command, the executor hop into
+   the partition and the callback back onto the Netty event loop.
+4. **`ApEngine.fanOut`'s sequential chain is not the ceiling the plan expected.** With keys
+   spread, `MSET` reached 21584.29 against `SET`'s 26673.78 on the same pass, about 19 percent
+   for ten keys across partitions. Without `-r`, where all ten keys are one key on one
+   partition, `MSET` reached only 13877.33: spreading made it faster, because fifty clients on
+   one key put all the work on one of sixteen partition threads. Replace the `thenCompose` chain
+   with `allOf` and re-run the spread pass, and sweep `MGET` at 2, 8, 16 and 64 keys so the
+   chain's cost is a function of how many partitions a command spans.
+
+Absolute numbers moved by up to a factor of two between three runs of the script, on both
+engines. The shape did not: the list tests were slowest every time, the U shape appeared every
+time, the pipelined write gap stayed near a third every time, and `EVERY_SECOND` `SET` was
+50.47, 49.51 and 53.30. Read a single number as good to a factor of two and the ratios as the
+result.
+
+**Orchestrator note:** every table was taken while another session ran Maven builds on this
+machine, and no quiet window was available before landing, so the report carries a PROVISIONAL
+banner. The script now gates each pass on a quiet machine and records the other-Java count and
+CPU idle it saw per pass in `load.txt`. The quiet rerun is a follow-up ticket that reuses the
+script unchanged.
+
+---
+
+## T49 - A snapshot cuts state before it opens channels
+
+**Built:** `DistributedSnapshot.start` now runs spec 2.8 step 1 before step 2: it cuts and
+saves the node's state through the T32 `SnapshotEngine`, only then publishes the snapshot's
+channels into `open`, and only then sends the markers. T36 had opened the channels first, so an
+envelope the demux handled between the opening and the cut was appended to its channel log and
+applied to the engine before the views were taken, and a restore applied it twice (bug 3 of the
+P6 review). A `Mutex` (`cutting`) is held across the save and the opening, and the demux hook
+takes it for every non-marker envelope before deciding whether to record it, so the initiator's
+demux, which is another coroutine, waits out the cut: what it applied before the cut is in the
+state and on no log, and what it records is applied after the cut and not in the state. A
+receiver never contends for the lock, since it cuts on the demux's own coroutine
+(`Replication.replicate` awaits the engine before the next envelope is read). Nothing else
+moved: `receive`'s marker path, `complete`, `abort`, `restoreFrom`, the file layout and the
+marker envelope are as T36 left them. Main-code diff: 31 lines in `DistributedSnapshot.kt`.
+
+**Acceptance:**
+- `I12_write_during_the_cut_is_restored_once`: one node beside one peer's endpoint on an
+  `InMemoryTransport`, under `runTest`; `initiate` runs on `Dispatchers.Default`, as on a real
+  node where it runs on the node's scope while the router's inbound loop runs the demux, and a
+  `Gate` clock parks it at the state save's first clock reading, before any partition's view
+  is taken. An `INCRBY n 1` Replicate is handed to the demux (the router's shape: the snapshot
+  hook, then the command on the engine) while the initiator is parked, the gate is released,
+  and a fresh node restores the part: `n` reads 1. At T36's order the same run read `Bulk(2)`.
+- `C10_state_is_cut_before_any_channel_opens`: the same interleaving; while the initiator is
+  parked inside its save no `from-*.log` exists in its part, and afterwards the part read back
+  through the T36 `recorded` helper is `Part(state = {}, channels = {node-2: {1}})`: the
+  envelope handed over during the cut is on its channel and not in the state. At T36's order
+  the log existed while the state was still being cut, and the envelope was in both.
+- `chandy_lamport_consistent_cut`, `chandy_lamport_restorable`, `chandy_lamport_timeout_aborts`,
+  `C10_marker_on_every_channel` and `I12_reads_after_restore_return_snapshot_time_values`
+  unchanged and green.
+- Offline `test -pl dynacache-cluster -am`: engine 144, cluster 85 (83 + 2), all green.
+
+**Known limitations, not fixed here:**
+1. **gRPC channels are not FIFO under concurrent sends.** `GrpcTransport.send` is one unary
+   `deliver` call per envelope; sequential sends to one peer arrive in order (the call returns
+   when the peer accepted it), but two coroutines sending to the same peer at once, say the
+   write path's Replicate and `initiate`'s marker, are two independent calls that may land in
+   either order. So over gRPC a channel is not a true channel: a Replicate sent before the
+   marker can arrive after it, closed channel, not recorded, applied after the receiver's cut
+   and missing from the set; one sent after the marker can arrive before it and be recorded
+   without its send being in the cut. Either way C10 is broken. The `InMemoryTransport` orders
+   per sender-receiver pair, so no kit test can show it. A fix needs one ordered stream per
+   peer: a per-peer sender coroutine feeding a streaming RPC (or, cheaper, a per-peer send
+   `Mutex` in `GrpcTransport` so concurrent sends are serialized and the unary calls stay
+   sequential), plus a `GrpcTransportTest` that sends from two coroutines and checks arrival
+   order. That is a transport change, outside this ticket's seams.
+2. **The initiator's cut has a residual window on a real node.** The lock covers the demux's
+   record decision, not the engine apply the router does after `receive` returns. An envelope
+   whose `receive` returned just before the initiator took the lock, and whose `engine.submit`
+   reaches the partition executor after the view was taken, is in neither the state nor a log.
+   The window is the few instructions between those two calls; T36 had the same one. Closing it
+   needs the initiator's part to run on the demux's coroutine (the router delivering the
+   initiator's own marker through its inbound loop, or serializing `initiate` with `receive`),
+   which is a router change. A receiver has no such window.
+
+**Deviations:**
+1. **The ticket names "every node"; the test is one node.** The kit's cluster cannot produce
+   the interleaving: under `runTest` the initiator's `start` has no suspension point the
+   in-memory transport reaches, so the demux never runs inside it, and the bug does not exist
+   there. The window is a real-thread one, so the test runs the initiator on
+   `Dispatchers.Default` and parks it with a `Gate` clock (the bug hunter's shape), inside
+   `runTest` with the kit's transport and `backgroundScope`. One node is where the double
+   application happens; the other nodes' parts are untouched by the initiator's order.
+2. **The lone node's deadline is `Duration.INFINITE`.** Its peer never sends a marker back, so
+   the part waits forever, and that is the scenario. With the default 30 s, `runTest` skipped
+   virtual time the moment the test idled on the initiator's thread, the deadline fired,
+   `abort` deleted the set, and the restore read nil; found on the first red run and not a
+   product bug. `delay(Long.MAX_VALUE)` is never scheduled, so nothing waits on the scheduler.
+3. **The demux now waits out the initiator's save, not only a receiver's.** T36 deviation 4
+   accepted that a receiver's inbound handling stalls for the write time of `save()`, since it
+   runs on the demux. The lock gives the initiator the same stall: acks and gossip it receives
+   during its save wait for it. The write path itself never waits on the lock
+   (`timeout_aborts` still writes through a survivor while a snapshot is open). Debt as before:
+   `withContext(Dispatchers.IO)` around the save if a measurement shows it.
+4. **The mid-flight C10 assertion reads the directory, not the demux coroutine.** Whether the
+   delivery coroutine has completed is not the observable: at T36's order it suspended on the
+   engine's future during `runCurrent`, so `isCompleted` was false either way. The log file
+   is written synchronously by `record`, so its absence is the fact that no channel is open.
+5. Size: 133 insertions, 8 deletions in two files, inside the budget. No new seam, no change
+   to `Transport`, `Replication`, the engine, the file layout or the marker.
+
+**For the next ticket:** T55 moves the cluster's file I/O behind a persist adapter; the order
+inside `start` (directory, then under the lock the save and the opening, then markers) must
+survive that move, and `record` stays synchronous or the C10 assertion on the log file needs
+another observable. `cutting` is the only lock in the cluster module's snapshot path; it is
+taken once per inbound non-marker envelope and is uncontended except during an initiator's
+save. `Lone` and `Gate` in `DistributedSnapshotTest` are the shape for any test that needs the
+initiator interleaved with its own demux; T58's `MutableClock` does not replace `Gate`, which
+parks a thread rather than moving time.

@@ -1,0 +1,2 @@
+# Git Bash runs this script; a CRLF checkout breaks the shebang line.
+*.sh text eol=lf

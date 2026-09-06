@@ -15,6 +15,8 @@ import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /**
  * One node's part of a Chandy-Lamport distributed snapshot (spec 2.8 steps 1 to 5). A
@@ -25,8 +27,10 @@ import kotlinx.coroutines.launch
  * `from-<peer>.log` (length-delimited protobuf, appended in arrival order).
  *
  * [initiate] is step 1, [receive] steps 2 and 3 fed by the router's demux, [complete] step 4
- * for this node; the whole snapshot is complete when every node's part is. Recording happens
- * beside normal handling, so a snapshot never blocks the write path; the engine is only read.
+ * for this node; the whole snapshot is complete when every node's part is. A part starts by
+ * cutting the state and only then opens its channels, and the demux waits out the cut, so an
+ * envelope is in the state or on a channel, never both (C10, I12). Recording happens beside
+ * normal handling, so a snapshot never blocks the write path; the engine is only read.
  * [restoreFrom] is the way back: the state into the engine, then every recorded envelope
  * through [demux] as if it had just arrived, so a replicated write in flight at the cut lands.
  *
@@ -56,6 +60,13 @@ class DistributedSnapshot(
     private val open = ConcurrentHashMap<String, MutableSet<NodeId>>()
     private val aborted = ConcurrentHashMap.newKeySet<String>()
 
+    /**
+     * Held while this node's state is being cut, so the demux hands nothing on in between (spec
+     * 2.8: the state first, then recording). Only the initiator ever contends for it; a
+     * receiver cuts on the demux's own coroutine.
+     */
+    private val cutting = Mutex()
+
     /** Step 1: this node records its state and sends a marker on every outgoing channel. */
     suspend fun initiate(id: String) = start(id)
 
@@ -70,7 +81,7 @@ class DistributedSnapshot(
     suspend fun receive(envelope: Envelope): Boolean {
         val from = NodeId(envelope.from)
         if (!envelope.hasMarker()) {
-            for ((id, channels) in open) if (from in channels) record(id, from, envelope)
+            cutting.withLock { for ((id, channels) in open) if (from in channels) record(id, from, envelope) }
             return false
         }
         val id = envelope.marker.snapshotId
@@ -100,13 +111,17 @@ class DistributedSnapshot(
 
     private suspend fun start(id: String) {
         require(!open.containsKey(id)) { "snapshot $id already started on $self" }
-        // The directory before the channels, not after: `open` is what tells the demux -- another
-        // coroutine on a real node, where `initiate` runs on the node's scope -- that it may start
-        // appending in here, so a channel published first is a file with nowhere to go (T37).
         val mine = part(dir, id)
         Files.createDirectories(mine)
-        open[id] = peers.toMutableSet()
-        SnapshotEngine(engine, mine, clock).save()
+        // The state before the channels (spec 2.8 step 1, then step 2). `open` is what tells the
+        // demux -- another coroutine on a real node, where `initiate` runs on the node's scope --
+        // that it may start appending in here, and the lock holds it off while the state is being
+        // cut: what it applied before the cut is in the state, what it records is applied after
+        // the cut, and nothing is in both. The directory is there before either (T37).
+        cutting.withLock {
+            SnapshotEngine(engine, mine, clock).save()
+            open[id] = peers.toMutableSet()
+        }
         val marker = Envelope.newBuilder().setFrom(self.name).setMarker(Marker.newBuilder().setSnapshotId(id))
         for (peer in peers) transport.send(peer, marker.setTo(peer.name).build())
         scope.launch {
