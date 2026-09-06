@@ -5,6 +5,7 @@ import dynacache.engine.Command
 import dynacache.engine.CrossPartitionBatch
 import dynacache.engine.Key
 import dynacache.engine.Reply
+import dynacache.engine.persist.SnapshotEngine
 import io.netty.bootstrap.ServerBootstrap
 import io.netty.buffer.ByteBuf
 import io.netty.buffer.Unpooled
@@ -18,6 +19,7 @@ import io.netty.channel.socket.SocketChannel
 import io.netty.channel.socket.nio.NioServerSocketChannel
 import io.netty.handler.codec.ByteToMessageDecoder
 import java.net.InetSocketAddress
+import java.nio.file.Path
 import java.time.Clock
 import java.util.ArrayDeque
 import java.util.concurrent.CompletableFuture
@@ -235,17 +237,26 @@ private fun CompletableFuture<Reply>.replyNow(): Reply =
     }
 
 /**
- * `dynacache [port] [partitions]`, defaulting to Redis's own port and sixteen partitions.
+ * `dynacache [port] [partitions] [dir]`, defaulting to Redis's own port and sixteen partitions.
+ * With a [dir], the last snapshot there is restored before the port opens, one is saved on the
+ * engine's default interval from the tick thread, and one more at shutdown (spec 2.8).
  * The engine outlives nothing here: the shutdown hook closes both in order.
  */
 fun main(args: Array<String>) {
     val port = args.getOrNull(0)?.toInt() ?: 6379
     val partitionCount = args.getOrNull(1)?.toInt() ?: 16
-    val engine = ApEngine(partitionCount, Clock.systemUTC())
-    val server = DynaCacheServer(port, engine)
+    val clock = Clock.systemUTC()
+    val engine = ApEngine(partitionCount, clock)
+    val snapshots = args.getOrNull(2)?.let { SnapshotEngine(engine, Path.of(it), clock) }
+    snapshots?.restore()
+    val server = DynaCacheServer(port, engine) {
+        engine.tick()
+        snapshots?.maybeSave(clock.instant())
+    }
     Runtime.getRuntime().addShutdownHook(
         Thread {
             server.close()
+            snapshots?.close()
             engine.close()
         },
     )

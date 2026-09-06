@@ -1,6 +1,8 @@
 package dynacache.engine
 
+import dynacache.engine.persist.RdbEntry
 import java.time.Clock
+import java.time.Instant
 import java.util.Random
 import java.util.concurrent.CompletableFuture
 
@@ -179,6 +181,18 @@ class ApEngine(
             // SCAN cursor, a CP key -- and so cannot run inside one partition's task.
             else -> Reply.Error("ERR", "this command spans partitions and cannot run inside a batch")
         }
+    }
+
+    /** Every partition's point-in-time view at [now], each taken as one task on its own executor. */
+    internal fun snapshotView(now: Instant): CompletableFuture<List<RdbEntry>> {
+        val views = partitions.map { it.snapshotView(now) }
+        return CompletableFuture.allOf(*views.toTypedArray()).thenApply { views.flatMap { it.join() } }
+    }
+
+    /** Writes [entries] into their partitions, each partition on its own executor. */
+    internal fun restore(entries: List<RdbEntry>): CompletableFuture<Void> {
+        val byPartition = entries.groupBy { partitionOf(it.key).index }
+        return CompletableFuture.allOf(*byPartition.map { (index, part) -> partitions[index].restore(part) }.toTypedArray())
     }
 
     override fun close() = partitions.forEach { it.close() }
