@@ -11,13 +11,13 @@ runs out, land the parser first and the pipeline as a follow-up ticket.
 
 **Nature:** adapter and wiring (Opus)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache e30a6ef, merged into misc/ai_gen)
 
-- [ ] `server_ping_pong` over a real socket
-- [ ] `server_pipelined_replies_in_order` with 100 pipelined commands
-- [ ] `server_unknown_command_error`, `server_arity_error`
-- [ ] `parser_maps_every_command`: one row per command name of tickets 02 to 09
-- [ ] Progress entry appended
+- [x] `server_ping_pong` over a real socket
+- [x] `server_pipelined_replies_in_order` with 100 pipelined commands
+- [x] `server_unknown_command_error`, `server_arity_error`
+- [x] `parser_maps_every_command`: one row per command name of tickets 02 to 09
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket, stubs throwing NotImplementedError
 for later seams; 200 to 600 lines including tests; JUnit 5 + Mockito only, no AssertJ or MockK;

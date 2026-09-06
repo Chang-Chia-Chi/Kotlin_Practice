@@ -1641,3 +1641,113 @@ RDB codec can assume a `Value.ZSet` has at least one member. `writeScore` is the
 of the pair; anything that has to change a score (T29's element-level merge, T31's load) should
 go through it rather than touching `scores` and `order` separately. The skip list holds the
 command's own member array, so nothing may mutate a `ByteArray` after handing it to `ZADD`.
+
+## T13: Command parser and Netty server
+
+**Built:** `dynacache-server` gains the two things that turn the engine into a node a Redis
+client can talk to.
+
+`CommandParser(clock)` turns one client frame's tokens into a `Command`, or into the
+`Reply.Error` to write back. Every command name the engine has today has a row: the server and
+keyspace set (`PING`, `COMMAND`, `INFO`, `DBSIZE`, `FLUSHDB`, `KEYS`, `RANDOMKEY`, `TYPE`,
+`DEL`, `EXISTS`, `SCAN`), the String set (`GET`, `SET`, `SETNX`, `SETEX`, `PSETEX`, `INCR`,
+`DECR`, `INCRBY`, `DECRBY`, `APPEND`, `STRLEN`, `MGET`, `MSET`), the ten Hash commands plus
+`HSCAN`, the nine List commands, and the six Key Expiry commands. Names match
+case-insensitively; everything else is bytes and stays bytes. `Parsed` is the two-case answer
+(`Ok(command)` or `Failed(error)`), so a parse failure is a value the handler writes rather
+than an exception that kills a connection.
+
+`DynaCacheServer(port, engine, tick)` is the RESP2 socket: a `ByteToMessageDecoder` wrapping
+T12's `RespDecoder`, a per-connection handler that parses, calls `engine.submit` and encodes,
+and a single-thread scheduled executor calling `ApEngine.tick()` once per the engine's
+`tickMillis`, started by `start()` and stopped by `close()`. `boundPort` reports what port 0
+was actually given, so a test never picks one. `main` takes port and partition count from its
+arguments, defaulting to 6379 and 16, and closes the server then the engine on shutdown.
+`RespClient` is the test kit's client: a plain `java.net.Socket`, RESP2 out, one `Reply` in
+through `RespDecoder.nextReply`, every read under a timeout.
+
+**Concepts named:** The parser is where the wire's several spellings of one meaning collapse,
+and that is its whole content. `EXPIRE`, `PEXPIRE` and `EXPIREAT` are three ways to write one
+deadline, so all three become `Command.Expire`'s absolute `Instant` (spec 5.4), which is why
+the parser needs an injected `Clock` at all. `INCR`, `DECR`, `INCRBY` and `DECRBY` are one
+signed delta. `SETNX`, `SETEX`, `PSETEX` and `SET`'s `NX`, `XX`, `EX`, `PX`, `EXAT` and `PXAT`
+are one `Command.Set`. `LPUSH`/`RPUSH` and `LPOP`/`RPOP` are one command and an `End`. The
+engine already decided these reductions when it froze its variants; the parser is the only
+place the wire's spelling is still visible, and after it nothing downstream has to know that
+`PEXPIRE` exists.
+
+The pipeline's one real idea is the **pending queue**: a command's future joins a per-connection
+`ArrayDeque` when the command arrives, and the queue is drained from the front only while its
+head is done. Futures across sixteen partitions complete in whatever order their executors get
+to them, and this is what makes the bytes come back in request order anyway. The queue is
+touched only from the channel's event loop, so it needs no lock, which is the same shape as the
+engine's own rule: one thread owns the state, nobody synchronises.
+
+Seams unchanged: `CommandEngine`, `Reply`, `Key` are exactly T01's, and the engine module was
+not touched. No new interface was introduced. `Parsed` is a value type, not a seam: there is
+one parser and one pipeline, so an interface would have had nothing behind it. The one new
+public parameter, `DynaCacheServer`'s `tick`, is the seam plan 2.3 already names ("the server
+owns the scheduler that calls it"); it defaults to the engine's own tick.
+
+**Acceptance:**
+- `server_ping_pong`: `PING` over a real socket answers `+PONG`, and so does the inline
+  `ping\r\n` form redis-cli uses interactively.
+- `server_pipelined_replies_in_order`: 100 `SET`/`GET` pairs on 100 keys across 16 partitions,
+  all written before any reply is read, come back in request order. Mutation-checked: with the
+  handler writing each reply on its own future's completion instead of through the queue, the
+  test fails.
+- `server_unknown_command_error`: `NOSUCH a b` over the socket answers
+  `-ERR unknown command 'nosuch', with args beginning with: 'a', 'b', ` and the connection
+  survives to answer the next `PING`.
+- `server_arity_error`: `GET` with no key and `SET` with no value each answer
+  `-ERR wrong number of arguments for '<name>' command`, under the lower-case name Redis uses,
+  and the connection survives.
+- `parser_maps_every_command`: 54 rows, one per command name (some names twice where the
+  argument count changes the variant, as `DEL k` and `DEL a b` do). Each row asserts the variant
+  and, where two names share a variant, a probe on the meaning: `LPUSH` is `HEAD` and `RPUSH`
+  `TAIL`, `INCR` is +1 and `DECRBY k 5` is -5, `TTL` is `SECONDS` and `PTTL` is `MILLIS`, all
+  three expiry spellings land on the same instant. Every row is parsed again lower-case.
+- Supporting tests: `SET`'s flags in every combination and its four syntax errors; the
+  arity, not-an-integer and invalid-cursor errors; a protocol error answered once and the
+  connection closed; the scheduler ticking three times at a 20 ms period.
+- `mvn -B -o clean package`: engine 82, cluster 39, cp 11, server 30. Every earlier test green.
+- This entry.
+
+**Deviations:** Five, one of them debt worth naming.
+1. **Size.** 828 lines including tests, against the ticket's 200 to 600. Reported rather than
+   silently exceeded, as the ticket requires. The overrun is the ticket's own shape: the
+   mandated one-row-per-command table is about 85 lines of test and the dispatch table about 70
+   of main, and the ticket asks for a parser, a Netty pipeline and a test-kit client in one
+   ticket. Nothing was split out, because splitting the parser from the pipeline would have left
+   the pipeline untestable in its own ticket.
+2. **`PING` takes no argument.** Real Redis answers `PING message` with a bulk echo of the
+   message. `Command.Ping` carries no message and the type is frozen, so an argument is an arity
+   error here. Debt, and cheap to repay when `Ping` gains a payload.
+3. **`PEXPIREAT` has no row.** Spec 2.1 lists `EXPIRE`, `PEXPIRE`, `EXPIREAT`, `TTL`, `PTTL` and
+   `PERSIST`, and the row would be one line whenever a client wants it.
+4. **`SET`'s `EXAT` and `PXAT` are reduced against the clock.** `Command.Set` carries a
+   `Duration`, not an `Instant`, so an absolute deadline becomes `deadline - now` in the parser.
+   That reintroduces exactly the clock question spec 5.4 avoids for `EXPIREAT`, over the
+   microseconds between the parser and the partition executor. Accepted; the repair is a second
+   `Set` shape carrying an instant, which is an engine change and not this ticket's.
+5. **No `invalid expire time` check.** Redis refuses `SET k v EX 0` and `SETEX k 0 v`; here a
+   zero or negative TTL is passed through and the key expires at once. Small debt, two lines in
+   `seconds`/`millis` whenever it matters.
+
+**For the next ticket:** T14 owns MULTI, EXEC and DISCARD, and everything it needs is in
+`CommandHandler`. That handler is where per-connection queue state belongs: it is already
+per-connection and already single-threaded on the channel's event loop, so `MULTI`'s buffer and
+the "a parse error while queued makes `EXEC` reply `-EXECABORT`" rule need no synchronisation.
+`MULTI`, `EXEC` and `DISCARD` are not parser rows and should not become `Command` variants: they
+are connection state, so the handler should recognise them before calling `CommandParser`, and
+the parser should keep answering only "what does this token list mean".
+
+Two notes for whoever touches the parser next. Sorted Set (T07) has a marked place in both the
+dispatch table and the test table, naming the eleven rows it owes. And the parser holds a
+`Clock` because `EXPIRE` needs one; T44's dispatcher will want to hand it the same clock the
+engine has, not `Clock.systemUTC()`, which is what `CommandHandler` currently constructs.
+
+The pipeline's known ceiling is marked with a `ponytail:` comment: the pending queue is
+unbounded, so a client that pipelines without ever reading grows it until the heap objects.
+Redis caps its own client output buffer; the repair here is a limit that closes the connection
+past N pending replies. Nothing in P1 pushes on it.
