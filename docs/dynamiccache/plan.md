@@ -6,8 +6,9 @@ Companion to: `docs/dynamiccache/design-spec.md` (AP engine, C1 to C15, I1 to I1
 Purpose: break DynaCache into tickets small enough for one fresh subagent each, with fixed
 contracts and fixed assertions, so implementations may vary but assertions may not.
 
-Tickets are `T01` to `T46`, grouped into phases `P1` to `P5` (one file per phase under
-`plans/`). Ticket files live in `.scratch/dynacache/issues/NN-<slug>.md`. The progress log is
+Tickets are `T01` to `T73`: `T01` to `T46` grouped into phases `P1` to `P5`, `T47` a
+measurement addendum to P1, and `T48` to `T73` the review fixes and deepening of `P6` (one
+file per phase under `plans/`). Ticket files live in `.scratch/dynacache/issues/NN-<slug>.md`. The progress log is
 `docs/dynamiccache/progress.md`. This directory is the authority for spec, plan and progress;
 `DynaCache/CONTEXT.md` is the glossary and `DynaCache/docs/adr/` holds the architecture
 decisions. `DynaCache/` is an ordinary directory of this repository (folded in on 2026-09-06
@@ -179,8 +180,8 @@ beside P3 and P4.
 
 | Tier | Model | Tickets | Why |
 |---|---|---|---|
-| 1 | Claude Fable 5.1 | T02, T05, T08, T18, T20, T21, T22, T25, T26, T28, T29, T30, T32, T34, T35, T36, T39, T40, T41, T45 | an interleaving, a causal order, a consistent cut or a monotonic counter is the deliverable |
-| 2 | Claude Opus 5 | T01, T03, T04, T06, T07, T09, T10, T11, T12, T13, T14, T15, T16, T17, T19, T23, T24, T27, T31, T33, T37, T38, T42, T43, T44, T46, T47 (measurement) | commands, codecs, data-structure craft with a sequential spec, adapters, wiring, acceptance |
+| 1 | Claude Fable 5.1 | T02, T05, T08, T18, T20, T21, T22, T25, T26, T28, T29, T30, T32, T34, T35, T36, T39, T40, T41, T45, T49, T50, T51, T65, T66, T67 | an interleaving, a causal order, a consistent cut or a monotonic counter is the deliverable |
+| 2 | Claude Opus 5 | T01, T03, T04, T06, T07, T09, T10, T11, T12, T13, T14, T15, T16, T17, T19, T23, T24, T27, T31, T33, T37, T38, T42, T43, T44, T46, T47 (measurement), T48, T52 to T64, T68 to T73 | commands, codecs, data-structure craft with a sequential spec, adapters, wiring, acceptance |
 
 Escalation: an Opus ticket that fails compile or tests on its second attempt, or that tries to
 change a seam of 2.3, is terminated and relaunched fresh on Fable with the error context. A
