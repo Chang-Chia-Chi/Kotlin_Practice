@@ -4818,3 +4818,97 @@ machine, and no quiet window was available before landing, so the report carries
 banner. The script now gates each pass on a quiet machine and records the other-Java count and
 CPU idle it saw per pass in `load.txt`. The quiet rerun is a follow-up ticket that reuses the
 script unchanged.
+
+---
+
+## T49 - A snapshot cuts state before it opens channels
+
+**Built:** `DistributedSnapshot.start` now runs spec 2.8 step 1 before step 2: it cuts and
+saves the node's state through the T32 `SnapshotEngine`, only then publishes the snapshot's
+channels into `open`, and only then sends the markers. T36 had opened the channels first, so an
+envelope the demux handled between the opening and the cut was appended to its channel log and
+applied to the engine before the views were taken, and a restore applied it twice (bug 3 of the
+P6 review). A `Mutex` (`cutting`) is held across the save and the opening, and the demux hook
+takes it for every non-marker envelope before deciding whether to record it, so the initiator's
+demux, which is another coroutine, waits out the cut: what it applied before the cut is in the
+state and on no log, and what it records is applied after the cut and not in the state. A
+receiver never contends for the lock, since it cuts on the demux's own coroutine
+(`Replication.replicate` awaits the engine before the next envelope is read). Nothing else
+moved: `receive`'s marker path, `complete`, `abort`, `restoreFrom`, the file layout and the
+marker envelope are as T36 left them. Main-code diff: 31 lines in `DistributedSnapshot.kt`.
+
+**Acceptance:**
+- `I12_write_during_the_cut_is_restored_once`: one node beside one peer's endpoint on an
+  `InMemoryTransport`, under `runTest`; `initiate` runs on `Dispatchers.Default`, as on a real
+  node where it runs on the node's scope while the router's inbound loop runs the demux, and a
+  `Gate` clock parks it at the state save's first clock reading, before any partition's view
+  is taken. An `INCRBY n 1` Replicate is handed to the demux (the router's shape: the snapshot
+  hook, then the command on the engine) while the initiator is parked, the gate is released,
+  and a fresh node restores the part: `n` reads 1. At T36's order the same run read `Bulk(2)`.
+- `C10_state_is_cut_before_any_channel_opens`: the same interleaving; while the initiator is
+  parked inside its save no `from-*.log` exists in its part, and afterwards the part read back
+  through the T36 `recorded` helper is `Part(state = {}, channels = {node-2: {1}})`: the
+  envelope handed over during the cut is on its channel and not in the state. At T36's order
+  the log existed while the state was still being cut, and the envelope was in both.
+- `chandy_lamport_consistent_cut`, `chandy_lamport_restorable`, `chandy_lamport_timeout_aborts`,
+  `C10_marker_on_every_channel` and `I12_reads_after_restore_return_snapshot_time_values`
+  unchanged and green.
+- Offline `test -pl dynacache-cluster -am`: engine 144, cluster 85 (83 + 2), all green.
+
+**Known limitations, not fixed here:**
+1. **gRPC channels are not FIFO under concurrent sends.** `GrpcTransport.send` is one unary
+   `deliver` call per envelope; sequential sends to one peer arrive in order (the call returns
+   when the peer accepted it), but two coroutines sending to the same peer at once, say the
+   write path's Replicate and `initiate`'s marker, are two independent calls that may land in
+   either order. So over gRPC a channel is not a true channel: a Replicate sent before the
+   marker can arrive after it, closed channel, not recorded, applied after the receiver's cut
+   and missing from the set; one sent after the marker can arrive before it and be recorded
+   without its send being in the cut. Either way C10 is broken. The `InMemoryTransport` orders
+   per sender-receiver pair, so no kit test can show it. A fix needs one ordered stream per
+   peer: a per-peer sender coroutine feeding a streaming RPC (or, cheaper, a per-peer send
+   `Mutex` in `GrpcTransport` so concurrent sends are serialized and the unary calls stay
+   sequential), plus a `GrpcTransportTest` that sends from two coroutines and checks arrival
+   order. That is a transport change, outside this ticket's seams.
+2. **The initiator's cut has a residual window on a real node.** The lock covers the demux's
+   record decision, not the engine apply the router does after `receive` returns. An envelope
+   whose `receive` returned just before the initiator took the lock, and whose `engine.submit`
+   reaches the partition executor after the view was taken, is in neither the state nor a log.
+   The window is the few instructions between those two calls; T36 had the same one. Closing it
+   needs the initiator's part to run on the demux's coroutine (the router delivering the
+   initiator's own marker through its inbound loop, or serializing `initiate` with `receive`),
+   which is a router change. A receiver has no such window.
+
+**Deviations:**
+1. **The ticket names "every node"; the test is one node.** The kit's cluster cannot produce
+   the interleaving: under `runTest` the initiator's `start` has no suspension point the
+   in-memory transport reaches, so the demux never runs inside it, and the bug does not exist
+   there. The window is a real-thread one, so the test runs the initiator on
+   `Dispatchers.Default` and parks it with a `Gate` clock (the bug hunter's shape), inside
+   `runTest` with the kit's transport and `backgroundScope`. One node is where the double
+   application happens; the other nodes' parts are untouched by the initiator's order.
+2. **The lone node's deadline is `Duration.INFINITE`.** Its peer never sends a marker back, so
+   the part waits forever, and that is the scenario. With the default 30 s, `runTest` skipped
+   virtual time the moment the test idled on the initiator's thread, the deadline fired,
+   `abort` deleted the set, and the restore read nil; found on the first red run and not a
+   product bug. `delay(Long.MAX_VALUE)` is never scheduled, so nothing waits on the scheduler.
+3. **The demux now waits out the initiator's save, not only a receiver's.** T36 deviation 4
+   accepted that a receiver's inbound handling stalls for the write time of `save()`, since it
+   runs on the demux. The lock gives the initiator the same stall: acks and gossip it receives
+   during its save wait for it. The write path itself never waits on the lock
+   (`timeout_aborts` still writes through a survivor while a snapshot is open). Debt as before:
+   `withContext(Dispatchers.IO)` around the save if a measurement shows it.
+4. **The mid-flight C10 assertion reads the directory, not the demux coroutine.** Whether the
+   delivery coroutine has completed is not the observable: at T36's order it suspended on the
+   engine's future during `runCurrent`, so `isCompleted` was false either way. The log file
+   is written synchronously by `record`, so its absence is the fact that no channel is open.
+5. Size: 133 insertions, 8 deletions in two files, inside the budget. No new seam, no change
+   to `Transport`, `Replication`, the engine, the file layout or the marker.
+
+**For the next ticket:** T55 moves the cluster's file I/O behind a persist adapter; the order
+inside `start` (directory, then under the lock the save and the opening, then markers) must
+survive that move, and `record` stays synchronous or the C10 assertion on the log file needs
+another observable. `cutting` is the only lock in the cluster module's snapshot path; it is
+taken once per inbound non-marker envelope and is uncontended except during an initiator's
+save. `Lone` and `Gate` in `DistributedSnapshotTest` are the shape for any test that needs the
+initiator interleaved with its own demux; T58's `MutableClock` does not replace `Gate`, which
+parks a thread rather than moving time.
