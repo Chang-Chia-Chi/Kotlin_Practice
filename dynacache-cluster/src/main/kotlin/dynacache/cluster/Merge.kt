@@ -65,7 +65,7 @@ private fun union(earlier: Value.List, later: Value.List): Value.List {
 private fun union(earlier: Value.ZSet, later: Value.ZSet, seed: Long): Value.ZSet {
     val merged = Value.ZSet(SkipList(seed))
     for (zset in listOf(earlier, later)) for ((member, score) in zset.scores.entries()) {
-        merged.write(maxOf(score, merged.scores.get(member) ?: Double.NEGATIVE_INFINITY), fieldBytes(member))
+        merged.writeScore(maxOf(score, merged.scores.get(member) ?: Double.NEGATIVE_INFINITY), fieldBytes(member))
     }
     return merged
 }

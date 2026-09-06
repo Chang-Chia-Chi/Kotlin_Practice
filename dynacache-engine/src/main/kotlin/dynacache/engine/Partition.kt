@@ -216,7 +216,7 @@ internal class Partition(
                 }
                 if (scored.isEmpty()) return ZERO
                 val zset = zset(command.key, now) ?: newZSet(command.key, now)
-                Reply.Integer(scored.count { (score, member) -> zset.write(score, member) }.toLong())
+                Reply.Integer(scored.count { (score, member) -> zset.writeScore(score, member) }.toLong())
             }
             is Command.ZScore ->
                 Reply.Bulk(scoreOf(command.key, now, command.member)?.let { scoreText(it).toByteArray() })
@@ -242,7 +242,7 @@ internal class Partition(
                 // inf + -inf: the one sum of two legal scores that is no score at all. Checked
                 // before the key is created, so a refused increment leaves no empty sorted set.
                 if (moved.isNaN()) return NAN_SCORE
-                (zset ?: newZSet(command.key, now)).write(moved, command.member)
+                (zset ?: newZSet(command.key, now)).writeScore(moved, command.member)
                 Reply.Bulk(scoreText(moved).toByteArray())
             }
             is Command.ZRangeByScore -> {

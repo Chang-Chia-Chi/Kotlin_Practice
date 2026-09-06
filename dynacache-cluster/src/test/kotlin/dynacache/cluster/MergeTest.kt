@@ -163,7 +163,7 @@ class MergeTest {
     private fun list(vararg items: String) = Value.List(ArrayDeque(items.map { it.toByteArray() }))
 
     private fun zset(vararg members: Pair<String, Double>) =
-        Value.ZSet(SkipList(1)).apply { for ((member, score) in members) write(score, member.toByteArray()) }
+        Value.ZSet(SkipList(1)).apply { for ((member, score) in members) writeScore(score, member.toByteArray()) }
 
     private fun hash(vararg fields: Pair<String, String>) =
         Value.Hash(HashTable<String, ByteArray>().apply { for ((name, text) in fields) put(name, text.toByteArray()) })

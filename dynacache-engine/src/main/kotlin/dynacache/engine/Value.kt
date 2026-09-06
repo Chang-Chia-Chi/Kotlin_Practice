@@ -44,9 +44,10 @@ sealed class Value(val kind: Kind) {
          * Writes one (member, score) into both indexes at once, answering whether the member was
          * new. The score map holds the member's one score, so an existing member is a move in the
          * list rather than a second entry; that pairing is what makes the dual index a single
-         * value, and this is its only writer.
+         * value. Every writer of a sorted set goes through here -- the command path and a restore
+         * from a snapshot alike -- so the two indexes cannot drift apart.
          */
-        fun write(score: Double, member: ByteArray): Boolean {
+        fun writeScore(score: Double, member: ByteArray): Boolean {
             val previous = scores.put(fieldName(member), score)
             if (previous == null) {
                 order.insert(score, member)
