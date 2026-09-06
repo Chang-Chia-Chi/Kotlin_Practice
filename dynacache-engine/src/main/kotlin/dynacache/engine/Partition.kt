@@ -27,6 +27,8 @@ internal class Partition(
      * branch to say so.
      */
     private val maxBytes: Long,
+    /** Which key this partition gives up when it is over [maxBytes]; see [coldest]. */
+    private val policy: EvictionPolicy,
 ) {
 
     private class Entry(val value: Value, val expiresAt: Instant?) {
@@ -55,6 +57,19 @@ internal class Partition(
      * after every command whether the partition is over its share.
      */
     private var usedBytes = 0L
+
+    /**
+     * The W-TinyLFU bookkeeping, or null under [EvictionPolicy.LRU], which needs none: sampling
+     * reads [Entry.lastAccess] off keys it draws and remembers nothing between evictions. A null
+     * here is the whole cost of the policy this partition did not choose.
+     */
+    private val tinyLfu: WindowTinyLfu? =
+        if (policy == EvictionPolicy.W_TINYLFU) {
+            WindowTinyLfu(maxBytes, random.nextLong()) { key -> store.get(key)?.accounted ?: 0 }
+        } else {
+            null
+        }
+
     private val executor = Executors.newSingleThreadExecutor { r ->
         Thread(r, "partition-${id.index}").apply { isDaemon = true }
     }
@@ -124,7 +139,13 @@ internal class Partition(
         val reply = run(command, now)
         // A command that grew or shrank an aggregate in place never passed through [write], so
         // one recount of the key it touched is what keeps the running total level with the store.
-        if (command is Command.Keyed) account(command.key)
+        if (command is Command.Keyed) {
+            // One access per command, recorded here rather than inside [live] so a command that
+            // reads its key twice -- the kind check and then the command itself -- counts once.
+            // Recency needs no more than the single clock read; frequency is the sketch's.
+            if (tinyLfu != null && store.get(command.key) != null) tinyLfu.touch(command.key)
+            account(command.key)
+        }
         // Spec 5.5: eviction runs when memory crosses the threshold, on the partition's own
         // thread, after the command that crossed it has finished with the store.
         if (usedBytes > maxBytes) evict(now)
@@ -333,7 +354,13 @@ internal class Partition(
             // The two numbers INFO joins across partitions: live keys, and the bytes they hold.
             is Command.Info -> {
                 purgeExpired(now)
-                Reply.Array(listOf(Reply.Integer(store.size.toLong()), Reply.Integer(usedBytes)))
+                Reply.Array(
+                    listOf(
+                        Reply.Integer(store.size.toLong()),
+                        Reply.Integer(usedBytes),
+                        Reply.Bulk(policy.info.toByteArray()),
+                    ),
+                )
             }
             is Command.Keys -> {
                 purgeExpired(now)
@@ -348,6 +375,7 @@ internal class Partition(
                 wheel = null
                 store.clear()
                 usedBytes = 0
+                tinyLfu?.clear()
                 OK
             }
 
@@ -396,7 +424,9 @@ internal class Partition(
     private fun write(key: Key, now: Instant, entry: Entry) {
         entry.lastAccess = now
         // The displaced entry's bytes leave with it; [account] then charges for what replaced it.
-        usedBytes -= store.put(key, entry)?.accounted ?: 0
+        val displaced = store.put(key, entry)?.accounted ?: 0
+        usedBytes -= displaced
+        tinyLfu?.resized(key, -displaced)
         account(key)
         val deadline = entry.expiresAt
         // A write that carries no TTL clears the one the key had, wheel entry and all; a key
@@ -415,7 +445,10 @@ internal class Partition(
      * wheel's own removal shares with [drop]: the wheel has already dropped its own entry by the
      * time its callback runs, so it cannot go through [drop], but the bytes still have to go.
      */
-    private fun forget(key: Key): Entry? = store.remove(key)?.also { usedBytes -= it.accounted }
+    private fun forget(key: Key): Entry? = store.remove(key)?.also {
+        usedBytes -= it.accounted
+        tinyLfu?.forgotten(key, it.accounted)
+    }
 
     /**
      * Charges [usedBytes] for what the entry under [key] costs now. Idempotent: it books the
@@ -426,6 +459,7 @@ internal class Partition(
         val entry = store.get(key) ?: return
         val size = key.bytes.size + ENTRY_BYTES + entry.value.approximateBytes()
         usedBytes += size - entry.accounted
+        tinyLfu?.resized(key, size - entry.accounted)
         entry.accounted = size
     }
 
@@ -449,11 +483,18 @@ internal class Partition(
     }
 
     /**
-     * The least recently accessed of [SAMPLE] keys drawn at random. A store no larger than the
-     * sample is taken whole: drawing with replacement from it could only miss a key that sampling
-     * "K random keys" was meant to include.
+     * The one key this eviction takes, by whichever policy the partition was built with. The step
+     * around it -- when to run, in what order, how many -- is the same either way, so the policy
+     * is this function and nothing else.
      */
-    private fun coldest(): Key? {
+    private fun coldest(): Key? = tinyLfu?.victim() ?: sampledColdest()
+
+    /**
+     * Spec 2.7's sampling LRU: the least recently accessed of [SAMPLE] keys drawn at random. A
+     * store no larger than the sample is taken whole -- drawing with replacement from it could
+     * only miss a key that sampling "K random keys" was meant to include.
+     */
+    private fun sampledColdest(): Key? {
         val drawn =
             if (store.size <= SAMPLE) store.entries().map { it.key }.toList()
             else List(SAMPLE) { store.randomKey(random) ?: return null }
