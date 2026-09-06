@@ -5973,3 +5973,150 @@ Suite totals unchanged, as no test was added or removed: engine 151, cluster 86,
    fixed alongside `CpRoutingTest`.
 5. `P5AcceptanceTest`'s nodes were put on the injected clock although P5 constructed no system
    clock, to remove the `EX 10` lease's dependency on how slow the machine is.
+
+---
+
+## T62 - Reply shapes and the spec ledger
+
+**Built:** four small gaps between the code and the specs closed, and the three that stay
+recorded below. Nothing new was designed; every change is a reply the spec already fixed, or a
+row the spec never asked for.
+
+`-NOTLEADER` **carries the member id alone.** `CpEngine.notLeader` wrote
+`leader is ${leader.id}`, so a client taking the first token of CP spec 6.8's `-NOTLEADER
+<hint>` read the word `leader`. It now writes `runtime.node.term.leaderEndpoint?.id`, and a
+member that knows of no leader writes no hint at all rather than a sentence a client would
+parse as an id. Nothing consumed the old wording: `ForwardingCpEngine` recognises a
+`-NOTLEADER` by its kind and rediscovers the leader through `GetInfo`, so the hint is for a
+real client, not for us.
+
+`LOCK_UNLOCK` **answers `:1` for every accepted unlock.** CP spec 3.1 makes the op an `ok:
+Bool` that "decrements reentrance; releases at 0", and 6.8 gives the rejection its own error,
+`-REENTRANCE`. The state machine already answered `-REENTRANCE` for a non-holder and `:1` for a
+release, but `:0` for a reentrant decrement -- a third answer the spec's boolean has no room
+for. A reentrant decrement is an accepted unlock, so it answers `:1` now, and `:0` is no longer
+produced by this verb at all. See deviation 3.
+
+`Command.Cp.LongDecrBy` **deleted, wire tag 6 retired.** Nothing produced the variant but the
+wire decoder: the dispatcher folds Redis's `DECRBY` into `Command.IncrBy` with a negative delta
+and then into `Command.Cp.LongIncrBy`, and the parser has no `cp.long.decrby` row, because CP
+spec 6.2 maps `INCRBY` to `ADD` and gives `DECRBY` no verb. The variant, its encoder row and
+its state-machine row are gone. The tag constant stays as `CMD_DECR_BY_RETIRED = 6` with a
+decode branch that names it, so the number is never reused and a peer replaying an old entry
+is told what it sent rather than reading "unknown tag".
+
+`EXAT`, `PXAT` **and** `PSETEX` **deleted.** No spec line asks for them: spec 2.1 gives `SET`
+the flags `NX`, `XX`, `EX` and `PX`, and the Redis-compat-for-CP set (CP spec 6.2, and 2.1's
+routing table) names `SETEX` without its millisecond twin. Nothing forwards them and the test
+kit does not reach for them -- checked by grep across all four modules before deleting -- so the
+`psetex` row, the two `SET` flags, the `TTL_FLAGS` entries and the now-dead `until(...)` helper
+T52 left behind all go. **Kept, with the reason:** `SETEX` (the CP compat set names it) and
+`PEXPIREAT` (`CommandTokens` writes every `Command.Expire` as one, since a forwarded deadline
+is an absolute instant however the client spelled it -- T16, T24; T13 deviation 3 first noted
+the row had no spec line of its own, and this is the reason it earned one).
+
+**The six missing constraint and invariant names.** Each asserts its constraint by delegating
+to the spec-named test that already covers the behaviour, so the constraint breaks the named
+test as well as the original:
+
+- `C17_fencing_tokens_never_repeat` (`FencedLockTest`) -- a successful `LOCK_TRY`'s token is
+  strictly greater than every token the key ever returned; delegates to
+  `lock_fencing_token_monotonic` (100 acquire/release cycles). The across-a-failover half of
+  C17 is `I18_lock_held_across_leader_failover` and `C17_lease_expires_after_skewed_failover`,
+  which already carried the prefix.
+- `I13_at_most_one_session_holds_a_lock` (`FencedLockTest`) -- delegates to
+  `lock_mutual_exclusion`: two sessions race, exactly one is granted and one denied.
+- `I14_a_later_acquire_gets_a_greater_token` (`FencedLockTest`) -- delegates to
+  `lock_fencing_token_monotonic`.
+- `C20_committed_cp_operations_are_linearizable` (`ChaosInvariantTest`) -- delegates to
+  `invariant_linearizable_ops(seed = 1)`: the Wing-Gong checker accepts a counter history
+  recorded across leader kills and restarts.
+- `C22_no_cross_engine_state_leakage` (`CommandDispatcherTest`) -- delegates to
+  `I22_namespaces_never_cross`: one key name written on both sides of the `cp:` boundary, each
+  engine seeing only its own.
+- `I10_the_same_script_answers_the_same_on_every_node` (`LuaTest`) -- delegates to
+  `lua_deterministic`: one script on two replicas with the same seed state, replies equal.
+
+**Concepts named:** nothing new. The only idea the ticket adds is that a **retired wire tag** is
+a constant that decodes to an error, not a hole in a `when`: the number carries meaning for as
+long as an old log entry can exist, so deleting the variant is not deleting the tag.
+
+**Acceptance:**
+- `notleader_hint_is_the_leader_id` (`CpEngineTest`): a follower's reply, and `NodeId(message)`
+  equals the leader's own id -- the whole message, not a token of it. Red first
+  (`expected: <cp1> but was: <leader is cp1>`).
+- `lock_unlock_reply_shape` (`FencedLockTest`): a lock held twice; a non-holder's unlock is
+  `-REENTRANCE`, the reentrant decrement is `:1` and `LOCK_STATE` still shows the holder with
+  one hold, the release is `:1`, and the lock is then unowned. Red first
+  (`expected: <Integer(value=1)> but was: <Integer(value=0)>`).
+- `lock_reentrant_same_session` keeps its name and now expects `:1` for the decrement.
+- `the_retired_decrby_tag_is_refused` (`CpWireTest`): an `ADD` encoding with its first byte set
+  to 6 throws, and the message names both the tag and `DECRBY`. Red first (nothing was thrown).
+- `EXAT PXAT and PSETEX are not commands here` (`CommandParserTest`): the two flags are a syntax
+  error, `psetex` is Redis's unknown-command reply word for word, and `PEXPIREAT` still parses.
+  Red first (the parse succeeded).
+- `C17_`, `C20_`, `C22_`, `I10_`, `I13_`, `I14_` as listed above, all green.
+- `mvn -o test -pl dynacache-server -am`: engine 151, cluster 86, cp 92 -> 99, server 92 -> 95.
+  Every earlier test green. (The brief's baseline of `cp 92, server 97` was right for cp and
+  stale for the server module, whose true baseline is 92, the number T58 recorded.)
+- This entry.
+
+**Deviations:** Six. The first three are the ledger entries the ticket asks for.
+
+1. **`-CAPACITY` is not built.** CP spec 6.8 lists `-CAPACITY` ("state machine at max-entries
+   cap") among the new RESP error prefixes, and no state machine has a cap: `AtomicLong`,
+   `FencedLock`, `Semaphore`, `CountDownLatch`, `AtomicReference` and `SessionRegistry` all grow
+   with the keys the log gives them, bounded only by the snapshot size and the heap. The error
+   string appears nowhere in the source. Building the cap is not this ticket's (it needs a
+   per-state-machine limit, a place to configure it, and a decision about what happens to an
+   entry already committed when the cap is hit -- a Raft-level question, since refusing at apply
+   time must be deterministic on every member). Recorded here so the next reader finds it named
+   rather than missing.
+
+2. **A fanned command inside a batch is refused even when its keys share the partition.** In
+   `ApEngine`'s `Batch` context, `Command.Keyed` runs when the batch declared its key and
+   everything else falls to `Reply.Error("ERR", "this command spans partitions and cannot run
+   inside a batch")`. `Command.Fanned` -- `MGET`, `MSET`, multi-key `DEL` and `EXISTS` -- is in
+   that "everything else", by definition rather than by measurement: the refusal does not look
+   at the keys. So `MULTI; MGET {t}.a {t}.b; EXEC` on two hash-tagged keys, which land on the
+   one declared partition and which spec 2.2's "atomicity across keys requires a batch with hash
+   tags" invites, is refused here and answered by Redis. T14 describes the rule; it was never
+   recorded as a divergence from Redis, and it is one. The repair is one branch -- a `Fanned`
+   whose every key is in `declared` runs key by key on this partition -- and it is a batch
+   semantics change, which this ticket's seams exclude.
+
+3. **The reentrancy reply shape, where CP spec 6.1 is ambiguous.** 6.1's table gives
+   `CP.LOCK.UNLOCK` the replies `:1` / `:0`, while 3.1 makes the op an `ok: Bool` that "rejects
+   if session/token mismatch" and 6.8 gives that rejection `-REENTRANCE`. Read together, `:0`
+   is the rejection 6.8 turned into an error, and the spec never says what a reentrant decrement
+   answers. Decided, per the ticket: every accepted unlock answers `:1`, released or not, and
+   `:0` is unreachable from this verb. A client that must know whether it still holds the lock
+   reads `CP.LOCK.STATE`'s reentrance count, which 6.1 already gives it. Redis has no
+   `LOCK.UNLOCK`, so there is no Redis behaviour to diverge from.
+
+4. **`-NOTLEADER` with no hint has a trailing space on the wire.** `RespEncoder` writes
+   `"-" + kind + " " + message`, so a member that knows of no leader sends `-NOTLEADER ` rather
+   than `-NOTLEADER`. It decodes back to the same `Reply.Error` either way and Redis clients
+   split on the first space, so this is cosmetic; fixing it means touching the encoder for every
+   error, which is outside this ticket.
+
+5. **`ChaosDriver` reads the lock owner back after an accepted unlock.** Changing the reply
+   broke `invariant_mutual_exclusion_under_chaos` and
+   `invariant_fencing_token_monotonic_under_chaos`, and the failure was not the reply: the
+   driver retries a `LockTry` after a lost reply (at-least-once, as `ForwardingCpEngine`'s own
+   note says), so a retry can take a second reentrant hold the driver never saw. The old `:0`
+   hid that -- the driver kept believing the lock held -- and `:1` exposed it as "denied to 4 but
+   belief says null". The driver now reads the new owner from `LOCK_STATE` after an accepted
+   unlock instead of guessing it from the reply, which is exact whatever the retries did.
+   Confirmed against a clean checkout of the base commit that the two tests were green before
+   the reply change, so this is a driver model that was always approximate, not a new bug.
+
+6. **Size:** 159 lines added against 64 deleted across sixteen files, inside the 200-to-600
+   budget. Two other things the ticket names were deliberately not touched: the AP engine, and
+   the dispatcher's routing.
+
+**For the next ticket:** the deviation-2 branch is the smallest real gap left in the batch path,
+and it is testable without a cluster: `ApEngine.atomically` with two hash-tagged keys and an
+`MGET` over both. Whoever takes it should note that `Batch.execute`'s `else` is currently doing
+two jobs -- refusing what spans partitions and refusing what this partition cannot interpret --
+and only the first is about keys.
