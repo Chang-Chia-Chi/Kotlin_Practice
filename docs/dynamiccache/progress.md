@@ -4996,3 +4996,66 @@ Redis splits its expiry commands in two, and so does this:
 lease is accepted; that is CP lease semantics, not key expiry, and belongs with the CP verbs.
 And ticket 62 may delete `EXAT`/`PXAT` -- they are validated here on the same code path as the
 rest, so removing them removes two `until` call sites and nothing else.
+
+---
+
+## T53 - A connection's session cache clears on CLOSE
+
+**Built:** `CommandHandler` now forgets its memoised CP session once the group no longer has it,
+so a connection that closes its session and creates another gets a fresh one instead of the
+closed id (CP spec 4, bug 4 of the P6 review). Two places drop the cache, and only those two:
+`CP.SESSION.CLOSE sid` when `sid` is this connection's own session and the close answered `+OK`
+or `-NOSESSION` (`closeSession`, a new branch of `submit` ahead of the `Sessioned` one, since
+`SessionClose` is a `Command.Cp.Session` and used to fall straight through to the engine), and a
+session-bearing verb whose reply is `-NOSESSION`, meaning the session lapsed at a TTL tick
+between its creation and this verb (`onSession`). Both forget through `forgetSession`, which
+hops to the connection's event loop (`loop`, taken from `ctx.executor()` in `handlerAdded`) and
+compares the cached future by identity, so the field keeps its invariant -- only the event loop
+reads or writes it -- and a session created in between is left alone. The hop is enqueued from
+the `whenComplete` that wraps each reply, which is registered before `channelRead`'s drain hop,
+so the cache is cleared before the reply reaches the client and therefore before the client's
+next command is read. `session()`'s `usable` check is untouched: it still refuses to remember a
+create that failed. Nothing in the CP engine, the session registry, the dispatcher, the wire or
+the parser moved. Main-code diff: 51 lines in `DynaCacheServer.kt`.
+
+**Acceptance** (`CpSessionLifecycleTest`, the `CpRoutingTest` arrangement: a real `ApEngine`, a
+real three-member `CpTestKit` group, the socket in front of both, raw `RespClient`):
+- `session_create_after_close_returns_a_new_session`: CREATE, CLOSE, CREATE on one connection
+  gives two different ids and `CP.LOCK.TRY` on the second is granted. Red before the fix:
+  `CREATE after CLOSE handed back the closed session ==> expected: not equal but was: <1>`.
+- `session_verbs_after_close_use_the_new_session`: after the second CREATE, `CP.LOCK.TRY` is
+  taken and `CP.LOCK.STATE` reports the second session as the owner. Red before: the lock verb
+  answered `Reply.Error` (`-NOSESSION`) instead of the granted array.
+- `session_lapse_clears_the_cache`: the leader's `MutableClock` is advanced past the 15 s default
+  session timeout and `leader.tick()` is driven once, so the session lapses in log time (CP spec
+  5); the next `CP.LOCK.TRY` answers `-NOSESSION` once, the next CREATE gives a new id, and the
+  lock is then granted. No sleeps; the kit's injected clock does the waiting.
+- Offline `test -pl dynacache-server -am`: engine, cluster, cp 89, server 86 (83 + 3), all green.
+
+**Deviations:**
+1. **The lapse test runs at the socket, not at a stubbed seam.** The ticket allowed a
+   dispatcher-level stub if a server-level test could not reach a member's clock. It can:
+   `CpTestKit.clock(kit.leader().config.nodeId)` and `RaftRuntime.tick()` are both public and the
+   server under test is built on `kit.leaderEngine()`, so the real lapse path is exercised end to
+   end. No stub was needed.
+2. **`BugHuntCpCompatTest` was not copied over.** Its `session_create_after_close_...` case is
+   reproduced as the first named test above; the `cp:ref:` TTL case in the same file belongs to
+   T54 and was left where it is.
+3. **A CLOSE that answers something else leaves the cache standing.** `-NOTLEADER` (a leader that
+   moved mid-close) does not end the session, so forgetting it there would orphan a live session
+   holding locks until it lapsed. The client retries the close against the new leader, which then
+   answers `+OK` and clears the cache.
+
+**Known limitation, not fixed here:** a `CP.SESSION.CLOSE` inside `MULTI` does not clear the
+cache. Buffered commands run through `atomically` and never pass `submit`, so the handler never
+sees the close. The repair is to check the buffer for a `SessionClose` on the way out of `exec`,
+and it is worth doing only if CP verbs inside transactions become a supported combination.
+
+**For the next ticket:** T44's debt is still open and this ticket does not touch it -- a
+connection's CP session is still never closed when the socket closes, only left to expire by
+heartbeat timeout. Closing it on `channelInactive` would make `sem_session_death_releases`
+deterministic (T44) and would let P5 kill the holder's connection and watch the lock fall free
+(T46 deviation 2). It is a separate concern from this one: T53 is about the handler's cache while
+the connection lives, `channelInactive` is about the session outliving the connection. The two
+would meet in the same field, so whoever takes it should reuse `forgetSession` for the clearing
+half. The README's known-debts list still carries the `channelInactive` entry and should keep it.
