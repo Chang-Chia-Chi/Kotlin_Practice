@@ -56,12 +56,13 @@ export JAVA_HOME=/c/Users/maxch/.jdks/openjdk-22.0.1
 
 `protoc` (run by the protobuf Maven plugin in `dynacache-cluster`) cannot open paths that
 contain the non-ASCII `文件` directory, and Maven canonicalizes junctions, so a build in this
-checkout fails at protobuf generation. Build from a git worktree on an ASCII path instead:
-`git worktree add -b <name> /c/Users/maxch/dynacache-wt/<name> misc/ai_gen`. The orchestrator
-keeps `/c/Users/maxch/dynacache-wt/verify` (branch `verify`, reset to `misc/ai_gen` before every
-verification run) for that purpose.
+checkout fails at protobuf generation. Build from a git worktree of the repository on an ASCII
+path instead, for example `git worktree add -b <name> /c/Users/maxch/kp-verify misc/ai_gen`
+and then `mvn -o -f DynaCache/pom.xml clean package` from that worktree.
 
 ## Git
 
-This directory is its own repository (branch `misc/ai_gen`), nested inside `Kotlin_Practice`,
-which ignores it. Commit code here; commit docs and tickets in the parent.
+This directory is an ordinary part of the `Kotlin_Practice` repository (branch `misc/ai_gen`);
+its history arrived through `git subtree add` from the `dynacache` branch, which remains as a
+backup of the standalone period. Code, docs and tickets are committed together in this one
+repository.
