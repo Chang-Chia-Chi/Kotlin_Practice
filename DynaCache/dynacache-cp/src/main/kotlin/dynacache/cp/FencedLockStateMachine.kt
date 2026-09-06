@@ -23,7 +23,7 @@ class FencedLockStateMachine {
         val lock = locks[command.key]?.at(now) ?: FREE
         return when (command) {
             is Command.Cp.LockTry -> when (lock.owner) {
-                null -> grant(command.key, Lock(command.session, lock.token + 1, now + command.ttl.toMillis(), 1))
+                null -> grant(command.key, Lock(command.session, lock.token + 1, now + command.lease.toMillis(), 1))
                 command.session -> grant(command.key, lock.copy(holds = lock.holds + 1))
                 else -> Reply.Array(listOf(Reply.Integer(0), Reply.Integer(0)))
             }
@@ -34,13 +34,13 @@ class FencedLockStateMachine {
             }
             is Command.Cp.LockRenew ->
                 if (lock.owner != command.session || lock.token != command.token) reentrance(lock)
-                else { locks[command.key] = lock.copy(expiresAt = now + command.ttl.toMillis()); Reply.Integer(1) }
+                else { locks[command.key] = lock.copy(leaseUntil = now + command.lease.toMillis()); Reply.Integer(1) }
             is Command.Cp.LockForceUnlock -> { locks[command.key] = lock.released(); Reply.Simple("OK") }
             is Command.Cp.LockState -> Reply.Array(
                 listOf(
                     lock.owner?.let(Reply::Integer) ?: Reply.Bulk(null),
                     Reply.Integer(lock.token),
-                    Reply.Integer(if (lock.owner == null) 0 else lock.expiresAt - now),
+                    Reply.Integer(if (lock.owner == null) 0 else lock.leaseUntil - now),
                     Reply.Integer(lock.holds.toLong()),
                 ),
             )
@@ -69,14 +69,14 @@ class FencedLockStateMachine {
     }
 
     /** One lock's state (CP spec 3.1). [token] is the last token issued for the key, held or not. */
-    data class Lock(val owner: Long?, val token: Long, val expiresAt: Long, val holds: Int) {
+    data class Lock(val owner: Long?, val token: Long, val leaseUntil: Long, val holds: Int) {
         /** This lock as log time [now] sees it: released once its lease has run out. */
-        fun at(now: Long): Lock = if (owner != null && expiresAt <= now) released() else this
+        fun at(now: Long): Lock = if (owner != null && leaseUntil <= now) released() else this
 
-        fun released() = Lock(owner = null, token = token, expiresAt = 0, holds = 0)
+        fun released() = Lock(owner = null, token = token, leaseUntil = 0, holds = 0)
     }
 
     private companion object {
-        val FREE = Lock(owner = null, token = 0, expiresAt = 0, holds = 0)
+        val FREE = Lock(owner = null, token = 0, leaseUntil = 0, holds = 0)
     }
 }

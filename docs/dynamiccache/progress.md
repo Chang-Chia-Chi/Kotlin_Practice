@@ -5113,3 +5113,365 @@ the old text (`Tests run: 63, Failures: 1`), then passed once `CrossPartitionBat
 reworded. Full run `-pl dynacache-server -am`: engine 147, cluster 85, cp 89, server 91, all
 green, counts unchanged as required -- this was wording only, so no test was added or removed.
 Diff is 4 files, well inside the size budget.
+
+---
+
+## T54 - TTL verbs on cp:ref: keys reach the reference
+
+**Built:** the compat re-target in `CommandDispatcher.compat` now reads the key's kind for
+`EXPIRE`, `PEXPIRE`, `TTL`, `PTTL` and `PERSIST` the way it already did for `GET` and `SET`, so a
+`cp:ref:` key goes to the AtomicReference and every other `cp:` key still goes to the counter. The
+reference had the expiry field and the tick's sweep since T42 but no verbs to reach them, so three
+commands were added beside the counter's: `RefExpire(key, ttl)`, `RefTtl(key, precision)` and
+`RefPersist(key)`, each a data class under `Command.Cp.AtomicReference`, with wire tags 31, 32 and
+33 in `CpWire` written and read exactly as `CMD_EXPIRE`, `CMD_TTL` and `CMD_PERSIST` are (a span in
+millis, a precision boolean, nothing). `AtomicReferenceStateMachine.apply` answers them from the
+same `now` its other verbs use, through a private `retime` that mirrors the counter's: `EXPIRE`
+gives a live reference the deadline `now + ttl` and answers 1, 0 when there is no live reference to
+give it to; `PERSIST` clears the deadline and answers 1, or 0 when there was none; `TTL` answers -2
+for a missing reference, -1 for one without a lease, the remaining millis for `PTTL` and Redis's
+`(remaining + 500) / 1000` rounding for `TTL`. Nothing reads a clock in the state machine, so the
+lease runs on log time (CP spec 5, 9.4) exactly as the counter's does. Main-code diff: 6 lines in
+`CommandDispatcher.kt`, 20 in `AtomicReferenceStateMachine.kt`, 14 in `CpWire.kt`, 15 in
+`Command.kt`; 93 lines of tests.
+
+**Repays the T42 deviation:** T42's deviation 2, "No `EXPIRE`, `TTL` or `PERSIST` on a reference" —
+CP spec 9.4 names AtomicReference among the state machines those verbs operate on, but 6.5's command
+table has no row for them, and T42 resolved the disagreement towards 6.5, leaving "T44 adds the
+three commands if the dispatcher needs to route `EXPIRE cp:ref:K`". It did need to, and this ticket
+adds them. Spec 9.4 wins over the empty 6.5 row, which is what the ticket and the P6 review (bug 6)
+asked for.
+
+**Acceptance:**
+- `ref_ttl_via_compat_reports_reference_ttl` (`CpRoutingTest`, a real three-member CP group behind
+  the RESP socket): `SET cp:ref:x v EX 100` then `TTL` reads 100 and `PTTL` reads the lease in
+  millis; advancing the leader's `MutableClock` 40 s makes `TTL` read 60, so the lease is on log
+  time; `TTL` of a reference nobody set is -2 and of one set without `EX` is -1. Before the fix the
+  first `TTL` read -2, which is the parked `BugHuntCpCompatTest` red.
+- `ref_expire_and_persist_via_compat` (same class): `EXPIRE` on a missing reference is 0, on a live
+  one 1; a second `EXPIRE` shortens the lease and `TTL` reads the shorter one; `PERSIST` answers 1
+  then 0 and the reference outlives its old deadline; `PEXPIRE 1000`, the clock two seconds on and
+  one `tick()` past the deadline, and `GET` is nil with `TTL` back to -2.
+- `the compat set reaches the CP engine as the verb it means` (`CommandDispatcherTest`) gains four
+  rows: the same five verbs on `cp:ref:r` re-target to `RefExpire`, `RefTtl` (both precisions) and
+  `RefPersist`, while every counter row in the table is unchanged, which is the "counter path
+  untouched" criterion at the seam.
+- `reference_commands_round_trip` (`CpWireTest`) gains the three new commands, both `RefTtl`
+  precisions among them, so a follower decodes what a leader replicated.
+- Offline `test -pl dynacache-server -am`: engine 147, cluster 85, cp 89, server 90 (88 + 2), all
+  green. The cp count is unchanged because the new wire and dispatcher coverage went into existing
+  test methods rather than new ones.
+
+**Deviations:**
+1. **One assertion is a range, not an equality.** `PTTL` right after `SET ... EX 100` is not
+   100000: `RaftRuntime.stamp` is `max(clock, lastApplied + 1, lastStamped + 1)`, so with a frozen
+   test clock every appended entry moves log time on by a millisecond, and the three entries between
+   the `SET` and the `PTTL` cost three of them. The test asserts `99_900..100_000` and says why. The
+   counter's own TTL tests never saw this because seconds rounding hides it.
+2. **No `CP.REF.EXPIRE` spelling on the wire.** The new commands are reachable only through the
+   Redis-compat verbs, exactly as the counter's `LongExpire`, `LongTtl` and `LongPersist` are: the
+   parser has `cp.long.set/get/incr/decr/add/cas` and no `cp.long.expire`. CP spec 3.5 and 6.5 name
+   no `REF_EXPIRE` log op either, so adding a parser row would have invented a verb; the ticket's
+   seams also put the parser's command rows out of bounds.
+3. **The namespace rule is still read from the key prefix in two places.** `compat` now branches on
+   `reference` in four arms instead of two. That is the smallest fix the ticket asked for; folding
+   it is ticket 71.
+
+**For the next ticket:**
+- **Ticket 71** should fold `CommandDispatcher.REFERENCE_PREFIX` and the four `if (reference)`
+  branches into one key-to-kind decision, and with it the `ponytail:` note still standing above
+  `compat`: `GET cp:lock:x` reads an empty counter instead of `-WRONGTYPE`, and `EXPIRE cp:lock:x`
+  answers 0 where CP spec 9.4 says a lock's lease is `CP.LOCK.RENEW`'s alone and the verb is
+  rejected. Both want the same thing: the kind of a `cp:` key named once, mapping a compat verb onto
+  the owning primitive's command, with `-WRONGTYPE` and the lock's refusal falling out of it. The
+  five TTL verbs and `GET`/`SET` are then one table, not seven branches.
+- The reference is now the second primitive with a full TTL surface; the latch and the semaphore
+  still have none, and CP spec 9.4 names them too. Whoever gives them one has this shape to copy:
+  three commands, three wire tags, a `retime` in the state machine, and the dispatcher branch.
+
+---
+
+## T50 - The idle TTL tick runs on log time
+
+**Built:** Leases and sessions keep running out after a failover to a leader whose wall clock
+trails log time. `RaftRuntime` gains one field and one function: `skew`, how far log time ran
+ahead of this member's clock when its term's first entry applied (`max(0, lastAppliedTs -
+clock.millis())`, set in `termApplied` before `appliedTerm` so a tick never reads a leader's
+term with the previous term's skew), and `logClock()`, the wall clock plus that skew. The
+**log clock** is log time at the election plus whatever the leader's own clock has measured
+since, so it moves at the real rate however far the wall clock is behind. `tick()` now gates on
+the log clock (`logClock() >= lastStampedTs + tickInterval`) and stamps the tick with it
+(`stamp(now = logClock())`); `stamp()` took a `now` parameter that defaults to the wall clock,
+so a user entry is stamped exactly as before. `CONTEXT.md`'s **TTL tick** entry names the log
+clock. Nothing in the state machines, the session registry, the wire format or the stores
+changed. Size: 126 insertions, 13 deletions across five files, 42 lines of them in
+`RaftRuntime` (mostly doc comments) and 90 in tests.
+
+**The gate and the stamping choice.** The old gate compared the wall clock with the last stamp.
+After a failover to a trailing clock the first tick stamped `lastAppliedTs + 1` (C19), which put
+`lastStampedTs` seconds past the wall clock, and the gate stayed shut until the clock caught up:
+no tick, no expiry, no lapse for the whole skew. The ticket's phrase "due when log time has not
+advanced for one interval of the leader's own elapsed time" is the log clock compared with the
+last stamp: when the clock leads or matches log time the skew is zero and the gate reads exactly
+as it did before, and when it trails the gate keeps opening every interval of the leader's own
+elapsed time whatever user entries stamped in between. The tick's stamp is the choice the ticket
+asked to be recorded. CP spec 5 fixes `ts = max(clock_now, last_committed_ts + 1)` for every
+entry and asks for a tick every interval "to advance time in idle periods"; with the literal rule
+an idle tick on a trailing clock advances log time by 1 ms, so a 1 s lease would take 1000 ticks,
+100 s of the new leader's time, to run out, which breaks I19's "at most T plus the election".
+So a tick stamps `max(logClock, lastAppliedTs + 1, lastStampedTs + 1)`: the C19 rule with the
+log clock in place of the wall clock, which is the wall clock itself whenever the skew is zero.
+Log time therefore advances by exactly one tick interval per idle tick when the clock trails
+(`I19_idle_ticks_continue_after_failover_to_a_trailing_clock` pins the ten stamps to
+`lastByOld + k * interval`), and by the wall clock's own reading otherwise. User entries do not
+read the log clock: the brief fixed the stamping rule, and between ticks they crawl at one
+millisecond per entry under skew as T39 recorded; the next tick, at most one interval later,
+brings log time back to the log clock. The log clock is never ahead of real elapsed time: it
+equals the old leader's last stamp plus what the new leader measured since its term applied,
+so a lease can expire late by the election window but never early (the existing
+`I19_lease_expires_late_never_early_across_failover` still passes unchanged).
+
+**Acceptance:** `dynacache-cp` 92 tests, all green (89 before this ticket); full offline
+`-pl dynacache-cp -am test` green with engine 144, cluster 83, cp 92. Red before green in
+every case: the I19 test failed on the second tick (`tick 2 was not appended`) before the
+change; C17 and C18 were re-run against the old wall-clock gate after the fix and both failed
+at "every idle interval appends a tick" with 0, then the gate was restored.
+
+- `CpEngineTest.I19_idle_ticks_continue_after_failover_to_a_trailing_clock`: the leader's clock
+  is advanced 30 s and a SET carries that into the log; the leader is killed; the successor's
+  clock (30 s behind log time) is advanced ten intervals, each followed by `tick()`; all ten
+  ticks commit, the stamps climb strictly past the old leader's last stamp, and each is exactly
+  one interval past the previous.
+- `FencedLockTest.C17_lease_expires_after_skewed_failover`: a 1 s lease taken under a 30 s skew;
+  nine idle ticks on the successor leave the lock held (read straight from the leader's state
+  machine at its applied index, no entry appended), the tenth releases it, and the next holder
+  gets the next token.
+- `SessionTest.C18_session_lapses_after_skewed_failover`: a session with a 1 s timeout holds a
+  30 s lease under a 30 s skew and stops heartbeating; nine idle ticks leave it held, the tenth
+  tick's `SESSION_CLOSED` releases the lock, and a heartbeat answers `-NOSESSION`.
+- Every existing CP test passes unchanged, including `C19_log_timestamps_monotonic_across_leader_change`,
+  `C23_every_member_agrees_on_expiry_at_same_index` and `I19_lease_expires_late_never_early_across_failover`.
+
+**T39 deviation 4, corrected.** T39 recorded: "Lease time after a failover to a slow clock
+stands still. If the new leader's clock is behind log time, stamps advance by 1 ms per entry
+until the clock catches up; that is the spec's own rule (time never turns back) and not
+something this ticket changed." That described the stamping rule but missed the consequence:
+the idle tick was gated on the wall clock against that 1 ms stamp, so with no user entries
+nothing was appended at all for the whole skew and no lease or session could run out. Read it
+now as: "User entries under a trailing clock stamp 1 ms apart (the C19 rule). The idle tick is
+gated and stamped on the leader's log clock, log time at its election plus its own elapsed
+time, so it keeps appending every interval and carries log time forward at the real rate
+whatever the wall clock says (T50)."
+
+**Deviations:**
+
+1. **The tick's stamp is `max(C19 rule, log clock)`, not the literal spec 5 formula.** Recorded
+   above; the literal formula cannot satisfy I19 on a trailing clock. The user entries' rule is
+   untouched.
+2. **`skew` is computed on every member at every term, not only on the leader.** It is one
+   volatile long written by the Raft thread when the term's first entry applies; a follower
+   never reads it. Computing it before `appliedTerm` is what keeps a leader from ticking with a
+   stale skew, and doing it unconditionally is one line shorter than gating on leadership.
+3. **A clock that steps backwards during a leadership is not repaired.** The skew is measured
+   once per term. If the leader's own clock later jumps back, the log clock jumps back with it
+   and the gate shuts until it catches up, the same failure this ticket fixes but for a clock
+   step rather than a failover; a monotonic source for elapsed time (`System.nanoTime()` since
+   the election) would close it. Not in the ticket; noted as the ceiling.
+4. **A burst of user entries faster than one per millisecond pushes log time ahead of the log
+   clock**, by the size of the burst (the C19 rule's `last + 1`), and no tick is due until the
+   log clock passes it. That is T39's rule, bounded by the burst, and unchanged here.
+
+**For the next ticket:**
+
+- The `stateOnLeader` helper in `FencedLockTest` and `stateOn` in `SessionTest` read a member's
+  state machine at its own applied index without appending an entry; any test that must show
+  "no user command in between" wants one of them.
+- The kit's members all start at the same epoch, so a skew is one `clock(leader).advance` before
+  the entries that should carry it, and the successor's clock is then behind log time by that
+  much; `SKEW` in the two test classes is the constant to reuse.
+- The production tick loop (`ClusterNode`, `DynaCacheServer`) is unchanged: it calls `tick()`
+  every interval on the system clock, and with a zero skew the gate reads as it always did.
+
+---
+
+## T57 - Glossary renames
+
+A mechanical rename pass so the code and tests speak CONTEXT.md's words and none of its "Avoid"
+words. No behaviour change: no logic edit, no reordering, no assertion changed beyond a renamed
+identifier. 13 files, 47 insertions and 47 deletions.
+
+### Batch (was "transaction")
+
+| Old | New | Where |
+| --- | --- | --- |
+| `TRANSACTION` (the MULTI/EXEC/DISCARD verb set) | `BATCH` | `DynaCacheServer.kt` (declaration and its one use) |
+| comment "refuses the whole transaction later" | "refuses the whole batch later" | `DynaCacheServer.kt`, above the `Parsed.Failed` branch |
+| `a parse error while queued makes EXEC abort the whole transaction` | `...abort the whole batch` | `DynaCacheServerTest.kt` |
+
+### Lease (was "ttl" / "expiresAt" on the lock)
+
+| Old | New | Where |
+| --- | --- | --- |
+| `Command.Cp.LockTry.ttl` | `.lease` | `Command.kt`, `CpWire.kt`, `FencedLockStateMachine.kt`, `FencedLockTest.kt`, `CpWireTest.kt`, `CommandParserTest.kt` |
+| `Command.Cp.LockRenew.ttl` | `.lease` | same, plus `SessionTest.kt` |
+| `FencedLockStateMachine.Lock.expiresAt` | `.leaseUntil` | `FencedLockStateMachine.kt`, `CpWire.kt` snapshot encoding, `CpWireTest.kt` |
+| KDoc `CP.LOCK.TRY K ttl_ms` | `CP.LOCK.TRY K lease_ms` | `Command.kt` |
+| KDoc `CP.LOCK.RENEW K token ttl_ms` / `[ttl]` | `... lease_ms` / `[lease]` | `Command.kt` |
+| KDoc `[owner or nil, token, ttl_remaining_ms, reentrance]` | `..., lease_remaining_ms, ...` | `Command.kt` (`LockState`) |
+| `tryLock(session, ttl = ...)` helper parameter | `lease` | `FencedLockTest.kt` |
+
+`ttl` elsewhere is left alone deliberately: it is the right word for counters (`LongSet`,
+`LongExpire`, `LongTtl`, `LongPersist`), for references (`RefSet`), for the AP engine's `Command.Set`
+and `Command.Ttl`, and for `TtlTick`, which is the log-time tick's own name in CP spec 5 and a
+CONTEXT.md glossary entry in its own right.
+
+### Latch (was "barrier")
+
+| Old | New | Where |
+| --- | --- | --- |
+| "A latch is a one-time barrier, so it is armed only from zero" | "A latch runs down once and stops at zero, so it is armed only from zero" | `CountDownLatchStateMachine.kt` class KDoc |
+| "The barrier has already fallen; ..." | "The latch has already run out; ..." | `CountDownLatchTest.kt`, `latch_down_at_zero_stays_zero` |
+| "would move the barrier under them" | "would move the count under them" | `CountDownLatchTest.kt`, `latch_reset_only_at_zero` |
+
+The engine's `CyclicBarrier` in `CommandEngine.kt` and `Partition.kt` stays: that is the parked-
+partition sense CONTEXT.md reserves the word for, and it is also the JDK type's own name.
+
+### Reply (was "Response" on the CP gRPC message types)
+
+| Old | New | Where |
+| --- | --- | --- |
+| proto `message CpResponse` | `message CpReply` | `cp.proto`, `CpGrpcServer.kt` (import, `apply` return type, builder) |
+| proto `message HeartbeatResponse` | `message HeartbeatReply` | `cp.proto`, `CpGrpcServer.kt` (import, `heartbeat` return type, builder) |
+| `rpc Apply(CpRequest) returns (CpResponse)` | `... returns (CpReply)` | `cp.proto` |
+| `rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse)` | `... returns (HeartbeatReply)` | `cp.proto` |
+
+Both message types are referenced only from `CpGrpcServer.kt`; `ForwardingCpEngine.kt` and
+`GrpcCpKit.kt` read the `reply` field, whose name did not change. The field numbers and the RPC
+method names are untouched, so the protobuf wire format is unchanged; the generated Kotlin class
+names and the service descriptor's type names change, and both sides of that wire are in this
+repository. Nothing persisted carries these types: the Raft store persists log entries and
+snapshots through `CpWire`'s own hand encoding, never a `CpResponse`.
+
+### Names deliberately kept
+
+| Name | Why |
+| --- | --- |
+| `Reply.Error("EXECABORT", "Transaction discarded because of previous errors.")` | Redis's own error text, byte for byte on the wire. Changing it would break every Redis client. Appears in `DynaCacheServer.kt`, `DynaCacheServerTest.kt` and `RespCodecTest.kt`. |
+| Test names `lock_ttl_expires`, `lock_ttl_renew` | Spec-named tests (design-spec-cp.md lines 391-392). The ground rule keeps spec test names, and this ticket's own criterion allows only the batch test to be renamed. |
+| proto `InstallSnapshotResponse`, and MicroRaft's `PreVoteResponse` / `VoteResponse` / `AppendEntriesSuccessResponse` / `AppendEntriesFailureResponse` | Raft's own message names, mirroring the `io.microraft.model.message.*` classes they encode. CONTEXT.md keeps Raft's vocabulary where it is Raft's (as with "majority"). These are not the CP message types the ticket names. |
+| `CyclicBarrier` and "barrier" in `CommandEngine.kt` / `Partition.kt` | The engine's parked-partition sense, which CONTEXT.md explicitly reserves the word for. |
+| `expiresAt` on `AtomicLongStateMachine.Counter` and `AtomicReferenceStateMachine.Reference`; `expiresAt` throughout the AP engine and cluster | TTL and expiry are the counter's and the reference's words. Only the lock says lease. |
+| RESP verb spellings `CP.LOCK.TRY` / `CP.LOCK.RENEW` / `CP.LOCK.STATE`, error kinds `REENTRANCE`, `NOSESSION`, `EXECABORT` | Client-facing wire names. |
+
+`docs/dynamiccache/design-spec-cp.md` still writes the lock argument as `ttl_ms` (lines 119, 121,
+214, 216, 217). The KDoc synopses now say `lease_ms` because CONTEXT.md is the glossary authority
+and this ticket asks for it; the spec itself was not edited, since this ticket modifies only
+`DynaCache/`. The spec already agrees in prose at line 356: "For FencedLock, TTL is the lease".
+
+### Grep proof
+
+Over `dynacache-{engine,cluster,cp,server}/src` for `*.kt` and `*.proto`, case-insensitive:
+
+- `transaction`: 4 hits, all the `EXECABORT` error text above.
+- `barrier`: 6 hits, all `CyclicBarrier` and the parked-partition comment in the engine.
+- `expiresAt`: no hit on a lock; all remaining hits are counters, references, the AP engine's
+  entries, and the cluster's replication messages.
+- `CpResponse`, `HeartbeatResponse`: no hits anywhere.
+- `Command.Cp.LockTry(...).ttl`, `Command.Cp.LockRenew(...).ttl`: no hits; both carry `lease`.
+
+### Tests
+
+Full reactor, all four modules green at unchanged counts:
+
+| Module | Tests |
+| --- | --- |
+| dynacache-engine | 147 |
+| dynacache-cluster | 85 |
+| dynacache-cp | 89 |
+| dynacache-server | 91 |
+
+One intermediate run saw `ReadRepairTest.read_repair_does_not_delay_reply` error with "no READ
+reached node-3". That test is in the cluster module, which this ticket does not touch, and it
+passed on both the run before it and the run after; it is a timing flake under three parallel
+Maven builds on the machine. The final run is clean.
+
+---
+
+## T51 - A node's dot counter survives restart
+
+**Built:** a node's `DotCounter` now resumes above everything it ever handed out, restart
+included (C2), which is what makes a restarted coordinator's first write new to every replica
+and closes the acknowledged-write loss the bug hunt found (I2). The counter reserves dots a
+block at a time: crossing its reserved ceiling persists the next ceiling (`(counter / block + 1)
+* block`, block 1000) through a new seam BEFORE the crossing dot is handed out, so the write
+path pays one fsync per 1000 writes and nothing otherwise, and a crash wastes at most one block.
+On start the counter takes the higher of two floors: the persisted ceiling and the highest own
+counter in the local-data scan T21 already had (empty on every node today, ticket 67's floor
+once versions persist).
+
+The seam is `dynacache.engine.persist.DotCeilingStore { load(): Long; reserve(ceiling: Long) }`,
+in the engine's persist package because that is the one package besides cp allowed
+`java.nio.file` (plan 2.2); the cluster module still does no file I/O. Two adapters, both in the
+same file as companion factories: `inFile(path)` writes the ceiling as decimal text to
+`<path>.tmp`, fsyncs, and renames it over `<path>` atomically (the snapshot engine's own idiom),
+and answers 0 for a missing file while a file it cannot parse fails loudly rather than starting
+over at 0; `inMemory()` is what a node with no data directory and every test uses. `ClusterNode`
+wires `inFile(dataDir/dots)` when it has a data directory and `inMemory()` otherwise; the file
+adapter creates the directory itself because the counter is built before the snapshot engine
+creates it. Inside the counter, `next()` stays an `AtomicLong` increment; only a dot past the
+ceiling enters the `@Synchronized` reservation, the first arrival writes and the rest re-check
+and go, and a reservation that throws leaves the ceiling where it was so the dot is never
+handed out and the next caller retries.
+
+The in-process test kit gained `restart(node)`: it cancels the node's router and handoff loops
+and rebuilds `Replication`, `AntiEntropy` and `Router` over the same engine, the same transport
+endpoint and the node's own `DotCeilingStore` (one in-memory store per node lives in the kit),
+so the version table empties and the counter resumes from the persisted ceiling exactly as a
+process restart does while the engine restores from disk. Node construction moved into one
+`start(node)` the constructor and `restart` share.
+
+**Acceptance:**
+- `C2_dot_counter_never_reuses_a_dot_across_restart` (`DvvTest`, block 4 against a recording
+  store): the first dot reserves 4 before it is out, dots 2 to 4 reserve nothing, dot 5 reserves
+  8; then 41 restarts dying after 0 to 40 dots each, and every restarted counter's first dot is
+  above everything handed out before; the recorded ceilings only rise.
+- `I2_acknowledged_write_survives_coordinator_restart` (`ReplicationTest`): v1 and v2 written
+  through the coordinator, replicas hold `(coord, 2)`; `restart(coordinator)`; v3 is written with
+  W acks and its dot is above 2; a quorum read through a replica answers v3; after read repair
+  drains every replica holds v3; `assertConverged` passes. Red at HEAD before the fix on the dot
+  assertion (the reused `(coord, 1)`), which is the mechanism the parked bug-hunt test named.
+- `dvv_no_counter_reuse` keeps its T21 assertions and is extended across a restart with no local
+  data (the persisted ceiling is the floor) and with local data above the ceiling (the higher
+  floor wins).
+- `DotCeilingStoreTest` (engine, `@TempDir`): a fresh node loads 0; the last of two reservations
+  is what a new instance loads and the temp file is gone; an unparseable file throws
+  `NumberFormatException`; the in-memory store survives only its own instance.
+- Every existing replication, hint, read-repair, anti-entropy and convergence test passes; the
+  P4 acceptance test restarts real nodes over data directories and now reads `dots` back.
+- Counts: engine 144 -> 148, cluster 83 -> 85, cp 89 -> 89, server 83 -> 83. Diff: 7 files,
+  about 300 lines including tests, inside the budget.
+
+**Deviations:** none against the spec or the plan entry. Three judgement calls.
+1. The seam lives in the engine's persist package, not the cluster, because the cluster depends
+   on the engine and not the reverse; its vocabulary ("dot") is the cluster's, and the KDoc says
+   where the word comes from. `inMemory()` is main code rather than test code because a node with
+   no data directory needs it.
+2. The reservation is a `@Synchronized` block holding an fsync, on the caller's thread, inside
+   `Replication.write`'s `versions.compute`. Once per 1000 writes on one key's map bin; the
+   plan's lock rule (2.5) is about the engine's data structures and this is the cluster module.
+   If a measurement ever shows the once-per-block stall, reserve the next block ahead of time on
+   a background coroutine; the seam does not change.
+3. The ceiling is rewritten whole (write, fsync, atomic rename) rather than appended to the WAL:
+   the WAL format is frozen for this ticket and a 20-byte file has nothing to gain from a log.
+
+**For the next ticket:**
+- Ticket 67 (persist the version table) should hand the restored versions to
+  `DotCounter.of(node, localData, ceilings)` as the scan floor it already takes; the ceiling
+  store stays as the guard for versions that were handed out but never reached the RDB. Do not
+  drop the ceiling in favour of the scan: the scan only sees what was persisted, and a write's dot
+  is handed out before the write is durable.
+- A restarted node's version table is still empty until ticket 67, so its own reads of keys it
+  wrote before the restart answer with no version and lose to any replica's; read repair then
+  refills it. Correct, and one round trip per key.
+- `InProcessCluster.restart(node)` restarts only the replication layer; the network's own
+  `kill`/`restart` stays separate, and a chaos run that wants "process restart" should call both.

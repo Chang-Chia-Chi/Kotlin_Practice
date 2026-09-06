@@ -13,19 +13,19 @@ and log time keeps moving at the tick interval even when the leader's clock is b
 
 **Nature:** monotonic time across leader changes, C19, I19 (Fable)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache d18427fe, merged into misc/ai_gen)
 
-- [ ] `I19_idle_ticks_continue_after_failover_to_a_trailing_clock`: the leader's clock is
+- [x] `I19_idle_ticks_continue_after_failover_to_a_trailing_clock`: the leader's clock is
       ahead of the followers' by 30 s, entries bring log time to the leader's now, the leader
       is killed, the new leader's clock is advanced ten intervals with no user writes, and ten
       ticks are committed with log time strictly increasing
-- [ ] `C17_lease_expires_after_skewed_failover`: a lock taken with a lease shorter than the
+- [x] `C17_lease_expires_after_skewed_failover`: a lock taken with a lease shorter than the
       skew is released by a tick on the new leader without any user command
-- [ ] `C18_session_lapses_after_skewed_failover`: same for a session whose heartbeat stops
-- [ ] `I19_lease_expires_late_never_early_across_failover` and every existing CP test pass;
+- [x] `C18_session_lapses_after_skewed_failover`: same for a session whose heartbeat stops
+- [x] `I19_lease_expires_late_never_early_across_failover` and every existing CP test pass;
       log time never moves backwards (C23)
-- [ ] The T39 progress wording ("1 ms per entry advance") is corrected to describe the fix
-- [ ] Progress entry appended
+- [x] The T39 progress wording ("1 ms per entry advance") is corrected to describe the fix
+- [x] Progress entry appended
 
 A red test for this exists in the review worktree `kp-wt/review` under the cp module's test
 tree (`BugHuntTtlTickTest`); reuse it if present, otherwise rewrite it from the first

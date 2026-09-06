@@ -6,6 +6,7 @@ import dynacache.engine.Key
 import dynacache.engine.Reply
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertNotEquals
 import org.junit.jupiter.api.Test
 import java.time.Duration
 import java.util.concurrent.TimeUnit.SECONDS
@@ -58,7 +59,7 @@ class SessionTest {
 
         assertEquals("NOSESSION", kindOf(tryLock(session)), "closed")
         assertEquals("NOSESSION", kindOf(submit(Command.Cp.LockUnlock(lock, session, token = 1))))
-        assertEquals("NOSESSION", kindOf(submit(Command.Cp.LockRenew(lock, session, token = 1, ttl = LEASE))))
+        assertEquals("NOSESSION", kindOf(submit(Command.Cp.LockRenew(lock, session, token = 1, lease = LEASE))))
     }
 
     /** CP spec 10.6: "wait > timeout" is the leader's clock moving and a tick carrying it into the log. */
@@ -130,6 +131,34 @@ class SessionTest {
         assertEquals(unowned(token = 1), state(other))
     }
 
+    /**
+     * C18, I19: the old leader's clock ran 30 s ahead of its successor's. A session with a
+     * one-second timeout whose heartbeat stops lapses on the successor's idle ticks alone, one
+     * second of the successor's own clock later, and the lock it held is released with it.
+     */
+    @Test
+    fun C18_session_lapses_after_skewed_failover() {
+        val old = kit.leader()
+        kit.clock(old.config.nodeId).advance(SKEW)
+        val session = create(timeout = Duration.ofSeconds(1))
+        assertEquals(granted(1), tryLock(session))
+
+        kit.killMember(old.config.nodeId)
+        val successor = kit.leader()
+        val interval = successor.config.tickInterval
+        fun idleTick(): Long {
+            kit.clock(successor.config.nodeId).advance(interval)
+            return successor.tick().get(REPLY_TIMEOUT_SECS, SECONDS)
+        }
+        val ticksInTimeout = (Duration.ofSeconds(1).toMillis() / interval.toMillis()).toInt()
+
+        repeat(ticksInTimeout - 1) { assertNotEquals(0L, idleTick(), "every idle interval appends a tick") }
+        assertEquals(session, ((stateOn(successor.config.nodeId, lock) as Reply.Array).items[0] as Reply.Integer).value, "held one interval short of the timeout")
+        assertNotEquals(0L, idleTick(), "the tick whose SESSION_CLOSED ends the session")
+        assertEquals(unowned(token = 1), stateOn(successor.config.nodeId, lock), "released by the tick's SESSION_CLOSED, no user command in between")
+        assertEquals("NOSESSION", kindOf(submit(Command.Cp.SessionHeartbeat(session))), "the session is gone")
+    }
+
     private fun commitIndex(): Long =
         kit.leader().node.getReport().get(REPLY_TIMEOUT_SECS, SECONDS).result.log.commitIndex
 
@@ -141,5 +170,6 @@ class SessionTest {
         const val REPLY_TIMEOUT_SECS = 10L
         val TIMEOUT: Duration = Duration.ofSeconds(15)
         val LEASE: Duration = Duration.ofSeconds(30)
+        val SKEW: Duration = Duration.ofSeconds(30)
     }
 }

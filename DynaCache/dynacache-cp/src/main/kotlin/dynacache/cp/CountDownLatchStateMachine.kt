@@ -6,9 +6,9 @@ import dynacache.engine.Reply
 
 /**
  * The CountDownLatch (CP spec 3.4): per `cp:latch:*` key, what is left to count down, mutated
- * only by applying committed entries in log order. A latch is a one-time barrier, so it is armed
- * only from zero: a latch nobody has set counts zero, and a latch that has run out may be armed
- * again, but one still counting down may not be moved under the parties waiting on it.
+ * only by applying committed entries in log order. A latch runs down once and stops at zero, so
+ * it is armed only from zero: a latch nobody has set counts zero, and a latch that has run out may
+ * be armed again, but one still counting down may not be moved under the parties waiting on it.
  */
 class CountDownLatchStateMachine {
 

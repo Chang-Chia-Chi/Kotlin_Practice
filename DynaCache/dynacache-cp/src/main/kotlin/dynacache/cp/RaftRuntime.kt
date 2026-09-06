@@ -59,9 +59,23 @@ class RaftRuntime(val config: CpConfig, transport: Transport, store: CpStore = I
     val isLeader: Boolean get() = endpoint == node.term.leaderEndpoint && appliedTerm == node.term.term
 
     private fun termApplied(term: Int) {
+        skew = maxOf(0, stateMachine.lastAppliedTs - config.clock.millis())
         appliedTerm = term
         if (isLeader) leadership.complete(this)
     }
+
+    /**
+     * How far log time ran ahead of this member's clock when its term's first entry applied, never
+     * negative. The **log clock** is the wall clock plus this: log time at the election plus the
+     * time this member has measured since, so a leader whose clock trails what its predecessor
+     * stamped still sees time pass at the real rate. Set before [appliedTerm] so no tick reads
+     * a leader's term with the previous term's skew.
+     */
+    @Volatile
+    private var skew = 0L
+
+    /** Log time as this leader's own clock measures it. */
+    private fun logClock(): Long = config.clock.millis() + skew
 
     /** The stamp of the last entry this leader appended; guarded by [appendLock]. */
     private var lastStampedTs = 0L
@@ -76,17 +90,20 @@ class RaftRuntime(val config: CpConfig, transport: Transport, store: CpStore = I
         synchronized(appendLock) { node.replicate(CpOp(stamp(), command)) }
 
     /**
-     * The TTL tick (CP spec 5): when this member leads and nothing has been appended for a tick
-     * interval of its clock, appends a [TtlTick] so log time moves on every member. A caller runs
-     * it every tick interval in production and step by step in a test; a non-leader does nothing.
-     * Once the tick is applied, every session whose timeout ran out at that log time gets a
-     * [SessionClosed] entry (CP spec 9.3), from the leader alone since only it saw its tick commit.
-     * Completes with the index of the last entry it appended once committed, or 0 when none was.
+     * The TTL tick (CP spec 5): when this member leads and log time has not moved for a tick
+     * interval of its [logClock], appends a [TtlTick] stamped with that clock, so log time keeps
+     * pace with the leader's own elapsed time on every member even when its wall clock trails
+     * what an earlier leader stamped (I19). A caller runs it every tick interval in production
+     * and step by step in a test; a non-leader does nothing. Once the tick is applied, every
+     * session whose timeout ran out at that log time gets a [SessionClosed] entry (CP spec 9.3),
+     * from the leader alone since only it saw its tick commit. Completes with the index of the
+     * last entry it appended once committed, or 0 when none was.
      */
     fun tick(): CompletableFuture<Long> {
         val tick = synchronized(appendLock) {
-            val idle = config.clock.millis() >= lastStampedTs + config.tickInterval.toMillis()
-            if (isLeader && idle) node.replicate<Any?>(TtlTick(stamp())) else return CompletableFuture.completedFuture(0L)
+            val now = logClock()
+            val idle = now >= lastStampedTs + config.tickInterval.toMillis()
+            if (isLeader && idle) node.replicate<Any?>(TtlTick(stamp(now))) else return CompletableFuture.completedFuture(0L)
         }
         return tick.thenCompose { applied ->
             val closed = stateMachine.lapsedSessions().map { session ->
@@ -96,9 +113,12 @@ class RaftRuntime(val config: CpConfig, transport: Transport, store: CpStore = I
         }
     }
 
-    /** CP spec 5: `max(clock_now, last_committed_ts + 1)`, and past whatever this leader stamped already. */
-    private fun stamp(): Long {
-        lastStampedTs = maxOf(config.clock.millis(), stateMachine.lastAppliedTs + 1, lastStampedTs + 1)
+    /**
+     * CP spec 5: `max(clock_now, last_committed_ts + 1)`, and past whatever this leader stamped
+     * already. A user entry reads the wall clock; a tick passes its [logClock] as [now].
+     */
+    private fun stamp(now: Long = config.clock.millis()): Long {
+        lastStampedTs = maxOf(now, stateMachine.lastAppliedTs + 1, lastStampedTs + 1)
         return lastStampedTs
     }
 

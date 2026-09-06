@@ -3,11 +3,11 @@ package dynacache.cp
 import com.google.protobuf.ByteString
 import dynacache.cp.proto.Accepted
 import dynacache.cp.proto.CpInfo
+import dynacache.cp.proto.CpReply
 import dynacache.cp.proto.CpRequest
-import dynacache.cp.proto.CpResponse
 import dynacache.cp.proto.CpServiceGrpcKt
+import dynacache.cp.proto.HeartbeatReply
 import dynacache.cp.proto.HeartbeatRequest
-import dynacache.cp.proto.HeartbeatResponse
 import dynacache.cp.proto.InfoRequest
 import dynacache.cp.proto.RaftEnvelope
 import dynacache.cp.proto.RaftServiceGrpcKt
@@ -59,18 +59,18 @@ class CpGrpcServer(
 
     private inner class CpCalls : CpServiceGrpcKt.CpServiceCoroutineImplBase() {
 
-        override suspend fun apply(request: CpRequest): CpResponse {
+        override suspend fun apply(request: CpRequest): CpReply {
             val reply = engine.submit(CpWire.decodeCommand(request.command.toByteArray())).await()
-            return CpResponse.newBuilder().setReply(ByteString.copyFrom(CpWire.encode(reply))).build()
+            return CpReply.newBuilder().setReply(ByteString.copyFrom(CpWire.encode(reply))).build()
         }
 
         override suspend fun getInfo(request: InfoRequest): CpInfo = info()
 
         /** `ok` only when this member's engine applied the heartbeat: a dead session or a follower says no. */
-        override suspend fun heartbeat(request: HeartbeatRequest): HeartbeatResponse {
+        override suspend fun heartbeat(request: HeartbeatRequest): HeartbeatReply {
             val session = request.sessionId.toLongOrNull()
             val reply = session?.let { engine.submit(Command.Cp.SessionHeartbeat(it)).await() }
-            return HeartbeatResponse.newBuilder().setOk(reply is Reply.Simple).build()
+            return HeartbeatReply.newBuilder().setOk(reply is Reply.Simple).build()
         }
     }
 

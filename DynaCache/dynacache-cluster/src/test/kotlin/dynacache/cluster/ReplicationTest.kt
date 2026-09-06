@@ -16,6 +16,7 @@ import kotlinx.coroutines.yield
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertThrows
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
 /**
@@ -211,6 +212,37 @@ class ReplicationTest {
         assertEquals(Reply.Integer(3), cluster.settle(cluster.router(third).submit(Command.ExistsKeys(keys))))
         assertEquals(Reply.Integer(3), cluster.settle(cluster.router(third).submit(Command.DelKeys(keys))))
         assertEquals(Reply.Integer(0), cluster.settle(cluster.router(first).submit(Command.ExistsKeys(keys))))
+        cluster.close()
+    }
+
+    /**
+     * I2 across a coordinator restart (T51). Before the restart the coordinator wrote the key
+     * twice, so its replicas hold the second value under its dot `(coord, 2)`. The restart empties
+     * the coordinator's version table; if its counter also started over, the third write would be
+     * stamped `(coord, 1)` or `(coord, 2)`, a dot the replicas already hold, so they would keep
+     * their value and still ack -- the acknowledged write would live on the coordinator alone.
+     * With the counter resumed above every dot it ever handed out, the third write is new to
+     * every replica: a quorum read through a replica answers it, and read repair leaves it in place.
+     */
+    @Test
+    fun I2_acknowledged_write_survives_coordinator_restart() = runTest {
+        val cluster = InProcessCluster(nodeCount = 3, n = 3, w = 2, r = 2, scope = backgroundScope)
+        val (coordinator, first, second) = cluster.ring.preferenceList(key, 3)
+        assertEquals(Reply.Simple("OK"), cluster.writeVia(coordinator, key, "v1".toByteArray()))
+        assertEquals(Reply.Simple("OK"), cluster.writeVia(coordinator, key, "v2".toByteArray()))
+        cluster.drainMessages()
+        assertEquals(Dot(coordinator, 2), cluster.replication(first).version(key)!!.dot)
+
+        cluster.restart(coordinator)
+
+        assertEquals(Reply.Simple("OK"), cluster.writeVia(coordinator, key, "v3".toByteArray()))
+        assertTrue(cluster.replication(coordinator).version(key)!!.dot.counter > 2, "the post-restart dot is new to every replica")
+        assertEquals(Reply.Bulk("v3".toByteArray()), cluster.readVia(first, key))
+        cluster.drainMessages()
+        val v3 = Reply.Bulk("v3".toByteArray())
+        assertEquals(mapOf(coordinator to v3, first to v3, second to v3), cluster.readAllReplicas(key), "after read repair")
+        assertEquals(v3, cluster.readVia(second, key))
+        cluster.assertConverged()
         cluster.close()
     }
 }
