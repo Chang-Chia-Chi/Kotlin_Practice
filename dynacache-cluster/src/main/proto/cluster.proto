@@ -1,0 +1,21 @@
+syntax = "proto3";
+
+package dynacache.cluster.proto;
+
+option java_package = "dynacache.cluster.proto";
+option java_multiple_files = true;
+
+// The one message that crosses the Transport seam. Later tickets add their own bodies to
+// the oneof (T19 Forward/ForwardReply, T20 gossip, T22 replication); the generated classes are
+// the cluster's message model and no codec exists (CONTEXT.md "transport").
+message Envelope {
+  string from = 1;
+  string to = 2;
+  oneof body {
+    Ping ping = 10;
+  }
+}
+
+message Ping {
+  int64 seq = 1;
+}
