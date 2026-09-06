@@ -10,12 +10,12 @@ each on ack; replay is one bounded coroutine per node.
 
 **Nature:** availability protocol, C5 and I9 (Fable)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache 94ec86b, merged into misc/ai_gen)
 
-- [ ] `hinted_handoff_replays`, `I9_rejoined_node_matches_reference_replica`
-- [ ] `C5_hint_carries_full_write`: value, DVV and TTL identical after replay
-- [ ] `sloppy_quorum_reaches_w_with_one_dead_node`, `hint_deleted_after_ack`
-- [ ] Progress entry appended
+- [x] `hinted_handoff_replays`, `I9_rejoined_node_matches_reference_replica`
+- [x] `C5_hint_carries_full_write`: value, DVV and TTL identical after replay
+- [x] `sloppy_quorum_reaches_w_with_one_dead_node`, `hint_deleted_after_ack`
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket, stubs throwing NotImplementedError
 for later seams; 200 to 600 lines including tests; JUnit 5 + Mockito only, no AssertJ or MockK;

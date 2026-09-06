@@ -3315,3 +3315,95 @@ The RDB's seq is 0 for a node without a log, and a node that later gains one rep
 which is right since its log starts empty. Keys under T22's DVV stamping should go into the
 entry payload alongside the command when replication lands, so a replayed write carries its
 version; the codec's op table is the place.
+
+## T25: Hinted handoff and sloppy quorum
+
+**Built:** Sloppy quorum and hinted handoff inside `Replication`, at the seam T22 left:
+`gather` now takes its targets from `successors(key, sloppy)`, which maps each live successor
+of the preference list to null and, for a write, each dead one to a substitute: the next
+healthy nodes clockwise past the list (`ring.preferenceList(key, ring.nodes.size).drop(n)`
+filtered by `membership.dead`), distinct from every member of it, zipped in order. A read never
+substitutes. The `Replicate` sent to a substitute carries `hint_for = <dead node>` (`cluster.proto`
+field 5, a plain field, so no oneof case and no exhaustive `when` changed). A replica that
+receives a `Replicate` with `hint_for` set stores the whole message in its `HintStore` under a
+fresh local id and acks under the request id, so the ack counts toward W exactly like a
+replica's (C4's distinct-node rule holds because the substitute is not in the preference list).
+`HintStore` (`dynacache.cluster`, concrete, in memory) is `id -> (target, Replicate)` in arrival
+order with `add`, `remove`, `pending(target, now, limit)` (drops every hint whose
+`expires_at_millis` has passed at `now` before answering) and `size`. `Replication.runHandoff()`
+is the node's one handoff coroutine: it collects `membership.changes` and, on an `ALIVE` row,
+loops `replayHints(node)` until a round acks nothing. `replayHints(target)` is the step function
+tests can call: it takes up to `replayBatch` (constructor parameter, default 64) hints, sends
+each unchanged (same tokens, DVV, TTL instant; `hint_for` cleared, id set to the hint's id) to
+the target, registers one `Gather(1)` per hint so the existing `REPLICATE_ACK` demux completes
+it, waits for all of them or the `deadline`, forgets the acked ones and returns how many.
+`Replication.hintCount` is the number for `INFO`. The target applies a replayed hint through
+the unchanged `replicate` path (T22's DVV rule). `InProcessCluster` launches `runHandoff` per
+node next to the router loops and gains `drainHints()` (drain rounds until no node holds a hint,
+bounded by the settle rounds). `GrpcTransportTest` round-trips `hint_for`. CONTEXT.md gains
+"hint" (and "handoff" inside it). Seven files, 308 insertions, 11 deletions; `mvn -B -o -q clean
+package` offline green: engine 137, cluster 67, cp 66, server 65.
+
+**Concepts named:** A **hint** is a write held by a node that is not one of the key's replicas,
+because the replica it was meant for was dead when the coordinator wrote; it is the `Replicate`
+envelope itself, unchanged (C5), which is why replaying it is sending it. The **substitute**
+(stand-in) is the next healthy node clockwise past the preference list, one per dead node, in
+order. **Handoff** is the replay on an alive event: rounds of at most `replayBatch` hints, each
+round waiting the quorum deadline for its acks, an unacked hint staying for the next round or
+the next alive event. No new seam: `HintStore` is concrete and tested through the cluster;
+`Gather` served as the third fan-out T22 predicted.
+
+**Acceptance:**
+- `sloppy_quorum_reaches_w_with_one_dead_node`: four nodes, N=3, W=3, R=1; one successor
+  network-killed and dead per membership; the write answers OK (red first: the quorum error),
+  the dead node holds nothing, the fourth node on the ring holds one hint.
+- `hinted_handoff_replays`: four nodes, N=3, W=2, R=2; the last node network-partitioned away
+  and dead; five keys it replicates written through node-1; it holds none; heal, alive at
+  incarnation 1, `drainHints`; it holds all five. Red first: `runHandoff` did not exist.
+- `hint_deleted_after_ack`: the holder's `hintCount` is 1 before the rejoin and 0 after, the
+  target holds the value.
+- `C5_hint_carries_full_write`: `SET ... PX 10000` while away; after the rejoin the returned
+  node answers the value, the coordinator's exact version, and PTTL 10000.
+- `I9_rejoined_node_matches_reference_replica`: eight keys cycling plain `SET`, `SET` with a
+  TTL of i+1 seconds, `HSET` of two fields, `INCRBY`; after the rejoin each key's `GET` or
+  `HGETALL`, `PTTL` and version equal the coordinator's (the replica that never left).
+- `expired_hint_is_not_replayed`: a `MutableClock` in the test; `SET ... PX 10000` while away,
+  the clock moved to 11s, rejoin; the holder's count is 0 and the returned node's version for
+  the key is null (a replay would have set it before the engine hop, so the null is the proof).
+- Every earlier test green, `GrpcTransportTest` included.
+- This entry.
+
+**Deviations:**
+1. `sloppy_quorum_reaches_w_with_one_dead_node` runs at W=3, not the briefing's W=2: with
+   N=3 and one dead successor, W=2 forms from the coordinator and the live successor without
+   any hint, so W=2 would not prove the sloppy quorum. W=3 needs the substitute's ack.
+2. C5, I9 and the expiry test were green on their first run: the replay slice already sent the
+   stored envelope unchanged and `pending` was written with the drop. Recorded rather than
+   faked red.
+3. A dead node with no healthy node left past the preference list gets no substitute and is
+   simply not written to; the quorum then fails as before. The plan says nothing about it.
+4. A hint whose tokens or DVV this node cannot parse is not stored and not acked, same as an
+   ordinary `Replicate`, so a garbage hint never lingers.
+5. In production a hint that stays unacked after a round (target silent) waits for the next
+   alive event; there is no periodic retry, since plan 2.5 wants one coroutine per background
+   process driven by an event, and SWIM re-emits alive on re-incarnation. Debt if a target that
+   acks nothing while alive is ever observed: a periodic `replayHints` round on the same
+   coroutine.
+6. The substitute keeps the hint only; it does not also apply the write locally, so a read
+   that lands on it while the replica is away answers nil. Dynamo's own semantics.
+7. `INFO` is not wired: `Replication.hintCount` is the number, the server module reports it
+   when T24 wires the router in.
+
+**For the next ticket:** T26 (read repair) hooks where `divergentReads` is incremented and can
+reuse `gather` with `sloppy = false`, or a `Gather(1)` per target exactly as `replayHints` does;
+`successors` is the one place that knows who a write went to. T28 (anti-entropy) has
+`Replication.version(key)` and the same `replicate` install path a replayed hint takes. Both
+edit `Replication.kt` after this ticket: the T25 surface is `successors`, `runHandoff`,
+`replayHints`, the `hint_for` branch at the top of `replicate`, and `HintStore.kt`. In tests,
+`InProcessCluster.drainHints()` after `membership.set(node, ALIVE, incarnation)` is the whole
+rejoin; `ScriptedMembership` is still shared by every node, so one `set` reaches every node's
+handoff coroutine, and only the holder has anything to send. The handoff coroutine subscribes
+to `changes` on the first yield after construction, so an `ALIVE` emitted before any suspension
+point is missed (a `MutableSharedFlow` without replay); every test drains before it rejoins.
+`InMemoryTransport.networkPartition` plus `membership.set(DEAD)` is the "partition away" pair,
+`heal` plus `set(ALIVE)` the rejoin; a node killed with `kill` needs `restart` first.
