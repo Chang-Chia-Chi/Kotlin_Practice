@@ -34,6 +34,41 @@ class CpWireTest {
     }
 
     @Test
+    fun semaphore_commands_round_trip() {
+        val key = Key("cp:sem:s")
+        listOf(
+            Command.Cp.SemInit(key, permits = 5),
+            Command.Cp.SemAcquire(key, session = 7, permits = 2),
+            Command.Cp.SemRelease(key, session = 7, permits = 2),
+            Command.Cp.SemAvailable(key),
+            Command.Cp.SemDrain(key, session = 7),
+        ).forEach { assertEquals(CpOp(9, it), roundTrip(CpOp(9, it))) }
+    }
+
+    @Test
+    fun latch_commands_round_trip() {
+        val key = Key("cp:latch:l")
+        listOf(
+            Command.Cp.LatchSet(key, count = 3),
+            Command.Cp.LatchDown(key),
+            Command.Cp.LatchGet(key),
+            Command.Cp.LatchReset(key, count = 5),
+        ).forEach { assertEquals(CpOp(9, it), roundTrip(CpOp(9, it))) }
+    }
+
+    /** A reference is opaque bytes, so its commands round-trip byte for byte, TTL and all. */
+    @Test
+    fun reference_commands_round_trip() {
+        val key = Key("cp:ref:r")
+        listOf(
+            Command.Cp.RefSet(key, byteArrayOf(0, 127, -1)),
+            Command.Cp.RefSet(key, "hello".toByteArray(), ttl = Duration.ofMillis(1500)),
+            Command.Cp.RefGet(key),
+            Command.Cp.RefCas(key, "hello".toByteArray(), byteArrayOf(0, -128)),
+        ).forEach { assertEquals(CpOp(9, it), roundTrip(CpOp(9, it))) }
+    }
+
+    @Test
     fun session_commands_round_trip() {
         listOf(
             Command.Cp.SessionCreate(Duration.ofSeconds(15)),

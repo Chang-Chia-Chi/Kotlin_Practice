@@ -25,6 +25,9 @@ class CpStateMachine(
 
     val longs = AtomicLongStateMachine()
     val locks = FencedLockStateMachine()
+    val semaphores = SemaphoreStateMachine()
+    val latches = CountDownLatchStateMachine()
+    val references = AtomicReferenceStateMachine()
     val sessions = SessionRegistry()
 
     /** Log time as this member sees it: the stamp of the last applied entry. */
@@ -44,6 +47,9 @@ class CpStateMachine(
             } else when (command) {
                 is Command.Cp.AtomicLong -> longs.apply(command, lastAppliedTs)
                 is Command.Cp.FencedLock -> locks.apply(command, lastAppliedTs)
+                is Command.Cp.Semaphore -> semaphores.apply(command)
+                is Command.Cp.CountDownLatch -> latches.apply(command)
+                is Command.Cp.AtomicReference -> references.apply(command, lastAppliedTs)
                 is Command.Cp.SessionClose -> { closeSession(command.session); Reply.Simple("OK") }
                 is Command.Cp.Session -> sessions.apply(command, lastAppliedTs)
             }
@@ -57,6 +63,7 @@ class CpStateMachine(
             lastAppliedTs = operation.ts
             longs.sweep(lastAppliedTs)
             locks.sweep(lastAppliedTs)
+            references.sweep(lastAppliedTs)
             null
         }
         is NewTerm -> {
@@ -68,7 +75,10 @@ class CpStateMachine(
 
     /** C18: the session and everything it held go in this one entry; a second closing is a no-op. */
     private fun closeSession(session: Long) {
-        if (sessions.close(session)) locks.releaseAllOf(session)
+        if (sessions.close(session)) {
+            locks.releaseAllOf(session)
+            semaphores.releaseAllOf(session)
+        }
     }
 
     /** The sessions whose timeout has run out at this member's log time; the leader closes them. */
@@ -78,7 +88,17 @@ class CpStateMachine(
 
     /** One chunk holding everything; chunking a large state is T45's business. */
     override fun takeSnapshot(commitIndex: Long, chunkConsumer: Consumer<Any>) =
-        chunkConsumer.accept(Snapshot(lastAppliedTs, longs.snapshot(), locks.snapshot(), sessions.snapshot()))
+        chunkConsumer.accept(
+            Snapshot(
+                lastAppliedTs,
+                longs.snapshot(),
+                locks.snapshot(),
+                semaphores.snapshot(),
+                latches.snapshot(),
+                references.snapshot(),
+                sessions.snapshot(),
+            ),
+        )
 
     override fun installSnapshot(commitIndex: Long, chunks: List<Any>) {
         chunks.forEach {
@@ -86,6 +106,9 @@ class CpStateMachine(
             lastAppliedTs = snapshot.lastAppliedTs
             longs.restore(snapshot.counters)
             locks.restore(snapshot.locks)
+            semaphores.restore(snapshot.semaphores)
+            latches.restore(snapshot.latches)
+            references.restore(snapshot.references)
             sessions.restore(snapshot.sessions)
         }
     }
@@ -94,6 +117,9 @@ class CpStateMachine(
         val lastAppliedTs: Long,
         val counters: Map<Key, AtomicLongStateMachine.Counter>,
         val locks: Map<Key, FencedLockStateMachine.Lock>,
+        val semaphores: Map<Key, SemaphoreStateMachine.Semaphore>,
+        val latches: Map<Key, Int>,
+        val references: Map<Key, AtomicReferenceStateMachine.Reference>,
         val sessions: SessionRegistry.State,
     )
 }
