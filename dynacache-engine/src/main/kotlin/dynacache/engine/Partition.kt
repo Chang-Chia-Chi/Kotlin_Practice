@@ -150,6 +150,26 @@ internal class Partition(
                 .toList()
         }, executor)
 
+    /**
+     * Frozen copies of the live keys [holds] selects, as one task on the executor: what a
+     * replica hashes and ships for one ring range (T28). A walk of the whole store, since keys
+     * are not indexed by ring position; a range is a small slice of it.
+     */
+    fun view(holds: (Key) -> Boolean): CompletableFuture<List<Stored>> =
+        CompletableFuture.supplyAsync({
+            val now = clock.instant()
+            store.entries().filter { holds(it.key) && !it.value.expired(now) }
+                .map { Stored(it.key, frozen(it.value.value), it.value.expiresAt) }
+                .toList()
+        }, executor)
+
+    /** Frozen copies of the live keys among [keys], as one task on the executor. */
+    fun view(keys: Collection<Key>): CompletableFuture<List<Stored>> =
+        CompletableFuture.supplyAsync({
+            val now = clock.instant()
+            keys.mapNotNull { key -> store.get(key)?.takeUnless { it.expired(now) }?.let { Stored(key, frozen(it.value), it.expiresAt) } }
+        }, executor)
+
     /** Writes restored [entries] in, through the same funnel a command uses, skipping the already expired. */
     fun restore(entries: List<RdbEntry>): CompletableFuture<Void> =
         CompletableFuture.runAsync({

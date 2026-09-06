@@ -85,6 +85,9 @@ class Replication(
     /** The version this node holds for [key], null when it never stored one. */
     fun version(key: Key): Dvv? = versions[key]
 
+    /** Anti-entropy's install (T28): [dvv] is now the version held for [key]; the value itself goes through the engine. */
+    fun installVersion(key: Key, dvv: Dvv) { versions[key] = dvv }
+
     override fun submit(command: Command): CompletableFuture<Reply> = when {
         command !is Command.Keyed -> engine.submit(command)
         command.isRead() -> scope.future { read(command) }

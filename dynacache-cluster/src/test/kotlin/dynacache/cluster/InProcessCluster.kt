@@ -30,7 +30,7 @@ class InProcessCluster(
     n: Int,
     w: Int,
     r: Int,
-    scope: CoroutineScope,
+    private val scope: CoroutineScope,
     clock: Clock = Clock.fixed(Instant.EPOCH, ZoneOffset.UTC),
     partitionsPerNode: Int = 8,
 ) {
@@ -43,6 +43,7 @@ class InProcessCluster(
     private val engines = nodes.associateWith { ApEngine(partitionsPerNode, clock) }
     private val transports = nodes.associateWith { network.endpoint(it) }
     private val gossiped = nodes.associateWith { mutableListOf<Envelope>() }
+    private val counters = nodes.associateWith { DotCounter.of(it, emptyList()) }
     private val replications = nodes.associateWith { node ->
         Replication(
             self = node,
@@ -51,11 +52,23 @@ class InProcessCluster(
             engine = engines.getValue(node),
             transport = transports.getValue(node),
             membership = membership,
-            counter = DotCounter.of(node, emptyList()),
+            counter = counters.getValue(node),
             clock = clock,
             tokens = TokenCodec::tokens,
             parse = TokenCodec::command,
             scope = scope,
+        )
+    }
+    private val antiEntropies = nodes.associateWith { node ->
+        AntiEntropy(
+            self = node,
+            ring = ring,
+            n = n,
+            engine = engines.getValue(node),
+            replication = replications.getValue(node),
+            transport = transports.getValue(node),
+            membership = membership,
+            counter = counters.getValue(node),
         )
     }
     private val routers = nodes.associateWith { node ->
@@ -68,7 +81,9 @@ class InProcessCluster(
             tokens = TokenCodec::tokens,
             parse = TokenCodec::command,
             scope = scope,
-            others = { if (!replications.getValue(node).receive(it)) gossiped.getValue(node).add(it) },
+            others = {
+                if (!replications.getValue(node).receive(it) && !antiEntropies.getValue(node).receive(it)) gossiped.getValue(node).add(it)
+            },
         )
     }
 
@@ -81,6 +96,21 @@ class InProcessCluster(
     fun transport(node: NodeId): Transport = transports.getValue(node)
     fun replication(node: NodeId): Replication = replications.getValue(node)
     fun router(node: NodeId): Router = routers.getValue(node)
+    fun antiEntropy(node: NodeId): AntiEntropy = antiEntropies.getValue(node)
+
+    /** One anti-entropy step on [node], the network driven until the step has its answers. */
+    suspend fun antiEntropyStep(node: NodeId) {
+        val step = scope.launch { antiEntropy(node).tick() }
+        repeat(SETTLE_ROUNDS) {
+            if (step.isCompleted) return
+            drainMessages()
+            yield()
+        }
+        step.join()
+    }
+
+    /** One full anti-entropy cycle on [node]: every range it replicates, once. */
+    suspend fun antiEntropyCycle(node: NodeId) = repeat(antiEntropy(node).ranges.size) { antiEntropyStep(node) }
 
     /** What the demux on [node] handed to gossip: the envelopes SWIM would have answered. */
     fun gossipOn(node: NodeId): List<Envelope> = gossiped.getValue(node)
