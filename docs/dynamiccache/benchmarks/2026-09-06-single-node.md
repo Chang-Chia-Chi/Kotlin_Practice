@@ -320,6 +320,16 @@ appeared in every run, the pipelined write gain stayed near a third of Redis's i
 the `EVERY_SECOND` SET rate was 50.47, 49.51 and 53.30. Treat a single number here as good to
 about a factor of two and the ratios as the result.
 
+The cause is known and the omission is mine. Another orchestrator session was running Maven
+builds and test suites in the `kp-wt/t48` to `kp-wt/t51` worktrees on this machine during all
+three runs. The ticket asked for the number of other Java processes and the CPU idle percentage
+to be recorded per pass, and neither was: no pass in these three runs has a load reading behind
+it, so no table here can be said to have been taken on a quiet machine. Sampled after the runs,
+the machine was carrying three other Java processes at 25 percent CPU idle. The follow-up is a
+rerun in a quiet window, which the script now supports: it waits for ten seconds in a row with
+no `java.exe` but its own node and at least 70 percent CPU idle before each pass, and writes the
+other-Java count and CPU idle it saw for every pass to `load.txt`.
+
 ## Reproducing
 
 ```bash
