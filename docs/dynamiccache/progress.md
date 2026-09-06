@@ -2955,3 +2955,132 @@ T10's two. Nothing outside the engine reads the per-partition shape; T13's `INFO
 T44's dispatcher see only the joined bulk string, which gains one `maxmemory_policy` line inside the
 `# Memory` section it already had. A test that matched the whole `# Memory` section literally would
 need updating; the existing ones match by line prefix and did not.
+
+## T42: Semaphore, CountDownLatch, AtomicReference
+
+**Built:** The three remaining CP primitives (CP spec 3.3 to 3.5, 6.3 to 6.5), each a primitive of
+the composite state machine beside the counter, the lock and the session registry.
+
+In the engine module, `Command.Cp` gained three more sealed sub-hierarchies. `Cp.Semaphore`:
+`SemInit(key, permits)`, `SemAcquire(key, session, permits)`, `SemRelease(key, session, permits)`,
+`SemAvailable(key)`, `SemDrain(key, session)`, the three session-tied ones implementing
+`Cp.Sessioned` as T41 left them to. `Cp.CountDownLatch`: `LatchSet(key, count)`, `LatchDown(key)`,
+`LatchGet(key)`, `LatchReset(key, count)`. `Cp.AtomicReference`: `RefSet(key, value, ttl?)`,
+`RefGet(key)`, `RefCas(key, expected, new)`. The two reference commands carry bytes, so they are
+plain classes comparing by byte content as `Key` does, rather than data classes over arrays.
+
+`SemaphoreStateMachine` holds, per key, the free permits and a map of session to permits held. A
+key nobody initialised is a semaphore of no permits rather than a separate kind of answer:
+acquiring from it fails, draining it takes nothing. `SemInit` is idempotent per CP spec 3.3, since
+re-initialising under live holders would invent permits nobody released. A release of more than the
+session holds is `-ERR` and changes nothing. `releaseAllOf(session)` is one `replaceAll` giving the
+permits back, and `CpStateMachine.closeSession` calls it beside the locks' in the one entry (C18,
+I15) exactly as T41 predicted.
+
+`CountDownLatchStateMachine` is a count per key that only falls and stops at zero. `LatchSet` and
+`LatchReset` are the same rule under two names, because a latch nobody set counts zero and the
+first SET therefore always takes; arming one that is still counting down is `-ERR`.
+
+`AtomicReferenceStateMachine` holds bytes and an optional expiry in log time, checked on access and
+swept on the TTL tick as the counter's is (C23). A CAS compares byte content, keeps the reference's
+TTL on success, and is one applied entry, so no reader sees a half state (I21).
+
+`CpWire` tags the twelve new verbs (19 to 30); the reference's bytes go through the same length-
+prefixed blob the key does. `CpStateMachine`'s `Snapshot` carries three more fields.
+`CONTEXT.md` gained **permit**, **latch** and **reference** entries in the CP section.
+
+**Concepts named:** A **permit** is what a semaphore hands out, and it belongs to a session, not to
+a caller, which is why a session's death is the only thing besides a release that returns one.
+Available and held are the two states a permit is in, so a semaphore has no third notion of
+"reserved". A **latch** is armed only from zero, one rule serving both spec verbs, so "SET" and
+"RESET" name a moment rather than two behaviours. A **reference** is bytes and stays bytes: nothing
+decodes them, and byte equality is the whole of its CAS. The seam did not move: every test drives
+`CpEngine.submit`, and the three new primitives are reached through it exactly as the counter and
+the lock are.
+
+**Acceptance:** `dynacache.cp.SemaphoreTest` 7, `CountDownLatchTest` 4, `AtomicReferenceTest` 5,
+`CpWireTest` 9 (three new). Full `clean package` green: engine 121, cluster 49, cp 66, server 35.
+
+- CP spec 10.3, all six: `sem_init_acquire_release`, `sem_over_acquire_fails`,
+  `sem_over_release_rejected` (the `-ERR` leaves the state alone and what the session does hold is
+  still releasable), `sem_session_death_releases` (the leader's clock moves 2 s past a 1 s session
+  and one `tick()` gives the permits back), `sem_drain`, and
+  `sem_concurrent_acquire_exactly_permits_succeed` (ten sessions, three permits, three ones).
+- `sem_drain_of_unknown_key_leaves_it_initialisable` (extra, from the self-review below).
+- CP spec 10.4, all four: `latch_set_down_get`, `latch_down_at_zero_stays_zero`,
+  `latch_reset_only_at_zero` (the refused RESET leaves the count where it was, and the spent latch
+  takes it), `latch_concurrent_down_correct_count` (a hundred parties see the hundred distinct
+  values 99 down to 0).
+- CP spec 10.5, all three: `ref_set_get_roundtrip`, `ref_cas_byte_equality` (a differing case, a
+  trailing space and a prefix all fail, and none of them swaps), `ref_concurrent_cas_exactly_one_wins`
+  (the reference ends holding the winner's bytes and nobody else's).
+- `ref_ttl_expires` (extra): a reference set with a 1 s TTL is nil after the clock moves and a tick
+  carries the time into the log.
+- `I21_concurrent_cas_exactly_one_wins`: ten concurrent `LONG_CAS` on the same expected value, then
+  ten concurrent `REF_CAS` on the same expected bytes; exactly one of each succeeds and a late CAS
+  on the old expected value fails, so nobody saw an intermediate state.
+- `semaphore_commands_round_trip`, `latch_commands_round_trip`, `reference_commands_round_trip`
+  (the last with high-bit and zero bytes, and with and without a TTL).
+- Every T38 to T41 and T43 test green, none changed.
+
+**Deviations:**
+
+1. **The size budget was exceeded.** 691 lines against the ticket's 200 to 600: 176 of diff on four
+   existing files and 515 in six new ones. Three primitives with fifteen spec-named tests between
+   them is what the ticket asked for; nothing was cut, and the excess is tests and KDoc, not logic.
+2. **No `EXPIRE`, `TTL` or `PERSIST` on a reference.** CP spec 9.4 names AtomicReference among the
+   state machines those Redis verbs operate on, but 6.5's command table lists no such row (6.2's
+   does, for the counter), and the ticket resolves the disagreement that way: TTL only through
+   `SET`. T44 adds the three commands if the dispatcher needs to route `EXPIRE cp:ref:K`; the
+   expiry field and the tick's sweep are already there for them.
+3. **A reference's CAS takes non-null bytes on both sides.** CP spec 3.5's state is
+   `ByteArray | null`, but the RESP form `CP.REF.CAS K expected new` cannot express nil on either
+   side, so neither does the command. A reference that was never set, or has expired, matches no
+   expected bytes and the CAS answers 0.
+4. **`LatchSet` and `LatchReset` share one rule and one branch.** CP spec 3.4 restricts only RESET
+   to a zero count, but a latch nobody set counts zero, so restricting SET the same way (which the
+   ticket asks for) changes nothing about a first SET and stops a live latch being moved under the
+   parties on it. Both commands exist because 6.4 has both verbs and T44 maps them one to one.
+5. **The latch keeps no `initial`.** CP spec 3.4's state names `count` and `initial`; no op in 3.4
+   or 6.4 reads `initial`, so it is not stored. A latch is one `Int` per key.
+6. **`SEM_RELEASE`'s error is `-ERR`.** CP spec 6.8's table has no code for it (`-REENTRANCE` is a
+   lock's), and 3.3 says only "rejects". `Reply.Error("ERR", ...)` naming what the session holds.
+7. **`SemInit` on an initialised semaphore is a no-op**, per CP spec 3.3's "idempotent", not the
+   error the ticket offered as the alternative. It answers `+OK` either way.
+8. **The semaphore's `apply` takes no log time.** Permits have no TTL, so the parameter would be
+   unused; the latch's takes none either. The counter's and the reference's do.
+9. **Three plain `HashMap`s.** Only the Raft thread reads and writes them, as T41's registry noted;
+   no test in this ticket reads a follower's semaphore, latch or reference from the test thread the
+   way T40's I15 test read a follower's locks.
+10. **TDD granularity.** Three vertical slices, each red on a stub throwing `NotImplementedError`
+    that the exhaustive `when`s in the composite and `CpWire` forced into existence with all of that
+    primitive's verbs and tags: `sem_init_acquire_release`, then `latch_set_down_get`, then
+    `ref_set_get_roundtrip`. The other twelve tests were green first time against the code each
+    slice's red test had forced, which is what a state machine with one branch per verb does to the
+    loop. The exception is item 11.
+11. **The self-review found a real bug and it was fixed red-first.** `SemDrain` of a key nobody had
+    initialised wrote a semaphore of zero permits with the draining session as a holder of nothing,
+    after which `SemInit` on that key found it present and no-opped: the key could never be
+    initialised again. `sem_drain_of_unknown_key_leaves_it_initialisable` was red on exactly that,
+    and taking nothing now writes nothing.
+12. **Real-time waits.** None added. The three new classes together run in about four seconds, all
+    of it MicroRaft elections.
+
+**For the next ticket:**
+
+- **T44 (dispatcher)**: the twelve verbs map one to one onto the commands.
+  `CP.SEM.INIT K permits` / `ACQUIRE K n` / `RELEASE K n` / `AVAILABLE K` / `DRAIN K`, with the
+  session from the connection as the lock verbs take it; `CP.LATCH.SET K count` / `DOWN K` /
+  `GET K` / `RESET K count`; `CP.REF.SET K v` / `GET K` / `CAS K expected new`. Replies are already
+  the shapes CP spec 6.3 to 6.5 name. The Redis-compat side of 6.5 is `SET cp:ref:K v [EX|PX]` onto
+  `RefSet`'s `ttl` and `GET cp:ref:K` onto `RefGet`; `EXPIRE`, `TTL` and `PERSIST` on a `cp:ref:*`
+  key have no command yet (deviation 2).
+- **T45 (snapshots)**: `CpStateMachine.Snapshot` now carries the semaphores, the latches and the
+  references; `installSnapshot` restores all three. `SemaphoreStateMachine.Semaphore` and
+  `AtomicReferenceStateMachine.Reference` both compare by content, so a restored state machine's
+  snapshot equals the original's for the I20 round-trip. The reference is the only one of the three
+  with a TTL, and it is swept on the tick like the counter and the lock.
+- The `-WRONGTYPE` of CP spec 6.8 is still unanswered by anything: a `cp:sem:*` key and a
+  `cp:latch:*` key are different maps in different primitives, and nothing checks that a key is
+  used as only one kind. The dispatcher routes on the verb, so a `CP.LATCH.GET cp:sem:s` would
+  silently read an empty latch. Worth a ticket if the namespace convention is ever to be enforced.

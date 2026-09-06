@@ -9,12 +9,12 @@ TTL through log time).
 
 **Nature:** three state machines with sequential specs, I21 (Opus)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache be7e742, merged into misc/ai_gen)
 
-- [ ] CP spec 10.3 all six semaphore tests
-- [ ] CP spec 10.4 all four latch tests
-- [ ] CP spec 10.5 all three reference tests, `I21_concurrent_cas_exactly_one_wins`
-- [ ] Progress entry appended
+- [x] CP spec 10.3 all six semaphore tests
+- [x] CP spec 10.4 all four latch tests
+- [x] CP spec 10.5 all three reference tests, `I21_concurrent_cas_exactly_one_wins`
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket, stubs throwing NotImplementedError
 for later seams; 200 to 600 lines including tests; JUnit 5 + Mockito only, no AssertJ or MockK;
