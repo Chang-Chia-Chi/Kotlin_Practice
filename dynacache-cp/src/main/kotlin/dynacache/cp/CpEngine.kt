@@ -6,6 +6,7 @@ import dynacache.engine.Key
 import dynacache.engine.PartitionContext
 import dynacache.engine.Reply
 import io.microraft.exception.CannotReplicateException
+import io.microraft.exception.IndeterminateStateException
 import io.microraft.exception.NotLeaderException
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CompletionException
@@ -32,6 +33,10 @@ class CpEngine(private val runtime: RaftRuntime) : CommandEngine {
                 // client retries against the hinted leader; forwarding on its behalf is T43.
                 failure.cpCause() is NotLeaderException -> notLeader()
                 failure.cpCause() is CannotReplicateException -> notLeader()
+                // A leader that lost quorum mid-append cannot know whether the entry committed. It
+                // never answers success: the client retries against the next leader (CP spec 9.1
+                // step 7), the same at-least-once contract a NOTLEADER retry already carries.
+                failure.cpCause() is IndeterminateStateException -> notLeader()
                 else -> throw failure
             }
         }

@@ -7,16 +7,22 @@ import dynacache.cp.proto.AppendEntriesSuccess
 import dynacache.cp.proto.Candidacy
 import dynacache.cp.proto.CpInfo
 import dynacache.cp.proto.Granted
+import dynacache.cp.proto.GroupMembersView
 import dynacache.cp.proto.RaftEnvelope
 import dynacache.engine.Command
 import dynacache.engine.Key
 import dynacache.engine.Reply
+import io.microraft.RaftEndpoint
 import io.microraft.model.groupop.RaftGroupOp
 import io.microraft.model.impl.DefaultRaftModelFactory
 import io.microraft.model.log.LogEntry
+import io.microraft.model.log.RaftGroupMembersView
+import io.microraft.model.log.SnapshotChunk
 import io.microraft.model.message.AppendEntriesFailureResponse
 import io.microraft.model.message.AppendEntriesRequest
 import io.microraft.model.message.AppendEntriesSuccessResponse
+import io.microraft.model.message.InstallSnapshotRequest
+import io.microraft.model.message.InstallSnapshotResponse
 import io.microraft.model.message.PreVoteRequest
 import io.microraft.model.message.PreVoteResponse
 import io.microraft.model.message.RaftMessage
@@ -30,7 +36,10 @@ import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.time.Duration
 import dynacache.cp.proto.AppendEntriesRequest as WireAppendEntries
+import dynacache.cp.proto.InstallSnapshotRequest as WireInstallSnapshotRequest
+import dynacache.cp.proto.InstallSnapshotResponse as WireInstallSnapshotResponse
 import dynacache.cp.proto.LogEntry as WireLogEntry
+import dynacache.cp.proto.SnapshotChunk as WireSnapshotChunk
 
 /**
  * The wire form of everything that leaves a CP member: MicroRaft's messages as the protobuf of
@@ -44,7 +53,7 @@ import dynacache.cp.proto.LogEntry as WireLogEntry
  */
 object CpWire {
 
-    private val models = DefaultRaftModelFactory()
+    internal val models = DefaultRaftModelFactory()
 
     // --- MicroRaft messages ------------------------------------------------
 
@@ -79,9 +88,24 @@ object CpWire {
                 .setQuerySequenceNumber(message.querySequenceNumber)
                 .setFlowControlSequenceNumber(message.flowControlSequenceNumber)
                 .build()
-            // InstallSnapshot only flows once a member has fallen behind a snapshot, and
-            // snapshots are T45; a group without them never reaches this branch.
-            else -> throw NotImplementedError("${message.javaClass.simpleName} has no wire form yet (T45)")
+            is InstallSnapshotRequest -> envelope.installSnapshotRequest = WireInstallSnapshotRequest.newBuilder()
+                .setSenderLeader(message.isSenderLeader)
+                .setSnapshotTerm(message.snapshotTerm)
+                .setSnapshotIndex(message.snapshotIndex)
+                .setTotalChunkCount(message.totalSnapshotChunkCount)
+                .also { request -> message.snapshotChunk?.let { request.chunk = encode(it) } }
+                .addAllSnapshottedMembers(message.snapshottedMembers.map { it.id.toString() })
+                .setMembers(encode(message.groupMembersView))
+                .setQuerySequenceNumber(message.querySequenceNumber)
+                .setFlowControlSequenceNumber(message.flowControlSequenceNumber)
+                .build()
+            is InstallSnapshotResponse -> envelope.installSnapshotResponse = WireInstallSnapshotResponse.newBuilder()
+                .setSnapshotIndex(message.snapshotIndex)
+                .setRequestedChunkIndex(message.requestedSnapshotChunkIndex)
+                .setQuerySequenceNumber(message.querySequenceNumber)
+                .setFlowControlSequenceNumber(message.flowControlSequenceNumber)
+                .build()
+            else -> error("${message.javaClass.simpleName} is not a message MicroRaft 0.7 sends")
         }
         return envelope.build()
     }
@@ -136,6 +160,27 @@ object CpWire {
                 .setQuerySequenceNumber(envelope.appendEntriesFailure.querySequenceNumber)
                 .setFlowControlSequenceNumber(envelope.appendEntriesFailure.flowControlSequenceNumber)
                 .build()
+            RaftEnvelope.BodyCase.INSTALL_SNAPSHOT_REQUEST -> envelope.installSnapshotRequest.let { request ->
+                models.createInstallSnapshotRequestBuilder()
+                    .setGroupId(group).setSender(sender).setTerm(term)
+                    .setSenderLeader(request.senderLeader)
+                    .setSnapshotTerm(request.snapshotTerm)
+                    .setSnapshotIndex(request.snapshotIndex)
+                    .setTotalSnapshotChunkCount(request.totalChunkCount)
+                    .setSnapshotChunk(if (request.hasChunk()) decode(request.chunk) else null)
+                    .setSnapshottedMembers(request.snapshottedMembersList.map(::endpoint))
+                    .setGroupMembersView(decode(request.members))
+                    .setQuerySequenceNumber(request.querySequenceNumber)
+                    .setFlowControlSequenceNumber(request.flowControlSequenceNumber)
+                    .build()
+            }
+            RaftEnvelope.BodyCase.INSTALL_SNAPSHOT_RESPONSE -> models.createInstallSnapshotResponseBuilder()
+                .setGroupId(group).setSender(sender).setTerm(term)
+                .setSnapshotIndex(envelope.installSnapshotResponse.snapshotIndex)
+                .setRequestedSnapshotChunkIndex(envelope.installSnapshotResponse.requestedChunkIndex)
+                .setQuerySequenceNumber(envelope.installSnapshotResponse.querySequenceNumber)
+                .setFlowControlSequenceNumber(envelope.installSnapshotResponse.flowControlSequenceNumber)
+                .build()
             RaftEnvelope.BodyCase.BODY_NOT_SET -> error("a Raft envelope from $sender carries no message")
         }
     }
@@ -145,17 +190,107 @@ object CpWire {
 
     private fun granted(granted: Boolean): Granted = Granted.newBuilder().setGranted(granted).build()
 
-    private fun encodeEntry(entry: LogEntry): WireLogEntry = WireLogEntry.newBuilder()
+    internal fun endpoint(id: String): RaftEndpoint = CpEndpoint(NodeId(id))
+
+    internal fun encodeEntry(entry: LogEntry): WireLogEntry = WireLogEntry.newBuilder()
         .setIndex(entry.index)
         .setTerm(entry.term)
         .setOperation(ByteString.copyFrom(encodeOperation(entry.operation)))
         .build()
 
-    private fun decodeEntry(entry: WireLogEntry): LogEntry = models.createLogEntryBuilder()
+    internal fun decodeEntry(entry: WireLogEntry): LogEntry = models.createLogEntryBuilder()
         .setIndex(entry.index)
         .setTerm(entry.term)
         .setOperation(decodeOperation(entry.operation.toByteArray()))
         .build()
+
+    // --- Snapshots ---------------------------------------------------------
+
+    fun encode(view: RaftGroupMembersView): GroupMembersView = GroupMembersView.newBuilder()
+        .setLogIndex(view.logIndex)
+        .addAllMembers(view.members.map { it.id.toString() })
+        .addAllVotingMembers(view.votingMembers.map { it.id.toString() })
+        .build()
+
+    fun decode(view: GroupMembersView): RaftGroupMembersView = models.createRaftGroupMembersViewBuilder()
+        .setLogIndex(view.logIndex)
+        .setMembers(view.membersList.map(::endpoint))
+        .setVotingMembers(view.votingMembersList.map(::endpoint))
+        .build()
+
+    /** A chunk's operation is the state machine's [CpStateMachine.Snapshot]; the store and the wire share this form. */
+    fun encode(chunk: SnapshotChunk): WireSnapshotChunk = WireSnapshotChunk.newBuilder()
+        .setIndex(chunk.index)
+        .setTerm(chunk.term)
+        .setOperation(ByteString.copyFrom(encodeSnapshot(chunk.operation as CpStateMachine.Snapshot)))
+        .setChunkIndex(chunk.snapshotChunkIndex)
+        .setChunkCount(chunk.snapshotChunkCount)
+        .setMembers(encode(chunk.groupMembersView))
+        .build()
+
+    fun decode(chunk: WireSnapshotChunk): SnapshotChunk = models.createSnapshotChunkBuilder()
+        .setIndex(chunk.index)
+        .setTerm(chunk.term)
+        .setOperation(decodeSnapshot(chunk.operation.toByteArray()))
+        .setSnapshotChunkIndex(chunk.chunkIndex)
+        .setSnapshotChunkCount(chunk.chunkCount)
+        .setGroupMembersView(decode(chunk.members))
+        .build()
+
+    /** Log time, then every primitive's table in the order the state machine holds them. */
+    internal fun encodeSnapshot(snapshot: CpStateMachine.Snapshot): ByteArray = bytes {
+        writeLong(snapshot.lastAppliedTs)
+        writeTable(snapshot.counters) { writeLong(it.value); writeLong(it.expiresAt ?: NO_TTL) }
+        writeTable(snapshot.locks) {
+            writeLong(it.owner ?: NO_OWNER)
+            writeLong(it.token)
+            writeLong(it.expiresAt)
+            writeInt(it.holds)
+        }
+        writeTable(snapshot.semaphores) { semaphore ->
+            writeInt(semaphore.available)
+            writeInt(semaphore.holders.size)
+            semaphore.holders.forEach { (session, permits) -> writeLong(session); writeInt(permits) }
+        }
+        writeTable(snapshot.latches) { writeInt(it) }
+        writeTable(snapshot.references) { writeBlob(it.value); writeLong(it.expiresAt ?: NO_TTL) }
+        writeLong(snapshot.sessions.lastId)
+        writeInt(snapshot.sessions.sessions.size)
+        snapshot.sessions.sessions.forEach { (id, session) ->
+            writeLong(id)
+            writeLong(session.lastHeartbeat)
+            writeLong(session.timeoutMs)
+        }
+    }
+
+    internal fun decodeSnapshot(encoded: ByteArray): CpStateMachine.Snapshot = read(encoded) {
+        CpStateMachine.Snapshot(
+            lastAppliedTs = readLong(),
+            counters = readTable { AtomicLongStateMachine.Counter(readLong(), readLong().takeIf { it != NO_TTL }) },
+            locks = readTable {
+                FencedLockStateMachine.Lock(readLong().takeIf { it != NO_OWNER }, readLong(), readLong(), readInt())
+            },
+            semaphores = readTable {
+                SemaphoreStateMachine.Semaphore(readInt(), List(readInt()) { readLong() to readInt() }.toMap())
+            },
+            latches = readTable { readInt() },
+            references = readTable {
+                AtomicReferenceStateMachine.Reference(readBlob(), readLong().takeIf { it != NO_TTL })
+            },
+            sessions = SessionRegistry.State(
+                readLong(),
+                List(readInt()) { readLong() to SessionRegistry.Session(readLong(), readLong()) }.toMap(),
+            ),
+        )
+    }
+
+    private inline fun <V> DataOutputStream.writeTable(table: Map<Key, V>, value: DataOutputStream.(V) -> Unit) {
+        writeInt(table.size)
+        table.forEach { (key, v) -> writeBlob(key.bytes); value(v) }
+    }
+
+    private inline fun <V> DataInputStream.readTable(value: DataInputStream.() -> V): Map<Key, V> =
+        List(readInt()) { Key(readBlob()) to value() }.toMap()
 
     // --- Log entry operations ----------------------------------------------
 
@@ -426,6 +561,7 @@ object CpWire {
     private const val CMD_REF_GET = 29
     private const val CMD_REF_CAS = 30
     private const val NO_TTL = -1L
+    private const val NO_OWNER = -1L
 
     private const val REPLY_SIMPLE = 1
     private const val REPLY_ERROR = 2

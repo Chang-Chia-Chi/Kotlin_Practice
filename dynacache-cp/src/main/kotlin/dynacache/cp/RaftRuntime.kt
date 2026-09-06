@@ -5,17 +5,17 @@ import dynacache.engine.Reply
 import io.microraft.Ordered
 import io.microraft.RaftNode
 import io.microraft.RaftRole
-import io.microraft.persistence.NopRaftStore
 import io.microraft.transport.Transport
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
 
 /**
- * One CP member's MicroRaft node: the replicated log, the state machine that applies it, and the
- * transport it reaches the other members through. The transport is the seam (plan 2.3) — tests
- * pass an in-memory one, T43 passes the gRPC one — and this class knows nothing about either.
+ * One CP member's MicroRaft node: the replicated log, the state machine that applies it, the
+ * transport it reaches the other members through and the store it remembers itself in. The
+ * transport and the store are the seams (plan 2.3): tests pass an in-memory transport and store,
+ * production the gRPC transport and the file store, and this class knows nothing about either.
  */
-class RaftRuntime(val config: CpConfig, transport: Transport) : AutoCloseable {
+class RaftRuntime(val config: CpConfig, transport: Transport, store: CpStore = InMemoryRaftStore()) : AutoCloseable {
 
     init {
         require(config.isCpMember) { "${config.nodeId} is not a CP member of ${config.cpMembers}" }
@@ -35,16 +35,18 @@ class RaftRuntime(val config: CpConfig, transport: Transport) : AutoCloseable {
 
     val node: RaftNode = RaftNode.newBuilder()
         .setGroupId(config.groupId)
-        .setLocalEndpoint(endpoint)
-        .setInitialGroupMembers(config.endpoints)
         .setConfig(config.raft)
         .setTransport(transport)
         .setStateMachine(stateMachine)
-        // ponytail: no persistence, so a restarted member replays from the leader instead of from
-        // its own disk. Snapshot and restore are T45 (I20); a RaftStore lands with them.
-        .setStore(NopRaftStore())
+        .setStore(store)
         .setRaftNodeReportListener { report ->
             if (report.role != RaftRole.LEADER && leadership.isDone) leadership = CompletableFuture()
+        }
+        // A member that ran before resumes from what its store kept: the term and vote Raft must
+        // not forget, its log and its last snapshot (I20). A fresh one starts from the config.
+        .let { builder ->
+            store.restored()?.let(builder::setRestoredState)
+                ?: builder.setLocalEndpoint(endpoint).setInitialGroupMembers(config.endpoints)
         }
         .build()
 
