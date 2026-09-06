@@ -5113,3 +5113,78 @@ the old text (`Tests run: 63, Failures: 1`), then passed once `CrossPartitionBat
 reworded. Full run `-pl dynacache-server -am`: engine 147, cluster 85, cp 89, server 91, all
 green, counts unchanged as required -- this was wording only, so no test was added or removed.
 Diff is 4 files, well inside the size budget.
+
+---
+
+## T54 - TTL verbs on cp:ref: keys reach the reference
+
+**Built:** the compat re-target in `CommandDispatcher.compat` now reads the key's kind for
+`EXPIRE`, `PEXPIRE`, `TTL`, `PTTL` and `PERSIST` the way it already did for `GET` and `SET`, so a
+`cp:ref:` key goes to the AtomicReference and every other `cp:` key still goes to the counter. The
+reference had the expiry field and the tick's sweep since T42 but no verbs to reach them, so three
+commands were added beside the counter's: `RefExpire(key, ttl)`, `RefTtl(key, precision)` and
+`RefPersist(key)`, each a data class under `Command.Cp.AtomicReference`, with wire tags 31, 32 and
+33 in `CpWire` written and read exactly as `CMD_EXPIRE`, `CMD_TTL` and `CMD_PERSIST` are (a span in
+millis, a precision boolean, nothing). `AtomicReferenceStateMachine.apply` answers them from the
+same `now` its other verbs use, through a private `retime` that mirrors the counter's: `EXPIRE`
+gives a live reference the deadline `now + ttl` and answers 1, 0 when there is no live reference to
+give it to; `PERSIST` clears the deadline and answers 1, or 0 when there was none; `TTL` answers -2
+for a missing reference, -1 for one without a lease, the remaining millis for `PTTL` and Redis's
+`(remaining + 500) / 1000` rounding for `TTL`. Nothing reads a clock in the state machine, so the
+lease runs on log time (CP spec 5, 9.4) exactly as the counter's does. Main-code diff: 6 lines in
+`CommandDispatcher.kt`, 20 in `AtomicReferenceStateMachine.kt`, 14 in `CpWire.kt`, 15 in
+`Command.kt`; 93 lines of tests.
+
+**Repays the T42 deviation:** T42's deviation 2, "No `EXPIRE`, `TTL` or `PERSIST` on a reference" —
+CP spec 9.4 names AtomicReference among the state machines those verbs operate on, but 6.5's command
+table has no row for them, and T42 resolved the disagreement towards 6.5, leaving "T44 adds the
+three commands if the dispatcher needs to route `EXPIRE cp:ref:K`". It did need to, and this ticket
+adds them. Spec 9.4 wins over the empty 6.5 row, which is what the ticket and the P6 review (bug 6)
+asked for.
+
+**Acceptance:**
+- `ref_ttl_via_compat_reports_reference_ttl` (`CpRoutingTest`, a real three-member CP group behind
+  the RESP socket): `SET cp:ref:x v EX 100` then `TTL` reads 100 and `PTTL` reads the lease in
+  millis; advancing the leader's `MutableClock` 40 s makes `TTL` read 60, so the lease is on log
+  time; `TTL` of a reference nobody set is -2 and of one set without `EX` is -1. Before the fix the
+  first `TTL` read -2, which is the parked `BugHuntCpCompatTest` red.
+- `ref_expire_and_persist_via_compat` (same class): `EXPIRE` on a missing reference is 0, on a live
+  one 1; a second `EXPIRE` shortens the lease and `TTL` reads the shorter one; `PERSIST` answers 1
+  then 0 and the reference outlives its old deadline; `PEXPIRE 1000`, the clock two seconds on and
+  one `tick()` past the deadline, and `GET` is nil with `TTL` back to -2.
+- `the compat set reaches the CP engine as the verb it means` (`CommandDispatcherTest`) gains four
+  rows: the same five verbs on `cp:ref:r` re-target to `RefExpire`, `RefTtl` (both precisions) and
+  `RefPersist`, while every counter row in the table is unchanged, which is the "counter path
+  untouched" criterion at the seam.
+- `reference_commands_round_trip` (`CpWireTest`) gains the three new commands, both `RefTtl`
+  precisions among them, so a follower decodes what a leader replicated.
+- Offline `test -pl dynacache-server -am`: engine 147, cluster 85, cp 89, server 90 (88 + 2), all
+  green. The cp count is unchanged because the new wire and dispatcher coverage went into existing
+  test methods rather than new ones.
+
+**Deviations:**
+1. **One assertion is a range, not an equality.** `PTTL` right after `SET ... EX 100` is not
+   100000: `RaftRuntime.stamp` is `max(clock, lastApplied + 1, lastStamped + 1)`, so with a frozen
+   test clock every appended entry moves log time on by a millisecond, and the three entries between
+   the `SET` and the `PTTL` cost three of them. The test asserts `99_900..100_000` and says why. The
+   counter's own TTL tests never saw this because seconds rounding hides it.
+2. **No `CP.REF.EXPIRE` spelling on the wire.** The new commands are reachable only through the
+   Redis-compat verbs, exactly as the counter's `LongExpire`, `LongTtl` and `LongPersist` are: the
+   parser has `cp.long.set/get/incr/decr/add/cas` and no `cp.long.expire`. CP spec 3.5 and 6.5 name
+   no `REF_EXPIRE` log op either, so adding a parser row would have invented a verb; the ticket's
+   seams also put the parser's command rows out of bounds.
+3. **The namespace rule is still read from the key prefix in two places.** `compat` now branches on
+   `reference` in four arms instead of two. That is the smallest fix the ticket asked for; folding
+   it is ticket 71.
+
+**For the next ticket:**
+- **Ticket 71** should fold `CommandDispatcher.REFERENCE_PREFIX` and the four `if (reference)`
+  branches into one key-to-kind decision, and with it the `ponytail:` note still standing above
+  `compat`: `GET cp:lock:x` reads an empty counter instead of `-WRONGTYPE`, and `EXPIRE cp:lock:x`
+  answers 0 where CP spec 9.4 says a lock's lease is `CP.LOCK.RENEW`'s alone and the verb is
+  rejected. Both want the same thing: the kind of a `cp:` key named once, mapping a compat verb onto
+  the owning primitive's command, with `-WRONGTYPE` and the lock's refusal falling out of it. The
+  five TTL verbs and `GET`/`SET` are then one table, not seven branches.
+- The reference is now the second primitive with a full TTL surface; the latch and the semaphore
+  still have none, and CP spec 9.4 names them too. Whoever gives them one has this shape to copy:
+  three commands, three wire tags, a `retime` in the state machine, and the dispatcher branch.
