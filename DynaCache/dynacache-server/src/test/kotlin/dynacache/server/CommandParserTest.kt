@@ -201,6 +201,9 @@ class CommandParserTest {
             row("CP.LONG.ADD cp:counter:k -5", Command.Cp.LongIncrBy::class) {
                 assertEquals(-5L, (it as Command.Cp.LongIncrBy).delta)
             },
+            row("CP.LONG.GETADD cp:counter:k -5", Command.Cp.LongGetAdd::class) {
+                assertEquals(-5L, (it as Command.Cp.LongGetAdd).delta)
+            },
             row("CP.LONG.CAS cp:counter:k 1 2", Command.Cp.LongCas::class) {
                 assertEquals(1L, (it as Command.Cp.LongCas).expected)
                 assertEquals(2L, it.new)

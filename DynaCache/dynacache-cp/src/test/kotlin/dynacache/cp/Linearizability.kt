@@ -65,6 +65,7 @@ object Linearizability {
 /** A counter operation for the checker: the AtomicLong verbs a chaos run records on one key. */
 sealed interface CounterOp {
     data class IncrBy(val delta: Long) : CounterOp
+    data class GetAdd(val delta: Long) : CounterOp
     data class Cas(val expected: Long, val new: Long) : CounterOp
     data object Get : CounterOp
 }
@@ -74,6 +75,8 @@ object CounterSpec : SequentialSpec<Long, CounterOp, Long> {
     override val initial = 0L
     override fun apply(state: Long, input: CounterOp): Pair<Long, Long> = when (input) {
         is CounterOp.IncrBy -> (state + input.delta).let { it to it }
+        // GETADD answers the old value, so the model's output is the state it came in with.
+        is CounterOp.GetAdd -> (state + input.delta) to state
         is CounterOp.Get -> state to state
         is CounterOp.Cas -> if (state == input.expected) input.new to 1L else state to 0L
     }
