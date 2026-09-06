@@ -5,6 +5,7 @@ import dynacache.cluster.HostPort
 import dynacache.cluster.NodeId
 import dynacache.cp.proto.CpRequest
 import dynacache.cp.proto.CpServiceGrpc
+import dynacache.cp.proto.HeartbeatRequest
 import dynacache.engine.Command
 import dynacache.engine.Reply
 import io.grpc.Grpc
@@ -76,15 +77,20 @@ class GrpcCpKit(size: Int = 3) : AutoCloseable {
 
     /** Sends [command] straight at [member]'s `CpService`, as a client that picked its own node. */
     fun applyDirect(member: NodeId, command: Command.Cp): Reply {
+        val request = CpRequest.newBuilder().setCommand(ByteString.copyFrom(CpWire.encode(command))).build()
+        return CpWire.decodeReply(stub(member).apply(request).reply.toByteArray())
+    }
+
+    /** The `Heartbeat` call of `CpService` at [member], as a client keeping its session alive. */
+    fun heartbeat(member: NodeId, session: String): Boolean =
+        stub(member).heartbeat(HeartbeatRequest.newBuilder().setSessionId(session).build()).ok
+
+    private fun stub(member: NodeId): CpServiceGrpc.CpServiceBlockingStub {
         val channel = clients.computeIfAbsent(member) {
             val address = addresses.getValue(member)
             Grpc.newChannelBuilder("${address.host}:${address.port}", InsecureChannelCredentials.create()).build()
         }
-        val request = CpRequest.newBuilder().setCommand(ByteString.copyFrom(CpWire.encode(command))).build()
-        val response = CpServiceGrpc.newBlockingStub(channel)
-            .withDeadlineAfter(REPLY_TIMEOUT_SECS, TimeUnit.SECONDS)
-            .apply(request)
-        return CpWire.decodeReply(response.reply.toByteArray())
+        return CpServiceGrpc.newBlockingStub(channel).withDeadlineAfter(REPLY_TIMEOUT_SECS, TimeUnit.SECONDS)
     }
 
     fun killMember(member: NodeId) {

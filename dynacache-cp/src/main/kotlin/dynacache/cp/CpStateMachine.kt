@@ -2,6 +2,7 @@ package dynacache.cp
 
 import dynacache.engine.Command
 import dynacache.engine.Key
+import dynacache.engine.Reply
 import io.microraft.statemachine.StateMachine
 import java.util.function.Consumer
 
@@ -24,6 +25,7 @@ class CpStateMachine(
 
     val longs = AtomicLongStateMachine()
     val locks = FencedLockStateMachine()
+    val sessions = SessionRegistry()
 
     /** Log time as this member sees it: the stamp of the last applied entry. */
     @Volatile
@@ -36,10 +38,20 @@ class CpStateMachine(
     override fun runOperation(commitIndex: Long, operation: Any): Any? = when (operation) {
         is CpOp -> {
             lastAppliedTs = operation.ts
-            when (val command = operation.command) {
+            val command = operation.command
+            if (command is Command.Cp.Sessioned && !sessions.isAlive(command.session)) {
+                Reply.Error("NOSESSION", "session ${command.session} expired or never created")
+            } else when (command) {
                 is Command.Cp.AtomicLong -> longs.apply(command, lastAppliedTs)
                 is Command.Cp.FencedLock -> locks.apply(command, lastAppliedTs)
+                is Command.Cp.SessionClose -> { closeSession(command.session); Reply.Simple("OK") }
+                is Command.Cp.Session -> sessions.apply(command, lastAppliedTs)
             }
+        }
+        is SessionClosed -> {
+            lastAppliedTs = operation.ts
+            closeSession(operation.session)
+            null
         }
         is TtlTick -> {
             lastAppliedTs = operation.ts
@@ -54,11 +66,19 @@ class CpStateMachine(
         else -> null // MicroRaft's own internal entries change no state.
     }
 
+    /** C18: the session and everything it held go in this one entry; a second closing is a no-op. */
+    private fun closeSession(session: Long) {
+        if (sessions.close(session)) locks.releaseAllOf(session)
+    }
+
+    /** The sessions whose timeout has run out at this member's log time; the leader closes them. */
+    fun lapsedSessions(): List<Long> = sessions.lapsed(lastAppliedTs)
+
     override fun getNewTermOperation(): Any = NewTerm(currentTerm())
 
     /** One chunk holding everything; chunking a large state is T45's business. */
     override fun takeSnapshot(commitIndex: Long, chunkConsumer: Consumer<Any>) =
-        chunkConsumer.accept(Snapshot(lastAppliedTs, longs.snapshot(), locks.snapshot()))
+        chunkConsumer.accept(Snapshot(lastAppliedTs, longs.snapshot(), locks.snapshot(), sessions.snapshot()))
 
     override fun installSnapshot(commitIndex: Long, chunks: List<Any>) {
         chunks.forEach {
@@ -66,6 +86,7 @@ class CpStateMachine(
             lastAppliedTs = snapshot.lastAppliedTs
             longs.restore(snapshot.counters)
             locks.restore(snapshot.locks)
+            sessions.restore(snapshot.sessions)
         }
     }
 
@@ -73,5 +94,6 @@ class CpStateMachine(
         val lastAppliedTs: Long,
         val counters: Map<Key, AtomicLongStateMachine.Counter>,
         val locks: Map<Key, FencedLockStateMachine.Lock>,
+        val sessions: SessionRegistry.State,
     )
 }

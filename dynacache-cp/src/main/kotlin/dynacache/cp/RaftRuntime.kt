@@ -77,12 +77,21 @@ class RaftRuntime(val config: CpConfig, transport: Transport) : AutoCloseable {
      * The TTL tick (CP spec 5): when this member leads and nothing has been appended for a tick
      * interval of its clock, appends a [TtlTick] so log time moves on every member. A caller runs
      * it every tick interval in production and step by step in a test; a non-leader does nothing.
-     * Completes with the tick's log index once it is committed, or with 0 when none was appended.
+     * Once the tick is applied, every session whose timeout ran out at that log time gets a
+     * [SessionClosed] entry (CP spec 9.3), from the leader alone since only it saw its tick commit.
+     * Completes with the index of the last entry it appended once committed, or 0 when none was.
      */
-    fun tick(): CompletableFuture<Long> = synchronized(appendLock) {
-        val idle = config.clock.millis() >= lastStampedTs + config.tickInterval.toMillis()
-        if (isLeader && idle) node.replicate<Any?>(TtlTick(stamp())).thenApply { it.commitIndex }
-        else CompletableFuture.completedFuture(0L)
+    fun tick(): CompletableFuture<Long> {
+        val tick = synchronized(appendLock) {
+            val idle = config.clock.millis() >= lastStampedTs + config.tickInterval.toMillis()
+            if (isLeader && idle) node.replicate<Any?>(TtlTick(stamp())) else return CompletableFuture.completedFuture(0L)
+        }
+        return tick.thenCompose { applied ->
+            val closed = stateMachine.lapsedSessions().map { session ->
+                synchronized(appendLock) { node.replicate<Any?>(SessionClosed(stamp(), session)) }
+            }
+            closed.lastOrNull()?.thenApply { it.commitIndex } ?: CompletableFuture.completedFuture(applied.commitIndex)
+        }
     }
 
     /** CP spec 5: `max(clock_now, last_committed_ts + 1)`, and past whatever this leader stamped already. */

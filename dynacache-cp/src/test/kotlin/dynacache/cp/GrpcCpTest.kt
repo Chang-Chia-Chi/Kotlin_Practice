@@ -5,6 +5,7 @@ import dynacache.engine.Key
 import dynacache.engine.Reply
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNotEquals
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
@@ -56,6 +57,17 @@ class GrpcCpTest {
 
         assertEquals(Reply.Integer(1), forwarded(Command.Cp.LongIncr(counter)))
         assertEquals(Reply.Integer(1), kit.applyDirect(kit.leader().config.nodeId, Command.Cp.LongGet(counter)))
+    }
+
+    /** CP spec 2.4, 6.6: the session keepalive is its own call, answered by the leader's engine. */
+    @Test
+    fun cp_heartbeat_over_grpc() {
+        val leader = kit.leader().config.nodeId
+        val session = (kit.applyDirect(leader, Command.Cp.SessionCreate()) as Reply.Integer).value
+
+        assertTrue(kit.heartbeat(leader, session.toString()), "a live session")
+        assertFalse(kit.heartbeat(leader, "99"), "never created")
+        assertFalse(kit.heartbeat(leader, "not a session id"))
     }
 
     /**

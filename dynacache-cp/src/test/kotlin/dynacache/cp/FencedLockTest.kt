@@ -6,19 +6,31 @@ import dynacache.engine.Reply
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNotEquals
+import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import java.time.Duration
 import java.util.concurrent.TimeUnit.SECONDS
 
 /**
- * The FencedLock (CP spec 3.1) through the CP engine's seam. A session is a caller-supplied
- * number until T41; time is the leader's injected clock, carried into the log by the next entry.
+ * The FencedLock (CP spec 3.1) through the CP engine's seam. Time is the leader's injected clock,
+ * carried into the log by the next entry.
  */
 class FencedLockTest {
 
     private val kit = CpTestKit()
     private val lock = Key("cp:lock:l")
     private val counter = Key("cp:counter:c")
+
+    /**
+     * A lock is held by a registered session (T41); these tests name theirs by number, so 1 to 8
+     * exist. Registering them spends one millisecond of log time each (C19), and the clocks follow,
+     * so a jump of the leader's clock below lands where it did before the registry existed.
+     */
+    @BeforeEach
+    fun registerSessions() {
+        repeat(SESSIONS) { submit(Command.Cp.SessionCreate(Duration.ofHours(1))) }
+        kit.members.forEach { kit.clock(it).advance(Duration.ofMillis(SESSIONS.toLong())) }
+    }
 
     @AfterEach
     fun tearDown() = kit.close()
@@ -65,7 +77,7 @@ class FencedLockTest {
     @Test
     fun lock_fencing_token_monotonic() {
         val tokens = (1..CYCLES).map { cycle ->
-            val session = (cycle % 3).toLong()
+            val session = (cycle % 3 + 1).toLong()
             val token = ((tryLock(session) as Reply.Array).items[1] as Reply.Integer).value
             assertEquals(Reply.Integer(1), submit(Command.Cp.LockUnlock(lock, session, token)))
             token
@@ -204,6 +216,7 @@ class FencedLockTest {
     private companion object {
         const val REPLY_TIMEOUT_SECS = 10L
         const val CYCLES = 100
+        const val SESSIONS = 8
         val LEASE: Duration = Duration.ofSeconds(30)
     }
 }

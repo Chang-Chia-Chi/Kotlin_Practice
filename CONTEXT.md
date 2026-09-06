@@ -108,10 +108,14 @@ lock's only TTL; `RENEW` by the holder extends it, `EXPIRE` on a lock key is rej
 _Avoid_: timeout, expiry (the counter's word), TTL (say lease for a lock)
 
 **Session**:
-The identity a lock or permit is held by; a session's death releases everything it holds
-(C18). Until T41 a session is a number the caller supplies with the command and nobody
-validates; the registry, heartbeats and `-NOSESSION` arrive with T41.
-_Avoid_: client, connection (a session may outlive one)
+The identity a lock or permit is held by. The **session registry**, a primitive of the
+composite state machine, hands out ids that climb from state-machine state and remembers each
+session's last heartbeat in log time. A session lapses when its timeout has run out since that
+heartbeat at a TTL tick; the leader then appends one `SESSION_CLOSED` entry for it, and applying
+that entry (or a `CP.SESSION.CLOSE`) forgets the session and releases everything it holds in
+that one entry (C18, I15). A command on behalf of a session that lapsed, closed or never
+existed answers `-NOSESSION` before any primitive sees it.
+_Avoid_: client, connection (a session may outlive one), lease (that is a lock's word)
 
 ## Example dialogue
 

@@ -114,6 +114,6 @@ message HeartbeatResponse {
 service CpService {
   rpc Apply(CpRequest) returns (CpResponse);
   rpc GetInfo(InfoRequest) returns (CpInfo);
-  // Session keepalive. The session registry is T41; this member answers nothing useful yet.
+  // Session keepalive: ok when this member's engine applied it (CP spec 6.6).
   rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
 }

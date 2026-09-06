@@ -161,14 +161,15 @@ object CpWire {
     /** Whatever MicroRaft puts in the log that is not the engine's own work, such as a new term. */
     internal data object Internal
 
-    // The three entries a leader appends (T39): a stamped command, a TTL tick and the first entry
-    // of a term. This is the one pair of functions that knows them; everything else here is below
-    // the log entry.
+    // The entries a leader appends: a stamped command, a TTL tick, the first entry of a term and
+    // a session's closing. This is the one pair of functions that knows them; everything else
+    // here is below the log entry.
     internal fun encodeOperation(operation: Any?): ByteArray = bytes {
         when (operation) {
             is CpOp -> { writeByte(OP_CP_OP); writeLong(operation.ts); writeCommand(operation.command) }
             is TtlTick -> { writeByte(OP_TICK); writeLong(operation.ts) }
             is NewTerm -> { writeByte(OP_NEW_TERM); writeInt(operation.term) }
+            is SessionClosed -> { writeByte(OP_SESSION_CLOSED); writeLong(operation.ts); writeLong(operation.session) }
             // The OP_INTERNAL tag carries no payload, so a membership change encoded through it
             // would arrive at the follower as a no-op and be applied by nobody. CP membership is
             // fixed at startup (CP spec 2.2), so refuse it loudly rather than lose it quietly.
@@ -182,6 +183,7 @@ object CpWire {
             OP_CP_OP -> CpOp(readLong(), readCommand())
             OP_TICK -> TtlTick(readLong())
             OP_NEW_TERM -> NewTerm(readInt())
+            OP_SESSION_CLOSED -> SessionClosed(readLong(), readLong())
             OP_INTERNAL -> Internal
             else -> error("unknown log operation tag $tag")
         }
@@ -226,6 +228,9 @@ object CpWire {
             }
             is Command.Cp.LockForceUnlock -> tagged(CMD_LOCK_FORCE_UNLOCK, command.key) {}
             is Command.Cp.LockState -> tagged(CMD_LOCK_STATE, command.key) {}
+            is Command.Cp.SessionCreate -> tagged(CMD_SESSION_CREATE, command.key) { writeLong(command.timeout.toMillis()) }
+            is Command.Cp.SessionHeartbeat -> tagged(CMD_SESSION_HEARTBEAT, command.key) { writeLong(command.session) }
+            is Command.Cp.SessionClose -> tagged(CMD_SESSION_CLOSE, command.key) { writeLong(command.session) }
         }
     }
 
@@ -249,6 +254,9 @@ object CpWire {
             CMD_LOCK_RENEW -> Command.Cp.LockRenew(key, readLong(), readLong(), Duration.ofMillis(readLong()))
             CMD_LOCK_FORCE_UNLOCK -> Command.Cp.LockForceUnlock(key)
             CMD_LOCK_STATE -> Command.Cp.LockState(key)
+            CMD_SESSION_CREATE -> Command.Cp.SessionCreate(Duration.ofMillis(readLong()))
+            CMD_SESSION_HEARTBEAT -> Command.Cp.SessionHeartbeat(readLong())
+            CMD_SESSION_CLOSE -> Command.Cp.SessionClose(readLong())
             else -> error("unknown CP command tag $tag")
         }
     }
@@ -329,6 +337,7 @@ object CpWire {
     private const val OP_CP_OP = 1
     private const val OP_TICK = 2
     private const val OP_NEW_TERM = 3
+    private const val OP_SESSION_CLOSED = 4
 
     private const val CMD_SET = 1
     private const val CMD_GET = 2
@@ -345,6 +354,9 @@ object CpWire {
     private const val CMD_LOCK_STATE = 13
     private const val CMD_LOCK_RENEW = 14
     private const val CMD_LOCK_FORCE_UNLOCK = 15
+    private const val CMD_SESSION_CREATE = 16
+    private const val CMD_SESSION_HEARTBEAT = 17
+    private const val CMD_SESSION_CLOSE = 18
     private const val NO_TTL = -1L
 
     private const val REPLY_SIMPLE = 1

@@ -11,6 +11,8 @@ import dynacache.cp.proto.HeartbeatResponse
 import dynacache.cp.proto.InfoRequest
 import dynacache.cp.proto.RaftEnvelope
 import dynacache.cp.proto.RaftServiceGrpcKt
+import dynacache.engine.Command
+import dynacache.engine.Reply
 import io.grpc.Grpc
 import io.grpc.InsecureServerCredentials
 import java.util.concurrent.TimeUnit
@@ -74,8 +76,12 @@ class CpGrpcServer(
 
         override suspend fun getInfo(request: InfoRequest): CpInfo = info()
 
-        override suspend fun heartbeat(request: HeartbeatRequest): HeartbeatResponse =
-            throw NotImplementedError("session keepalive arrives with the session registry (T41)")
+        /** `ok` only when this member's engine applied the heartbeat: a dead session or a follower says no. */
+        override suspend fun heartbeat(request: HeartbeatRequest): HeartbeatResponse {
+            val session = request.sessionId.toLongOrNull()
+            val reply = session?.let { engine.submit(Command.Cp.SessionHeartbeat(it)).await() }
+            return HeartbeatResponse.newBuilder().setOk(reply is Reply.Simple).build()
+        }
     }
 
     private companion object {
