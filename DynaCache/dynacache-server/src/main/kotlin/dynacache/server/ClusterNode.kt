@@ -22,6 +22,7 @@ import dynacache.engine.PartitionContext
 import dynacache.engine.Reply
 import dynacache.engine.install
 import dynacache.engine.persist.DotCeilingStore
+import dynacache.engine.persist.FileSnapshotParts
 import dynacache.engine.persist.FsyncPolicy
 import dynacache.engine.persist.SnapshotEngine
 import dynacache.engine.view
@@ -69,7 +70,7 @@ class ClusterNode(
     dataDir: Path? = null,
     fsync: FsyncPolicy = FsyncPolicy.EVERY_SECOND,
     /** The root of the snapshot sets this node takes part in; null is a node that takes none. */
-    private val snapshotDir: Path? = null,
+    snapshotDir: Path? = null,
     /** This node's memory threshold and the policy it sheds keys by (spec 2.7); a node's own. */
     maxMemoryBytes: Long? = null,
     policy: EvictionPolicy = EvictionPolicy.LRU,
@@ -164,10 +165,8 @@ class ClusterNode(
         DistributedSnapshot(
             self = self,
             peers = nodes - self,
-            engine = engine,
             transport = NodeTransport(wire, reads = false),
-            dir = it,
-            clock = clock,
+            parts = FileSnapshotParts(it, self.name, engine, clock),
             demux = router::receive,
             scope = scope,
         )
@@ -258,7 +257,7 @@ class ClusterNode(
      * table (T36 deviation 6), so it runs before this node's first client, not beside one.
      */
     fun restoreSnapshot(id: String) = runBlocking {
-        checkNotNull(distributed) { "$self was given no snapshot directory" }.restoreFrom(checkNotNull(snapshotDir), id)
+        checkNotNull(distributed) { "$self was given no snapshot directory" }.restoreFrom(id)
     }
 
     override fun close() {
