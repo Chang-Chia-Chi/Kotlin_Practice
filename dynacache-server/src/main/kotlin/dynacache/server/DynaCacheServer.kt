@@ -14,6 +14,7 @@ import dynacache.engine.CommandEngine
 import dynacache.engine.CrossPartitionBatch
 import dynacache.engine.Key
 import dynacache.engine.Reply
+import dynacache.engine.persist.FsyncPolicy
 import dynacache.engine.persist.SnapshotEngine
 import io.netty.bootstrap.ServerBootstrap
 import io.netty.buffer.ByteBuf
@@ -318,23 +319,28 @@ private fun CompletableFuture<Reply>.replyNow(): Reply =
     }
 
 /**
- * `dynacache [port] [partitions] [dir] [cp-self] [cp-members]`, defaulting to Redis's own port
- * and sixteen partitions. With a [dir], the last snapshot there is restored before the port opens,
- * one is saved on the engine's default interval from the tick thread, and one more at shutdown
+ * `dynacache [port] [partitions] [dir] [ALWAYS|EVERY_SECOND|NEVER] [cp-self] [cp-members]`,
+ * defaulting to Redis's own port, sixteen partitions and `EVERY_SECOND`. With a [dir], the last
+ * snapshot there and the log after it are restored before the port opens, a snapshot is saved on
+ * the engine's default interval from the tick thread (which is also the log's checkpoint), the
+ * log is forced by the same thread once a second, and one more snapshot is saved at shutdown
  * (spec 2.8). With a CP group named, this node either holds the replicated log or forwards to
- * whoever leads it; without one it has no CP engine and every `cp:` key answers `-NOTCP`.
- * The engine outlives nothing here: the shutdown hook closes everything in order.
+ * whoever leads it; without one it has no CP engine and every `cp:` key answers `-NOTCP`. The
+ * engine outlives nothing here: the shutdown hook closes the socket, then the log, then the
+ * engine.
  */
 fun main(args: Array<String>) {
     val port = args.getOrNull(0)?.toInt() ?: 6379
     val partitionCount = args.getOrNull(1)?.toInt() ?: 16
+    val fsync = args.getOrNull(3)?.let(FsyncPolicy::valueOf) ?: FsyncPolicy.EVERY_SECOND
     val clock = Clock.systemUTC()
     val engine = ApEngine(partitionCount, clock)
-    val snapshots = args.getOrNull(2)?.let { SnapshotEngine(engine, Path.of(it), clock) }
+    val snapshots = args.getOrNull(2)?.let { SnapshotEngine(engine, Path.of(it), clock, fsync = fsync) }
     snapshots?.restore()
-    val cp = cpNode(args.getOrNull(3), args.getOrNull(4), clock)
+    val cp = cpNode(args.getOrNull(4), args.getOrNull(5), clock)
     val server = DynaCacheServer(port, engine, cp?.engine, clock) {
         engine.tick()
+        engine.wal?.tick()
         cp?.runtime?.tick()
         snapshots?.maybeSave(clock.instant())
     }

@@ -121,7 +121,7 @@ class WalAppend(val seq: Long, val durable: CompletableFuture<Unit>)
  * the caller's [tick].
  */
 class WalWriter(
-    private val sink: WalSink,
+    private var sink: WalSink,
     firstSeq: Long,
     private val policy: FsyncPolicy,
     private val clock: Clock,
@@ -137,6 +137,12 @@ class WalWriter(
     private class Pending(val record: ByteBuffer, val durable: CompletableFuture<Unit>)
 
     private var nextSeq: Long = firstSeq
+
+    /** The seq handed out last; [firstSeq] minus one before the first append. */
+    val lastSeq: Long get() = synchronized(this) { nextSeq - 1 }
+
+    /** Held while the sink is forced or swapped, so a [tick] never forces a sink [rotate] just closed. */
+    private val sinkLock = Any()
 
     /** Enqueued under the writer's monitor in seq order, so a FIFO drain is file order. */
     private val pending = ConcurrentLinkedQueue<Pending>()
@@ -168,6 +174,20 @@ class WalWriter(
         if (clock.instant() < lastFsync.plusSeconds(1)) return
         val batch = takeAwaiting()
         if (batch.isNotEmpty()) fsyncAndComplete(batch)
+    }
+
+    /**
+     * The checkpoint cut: everything appended so far is forced into the old sink, which is then
+     * closed, and every later entry goes to [next]. The caller guarantees no append is in flight,
+     * which the engine has by parking every partition at the cut; the check names that contract.
+     */
+    fun rotate(next: WalSink) {
+        check(pending.isEmpty() && !flushing.get()) { "rotate needs a quiet log" }
+        synchronized(sinkLock) {
+            forceAwaiting()
+            sink.close()
+            sink = next
+        }
     }
 
     private fun flushIfIdle() {
@@ -206,9 +226,14 @@ class WalWriter(
         ArrayList(awaitingFsync).also { awaitingFsync.clear() }
     }
 
+    private fun forceAwaiting() {
+        val left = takeAwaiting()
+        if (left.isNotEmpty()) fsyncAndComplete(left)
+    }
+
     private fun fsyncAndComplete(batch: List<CompletableFuture<Unit>>) {
         try {
-            sink.fsync()
+            synchronized(sinkLock) { sink.fsync() }
             lastFsync = clock.instant()
             batch.forEach { it.complete(Unit) }
         } catch (e: IOException) {
@@ -229,8 +254,7 @@ class WalWriter(
     /** Writes what is still queued, forces what is still waiting, then closes the sink. */
     override fun close() {
         flushIfIdle()
-        val left = takeAwaiting()
-        if (left.isNotEmpty()) fsyncAndComplete(left)
+        forceAwaiting()
         sink.close()
     }
 }

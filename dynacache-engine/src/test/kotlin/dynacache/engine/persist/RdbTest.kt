@@ -24,7 +24,7 @@ class RdbTest {
         ByteArrayOutputStream().also { RdbWriter.write(it, entries, at) }.toByteArray()
 
     private fun load(bytes: ByteArray): List<RdbEntry> =
-        RdbReader(Random(31)).read(ByteArrayInputStream(bytes))
+        RdbReader(Random(31)).read(ByteArrayInputStream(bytes)).entries
 
     @Test
     fun rdb_empty_snapshot_roundtrip() {

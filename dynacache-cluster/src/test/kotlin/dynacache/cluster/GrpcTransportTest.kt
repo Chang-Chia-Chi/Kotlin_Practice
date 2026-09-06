@@ -5,8 +5,12 @@ import dynacache.cluster.proto.Envelope
 import dynacache.cluster.proto.Forward
 import dynacache.cluster.proto.ForwardReply
 import dynacache.cluster.proto.Ping
-import dynacache.cluster.proto.ReplyMsg
 import dynacache.cluster.proto.PingReq
+import dynacache.cluster.proto.Read
+import dynacache.cluster.proto.ReadReply
+import dynacache.cluster.proto.Replicate
+import dynacache.cluster.proto.ReplicateAck
+import dynacache.cluster.proto.ReplyMsg
 import com.google.protobuf.ByteString
 import io.grpc.StatusException
 import java.net.ServerSocket
@@ -83,6 +87,17 @@ class GrpcTransportTest {
             )
             Envelope.BodyCase.FORWARD_REPLY -> envelope.setForwardReply(
                 ForwardReply.newBuilder().setId(7).setReply(ReplyMsg.newBuilder().setSimple("OK"))
+            )
+            Envelope.BodyCase.REPLICATE -> envelope.setReplicate(
+                Replicate.newBuilder().setId(7).addAllToken(listOf("SET", "k", "v").map(ByteString::copyFromUtf8))
+                    .setDvv(ByteString.copyFromUtf8("dvv")).setExpiresAtMillis(9).setHintFor("charlie")
+            )
+            Envelope.BodyCase.REPLICATE_ACK -> envelope.setReplicateAck(ReplicateAck.newBuilder().setId(7))
+            Envelope.BodyCase.READ -> envelope.setRead(
+                Read.newBuilder().setId(7).addAllToken(listOf("GET", "k").map(ByteString::copyFromUtf8))
+            )
+            Envelope.BodyCase.READ_REPLY -> envelope.setReadReply(
+                ReadReply.newBuilder().setId(7).setReply(ReplyMsg.newBuilder().setSimple("OK")).setDvv(ByteString.copyFromUtf8("dvv"))
             )
             Envelope.BodyCase.BODY_NOT_SET -> throw AssertionError("BODY_NOT_SET is not a message type")
         }

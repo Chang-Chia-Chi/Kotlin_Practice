@@ -21,7 +21,44 @@ message Envelope {
     PingReq ping_req = 12;
     Forward forward = 13;
     ForwardReply forward_reply = 14;
+    Replicate replicate = 15;
+    ReplicateAck replicate_ack = 16;
+    Read read = 17;
+    ReadReply read_reply = 18;
   }
+}
+
+// The coordinator's write to one replica (spec 5.1 step 5): the command's tokens with NX/XX
+// and the TTL already decided by the coordinator, the version the write created, and the TTL
+// as an absolute instant so clock skew between replicas cannot shorten or stretch it (spec 5.4).
+message Replicate {
+  int64 id = 1;
+  repeated bytes token = 2;
+  bytes dvv = 3;
+  // Unix millis; 0 when the key has no TTL.
+  int64 expires_at_millis = 4;
+  // Sloppy quorum (spec 2.4, T25): set when the receiver stands in for this dead preference-list
+  // node. It stores the whole message as a hint instead of applying it, and acks toward W.
+  string hint_for = 5;
+}
+
+// A replica's acknowledgement of a Replicate, under the same id; one per node counts (C4).
+message ReplicateAck {
+  int64 id = 1;
+}
+
+// The coordinator's read on one replica (spec 5.2 step 2): the read command's tokens, run
+// there as they are, so every read command replicates without a per-type message.
+message Read {
+  int64 id = 1;
+  repeated bytes token = 2;
+}
+
+// A replica's answer to a Read: its reply and the version it answered from (empty: none held).
+message ReadReply {
+  int64 id = 1;
+  ReplyMsg reply = 2;
+  bytes dvv = 3;
 }
 
 // A command a contact node hands to the key's coordinator (spec 5.1 step 3). The tokens are

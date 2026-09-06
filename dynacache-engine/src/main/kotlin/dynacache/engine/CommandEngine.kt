@@ -1,10 +1,14 @@
 package dynacache.engine
 
 import dynacache.engine.persist.RdbEntry
+import dynacache.engine.persist.RdbSnapshot
+import dynacache.engine.persist.WalCodec
+import dynacache.engine.persist.WalWriter
 import java.time.Clock
 import java.time.Instant
 import java.util.Random
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.CyclicBarrier
 
 /**
  * Runs commands. The engine owns one single-thread executor per partition, so a caller never
@@ -96,6 +100,15 @@ class ApEngine(
     policy: EvictionPolicy = EvictionPolicy.LRU,
 ) : CommandEngine {
 
+    /**
+     * The write-ahead log every mutation is appended to before its reply completes (C14); null
+     * is a node without one. Attached by recovery once the state the log continues is in place,
+     * so a replayed entry is never logged a second time.
+     */
+    @Volatile
+    var wal: WalWriter? = null
+        internal set
+
     // Each partition draws from its own stream, seeded from the engine's, so one injected seed
     // makes the whole engine reproducible even though the partitions run on their own threads.
     private val partitions = List(partitionCount) {
@@ -106,7 +119,15 @@ class ApEngine(
             tickMillis,
             maxMemoryBytes?.let { bytes -> bytes / partitionCount } ?: Long.MAX_VALUE,
             policy,
+            ::log,
         )
+    }
+
+    /** The partition hook: one entry per command that changed a store, answering when it is durable. */
+    private fun log(command: Command, reply: Reply, now: Instant): CompletableFuture<*>? {
+        val wal = wal ?: return null
+        val (op, payload) = WalCodec.encode(command, reply, now) ?: return null
+        return wal.append(op, payload).durable
     }
 
     /**
@@ -219,10 +240,17 @@ class ApEngine(
         }
     }
 
-    /** Every partition's point-in-time view at [now], each taken as one task on its own executor. */
-    internal fun snapshotView(now: Instant): CompletableFuture<List<RdbEntry>> {
-        val views = partitions.map { it.snapshotView(now) }
-        return CompletableFuture.allOf(*views.toTypedArray()).thenApply { views.flatMap { it.join() } }
+    /**
+     * Every partition's point-in-time view at [now], each taken as one task on its own executor.
+     * The views are one cut: every partition parks at a barrier before copying, and [cut] runs
+     * while all of them are parked, so nothing is appended to the log between its answer and
+     * any view. That answer is the checkpoint's WAL seq; the default is a node without a log.
+     */
+    internal fun snapshotView(now: Instant, cut: () -> Long = { 0 }): CompletableFuture<RdbSnapshot> {
+        var seq = 0L
+        val barrier = CyclicBarrier(partitions.size) { seq = cut() }
+        val views = partitions.map { it.snapshotView(now, barrier) }
+        return CompletableFuture.allOf(*views.toTypedArray()).thenApply { RdbSnapshot(seq, views.flatMap { it.join() }) }
     }
 
     /** Writes [entries] into their partitions, each partition on its own executor. */

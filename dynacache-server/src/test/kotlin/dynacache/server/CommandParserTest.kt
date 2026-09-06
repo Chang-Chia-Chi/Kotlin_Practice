@@ -3,6 +3,7 @@ package dynacache.server
 import dynacache.engine.Command
 import dynacache.engine.Reply
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
@@ -39,8 +40,7 @@ class CommandParserTest {
     /**
      * One row per command name the engine has today (spec 2.1, tickets T02 to T09). The variant
      * proves the name is wired; the probe proves the meaning wherever two names share a variant.
-     * Sorted Set arrives with T07 and its rows (`ZADD`, `ZREM`, `ZRANGE`, `ZREVRANGE`,
-     * `ZRANGEBYSCORE`, `ZRANK`, `ZREVRANK`, `ZSCORE`, `ZCARD`, `ZINCRBY`, `ZSCAN`) belong here.
+     * Every command name the engine has is here, Sorted Set included (T16).
      */
     @Test
     fun parser_maps_every_command() {
@@ -129,7 +129,62 @@ class CommandParserTest {
             row("PTTL k", Command.Ttl::class) {
                 assertEquals(Command.Ttl.Precision.MILLIS, (it as Command.Ttl).precision)
             },
+            row("PEXPIREAT k ${FIXED_CLOCK.instant().toEpochMilli() + 10_000}", Command.Expire::class) {
+                assertEquals(at(10), (it as Command.Expire).deadline)
+            },
             row("PERSIST k", Command.Persist::class),
+            // Sorted Set (T07's eleven names, in nine variants: ZRANGE/ZREVRANGE and
+            // ZRANK/ZREVRANK are each one command read from the other end)
+            row("ZADD k 1 a", Command.ZAdd::class) {
+                assertEquals(1, (it as Command.ZAdd).entries.size)
+                assertNull(it.condition)
+                assertFalse(it.changed)
+            },
+            row("ZADD k NX CH 1 a 2 b", Command.ZAdd::class) {
+                assertEquals(2, (it as Command.ZAdd).entries.size)
+                assertEquals(Command.Set.Condition.NX, it.condition)
+                assertTrue(it.changed)
+            },
+            row("ZADD k XX 1 a", Command.ZAdd::class) {
+                assertEquals(Command.Set.Condition.XX, (it as Command.ZAdd).condition)
+            },
+            row("ZREM k a b", Command.ZRem::class) { assertEquals(2, (it as Command.ZRem).members.size) },
+            row("ZRANGE k 0 -1", Command.ZRange::class) {
+                assertEquals(0L, (it as Command.ZRange).start)
+                assertEquals(-1L, it.stop)
+                assertFalse(it.withScores)
+                assertFalse(it.reverse)
+            },
+            row("ZRANGE k 0 -1 WITHSCORES", Command.ZRange::class) {
+                assertTrue((it as Command.ZRange).withScores)
+                assertFalse(it.reverse)
+            },
+            row("ZREVRANGE k 0 -1", Command.ZRange::class) { assertTrue((it as Command.ZRange).reverse) },
+            row("ZRANGEBYSCORE k (1 +inf", Command.ZRangeByScore::class) {
+                assertEquals("(1", (it as Command.ZRangeByScore).min.text())
+                assertEquals("+inf", it.max.text())
+                assertFalse(it.withScores)
+                assertEquals(0L, it.offset)
+                assertEquals(-1L, it.count)
+            },
+            row("ZRANGEBYSCORE k -inf 5 WITHSCORES LIMIT 2 3", Command.ZRangeByScore::class) {
+                assertTrue((it as Command.ZRangeByScore).withScores)
+                assertEquals(2L, it.offset)
+                assertEquals(3L, it.count)
+            },
+            row("ZRANK k m", Command.ZRank::class) { assertFalse((it as Command.ZRank).reverse) },
+            row("ZREVRANK k m", Command.ZRank::class) { assertTrue((it as Command.ZRank).reverse) },
+            row("ZSCORE k m", Command.ZScore::class) { assertEquals("m", (it as Command.ZScore).member.text()) },
+            row("ZCARD k", Command.ZCard::class),
+            row("ZINCRBY k 5 m", Command.ZIncrBy::class) {
+                assertEquals("5", (it as Command.ZIncrBy).delta.text())
+                assertEquals("m", it.member.text())
+            },
+            row("ZSCAN k 3 MATCH m* COUNT 7", Command.ZScan::class) {
+                assertEquals(3L, (it as Command.ZScan).cursor)
+                assertEquals("m*", it.pattern!!.text())
+                assertEquals(7, it.count)
+            },
             // The CP verbs of CP spec 6 (T44). A CP key stays whole on the wire, and a lock or
             // semaphore verb carries no session: the connection owns that (CP spec 4), so the
             // parser leaves it unset and the handler fills it in.
@@ -276,8 +331,8 @@ class CommandParserTest {
             error("foo", "a", "b"),
         )
         assertEquals(
-            Reply.Error("ERR", "unknown command 'zadd', with args beginning with: 'k', '1', 'm', "),
-            error("ZADD", "k", "1", "m"),
+            Reply.Error("ERR", "unknown command 'zrevrangebyscore', with args beginning with: 'k', '5', '1', "),
+            error("ZREVRANGEBYSCORE", "k", "5", "1"),
         )
     }
 
