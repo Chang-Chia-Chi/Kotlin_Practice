@@ -2828,3 +2828,130 @@ which `exec()` and `evalScript` now both use; it is the four lines `exec()` alre
   half of `lua_redis_call` and works over the socket as written.
 - `orBatchError()` in `DynaCacheServer.kt` is now the one place C12's refusal turns back into a
   reply. Any third kind of batch should end with it rather than its own `exceptionally`.
+
+## T11: Count-Min Sketch and W-TinyLFU
+
+**Built:** A partition can now be told *which* key to give up, and there are two answers. The new
+`dynacache.engine.ds.CountMinSketch(width, depth = 4, seed)` is the frequency half: `depth` rows of
+`width` byte counters laid end to end, `increment` raising one counter per row and `estimate`
+answering with the smallest of them, so a collision can only ever make the answer too high. That
+one-sided error is the point -- a policy that over-rates a cold key loses a little hit ratio, one
+that under-rates a hot key throws it away. `halve()` ages every counter, which is what stops the key
+that was hot an hour ago from outranking the key that is hot now. Counters are bytes saturating at
+`MAX_COUNT` (255) rather than Caffeine's packed nibbles: four times the memory of a nibble, none of
+the shifting, and at `depth * width` counters the whole sketch is still kilobytes. Rows are made
+independent by one odd multiplier apiece drawn from the seed, and `width` is rounded up to a power
+of two so a row's slot is a mask rather than a modulo.
+
+`WindowTinyLfu` is Caffeine's algorithm as one object and the whole of "which key goes" for a
+partition built `W_TINYLFU`. Three LRU lists, each a `LinkedHashSet` re-inserted on touch, which is
+exact LRU in O(1) where the sampling loop was an approximation. A key the policy has not seen enters
+the **window**, one percent of the partition's share. When the window is over its share its least
+recently used key is a **candidate**, and `victim()` runs TinyLFU's admission filter: the candidate
+enters the main space only if the sketch has seen it more often than the main space's own victim,
+and the loser of that comparison is what gets evicted. A tie goes to the incumbent, which is what
+stops a stream of never-repeated keys washing the main space out one key at a time. The main space
+is segmented: a candidate lands on **probation**, a hit while on probation earns **protection**, and
+a protected segment over its eighty percent demotes its coldest key back to probation -- demotion,
+not eviction, so a demoted key is still in the cache and has only lost its head start. The sketch is
+halved every `10 x` the keys the policy holds (Caffeine's sample size, floored at 100 so a nearly
+empty policy does not age its sketch away on every access).
+
+`EvictionPolicy { LRU, W_TINYLFU }` is a sixth, defaulted parameter on `ApEngine`, passed straight
+through to every `Partition`. `Partition.coldest()` is now two lines -- `tinyLfu?.victim() ?:
+sampledColdest()` -- and `sampledColdest()` is T10's sampling loop under its own name. `evict`,
+`purgeExpired`, `MAX_EVICTIONS` and every accounting line are exactly as T10 left them. The
+bookkeeping the policy needs hangs off the two verbs T10 named: `account` tells it a key was resized,
+`forget` tells it a key is gone, `FLUSHDB` clears it, and `execute` records one access per keyed
+command on a live key. `INFO` gains a `maxmemory_policy` line in its `# Memory` section, so each
+partition now answers `Command.Info` with `[keys, usedBytes, policyName]` and `Info.join` reads the
+policy off the first partition (every partition of a node runs the same one).
+
+**Concepts named:** **Window**, **candidate**, **main space**, **probation** and **protected** are
+Caffeine's own words and now the code's. **Admission** is the decision at the window's edge and it
+lives in `victim()` on purpose: a candidate leaves the window exactly when something has to be given
+up, so the comparison that admits it is the same comparison that names the victim, and there is no
+second moment to keep in sync. **Aging** is the sketch's `halve()`, separated from the policy that
+schedules it, so the ticket's "never underestimates" and "halving" are testable without a partition.
+`sizeOf` is the one thing `WindowTinyLfu` asks the partition for -- what a key currently costs, read
+straight off `Entry.accounted` -- which is why the policy needs no byte bookkeeping of its own beyond
+two running totals. Seams unchanged: `CommandEngine`, `PartitionContext`, `Reply`, `Key`,
+`PartitionId` are exactly T01's; `EvictionPolicy` is a new enum next to `ApEngine`, not a seam,
+because there is no second adapter and never will be -- a policy is a function, not a module.
+
+**Acceptance:**
+- `sketch_estimate_never_underestimates`: 4,000 seeded increments over 500 keys, the truth counted in
+  a map the sketch never sees, and every key's estimate at or above its true count.
+- `sketch_ages_halves_counts`: one key alone in the sketch (so no collision is possible) counted to
+  nine, then halved four times: 9, 4, 2, 1, 0. Halving rounds down and an untouched key ages out.
+- `sketch_counters_saturate_rather_than_wrap`: 400 increments read back as 255. A byte counter that
+  wrapped would read near zero, and the whole one-sided-error guarantee with it.
+- `eviction_respects_max_memory` is now `@ParameterizedTest @EnumSource(EvictionPolicy::class)`, so
+  the T10 assertions -- twenty writes into a three-entry budget end at three keys, under the
+  threshold, last write readable -- run under both policies from one body.
+- `tinylfu_admits_frequent`: a six-entry budget, key 0 read ten times, then a one-hit key and thirty
+  more one-hit keys of churn. Key 0 survives, the one-hit key does not, and `DBSIZE` still reports
+  six. Verified to be the policy's doing and not the clock's: the identical trace under `LRU` loses
+  key 0 (it is read once and then never again while thirty writes go past it).
+- `tinylfu_hit_ratio_beats_lru_on_zipf`: a seeded Zipf trace of 20,000 accesses over 2,000 keys
+  replayed against a 200-entry budget under each policy, reading each key and writing it back on a
+  miss, clock advanced on every access. W-TinyLFU hit 12,523 times against LRU's 12,004; the message
+  prints both. Checked at four seeds before landing -- 12532/11915, 12612/12049, 12493/11966,
+  12523/12004 -- so the margin is the policy and not the seed.
+- `info_reports_the_eviction_policy`: `maxmemory_policy:lru` on a default node, `maxmemory_policy:
+  w-tinylfu` on one built W-TinyLFU.
+- Mutation-checked two ways: reversing the admission comparison (`<=` to `>=`, so the *more*
+  frequent key is the one thrown away) fails `tinylfu_admits_frequent`; and see Deviation 2 for the
+  one mutation nothing catches.
+- Every existing test still green under the default `LRU`. `mvn -B -o clean package`: engine 128,
+  cluster 49, cp 38, server 35.
+- This entry.
+
+**Deviations:** Nothing against the spec, the frozen types or ADR 0002. Four judgement calls, one of
+them debt.
+
+1. **LFU is not built.** Spec 2.7's middle policy is a Redis-style logarithmic frequency counter per
+   key, and the ticket makes it conditional on the budget. It is not in the acceptance list, nothing
+   consumes it, and the ticket landed at 509 lines. Adding it would mean a third `EvictionPolicy`
+   value, a counter beside `Entry.lastAccess`, a third victim function and its own test. Repaid by
+   exactly that when something asks for it; until then W-TinyLFU is strictly the better of the two
+   and LRU is the baseline the spec wants kept.
+2. **Nothing tests that the policy ages its sketch.** Debt, and the sharpest thing in this entry.
+   `CountMinSketch.halve()` is directly and thoroughly tested, but making `WindowTinyLfu.age()` a
+   no-op leaves all 128 engine tests green, the Zipf comparison included. A test that bites would
+   need a phase-change trace -- one key made hot, then left alone while a second key climbs -- and
+   at these budgets the window's LRU order and the halving cadence make the arithmetic delicate
+   enough that the test would pin the implementation rather than the behaviour. What would repay it:
+   a seam on `WindowTinyLfu` that reports its own halving count, or a Zipf trace whose popularity
+   ranking is reversed halfway through, where a sketch that never ages provably keeps the wrong keys.
+3. **The aging period N is a constant, not a parameter.** The ticket calls N configurable.
+   `SAMPLES_PER_KEY` (10) and `MIN_SAMPLE` (100) are private constants in one place with one caller;
+   a constructor parameter for a value nothing varies would be configuration for its own sake. The
+   period itself is Caffeine's and does scale with the cache, as the ticket asks: `10 x` the keys the
+   policy currently holds, recomputed on every access rather than fixed at construction.
+4. **The window never shrinks below one key.** `victim()` guards the admission branch with
+   `window.size > 1`, so the key a command just wrote is never itself the candidate it offers to the
+   main space. Without it, a budget small enough that one percent rounds to a few bytes evicts every
+   write the instant it lands, and `eviction_respects_max_memory`'s "the last write survived it"
+   fails under `W_TINYLFU` for a reason that has nothing to do with the policy.
+
+**For the next ticket:** T11 leaves the eviction step exactly where T10 left it and nothing new is
+stubbed. Three things worth knowing.
+
+`Partition.coldest()` is still the whole policy, and now demonstrably so: a third policy is a third
+implementation of that one function plus whatever bookkeeping it hangs off `account`, `forget` and
+the one `touch` in `execute`. Those four call sites are the entire policy surface inside `Partition`.
+
+`WindowTinyLfu`'s region byte totals are running totals kept in step with `Entry.accounted`, not
+recomputed, so they are exact against T10's formula and drift only if a future mutation path reaches
+the store without going through `account` or `forget`. T10's note about those two verbs being the
+only ways `usedBytes` changes is now load-bearing for the policy as well: add a third path and the
+window will think it is a size it is not. Probation's bytes are deliberately not tracked -- the
+policy only ever needs to know whether probation is empty -- so do not add the third total on the
+assumption that it is missing by oversight.
+
+`Command.Info`'s per-partition reply is now `[keys, usedBytes, policyName]`, a third item on top of
+T10's two. Nothing outside the engine reads the per-partition shape; T13's `INFO` over RESP and
+T44's dispatcher see only the joined bulk string, which gains one `maxmemory_policy` line inside the
+`# Memory` section it already had. A test that matched the whole `# Memory` section literally would
+need updating; the existing ones match by line prefix and did not.

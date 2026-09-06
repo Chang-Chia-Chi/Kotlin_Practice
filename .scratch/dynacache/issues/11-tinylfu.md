@@ -11,12 +11,12 @@ deviation.
 
 **Nature:** eviction policy, spec 2.7 (Opus)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache ef7cb58, merged into misc/ai_gen)
 
-- [ ] `tinylfu_admits_frequent`
-- [ ] `sketch_estimate_never_underestimates`, `sketch_ages_halves_counts`
-- [ ] `eviction_respects_max_memory` green under `W_TINYLFU`
-- [ ] Progress entry appended
+- [x] `tinylfu_admits_frequent`
+- [x] `sketch_estimate_never_underestimates`, `sketch_ages_halves_counts`
+- [x] `eviction_respects_max_memory` green under `W_TINYLFU`
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket, stubs throwing NotImplementedError
 for later seams; 200 to 600 lines including tests; JUnit 5 + Mockito only, no AssertJ or MockK;
