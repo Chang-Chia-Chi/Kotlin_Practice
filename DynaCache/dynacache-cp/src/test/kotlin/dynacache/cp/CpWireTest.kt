@@ -3,6 +3,7 @@ package dynacache.cp
 import dynacache.cluster.NodeId
 import dynacache.engine.Command
 import dynacache.engine.Key
+import dynacache.engine.Reply
 import io.microraft.model.message.InstallSnapshotRequest
 import io.microraft.model.message.InstallSnapshotResponse
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -10,6 +11,8 @@ import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import java.io.ByteArrayOutputStream
+import java.io.DataOutputStream
 import java.time.Duration
 
 /** Every entry a leader appends comes back from its wire form equal, stamp and all. */
@@ -17,16 +20,37 @@ class CpWireTest {
 
     private fun roundTrip(operation: Any): Any = CpWire.decodeOperation(CpWire.encodeOperation(operation))
 
-    /** A snapshot with one row per primitive, the shape the store and the wire both carry. */
-    private val snapshot = CpStateMachine.Snapshot(
-        lastAppliedTs = 1_788_656_400_001L,
-        counters = mapOf(Key("cp:counter:c") to AtomicLongStateMachine.Counter(7, expiresAt = 1_788_656_500_000L)),
-        locks = mapOf(Key("cp:lock:l") to FencedLockStateMachine.Lock(owner = 3, token = 9, leaseUntil = 1_788_656_430_000L, holds = 2)),
-        semaphores = mapOf(Key("cp:sem:s") to SemaphoreStateMachine.Semaphore(available = 1, holders = mapOf(3L to 2))),
-        latches = mapOf(Key("cp:latch:l") to 5),
-        references = mapOf(Key("cp:ref:r") to AtomicReferenceStateMachine.Reference(byteArrayOf(0, 127, -1), expiresAt = null)),
-        sessions = SessionRegistry.State(lastId = 3, sessions = mapOf(3L to SessionRegistry.Session(1_788_656_400_000L, 15_000))),
-    )
+    /** A snapshot with a row per primitive, the shape the store and the wire both carry. */
+    private val snapshot = Primitives().run {
+        val session = (apply(Command.Cp.SessionCreate(Duration.ofSeconds(15))) as Reply.Integer).value
+        apply(Command.Cp.LongSet(Key("cp:counter:c"), 7, ttl = Duration.ofHours(1)))
+        apply(Command.Cp.LockTry(Key("cp:lock:l"), session, lease = Duration.ofSeconds(30)))
+        apply(Command.Cp.SemInit(Key("cp:sem:s"), 3))
+        apply(Command.Cp.SemAcquire(Key("cp:sem:s"), session, 2))
+        apply(Command.Cp.LatchSet(Key("cp:latch:l"), 5))
+        apply(Command.Cp.RefSet(Key("cp:ref:r"), byteArrayOf(0, 127, -1)))
+        stateMachine.state
+    }
+
+    /** The chunk's own byte form: a version, log time, and one opaque table per primitive. */
+    @Test
+    fun snapshot_round_trips_through_its_bytes() {
+        assertEquals(6, snapshot.tables.size, "one table per primitive")
+        assertEquals(snapshot, CpWire.decodeSnapshot(CpWire.encodeSnapshot(snapshot)))
+    }
+
+    /**
+     * The layout before T70 opened with the log-time long, whose top byte reads here as version 0.
+     * The project is pre-release, so such a snapshot is refused by name rather than migrated.
+     */
+    @Test
+    fun a_snapshot_from_before_the_version_bump_is_refused() {
+        val old = ByteArrayOutputStream().also { DataOutputStream(it).writeLong(1_788_656_400_001L) }.toByteArray()
+
+        val refused = assertThrows(CpWire.UnsupportedSnapshotVersion::class.java) { CpWire.decodeSnapshot(old) }
+
+        assertTrue(refused.message.orEmpty().contains("version 0"), "names the version it found: ${refused.message}")
+    }
 
     /** The install of a snapshot at a lagging member: the chunk, the members that hold it, and the group view. */
     @Test
