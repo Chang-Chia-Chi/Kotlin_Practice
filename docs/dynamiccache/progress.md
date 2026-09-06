@@ -3590,3 +3590,80 @@ db0:keys=5
 - `scoreText`'s exponent form (T07's fourth deviation, `1.0E17` where Redis writes `1e+17`)
   never came up: Jedis parses scores with `Double.parseDouble`, which accepts both. It stays a
   difference from Redis's bytes, and a client that reads the score as text would still see it.
+
+## T44: Command dispatcher, Redis-compat routing, RESP verbs
+
+**Built:** `CommandDispatcher(ap, cp?, clock)` in the server module, a `CommandEngine` that sits
+in front of both engines and applies CP spec 9.5's three rules in order: a `Command.Cp` whose key
+is in the `cp:` namespace goes to the CP engine and one whose key is not is `-NOTCP`; any other
+command naming a `cp:` key goes to the CP engine re-targeted onto the CP verb it means when it is
+in the Redis-compat set, and is `-NOTCP` otherwise; everything else goes to the AP engine. A node
+constructed with a null CP engine answers every CP-bound command `-NOTCP`. `atomically` runs on
+the AP engine and refuses a span that declares a `cp:` key.
+
+The T13 parser gains a row for every `CP.*` verb of CP spec 6 (long, lock, semaphore, latch,
+reference, session, introspection), each asserted in `parser_maps_every_command`. `Command.Cp`
+gains the `Introspection` branch with `Info` and `Members`; `CpEngine` and `ForwardingCpEngine`
+answer both from a member's own MicroRaft report rather than through the log, and `CpWire.info`
+is the one place a report becomes a `CpInfo` (`CpGrpcServer.info` now calls it). `Command.Cp
+.LongTtl` gains a `precision`, so `PTTL` on a `cp:counter:*` key answers milliseconds; the
+AtomicLong state machine and the wire codec carry it.
+
+`CommandHandler` owns a CP session per connection: the first session-bearing CP verb creates one,
+`CP.SESSION.CREATE` names that same session rather than making a second, and the lock and
+semaphore verbs get it put in on the way to the dispatcher (the parser leaves `NO_SESSION`, and
+`CP.SESSION.HEARTBEAT`/`CLOSE` keep the session they name on the wire). A creation that failed is
+not remembered, so the next verb tries again. `DynaCacheServer` takes the CP engine and a clock
+and builds the dispatcher; `main` wires a MicroRaft member plus its gRPC server when this node is
+in the configured group and a `ForwardingCpEngine` when it is not.
+
+**Concepts named:** **Re-target** is the one thing the dispatcher does to a command, and CONTEXT.md
+now says so: `INCR cp:counter:x` and `CP.LONG.INCR cp:counter:x` are one command by the time an
+engine sees them. It never rewrites a reply and never sends one command to both engines, which is
+what C16 and C22 are. **Redis-compat set** is the second new term: the Redis commands the `cp:`
+namespace answers, each mapped onto a CP verb, with everything else `-NOTCP`. Seams: `isCpKey()`
+and `keysOf(command)` are internal to the server module and are the only place the namespace rule
+is read (`keysOf` replaced the private `declaredKeys` EXEC used, so one function answers both).
+
+**Acceptance:**
+- CP spec 10.8's five: `dispatch_cp_verb_routes_to_cp`, `dispatch_cp_prefix_routes_to_cp`,
+  `dispatch_ap_key_routes_to_ap`, `dispatch_cp_verb_bad_namespace_rejected`,
+  `dispatch_unsupported_redis_cmd_on_cp_rejected`, all in `CommandDispatcherTest` against two
+  recording engines, each asserting the engine that did *not* see the command as well.
+- `long_redis_compat_incr` and `dispatch_auto_creates_session_on_first_cp_verb` in `CpRoutingTest`,
+  over a real socket with a real AP engine and a real three-member CP group.
+- `C16_ap_engine_never_sees_cp_key` (nine commands plus a batch) and `I22_namespaces_never_cross`
+  (the same key name written and read on both sides) in `CommandDispatcherTest`.
+- Every `CP.*` verb in `parser_maps_every_command`.
+- Full offline `mvn clean package` green: engine 144, cluster 67, cp 66, server 79.
+
+**Deviations:**
+- `DEL`, `EXISTS` and `TYPE` are in CP spec 9.5's compat set but no CP primitive answers them yet,
+  so the dispatcher rejects them with `-NOTCP` rather than routing them to an engine that would
+  fail. Debt: repaid by three `Command.Cp` variants and the state-machine support behind them.
+- The compat path reads only the key prefix, so `GET cp:lock:x` reaches the counter and reads
+  empty instead of answering `-WRONGTYPE`, and `EXPIRE cp:lock:x` answers 0 where CP spec 9.4 says
+  a lock's lease rejects it. Debt: nothing tracks which primitive owns a key; the repair is a
+  key-to-kind check in the state machines, where `-WRONGTYPE` has to come from anyway. Marked with
+  a `ponytail:` comment on `CommandDispatcher.compat`.
+- A `MULTI`/`EXEC` span naming a `cp:` key is refused, but the refusal reaches the client as
+  `-ERR a batch cannot name a cp: key` rather than `-NOTCP`: `atomically` is generic in its
+  result, so the only carrier is the future's failure, and `orBatchError` only knows
+  `CrossPartitionBatch`'s fixed `-CROSSSLOT`. C16 holds either way (the batch never runs). Debt:
+  an exception that carries its own `Reply.Error` would repay it.
+- Size: the change is roughly 770 lines including tests, over the 200-to-600 budget. Every part of
+  the overage is ticket surface (the CP parser rows alone are 120 lines of table and test), so
+  nothing was trimmed; nothing was added past what acceptance needs either.
+- `dynacache-cp` now publishes a test-jar so the server module's routing tests can run the real
+  three-member `CpTestKit` group. It is a build-time wiring change, not a new dependency.
+- Merge with `misc/ai_gen`: the WAL's fsync policy had taken `main`'s argument 3, which T44 had
+  given to `cp-self`, so the CP group moved to arguments 4 and 5. The command line is now
+  `dynacache [port] [partitions] [dir] [fsync] [cp-self] [cp-members]`.
+
+**For the next ticket:** the connection's session is never closed when the socket closes; it is
+left to expire by heartbeat timeout (CP spec 4). Closing it on `channelInactive` is a small
+addition and would make `sem_session_death_releases` deterministic without a timeout wait.
+`ForwardingCpEngine` answers `CP.MEMBERS` from the fixed membership it was configured with and
+`CP.INFO` by asking the leader; only the `CpEngine` path is covered by a test here. The
+dispatcher's `compat` is the one place to extend when a CP primitive learns a new Redis spelling,
+and the `Rejected` exception it throws never leaves `submit`.

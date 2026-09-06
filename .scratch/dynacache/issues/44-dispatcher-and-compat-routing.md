@@ -12,12 +12,12 @@ pipeline submits to the dispatcher; the CP error kinds of CP spec 6.8 are `Reply
 
 **Nature:** routing, C16, C22, I22 (Opus)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache 6715f54 + merge 4b4ae75, merged into misc/ai_gen)
 
-- [ ] CP spec 10.8 all five dispatcher tests
-- [ ] `long_redis_compat_incr`, `I22_namespaces_never_cross`
-- [ ] `C16_ap_engine_never_sees_cp_key` with the recording fake engine
-- [ ] Progress entry appended
+- [x] CP spec 10.8 all five dispatcher tests
+- [x] `long_redis_compat_incr`, `I22_namespaces_never_cross`
+- [x] `C16_ap_engine_never_sees_cp_key` with the recording fake engine
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket, stubs throwing NotImplementedError
 for later seams; 200 to 600 lines including tests; JUnit 5 + Mockito only, no AssertJ or MockK;
