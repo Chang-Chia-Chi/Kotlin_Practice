@@ -9,12 +9,12 @@ as is.
 
 **Nature:** technology adapter (Opus)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache a5de4e6, merged into misc/ai_gen)
 
-- [ ] `grpc_transport_roundtrip_every_message_type` on two transports over localhost ephemeral ports, the same suite the in-memory adapter passes
-- [ ] `grpc_peer_down_is_a_send_error`
-- [ ] Generated classes appear only in the cluster module, the cp module and the server's adapters
-- [ ] Progress entry appended
+- [x] `grpc_transport_roundtrip_every_message_type` on two transports over localhost ephemeral ports, the same suite the in-memory adapter passes
+- [x] `grpc_peer_down_is_a_send_error`
+- [x] Generated classes appear only in the cluster module, the cp module and the server's adapters
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket, stubs throwing NotImplementedError
 for later seams; 200 to 600 lines including tests; JUnit 5 + Mockito only, no AssertJ or MockK;

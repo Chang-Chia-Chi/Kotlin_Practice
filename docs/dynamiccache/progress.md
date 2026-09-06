@@ -762,3 +762,94 @@ T05's hand-built table replaces the `HashMap` store, not the field maps, unless 
 Multi-key fan-out lives entirely in `ApEngine.fanOut`, so T04's `KEYS`, `DBSIZE` and `FLUSHDB`
 compose the same way but need a different shape: they have no keys to group by, so they want a
 "every partition" variant rather than a `Fanned`. `atomically` is still `TODO("T14: batches")`.
+
+## T23: gRPC transport adapter
+
+**Built:** `cluster.proto` gains `service ClusterService { rpc Deliver(Envelope) returns
+(Delivered); }` and an empty `Delivered` message, so the grpc-java and grpc-kotlin generators
+now actually emit stubs (T18 configured them against a proto with no service). `GrpcTransport`
+in `dynacache-cluster/src/main` is the second adapter of the `Transport` seam: it starts a gRPC
+server in its constructor, opens one `ManagedChannel` per peer on the first send to that peer,
+and delivers into the same `Channel<Envelope>` that `inbound` exposes. `HostPort(host, port)`
+is the new address type. No codec anywhere: the generated `Envelope` is the wire message and
+`Deliver` carries it whole.
+
+**Concepts named:** `HostPort` is where a node's gRPC server listens - the transport's only
+notion of an address, kept apart from `NodeId`, which stays the cluster's identity. `boundPort`
+is how a node started on port 0 says which ephemeral port it got. The **inbox** is the server
+side of the seam, an inner `ClusterServiceCoroutineImplBase` whose `deliver` puts the envelope
+on the receive channel and answers `Delivered`; nothing else in the adapter knows gRPC exists.
+The seam itself is untouched: `send`, `inbound` and `close` are T18's signatures exactly, so
+the in-memory adapter and this one are interchangeable to every caller.
+
+Two design points worth carrying:
+
+- **Unary, not client-streaming.** One call carries one envelope and its acceptance, which is
+  the whole of what `Transport.send` promises. A stream would add a lifecycle and a reconnect
+  policy that no ticket yet asks for, and would still have to answer the same question on
+  failure. A reply to an envelope is another envelope (T19), never an RPC response.
+- **`peers` is read at send time, not at construction.** The map is a `Map<NodeId, HostPort>`
+  the caller keeps. Two nodes on ephemeral ports cannot both know the other's port at
+  construction, so a caller passes one mutable map to both and fills it in once both have
+  bound; the lazy channel creation makes that work with no extra API. The round-trip test is
+  exactly this shape, and T24's three-node harness can use it unchanged.
+
+**Acceptance:**
+- `grpc_transport_roundtrip_every_message_type` (`GrpcTransportTest`): two `GrpcTransport`s on
+  localhost ephemeral ports exchange one envelope per `oneof body` case in both directions and
+  assert the received envelope equals the sent one. The cases come from
+  `Envelope.BodyCase.values()` and each is built by a `when` **expression**, so a case added by
+  a later ticket stops the test file compiling until it is given an envelope of its own. That
+  guard was verified, not assumed: a second case added to the oneof produced `'when' expression
+  must be exhaustive. Add the 'PROBE' branch`, and was then reverted.
+- `grpc_peer_down_is_a_send_error` (`GrpcTransportTest`): a peer whose `HostPort` names a port
+  the OS handed out and took back. gRPC's default fail-fast turns the refused connection into a
+  `StatusException` well inside the deadline. Because the assertion is `assertThrows` around a
+  `withTimeout`, a hang would surface as `TimeoutCancellationException` and fail the test
+  rather than pass it, which is the distinction the ticket asked for.
+- Generated classes only in the cluster module: `grep -r "dynacache.cluster.proto"
+  dynacache-engine/src` is empty.
+- `mvn -B -o clean package` green offline: engine 44, cluster 27, server 16.
+
+**Deviations:**
+- **The `grpc-kotlin` `compile-custom` execution is removed from `dynacache-cluster/pom.xml`.**
+  T18's deviation note says `protocPlugins` "passes protoc no `--plugin=` flag" for the
+  jar-based generator, which is why that execution named the launcher through
+  `pluginExecutable`. That is not what happens: `protocPlugins` does run the generator as part
+  of the `protobuf-java` execution. With no service in the proto it emitted nothing, so the
+  redundancy was invisible; the moment `ClusterService` existed the coroutine stub was written
+  into both `generated-sources/protobuf/java` and `.../grpc-kotlin` and Kotlin failed with
+  `Redeclaration: object ClusterServiceGrpcKt`. Deleting the execution is the fix. The
+  Windows-only `.exe` path goes away with it, so T18's portability debt is repaid as a side
+  effect; the WinRun4J launcher itself is still built by `protocPlugins`, so a move off Windows
+  would still need looking at. `ClusterGrpcKt.kt` now lands in `generated-sources/protobuf/java`
+  beside the message classes, and `ClusterServiceGrpc.java` stays in `.../grpc-java`.
+- **`runBlocking`, not `runTest`, in `GrpcTransportTest`.** These are the project's only tests
+  on real sockets. Under `runTest` the deadlines would run on the scheduler's virtual clock,
+  which advances whenever the coroutine is idle, so a `withTimeout` would fire while a socket
+  was still legitimately in flight. Real time is the acceptance boundary here; every wait
+  carries a deadline and there is no sleep anywhere.
+- **No new dependencies.** The generated stubs compiled against what the cluster pom already
+  declares. Neither `grpc-stub` nor `javax.annotation` had to be added, contrary to what the
+  ticket allowed for.
+- **Nothing added to `dynacache-server`.** The ticket left the gRPC-next-to-Netty hosting open.
+  `GrpcTransport` hosts its own server, so a server-module node needs only to construct one -
+  there is no separate hosting concern to write, and no `main` exists yet to wire it into. T24
+  starts three nodes and is where that wiring belongs.
+- **Size: 157 lines of new Kotlin** (76 main, 81 test) plus 11 proto lines and a 9-line pom
+  deletion, under the ticket's 200-line floor. Both acceptance tests exist and the seam is
+  fully implemented; there was no third behaviour to write that the seam promises and this
+  adapter does not already deliver. Padding it would have meant testing gRPC rather than
+  DynaCache.
+
+**For the next ticket:** `Transport.send` on this adapter awaits the peer's acknowledgement, so
+sequential sends to one peer arrive in send order (the seam's promise) but concurrent ones do
+not - if T19 or T22 fan out with `async`, order per pair is no longer guaranteed and a caller
+that needs it must serialize per peer. A peer that is down surfaces as a `StatusException` out
+of `send`; nothing retries, so the first caller that cares about a dead peer (T20's SWIM, T22's
+hinted handoff) decides the policy. `close()` stops the server, then the channels, then closes
+the inbox, in that order, so an in-flight `deliver` is not cut off by a closed channel.
+`GrpcTransport` is `AutoCloseable`, so tests can `use` it. Adding a case to the `oneof` in
+`cluster.proto` will break `GrpcTransportTest` compilation by design: add the branch, do not
+add an `else`. `HostPort` is deliberately plain; if a node ever needs TLS or a name rather than
+an address, that is where it goes, and `Grpc.newChannelBuilder` already takes credentials.
