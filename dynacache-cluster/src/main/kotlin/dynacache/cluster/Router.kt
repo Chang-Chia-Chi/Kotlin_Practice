@@ -32,8 +32,9 @@ import kotlinx.coroutines.launch
  * It is not the **dispatcher** (CONTEXT.md), which chooses between the AP and the CP engine by
  * namespace; the router sits under that choice and moves one command between nodes.
  *
- * [run] is the node's one inbound loop and owns the demux: `Forward` and `ForwardReply` are
- * the router's, and every other envelope goes to [others]: `Replication.receive` first and then
+ * [run] is the node's one inbound loop and owns the demux: [snapshots] sees every envelope
+ * first and keeps the Chandy-Lamport markers (T36); `Forward` and `ForwardReply` are the
+ * router's, and every other envelope goes to [others]: `Replication.receive` first and then
  * `Swim::deliver`, composed by whoever wires the node.
  *
  * @param local the engine that runs a command this node coordinates.
@@ -42,6 +43,7 @@ import kotlinx.coroutines.launch
  * @param scope the node's lifecycle scope; a forward and its deadline live on it.
  * @param deadline how long a forward may take before its future answers with an error.
  * @param others where every envelope that is not a forward goes.
+ * @param snapshots `DistributedSnapshot.receive`: records in-flight envelopes and consumes markers.
  */
 class Router(
     val self: NodeId,
@@ -54,6 +56,7 @@ class Router(
     private val scope: CoroutineScope,
     private val deadline: Duration = 2.seconds,
     private val others: suspend (Envelope) -> Unit = {},
+    private val snapshots: suspend (Envelope) -> Boolean = { false },
 ) : CommandEngine {
 
     private val pending = ConcurrentHashMap<Long, CompletableFuture<Reply>>()
@@ -108,6 +111,7 @@ class Router(
 
     /** One inbound envelope. Public so a test can hand the router one without a loop. */
     suspend fun receive(envelope: Envelope) {
+        if (snapshots(envelope)) return
         when (envelope.bodyCase) {
             Envelope.BodyCase.FORWARD -> scope.launch { coordinate(NodeId(envelope.from), envelope.forward) }
             Envelope.BodyCase.FORWARD_REPLY ->

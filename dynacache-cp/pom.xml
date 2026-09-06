@@ -39,6 +39,18 @@
             </extension>
         </extensions>
         <plugins>
+            <!-- The CP test kit (a three-member in-process group) is what the server module's
+                 routing tests run a real CP engine on, so the tests are published as a jar. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <version>3.4.1</version>
+                <executions>
+                    <execution>
+                        <goals><goal>test-jar</goal></goals>
+                    </execution>
+                </executions>
+            </plugin>
             <!-- Same generator wiring as the cluster module (T23): protoc plus the grpc-java
                  generator, with the jar-based grpc-kotlin generator launched inside the
                  protobuf-java execution so the coroutine stubs land next to the messages. -->

@@ -116,6 +116,49 @@ class CommandParser(private val clock: Clock = Clock.systemUTC()) {
             options(it.drop(2)).run { Command.ZScan(Key(it[0]), cursor(it[1]), pattern, count) }
         }
 
+        // The CP verbs of CP spec 6. A CP key stays whole -- `cp:counter:x`, not `x` -- so the
+        // dispatcher reads the same key the CP engine keys its state by (C16). A lock or
+        // semaphore verb takes no session on the wire: the connection owns one (CP spec 4) and
+        // the handler puts it in on the way to the engine, so the parser leaves it [NO_SESSION].
+        "cp.long.set" -> exactly(name, args, 2).let { Command.Cp.LongSet(Key(it[0]), integer(it[1])) }
+        "cp.long.get" -> Command.Cp.LongGet(key(name, args, 1))
+        "cp.long.incr" -> Command.Cp.LongIncr(key(name, args, 1))
+        "cp.long.decr" -> Command.Cp.LongDecr(key(name, args, 1))
+        "cp.long.add" -> exactly(name, args, 2).let { Command.Cp.LongIncrBy(Key(it[0]), integer(it[1])) }
+        "cp.long.cas" -> exactly(name, args, 3).let {
+            Command.Cp.LongCas(Key(it[0]), integer(it[1]), integer(it[2]))
+        }
+        "cp.lock.try" -> exactly(name, args, 2).let { Command.Cp.LockTry(Key(it[0]), NO_SESSION, millis(it[1])) }
+        "cp.lock.unlock" -> exactly(name, args, 2).let {
+            Command.Cp.LockUnlock(Key(it[0]), NO_SESSION, integer(it[1]))
+        }
+        "cp.lock.renew" -> exactly(name, args, 3).let {
+            Command.Cp.LockRenew(Key(it[0]), NO_SESSION, integer(it[1]), millis(it[2]))
+        }
+        "cp.lock.state" -> Command.Cp.LockState(key(name, args, 1))
+        "cp.lock.force_unlock" -> Command.Cp.LockForceUnlock(key(name, args, 1))
+        "cp.sem.init" -> exactly(name, args, 2).let { Command.Cp.SemInit(Key(it[0]), counted(it[1])) }
+        "cp.sem.acquire" -> exactly(name, args, 2).let {
+            Command.Cp.SemAcquire(Key(it[0]), NO_SESSION, counted(it[1]))
+        }
+        "cp.sem.release" -> exactly(name, args, 2).let {
+            Command.Cp.SemRelease(Key(it[0]), NO_SESSION, counted(it[1]))
+        }
+        "cp.sem.available" -> Command.Cp.SemAvailable(key(name, args, 1))
+        "cp.sem.drain" -> Command.Cp.SemDrain(key(name, args, 1), NO_SESSION)
+        "cp.latch.set" -> exactly(name, args, 2).let { Command.Cp.LatchSet(Key(it[0]), counted(it[1])) }
+        "cp.latch.down" -> Command.Cp.LatchDown(key(name, args, 1))
+        "cp.latch.get" -> Command.Cp.LatchGet(key(name, args, 1))
+        "cp.latch.reset" -> exactly(name, args, 2).let { Command.Cp.LatchReset(Key(it[0]), counted(it[1])) }
+        "cp.ref.set" -> exactly(name, args, 2).let { Command.Cp.RefSet(Key(it[0]), it[1]) }
+        "cp.ref.get" -> Command.Cp.RefGet(key(name, args, 1))
+        "cp.ref.cas" -> exactly(name, args, 3).let { Command.Cp.RefCas(Key(it[0]), it[1], it[2]) }
+        "cp.session.create" -> exactly(name, args, 0).let { Command.Cp.SessionCreate() }
+        "cp.session.heartbeat" -> Command.Cp.SessionHeartbeat(integer(exactly(name, args, 1)[0]))
+        "cp.session.close" -> Command.Cp.SessionClose(integer(exactly(name, args, 1)[0]))
+        "cp.info" -> exactly(name, args, 0).let { Command.Cp.Info }
+        "cp.members" -> exactly(name, args, 0).let { Command.Cp.Members }
+
         else -> unknown(name, args)
     }
 
@@ -254,6 +297,10 @@ class CommandParser(private val clock: Clock = Clock.systemUTC()) {
 
     private fun syntaxError(): Nothing = reject("syntax error")
 
+    /** A permit or latch count: an integer that fits in one and is not negative. */
+    private fun counted(token: ByteArray): Int =
+        integer(token).let { if (it < 0 || it > Int.MAX_VALUE) reject("value is out of range") else it.toInt() }
+
     private fun integer(token: ByteArray): Long =
         token.text().toLongOrNull() ?: reject("value is not an integer or out of range")
 
@@ -295,6 +342,12 @@ class CommandParser(private val clock: Clock = Clock.systemUTC()) {
         const val DEFAULT_SCAN_COUNT = 10
     }
 }
+
+/**
+ * The session a lock or semaphore verb carries before the connection's own is put in. Session ids
+ * start at 1 (CP spec 4), so nothing the CP engine hands out is ever mistaken for this.
+ */
+internal const val NO_SESSION = 0L
 
 /**
  * A token as text. ISO-8859-1 is a bijection over the 256 byte values, so a token that is not

@@ -1,5 +1,6 @@
 package dynacache.server
 
+import dynacache.cluster.AntiEntropy
 import dynacache.cluster.DotCounter
 import dynacache.cluster.GrpcTransport
 import dynacache.cluster.HostPort
@@ -61,6 +62,7 @@ class ClusterNode(
 
     private val engine = ApEngine(partitionCount, clock)
     private val wire = GrpcTransport(self, addresses, grpcPort)
+    private val counter = DotCounter.of(self, emptyList())
 
     private val swim = Swim(
         self = self,
@@ -80,11 +82,22 @@ class ClusterNode(
         engine = engine,
         transport = NodeTransport(wire, reads = false),
         membership = swim,
-        counter = DotCounter.of(self, emptyList()),
+        counter = counter,
         clock = clock,
         tokens = ::commandToTokens,
         parse = ::parse,
         scope = scope,
+    )
+
+    private val antiEntropy = AntiEntropy(
+        self = self,
+        ring = ring,
+        n = config.n,
+        engine = engine,
+        replication = replication,
+        transport = NodeTransport(wire, reads = false),
+        membership = swim,
+        counter = counter,
     )
 
     private val router = Router(
@@ -96,10 +109,10 @@ class ClusterNode(
         tokens = ::commandToTokens,
         parse = ::parse,
         scope = scope,
-        others = { if (!replication.receive(it)) swim.deliver(it) },
+        others = { if (!replication.receive(it) && !antiEntropy.receive(it)) swim.deliver(it) },
     )
 
-    private val server = DynaCacheServer(respPort, engine, commands = this)
+    private val server = DynaCacheServer(respPort, engine, ap = this, clock = clock)
 
     /** The gRPC port this node listens on; the only way to learn an ephemeral one. */
     val grpcPort: Int get() = wire.boundPort
@@ -107,12 +120,13 @@ class ClusterNode(
     /** The RESP port this node listens on. Reads only after [start]. */
     val respPort: Int get() = server.boundPort
 
-    /** Opens the RESP socket and starts the node's three background loops. */
+    /** Opens the RESP socket and starts the node's four background loops. */
     fun start() {
         server.start()
         scope.launch { router.run() }
         scope.launch { swim.run() }
         scope.launch { replication.runHandoff() }
+        scope.launch { antiEntropy.run() }
     }
 
     /**
@@ -152,6 +166,8 @@ class ClusterNode(
             "cluster_known_nodes:${view.size}",
             "cluster_quorum:n=${config.n},w=${config.w},r=${config.r}",
             "cluster_hints_pending:${replication.hintCount}",
+            "cluster_ranges_compared:${antiEntropy.rangesCompared}",
+            "cluster_keys_synced:${antiEntropy.keysSynced}",
         ) + view.map { "member_${it.node}:${it.state.name.lowercase()},${it.incarnation}" } + ""
         return Reply.Bulk(body + lines.joinToString(CRLF).toByteArray(Charsets.ISO_8859_1))
     }

@@ -111,7 +111,7 @@ class ApEngine(
 
     // Each partition draws from its own stream, seeded from the engine's, so one injected seed
     // makes the whole engine reproducible even though the partitions run on their own threads.
-    private val partitions = List(partitionCount) {
+    internal val partitions = List(partitionCount) {
         Partition(
             PartitionId(it),
             clock,
