@@ -19,7 +19,52 @@ message Envelope {
     Ping ping = 10;
     Ack ack = 11;
     PingReq ping_req = 12;
+    Forward forward = 13;
+    ForwardReply forward_reply = 14;
   }
+}
+
+// A command a contact node hands to the key's coordinator (spec 5.1 step 3). The tokens are
+// the client's own frame, so the coordinator's parser reads them exactly as the contact's
+// would have and no second encoding of a command exists.
+message Forward {
+  // Unique per sending router; the ForwardReply carries it back so the request finds its future.
+  int64 id = 1;
+  repeated bytes token = 2;
+}
+
+// The coordinator's answer to a Forward, under the same id.
+message ForwardReply {
+  int64 id = 1;
+  ReplyMsg reply = 2;
+}
+
+// A `Reply` on the wire, in exactly the five RESP2 shapes the engine answers in. A structured
+// message rather than a RESP blob: RESP lives in the server module, and protobuf is the
+// cluster's message model (ADR 0001).
+message ReplyMsg {
+  oneof kind {
+    string simple = 1;
+    ErrorReply error = 2;
+    int64 integer = 3;
+    BulkReply bulk = 4;
+    ArrayReply array = 5;
+  }
+}
+
+message ErrorReply {
+  string kind = 1;
+  string message = 2;
+}
+
+// `nil` tells a nil bulk from an empty one, which proto3 cannot do with `bytes` alone.
+message BulkReply {
+  bool nil = 1;
+  bytes value = 2;
+}
+
+message ArrayReply {
+  repeated ReplyMsg item = 1;
 }
 
 message Ping {
