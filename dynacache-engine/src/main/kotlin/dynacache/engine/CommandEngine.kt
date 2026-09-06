@@ -45,6 +45,23 @@ class CrossPartitionBatch(keys: List<Key>, spanned: List<PartitionId>) :
     )
 }
 
+/**
+ * Which key a partition over its memory share gives up (spec 2.7). The step around the choice is
+ * the same either way -- expired keys first, then a bounded number of live ones -- so a policy is
+ * one function, and this is the switch between the two implementations of it.
+ */
+enum class EvictionPolicy {
+
+    /** Redis-style sampling LRU: draw K random keys, evict the one accessed longest ago. */
+    LRU,
+
+    /** Caffeine's W-TinyLFU: an admission window, a segmented main space and a frequency sketch. */
+    W_TINYLFU;
+
+    /** The name `INFO` reports, in Redis's own lower-case-and-dashes style. */
+    val info: String = name.lowercase().replace('_', '-')
+}
+
 /** The one partition a batch runs on, for the duration of that batch. */
 interface PartitionContext {
 
@@ -72,6 +89,11 @@ class ApEngine(
      * the default, means the node holds everything it is given.
      */
     maxMemoryBytes: Long? = null,
+    /**
+     * Which key a partition over its share gives up (spec 2.7). Every partition of a node runs
+     * the same policy, so `INFO` reads it off any one of them.
+     */
+    policy: EvictionPolicy = EvictionPolicy.LRU,
 ) : CommandEngine {
 
     // Each partition draws from its own stream, seeded from the engine's, so one injected seed
@@ -83,6 +105,7 @@ class ApEngine(
             Random(random.nextLong()),
             tickMillis,
             maxMemoryBytes?.let { bytes -> bytes / partitionCount } ?: Long.MAX_VALUE,
+            policy,
         )
     }
 

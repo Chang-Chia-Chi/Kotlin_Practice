@@ -9,6 +9,8 @@ import org.junit.jupiter.api.Assertions.assertSame
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.params.ParameterizedTest
+import org.junit.jupiter.params.provider.EnumSource
 import java.time.Clock
 import java.time.Duration
 import java.time.Instant
@@ -634,6 +636,20 @@ class CommandEngineTest {
         assertEquals(one, usedMemory(), "the wheel's own removal gives the bytes back too")
     }
 
+    @Test
+    fun info_reports_the_eviction_policy() {
+        assertTrue(info().contains("maxmemory_policy:lru"), "LRU is the default:\n${info()}")
+        val tiny = ApEngine(partitionCount = 2, clock = clock, policy = EvictionPolicy.W_TINYLFU)
+        try {
+            assertTrue(
+                info(tiny).contains("maxmemory_policy:w-tinylfu"),
+                "a node built W-TinyLFU says so:\n${info(tiny)}",
+            )
+        } finally {
+            tiny.close()
+        }
+    }
+
     /** Key number [i], always the same length, so every seeded entry costs the same. */
     private fun evictKey(i: Int) = Key("k%03d".format(i))
 
@@ -670,12 +686,20 @@ class CommandEngineTest {
      * partition because the threshold is split evenly across them, so a budget of three entries
      * over four partitions would be a budget of none.
      */
-    private fun capped(entries: Int) =
-        ApEngine(partitionCount = 1, clock = clock, random = Random(10), maxMemoryBytes = entries * entryBytes)
+    private fun capped(entries: Int, policy: EvictionPolicy = EvictionPolicy.LRU) =
+        ApEngine(
+            partitionCount = 1,
+            clock = clock,
+            random = Random(10),
+            maxMemoryBytes = entries * entryBytes,
+            policy = policy,
+        )
 
-    @Test
-    fun eviction_respects_max_memory() {
-        val node = capped(3)
+    /** The threshold is the threshold whichever policy chooses the victims under it. */
+    @ParameterizedTest
+    @EnumSource(EvictionPolicy::class)
+    fun eviction_respects_max_memory(policy: EvictionPolicy) {
+        val node = capped(3, policy)
         try {
             repeat(20) { seed(it, node) }
             assertTrue(usedMemory(node) <= 3 * entryBytes, "still over the threshold: ${usedMemory(node)}")
@@ -684,6 +708,99 @@ class CommandEngineTest {
         } finally {
             node.close()
         }
+    }
+
+    /**
+     * Spec 2.7's admission rule, end to end. Key 0 is read until the sketch rates it far above
+     * anything else, so when the window overflows and offers it to the main space it is taken;
+     * every one-hit key after it loses the same comparison and never gets in. Under sampling LRU
+     * key 0 would have gone early -- it is read once and then never again while thirty writes go
+     * past it -- so the survival is the policy's doing and not the clock's.
+     */
+    @Test
+    fun tinylfu_admits_frequent() {
+        val node = capped(6, EvictionPolicy.W_TINYLFU)
+        try {
+            seed(0, node)
+            repeat(10) {
+                clock.now += Duration.ofMillis(1)
+                assertEquals(Reply.Bulk(evictValue(0)), run(Command.Get(evictKey(0)), node))
+            }
+            // Key 1 is read exactly as often as any of the churn keys that follow it: once.
+            seed(1, node)
+            repeat(30) { seed(it + 2, node) }
+
+            assertEquals(
+                Reply.Bulk(evictValue(0)),
+                run(Command.Get(evictKey(0)), node),
+                "the frequent key was admitted to the main space and survived the churn",
+            )
+            assertEquals(Reply.Integer(0), run(Command.Exists(evictKey(1)), node), "the one-hit key was not")
+            assertEquals(Reply.Integer(6), run(Command.DbSize, node), "the threshold still holds six entries")
+        } finally {
+            node.close()
+        }
+    }
+
+    /** A Zipf key: five characters wide whatever its number, so every entry costs the same. */
+    private fun zipfKey(i: Int) = Key("z%04d".format(i))
+
+    /**
+     * A seeded Zipf trace over [keys] keys: key `i` is drawn with probability proportional to
+     * `1/(i+1)`, the skew a cache is for. The cumulative weights are built once and the draw is a
+     * binary search into them, so the trace costs nothing next to replaying it.
+     */
+    private fun zipfTrace(accesses: Int, keys: Int, seed: Long): IntArray {
+        val cumulative = DoubleArray(keys)
+        var total = 0.0
+        for (i in 0 until keys) {
+            total += 1.0 / (i + 1)
+            cumulative[i] = total
+        }
+        val draw = Random(seed)
+        return IntArray(accesses) {
+            val at = java.util.Arrays.binarySearch(cumulative, draw.nextDouble() * total)
+            (if (at >= 0) at else -at - 1).coerceIn(0, keys - 1)
+        }
+    }
+
+    /**
+     * Replays [trace] against a node of [policy] holding about two hundred entries, reading each
+     * key and writing it back on a miss, and answers with how many reads hit. The clock moves on
+     * every access, hit or miss: recency is what LRU has, and a trace that stood still would take
+     * it away from the policy this comparison is meant to beat.
+     */
+    private fun hitsUnder(policy: EvictionPolicy, trace: IntArray): Int {
+        val node = capped(200, policy)
+        try {
+            var hits = 0
+            val value = ByteArray(100) { '.'.code.toByte() }
+            for (i in trace) {
+                clock.now += Duration.ofMillis(1)
+                if (run(Command.Get(zipfKey(i)), node) != Reply.Bulk(null)) hits++
+                else run(Command.Set(zipfKey(i), value), node)
+            }
+            return hits
+        } finally {
+            node.close()
+        }
+    }
+
+    /**
+     * The reason W-TinyLFU is in the spec at all: on a skewed trace it keeps the keys that are
+     * asked for often, where sampling LRU keeps the keys that were asked for last. Both policies
+     * see the identical trace and the identical budget, so the difference is the policy.
+     */
+    @Test
+    fun tinylfu_hit_ratio_beats_lru_on_zipf() {
+        val trace = zipfTrace(accesses = 20_000, keys = 2_000, seed = 20260906)
+        val lru = hitsUnder(EvictionPolicy.LRU, trace)
+        val tiny = hitsUnder(EvictionPolicy.W_TINYLFU, trace)
+        assertTrue(
+            tiny > lru,
+            "over ${trace.size} accesses to ${2_000} keys with room for about 200: " +
+                "W-TinyLFU hit $tiny times, LRU hit $lru times",
+        )
     }
 
     @Test

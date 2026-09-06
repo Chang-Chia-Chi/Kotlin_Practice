@@ -147,12 +147,15 @@ sealed class Command {
     /**
      * `INFO`: one bulk string of `field:value` lines in Redis's section layout. Minimal here: the
      * version, the memory the node holds and the keyspace size, which is what the node's own tests
-     * and `redis-cli` look for. Each partition answers with its live key count and its used bytes.
+     * and `redis-cli` look for. Each partition answers with its live key count, its used bytes and
+     * the eviction policy it runs; every partition of a node runs the same policy, so the first
+     * partition's answer is the node's.
      */
     data object Info : EveryPartition() {
         override fun join(replies: List<Reply>, random: Random): Reply {
             val perPartition = replies.map { (it as Reply.Array).items }
             fun total(at: Int) = perPartition.sumOf { (it[at] as Reply.Integer).value }
+            val policy = (perPartition.first()[2] as Reply.Bulk).bytes!!.toString(Charsets.ISO_8859_1)
             return Reply.Bulk(
                 listOf(
                     "# Server",
@@ -160,6 +163,7 @@ sealed class Command {
                     "",
                     "# Memory",
                     "used_memory:${total(1)}",
+                    "maxmemory_policy:$policy",
                     "",
                     "# Keyspace",
                     "db0:keys=${total(0)}",
