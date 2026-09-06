@@ -109,6 +109,24 @@ to the engine, keyed by key, so the engine never learns of it. Replicas exchange
 their versions, and a read answers with the version that dominates.
 _Avoid_: timestamp, revision, vector clock
 
+**Channel**:
+One peer's envelopes to one node, in send order (the transport's promise); a node has one
+incoming channel per peer. A Chandy-Lamport snapshot records what was on a channel between
+this node's own state and the peer's marker.
+_Avoid_: connection, stream, link
+
+**Marker**:
+The Chandy-Lamport envelope that carries a snapshot id and nothing else. The first one a node
+sees for an id makes it record its state and send its own markers; every one closes the
+channel it arrived on. A node's part is complete when every incoming channel is closed.
+_Avoid_: barrier (that is the engine's word for a parked partition), token
+
+**Snapshot set**:
+Every node's part of one Chandy-Lamport snapshot: its state file plus one log per recorded
+channel, under `<dir>/<id>/<node>/`. Consistent as a whole (C10); restored as a whole (I12);
+deleted as a whole when a node's deadline passes with a channel still open.
+_Avoid_: backup, dump (that is the single-node RDB file)
+
 ### CP
 
 **Log time**:

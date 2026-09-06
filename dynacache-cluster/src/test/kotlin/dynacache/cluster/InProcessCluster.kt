@@ -7,6 +7,7 @@ import dynacache.engine.ApEngine
 import dynacache.engine.Command
 import dynacache.engine.Key
 import dynacache.engine.Reply
+import java.nio.file.Path
 import java.time.Clock
 import java.time.Instant
 import java.time.ZoneOffset
@@ -19,8 +20,9 @@ import kotlinx.coroutines.yield
  * The test kit's cluster: [nodeCount] nodes named `node-1..N`, one shared immutable [Ring]
  * (a pure function of the node set, T17), one scripted [membership] every node reads, and per
  * node one [ApEngine], one endpoint on one [InMemoryTransport], one [Replication] wrapping the
- * engine and one [Router] wrapping that, whose inbound loop runs on [scope]. [config] is the
- * quorum: [n] replicas, [w] acks per write, [r] answers per read.
+ * engine, one [DistributedSnapshot] and one [Router] wrapping that, whose inbound loop runs on
+ * [scope]. [config] is the quorum: [n] replicas, [w] acks per write, [r] answers per read.
+ * [snapshotDir] is the one directory every node's snapshot part lands in (T36).
  *
  * `writeVia` and `readVia` go through the contact node's router, so a key the contact does not
  * coordinate crosses the network (T19) and every write reaches its replicas (T22).
@@ -33,6 +35,7 @@ class InProcessCluster(
     scope: CoroutineScope,
     clock: Clock = Clock.fixed(Instant.EPOCH, ZoneOffset.UTC),
     partitionsPerNode: Int = 8,
+    snapshotDir: Path = Path.of("target", "snapshots"),
 ) {
     val nodes: List<NodeId> = List(nodeCount) { NodeId("node-${it + 1}") }
     val ring: Ring = Ring.of(nodes.toSet())
@@ -58,7 +61,14 @@ class InProcessCluster(
             scope = scope,
         )
     }
-    private val routers = nodes.associateWith { node ->
+    private val snapshots: Map<NodeId, DistributedSnapshot> = nodes.associateWith { node ->
+        DistributedSnapshot(
+            node, nodes - node, engines.getValue(node), transports.getValue(node), snapshotDir, clock,
+            demux = { routers.getValue(node).receive(it) },
+            scope = scope,
+        )
+    }
+    private val routers: Map<NodeId, Router> = nodes.associateWith { node ->
         Router(
             self = node,
             ring = ring,
@@ -69,6 +79,7 @@ class InProcessCluster(
             parse = TokenCodec::command,
             scope = scope,
             others = { if (!replications.getValue(node).receive(it)) gossiped.getValue(node).add(it) },
+            snapshots = snapshots.getValue(node)::receive,
         )
     }
 
@@ -80,6 +91,7 @@ class InProcessCluster(
     fun transport(node: NodeId): Transport = transports.getValue(node)
     fun replication(node: NodeId): Replication = replications.getValue(node)
     fun router(node: NodeId): Router = routers.getValue(node)
+    fun snapshot(node: NodeId): DistributedSnapshot = snapshots.getValue(node)
 
     /** What the demux on [node] handed to gossip: the envelopes SWIM would have answered. */
     fun gossipOn(node: NodeId): List<Envelope> = gossiped.getValue(node)

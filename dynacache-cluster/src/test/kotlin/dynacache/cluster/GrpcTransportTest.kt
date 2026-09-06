@@ -4,6 +4,7 @@ import dynacache.cluster.proto.Ack
 import dynacache.cluster.proto.Envelope
 import dynacache.cluster.proto.Forward
 import dynacache.cluster.proto.ForwardReply
+import dynacache.cluster.proto.Marker
 import dynacache.cluster.proto.Ping
 import dynacache.cluster.proto.PingReq
 import dynacache.cluster.proto.Read
@@ -99,6 +100,7 @@ class GrpcTransportTest {
             Envelope.BodyCase.READ_REPLY -> envelope.setReadReply(
                 ReadReply.newBuilder().setId(7).setReply(ReplyMsg.newBuilder().setSimple("OK")).setDvv(ByteString.copyFromUtf8("dvv"))
             )
+            Envelope.BodyCase.MARKER -> envelope.setMarker(Marker.newBuilder().setSnapshotId("s7"))
             Envelope.BodyCase.BODY_NOT_SET -> throw AssertionError("BODY_NOT_SET is not a message type")
         }
         return withBody.build()

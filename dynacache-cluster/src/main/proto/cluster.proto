@@ -25,6 +25,7 @@ message Envelope {
     ReplicateAck replicate_ack = 16;
     Read read = 17;
     ReadReply read_reply = 18;
+    Marker marker = 19;
   }
 }
 
@@ -56,6 +57,12 @@ message ReadReply {
   int64 id = 1;
   ReplyMsg reply = 2;
   bytes dvv = 3;
+}
+
+// A Chandy-Lamport marker (spec 2.8): the first one a node sees for `snapshot_id` makes it
+// record its state and send its own markers; every one closes the channel it arrived on.
+message Marker {
+  string snapshot_id = 1;
 }
 
 // A command a contact node hands to the key's coordinator (spec 5.1 step 3). The tokens are

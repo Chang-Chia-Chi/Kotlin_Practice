@@ -38,6 +38,9 @@ class InMemoryTransport {
     private var sides: List<Set<NodeId>> = emptyList()
     private val dead = HashSet<NodeId>()
 
+    /** Every envelope handed to the hub, in send order, dropped or not: what the network carried. */
+    val sent = mutableListOf<Envelope>()
+
     fun endpoint(node: NodeId): Transport = endpoints.getOrPut(node) { Endpoint(node) }
 
     /** Every envelope sent from now on is lost with probability [rate], decided by [seed]. */
@@ -98,6 +101,7 @@ class InMemoryTransport {
     }
 
     private fun enqueue(from: NodeId, to: NodeId, envelope: Envelope) {
+        sent.add(envelope)
         if (dropRandom.nextDouble() < dropRate) return
         val due = round + delayRandom.nextInt(delayRounds.first, delayRounds.last + 1)
         pairs.getOrPut(from to to) { ArrayDeque() }.addLast(InFlight(envelope, due))
