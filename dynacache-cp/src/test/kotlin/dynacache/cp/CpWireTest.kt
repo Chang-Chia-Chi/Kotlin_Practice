@@ -34,6 +34,20 @@ class CpWireTest {
     }
 
     @Test
+    fun session_commands_round_trip() {
+        listOf(
+            Command.Cp.SessionCreate(Duration.ofSeconds(15)),
+            Command.Cp.SessionHeartbeat(session = 7),
+            Command.Cp.SessionClose(session = 7),
+        ).forEach { assertEquals(CpOp(9, it), roundTrip(CpOp(9, it))) }
+    }
+
+    @Test
+    fun session_closed_round_trips() {
+        assertEquals(SessionClosed(42, session = 7), roundTrip(SessionClosed(42, session = 7)))
+    }
+
+    @Test
     fun ttl_tick_round_trips() {
         assertEquals(TtlTick(42), roundTrip(TtlTick(42)))
     }

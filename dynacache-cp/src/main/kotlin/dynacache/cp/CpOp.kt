@@ -21,3 +21,10 @@ data class TtlTick(val ts: Long)
  * applied every entry before it, which is what a fresh leader must have done before it may stamp.
  */
 data class NewTerm(val term: Int)
+
+/**
+ * The entry the leader appends when a session's timeout has run out at log time (CP spec 4,
+ * 9.3). Applying it forgets the [session] and releases every lock it held, in this one entry
+ * (C18, I15). Stamped like every other entry, so log time never turns back (C19).
+ */
+data class SessionClosed(val ts: Long, val session: Long)

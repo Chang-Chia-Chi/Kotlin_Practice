@@ -58,6 +58,9 @@ class FencedLockStateMachine {
     /** A tick releases every lease that has run out, so the state matches what any access would see. */
     fun sweep(now: Long) = locks.replaceAll { _, lock -> lock.at(now) }
 
+    /** A session's death releases every lock it holds, in the one entry that ends it (C18, I15). */
+    fun releaseAllOf(session: Long) = locks.replaceAll { _, lock -> if (lock.owner == session) lock.released() else lock }
+
     fun snapshot(): Map<Key, Lock> = HashMap(locks)
 
     fun restore(state: Map<Key, Lock>) {

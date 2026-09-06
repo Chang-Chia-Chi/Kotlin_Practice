@@ -60,11 +60,24 @@ sealed class Command {
         /** The AtomicLong verbs (CP spec 3.2, 6.2), each over a `cp:counter:*` key. */
         sealed class AtomicLong : Cp()
 
-        /**
-         * The FencedLock verbs (CP spec 3.1, 6.1), each over a `cp:lock:*` key. A session is a
-         * number the caller supplies until T41 gives it a registry.
-         */
+        /** The FencedLock verbs (CP spec 3.1, 6.1), each over a `cp:lock:*` key. */
         sealed class FencedLock : Cp()
+
+        /**
+         * The session verbs (CP spec 4, 6.6). A session is not a key's state, so these share one
+         * `cp:` key for the namespace rule (C16) and are answered by the session registry.
+         */
+        sealed class Session : Cp() {
+            override val key: Key get() = REGISTRY
+        }
+
+        /**
+         * A command done on behalf of a session: the CP state machine answers `-NOSESSION` for a
+         * session that expired or was never created before the primitive sees the command.
+         */
+        interface Sessioned {
+            val session: Long
+        }
 
         /** `CP.LONG.SET K n`, or `SET cp:counter:K n [EX|PX]`: a [ttl] runs on log time (CP spec 9.4). */
         data class LongSet(override val key: Key, val value: Long, val ttl: Duration? = null) : AtomicLong()
@@ -97,19 +110,32 @@ sealed class Command {
         data class LongPersist(override val key: Key) : AtomicLong()
 
         /** `CP.LOCK.TRY K ttl_ms`: `[ok, token]`; a holder trying again holds once more with the same token. */
-        data class LockTry(override val key: Key, val session: Long, val ttl: Duration) : FencedLock()
+        data class LockTry(override val key: Key, override val session: Long, val ttl: Duration) : FencedLock(), Sessioned
 
         /** `CP.LOCK.UNLOCK K token`: 1 when released, 0 when still held reentrantly, `-REENTRANCE` for a non-holder. */
-        data class LockUnlock(override val key: Key, val session: Long, val token: Long) : FencedLock()
+        data class LockUnlock(override val key: Key, override val session: Long, val token: Long) : FencedLock(), Sessioned
 
         /** `CP.LOCK.RENEW K token ttl_ms`: 1 when the holder's lease now runs [ttl] from here, `-REENTRANCE` otherwise. */
-        data class LockRenew(override val key: Key, val session: Long, val token: Long, val ttl: Duration) : FencedLock()
+        data class LockRenew(override val key: Key, override val session: Long, val token: Long, val ttl: Duration) : FencedLock(), Sessioned
 
         /** `CP.LOCK.FORCE_UNLOCK K`: the admin override, `+OK` whether or not anyone held it. */
         data class LockForceUnlock(override val key: Key) : FencedLock()
 
         /** `CP.LOCK.STATE K`: `[owner or nil, token, ttl_remaining_ms, reentrance]`. */
         data class LockState(override val key: Key) : FencedLock()
+
+        /** `CP.SESSION.CREATE`: the new session's id; it dies after [timeout] of log time without a heartbeat. */
+        data class SessionCreate(val timeout: Duration = Duration.ofSeconds(15)) : Session()
+
+        /** `CP.SESSION.HEARTBEAT sid`: `+OK`, the timeout runs again from this entry's log time. */
+        data class SessionHeartbeat(override val session: Long) : Session(), Sessioned
+
+        /** `CP.SESSION.CLOSE sid`: `+OK`, and every lock it held is released in this same entry (C18). */
+        data class SessionClose(override val session: Long) : Session(), Sessioned
+
+        private companion object {
+            val REGISTRY = Key("cp:session")
+        }
     }
 
     /**
