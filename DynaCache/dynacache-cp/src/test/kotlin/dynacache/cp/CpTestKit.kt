@@ -1,16 +1,13 @@
 package dynacache.cp
 
 import dynacache.cluster.NodeId
+import dynacache.engine.testkit.MutableClock
 import io.microraft.RaftConfig
 import io.microraft.RaftEndpoint
 import io.microraft.model.message.RaftMessage
 import io.microraft.transport.Transport
 import java.nio.file.Path
-import java.time.Clock
-import java.time.Duration
 import java.time.Instant
-import java.time.ZoneId
-import java.time.ZoneOffset
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
@@ -135,14 +132,6 @@ class CpTestKit(size: Int = 3, private val fileStoreDir: Path? = null) : AutoClo
 
         override fun isReachable(endpoint: RaftEndpoint): Boolean =
             (endpoint as CpEndpoint).nodeId !in killed
-    }
-
-    /** Time moves only when a test says so; the Raft thread reads it, hence volatile. */
-    class MutableClock(@Volatile var now: Instant) : Clock() {
-        fun advance(by: Duration) { now += by }
-        override fun instant(): Instant = now
-        override fun getZone(): ZoneId = ZoneOffset.UTC
-        override fun withZone(zone: ZoneId): Clock = this
     }
 
     private companion object {

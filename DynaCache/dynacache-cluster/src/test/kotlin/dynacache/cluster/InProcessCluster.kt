@@ -10,12 +10,14 @@ import dynacache.engine.Reply
 import dynacache.engine.Value
 import dynacache.engine.view
 import dynacache.engine.install
+import dynacache.engine.persist.DotCeilingStore
 import java.nio.file.Path
 import java.time.Clock
 import java.time.Instant
 import java.time.ZoneOffset
 import java.util.concurrent.CompletableFuture
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.yield
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -37,7 +39,7 @@ class InProcessCluster(
     w: Int,
     r: Int,
     private val scope: CoroutineScope,
-    clock: Clock = Clock.fixed(Instant.EPOCH, ZoneOffset.UTC),
+    private val clock: Clock = Clock.fixed(Instant.EPOCH, ZoneOffset.UTC),
     partitionsPerNode: Int = 8,
     snapshotDir: Path = Path.of("target", "snapshots"),
 ) {
@@ -50,36 +52,11 @@ class InProcessCluster(
     private val engines = nodes.associateWith { ApEngine(partitionsPerNode, clock) }
     private val transports = nodes.associateWith { network.endpoint(it) }
     private val gossiped = nodes.associateWith { mutableListOf<Envelope>() }
-    private val counters = nodes.associateWith { DotCounter.of(it, emptyList()) }
-    private val replications = nodes.associateWith { node ->
-        Replication(
-            self = node,
-            ring = ring,
-            config = config,
-            engine = engines.getValue(node),
-            transport = transports.getValue(node),
-            membership = membership,
-            counter = counters.getValue(node),
-            clock = clock,
-            tokens = TokenCodec::tokens,
-            parse = TokenCodec::command,
-            view = { key -> engines.getValue(node).view(listOf(key)).thenApply { it.firstOrNull() } },
-            install = engines.getValue(node)::install,
-            scope = scope,
-        )
-    }
-    private val antiEntropies = nodes.associateWith { node ->
-        AntiEntropy(
-            self = node,
-            ring = ring,
-            n = n,
-            engine = engines.getValue(node),
-            replication = replications.getValue(node),
-            transport = transports.getValue(node),
-            membership = membership,
-            counter = counters.getValue(node),
-        )
-    }
+    private val ceilings = nodes.associateWith { DotCeilingStore.inMemory() }
+    private val replications = HashMap<NodeId, Replication>()
+    private val antiEntropies = HashMap<NodeId, AntiEntropy>()
+    private val routers = HashMap<NodeId, Router>()
+    private val loops = HashMap<NodeId, List<Job>>()
     private val snapshots: Map<NodeId, DistributedSnapshot> = nodes.associateWith { node ->
         DistributedSnapshot(
             node, nodes - node, engines.getValue(node), transports.getValue(node), snapshotDir, clock,
@@ -87,26 +64,66 @@ class InProcessCluster(
             scope = scope,
         )
     }
-    private val routers: Map<NodeId, Router> = nodes.associateWith { node ->
-        Router(
+    init {
+        nodes.forEach(::start)
+    }
+
+    /** Builds [node]'s replication layer over its engine and transport and starts its loops. */
+    private fun start(node: NodeId) {
+        val engine = engines.getValue(node)
+        val transport = transports.getValue(node)
+        val counter = DotCounter.of(node, emptyList(), ceilings.getValue(node))
+        val replication = Replication(
+            self = node,
+            ring = ring,
+            config = config,
+            engine = engine,
+            transport = transport,
+            membership = membership,
+            counter = counter,
+            clock = clock,
+            tokens = TokenCodec::tokens,
+            parse = TokenCodec::command,
+            view = { key -> engine.view(listOf(key)).thenApply { it.firstOrNull() } },
+            install = engine::install,
+            scope = scope,
+        )
+        val antiEntropy = AntiEntropy(
             self = node,
             ring = ring,
             n = n,
-            local = replications.getValue(node),
-            transport = transports.getValue(node),
+            engine = engine,
+            replication = replication,
+            transport = transport,
+            membership = membership,
+            counter = counter,
+        )
+        val router = Router(
+            self = node,
+            ring = ring,
+            n = n,
+            local = replication,
+            transport = transport,
             tokens = TokenCodec::tokens,
             parse = TokenCodec::command,
             scope = scope,
-            others = {
-                if (!replications.getValue(node).receive(it) && !antiEntropies.getValue(node).receive(it)) gossiped.getValue(node).add(it)
-            },
+            others = { if (!replication.receive(it) && !antiEntropy.receive(it)) gossiped.getValue(node).add(it) },
             snapshots = snapshots.getValue(node)::receive,
         )
+        replications[node] = replication
+        antiEntropies[node] = antiEntropy
+        routers[node] = router
+        loops[node] = listOf(scope.launch { router.run() }, scope.launch { replication.runHandoff() })
     }
 
-    init {
-        routers.values.forEach { router -> scope.launch { router.run() } }
-        replications.values.forEach { replication -> scope.launch { replication.runHandoff() } }
+    /**
+     * Restarts [node]'s replication layer over the same engine, as a process restart does while
+     * the engine restores from disk: an empty version table, a counter rebuilt from what the node
+     * persisted, and fresh loops on the same transport (T51). The replicas keep their memory.
+     */
+    fun restart(node: NodeId) {
+        loops.getValue(node).forEach(Job::cancel)
+        start(node)
     }
 
     fun engine(node: NodeId): ApEngine = engines.getValue(node)

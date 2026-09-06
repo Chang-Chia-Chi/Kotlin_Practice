@@ -136,7 +136,7 @@ class DynaCacheServerTest {
     }
 
     @Test
-    fun `a parse error while queued makes EXEC abort the whole transaction`() {
+    fun `a parse error while queued makes EXEC abort the whole batch`() {
         withServer { server ->
             RespClient(server.boundPort).use { client ->
                 client.send("MULTI")

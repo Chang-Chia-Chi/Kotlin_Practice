@@ -38,7 +38,7 @@ class FencedLockTest {
     private fun submit(command: Command): Reply =
         kit.leaderEngine().submit(command).get(REPLY_TIMEOUT_SECS, SECONDS)
 
-    private fun tryLock(session: Long, ttl: Duration = LEASE) = submit(Command.Cp.LockTry(lock, session, ttl))
+    private fun tryLock(session: Long, lease: Duration = LEASE) = submit(Command.Cp.LockTry(lock, session, lease))
 
     private fun state() = submit(Command.Cp.LockState(lock))
 
@@ -120,7 +120,7 @@ class FencedLockTest {
     @Test
     fun lock_ttl_expires() {
         val leader = kit.leader()
-        assertEquals(granted(1), tryLock(session = 7, ttl = Duration.ofSeconds(1)))
+        assertEquals(granted(1), tryLock(session = 7, lease = Duration.ofSeconds(1)))
 
         kit.clock(leader.config.nodeId).advance(Duration.ofSeconds(2))
         leader.tick().get(REPLY_TIMEOUT_SECS, SECONDS)
@@ -132,8 +132,8 @@ class FencedLockTest {
     @Test
     fun lock_ttl_renew() {
         val leader = kit.leader()
-        assertEquals(granted(1), tryLock(session = 7, ttl = Duration.ofSeconds(1)))
-        assertEquals(Reply.Integer(1), submit(Command.Cp.LockRenew(lock, session = 7, token = 1, ttl = Duration.ofSeconds(5))))
+        assertEquals(granted(1), tryLock(session = 7, lease = Duration.ofSeconds(1)))
+        assertEquals(Reply.Integer(1), submit(Command.Cp.LockRenew(lock, session = 7, token = 1, lease = Duration.ofSeconds(5))))
 
         kit.clock(leader.config.nodeId).advance(Duration.ofSeconds(2))
         leader.tick().get(REPLY_TIMEOUT_SECS, SECONDS)
@@ -143,9 +143,9 @@ class FencedLockTest {
 
     @Test
     fun lock_renew_by_non_holder_rejected() {
-        assertEquals(granted(1), tryLock(session = 7, ttl = Duration.ofSeconds(1)))
+        assertEquals(granted(1), tryLock(session = 7, lease = Duration.ofSeconds(1)))
 
-        val renewed = submit(Command.Cp.LockRenew(lock, session = 8, token = 1, ttl = Duration.ofSeconds(5)))
+        val renewed = submit(Command.Cp.LockRenew(lock, session = 8, token = 1, lease = Duration.ofSeconds(5)))
 
         assertEquals("REENTRANCE", (renewed as Reply.Error).kind)
         assertEquals(heldBy(session = 7, token = 1, remaining = Duration.ofSeconds(1).toMillis() - 2), state(), "lease unchanged")
@@ -199,7 +199,7 @@ class FencedLockTest {
     fun I19_lease_expires_late_never_early_across_failover() {
         val old = kit.leader()
         val lease = Duration.ofSeconds(30)
-        assertEquals(granted(1), tryLock(session = 7, ttl = lease))
+        assertEquals(granted(1), tryLock(session = 7, lease = lease))
         kit.clock(old.config.nodeId).advance(lease.dividedBy(3))
         assertEquals(heldBy(session = 7, token = 1, remaining = lease.toMillis() * 2 / 3), state())
 
@@ -213,10 +213,42 @@ class FencedLockTest {
         assertEquals(unowned(token = 1), state(), "late by no more than the election")
     }
 
+    /**
+     * C17, I19: the old leader's clock ran 30 s ahead of its successor's. A one-second lease taken
+     * there is released by the successor's idle ticks alone, one second of the successor's own
+     * clock later, with no user command carrying time into the log.
+     */
+    @Test
+    fun C17_lease_expires_after_skewed_failover() {
+        val old = kit.leader()
+        kit.clock(old.config.nodeId).advance(SKEW)
+        assertEquals(granted(1), tryLock(session = 7, lease = Duration.ofSeconds(1)))
+
+        kit.killMember(old.config.nodeId)
+        val successor = kit.leader()
+        val interval = successor.config.tickInterval
+        fun idleTick(): Long {
+            kit.clock(successor.config.nodeId).advance(interval)
+            return successor.tick().get(REPLY_TIMEOUT_SECS, SECONDS)
+        }
+        val ticksInLease = (Duration.ofSeconds(1).toMillis() / interval.toMillis()).toInt()
+
+        repeat(ticksInLease - 1) { assertNotEquals(0L, idleTick(), "every idle interval appends a tick") }
+        assertEquals(7L, ((stateOnLeader(successor) as Reply.Array).items[0] as Reply.Integer).value, "held one interval short of the lease")
+        assertNotEquals(0L, idleTick(), "the tick that ends the lease")
+        assertEquals(unowned(token = 1), stateOnLeader(successor), "released by the tick, no user command in between")
+        assertEquals(granted(2), tryLock(session = 8), "C17: the next holder gets the next token")
+    }
+
+    /** STATE as the leader's state machine sees it at its applied index, without appending an entry. */
+    private fun stateOnLeader(leader: RaftRuntime): Reply =
+        leader.stateMachine.let { it.locks.apply(Command.Cp.LockState(lock), it.lastAppliedTs) }
+
     private companion object {
         const val REPLY_TIMEOUT_SECS = 10L
         const val CYCLES = 100
         const val SESSIONS = 8
         val LEASE: Duration = Duration.ofSeconds(30)
+        val SKEW: Duration = Duration.ofSeconds(30)
     }
 }

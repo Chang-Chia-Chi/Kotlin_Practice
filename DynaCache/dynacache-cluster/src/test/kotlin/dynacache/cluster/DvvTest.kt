@@ -1,5 +1,6 @@
 package dynacache.cluster
 
+import dynacache.engine.persist.DotCeilingStore
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertArrayEquals
 import org.junit.jupiter.api.Assertions.assertFalse
@@ -87,6 +88,49 @@ class DvvTest {
 
         assertEquals(Dot(alpha, 8), restarted.next())
         assertEquals(Dot(bravo, 10), DotCounter.of(bravo, localData).next())
+
+        // Across a restart with no local data at all (T51): the persisted ceiling is the floor.
+        val ceilings = DotCeilingStore.inMemory()
+        val crashed = DotCounter.of(alpha, emptyList(), ceilings, block = 4)
+        val handedOut = List(6) { crashed.next() }
+        val resumed = DotCounter.of(alpha, emptyList(), ceilings, block = 4)
+        assertTrue(resumed.next().counter > handedOut.maxOf { it.counter })
+        // Local data above the ceiling still counts: the higher floor wins.
+        assertEquals(Dot(alpha, 101), DotCounter.of(alpha, listOf(Dvv(Dot(alpha, 100), emptyMap())), ceilings, block = 4).next())
+    }
+
+    /**
+     * C2 across a restart (T51): a counter reserves a block by persisting its ceiling before it
+     * hands out the block's first dot, so whatever it handed out before dying is at or below the
+     * last ceiling on disk, and a counter rebuilt from that ceiling starts above all of it. The
+     * process dies at every point of a block, including right after the reservation.
+     */
+    @Test
+    fun C2_dot_counter_never_reuses_a_dot_across_restart() {
+        val ceilings = RecordingCeilings()
+        val fresh = DotCounter.of(alpha, emptyList(), ceilings, block = 4)
+        assertEquals(Dot(alpha, 1), fresh.next())
+        assertEquals(listOf(4L), ceilings.reserved, "the ceiling is on disk before the first dot is out")
+        repeat(3) { fresh.next() }
+        assertEquals(listOf(4L), ceilings.reserved, "dots below the ceiling reserve nothing")
+        assertEquals(Dot(alpha, 5), fresh.next())
+        assertEquals(listOf(4L, 8L), ceilings.reserved)
+
+        var handedOut = 5L
+        for (dieAfter in 0..40) {
+            val restarted = DotCounter.of(alpha, emptyList(), ceilings, block = 4)
+            val first = restarted.next()
+            assertTrue(first.counter > handedOut, "restart after $dieAfter dots: $first reuses one of the $handedOut handed out")
+            repeat(dieAfter) { assertTrue(restarted.next().counter > first.counter) }
+            handedOut = first.counter + dieAfter
+        }
+        assertTrue(ceilings.reserved.zipWithNext().all { (lower, higher) -> lower < higher }, "ceilings only rise: ${ceilings.reserved}")
+    }
+
+    private class RecordingCeilings : DotCeilingStore {
+        val reserved = ArrayList<Long>()
+        override fun load(): Long = reserved.lastOrNull() ?: 0L
+        override fun reserve(ceiling: Long) { reserved += ceiling }
     }
 
     @Test

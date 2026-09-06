@@ -19,7 +19,7 @@ class CpWireTest {
     private val snapshot = CpStateMachine.Snapshot(
         lastAppliedTs = 1_788_656_400_001L,
         counters = mapOf(Key("cp:counter:c") to AtomicLongStateMachine.Counter(7, expiresAt = 1_788_656_500_000L)),
-        locks = mapOf(Key("cp:lock:l") to FencedLockStateMachine.Lock(owner = 3, token = 9, expiresAt = 1_788_656_430_000L, holds = 2)),
+        locks = mapOf(Key("cp:lock:l") to FencedLockStateMachine.Lock(owner = 3, token = 9, leaseUntil = 1_788_656_430_000L, holds = 2)),
         semaphores = mapOf(Key("cp:sem:s") to SemaphoreStateMachine.Semaphore(available = 1, holders = mapOf(3L to 2))),
         latches = mapOf(Key("cp:latch:l") to 5),
         references = mapOf(Key("cp:ref:r") to AtomicReferenceStateMachine.Reference(byteArrayOf(0, 127, -1), expiresAt = null)),
@@ -86,9 +86,9 @@ class CpWireTest {
     fun lock_commands_round_trip() {
         val key = Key("cp:lock:l")
         listOf(
-            Command.Cp.LockTry(key, session = 7, ttl = Duration.ofSeconds(30)),
+            Command.Cp.LockTry(key, session = 7, lease = Duration.ofSeconds(30)),
             Command.Cp.LockUnlock(key, session = 7, token = 3),
-            Command.Cp.LockRenew(key, session = 7, token = 3, ttl = Duration.ofMillis(1500)),
+            Command.Cp.LockRenew(key, session = 7, token = 3, lease = Duration.ofMillis(1500)),
             Command.Cp.LockForceUnlock(key),
             Command.Cp.LockState(key),
         ).forEach { assertEquals(CpOp(9, it), roundTrip(CpOp(9, it))) }

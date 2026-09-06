@@ -1,15 +1,13 @@
 package dynacache.engine.persist
 
+import dynacache.engine.testkit.MutableClock
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.nio.ByteBuffer
 import java.nio.file.Path
-import java.time.Clock
 import java.time.Instant
-import java.time.ZoneId
-import java.time.ZoneOffset
 import java.util.concurrent.Callable
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
@@ -131,12 +129,6 @@ class WalFsyncTest {
 
     private fun writer(sink: WalSink, policy: FsyncPolicy) =
         WalWriter(sink, firstSeq = 1L, policy = policy, clock = clock)
-
-    private class MutableClock(@Volatile var now: Instant) : Clock() {
-        override fun instant(): Instant = now
-        override fun getZone(): ZoneId = ZoneOffset.UTC
-        override fun withZone(zone: ZoneId): Clock = this
-    }
 
     /** The filesystem is a true boundary: this adapter counts what reaches it and can hold an fsync. */
     private class CountingSink(private val delegate: WalSink) : WalSink {

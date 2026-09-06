@@ -285,6 +285,33 @@ class CpEngineTest {
         assertTrue(stamps[0] > kit.clock(successor.config.nodeId).millis(), "log time runs ahead of the successor's own clock")
     }
 
+    /**
+     * I19, CP spec 5: the old leader's clock runs 30 s ahead, so log time leaves every follower's
+     * clock behind. The successor still appends a tick per interval of its own clock while the
+     * group is idle, and each tick carries log time one interval further, so leases and sessions
+     * keep running out instead of waiting 30 s for the successor's clock to catch up.
+     */
+    @Test
+    fun I19_idle_ticks_continue_after_failover_to_a_trailing_clock() {
+        val old = kit.leader()
+        kit.clock(old.config.nodeId).advance(Duration.ofSeconds(30))
+        submit(Command.Cp.LongSet(counter, 1))
+        val lastByOld = old.stateMachine.lastAppliedTs
+
+        kit.killMember(old.config.nodeId)
+        val successor = kit.leader()
+        val interval = successor.config.tickInterval.toMillis()
+        val stamps = (1..10).map { tick ->
+            kit.clock(successor.config.nodeId).advance(successor.config.tickInterval)
+            assertNotEquals(0L, successor.tick().get(REPLY_TIMEOUT_SECS, SECONDS), "tick $tick was not appended")
+            successor.stateMachine.lastAppliedTs
+        }
+
+        assertTrue(stamps[0] > lastByOld, "the first tick ${stamps[0]} is past the old leader's $lastByOld (C23)")
+        assertEquals(stamps, stamps.distinct().sorted(), "log time climbs strictly: $stamps")
+        assertEquals((1..10).map { lastByOld + it * interval }, stamps, "one tick interval of log time per idle tick")
+    }
+
     private fun io.microraft.RaftNode.report() = getReport().get(REPLY_TIMEOUT_SECS, SECONDS).result
 
     private companion object {
