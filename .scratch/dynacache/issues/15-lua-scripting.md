@@ -10,12 +10,12 @@ survives between calls. `EVALSHA` is out of scope.
 
 **Nature:** sandbox and bridge, C11, C12, I10 (Opus)
 
-**Status:** ready-for-agent
+**Status:** done (DynaCache 03d3708, merged into misc/ai_gen)
 
-- [ ] `lua_redis_call`, `lua_keys_argv`, `lua_cross_partition_rejected`, `lua_no_side_effects`
-- [ ] `lua_deterministic`: two engines with the same state give the same result
-- [ ] `C11_clock_and_random_unavailable`, `lua_type_conversion_table`
-- [ ] Progress entry appended
+- [x] `lua_redis_call`, `lua_keys_argv`, `lua_cross_partition_rejected`, `lua_no_side_effects`
+- [x] `lua_deterministic`: two engines with the same state give the same result
+- [x] `C11_clock_and_random_unavailable`, `lua_type_conversion_table`
+- [x] Progress entry appended
 
 Ground rules for every ticket: implement only this ticket, stubs throwing NotImplementedError
 for later seams; 200 to 600 lines including tests; JUnit 5 + Mockito only, no AssertJ or MockK;

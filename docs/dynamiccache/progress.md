@@ -2700,3 +2700,131 @@ argument on `save()`. T10 touches `Partition.write` and `drop`; `restore` goes t
 
 **Build:** `mvn -B -o -q clean package` offline, green. Engine 117 tests, cluster 49, cp 38,
 server 35; 0 failures, 0 errors, 0 skipped. Commit `a683b6f` on branch `t32`.
+
+## T15: Lua scripting
+
+**Built:** `EVAL` end to end, in one new server file `Lua.kt` and one new branch in
+`CommandHandler.answer`.
+
+`sandboxedGlobals()` is `JsePlatform.standardGlobals()` with `os`, `io`, `luajava`, `require`,
+`package`, `load`, `loadstring`, `dofile`, `loadfile` and `debug` set to nil, and `math.random`
+and `math.randomseed` taken off `math` (C11). `luajava` is not on the ticket's list and is the
+widest door of the lot -- it reflects into any JVM class -- so it went with them. The script is
+compiled with `Globals.load(stream, "@user_script", "t", globals)`: mode `t` is text only, so a
+precompiled chunk carrying bytecode the sandbox never inspected cannot be loaded even by a
+client that sends one. A fresh `Globals` per call is also the whole of "no state survives
+between calls": the environment a script writes into is discarded with it.
+
+`evalScript(engine, parser, args)` parses `EVAL script numkeys key... arg...`, maps the declared
+keys to `Key`s and hands them to `atomically` as the batch's span. Everything C12 and I11 asked
+of `MULTI`/`EXEC` in T14 therefore holds for a script without a line of new code: a span across
+partitions is refused before the first Lua statement runs and arrives back as
+`CrossPartitionBatch`, and a `redis.call` on a key the script did not declare gets
+`-ERR <key> was not declared by this batch` from the same `Batch` context.
+
+`redis.call` and `redis.pcall` are one `VarArgFunction` with one flag between them. Each builds
+the token list a client would have sent -- Lua strings as their bytes, Lua numbers as their
+string form -- hands it to `CommandParser` and runs the result through the batch's
+`PartitionContext`. On a `Reply.Error`, `call` throws `LuaError` carrying the `{err = ...}`
+table and `pcall` returns it.
+
+**Concepts named:** The ticket's one real idea is that **a script is a batch with a program in
+it**. Nothing in the engine changed and nothing in `atomically` changed; `EVAL` differs from
+`EXEC` only in where its command list comes from -- a compiled chunk asking for one command at a
+time instead of a buffer filled in advance. That is why the undeclared-key error and the
+cross-partition refusal needed no Lua-specific code: they are the batch's rules, read through a
+new caller. `CONTEXT.md`'s "Batch" already said "a MULTI/EXEC sequence or one EVAL script", so
+no vocabulary was added.
+
+The second is that **`redis.call` is the wire, not an API**. It takes the same token list the
+socket takes and answers the same `Reply`, so the parser is the only place that knows what
+`SET` means and there is no second command table to drift. It also means the bridge inherits
+every arity check and every error wording for free.
+
+The third is that **the sandbox is a factory, not a policy object**. `sandboxedGlobals()` is a
+function returning a fresh `Globals`; there is no interface, no configuration and nothing to
+inject, because there is exactly one sandbox and a second one would be a second answer to C11.
+It is public so a test can assert C11 without a socket, which is the ticket's second seam.
+
+Seams unchanged: `Reply`, `Key`, `CommandEngine`, `PartitionContext` and `CrossPartitionBatch`
+have exactly the signatures T01 and T14 froze, and the engine module was not touched. The one
+shared helper extracted is `CompletableFuture<Reply>.orBatchError()` in `DynaCacheServer.kt`,
+which `exec()` and `evalScript` now both use; it is the four lines `exec()` already had.
+
+**Acceptance:**
+- `C11_clock_and_random_unavailable`: every banned global reads nil on a fresh `sandboxedGlobals()`,
+  `math.random` and `math.randomseed` are gone from `math`, and `os.time`, `os.clock`, `os.date`
+  and `math.random` each either are nil or raise when a chunk evaluates them. The test also
+  loads `string.upper` to prove what is left is still a working Lua and not an empty table.
+- `sandbox_carries_no_state_between_calls`: a chunk sets a global, the next `sandboxedGlobals()`
+  does not see it.
+- `lua_keys_argv`: `EVAL ... 2 {s}.one {s}.two first second` returns `#KEYS`, both keys, `#ARGV`
+  and `ARGV[1]`, so both tables are 1-indexed and `numkeys` split them where it said.
+- `lua_redis_call`: `SET` then `GET` inside one script, then the spec's own read-add-write
+  counter script, then a `GET` from outside proving the write outlived the script.
+- `lua_cross_partition_rejected`: two keys on different partitions answer `-CROSSSLOT`, and the
+  key the script would have written first is still nil, so nothing ran (C12).
+- `lua_no_side_effects`: `os.execute`, `io.open`, `math.random` and `luajava.bindClass` each
+  fail the script with `-ERR Error running script ...`.
+- `lua_deterministic` (I10): two engines built the same way, seeded the same way, given the same
+  script, return replies that are equal to each other and equal to the literal the script's
+  inputs determine -- so the test fails both if the two disagree and if both answer nothing.
+- `lua_type_conversion_table`: twenty rows, each its own engine. Lua to Redis: number to
+  integer, `3.9` and `-3.9` truncating toward zero, string to bulk, `true` to `:1`, `false` and
+  `nil` and no return at all to the nil bulk, table to array, an array stopping at its first
+  hole, a nested table, `{ok=}` to a simple string and `{err=}` to an error. Redis to Lua, read
+  back out from inside the script: integer to `number`, bulk to `string`, nil bulk to `false`,
+  array to a table of the right length and contents, `+OK` to a table with `ok`, an error to a
+  table with `err`, and a Lua number argument reaching the command as its string form.
+- `lua_undeclared_key_is_an_error` and `lua_refused_command_inside_script_is_an_error`: a
+  `SET` on an undeclared key on the *same* partition still gets the declaration error and does
+  not land; `redis.call('SCAN', '0')` gets `-ERR this command spans partitions and cannot run
+  inside a batch`.
+- `lua_pcall_returns_the_error_rather_than_raising`: `redis.pcall('INCR', k)` on a non-numeric
+  string returns a table the script reads `err` out of and concatenates, so it did not raise.
+- `mvn -B -o clean package`: engine 112, cluster 49, cp 38, server 65. Every earlier test green.
+- This entry.
+
+**Deviations:** Four, none against a fixed contract.
+1. **`luajava` and mode `t` are additions to the ticket's banned list.** The ticket names `os`,
+   `io`, `require`, `load`, `loadstring`, `dofile`, `loadfile`, `debug`, `package`,
+   `math.random` and `math.randomseed`. `JsePlatform.standardGlobals()` also installs `luajava`,
+   which reflects into arbitrary JVM classes and would have made every other removal decorative,
+   and `Globals.load` accepts binary chunks unless the mode says otherwise. Both are C11 read
+   strictly rather than a change to it.
+2. **Bytes cross into Lua as raw bytes, not through a `String`.** The ticket says "strings from
+   bytes via ISO-8859-1 so bytes survive". ISO-8859-1 is the byte-for-char mapping that spells
+   this, but LuaJ's `LuaValue.valueOf(String)` re-encodes to UTF-8, so a key byte `0xE9` would
+   become two bytes inside Lua: `#KEYS[1]` would disagree with the key's length on the wire, and
+   the bytes `redis.call` sent back would not be the declared key's, which the undeclared-key
+   check would then refuse. `LuaString.valueUsing(bytes)` and reading `m_bytes` back is the same
+   mapping done byte-exactly. ISO-8859-1 is still what turns a byte string into text for an
+   error message.
+3. **`EVAL` inside `MULTI` answers an error and aborts the transaction.** Redis queues it. `EVAL`
+   is not a `Command`, so it cannot enter T14's buffer, and giving it one would have meant a
+   second kind of buffered thing for a case the ticket does not name. Today's behaviour without
+   this ticket was the same abort by another route (`eval` was an unknown command), so nothing
+   regressed. Debt: repaid by making the buffer hold "things that answer a reply" rather than
+   `Command`s, which is also what `EVALSHA` will want.
+4. **A `{err = ...}` table with no space in it gets the kind `ERR`.** Redis writes the string
+   after `-` verbatim; `Reply.Error` is a kind and a message, and a kind-only error would encode
+   with a trailing space. Splitting at the first space round-trips every error that has one,
+   which is every error the engine produces.
+
+**For the next ticket:**
+- `EVALSHA` and `SCRIPT LOAD` need a per-server script cache keyed by SHA1 of the source; the
+  `evalScript` signature already takes the source as `ByteArray`, so a cache sits in front of it
+  and nothing else moves. `EVAL` itself does not cache: a fresh `Globals` per call is C11's
+  no-state rule and a compiled `Prototype` could be cached without breaking it, but the chunk
+  must still be bound to a new environment each time.
+- **A runaway script pins its partition's only thread forever**, and every key on that partition
+  stops answering with it. There is a `ponytail:` comment on `evalScript` naming the repair: an
+  instruction-count hook on the `Globals`. It wants its own ticket, because killing a half-run
+  script is a question about atomicity, not about sandboxing.
+- An integer reply crosses into Lua as a double (`LuaValue.valueOf(value.toDouble())`), so a
+  count above 2^53 loses precision inside a script. Real Redis has exactly this limitation for
+  the same reason, so it is faithful rather than a shortcut.
+- T16's acceptance transcript wants the counter `EVAL` from spec section 9; it is the second
+  half of `lua_redis_call` and works over the socket as written.
+- `orBatchError()` in `DynaCacheServer.kt` is now the one place C12's refusal turns back into a
+  reply. Any third kind of batch should end with it rather than its own `exceptionally`.
